@@ -26,6 +26,19 @@ schema-qualified. EXECUTE is revoked from PUBLIC and granted to the five sending
 `email.template_grant`, which `email.enqueue()` reads for every caller, is still in `email`, where every
 sending service can name it.
 
+The schema keeps other logins off the worker's tables only. It does not stop them holding up the
+delivery check, the sender's digest flush, or any caller's `email.enqueue()`. Three ways remain, and
+`worker.db.test.ts` pins the list:
+
+- `email.enqueue()` reads `email.template_grant`, which every sending service can name.
+- `email.enqueue()` joins `pg_catalog.pg_roles`, which any login can name.
+- The check records each run in `ops.duty_state`, and every service has USAGE on `ops`.
+
+Two sessions holding either relation that `email.enqueue()` reads make the check fail with `55P03`
+after its lock timeout. Every other enqueue, sign-in codes included, waits as long as the hold lasts.
+A hold on `ops.duty_state` lets the check queue but stops its success being recorded, so the duty
+reads as failing.
+
 ## Layout
 
 | Path | What |

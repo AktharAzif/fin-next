@@ -10,14 +10,24 @@
 // privileges, so a login that can name the table can hold it up with no privilege on it (a PREPARE
 // in an open transaction holds a lock, and a CREATE RULE or CREATE TRIGGER queues ACCESS EXCLUSIVE or
 // SHARE ROW EXCLUSIVE behind it before its privilege check fails), and the turn's INSERT and FOR
-// UPDATE then wait behind that request. What keeps other logins out is the schema: only the worker
-// (and `email.enqueue()`'s owner) may use `email_private`, and a login without USAGE on it cannot name
-// its tables, so Postgres refuses the name before it locks anything. The check also reads
-// `email.template_grant` through `email.enqueue()`; that table stays in `email`, where every sending
-// service can name it. The wait is bounded all the same, so a stuck replica costs one failed run,
-// never a pooled connection held for long. The check is queued in the same transaction as its record.
-// Each run then records its result in `ops.duty_state` (spec 01 §6.10), the duty's last success that
-// `fin_probe` and the alerts read.
+// UPDATE then wait behind that request. The schema keeps other logins off the check's own tables:
+// only the worker (and `email.enqueue()`'s owner) may use `email_private`, and a login without USAGE
+// on it cannot name its tables, so Postgres refuses the name before it locks anything.
+//
+// The schema does not cover the whole run. These relations on its path stay where other logins can
+// name them, so two sessions holding any of them still hold the check up:
+// - In the check's transaction, `email.enqueue()` reads `email.template_grant`, in `email`, where
+//   every sending service has USAGE. It also joins `pg_catalog.pg_roles`, a view on `pg_authid` and
+//   `pg_db_role_setting`, which any login can name. A hold on any of these fails the run with 55P03
+//   after LOCK_TIMEOUT. While the hold lasts, every other service's `email.enqueue()` waits as well.
+// - The run's second transaction writes `ops.duty_state`, in `ops`, where every service has USAGE.
+//   A hold there lets the check queue but stops its success being recorded, so the duty reads as
+//   failing.
+// worker.db.test.ts pins this list ("locks no relation outside email_private but ...").
+// The wait is bounded all the same, so a stuck replica costs one failed run, never a pooled
+// connection held for long. The check is queued in the same transaction as its record. Each run then
+// records its result in `ops.duty_state` (spec 01 §6.10), the duty's last success that `fin_probe`
+// and the alerts read.
 import {
   type EmailLog,
   enqueue,
