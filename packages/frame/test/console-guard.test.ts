@@ -4,7 +4,12 @@
 import { describe, expect, it } from "vitest";
 import packageJson from "../package.json" with { type: "json" };
 import { ApiError } from "../src/api/errors.ts";
-import { installConsoleGuard, safeConsoleValue } from "../src/report/console-guard.ts";
+import {
+  CUT_MARK,
+  installConsoleGuard,
+  LINE_LIMIT,
+  safeConsoleValue,
+} from "../src/report/console-guard.ts";
 
 // A fake address and secrets, built at run time so the repository's public-safety scan never sees
 // a real-looking literal.
@@ -208,6 +213,79 @@ describe("the console guard", () => {
       ["log", "account [digits] ok true null undefined 10n"],
       ["log"],
     ]);
+  });
+
+  it("scrubs a long bigint and a number in exponent form, whose digits the digits row cannot see", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    const big = 1234567890123456n;
+    // 1e21 and more prints in exponent form, keeping 17 digits beside its `e`.
+    const huge = Number("12345678901234567890123");
+    target.log(big);
+    target.log("acct %d", big);
+    target.log("acct %i %f %s %o", big, big, big, big);
+    target.log(huge);
+    target.log("%d", "12345678901234567890123");
+    target.log("%f", "1.2345678901234567e-10");
+    target.log("%i", huge);
+    target.log("acct", -9876543210987654321n, huge);
+    // Short ones print as they are; a run of nine digits or more is left to the line's row.
+    target.log(10n, 1e21, 1.5e-7, 123456789);
+    // A label is whatever a library passes, typed or not.
+    const labels = target as unknown as Record<"count" | "time", (label: unknown) => void>;
+    labels.count(big);
+    labels.time(huge);
+    remove();
+    expect(printed(lines)).not.toMatch(/\d{9,}/u);
+    expect(lines.slice(0, -2).map(printedText)).toEqual([
+      "[digits]n",
+      "acct [digits]n",
+      "acct [digits]n [digits]n [digits]n [digits]n",
+      "[digits]",
+      "[digits]",
+      "[digits]",
+      "[digits]",
+      "acct -[digits]n [digits]",
+      "10n 1e+21 1.5e-7 [digits]",
+    ]);
+    expect(lines.slice(-2)).toEqual([
+      ["count", "[digits]n"],
+      ["time", "[digits]"],
+    ]);
+    expect(safeConsoleValue(big)).toBe("[digits]n");
+    expect(safeConsoleValue(huge)).toBe("[digits]");
+  });
+
+  it("cuts a line longer than LINE_LIMIT at a space, so no value is left cut in two", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    // An address runs across the limit: the cut takes it whole, never leaving its start to print.
+    const filler = "x ".repeat(Math.floor((LINE_LIMIT - 5) / 2));
+    target.log(`${filler}${ADDRESS} and more`);
+    // One run with no space in it: nothing of it is left but the mark.
+    target.error("%s", "a".repeat(LINE_LIMIT * 4));
+    target.warn(`${"y".repeat(LINE_LIMIT - 1)} z`);
+    target.info("short line");
+    remove();
+    const [cut, run, edge, short] = lines.map(printedText);
+    expect(cut).toBe(`${filler.trimEnd()} ${CUT_MARK}`);
+    expect(cut).not.toContain(ADDRESS.slice(0, 4));
+    expect(run).toBe(CUT_MARK);
+    expect(edge).toBe(`${"y".repeat(LINE_LIMIT - 1)} ${CUT_MARK}`);
+    expect(short).toBe("short line");
+    for (const line of [cut, run, edge]) {
+      expect(line?.length).toBeLessThanOrEqual(LINE_LIMIT + CUT_MARK.length + 1);
+    }
+  });
+
+  it("spends bounded time on one huge line, whatever it holds", () => {
+    const { target } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    const started = performance.now();
+    target.log(`${"__Host-a ".repeat(8 * 1024)}${"__Host-a".repeat(64 * 1024)}`);
+    target.log("%s", `postgres://a:${"b ".repeat(128 * 1024)}`);
+    remove();
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("scrubs a counter's or a timer's label, and a timer's data as one line", () => {

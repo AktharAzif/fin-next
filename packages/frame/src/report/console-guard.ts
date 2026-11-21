@@ -4,11 +4,16 @@
 //   - each value is reduced first. An Error prints as its name and a bounded code, as safeError
 //     keeps them (spec 08 §5.4), with its message only when it is Fin's own words (the frame's
 //     ApiError names a contract, a kind, a status and a code, never a value), and never its stack
-//     or its cause. A string, number, boolean, bigint, null or undefined prints as it is. Anything
-//     else (an object, an array, a DOM node) prints as its kind, never its contents;
+//     or its cause. A string, number, boolean, bigint, null or undefined prints as it is, but for
+//     a run of nine digits or more that the line's digits row could not see (beside a bigint's
+//     `n`, or in an exponent's mantissa). Anything else (an object, an array, a DOM node) prints as
+//     its kind, never its contents;
 //   - a format string in the first argument (`%s`, `%d`, `%i`, `%f`, `%o`, `%O`, `%c`, `%%`) is
 //     applied here, as the console applies it (the Console Standard's Formatter), and the other
 //     arguments follow, joined with spaces as the console joins them;
+//   - a line longer than LINE_LIMIT is cut at a space before the limit (the run of characters the
+//     limit falls in goes whole) and ends with CUT_MARK, so one huge print costs the page bounded
+//     work and no part of a value is left at the cut;
 //   - the whole line is then scrubbed of every shape of spec 08 §5.4 (scrub.ts), so a shape split
 //     across arguments, or across a format string and its values, is found as it would be printed;
 //   - the browser gets that one string, alone, or as the argument of a lone `%s` when it holds a
@@ -50,13 +55,62 @@ const LABEL_METHODS = [
 const NAME = /^[A-Za-z_$][\w$]{0,63}$/;
 const CODE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 
+/**
+ * The longest line the guard scrubs and prints, in UTF-16 code units. Every scrub shape is linear,
+ * but a library can print a line of any length, and the guard runs on the page's main thread.
+ */
+export const LINE_LIMIT = 16 * 1024;
+
+/** What a cut line ends with. */
+export const CUT_MARK = "[truncated]";
+
+const SPACE = /\s/u;
+
+/**
+ * `line`, cut to LINE_LIMIT when it is longer. The cut takes the whole run of non-space characters
+ * it falls in, so no part of a value (the start of an address, a token's first half) is left at
+ * the end for a shape to miss, and the line says it was cut.
+ */
+function bounded(line: string): string {
+  if (line.length <= LINE_LIMIT) return line;
+  let end = LINE_LIMIT;
+  if (!SPACE.test(line.charAt(end))) {
+    while (end > 0 && !SPACE.test(line.charAt(end - 1))) end -= 1;
+  }
+  const kept = line.slice(0, end).trimEnd();
+  return kept === "" ? CUT_MARK : `${kept} ${CUT_MARK}`;
+}
+
+/** `text` as the guard prints it: bounded, then scrubbed of every shape. */
+function scrubbed(text: string): string {
+  return scrubText(bounded(text));
+}
+
+/** Nine digits or more in a row: what spec 08 §5.4's digits row removes. */
+const LONG_DIGITS = /\d{9,}/u;
+
+/**
+ * A number as the console prints it (a bigint with its `n`), with a run of nine digits or more
+ * removed where the line's digits row cannot see it: beside a bigint's `n`, or in the mantissa of
+ * the exponent form (1e21 and more, or under 1e-6), which keeps up to 17 digits beside its `e`.
+ * Any other run is left to that row, which finds it with a boundary on each side.
+ */
+function numberText(value: number | bigint): string {
+  const text = String(value);
+  if (typeof value === "bigint") return `${text.replace(LONG_DIGITS, "[digits]")}n`;
+  const exponent = text.indexOf("e");
+  if (exponent === -1) return text;
+  const digits = text.slice(0, exponent).replace(/[^0-9]/gu, "").length;
+  return digits >= 9 ? "[digits]" : text;
+}
+
 function isError(value: object): value is Error {
   return value instanceof Error || Object.prototype.toString.call(value) === "[object Error]";
 }
 
 function errorText(error: Error): string {
   const name = typeof error.name === "string" && NAME.test(error.name) ? error.name : "Error";
-  if (error instanceof ApiError) return `${name}: ${scrubText(error.message)}`;
+  if (error instanceof ApiError) return `${name}: ${scrubbed(error.message)}`;
   const code: unknown = (error as Error & { code?: unknown }).code;
   return typeof code === "string" && CODE.test(code) ? `${name} [${code}]` : name;
 }
@@ -66,10 +120,12 @@ export function safeConsoleValue(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   switch (typeof value) {
     case "string":
-      return scrubText(value);
+      return scrubbed(value);
     case "number":
-    case "boolean":
     case "bigint":
+      // As it is, unless it prints nine digits or more in a row: then as the guard prints it.
+      return LONG_DIGITS.test(String(value)) ? scrubText(numberText(value)) : value;
+    case "boolean":
       return value;
     case "symbol":
       return "[symbol]";
@@ -90,23 +146,24 @@ export function safeConsoleValue(value: unknown): unknown {
  */
 function valueText(value: unknown): string {
   if (typeof value === "string") return value;
-  if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "number" || typeof value === "bigint") return numberText(value);
   return String(safeConsoleValue(value));
 }
 
 /** `%d` and `%i`: an integer, as the console's parseInt reads the value; NaN for anything else. */
 function integerText(value: unknown): string {
-  if (typeof value === "bigint") return `${value}n`;
-  if (typeof value === "number") return String(Number.isFinite(value) ? Math.trunc(value) : value);
-  if (typeof value === "string") return String(Number.parseInt(value, 10));
+  if (typeof value === "bigint") return numberText(value);
+  if (typeof value === "number") {
+    return numberText(Number.isFinite(value) ? Math.trunc(value) : value);
+  }
+  if (typeof value === "string") return numberText(Number.parseInt(value, 10));
   return "NaN";
 }
 
 /** `%f`: a number, as the console's parseFloat reads the value; NaN for anything else. */
 function floatText(value: unknown): string {
-  if (typeof value === "bigint") return `${value}n`;
-  if (typeof value === "number") return String(value);
-  if (typeof value === "string") return String(Number.parseFloat(value));
+  if (typeof value === "bigint" || typeof value === "number") return numberText(value);
+  if (typeof value === "string") return numberText(Number.parseFloat(value));
   return "NaN";
 }
 
@@ -178,9 +235,9 @@ function printing(line: string): unknown[] {
   return line.includes("%") ? ["%s", line] : [line];
 }
 
-/** The arguments a printing call gets: its line, built and scrubbed whole; none for none. */
+/** The arguments a printing call gets: its line, built, bounded and scrubbed whole; none for none. */
 function guardedArguments(data: readonly unknown[]): unknown[] {
-  return data.length === 0 ? [] : printing(scrubText(consoleLine(data)));
+  return data.length === 0 ? [] : printing(scrubbed(consoleLine(data)));
 }
 
 /** U+FF05, which a label shows in place of `%`. */
@@ -194,7 +251,7 @@ const FULL_WIDTH_PERCENT = String.fromCharCode(0xff05);
 function labelText(label: unknown): string | undefined {
   return label === undefined
     ? undefined
-    : scrubText(valueText(label)).replaceAll("%", FULL_WIDTH_PERCENT);
+    : scrubbed(valueText(label)).replaceAll("%", FULL_WIDTH_PERCENT);
 }
 
 type ConsoleMethod = (...data: unknown[]) => unknown;
@@ -231,7 +288,7 @@ export function installConsoleGuard(target: Console = globalThis.console): () =>
       method,
       (original) =>
         (...data) =>
-          original.apply(target, data.length === 0 ? [] : [scrubText(valueText(data[0]))]),
+          original.apply(target, data.length === 0 ? [] : [scrubbed(valueText(data[0]))]),
     );
   }
   for (const method of LABEL_METHODS) {
@@ -245,7 +302,7 @@ export function installConsoleGuard(target: Console = globalThis.console): () =>
         original.call(
           target,
           labelText(label),
-          ...(data.length === 0 ? [] : [scrubText(joinedLine(data))]),
+          ...(data.length === 0 ? [] : [scrubbed(joinedLine(data))]),
         ),
   );
   // The first argument is the condition, which decides whether anything prints at all.
