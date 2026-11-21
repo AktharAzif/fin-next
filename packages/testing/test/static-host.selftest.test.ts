@@ -2,19 +2,17 @@
 // the `app` profile's rendered `_headers`, over https under its own name, and a client sees the
 // headers, the single-page fallback and the proxying exactly as the zone would answer them
 // (S-01's answers). The command line is run as Playwright runs it.
-import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeToken } from "../src/access/jwt.ts";
 import { CANON_TIME } from "../src/clock.ts";
 import { forward } from "../src/http/node.ts";
 import type { RequestLine } from "../src/static-host/host.ts";
 import { type RunningStaticHost, startStaticHost } from "../src/static-host/server.ts";
+import { type Cli, runCli } from "./cli.ts";
 import { type FakeApi, startFakeApi } from "./fake-api.ts";
 
 const ROOT = join(import.meta.dirname, "fixtures/app");
@@ -156,52 +154,6 @@ describe("proxying /api/", () => {
   });
 });
 
-interface Cli {
-  readonly stdout: string[];
-  readonly stderr: () => string;
-  line(index: number): Promise<string>;
-  stop(): Promise<void>;
-}
-
-/** Runs the command line as Playwright's webServer does, and reads what it prints. */
-function runCli(args: readonly string[], env: NodeJS.ProcessEnv = {}): Cli {
-  const child: ChildProcess = spawn(process.execPath, [CLI, ...args], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, FIN_E2E_CLOCK: "", FIN_E2E_INGRESS_PROOF: "", ...env },
-  });
-  const stdout: string[] = [];
-  let stderr = "";
-  const waiters: Array<() => void> = [];
-  createInterface({ input: child.stdout as NodeJS.ReadableStream }).on("line", (text) => {
-    stdout.push(text);
-    for (const wake of waiters.splice(0)) wake();
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stderr += chunk.toString("utf8");
-  });
-  const exited = once(child, "exit");
-  return {
-    stdout,
-    stderr: () => stderr,
-    async line(index) {
-      while (stdout.length <= index) {
-        if (child.exitCode !== null) throw new Error(`the CLI exited: ${stderr}`);
-        await new Promise<void>((wake) => {
-          waiters.push(wake);
-          setTimeout(wake, 200);
-        });
-      }
-      return stdout[index] as string;
-    },
-    async stop() {
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await exited;
-      }
-    },
-  };
-}
-
 interface Start {
   readonly event: string;
   readonly app: string;
@@ -220,6 +172,7 @@ describe("the command line", () => {
 
   function start(args: readonly string[], env: NodeJS.ProcessEnv = {}): Cli {
     const cli = runCli(
+      CLI,
       ["--root", ROOT, "--headers", join(ROOT, "_headers"), "--port", "0", ...args],
       env,
     );
@@ -333,17 +286,16 @@ describe("the command line", () => {
     [["--app", "nope"], "--app"],
     [["--app", "docs", "--clock", "yesterday"], "--clock"],
   ])("refuses %j with exit code 78, naming the option", async (args, named) => {
-    const bad = spawn(
-      process.execPath,
-      [CLI, "--root", ROOT, "--headers", join(ROOT, "_headers"), "--port", "0", ...args],
-      { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, FIN_E2E_CLOCK: "" } },
-    );
-    let stderr = "";
-    bad.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-    const [code] = (await once(bad, "exit")) as [number];
-    expect(code).toBe(78);
-    expect(stderr).toContain(named);
+    const bad = runCli(CLI, [
+      "--root",
+      ROOT,
+      "--headers",
+      join(ROOT, "_headers"),
+      "--port",
+      "0",
+      ...args,
+    ]);
+    expect(await bad.exited()).toBe(78);
+    expect(bad.stderr()).toContain(named);
   });
 });

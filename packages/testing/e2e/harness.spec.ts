@@ -2,8 +2,9 @@
 // host serves the fixture app under the `app` profile's policy, over https under each host's own
 // name, and the shared fixtures do their jobs in a real browser: no violation on a clean page,
 // every violation caught on a broken one, the page's JSON POST through /api/ with no preflight,
-// `__Host-` cookies kept per host, the frozen clock, the virtual authenticator, Access in front of
-// a host, the off-origin recorder, and the bypassCSP refusals.
+// `__Host-` cookies kept per host, the browser and Node clocks at the run's clock, the virtual
+// authenticator, Access in front of a host, the off-origin recorder, and the bypassCSP refusals
+// on every way a test can make a context.
 import { join } from "node:path";
 import {
   AccessStandIn,
@@ -236,21 +237,92 @@ test("the off-origin recorder records a WebSocket to another origin", async ({
   offsite.clear();
 });
 
-test("the browser clock is frozen at the canon's time", async ({ page, servers, clock }) => {
-  await gotoReady(page, `${servers.host.origin}/`);
-  const now = await page.evaluate(() => Date.now());
-  expect(now).toBe(Date.parse(CANON_TIME));
-  expect(clock.epochMs()).toBe(now);
+/** Sets FIN_E2E_CLOCK in this worker; undefined removes it. */
+function setRunClock(value: string | undefined): void {
+  if (value === undefined) Reflect.deleteProperty(process.env, "FIN_E2E_CLOCK");
+  else process.env.FIN_E2E_CLOCK = value;
+}
+
+/**
+ * Runs a describe block's tests as a run whose FIN_E2E_CLOCK is `value` (undefined: unset). The
+ * hooks run before the test's own fixtures are set up, so the clock options read it as a run would.
+ */
+function runClockIs(value: string | undefined): void {
+  let saved: string | undefined;
+  test.beforeEach(() => {
+    saved = process.env.FIN_E2E_CLOCK;
+    setRunClock(value);
+  });
+  test.afterEach(() => {
+    setRunClock(saved);
+  });
+}
+
+test.describe("the run's clock sets the browser clock and the Node clock", () => {
+  test.describe("with FIN_E2E_CLOCK unset", () => {
+    runClockIs(undefined);
+    test("both stand at the canon's time", async ({ page, servers, clock }) => {
+      await gotoReady(page, `${servers.host.origin}/`);
+      expect(await page.evaluate(() => Date.now())).toBe(Date.parse(CANON_TIME));
+      expect(clock.epochMs()).toBe(Date.parse(CANON_TIME));
+    });
+  });
+
+  test.describe("with FIN_E2E_CLOCK at a time", () => {
+    runClockIs("2026-11-18T09:00:00+05:30");
+    test("both stand there, in a second context too", async ({
+      page,
+      servers,
+      clock,
+      newContext,
+    }) => {
+      const at = Date.parse("2026-11-18T03:30:00Z");
+      await gotoReady(page, `${servers.host.origin}/`);
+      expect(await page.evaluate(() => Date.now())).toBe(at);
+      expect(clock.epochMs()).toBe(at);
+      const other = await (await newContext()).newPage();
+      await gotoReady(other, `${servers.host.origin}/`);
+      expect(await other.evaluate(() => Date.now())).toBe(at);
+    });
+  });
+
+  test.describe("with FIN_E2E_CLOCK=wall", () => {
+    runClockIs("wall");
+    let started = 0;
+    test.beforeEach(() => {
+      started = Date.now();
+    });
+    test("the browser keeps the system clock, and the Node clock stands at the test's start", async ({
+      page,
+      servers,
+      clock,
+    }) => {
+      expect(clock.epochMs()).toBeGreaterThanOrEqual(started);
+      expect(clock.epochMs()).toBeLessThanOrEqual(Date.now());
+      await gotoReady(page, `${servers.host.origin}/`);
+      const before = Date.now();
+      const seen = await page.evaluate(
+        () =>
+          new Promise<{ at: number; moved: number }>((done) => {
+            const at = Date.now();
+            setTimeout(() => done({ at, moved: Date.now() - at }), 200);
+          }),
+      );
+      expect(Math.abs(seen.at - before)).toBeLessThan(2_000);
+      expect(seen.moved).toBeGreaterThanOrEqual(150);
+    });
+  });
 });
 
 test("a second context gets its own recorders and the project's options", async ({
   newContext,
+  page,
   servers,
 }) => {
-  const other = await newContext();
-  const page = await other.newPage();
-  await gotoReady(page, `${servers.host.origin}/`);
-  expect(await page.evaluate(() => Date.now())).toBe(Date.parse(CANON_TIME));
+  const other = await (await newContext()).newPage();
+  await gotoReady(other, `${servers.host.origin}/`);
+  expect(other.viewportSize()).toEqual(page.viewportSize());
+  expect(await other.evaluate(() => window.isSecureContext)).toBe(true);
 });
 
 test("a second context with bypassCSP is refused", async ({ newContext }) => {
@@ -337,18 +409,52 @@ test.describe("the recorders fail the test that meets one", () => {
     await page.goto(`${servers.elsewhere.origin}/elsewhere`);
     expect(offsite.requests.length).toBeGreaterThan(0);
   });
+
+  test("a violation in a second context fails the test @csp", async ({ newContext, servers }) => {
+    test.fail(true, "the newContext fixture must fail a test whose second context saw a violation");
+    const page = await (await newContext()).newPage();
+    await gotoReady(page, `${servers.host.origin}/`);
+    // The recorder listens in the capture phase, so it has the event before this listener does.
+    await page.evaluate(
+      () =>
+        new Promise<void>((seen) => {
+          document.addEventListener("securitypolicyviolation", () => seen(), { once: true });
+          document.getElementById("main")?.setAttribute("style", "color: red");
+        }),
+    );
+  });
 });
 
 test.describe("bypassCSP from a test.use is refused", () => {
   test.use({ bypassCSP: true });
-  test.fail("the context fixture refuses it before the test runs", async ({ page }) => {
+  test.fail("the fixtures refuse it before the test runs", async ({ page }) => {
     await page.goto("about:blank");
   });
 });
 
 test.describe("bypassCSP through contextOptions is refused", () => {
   test.use({ contextOptions: { bypassCSP: true } });
-  test.fail("the context fixture refuses it before the test runs", async ({ page }) => {
+  test.fail("the fixtures refuse it before the test runs", async ({ page }) => {
     await page.goto("about:blank");
+  });
+});
+
+test.describe("bypassCSP from a test.use is refused in a test that makes only second contexts", () => {
+  test.use({ bypassCSP: true });
+  test.fail("the fixtures refuse it before the test runs", async ({ newContext, servers }) => {
+    const page = await (await newContext()).newPage();
+    await gotoReady(page, `${servers.host.origin}/`);
+  });
+});
+
+test.describe("bypassCSP from a test.use is refused in a test that makes its own context", () => {
+  test.use({ bypassCSP: true });
+  test.fail("the fixtures refuse it before the test runs", async ({ browser, servers }) => {
+    const own = await browser.newContext();
+    try {
+      await gotoReady(await own.newPage(), `${servers.host.origin}/`);
+    } finally {
+      await own.close();
+    }
   });
 });

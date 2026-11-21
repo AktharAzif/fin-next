@@ -15,7 +15,7 @@ import { accessLoginUrl } from "./access.ts";
 import { rpIdFor } from "./authenticator.ts";
 import { finPlaywrightConfig, selectedRoles } from "./config.ts";
 import { CSP_INIT_SCRIPT, isPolicyConsoleMessage } from "./csp.ts";
-import { refuseBypassCsp } from "./fixtures.ts";
+import { refuseBypassCsp, refuseResolvedBypassCsp, secondContextOptions } from "./fixtures.ts";
 import { isOffsite, watchOffsite } from "./offsite.ts";
 
 type Listener = (value: never) => void;
@@ -116,6 +116,38 @@ describe("refuseBypassCsp", () => {
     for (const options of [undefined, {}, { bypassCSP: false }, { bypassCSP: undefined }]) {
       expect(() => refuseBypassCsp("x", options)).not.toThrow();
     }
+  });
+
+  it("refuses a test whose resolved options turn it on, from either place", () => {
+    expect(() => refuseResolvedBypassCsp({ bypassCSP: true, contextOptions: {} })).toThrow(
+      "the test's options turns it on",
+    );
+    expect(() =>
+      refuseResolvedBypassCsp({ bypassCSP: false, contextOptions: { bypassCSP: true } }),
+    ).toThrow("contextOptions turns it on");
+    expect(() =>
+      refuseResolvedBypassCsp({ bypassCSP: false, contextOptions: { locale: "en-GB" } }),
+    ).not.toThrow();
+    expect(() =>
+      refuseResolvedBypassCsp({ bypassCSP: undefined, contextOptions: undefined }),
+    ).not.toThrow();
+  });
+});
+
+describe("secondContextOptions", () => {
+  it("refuses a caller that turns bypassCSP on", () => {
+    expect(() => secondContextOptions({ bypassCSP: true })).toThrow("newContext() turns it on");
+  });
+
+  it("pins the page policy on as an own key, which Playwright never fills over", () => {
+    for (const given of [undefined, {}, { bypassCSP: false }]) {
+      const made = secondContextOptions(given);
+      expect(made).toEqual({ bypassCSP: false });
+      expect(Object.hasOwn(made, "bypassCSP")).toBe(true);
+    }
+    const phone = { viewport: { width: 390, height: 844 }, isMobile: true };
+    expect(secondContextOptions(phone)).toEqual({ ...phone, bypassCSP: false });
+    expect(phone).toEqual({ viewport: { width: 390, height: 844 }, isMobile: true });
   });
 });
 
@@ -266,6 +298,25 @@ describe("the Playwright configuration", () => {
     expect(servers[0]?.command).toContain("--headers /rendered/admin/_headers");
     expect(servers[0]?.reuseExistingServer).toBe(false);
     expect(() => finPlaywrightConfig(root, { FIN_E2E_APPS: "nope" })).toThrow("unknown app");
+  });
+
+  it("turns bypassCSP on in no project of any run", () => {
+    const everyApp = { FIN_E2E_APPS: "console,admin,verify,docs" };
+    for (const env of [
+      {},
+      everyApp,
+      { ...everyApp, FIN_E2E_NIGHTLY: "1" },
+      { ...everyApp, FIN_CANVAS_RENDERS: "/renders" },
+      { ...everyApp, CI: "true" },
+    ]) {
+      const config = finPlaywrightConfig(root, env);
+      expect(config.use?.bypassCSP).toBe(false);
+      expect(config.use?.contextOptions?.bypassCSP).not.toBe(true);
+      for (const project of config.projects ?? []) {
+        expect(project.use?.bypassCSP, project.name).not.toBe(true);
+        expect(project.use?.contextOptions?.bypassCSP, project.name).not.toBe(true);
+      }
+    }
   });
 
   it("adds the fidelity projects only with FIN_CANVAS_RENDERS", () => {

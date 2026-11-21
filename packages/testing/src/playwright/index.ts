@@ -18,7 +18,10 @@ export {
   type FinFixtures,
   type FinOptions,
   prepareContext,
+  type ResolvedContextOptions,
   refuseBypassCsp,
+  refuseResolvedBypassCsp,
+  secondContextOptions,
   test,
 } from "./fixtures.ts";
 export {

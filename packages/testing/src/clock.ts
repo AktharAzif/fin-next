@@ -65,7 +65,7 @@ export class FrozenClock implements Clock {
   }
 }
 
-/** How a journey run's stand-ins tell the time (`e2eClock`). */
+/** How a journey run tells the time (`e2eClock`): its stand-ins, its browsers and its tests. */
 export interface RunClock {
   /** "wall", or the ISO time the clock stands at. */
   readonly setting: string;
@@ -76,11 +76,13 @@ export interface RunClock {
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
- * The clock a journey run's stand-ins sign and check with, from FIN_E2E_CLOCK, so the Access
+ * The run's clock, from FIN_E2E_CLOCK: what the stand-ins sign, stamp and check with, and where
+ * the fixtures start the browser clock and the Node-side clock (`journeyClock`). So the Access
  * stand-in's `iat`, `nbf` and `exp` agree with the clock the API halves' test servers check them
- * against (spec 01 §7.7). Unset, "" or "canon": stopped at CANON_TIME, where the servers'
- * controllable clock starts; an ISO 8601 time with its offset: stopped there; "wall": the system
- * clock, for servers that check against wall time. Anything else throws.
+ * against (spec 01 §7.7), and a page's `Date.now()` with the servers' timestamps. Unset, "" or
+ * "canon": stopped at CANON_TIME, where the servers' controllable clock starts; an ISO 8601 time
+ * with its offset: stopped there; "wall": the system clock, for servers that check against wall
+ * time. Anything else throws.
  */
 export function e2eClock(value: string | undefined = process.env.FIN_E2E_CLOCK): RunClock {
   const given = value?.trim() ?? "";
@@ -93,6 +95,27 @@ export function e2eClock(value: string | undefined = process.env.FIN_E2E_CLOCK):
     );
   }
   return { setting: new Date(ms).toISOString(), now: () => ms };
+}
+
+/** Where a journey's browser clock starts, and how it runs (the fixtures' clock defaults). */
+export interface JourneyClock {
+  /** "fixed" pins Date at `time`; "off" leaves the browser on the system clock. */
+  readonly mode: "fixed" | "off";
+  /** ISO 8601: where the run's clock stands when the test starts. */
+  readonly time: string;
+}
+
+/**
+ * A journey's clock from the run's clock, so the browser and the Node-side clock agree with the
+ * stand-ins and the servers, which read the same FIN_E2E_CLOCK. A stopped run clock (canon, or an
+ * ISO time) pins the browser there; "wall" leaves the browser on the system clock, which the
+ * servers and the stand-ins read too, and `time` is the moment the test started.
+ */
+export function journeyClock(run: RunClock = e2eClock()): JourneyClock {
+  return {
+    mode: run.setting === "wall" ? "off" : "fixed",
+    time: new Date(run.now()).toISOString(),
+  };
 }
 
 /** The part of Playwright's BrowserContext (or Page) this needs. */

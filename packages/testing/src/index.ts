@@ -34,6 +34,8 @@ export {
   e2eClock,
   FrozenClock,
   freezeBrowserClock,
+  type JourneyClock,
+  journeyClock,
   type RunClock,
 } from "./clock.ts";
 export {

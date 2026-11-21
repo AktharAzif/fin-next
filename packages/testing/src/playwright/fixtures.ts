@@ -4,13 +4,18 @@
 //
 // On every context, before its first page: the `securitypolicyviolation` recorder and the
 // off-origin request recorder (both fail the test at its end if they saw anything), and the
-// browser clock frozen at the canon's time ("fixed" pins Date; "paused" also stops timers; "off"
-// leaves the clock alone). The Access stand-in's origin may be navigated to (its login page stands
-// in front of Fin Admin) but nothing may load from it. A test that turns bypassCSP on, in its
-// project, a `test.use`, `contextOptions` or `newContext`, is refused (spec 06 §6.4).
+// browser clock at the run's clock, FIN_E2E_CLOCK, which the stand-ins and the servers read too
+// ("fixed" pins Date, the default; "paused" also stops timers; "off" leaves the clock alone, the
+// default for a "wall" run). The Access stand-in's origin may be navigated to (its login page
+// stands in front of Fin Admin) but nothing may load from it.
+//
+// No test turns bypassCSP on (spec 06 §6.4). Every test, whichever fixtures it uses, is refused
+// when its resolved options turn it on (its project, a `test.use`, `contextOptions`), because
+// Playwright starts every context the test makes from them, a `browser.newContext()` of its own
+// included. `newContext()` also refuses its own options and pins the page policy on.
 import { type BrowserContext, type BrowserContextOptions, test as base } from "@playwright/test";
 import { type AddressBook, createAddressBook, testScope } from "../canon/addresses.ts";
-import { CANON_TIME, FrozenClock, freezeBrowserClock } from "../clock.ts";
+import { FrozenClock, freezeBrowserClock, journeyClock } from "../clock.ts";
 import { EmailSinkReader } from "../email/reader.ts";
 import { ACCESS_STAND_IN_PORT, EMAIL_SINK_PORT } from "../static-host/apps.ts";
 import { installAuthenticator, type VirtualAuthenticator } from "./authenticator.ts";
@@ -20,7 +25,9 @@ import { type OffsiteWatcher, watchOffsite } from "./offsite.ts";
 export interface FinOptions {
   /** Origins a page may load from besides the project's baseURL (the selfie page's Sumsub hosts). */
   readonly allowedOrigins: readonly string[];
+  /** By default "fixed", or "off" when the run's clock is "wall" (`journeyClock`). */
   readonly clockMode: "fixed" | "paused" | "off";
+  /** Where the browser clock starts: by default, where the run's clock stands as the test starts. */
   readonly clockTime: string;
   readonly emailSinkOrigin: string;
   /** The Access stand-in: a top-level navigation may reach it; nothing may load from it. */
@@ -33,13 +40,22 @@ export interface FinFixtures {
   readonly authenticator: VirtualAuthenticator;
   readonly emailSink: EmailSinkReader;
   readonly addresses: AddressBook;
-  /** The Node-side frozen clock at the same moment as the browser's. */
+  /**
+   * The Node-side frozen clock, standing where the browser clock starts (`clockTime`). In a
+   * "wall" run the browser keeps the system clock, and this one stands at the test's start.
+   */
   readonly clock: FrozenClock;
   /**
    * A second browser context (another person, another device) with the same recorders and
-   * clock as the test's own; closed and checked when the test ends.
+   * clock as the test's own, and the page policy pinned on; closed and checked when the test ends.
    */
   readonly newContext: (options?: BrowserContextOptions) => Promise<BrowserContext>;
+}
+
+/** Fixtures every test runs, whether it names them or not. */
+interface FinAutomaticFixtures {
+  /** Refuses bypassCSP from the test's resolved options (`refuseResolvedBypassCsp`). */
+  readonly pagePolicy: undefined;
 }
 
 interface Watchers {
@@ -68,6 +84,36 @@ export function refuseBypassCsp(
   }
 }
 
+/** The test's resolved options that Playwright starts each of its contexts from. */
+export interface ResolvedContextOptions {
+  /** The project's, the file's or a describe block's `test.use`, else `contextOptions`'s. */
+  readonly bypassCSP: boolean | undefined;
+  readonly contextOptions: BrowserContextOptions | undefined;
+}
+
+/**
+ * Refuses bypassCSP from a test's resolved options. Playwright fills every context the test makes
+ * from them (the `context` fixture's, `newContext()`'s and a `browser.newContext()` of the test's
+ * own), so the fixtures run this for every test, whichever fixtures it names.
+ */
+export function refuseResolvedBypassCsp({
+  bypassCSP,
+  contextOptions,
+}: ResolvedContextOptions): void {
+  refuseBypassCsp("the test's options", { bypassCSP });
+  refuseBypassCsp("contextOptions", contextOptions);
+}
+
+/**
+ * The options `newContext()` makes a context with: the caller's, refused when they turn bypassCSP
+ * on, and bypassCSP pinned off, so no option Playwright fills in from the test's can turn the page
+ * policy off (it fills only what the caller left out).
+ */
+export function secondContextOptions(options: BrowserContextOptions = {}): BrowserContextOptions {
+  refuseBypassCsp("newContext()", options);
+  return { ...options, bypassCSP: false };
+}
+
 interface Preparation {
   readonly baseURL: string | undefined;
   readonly allowedOrigins: readonly string[];
@@ -91,10 +137,25 @@ export async function prepareContext(
   return prepared;
 }
 
-export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
+type FinTestFixtures = FinOptions & FinFixtures & FinAutomaticFixtures;
+
+export const test = base.extend<FinTestFixtures, { runId: string }>({
   allowedOrigins: [[], { option: true }],
-  clockMode: ["fixed", { option: true }],
-  clockTime: [CANON_TIME, { option: true }],
+  // From the run's clock, read as each test starts, unless the test sets them.
+  clockMode: [
+    // biome-ignore lint/correctness/noEmptyPattern: Playwright's fixture signature
+    async ({}, use) => {
+      await use(journeyClock().mode);
+    },
+    { option: true },
+  ],
+  clockTime: [
+    // biome-ignore lint/correctness/noEmptyPattern: Playwright's fixture signature
+    async ({}, use) => {
+      await use(journeyClock().time);
+    },
+    { option: true },
+  ],
   emailSinkOrigin: [
     process.env.FIN_E2E_EMAIL_SINK ?? `http://127.0.0.1:${EMAIL_SINK_PORT}`,
     { option: true },
@@ -113,22 +174,19 @@ export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
     { scope: "worker" },
   ],
 
-  context: async (
-    {
-      context,
-      baseURL,
-      allowedOrigins,
-      accessStandInOrigin,
-      clockMode,
-      clockTime,
-      bypassCSP,
-      contextOptions,
+  // Before the test's own fixtures, and before any context it makes however it makes it.
+  pagePolicy: [
+    async ({ bypassCSP, contextOptions }, use) => {
+      refuseResolvedBypassCsp({ bypassCSP, contextOptions });
+      await use(undefined);
     },
+    { auto: true, title: "the page policy stays on" },
+  ],
+
+  context: async (
+    { context, baseURL, allowedOrigins, accessStandInOrigin, clockMode, clockTime },
     use,
   ) => {
-    // The resolved option: the project's, the file's or a describe block's `test.use`.
-    refuseBypassCsp("the test's options", { bypassCSP });
-    refuseBypassCsp("contextOptions", contextOptions);
     const prepared = await prepareContext(context, {
       baseURL,
       allowedOrigins,
@@ -147,9 +205,9 @@ export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
   ) => {
     const made: Array<{ context: BrowserContext; watchers: Watchers }> = [];
     await use(async (options = {}) => {
-      refuseBypassCsp("newContext()", options);
-      // Inside a test, browser.newContext() starts from the project's `use` options.
-      const context = await browser.newContext(options);
+      // Inside a test, browser.newContext() fills what `options` leaves out from the test's own
+      // options (the project's `use`, a `test.use`), which `pagePolicy` has already checked.
+      const context = await browser.newContext(secondContextOptions(options));
       made.push({
         context,
         watchers: await prepareContext(context, {

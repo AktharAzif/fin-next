@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CANON_TIME,
   type ClockOwner,
@@ -6,6 +6,7 @@ import {
   e2eClock,
   FrozenClock,
   freezeBrowserClock,
+  journeyClock,
 } from "./clock.ts";
 
 describe("FrozenClock", () => {
@@ -70,6 +71,39 @@ describe("e2eClock (FIN_E2E_CLOCK)", () => {
     ]) {
       expect(() => e2eClock(value)).toThrow("FIN_E2E_CLOCK");
     }
+  });
+});
+
+describe("journeyClock (the fixtures' browser and Node clock)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("pins the browser where a stopped run clock stands", () => {
+    expect(journeyClock(e2eClock("canon"))).toEqual({ mode: "fixed", time: CANON_TIME });
+    expect(journeyClock(e2eClock("2026-11-18T09:00:00+05:30"))).toEqual({
+      mode: "fixed",
+      time: "2026-11-18T03:30:00.000Z",
+    });
+  });
+
+  it("leaves the browser on the system clock for 'wall', starting where it stands", () => {
+    const before = Date.now();
+    const clock = journeyClock(e2eClock("wall"));
+    expect(clock.mode).toBe("off");
+    expect(Date.parse(clock.time)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(clock.time)).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("reads FIN_E2E_CLOCK as it is called, as the stand-ins do", () => {
+    vi.stubEnv("FIN_E2E_CLOCK", "2026-11-18T09:00:00Z");
+    expect(journeyClock()).toEqual({ mode: "fixed", time: "2026-11-18T09:00:00.000Z" });
+    vi.stubEnv("FIN_E2E_CLOCK", "");
+    expect(journeyClock()).toEqual({ mode: "fixed", time: CANON_TIME });
+    vi.stubEnv("FIN_E2E_CLOCK", "wall");
+    expect(journeyClock().mode).toBe("off");
+    vi.stubEnv("FIN_E2E_CLOCK", "yesterday");
+    expect(() => journeyClock()).toThrow("FIN_E2E_CLOCK");
   });
 });
 
