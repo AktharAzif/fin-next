@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en-GB" data-app="console">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta property="csp-nonce">
+    <title>Fin</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <script src="/theme.js"></script>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </head>
+  <body class="fin-shimmer">
+    <a class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-tooltip focus:rounded-control focus:bg-surface-raised focus:px-3 focus:py-2 focus:text-label focus:text-text-primary focus:shadow-popover focus:outline-focus" href="#main">Skip to content</a>
+    <div id="root">
+      <!-- boot:app --><div data-boot-block="app" aria-hidden="true" class="flex h-dvh flex-col overflow-hidden bg-bg">
+        <div data-boot-strip class="flex h-6 shrink-0 items-center justify-center bg-surface-subtle"><div data-skeleton class="h-2 w-14 rounded-sm bg-fill-selected"></div></div>
+        <div class="flex min-h-0 flex-1">
+          <div data-boot-sidebar class="hidden h-full w-sidebar shrink-0 flex-col overflow-hidden border-r border-border bg-surface lg:flex">
+            <div class="flex h-header shrink-0 items-center px-4"><div data-skeleton class="h-4.5 w-24 shrink-0 rounded-sm bg-fill-selected"></div></div>
+            <div class="flex flex-col gap-1 px-3">
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="mt-4 h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+            </div>
+          </div>
+          <div class="flex min-w-0 flex-1 flex-col">
+            <div data-boot-header="phone" class="shrink-0 border-b border-border lg:hidden">
+              <div data-boot-row="1" class="flex h-12 items-center gap-3 px-2">
+                <div data-skeleton class="size-8 shrink-0 rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="size-4.5 shrink-0 rounded-sm bg-fill-selected"></div>
+                <div class="ml-auto flex h-8 items-center pr-2 pl-1"><div data-skeleton class="size-6 rounded-full bg-fill-selected"></div></div>
+              </div>
+              <div data-boot-row="2" class="flex min-w-0 items-center gap-3 px-3 pb-2">
+                <div data-skeleton class="h-8 w-36 min-w-0 shrink rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="h-8 w-44 shrink-0 rounded-control bg-fill-selected"></div>
+              </div>
+            </div>
+            <div data-boot-header="wide" class="hidden h-header shrink-0 items-center justify-between gap-3 border-b border-border px-6 lg:flex">
+              <div class="flex items-center gap-3">
+                <div data-skeleton class="h-8 w-36 rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="h-8 w-44 rounded-control bg-fill-selected"></div>
+              </div>
+              <div data-skeleton class="size-6 rounded-full bg-fill-selected"></div>
+            </div>
+            <div class="flex flex-col gap-3 px-4 pt-7 md:px-6 lg:px-8 lg:pt-9">
+              <div data-skeleton class="h-6 w-48 rounded-sm bg-fill-selected"></div>
+              <div data-skeleton class="h-2 w-80 max-w-full rounded-sm bg-fill-selected"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /boot:app -->
+      <!-- boot:auth --><div data-boot-block="auth" aria-hidden="true" class="flex min-h-dvh flex-col gap-8 overflow-hidden bg-bg p-4 sm:gap-0 sm:p-8">
+        <div data-boot-header="auth" class="flex h-6 items-center"><div data-skeleton class="h-4.5 w-4.5 rounded-sm bg-fill-selected sm:w-20"></div></div>
+        <div data-boot-main class="flex flex-1 items-start justify-center sm:items-center sm:pt-8 sm:pb-14">
+          <div class="w-full max-w-modal">
+            <div data-boot-card class="flex flex-col gap-6 bg-bg sm:rounded-md sm:border sm:border-transparent sm:bg-surface-raised sm:p-8 sm:shadow-ring">
+              <div class="flex flex-col gap-2">
+                <div data-skeleton class="h-6 w-40 rounded-sm bg-fill-selected"></div>
+                <div data-skeleton class="h-3 w-56 max-w-full rounded-sm bg-fill-selected"></div>
+              </div>
+              <div class="flex flex-col gap-3">
+                <div data-skeleton class="h-control-lg rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="h-control-lg rounded-control bg-fill-selected"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /boot:auth -->
+    </div>
+  </body>
+</html>

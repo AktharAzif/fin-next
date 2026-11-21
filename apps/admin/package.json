@@ -1,23 +1,45 @@
 {
   "name": "@fin/admin",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
+  "description": "Fin Admin: the staff console behind Cloudflare Access. Its single-page app (src/client) and its API half (src/server)",
   "scripts": {
-    "build": "pnpm run build:server",
+    "dev": "vite",
+    "build": "vite build --mode production && pnpm run build:server",
+    "build:test": "vite build --mode test",
     "build:server": "vite build --config vite.server.config.ts",
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
-    "lint": "biome check .",
-    "typecheck": "pnpm run typecheck:server",
+    "routes": "node scripts/generate-routes.mjs",
+    "typecheck": "pnpm run routes && tsc -p tsconfig.json && pnpm run typecheck:server",
     "typecheck:server": "tsc -p src/server/tsconfig.json",
-    "test": "vitest run --config ../../vitest.config.ts"
+    "lint": "biome check .",
+    "pretest": "pnpm run routes",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "e2e": "pnpm run build && playwright test"
   },
   "dependencies": {
+    "@fin/app-contracts": "workspace:*",
     "@fin/core": "workspace:*",
+    "@fin/frame": "workspace:*",
+    "@fin/motion": "workspace:*",
     "@fin/server": "workspace:*",
-    "@fin/web-host": "workspace:*"
+    "@fin/tokens": "workspace:*",
+    "@fin/ui": "workspace:*",
+    "@fin/web-host": "workspace:*",
+    "@tanstack/react-router": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@playwright/test": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "@tanstack/router-plugin": "catalog:",
     "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"
