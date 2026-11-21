@@ -1,6 +1,7 @@
 // @fin/motion: the React side of the motion layer (spec 06 §5.1). The motion itself is CSS
 // (fin-motion.css); these helpers only put its classes in the right place at the right time.
-import { type ReactNode, useRef, useSyncExternalStore } from "react";
+import { type ReactNode, useState, useSyncExternalStore } from "react";
+import { initialNavigationRun, navigationDraw, nextNavigationRun } from "./navigation-run.ts";
 
 function join(...names: (string | false | null | undefined)[]): string {
   return names.filter(Boolean).join(" ");
@@ -35,28 +36,26 @@ export function Swap(props: {
 /**
  * The navigation bar over the content while the router is pending. It grows from the left once
  * per navigation and stays mounted afterwards, fading out over 140ms, because CSS cannot animate
- * an element that has left the page. The frame gives it its place and colour through
- * `className` (a 2px bar of text-primary across the top of the content).
+ * an element that has left the page; that includes the first load, when the frame mounts while the
+ * router is already pending. Before any navigation it draws nothing. The frame gives it its place
+ * and colour through `className` (a 2px bar of text-primary across the top of the content).
  */
 export function NavigationBar(props: { pending: boolean; className?: string }) {
-  const last = useRef(props.pending);
-  const run = useRef(0);
-  if (props.pending && !last.current) run.current += 1;
-  last.current = props.pending;
-  if (!props.pending && run.current === 0) return null;
-  return props.pending ? (
+  const [state, setState] = useState(() => initialNavigationRun(props.pending));
+  // React's pattern for state that follows a prop: set during render, re-rendered before commit.
+  const next = nextNavigationRun(state, props.pending);
+  if (next !== state) setState(next);
+  const draw = navigationDraw(next);
+  if (draw.kind === "nothing") return null;
+  return draw.kind === "bar" ? (
     <div
-      key={run.current}
+      key={draw.key}
       role="progressbar"
       aria-label="Loading"
       className={join("fin-progress", props.className)}
     />
   ) : (
-    <div
-      key={`${run.current}-out`}
-      aria-hidden="true"
-      className={join("fin-swap-out", props.className)}
-    />
+    <div key={draw.key} aria-hidden="true" className={join("fin-swap-out", props.className)} />
   );
 }
 
