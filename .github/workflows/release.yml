@@ -61,7 +61,10 @@ jobs:
       matrix:
         image: [console, admin, verify, edge, api, connector]
     # Each record's SHA-256, which only this job can set (any job of the run can replace the
-    # record artefact). One name per image: each leg sets its own, and the legs' outputs combine.
+    # record artefact, so an artefact would not do). One name per image: each leg sets its own,
+    # and the legs' outputs combine (GitHub's workflow syntax, jobs.<job_id>.outputs: a matrix's
+    # outputs are combined, and an output with an empty value is not set, so no leg clears
+    # another's).
     outputs:
       record_sha256_console: ${{ steps.build.outputs.record_sha256_console }}
       record_sha256_admin: ${{ steps.build.outputs.record_sha256_admin }}
