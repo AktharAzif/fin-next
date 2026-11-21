@@ -525,6 +525,9 @@ importers:
       '@biomejs/biome':
         specifier: 'catalog:'
         version: 2.6.8
+      '@fin/server':
+        specifier: workspace:*
+        version: link:../server
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
