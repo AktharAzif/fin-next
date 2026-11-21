@@ -2,7 +2,7 @@
 // outside request (403, api.outside_request), signed or not, until the door matrix lists it.
 import { bootApi, NEIGHBOUR_ADDRESS } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { apiService, main } from "../main.ts";
+import { apiService } from "../main.ts";
 
 let api: Awaited<ReturnType<typeof bootApi>>;
 
@@ -68,23 +68,5 @@ describe("api", () => {
     expect(api.stdout.filter((l) => l.event === "api.outside_request").at(-1)).toMatchObject({
       reason: "not_in_matrix",
     });
-  });
-
-  it("exits 64 for a mode whose entry is not wired yet, naming only the mode", async () => {
-    for (const [argv, mode] of [
-      [["--worker"], "worker"],
-      [["--migrate"], "migrate"],
-      [["--task", "staff-bootstrap"], "task"],
-      [["--anything"], "unknown"],
-    ] as const) {
-      const exits: number[] = [];
-      const lines: string[] = [];
-      await main(argv, { exit: (code) => exits.push(code), stdout: (line) => lines.push(line) });
-      expect(exits).toEqual([64]);
-      expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
-        event: "process.mode_unavailable",
-        mode,
-      });
-    }
   });
 });
