@@ -22,6 +22,8 @@
         "$TURBO_ROOT$/apps/*/package.json",
         "$TURBO_ROOT$/apps/*/vite.server.config.ts",
         "$TURBO_ROOT$/apps/*/src/**",
+        "$TURBO_ROOT$/packages/audit/src/**",
+        "!$TURBO_ROOT$/packages/audit/src/events/_index.gen.ts*",
         "$TURBO_ROOT$/packages/testing/package.json",
         "$TURBO_ROOT$/packages/testing/src/**"
       ],

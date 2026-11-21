@@ -7,6 +7,7 @@
 // three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts) carries
 // the guard in a release build, in its main bundle and in every worker's, and still builds, with
 // nothing of the harness in any of its source maps.
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   globSync,
@@ -21,7 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { build, type Plugin, resolveConfig } from "vite";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { HARNESS_GUARD, harnessGuard, harnessMessage, harnessModules } from "./harness-guard.ts";
 import { serverBundleConfig } from "./vite-server.ts";
 
@@ -259,12 +260,25 @@ describe("each of the guard's checks", () => {
 });
 
 // These tests read files outside packages/server (each app's manifest, vite.server.config.ts and
-// sources, and packages/testing), so turbo.json names them as inputs of `@fin/server#test`: a
-// change to any of them runs the tests again instead of replaying a cached pass.
+// sources, packages/audit/src and packages/testing), so turbo.json names them as inputs of
+// `@fin/server#test`: a change to any of them runs the tests again instead of replaying a cached
+// pass.
 describe("the real server bundles", () => {
   const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
     .map((path) => path.split(sep).join("/"))
     .sort();
+
+  // A real bundle can reach @fin/audit (the api's does: main.ts, then migrate/main.ts), whose index
+  // loads the event index that packages/audit/src/gen.ts writes and git ignores. The real build
+  // writes it first (the api's prebuild:server); these tests call Vite without that pre-script, so
+  // they run the same generator before any build, and pass from a clean clone in any task order.
+  // The generator renames a finished file into place, so a package script running it at the same
+  // time is safe.
+  beforeAll(() => {
+    execFileSync(process.execPath, [join(REPOSITORY, "packages/audit/src/gen.ts")], {
+      stdio: "pipe",
+    });
+  });
 
   it("are found", () => {
     expect(configs.length).toBeGreaterThan(0);
