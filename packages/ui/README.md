@@ -11,7 +11,7 @@ specifications and the design canvases (UI-12: no port).
 | `src/inputs/` | OTPInput, Switch |
 | `src/data/` | DropdownMenu and its items, ErrorState, Table, TableId, TableAmount, TablePagination |
 | `src/auth/` | AuthLayout, AuthCard, AuthFooter |
-| `src/lib/` | `cn`, `announce`, the failure reporter (`ReportFailures`) |
+| `src/lib/` | `cn`, `announce`, the failure reporter (`ReportFailures`); `qr/`: the QR encoder (ISO/IEC 18004, written fresh, loaded on demand) and `QrCode`, which draws it as SVG rects (UR-13) |
 | `src/shell/` | The shells lane's (AppShell, Sidebar, the header menus) |
 | `src/kit.tsx` | Kit-only exports (the page-policy probes); never imported by a screen |
 | `kit/` | The kit page: every component above, live, built in test mode only |

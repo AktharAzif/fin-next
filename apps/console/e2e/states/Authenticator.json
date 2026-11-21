@@ -25,18 +25,22 @@
       "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
     },
     "qrLoading": {
-      "status": "pending",
-      "day": "h02",
-      "note": "no QR encoder in @fin/ui yet (UR-13); the key is drawn for manual entry"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/qr/qr.spec.ts",
+      "test": "@journey the placeholder shows while the QR code's chunk loads; the key is there at once"
     },
     "qrFailed": {
-      "status": "pending",
-      "day": "h02",
-      "note": "no QR encoder in @fin/ui yet (UR-13)"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/qr/qr.spec.ts",
+      "test": "@journey a QR code that cannot load offers Try again; the key still sets the app up"
     },
     "keyCopied": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/qr/qr.spec.ts",
+      "test": "@journey @csp the set-up draws the QR code, which scans to the URI, with the key kept"
     },
     "typing": {
       "status": "covered",
