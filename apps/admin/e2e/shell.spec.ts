@@ -7,7 +7,7 @@
 // with `page.route`, so each state is drawn exactly.
 import { expect, test } from "@fin/testing/playwright";
 import type { Page, Route } from "@playwright/test";
-import { ORIGIN, throughAccess } from "./support/journey.ts";
+import { inApp, ORIGIN, throughAccess } from "./support/journey.ts";
 
 const NADIA_EMAIL = "nadia.brooks@example.com";
 
@@ -129,7 +129,7 @@ test("@journey Staff that cannot load keeps its header and offers Try again", as
   await page.route("**/api/staff?*", problem(500, "internal"));
   await throughAccess(page, NADIA_EMAIL, "/staff");
   await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
-  await expect(page.getByText("Couldn’t load staff")).toBeVisible();
+  await expect(inApp(page).getByText("Couldn’t load staff")).toBeVisible();
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
 });
 

@@ -7,68 +7,113 @@
       "status": "covered",
       "day": "sat",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
-      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
     },
-    "passkeyOnly": { "status": "pending", "day": "sat" },
+    "passkeyOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with a passkey alone passes the factor step with it"
+    },
     "appOnly": {
       "status": "covered",
       "day": "sat",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
       "test": "@journey a code sign-in is held at the factor step until the authenticator's code is right"
     },
-    "passkeyPrompt": { "status": "pending", "day": "sat" },
-    "passkeyClosed": { "status": "pending", "day": "sat" },
-    "noPasskeySupport": { "status": "pending", "day": "sat" },
-    "noPasskey": { "status": "pending", "day": "sat" },
+    "passkeyPrompt": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with a passkey alone passes the factor step with it"
+    },
+    "passkeyClosed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with a passkey alone passes the factor step with it"
+    },
+    "noPasskeySupport": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a browser without passkeys uses the authenticator at the factor step"
+    },
+    "noPasskey": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with a passkey alone passes the factor step with it"
+    },
     "codeShort": {
       "status": "covered",
       "day": "sat",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
       "test": "@journey a code sign-in is held at the factor step until the authenticator's code is right"
     },
-    "verifying": { "status": "pending", "day": "sat" },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a browser without passkeys uses the authenticator at the factor step"
+    },
     "tooManyTries": {
       "status": "covered",
       "day": "sat",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
-      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
     },
     "setup": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
-      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
     },
     "setupPasskey": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
-      "test": "@journey a wrong emailed code, then a passkey alone after signing out"
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey a closed passkey prompt at set-up says so, and the next one adds the passkey"
     },
-    "setupPasskeyClosed": { "status": "pending", "day": "sat" },
+    "setupPasskeyClosed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey a closed passkey prompt at set-up says so, and the next one adds the passkey"
+    },
     "setupApp": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
-      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
     },
-    "setupAppShort": { "status": "pending", "day": "sat" },
-    "turningOn": { "status": "pending", "day": "sat" },
+    "setupAppShort": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
+    },
+    "turningOn": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
+    },
     "enrolmentCode": {
       "status": "new",
       "uiRequest": "UR-24",
       "drawn": false,
       "day": "sat",
-      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
-      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
     },
     "enrolmentCodeWrong": {
       "status": "new",
       "uiRequest": "UR-24",
       "drawn": false,
       "day": "sat",
-      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
-      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+      "spec": "apps/admin/e2e/sat/staff-enrolment.spec.ts",
+      "test": "@journey forced enrolment with the enrolment code, which works once"
     }
   }
 }

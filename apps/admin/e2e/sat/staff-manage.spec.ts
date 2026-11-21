@@ -1,4 +1,5 @@
-// T-SAT-65, T-SAT-66 (spec 02 §19.3): the bootstrapped Admin signs in with the emailed code, enters
+// T-SAT-66 (spec 02 §19.3; T-SAT-65's forced enrolment and its once-only code are in
+// staff-enrolment.spec.ts): the bootstrapped Admin signs in with the emailed code, enters
 // the enrolment code, enrols an authenticator and then a passkey, adds a member of staff with
 // "Confirm it's you" and sees the enrolment code once, changes their role, and cannot remove the
 // last Admin; the new member enrols with both codes, and as a Viewer sees the controls disabled
@@ -10,6 +11,7 @@ import {
   dialogsGone,
   emailedCodeSignIn,
   enrol,
+  inApp,
   ORIGIN,
   server,
   stepUpDialog,
@@ -39,7 +41,9 @@ test("@journey the first Admin enrols, adds staff with a step-up, changes the ro
   // Pending: the enrolment code comes first, and a wrong one is refused.
   await page.getByRole("textbox", { name: "Enrolment code" }).fill("AAAA-AAAA-AAAA-AAAA");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByText("That code didn’t work. Check it and try again.")).toBeVisible();
+  await expect(
+    inApp(page).getByText("That code didn’t work. Check it and try again."),
+  ).toBeVisible();
   await page.getByRole("textbox", { name: "Enrolment code" }).fill("");
   const key = await enrol(page, enrolmentCode, "authenticator");
   expect(key).not.toBeNull();
@@ -91,7 +95,7 @@ test("@journey the first Admin enrols, adds staff with a step-up, changes the ro
     .getByRole("textbox", { name: "Authenticator code" })
     .fill(await authenticatorCode(key as string));
   await expect(confirm).toBeHidden();
-  await expect(page.getByText("Passkey added")).toBeVisible();
+  await expect(inApp(page).getByText("Passkey added")).toBeVisible();
   expect(await authenticator.list(authenticator.rpIdFor(ORIGIN))).toHaveLength(1);
   await expect(page.getByRole("table", { name: "Second factors" }).getByRole("row")).toHaveCount(3);
 
@@ -121,7 +125,7 @@ test("@journey the first Admin enrols, adds staff with a step-up, changes the ro
   await expect(meiRow.getByText("Hasn’t signed in yet")).toBeVisible();
   await expect(meiRow.getByRole("cell", { name: "Operator", exact: true })).toBeVisible();
   // The code is shown once: it is nowhere on the page after Done.
-  await expect(page.getByText(meiCode)).toHaveCount(0);
+  await expect(inApp(page).getByText(meiCode)).toHaveCount(0);
 
   // Change role: Operator to Viewer, confirmed with the passkey.
   await meiRow.getByRole("button", { name: `Change role of ${mei}` }).click();
@@ -132,7 +136,7 @@ test("@journey the first Admin enrols, adds staff with a step-up, changes the ro
     stepUpDialog(page).getByText(`Use your second factor to change ${mei}’s role to Viewer.`),
   ).toBeVisible();
   await stepUpDialog(page).getByRole("button", { name: "Use my passkey" }).click();
-  await expect(page.getByText("Role changed")).toBeVisible();
+  await expect(inApp(page).getByText("Role changed")).toBeVisible();
   await expect(meiRow.getByRole("cell", { name: "Viewer", exact: true })).toBeVisible();
 
   // Every step wrote its audit event.

@@ -20,6 +20,7 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useRef, useState } from "react";
 import { redeemEnrolmentCode } from "../api/contracts.ts";
+import type { AuthFailure } from "../auth/http.ts";
 import {
   AUTHENTICATOR_CODE_LENGTH,
   groupsOfFour,
@@ -38,9 +39,13 @@ import {
   type EnrolmentOutcome,
   enrolmentOutcome,
   enrolmentWindowClosed,
+  type FactorOutcome,
   factorOutcome,
+  isLimit,
+  sessionEnded,
 } from "../auth/outcomes.ts";
 import { passkeysSupported } from "../auth/passkey.ts";
+import { signInAgain } from "../auth/sign-in-again.ts";
 import { OrDivider } from "../components/OrDivider.tsx";
 import { nextStepFor } from "./after-sign-in.ts";
 
@@ -65,10 +70,18 @@ const SHORT: Notice = {
   tone: "danger",
   title: "Enter the 6-digit code from your authenticator app.",
 };
-const TOO_MANY: Notice = {
+/** A limit or the realm's lockout (spec 02 §5.4): the session lives on, so nothing says sign-out. */
+const LIMITED: Notice = {
+  tone: "warning",
+  title: "Too many wrong tries.",
+  body: "Try again later.",
+};
+const LIMITED_REASON = "Too many wrong tries. Try again later.";
+/** The realm ended the session after too many wrong tries (spec 02 §7.7). */
+const ENDED: Notice = {
   tone: "danger",
-  title: "Too many wrong tries. Sign in again.",
-  body: "Fin Admin signs you out and takes you back to sign in.",
+  title: "You were signed out after too many wrong tries.",
+  body: "Fin Admin takes you back to sign in.",
 };
 
 function NoticeView({ notice }: { notice: Notice }) {
@@ -140,15 +153,26 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
       : null,
   );
   const [busy, setBusy] = useState<"passkey" | "code" | null>(null);
-  const [locked, setLocked] = useState(false);
+  // The session ended after too many wrong tries: nothing more can be sent.
+  const [ended, setEnded] = useState(false);
+  // A limit or the realm's lockout on codes: the session lives on and the passkey still works.
+  const [limited, setLimited] = useState(false);
   const [code, setCode] = useState("");
   const [otpStatus, setOtpStatus] = useState<OTPStatus>("idle");
 
-  const lockOut = () => {
-    setLocked(true);
-    setNotice(TOO_MANY);
-    // The realm ended the session; this page loads sign-in again shortly, as the board says.
-    window.setTimeout(() => window.location.assign("/sign-in?ended=1"), 4000);
+  /** What a refusal other than a wrong code means at the factor step. */
+  const refused = (outcome: FactorOutcome): void => {
+    if (outcome === "tooManyTries") {
+      setEnded(true);
+      setNotice(ENDED);
+      // The realm ended the session (spec 02 §7.7); sign-in loads again shortly, as the board says.
+      window.setTimeout(signInAgain, 4000);
+    } else if (outcome === "signedOut") signInAgain();
+    else if (outcome === "limited") {
+      setLimited(true);
+      setNotice(LIMITED);
+    } else if (outcome === "offline") setNotice(OFFLINE);
+    else if (outcome === "failed") setNotice(OUR_SIDE);
   };
 
   const afterCode = async (answer: Awaited<ReturnType<typeof verifyAuthenticatorCode>>) => {
@@ -162,14 +186,11 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
       return;
     }
     setOtpStatus(outcome === "wrong" ? "invalid" : "idle");
-    if (outcome === "locked") lockOut();
-    else if (outcome === "signedOut") window.location.assign("/sign-in?ended=1");
-    else if (outcome === "offline") setNotice(OFFLINE);
-    else if (outcome === "failed") setNotice(OUR_SIDE);
+    refused(outcome);
   };
 
   const withCode = async (typed: string) => {
-    if (busy !== null || locked) return;
+    if (busy !== null || ended || limited) return;
     if (!isDigits(typed, AUTHENTICATOR_CODE_LENGTH)) {
       setNotice(SHORT);
       setOtpStatus("invalid");
@@ -207,15 +228,13 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
         return;
       }
       const outcome = factorOutcome(result.failure);
-      if (outcome === "locked") lockOut();
-      else if (outcome === "signedOut") window.location.assign("/sign-in?ended=1");
-      else if (outcome === "offline") setNotice(OFFLINE);
-      else
+      if (outcome === "wrong" || outcome === "failed") {
         setNotice({
           tone: "danger",
           title: "That passkey didn’t work.",
           body: hasApp ? "Try again, or use your authenticator app." : "Try again.",
         });
+      } else refused(outcome);
     } finally {
       setBusy(null);
     }
@@ -230,7 +249,7 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
           size="lg"
           className="w-full"
           loading={busy === "passkey"}
-          disabled={locked || busy === "code"}
+          disabled={ended || busy === "code"}
           onClick={withPasskey}
         >
           Use my passkey
@@ -256,7 +275,7 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
             }}
             onComplete={(full) => void withCode(full)}
             status={otpStatus}
-            disabled={locked || busy === "passkey"}
+            disabled={ended || limited || busy === "passkey"}
             autoFocus={!passkeyHere}
           />
           <Button
@@ -265,7 +284,8 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
             size="lg"
             className="w-full"
             loading={busy === "code"}
-            disabled={locked || busy === "passkey"}
+            disabled={ended || busy === "passkey"}
+            {...(limited && !ended ? { disabledReason: LIMITED_REASON } : {})}
           >
             Verify and continue
           </Button>
@@ -280,7 +300,7 @@ function ConfirmStep({ email, methods }: { email: string; methods: readonly stri
   );
 }
 
-const ENROLMENT_ERRORS: Record<EnrolmentOutcome, string> = {
+const ENROLMENT_ERRORS: Record<Exclude<EnrolmentOutcome, "signedOut">, string> = {
   wrong: "That code didn’t work. Check it and try again.",
   expired: "That code has expired. Ask the Admin who added you for a new one.",
   used: "That code can’t be used again. Ask the Admin who added you for a new one.",
@@ -316,7 +336,10 @@ function EnrolmentCodeStep({
       await fin.api(redeemEnrolmentCode, { code });
       onRedeemed();
     } catch (failure) {
-      setError(ENROLMENT_ERRORS[enrolmentOutcome(failure)]);
+      const outcome = enrolmentOutcome(failure);
+      // The session's 10 minutes are shorter than the code's 30: a new code would not help.
+      if (outcome === "signedOut") return signInAgain();
+      setError(ENROLMENT_ERRORS[outcome]);
       input.current?.focus();
     } finally {
       setBusy(false);
@@ -390,6 +413,17 @@ function SetupStep({ onWindowClosed }: { onWindowClosed: () => void }) {
     if (!(await goOn())) setNotice(OUR_SIDE);
   };
 
+  /**
+   * A refused set-up call: the enrolment window closed (the code step comes again), the session
+   * ended (sign in again; spec 02 §6.4, §11.1), a limit, or no answer.
+   */
+  const refusedBy = (failure: AuthFailure): void => {
+    if (enrolmentWindowClosed(failure)) onWindowClosed();
+    else if (sessionEnded(failure)) signInAgain();
+    else if (isLimit(failure)) setNotice(LIMITED);
+    else setNotice(failure.kind === "network" || failure.kind === "access" ? OFFLINE : OUR_SIDE);
+  };
+
   const withPasskey = async () => {
     setNotice(null);
     setBusy("passkey");
@@ -410,8 +444,7 @@ function SetupStep({ onWindowClosed }: { onWindowClosed: () => void }) {
         );
         return;
       }
-      if (enrolmentWindowClosed(result.failure)) return onWindowClosed();
-      setNotice(result.failure.kind === "network" ? OFFLINE : OUR_SIDE);
+      refusedBy(result.failure);
     } finally {
       setBusy(null);
     }
@@ -429,8 +462,8 @@ function SetupStep({ onWindowClosed }: { onWindowClosed: () => void }) {
         setView("app");
         return;
       }
-      if (enrolmentWindowClosed(answer)) return onWindowClosed();
-      setNotice(!answer.ok && answer.kind === "network" ? OFFLINE : OUR_SIDE);
+      if (answer.ok) setNotice(OUR_SIDE);
+      else refusedBy(answer);
     } finally {
       setBusy(null);
     }
@@ -454,10 +487,7 @@ function SetupStep({ onWindowClosed }: { onWindowClosed: () => void }) {
         return await finish();
       }
       setOtpStatus(outcome === "wrong" ? "invalid" : "idle");
-      if (enrolmentWindowClosed(answer)) return onWindowClosed();
-      if (outcome === "locked") setNotice(TOO_MANY);
-      else if (outcome === "offline") setNotice(OFFLINE);
-      else if (outcome !== "wrong") setNotice(OUR_SIDE);
+      if (outcome !== "wrong" && !answer.ok) refusedBy(answer);
     } finally {
       setBusy(null);
     }

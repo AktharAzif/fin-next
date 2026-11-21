@@ -2,7 +2,7 @@
 // wrong code says so; someone Access lets in who is not staff sees the same screens and gets no
 // code; signing out ends with sign-in; and the sign-in page draws in light and dark.
 import { expect, test } from "@fin/testing/playwright";
-import { enrol, ORIGIN, server, throughAccess } from "../support/journey.ts";
+import { enrol, inApp, ORIGIN, server, throughAccess } from "../support/journey.ts";
 
 test.beforeEach(async () => {
   await server.reset();
@@ -23,7 +23,7 @@ test("@journey a wrong emailed code, then a passkey alone after signing out", as
   const code = await emailSink.waitForCode({ to: nadia, after: mark });
   const wrong = code === "00000000" ? "11111111" : "00000000";
   await page.getByRole("textbox", { name: "Sign-in code" }).fill(wrong);
-  await expect(page.getByText("That code didn’t work.")).toBeVisible();
+  await expect(inApp(page).getByText("That code didn’t work.")).toBeVisible();
   await page.getByRole("textbox", { name: "Sign-in code" }).fill(code);
   await expect(page).toHaveURL(`${ORIGIN}/sign-in/factor`);
   await enrol(page, enrolmentCode, "passkey");
@@ -55,9 +55,9 @@ test("@journey someone Access lets in who is not staff sees the same screens, an
   const mark = await emailSink.mark();
   await page.getByRole("button", { name: "Email me a code" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
-  await expect(page.getByText(`Enter the code we emailed to ${stranger}.`)).toBeVisible();
+  await expect(inApp(page).getByText(`Enter the code we emailed to ${stranger}.`)).toBeVisible();
   await page.getByRole("textbox", { name: "Sign-in code" }).fill("12345678");
-  await expect(page.getByText("That code didn’t work.")).toBeVisible();
+  await expect(inApp(page).getByText("That code didn’t work.")).toBeVisible();
   expect((await emailSink.list({ to: stranger, after: mark })).messages).toHaveLength(0);
 });
 
@@ -68,10 +68,10 @@ test("@journey the work email is checked before anything is sent", async ({ page
   const field = page.getByRole("textbox", { name: "Work email" });
   await field.fill("");
   await page.getByRole("button", { name: "Email me a code" }).click();
-  await expect(page.getByText("Enter an email address.")).toBeVisible();
+  await expect(inApp(page).getByText("Enter an email address.")).toBeVisible();
   await field.fill("nadia@example.org");
   await page.getByRole("button", { name: "Email me a code" }).click();
-  await expect(page.getByText("Enter a work email address.")).toBeVisible();
+  await expect(inApp(page).getByText("Enter a work email address.")).toBeVisible();
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin Admin" })).toBeVisible();
 });
 
@@ -83,5 +83,5 @@ test("@visual the sign-in page draws in the system theme, light or dark", async 
   const dark = testInfo.project.use.colorScheme === "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", dark ? "dark" : "light");
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin Admin" })).toBeVisible();
-  await expect(page.getByText("You were signed out. Sign in again.")).toBeVisible();
+  await expect(inApp(page).getByText("You were signed out. Sign in again.")).toBeVisible();
 });

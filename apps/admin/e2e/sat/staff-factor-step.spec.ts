@@ -1,17 +1,27 @@
 // AdminSecondFactor's factor step and AdminSignIn's refusals (spec 02 §6.4, §5.2, §15.3): a member
 // with an authenticator signs in by code and is held at "Confirm it's you" until the code is
-// right; a member with both factors is offered the passkey first; the code step's short, expired
-// and limited codes, and the sending and resend states, each say what happened.
+// right; a member with both factors is offered the passkey first, and the realm's lockout on codes
+// (spec 02 §5.4) stops the codes without signing anyone out; a member with a passkey alone passes
+// the step with it; a browser without passkeys uses the authenticator; the code step's short,
+// expired and limited codes, and the sending, verifying and resend states, each say what happened.
+import type { EmailSinkReader } from "@fin/testing";
 import { expect, test } from "@fin/testing/playwright";
 import type { Page, Route } from "@playwright/test";
 import {
   authenticatorCode,
   dialogsGone,
   emailedCodeSignIn,
+  endNextPasskeyPrompt,
   enrol,
+  hold,
+  inApp,
   ORIGIN,
   server,
   throughAccess,
+  tryCode,
+  viewerState,
+  withoutPasskeys,
+  wrongCodes,
 } from "../support/journey.ts";
 
 test.beforeEach(async () => {
@@ -23,6 +33,33 @@ async function logOut(page: Page, email: string) {
   await page.getByRole("button", { name: `Account menu, ${email}` }).click();
   await page.getByRole("menuitem", { name: "Log out" }).click();
   await expect(page).toHaveURL(`${ORIGIN}/sign-in`);
+}
+
+/**
+ * The first Admin with both factors: a passkey at enrolment, then an authenticator from Your
+ * sign-in, confirmed with the passkey. Ends signed out; returns the authenticator's key.
+ */
+async function withBothFactors(
+  page: Page,
+  emailSink: EmailSinkReader,
+  email: string,
+): Promise<string> {
+  const { enrolmentCode } = await server.bootstrap(email);
+  await throughAccess(page, email, "/sign-in");
+  await emailedCodeSignIn(page, emailSink, email);
+  await enrol(page, enrolmentCode, "passkey");
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Add an authenticator app" }).click();
+  await page
+    .getByRole("dialog", { name: "Confirm it’s you" })
+    .getByRole("button", { name: "Use my passkey" })
+    .click();
+  const add = page.getByRole("dialog", { name: "Add an authenticator app" });
+  const key = ((await add.locator("[data-slot=copy-field] .font-mono").textContent()) ?? "").trim();
+  await add.getByRole("textbox", { name: "Code from the app" }).fill(await authenticatorCode(key));
+  await expect(inApp(page).getByText("Authenticator app added")).toBeVisible();
+  await logOut(page, email);
+  return key;
 }
 
 function problemRoute(status: number, code: string, extra: Record<string, unknown> = {}) {
@@ -56,7 +93,7 @@ test("@journey a code sign-in is held at the factor step until the authenticator
   // An emailed code alone is aal1: the factor step, and Staff is out of reach.
   await emailedCodeSignIn(page, emailSink, nadia);
   await expect(page.getByRole("heading", { level: 1, name: "Confirm it’s you" })).toBeVisible();
-  await expect(page.getByText(`Signing in as ${nadia}.`)).toBeVisible();
+  await expect(inApp(page).getByText(`Signing in as ${nadia}.`)).toBeVisible();
   await expect(page.getByRole("button", { name: "Use my passkey" })).toHaveCount(0);
   await page.goto("/staff");
   await expect(page).toHaveURL(`${ORIGIN}/sign-in/factor`);
@@ -64,10 +101,14 @@ test("@journey a code sign-in is held at the factor step until the authenticator
   const code = page.getByRole("textbox", { name: "Authenticator code" });
   await code.fill("123");
   await page.getByRole("button", { name: "Verify and continue" }).click();
-  await expect(page.getByText("Enter the 6-digit code from your authenticator app.")).toBeVisible();
+  await expect(
+    inApp(page).getByText("Enter the 6-digit code from your authenticator app."),
+  ).toBeVisible();
   const right = await authenticatorCode(key);
   await code.fill(right === "000000" ? "111111" : "000000");
-  await expect(page.getByText("That code isn’t right. Check it and try again.")).toBeVisible();
+  await expect(
+    inApp(page).getByText("That code isn’t right. Check it and try again."),
+  ).toBeVisible();
   await code.fill(right);
   await expect(page).toHaveURL(`${ORIGIN}/staff`);
   expect(
@@ -77,7 +118,46 @@ test("@journey a code sign-in is held at the factor step until the authenticator
   ).toBe(true);
 });
 
-test("@journey a member with both factors is offered the passkey first, and too many tries end it", async ({
+test("@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out", async ({
+  page,
+  authenticator: _authenticator,
+  emailSink,
+  addresses,
+}) => {
+  const nadia = addresses.address("nadia.brooks");
+  const key = await withBothFactors(page, emailSink, nadia);
+
+  await emailedCodeSignIn(page, emailSink, nadia);
+  const passkey = page.getByRole("button", { name: "Use my passkey" });
+  const box = page.getByRole("textbox", { name: "Authenticator code" });
+  const verify = page.getByRole("button", { name: "Verify and continue" });
+  await expect(passkey).toBeVisible();
+  await expect(box).toBeVisible();
+
+  // The realm's own lockout (spec 02 §5.4): ten wrong codes, then it refuses codes for an hour.
+  const codes = await wrongCodes(key, 11);
+  for (const [index, code] of codes.entries()) {
+    const answer = await tryCode(page, box, verify, code);
+    if (index < 10) expect(answer).toMatchObject({ status: 401, code: "INVALID_CODE" });
+    else expect(answer).toMatchObject({ status: 429, code: "ACCOUNT_TEMPORARILY_LOCKED" });
+  }
+  await expect(inApp(page).getByText("Too many wrong tries.", { exact: true })).toBeVisible();
+  await expect(inApp(page).getByText("Try again later.", { exact: true })).toBeVisible();
+  await expect(inApp(page).getByText("signs you out", { exact: false })).toHaveCount(0);
+  await expect(box).toBeDisabled();
+  await expect(verify).toHaveAttribute("aria-disabled", "true");
+
+  // The lockout ends no session, so the page claims none: it stays where it is, still at the
+  // factor step, and the passkey (not a code) still finishes it.
+  await expect(page).toHaveURL(`${ORIGIN}/sign-in/factor`);
+  expect(await viewerState(page)).toBe("factor_step");
+  await expect(passkey).toBeEnabled();
+  await passkey.click();
+  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+});
+
+test("@journey a member with a passkey alone passes the factor step with it", async ({
   page,
   authenticator: _authenticator,
   emailSink,
@@ -88,39 +168,65 @@ test("@journey a member with both factors is offered the passkey first, and too 
   await throughAccess(page, nadia, "/sign-in");
   await emailedCodeSignIn(page, emailSink, nadia);
   await enrol(page, enrolmentCode, "passkey");
-  // A second factor from Your sign-in, confirmed with the passkey.
-  await page.goto("/account");
-  await page.getByRole("button", { name: "Add an authenticator app" }).click();
-  await page
-    .getByRole("dialog", { name: "Confirm it’s you" })
-    .getByRole("button", { name: "Use my passkey" })
-    .click();
-  const add = page.getByRole("dialog", { name: "Add an authenticator app" });
-  const key = ((await add.locator("[data-slot=copy-field] .font-mono").textContent()) ?? "").trim();
-  await add.getByRole("textbox", { name: "Code from the app" }).fill(await authenticatorCode(key));
-  await expect(page.getByText("Authenticator app added")).toBeVisible();
   await logOut(page, nadia);
 
+  // An emailed code alone is aal1: "Confirm it's you" with the passkey, and no code to type.
   await emailedCodeSignIn(page, emailSink, nadia);
+  await expect(page.getByRole("heading", { level: 1, name: "Confirm it’s you" })).toBeVisible();
   const passkey = page.getByRole("button", { name: "Use my passkey" });
   await expect(passkey).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Authenticator code" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Authenticator code" })).toHaveCount(0);
 
-  // The realm's lockout (spec 02 §5.4) ends the attempt: say so, and go back to sign-in.
-  await page.route("**/api/auth/two-factor/verify-totp", (route) =>
-    route.fulfill({
-      status: 429,
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-      body: JSON.stringify({ code: "ACCOUNT_TEMPORARILY_LOCKED", message: "locked" }),
-    }),
+  // The prompt closed by the person, then refused by the authenticator: each says so.
+  await endNextPasskeyPrompt(page, "get");
+  await passkey.click();
+  await expect(inApp(page).getByText("The passkey prompt was closed.")).toBeVisible();
+  await endNextPasskeyPrompt(page, "get", "UnknownError");
+  await passkey.click();
+  await expect(inApp(page).getByText("There’s no passkey to use.")).toBeVisible();
+  await expect(inApp(page).getByText("Try the passkey on another device.")).toBeVisible();
+
+  // While the prompt is open the button waits; the passkey raises the session to aal2.
+  const prompt = await hold(page, "**/api/auth/passkey/generate-authenticate-options");
+  await passkey.click();
+  await expect(passkey).toHaveAttribute("aria-busy", "true");
+  prompt.release();
+  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  const signedIn = (await server.audit()).filter(
+    (e) => e.event === "staff.signed_in" && e.metadata.method === "passkey",
   );
-  await page.getByRole("textbox", { name: "Authenticator code" }).fill("123456");
-  await expect(page.getByText("Too many wrong tries. Sign in again.")).toBeVisible();
-  await expect(passkey).toBeDisabled();
-  await page.unroute("**/api/auth/two-factor/verify-totp");
+  expect(signedIn.length).toBeGreaterThanOrEqual(2);
 });
 
-test("@journey the code step says a short, expired or limited code, and while it sends", async ({
+test("@journey a browser without passkeys uses the authenticator at the factor step", async ({
+  page,
+  authenticator: _authenticator,
+  emailSink,
+  addresses,
+}) => {
+  const nadia = addresses.address("nadia.brooks");
+  const key = await withBothFactors(page, emailSink, nadia);
+  await withoutPasskeys(page);
+  await page.reload();
+
+  await emailedCodeSignIn(page, emailSink, nadia);
+  await expect(inApp(page).getByText("This browser can’t use passkeys.")).toBeVisible();
+  await expect(inApp(page).getByText("Use your authenticator app.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use my passkey" })).toHaveCount(0);
+
+  // The code is checked while the button waits.
+  const verify = page.getByRole("button", { name: "Verify and continue" });
+  const checking = await hold(page, "**/api/auth/two-factor/verify-totp");
+  await page
+    .getByRole("textbox", { name: "Authenticator code" })
+    .fill(await authenticatorCode(key));
+  await expect(verify).toHaveAttribute("aria-busy", "true");
+  checking.release();
+  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+});
+
+test("@journey the code step says a short, expired or limited code, and while it sends and checks", async ({
   page,
   emailSink,
   addresses,
@@ -135,7 +241,7 @@ test("@journey the code step says a short, expired or limited code, and while it
     problemRoute(429, "rate_limited", { retry_after: 600 }),
   );
   await page.getByRole("button", { name: "Email me a code" }).click();
-  await expect(page.getByText("Too many codes asked for in the last hour.")).toBeVisible();
+  await expect(inApp(page).getByText("Too many codes asked for in the last hour.")).toBeVisible();
   await page.unroute("**/api/auth/email-otp/send-verification-otp");
 
   // Sending: the button is busy until the realm answers.
@@ -160,13 +266,13 @@ test("@journey the code step says a short, expired or limited code, and while it
   const box = page.getByRole("textbox", { name: "Sign-in code" });
   await box.fill("1234");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText("Enter the 8-digit code from the email.")).toBeVisible();
+  await expect(inApp(page).getByText("Enter the 8-digit code from the email.")).toBeVisible();
 
   // Limited: the realm's limit on tries.
   await page.route("**/api/auth/sign-in/email-otp", problemRoute(429, "rate_limited"));
   await box.fill(code);
   await expect(
-    page.getByText("Too many wrong tries in the last hour.", { exact: true }),
+    inApp(page).getByText("Too many wrong tries in the last hour.", { exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign in" })).toHaveAttribute(
     "aria-disabled",
@@ -181,7 +287,18 @@ test("@journey the code step says a short, expired or limited code, and while it
   const fresh = await emailSink.waitForCode({ to: nadia, after: again });
   await server.advance(11 * 60);
   await page.getByRole("textbox", { name: "Sign-in code" }).fill(fresh);
-  await expect(page.getByText("That code has expired or was used.")).toBeVisible();
+  await expect(inApp(page).getByText("That code has expired or was used.")).toBeVisible();
+
+  // Verifying: the button waits while the realm checks a new code, which then signs in.
+  await page.getByRole("button", { name: "Use another address" }).click();
+  const last = await emailSink.mark();
+  await page.getByRole("button", { name: "Email me a code" }).click();
+  const newest = await emailSink.waitForCode({ to: nadia, after: last });
+  const checking = await hold(page, "**/api/auth/sign-in/email-otp");
+  await page.getByRole("textbox", { name: "Sign-in code" }).fill(newest);
+  await expect(page.getByRole("button", { name: "Sign in" })).toHaveAttribute("aria-busy", "true");
+  checking.release();
+  await expect(page).toHaveURL(`${ORIGIN}/sign-in/factor`);
 });
 
 test.describe("the resend countdown", () => {
@@ -196,12 +313,12 @@ test.describe("the resend countdown", () => {
     await server.bootstrap(nadia);
     await throughAccess(page, nadia, "/sign-in");
     await page.getByRole("button", { name: "Email me a code" }).click();
-    await expect(page.getByText(/^Send a new code in 0:4\d$/)).toBeVisible();
+    await expect(inApp(page).getByText(/^Send a new code in 0:4\d$/)).toBeVisible();
     // One second at a time: each tick of the countdown schedules the next once React has drawn.
     for (let second = 0; second < 46; second += 1) await page.clock.runFor(1000);
     const mark = await emailSink.mark();
     await page.getByRole("button", { name: "Send a new code" }).click();
-    await expect(page.getByText("We sent a new code.")).toBeVisible();
+    await expect(inApp(page).getByText("We sent a new code.")).toBeVisible();
     await emailSink.waitForCode({ to: nadia, after: mark });
   });
 });

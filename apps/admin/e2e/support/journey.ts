@@ -4,10 +4,23 @@
 
 import { ACCESS_STAND_IN_PORT, appOrigin, type EmailSinkReader, totp } from "@fin/testing";
 import { expect, signInThroughAccess, waitForReady } from "@fin/testing/playwright";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { CONTROL_PORT } from "./server.ts";
 
 export const ORIGIN = appOrigin("admin");
+
+/** Sign-in after the session ended: `?ended=1`, which the router may write back as `?ended=true`. */
+export const ENDED_URL = new RegExp(
+  `^${ORIGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/sign-in\\?ended=(1|true)$`,
+);
+
+/**
+ * The app's own document, without the SDK's live regions: an alert's words are also put in a
+ * screen-reader region a moment later, so a text looked up in the whole page can match twice.
+ */
+export function inApp(page: Page): Locator {
+  return page.locator("#root");
+}
 export const ACCESS =
   process.env.FIN_E2E_ACCESS_STAND_IN ?? `http://127.0.0.1:${ACCESS_STAND_IN_PORT}`;
 const CONTROL = process.env.FIN_E2E_ADMIN_CONTROL ?? `http://127.0.0.1:${CONTROL_PORT}`;
@@ -32,7 +45,15 @@ export const server = {
   advance: (seconds: number) => control<{ now: string }>("POST", "/clock", { seconds }),
   now: async () => Date.parse((await control<{ now: string }>("GET", "/clock")).now),
   audit: async () =>
-    (await control<{ events: { event: string; target: string | null }[] }>("GET", "/audit")).events,
+    (
+      await control<{
+        events: {
+          event: string;
+          target: string | null;
+          metadata: Readonly<Record<string, unknown>>;
+        }[];
+      }>("GET", "/audit")
+    ).events,
 };
 
 /** Passes Access as `email` and opens `path`; returns once the app is ready. */
@@ -46,6 +67,125 @@ export async function authenticatorCode(key: string): Promise<string> {
   // A step's code works once (no reuse), so move to the next step first, as a person would wait.
   await server.advance(30);
   return totp(key.replace(/\s+/g, ""), await server.now());
+}
+
+/**
+ * `count` different codes the authenticator does not show now, nor one step either side, by the
+ * server's clock: each is a wrong try, and no two are the same, so each one is typed afresh.
+ */
+export async function wrongCodes(key: string, count: number): Promise<string[]> {
+  const secret = key.replace(/\s+/g, "");
+  const now = await server.now();
+  const valid = new Set([-60_000, -30_000, 0, 30_000, 60_000].map((d) => totp(secret, now + d)));
+  const codes: string[] = [];
+  for (let n = 1; codes.length < count; n += 1) {
+    const code = String((n * 104_729) % 1_000_000).padStart(6, "0");
+    if (!valid.has(code) && !codes.includes(code)) codes.push(code);
+  }
+  return codes;
+}
+
+/**
+ * Types one authenticator code into `box` and waits for the realm's answer and for the page to be
+ * ready for the next one (`button` no longer busy). Returns the answer's status and code.
+ */
+export async function tryCode(
+  page: Page,
+  box: Locator,
+  button: Locator,
+  code: string,
+): Promise<{ status: number; code: string | null; reason: string | null }> {
+  const answered = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/auth/two-factor/verify-totp") &&
+      response.request().method() === "POST",
+  );
+  await box.fill(code);
+  const response = await answered;
+  const body = (await response.json().catch(() => ({}))) as { code?: unknown; reason?: unknown };
+  await expect(button).not.toHaveAttribute("aria-busy", "true");
+  return {
+    status: response.status(),
+    code: typeof body.code === "string" ? body.code : null,
+    reason: typeof body.reason === "string" ? body.reason : null,
+  };
+}
+
+/**
+ * Holds every request to `url` until `release()`: the screen's waiting state stays on screen long
+ * enough to check, as on a slow connection.
+ */
+export async function hold(page: Page, url: string): Promise<{ release: () => void }> {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(url, async (route) => {
+    await held;
+    await route.fallback();
+  });
+  return { release };
+}
+
+/**
+ * The next passkey prompt ends the way the browser ends it when the person closes it
+ * (`NotAllowedError`), or with another of WebAuthn's errors (`UnknownError`: the authenticator
+ * refused). Only that one prompt: the next works again.
+ */
+export async function endNextPasskeyPrompt(
+  page: Page,
+  kind: "create" | "get",
+  name: "NotAllowedError" | "UnknownError" = "NotAllowedError",
+): Promise<void> {
+  await page.evaluate(
+    ({ kind, name }) => {
+      const credentials = navigator.credentials as unknown as Record<string, unknown>;
+      const original = credentials[kind];
+      credentials[kind] = async () => {
+        credentials[kind] = original;
+        throw new DOMException("The prompt ended without a passkey.", name);
+      };
+    },
+    { kind, name },
+  );
+}
+
+/** From the next document on, this browser has no WebAuthn at all (`PublicKeyCredential` gone). */
+export async function withoutPasskeys(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "PublicKeyCredential", { value: undefined, configurable: true });
+  });
+}
+
+/** Asks the server to redeem an enrolment code for the page's session; its status and reason. */
+export async function redeemFromPage(
+  page: Page,
+  code: string,
+): Promise<{ status: number; reason: string | null }> {
+  return page.evaluate(async (value) => {
+    const response = await fetch("/api/enrolment/redeem", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-Fin-App": "admin",
+      },
+      body: JSON.stringify({ code: value }),
+    });
+    const body = (await response.json().catch(() => ({}))) as { reason?: unknown };
+    return {
+      status: response.status,
+      reason: typeof body.reason === "string" ? body.reason : null,
+    };
+  }, code);
+}
+
+/** The viewer's state as the server answers it now, for the page's session. */
+export async function viewerState(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const response = await fetch("/api/viewer", { headers: { Accept: "application/json" } });
+    return ((await response.json()) as { state: string }).state;
+  });
 }
 
 /** The key the page shows for an authenticator app (`MFRG GZDF …`). */

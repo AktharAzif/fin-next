@@ -36,8 +36,9 @@ import {
   turnOffAuthenticator,
   verifyAuthenticatorCode,
 } from "../auth/library.ts";
-import { factorOutcome } from "../auth/outcomes.ts";
+import { factorOutcome, sessionEnded } from "../auth/outcomes.ts";
 import { passkeysSupported } from "../auth/passkey.ts";
+import { signInAgain } from "../auth/sign-in-again.ts";
 import { type Attempt, attemptOf, withStepUp } from "../auth/step-up.ts";
 import { formatUtc } from "../format.ts";
 import { OUR_SIDE, staffActionError, TRY_AGAIN, UNREACHABLE } from "../staff/messages.ts";
@@ -48,6 +49,17 @@ function passkeyAttempt(outcome: PasskeyOutcome): Attempt<unknown> {
   if (outcome.kind === "done") return { ok: true, value: outcome.data };
   if (outcome.kind === "ceremony") return { ok: false, stopped: outcome.reason };
   return { ok: false, failure: outcome.failure };
+}
+
+const LIMITED = "Too many tries in a short time. Try again in a moment.";
+
+/**
+ * Shows what a refused factor change says. An ended session says nothing here and loads sign-in:
+ * these calls go to the realm directly, past api()'s own handling of a 401.
+ */
+function showFactorError(failure: AuthFailure, show: (message: string) => void): void {
+  if (sessionEnded(failure)) signInAgain();
+  else show(factorError(failure));
 }
 
 /** What a refused factor change says. */
@@ -61,7 +73,7 @@ function factorError(failure: AuthFailure): string {
         : null;
   if (code === "last_factor") return "Keep another way to sign in first.";
   if (code === "step_up_invalid") return TRY_AGAIN;
-  if (code === "rate_limited") return "Too many tries in a short time. Try again in a moment.";
+  if (code === "rate_limited" || code === "ACCOUNT_TEMPORARILY_LOCKED") return LIMITED;
   return OUR_SIDE;
 }
 
@@ -122,7 +134,9 @@ function AuthenticatorDialog(props: {
         return;
       }
       setStatus(outcome === "wrong" ? "invalid" : "idle");
-      if (outcome === "offline") setAlert(UNREACHABLE);
+      if (outcome === "signedOut" || outcome === "tooManyTries") signInAgain();
+      else if (outcome === "limited") setAlert(LIMITED);
+      else if (outcome === "offline") setAlert(UNREACHABLE);
       else if (outcome !== "wrong") setAlert(OUR_SIDE);
     } finally {
       setBusy(false);
@@ -205,6 +219,20 @@ export function AccountPage({ data }: { data: AccountData }) {
     />
   );
 
+  // The authenticator's key is shown once: the dialog stays at the same place in the tree whatever
+  // the page's data, so a reload that fails while it is open never takes the key off the screen.
+  const authenticatorDialog = (
+    <AuthenticatorDialog
+      secret={secret}
+      onClose={() => setSecret(null)}
+      onAdded={() => {
+        setSecret(null);
+        toast.success("Authenticator app added");
+        void reload();
+      }}
+    />
+  );
+
   if (data.kind === "failed") {
     return (
       <div className="flex flex-col gap-6">
@@ -213,10 +241,11 @@ export function AccountPage({ data }: { data: AccountData }) {
           size="page"
           headingLevel={2}
           title="Couldn’t load your sign-in"
+          // A load changes nothing, and it may follow a change that went through: it says neither.
           description={
             data.offline
               ? "Check your connection and try again."
-              : "Something went wrong on our side. Nothing was changed."
+              : "Something went wrong on our side. Try again in a moment."
           }
           retrying={retrying}
           onRetry={async () => {
@@ -229,6 +258,7 @@ export function AccountPage({ data }: { data: AccountData }) {
           }}
           {...(data.requestId === null ? {} : { requestId: data.requestId })}
         />
+        {authenticatorDialog}
       </div>
     );
   }
@@ -260,7 +290,7 @@ export function AccountPage({ data }: { data: AccountData }) {
               : "This browser couldn’t make a passkey. Try another browser.",
         });
       } else if ("failure" in result) {
-        setFactorAlert(factorError(result.failure));
+        showFactorError(result.failure, setFactorAlert);
       }
     } finally {
       setAdding(null);
@@ -280,7 +310,7 @@ export function AccountPage({ data }: { data: AccountData }) {
         if (key === null) setFactorAlert(OUR_SIDE);
         else setSecret(key);
       } else if ("failure" in result) {
-        setFactorAlert(factorError(result.failure));
+        showFactorError(result.failure, setFactorAlert);
       }
     } finally {
       setAdding(null);
@@ -311,7 +341,7 @@ export function AccountPage({ data }: { data: AccountData }) {
         toast.success(row.kind === "passkey" ? "Passkey removed" : "Authenticator app removed");
         await reload();
       } else if ("failure" in result) {
-        setRemoveError(factorError(result.failure));
+        showFactorError(result.failure, setRemoveError);
       }
     } finally {
       setRemoveBusy(false);
@@ -497,15 +527,7 @@ export function AccountPage({ data }: { data: AccountData }) {
         </section>
       </div>
 
-      <AuthenticatorDialog
-        secret={secret}
-        onClose={() => setSecret(null)}
-        onAdded={() => {
-          setSecret(null);
-          toast.success("Authenticator app added");
-          void reload();
-        }}
-      />
+      {authenticatorDialog}
       <ConfirmDialog
         open={removing !== null}
         onOpenChange={(open) => {

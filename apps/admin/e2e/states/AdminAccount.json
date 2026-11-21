@@ -29,20 +29,20 @@
       "status": "covered",
       "day": "sun-spill",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
-      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
     },
     "addAuthenticator": {
       "status": "covered",
       "day": "sun-spill",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
-      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
     },
     "addAuthenticatorShort": { "status": "pending", "day": "sun-spill" },
     "authenticatorAdded": {
       "status": "covered",
       "day": "sun-spill",
       "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
-      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
     },
     "signedOutElsewhere": { "status": "pending", "day": "sun-spill" },
     "loading": { "status": "pending", "day": "sun-spill" },

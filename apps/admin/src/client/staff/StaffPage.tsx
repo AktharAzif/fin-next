@@ -230,58 +230,50 @@ export function StaffPage({
     />
   );
 
-  if (data.kind === "failed") {
-    return (
-      <div className="flex flex-col gap-6">
-        {header}
-        <Table
-          caption="Staff list"
-          noun={STAFF_NOUN}
-          columns={[
-            { id: "email", header: "Email", cell: () => null },
-            { id: "role", header: "Role", width: "md", cell: () => null },
-            { id: "last", header: "Last signed in", kind: "date", width: "lg", cell: () => null },
-          ]}
-          rows={[]}
-          getRowId={() => ""}
-          getRowLabel={() => ""}
-          status="error"
-          error={{
-            title: "Couldn’t load staff",
-            description: data.offline
-              ? "Check your connection and try again."
-              : "Something went wrong on our side. Nothing was changed.",
-            retrying,
-            onRetry: async () => {
-              setRetrying(true);
-              try {
-                await reload();
-              } finally {
-                setRetrying(false);
-              }
-            },
-            ...(data.requestId === null ? {} : { requestId: data.requestId }),
-          }}
-          empty={null}
-        />
-      </div>
-    );
-  }
-
-  const { staff, roles } = data;
-  return (
-    <div className="flex flex-col gap-6">
-      {header}
+  const body =
+    data.kind === "failed" ? (
+      <Table
+        caption="Staff list"
+        noun={STAFF_NOUN}
+        columns={[
+          { id: "email", header: "Email", cell: () => null },
+          { id: "role", header: "Role", width: "md", cell: () => null },
+          { id: "last", header: "Last signed in", kind: "date", width: "lg", cell: () => null },
+        ]}
+        rows={[]}
+        getRowId={() => ""}
+        getRowLabel={() => ""}
+        status="error"
+        error={{
+          title: "Couldn’t load staff",
+          // A load changes nothing, and it may follow a change that went through: it says neither.
+          description: data.offline
+            ? "Check your connection and try again."
+            : "Something went wrong on our side. Try again in a moment.",
+          retrying,
+          onRetry: async () => {
+            setRetrying(true);
+            try {
+              await reload();
+            } finally {
+              setRetrying(false);
+            }
+          },
+          ...(data.requestId === null ? {} : { requestId: data.requestId }),
+        }}
+        empty={null}
+      />
+    ) : (
       <div className="flex flex-col gap-16">
         <Table
           caption="Staff list"
           noun={STAFF_NOUN}
-          columns={columns(actor, staff, roles, {
+          columns={columns(actor, data.staff, data.roles, {
             changeRole: setChanging,
             remove: setRemoving,
             newCode: setReissuing,
           })}
-          rows={staff}
+          rows={data.staff}
           getRowId={(member) => member.id}
           getRowLabel={(member) =>
             `${member.email}, ${member.roleLabel}, last signed in ${lastSignedIn(member)}`
@@ -295,58 +287,70 @@ export function StaffPage({
             />
           }
         />
-        <RolesCard roles={roles} />
+        <RolesCard roles={data.roles} />
       </div>
+    );
 
-      <AddStaffDialog
-        open={adding}
-        onOpenChange={(open) => {
-          setAdding(open);
-          if (!open) onAddClosed();
-        }}
-        actor={actor}
-        roles={roles}
-        onAdded={(code) => {
-          setAdding(false);
-          onAddClosed();
-          setIssued(code);
-          void reload();
-        }}
-      />
-      <ChangeRoleDialog
-        member={changing}
-        onClose={() => setChanging(null)}
-        actor={actor}
-        roles={roles}
-        onChanged={(member) => {
-          setChanging(null);
-          toast.success({
-            title: "Role changed",
-            description: `${member.email} is now ${member.roleLabel}. They sign in again to use it.`,
-          });
-          void reload();
-        }}
-      />
-      <RemoveDialog
-        member={removing}
-        onClose={() => setRemoving(null)}
-        onRemoved={(member) => {
-          setRemoving(null);
-          toast.success({
-            title: "Removed from staff",
-            description: `${member.email} can’t use Fin Admin any more. Take their address off the Access list too.`,
-          });
-          void reload();
-        }}
-      />
-      <NewCodeDialog
-        member={reissuing}
-        onClose={() => setReissuing(null)}
-        onIssued={(code) => {
-          setReissuing(null);
-          setIssued(code);
-        }}
-      />
+  return (
+    <div className="flex flex-col gap-6">
+      {header}
+      {body}
+
+      {data.kind === "ready" ? (
+        <>
+          <AddStaffDialog
+            open={adding}
+            onOpenChange={(open) => {
+              setAdding(open);
+              if (!open) onAddClosed();
+            }}
+            actor={actor}
+            roles={data.roles}
+            onAdded={(code) => {
+              setAdding(false);
+              onAddClosed();
+              setIssued(code);
+              void reload();
+            }}
+          />
+          <ChangeRoleDialog
+            member={changing}
+            onClose={() => setChanging(null)}
+            actor={actor}
+            roles={data.roles}
+            onChanged={(member) => {
+              setChanging(null);
+              toast.success({
+                title: "Role changed",
+                description: `${member.email} is now ${member.roleLabel}. They sign in again to use it.`,
+              });
+              void reload();
+            }}
+          />
+          <RemoveDialog
+            member={removing}
+            onClose={() => setRemoving(null)}
+            onRemoved={(member) => {
+              setRemoving(null);
+              toast.success({
+                title: "Removed from staff",
+                description: `${member.email} can’t use Fin Admin any more. Take their address off the Access list too.`,
+              });
+              void reload();
+            }}
+          />
+          <NewCodeDialog
+            member={reissuing}
+            onClose={() => setReissuing(null)}
+            onIssued={(code) => {
+              setReissuing(null);
+              setIssued(code);
+            }}
+          />
+        </>
+      ) : null}
+      {/* Drawn whatever the list's state: the code is shown once, and a list that cannot load
+          after the change must not take it off the screen (spec 02 §6.5, §10.2). */}
       <EnrolmentCodeDialog
         issued={issued}
         onDone={() => {

@@ -3,7 +3,8 @@
 // code, whichever of them the member has and this browser can use. After the proof the dialog
 // waits while api() sends the action again once; "That didn't work. Try again." ends it with Close
 // only, never a loop. Five wrong tries end the session (spec 02 §7.7): the dialog says so and the
-// only way on is to sign in again.
+// only way on is to sign in again. A limit (`429`) leaves the session alive: the dialog says to
+// try again later, and Cancel stays.
 import type { StepUpContentProps } from "@fin/frame";
 import { useStore } from "@fin/frame";
 import { Button, InlineAlert, Modal, OTPInput, type OTPStatus } from "@fin/ui";
@@ -12,6 +13,7 @@ import { AUTHENTICATOR_CODE_LENGTH, isDigits } from "../auth/inputs.ts";
 import { usePasskey, verifyAuthenticatorCode } from "../auth/library.ts";
 import { factorOutcome } from "../auth/outcomes.ts";
 import { passkeysSupported } from "../auth/passkey.ts";
+import { signInAgain } from "../auth/sign-in-again.ts";
 import { OrDivider } from "../components/OrDivider.tsx";
 import { reasonSentence, stepUpSubject } from "./reasons.ts";
 
@@ -19,6 +21,7 @@ type Alert =
   | "passkeyClosed"
   | "passkeyFailed"
   | "short"
+  | "limited"
   | "tooMany"
   | "signedOut"
   | "offline"
@@ -40,11 +43,9 @@ const ALERTS: Record<
     body: "Use a passkey of your own Fin Admin sign-in, or your authenticator app.",
   },
   short: { tone: "danger", title: "Enter the 6-digit code from your authenticator app." },
-  tooMany: {
-    tone: "danger",
-    title: "Too many wrong tries. Sign in again.",
-    body: "Fin Admin signs you out and takes you back to sign in.",
-  },
+  limited: { tone: "warning", title: "Too many wrong tries.", body: "Try again later." },
+  // The realm has already ended the session (spec 02 §7.7's sentence).
+  tooMany: { tone: "danger", title: "You were signed out after too many wrong tries." },
   signedOut: { tone: "warning", title: "You were signed out. Sign in again." },
   offline: {
     tone: "danger",
@@ -58,18 +59,13 @@ const ALERTS: Record<
   },
 };
 
-function signInAgain(): void {
-  const root = document.getElementById("root");
-  if (root !== null) root.hidden = true;
-  window.location.assign("/sign-in?ended=1");
-}
-
 export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
   const subject = useStore(stepUpSubject());
   const [alert, setAlert] = useState<Alert>(null);
   const [code, setCode] = useState("");
   const [otpStatus, setOtpStatus] = useState<OTPStatus>("idle");
   const [busy, setBusy] = useState<"passkey" | "code" | null>(null);
+  const [codesLimited, setCodesLimited] = useState(false);
 
   const proof = state.kind === "proof" ? state : null;
   const status = proof?.status ?? null;
@@ -107,14 +103,20 @@ export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
   const canApp = required.methods.includes("authenticator");
   const sending = status === "sending";
   const invalid = status === "invalid";
+  // The session is gone: "Sign in again" is the only way on.
   const ended = alert === "tooMany" || alert === "signedOut";
   const locked = ended || invalid || sending;
+  // A limit or the realm's lockout stops codes for now; the session, and the passkey, live on.
+  const codeLocked = locked || codesLimited;
 
   const afterFailure = (outcome: ReturnType<typeof factorOutcome>) => {
     if (outcome === "wrong") {
       setOtpStatus("invalid");
       setAlert(null);
-    } else if (outcome === "locked") setAlert("tooMany");
+    } else if (outcome === "limited") {
+      setCodesLimited(true);
+      setAlert("limited");
+    } else if (outcome === "tooManyTries") setAlert("tooMany");
     else if (outcome === "signedOut") setAlert("signedOut");
     else if (outcome === "offline") setAlert("offline");
     else setAlert("ourSide");
@@ -142,6 +144,7 @@ export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
   };
 
   const withCode = async (typed: string) => {
+    if (busy !== null || codeLocked) return;
     if (!isDigits(typed, AUTHENTICATOR_CODE_LENGTH)) {
       setAlert("short");
       setOtpStatus("invalid");
@@ -172,7 +175,10 @@ export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
     <Modal
       open
       onOpenChange={(open) => {
-        if (!open && !sending) close();
+        if (open || sending) return;
+        // With the session gone, closing the dialog leads where "Sign in again" does.
+        if (ended) signInAgain();
+        else close();
       }}
       busy={sending || busy !== null}
       title="Confirm it’s you"
@@ -242,7 +248,7 @@ export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
             }}
             onComplete={(full) => void withCode(full)}
             status={otpStatus}
-            disabled={locked || busy === "passkey"}
+            disabled={codeLocked || busy === "passkey"}
             autoFocus={!passkeyHere}
           />
           <Button
@@ -250,7 +256,7 @@ export function AdminStepUp({ state, prove, close }: StepUpContentProps) {
             variant={passkeyHere ? "secondary" : "primary"}
             className="w-full"
             loading={busy === "code" || (sending && otpStatus === "success")}
-            disabled={locked || busy === "passkey"}
+            disabled={codeLocked || busy === "passkey"}
           >
             Confirm
           </Button>

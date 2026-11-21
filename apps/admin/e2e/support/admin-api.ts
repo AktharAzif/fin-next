@@ -457,13 +457,28 @@ export class AdminApiStandIn {
 
   // ── Control (test only, on its own loopback port) ──
 
-  /** `pnpm fin task <env> staff-bootstrap`: the first Admin, pending, and the code once (§10.6). */
+  /**
+   * `pnpm fin task <env> staff-bootstrap`: the first Admin, pending, and the code once (§10.6). It
+   * inserts or reactivates the member, so running it again for a pending address makes a new code.
+   */
   bootstrap(email: string): { staffId: string; enrolmentCode: string } {
     const address = email.toLowerCase();
     const activeAdmin = [...this.members.values()].some(
       (m) => m.roleKey === "admin" && m.status === "active",
     );
     if (activeAdmin) throw new Error("an active Admin exists");
+    const existing = [...this.members.values()].find((m) => m.email === address);
+    if (existing !== undefined) {
+      existing.roleKey = "admin";
+      existing.status = "pending";
+      existing.passkeys = [];
+      existing.totp = null;
+      this.#record("staff.bootstrapped", "operator", existing.id, { reset: true });
+      return {
+        staffId: existing.id,
+        enrolmentCode: this.#issueCode(existing, "bootstrap", "operator"),
+      };
+    }
     const member: Member = {
       id: newId("stf"),
       email: address,

@@ -1,7 +1,7 @@
 // Each realm answer lands in the board state it means (AdminSignIn, AdminSecondFactor).
 import { ApiError } from "@fin/frame";
 import { describe, expect, it } from "vitest";
-import type { AuthAnswer } from "./http.ts";
+import type { AuthAnswer, AuthFailure } from "./http.ts";
 import {
   codeOutcome,
   enrolmentOutcome,
@@ -9,6 +9,7 @@ import {
   factorOutcome,
   requestIdOf,
   sendOutcome,
+  sessionEnded,
 } from "./outcomes.ts";
 
 const library = (status: number, code: string): AuthAnswer => ({
@@ -71,13 +72,34 @@ describe("an authenticator code", () => {
   it.each([
     [ok, "done"],
     [library(401, "INVALID_CODE"), "wrong"],
-    [library(429, "ACCOUNT_TEMPORARILY_LOCKED"), "locked"],
-    [problem(401, "unauthenticated", { reason: "too_many_tries" }), "locked"],
+    // The realm's lockout and the limits leave the session alive: wait, not "signed out".
+    [library(429, "ACCOUNT_TEMPORARILY_LOCKED"), "limited"],
+    [problem(429, "rate_limited", { retry_after: 60 }), "limited"],
+    // Only the fifth wrong try at a step-up ends the session (spec 02 §7.7).
+    [problem(401, "unauthenticated", { reason: "too_many_tries" }), "tooManyTries"],
     [problem(401, "unauthenticated", { reason: "expired" }), "signedOut"],
+    [problem(401, "unauthenticated", { reason: "signed_out" }), "signedOut"],
+    [problem(403, "access_mismatch"), "signedOut"],
     [network, "offline"],
     [library(400, "TOTP_NOT_ENABLED"), "failed"],
   ] as const)("%o is %s", (answer, expected) => {
     expect(factorOutcome(answer)).toBe(expected);
+  });
+});
+
+describe("an ended session", () => {
+  it.each([
+    [problem(401, "unauthenticated", { reason: "expired" }), true],
+    [problem(401, "unauthenticated", { reason: "signed_out" }), true],
+    [problem(401, "unauthenticated", { reason: "too_many_tries" }), true],
+    [problem(403, "access_mismatch"), true],
+    [problem(403, "forbidden", { reason: "enrolment_code_required" }), false],
+    [problem(429, "rate_limited"), false],
+    [library(429, "ACCOUNT_TEMPORARILY_LOCKED"), false],
+    [library(401, "INVALID_CODE"), false],
+    [network, false],
+  ] as const)("%o is %s", (answer, expected) => {
+    expect(sessionEnded(answer as AuthFailure)).toBe(expected);
   });
 });
 
@@ -115,7 +137,13 @@ describe("redeeming an enrolment code", () => {
     [refused(403, "forbidden", "expired"), "expired"],
     [refused(403, "forbidden", "used"), "used"],
     [refused(403, "forbidden", "void"), "used"],
+    [refused(403, "forbidden", "not_pending"), "used"],
     [refused(429, "rate_limited"), "tooMany"],
+    // The session's end is not the code's: its own `reason` says nothing about the code.
+    [refused(401, "unauthenticated", "expired"), "signedOut"],
+    [refused(401, "unauthenticated", "signed_out"), "signedOut"],
+    [refused(401, "access_required"), "signedOut"],
+    [refused(403, "access_mismatch"), "signedOut"],
     [refused(500, "internal"), "failed"],
     [new ApiError({ kind: "network", contract: "enrolment.redeem" }), "offline"],
     [new Error("not an api error"), "failed"],
