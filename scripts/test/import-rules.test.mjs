@@ -594,6 +594,24 @@ describe("imports:check", () => {
         opener,
       );
     }
+    // The lexer does not read JSX, so a JSX test file is read whole, like code that runs.
+    for (const opener of openers) {
+      for (const file of ["packages/ui/src/q.test.tsx", "packages/ui/e2e/q.spec.jsx"]) {
+        assert.deepEqual(
+          rules(checkSource(file, src(opener, ...imports))),
+          ["client-node", "node-network", "refused-package"],
+          `${file}: ${opener}`,
+        );
+      }
+    }
+    // A fixture in a test file that is not JSX is still skipped.
+    const fixture = src(`const sample = ${BT}${imports.join("\n")}${BT};`);
+    assert.deepEqual(checkSource("packages/ui/src/q.test.ts", fixture), []);
+    assert.deepEqual(rules(checkSource("packages/ui/src/q.test.tsx", fixture)), [
+      "client-node",
+      "node-network",
+      "refused-package",
+    ]);
   });
 
   test("an escape in a name or a string hides no sink", () => {

@@ -61,9 +61,11 @@
 // global object, a string that names a loader, and an `import` or `export` this check cannot read
 // as one of JavaScript's forms. In code that runs, text in comments and strings is read as well,
 // so an import-shaped string that breaks a rule is reported; in a test file, comments, strings,
-// template text and regular expressions are skipped, since fixtures often hold import-shaped text.
-// Outside the areas where every import must be read, a module name assembled at run time is
-// beyond a static check.
+// template text and regular expressions are skipped, since fixtures often hold import-shaped text,
+// except in a JSX test file (.jsx, .tsx), which is read whole like code that runs: the lexer does
+// not read JSX, whose text may hold a quote, a backtick or `/*` that is none of them. Outside the
+// areas where every import must be read, a module name assembled at run time is beyond a static
+// check.
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { join, posix } from "node:path";
@@ -1082,9 +1084,10 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
   const loadsChecked = (builtinsOnly || relativeOnly || controlled) && !isTest;
   const { isFile } = options;
   const lexed = lex(text);
+  // A test file's fixtures are skipped by the lexer's mask, except in JSX, which it does not read.
   const { imports, dynamicExpressions, statements } = findImports(
     text,
-    isTest ? lexed.mask : undefined,
+    isTest && !/\.[jt]sx$/i.test(file) ? lexed.mask : undefined,
   );
   const lineAt = lineFinder(text);
   // The text as written, and with its escapes decoded, for the rules that read the whole text.
