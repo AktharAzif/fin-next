@@ -1,7 +1,8 @@
 // Minimal, well-formed image and font files for the units tests: each is laid out end to end as
 // its format, so a test can show what the engine exempts and, by changing a byte, what it does not.
-// `planted` builds the opposite: a format's header whose length fields cover bytes of any kind, or a
-// structure the format does not define (or the walk does not read) holding them.
+// `planted` builds the opposite: a format's header whose length fields cover bytes of any kind, a
+// structure the format does not define (or the walk does not read) holding them, and, for each check
+// of a walk, a layout that fails that check alone.
 
 import { brotliCompressSync, crc32, deflateSync } from "node:zlib";
 
@@ -108,9 +109,9 @@ export function fullBox(type: string, version: number, data: Buffer, flags = 0):
   return box(type, Buffer.concat([Buffer.from([version, (flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff]), data]));
 }
 
-/** An AVIF item's infe entry (version 2): its ID, no protection, its type and its NUL-terminated strings. */
-export function infe(id: number, type: string, strings = "\0", flags = 0): Buffer {
-  return fullBox("infe", 2, Buffer.concat([u16be(id), u16be(0), Buffer.from(type, "latin1"), Buffer.from(strings, "latin1")]), flags);
+/** An AVIF item's infe entry (version 2): its ID, its protection index (0: none), its type and its NUL-terminated strings. */
+export function infe(id: number, type: string, strings = "\0", flags = 0, protection = 0): Buffer {
+  return fullBox("infe", 2, Buffer.concat([u16be(id), u16be(protection), Buffer.from(type, "latin1"), Buffer.from(strings, "latin1")]), flags);
 }
 
 /** An item reference of an iref box (version 0): its type, from item `from` to `to`. */
@@ -118,22 +119,44 @@ export function itemReference(type: string, from: number, to: readonly number[])
   return box(type, Buffer.concat([u16be(from), u16be(to.length), ...to.map((id) => u16be(id))]));
 }
 
+/** What `avif` adds to or puts in place of its default boxes. */
+export interface AvifExtra {
+  /** infe entries after the first item's. */
+  readonly items?: Buffer[];
+  /** Item properties after ispe. */
+  readonly properties?: Buffer[];
+  /** Boxes at the end of meta. */
+  readonly meta?: Buffer[];
+  /** hdlr's name. */
+  readonly name?: Buffer;
+  /** ftyp's body (brands), in place of avif, 0, avif, mif1. */
+  readonly ftyp?: Buffer;
+  /** hdlr's body after its version and flags, in place of pre_defined, pict, the reserved words and the name. */
+  readonly hdlr?: Buffer;
+  /** pitm's body after its version and flags, in place of the primary item's ID. */
+  readonly pitm?: Buffer;
+  /** Bytes after iloc's last item. */
+  readonly ilocTail?: Buffer;
+  /** Boxes in iprp after its ipma. */
+  readonly ipma?: Buffer[];
+}
+
 /**
  * An AVIF still image: ftyp (avif, compatible mif1), meta (hdlr pict, pitm, iloc, iinf with one
  * av01 item, iprp with ispe), and mdat holding the item's data, which iloc's one extent covers.
- * `extra` adds infe entries after the first item's, properties after ispe, boxes at the end of
- * meta, and hdlr's name.
+ * `extra` adds to or replaces parts of it (AvifExtra).
  */
-export function avif(data: Buffer = Buffer.from([0x12, 0x00, 0x0a, 0x0b]), extra: { items?: Buffer[]; properties?: Buffer[]; meta?: Buffer[]; name?: Buffer } = {}): Buffer {
-  const ftyp = box("ftyp", Buffer.from("avif\0\0\0\0avifmif1", "latin1"));
-  const hdlr = fullBox("hdlr", 0, Buffer.concat([u32be(0), Buffer.from("pict", "latin1"), Buffer.alloc(12), extra.name ?? Buffer.from("Picture\0", "latin1")]));
-  const pitm = fullBox("pitm", 0, u16be(1));
+export function avif(data: Buffer = Buffer.from([0x12, 0x00, 0x0a, 0x0b]), extra: AvifExtra = {}): Buffer {
+  const ftyp = box("ftyp", extra.ftyp ?? Buffer.from("avif\0\0\0\0avifmif1", "latin1"));
+  const hdlr = fullBox("hdlr", 0, extra.hdlr ?? Buffer.concat([u32be(0), Buffer.from("pict", "latin1"), Buffer.alloc(12), extra.name ?? Buffer.from("Picture\0", "latin1")]));
+  const pitm = fullBox("pitm", 0, extra.pitm ?? u16be(1));
   const items = [infe(1, "av01", "Color\0"), ...(extra.items ?? [])];
   const iinf = fullBox("iinf", 0, Buffer.concat([u16be(items.length), ...items]));
   const ipco = box("ipco", Buffer.concat([fullBox("ispe", 0, Buffer.concat([u32be(1), u32be(1)])), ...(extra.properties ?? [])]));
-  const iprp = box("iprp", Buffer.concat([ipco, fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1, 0x81])]))]));
+  const iprp = box("iprp", Buffer.concat([ipco, fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1, 0x81])])), ...(extra.ipma ?? [])]));
   // iloc version 0: four-byte offsets and lengths, no base offset; item 1, one extent.
-  const iloc = (offset: number): Buffer => fullBox("iloc", 0, Buffer.concat([u16be(0x4400), u16be(1), u16be(1), u16be(0), u16be(1), u32be(offset), u32be(data.length)]));
+  const iloc = (offset: number): Buffer =>
+    fullBox("iloc", 0, Buffer.concat([u16be(0x4400), u16be(1), u16be(1), u16be(0), u16be(1), u32be(offset), u32be(data.length), extra.ilocTail ?? Buffer.alloc(0)]));
   const meta = (offset: number): Buffer => fullBox("meta", 0, Buffer.concat([hdlr, pitm, iloc(offset), iinf, iprp, ...(extra.meta ?? [])]));
   const before = ftyp.length + meta(0).length;
   return Buffer.concat([ftyp, meta(before + 8), box("mdat", data)]);
@@ -242,9 +265,10 @@ export function woff(options: { compressed?: boolean; table?: Buffer; metadata?:
 
 /**
  * A WOFF2 with one known table, head (with its magic), as one brotli stream (or `stream`, which must
- * decompress to the head table), and optionally a private block on a four-byte boundary.
+ * decompress to the head table), and optionally a metadata block (`block`, said to decompress to
+ * `original` bytes) and a private block, each on a four-byte boundary.
  */
-export function woff2(options: { stream?: Buffer; private?: Buffer } = {}): Buffer {
+export function woff2(options: { stream?: Buffer; metadata?: { block: Buffer; original: number }; private?: Buffer } = {}): Buffer {
   const stream = options.stream ?? brotliCompressSync(headTable());
   const header = Buffer.alloc(48);
   header.write("wOF2", 0, "latin1");
@@ -253,6 +277,13 @@ export function woff2(options: { stream?: Buffer; private?: Buffer } = {}): Buff
   header.writeUInt32BE(12 + 16 + 56, 16);
   header.writeUInt32BE(stream.length, 20);
   let body: Buffer = Buffer.concat([Buffer.from([0x01, 54]), stream]);
+  if (options.metadata !== undefined) {
+    body = padded(body);
+    header.writeUInt32BE(48 + body.length, 28);
+    header.writeUInt32BE(options.metadata.block.length, 32);
+    header.writeUInt32BE(options.metadata.original, 36);
+    body = Buffer.concat([body, options.metadata.block]);
+  }
   if (options.private !== undefined) {
     body = padded(body);
     header.writeUInt32BE(48 + body.length, 40);
@@ -332,12 +363,210 @@ export function eot(options: { xor?: boolean; names?: Buffer[]; v22?: { root?: B
   return Buffer.concat([header, names, font]);
 }
 
+/** `text` repeated to exactly `length` bytes: printable ASCII when `text` is. */
+function repeated(text: string, length: number): Buffer {
+  return Buffer.from(text.repeat(Math.ceil(length / text.length)).slice(0, length), "latin1");
+}
+
 /**
  * For each format whose walk once left bytes unread, a header whose length fields cover `payload`,
  * or a structure the format does not define (or the walk does not read) holding it: each starts as
- * an image or a font, and none is one.
+ * an image or a font, and none is one. Then one shape for each other check of the walks
+ * (`perGuard`): each passes every check but the one its name says, so a test over these fails when
+ * any one check is taken out.
  */
 export function planted(payload: Buffer): Record<string, Buffer> {
+  return { ...plantedLayouts(payload), ...perGuard(payload) };
+}
+
+/** An ICC profile's header (132 bytes): `size` as its size field, and `signature` at 36 (acsp in a real one). */
+function iccHeader(size: number, signature = "acsp"): Buffer {
+  const icc = Buffer.alloc(132);
+  icc.writeUInt32BE(size, 0);
+  icc.write(signature, 36, "latin1");
+  return icc;
+}
+
+/**
+ * One shape for each check of the walks that no layout above reaches alone: `payload` (or a long
+ * run of it, or long printable text) past each size or bound a walk sets (an AVIF property, string,
+ * ftyp, hdlr, pitm, iloc or ipma; an EOT name or root string; a PNG IHDR or IEND), in each gap it
+ * requires to be zero, and each type, flag, reserved field, count, marker or compressed stream it
+ * refuses. Each is refused by that one check only: with that check taken out of content.ts, it
+ * passes as an image or a font.
+ */
+function perGuard(payload: Buffer): Record<string, Buffer> {
+  const long = Buffer.concat(Array.from({ length: Math.ceil(300 / payload.length) }, () => payload));
+  const script = "#!/bin/sh echo MARKER-PAYLOAD; ";
+  const property = (name: string, bytes: Buffer): [string, Buffer] => [`property-${name}.avif`, avif(undefined, { properties: [bytes] })];
+  const u32s = (...values: number[]): Buffer => Buffer.concat(values.map((value) => u32be(value)));
+  const alpha = Buffer.from("urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0", "latin1");
+  const dref = (count: number, entries: Buffer[]): Buffer => fullBox("dref", 0, Buffer.concat([u32be(count), ...entries]));
+  const selfContained = fullBox("url ", 0, Buffer.alloc(0), 1);
+  // EOT: the header's reserved words, a name's padding, and a version 2.2 EOT's EUDC fields.
+  const reservedEot = eot();
+  payload.copy(reservedEot, 64, 0, Math.min(16, payload.length));
+  reservedEot.writeUInt16LE(0x2123, 64);
+  const paddingEot = eot();
+  paddingEot.writeUInt16LE(0x2123, 80);
+  const eudcEot = eot({ v22: {} });
+  eudcEot.writeUInt32LE(0x6e69622f, 112);
+  eudcEot.writeUInt32LE(0x0a68732f, 116);
+  // EOT: plain font data flagged as compressed with MicroType Express, which the walk does not read.
+  const mtxEot = eot();
+  mtxEot.writeUInt32LE(0x4, 12);
+  // WOFF and WOFF2: a private block lying over the font's own bytes, and the reserved field set.
+  const privateWoff = woff();
+  privateWoff.writeUInt32BE(64, 36);
+  privateWoff.writeUInt32BE(4, 40);
+  const privateWoff2 = woff2();
+  privateWoff2.writeUInt32BE(48, 40);
+  privateWoff2.writeUInt32BE(2, 44);
+  const reservedWoff = woff();
+  reservedWoff.writeUInt16BE(1, 14);
+  const reservedWoff2 = woff2();
+  reservedWoff2.writeUInt16BE(1, 14);
+  // An ICO entry's reserved byte; an iinf box that says it holds one more item than it does.
+  const reservedIco = ico();
+  reservedIco[9] = 1;
+  const iinfCount = avif();
+  iinfCount.writeUInt16BE(2, iinfCount.indexOf("iinf", 0, "latin1") + 8);
+  // A version 5 bitmap that embeds a colour profile (with no profile data at all).
+  const v5 = Buffer.alloc(124);
+  v5.writeUInt32LE(124, 0);
+  v5.writeInt32LE(1, 4);
+  v5.writeInt32LE(1, 8);
+  v5.writeUInt16LE(1, 12);
+  v5.writeUInt16LE(24, 14);
+  v5.writeUInt32LE(0x4d424544, 56);
+  const profileBmp = Buffer.concat([Buffer.from("BM", "latin1"), u32le(14 + 124 + 4), Buffer.alloc(4), u32le(14 + 124), v5, Buffer.from([0, 0, 0xff, 0])]);
+  // PNG: IHDR longer than its 13 bytes, a second IHDR, and an IEND that holds data.
+  const image = png();
+  const longIhdr = Buffer.concat([image.subarray(0, 8), pngChunk("IHDR", Buffer.concat([image.subarray(16, 29), payload])), image.subarray(33)]);
+  const iendData = Buffer.concat([image.subarray(0, image.length - 12), pngChunk("IEND", payload)]);
+  // WebP: an odd chunk whose pad byte is not zero.
+  const oddChunk = riffChunk("EXIF", Buffer.from("Exif\0\0MM\0*\0", "latin1"));
+  oddChunk[oddChunk.length - 1] = 0x23;
+  // BMP: a gap between the header and the rows that holds the payload.
+  const gapBmp = Buffer.concat([bmp().subarray(0, 54), payload, bmp().subarray(54)]);
+  gapBmp.writeUInt32LE(gapBmp.length, 2);
+  gapBmp.writeUInt32LE(54 + payload.length, 10);
+  // WOFF and WOFF2: a metadata block that is not the compressed stream it says it is; a WOFF2 collection.
+  const metadataWoff = woff({ metadata: '<?xml version="1.0"?><metadata version="1.0"/>' });
+  payload.copy(metadataWoff, metadataWoff.readUInt32BE(24), 0, Math.min(payload.length, metadataWoff.readUInt32BE(28)));
+  metadataWoff[metadataWoff.readUInt32BE(24)] = 0;
+  const collection = woff2();
+  collection.write("ttcf", 4, "latin1");
+  // A font with a second table whose tag is not printable.
+  const head = headTable();
+  const tagTtf = Buffer.concat([
+    u32be(0x00010000),
+    u16be(2),
+    u16be(32),
+    u16be(1),
+    u16be(0),
+    Buffer.from([1, 2, 3, 4]),
+    u32be(0),
+    u32be(44),
+    u32be(4),
+    Buffer.from("head", "latin1"),
+    u32be(0),
+    u32be(48),
+    u32be(head.length),
+    Buffer.alloc(4),
+    padded(head),
+  ]);
+  return Object.fromEntries([
+    // AVIF item properties: the payload past each fixed size, each bounded part, and each reserved field.
+    property("ispe-size", fullBox("ispe", 0, Buffer.concat([u32s(1, 1), payload]))),
+    property("pixi-size", fullBox("pixi", 0, Buffer.concat([Buffer.from([1, 8]), payload]))),
+    property("av1C-bound", box("av1C", Buffer.concat([Buffer.from([0x81, 0x00, 0x0c, 0x00]), long]))),
+    property("av1C-marker", box("av1C", Buffer.from([0x01, 0x00, 0x0c, 0x00]))),
+    property("av1C-reserved", box("av1C", Buffer.from([0x81, 0x00, 0x0c, 0xe0]))),
+    property("nclx-size", box("colr", Buffer.concat([Buffer.from("nclx", "latin1"), Buffer.from([0, 1, 0, 13, 0, 6, 0x80]), payload]))),
+    property("nclx-reserved", box("colr", Buffer.from([...Buffer.from("nclx", "latin1"), 0, 1, 0, 13, 0, 6, 0x81]))),
+    property("icc-short", box("colr", Buffer.concat([Buffer.from("prof", "latin1"), u32be(40 + payload.length), Buffer.alloc(32), Buffer.from("acsp", "latin1"), payload]))),
+    property("icc-size", box("colr", Buffer.concat([Buffer.from("prof", "latin1"), iccHeader(132), payload]))),
+    property("icc-signature", box("colr", Buffer.concat([Buffer.from("prof", "latin1"), iccHeader(132 + payload.length, "\0\0\0\0"), payload]))),
+    property("pasp-size", box("pasp", Buffer.concat([u32s(1, 1), payload]))),
+    property("clap-size", box("clap", Buffer.concat([u32s(1, 1, 1, 1, 0, 1, 0, 1), payload]))),
+    property("irot-size", box("irot", Buffer.concat([Buffer.from([1]), payload]))),
+    property("irot-reserved", box("irot", Buffer.from([0x04]))),
+    property("imir-size", box("imir", Buffer.concat([Buffer.from([0]), payload]))),
+    property("imir-reserved", box("imir", Buffer.from([0x02]))),
+    property("lsel-size", box("lsel", Buffer.concat([Buffer.from([0, 0]), payload]))),
+    property("a1op-size", box("a1op", Buffer.concat([Buffer.from([0]), payload]))),
+    property("a1lx-size", box("a1lx", Buffer.concat([Buffer.from([0, 0, 1, 0, 2, 0, 3]), payload]))),
+    property("a1lx-reserved", box("a1lx", Buffer.from([0x02, 0, 1, 0, 2, 0, 3]))),
+    property("clli-size", box("clli", Buffer.concat([Buffer.from([0, 100, 0, 50]), payload]))),
+    property("mdcv-size", box("mdcv", Buffer.concat([Buffer.alloc(24, 1), payload]))),
+    property("auxC-subtype", fullBox("auxC", 0, Buffer.concat([alpha, long]))),
+    property("auxC-type", fullBox("auxC", 0, Buffer.concat([repeated(script, 300), Buffer.from([0])]))),
+    property("auxC-version", fullBox("auxC", 1, alpha)),
+    // AVIF strings, ftyp, hdlr and pitm: long printable text, a string that is not printable, too
+    // many strings, a protected item, and bytes in fields that must be zero or end the box.
+    ["long-hdlr-name.avif", avif(undefined, { name: Buffer.concat([repeated(script, 2000), Buffer.from([0])]) })],
+    ["long-item-name.avif", avif(undefined, { items: [infe(2, "Exif", `${repeated(script, 2000).toString("latin1")}\0`)] })],
+    ["item-strings.avif", avif(undefined, { items: [infe(2, "Exif", "#!/bin/sh\0echo MARKER-PAYLOAD\0")] })],
+    ["item-unprintable.avif", avif(undefined, { items: [infe(2, "Exif", "#!/bin/sh\necho MARKER-PAYLOAD\n\0")] })],
+    ["item-type.avif", avif(undefined, { items: [infe(2, "\x01\x02\x03\x04", "\0")] })],
+    ["item-protected.avif", avif(undefined, { items: [infe(2, "Exif", "\0", 0, 1)] })],
+    ["long-ftyp.avif", avif(undefined, { ftyp: Buffer.concat([Buffer.from("avif\0\0\0\0avif", "latin1"), repeated(script, 2000)]) })],
+    ["ftyp-brands.avif", avif(undefined, { ftyp: Buffer.concat([Buffer.from("avif\0\0\0\0avif", "latin1"), padded(payload)]) })],
+    ["hdlr-reserved.avif", avif(undefined, { hdlr: Buffer.concat([u32be(0), Buffer.from("pict", "latin1"), repeated(script, 12), Buffer.from("Picture\0", "latin1")]) })],
+    ["hdlr-predefined.avif", avif(undefined, { hdlr: Buffer.concat([repeated(script, 4), Buffer.from("pict", "latin1"), Buffer.alloc(12), Buffer.from("Picture\0", "latin1")]) })],
+    ["pitm-tail.avif", avif(undefined, { pitm: Buffer.concat([u16be(1), payload]) })],
+    // AVIF boxes: an unknown box in meta, a second idat, unknown reference and group types, extra
+    // entries, a data reference not in this file, a counted list that is longer or shorter than its
+    // count, a box other than ipma after ipco, and bytes after iloc's or ipma's entries.
+    ["box-in-meta.avif", avif(undefined, { meta: [box("free", payload)] })],
+    ["second-idat.avif", avif(undefined, { meta: [box("idat", payload), box("idat", Buffer.alloc(0))] })],
+    ["iref-type.avif", avif(undefined, { meta: [fullBox("iref", 0, itemReference("xxxx", 1, [1]))] })],
+    ["iref-extra.avif", avif(undefined, { meta: [fullBox("iref", 0, box("cdsc", Buffer.concat([u16be(1), u16be(1), u16be(1), u16be(1)])))] })],
+    ["grpl-type.avif", avif(undefined, { meta: [box("grpl", fullBox("xxxx", 0, u32s(5, 1, 1)))] })],
+    ["grpl-extra.avif", avif(undefined, { meta: [box("grpl", fullBox("altr", 0, u32s(5, 1, 1, 1)))] })],
+    ["url-elsewhere.avif", avif(undefined, { meta: [box("dinf", dref(1, [fullBox("url ", 0, Buffer.alloc(0), 0)]))] })],
+    ["dinf-extra.avif", avif(undefined, { meta: [box("dinf", Buffer.concat([dref(1, [selfContained]), box("free", payload)]))] })],
+    ["dref-count.avif", avif(undefined, { meta: [box("dinf", dref(2, [selfContained]))] })],
+    ["iinf-count.avif", iinfCount],
+    ["iprp-box.avif", avif(undefined, { ipma: [fullBox("xxxx", 0, u32be(0))] })],
+    ["ipma-tail.avif", avif(undefined, { ipma: [fullBox("ipma", 0, Buffer.concat([u32be(0), payload]))] })],
+    ["iloc-tail.avif", avif(undefined, { ilocTail: payload })],
+    // JPEG: a segment under the JPG marker, a reserved marker low and high, and a restart marker.
+    ["jpg-marker.jpg", jpeg([jpegSegment(0xc8, payload)])],
+    ["reserved-low.jpg", jpeg([jpegSegment(0x02, payload)])],
+    ["reserved-high.jpg", jpeg([jpegSegment(0xbf, payload)])],
+    ["restart.jpg", jpeg([jpegSegment(0xd0, payload)])],
+    // EOT: a root string far longer than any font's, a name of an odd size, and non-zero padding,
+    // reserved words or EUDC fields; and plain data flagged as compressed.
+    ["long-root.eot", eot({ v22: { root: repeated(script, 2000) } })],
+    ["odd-name.eot", eot({ names: [Buffer.concat([payload, Buffer.alloc(1 - (payload.length % 2), 0x23)])] })],
+    ["padding.eot", paddingEot],
+    ["reserved.eot", reservedEot],
+    ["eudc-fields.eot", eudcEot],
+    ["mtx-flag.eot", mtxEot],
+    // PNG and WebP.
+    ["long-ihdr.png", longIhdr],
+    ["second-ihdr.png", png([pngChunk("IHDR", payload)])],
+    ["iend-data.png", iendData],
+    ["odd-pad.webp", webp([oddChunk])],
+    // WOFF and WOFF2, a bitmap, an icon and a font.
+    ["private-overlap.woff", privateWoff],
+    ["private-overlap.woff2", privateWoff2],
+    ["reserved.woff", reservedWoff],
+    ["reserved.woff2", reservedWoff2],
+    ["metadata.woff", metadataWoff],
+    ["metadata.woff2", woff2({ metadata: { block: padded(payload), original: 100 } })],
+    ["collection.woff2", collection],
+    ["gap.bmp", gapBmp],
+    ["profile.bmp", profileBmp],
+    ["reserved.ico", reservedIco],
+    ["tag.ttf", tagTtf],
+  ]);
+}
+
+/** The layouts of `planted` that hold `payload` where a walk once left bytes unread. */
+function plantedLayouts(payload: Buffer): Record<string, Buffer> {
   // AVIF: ftyp, an empty meta box, and an mdat of size 0, which runs to the end of the file.
   const avifRunOn = Buffer.concat([box("ftyp", Buffer.from("avif\0\0\0\0", "latin1")), box("meta", Buffer.alloc(0)), u32be(0), Buffer.from("mdat", "latin1"), payload]);
   // WOFF: one four-byte table (the payload's first bytes), and the length field set to the file's.

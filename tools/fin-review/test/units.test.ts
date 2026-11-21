@@ -223,8 +223,10 @@ describe("inventory and shards", () => {
     assert.equal(mediaFormat(png([pngChunk("tEXt", Buffer.from("k\0v"))])), "png", "a chunk before IEND is part of the layout");
   });
 
-  it("a format's header whose length fields cover bytes of any kind, or a structure the walk does not read, is no image or font", () => {
+  it("a format's header whose length fields cover bytes of any kind, a structure the walk does not read, or a layout that fails any one check of a walk, is no image or font", () => {
+    // One shape per check of each walk (helpers/media.ts): taking any one check out makes its shape pass.
     const files = planted(Buffer.from("\0#!/bin/sh\necho MARKER-PAYLOAD\n"));
+    assert.ok(Object.keys(files).length >= 99, "no shape is dropped");
     for (const [name, bytes] of Object.entries(files)) {
       assert.equal(mediaFormat(bytes), null, name);
       assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
