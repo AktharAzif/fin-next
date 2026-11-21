@@ -17,6 +17,22 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Whether a path parameter's value is, or decodes to, a "." or ".." segment. The URL parser reads
+ * `%2e` as a dot, and a server or proxy may decode a segment again before resolving it; a dot
+ * segment is resolved away, so the request would reach another route under /api. Each pass only
+ * shortens the value, so the loop ends.
+ */
+function isDotSegment(value: string): boolean {
+  let current = value;
+  for (;;) {
+    const next = current.replace(/%25/gi, "%").replace(/%2e/gi, ".");
+    if (next === current) break;
+    current = next;
+  }
+  return current === "." || current === "..";
+}
+
 function scalar(contract: string, field: string, value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -46,6 +62,9 @@ export function buildRequest(contract: AppContract, input: unknown): BuiltReques
     for (const param of params) {
       const raw = scalar(contract.name, param, rest[param]);
       if (raw === "") throw new TypeError(`${contract.name}: :${param} is empty`);
+      if (isDotSegment(raw)) {
+        throw new TypeError(`${contract.name}: :${param} may not be a dot segment`);
+      }
       path = path.replace(`:${param}`, encodeURIComponent(raw));
       delete rest[param];
     }
