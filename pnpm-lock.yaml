@@ -472,6 +472,9 @@ importers:
       '@fin/identity':
         specifier: workspace:*
         version: link:../../packages/identity
+      '@fin/keys':
+        specifier: workspace:*
+        version: link:../../packages/keys
       '@fin/motion':
         specifier: workspace:*
         version: link:../../packages/motion

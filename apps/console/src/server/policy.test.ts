@@ -4,6 +4,7 @@
 // [SA-44]); every step-up route names an action the catalogue knows, binding the same fields; every
 // organisation change takes the team-change lock; every audit event named is in a fragment.
 import { IDENTITY_EVENTS } from "@fin/identity";
+import { KEY_EVENTS, KEYS_ACTIONS } from "@fin/keys";
 import { ORGS_ACTIONS, ORGS_EVENTS } from "@fin/orgs";
 import type { FinEnv } from "@fin/server/http";
 import { Hono } from "hono";
@@ -50,6 +51,12 @@ const SPEC_ROUTES = [
   "PUT /api/roles/:roleId",
   "POST /api/roles/:roleId/delete",
   "GET /api/audit-log",
+  // API keys (§12.3, stretch 1, L-SAT-11).
+  "GET /api/keys",
+  "POST /api/keys",
+  "PATCH /api/keys/:keyId",
+  "POST /api/keys/:keyId/roll",
+  "POST /api/keys/:keyId/revoke",
 ];
 
 function registered(): string[] {
@@ -94,8 +101,8 @@ describe("the console's route policy", () => {
   });
 
   it("names, for every step-up, an action the catalogue knows, binding exactly its fields", () => {
-    const actions = new Map<string, (typeof ORGS_ACTIONS)[number]>(
-      ORGS_ACTIONS.map((a) => [a.key, a]),
+    const actions = new Map<string, { bind: readonly { name: string }[] }>(
+      [...ORGS_ACTIONS, ...KEYS_ACTIONS].map((a) => [a.key, a]),
     );
     for (const p of CONSOLE_POLICY.filter((q) => q.stepUp !== "none")) {
       expect(p.action, p.id).toMatch(/^[a-z][a-zA-Z]*\.[a-z][a-z_]*$/);
@@ -122,7 +129,11 @@ describe("the console's route policy", () => {
   });
 
   it("names only audit events the fragments define, and every changing route names one", () => {
-    const known = new Set([...Object.keys(ORGS_EVENTS), ...Object.keys(IDENTITY_EVENTS)]);
+    const known = new Set([
+      ...Object.keys(ORGS_EVENTS),
+      ...Object.keys(IDENTITY_EVENTS),
+      ...Object.keys(KEY_EVENTS),
+    ]);
     for (const p of CONSOLE_POLICY) {
       for (const event of p.audit) expect(known.has(event), `${p.id}: ${event}`).toBe(true);
     }

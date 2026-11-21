@@ -109,6 +109,7 @@ export {
 } from "./lookup.ts";
 export { checkKeyName, KEY_NAME_MAX, KEY_NAME_SENTENCE, type KeyNameRefusal } from "./names.ts";
 export { type KeyEnvironment, KNOWN_SALTS, SALTS, saltFor } from "./salts.ts";
+export { type KeySettings, keySettingsAbsent, keySettingsFromEnv } from "./settings.ts";
 export {
   accessLabel,
   checkScopes,

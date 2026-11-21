@@ -8,6 +8,7 @@
 import { isBuiltInKey } from "@fin/access";
 import { isId as coreIsId, type IdPrefix } from "@fin/core";
 import type { RequestContext } from "@fin/identity";
+import { isKeyId, type Keys } from "@fin/keys";
 import { CATALOGUE, type Orgs } from "@fin/orgs";
 import type { FinContext, FinEnv } from "@fin/server/http";
 import type { Hono } from "hono";
@@ -19,6 +20,8 @@ import { problem, refusalAnswer } from "./problems.ts";
 export interface ConsoleDeps {
   orgs: Orgs;
   docsOrigin: string;
+  /** The API keys lifecycle (L-SAT-11), or null when a development or CI process has no peppers. */
+  keys?: Keys | null;
 }
 
 export interface RouteInput {
@@ -71,6 +74,8 @@ function invalid(c: FinContext, deps: ConsoleDeps, fields: { path: string; code:
 
 function pathIdOk(kind: string, value: string): boolean {
   if (kind === "role_key") return isBuiltInKey(CATALOGUE, value) || coreIsId(value, "rol");
+  // An API key's 10-character ID (spec 05 §4.1), upper case only: another shape is not found.
+  if (kind === "key_id") return isKeyId(value);
   return coreIsId(value, kind as IdPrefix);
 }
 

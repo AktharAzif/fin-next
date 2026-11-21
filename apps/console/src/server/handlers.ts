@@ -58,6 +58,7 @@ import {
   revokeOthers,
   revokeTrustedBrowser,
 } from "./account.ts";
+import { KEYS_HANDLERS } from "./keys.ts";
 import { isTimeZone } from "./policy/schemas.ts";
 import type { ConsoleDeps, RouteInput } from "./routes.ts";
 import { viewerOf } from "./viewer.ts";
@@ -480,4 +481,7 @@ export const HANDLERS = {
       ),
     );
   },
+
+  // API keys (spec 02 §12.3, L-SAT-11): keys.ts.
+  ...KEYS_HANDLERS,
 } satisfies Record<string, Handler>;

@@ -26,6 +26,7 @@
     "@fin/frame": "workspace:*",
     "@fin/icons": "workspace:*",
     "@fin/identity": "workspace:*",
+    "@fin/keys": "workspace:*",
     "@fin/motion": "workspace:*",
     "@fin/orgs": "workspace:*",
     "@fin/server": "workspace:*",

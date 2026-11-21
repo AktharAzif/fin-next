@@ -10,6 +10,7 @@
 // core's (`resolver`); the gap is recorded for P0-D.
 import type { Clock } from "@fin/core";
 import { createPgDatabase, createRealm, type LineSink, type Realm } from "@fin/identity";
+import { KEYS_ACTIONS } from "@fin/keys";
 import { CredentialRegistry, createOrgs, ORGS_ACTIONS, type Orgs } from "@fin/orgs";
 import type { BuiltService, ServiceContext, ServiceDefinition } from "@fin/server";
 import { loadDocsOrigin, loadIngressConfig } from "@fin/server/config";
@@ -18,6 +19,7 @@ import { ConnectorPeers } from "@fin/server/ingress";
 import type { Telemetry } from "@fin/server/telemetry";
 import { type AuthHook, createApiHost } from "@fin/web-host";
 import type { Pool } from "pg";
+import { apiKeyCredentials, keysOf } from "./keys.ts";
 import { registerRoutes, requestContext } from "./routes.ts";
 import { createConsolePool, poolSettings, realmSettings } from "./settings.ts";
 
@@ -93,10 +95,22 @@ export async function buildConsole(
   const lines = lineSink(ctx.telemetry);
   const clock = dateClock(ctx.clock);
   const db = createPgDatabase({ pool, clock, release: ctx.config.release, lines });
-  const realm = createRealm({ settings, db, clock, lines, docsOrigin, actions: [ORGS_ACTIONS] });
-  const orgs = createOrgs(realm, {
-    credentials: overrides.credentials ?? new CredentialRegistry(),
+  const realm = createRealm({
+    settings,
+    db,
+    clock,
+    lines,
+    docsOrigin,
+    actions: [ORGS_ACTIONS, KEYS_ACTIONS],
   });
+  // API keys (spec 02 §12, L-SAT-11): the lifecycle, and its keys as a credential source a removal
+  // or a demotion rolls (§9.4).
+  const keys = keysOf(ctx.env, environment, { clock, lines });
+  const credentials = overrides.credentials ?? new CredentialRegistry();
+  if (keys !== null && !credentials.sources.some((s) => s.kind === "api_key")) {
+    credentials.register(apiKeyCredentials(keys));
+  }
+  const orgs = createOrgs(realm, { credentials });
   ctx.readiness.add("database", async () => {
     try {
       await pool.query("SELECT 1");
@@ -123,7 +137,7 @@ export async function buildConsole(
     peers,
     fetch: ctx.fetch,
     auth: authHook(realm),
-    routes: (api) => registerRoutes(api, { orgs, docsOrigin }),
+    routes: (api) => registerRoutes(api, { orgs, docsOrigin, keys }),
   });
   return {
     fetch: host.fetch,
