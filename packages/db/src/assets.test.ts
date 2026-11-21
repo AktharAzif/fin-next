@@ -1,10 +1,10 @@
 // The database files' one rule (assets.ts): every package's bootstrap, migrations and grants, each kind
-// in one order by name across packages, duplicates refused; and the command line stages exactly that
-// set, laid out as in the source.
+// in one order by name across packages, duplicates refused; and the image ships exactly that set at
+// FIN_DB_ASSETS_DIR (ops/docker/app.Dockerfile).
 import { execFileSync } from "node:child_process";
 import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, matchesGlob } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   dbAssetsRoot,
@@ -247,5 +247,66 @@ describe("the command line (assets-cli.ts)", () => {
       migrations,
       minimumSchemaVersion: migrations.at(-1),
     });
+  });
+});
+
+/** The Dockerfile's stages: name to instructions, continuation lines joined. */
+function dockerStages(text: string): Map<string, string[]> {
+  const stages = new Map<string, string[]>();
+  let current: string[] | null = null;
+  for (const line of text.replace(/\\\n\s*/g, " ").split("\n")) {
+    const instruction = line.trim();
+    if (instruction === "" || instruction.startsWith("#")) continue;
+    const from = /^FROM\s+\S+\s+AS\s+(\S+)$/i.exec(instruction);
+    if (from?.[1] !== undefined) {
+      current = [];
+      stages.set(from[1], current);
+    } else {
+      current?.push(instruction);
+    }
+  }
+  return stages;
+}
+
+describe("the image (ops/docker/app.Dockerfile)", () => {
+  const dockerfile = readFileSync(join(ROOT, "ops/docker/app.Dockerfile"), "utf8");
+  const stages = dockerStages(dockerfile);
+  const stageCommand = /^RUN node packages\/db\/src\/assets-cli\.ts stage (\/\S+)$/;
+
+  it("stages every package's files with assets.ts's own rule", () => {
+    const run = stages.get("db-assets")?.find((i) => stageCommand.test(i));
+    expect(run).toBeDefined();
+  });
+
+  it("copies them to FIN_DB_ASSETS_DIR in both run images, and names that path", () => {
+    const staged = stages
+      .get("db-assets")
+      ?.map((i) => stageCommand.exec(i)?.[1])
+      .find((dir) => dir !== undefined);
+    for (const target of ["test", "release"]) {
+      const instructions = stages.get(target) ?? [];
+      expect(instructions, target).toContain(
+        `COPY --from=db-assets ${staged}/ ${IMAGE_ASSETS_DIR}/`,
+      );
+      const env = instructions.filter((i) => i.startsWith("ENV ")).join(" ");
+      expect(env, target).toMatch(new RegExp(`\\bFIN_DB_ASSETS_DIR=${IMAGE_ASSETS_DIR}(\\s|$)`));
+    }
+  });
+
+  it("builds from a context that holds every one of the files", () => {
+    const ignore = readFileSync(join(ROOT, "ops/docker/app.Dockerfile.dockerignore"), "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && !l.startsWith("#"));
+    for (const file of globbed(ROOT)) {
+      for (const pattern of ignore) {
+        const excluded =
+          matchesGlob(file, pattern) ||
+          file
+            .split("/")
+            .some((_, i, parts) => matchesGlob(parts.slice(0, i + 1).join("/"), pattern));
+        expect(excluded, `${file} excluded by ${pattern}`).toBe(false);
+      }
+    }
   });
 });
