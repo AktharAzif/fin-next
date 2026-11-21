@@ -1,0 +1,8 @@
+{
+  "$comment": "The data side of apps/api (P0-E): migrate, tasks and the database probe. P0-D's apps/api/tsconfig.json, when it lands, includes these paths and replaces this file.",
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts", "../tasks/**/*.ts", "../worker/probe/**/*.ts"]
+}
