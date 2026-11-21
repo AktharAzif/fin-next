@@ -211,10 +211,11 @@ const RECEIVER = `(?:[^,()]|${PARENS})*,`;
 // An argument up to its comma, read item by item: white space and comments, a quoted string (a
 // comma in it read too), parenthesised text, or any other character but a comma.
 const ARGUMENT = String.raw`(?:${TRIVIA}|'(?:[^'\\\n\r]|\\[^])*'|"(?:[^"\\\n\r]|\\[^])*"|\x60(?:[^\x60\\]|\\[^])*\x60|${PARENS}|[^,()\s/'"\x60]|/(?![*/]))*,`;
-// The end of a name's parentheses, `)`, after a TypeScript assertion (`as T`, `satisfies T` or
-// `!`) or none; with a comma in `stops`, the end of an argument instead.
+// The end of a name's parentheses, `)`, after a TypeScript assertion (`as T`, `satisfies T`, its
+// type's parentheses read two levels deep as PARENS reads them, or `!`) or none; with a comma in
+// `stops`, the end of an argument instead.
 const closedBy = (/** @type {string} */ stops, /** @type {string} */ end) =>
-  String.raw`(?:${GAP}(?:!|(?:as|satisfies)(?![\w$]))(?:[^${stops}]|\([^()]*\))*|${GAP})${end}`;
+  String.raw`(?:${GAP}(?:!|(?:as|satisfies)(?![\w$]))(?:[^${stops}]|${PARENS})*|${GAP})${end}`;
 const CLOSED = closedBy("()", String.raw`\)`);
 // A TypeScript angle-bracket assertion before an expression, `<T>`.
 const ASSERTION = `(?:<[^<>()]*>${GAP})*`;
@@ -305,15 +306,22 @@ const EXPORT_DECLARATIONS = new Set([
 // to setTimeout or setInterval). The whole text is read, comments, strings and regular expressions
 // included, as written and again with every escape decoded (unescapeText): a reading of the code's
 // structure can be led to take code for a string or a comment, so the policy trusts none, and a
-// comment that names a sink is refused too. Every direct spelling of a sink is read: a member, an
-// optional member or a string key; a call, an optional call, a tagged template, a call through
-// call or apply, a call of the function bind returns (or of bind's own bound arguments), a call
-// through Reflect's apply (and for the Function constructor its construct), or a call of the sink
-// in parentheses, as an indirect call (`(0, f)(...)`); with a TypeScript assertion (`as T`,
-// `satisfies T`, `!` or `<T>`) where one may stand, an argument that holds a call, and white
-// space and comments anywhere JavaScript allows them.
-// A sink reached by another name (a destructured or assigned alias) is beyond a reading of the
-// text, as BD-19 says of loading code. Tests, their helpers and fixtures (files under test/, e2e/
+// comment that names a sink is refused too. The spellings read are those the tests list: the sink
+// as a member, an optional member or a string key; called directly or optionally, through call or
+// apply, as the function bind returns called at once (`f.bind(x)(...)`, its arguments in bind or
+// in the call; a namespaced writer's namespace and name both in one of them), through Reflect's
+// apply with the sink named plainly or as a member as its first argument (and for the Function
+// constructor its construct), and a timer, eval or Function as a tagged template straight after
+// its name; the sink in one pair of parentheses, as an indirect call (`(0, f)(...)`) or with a
+// TypeScript assertion on the sink itself (`as T` or `satisfies T`, the type's parentheses two
+// levels deep; `!`; `<T>` with no brackets or parentheses in T); an argument that holds a call;
+// and white space and comments anywhere JavaScript allows them.
+// It is a lint against mistakes, not a sandbox (BD-19): other spellings are left to review, which
+// treats them as findings. Among them: these forms combined (a bound or asserted sink in more
+// parentheses, or called by a tagged template; type arguments on bind, call or apply; a
+// namespace in bind and the name in the call), an assertion whose type nests deeper, an asserted
+// receiver (`(window as any).eval`, `(document as any).write`), and a sink reached by another name
+// (a destructured or assigned alias). Tests, their helpers and fixtures (files under test/, e2e/
 // or fixtures/) are left out, since a violation fixture plants one on purpose, and code that runs
 // reaches none of them (above, and the module URLs below); Biome's noDangerouslySetInnerHtml still
 // covers their JSX. The sink names are built at run time and no pattern below reads as a use of
