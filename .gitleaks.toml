@@ -1,0 +1,71 @@
+# gitleaks configuration: gitleaks' default rules plus Fin's own token shapes (spec 01 §3.8).
+# Run with --redact so a finding never prints the secret, as scripts/pre-push.mjs does:
+#   gitleaks git --redact --config .gitleaks.toml --log-opts="<range>"
+# Every pattern is RE2 (no lookarounds). Tests that need a token-shaped value build it at run time.
+title = "fin-next"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "fin-api-key"
+description = "A Fin API key (test or live)"
+regex = '''\bfin_(?:test|live)_[A-Za-z0-9]{16,}'''
+keywords = ["fin_test_", "fin_live_"]
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "A Cloudflare account or user API token"
+regex = '''\bcf[au]t_[A-Za-z0-9_-]{20,}'''
+keywords = ["cfat_", "cfut_"]
+
+[[rules]]
+id = "standard-webhooks-secret"
+description = "A Standard Webhooks signing secret"
+regex = '''\bwhsec_[A-Za-z0-9+/=]{16,}'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "age-secret-key"
+description = "An age secret key (escrow, backups, sealed findings)"
+regex = '''AGE-SECRET-KEY-1[0-9A-Z]{20,}'''
+keywords = ["age-secret-key-1"]
+
+[[rules]]
+id = "cloudflare-tunnel-token"
+description = "A Cloudflare tunnel token: base64 JSON with the a, t and s keys"
+regex = '''\beyJhIjoi[A-Za-z0-9+/_-]{40,}={0,2}'''
+keywords = ["eyjhijoi"]
+
+[[rules]]
+id = "better-stack-heartbeat-url"
+description = "A Better Stack heartbeat URL, which carries its own secret"
+regex = '''https://uptime\.betterstack\.com/api/v\d/heartbeat/[A-Za-z0-9]{8,}'''
+keywords = ["heartbeat"]
+
+[[rules]]
+id = "better-stack-source-token"
+description = "A Better Stack source token beside its name or ingesting host"
+regex = '''(?i)(?:betterstack|better_stack|logtail|source)[\w.-]{0,30}token["'\s]{0,3}[:=]["'\s]{0,3}([A-Za-z0-9]{20,48})\b'''
+secretGroup = 1
+keywords = ["token"]
+
+[[rules]]
+id = "better-stack-ingest-bearer"
+description = "A bearer token sent to a Better Stack ingesting host"
+regex = '''(?i)betterstackdata\.com\S*\s.{0,200}?Bearer\s+([A-Za-z0-9]{20,48})'''
+secretGroup = 1
+keywords = ["betterstackdata"]
+
+[[rules]]
+id = "railway-token"
+description = "A Railway project or account token (a UUID beside its name)"
+regex = '''(?i)railway[\w-]{0,20}token["'\s]{0,3}[:=]["'\s]{0,3}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'''
+secretGroup = 1
+keywords = ["railway"]
+
+[[rules]]
+id = "pem-private-key"
+description = "A PEM private key"
+regex = '''-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----'''
+keywords = ["private key"]

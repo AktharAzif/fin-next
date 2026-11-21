@@ -1,0 +1,23 @@
+{
+  "name": "@fin/api",
+  "private": true,
+  "type": "module",
+  "description": "Fin's private API service and its worker. L-SAT-05 adds the worker's email loop and the delivery check (src/worker/email/).",
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --exclude \"**/*.db.test.ts\"",
+    "test:db": "vitest run db.test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "dependencies": {
+    "@fin/email": "workspace:*",
+    "pg": "catalog:",
+    "zod": "catalog:"
+  }
+}
