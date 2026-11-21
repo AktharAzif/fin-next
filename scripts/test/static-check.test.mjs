@@ -187,6 +187,31 @@ describe("static:check", () => {
     );
   });
 
+  test("a noscript's content is read as markup too, as a browser with scripting off reads it", () => {
+    for (const [html, message] of /** @type {[string, RegExp][]} */ ([
+      ['<noscript><p style="color:red">x</p></noscript>', /no style attribute/],
+      ["<noscript><img src=x onerror=alert(1)></noscript>", /no inline event handler/],
+      ["<noscript><script>alert(1)</script></noscript>", /no inline script/],
+      ["<noscript><style>p{}</style></noscript>", /no <style> element/],
+      // With scripting on, the noscript ends at its end tag, and what follows is markup.
+      ["<noscript><xmp></noscript><img src=x onerror=y></xmp>", /no inline event handler/],
+    ])) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      const findings = checkIndexHtml("index.html", page);
+      assert.ok(
+        findings.some((f) => message.test(f.message)),
+        `${html}: ${JSON.stringify(findings)}`,
+      );
+    }
+    for (const html of [
+      "<noscript>Turn on JavaScript to use Fin.</noscript>",
+      '<noscript><a href="/help">Help</a></noscript>',
+    ]) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      assert.deepEqual(checkIndexHtml("index.html", page), [], html);
+    }
+  });
+
   test("SVG and MathML, inside which a browser reads raw-text elements as markup, fail", () => {
     for (const html of [
       '<svg><title><img src="x" onerror="alert(1)"></title></svg>',

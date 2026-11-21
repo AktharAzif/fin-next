@@ -9,7 +9,8 @@
 //     index.html carries <meta property="csp-nonce"> with no nonce attribute and has no inline
 //     script, style attribute, event handler, javascript: URL, srcdoc or nonce, read with the
 //     browser's tokenizer rules (`/` between attributes, `>` inside quoted values, `</script >`,
-//     comments and raw text); it has no <svg> or <math> element, inside which a browser reads
+//     comments and raw text, a <noscript>'s content both as text and as markup, as scripting on
+//     and off read it); it has no <svg> or <math> element, inside which a browser reads
 //     markup by other rules, and it is UTF-8 with no NUL or other control character, as are the
 //     CSS and JavaScript; the CSS's first statement is `@layer ui-sdk` and it holds no data: URL;
 //     no *.map is left; the build wrote no _headers or env.json (they are rendered at deploy,
@@ -268,6 +269,13 @@ export function htmlStartTags(html) {
       }
       const stop = end === null ? html.length : end.index;
       if (name === "script") tag.text = html.slice(i, stop);
+      // A browser reads a noscript's content as text with scripting on and as markup with it off,
+      // so its tags are read too, and the check holds for both.
+      if (name === "noscript") {
+        for (const inner of htmlStartTags(html.slice(i, stop))) {
+          tags.push({ ...inner, index: inner.index + i });
+        }
+      }
       i = stop;
     }
   }
