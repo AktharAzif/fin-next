@@ -9,8 +9,13 @@
 #
 # Rules every job keeps: least permissions, persist-credentials: false on every checkout, values
 # reach a shell only through env:, every action pinned by SHA, ubuntu-24.04, a timeout. The pnpm
-# store and Turborepo's local cache go through actions/cache (no remote cache, CI-02); a pull
-# request's writes stay in its own scope and main's are read by all.
+# store and Turborepo's local cache go through actions/cache (no remote cache, CI-02). Only a push
+# to main saves them, and every run restores main's: a pull request's run saves no cache, so no
+# later run of it can replay what an earlier one left (an earlier commit may have written any
+# file there, and been force-pushed away since). workflow-rules.mjs refuses any other save.
+#
+# plan, commit-dates-utc and gate run main's scripts on main's Node (engine/.node-version); the
+# jobs that run the change's own check scripts check their Node first (node-check.mjs).
 name: ci
 
 on:
@@ -87,6 +92,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
     steps:
       - name: Start the clock
         run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
@@ -110,20 +116,28 @@ jobs:
       - name: Find the pnpm store
         id: pnpm-store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
       - name: Restore the pnpm store
         id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
       - name: Restore Turborepo's cache
         id: turbo-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
           key: turbo-check-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            turbo-check-${{ github.ref_name }}-
             turbo-check-main-
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -131,14 +145,14 @@ jobs:
         run: pnpm check
       - name: Type-check the CI scripts
         run: pnpm exec tsc -p .github/scripts/tsconfig.json
-      - name: Save the pnpm store
-        if: steps.store-cache.outputs.cache-hit != 'true'
+      - name: Save the pnpm store (main only)
+        if: github.event_name == 'push' && steps.store-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ steps.store-cache.outputs.cache-primary-key }}
-      - name: Save Turborepo's cache
-        if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
+      - name: Save Turborepo's cache (main only)
+        if: github.event_name == 'push' && steps.turbo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
@@ -157,6 +171,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
     services:
       # The image and digest of compose.yaml (spec 01 §4.2); workflow-rules.mjs refuses any other.
       # The password is a throwaway for this job's own server, reachable from this runner only.
@@ -187,12 +202,20 @@ jobs:
       - name: Find the pnpm store
         id: pnpm-store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
       - name: Restore the pnpm store
         id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Point the tests at the service
@@ -205,7 +228,7 @@ jobs:
         if: always()
         env:
           CI_JOB: db
-          CI_CACHE: ${{ steps.store-cache.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
+          CI_CACHE: ${{ steps.store-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
         run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
 
   build:
@@ -215,6 +238,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
     steps:
       - name: Start the clock
         run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
@@ -232,20 +256,28 @@ jobs:
       - name: Find the pnpm store
         id: pnpm-store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
       - name: Restore the pnpm store
         id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
       - name: Restore Turborepo's cache
         id: turbo-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
           key: turbo-build-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            turbo-build-${{ github.ref_name }}-
             turbo-build-main-
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -255,8 +287,8 @@ jobs:
         run: node .github/scripts/bundle-check.mjs
       - name: Static build checks (index.html, static.json)
         run: node scripts/static-check.mjs
-      - name: Save Turborepo's cache
-        if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
+      - name: Save Turborepo's cache (main only)
+        if: github.event_name == 'push' && steps.turbo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
@@ -319,6 +351,7 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
     steps:
       - name: Start the clock
         run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
@@ -334,12 +367,20 @@ jobs:
       - name: Find the pnpm store
         id: pnpm-store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
       - name: Restore the pnpm store
         id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Install Bun 1.4.5 (release asset, by checksum)
@@ -350,7 +391,7 @@ jobs:
         if: always()
         env:
           CI_JOB: bun
-          CI_CACHE: ${{ steps.store-cache.outputs.cache-hit == 'true' && 'hit' || 'miss' }}
+          CI_CACHE: ${{ steps.store-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
         run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
 
   # G-09: the ruleset requires a status with exactly this name.

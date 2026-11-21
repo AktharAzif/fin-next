@@ -388,6 +388,38 @@ describe("this repository", () => {
     }
   });
 
+  it("saves a cache on push to main only, and restores one only after its scope check", () => {
+    let saves = 0;
+    let restores = 0;
+    for (const name of ["check", "db", "build", "bun"]) {
+      const list = steps("ci.yml", name);
+      const scope = list.findIndex((s) => runOf(s) === "node .github/scripts/cache-scope.mjs");
+      for (const [i, step] of list.entries()) {
+        const uses = usesOf(step);
+        if (uses.startsWith("actions/cache/save@")) {
+          saves++;
+          assert.match(valueAt(step, "if") ?? "", /^github\.event_name == 'push' && [^|]*$/, name);
+        } else if (uses.startsWith("actions/cache/restore@")) {
+          restores++;
+          assert.ok(scope >= 0 && scope < i, `${name}: the scope check runs before each restore`);
+          assert.equal(valueAt(step, "if"), "steps.cache-scope.outputs.restore == 'true'", name);
+          assert.doesNotMatch(
+            child(step, "with")
+              ?.children.find((c) => c.key === "restore-keys")
+              ?.scalar.map((s) => s.text)
+              .join("\n") ?? "",
+            /ref_name/,
+            `${name}: main's entries only`,
+          );
+        } else {
+          assert.ok(!uses.startsWith("actions/cache"), `${name}: ${uses} saves in its post step`);
+        }
+      }
+    }
+    assert.equal(saves, 3, "check saves the store and Turborepo's cache, build Turborepo's");
+    assert.equal(restores, 6);
+  });
+
   it("checks the Node in check and build before any check script can run on it", () => {
     for (const name of ["check", "build"]) {
       const list = steps("ci.yml", name);
