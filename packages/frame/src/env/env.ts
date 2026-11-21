@@ -27,15 +27,36 @@ export function isOrigin(value: string): boolean {
 
 const origin = z.string().refine(isOrigin, { message: "an https origin with no path" });
 
-export const envSchema = z.object({
-  environment: z.enum(ENVIRONMENTS),
-  /** The release's commit, compared with every API answer's `Fin-Release` (FW-C13). */
-  release: z.string().min(1).max(64),
-  /** Only on the docs site and under the fallback shape (ARCHITECTURE §5.17). */
-  apiOrigin: origin.optional(),
-  docsOrigin: origin,
-  consoleOrigin: origin,
-});
+/** The environments where a loopback origin may be plain http: a laptop and CI, never a deploy. */
+const LOOPBACK_ENVIRONMENTS: ReadonlySet<Environment> = new Set(["development", "ci"]);
+
+const ORIGIN_FIELDS = ["apiOrigin", "docsOrigin", "consoleOrigin"] as const;
+
+export const envSchema = z
+  .object({
+    environment: z.enum(ENVIRONMENTS),
+    /** The release's commit, compared with every API answer's `Fin-Release` (FW-C13). */
+    release: z.string().min(1).max(64),
+    /** Only on the docs site and under the fallback shape (ARCHITECTURE §5.17). */
+    apiOrigin: origin.optional(),
+    docsOrigin: origin,
+    consoleOrigin: origin,
+  })
+  .superRefine((env, context) => {
+    // isOrigin lets plain http through on loopback only; a staging or production env.json that
+    // names one is a development value rendered into a deploy, and fails closed.
+    if (LOOPBACK_ENVIRONMENTS.has(env.environment)) return;
+    for (const field of ORIGIN_FIELDS) {
+      const value = env[field];
+      if (value !== undefined && !value.startsWith("https:")) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `an https origin in ${env.environment}`,
+        });
+      }
+    }
+  });
 export type FinEnv = z.output<typeof envSchema>;
 
 export type EnvResult =

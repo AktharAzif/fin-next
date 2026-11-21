@@ -68,6 +68,33 @@ describe("loadEnv", () => {
     expect(await loadEnv(offline)).toEqual({ ok: false, reason: "network" });
   });
 
+  it("allows a plain-http loopback origin only in development and CI", () => {
+    const loopback = {
+      docsOrigin: "http://localhost:4000",
+      consoleOrigin: "http://127.0.0.1:5173",
+      apiOrigin: "http://[::1]:8080",
+    };
+    for (const environment of ["development", "ci"]) {
+      expect(envSchema.safeParse({ ...good, ...loopback, environment }).success).toBe(true);
+    }
+    for (const environment of ["staging", "production"]) {
+      expect(envSchema.safeParse({ ...good, ...loopback, environment }).success).toBe(false);
+      for (const [field, value] of Object.entries(loopback)) {
+        const parsed = envSchema.safeParse({ ...good, environment, [field]: value });
+        expect(parsed.success, `${environment} ${field}`).toBe(false);
+        expect(parsed.error?.issues.map((issue) => issue.path.join("."))).toEqual([field]);
+      }
+    }
+  });
+
+  it("fails closed on a deployed env.json that names a plain-http origin", async () => {
+    expect(
+      await loadEnv(
+        answer({ ...good, environment: "production", consoleOrigin: "http://localhost:5173" }),
+      ),
+    ).toEqual({ ok: false, reason: "invalid" });
+  });
+
   it("names exactly the plan's fields (spec 01 §7.4)", () => {
     expect(Object.keys(envSchema.shape).sort()).toEqual(
       ["apiOrigin", "consoleOrigin", "docsOrigin", "environment", "release"].sort(),
