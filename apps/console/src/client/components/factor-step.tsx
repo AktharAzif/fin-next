@@ -1,16 +1,16 @@
 // What the two factor-step pages share (TwoFactor and BackupCode boards; spec 02 §5.4, §6.2): the
-// guard that keeps them for a session at the factor step, the passkey ceremony, where to go once a
+// passkey ceremony, where to go once a
 // factor passed, and the dialogs that end the step (too many wrong codes, too slow, paused). A right
 // code or passkey raises the session to `aal2`; the page then reads the viewer again.
 import type { ConsoleViewer } from "@fin/app-contracts";
-import { type FinRouterContext, signInHref, signOut, useFin } from "@fin/frame";
+import { signOut, useFin } from "@fin/frame";
 import { FingerprintIcon } from "@fin/icons";
 import { Button, InlineAlert, Modal } from "@fin/ui";
-import { redirect, useRouter } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 import { commonAlert, type Failure, failureOf } from "../api/failures.ts";
 import { ceremonyApi } from "../api/library.ts";
-import { destinationAfterSignIn, stepFor } from "../auth/after-sign-in.ts";
+import { destinationAfterSignIn } from "../auth/after-sign-in.ts";
 import { authenticateWithPasskey, isCeremonyError } from "../auth/webauthn.ts";
 import { AlertFrom } from "./auth.tsx";
 
@@ -21,38 +21,6 @@ import { AlertFrom } from "./auth.tsx";
 export async function startOver(): Promise<void> {
   const ended = await signOut({ app: "console" });
   if (!ended) window.location.assign("/sign-in");
-}
-
-/** Only a session at the factor step stays; everyone else goes where their gate says. */
-export function guardFactorStep({
-  context,
-  search,
-}: {
-  context: FinRouterContext<ConsoleViewer>;
-  search: { next?: string };
-}): void {
-  const viewer = context.fin.viewer.get();
-  const next = search.next ?? null;
-  let href: string | null = null;
-  if (viewer === null) {
-    href = signInHref({ pathname: "/", search: "" }, context.fin.routeExists);
-  } else if (viewer.gate !== "factor_step") {
-    const step = stepFor(viewer, next, context.fin.routeExists);
-    href = step.kind === "go" ? step.href : "/";
-  }
-  if (href !== null) {
-    throw redirect({ href, replace: true } as unknown as Parameters<typeof redirect>[0]);
-  }
-}
-
-/** Whether the viewer allows the "Trust this browser" box (absent at the factor step: no). */
-export function canTrust(viewer: ConsoleViewer | null): boolean {
-  if (viewer === null) return false;
-  return "canTrustBrowser" in viewer && viewer.canTrustBrowser === true;
-}
-
-export function readNext(search: Record<string, unknown>): { next?: string } {
-  return typeof search.next === "string" && search.next !== "" ? { next: search.next } : {};
 }
 
 export type StepDialog = null | "usedUp" | "timedOut" | "paused";

@@ -9,15 +9,10 @@ import { useRef, useState } from "react";
 import { backupCodeVerify } from "../../api/contracts/auth.ts";
 import { ceremonyApi } from "../../api/library.ts";
 import { withNext } from "../../auth/after-sign-in.ts";
+import { guardFactorStep, readNext } from "../../auth/guards.ts";
 import { passkeysSupported } from "../../auth/webauthn.ts";
 import { AuthLoading, QuietLink } from "../../components/auth.tsx";
-import {
-  guardFactorStep,
-  readNext,
-  StepDialogs,
-  stepAlert,
-  useFactorStep,
-} from "../../components/factor-step.tsx";
+import { StepDialogs, stepAlert, useFactorStep } from "../../components/factor-step.tsx";
 
 export const Route = createFileRoute("/sign-in/backup-code")({
   staticData: { frame: "auth", navId: null, pageName: "Enter a backup code" },

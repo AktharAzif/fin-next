@@ -12,9 +12,9 @@ import { totpEnable, totpVerify } from "../../api/contracts/auth.ts";
 import { codeOf, failureOf, requestIdOf } from "../../api/failures.ts";
 import { ceremonyApi } from "../../api/library.ts";
 import { destinationAfterSignIn, withNext } from "../../auth/after-sign-in.ts";
+import { readNext } from "../../auth/guards.ts";
 import { AuthLoading } from "../../components/auth.tsx";
 import { AuthenticatorScan, BackupCodesPanel } from "../../components/authenticator.tsx";
-import { readNext } from "../../components/factor-step.tsx";
 import { guardWelcome } from "../../components/welcome.ts";
 import { SignInByEmail } from "../../step-up/StepUpDialog.tsx";
 

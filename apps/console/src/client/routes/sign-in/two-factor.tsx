@@ -18,16 +18,10 @@ import { useState } from "react";
 import { TOTP_CODE_LENGTH, totpVerify } from "../../api/contracts/auth.ts";
 import { ceremonyApi } from "../../api/library.ts";
 import { withNext } from "../../auth/after-sign-in.ts";
+import { canTrust, guardFactorStep } from "../../auth/guards.ts";
 import { passkeysSupported } from "../../auth/webauthn.ts";
 import { AuthLoading, QuietLink } from "../../components/auth.tsx";
-import {
-  canTrust,
-  guardFactorStep,
-  StepDialogs,
-  startOver,
-  stepAlert,
-  useFactorStep,
-} from "../../components/factor-step.tsx";
+import { StepDialogs, startOver, stepAlert, useFactorStep } from "../../components/factor-step.tsx";
 
 export const Route = createFileRoute("/sign-in/two-factor")({
   staticData: { frame: "auth", navId: null, pageName: "Confirm it’s you" },

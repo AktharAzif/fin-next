@@ -21,6 +21,7 @@ import {
   MenuSeparator,
   Modal,
   PageHeader,
+  SkeletonPage,
   StatusBadge,
   Table,
   type TableColumn,
@@ -66,36 +67,12 @@ export const Route = createFileRoute("/settings/team")({
     ...(search.view === "invite" ? { view: "invite" as const } : {}),
     ...(typeof search.q === "string" && search.q !== "" ? { q: search.q.slice(0, 200) } : {}),
   }),
-  pendingComponent: TeamLoading,
+  pendingComponent: () => <SkeletonPage label="the team" toolbar rows={6} />,
   component: TeamPage,
 });
 
 const DESCRIPTION =
   "Each person’s role decides what they can do. Anyone with Production access must use a second factor.";
-
-function TeamLoading() {
-  return (
-    <div className="flex flex-col gap-8">
-      <PageHeader
-        title="Settings"
-        description={DESCRIPTION}
-        tabs={<SettingsTabs current="team" />}
-        linkAs={RouterLink}
-      />
-      <Table
-        caption="Members"
-        noun={{ singular: "member", plural: "members" }}
-        columns={[{ id: "member", header: "Member", cell: () => null }]}
-        rows={[]}
-        getRowId={() => ""}
-        getRowLabel={() => ""}
-        status="loading"
-        loadingRows={6}
-        empty={null}
-      />
-    </div>
-  );
-}
 
 const SECOND_FACTOR: Readonly<
   Record<MemberRow["secondFactor"], { label: string; tone: "success" | "warning" }>

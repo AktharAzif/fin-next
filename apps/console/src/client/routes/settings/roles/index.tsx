@@ -16,6 +16,7 @@ import {
   MenuSeparator,
   Modal,
   PageHeader,
+  SkeletonPage,
   Table,
   type TableColumn,
   toast,
@@ -39,36 +40,12 @@ import { withReasonValues } from "../../../step-up/reasons.ts";
 
 export const Route = createFileRoute("/settings/roles/")({
   staticData: { frame: "app", navId: "settings", pageName: "Settings", needs: ["member.read"] },
-  pendingComponent: RolesLoading,
+  pendingComponent: () => <SkeletonPage label="the roles" rows={5} />,
   component: RolesPage,
 });
 
 const DESCRIPTION =
   "Each person’s role decides what they can do. Anyone with Production access must use a second factor.";
-
-function RolesLoading() {
-  return (
-    <div className="flex flex-col gap-8">
-      <PageHeader
-        title="Settings"
-        description={DESCRIPTION}
-        tabs={<SettingsTabs current="roles" />}
-        linkAs={RouterLink}
-      />
-      <Table
-        caption="Built-in roles"
-        noun={{ singular: "role", plural: "roles" }}
-        columns={[{ id: "role", header: "Role", cell: () => null }]}
-        rows={[]}
-        getRowId={() => ""}
-        getRowLabel={() => ""}
-        status="loading"
-        loadingRows={2}
-        empty={null}
-      />
-    </div>
-  );
-}
 
 function RolesPage() {
   const fin = useFin<ConsoleViewer>();

@@ -14,6 +14,7 @@ import {
   Input,
   Modal,
   PageHeader,
+  SkeletonPage,
   StatusBadge,
   Table,
   type TableColumn,
@@ -63,21 +64,12 @@ import { withReasonValues } from "../../step-up/reasons.ts";
 
 export const Route = createFileRoute("/account/security")({
   staticData: { frame: "app", navId: null, pageName: "Account security" },
-  pendingComponent: AccountSecurityLoading,
+  pendingComponent: () => <SkeletonPage label="your sign-in methods" rows={5} />,
   component: AccountSecurityPage,
 });
 
 const DESCRIPTION =
   "How you sign in to Fin, and where you’re signed in. These are yours: they apply in every organisation you belong to.";
-
-function AccountSecurityLoading() {
-  return (
-    <div className="flex flex-col gap-8">
-      <PageHeader title="Account security" description={DESCRIPTION} linkAs={RouterLink} />
-      <FieldsLoading label="your sign-in methods" />
-    </div>
-  );
-}
 
 type Dialog =
   | null

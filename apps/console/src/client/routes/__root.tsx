@@ -12,10 +12,11 @@ import {
   type FinRouterContext,
   guardConsole,
   RouteNotFound,
+  type StepUpContentProps,
 } from "@fin/frame";
 import { createRootRouteWithContext, redirect } from "@tanstack/react-router";
+import { lazy, Suspense, useEffect } from "react";
 import { ensureOrganisation } from "../auth/after-sign-in.ts";
-import { StepUpDialog } from "../step-up/StepUpDialog.tsx";
 
 type GuardInput = Parameters<typeof guardConsole>[0];
 
@@ -32,11 +33,36 @@ export async function firstOrganisationGate(input: GuardInput): Promise<void> {
   throw redirect({ href, replace: true } as unknown as Parameters<typeof redirect>[0]);
 }
 
+// The StepUp dialog and its ceremonies stay out of the first route's bundle (spec 06 §1.5's
+// 250 KB): the chunk is fetched once the page has drawn, so it is there before an action asks.
+const loadStepUp = () => import("../step-up/StepUpDialog.tsx");
+const StepUpDialog = lazy(() => loadStepUp().then((module) => ({ default: module.StepUpDialog })));
+
+function StepUpContent(props: StepUpContentProps) {
+  return (
+    <Suspense fallback={null}>
+      <StepUpDialog {...props} />
+    </Suspense>
+  );
+}
+
+function ConsoleRoot() {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadStepUp().catch(() => {
+        // A failed preload is fetched again when a step-up first asks for the dialog.
+      });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+  return <FinRoot appFrame={AppFrame} fallbackFrame="app" stepUpContent={StepUpContent} />;
+}
+
 export const Route = createRootRouteWithContext<FinRouterContext<ConsoleViewer>>()({
   beforeLoad: async (input): Promise<void> => {
     guardConsole(input);
     await firstOrganisationGate(input);
   },
-  component: () => <FinRoot appFrame={AppFrame} fallbackFrame="app" stepUpContent={StepUpDialog} />,
+  component: ConsoleRoot,
   notFoundComponent: RouteNotFound,
 });

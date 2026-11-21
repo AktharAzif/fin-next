@@ -16,6 +16,7 @@ import {
   InlineAlert,
   Input,
   PageHeader,
+  SkeletonPage,
   SkeletonSection,
   Textarea,
   toast,
@@ -60,7 +61,7 @@ export const Route = createFileRoute("/settings/roles/$roleKey")({
   staticData: { frame: "app", navId: "settings", pageName: "Settings", needs: ["member.read"] },
   validateSearch: (search: Record<string, unknown>): { from?: string } =>
     typeof search.from === "string" && search.from !== "" ? { from: search.from.slice(0, 80) } : {},
-  pendingComponent: () => <EditorLoading title="Role" />,
+  pendingComponent: () => <SkeletonPage label="this role" rows={8} />,
   component: RoleEditorPage,
 });
 

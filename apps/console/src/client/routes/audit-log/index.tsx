@@ -20,6 +20,7 @@ import {
   MenuRadioItem,
   Modal,
   PageHeader,
+  SkeletonPage,
   Table,
   type TableColumn,
 } from "@fin/ui";
@@ -57,31 +58,12 @@ export const Route = createFileRoute("/audit-log/")({
     needs: ["auditLog.read"],
   },
   validateSearch: readAuditSearch,
-  pendingComponent: AuditLoading,
+  pendingComponent: () => <SkeletonPage label="the audit log" toolbar rows={9} />,
   component: AuditLogPage,
 });
 
 function description(organisation: string | null): string {
   return `Every sensitive action in ${organisation ?? "this organisation"}: who did it, to what, and how they were verified. Entries can’t be edited or removed.`;
-}
-
-function AuditLoading() {
-  return (
-    <div className="flex flex-col gap-6">
-      <PageHeader title="Audit log" description={description(null)} linkAs={RouterLink} />
-      <Table
-        caption="Audit log"
-        noun={{ singular: "event", plural: "events" }}
-        columns={[{ id: "event", header: "Event", cell: () => null }]}
-        rows={[]}
-        getRowId={() => ""}
-        getRowLabel={() => ""}
-        status="loading"
-        loadingRows={9}
-        empty={null}
-      />
-    </div>
-  );
 }
 
 function timeZone(): string {

@@ -15,6 +15,7 @@ import {
   Input,
   Modal,
   PageHeader,
+  SkeletonPage,
   StatusBadge,
   Table,
   type TableColumn,
@@ -51,7 +52,7 @@ export const Route = createFileRoute("/settings/organisation")({
   staticData: { frame: "app", navId: "settings", pageName: "Settings" },
   validateSearch: (search: Record<string, unknown>): { view?: View } =>
     search.view === "create" || search.view === "delete" ? { view: search.view } : {},
-  pendingComponent: OrganisationLoading,
+  pendingComponent: () => <SkeletonPage label="the organisation" rows={4} />,
   component: OrganisationPage,
 });
 
@@ -66,15 +67,6 @@ function Header() {
       tabs={<SettingsTabs current="organisation" />}
       linkAs={RouterLink}
     />
-  );
-}
-
-function OrganisationLoading() {
-  return (
-    <div className="flex flex-col gap-8">
-      <Header />
-      <FieldsLoading label="organisation" />
-    </div>
   );
 }
 
