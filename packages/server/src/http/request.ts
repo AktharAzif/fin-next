@@ -18,15 +18,18 @@ export interface RequestOptions {
   docsOrigin: string;
 }
 
-/** The route template: the last matched handler's pattern, never the raw path. */
+/**
+ * The route template, never the raw path: the pattern a layer recorded for this request, or else
+ * the first matched route after the middleware, which is the one Hono dispatches to (it runs the
+ * matches in registration order, and the first route answers). Where a static route and a parameter
+ * route overlap, the later of the two never runs, so it is never the template.
+ */
 export function routeTemplate(c: FinContext): string {
   const set = c.get("route");
   if (set !== undefined) return set;
-  const routes = matchedRoutes(c);
-  for (let i = routes.length - 1; i >= 0; i--) {
-    const route = routes[i];
+  for (const route of matchedRoutes(c)) {
     // Middleware is registered on every path (`*`); a route has a pattern of its own.
-    if (route !== undefined && route.path !== "*" && route.path !== "/*") return route.path;
+    if (route.path !== "*" && route.path !== "/*") return route.path;
   }
   return "unmatched";
 }

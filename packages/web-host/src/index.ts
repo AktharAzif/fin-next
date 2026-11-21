@@ -21,12 +21,18 @@ export {
   createApiHost,
 } from "./api-host.ts";
 export {
+  type BodyRequest,
+  bodyDecision,
   type GateCode,
+  type GateRefusalOptions,
   type GateRequest,
   gateDecision,
   hasBody,
   type OriginGateOptions,
   originGate,
+  type RouteBodyCheckOptions,
+  type RouteRegistration,
+  routeBodyCheck,
   SAFE_METHODS,
 } from "./origin-gate.ts";
 export { type ApiServiceHooks, buildApiService, defineApiService } from "./service.ts";

@@ -12,6 +12,9 @@
 //      any limit is counted); no hook, no auth route;
 //   8. the app's JSON routes, under Hono's basePath("/api");
 //   9. anything else under /api/ is 404.
+// Every route of steps 7 and 8 is mounted through one wrapper that records the route's own pattern
+// for the request line and runs the gate's body check against the route's own registration, so the
+// upload exemption follows the route that runs (origin-gate.ts).
 // Every answer carries Cache-Control: no-store, Fin-Release and ARCHITECTURE §7.12's API headers;
 // errors are RFC 9457 problems; no CORS header is ever sent.
 import type { Clock } from "@fin/core";
@@ -34,7 +37,7 @@ import type { Telemetry } from "@fin/server/telemetry";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { AccessVerifier, accessCheck } from "./access-jwt.ts";
-import { originGate } from "./origin-gate.ts";
+import { originGate, routeBodyCheck } from "./origin-gate.ts";
 
 export type AppName = "console" | "admin" | "verify";
 
@@ -77,10 +80,32 @@ export interface ApiHostOptions {
   accessVerifier?: AccessVerifier;
   fetch?: typeof fetch;
   auth?: AuthHook;
-  /** Registers the app's JSON routes on a Hono app whose basePath is /api. */
+  /**
+   * Registers the app's JSON routes on a Hono app whose basePath is /api. A route's whole chain is
+   * its own registration (`api.post(path, ...handlers)`); an entry registered without a method
+   * (`api.use`, `api.all`) is held to JSON bodies. Errors answer through the host's error handler.
+   */
   routes?: (api: Hono<FinEnv>) => void;
-  /** `METHOD /api/route/:template` entries whose bodies may be multipart uploads. */
+  /**
+   * `METHOD /api/route/:template` entries whose bodies may be multipart uploads: each names a POST,
+   * PUT or PATCH route the app registers, exactly as registered, or the host refuses to start.
+   */
   uploads?: readonly string[];
+}
+
+const UPLOAD_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH"]);
+
+/** Every upload entry names a route the app registered, with its method and pattern exactly. */
+function checkUploads(uploads: readonly string[], api: Hono<FinEnv>): void {
+  const registered = new Set(api.routes.map((route) => `${route.method} ${route.path}`));
+  for (const entry of uploads) {
+    const method = entry.split(" ")[0] ?? "";
+    if (!UPLOAD_METHODS.has(method) || !registered.has(entry)) {
+      throw new TypeError(
+        `the upload "${entry}" names no POST, PUT or PATCH route the app registers`,
+      );
+    }
+  }
 }
 
 export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
@@ -181,6 +206,10 @@ export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
   });
   // 6. The origin gate.
   const uploads = new Set(options.uploads ?? []);
+  const gateRefusal = {
+    telemetry: options.telemetry,
+    refuse: (c: FinContext, code: string) => problem(c, 403, "invalid_origin", { reason: code }),
+  };
   app.use(
     originGate({
       app: options.app,
@@ -189,13 +218,13 @@ export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
         return role === undefined ? undefined : options.ingress.origins[role];
       },
       uploads,
-      telemetry: options.telemetry,
-      refuse: (c, code) => problem(c, 403, "invalid_origin", { reason: code }),
+      ...gateRefusal,
     }),
   );
+  const api = new Hono<FinEnv>().basePath("/api");
   // 7. /api/auth/* through the realm's allowlist only.
   const auth = options.auth;
-  app.all("/api/auth/*", async (c) => {
+  api.all("/auth/*", async (c) => {
     const raw = rawTarget(c).split("?")[0] ?? "";
     const rest = raw.startsWith("/api/auth/") ? raw.slice("/api/auth".length) : "";
     const verdict: AuthClass =
@@ -211,10 +240,20 @@ export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
     return new Response(null, { status: 404 });
   });
   // 8. The app's JSON routes, under /api.
-  const api = new Hono<FinEnv>().basePath("/api");
   api.on(["GET", "HEAD"], "/health", (c) => c.json({ status: "ok" }, 200));
   options.routes?.(api);
-  app.route("/", api);
+  checkUploads(options.uploads ?? [], api);
+  // Steps 7 and 8, mounted in registration order (which is the order Hono dispatches in), each
+  // entry recording its own pattern and holding the body check to its own registration.
+  const bodyCheck = routeBodyCheck({ uploads, ...gateRefusal });
+  for (const route of api.routes) {
+    const registration = { method: route.method, path: route.path };
+    const handler = route.handler;
+    app.on(route.method, route.path, (c, next) => {
+      c.set("route", registration.path);
+      return bodyCheck(c, registration) ?? handler(c, next);
+    });
+  }
   // 9. Everything else: app.notFound.
   return app;
 }

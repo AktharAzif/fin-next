@@ -98,6 +98,32 @@ describe("the console's API half", () => {
     expect(refused).toEqual(cases.map(([, reason]) => reason));
   });
 
+  it("lets a body-less POST or DELETE with no content type through the gate, and refuses a body without JSON", async () => {
+    const { "content-type": _json, ...bare } = json;
+    for (const method of ["POST", "DELETE"]) {
+      const res = await api.send({ host: HOST, path: "/api/nothing-here", method, headers: bare });
+      expect(res.status, method).toBe(404);
+    }
+    const refusalsBefore = api.stdout.filter((l) => l.event === "csrf.refused").length;
+    const refused: { headers: Record<string, string>; body?: string }[] = [
+      { headers: { ...bare, "content-length": "0", "content-type": "text/plain" } },
+      { headers: { ...bare, "transfer-encoding": "chunked" }, body: "{}" },
+      { headers: bare, body: "{}" },
+    ];
+    for (const { headers, body } of refused) {
+      const res = await api.send({
+        host: HOST,
+        path: "/api/nothing-here",
+        method: "POST",
+        headers,
+        ...(body !== undefined ? { body } : {}),
+      });
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      expect(res.json()).toMatchObject({ code: "invalid_origin", reason: "content_type" });
+    }
+    expect(api.stdout.filter((l) => l.event === "csrf.refused").length - refusalsBefore).toBe(3);
+  });
+
   it("lets a well-formed same-origin JSON POST through the gate to the router", async () => {
     const res = await api.send({
       host: HOST,

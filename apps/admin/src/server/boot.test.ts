@@ -92,14 +92,46 @@ describe("Fin Admin's API half", () => {
     expect(forged.status).toBe(401);
   });
 
-  it("refuses a forged token from a non-connector peer at the ingress check: 403", async () => {
-    const res = await api.send({
+  it("refuses a forged token, or none, from a non-connector peer at the ingress check: 403", async () => {
+    const untrusted = () => api.stdout.filter((l) => l.event === "ingress.untrusted_peer").length;
+    const jwtRefused = () => api.stdout.filter((l) => l.event === "access.jwt_refused").length;
+    const [untrustedBefore, jwtBefore] = [untrusted(), jwtRefused()];
+    for (const headers of [
+      { "cf-access-jwt-assertion": `${token.slice(0, -4)}AAAA` },
+      {} as Record<string, string>,
+    ]) {
+      const res = await api.send({
+        host: HOST,
+        path: "/api/health",
+        from: NEIGHBOUR_ADDRESS,
+        headers,
+      });
+      expect(res.status).toBe(403);
+    }
+    expect(untrusted() - untrustedBefore).toBe(2);
+    expect(jwtRefused()).toBe(jwtBefore);
+  });
+
+  it("checks Access before the path check and the origin gate: a tokenless request is 401 wherever it goes", async () => {
+    const refusalsBefore = api.stdout.filter((l) => l.event === "csrf.refused").length;
+    const crossSite = await api.send({
       host: HOST,
-      path: "/api/health",
-      from: NEIGHBOUR_ADDRESS,
-      headers: { "cf-access-jwt-assertion": token },
+      path: "/api/staff",
+      method: "POST",
+      headers: {
+        origin: "https://evil.example.com",
+        "sec-fetch-site": "cross-site",
+        "content-type": "text/plain",
+      },
+      body: "{}",
     });
-    expect(res.status).toBe(403);
+    expect(crossSite.status).toBe(401);
+    expect(crossSite.json()).toMatchObject({ code: "access_required" });
+    for (const path of ["/sign-in", "/"]) {
+      const res = await api.send({ host: HOST, path });
+      expect(res.status, path).toBe(401);
+    }
+    expect(api.stdout.filter((l) => l.event === "csrf.refused")).toHaveLength(refusalsBefore);
   });
 
   it("runs the origin gate after Access: X-Fin-App must be admin", async () => {

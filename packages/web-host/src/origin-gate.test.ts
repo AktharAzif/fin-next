@@ -1,6 +1,6 @@
 // spec 01 §4.4's gate, check by check and in its order.
 import { describe, expect, it } from "vitest";
-import { type GateRequest, gateDecision } from "./origin-gate.ts";
+import { type GateRequest, gateDecision, hasBody } from "./origin-gate.ts";
 
 const EXPECTED = { origin: "https://console.example.net", app: "console" };
 const GOOD: GateRequest = {
@@ -92,5 +92,25 @@ describe("gateDecision", () => {
       decide({ secFetchSite: "cross-site", finApp: undefined, contentType: "text/plain" }),
     ).toBe("fetch_site");
     expect(decide({ finApp: undefined, contentType: "text/plain" })).toBe("app_header");
+  });
+});
+
+describe("hasBody", () => {
+  const body = (init: Record<string, string>) => hasBody(new Headers(init));
+
+  it("sees no body without Content-Length and Transfer-Encoding, or with a length of 0", () => {
+    expect(body({})).toBe(false);
+    expect(body({ "content-type": "application/json" })).toBe(false);
+    expect(body({ "content-length": "0" })).toBe(false);
+    expect(body({ "content-length": " 0 " })).toBe(false);
+    expect(body({ "content-length": "" })).toBe(false);
+  });
+
+  it("sees a body with a positive Content-Length or any Transfer-Encoding", () => {
+    expect(body({ "content-length": "2" })).toBe(true);
+    expect(body({ "content-length": "00" })).toBe(true);
+    expect(body({ "transfer-encoding": "chunked" })).toBe(true);
+    expect(body({ "transfer-encoding": "gzip, chunked" })).toBe(true);
+    expect(body({ "transfer-encoding": "chunked", "content-length": "0" })).toBe(true);
   });
 });

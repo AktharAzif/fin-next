@@ -4,7 +4,7 @@ import { ConnectorPeers } from "@fin/server/ingress";
 import { capture, randomProof } from "@fin/server/testing";
 import { describe, expect, it } from "vitest";
 import { type AccessResult, AccessVerifier } from "./access-jwt.ts";
-import { type AppName, type AuthHook, createApiHost } from "./api-host.ts";
+import { type ApiHostOptions, type AppName, type AuthHook, createApiHost } from "./api-host.ts";
 
 const CONNECTOR = "2001:db8::c1";
 const NEIGHBOUR = "2001:db8::77";
@@ -68,7 +68,8 @@ async function setup(
     init: {
       method?: string;
       headers?: Record<string, string>;
-      body?: string;
+      /** Bytes carry no implied Content-Type, as a string body would (text/plain). */
+      body?: string | Uint8Array;
       peer?: string;
       role?: keyof typeof ORIGINS;
       proof?: string | null;
@@ -79,8 +80,14 @@ async function setup(
     const headers: Record<string, string> = { host: hostName, ...init.headers };
     const proof = init.proof === undefined ? proofs[role]?.[0] : init.proof;
     if (proof !== null && proof !== undefined) headers["fin-ingress-proof"] = proof;
-    if (init.body !== undefined && headers["content-length"] === undefined) {
-      headers["content-length"] = String(Buffer.byteLength(init.body));
+    if (
+      init.body !== undefined &&
+      headers["content-length"] === undefined &&
+      headers["transfer-encoding"] === undefined
+    ) {
+      headers["content-length"] = String(
+        typeof init.body === "string" ? Buffer.byteLength(init.body) : init.body.byteLength,
+      );
     }
     return host.request(
       `http://${hostName}${path}`,
@@ -151,6 +158,18 @@ describe("createApiHost", () => {
     expect(((await res.json()) as { code: string }).code).toBe("payload_too_large");
   });
 
+  it("step 2 runs before step 3: a neighbour's oversized body is refused at the ingress check", async () => {
+    const { send, good, captured } = await setup();
+    const res = await send("/api/anything", {
+      method: "POST",
+      headers: good(),
+      body: "x".repeat(256 * 1024 + 1),
+      peer: NEIGHBOUR,
+    });
+    expect(res.status).toBe(403);
+    expect(captured.events("ingress.untrusted_peer")).toHaveLength(1);
+  });
+
   it("step 5: nothing outside /api/ exists, /api without a slash included", async () => {
     const { send } = await setup();
     for (const path of ["/", "/api", "/sign-in", "/assets/a.js", "/apix"]) {
@@ -158,6 +177,76 @@ describe("createApiHost", () => {
       expect(res.status, path).toBe(404);
       expect(((await res.json()) as { type: string }).type).toBe(`${DOCS}/errors/not_found`);
     }
+  });
+
+  it("step 5 runs before step 6: an unsafe request outside /api/ is 404 and never gated", async () => {
+    const { post, good, captured } = await setup();
+    const crossSite = {
+      ...good(),
+      origin: "https://evil.example.com",
+      "sec-fetch-site": "cross-site",
+    };
+    for (const path of ["/", "/api", "/sign-in"]) {
+      expect((await post(path, crossSite)).status, path).toBe(404);
+    }
+    expect(captured.events("csrf.refused")).toEqual([]);
+  });
+
+  it("step 6, check 4: a body-less POST or DELETE needs no content type; Content-Length and Transfer-Encoding say whether a body came", async () => {
+    const seen: string[] = [];
+    const { send, captured } = await setup("console", {
+      routes: (api) => {
+        api.post("/items/:id/archive", (c) => {
+          seen.push("archive");
+          return c.json({ archived: c.req.param("id") }, 200);
+        });
+        api.delete("/items/:id", (c) => {
+          seen.push("delete");
+          return c.body(null, 204);
+        });
+      },
+    });
+    const bare = {
+      origin: ORIGINS.console,
+      "sec-fetch-site": "same-origin",
+      "x-fin-app": "console",
+    };
+    const archive = "/api/items/itm_1/archive";
+    // No body: no Content-Length at all, or Content-Length 0; no content type, or JSON's.
+    expect((await send(archive, { method: "POST", headers: bare })).status).toBe(200);
+    expect((await send("/api/items/itm_1", { method: "DELETE", headers: bare })).status).toBe(204);
+    expect(
+      (await send(archive, { method: "POST", headers: { ...bare, "content-length": "0" } })).status,
+    ).toBe(200);
+    expect(
+      (
+        await send(archive, {
+          method: "POST",
+          headers: { ...bare, "content-length": "0", "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(seen).toEqual(["archive", "delete", "archive", "archive"]);
+    // Refused: a body-less request with another type, and a body (by length or chunked) with none.
+    const bytes = new TextEncoder().encode("{}");
+    const refused: [Record<string, string>, Uint8Array | undefined][] = [
+      [{ ...bare, "content-length": "0", "content-type": "text/plain" }, undefined],
+      [bare, bytes],
+      [{ ...bare, "transfer-encoding": "chunked" }, bytes],
+    ];
+    for (const [headers, body] of refused) {
+      const res = await send(archive, {
+        method: "POST",
+        headers,
+        ...(body !== undefined ? { body } : {}),
+      });
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      expect(await res.json()).toMatchObject({ code: "invalid_origin", reason: "content_type" });
+    }
+    expect(seen).toHaveLength(4);
+    expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual(
+      refused.map(() => ["content_type", "/api/items/:id/archive"]),
+    );
   });
 
   it("step 6: a cross-site POST, a POST without X-Fin-App and a text/plain POST get 403 invalid_origin", async () => {
@@ -268,6 +357,187 @@ describe("createApiHost", () => {
     expect((await send("/api/missing")).status).toBe(404);
   });
 
+  it("step 6 runs before step 8: a cross-site POST to an app route never reaches it", async () => {
+    const seen: string[] = [];
+    const { post, good } = await setup("console", {
+      routes: (api) => {
+        api.post("/items", (c) => {
+          seen.push("items");
+          return c.json({}, 201);
+        });
+      },
+    });
+    const crossSite = {
+      ...good(),
+      origin: "https://evil.example.com",
+      "sec-fetch-site": "cross-site",
+    };
+    expect((await post("/api/items", crossSite)).status).toBe(403);
+    expect(seen).toEqual([]);
+  });
+
+  describe("check 4's upload exemption follows the route that runs", () => {
+    const multipart = (good: () => Record<string, string>) => ({
+      ...good(),
+      "content-type": "multipart/form-data; boundary=x",
+    });
+    const crossSite = (good: () => Record<string, string>) => ({
+      ...good(),
+      origin: "https://evil.example.com",
+      "sec-fetch-site": "cross-site",
+    });
+
+    it("a static route registered before an overlapping upload route gets no multipart body", async () => {
+      const seen: string[] = [];
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.post("/files/new", (c) => {
+            seen.push("new");
+            return c.json({}, 201);
+          });
+          api.post("/files/:id", (c) => {
+            seen.push("upload");
+            return c.json({}, 201);
+          });
+        },
+        uploads: ["POST /api/files/:id"],
+      });
+      const refused = await post("/api/files/new", multipart(good), "--x--");
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({
+        code: "invalid_origin",
+        reason: "content_type",
+      });
+      expect((await post("/api/files/new", crossSite(good))).status).toBe(403);
+      expect((await post("/api/files/fil_1", multipart(good), "--x--")).status).toBe(201);
+      expect((await post("/api/files/new", good())).status).toBe(201);
+      expect(seen).toEqual(["upload", "new"]);
+      expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual([
+        ["content_type", "/api/files/new"],
+        ["origin_mismatch", "/api/files/new"],
+      ]);
+      expect(captured.events("request").map((l) => [l.status, l.route])).toEqual([
+        [403, "/api/files/new"],
+        [403, "/api/files/new"],
+        [201, "/api/files/:id"],
+        [201, "/api/files/new"],
+      ]);
+    });
+
+    it("an upload route registered first runs for the static path, and keeps its exemption", async () => {
+      const seen: string[] = [];
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.post("/files/:id", (c) => {
+            seen.push("upload");
+            return c.json({}, 201);
+          });
+          api.post("/files/new", (c) => {
+            seen.push("new");
+            return c.json({}, 201);
+          });
+        },
+        uploads: ["POST /api/files/:id"],
+      });
+      expect((await post("/api/files/new", multipart(good), "--x--")).status).toBe(201);
+      expect(seen).toEqual(["upload"]);
+      expect(captured.events("request").map((l) => l.route)).toEqual(["/api/files/:id"]);
+    });
+
+    it("an upload pattern that matches the path does not help the route that runs", async () => {
+      const seen: string[] = [];
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.post("/files/:id", (c) => {
+            seen.push("param");
+            return c.json({}, 201);
+          });
+          api.post("/files/new", (c) => {
+            seen.push("upload");
+            return c.json({}, 201);
+          });
+        },
+        uploads: ["POST /api/files/new"],
+      });
+      expect((await post("/api/files/new", multipart(good), "--x--")).status).toBe(403);
+      expect((await post("/api/files/new", crossSite(good))).status).toBe(403);
+      expect(seen).toEqual([]);
+      expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual([
+        ["content_type", "/api/files/:id"],
+        ["origin_mismatch", "/api/files/:id"],
+      ]);
+    });
+
+    it("Better Auth never gets a multipart body, even where an upload pattern overlaps /api/auth/*", async () => {
+      const seen: string[] = [];
+      const auth: AuthHook = {
+        realm: "developer",
+        classify: () => "allow",
+        handle: (c) => {
+          seen.push("auth");
+          return c.json({ ok: true });
+        },
+      };
+      const { post, good, captured } = await setup("console", {
+        auth,
+        routes: (api) => {
+          api.post("/:area/:id", (c) => c.json({}, 201));
+        },
+        uploads: ["POST /api/:area/:id"],
+      });
+      const res = await post("/api/auth/sign-in", multipart(good), "--x--");
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ reason: "content_type" });
+      expect(seen).toEqual([]);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual(["/api/auth/*"]);
+      expect((await post("/api/items/itm_1", multipart(good), "--x--")).status).toBe(201);
+    });
+
+    it("an upload route's own chain keeps the exemption; an entry registered without a method does not", async () => {
+      const { post, good } = await setup("console", {
+        routes: (api) => {
+          api.post(
+            "/docs/:id",
+            async (_c, next) => {
+              await next();
+            },
+            (c) => c.json({}, 201),
+          );
+          api.use("/media/*", async (_c, next) => {
+            await next();
+          });
+          api.post("/media/:id", (c) => c.json({}, 201));
+        },
+        uploads: ["POST /api/docs/:id", "POST /api/media/:id"],
+      });
+      expect((await post("/api/docs/doc_1", multipart(good), "--x--")).status).toBe(201);
+      expect((await post("/api/media/med_1", multipart(good), "--x--")).status).toBe(403);
+      expect((await post("/api/media/med_1", good())).status).toBe(201);
+    });
+
+    it("refuses to start when an upload names no POST, PUT or PATCH route the app registers", async () => {
+      const routes: ApiHostOptions["routes"] = (api) => {
+        api.post("/items/:id/document", (c) => c.json({}, 201));
+        api.get("/items/:id", (c) => c.json({}));
+      };
+      for (const entry of [
+        "POST /api/items/:id/doc",
+        "POST /api/items/itm_1/document",
+        "POST /items/:id/document",
+        "GET /api/items/:id",
+        "ALL /api/items/:id/document",
+        "post /api/items/:id/document",
+      ]) {
+        await expect(setup("console", { routes, uploads: [entry] }), entry).rejects.toThrow(
+          /names no POST, PUT or PATCH route/,
+        );
+      }
+      await expect(
+        setup("console", { routes, uploads: ["POST /api/items/:id/document"] }),
+      ).resolves.toBeDefined();
+    });
+  });
+
   it("verify answers both of its hosts, each with its own origin and proof, and runs no Better Auth", async () => {
     const { post, good, send } = await setup("verify");
     expect((await send("/api/health", { role: "selfie" })).status).toBe(200);
@@ -284,14 +554,34 @@ describe("createApiHost", () => {
     ).rejects.toThrow(/no Better Auth/);
   });
 
-  it("step 4: Fin Admin checks the Access token on every request, before the gate", async () => {
-    const { send, verifier, captured } = await setup("admin");
+  it("step 4: Fin Admin checks the Access token on every request, after the body limit and before the path check and the gate", async () => {
+    const { send, post, good, verifier, captured } = await setup("admin");
     expect((await send("/api/health")).status).toBe(200);
+    expect((await send("/sign-in")).status).toBe(404);
     verifier.result = { ok: false, reason: "aud" };
     const refused = await send("/api/health");
     expect(refused.status).toBe(401);
     expect(((await refused.json()) as { code: string }).code).toBe("access_required");
     expect(captured.events("access.jwt_refused")[0]).toMatchObject({ reason: "aud" });
+    // Before step 5: a path outside /api/ is 401, not 404.
+    for (const path of ["/sign-in", "/", "/assets/a.js"]) {
+      expect((await send(path)).status, path).toBe(401);
+    }
+    // Before step 6: a cross-site text/plain POST without X-Fin-App is 401, and the gate never runs.
+    const crossSite = await post("/api/staff", {
+      origin: "https://evil.example.com",
+      "sec-fetch-site": "cross-site",
+      "content-type": "text/plain",
+    });
+    expect(crossSite.status).toBe(401);
+    expect(((await crossSite.json()) as { code: string }).code).toBe("access_required");
+    expect((await post("/sign-in", { origin: "https://evil.example.com" })).status).toBe(401);
+    expect((await post("/api/auth/sign-in/email-otp", good())).status).toBe(401);
+    expect(captured.events("csrf.refused")).toEqual([]);
+    // After step 3: an oversized body is 413 before the token is read.
+    const jwtRefusals = captured.events("access.jwt_refused").length;
+    expect((await post("/api/staff", good(), "x".repeat(256 * 1024 + 1))).status).toBe(413);
+    expect(captured.events("access.jwt_refused")).toHaveLength(jwtRefusals);
     verifier.result = "unavailable";
     const down = await send("/api/health");
     expect(down.status).toBe(503);

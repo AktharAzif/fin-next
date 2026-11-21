@@ -126,4 +126,41 @@ describe("the edge", () => {
         .status,
     ).toBe(403);
   });
+
+  it("runs its layers in order: ingress, then plain http, then the 256 KB body limit", async () => {
+    const big = "x".repeat(256 * 1024 + 1);
+    const json = { "content-type": "application/json" };
+    const tooLarge = await api.send({
+      host: HOST,
+      path: "/v4/whoami",
+      method: "POST",
+      headers: { ...HTTPS, ...json },
+      body: big,
+    });
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.json()).toMatchObject({ code: "payload_too_large" });
+    const plain = await api.send({
+      host: HOST,
+      path: "/v4/whoami",
+      method: "POST",
+      headers: { "cf-visitor": '{"scheme":"http"}', ...json },
+      body: big,
+    });
+    expect(plain.status).toBe(403);
+    expect(plain.json()).toMatchObject({ code: "https_required" });
+    const untrusted = api.stdout.filter((l) => l.event === "ingress.untrusted_peer").length;
+    const neighbour = await api.send({
+      host: HOST,
+      path: "/v4/whoami",
+      method: "POST",
+      from: NEIGHBOUR_ADDRESS,
+      headers: { "cf-visitor": '{"scheme":"http"}', ...json },
+      body: big,
+    });
+    expect(neighbour.status).toBe(403);
+    expect(neighbour.json()).not.toMatchObject({ code: "https_required" });
+    expect(api.stdout.filter((l) => l.event === "ingress.untrusted_peer")).toHaveLength(
+      untrusted + 1,
+    );
+  });
 });

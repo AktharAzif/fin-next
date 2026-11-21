@@ -69,7 +69,11 @@ export async function bootApi(
       const proof =
         init.proof === undefined ? proofs[init.role ?? options.roles[0] ?? ""] : init.proof;
       if (proof !== null && proof !== undefined) headers["fin-ingress-proof"] = proof;
-      if (init.body !== undefined) headers["content-length"] = String(Buffer.byteLength(init.body));
+      // A body is framed by its length, unless the test asks for chunked framing (node:http then
+      // writes the chunks itself, and a request may not carry both).
+      if (init.body !== undefined && headers["transfer-encoding"] === undefined) {
+        headers["content-length"] = String(Buffer.byteLength(init.body));
+      }
       return rawRequest({
         port: service.port,
         address: init.from ?? CONNECTOR_ADDRESS,
