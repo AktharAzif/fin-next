@@ -13,6 +13,7 @@ import {
   emailedCodeSignIn,
   endNextPasskeyPrompt,
   enrol,
+  expectHome,
   hold,
   inApp,
   ORIGIN,
@@ -110,7 +111,7 @@ test("@journey a code sign-in is held at the factor step until the authenticator
     inApp(page).getByText("That code isn’t right. Check it and try again."),
   ).toBeVisible();
   await code.fill(right);
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+  await expectHome(page);
   expect(
     (await server.audit()).some(
       (e) => e.event === "staff.signed_in" && JSON.stringify(e).includes("totp"),
@@ -153,8 +154,7 @@ test("@journey a member with both factors is offered the passkey first, and the 
   expect(await viewerState(page)).toBe("factor_step");
   await expect(passkey).toBeEnabled();
   await passkey.click();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
-  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  await expectHome(page);
 });
 
 test("@journey a member with a passkey alone passes the factor step with it", async ({
@@ -191,8 +191,7 @@ test("@journey a member with a passkey alone passes the factor step with it", as
   await passkey.click();
   await expect(passkey).toHaveAttribute("aria-busy", "true");
   prompt.release();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
-  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  await expectHome(page);
   const signedIn = (await server.audit()).filter(
     (e) => e.event === "staff.signed_in" && e.metadata.method === "passkey",
   );
@@ -223,7 +222,7 @@ test("@journey a browser without passkeys uses the authenticator at the factor s
     .fill(await authenticatorCode(key));
   await expect(verify).toHaveAttribute("aria-busy", "true");
   checking.release();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+  await expectHome(page);
 });
 
 test("@journey the code step says a short, expired or limited code, and while it sends and checks", async ({

@@ -2,10 +2,11 @@
 // is the staff realm's library behind its endpoint allowlist (@fin/identity, §4.3) and
 // `/api/health` is the shared host's; every other route is listed here exactly once.
 //
-// Not routed on Saturday, as §14.3 marks them: `GET /api/audit` (Sunday's spill screen, read
-// through `api`'s door, which has no staff operation yet) and the custom staff role writes
-// (stretch 3). Both are recorded in the pull request's open items.
+// Not routed on Saturday, as §14.3 marks it: the custom staff role writes (stretch 3), recorded in
+// the pull request's open items. `GET /api/audit` (Sunday's spill screen) reads through the staff
+// package's two SECURITY DEFINER reads until `api`'s door has its staff operation.
 import { ACCOUNT_POLICIES } from "./account.ts";
+import { AUDIT_POLICIES } from "./audit.ts";
 import { SESSION_POLICIES } from "./session.ts";
 import { STAFF_POLICIES } from "./staff.ts";
 import { SWITCH_POLICIES } from "./switches.ts";
@@ -16,6 +17,7 @@ export const ADMIN_POLICIES = definePolicies([
   ...ACCOUNT_POLICIES,
   ...STAFF_POLICIES,
   ...SWITCH_POLICIES,
+  ...AUDIT_POLICIES,
 ] as const);
 
 export type AdminPolicy = (typeof ADMIN_POLICIES)[number];

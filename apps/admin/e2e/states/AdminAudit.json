@@ -1,0 +1,103 @@
+{
+  "board": "AdminAudit",
+  "canvas": "fin-admin",
+  "route": "/audit",
+  "states": {
+    "list": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey the log lists staff actions newest first; a row opens its entry and steps through the page"
+    },
+    "mine": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey My actions and Rejections this week ask for their view, and an empty view says why"
+    },
+    "rejections": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey My actions and Rejections this week ask for their view, and an empty view says why"
+    },
+    "filtered": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey filters live in the URL as chips, and filters matching nothing offer to clear them"
+    },
+    "noResults": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey filters live in the URL as chips, and filters matching nothing offer to clear them"
+    },
+    "empty": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey before any staff action the log says so, with nothing to filter"
+    },
+    "loading": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey while the log loads the frame says so, then the list draws"
+    },
+    "failed": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a log that fails keeps its header and offers Try again"
+    },
+    "drawer": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey the log lists staff actions newest first; a row opens its entry and steps through the page"
+    },
+    "drawerNoChange": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey the log lists staff actions newest first; a row opens its entry and steps through the page"
+    },
+    "drawerLoading": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a link to an entry opens it: loading, failed with Try again, then the entry; one not in the log says so"
+    },
+    "drawerFailed": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a link to an entry opens it: loading, failed with Try again, then the entry; one not in the log says so"
+    },
+    "drawerNotFound": {
+      "status": "new",
+      "uiRequest": "UR-24",
+      "drawn": false,
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a link to an entry opens it: loading, failed with Try again, then the entry; one not in the log says so"
+    },
+    "paging": {
+      "status": "new",
+      "uiRequest": "UR-23",
+      "drawn": false,
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey older and newer pages follow the cursors"
+    },
+    "noPermission": {
+      "status": "new",
+      "uiRequest": "UR-19",
+      "drawn": false,
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a role without audit.read has no Audit log and cannot open it"
+    }
+  }
+}

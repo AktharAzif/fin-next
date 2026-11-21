@@ -150,6 +150,8 @@ describe("Fin Admin's route policy", () => {
       "staff_roles.get": "staff.read",
       "switches.list": "switches.manage",
       "switches.set": "switches.manage",
+      "audit.list": "audit.read",
+      "audit.get": "audit.read",
     };
     expect(Object.fromEntries(ADMIN_POLICIES.map((p) => [p.id, p.permission]))).toEqual(expected);
     for (const policy of ADMIN_POLICIES) {
