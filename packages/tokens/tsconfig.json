@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom"],
+    "types": [],
+    "resolveJsonModule": true
+  },
+  "include": ["test/**/*.ts", "vite.ts"]
+}

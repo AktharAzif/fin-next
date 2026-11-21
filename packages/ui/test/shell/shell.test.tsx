@@ -3,16 +3,16 @@
 // shell specs'.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AccountMenu, initials, StaffMenu } from "./AccountMenu.tsx";
-import { AppShell, AppShellContent } from "./AppShell.tsx";
-import { AuthLayout } from "./AuthLayout.tsx";
-import { DeploymentBadge, deploymentLabel } from "./DeploymentBadge.tsx";
-import { EdgeToggle } from "./EdgeToggle.tsx";
-import { EnvironmentSwitch } from "./EnvironmentSwitch.tsx";
-import { shellGlyphs } from "./glyph-data.ts";
-import { OrganisationSwitcher } from "./OrganisationSwitcher.tsx";
-import { PageHeading, PageProblem } from "./PageState.tsx";
-import { PlainLink, Sidebar, type SidebarNav } from "./Sidebar.tsx";
+import { AccountMenu, initials, StaffMenu } from "../../src/shell/AccountMenu.tsx";
+import { AppShell, AppShellContent } from "../../src/shell/AppShell.tsx";
+import { AuthLayout } from "../../src/shell/AuthLayout.tsx";
+import { DeploymentBadge, deploymentLabel } from "../../src/shell/DeploymentBadge.tsx";
+import { EdgeToggle } from "../../src/shell/EdgeToggle.tsx";
+import { EnvironmentSwitch } from "../../src/shell/EnvironmentSwitch.tsx";
+import { shellGlyphs } from "../../src/shell/glyph-data.ts";
+import { OrganisationSwitcher } from "../../src/shell/OrganisationSwitcher.tsx";
+import { PageHeading, PageProblem } from "../../src/shell/PageState.tsx";
+import { PlainLink, Sidebar, type SidebarNav } from "../../src/shell/Sidebar.tsx";
 
 const nav: SidebarNav = {
   currentId: "home",

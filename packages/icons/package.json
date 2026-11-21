@@ -1,0 +1,29 @@
+{
+  "name": "@fin/icons",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fin's glyphs (Phosphor 2.1.10 path data, bold and fill), createIcon, the cues and the brand marks (spec 06 §3.1)",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/motion": "workspace:*",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
