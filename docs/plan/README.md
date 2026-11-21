@@ -78,7 +78,8 @@ repository `aktharazif/fin-next` (R12). This plan is committed before any code (
 
 **What the owner does first.** Before 10:00 on Saturday, the owner provides the credentials in
 section 7 and answers nine decisions. Two of them block work until they are answered: [G-06], the
-dependencies, and [UI-12], the ported design layer. The other seven take their defaults at 09:00.
+dependencies, and [UI-12], the ported design layer. [FD-09], the staging zone, is answered at the
+08:00 sitting, since CR-05b is due at 08:30. The other six take their defaults at 09:00.
 
 ## 2. The stack at a glance
 
@@ -239,9 +240,9 @@ the item that completes it.
 | R10 | fin-review: quality, bugs and performance across the codebase and per commit and merge; a faster CI; fast itself | ARCHITECTURE §11.3, §11.6, §11.13; EXECUTION §1.7, §2.4; spec 07 (§2 the engine, §5 caching and budgets, §10 making CI fast, §12 speed targets) | [RV-01], [RV-02], [RV-12], [RV-20], [CI-02] | Partial: local runs with signed receipts; the cache and the CI runner come in H-03 |
 | R11 | Selectable model and effort (high or above); a separate attack model and effort (high or above); Opus or Fable only; a Fable run cannot use an Opus attack, while an Opus run may use a Fable attack | ARCHITECTURE §11.6; spec 07 §3 (options, validator, the 27 valid combinations), §4 (locked sessions) | [RV-03], [RV-06], [RV-07], [RV-19] | Full for the models, the attack pass and tiers N and D, proven per session by each receipt's recorded model. Narrowed on tier S under [RV-06]'s default floor: a gating run there refuses `--effort high`, which gives only an advisory run with no receipt (spec 07 §3.4). Full everywhere if the owner picks `high` everywhere for [RV-06] |
 | R12 | The public repository `aktharazif/fin-next` | ARCHITECTURE §11.1; spec 01 §3; spec 07 §8, §9 (sealed findings) | [G-02], [G-03], [G-09], [CI-01], [CI-08], [CI-15], [UI-12] | Full |
-| R13 | The plan first, saved in the repository | This page; ARCHITECTURE, DECISIONS, EXECUTION and specs 01 to 08; spec 01 §3.1 (the plan as the first commit) | [G-02] | Full |
+| R13 | The plan first, saved in the repository | This page; ARCHITECTURE, DECISIONS, EXECUTION and specs 01 to 08; spec 01 §3.1 (the plan merged as pull request 1, before any code) | [G-02] | Full |
 | R14 | The new designs: the canvases "Fin Dashboard · new design" and "Fin Admin · new design" | ARCHITECTURE §3.4; spec 06 (§3 the design system, §4 the shell and the edge toggle, §8 the screens day by day, appendix A every board and state); the screens section of each day's spec | [UI-02], [UI-09] to [UI-13] | Partial: screens without a board are built as marked pending compositions; full parity in H-02 |
-| R15 | Bun or Node, checked | ARCHITECTURE §3.2; spec 01 §4.1, §5.5 | [P-05], [CI-10] | Full: Node, with the Bun canary job |
+| R15 | Bun or Node, checked | ARCHITECTURE §3.2; spec 01 §4.1, §5.3 (the `bun` job in `ci.yml`) | [P-05], [CI-10] | Full: Node, with the Bun canary job |
 | R16 | The public API, and a good docs site with Try it on Sandbox keys | ARCHITECTURE §13; spec 05 (§3 conventions, §6 routes, §8 the docs site, §9 Try it); spec 04 §25; spec 03 §9 | [AP-01] to [AP-20], [FD-18] | Partial: the reference with Try it and the getting-started guide; other guides, the changelog and search in H-08 |
 
 Each specification also lists the requirements it touches, with sections, in its own requirement map
@@ -255,7 +256,7 @@ package release ages are in UTC (EXECUTION, "How to read this file").
 
 | When | What must be on staging by the end | Where |
 |---|---|---|
-| Sat 21 Nov, 08:00 to 13:30, Phase 0 | The public repository with the plan as its first commit; CI with `gate`, then the ruleset; the fin-review MVP with signed receipts; Railway staging with Postgres 18; the public and admin tunnels, the watcher and the assets-only static deployments; Better Stack receiving lines and errors; one email delivered. The front-door spike S-01 (SP-25) runs at 09:15 | EXECUTION §2; spec 01; spec 07 §15 |
+| Sat 21 Nov, 08:00 to 13:30, Phase 0 | The public repository with the plan merged as pull request 1; CI with `gate`, then the ruleset; the fin-review MVP with signed receipts; Railway staging with Postgres 18; the public and admin tunnels, the watcher and the assets-only static deployments; Better Stack receiving lines and errors; one email delivered. The front-door spike S-01 (SP-25) runs at 09:15 | EXECUTION §2; spec 01; spec 07 §15 |
 | Sat 21 Nov, R6 | Both realms with emailed codes and passkeys, TOTP and backup codes; the mandatory second factor; step-up intents; organisations, team, invitations and roles; Fin Admin's staff permissions and prebuilt roles; adding staff with an intent and an enrolment code; audit and security emails; the frames on the UI SDK with the edge toggle | EXECUTION §3; spec 02; spec 06 §8.2, §8.3 |
 | Sun 22 Nov, R7 | Saturday's spill (08:00 to 11:00); the public API foundation and the edge; the KYC domain, the Sumsub adapter and the sandbox provider; inbound Sumsub webhooks; the hosted verify pages and the selfie host; requests for information; developer webhooks and events; going to Production end to end; Fin Admin's review screens | EXECUTION §4; spec 03; spec 05 §6.3 to §6.7 |
 | Mon 23 Nov, R8 | The money schema and ledger; the `ProviderAdapter` interface; the Fin simulator and the conformance suite; the MassPay adapter (sandbox) in `payments`; virtual accounts, beneficiaries and transfers; reconciliation; the money API and screens; the docs site with Try it on Sandbox keys | EXECUTION §5; spec 04; spec 05 §6.8, §8, §9 |
@@ -291,17 +292,19 @@ In the order they are needed.
 
 | ID | What | Exact scope | Lives in | Needed by |
 |---|---|---|---|---|
-| CR-21 | The private overlay: the staging zone's name; the old product's repository and zone names, the design system's private repository name, the redesign pull request's reference and the port's source commit (the public-safety check's refuse list); the seed inbox address; the Zero Trust team name; the Railway and Better Stack account, workspace and team IDs; the on-call roster and its time zone; the threat model's private annex (spec 08 §2.5); the private provider notes, which hold what Fin observed of a provider's behaviour, fees and account terms (ARCHITECTURE §12.12, spec 04 MS-30). The names Fin gives its own Better Stack teams, schedules and workspaces are public labels ([G-09]) | Not a credential, but never in the repository ([G-09]) | A file on the owner's machine outside the repository, read by `pnpm fin` and the public-safety check | 08:00 |
+| CR-21 | The private overlay, holding everything [G-09] lists: the staging zone's name; the old product's repository and zone names, the design system's private repository name, the redesign pull request's reference and the port's source commit (the public-safety check's refuse list); the staff list (CR-07), the Zero Trust (Access) team name and the Access audience tags; the Cloudflare, Railway and Better Stack account, workspace, team, source and tunnel IDs that no API resolves from a name; the seed inbox address; the on-call roster, its time zone, quiet hours and escalation timings; the time zone of the build clock and of the owner's decision times; the threat model's private annex (spec 08 §2.5); the private provider notes, which hold what Fin observed of a provider's behaviour, fees and account terms (ARCHITECTURE §12.12, spec 04 MS-30); every numeric alert threshold and heartbeat grace period ([OB-13]); and spec 01 §9.2's additions, the static egress addresses and the database CA fingerprint. The names Fin gives its own objects, its Better Stack teams, schedules and workspaces included, are public labels and are not in it ([G-09]) | Not a credential, but never in the repository ([G-09]) | A file on the owner's machine outside the repository, given at the secure prompt to `pnpm fin` and read by the public-safety check; never a GitHub secret, unless the owner adopts spec 01's S0-11 in DECISIONS appendix C | 08:00 |
 | CR-01 | The repository `aktharazif/fin-next`, created public, with Issues, Discussions, Wiki and Projects off; GitHub Pro ([CI-06]) | The owner's own GitHub account, as repository admin. No agent ever holds this login | GitHub | 08:00 |
 | CR-17 | The builder machine account (a separate GitHub user: a collaborator with Write and no Admin) and its tokens; the `fin-builder` and `fin-review` OS users on both machines; an Ed25519 receipt-signing key pair per machine | **Builder token:** a classic token with `public_repo` only (no `workflow`, no `admin:*`, no `repo_deployment`, no `delete_repo`) and a 30-day expiry. If SP-23 shows a collaborator's fine-grained token can reach this repository, use one instead: this repository only, with Contents read and write, Pull requests read and write, and Metadata read. **CI lane token:** the same account with `public_repo` and `workflow`, a 7-day expiry, held only by the CI lane's session. **`fin-review` token:** pushes only `refs/fin-review/receipts/*`, re-runs `gate` and, from H-03, downloads CI runs' sealed artefacts (`public_repo`; SP-24 tests a narrower form). **Receipt keys:** the private half never leaves the `fin-review` keychain, and the public half goes to `docs/review/receipt-keys/` | GitHub; each machine's keychains | 08:15 |
 | CR-02 | Claude Code signed in for the `fin-builder` and `fin-review` OS users on both machines | The owner's subscription, with both Opus and Fable answering in a `fin-review` session (the doctor checks). No settings file that caps effort, sets a model alias or switches provider | Each OS user's login | 08:30 |
 | CR-04 | A new Railway workspace on Pro for staging: two-factor sign-in required, one project with only its default environment, PR environments off, static outbound IPs available | One **project token** for that project's default environment, which can deploy and configure services in it and nothing else. No workspace or account token is stored. If SP-03 shows a call needs one, the owner types a workspace token for that one run and revokes it afterwards | The secure prompt for `pnpm fin`; the `staging` GitHub environment's secret ([CI-03]) | 08:30 |
 | CR-05b | A new staging zone in a new Cloudflare account ([FD-09]), registered through Cloudflare's registrar; Zero Trust on the Free plan | The owner's Cloudflare login, protected by a security key; the Free zone plan | Cloudflare | 08:30 |
-| CR-05 | The operator token on the staging account, owned by the account | **Zone permissions, on the staging zone only:** Zone Read, Zone Settings Edit, DNS Edit, Workers Routes Edit, Transform Rules Edit, Configuration Rules Edit, Cache Rules Edit, Single Redirects Edit, Zone WAF Edit, Logs Edit. **Account permissions, on the staging account only:** Cloudflare Tunnel Edit, Access: Apps and Policies Edit, Workers Scripts Edit, Email Sending Edit, Account API Tokens Edit (to mint CR-08, CR-18 and CR-20), Account Settings Read. A 24-hour expiry (a new token each morning) and a client IP filter to the operator's address where practical. The group names follow Cloudflare's token page, and S-01 records any difference (UNVERIFIED) | The secure prompt, per run, never stored | 08:45 |
-| CR-09 | Better Stack: an organisation with the team `fin-staging` (data region `europe`, two-factor enforced, AI features and MCP off) | Two **team-scoped** tokens for `fin-staging` only: a Telemetry token and an Uptime token, for `pnpm fin monitoring apply`. No global token. Ingest tokens and error DSNs are made by `monitoring apply` and become sealed variables per service | The secure prompt, per run | 09:00 |
+| CR-05 | The operator token on the staging account, owned by the account | **Zone permissions, on the staging zone only:** Zone Read, Zone Settings Edit, DNS Edit, Workers Routes Edit, Transform Rules Edit, Configuration Rules Edit, Cache Rules Edit, Single Redirects Edit, Zone WAF Edit. No Logs permission until Logpush is built in hardening ([FD-08], spec 01 S0-22). **Account permissions, on the staging account only:** Cloudflare Tunnel Edit, Access: Apps and Policies Edit, Workers Scripts Edit, Email Sending Edit, Account API Tokens Edit (to mint CR-08, CR-15's writer tokens, CR-18, CR-20, and a one-run static token for a rollback without CI), Account Settings Read. A 24-hour expiry (a new token each morning) and a client IP filter to the operator's address where practical. The group names follow Cloudflare's token page, and S-01 records any difference (UNVERIFIED) | The secure prompt, per run, never stored | 08:30 |
+| CR-25 | The R2 bucket-administration token on the staging account | Owned by the account; **Workers R2 Storage Edit** on the staging account only, to create the vault's buckets with their locks and lifecycle rules, and nothing else; a 24-hour expiry. The group name follows Cloudflare's token page (UNVERIFIED) | The secure prompt, per run, never stored | 08:30 |
+| CR-15 (operator part) | The vault's `fin-next-staging-ops`, `-escrow` and `-state` buckets and the operator's writer token for each, made by `pnpm fin vault create staging` with CR-25 and CR-05 before any other run | Each token reaches one bucket, object read and write only | The operator's tokens: the secure prompt, per run | About 10:00, made by the first registered run (CR-25 and CR-10 by 08:30) |
+| CR-10 | The staging escrow `age` recipient | The public key only. The identity stays in the owner's password manager, with a printed copy | The public settings ([G-09]) | 08:30 |
+| CR-09 | Better Stack: an organisation with the team `fin-staging` (data region `europe`, two-factor enforced, AI features and MCP off) | Three **team-scoped** tokens for `fin-staging` only: a Telemetry token and an Uptime token for `pnpm fin monitoring apply`, and a separate CI Telemetry token with which `finish-staging` registers releases and `sourcemaps-staging` uploads the build's browser maps ([CI-03], [FD-19]). No global token. Ingest tokens and error DSNs are made by `monitoring apply` and become sealed variables per service | The secure prompt, per run; the CI Telemetry token only as the `staging` GitHub environment's secret `BETTERSTACK_TELEMETRY_TOKEN` ([CI-03]) | 09:00 |
 | CR-06 | Workers Paid on the staging Cloudflare account | The account's Workers plan. Email Sending to any recipient and the watcher's minute cron need it; static asset requests are free on any plan | Cloudflare | 09:30 |
 | CR-08 | The email token and the seed inbox | Minted by `pnpm fin email token staging` with CR-05: owned by the account, **Email Sending Edit only**, for the staging zone's `auth.` and `notify.` sending subdomains, with a client IP filter to `worker`'s static egress addresses (S-03 checks that the filter is honoured) and an expiry of 180 days or less. The seed inbox is the owner's own mailbox, named in CR-21 | A sealed variable on `worker` only | 10:00 |
-| CR-10 | The staging escrow `age` recipient | The public key only. The identity stays in the owner's password manager, with a printed copy | The public settings ([G-09]) | 10:00 |
 
 **Later on Saturday** (EXECUTION §2.9):
 
@@ -309,8 +312,8 @@ In the order they are needed.
 |---|---|
 | 11:00 | CR-18, the watcher's read-only tokens |
 | 11:30 | CR-20, the static deploy token, minted by `pnpm fin` |
-| 12:00 | CR-07, the staff list and the Access settings; the staging identity provider follows by 22:00 ([FD-05]) |
-| 12:00 | CR-15, the vault buckets and their writer tokens |
+| 12:00 | CR-07, the staff list (into the overlay) and the Access settings; the staging identity provider follows by 22:00 ([FD-05]) |
+| 12:00 | CR-15's audit and backups parts: the worker's and backup's writer tokens |
 | From 13:00 | CR-19, the canary key |
 | 17:00 | CR-22, fin-review's ingest token and nightly heartbeat URL |
 | 18:00 | CR-13, the Sumsub sandbox request |
@@ -323,13 +326,14 @@ CR-23 (fin-review's CI ingest token) and CR-24 (each machine's `age` identity) c
 
 These are DECISIONS' short list. Each has a default. The two marked **blocking** hold back the work
 that depends on them until the owner gives an explicit answer. The other seven take their default at
-09:00 if the owner has not answered.
+09:00 if the owner has not answered, except [FD-09], which needs its answer at the 08:00 sitting
+because CR-05b is due at 08:30.
 
 | # | Decision | Default | Blocks |
 |---|---|---|---|
-| 1 | [G-06] The starting dependency set, as amended overnight | Approve the set in [G-06], with no exception. The UI SDK (`@ui-sdk/react` and `@ui-sdk/core`, one exact version) replaces Radix, Phosphor, `clsx` and `tailwind-merge`. It is installed at the newest beta that has cleared the release age when the install runs: `0.1.0-beta.9` at P0-4 (cleared at 03:02 UTC), or `0.1.0-beta.10` if the install runs after 09:47 UTC. It then moves to `0.1.0-beta.13` in a pull request of its own after 12:24 UTC on Sunday. `wrangler` is pinned at one exact version in `tools/static-deploy` only, and any install script it brings needs the owner's own yes | **Blocking**: nothing is installed without an explicit yes |
+| 1 | [G-06] The starting dependency set, as amended overnight | Approve the set in [G-06] as recorded, with no release-age exception. The UI SDK (`@ui-sdk/react` and `@ui-sdk/core`, one exact version) replaces Radix, Phosphor, `clsx` and `tailwind-merge`. It is installed at the newest exact beta that has cleared the three-day release age when the install pull request runs: `0.1.0-beta.9` at P0-4 (cleared at 03:02 UTC), or `0.1.0-beta.10` only if the install pull request runs after 09:47 UTC. It then moves to `0.1.0-beta.13` in a pull request of its own after 12:24 UTC on Sunday. `wrangler` is pinned at one exact version in `tools/static-deploy` only, and any install script it brings needs the owner's own yes. `@types/react` and `@types/react-dom`, and the `overrides` entry that pins `@better-auth/core` ([SA-02]), are outside that set: each needs its own owner yes at the 08:00 sitting | **Blocking**: nothing is installed without an explicit yes |
 | 2 | [UI-12] May the ported design layer (from the old product's redesign branch), part of whose text comes from the design system's private source, the logo's paths, and the verbatim copies of `fin-motion.css`, the export's token file and its font files be public? | Yes. Private-document references are stripped, sample domains become `example.com`, the notices are extended, and the logo stays under [G-03]'s reservation of brand assets | **Blocking** for the port, and so for every screen. Without a yes, screens are built fresh from the specifications |
-| 3 | [FD-09] The staging zone | A new staging zone in a new Cloudflare account (CR-05b). The fallback is the shared zone's `-next` names, recorded as an accepted risk | The front door and S-01 |
+| 3 | [FD-09] The staging zone | A new staging zone in a new Cloudflare account (CR-05b). The fallback is the shared zone's `-next` names, recorded as an accepted risk | The front door and S-01. Answered at the 08:00 sitting, not by the 09:00 default, because CR-05b is needed by 08:30 |
 | 4 | [OB-18] May the watcher stay a Cloudflare Worker under the owner's rule of "no vendor locked in items like workers"? | Yes: plain `fetch` calls on a minute cron, with no Workers-only binding, no application traffic and no write credential. This departs from the owner's words. The non-Worker alternative is the same code on a small virtual machine at another provider, outside Railway, for a few US dollars a month per environment (UNVERIFIED), with one more vendor and an operating system to patch. Better Stack's monitors alone cannot read Cloudflare's or Railway's configuration | The watcher, which must be live before the first staging deploy |
 | 5 | [SA-05] A mandatory second factor for privileged dashboard roles, checked on every request across organisations (R6) | Yes | The identity spec at 10:00 |
 | 6 | [SA-12] Fin Admin's granular permission catalogue and prebuilt roles (R6) | 26 permissions; Viewer, Compliance, Operator and Admin; custom roles | The staff spec at 11:00 |
@@ -379,19 +383,26 @@ later, from Saturday to before production, are listed by deadline in DECISIONS a
 
 ### 8.3 Precedence
 
-The plan has one order of precedence. Every specification repeats it in its opening section, and
-where two texts disagree the higher one binds.
+The plan has one order of precedence. It is written once, here, and DECISIONS.md and every
+specification copy this sentence word for word in their opening section:
+
+> The plan's one order of precedence, highest first: (1) the owner's decisions of 21 Nov 2026;
+> (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+> specifications, and between two specifications the one that owns the area, as README §8.3 lists
+> the owners.
+
+Where two texts disagree, the higher one binds.
 
 1. **The owner's decisions of 21 Nov 2026** (section 4). DECISIONS.md records them in its table
    "The owner's decisions of 21 Nov 2026, overnight" and quotes the owner's words in each block.
    Spec 01 §1 lists them as OD-1 to OD-6.
 2. **DECISIONS.md**, the only register, appendix C included. A decision that is still for the owner
    is built on its default, and a later answer changes the code through a reviewed pull request.
-3. **The specification that owns the area**, for that area (the table below). Spec 08 owns the
-   cross-cutting rules of audit, security email, personal data, scrubbing, secrets and observability,
-   and holds over a day's specification on them.
-4. **ARCHITECTURE.md.**
-5. **EXECUTION.md.**
+3. **ARCHITECTURE.md.**
+4. **EXECUTION.md.**
+5. **The specifications.** Between two specifications, the one that owns the area holds for that
+   area (the table below). Spec 08 owns the cross-cutting rules of audit, security email, personal
+   data, scrubbing, secrets and observability, and holds over a day's specification on them.
 
 This page and the research notes (section 8.5) rank below all five.
 
@@ -415,9 +426,11 @@ changes or not adopted, and each is also an open item for the owner:
 | SF-09 | The `since` and `import` review modes (S7-02, S7-03) | [RV-02] | Folded |
 | SF-10 | Audit context outside the hash chain, kept 13 months (D08-02, D08-34) | [BC-03] | Folded |
 
-A spec decision that disagrees only with ARCHITECTURE.md or EXECUTION.md needs no row: the owning
-specification holds over both, and the steward corrects their text in the plan's first follow-up
-pull request.
+A spec decision that disagrees only with ARCHITECTURE.md or EXECUTION.md needs no row, but it does
+not bind on its own: both rank above every specification, so their text holds and the spec yields
+until that file is changed to match in a reviewed pull request. Where the higher file has already
+been amended to match (spec 07 §1.3 lists such changes), the decision binds; the steward proposes
+any other such change in the plan's first follow-up pull request.
 
 **Which specification owns which area.** A screen's behaviour (its API calls, refusals, audit events
 and copy) belongs to the day's specification; its components, frame and states belong to spec 06.
@@ -446,10 +459,10 @@ DECISIONS.md before work that depends on it merges.
 | `Dnn` (D1 to D57) | A decision of the 19 Nov plan, cited in a block as "Was Dnn" | DECISIONS §17 |
 | `EQ-nn` | An owner question of EXECUTION's first draft, with the decision that now answers it | EXECUTION §10 |
 | `PG-nn` | A production gate, PG-01 to PG-14. `G-` belongs to governance alone | EXECUTION §7.3 |
-| `SP-nn`, `S-nn` | A spike; EXECUTION's four front-door spikes (S-01 is SP-25) | ARCHITECTURE §11.11; EXECUTION §2.6; spec 01 §11 (SP-25, SP-26) |
+| `SP-nn`, `S-nn` | A spike; EXECUTION's four front-door spikes (S-01 is SP-25) | ARCHITECTURE §11.11; EXECUTION §2.6; spec 01 §11 (SP-25, SP-26); spec 03 §22 (SP-27) |
 | `FW-Cnn`, `FW-Snn`, `FW-Xnn` | The framework verdict's conditions, spikes and reversal triggers | ARCHITECTURE §3.4 |
 | `CR-nn` | A credential or account the owner provides | EXECUTION §0.3, §2.9 |
-| `P0-n`, `P0-<letter>` | A Phase 0 step in order (P0-1 onwards), and a Phase 0 lane (P0-B to P0-G; spec 07 splits P0-C into P0-C1 to P0-C3) | EXECUTION §2.1, §2.10; spec 07 §13 |
+| `P0-n`, `P0-<letter>` | A Phase 0 step in order (P0-1 onwards), and a Phase 0 lane (P0-B to P0-G; spec 07 runs P0-C, one lane on machine A, as sessions P0-C1 to P0-C3) | EXECUTION §2.1, §2.10; spec 07 §13 |
 | `EX-nn`, `NB-nn`, `RK-nn`, `CUT-nn`, `H-nn`, `L-<day>-nn` | Working rules, never-cut security rules, risks, cut lines, hardening workstreams (spec 07 splits H-03 into H-03a to H-03d), lanes | EXECUTION.md |
 | `C1` to `C4` | The day's checkpoints: triage at 08:00, midday at 13:00, the cut decision at 18:00, deploy at 22:00 | EXECUTION §1.10 |
 | `AC-<day>-nn` | A day's acceptance criterion: `AC-P0`, `AC-SAT`, `AC-SUN`, `AC-MON`. EXECUTION holds the first numbers; the day's specification adds later ones | EXECUTION §2.11, §3.6, §4.6, §5.6; spec 01 §13, spec 02 §21, spec 03 §21, spec 04 §35 |
@@ -513,6 +526,7 @@ sources are kept in a private design repository.
 [FD-02]: DECISIONS.md#fd-02-production-origin-tls
 [FD-05]: DECISIONS.md#fd-05-fin-admin-behind-cloudflare-access
 [FD-06]: DECISIONS.md#fd-06-turnstile
+[FD-08]: DECISIONS.md#fd-08-cloudflare-logs-to-better-stack
 [FD-09]: DECISIONS.md#fd-09-the-staging-zone
 [FD-10]: DECISIONS.md#fd-10-the-production-zones-and-the-docs-domain
 [FD-11]: DECISIONS.md#fd-11-the-operators-database-route

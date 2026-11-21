@@ -99,7 +99,7 @@ What each requirement will look like when staging is complete, full or partial, 
 | edge toggle | The sidebar's collapse control: a small round chevron on the sidebar's right edge (§3.4) |
 | kill switch | A switch that stops one kind of work at once without a deploy (§15.1) |
 | tier S | A path class that gets the deepest review and the attack pass (§11.6) |
-| control paths | The paths that define the review and its gate: `.github/**`, `tools/fin-review/**`, `tools/layout.json`, `docs/review/**`, `.claude/**`, `CODEOWNERS` and the rules files (§11.1) |
+| control paths | The paths that define the review, its gate and what deploys, which need the owner ([CI-14]): `.github/**`, `tools/fin-review/**`, `tools/layout.json`, `docs/review/**`, `.claude/**`, `CODEOWNERS`, the rules files (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `SECURITY.md`), `pnpm-workspace.yaml`, `scripts/check-supply-chain.mjs`, `scripts/public-safety.mjs`, `ops/fin/**`, `ops/docker/**`, the `_headers` templates (`packages/web-host/src/static/**`), each app's `static.json`, and `tools/static-deploy/**` (§11.1) |
 | builder account | The GitHub machine account agents use; it is a collaborator, not an admin, and its tokens cannot change workflows, settings or environments (§11.1) |
 | `test` and `release` | The two targets of every image. Only `test` holds development seams; `release` is what deploys (§3.5) |
 
@@ -426,9 +426,9 @@ connector back to zero.
 **F19. A leaked key reported by GitHub.** GitHub posts to `api.<zone>/hooks/github/secret-scanning`.
 `edge` verifies the ECDSA signature with GitHub's published key set (cached, refreshed at most once
 per interval whatever identifier arrives), checks each token's checksum with every known salt and
-its HMAC with the pepper, and calls `api`'s key-revoke door with the key ID alone. `api` revokes a
-live key at once, writes the audit event as the system, queues the security email and writes an
-alerting line.
+its HMAC with the pepper, and calls `api`'s key-revoke door with the key ID alone. `api` revokes the
+reported key at once, whatever its mode ([SA-21]), writes the audit event as the system, queues the
+security email and writes an alerting line.
 
 **F20. Telemetry.** Each process keeps one batch of lines per unit of work, scrubs them, writes the
 same scrubbed line to stdout for Railway, and ships the batch to Better Stack after the response.
@@ -491,7 +491,7 @@ adds (§3.4), land in Phase 0 with the steward.
 | `apps/api` | Core service. The same image runs `api` (`dist/main.js`), `worker` (`--worker`) and `migrate` (`--migrate`). Worker code lives in `apps/api/src/worker/<area>/` | S |
 | `apps/payments` | Money service: the money door, the provider hook door (`src/hooks/`) and the money jobs (`src/jobs/`) in one process | S |
 | `apps/console`, `apps/admin`, `apps/verify` | Web apps on Shape B (§3.4): a Vite single-page app in `src/client/`, built to static files for a static deployment, with its committed `static.json` (verify has two entries, the hosted pages and the selfie document, each with its own), and its Hono API server in `src/server/`, which serves `/api/*` only. No `_headers` lives in an app: the deploy renders it from `packages/web-host`'s template for the app's profile (§5.16) | S for `src/server/` and `static.json`; N for `src/client/` |
-| `apps/docs` | Docs site: a static build of the guides and the Scalar reference for a static deployment, with its `static.json`. It has no server and no `_headers` of its own (its profile is a template in `packages/web-host`, §5.16); its pages report failures to the edge ([P-07], §13.10) | S for the Try-it guard, N otherwise |
+| `apps/docs` | Docs site: a static build of the guides and the Scalar reference for a static deployment, with its `static.json`. It has no server and no `_headers` of its own (its profile is a template in `packages/web-host`, §5.16); its pages report failures to the edge ([P-07], §13.10). Phase 0 ships a static placeholder page under the `docs` profile with no `/api/` path (P0-G, EXECUTION §2.10); the docs lanes build the site from Sunday | S for the Try-it guard, N otherwise |
 | `apps/connector` | The connector supervisor that runs `cloudflared` (§5.4) | S |
 | `packages/server` | Runtime for every Node service: config, ingress, caller signatures and the door matrix, database pool and unit of work, background registry, shutdown, health, scheduler lease and duty state, job claims, kill-switch reads, `deliveryFetch`, the private-DNS cache, log, telemetry (`src/telemetry/`), error reporting | S |
 | `packages/web-host` | The host package the app API services share (FW-C02): the API front door in FW-C03's order, the origin gate, the error envelope, health and readiness, the scrubbing console, the route-policy test helper; the `_headers` templates of every static profile (`src/static/`: `app`, `hosted`, `selfie` and `docs`; a control path) and the renderer that writes each artifact's `_headers` and `env.json` at deploy; and the header-matrix test over every rendered `_headers` | S |
@@ -522,6 +522,7 @@ adds (§3.4), land in Phase 0 with the steward.
 | `ops/fin` | `pnpm fin`: Railway, Cloudflare (DNS, rules, tunnels, Access, Workers routes), R2, Better Stack and GitHub operations. Node built-ins only, no npm dependency | S, control path |
 | `ops/monitoring` | Alerts, monitors, heartbeats, policies and dashboards as JSON, the event catalogue (`catalog/<area>.ts`), alert fragments (`<env>/alerts/<area>.json`) | S |
 | `ops/docker` | `app.Dockerfile` (one, parameterised by service, with `test` and `release` targets), `connector.Dockerfile`, `backup.Dockerfile`. The browser apps' static builds are not images | S, control path |
+| `ops/backup` | The backup uploader that `backup.Dockerfile`'s image runs (spec 01 S0-16); created in Phase 0 by P0-F (EXECUTION §2.10) | S |
 | `ops/environments` | `staging.json`, `production.json`, `dr.json`: the public desired state, including each tunnel's host-role map and each app host's static deployment and routes. No private values ([G-09]) | S |
 | `ops/credentials.json` | The credential inventory: names, holders, issuers, dates, cadences and runbooks, never values ([OP-05]) | S |
 | `ops/watcher` | The watcher Worker (§10.6), uploaded by `pnpm fin watcher deploy` | S |
@@ -614,14 +615,14 @@ reviewed Dependabot pull request once it clears. Re-check every pin when it is i
 | `@hono/zod-openapi` | 1.6.3 | OpenAPI 3.1 from the route schemas |
 | `drizzle-orm`, `drizzle-kit` | 0.45.4, 0.31.11 | `drizzle-orm/node-postgres` only; never 1.0 release candidates |
 | `pg` | 8.23.1 | TLS options set in code, never in the URL |
-| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov (it clears the release age at 10:53 UTC) in one dependency pull request | The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin takes [SA-27]'s fast path instead. `overrides` pins `@better-auth/core`; never `1.8.0-beta` ([SA-02]) |
+| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov (it clears the release age at 10:53 UTC) in one dependency pull request | The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin takes [SA-27]'s fast path instead. `overrides` pins `@better-auth/core`, outside [G-06]'s set and on the owner's own yes; never `1.8.0-beta` ([SA-02]) |
 | `@better-auth/utils`, `better-call` | the exact versions the pinned `better-auth` declares | `@better-auth/utils` 0.5.1 for 1.7.27 |
 | `@simplewebauthn/browser` | 13.3.0 | The passkey plugin's peer; server 13.3.2 comes with the plugin |
 | `@sentry/core`, `@sentry/react`, `@sentry/vite-plugin` | 11.14.0, then 11.16.0 | Pointed at Better Stack; the browser integrations that inject styles (feedback, replay) stay off. The Vite plugin brings Sentry's new CLI under the FSL-1.1-Apache-2.0 licence, which the dependency rules require us to name |
 | `react`, `react-dom` | 19.3.1 | |
 | `vite`, `@vitejs/plugin-react` | 8.3.8, 6.3.0 | One group ([FW-01], FW-C18). `html.cspNonce` is never set; `build.assetsInlineLimit: 0` |
 | `tailwindcss` | 4.3.5 | |
-| `@ui-sdk/react`, `@ui-sdk/core` | the newest beta that clears the release age when the install runs (`0.1.0-beta.9` at Saturday's 09:00 install); both to `0.1.0-beta.13` together after 12:24 UTC on Sunday 22 Nov, in one dependency pull request | Exact, one version for both, listed only by `packages/ui`. Apache-2.0; no runtime dependency and no install script; trusted publishing with provenance since beta.2; one npm maintainer; a beta under Vercel's beta terms ([UI-10], [G-06], §3.4) |
+| `@ui-sdk/react`, `@ui-sdk/core` | the newest exact beta that has cleared the three-day release age when the install pull request runs: `0.1.0-beta.9` at P0-4, or `0.1.0-beta.10` only if the install pull request runs after 09:47 UTC ([G-06]); both to `0.1.0-beta.13` together after 12:24 UTC on Sunday 22 Nov, in one dependency pull request | Exact, one version for both, listed only by `packages/ui`. Apache-2.0; no runtime dependency and no install script; trusted publishing with provenance since beta.2; one npm maintainer; a beta under Vercel's beta terms ([UI-10], [G-06], §3.4) |
 | `wrangler` | one exact version that clears the release age | In `tools/static-deploy` only, never in an app or an image ([FD-19], [G-06]); each install script it brings needs the owner's yes. Replaced by `pnpm fin static deploy` if SP-26 shows Cloudflare's API alone suffices |
 | `@scalar/api-reference` | 1.78.1 | The version the old product themed and tested; a monthly reviewed bump with a bundle diff |
 | `fuse.js` | the exact version Scalar resolves | Docs search; no new code |
@@ -700,8 +701,8 @@ mode), `@axe-core/playwright`, and a QR encoder package (§7.12).
   Saturday carries only its must-have states.
 - **Versions** ([G-06]). `@ui-sdk/react` and `@ui-sdk/core` stay at the same exact version: the
   newest beta that clears the three-day release age when the install pull request runs
-  (`0.1.0-beta.9` at Saturday's 09:00 install, cleared at 03:02 UTC; beta.10 clears at 09:47
-  UTC). One dependency pull request moves both to `0.1.0-beta.13` after 12:24 UTC on Sunday 22 Nov, before Monday's money screens. Installing beta.13 on Saturday
+  (`0.1.0-beta.9` at P0-4, cleared at 03:02 UTC; `0.1.0-beta.10` only if the install pull request
+  runs after 09:47 UTC, when it clears). One dependency pull request moves both to `0.1.0-beta.13` after 12:24 UTC on Sunday 22 Nov, before Monday's money screens. Installing beta.13 on Saturday
   would need a dated, exact-version exclusion and the owner's explicit yes, so it is never the
   default. Every bump reads the registry facts and the provenance (trusted publishing from
   `release.yml` on `main` since beta.2), reads every changelog section (each is labelled "Patch
@@ -813,7 +814,7 @@ FW-C17, FW-C20 and FW-C21).
 | FW-C06 | **Injected styles, with no nonce.** The UI SDK writes its CSS through one function. With the nonce-less `csp-nonce` meta present it adopts constructed style sheets, which `style-src 'self'` does not block: 13 violations without the tag and none with it, in Chromium (D1, D3). Each app's global stylesheet starts with `@layer ui-sdk;`, without which the SDK's reset quietly beats Fin's Tailwind utilities with no violation at all (D3), so the kit spec asserts computed styles, not only the absence of violations. Fin's code sets dynamic styles only through the CSSOM (React `style` props in the browser), never `setAttribute("style")`. Sentry's browser integrations that inject styles (feedback, replay) stay off |
 | FW-C07 | **Route policy: unlisted means refused.** Each JSON route is listed with its guard (`requirePerson`, `requireActor` or `requireStaff`), its permission, its step-up kind (`none`, `window` or `intent`), its input schema and its audit event, in one fragment per area. A test walks the Hono app's routes and fails on any route missing from the policy or without a schema. The per-route refusal tests are generated from it |
 | FW-C08 | **The client.** One `api()` wrapper and the router's loaders; no TanStack Query at first. Calls are relative (`/api/...`) and same-origin, and every unsafe method carries `X-Fin-App: <app>`. `api()` maps the error envelope: `step_up_required` opens the root StepUp modal for the named intent and, after the proof, re-sends the same request once with the intent ID and the same idempotency key; `second_factor_required`; 401 goes to `/sign-in?next=`; 429 honours `Retry-After`; a network failure, or an answer that is not Fin's JSON (a Cloudflare block, a 502, or a 530 or 1033 when no connector is healthy), is its own type, "couldn't reach Fin", with the status; a different `Fin-Release` shows the reload toast; on Fin Admin, `redirect: "manual"`, and an opaque redirect (the Access session ended) reloads the page. Types come from `packages/app-contracts`, with a contract test per route. Hono's `hc` types are not used |
-| FW-C09 | **The origin gate** ([SA-44]), on every unsafe method (POST, PUT, PATCH, DELETE), failing closed, in this order: `Origin` must equal the configured app origin, and a missing or `null` Origin is refused, with no `Referer` fallback; `Sec-Fetch-Site`, when present, must be `same-origin`, which refuses a sibling host on its own; `X-Fin-App` must name the app; a body must be `application/json`, except named upload routes, which take `multipart/form-data`, and body-less POSTs such as sign-out carry no content type. A refusal answers 403 `invalid_origin` and writes one `csrf.refused` line with the reason. The only exemptions: `GET /api/auth/callback/google`, a top-level navigation (`POST /api/auth/callback/*` is refused), and the report endpoints under `/api/monitoring/`, which the browser itself posts, read no cookie, change nothing and are parsed as untrusted input (§10.5). Hono's `csrf()` is not relied on, and there are no CORS headers. Better Auth's own origin check runs underneath (§7.5). A sign-in redirect's `next` must be a path that starts with a single `/` and is in the route list |
+| FW-C09 | **The origin gate** ([SA-44]), on every unsafe method (POST, PUT, PATCH, DELETE), failing closed, in this order: `Origin` must equal the configured app origin, and a missing or `null` Origin is refused, with no `Referer` fallback; `Sec-Fetch-Site`, when present, must be `same-origin`, which refuses a sibling host on its own; `X-Fin-App` must name the app; a body must be `application/json`, except named upload routes, which take `multipart/form-data`, and body-less POSTs such as sign-out carry no content type. A refusal answers 403 `invalid_origin` and writes one `csrf.refused` line with the reason. The only exemption is `GET /api/auth/callback/google`, a top-level navigation (`POST /api/auth/callback/*` is refused), as [SA-44] words it. The report endpoints under `/api/monitoring/` are not exempt: [SA-44] lists no such exemption, and the browser posts those reports itself, with no `X-Fin-App` and a body that is not JSON, so the gate refuses them as written (§10.5). Exempting them, because they read no cookie, change nothing and are parsed as untrusted input, needs the owner to amend [SA-44] through DECISIONS appendix C; EXECUTION §3.1, spec 01 §4.4, spec 02 §2.3 and AC-SAT-27 would then follow. Hono's `csrf()` is not relied on, and there are no CORS headers. Better Auth's own origin check runs underneath (§7.5). A sign-in redirect's `next` must be a path that starts with a single `/` and is in the route list |
 | FW-C10 | **First load.** The document and assets come from Cloudflare's edge, with no origin round trip. The entry starts the viewer request and the matched route's data in parallel, and the API is the guard: a signed-out viewer gets 401 and the client goes to `/sign-in?next=`. Nothing runs before the static document, so there is no server redirect for a document without a session cookie. `autoCodeSplitting` is on and the entry is `modulepreload`ed. CI enforces bundle budgets ([FW-04]). D3 measured 177 KB gzip for React, the router and the SDK parts of the console's frame before any Fin code (against 250 KB), and about 123 KB for verify's sign-in set (against 150 KB): routes are split, Select, Combobox, Drawer and DateRangePicker stay out of first routes, and the phone sheet and Sentry load lazily |
 | FW-C11 | **Loaders and pending UI.** `loaderDeps` carry only the search params a loader reads; `view` and `tab` never enter a list route's deps, so opening a drawer or switching a tab does not refetch the list (a test counts the calls, FW-S5). Mutations call `router.invalidate()` for what they changed. Pending UI keeps the router's defaults (1000 ms and 500 ms). Every route has a `pendingComponent` that draws its own skeleton |
 | FW-C12 | **The boundary.** A web app's client code depends on no server package and imports no `node:*`; a dependency check enforces it. Builds take public settings only, and CI scans the built client and the static artifact for server-only markers, setting names, secret shapes and source maps |
@@ -1291,7 +1292,7 @@ staging's "live" exercises the real adapters end to end on synthetic data. A thi
 | Railway staging (15 services, three of them at 0 replicas, standalone Postgres) | about 30 to 40 USD |
 | Railway static egress addresses (7 services per environment: the four connector services, two of them standby, and `api`, `worker` and `payments`) | unpublished; read from the staging invoice preview (SP-08) |
 | Railway egress: API responses through the connectors (the browser apps' files are not on Railway: Cloudflare serves them), PITR uploads (B2: 60 to 150 GB a month), dumps to R2, telemetry | 0.05 USD per GB; Railway may throttle above 100 GB a month, so it is told in writing beforehand and `pnpm fin verify` alerts at 70 GB ([P-22]) |
-| Cloudflare: production zones (main and pages Pro, admin Free, [FD-04]), Workers Paid on each account that sends email or runs the watcher; requests for static assets are free | about 50 to 65 USD |
+| Cloudflare: production zones (main and hosted Pro, admin Free, [FD-04]), Workers Paid on each account that sends email or runs the watcher; requests for static assets are free | about 50 to 65 USD |
 | Better Stack: responders, extra monitors and heartbeats, telemetry | about 90 to 160 USD (plus 208 to 250 USD if the audit-log add-on is bought, [AU-05]) |
 | GitHub Pro ([CI-06]) | 4 USD |
 | Review model spend (fin-review), within the caps of [RV-13] | to be measured; EXECUTION estimates 30 to 60 USD per tier S gate, so likely several hundred USD a day during the build once reviews bill through the API, with daily and monthly caps and the `review-cost-high` alert |
@@ -1714,13 +1715,23 @@ settings file and reports drift; the watcher checks them every minute.
 
 - One **account-owned** operator token per environment for `pnpm fin` (prefix `cfat_`): Zone DNS,
   Zone Settings, rule sets (transform, cache, configuration, redirect, WAF), Cloudflare Tunnel Edit,
-  Zero Trust (Access apps and policies) Edit, Email Sending, Logs Write, Workers Scripts Edit (the
-  static deployments and the watcher), Workers Routes Edit, and Account API Tokens to mint the email
-  token. Short expiry, limited to the operator's address where practical, given through the secure
-  prompt each time and never stored.
+  Zero Trust (Access apps and policies) Edit, Email Sending, Workers Scripts Edit (the static
+  deployments and the watcher), Workers Routes Edit, and Account API Tokens to mint the email,
+  watcher, static-deploy and vault writer tokens. The Logs permission is added only when Logpush is
+  built in hardening ([FD-08]), so the token holds nothing it does not use. Short expiry, limited to
+  the operator's address where practical, given through the secure prompt each time and never stored.
+- An **R2 bucket-administration** token per vault account (CR-25 in staging): Workers R2 Storage
+  Edit only, to create the vault's buckets with their locks and lifecycle rules (§6.10) and nothing
+  else; given through the secure prompt for `pnpm fin vault create` and the R2 rotation runbook only,
+  and never stored.
 - A **static-deploy** token per environment: Workers Scripts Edit on the account, nothing else
-  ([FD-19]); the routes are made once by `pnpm fin provision` with the operator token. Staging's sits
-  in the protected `staging-static` environment; production's comes from the secure prompt. A token
+  ([FD-19]); the routes, DNS records and zone rules are made by `pnpm fin` with the operator token
+  (`routes apply` and `rules apply` on Saturday, `pnpm fin provision` before production, [P-13]).
+  Staging's sits
+  in the protected `staging-static` environment. Where production's lives depends on who uploads
+  production's static files, which is the owner's open question ([FD-19]): the default put to the
+  owner is the operator's launcher, with the token given at the secure prompt; the other answer is an
+  Actions job in a `production` environment that holds it. A token
   that can upload a version could also upload code onto the app routes, so it is an interception
   credential like a tunnel token: it rotates with the front door's secrets ([FD-12]), and the watcher
   checks every minute what it can touch (§5.9).
@@ -1784,7 +1795,7 @@ change is validated against the map before it applies.
 | SP-04c Access at the connector | `access.required` at the admin connector refuses a request without a valid Access token; the app still receives and validates `Cf-Access-Jwt-Assertion` | §5.3, §5.10 |
 | SP-04d Keep-alive | Under load, 502s from cloudflared's 90 s idle reuse against Node's 95 s `keepAliveTimeout` stay at noise level | §3.5 timeouts |
 | SP-04e Protocol | `http2` connectors are stable on Railway; QUIC (UDP 7844) recorded as working or not | §5.4 |
-| SP-04f The watch | The watcher lists each tunnel's connectors with count, version and origin address; a connector run from outside Railway with a staging token pages within 2 minutes | §5.9 |
+| SP-04f The watch | The watcher lists each tunnel's connectors with count, version and origin address; a connector run from outside Railway with a staging token alerts within 2 minutes, by email on staging (§4.7) | §5.9 |
 | SP-04g Supervisor | Metrics answer only on loopback; a killed `cloudflared` is replaced; Railway's health check passes only with connections | §5.4 |
 | SP-04h Evict | The blue and green swap completes with no failed request in a load test; the times are recorded | §5.14 |
 | SP-25 Same-host routing (first thing on Saturday, about 15 minutes, on a throwaway host `c1-spike.<staging-zone>`; [FD-18]) | Origin Rules offer only the destination-port override on the plan; a tunnel route for the host with `^/api/` answers a distinctive status; an assets-only deployment (no script) made with the pinned `wrangler` on route `<host>/*` serves `index.html` for `/` and for a deep link; a zone route `<host>/api/*` with no Worker sends `/api/...` to the tunnel for a GET, a JSON POST and a same-origin `fetch` POST in a browser (no preflight, no redirect); `/api/...` typed in the address bar reaches the tunnel; the edge and the tunnel agree on `/x/../api/y`, `//api/y` and `/api%2Fy`; the metrics show no Worker invocation; on a throwaway host behind Access, `/` and `/api/` both meet Access and no `workers.dev` or preview copy answers | §5.1 to §5.3; else §5.17 |
@@ -1815,14 +1826,19 @@ Enterprise-only overrides or paid routing (research C1 and C3).
   {
     "name": "fin-next-staging-console-static",
     "compatibility_date": "2026-11-20",
-    "assets": { "directory": "./dist", "not_found_handling": "single-page-application" },
+    "assets": {
+      "directory": "./dist",
+      "not_found_handling": "single-page-application",
+      "html_handling": "auto-trailing-slash"
+    },
     "workers_dev": false,
     "preview_urls": false
   }
   ```
 
-  The routes are not part of a deployment: `pnpm fin provision` makes them once per host with the
-  operator's token ([FD-18]), `console.<staging-zone>/*` to the deployment and
+  The routes are not part of a deployment: `pnpm fin` makes them per host with the operator's token
+  ([FD-18], [FD-19]), through `pnpm fin routes apply` on Saturday and `pnpm fin provision` from before
+  production ([P-13]), `console.<staging-zone>/*` to the deployment and
   `console.<staging-zone>/api/*` with no Worker. The API route is written `<host>/api/*`, never
   `<host>/api*`, which would also match `/apix` and has a documented specificity bug. A request for
   `/api` with no slash reaches the static app, which defines no route there.
@@ -1854,17 +1870,21 @@ Enterprise-only overrides or paid routing (research C1 and C3).
   own fields (`keySalt`, `statusOrigin`, `indexable`; spec 05 §8.2). Fin Admin's origin is never a
   field, so it never appears in a public app's file. Each app fetches `/env.json` (`Cache-Control:
   no-cache`) at entry, in parallel with the viewer request. The
-  public-safety check and gitleaks scan the artifact; no source map is ever uploaded.
+  public-safety check and gitleaks scan the artifact; no source map is ever uploaded to a static
+  deployment (the maps go to Better Stack from the build, §10.5).
 - **Deploys** ([FD-19]). The owner's "pinned CLI" is `wrangler` at one exact version, in
   `tools/static-deploy` only ([G-06]); its install scripts each need the owner's yes. In staging a
-  `deploy-static-staging` job uploads each attested `dist/`, in a GitHub environment of its own,
+  `deploy-static-staging` job renders each attested `dist/`'s `_headers` and `env.json` with
+  `pnpm fin static render` and then uploads it, in a GitHub environment of its own,
   `staging-static`, which holds only the staging static-deploy token and is approved by the owner's
   account like `staging`; it never shares a job with the Railway deploy, so `ops/fin` keeps no npm
   dependency. Before the upload it refuses a `static.json` key outside the allowlist; after it, it
   re-reads each deployment (no script module, no binding, `workers_dev` and previews off) and
-  compares its asset manifest hash with the release manifest. Production's upload is the operator's,
-  through the launcher, with a token given at the secure prompt ([CI-04]); GitHub holds no
-  production credential. If SP-26 shows that Cloudflare's API alone can make an assets-only
+  compares its asset manifest hash with the release manifest. Who uploads production's static files
+  is the owner's open question ([FD-19], needed before production). The default put to the owner is
+  the operator's launcher, with a token given at the secure prompt ([CI-04]), so GitHub holds no
+  production credential; the other answer is an Actions job in a `production` environment that the
+  owner's account approves. If SP-26 shows that Cloudflare's API alone can make an assets-only
   deployment, `pnpm fin static deploy` (Node built-ins, no dependency) replaces `wrangler`.
 - **Previews:** off on every deployment ([FD-17]). The owner's 03:00 note allowed public
   pull-request previews built with no secret; on a `workers.dev` host, a public suffix, they could
@@ -2597,7 +2617,7 @@ has a rotation runbook and a row in the credential inventory (§15.6).
 Routine operator credentials (the Railway project token, Cloudflare operator and static-deploy
 tokens, the Better Stack management token, vault tokens, the owner's GitHub login) are never stored
 by Fin; the owner gives each at the secure prompt when a command needs it. The exceptions are
-staging's: its Railway project token and its Better Stack tokens sit in the protected `staging`
+staging's: its Railway project token and its CI Telemetry token for Better Stack sit in the protected `staging`
 environment, and its static-deploy token in `staging-static` ([CI-03], [FD-19]). A secret never
 appears in the repository, an image, a static build, a build argument, a log line, an event, an
 error report or a pull request. Scrubbers know every shape above.
@@ -3216,15 +3236,23 @@ alerts compete for four concurrent queries.
   item types and sizes Fin sends (200 KB at most), and cap by address and in all. The caps are
   per-replica token buckets, because `verify` holds no database login and a report must
   cost no database work (load shedding, §13.6). These endpoints read no cookie and change nothing,
-  which is why the origin gate exempts them (FW-C09). Alerts from them only notify, and only above a
-  volume threshold, so a stranger cannot page anyone.
+  but [SA-44] exempts only `GET /api/auth/callback/google` from the origin gate (FW-C09), so as the
+  register stands the app relays under `/api/monitoring/` are gated like any other unsafe request,
+  and the browser's own posts (no `X-Fin-App`, a body that is not JSON) are refused. They reach Better
+  Stack only once the owner amends [SA-44] through DECISIONS appendix C to exempt them. The edge's
+  `POST /reports/docs` is on `api.`, outside the app hosts' origin gate, and checks the docs origin
+  itself (spec 05 §8.13). Alerts from them only notify, and only
+  above a volume threshold, so a stranger cannot page anyone.
 - **Releases and source maps:** `FIN_RELEASE` (the commit SHA) on every line and event. The deploy
-  registers the release with Better Stack and uploads the browser source maps with a Telemetry token.
-  That token can manage all of its team's Telemetry, so production's comes only from the secure
-  prompt, never from CI; staging's may sit in the protected `staging` environment ([CI-03]). Builds
-  make hidden maps with debug IDs, keep them as a build artifact (the code is public, so they hold
-  nothing secret), and delete them from the images and the static artifacts; a build check refuses
-  any map left in what is served, and no `*.map` is ever uploaded to a static deployment.
+  registers the release with Better Stack. The browser source maps go from the build ([FD-19]):
+  builds make hidden maps with debug IDs, keep them as the release's source-map artifact (the code is
+  public, so they hold nothing secret), and delete them from the images and the static artifacts; a
+  build check refuses any map left in what is served, and no `*.map` is ever uploaded to a static
+  deployment. The build holds no secret, so in staging the `sourcemaps-staging` job uploads the
+  artifact after the build (§11.2), and in production the operator's launcher does. Both the
+  registration and the upload use a Telemetry token, which can manage all of its team's Telemetry,
+  so production's comes only from the secure prompt, never from CI; staging's CI token sits in the
+  protected `staging` environment ([CI-03]).
 - **Paging comes from log alerts on `error.unexpected`**, not from the Errors product, whose routing
   to incidents is set only in its UI. Errors is for triage, with email notifications of new and
   reoccurring errors in production.
@@ -3444,7 +3472,7 @@ components as the service objectives (§15.7).
 - **Free security on a public repository:** secret scanning with push protection, Dependabot alerts
   and security updates, private vulnerability reporting, CodeQL (default setup), dependency review.
 - **Environments:** `staging` (deployment branch `main` only, the owner's account as the required
-  reviewer, holding the staging Railway project token and staging's Better Stack tokens), and
+  reviewer, holding the staging Railway project token and staging's CI Telemetry token for Better Stack), and
   `staging-static` (the same branch rule and reviewer, holding only staging's static-deploy token)
   ([CI-03], [FD-19]). There is no production environment in GitHub: production is deployed by the
   operator ([CI-04], was D37).
@@ -3461,7 +3489,7 @@ Every job sets `permissions: {}` at the top and the least it needs, a timeout, a
 
 | Workflow | Job | What |
 |---|---|---|
-| `ci.yml` (`pull_request`, `push` to `main`, `workflow_dispatch`) | `plan` | Blobless checkout with history; `fin-review plan` (no dependencies, seconds): tier, affected packages, the jobs and e2e shards to run, the review matrix |
+| `ci.yml` (`pull_request`, `push` to `main`, `workflow_dispatch`) | `plan` | Blobless checkout with history, and `main`'s copy of the engine in `engine/` (never the pull request's); `fin-review plan` from that copy (no dependencies, seconds): tier, affected packages, the jobs and e2e shards to run, the review matrix (spec 07 §10.1) |
 | | `check` | pnpm by checksum; `pnpm install --frozen-lockfile`; Biome; typecheck; unit tests; `layout:check`; `flows:check`; `monitoring:check`; `threat-model:check`; the supply-chain and lockfile checks; the public-safety check; through Turborepo with its local cache |
 | | `db` | Suites that need real Postgres 18 (grants, the audit guard and sequencer, locks, `LISTEN`, the `login` trigger, migrations forward from empty and from the previous release, the migration-order check, squawk) |
 | | `build` | `turbo run build` of both image targets' bundles and every browser app's static build; bundle checks (no development markers in release bundles, no left-over source maps, no third-party origin, no secret shape in a static build; each built `index.html` and `_headers` checked, FW-C04 and FW-C05) |
@@ -3470,14 +3498,17 @@ Every job sets `permissions: {}` at the top and the least it needs, a timeout, a
 | | `e2e-report` | Merges blob reports; uploads the HTML report for 3 to 7 days (no real data, no credential) |
 | | `static` | zizmor, actionlint, gitleaks with Fin's token shapes (redacted), hadolint, the OpenAPI checks (§13.8), the key-shaped-string check (§7.7) |
 | | `bun` | The non-blocking Bun canary: shared packages' tests under Bun, known-answer tests (argon2id, AES-GCM, Ed25519, key HMAC), the SSRF refusal tests, a server start |
-| | `gate` | `needs` every job, `if: always()`; passes only when each job succeeded or was skipped because `plan` said so, and when `main`'s receipt checker accepts a signed receipt for the head (§11.6) |
+| | `gate` | `needs` every job but the non-blocking `bun`, `if: always()`; passes only when each job succeeded or was skipped because `plan` said so, and when `main`'s receipt checker, run from the same engine copy, accepts a signed receipt for the head (§11.6) |
+| | `merge` | On `push` to `main` only: the pushed commit is a merge commit whose tree equals its reviewed second parent's tree, with that head's receipt accepted, except the bootstrap merges in `docs/review/bootstrap.json`; a failure raises `main-unreviewed-change`, and `deploy-staging` needs this job's success (spec 07 §2.3.4) |
 | `review.yml` (reusable, called from `ci.yml`; H-03) | `review` (matrix) | fin-review lenses in CI (§11.6) |
 | `dependencies.yml` (pull requests touching manifests, `push` to `main`, daily) | `audit` | `pnpm audit`, `pnpm audit signatures`, OSV-Scanner, dependency review; no caches |
 | `containers.yml` | per deployable | hadolint, BuildKit build of both targets, SBOM (Syft), Grype, non-root and no-secret-file checks, the Node version inside the image |
 | `release.yml` (`push` to `main`) | `release` | Builds changed `release` images and every browser app's static artifact **with no build cache**, carries the previous release's `/assets` into each artifact (FW-C13), pushes images to GHCR by digest, attests images and artifacts, writes the release manifest (§11.7) |
-| | `deploy-staging` | In the `staging` environment, after the owner's approval: `pnpm fin deploy staging --release <sha>` (§11.8) |
-| | `deploy-static-staging` | In the `staging-static` environment, after the owner's approval: uploads each attested static artifact with `tools/static-deploy` once the services have rolled, then re-reads each deployment ([FD-19], §5.16) |
-| `nightly.yml` (`schedule`) | | fin-review `sweep` (H-03), the full e2e suite, zizmor's online audits, full-history gitleaks, `fin-review ci-report` |
+| | `sourcemaps-staging` | In the `staging` environment, after the owner's approval: `pnpm fin sourcemaps upload staging --release <sha>` sends the release's browser source-map artifact to staging's Errors applications with the CI Telemetry token and no other secret ([FD-19], §10.5) |
+| | `deploy-staging` | In the `staging` environment, after the owner's approval: `pnpm fin deploy staging --release <sha>`, the services half of §11.8's order, ending with the run open |
+| | `deploy-static-staging` | In the `staging-static` environment, after the owner's approval: uploads each attested static artifact with `tools/static-deploy` once the services have rolled, then re-reads each deployment and checks each host's served headers ([FD-19], §5.16) |
+| | `finish-staging` | In the `staging` environment, after the owner's approval, once `deploy-static-staging` has ended: `pnpm fin deploy staging --release <sha> --finish`, the rest of §11.8's order (the smoke tests, the checks, the release registered, `deploy.done`) |
+| `nightly.yml` (`schedule`) | | fin-review `sweep` (H-03; until the ledger exists the nightly review is `since <ref>` on machine A, §11.6), the full e2e suite, zizmor's online audits, full-history gitleaks, `fin-review ci-report` |
 
 Concurrency: pull-request runs cancel the run they supersede (review spend included); `main` runs
 never cancel. A pull-request run uses at most about 12 concurrent jobs, so two machines' pull
@@ -3621,16 +3652,22 @@ model sessions for judgement:
   | `commit` | each push to a lane pull request, drafts included ([RV-12]) | the delta since the last reviewed head when it is small and adds no new tier S path; otherwise `pr` | p50 under 10 minutes |
   | `pr` (the gate) | a pull request marked ready, or `commit` escalated | the parts of the pull request's own patch (merge base to head) that reviewed `commit` deltas do not already cover, plus one integration pass over the joins it touches and one-hop callers; the cache skips unchanged units | p50 under 25 minutes, falling as `commit` coverage grows |
   | `merge` | `push` to `main` | confirms the merge tree equals a reviewed head's tree; otherwise reviews the difference | seconds, or under 5 minutes |
-  | `sweep` | nightly (H-03) | every unit and join whose content key has no clean result, oldest first, within a budget ([RV-13]) | bounded |
-  | `all` | the owner, before production or after a procedure or model change | the whole tree, cache ignored | hours |
+  | `reissue` | a pull request updated from `main` | no model session when the patch-id and its neighbourhood are unchanged; otherwise a delta review of the affected hunks and joins ([RV-20], below) | seconds |
+  | `import` | the design layer's port pull requests only ([G-04]'s one exception) | every added unit whole, every lens of its tier, no reuse, and the port check; starts a gating chain like `pr` ([RV-02]) | under 45 minutes per group |
+  | `since <ref>` | nightly at 01:00 on machine A until the ledger exists; the owner's "everything since a commit" | every unit of every layout entry changed in `<ref>..main`, with one hop, joins and the attack profiles its paths map to ([RV-02]) | within the nightly budget |
+  | `sweep` | nightly once the ledger exists (H-03) | every unit and join whose content key has no clean result, oldest first, within a budget ([RV-13]) | bounded |
+  | `all [--cold]` | cold on the first night over everything merged (EXECUTION EX-18); over named packages under a budget cap from the MVP; cold before production and after a procedure or model change ([RV-13]) | the whole tree, or the named packages; `--cold` ignores the cache | hours |
   | `ci` | weekly and on changes to CI paths | the pipeline: security, correctness and cost of CI | under 15 minutes |
   | `dependency`, `trial`, `ship` | as named | a changed package's installed source; planted defects; the merge | |
 
 - **Lenses by tier:** correctness and rules on every tier; security, quality and joins on S and N; the
-  attack pass on S, never switched off there ([RV-07]); infrastructure on Docker, ops and workflow
+  attack pass on S, never switched off there ([RV-07]), and in the `pr` gate over the same parts as
+  the lenses (those that reviewed `commit` deltas do not already cover), with the integration pass
+  over the joins the patch touches; infrastructure on Docker, ops and workflow
   changes; dependency on manifest, lockfile, image or action changes; test-truth (do the tests fail
-  without the guard?) on behaviour and test changes; performance where a performance item's paths meet
-  the change ("a number, or no finding"); the CI lens on CI paths. Tiers come from `tools/layout.json`
+  without the guard?) on every tier S change and on behaviour and test changes elsewhere; performance
+  ("a number, or no finding") on all tier S and N code in the MVP, and from H-03 only where a
+  performance item's paths meet the change (spec 07 §2.6); the CI lens on CI paths. Tiers come from `tools/layout.json`
   (§3.1); an unmapped path counts as S; a tier only goes up; a renamed file counts at its old path too.
 - **Verification**, carried from the old procedure: one sceptic for low and medium, two working apart
   for high and critical; a refutation must quote the guard and show every path passes it; "unsure"
@@ -3695,9 +3732,9 @@ model sessions for judgement:
   cost per pull request, and a regression against §11.13's budgets becomes a CI lens finding.
 - **Measured:** one line per run to Better Stack (wall time by phase, tokens and cost per session,
   cache hit and receipt reuse ratios, findings, refusals, budget hits), with alerts on a time or cost
-  regression and a heartbeat on the nightly sweep. A self-test on a fixture repository with planted
-  defects (one per lens, a join defect, a prompt-injection string) runs with fake agents on every
-  change to fin-review and with real agents on a schedule.
+  regression and a heartbeat on the nightly review (`since`, then `sweep` from H-03). A self-test on a
+  fixture repository with planted defects (one per lens, a join defect, a prompt-injection string)
+  runs with fake agents on every change to fin-review and with real agents on a schedule.
 
 ### 11.7 Releases
 
@@ -3708,8 +3745,9 @@ model sessions for judgement:
   `connector.Dockerfile` and `backup.Dockerfile` build the same way.
 - The same job builds each browser app's **static artifact**: its `dist/` (with no `_headers` or
   `env.json`, which the deploy renders, §5.16), the previous release's `/assets` copied in from the
-  previous release's artifact (FW-C13), browser source maps moved out and proven absent, and the
-  public-safety and gitleaks scans passed. Each artifact is named in the release manifest with its
+  previous release's artifact (FW-C13), browser source maps moved out into the release's source-map
+  artifact, which `sourcemaps-staging` uploads (§10.5), and proven absent, and the public-safety and
+  gitleaks scans passed. Each artifact is named in the release manifest with its
   SHA-256 and copied write-once to the ops bucket at deploy, so a rollback always has it.
 - Images are pushed to **public GHCR packages** by digest ([P-08]): they hold no secret and the code is
   public, so Railway pulls them with no registry credential. Packages are kept at least 90 days.
@@ -3737,13 +3775,22 @@ model sessions for judgement:
   and an asset on each browser host equal the rendered `_headers`; `GET /v4/whoami` with no key expects
   401 and Fin's problem `type`; the canary key expects 200; the sign-in page and docs keywords; the
   release smoke of §11.4); then check that no service has a domain or TCP proxy, that no static
-  deployment has a script, and that the watcher reports the expected connectors and routes; upload
-  browser source maps; write a `deploy.done` line; close the window.
-- **Staging** ([CI-03]): `deploy-staging` runs after the owner's account approves it in the
-  `staging` environment. Deploys are batched: the owner approves the waiting deployment at the day's
-  checkpoints (C1 to C4); between them, merges accumulate. The deploy job runs only `ops/fin`, which
-  has no npm dependency, with no cache; it verifies attestations first; prints names, never IDs;
-  masks everything else; and uploads nothing. The static uploads are a job of their own,
+  deployment has a script, and that the watcher reports the expected connectors and routes; register
+  the release with Better Stack; write a `deploy.done` line; close the window. The browser source maps
+  are not a deploy step: they go from the build (§10.5, [FD-19]).
+- **Staging** ([CI-03], [FD-19]): no job holds both Railway's token and the static-deploy token, so
+  the order above runs as three jobs of `release.yml` in two environments, each after the owner's
+  account approves it. `deploy-staging` (`staging`) runs it from registering the run to the last
+  service and connector, and leaves the run open, its lock held and its window open.
+  `deploy-static-staging` (`staging-static`) then uploads the static deployments and checks each
+  host's served headers. `finish-staging` (`staging` again) runs once the static job has ended: the
+  smoke tests, the checks, the release registered with Better Stack, `deploy.done`, the window
+  closed and the lock released. If the static job failed, `finish-staging` writes `deploy.failed`
+  with its step and the mixed state instead, so `deploy.done` always covers both halves. Deploys are
+  batched: the owner approves the waiting jobs at the day's checkpoints (C1 to C4); between them,
+  merges accumulate. `deploy-staging` and `finish-staging` run only `ops/fin`, which has no npm
+  dependency, with no cache; `deploy-staging` verifies attestations first; both print names, never
+  IDs, mask everything else and upload nothing. The static uploads are the job between them,
   `deploy-static-staging`, in the `staging-static` environment, approved at the same checkpoints
   ([FD-19]). The staging project token can set any image on any service, and an image reads its
   service's sealed variables, so whoever controls a staging deploy job holds every staging secret;
@@ -3767,9 +3814,10 @@ model sessions for judgement:
 - **Migrations** are expand-then-contract and every cross-service contract accepts N-1 (§6.4), so
   services can roll in any order and roll back without a schema change.
 - **Rollback:** `pnpm fin rollback <env>` needs only the Railway token: it redeploys the previous
-  manifest's digests in reverse order, never runs `migrate`, and skips source maps and release
-  registration. The previous release's static artifacts, kept in the ops bucket, are re-uploaded by
-  `tools/static-deploy` (staging) or the launcher (production) with the static-deploy token.
+  manifest's digests in reverse order, never runs `migrate`, and skips release registration (the
+  previous release's maps are already at Better Stack). The previous release's static artifacts, kept in the ops bucket, are re-uploaded by
+  `tools/static-deploy` (staging) or, in production, by whichever uploader the owner picks under
+  [FD-19] (the default put to the owner is the launcher), with the static-deploy token.
   A contraction migration only ever runs a release after the code that stopped needing the old shape.
 - **A failed step** stops the deploy, leaves Railway's previous deployment serving the failed service
   (and the previous static version serving its host), pages in production, and prints the mixed state
@@ -3779,9 +3827,11 @@ model sessions for judgement:
 - **Railway and Cloudflare configuration** (services, settings, static IPs, connector hostnames, the
   Workers routes and the static deployments' settings) is applied by `pnpm fin` from the public
   settings file plus the private overlay. A thin first version on Saturday (deploy and verify, with
-  staging provisioned by hand against a written checklist), and `pnpm fin provision` complete before
-  production, proven by provisioning a throwaway environment from scratch and running the smoke tests
-  and drills on it, with `pnpm fin verify` reporting no drift ([P-13], [OP-09]).
+  Railway staging provisioned by hand against a written checklist, while the Workers routes, DNS
+  records and zone rules still come from `pnpm fin routes apply` and `rules apply` with the operator
+  token, [FD-19]), and `pnpm fin provision` complete before production, proven by provisioning a
+  throwaway environment from scratch and running the smoke tests and drills on it, with
+  `pnpm fin verify` reporting no drift ([P-13], [OP-09]).
 
 ### 11.9 Development
 
@@ -3843,6 +3893,7 @@ Each spike has a pass rule, runs before the work it shapes, and records its resu
 | SP-12 Models and sessions | In Phase 0's doctor: the `modelUsage` format; background calls pinned or off; the session lock-down settings; the built-ins' sub-agent models; whether effort can be read back. In H-03: Workload Identity Federation with refresh through a 30-minute session | [RV-10], [RV-19], [RV-05] | Phase 0; H-03 |
 | SP-13 MassPay | The webhook signature; finding a payout by `client_transfer_id` after a lost answer; the duplicate client ID answer; the ledger shapes; a key of fin-next's own; whether two live keys can overlap | [MO-01], [MO-07] | Monday morning |
 | SP-14 Scalar | 1.78.1 on the docs site's static deployment under its `_headers` policy; every browser store empty after Try it; nothing leaves the origin but the API calls | [AP-09] | Monday |
+| SP-27 Document viewing under Fin Admin's policy | Spec 03 §22: on Chromium, Firefox and WebKit, an image and a PDF tab load from a single-use same-origin view URL minted by a gated POST, with no `blob:` and no `frame-src`; each engine fetches the URL once; a fetch from a sibling host is refused | spec 03 SD3-17, [SA-45]; else the download fallback, for the owner to accept | Sunday 11:00 (L-SUN-08) |
 | SP-17 HA | Every member's certificate and CA; failover and services reconnecting; PITR restore on HA with times; a failover and `pg_rewind` after a superuser rotation | [P-10], [P-14], [P-18] | before production |
 | SP-18 to SP-20 | Node's permission model in audit mode; R2 lock behaviour and token filters; `age` with hardware recipients | production gates | before production |
 | SP-21 Railway read-only credential | §5.15 | [OB-11] | Saturday, else hardening |
@@ -4691,8 +4742,10 @@ otherwise is behaviour, rules and decisions, rebuilt from the specifications in 
 ### 14.4 Dropped
 
 - **Everything AWS** (the AWS exit, D33 to D35, SES, CloudWatch): fin-next never has an AWS account.
-- **The import programme** (import mode, provenance, port drift, the import order, the bootstrap retro
-  of ported pull requests) and its cost figures (40,000 to 91,000 USD): R1 builds from scratch.
+- **The import programme** (its import mode for the old product's code, provenance, port drift, the
+  import order, the bootstrap retro of ported pull requests) and its cost figures (40,000 to 91,000
+  USD): R1 builds from scratch. [RV-02]'s `import` mode is a different, narrow mode for the design
+  layer's port only (§11.6).
 - **Old-repository coordination** (freezing, porting urgent fixes, D48 to D50, D53, the 14-day Workers
   rollback), except the hostname cutover, which applies only if staging falls back to the shared zone
   ([FD-09]).

@@ -26,9 +26,11 @@ name, a local path or a real person.
     triggers (ARCHITECTURE §3.4).
   - `R1` to `R16` are the owner's requirements of 21 Nov ([G-01]).
   - `SF-nn` is a specification's decision settled in this register before the first commit, either
-    folded into the entry it changes or not adopted (appendix C). The plan's one order of precedence
-    is in README §8.3: the owner's decisions of 21 Nov, then this register, then the specification
-    that owns the area, then ARCHITECTURE.md, then EXECUTION.md.
+    folded into the entry it changes or not adopted (appendix C).
+- **Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+  21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+  specifications, and between two specifications the one that owns the area, as README §8.3 lists
+  the owners.
 - **Status** is one of:
   - **DECIDED (owner, 21 Nov 2026, about hh:mm)**: a decision the owner made overnight on 21 Nov.
     The block quotes it in a line headed "The owner's decision".
@@ -113,19 +115,20 @@ the blocks named.
 
 These nine truly block the start: work waits for them, the owner must act before the first lane can
 begin, or Phase 0's first lanes build on them. Each has a default. The two marked **blocking** hold
-work back until they are answered; the others take their default at 09:00.
+work back until they are answered. [FD-09] is answered at the 08:00 sitting, because its 09:00
+default would come after CR-05b, which is needed by 08:30. The others take their default at 09:00.
 
 | # | ID | Question | Default | Why it is on the short list |
 |---|---|---|---|---|
-| 1 | G-06 | Approve the starting dependency set, amended overnight | Approve the set in [G-06]: the UI SDK in place of Radix, Phosphor, `clsx` and `tailwind-merge`, at the newest exact beta cleared when the install runs: 0.1.0-beta.9 at P0-4 (09:00 to 10:00 build time, 03:30 to 04:30 UTC; cleared at 03:02 UTC), or 0.1.0-beta.10 if the install runs after 09:47 UTC; then 0.1.0-beta.13 after 12:24 UTC on Sunday, in its own pull request. No exception; `wrangler` pinned in `tools/static-deploy` | **Blocking**: nothing is installed without it |
+| 1 | G-06 | Approve the starting dependency set, amended overnight | Approve the set in [G-06]: the UI SDK in place of Radix, Phosphor, `clsx` and `tailwind-merge`, at the newest exact beta that has cleared the three-day release age when the install pull request runs: 0.1.0-beta.9 at P0-4 (cleared at 03:02 UTC), or 0.1.0-beta.10 only if the install pull request runs after 09:47 UTC; then 0.1.0-beta.13 after 12:24 UTC on Sunday, in its own pull request. No release-age exception; `wrangler` pinned in `tools/static-deploy`. Outside the set, each needing its own owner yes at the 08:00 sitting: `@types/react` and `@types/react-dom`, and the `overrides` entry that pins `@better-auth/core` ([SA-02]) | **Blocking**: nothing is installed without it |
 | 2 | UI-12 | May the ported design layer, part of whose text comes from the design system's private source, the logo's paths, and the verbatim copies of `fin-motion.css`, the export's token file and its font files be public? | Yes, with private-document references and sample domains stripped and the notices extended | **Blocking** for the design-layer port, and so for every screen |
-| 3 | FD-09 | The staging zone | A new staging zone in a new Cloudflare account; fallback `-next` names on the shared zone | The owner makes the zone and the account; SP-25 and the tunnels need them in the first hour |
+| 3 | FD-09 | The staging zone | A new staging zone in a new Cloudflare account; fallback `-next` names on the shared zone | The owner makes the zone and the account (CR-05b, by 08:30), and SP-25 (S-01, 09:15) and the tunnels need them in the first hour, so this needs an answer at the 08:00 sitting: a 09:00 default would come too late |
 | 4 | OB-18 | May the watcher stay a Cloudflare Worker under "no vendor locked in items like workers"? | Yes: portable `fetch` code on a minute cron, with no Workers-only binding. This departs from the owner's 03:00 words. The non-Worker alternative is the same code on a small virtual machine at another provider, outside Railway, on a minute timer: the smallest instance costs a few US dollars a month per environment (UNVERIFIED; the steward prints the price at the sitting), plus one more vendor account and an operating system to patch. Better Stack's own monitors alone need no new host, but they cannot read Cloudflare's or Railway's configuration, so the connector and static-deployment checks would go | Phase 0 builds the watcher before the first staging deploy |
 | 5 | SA-05 | A mandatory second factor for privileged dashboard roles, checked per request across organisations (R6) | Yes | Saturday's first identity lane builds it |
 | 6 | SA-12 | Fin Admin's permission catalogue and prebuilt roles (R6) | 26 permissions; Viewer, Compliance, Operator, Admin; custom roles | The staff realm and its first migration build it on Saturday |
 | 7 | AU-01 | What R9 covers for reads | Audit every reveal of personal data, documents or bank numbers; list reads are log lines | The audit allowlists are in the first migrations |
 | 8 | G-10 | What agents may do without asking | The steward merges green pull requests with signed receipts in batches; never control paths, plausible highs, dependencies, staging deploys or production | It sets how every merge runs from the first hour |
-| 9 | CI-14 | Control paths need the owner's code-owner approval and typed confirmation | Control paths only, now including each app's `_headers` and static deployment settings; other tier S paths rely on signed receipts | CODEOWNERS and the ruleset are set in Phase 0's first hour |
+| 9 | CI-14 | Control paths need the owner's code-owner approval and typed confirmation | Control paths only, now including each app's `_headers` and static deployment settings and `tools/static-deploy/**`; other tier S paths rely on signed receipts | CODEOWNERS and the ruleset are set in Phase 0's first hour |
 
 **Two defaults depart from the owner's literal words.** The owner sees both at the sitting:
 
@@ -174,7 +177,7 @@ owner: [UI-12] and [OB-18].
 
 | ID | Question | Default | By |
 |---|---|---|---|
-| OB-11 | The staging watcher's read-only tokens (Cloudflare, vault, GitHub, Railway if SP-21 passes) | As listed; Railway checked by `pnpm fin verify` until a read-only credential exists | 12:00 |
+| OB-11 | The staging watcher's read-only tokens (Cloudflare, vault, GitHub, Railway if SP-21 passes) | As listed; Railway checked by `pnpm fin verify` until a read-only credential exists | 11:00 (CR-18 is needed then, and the watcher deploys from 11:00 to 12:00) |
 | RV-13 | Provisional review spend caps | Caps per pull request, day and month, revised after ten runs; a cap reached blocks | 13:00 |
 | BC-05 | Keep an API key's "last used" | Keep, rounded to the minute | 18:00 (with API keys) |
 | KY-09 | The hosted verify pages' design source | New boards on `AuthLayout`, drawn Saturday evening | 18:00 |
@@ -220,7 +223,7 @@ owner: [UI-12] and [OB-18].
 | RV-05 | The CI credential for model calls | Workload Identity Federation bound to the reusable review workflow at `main` |
 | RV-09 | Where sealed findings' key lives; whether non-security findings may be public | An `age` key held by the owner offline; everything sealed, counts public |
 | RV-11 | The Claude Agent SDK as a dependency of `tools/fin-review` (CI runner) | Yes (proprietary licence, large binary) |
-| FD-10 | The production zones and the docs domain | Three registrable domains: main, admin, pages; chosen early for the email warm-up |
+| FD-10 | The production zones and the docs domain | Three registrable domains: main, admin, hosted; chosen early for the email warm-up |
 
 ### Production
 
@@ -292,8 +295,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   licence.
 - **Rationale:** the repository is public for CI (R12), not as an open-source decision; adding an open
   licence later is easy, withdrawing one is not.
-- **Status:** OWNER MUST DECIDE · **Deadline:** before Saturday's start. The first commit carries the
-  default in words: the root `README.md` says all rights are reserved. The `LICENSE` file follows with
+- **Status:** OWNER MUST DECIDE · **Deadline:** before Saturday's start. The plan's pull request
+  (pull request 1) carries the default in words: the root `README.md` says all rights are reserved. The `LICENSE` file follows with
   Phase 0's root files (EXECUTION §2.2; spec 01 §3.8)
 
 ### G-04 From scratch, from specifications
@@ -341,8 +344,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     `tailwindcss` 4.3.5 with its Vite plugin;
   - the UI SDK ([UI-10]): `@ui-sdk/react` and `@ui-sdk/core`, together at one exact version: the
     newest beta that has cleared the three-day release age when the install pull request runs. At
-    P0-4 (09:00 to 10:00 build time, 03:30 to 04:30 UTC) that is 0.1.0-beta.9, cleared at 03:02 UTC
-    on Saturday 21 Nov; if the install runs after 09:47 UTC, it is 0.1.0-beta.10. Then 0.1.0-beta.13
+    P0-4 that is 0.1.0-beta.9, cleared at 03:02 UTC on Saturday 21 Nov; only if the install pull
+    request runs after 09:47 UTC is it 0.1.0-beta.10. Then 0.1.0-beta.13
     in a dependency pull request of its own once it clears, after 12:24 UTC on Sunday 22 Nov. Both
     have no runtime dependency and no install script, are Apache-2.0 and are published with
     provenance; they have one npm maintainer.
@@ -360,6 +363,10 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   The lockfile check refuses `@tanstack/react-start`, `@tanstack/start-*`, `@vitejs/plugin-rsc`,
   `react-server-dom-*` and `@rsbuild/core`, and requires `seroval` and `seroval-plugins` at 1.6.11
   or later. No phone-number library: phones are E.164 only.
+  Outside this set, so approving it does not approve them: `@types/react` and `@types/react-dom`
+  (spec 06 §14 item 6), and the `overrides` entry that pins `@better-auth/core` ([SA-02]). Each
+  needs its own owner yes at the 08:00 sitting, recorded with a dated comment where
+  `pnpm-workspace.yaml` holds it.
 - **Default:** approve. Licences outside MIT, ISC, BSD, Apache-2.0 and 0BSD are named: Sentry's new
   CLI (FSL-1.1-Apache-2.0, through the Vite plugin) and, in H-03, the Claude Agent SDK (proprietary;
   [RV-11]). The steward prints `wrangler`'s licence and its dependencies' with their registry facts.
@@ -407,7 +414,7 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   workspace, team and tunnel IDs, Better Stack team and source IDs, seed inbox addresses, the
   on-call roster, its time zone, quiet hours and escalation timings, the time zone of the build
   clock and of the owner's decision times (the plan gives build-clock times, counted from Phase 0's
-  08:00 start, or UTC, and never pairs the two), the threat model's private annex (spec 08 §2.5: the
+  08:00 start, or UTC, and never pairs the two; commit dates follow the rule below), the threat model's private annex (spec 08 §2.5: the
   stated limits about responders and the pager, and when the owner is reachable), the private
   provider notes (what Fin observed of a provider's behaviour, fees and account terms; ARCHITECTURE
   §12.12, spec 04 MS-30), and every numeric alert threshold ([OB-13]). **Fin's own labels are
@@ -421,14 +428,24 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   the public settings (they were EQ-26b in the draft). The public-safety check refuses the zone names,
   the old repository's name, the design system's private repository name, the redesign pull
   request's reference and the port's source commit (in full, or any prefix of 7 or more characters),
-  all held in the overlay as its refuse list. It runs locally over `docs/plan/` before the first
-  commit and on every push. The port's notice (`packages/ui/PORTED.md`) names fin-next and source
+  all held in the overlay as its refuse list. It runs locally over `docs/plan/` before the plan's
+  merge and on every push. The port's notice (`packages/ui/PORTED.md`) names fin-next and source
   paths only: the port check and the ship-step similarity check read the source commit from the
   overlay at run time. Before the plan is made public, the owner confirms, outside this repository,
   that the old product's staging is behind Access or on its dependencies' current security releases;
   the sitting's notes record it (spec 01 §3.1, step 0). The plan names nothing of the old product's
   deployment beyond what the cutover needs (EXECUTION §9).
+  **Commit dates.** Git records each commit's author and committer dates with the committing
+  machine's UTC offset, and the public pull request shows them, so an offset pairs every commit
+  with UTC. Every commit to the public repository is made with `TZ=UTC` (offset `+0000`), and the
+  pre-push hook and the public-safety check refuse a commit whose author or committer date carries
+  another offset. The plan branch's commits, made before this rule with the build machine's offset,
+  are re-made with UTC dates before pull request 1 merges (a force push to `plan/initial`, never to
+  `main`). The root commit on `main` carries that offset too, and nothing rewrites `main`, so the
+  rule limits what is public but cannot undo it.
 - **Alternatives:** an encrypted file in the repository (still publishes ciphertext and its shape).
+  For the commit dates: the owner accepts the build clock's time zone as public, which takes it out
+  of the overlay and drops the commit-date rule.
 - **Rationale:** R12; the 19 Nov settings file held the staff list, the first draft named the real
   staging zone and the operator's habits, and a later draft named a second private repository, the
   port's source commit and details of the old product's deployment; a last pass before the first
@@ -733,8 +750,10 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   the public hosts (console, api, developer, verify) and Fin Admin (admin, behind Cloudflare Access
   with a JWT check on every request). Railway services get NO public domains and NO TCP proxies."
 - **Default:** Cloudflare Tunnels for all hosts:
-  - a public tunnel carries `api.` whole, and the `/api/*` paths of `console.`, `verify.`, `selfie.`
-    and `developer.`;
+  - a public tunnel carries `api.` whole, and the `/api/*` paths of `console.`, `verify.` and
+    `selfie.`; `developer.` (the docs) is assets-only, with a proxied CNAME to the public tunnel but
+    no `/api/*` route, no ingress rule and no service, and its browser reports go to
+    `api.<zone>/reports/docs` ([FD-18], appendix C SF-01);
   - an admin tunnel carries the `/api/*` paths of Fin Admin, behind Access, with a token check on every
     request;
   - the static files of those app hosts are served by Cloudflare's assets-only deployments and never
@@ -926,10 +945,11 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     served to neighbours), exits after repeated `/ready` failures so Railway restarts it, answers only
     `/healthz` and `/readyz` for Railway's deploy check, and writes `connector.health` lines.
   - **The ingress map is code:** host roles to fixed services, `httpHostHeader` per host, and a
-    `http_status:404` catch-all. On the app hosts (console, verify, selfie and developer on the public
-    tunnel; Fin Admin on the admin tunnel) a rule matches the hostname **and** the path `^/api/`;
-    `api.` is matched by hostname alone. Static paths never reach a connector, because Cloudflare
-    serves them ([FD-17], [FD-18]); if one did, the catch-all refuses it. Hostnames come from
+    `http_status:404` catch-all. On the app hosts (console, verify and selfie on the public tunnel;
+    Fin Admin on the admin tunnel) a rule matches the hostname **and** the path `^/api/`; `api.` is
+    matched by hostname alone; `developer.` has no ingress rule at all, so if its static route ever
+    vanished the catch-all answers ([FD-18], SF-01). Static paths never reach a connector, because
+    Cloudflare serves them ([FD-17], [FD-18]); if one did, the catch-all refuses it. Hostnames come from
     non-secret settings; no setting can target any other service. Tunnels are locally managed, so no
     remote configuration applies (SP-04a); the fallback is a remote configuration pushed only by
     `pnpm fin`, validated, kept for rollback and hashed every minute. SP-25 checks that the edge and
@@ -1101,20 +1121,30 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 - **Default:**
   - GitHub Actions builds each app's `dist/` with no secret in scope, and the release manifest records
     its content hash ([CI-02]). Source maps go to Better Stack's error tracking from the build and are
-    removed from `dist/` before the upload.
-  - Staging: a `deploy-static-staging` job uploads the files with the pinned `wrangler` from
-    `tools/static-deploy` ([G-06]). It runs in a GitHub environment of its own, which holds only the
-    static-deploy token and is approved by the owner's account like `staging` ([CI-03]). It never
+    removed from `dist/` before the upload: the build emits hidden maps, keeps them as the release's
+    source-map artefact and deletes them from `dist/` (a build check refuses any `*.map` left).
+    Because the build holds no secret, the upload is a job of its own: in staging,
+    `sourcemaps-staging` in `release.yml`, after the build, in the `staging` environment and approved
+    with `deploy-staging`, runs `pnpm fin sourcemaps upload` with staging's CI Telemetry token
+    (`BETTERSTACK_TELEMETRY_TOKEN`, part of CR-09, [CI-03]) and no other secret. In production the
+    operator's launcher uploads the same artefact with a Telemetry token given at the secure prompt
+    ([CI-04]).
+  - Staging: a `deploy-static-staging` job renders each app's `_headers` and `env.json` with
+    `pnpm fin static render` (appendix C, SF-05), then uploads the files with the pinned `wrangler`
+    from `tools/static-deploy` ([G-06]). It runs in a GitHub environment of its own, which holds only
+    the static-deploy token and is approved by the owner's account like `staging` ([CI-03]). It never
     shares a job with the Railway deploy, so the `ops/fin` job keeps no npm dependency.
   - Production, a question for the owner: the owner's words are "GitHub Actions builds, then
     uploads". The answer put to the owner is that the operator's launcher uploads the exact `dist/`
     that passed staging, by content hash, with a token given at the secure prompt ([CI-04]), so
     GitHub holds no production credential. The other answer is an Actions job in a `production`
     environment that the owner's account approves, holding a production static-deploy token.
-  - The token can edit Workers scripts on that one account and nothing else; the routes are made once
-    by `pnpm fin provision` with the operator's token. A token that can upload a version could also
-    upload code onto the app's routes, so it is an interception credential like a tunnel token. The
-    watcher checks every minute that each deployment has no script module and no binding, that
+  - The token can edit Workers scripts on that one account and nothing else; the routes, DNS records
+    and zone rules are made by `pnpm fin` with the operator's token: on Saturday by
+    `pnpm fin routes apply` and `pnpm fin rules apply`, while Railway staging is provisioned by hand
+    ([P-13]), and by `pnpm fin provision` from before production. A token that can upload a
+    version could also upload code onto the app's routes, so it is an interception credential like a
+    tunnel token. The watcher checks every minute that each deployment has no script module and no binding, that
     `workers_dev` and previews are off, and that the zone's routes match the map, and pages on any
     difference ([OB-11]). The token rotates with the front door's secrets ([FD-12]).
 - **Alternatives:**
@@ -1400,7 +1430,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     and [SA-27]'s fast path.
   - All Better Auth packages move together through one Dependabot group.
   - `@better-auth/core` is pinned through one `overrides` entry, an exact version with a dated
-    comment, approved with [G-06], because `overrides` is a protected key.
+    comment. `overrides` is a protected key and the entry is outside [G-06]'s set, so it needs its
+    own owner yes at the 08:00 sitting.
   - Never a 1.8 beta. SP-10 re-reads the session paths on every bump.
 - **Default:** as stated.
 - **Alternatives:** 1.7.26 in between (it clears only at 17:56 UTC on Saturday, after Phase 0); an
@@ -1672,8 +1703,9 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   - Join before production holds live keys, with one pattern per mode.
   - The edge verifies GitHub's signature with GitHub's key set, cached and refreshed at most once per
     interval whatever identifier arrives, limits the route per address, checks each token's checksum
-    and HMAC, and calls `api`'s key-revoke door with the key ID alone. `api` revokes a live key at
-    once. The pepper stays off `api`.
+    and HMAC, and calls `api`'s key-revoke door with the key ID alone. `api` revokes the reported
+    key at once, whatever its mode: a Sandbox key as well as a live one (spec 05 §4.8, D05-10). The
+    pepper stays off `api`.
   - The repository never holds a key-shaped string with a valid checksum.
 - **Alternatives:** rely on developers to report leaks.
 - **Rationale:** a public key format invites copies in public code; the first draft had `api` verify
@@ -1857,8 +1889,9 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 ### SA-34 Edits that widen a credential
 - **Decision:** which edits step up.
 - **Default:** a step-up intent, an audit event and an email for changing a webhook endpoint's URL,
-  editing a key (address allowlist, expiry, scopes), and changing, resending or cancelling a pending
-  invitation; a key edit never grants more scope or life than the key had.
+  editing a key (address allowlist, expiry, scopes, and its name too, as ARCHITECTURE §7.7 steps up
+  every key edit), and changing, resending or cancelling a pending invitation; a key edit never grants
+  more scope or life than the key had.
 - **Alternatives:** step-up only on create and delete.
 - **Rationale:** a new URL sends every signed event to a new receiver, and a wider key gives it more than
   it had: a replacement never gets more than what it replaces.
@@ -2042,7 +2075,11 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 
   A refusal answers 403 `invalid_origin` and writes one `csrf.refused` line with the reason and the
   route pattern. Better Auth's own origin check, with exact `trustedOrigins`, runs underneath. The only
-  exemption is `GET /api/auth/callback/google`; `POST /api/auth/callback/*` is refused. Every API
+  exemption is `GET /api/auth/callback/google`; `POST /api/auth/callback/*` is refused. The
+  browser-report relays under `/api/monitoring/` are not exempt; exempting them would amend this
+  entry, which is the owner's call through appendix C. That amendment is recommended: the relays read
+  no cookie, change nothing and parse each report as untrusted input ([SA-42]), and until it is made
+  the browser's own reports are refused (ARCHITECTURE FW-C09, §10.5). Every API
   answer sets `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. An app's API sends no
   CORS headers. Hono's `csrf()` is not relied on. Each refusal reason has a unit test, and Playwright
   proves that a cross-site POST and a POST from a sibling host are refused.
@@ -2491,8 +2528,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 - **Rationale:** the watcher must stay standing after a compromise of what it watches, must hold nothing
   that can change it, and must watch the tunnels from the first day they exist.
 - **Status:** OWNER MUST DECIDE (open since 19 Nov, was D26, D27 and D31; staging's placement was decided
-  on 19 Nov) · **Deadline:** Saturday 12:00 (staging, before the first staging deploy); production (the
-  watch account and the Railway user)
+  on 19 Nov) · **Deadline:** Saturday 11:00 (staging: CR-18 is needed then, and the watcher deploys from 11:00,
+  before the first staging deploy); production (the watch account and the Railway user)
 
 ### OB-12 A production journey monitor
 - **Decision:** whether a scripted sign-in journey runs against production.
@@ -2627,10 +2664,14 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     as the required reviewer, which no agent holds ([CI-13]).
   - The owner approves the waiting deployment at the day's checkpoints (C1 to C4); merges accumulate in
     between. The operator may also deploy staging by hand with `pnpm fin deploy staging`.
+  - There is no extra Phase 0 approval. On Saturday nothing is approved between C1 (08:00) and C2
+    (13:00), so Phase 0's first staging deploy is approved at C2, and the steps that need deployed
+    code (the static uploads and routes, S-01b, S-02 and FW-S6) run from 13:00 to the Phase 0 exit at
+    13:30 (EXECUTION EX-15, §2.5 step 8, §3.7).
   - The job runs only `ops/fin` (no npm dependency, no cache), verifies attestations first, prints
     names not IDs, masks the rest and uploads nothing. The environment holds the staging Railway project
-    token and staging's Better Stack tokens, including the Telemetry token that reaches only the
-    staging team. Whoever controls this job holds every staging secret, which is why staging holds test
+    token and staging's CI Telemetry token for Better Stack, which reaches only the staging team,
+    and nothing else. Whoever controls this job holds every staging secret, which is why staging holds test
     data and sandbox credentials only.
   - The static uploads are not this job: the owner's 03:00 decision already has GitHub Actions upload
     them, in a job and environment of their own ([FD-19]). This item asks about the Railway deploy
@@ -2649,7 +2690,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     release without a recorded staging `deploy.done` and release-smoke pass for the same digests at
     least the soak time old ([CI-17]).
   - Production gets exactly the digests that passed staging. GitHub has no production environment.
-    The static builds that passed staging are uploaded the same way, by content hash ([FD-19]).
+    The static builds that passed staging go to production by content hash; who uploads them is
+    [FD-19]'s open question for the owner (the default put to the owner is this launcher).
   - `pnpm fin rollback production` needs only the Railway token and never runs `migrate`; a failed step
     stops, leaves the previous deployment serving and prints the mixed state; `pnpm fin lock break
     --reason` breaks a stale lock with a record.
@@ -3718,7 +3760,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 ### UI-04 Who draws the missing boards
 - **Decision:** who draws the boards that R6 to R8 need and the canvases lack, and whether they must
   exist before code. The missing boards are AdminRoles, AdminRoleEditor, unlocked Production, the
-  verify pages, the docs site and money charts.
+  verify pages, the docs site, money charts (Fin Admin's money view, [MO-13]) and the kill-switches
+  page (spec 02 S2-27). EXECUTION §0.2 (R14) and RK-16 give the same list.
 - **Default:** builders compose from primitives ([UI-03]). The boards follow the same day and are
   mirrored on the canvases.
 - **Alternatives:** draw every board before its code.
@@ -3792,8 +3835,10 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     Fin's own rules.
   - The port follows the decisions newer than the redesign branch: the edge toggle ([UI-11]), the
     header organisation switcher, Audit log in the sidebar footer, one Money tab, wizards in an L
-    drawer, the motion layer with its selectors remapped to the SDK's attributes, and the static page
-    policy ([SA-45]).
+    drawer, the motion layer as [UI-12] answers (under a yes the pinned snapshot's `fin-motion.css`
+    byte for byte, under a no Fin's own file from the motion spec and the token values, with a hash
+    test either way; its rules already match the attributes the SDK writes, so no selector is
+    remapped, ARCHITECTURE §3.4, spec 06 §5.1), and the static page policy ([SA-45]).
   - No Radix, Phosphor, `clsx` or `tailwind-merge`.
 - **Alternatives:** vendoring the design system's private, Radix-based source ([UI-01], superseded);
   building the components on the SDK from the specifications alone, without the port (about three
@@ -4319,11 +4364,11 @@ minor one is resolved too, in some cases in part, as the row says. "Arch" is ARC
 | CF-82 | major | Built-ins in the gate and the bootstrap review | As CF-19: out of the gate and EX-18; hand-started lens and attack sessions until the MVP; non-gating later | [RV-10], [RV-01]; Exec EX-11, EX-18 |
 | CF-83 | major | Up-to-date plus per-head receipts multiplied reviews; no capacity budget | Receipt reuse by patch-id when neither the patch nor its one-hop neighbourhood changed; merge batches every 90 minutes; gates split across machines; a capacity table; a usage limit as a cut line | Arch §11.6; [RV-20]; Exec §1.1, CUT-07 |
 | CF-84 | major | Receipts posted as comments were forgeable and re-ran nothing | As CF-02: signed receipts in a ref, the engine re-runs `gate` with its own token, a receipt from any other source counts as missing. (A ref is used instead of a commit status, because the signature, not the channel, is the control.) | Arch §11.6; [CI-11] |
-| CF-85 | major | Saturday was not achievable as written | Re-baselined: Fin Admin beyond sign-in, factor, step-up and Staff moves to Sunday's spill; API keys and the edge's key check on Saturday only if the realms are green at 18:00; FW-S1 12:30 to 13:30 with stubs meanwhile; one 08:00 sitting with defaults at 09:00; two spill days, staging-complete Thu 26 Nov; production estimate moved, still UNVERIFIED | Exec §0, §2.1, §3, §6, §11 |
+| CF-85 | major | Saturday was not achievable as written | Re-baselined: Fin Admin beyond sign-in, factor, step-up and Staff moves to Sunday's spill; API keys and the edge's key check on Saturday only if the realms are green at 18:00; FW-S1 12:15 to 13:00 (Arch §3.4) with stubs meanwhile; one 08:00 sitting with defaults at 09:00; two spill days, staging-complete Thu 26 Nov; production estimate moved, still UNVERIFIED | Exec §0, §2.1, §3, §6, §11 |
 | CF-86 | major | Saturday's specs had no owner or slot | A spec lane on machine B from 07:30 writing Saturday's specs in order of need, owning `docs/plan/specs/**` (EX-08), reviewed as tier D with a correctness lens; the next day's specs 18:00 to 20:00 as a named lane | Exec §1.4, §2.1 |
 | CF-87 | major | Shared generated files, migration names and fragment ownership | `routeTree.gen.ts` not committed; OpenAPI and route policy from per-area fragments; no Drizzle journal; timestamp migration names with an order check; grant fragments per area; a lane owns its fragments wherever they live; ownership overlaps removed; one owner per package's root files; the steward owns `packages/testing` after Saturday | Arch §3.1, §6.4, §13.8; Exec §1.3 |
 | CF-88 | major | The fin-review MVP did not fit its slot, was not fast, and its model check could fail | Staged: validator, planner, `commit`, `pr`, signed receipts and checker by 10:30; sceptics and `merge` by 12:00; the doctor and self-test in the afternoon (3 of 4 passes, miss logged); the gate reviews only what commit reviews did not cover; background model pinned or off, checked by the doctor | Arch §11.6; [RV-12], [RV-19]; Exec §2.4 |
-| CF-89 | major | The ruleset came before the gate existed; the hook was written by an agent | The order: the plan commit; PR 1 with a minimal `ci.yml`; then the ruleset; then the hook and settings by the owner or a fully reviewed pull request; then the receipt requirement with AC-P0-03 at once | Exec §2.1; [CI-01] |
+| CF-89 | major | The ruleset came before the gate existed; the hook was written by an agent | The order: the plan's merge (pull request 1); the CI pull request with a minimal `ci.yml`; then the ruleset; then the hook and settings by the owner or a fully reviewed pull request; then the receipt requirement with AC-P0-03 at once | Exec §2.1; [CI-01] |
 | CF-90 | major | The real staging zone and old repository named; EQ-14 against G-04 | Placeholders, the names in the overlay's refuse list, the public-safety check run locally over `docs/plan/` before the first commit; EQ-14 dropped for G-04 with the copy check local | [G-04], [G-09]; Exec §9 |
 | CF-91 | major | Two registers with conflicting defaults | DECISIONS is the only register; Exec §10 is a "needed by" table keyed by these IDs; each pair resolved (SA-11 with a custom read-only role in AC-SAT-16; SA-08 by CF-07's intents; CI-03 with G-10; fin-review CI in H-03 with RV deadlines moved; RV-06 one rule, `xhigh` lenses on tier S, chosen over the suggested `high` everywhere so the 19 Nov depth stays on sensitive paths; drafts reviewed per RV-12; CI-06 Pro; KY-09 by Saturday 18:00; KY-06 stretch; F21 to KY-05; SA-13 decided and EQ-04 removed; API keys conditional on Saturday in both documents; AU-06 weekly then daily; P-02 and G-07 before the start; no phone library; one SameSite rule) | Every file |
 | CF-92 | major | R7 was read narrowly without asking | KY-13 puts the reading, KY-05 and KY-06 to the owner at 08:00 as one question with the cost of each reading; by default a stretch lane for Sumsub's ongoing signals and R7 marked partial with the list | [KY-13]; Arch §12.16; Exec §0.2, §4.1 |
@@ -4331,7 +4376,7 @@ minor one is resolved too, in some cases in part, as the row says. "Arch" is ARC
 | CF-94 | major | Behaviour changed from the old product without decisions | Arch §14.6 and BC-01 to BC-07: old step-ups kept, webhook analytics restored in H-02, address and device on every console audit row, 15 tries, "last used", the 10-organisation limit and the deletion rule carried | Arch §14.6; [BC-01] to [BC-07] |
 | CF-95 | major | The test endpoint could never be reached through `deliveryFetch` | As CF-38: test endpoints flagged and delivered in-process; both cases in AC-SUN-09 and AC-SUN-12 | Arch §13.7; [AP-20]; Exec §4.6 |
 | CF-96 | minor | Better Auth's version sequence differed across files, and 1.7.26 clears after Phase 0 | FW-S2 on 1.7.25; one sequence everywhere: 1.7.25 now, read 1.7.26 and 1.7.27 notes before the first auth merge, all four to 1.7.27 on Monday unless an advisory takes the fast path | Arch §3.3; [SA-02], [G-06] |
-| CF-97 | minor | Several FW conditions did not fit the plan | FW-C03 names the tunnel's connector service; FW-C16 "where the app has one"; FW-C13 owned by the CI lane and tested in FW-S6; FW-S3 on a stub landing route deployed Saturday night; FW-S1 from 12:30 to 13:30 | Arch §3.4; Exec §2.1, §4 |
+| CF-97 | minor | Several FW conditions did not fit the plan | FW-C03 names the tunnel's connector service; FW-C16 "where the app has one"; FW-C13 owned by the CI lane and tested in FW-S6; FW-S3 on a stub landing route deployed Saturday night; FW-S1 from 12:15 to 13:00 (Arch §3.4) | Arch §3.4; Exec §2.1, §4 |
 
 ## Appendix B. Changes for the owner's overnight decisions of 21 Nov
 
@@ -4358,7 +4403,7 @@ cookie and UI SDK research behind the changes was read on 21 Nov 2026 and is sum
 | [SA-25], [SA-26] | No nonce anywhere; the selfie host's own deployment |
 | [SA-43], [SA-44], [SA-45] | New: cookies, CSRF, and the page policy from `_headers` |
 | [OB-11], [OB-18] | The watcher checks the static deployments and routes; whether it may stay a Worker is put to the owner |
-| [CI-02], [CI-03], [CI-04], [CI-14] | The static build, its upload job, production uploads by the operator, and `_headers` as a control path |
+| [CI-02], [CI-03], [CI-04], [CI-14] | The static build, its upload job, production's static uploads left to [FD-19]'s open question, and `_headers` as a control path |
 | [AP-09], [AP-10] | The docs site served assets-only; Try it reaffirmed |
 | [UI-01], [UI-05] | Superseded |
 | [UI-02], [UI-09] | Built on the UI SDK; the hover swap superseded |
@@ -4375,9 +4420,10 @@ made exact by [SA-43].
 
 The eight specifications take their own decisions where the plan is silent: `S0-nn` (spec 01),
 `S2-nn` (spec 02), `SD3-nn` (spec 03), `MS-nn` (spec 04), `D05-nn` (spec 05), `S6-nn` (spec 06),
-`S7-nn` (spec 07) and `D08-nn` (spec 08). The plan has one order of precedence (README §8.3): the
-owner's decisions of 21 Nov 2026, then this register, then the specification that owns the area,
-then ARCHITECTURE.md, then EXECUTION.md. Under it:
+`S7-nn` (spec 07) and `D08-nn` (spec 08). The plan's one order of precedence, highest first:
+(1) the owner's decisions of 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md;
+(4) EXECUTION.md; (5) the specifications, and between two specifications the one that owns the area,
+as README §8.3 lists the owners. Under it:
 
 - a spec decision that fills a gap binds as its spec says, and the steward copies it into this
   register in the plan's first follow-up pull request;
@@ -4408,6 +4454,7 @@ S6-06 first changed, are already in [UI-11] and need no row.
 | SF-09 | S7-02 and S7-03 (spec 07) | [RV-02] | Folded | fin-review has two more modes: `since <ref>` (the nightly run until the ledger exists, and "everything since a commit") and `import` (the design layer's port only, [G-04]'s one exception) | Confirm with [RV-02], before Saturday's start |
 | SF-10 | D08-02 and D08-34 (spec 08) | [BC-03] | Folded | [BC-03]'s client address and user agent are stored in `audit.event_context`, linked to the audit row but outside the hash chain, kept 13 months, and only for console and Fin Admin actors. The chain keeps no personal data for the life of the service | Confirm with [BC-03], before Saturday's start; the 13 months with counsel under [DA-08], before production |
 
-A spec decision that disagrees only with ARCHITECTURE.md or EXECUTION.md needs no row: the owning
-spec holds over both, and the steward corrects their text in the plan's first follow-up pull
-request. Where two specs disagree, the spec that owns the area holds; README §8.3 lists the owners.
+A spec decision that disagrees only with ARCHITECTURE.md or EXECUTION.md needs no row, but it does
+not bind on its own: both rank above every spec, so their text holds and the spec yields until that
+file is changed to match in a reviewed pull request (README §8.3). Where two specs disagree, the spec
+that owns the area holds; README §8.3 lists the owners.

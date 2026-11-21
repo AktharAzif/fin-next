@@ -51,7 +51,8 @@ All rights are reserved. This is the default of decision G-03 in
 licence, with the source public so that it can be reviewed and built in CI, not as an open-source
 release. Fin's name, logo and other brand assets are reserved.
 
-The repository's first commit holds only the plan and this page. A `LICENSE` file that says the
-same arrives with the repository's root files in Phase 0, together with the notices for the
+The repository's root commit is a two-line README. The plan and this page arrive together in pull
+request 1, the repository's first merge and its only change before any code. A `LICENSE` file that
+says the same arrives with the repository's root files in Phase 0, together with the notices for the
 third-party code, icons and fonts that later commits carry. Until it does, this section is the
 licence statement.

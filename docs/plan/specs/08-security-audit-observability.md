@@ -14,29 +14,33 @@
 
 ### 0.1 Precedence, IDs and placeholders
 
-**Precedence.** The plan's one order (README §8.3) holds here.
+**Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+specifications, and between two specifications the one that owns the area, as README §8.3 lists
+the owners.
 
 1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to
    OD-6, override every other text.
 2. DECISIONS.md, appendix C included.
-3. The specification that owns the area. This spec owns the cross-cutting rules (§1.1): the shape of
-   an audit row, the chain, the anchoring and the journal; the email classes and the digest; the
-   personal-data classes and the scrubbers; the secrets inventory and the rotation runbooks; the line
-   envelope, the transport, the alert file shape, the policies and the incident runbooks. On those
-   rules it holds over specs 01 to 07, and §15 lists the reconciliations for the steward. Specs 02 to
-   05 own their own areas' events, templates, lines and alerts: the metadata, targets, triggers,
-   recipients and copy. The names are the exception: §3.4 is the one list of audit event names and
-   fragment files, and §4.4 the one list of template names and folders (D08-33). Specs 02, 03 and 05
-   use those names.
-4. ARCHITECTURE.md.
-5. EXECUTION.md.
+3. ARCHITECTURE.md.
+4. EXECUTION.md.
+5. The specifications. Between two of them, the one that owns the area holds. This spec owns the
+   cross-cutting rules (§1.1): the shape of an audit row, the chain, the anchoring and the journal;
+   the email classes and the digest; the personal-data classes and the scrubbers; the secrets
+   inventory and the rotation runbooks; the line envelope, the transport, the alert file shape, the
+   policies and the incident runbooks. On those rules it holds over specs 01 to 07, and §15 lists
+   the reconciliations for the steward. Specs 02 to 05 own their own areas' events, templates, lines
+   and alerts: the metadata, targets, triggers, recipients and copy. The names are the exception:
+   §3.4 is the one list of audit event names and fragment files, and §4.4 the one list of template
+   names and folders (D08-33). Specs 02, 03 and 05 use those names.
 
-A decision of this spec (D08-nn, §14) binds where everything above it is silent. One that would
+A decision of this spec (D08-nn, §14) binds where everything above it is silent; one that differs
+from ARCHITECTURE.md or EXECUTION.md binds only once that file is changed to match. One that would
 change a register entry binds only as DECISIONS appendix C settles it: D08-02 and D08-34 are folded
 into [BC-03] (SF-10), and D08-32 into [P-07] (SF-01). A conflict with the register found later is
 settled the same way, and the register holds until it is. Where this spec repeats a rule it names
 the section it comes from and keeps it short; where it differs from ARCHITECTURE or EXECUTION, §14
-says so.
+says so, and the higher file holds until it is amended to match.
 
 Anything marked **UNVERIFIED** is confirmed by the spike named beside it before work that depends on
 it merges.
@@ -98,7 +102,7 @@ one unit of work: an HTTP request, one run of a duty, one queue item, one proces
 | OD-1 Tunnels for every host | A tunnel token is an interception credential: whoever runs a connector with it receives a share of real traffic, and rotating it does not evict running connectors. Hence the minute watch, the blue and green evict, and the exposure assessment after any rogue connector (§8.2) |
 | OD-2 Assets-only static deployments | The static deploy token (CR-20) can replace every page of an environment. It is a family of its own (§6.2), watched every minute (`static-deployment-changed`), with a leak runbook. No Fin code runs at Cloudflare for an app, so the browser's errors and policy reports come back through each app's own `/api/monitoring/*` |
 | OD-3 One origin per app | No CORS between an app and its API, so the envelope relay and the policy report endpoint are same-origin and read no cookie. The docs site reports to `api.<zone>/reports/docs` (spec 05 §8.13) |
-| OD-4 Cookies and CSRF | The origin gate's refusals are a monitored signal (`csrf-refusals-jump`, spec 02 §18.2); cookie values are a scrubber shape |
+| OD-4 Cookies and CSRF | The origin gate's refusals are a monitored signal: one `csrf.refused` line per refusal with its reason and route pattern ([SA-44]), watched by `csrf-refused-jump` (ARCHITECTURE §10.8, spec 02 §18.2); cookie values are a scrubber shape |
 | OD-5 The UI SDK | No third-party origin at run time; the page policy has no nonce. `securitypolicyviolation` fails every browser test, and production reports reach `csp.report` lines |
 | OD-6 The edge toggle | Nothing here |
 
@@ -129,13 +133,13 @@ one unit of work: an HTTP request, one run of a duty, one queue item, one proces
 | Money events, templates, lines, alerts and the ledger head | Spec 04 §28 to §30 | Fragment `money.ts`; §3.7 anchors the ledger head |
 | API key and webhook events, templates, lines and alerts; the docs reports | Spec 05 §4.10, §5.7, §8.13, §10 | Fragments `api-keys.ts`, `webhooks.ts` |
 | Tunnels, the connector supervisor, the ingress check, static deployments, the Phase 0 watcher, the Phase 0 Better Stack team and files | Spec 01 §7 to §10 | §7 extends spec 01 §8 for production; §8.2 runs on spec 01 §7.3's commands |
-| Kill switches by area | Specs 02 (`signups`), 03 (`hosted_verify`, `sumsub_writes`), 04 (`live_money`, `provider_instance:<instance>`), 05 (`live_keys`, `all_api`, `outbound_webhooks`) | §8.6 lists them as containment tools |
+| Kill switches by area | Specs 02 (`signups`), 03 (`hosted_verify`, `sumsub_writes`), 04 (`live_money`, `provider_instance:<instance>`), 05 (`live_keys`, `outbound_webhooks`); all of `api.` only by the Cloudflare rule `killswitch-api` ([OP-01]) | §8.6 lists them as containment tools |
 
 ### 1.3 When each part is built
 
 | When | What | Lane |
 |---|---|---|
-| Phase 0 (Sat 08:00 to 13:30) | Scrubbers, the line envelope and transport, `reportError`, the envelope and policy relays; `audit.event`, `audit.record()`, the registry sync, the guard installer, the sequencer, `recordAudit`; the staging Better Stack team, sources, monitors, Phase 0 heartbeats and platform alerts; the watcher's front-door checks; `ops/credentials.json` with its Phase 0 rows; `docs/security/threat-model.json` | P0-D, P0-E, P0-F, steward |
+| Phase 0 (Sat 08:00 to 13:30) | Scrubbers, the line envelope and transport, `reportError`, the envelope and policy relays; `audit.event`, `audit.record()`, the registry sync, the guard installer, the sequencer, `recordAudit`; the staging Better Stack team, sources, monitors, Phase 0 heartbeats and platform alerts; the watcher's front-door checks and its vault inventory; `ops/credentials.json` with its Phase 0 rows; `docs/security/threat-model.json` | P0-D, P0-E, P0-F, steward |
 | Saturday | Auth events and emails, the digest and email classes, anchoring and the hourly verification, the revocation journal's table and shipper | L-SAT-02 to L-SAT-05, P0-E, L-SAT-09 |
 | Sunday | KYC and webhook events; reveal budgets; the personal-data read lines; the `kyc.pd_read` budget alerts | L-SUN-02, L-SUN-04, L-SUN-08, L-SUN-10 |
 | Monday | Money events, the ledger head anchor, money alerts | L-MON-01, L-MON-09 |
@@ -260,7 +264,7 @@ never reports them as new.
 | TM-L01 | Code running inside the console can act for any live developer session, and could mint sessions and proofs; the audit guard makes it leave a row naming its login | [SA-36], ARCH §7.9 |
 | TM-L02 | Code inside the edge can act as any key whose record it reads; `payments` re-reads keys and money keys carry allowlists | [SA-36], [MO-20] |
 | TM-L03 | The HA superuser's password lives in the cluster's own variables | [P-18] |
-| TM-L04 | A GitHub Actions log is public; nothing secret may be printed, and the overlay is masked value by value | [CI-03], spec 01 S0-11 |
+| TM-L04 | A GitHub Actions log is public; nothing secret may be printed, and the overlay is masked value by value wherever `pnpm fin` reads it | [CI-03], spec 01 §9.2 |
 | TM-L05 | Staging's watcher and vault live in the staging Cloudflare account | [OB-11], [DA-09] |
 | TM-L06 | One vendor holds the logs and the pager; liveness also rides on monitors, heartbeats and the watcher | [OB-01], ARCH §10.12 |
 | TM-L07 | An R2 bucket lock can be lifted by whoever edits the bucket, probably without an audit entry; the watcher's inventory is the control | [DA-09] |
@@ -487,7 +491,7 @@ one. An event name is never also a permission key (spec 02 §8.2): the Sandbox r
 | `staff.ts` (L-SAT-04) | 02 §16.4 | staff | `sign_in`, `security`, `staff` | `fin_admin` (`staff.bootstrapped`: `fin_owner`) | `staff.signed_in`, `staff.second_factor_required`, `staff.signed_out`, `staff.session_revoked`, `staff.signed_out_everywhere`, `staff.sign_in_failed`, `staff.step_up_passed`, `staff.step_up_failed`, `staff.step_up_locked`, `staff.factor_setup_started`, `staff.factor_added`, `staff.factor_removed`, `staff.factor_enrolled`, `staff.enrolment_code_issued`, `staff.enrolment_code_redeemed`, `staff.member_added`, `staff.role_changed`, `staff.member_removed`, `staff.factors_reset`, `staff.role_created`, `staff.role_updated`, `staff.role_deleted`, `staff.bootstrapped` |
 | `staff.ts` (L-SAT-04) | 02 §16.4 | staff | `operations` | `fin_admin`, `fin_owner` (`pnpm fin switch`) | `switch.set`, `switch.cleared` |
 | `api-keys.ts` (L-SAT-11) | 05 §4.10 | organisation | `api_keys` | `fin_console`; `fin_api` for exposures | `api_key.created`, `api_key.updated`, `api_key.rolled`, `api_key.revoked`, `api_key.exposed` |
-| `webhooks.ts` (L-SUN-04) | 05 §5.7 | organisation | `webhooks` | `fin_api`, `fin_worker` (system) | `webhook_endpoint.created`, `webhook_endpoint.updated`, `webhook_endpoint.events_changed`, `webhook_endpoint.url_changed`, `webhook_endpoint.secret_rolled`, `webhook_endpoint.deleted`, `webhook_endpoint.test_sent`, `webhook_endpoint.verified`, `webhook_endpoint.verification_failed`, `webhook_endpoint.paused`, `webhook_endpoint.resumed`, `webhook_delivery.retried` |
+| `webhooks.ts` (L-SUN-04) | 05 §5.7 | organisation | `webhooks` | `fin_api`, `fin_worker` (system) | `webhook_endpoint.created`, `webhook_endpoint.updated`, `webhook_endpoint.events_changed`, `webhook_endpoint.url_changed`, `webhook_endpoint.secret_rolled`, `webhook_endpoint.deleted`, `webhook_endpoint.test_sent`, `webhook_endpoint.verified`, `webhook_endpoint.verification_failed`, `webhook_endpoint.paused`, `webhook_endpoint.disabled`, `webhook_endpoint.resumed`, `webhook_delivery.retried` |
 | `customers.ts` (L-SUN-02) | 03 §16.2 | organisation | `customers` | `fin_api`; `fin_worker` (provider, system) | `customer.created`, `customer.updated`, `customer.details_entered`, `customer.consent_given`, `customer.link_created`, `customer.assisted_link_created`, `customer.link_opened`, `customer.link_emailed`, `customer.details_shown`, `customer.submitted`, `customer.status_changed`, `customer.document_added`, `customer.document_status_changed`, `customer.person_added`, `customer.person_updated`, `customer.person_removed`, `customer.person_link_created`, `person.details_entered`, `person.submitted`, `person.link_opened`, `person.status_changed`, `customer.rfi_opened`, `customer.rfi_draft_saved`, `customer.rfi_form_sent`, `customer.rfi_note_added`, `customer.rfi_documents_added`, `customer.rfi_answered`, `customer.rfi_accepted`, `customer.rfi_more_needed`, `customer.rfi_changed`, `customer.rfi_cancelled`, `customer.rfi_expired`, `customer.selfie_started`, `customer.selfie_completed`, `customer.test_data_created`, `customer.sandbox_action`, `customer.restarted`, `customer.deleted`, `customer.erased`, `customer.sandbox_reset` |
 | `going-live.ts` (L-SUN-02) | 03 §16.3 | organisation | `going_live` | `fin_api`; `fin_worker` (provider) | `go_live.started`, `go_live.answers_saved`, `go_live.company_email_code_sent`, `go_live.company_email_checked`, `go_live.person_added`, `go_live.person_removed`, `go_live.person_link_created`, `go_live.company_added`, `go_live.company_removed`, `go_live.terms_accepted`, `go_live.submitted`, `go_live.person_status_changed`, `go_live.provider_status_changed`, `organization.live_status_changed` |
 | `staff-kyc.ts` (L-SUN-02) | 03 §16.4 | staff | `staff`, `system` | `fin_api`; `fin_worker` (system) | `staff.customer_approved`, `staff.customer_unapproved`, `staff.customer_rejected`, `staff.customer_restart_allowed`, `staff.customer_details_shown`, `staff.document_viewed`, `staff.rfi_created`, `staff.rfi_accepted`, `staff.rfi_more_needed`, `staff.rfi_withdrawn`, `staff.rfi_changed`, `staff.form_created`, `staff.form_updated`, `staff.form_published`, `staff.form_archived`, `staff.fin_approval_enabled`, `staff.fin_approval_disabled`, `staff.go_live_first_approval`, `staff.go_live_approved`, `staff.go_live_changes_requested`, `staff.go_live_declined`, `staff.organization_paused`, `staff.organization_restore_requested`, `staff.organization_restored`, `staff.approval_cancelled`, `staff.approval_expired`, `staff.flag_resolved`, `staff.reveal_budget_reached`, `system.kyc_write_refused`, `system.kyc_unknown_applicant` |
@@ -729,7 +733,8 @@ organisation. A scope test proves no `staff` row ever reaches an organisation's 
 
 ### 3.13 Audit outside the application
 
-ARCHITECTURE §8.8 and spec 01 §10 hold. The additions in hardening (H-04):
+ARCHITECTURE §8.8 and spec 01 §10 hold. The R2 vault's inventory is in the Phase 0 watcher (EXECUTION §2.5
+step 10, spec 01 §7.11); the other rows are additions in hardening (H-04):
 
 | What | How | Kept in | Alert |
 |---|---|---|---|
@@ -737,7 +742,7 @@ ARCHITECTURE §8.8 and spec 01 §10 hold. The additions in hardening (H-04):
 | GitHub settings | The watcher hashes the ruleset, settings, environments, collaborators, deploy keys and Actions settings hourly ([AU-09]) | Better Stack lines | `github-settings-changed` |
 | Cloudflare | The watcher's minute checks; the account audit log read by `pnpm fin verify` | Better Stack lines | `cloudflare-config-changed` |
 | Better Stack | The daily dry run of `pnpm fin monitoring apply` reads every object and `paused_reason` ([AU-05] default) | Better Stack lines from the `ops` source | `monitoring-drift` |
-| The R2 vault | The watcher's inventory of every locked object: removed or changed before its lock ends pages | Better Stack lines | `vault-inventory-changed` |
+| The R2 vault (Phase 0) | The watcher's inventory of every locked object: removed or changed before its lock ends pages | Better Stack lines | `vault-inventory-changed` |
 | Operator SQL | `pnpm fin db` transcripts and Postgres's statement log for `fin_owner` and `fin_readonly` ([AU-08]) | the ops bucket, encrypted | `privileged-login` |
 
 ### 3.14 Duties, lines and alerts for audit
@@ -1102,7 +1107,7 @@ runbook. "Deploys" counts the Railway deploys one routine rotation needs.
 | `db-login` | `FIN_DB_USER`, `FIN_DB_PASSWORD` | each service with a login, its own | SCRAM verifier set by a registered task; 32 bytes base64url | 180 days | `rotate-db-login.md` | 1, then disable the old login |
 | `turnstile-secret` (if adopted) | `FIN_TURNSTILE_SECRET` | console, admin, verify | issued by Cloudflare | yearly | `rotate-turnstile.md` | 1 |
 | `google-client-secret` (if built) | `FIN_GOOGLE_CLIENT_SECRET` | console (admin if enabled) | issued by Google | yearly | `rotate-google.md` | 1 |
-| `static-deploy-token` | `CF_STATIC_DEPLOY_TOKEN` | the `staging-static` GitHub environment; production's at the secure prompt only | Cloudflare token, Workers Scripts Edit only | 90 days | `rotate-static-deploy-token.md` | none |
+| `static-deploy-token` | `CF_STATIC_DEPLOY_TOKEN` | the `staging-static` GitHub environment; production's depends on the owner's open answer to [FD-19]: at the secure prompt only under the default put to the owner (the operator's launcher), or a `production` GitHub environment under the other answer | Cloudflare token, Workers Scripts Edit only | 90 days | `rotate-static-deploy-token.md` | none |
 | `railway-project-token` | `RAILWAY_TOKEN` | the `staging` GitHub environment; production's at the secure prompt only | issued by Railway | 90 days | `rotate-railway-token.md` | none |
 | `betterstack-ci-token` | `BETTERSTACK_TELEMETRY_TOKEN` | the `staging` GitHub environment | team Telemetry token | 90 days | `rotate-betterstack.md` (CI section) | none |
 | `watcher-tokens` | the watcher's secrets (CR-18) | the watcher | read-only tokens | yearly | `rotate-watcher-tokens.md` | a watcher upload |
@@ -1273,7 +1278,10 @@ export interface Envelope {
 ```
 
 **Units and their lines.** Every unit writes exactly one terminal line; a unit may also write named
-event lines (a failure, a security refusal) before it ends.
+event lines (a failure, a security refusal) before it ends. The origin gate's refusal is one: it
+writes one `csrf.refused` line with `reason` (the refusal code) and `route` (the route pattern)
+([SA-44]; spec 01 §8.9, catalogued in `platform.ts`), and the `request` line that ends the unit
+carries `outcome: refused` and `reason: origin_gate.<code>`.
 
 | Unit | Terminal line | Written by | When |
 |---|---|---|---|
@@ -1450,7 +1458,7 @@ function) and the tags of the IDs above; it drops `request` (cookies, headers, q
 `contexts.device`, `contexts.os` beyond its name, `extra`, `server_name` and every breadcrumb but
 `navigation` ones carrying a route template; then it runs `scrubText` over every remaining string.
 
-**Browser** (console, Fin Admin, verify, selfie). `packages/frame/src/reporting/` (P0-G) loads
+**Browser** (console, Fin Admin, verify, selfie). `packages/frame/src/report/` (P0-G; spec 06 §2.6 owns `packages/frame` and this path) loads
 `@sentry/react` after first paint, queueing up to 20 errors before, with:
 
 - `dsn: "https://fin@relay.invalid/1"`, a placeholder: the relay ignores it and forwards to the app's
@@ -1477,13 +1485,19 @@ on the console, admin and verify API services, verify also answering for the sel
    `FIN_BROWSER_ERRORS_DSN` with a 3 s timeout, after the answer.
 5. Answer 200 `{}` with `Cache-Control: no-store`, whatever happened upstream; write `browser.report`.
 
-The relay reads no cookie, needs no session and changes nothing, so the origin gate exempts it
-(FW-C09). It holds no database login; its caps are per replica, because a report must cost no
-database work ([SA-42]).
+The relay reads no cookie, needs no session and changes nothing, but it is not exempt from the
+origin gate: [SA-44] exempts only `GET /api/auth/callback/google` (ARCHITECTURE FW-C09, §10.5). The
+browser posts the envelope itself, with no `X-Fin-App` and a body that is not JSON, so as the
+register stands the gate refuses it, and the page-policy relay below in the same way. Exempting both
+needs the owner to amend [SA-44] through DECISIONS appendix C (EXECUTION §3.1, spec 01 §4.4, spec 02
+§2.3 and AC-SAT-27 then follow); until then neither relay holds an exemption. It holds no database
+login; its caps are per replica, because a report must cost no database work ([SA-42]).
 
 **The page-policy relay** (`packages/web-host/src/monitoring/csp.ts`, `POST /api/monitoring/csp`):
 each app's `_headers` adds `Reporting-Endpoints: csp="/api/monitoring/csp"` and appends `; report-to
-csp` to the page policy of ARCHITECTURE §7.12 (D08-13). The relay accepts `application/reports+json`
+csp` to the page policy of ARCHITECTURE §7.12 (D08-13). The `docs` profile is excluded: the docs host
+has no `/api/`, so it carries neither header and reports through spec 05 §8.13's `csp` stage at the
+edge (spec 01 §7.4, spec 05 §8.11). The relay accepts `application/reports+json`
 and `application/csp-report`, with the same caps and size rule, keeps `effectiveDirective`,
 `disposition`, the blocked URL's origin only, the source file's origin only, and the document's route
 template (matched against the app's route list, or `unknown`), and writes `csp.report`. It never
@@ -1494,9 +1508,11 @@ Try it holds a key.
 
 **Releases and source maps**: ARCHITECTURE §10.5 and §11.7 hold. `pnpm fin deploy` registers the
 release with every Errors application of the environment (`POST
-https://errors.betterstack.com/api/v1/releases`) and uploads the browser maps kept as a build
-artefact; staging's Telemetry token comes from the `staging` environment, production's only from the
-secure prompt. No `*.map` is ever served.
+https://errors.betterstack.com/api/v1/releases`). The browser maps go from the build ([FD-19]): the
+build keeps them as the release's source-map artefact, and in staging the `sourcemaps-staging` job
+uploads that artefact (`pnpm fin sourcemaps upload`), in production the operator's launcher. Staging's
+Telemetry token comes from the `staging` environment, production's only from the secure prompt. No
+`*.map` is ever served.
 
 **Triage, not paging.** Errors notifies by email on new and reoccurring errors in production; paging
 comes from log alerts on `error.unexpected` and `process.*` lines.
@@ -1659,7 +1675,7 @@ a metric of §7.4 or `{ "sql": "<a saved exploration name>" }` for raw-log alert
 | Group | Alerts | Spec |
 |---|---|---|
 | B, the API | `api-latency`, `rate-limiter-failing`, `idempotency-store-failing`, `pepper-missing`, `keys-not-rehashed`, `bad-key-flood`, `load-shedding`, `key-sent-in-clear`, `key-leaked`, `secret-scanning-refused`, `edge-pool-waiting`, `docs-failing`, `webhook-host-capped` | 05 §10.2 |
-| C, sign-in and roles | `sign-in-failing`, `second-factor-step-failing`, `step-up-failing`, `sign-in-failures-spike`, `step-up-locked`, `secret-unreadable`, `rate-limiter-failing`, `auth-endpoint-unlisted`, `csrf-refusals-jump`, `identity-sweep-stalled`, `staff-sign-in-failures`, `admin-staff-refused`, `admin-without-second-factor`, `admin-access-mismatch`, `admin-access-drift`, `access-keys-unavailable`, `staff-changed`, `staff-enrolled`, `staff-enrolment-refused`, `duty-stalled-access-drift`, `staff-sweep-stalled`, `team-change-failing`; stretch `password-guessing-spread`, `google-sign-in-failing` | 02 §18.2 |
+| C, sign-in and roles | `sign-in-failing`, `second-factor-step-failing`, `step-up-failing`, `sign-in-failures-spike`, `step-up-locked`, `secret-unreadable`, `rate-limiter-failing`, `auth-endpoint-unlisted`, `csrf-refused-jump`, `identity-sweep-stalled`, `staff-sign-in-failures`, `admin-staff-refused`, `admin-without-second-factor`, `admin-access-mismatch`, `admin-access-drift`, `access-keys-unavailable`, `staff-changed`, `staff-enrolled`, `staff-enrolment-refused`, `duty-stalled-access-drift`, `staff-sweep-stalled`, `team-change-failing`; stretch `password-guessing-spread`, `google-sign-in-failing` | 02 §18.2 |
 | E, onboarding | `sumsub-failing`, `sumsub-rate-limited`, `sumsub-webhook-refused`, `kyc-inbound-backlog`, `applicant-write-backlog`, `sumsub-poll-stalled`, `kyc-review-stale`, `go-live-queue-age`, `documents-failing`, `erasure-failing`, `kyc-unknown-applicant`, `kyc-write-refused`, `selfie-failing`, `verify-link-flood`, `5xx-rate-verify`, `reveal-budget-reached`, the `duty-stalled-*` of spec 03 §7.6 | 03 §18.2 |
 | F, money and webhooks | `provider-failing`, `provider-auth-failing`, `provider-rate-limited`, `provider-latency`, `provider-webhook-refused`, `provider-sync-stalled`, `transfers-stuck`, `transfer-sent-after-end`, `idempotency-mismatch`, `reconciliation-break`, `orphan-payout`, `money-switch-tripped`, `money-durability-unconfirmed`, `ledger-unsequenced`, `holder-locked`, `provisioning-failed`, `accounts-not-closing`, `funding-low`, `provider-events-backlog`, `money-door-volume`, `simulation-refused`; `webhook-deliveries-failing`, `webhook-dispatcher-stalled`, `webhook-backlog`, `webhook-signing-failed` | 04 §30.3; 05 §10.2 |
 
@@ -2030,15 +2046,16 @@ with no cache, guarded by §3.5's audit rule):
 | `live_money` | every live money write | 04 §31 | `killswitch-money`: blocks `/v4/transfers*`, `/v4/customers/*/beneficiaries*`, `/v4/customers/*/virtual_account*` on `api.` |
 | `provider_instance:<instance>` | money writes on one instance; tripped automatically | 04 §31 | as above |
 | `live_keys` | every live API key | 05 §2.1 | `killswitch-api`: blocks all of `api.` except `/hooks/` |
-| `all_api` | the whole public API | 05 §3.4 | `killswitch-api` |
 | `signups` | account-creating sign-ins | 02 §5.1 | `killswitch-signups`: blocks the console's sign-up and code-send paths |
 | `hosted_verify` | every verify door | 03 §18.4 | `killswitch-verify`: blocks the `verify.` and `selfie.` hosts whole |
 | `outbound_webhooks` | developer webhook deliveries | 05 §5.4 | none (deliveries start inside Railway) |
 | `sumsub_writes` | the transit queue, submit and uploads | 03 §7.4 | none |
 
-The Cloudflare rules are WAF custom rules created disabled by the ops lanes and toggled by `pnpm fin
-killswitch <env> <rule> on|off` with the Cloudflare token alone; a block answers Fin's JSON problem
-document. Each switch has a test that it stops what it names and nothing else (T08-57), and each rule
+There is no database switch for the whole public API: [OP-01] and ARCHITECTURE §15.1 list none, so
+stopping all of `api.` is the Cloudflare rule `killswitch-api` alone, unless the owner first adds such
+a switch to [OP-01]. The Cloudflare rules are WAF custom rules created disabled by the ops lanes and
+toggled by `pnpm fin killswitch <env> <rule> on|off` with the Cloudflare token alone; a block answers
+Fin's JSON problem document. Each switch has a test that it stops what it names and nothing else (T08-57), and each rule
 is toggled in a drill (§9).
 
 ---
@@ -2101,11 +2118,11 @@ board at a merge point (EXECUTION §1.3).
 | Steward | Phase 0 onward | `docs/security/**` (`threat-model.md`, `threat-model.json`, `threat-model.schema.json`, `check.mjs`, `personal-data.md`, `personal-data.json`) | §2, §5.2's inventory; folds §14's decisions into DECISIONS.md and §15's reconciliations into the plan |
 | P0-D | Phase 0 | `packages/core/src/{scrub,scrub-shapes,safe-error}.ts`, `packages/server/src/telemetry/**`, `packages/server/src/{report,report-dsn}.ts`, `packages/web-host/src/monitoring/**` | §5.4, §7.2, §7.3, §7.5's server client and relays; T08-30 to T08-35, T08-39 to T08-42 |
 | P0-E | Phase 0, then Saturday | `packages/audit/{build,src}/**` except other areas' `src/events/<area>.ts`, `packages/db/migrations/<ts>_audit_*.sql`, `packages/db/roles/grants/audit.json`, `packages/db/src/guards/platform.ts`, `apps/api/src/worker/audit/**`, `apps/api/src/tasks/{audit-sync,audit-note,start-epoch}.ts` | §3.2 to §3.9, §3.14's duties; T08-01 to T08-13, T08-15, T08-16 |
-| P0-G | Phase 0 | `packages/frame/src/reporting/**` | §7.5's browser client |
-| P0-F, then L-SAT-09, L-SUN-10, L-MON-09 | Phase 0 onward | `ops/monitoring/{check.ts,vrl/**}`, `ops/monitoring/catalog/{platform,audit,database,ops}.ts`, `ops/monitoring/<env>/{sources,errors,metrics,monitors,heartbeats,policies,webhooks,status-page}.json`, `ops/monitoring/<env>/alerts/{platform,audit,database,ops}.json`, `ops/monitoring/<env>/dashboards/**`, `ops/watcher/**`, `ops/credentials.json`, `ops/fin/src/commands/{monitoring,tunnel,secret}/**`, the runbooks of §3.14 and §7.8 for those fragments | §7.6 to §7.11, §6.5; T08-36 to T08-38, T08-43, T08-44 |
+| P0-G | Phase 0 | `packages/frame/src/report/**` (spec 06 §2.6's path) | §7.5's browser client |
+| P0-F, then L-SAT-09, L-SUN-10, L-MON-09 | Phase 0 onward | `ops/monitoring/{check.ts,vrl/**}`, `ops/monitoring/catalog/{platform,audit,database,ops}.ts`, `ops/monitoring/<env>/{sources,errors,metrics,monitors,heartbeats,policies,webhooks,status-page}.json`, `ops/monitoring/<env>/alerts/{platform,audit,database,ops}.json`, `ops/monitoring/<env>/dashboards/**`, `ops/watcher/**`, `ops/credentials.json`, `ops/fin/src/commands/{monitoring,tunnel,secret,access}/**` (the Access commands are Phase 0 and Saturday work: `access apply` at EXECUTION §2.5 step 9, `access sync` and `revoke` with L-SAT-09, spec 02 §10.1), the runbooks of §3.14 and §7.8 for those fragments, and `docs/runbooks/evict-tunnel.md` (§8.2), Phase 0 work: written by EXECUTION §2.5 step 12 (Saturday 13:00) as the runbook of spec 01 §8.7's `tunnel-connectors` alert | §7.6 to §7.11, §6.5; T08-36 to T08-38, T08-43, T08-44 |
 | L-SAT-05 | Saturday | `packages/email/src/{classes,digest}.ts`, `packages/email/src/templates/ops/**`, `ops/monitoring/catalog/email.ts`, `ops/monitoring/<env>/alerts/email.json`, `docs/runbooks/{email,security-email-unsent}.md` | §4.1 to §4.3, group G; T08-20 to T08-25 |
-| H-04 | hardening | `ops/watcher/src/checks/{vault,github,audit-epochs}.ts`, `ops/fin/src/commands/{logpush,killswitch}/**`, `ops/fin/src/commands/railway/audit-export.ts`, `apps/api/src/tasks/journal-replay.ts`, `ops/fin/src/commands/restore/replay.ts` | §3.10's replay, §3.13, §7.12, §8.6's Cloudflare rules; T08-14, T08-45 |
-| H-05 | hardening | `ops/fin/src/commands/{rotate,escrow,restore,restore-check,reseal,reindex,sessions,access}/**`, `apps/api/src/tasks/{reseal,reindex,auth-reencrypt,sessions-end-all}.ts`, `docs/operations/**`, `docs/runbooks/{rotate-*,evict-tunnel,rotate-emergency,railway-variable-leak,restore-check,restore-drill,failover-lost-commits}.md` and §8.5's playbooks | §6.3, §6.4, §8; T08-50, T08-51, T08-58 |
+| H-04 | hardening | `ops/watcher/src/checks/{github,audit-epochs}.ts` (the `vault` check is Phase 0's, in P0-F's `ops/watcher/**`, EXECUTION §2.5 step 10), `ops/fin/src/commands/{logpush,killswitch}/**`, `ops/fin/src/commands/railway/audit-export.ts`, `apps/api/src/tasks/journal-replay.ts`, `ops/fin/src/commands/restore/replay.ts` | §3.10's replay, §3.13, §7.12, §8.6's Cloudflare rules; T08-14, T08-45 |
+| H-05 | hardening | `ops/fin/src/commands/{rotate,escrow,restore,restore-check,reseal,reindex,sessions}/**` (the db tunnel's Access TCP application extends the Access commands through the lane board), `apps/api/src/tasks/{reseal,reindex,auth-reencrypt,sessions-end-all}.ts`, `docs/operations/**`, `docs/runbooks/{rotate-*,rotate-emergency,railway-variable-leak,restore-check,restore-drill,failover-lost-commits}.md` and §8.5's playbooks (the evict drill's times go into P0-F's `evict-tunnel.md` through the lane board) | §6.3, §6.4, §8 (§8.2's runbook is Phase 0's); T08-50, T08-51, T08-58 |
 | H-06 | hardening | `ops/monitoring/production/**`, `apps/api/src/worker/canary/**`, the shadow copies | §7.9, §7.10, §7.13, §7.14; A08-29 |
 | H-09 | hardening | `apps/api/src/worker/audit/context-sweep.ts` (moved from P0-E through the lane board), the erasure parts of spec 03 | §3.12's context sweep, §5.7 |
 | H-12 | hardening | no files; drill records in the ops bucket; `docs/operations/drills.md` | §9 |
@@ -2122,7 +2139,7 @@ docs/runbooks/            evict-tunnel.md, rotate-<family>.md (one per row of §
 packages/core/src/        scrub.ts, scrub-shapes.ts, safe-error.ts (+ tests)
 packages/server/src/      telemetry/{lines,unit,batch,queue,ship,middleware}.ts, report.ts, report-dsn.ts
 packages/web-host/src/    monitoring/{envelope,csp,buckets}.ts
-packages/frame/src/       reporting/{client,queue}.ts
+packages/frame/src/       report/{client,queue}.ts (spec 06 §2.6)
 packages/audit/           build/gen-index.ts; src/{define,record,chain,anchor,verify,journal}.ts;
                           src/events/platform.ts (area fragments beside it, owned by their lanes)
 packages/db/              migrations/<ts>_audit_core.sql, <ts>_audit_journal.sql, <ts>_audit_guards_platform.sql;
@@ -2145,7 +2162,7 @@ asks for its changes. Each area lane keeps its own fragments of `packages/audit/
 `packages/email/src/templates/`, `ops/monitoring/catalog/` and `ops/monitoring/<env>/alerts/`.
 
 **Definition of done** for a pull request in these paths: EXECUTION §1.5, with tier S review for every
-path above except `docs/**` (tier D) and `packages/frame/src/reporting/**` (tier N, whose server side
+path above except `docs/**` (tier D) and `packages/frame/src/report/**` (tier N, whose server side
 is the relay).
 
 ---
@@ -2236,7 +2253,7 @@ Builders proceed on them.
 | D08-10 | `pnpm fin rotate` prepares the inventory's date change for a reviewed pull request | one source of truth, with a trail |
 | D08-11 | Rotating the limit key counts under both versions for 24 hours and enforces the higher | a rotation must not hand out fresh allowances |
 | D08-12 | Browsers use a placeholder DSN; each relay forwards to its sealed `FIN_BROWSER_ERRORS_DSN` | no Better Stack identifier in a public bundle or `env.json` |
-| D08-13 | Every app's `_headers` adds `Reporting-Endpoints: csp="/api/monitoring/csp"` and `report-to csp` to the page policy | production violations must be seen (research D1 §9); amends ARCHITECTURE §7.12's string |
+| D08-13 | Every app's `_headers` adds `Reporting-Endpoints: csp="/api/monitoring/csp"` and `report-to csp` to the page policy, except the `docs` profile, which has no `/api/` and reports through spec 05 §8.13 | production violations must be seen (research D1 §9); amends ARCHITECTURE §7.12's string |
 | D08-14 | No monitor carries an Access service token; the admin API's liveness rides on its lines | a service token would widen Access's policy |
 | D08-15 | A second dashboard, "Fin Security" | security signals need one place |
 | D08-16 | The drill identity is typed per check or drill; its recipient rotates after each full drill; the weekly check is operator-started | [DA-15] forbids a standing drill key |
@@ -2258,7 +2275,7 @@ Builders proceed on them.
 | D08-32 | An Errors application `fin-next-<env>-docs-web`, fed only by the edge's docs reports | the docs site has no relay of its own |
 | D08-33 | One catalogue of names: §3.4 is the canonical list of audit event names and fragment files, and §4.4 of template names and folders. They take the owning spec's names (spec 05's `api-keys.ts`, `webhooks.ts`, `key-changed`, `key-exposed`, `endpoint-changed` and `endpoint-paused`; spec 03's `customer.sandbox_reset` and `staff-kyc/` folder), and specs 02, 03 and 05 were edited to use them on 21 Nov 2026. No event name is also a permission key | `recordAudit` accepts only registry names and R9 needs one test per event, so two names for one event would break the joins and the tests or leave an event unwritten |
 | D08-34 | `audit.record()` stores context only for `console` and `admin` actors | [BC-03] names those two; a customer's address on a hosted page is not Fin's to keep |
-| D08-35 | The guard matches `target_id` or any of up to 32 `ref_ids` | reconciles spec 02's ten refs and spec 04's `target_ids` |
+| D08-35 | The guard matches `target_id` or any of up to 32 `ref_ids` | reconciles spec 02's ten refs and spec 04's targets (its `target` and `refs`) |
 
 ---
 
@@ -2269,7 +2286,7 @@ Builders proceed on them.
 | 1 | [AU-01]: confirm that R9 means actions and disclosures, not a row per read | Owner | before Saturday's start (default built) |
 | 2 | [AU-03]: production's audit bucket lock, Indefinite by default | Owner | production |
 | 3 | [OB-18]: whether the watcher may stay a Worker; and D08-24's amendment to ARCHITECTURE §10.6 (TM-L12, in the private annex) | Owner | Saturday 12:00 (staging), production |
-| 4 | Names across specs (D08-33). Settled on 21 Nov: spec 02's `keys.ts` fragment and `keys/` folder are now `api-keys.ts` and `api-keys/`, its four `api-key-*` templates are now `api-keys/key-changed`, and its key metadata and revoke reasons defer to spec 05 §4.9 and §4.10; the roll overlap is `now`, `1h` or `24h` in the request and the audit row alike (spec 02 §12.3, spec 05 §4.10); the Sandbox reset is `customer.sandbox_reset` everywhere; the reveal-budget notice is `staff-kyc/reveal-budget`. Spec 03's webhook names already defer to spec 05 §5.7 (spec 03 §16.5). Still open: spec 04 §28 writes `target_ids` where §3.3's `recordAudit` takes `target` and `refs` (the guard's matching is D08-35's); the steward aligns the wording | Steward with L-MON-01 | before Monday's money lanes merge |
+| 4 | Names across specs (D08-33). Settled on 21 Nov: spec 02's `keys.ts` fragment and `keys/` folder are now `api-keys.ts` and `api-keys/`, its four `api-key-*` templates are now `api-keys/key-changed`, and its key metadata and revoke reasons defer to spec 05 §4.9 and §4.10; the roll overlap is `now`, `1h` or `24h` in the request and the audit row alike (spec 02 §12.3, spec 05 §4.10); the Sandbox reset is `customer.sandbox_reset` everywhere; the reveal-budget notice is `staff-kyc/reveal-budget`. Spec 03's webhook names already defer to spec 05 §5.7 (spec 03 §16.5). Spec 04 §7.7 and §28 now use §3.3's `target` and `refs` (the guard's matching is D08-35's) | none | done |
 | 5 | Resolved on 21 Nov: spec 02 §18.4 and S2-35 now follow D08-14. Both admin monitors expect Access's own refusal, `admin-api-health` fails on any answer from the admin API half, and the watcher asserts the Access application's shape (`admin-access-shape`) | none | done |
 | 6 | ARCHITECTURE §7.12's page policy lacks `report-to`, and §10.6's canary sentence: fold D08-13 and D08-24 into the plan. Spec 01 S0-10's alert names (`static-deployment-changed`, `cloudflare-config-changed`) are folded into ARCHITECTURE §5.9 and §10.8 before the first commit | Steward | the plan's next follow-up |
 | 7 | Counsel ([DA-08]): audit for the life of the service, the 13-month context retention, the processor role, and how requests from people about their data are answered (§5.8) | Owner with counsel | production (PG-07) |

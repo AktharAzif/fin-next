@@ -18,18 +18,20 @@ zone is `<staging-zone>`. Test addresses use `example.com`, `example.org` or `ex
 
 ### 0.1 Precedence, IDs and placeholders
 
-**Precedence.** The plan's one order (README §8.3) holds here. (1) The owner's decisions of 21 Nov
-2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to OD-6. (2) DECISIONS.md, appendix C
-included. (3) The specification that owns the area: this spec for sign-in in both realms, the second
-factor, step-up, permissions and roles, organisations and teams, staff management and sessions; the
-sibling that owns any other area (spec 05 for API keys' public conventions, webhooks and events);
-and spec 08 for the cross-cutting rules of audit, security email, personal data, scrubbing, secrets
-and observability. (4) ARCHITECTURE.md. (5) EXECUTION.md. A decision of this spec (S2-nn, §22)
-binds where everything above it is silent. DECISIONS appendix C found none that changes a register
-entry; if one is found later, the register holds until appendix C settles it. Where this spec
-repeats a rule it names the section and keeps it short; where it differs from ARCHITECTURE or
-EXECUTION, §1.3 says so. **UNVERIFIED** marks a library or platform behaviour that the named
-spike or pin test confirms before work that depends on it merges.
+**Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+specifications, and between two specifications the one that owns the area, as README §8.3 lists
+the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
+OD-6. Among the specifications, this spec owns sign-in in both realms, the second factor, step-up,
+permissions and roles, organisations and teams, staff management and sessions; the sibling owns any
+other area (spec 05 for API keys' public conventions, webhooks and events); and spec 08 owns the
+cross-cutting rules of audit, security email, personal data, scrubbing, secrets and observability.
+A decision of this spec (S2-nn, §22) binds where everything above it is silent. DECISIONS appendix C
+found none that changes a register entry; if one is found later, the register holds until appendix C
+settles it. Where this spec repeats a rule it names the section and keeps it short; where it differs
+from ARCHITECTURE or EXECUTION, §1.3 says so, and the higher file holds until it is amended to
+match. **UNVERIFIED** marks a library or platform behaviour that the named spike or pin test
+confirms before work that depends on it merges.
 
 | ID form | Meaning | Register |
 |---|---|---|
@@ -44,7 +46,7 @@ spike or pin test confirms before work that depends on it merges.
 | `L-SAT-nn`, `CUT-nn`, `NB-nn`, `EX-nn`, `CR-nn`, `RK-nn`, `H-nn` | Lanes, cut lines, never-cut rules, working rules, credentials, risks, hardening workstreams | EXECUTION.md |
 | `PG-nn` | A production gate | EXECUTION §7.3. Production gates use `PG-` only; `G-` belongs to governance decisions |
 | `SP-nn`, `FW-Cnn` | A spike; a framework condition | ARCHITECTURE §11.11 and §3.4, spec 01 §11 (SP-25, SP-26) |
-| `F1` to `F23`, `F-<slug>` | A flow in ARCHITECTURE §2.3; a new flow for the Flow Atlas | §18.5 |
+| `F1` to `F24`, `F-<slug>` | A flow in ARCHITECTURE §2.3; a new flow for the Flow Atlas | §18.5 |
 
 | Placeholder | Stands for |
 |---|---|
@@ -124,7 +126,7 @@ Sunday's spill block (S2-28).
 ARCHITECTURE.md and EXECUTION.md now carry the owner's decisions of 21 Nov (spec 01 §1): the
 static files at Cloudflare and only `/api/*` through the tunnel (FW-C03, FW-C10, §5.2, §5.3),
 the cookie lines of §7.12 with the session `Strict` and every other auth cookie `Lax`, the
-origin gate with `X-Fin-App` (FW-C09), screens on the UI SDK ([UI-10]), the `console-api`
+origin gate with `X-Fin-App` (FW-C09), screens on the UI SDK ([UI-10]), the `console-api-health`
 monitor (§10.6) and the invitation token kept out of every path. This spec builds the auth parts
 on that text: the Access token on every `/api/*` request (§2.1, §2.2), the cookies (§2.4), the
 origin gate (§2.3), the viewer request that sends a signed-out page to `/sign-in?next=` (§14.1),
@@ -186,8 +188,9 @@ changes. The code reads one mode from configuration, so the fallback is a settin
 ### 2.3 CSRF: the origin gate and what sits under it
 
 The gate (spec 01 §4.4, OD-4) runs on every unsafe method, `/api/auth/*` included, and refuses with
-`403`, problem `type <docs origin>/errors/invalid_origin`, and a `request` line with `outcome: refused`
-and `reason: origin_gate.<code>`:
+`403`, problem `type <docs origin>/errors/invalid_origin`, and one `csrf.refused` line with `reason`
+(the code below) and `route` (the route pattern) ([SA-44]); the `request` line also carries
+`outcome: refused` and `reason: origin_gate.<code>`:
 
 | Order | Check | Code |
 |---|---|---|
@@ -249,7 +252,9 @@ in `localStorage`, not cookies (spec 01 §1.1).
 
 ### 2.5 What each app's `_headers` must carry for auth
 
-P0-G and P0-D own the file and its renderer (spec 01 §7.4); auth needs these, checked by T-SAT-05:
+No app holds a `_headers` file: P0-D owns the profiles in `packages/web-host/src/static/` and their
+renderer (EXECUTION §1.3, spec 01 §7.4), and the deploy renders each app's file from them. Auth's
+lanes send these lines to P0-D through the lane board, and T-SAT-05 checks them in the rendered file:
 `Permissions-Policy` allowing only `publickey-credentials-get=(self)` and
 `publickey-credentials-create=(self)` (everything else denied); `connect-src 'self'` under the
 same-origin shape; `Referrer-Policy: same-origin`; `form-action 'self'`; `frame-ancestors 'none'`;
@@ -282,7 +287,7 @@ start if `BETTER_AUTH_TRUSTED_ORIGINS` is set in either mode.
 
 | Package | Pin | Notes |
 |---|---|---|
-| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov after 10:53 UTC, in one dependency pull request gated by T-SAT-01 and T-SAT-02 | `overrides` pins `@better-auth/core` exactly, with a dated comment ([G-06]). Never `1.8.0-beta`. The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin goes to the owner ([SA-27]) |
+| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov after 10:53 UTC, in one dependency pull request gated by T-SAT-01 and T-SAT-02 | `overrides` pins `@better-auth/core` exactly, with a dated comment; the entry is outside [G-06]'s set and needs the owner's own yes at the 08:00 sitting ([SA-02]). Never `1.8.0-beta`. The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin goes to the owner ([SA-27]) |
 | `@better-auth/utils`, `better-call` | exactly what the pinned `better-auth` declares | moved with the group |
 | `@simplewebauthn/browser` | 13.3.0 | the passkey plugin's peer; `@simplewebauthn/server` 13.3.2 arrives with the plugin |
 | `hono` 4.13.19, `@hono/node-server` 2.1.9 (2.1.11 from 23 Nov), `zod` 4.6.7, `drizzle-orm` 0.45.4, `pg` 8.23.1 | | spec 01 §4.8 |
@@ -930,7 +935,7 @@ is the StepUp board's "Use your second factor to {reason}." (§15.5).
 | `invitation.change` | `PATCH /api/team/invitations/:invitationId` | intent | the invitation | `roleKey` | `member.invite` |
 | `invitation.resend` | `POST /api/team/invitations/:invitationId/resend` | intent | the invitation | | `member.invite` |
 | `invitation.cancel` | `DELETE /api/team/invitations/:invitationId` | intent | the invitation | | `member.invite` |
-| `invitation.accept` | `POST /api/invitation/accept` | intent when the person has a factor; none before | the invitation | | (person) |
+| `invitation.accept` | `POST /api/invitations/:invitationId/accept` | intent when the person has a factor; none before | the invitation | | (person) |
 | `member.role` | `PATCH /api/team/members/:memberId` | intent | the member | `roleKey`, `rollCredentials` | `member.role` |
 | `member.remove` | `POST /api/team/members/:memberId/remove` | intent | the member | `rollCredentials` | `member.invite` |
 | `role.create` | `POST /api/roles` | intent | | `name`, `description`, `permissions` | `role.manage` |
@@ -1006,10 +1011,13 @@ type RoleProblem = "name" | "description" | "empty" | "restricted" | "beyond" | 
 ```
 
 Catalogue fragments live in `packages/access/src/catalogue/{dashboard,staff}/<area>.ts`; the
-assembled catalogue is built and checked, never edited by hand. On Saturday L-SAT-01 writes every
-fragment of both catalogues (they are fixed by [SA-11] and [SA-12]); ownership of the `customers`,
-`simulator`, `money`, `webhooks`, `go-live` and staff onboarding and money fragments passes to the
-area's lane at Sunday's and Monday's first merge (S2-09).
+assembled catalogue is built and checked, never edited by hand. Each area's fragment belongs to that
+area's lane (EXECUTION §1.3 and §3.2); L-SAT-01 owns the engine and the package's root files. Both
+catalogues are fixed by [SA-11] and [SA-12], and the role editor and T-SAT-09 need all 26 permissions
+of each on Saturday, so a fragment needed before its area's lane starts is asked for through the lane
+board. S2-09 proposes instead that L-SAT-01 writes every fragment on Saturday and hands the
+`customers`, `simulator`, `money`, `webhooks`, `go-live` and staff onboarding and money fragments to
+their lanes at Sunday's and Monday's first merge; it binds only once EXECUTION §3.2 adopts it.
 
 ### 8.2 The dashboard catalogue (26 permissions)
 
@@ -1397,39 +1405,44 @@ this section fixes what the console and the tables need.
 
 `fin_<test|live>_<sk|rk>_` + a 10-character Crockford key ID + a 32-character base62 secret + a
 6-character base62 CRC-32 checksum over the deployment's salt (`fin-stg-1` on staging) and everything
-before it. Only an HMAC-SHA256 of the secret with `API_KEY_PEPPER_<n>` is stored. The secret is shown
+before it. Only an HMAC-SHA256 with `API_KEY_PEPPER_<n>` is stored, and a newer pepper is applied over
+the stored hash (the pepper chain of ARCHITECTURE §7.7 and spec 05 §4.2). The secret is shown
 once, in the create or roll answer, with `Cache-Control: no-store`; the answer is never stored by any
 idempotency layer. Test fixtures make keys at run time; the repository never holds a key-shaped string
 with a valid checksum (a CI check).
 
 ### 12.2 Who may make which key
 
-A Sandbox key needs `apiKey.sandbox`; a Production key needs `apiKey.live`, and the organisation's
-`live_status = 'approved'` (so none can be made on Saturday). A full-access (`sk`) key needs every
-scope's permissions plus `webhooks.manage`, `webhooks.roll_secret` and `webhooks.redeliver`; a
-restricted (`rk`) key needs the permissions behind each scope:
+Spec 05 §4.4 owns the scopes and what each needs (README §8.3); this table copies it, and
+`KEY_SCOPE_NEEDS` and `FULL_ACCESS_NEEDS` in `packages/keys/src/scopes.ts` are what the permission
+engine reads. A Sandbox key needs `apiKey.sandbox`; a Production key needs `apiKey.live`, and the
+organisation's `live_status = 'approved'` (so none can be made on Saturday). Making or rolling a
+full-access (`sk`) key needs every scope's permissions for its mode plus `webhooks.manage`,
+`webhooks.roll_secret` and `webhooks.redeliver`, plus `sandbox.reset` for a Sandbox key; a restricted
+(`rk`) key needs the permissions behind each of its scopes:
 
 | Scope | Needs |
 |---|---|
 | `customers:read` | `customers.read` |
-| `customers:write` | `customers.create`, `customers.restart`, `customers.delete` |
+| `customers:write` | `customers.read`, `customers.create`, `customers.restart`, `customers.delete` |
 | `events:read` | `webhooks.read` |
-| `money:read` | `money.read` |
-| `money:write` | `money.transfer` |
-| `beneficiaries:write` | `money.beneficiaries` |
-| `sandbox:simulate` | `simulator.use` |
-| `sandbox:deposit` | `money.simulate` |
+| `money:read` | `customers.read`, `money.read` |
+| `money:write` | `customers.read`, `money.read`, `money.transfer` |
+| `beneficiaries:write` | `customers.read`, `money.read`, `money.beneficiaries` |
+| `sandbox:simulate` | `customers.read`, `simulator.use` |
+| `sandbox:deposit` | `customers.read`, `simulator.use`, `money.read`, `money.simulate` |
 
-An unknown scope needs every permission. A live key with a money scope must carry an address allowlist
-([MO-20]).
+The Sandbox-only scopes (`sandbox:simulate`, `sandbox:deposit`) cannot be put on a Production key, and
+an unknown scope is refused at create (spec 05 §4.4). A live key with a money scope must carry an
+address allowlist ([MO-20]).
 
 ### 12.3 Routes
 
 | Route | Permission | Bind | Rules |
 |---|---|---|---|
 | `GET /api/keys?mode&page&size` | `apiKey.read` | | names, prefix and key ID, kind, scopes, expiry, last used (rounded to the minute), maker, flags (§9.4) |
-| `POST /api/keys` `{ name, mode, kind, scopes, ipAllowlist, expiresIn }` | by mode | all fields | at most 50 working keys per organisation; `keyName` rule (at most 60 characters); up to 20 allowlist entries; expiry 30 days, 90 days, a year or never; `api_key.created`; a `keys.key_disclosure` row for the maker; `api-keys/key-changed` to every member, refusing the action if it cannot be queued ([SA-41]) |
-| `PATCH /api/keys/:keyId` `{ name?, ipAllowlist?, expiresAt?, scopes? }` | by mode | the changed fields | scopes may only be removed and expiry only shortened (a key edit never grants more scope or life than the key had, [SA-34]); the allowlist may change; `api_key.updated`; `api-keys/key-changed` to every member (not for a name alone) |
+| `POST /api/keys` `{ name, mode, kind, scopes, ipAllowlist, expiresIn }` | by mode | all fields | at most 50 working keys per organisation; `keyName` rule (at most 60 characters); up to 20 allowlist entries; expiry 30 days, 90 days, a year or never; `api_key.created`; the maker added to the key's `seen_by` (spec 05 §4.9); `api-keys/key-changed` to every member, refusing the action if it cannot be queued ([SA-41]) |
+| `PATCH /api/keys/:keyId` `{ name?, ipAllowlist?, expiresAt?, scopes? }` | by mode | the changed fields | scopes may only be removed and expiry only shortened (a key edit never grants more scope or life than the key had, [SA-34]); the allowlist may change; every edit, a name alone included, takes the `key.update` intent (ARCHITECTURE §7.7); `api_key.updated`; `api-keys/key-changed` to every member (a name alone included) |
 | `POST /api/keys/:keyId/roll` `{ overlap: "now" \| "1h" \| "24h" }` | by mode | `overlap` | one overlap enum, `now`, `1h` or `24h`, used alike by the request and by `api_key.rolled`'s `overlap` (spec 05 §4.10; spec 08 open item 4); the old key keeps working until the earlier of the overlap's end and its own expiry ([SA-20]); `api_key.rolled`; `api-keys/key-changed` |
 | `POST /api/keys/:keyId/revoke` | by mode | | immediate; `api_key.revoked` (`reason: member`, spec 05 §4.9); a revocation-journal entry; `api-keys/key-changed` |
 
@@ -1526,12 +1539,15 @@ cancels or lapses due recoveries as §6.8 says, each in its own transaction with
 
 ### 13.5 Schema `keys` (stretch 1)
 
-`keys.api_key`: `id` text PK (the 10-character key ID); `organization_id`; `mode` CHECK IN (`test`,
-`live`); `kind` CHECK IN (`sk`, `rk`); `name`; `scopes` text[]; `secret_hmac` bytea; `pepper_version`
-smallint; `ip_allowlist` cidr[] (at most 20); `expires_at` NULL; `created_by` (`usr_`); `created_at`;
-`last_used_at` NULL; `revoked_at`, `revoked_by`, `revoke_reason` NULL; `rolled_from` NULL;
-`roll_ends_at` NULL. `keys.key_disclosure`: `key_id`, `user_id`, `shown_at`. `keys.key_lookup` is
-ARCHITECTURE §7.7's view for the edge.
+Spec 05 §4.9 owns these objects (README §8.3), and this section copies it. `keys.api_key`: `id` text
+PK (the 10-character key ID); `organization_id`; `mode` CHECK IN (`test`, `live`); `kind` CHECK IN
+(`sk`, `rk`); `name`; `scopes` text[]; `ip_allowlist` cidr[] (at most 20); `hash` bytea;
+`pepper_versions` smallint[] (the pepper chain, in order, ARCHITECTURE §7.7); `created_by` (`usr_`);
+`created_at`; `expires_at` NULL; `revoked_at` NULL; `revoked_reason` NULL, CHECK IN (`member`,
+`maker_removed`, `sent_in_clear`, `leaked_public`, `organisation_deleted`); `replaced_by` NULL;
+`rolling_until` NULL; `last_used_at` NULL; `seen_by` text[] (who was shown the secret, [SA-33]). There
+is no separate disclosure table. `keys.key_lookup` is ARCHITECTURE §7.7's view for the edge, with the
+columns of spec 05 §4.9; `keys.touch_last_used(key_id)` is spec 05 §4.9's.
 
 ### 13.6 Views and functions for other services
 
@@ -1560,7 +1576,7 @@ ARCHITECTURE §7.7's view for the edge.
 | `fin_admin` | every table in §13.3; the same `ops` grants; `audit.record()`, `email.enqueue()`; `ops.set_switch()` |
 | `fin_api` | `SELECT` on §13.6's views; `EXECUTE` on `identity.person_gate`; `SELECT` on `ops.step_up_intent`; `UPDATE (live_status)` on `identity.organization` (Sunday); `EXECUTE` on `identity.revoke_trusted_browsers` (Sunday); `INSERT` and `UPDATE (approved_by, approved_at, cancelled_at, cancelled_by, cancel_reason)` on `identity.recovery` (Sunday spill, the staff path of §6.8) |
 | `fin_worker` | `EXECUTE` on the three sweeps and on `identity.finish_recoveries()`; `SELECT` on `staff.access_list_view` |
-| `fin_readonly` | the tables without `token`, `password`, `secret`, `backup_codes`, `value`, `token_hash`, `code_hash` or `secret_hmac` columns, through column grants |
+| `fin_readonly` | the tables without `token`, `password`, `secret`, `backup_codes`, `value`, `token_hash`, `code_hash` or `hash` columns, through column grants |
 
 Every forbidden statement fails with SQLSTATE 42501 in the per-role tests (T-SAT-20, AC-P0-11).
 `email.enqueue()`'s allowlist lets `fin_console` send only §17's developer templates and `fin_admin`
@@ -1589,7 +1605,7 @@ accepts. Registrations (in `packages/db/src/guards/<area>.ts`, owned by the area
 | `staff.role`, `staff.role_permission` | INSERT, UPDATE, DELETE | `id`, `role_id` | `staff.role_created`, `staff.role_updated`, `staff.role_deleted`; cascaded permission deletes as for `identity.role_permission` |
 | `staff.assurance` | INSERT | `session_id` | `staff.step_up_passed`, `staff.signed_in`, `staff.factor_enrolled`, `staff.factor_added` |
 | `staff.enrolment_code` | INSERT, UPDATE OF `redeemed_at` | `id` | `staff.enrolment_code_issued`, `staff.enrolment_code_redeemed` |
-| `keys.api_key` (stretch) | INSERT, UPDATE OF `scopes`, `ip_allowlist`, `expires_at`, `revoked_at`, `roll_ends_at` | `id` | the `api_key.*` events |
+| `keys.api_key` (stretch) | INSERT, UPDATE OF `scopes`, `ip_allowlist`, `expires_at`, `revoked_at`, `rolling_until` | `id` | the `api_key.*` events |
 | `identity.recovery` (Sunday spill) | INSERT, UPDATE OF `approved_at`, `cancelled_at`, `finished_at` | `id` | `account.recovery_started`, `account.recovery_approved`, `account.recovery_cancelled`, `account.recovery_finished` |
 
 **The sign-in tables** (S2-04). These rows are how a person signs in, so a write to them is guarded
@@ -1858,7 +1874,7 @@ from the inventory's wording.
 
 | Board (frame title) | Route | Must-have states on Saturday | Calls | Journey |
 |---|---|---|---|---|
-| AppFrame (App frame) | every signed-in route | default, orgMenu, accountMenu, navigating, frameLoading, notFound, notAllowed, error, offline, collapsed, navOpen; the invitation notice; the sidebar's Audit log item only with `auditLog.read` | `GET /api/viewer`, `PUT /api/viewer/organization`, `GET /api/invitations/mine` | `frame.spec.ts` |
+| AppFrame (App frame) | every signed-in route | default, orgMenu, accountMenu, navigating, frameLoading, notFound, notAllowed, error, offline, collapsed, navOpen (EXECUTION §3.5's list); the sidebar's Audit log item only with `auditLog.read`. The invitation notice (`invitation`, `invitations`) may be built on Saturday but is not a must-have state | `GET /api/viewer`, `PUT /api/viewer/organization`, `GET /api/invitations/mine` | `frame.spec.ts` |
 | Home (Home) | `/` | all 3 | the viewer | `frame.spec.ts` |
 | SignIn (Sign in) | `/sign-in` (`?next=`, `?error=`) | start with the passkey button and autofill, passkey in progress, code sent, load error, the redirect messages; the password step only with passwords | the library's sign-in endpoints | `sign-in.spec.ts` |
 | SignInCode (Sign in · check your email) | `/sign-in/code` | code entry, from the link in the asking browser (press to sign in), wrong code, expired, resend countdown (45 seconds), opened in another browser (the empty form: the person types their own address and the code, §5.2) | `POST /api/sign-in/code-link`, `/sign-in/email-otp`, `/email-otp/send-verification-otp` | `sign-in.spec.ts` |
@@ -1906,7 +1922,7 @@ opened them.
 
 | Board (frame title) | Route | Must-have states | Calls | Journey |
 |---|---|---|---|---|
-| AdminFrame (Fin Admin · Frame) | every route | default, staffMenu (Your sign-in, Log out), the environment badge, loading, pageError, notFound; Staff in the Settings group; until Sunday's screens exist, `/` opens Staff | `GET /api/viewer` | `admin-frame.spec.ts` |
+| AdminFrame (Fin Admin · Frame) | every route | default, staffMenu (Your sign-in, Log out), staging (the environment badge), loading, pageError, notFound, collapsed (the edge toggle) (EXECUTION §3.5's list); Staff in the Settings group; until Sunday's screens exist, `/` opens Staff | `GET /api/viewer` | `admin-frame.spec.ts` |
 | AdminSignIn (Fin Admin · Sign in) | `/sign-in` (`?ended=1`) | address prefilled from Access, code, wrong code, expired, too many, not staff (the same answer as staff), signed out | `/email-otp/send-verification-otp`, `/sign-in/email-otp`, passkey authentication | `staff-sign-in.spec.ts` |
 | AdminSecondFactor (Fin Admin · Second factor) | `/sign-in/factor` | passkey, authenticator, wrong code, too many tries; **no factor yet: the enrolment code step, then add a passkey (and, outside production, an authenticator)** | §6.4, `POST /api/enrolment/redeem` | `staff-enrolment.spec.ts` |
 | AdminStepUp (Fin Admin · Confirm it's you) | a root dialog | all | §7.4 | `staff-step-up.spec.ts` |
@@ -2167,6 +2183,7 @@ code, token or query string.
 
 | Event | Kind | Fields | Written by |
 |---|---|---|---|
+| `csrf.refused` | security | `reason` (the gate's code), `route` (the route pattern) | §2.3 (spec 01 §8.9's line, catalogued in `platform.ts`) |
 | `auth.endpoint_blocked` | security | `realm`, `class` (`unlisted`, `blocked`) | §4.1 |
 | `auth.gate_refused` | security | `realm`, `state` | §6.2, §6.4 |
 | `auth.code_contested` | security | `reason` (`supersede_refused`, `unknown_share_used`), `userId` when the account exists | §5.2 |
@@ -2206,7 +2223,7 @@ the quiet policy. Thresholds live in the private overlay ([OB-13]).
 | `secret-unreadable` | P | `auth.secret_unreadable` | `BETTER_AUTH_SECRETS` versions on the service | identity |
 | `rate-limiter-failing` | P | `limits.store_failed` (the limiter fails closed, so sign-ins are refused) | Postgres | identity |
 | `auth-endpoint-unlisted` | N | `auth.endpoint_blocked` with `class: unlisted` above its threshold | a client or library change calling an unlisted path, or probing | identity |
-| `csrf-refusals-jump` | N | `request` lines with `reason: origin_gate.*` above the pre-deploy baseline | `FIN_PUBLIC_ORIGIN` and the client's `X-Fin-App` | identity |
+| `csrf-refused-jump` | N | `csrf.refused` lines (spec 01 §8.9) above the pre-deploy baseline: the hosts and the lists drifted apart (ARCHITECTURE §10.8 group B) | `FIN_PUBLIC_ORIGIN` and the client's `X-Fin-App` | identity |
 | `identity-sweep-stalled` | N | no successful `identity.sweep` or `step_up.sweep` run in 2 hours | the worker's scheduler lease | identity |
 | `staff-sign-in-failures` | N | `staff.sign_in_failed` above its threshold (staging: 10 in 10 minutes, AC-SAT-21) | who, from the audit log | staff |
 | `admin-staff-refused` | P | `staff.not_listed` | the Access list against the staff table | staff |
@@ -2371,7 +2388,7 @@ fragments belong to the area's lane wherever they live; anything else goes throu
 
 | Lane | Machine | Owns | Starts | Needs | Delivers | Tier |
 |---|---|---|---|---|---|---|
-| L-SAT-01 Permission engine | B | `packages/access/**` (root files, `src/engine/**`, and on Saturday every `src/catalogue/{dashboard,staff}/*.ts` fragment, S2-09) | 09:00 (this spec from 08:45) | the workspace (P0-4) | §8.1 to §8.5; T-SAT-08, T-SAT-09 | S |
+| L-SAT-01 Permission engine | B | `packages/access/**` (root files and `src/engine/**`; each area's `src/catalogue/{dashboard,staff}/<area>.ts` fragment belongs to its lane, EXECUTION §3.2, unless EXECUTION adopts S2-09) | 09:00 (this spec from 08:45) | the workspace (P0-4) | §8.1 to §8.5; T-SAT-08, T-SAT-09 | S |
 | L-SAT-02 Identity realms | A | `packages/identity/**`; `packages/db/src/schema/{identity,ops-step-up,ops-limits}.ts`; migrations `*_identity_*`, `*_ops_step_up`, `*_ops_limits`; `packages/db/roles/grants/{identity,step-up,limits}.json`; `packages/db/src/guards/identity.ts`; `packages/audit/src/events/identity.ts`; `packages/email/src/templates/identity/**`; `packages/app-contracts/src/identity/**` and `src/errors/auth.ts`; `apps/api/src/worker/identity/**`; `ops/monitoring/catalog/identity.ts`; `ops/monitoring/{staging,production}/alerts/identity.json`; the runbooks of its alerts | 10:00 on interface stubs of `packages/db` and `packages/audit`; rebased on P0-E at 12:30 | P0-E; L-SAT-01; L-SAT-05's `email.enqueue()` | §3 to §7, §11; `createRealm()`, `requirePerson`, the gate, intents, windows, limits, names, trusted and known browsers; SP-10's pins; T-SAT-01 to T-SAT-07, T-SAT-10, T-SAT-13 (with P0-E, who owns `packages/crypto`), T-SAT-21, T-SAT-27 to T-SAT-30, T-SAT-32, T-SAT-33 | S |
 | L-SAT-03 Organisations | B | `packages/orgs/**`; `packages/db/src/schema/orgs.ts`; migrations `*_orgs_*`; grants `orgs.json`; guards `orgs.ts`; `packages/audit/src/events/orgs.ts`; `packages/email/src/templates/orgs/**`; `packages/app-contracts/src/orgs/**`; `apps/api/src/doors/audit/**` and `packages/server/src/doors/audit.ts` (S2-34); monitoring `orgs`; its runbooks | 11:00 | L-SAT-01; L-SAT-02's `requirePerson` and intents; L-SAT-05 | §9; `requireActor`; §14.5's console door operations; T-SAT-22, T-SAT-24 (organisations), T-SAT-25, T-SAT-35 to T-SAT-37 | S |
 | L-SAT-04 Staff | A | `packages/staff/**`; `packages/db/src/schema/staff.ts`; migrations `*_staff_*`; grants `staff.json`; guards `staff.ts`; `packages/audit/src/events/staff.ts`; `packages/email/src/templates/staff/**`; `packages/app-contracts/src/staff/**`; `apps/api/src/worker/staff/**`; `apps/api/src/tasks/staff-bootstrap.ts`; `apps/api/src/doors/staff-audit/**`; monitoring `staff`; its runbooks | 12:30 | L-SAT-02's factory; L-SAT-01 | §6.4, §6.5, §10; `requireStaff`; the Access check; the drift duty; the bootstrap task; T-SAT-11, T-SAT-12, T-SAT-23, T-SAT-24 (staff), T-SAT-34, T-SAT-38 (drift), T-SAT-39 | S |
@@ -2404,7 +2421,8 @@ C3 18:00: L-SAT-02 green (AC-SAT-02 to AC-SAT-06)? ─► L-SAT-11 API keys and 
 
 - P0-D's `apps/console/src/server/main.ts` and `apps/admin/src/server/main.ts`, and P0-G's client
   shells, pass to L-SAT-06 and L-SAT-07 when their last Phase 0 pull request merges (EX-07).
-- The catalogue fragments of §8 pass from L-SAT-01 to Sunday's and Monday's lanes (S2-09).
+- Each catalogue fragment of §8 belongs to its area's lane (EXECUTION §1.3, §3.2). Only if EXECUTION
+  adopts S2-09 does L-SAT-01 write them on Saturday and pass them to Sunday's and Monday's lanes.
 - Each lane asks P0-D through the lane board for its ID prefixes (IF-01) and P0-E for `totp.ts` if
   SP-10 needs it.
 
@@ -2424,8 +2442,9 @@ nightly review at 01:00 Sunday is `all --cold` over everything merged.
 
 ### 20.5 Checkpoints and cut lines (EXECUTION §3.7)
 
-- **C2 13:00:** Phase 0's exit. L-SAT-01 and L-SAT-05 have a merged first milestone; L-SAT-02 is on
-  P0-E.
+- **C2 13:00:** a checkpoint, not Phase 0's exit, which is at 13:30 (EXECUTION §2.11). The owner
+  approves Phase 0's first staging deploy here (EXECUTION EX-15), and S-02 runs on it from 13:00 to
+  13:30. L-SAT-01 and L-SAT-05 have a merged first milestone; L-SAT-02 is on P0-E.
 - **C3 18:00:** if L-SAT-02 has not merged with AC-SAT-02 to AC-SAT-06 green, CUT-01 applies (Google,
   passwords, the staff reset screen, custom staff roles and AdminRoleEditor, API keys move, in that
   order). Otherwise L-SAT-11 starts.
@@ -2490,7 +2509,7 @@ nightly review at 01:00 Sunday is `all --cold` over everything merged.
 |---|---|
 | AC-SAT-25 [STG] | SP-25 passes on the staging zone, or the split-host fallback of §2.6 is chosen and recorded, before L-SAT-06's first ready pull request (T-SAT-73) |
 | AC-SAT-26 [I] | Every cookie either realm sets matches §2.4 exactly (T-SAT-03, T-SAT-04) |
-| AC-SAT-27 [I] | Every unsafe request to either API half, `/api/auth/*` included, without the exact `Origin`, a `same-origin` `Sec-Fetch-Site` when sent, the right `X-Fin-App` and a JSON body is refused with `invalid_origin`; the Google callback GET is the only exemption (T-SAT-06 and P0-D's gate tests) |
+| AC-SAT-27 [I] | Every unsafe request to either API half, `/api/auth/*` included, without the exact `Origin`, a `same-origin` `Sec-Fetch-Site` when sent, the right `X-Fin-App` and a JSON body is refused with `invalid_origin` and one `csrf.refused` line naming its reason and route pattern; the Google callback GET is the only exemption (T-SAT-06 and P0-D's gate tests) |
 | AC-SAT-28 [I] | On Fin Admin, every `/api/*` request without a valid Access JWT is refused before any handler, `/api/auth/*` included; when the key set cannot be fetched the API half fails closed (T-SAT-11, T-SAT-34) |
 | AC-SAT-29 [I] | A staff code is sent only for an active or pending member whose address equals the Access identity, and the answer is identical otherwise (T-SAT-32, T-SAT-34) |
 | AC-SAT-30 [I] | A removed staff member cannot sign in by code or passkey; adding them again makes them pending with the same `stf_` ID (T-SAT-34) |
@@ -2530,7 +2549,7 @@ overturn any.
 | S2-06 | The Authenticator board shows the key for manual entry until research note D3's Q5 (a QR encoder) is answered | No new dependency without the owner's yes |
 | S2-07 | A developer session at the factor step lives 10 minutes, like a staff one | A half-finished sign-in should not linger |
 | S2-08 | A person with no membership gets a first organisation as Super admin (`POST /api/orgs/first`, no step-up), as in the old product | Keeps the old onboarding; with [SA-05] it makes the factor mandatory at sign-up for self-serve developers |
-| S2-09 | On Saturday L-SAT-01 writes every catalogue fragment; ownership of each area's fragment passes to that area's lane at its first merge | The role editor needs all 26 permissions on Saturday |
+| S2-09 | Proposed to EXECUTION, not binding until EXECUTION §3.2 adopts it: on Saturday L-SAT-01 writes every catalogue fragment, and ownership of each area's fragment passes to that area's lane at its first merge. Until then each area's fragment belongs to its lane (EXECUTION §1.3, §3.2) | The role editor needs all 26 permissions on Saturday |
 | S2-10 | Organisation routes take the organisation from `Fin-Organization`, never from the session | The old product's cross-tab guard, made structural |
 | S2-11 | The hourly Access drift check runs in the worker with a new read-only token `FIN_ACCESS_READ_TOKEN` (Access: Apps and Policies Read) | ARCHITECTURE §5.10 needs the Access list; §7.8 names no holder for it |
 | S2-12 | A passkey step-up's replacement session keeps the old session's absolute expiry | A step-up must never lengthen a session |
@@ -2577,7 +2596,7 @@ overturn any.
 | 3 | SP-10's pins on 1.7.25: that every adapter write of a request goes through Fin's unit of work and `hooks.after` runs before the handler returns (S2-04; an endpoint where it does not is blocked and replaced), the versioned-secrets option, TOTP reuse within a step, counter regression, `returnHeaders` on `getSession` | L-SAT-02, Saturday morning |
 | 4 | `FIN_ACCESS_READ_TOKEN` is a new credential (S2-11): it needs a CR entry, a row in `ops/credentials.json` and a rotation runbook | owner, L-SAT-09 |
 | 5 | Research note D3's Q5 (a QR encoder for the Authenticator board) | owner |
-| 6 | The UI SDK on Saturday is beta.9 (research note D3 §3); OTPInput and Modal behaviour must be re-tested at the beta.13 move on Sunday | P0-G |
+| 6 | The UI SDK on Saturday is the newest exact beta that has cleared the release age when the install pull request runs ([G-06]): beta.9 at P0-4, or beta.10 only if the install pull request runs after 09:47 UTC (research note D3 §3); OTPInput and Modal behaviour must be re-tested at the beta.13 move on Sunday | P0-G |
 | 7 | The library stores the session token in clear in `identity.session.token`; only `fin_console` reads it, but [DA-15] should say whether dumps carry the table | owner, before production |
 | 8 | Resolved: EXECUTION EX-08, P0-0 and L-SPEC now keep every spec in `docs/plan/specs/` | none |
 | 9 | ARCHITECTURE writes `admin.<admin zone>`; this spec writes `admin.<zone>` for the host's own zone. Passkey RP IDs must be the final hosts before the first production passkey ([FD-10]) | owner, by Tuesday 24 Nov |

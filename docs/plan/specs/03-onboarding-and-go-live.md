@@ -24,25 +24,30 @@ copy is made under another path.
   those files. A flow such as F7 is one of ARCHITECTURE §2.3's.
 - UNVERIFIED marks a fact not confirmed from a primary source, with what would confirm it.
 
-**What wins where they disagree.** The plan's one order (README §8.3) holds here.
+**What wins where they disagree.** The plan's one order of precedence, highest first: (1) the
+owner's decisions of 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md;
+(4) EXECUTION.md; (5) the specifications, and between two specifications the one that owns the area,
+as README §8.3 lists the owners.
 
 1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to
    OD-6: tunnels for every host; the assets-only static deployments with a no-Worker route sending
    `<app>.<zone>/api/*` to the tunnel, one host per app with no CORS; host-only `__Host-` cookies,
    the session cookie `Strict` and the others `Lax`; the UI SDK; the sidebar edge toggle.
 2. DECISIONS.md, appendix C included.
-3. The specification that owns the area. This spec owns onboarding, the KYC port and the Sumsub
-   adapter, the hosted verify pages and the selfie host, requests for information, going to
-   Production and Fin Admin's review rules. The siblings own theirs: spec 01 (the platform, the
-   static hosts, `_headers`, the API halves' shared host), spec 02 (the realms, step-up,
-   permissions), spec 04 (money), spec 05 (API conventions, errors, idempotency, the route
-   inventory, developer events and webhooks), spec 06 (components, frames and states), and spec 08
-   (the cross-cutting rules of audit, security email, personal data, scrubbing, secrets and
-   observability).
-4. ARCHITECTURE.md.
-5. EXECUTION.md.
+3. ARCHITECTURE.md.
+4. EXECUTION.md.
+5. The specifications. Between two of them, the one that owns the area holds. This spec owns
+   onboarding, the KYC port and the Sumsub adapter, the hosted verify pages and the selfie host,
+   requests for information, going to Production and Fin Admin's review rules. The siblings own
+   theirs: spec 01 (the platform, the static hosts, `_headers`, the API halves' shared host), spec 02
+   (the realms, step-up, permissions), spec 04 (money), spec 05 (API conventions, errors,
+   idempotency, the route inventory, developer events and webhooks), spec 06 (components, frames and
+   states), and spec 08 (the cross-cutting rules of audit, security email, personal data, scrubbing,
+   secrets and observability).
 
-A decision of this spec (SD3-nn) binds where everything above it is silent. One that would change a
+A decision of this spec (SD3-nn) binds where everything above it is silent. One that differs from
+ARCHITECTURE.md or EXECUTION.md binds only once that file is changed to match; until then that
+file's text holds. One that would change a
 register entry binds only as DECISIONS.md appendix C settles it: SD3-02 and SD3-03 are folded into
 [SA-37] and [SA-26] (SF-07). A conflict with the register found later is settled the same way, and
 the register holds until it is. Where this spec restates a sibling's rule it names the section;
@@ -130,7 +135,7 @@ Sumsub's own dashboard.
 | `packages/keys`, `apps/edge`, `apps/api/src/platform` | Spec 05 §3 and §4: key check, scopes, `GET /v4/whoami`, the live-status read on each live key, problem documents, idempotency, pagination, the route policy | first item of Sunday's spill block (L-SUN-01) |
 | `packages/events` | Spec 05 §5: `events.emit()`, the event catalogue, endpoints and delivery | L-SUN-04, from 08:00 |
 | `packages/testing` | The canon seed, the email sink, the clock, the Access stand-in, the virtual authenticator, and spec 01 §4.7's static host for journeys | L-SUN-03 adds the Sumsub stand-in (§20.2) |
-| `packages/ui`, `packages/frame` | `@fin/ui` on the UI SDK, AppFrame, AdminFrame and the AuthLayout card; `@ui-sdk/*` pinned at `0.1.0-beta.9`, moved to `0.1.0-beta.13` by one dependency pull request after Sunday 12:24 UTC (research note D3 §3.3), so Sunday's screens must pass on both | screens start on pending compositions ([UI-03]) |
+| `packages/ui`, `packages/frame` | `@fin/ui` on the UI SDK, AppFrame, AdminFrame and the AuthLayout card; `@ui-sdk/*` pinned at the newest exact beta cleared when the install pull request runs ([G-06]: `0.1.0-beta.9` at P0-4, or `0.1.0-beta.10` only if the install pull request runs after 09:47 UTC), moved to `0.1.0-beta.13` by one dependency pull request after Sunday 12:24 UTC (research note D3 §3.3), so Sunday's screens must pass on both | screens start on pending compositions ([UI-03]) |
 
 Node 26.13.1 runs every service, test and script (R15, [P-05]).
 
@@ -187,12 +192,16 @@ spec 01 §7.12's split-host shape (`verify-api.<zone>`), and every route here ke
 
 ### 2.2 What verify adds to the static shape
 
-- **Two Vite entries** in `apps/verify`: `src/client/verify/main.ts` (every verify page) and
-  `src/client/selfie/main.ts` (the selfie page alone), each with its own `index.html`, the nonce-less
-  `<meta property="csp-nonce">`, and a stylesheet that starts with `@layer ui-sdk;` (spec 01 §1.1,
-  FW-C06 as rewritten), built with `build.assetsInlineLimit: 0` so nothing becomes a `data:` URL
-  (research note D3 §7.3). A page's policy is fixed when its document loads, so the selfie page is its
-  own entry and links between the two hosts are full document loads (research note D3 §7.4).
+- **Two Vite entries** in `apps/verify`, laid out as spec 06 §1.2 gives them (spec 06 owns the app
+  skeleton's files): `index.html` → `src/client/main.tsx` for every verify page, built by
+  `vite.config.ts` into `dist/static/verify/`, and `selfie.html` → `src/selfie/main.tsx` for the
+  selfie page alone, built by `vite.selfie.config.ts` into `dist/static/selfie/`, the selfie
+  deployment holding only `selfie.html` and its assets ([FD-17]). Each document carries the
+  nonce-less `<meta property="csp-nonce">` and a stylesheet that starts with `@layer ui-sdk;` (spec 01
+  §1.1, FW-C06 as rewritten), and both builds use `build.assetsInlineLimit: 0` so nothing becomes a
+  `data:` URL (research note D3 §7.3). A page's policy is fixed when its document loads, so the selfie
+  page is its own entry and links between the two hosts are full document loads (research note D3
+  §7.4).
 - **The `hosted` profile** gains `img-src 'self' blob:` for the local preview of a photo the customer
   picked (made with `URL.createObjectURL`, revoked when the step closes; SD3-04). No other profile gets
   `blob:`, in any directive: [SA-45] lists this one exception, and its policy test refuses `blob:`
@@ -214,8 +223,9 @@ served by spec 01 §4.4's shared host: ingress check, body limits, the origin ga
 `GET /api/health`, and `Cache-Control: no-store` on every answer. It serves two hosts, told apart by
 `Host` (anything else is 421), and each host only its own routes (§12.3). On both hosts the origin
 gate requires `X-Fin-App: verify` and an `Origin` equal to that host's own origin; refusals are spec
-01 §4.4's `invalid_origin` with `reason: origin_gate.<code>`. `POST /api/documents` is the one route
-the policy names as a `multipart/form-data` upload.
+01 §4.4's `invalid_origin`, each writing one `csrf.refused` line with the refusal code and the route
+pattern ([SA-44]), the `request` line also carrying `reason: origin_gate.<code>`.
+`POST /api/documents` is the one route the policy names as a `multipart/form-data` upload.
 
 ### 2.4 Cookies
 
@@ -1059,9 +1069,9 @@ sandbox provider (AC-SUN-05): ensure an applicant (new, existing, a 409 on creat
 an upload (accepted, refused with errors, warnings); link and unlink a beneficiary; request a review
 (accepted; Developer Verification's 409); read a review (each answer and reject type); mint an SDK
 token; read an action; stream a document; deactivate; verify a webhook (right digest, wrong digest,
-SHA-1, unknown algorithm, too big); and the transport rules: a timeout on a read is `retry`, on an
-upload is `unknown`; a 429 carries `afterMs` from `Retry-After`; a 4xx is never retried; a redirect is
-not followed; a host outside the allowlist is `host_refused`. The real sandbox app is exercised by
+SHA-1 refused by default, unknown algorithm, too big); and the transport rules: a timeout on a read
+is `retry`, on an upload is `unknown`; a 429 carries `afterMs` from `Retry-After`; a 4xx is never
+retried; a redirect is not followed; a host outside the allowlist is `host_refused`. The real sandbox app is exercised by
 the operator's `pnpm --filter @fin/kyc sumsub:smoke staging` (token at the secure prompt), never in CI,
 and by AC-SUN-17 on staging.
 
@@ -1073,9 +1083,10 @@ and by AC-SUN-17 on staging.
    before reading it (413), limits per address, and forwards the raw bytes with `X-Payload-Digest`
    and `X-Payload-Digest-Alg` to `api`'s hook door, signed (ARCHITECTURE §7.9).
 2. `api` verifies the digest over the raw bytes with each of `SUMSUB_WEBHOOK_SECRETS`, in constant time:
-   `HMAC_SHA256_HEX` (the default when the header is absent) or `HMAC_SHA512_HEX`; `HMAC_SHA1_HEX` is
-   refused. A mismatch is 401 and a `sumsub.webhook_refused` line with the reason (`digest`, `alg`,
-   `size`, `json`). With no secret configured the door answers 503 and writes
+   `HMAC_SHA256_HEX` (the default when the header is absent) or `HMAC_SHA512_HEX`. `HMAC_SHA1_HEX` is
+   refused by default; the owner may keep it (ARCHITECTURE §7.10), and only that recorded owner
+   decision turns it on. A mismatch is 401 and a `sumsub.webhook_refused` line with the reason
+   (`digest`, `alg`, `size`, `json`). With no secret configured the door answers 503 and writes
    `sumsub.webhook_unconfigured`.
 3. `api` parses the JSON, keeps only the allowlisted fields (§4.2), inserts `kyc.inbound_event` with
    `ON CONFLICT (payload_digest) DO NOTHING`, sends `NOTIFY kyc_inbound`, and answers 200 within one
@@ -1325,7 +1336,8 @@ declare an `audit` event, a budget or `stepUp: "intent"` (using up an intent is 
 is audited or counted happens at a gated POST. A GET that redeems a URL a POST minted (here, only
 `GET /api/document-views/:viewId`) declares `fetchSite: "same-origin-or-none"`: `Sec-Fetch-Site`
 must be present and `same-origin`, or `none` (the minted URL typed or pasted into a tab); anything
-else, or no header, is 403 `invalid_origin` with `reason: origin_gate.fetch_site`. The route-policy
+else, or no header, is 403 `invalid_origin` with one `csrf.refused` line (reason `fetch_site`) and
+`reason: origin_gate.fetch_site` on the `request` line. The route-policy
 test fails on a GET that declares `audit`, an intent or `limits` that spend a budget, and on a GET
 that redeems a minted URL without `fetchSite`.
 
@@ -1833,7 +1845,7 @@ Labels as EXECUTION: `[U]`, `[I]` (real Postgres 18), `[C]`, `[E2E]`, `[STG]`.
 | `packages/kyc/src/providers/sumsub/levels-coverage.test.ts` [U] | Fin collects every required input of every level |
 | `packages/kyc/src/providers/sumsub/signing.test.ts` [U] | the request signature on fixed vectors; level-name encoding; the strict `externalUserId` parser |
 | `packages/kyc/src/conformance/*.test.ts` [C] | both providers pass the suite (AC-SUN-05) |
-| `apps/api/test/hooks/sumsub.test.ts` [I] | a wrong digest, SHA-1, an unknown algorithm and a 65 KB body are refused and logged; a valid event is stored and answered within a second; a replay is stored once (AC-SUN-06) |
+| `apps/api/test/hooks/sumsub.test.ts` [I] | a wrong digest, SHA-1 (by default), an unknown algorithm and a 65 KB body are refused and logged; a valid event is stored and answered within a second; a replay is stored once (AC-SUN-06) |
 | `apps/api/test/worker/kyc-inbound.test.ts` [I] | every type of §7.2; a review is re-read, never taken from the payload; applying twice gives one status change, one audit row and one developer event |
 | `apps/api/test/worker/kyc-poll.test.ts` [I] | the poll applies a review that no webhook announced, on the backoff schedule |
 | `apps/api/test/worker/applicant-writes.test.ts` [I] | order per applicant; retry on 5xx; purge and flag on 4xx; submit's flush and its 503; the `sumsub_writes` switch |
@@ -1898,8 +1910,8 @@ owns its fragments wherever they live (EXECUTION §1.3).
 | L-SUN-04 Webhooks | B | as Spec 05 §12 | 08:00 | Spec 05 §5; the `webhooks.*` door operations the console calls |
 | L-SUN-05 Onboarding API routes and doors | A | Spec 05 §12's L-SUN-05 paths (`apps/api/src/routes/{customers,people,documents,links,rfis,sandbox,events,webhook-endpoints}/**` and the contract fragments for `customers`, `documents`, `people`, `rfis`, `events`, `webhook-endpoints` and `sandbox`), plus `apps/api/src/doors/{kyc,golive,verify,admin_kyc}/**`, `packages/server/src/doors/{kyc,golive,verify,admin_kyc}.ts` and `apps/api/test/kyc/**` | 11:00 (door stubs from 09:30) | §9, §11 |
 | L-SUN-06 Verify | B | `apps/verify/**` (both entries, the API half, `e2e/sun/`), `packages/app-contracts/src/verify/**`, `ops/monitoring/catalog/verify.ts`, `ops/monitoring/*/alerts/verify.json` | 10:00 (after FW-S3, on KY-09's boards or pending compositions) | §2, §12.3, §13.4 |
-| L-SUN-07 Console onboarding | A | `apps/console/src/client/routes/{customers,developers/simulator,developers/webhooks,developers/events,settings/go-live}/**`, `apps/console/src/server/routes/{customers,sandbox,golive,webhooks,events}/**`, `apps/console/src/server/policy/{customers,sandbox,golive,webhooks,events}.ts`, `apps/console/src/client/nav/{customers,developers}.ts`, `apps/console/e2e/sun/**`, `packages/app-contracts/src/console/{customers,sandbox,golive,webhooks,events}.ts` | 11:00 | §12.1, §13.2 |
-| L-SUN-08 Fin Admin onboarding | B | `apps/admin/src/client/routes/{go-live,approvals,customers,documents,organisations,rfis,forms,reasons}/**`, `apps/admin/src/server/routes/{golive,approvals,customers,documents,organisations,rfis,forms,reasons,templates,history,flags}/**`, their `policy/` and `nav/` fragments, `apps/admin/e2e/sun/**`, `packages/app-contracts/src/admin/{golive,approvals,customers,documents,organisations,rfis,forms,reasons}.ts`, `packages/db/migrations/*_admin_settings_*.sql`, `packages/db/src/schema/admin-settings.ts`, `packages/db/roles/grants/admin_settings.json`, `packages/audit/src/events/staff-settings.ts`, `packages/email/src/templates/staff-kyc/**`, `ops/monitoring/catalog/admin_kyc.ts`, `ops/monitoring/*/alerts/admin_kyc.json` | 11:00 | §12.2, §13.3, §15's screens; SP-27 |
+| L-SUN-07 Console onboarding | A | `apps/console/src/client/routes/{customers,developers/simulator,developers/webhooks,developers/events,settings/go-live}/**`, `apps/console/src/server/routes/{customers,sandbox,golive,webhooks,events}/**`, `apps/console/src/server/policy/{customers,sandbox,golive,webhooks,events}.ts`, `packages/frame/src/nav/console/{customers,developers}.ts` (EXECUTION §1.3), `apps/console/e2e/sun/**`, `packages/app-contracts/src/console/{customers,sandbox,golive,webhooks,events}.ts` | 11:00 | §12.1, §13.2 |
+| L-SUN-08 Fin Admin onboarding | B | `apps/admin/src/client/routes/{go-live,approvals,customers,documents,organisations,rfis,forms,reasons}/**`, `apps/admin/src/server/routes/{golive,approvals,customers,documents,organisations,rfis,forms,reasons,templates,history,flags}/**`, their `apps/admin/src/server/policy/` fragments and `packages/frame/src/nav/admin/` fragments (EXECUTION §1.3), `apps/admin/e2e/sun/**`, `packages/app-contracts/src/admin/{golive,approvals,customers,documents,organisations,rfis,forms,reasons}.ts`, `packages/db/migrations/*_admin_settings_*.sql`, `packages/db/src/schema/admin-settings.ts`, `packages/db/roles/grants/admin_settings.json`, `packages/audit/src/events/staff-settings.ts`, `packages/email/src/templates/staff-kyc/**`, `ops/monitoring/catalog/admin_kyc.ts`, `ops/monitoring/*/alerts/admin_kyc.json` | 11:00 | §12.2, §13.3, §15's screens; SP-27 |
 | L-SUN-09 Docs site (stretch) | A | `apps/docs/**` | 14:00 | the reference with Try it; guides for customers, people, requests for information, going to Production, and Sandbox test values generated from §3.8's constants |
 | L-SUN-10 Ops | B | `ops/fin/**`, the `ops/monitoring/**` index files, dashboards and monitors, the runbooks of §18.2 under `docs/runbooks/` | 08:00 | CR-13 set by `pnpm fin` once the watcher and the staging identity provider are live; the verify and selfie static deployments and their routes as spec 01 §7.4 and §7.5 build them; the `verify` monitor on `/api/health`; the alerts applied |
 | L-SUN-11 Design | canvas | the canvases | 08:00 | unlocked Production; the verify boards if not done; the second-approver, restart and flag states |
@@ -1988,10 +2000,13 @@ These add to them, numbered after EXECUTION's last (AC-SUN-22 onwards; to be cop
   `delivery: "download"` (recorded in the audit metadata), for the owner to accept. A new tab is a
   new document, so Fin Admin's own page policy stays as it is (research note D3 §7.4).
 
-**Owner decisions this spec builds on their defaults** (DECISIONS.md, deadline Sunday unless noted):
-[KY-05], [KY-06] and [KY-13] (08:00 Saturday), [KY-07], [KY-08], [KY-10], [KY-11], [KY-12],
-[SA-17], [SA-26], [SA-37], [SA-39], [SA-40], [DA-13], [AP-04], [AP-07], [AP-08], [AP-16], [AP-18],
-[UI-08], [BC-04], [BC-07], [FW-02], [FW-03].
+**Owner decisions this spec builds on their defaults** (entries whose status in DECISIONS.md is
+OWNER MUST DECIDE; deadline Sunday unless noted): [KY-05], [KY-06] and [KY-13] (08:00 Saturday),
+[KY-07], [KY-11], [SA-39] (the budgets and the second approver), [AP-04], [AP-07], [AP-08] (keeping
+Fin's own engine, a confirmation), [AP-16], [UI-08], [BC-04], [BC-07], [FW-02].
+
+**Register entries this spec follows that are not for the owner** (Recommended, or already decided,
+in DECISIONS.md): [KY-08], [KY-10], [KY-12], [SA-17], [SA-26], [SA-37], [SA-40], [DA-13], [AP-18].
 
 **Content the owner provides** (none of it blocks the build; placeholders are marked draft and never
 shipped to production): the end-customer consent and privacy notice text and

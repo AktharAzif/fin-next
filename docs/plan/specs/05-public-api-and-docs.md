@@ -12,19 +12,22 @@
 
 ## How to read it
 
-**Precedence.** The plan's one order (README §8.3) holds here. (1) The owner's decisions of 21 Nov
-2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to OD-6. (2) DECISIONS.md, appendix C
-included. (3) The specification that owns the area: this file for the public API's conventions, API
-keys, webhooks and events, the OpenAPI document, the docs site and Try it; the sibling that owns any
-other area (spec 01 for the platform and the static hosts, spec 02 for sign-in and roles, spec 03
-for onboarding, spec 04 for money); and spec 08 for the cross-cutting rules of audit, security
-email, personal data, scrubbing, secrets and observability. (4) ARCHITECTURE.md. (5) EXECUTION.md.
-A decision of this file (D05-nn, §16) binds where everything above it is silent. One that would
-change a register entry binds only as DECISIONS appendix C settles it: D05-01 is folded into [P-07]
-(SF-01), D05-03 waits for the owner's yes under [AP-11] (SF-08), and D05-32's first form, a
-`404-page` fallback, is not adopted (SF-06). A conflict with the register found later is settled
-the same way, and the register holds until it is. Where this file repeats a rule it cites the
-section and keeps it short; where it differs from ARCHITECTURE or EXECUTION, the change is named.
+**Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+specifications, and between two specifications the one that owns the area, as README §8.3 lists
+the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
+OD-6. Among the specifications, this file owns the public API's conventions, API keys, webhooks and
+events, the OpenAPI document, the docs site and Try it; the sibling owns any other area (spec 01 for
+the platform and the static hosts, spec 02 for sign-in and roles, spec 03 for onboarding, spec 04
+for money); and spec 08 owns the cross-cutting rules of audit, security email, personal data,
+scrubbing, secrets and observability. A decision of this file (D05-nn, §16) binds where everything
+above it is silent; one that differs from ARCHITECTURE.md or EXECUTION.md binds only once that file
+is changed to match. One that would change a register entry binds only as DECISIONS appendix C
+settles it: D05-01 is folded into [P-07] (SF-01), D05-03 waits for the owner's yes under [AP-11]
+(SF-08), and D05-32's first form, a `404-page` fallback, is not adopted (SF-06). A conflict with the
+register found later is settled the same way, and the register holds until it is. Where this file
+repeats a rule it cites the section and keeps it short; where it differs from ARCHITECTURE or
+EXECUTION, the change is named, and the higher file holds until it is amended to match.
 
 | Mark | Meaning |
 |---|---|
@@ -86,7 +89,8 @@ webhook secret: test vectors are built at run time from stated inputs.
   sheds load first, then checks shape and checksum, then reads the key in one statement with no
   positive cache ([SA-19]). Every refusal is the same 401 (§4).
 - **Webhooks** are Standard Webhooks `v1`, thin payloads, an outbox in the action's transaction,
-  endpoints enabled only after a signed challenge, 15 tries over about 3 days, 410 pauses, sent only
+  endpoints enabled only after a signed challenge, 15 tries over about 3 days, 410 Gone disables the
+  endpoint ([AP-07]), sent only
   through `deliveryFetch` from the worker's static addresses (§5).
 - **59 operations**: 1 on Saturday (`whoami`), 40 on Sunday (onboarding, events, webhook endpoints,
   Sandbox customers), 18 on Monday (money and Sandbox money) (§6).
@@ -126,13 +130,18 @@ webhook secret: test vectors are built at run time from stated inputs.
 | `deliveryFetch`, caller signatures, the door matrix, the unit of work, telemetry | `packages/server` (spec 01, P0-D) | Used as ARCH §7.9, §7.11 and §10 say |
 | The audit chain and `recordAudit` | `packages/audit` (spec 01, P0-E) | Fragments `api-keys.ts` and `webhooks.ts` (§4.10, §5.7) |
 
-### 1.3 What the owner's 21 Nov decisions change in ARCH §13
+### 1.3 What the owner's 21 Nov decisions changed in ARCH §13
 
-| ARCHITECTURE text | Under OD-2 and OD-3 (spec 01 §1) | This spec |
+ARCHITECTURE already follows OD-2 and OD-3 (spec 01 §1), [FD-18] and DECISIONS appendix C (SF-01): it
+has no `docs` service, no docs server and no failure path on the docs host (ARCH §3.1, §4.2, §5.2,
+§10.5, §13.10). This table records what an earlier draft said and what holds now, so a reader of the
+old draft finds the change; none of the left column's texts is in ARCHITECTURE any more.
+
+| Earlier draft | Now (ARCHITECTURE and this spec agree) | This spec |
 |---|---|---|
-| ARCH §13.10: "`POST /failed/<stage>`", "`/readyz` answers only Railway's health checker"; ARCH §3.1: "served by a small Hono static server"; ARCH §4.2: the `docs` service | There is no `docs` service and `developer.<zone>` has no `/api/` path | The docs site is static only. Browser failure reports go to the edge at `POST <api origin>/reports/docs` (§8.13, D05-01) |
-| ARCH §13.10: `connect-src` "fixed at build time" | Builds carry nothing environment-specific; `env.json` and `_headers` are rendered at deploy (spec 01 S0-05) | One build for every environment; the reference reads the API origin and the salt from `/env.json` (§8.2, D05-02) |
-| ARCH §5.2: `developer.<hosted zone>` | Hosts written `<app>.<zone>` | `developer.<zone>`, read as [FD-10] assigns it |
+| A `docs` service on Railway, a small static server for the docs, and a docs-side failure path | There is no `docs` service. `developer.<zone>` is assets-only, with a proxied CNAME to the public tunnel but no `/api/*` route, no ingress rule and no service (ARCH §5.2, [FD-18], SF-01) | The docs site is static only. Browser failure reports go to the edge at `POST <api origin>/reports/docs`, which feeds the Errors application `fin-next-<env>-docs-web` (§8.13, D05-01; ARCH §10.5) |
+| `connect-src` fixed at build time | Builds carry nothing environment-specific; `env.json` and `_headers` are rendered at deploy (ARCH §5.16, spec 01 S0-05) | One build for every environment; the reference reads the API origin and the salt from `/env.json` (§8.2, D05-02) |
+| `developer.<hosted zone>` | Hosts written `<app>.<zone>` (ARCH §5.2) | `developer.<zone>`, read as [FD-10] assigns it |
 
 ---
 
@@ -213,7 +222,7 @@ ARCH §13.1 is the normative list. This section adds what a builder needs to imp
 | `Deprecation`, `Sunset`, `Link` | answer | §3.6, on deprecated operations only |
 | `Cache-Control: no-store` | answer | Every answer |
 | `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` | answer | Every answer (ARCH §7.12) |
-| `Strict-Transport-Security: max-age=31536000`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` | answer | Every https answer |
+| `Strict-Transport-Security: max-age=63072000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` | answer | Every https answer. `api.` is on the main zone in production and on the staging zone in staging, so it takes that zone class's value, with no `preload` (ARCH §5.8, [SA-45]); the header-matrix test asserts the exact value |
 | `Vary: Origin` | answer | Every `/v4` answer, preflights included |
 | CORS headers | answer | §3.8, for the docs origin only |
 | `Fin-Release` | never | The public API does not say which release answered (D05-29) |
@@ -328,7 +337,7 @@ The old product's `live_key_refused` is not carried; `sandbox_key_required` repl
 |---|---|---|
 | `errors/customers.ts`, `documents.ts`, `people.ts`, `rfis.ts`, `sandbox.ts` | L-SUN-05 with spec 03 | 400 `customer_incomplete`, `details_missing`, `invalid_count`, `invalid_document`, `invalid_document_type`, `invalid_field`, `invalid_forms`, `invalid_items`, `invalid_link`, `invalid_note`, `invalid_ownership`, `invalid_reason`, `invalid_roles`, `invalid_side`, `invalid_status`, `invalid_type`, `ownership_over`, `rfi_incomplete`, `too_many_documents`; 409 `company_type_missing`, `customer_locked`, `customer_not_deletable`, `customer_not_rejected`, `customer_submitted`, `email_used`, `external_id_used`, `form_takes_id`, `not_business`, `person_locked`, `rfi_closed`, `rfi_forms`, `rfi_open`, `transition_refused`, `restart_not_allowed` (new, [KY-07]), `too_many_people` (new, 20 a business), `sandbox_quota` (new, [DA-13], D05-31); 422 `document_refused`, `document_unreadable`, `invalid_answers`; 429 `restart_limit`. Spec 03 decides which of the old verify-only codes (`selfie_*`, `person_submitted`, `rfi_not_answered`, `rfi_not_waiting`, `status_changed`) stay public |
 | `errors/webhooks.ts` | L-SUN-04 | 400 `invalid_url` (adds `reason`), `invalid_events`, `invalid_description`, `invalid_held_deliveries`; 409 `too_many_endpoints`, `endpoint_paused`, `endpoint_not_verified` (new), `not_sendable` |
-| `errors/money.ts` | L-MON-05 with spec 04 | Spec 04 §25 is the list. It includes 400 `invalid_beneficiary`, `invalid_transfer`; 403 `money_not_enabled`; 409 `account_not_ready`, `beneficiary_exists`, `beneficiary_removed`, `beneficiary_not_ready`, `insufficient_funds`, `money_locked`, `not_approved`, `not_cancellable`, `not_simulatable`, `not_supported`, `rail_unavailable`, `rail_unsupported`, `deposit_unavailable`; 429 `beneficiary_limit`, `deposit_limit`, `transfer_limit` |
+| `errors/money.ts` | L-MON-05 with spec 04 | Spec 04 §25 is the list. It includes 400 `invalid_beneficiary`, `invalid_transfer`; 409 `account_not_ready`, `beneficiary_exists`, `beneficiary_removed`, `beneficiary_not_ready`, `insufficient_funds`, `money_locked`, `not_approved`, `not_cancellable`, `not_simulatable`, `not_supported`, `rail_unavailable`, `rail_unsupported`; 429 `beneficiary_limit`, `deposit_limit`, `transfer_limit`. The old `money_not_enabled` and `deposit_unavailable` are not carried (spec 04 §25.6, MS-24): a live money call while live money is off, or while the live instance is disabled, is 403 `sandbox_only` (§3.3.4; ARCHITECTURE §13.1 rule 6) |
 
 Codes never in the public catalogue: `step_up_required`, `second_factor_required`, `invalid_origin`
 and the app halves' codes (spec 01 §4.4), which belong to the console, Fin Admin and verify.
@@ -609,7 +618,7 @@ export function buildKey(mode: KeyMode, kind: KeyKind, id: string, secret: strin
 |---|---|---|
 | Works | From sign-up | Only after Fin approves the organisation's go-live (F21); 403 `live_not_enabled` before, 403 `live_paused` while paused |
 | Customers | Decided by the sandbox provider from test values (spec 03) | Verified by Sumsub |
-| Money | The Fin simulator ([MO-05]) | Refused with 403 `sandbox_only` on every money route until live money is enabled (PG-14); then the routed provider, or 403 `money_not_enabled` if the deployment has no provider instance for live |
+| Money | The Fin simulator ([MO-05]) | Refused with 403 `sandbox_only` on every money route until live money is enabled (PG-14); then the routed provider, and 403 `sandbox_only` again whenever the deployment's live provider instance is disabled (ARCHITECTURE §13.1 rule 6, spec 04 §25.6) |
 | Sandbox routes (`/v4/sandbox/*`) | Yes | 403 `sandbox_only` |
 | Try it on the docs site | Yes, with this deployment's salt | 403 `sandbox_key_required` (§9) |
 | Mail to customers and people | Only to confirmed addresses of the organisation's members ([SA-40]) | As addressed |
@@ -664,9 +673,9 @@ export function buildKey(mode: KeyMode, kind: KeyKind, id: string, secret: strin
 |---|---|
 | Expiry | 30 days, 90 days, a year or never, chosen at create |
 | Roll | A new key with the same scopes, allowlist and expiry; the old key keeps working for now, 1 hour or 24 hours ([SA-20]), never past its own expiry; `replaced_by` and `rolling_until` set |
-| Edit | Name freely; scopes only narrowed; expiry only shortened; the allowlist changed. Every edit but the name takes a step-up intent, is audited and emailed ([SA-34]) |
+| Edit | The name changed; scopes only narrowed; expiry only shortened; the allowlist changed. Every edit, a name alone included, takes a step-up intent, is audited and emailed (ARCH §7.7, [SA-34]) |
 | Limit | 50 working keys per organisation, a rolling old key not counted |
-| Step-up | An intent for create, roll, revoke and every edit but the name (ARCH §7.4, spec 02) |
+| Step-up | An intent for create, every edit (the name included), roll and revoke (ARCH §7.4, §7.7, spec 02) |
 | Last used | `last_used_at` rounded down to the minute, written after the answer at most once a minute per key ([BC-05]) |
 | Statuses (derived, shown by the console) | `active`; `rolling` (until `rolling_until`); `expired` (`expires_at` passed); `revoked` |
 | When a maker leaves or is demoted | Spec 02 lists and by default rolls the keys they made or saw ([SA-33]); a key whose maker no longer holds the permissions behind its scopes is flagged in the console |
@@ -707,7 +716,8 @@ shape and checksum, the edge calls `api`'s door operation `keys.exposed` with `{
   cached and refreshed at most once per 10 minutes whatever identifier arrives; then for each
   `{ token, type, url, source }`: shape, checksum against every salt in `KNOWN_SALTS`, the HMAC with
   the pepper. A match calls `keys.exposed` with `{ key_id, source: "secret_scanning" }`; `api`
-  revokes the key whatever its mode (D05-10), audits, emails and writes `key.leaked`. The answer is
+  revokes the key whatever its mode (D05-10, recorded in [SA-21]), audits, emails and writes
+  `key.leaked`. The answer is
   200 within 10 seconds; work past that runs after the answer. Never logged: the token or its URL.
 - Feedback to GitHub (`true_positive` by token hash) is optional and later.
 
@@ -716,12 +726,14 @@ shape and checksum, the edge calls `api`'s door operation `keys.exposed` with `{
 | Object | Shape | Grants (`packages/db/roles/grants/keys.json`) |
 |---|---|---|
 | `keys.api_key` | `id` (the 10-character key ID, primary key), `organization_id`, `mode`, `kind`, `name`, `scopes text[]`, `ip_allowlist cidr[]`, `hash bytea`, `pepper_versions smallint[]`, `created_by` (`usr_`), `created_at`, `expires_at`, `revoked_at`, `revoked_reason` (`member`, `maker_removed`, `sent_in_clear`, `leaked_public`, `organisation_deleted`), `replaced_by`, `rolling_until`, `last_used_at`, `seen_by text[]` (who was shown the secret, [SA-33]) | `fin_console` insert, update (create, edit, roll, revoke); `fin_api` execute `keys.revoke_exposed(key_id, reason)` only; `fin_worker` update `hash`, `pepper_versions` only; `fin_edge` and `fin_payments` select on the view only |
-| `keys.key_lookup` (view) | `id`, `organization_id`, `mode`, `kind`, `scopes`, `ip_allowlist`, `hash`, `pepper_versions`, `expires_at`, `revoked_at`, `rolling_until`, `org_live_status` (`not_enabled`, `enabled`, `paused`) | as above |
+| `keys.key_lookup` (view) | `id`, `organization_id`, `mode`, `kind`, `scopes`, `ip_allowlist`, `hash`, `pepper_versions`, `expires_at`, `revoked_at`, `rolling_until`, `org_live_status` (`not_enabled`, `enabled`, `paused`, derived from `identity.organization.live_status`: `approved` is `enabled`, `paused` is `paused`, every other value is `not_enabled`; spec 03 §3.7) | as above |
 | `keys.touch_last_used(key_id)` | `UPDATE ... SET last_used_at = date_trunc('minute', now()) WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < date_trunc('minute', now()))` | `fin_edge` execute |
 
 The edge's one statement (§2.1 step 15) reads the view row, the address's `refused_keys` window from
-`ops.rate_window` and the `live_keys` and `all_api` switches from `ops.kill_switch` together; its SQL
-lives in `packages/keys/src/lookup.ts` with an `EXPLAIN` test.
+`ops.rate_window` and the `live_keys` switch from `ops.kill_switch` together; its SQL lives in
+`packages/keys/src/lookup.ts` with an `EXPLAIN` test. There is no database switch for the whole
+public API ([OP-01], ARCHITECTURE §15.1): all of `api.` is stopped by the prepared Cloudflare rule
+`killswitch-api` (spec 08 §8.6), unless the owner first adds such a switch to [OP-01].
 
 ### 4.10 Audit events and emails (`packages/audit/src/events/api-keys.ts`; category `api_keys`, scope `organisation`)
 
@@ -734,11 +746,11 @@ D08-33), and spec 02 §12.3, §16.5 and §17.2 use them.
 | `api_key.updated` | console | `key_id`, `changed` (field names), `scopes_removed`, `expiry_shortened`, `allowlist_count` |
 | `api_key.rolled` | console | `key_id`, `new_key_id`, `overlap` (`now`, `1h`, `24h`: the request's value, spec 02 §12.3), `shown_to` |
 | `api_key.revoked` | console, or `api` for exposures | `key_id`, `reason`, `source` (for exposures: `plain_http`, `secret_scanning`) |
-| `api_key.exposed` | `api` | `key_id`, `source`; a Sandbox key not revoked |
+| `api_key.exposed` | `api` | `key_id`, `source`; a Sandbox key sent over plain http, which is not revoked (a reported one is, §4.8) |
 
 | Template (`packages/email/src/templates/api-keys/`) | To | When |
 |---|---|---|
-| `key-changed` | every member (ARCH §7.7) | created, edited (not a name alone), rolled, revoked; a security notice, never dropped ([SA-41]) |
+| `key-changed` | every member (ARCH §7.7) | created, edited (a name alone included), rolled, revoked; a security notice, never dropped ([SA-41]) |
 | `key-exposed` | Super admins and Admins | sent over plain http or reported by GitHub; says what happened and whether the key was revoked; no key material |
 
 Each event has a test that fails when it is not written (AGENTS rule); each email a test that it is
@@ -811,8 +823,9 @@ it.
 
 `WebhookEndpoint`: `id` (`whe_`), `object: "webhook_endpoint"`, `url` (null for Fin's test
 receiver), `fin_test_receiver` (boolean), `description` (at most 200 characters, through
-`packages/identity/src/names.ts`'s free-text rule), `enabled_events`, `status`, `paused_reason`
-(`developer`, `failing`, `gone`, or null), `failing_since`, `verified_at`, `created_at`, `updated_at`.
+`packages/identity/src/names.ts`'s free-text rule), `enabled_events`, `status` (`verifying`,
+`unverified`, `active`, `failing`, `paused`, `disabled`), `paused_reason` (`developer` or `failing`
+while `paused`, otherwise null), `failing_since`, `verified_at`, `created_at`, `updated_at`.
 `WebhookEndpointWithSecret` adds `secret` and is answered only by create and roll.
 
 Limits: 10 endpoints per organisation and mode (409 `too_many_endpoints`).
@@ -831,12 +844,13 @@ Limits: 10 endpoints per organisation and mode (409 `too_many_endpoints`).
 | `failing` | a 2xx | `active` | `failing_since` null |
 | `active`, `failing` | `PATCH { "status": "paused" }` | `paused` (`developer`) | pending deliveries become `paused` |
 | `active`, `failing` | a delivery ends its 15th try with no success at this endpoint since that delivery's first try | `paused` (`failing`) | its pending deliveries become `paused`; email `endpoint-paused` |
-| `active`, `failing` | an attempt answered 410 Gone | `paused` (`gone`) | as above |
-| `paused` | `PATCH { "status": "active", "held_deliveries": "send" or "skip" }` | `active` if the reason was `developer`; `verifying` if `failing` or `gone` | held deliveries go back to `pending` with a fresh schedule, or become `skipped`; `held_deliveries` is required when any are held, else 400 `invalid_held_deliveries` |
+| `active`, `failing` | an attempt answered 410 Gone | `disabled` ([AP-07]) | its pending deliveries become `paused` (held); new events create none for it; audit `webhook_endpoint.disabled`; email `endpoint-paused` |
+| `paused`, `disabled` | `PATCH { "status": "active", "held_deliveries": "send" or "skip" }` | `active` if paused by the `developer`; `verifying` if paused for `failing`, or if `disabled` (the challenge runs again) | held deliveries go back to `pending` with a fresh schedule, or become `skipped`; `held_deliveries` is required when any are held, else 400 `invalid_held_deliveries` |
 | any | `DELETE` | (deleted) | its deliveries are deleted; audit; email |
 
 Events create deliveries only for endpoints in `active` or `failing` (as `pending`) and in `paused`
-(as `paused`, so a resume can send them). `verifying` and `unverified` endpoints get none.
+(as `paused`, so a resume can send them). `verifying`, `unverified` and `disabled` endpoints get none:
+a `disabled` endpoint keeps only what it held when the 410 came.
 
 #### 5.3.3 The challenge ([AP-07], [SA-40])
 
@@ -879,7 +893,7 @@ exception.
 |---|---|
 | Attempt | `POST` through `deliveryFetch` from the worker's static addresses; connect 5 s, 15 s in all; redirects not followed; at most 1 KB of the answer kept |
 | Success | Any 2xx. A 3xx is a failure (`outcome: redirect`) |
-| 410 Gone | Pauses the endpoint (`gone`), §5.3.2 |
+| 410 Gone | Disables the endpoint ([AP-07]), §5.3.2 |
 | 429, 503 with `Retry-After` | The next try waits for the later of the schedule and `Retry-After`, capped at 12 hours |
 | Tries | 15 ([BC-04]) |
 | Schedule (`RETRY_DELAYS_S` in `packages/events/src/schedule.ts`) | at once, then 5 s, 5 min, 30 min, 1 h, 2 h, 3 h, 4 h, 5 h, 6 h, 8 h, 10 h, 10 h, 12 h, 12 h after each failure: about 3 days 1 hour |
@@ -888,7 +902,7 @@ exception.
 | A delivery's end | `failed` when its 15th try fails and the endpoint has had a success since that delivery's first try; otherwise the endpoint pauses and the delivery is held (§5.3.2) |
 | Caps (D05-18) | 5 deliveries in flight per endpoint; 20 in flight per target host across every organisation; 600 attempts per minute per target host (a window in `ops.rate_window` keyed by a hash of the host). A capped delivery waits; its try is not counted |
 | Kill switch | While `outbound_webhooks` is on, nothing is claimed and no try is counted; `switch.refused` lines |
-| Manual retry (`retryDelivery`) | On `retrying`: one attempt now, not counted unless it succeeds; on `pending`: its first attempt now; on `succeeded`, `failed` or `skipped`: a new delivery of the same event with `retry_of`. 409 `endpoint_paused` while the endpoint is paused, 409 `not_sendable` for a challenge |
+| Manual retry (`retryDelivery`) | On `retrying`: one attempt now, not counted unless it succeeds; on `pending`: its first attempt now; on `succeeded`, `failed` or `skipped`: a new delivery of the same event with `retry_of`. 409 `endpoint_paused` while the endpoint is paused or disabled, 409 `not_sendable` for a challenge |
 | Retention | Deliveries 30 days, then deleted by the daily `webhook.sweep` |
 | Addresses | The worker's static outbound addresses are published in the webhooks guide, noting Railway may share them with other customers (ARCH §4.4) |
 
@@ -941,14 +955,15 @@ D08-33), and spec 03 §12.1 and §16.5 use them.
 | `webhook_endpoint.deleted` | `endpoint_id` |
 | `webhook_endpoint.test_sent` | `endpoint_id`, `event_id` |
 | `webhook_endpoint.verified`, `webhook_endpoint.verification_failed` | `endpoint_id`, `tries` (system actor) |
-| `webhook_endpoint.paused` | `endpoint_id`, `reason` (`developer` with the actor; `failing` and `gone` with the system actor) |
+| `webhook_endpoint.paused` | `endpoint_id`, `reason` (`developer` with the actor; `failing` with the system actor) |
+| `webhook_endpoint.disabled` | `endpoint_id`, `response_code` (410; system actor) |
 | `webhook_endpoint.resumed` | `endpoint_id`, `held` (`send`, `skip`, `none`) |
 | `webhook_delivery.retried` | `endpoint_id`, `delivery_id`, `new_delivery_id` |
 
 | Template (`packages/email/src/templates/webhooks/`) | To | When |
 |---|---|---|
 | `endpoint-changed` | Super admins and Admins | created, URL changed, secret rolled, deleted (a signing secret is a credential; D05-20); a security notice ([SA-41]) |
-| `endpoint-paused` | Super admins and Admins | paused for `failing` or `gone` |
+| `endpoint-paused` | Super admins and Admins | paused for `failing`, or disabled by a 410 Gone (the email says which) |
 
 ---
 
@@ -1068,14 +1083,15 @@ Spec 03 defines what it writes (audit `customer.sandbox_reset`). Its answer is `
 
 ### 6.8 Monday, money (L-MON-05 with spec 04 §25): 13 operations
 
-Spec 04 §25 is the source for bodies, answers, codes and the money door operations behind each
-route. Every money route is `liveMoney: true` (403 `sandbox_only` with a live key until PG-14) and
+This spec owns the names and conventions here: the operation IDs, paths, scopes and the paging and
+filter parameters of §3.5 (README §8.3). Spec 04 §25 owns the bodies, answers, codes and the money
+door operations behind each route, and the 2xx column below follows it. Every money route is `liveMoney: true` (403 `sandbox_only` with a live key until PG-14) and
 answered by `payments` through `api`.
 
 | operationId | Method and path | Key | Idem. | 2xx |
 |---|---|---|---|---|
 | `getVirtualAccount` | `GET /v4/customers/{id}/virtual_account` (full deposit instructions; audited reveal, spec 04 §11.4) | `money:read` | none | 200 `VirtualAccount` |
-| `openVirtualAccount` | `POST /v4/customers/{id}/virtual_account` | `money:write` | state | 200 `VirtualAccount` |
+| `openVirtualAccount` | `POST /v4/customers/{id}/virtual_account` | `money:write` | state | 201 `VirtualAccount` for a new account, 200 the existing one |
 | `listVirtualAccounts` (new) | `GET /v4/customers/{id}/virtual_accounts` (never instructions) | `money:read` | none | 200 list of `VirtualAccount` |
 | `getBalance` | `GET /v4/customers/{id}/balance` | `money:read` | none | 200 `Balance` |
 | `addBeneficiary` | `POST /v4/customers/{id}/beneficiaries` | `beneficiaries:write` | perm? | 201 `Beneficiary` |
@@ -1084,7 +1100,7 @@ answered by `payments` through `api`.
 | `removeBeneficiary` | `DELETE /v4/customers/{id}/beneficiaries/{beneficiary_id}` | `beneficiaries:write` | state | 200 `Beneficiary` (`status: "removed"`) |
 | `quoteTransfer` (new, [MO-16]) | `POST /v4/transfers/quote` (holds nothing; spec 04 §15.3) | `money:read` (MS-22) | none | 200 `TransferQuote` |
 | `createTransfer` | `POST /v4/transfers` | `money:write` | perm! | 201 `Transfer` (a replay 200) |
-| `listTransfers` | `GET /v4/transfers` (`customer_id`, `status`, `direction`, `created_gte`, `created_lt`, paging) | `money:read` | none | 200 list of `Transfer` |
+| `listTransfers` | `GET /v4/transfers` (`customer_id`, `status`, `direction`, `created_gte`, `created_lt`, paging with `ending_before`, as the Transfers screens page both ways, [AP-17]) | `money:read` | none | 200 list of `Transfer` |
 | `getTransfer` | `GET /v4/transfers/{id}` | `money:read` | none | 200 `Transfer` |
 | `cancelTransfer` | `POST /v4/transfers/{id}/cancel` | `money:write` | state | 200 `Transfer` |
 
@@ -1491,7 +1507,7 @@ Rendered for staging, once the owner's yes on the exception is recorded:
 /*
   Cache-Control: no-cache
   Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.<staging-zone>; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
-  Strict-Transport-Security: max-age=31536000
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   Cross-Origin-Opener-Policy: same-origin
@@ -1503,6 +1519,10 @@ Rendered for staging, once the owner's yes on the exception is recorded:
   Cache-Control: public, max-age=31536000, immutable
 ```
 
+- `Strict-Transport-Security` takes the zone class's value (ARCH §5.8, [SA-45]): the staging docs
+  host, on the staging zone, renders `max-age=63072000; includeSubDomains` as above; the production
+  docs host, on the hosted zone ([FD-10]), renders `max-age=63072000; includeSubDomains; preload`.
+  The header-matrix test asserts the exact value for each.
 - `X-Robots-Tag` appears outside production only, as in every profile. `/env.json`, `/openapi.json`
   and `/search-index.json` take `no-cache` from `/*`, so they need no rule of their own.
 - **The docs exception** ([SA-45], FW-C05, [AP-11]). `style-src 'unsafe-inline'` and `img-src data:`
@@ -1762,7 +1782,7 @@ guide templates (tier N). The attack pass uses these profiles (EXECUTION §1.7):
 | Idempotency abuse: replaying another key's secret-bearing answer | the same-key rule and no stored secret (§3.4.3) |
 | A forged cursor or one reused with other filters | the MAC and the filter hash (§3.5) |
 | SSRF through a webhook URL, DNS rebinding, a redirect | `deliveryFetch` at save and at every attempt; no redirects (§5.3.4) |
-| Using Fin to flood a third party with retries | the challenge, the host caps, 410 pauses (§5.3, §5.4) |
+| Using Fin to flood a third party with retries | the challenge, the host caps, 410 Gone disables (§5.3, §5.4) |
 | A removed member forging signed events | secrets rolled on removal ([SA-33]); `seen_by` |
 | "Try it" leaking a key | the five layers (§9) and the storage and network tests (T05-45, T05-46) |
 | Personal data or secrets in logs, events, cursors or errors | thin events; scrubbers; the line rules (§10.1); T05-30, T05-24 |
@@ -1784,7 +1804,7 @@ live (EXECUTION §1.3). A lane that needs another lane's file asks through the l
 | L-SUN-05 Onboarding API routes | Sunday 11:00 | `apps/api/src/routes/{customers,people,documents,links,rfis,sandbox,events,webhook-endpoints}/**`; contract fragments for `customers`, `documents`, `people`, `rfis`, `events`, `webhook-endpoints`, `sandbox` (routes, policy, schemas, errors, openapi) | §6.3 to §6.7 |
 | L-MON-05 Money API | Monday 12:00 | `apps/api/src/routes/{virtual-accounts,balances,beneficiaries,transfers,quotes,sandbox/money}/**`; contract fragments `money`, `sandbox-money` | §6.8, §6.9 with spec 04 §25 |
 | L-SUN-09 Docs site (stretch), then L-MON-08 | Sunday 14:00; Monday 08:00 | `apps/docs/**`; `apps/edge/src/reports/**`; `packages/contract/src/docs-links.ts`; `docs/api-changelog/**`; `ops/monitoring/catalog/docs.ts` and its alerts | §8, §9; T05-40 to T05-58 and T05-61. Sunday: Scalar bundled with no CDN, the policy, the guard and its five layers, getting started. Monday: the reference for onboarding and money with Try it, the getting-started guide; stretch: error pages, money movement, idempotency, pagination and webhooks guides |
-| L-SUN-10, L-MON-09 Ops | Sunday and Monday 08:00 | `ops/fin/**`, `ops/monitoring/**` index files | The docs host's static entry and deploy, the monitors, the GitHub app registration for secret scanning (before production), the worker's static addresses for the webhooks guide |
+| L-SUN-10, L-MON-09 Ops | Sunday and Monday 08:00 | `ops/fin/**`, `ops/monitoring/**` index files | The docs site's builds deployed through `deploy-static-staging` onto the static deployment and route that Phase 0 already made for its placeholder (EXECUTION §2.5 step 8, AC-P0-14, spec 01 §7.4 and §7.5): these lanes replace the placeholder's content, not the deployment or the route. The docs host's monitors (the `docs-web` Errors application already exists from Phase 0, spec 01 §8.2), the GitHub app registration for secret scanning (before production), the worker's static addresses for the webhooks guide |
 | H-08 Docs | From Tuesday | `apps/docs/content/**`, `docs/api-changelog/**` | Every guide, the changelog and its first entry, search, the error pages, response examples on every operation |
 
 **Requests to other lanes** (through the lane board): `apps/connector` keeps no `developer` ingress
@@ -1857,7 +1877,7 @@ fails when the rule it names breaks.
 | T05-35 | C | Every example validates against its schema; vacuum and the regenerate-and-diff pass | L-SUN-01 |
 | T05-36 | I | Isolation, generated per route and per mode: another organisation's or the other mode's object answers 404 and nothing changes (AC-SUN-07) | L-SUN-05, L-MON-05 |
 | T05-37 | I | Endpoint states of §5.3.2, one test per row; the challenge passes with JSON and text answers and fails otherwise | L-SUN-04 |
-| T05-38 | I | Delivery: the schedule with jitter bounds; 410 pauses; `Retry-After` honoured; 5 failures mark failing; the end-of-window pause holds deliveries; resume send and skip; manual retry rules; caps per endpoint and host; the kill switch; 30-day sweep | L-SUN-04 |
+| T05-38 | I | Delivery: the schedule with jitter bounds; 410 disables, and re-enabling runs the challenge again; `Retry-After` honoured; 5 failures mark failing; the end-of-window pause holds deliveries; resume send and skip; manual retry rules; caps per endpoint and host; the kill switch; 30-day sweep | L-SUN-04 |
 | T05-39 | I | `deliveryFetch` refuses private, loopback, link-local, CGNAT, ULA, Railway, documentation and multicast addresses, IP literals, Fin's zones, http and other ports, at save and at send; the test receiver is reached in-process only (AC-SUN-09) | L-SUN-04 with `packages/server` |
 | T05-40 | U | The guard refuses a live key, a malformed key, a wrong checksum, another salt, a key in a URL or another header, another origin (throws), a docs-origin request with `Authorization`, and sends a valid Sandbox key with `credentials: "omit"`, `cache: "no-store"`, `referrerPolicy: "no-referrer"`, `redirect: "error"`; adds an `Idempotency-Key` to a bare POST | L-SUN-09 |
 | T05-41 | I | CORS: the docs origin gets the preflight and the headers; other origins, other methods and other headers get none; no `Access-Control-Allow-Credentials` ever; preflights never reach `api` | L-SUN-01 |
@@ -1907,7 +1927,7 @@ fails when the rule it names breaks.
 | A05-17 | I | Every write through the API is audited with `via: "api"`, the key ID, the mode and the request ID | AC-SUN-10 (part) |
 | A05-18 | U | Webhook signing matches the fixed vector; the guides' verifiers pass it | |
 | A05-19 | I | Endpoint URLs are refused for every rule of §5.3.4 at save and at send; redirects are not followed; an endpoint that does not answer the challenge is not enabled; the test receiver is in-process | AC-SUN-09 |
-| A05-20 | I | Delivery follows §5.4: 15 tries on the schedule, 410 pauses, the end-of-window pause holds deliveries and emails, caps hold | |
+| A05-20 | I | Delivery follows §5.4: 15 tries on the schedule, 410 disables, the end-of-window pause holds deliveries and emails, caps hold | |
 | A05-21 | E2E | A Sandbox customer made by API completes the hosted flow; the developer receives `customer.*` webhooks verified by a reference verifier at a stand-in endpoint and at Fin's test receiver | AC-SUN-12 |
 | A05-22 | I | Events are written in the action's transaction; `events.emit` refuses a type for the wrong role | |
 | A05-23 | I | Answers, events, examples and the docs name no provider | AC-MON-07 |
@@ -1960,19 +1980,19 @@ The routing checks of spec 01's SP-25, (b) to (d), do not apply to the docs host
 | D05-01 | Docs failure reports go to the edge at `POST /reports/docs`, outside `/v4` and the document | `POST /failed/<stage>` on a docs server that OD-2 removed |
 | D05-02 | One docs build for every environment; `env.json` gives the API origin, docs origin, console origin and salt at run time; the document's server is a variable that the reference replaces; samples use `$FIN_API_URL` | per-environment builds |
 | D05-03 | One page policy for the whole docs site: spec 01 §7.4's `docs` profile, the only header source, with the docs exception (`style-src 'unsafe-inline'`, `img-src data:`) while Scalar needs it and only with the owner's yes under [AP-11]; narrowed to `/reference` once `!` detach is proven | a split policy before detach is proven; a docs-owned headers template that differs from spec 01's profile |
-| D05-04 | The docs follow the system colour scheme with no theme switch, so nothing is stored | `localStorage` theme ([UI-05] for the apps) |
+| D05-04 | The docs follow the system colour scheme with no theme switch, so nothing is stored | `localStorage` theme ([UI-13] for the apps) |
 | D05-05 | No `@sentry/*` on the docs site | the apps' browser error client |
 | D05-06 | Fin's own build-time sample generator | a direct `@scalar/snippetz` dependency |
 | D05-07 | The guard adds an `Idempotency-Key` to a POST that has none | Scalar's experimental request hook |
 | D05-08 | The checksum is CRC-32 (IEEE) over `salt + ":" + body`, base62 in the stated alphabet order, padded to 6; salts `fin-dev-1`, `fin-ci-1`, `fin-stg-1`, `fin-prod-1` | unstated |
 | D05-09 | The stored hash covers the whole key body, not the secret alone | secret only |
-| D05-10 | GitHub-reported keys are revoked in both modes; plain http revokes live keys only ([FD-03]) | live only for both |
+| D05-10 | GitHub-reported keys are revoked in both modes, as [SA-21] records; plain http revokes live keys only ([FD-03]) | live only for both |
 | D05-11 | Allowlist entries must be public unicast, IPv4 at least /16, IPv6 at least /32, not Cloudflare's shared Workers address | any range |
 | D05-12 | `resetSandbox` needs a full-access Sandbox key | a scope |
 | D05-13 | `operationId`s keep the old names; four new operations named here | renames |
 | D05-14 | Every list pages both ways with `previous_cursor`, newest first; no counts | per-list rules |
 | D05-15 | Event filters `type`, `customer_id`, `rfi_id`, `created_gte`, `created_lt` | `created[gte]` style |
-| D05-16 | Endpoint states add `verifying` and `unverified` and a `paused_reason`; resuming after `failing` or `gone` verifies again; resume `send` restarts the schedule | three states |
+| D05-16 | Endpoint states add `verifying`, `unverified` and `disabled` (410 Gone, [AP-07]) and a `paused_reason`; resuming after `failing`, or re-enabling a `disabled` endpoint, verifies again; resume `send` restarts the schedule | three states |
 | D05-17 | The challenge is three tries (0 s, 10 s, 60 s), 15 s each, answered by echo in JSON or text | one try |
 | D05-18 | Caps: 5 in flight per endpoint, 20 per target host, 600 attempts a minute per host | unstated |
 | D05-19 | The test receiver is made with `fin_test_receiver: true` (Sandbox only) | a URL |

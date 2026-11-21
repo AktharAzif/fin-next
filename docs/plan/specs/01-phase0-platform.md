@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Status | Specification for builders, written on Saturday 21 Nov 2026 for Phase 0 (Saturday 08:00 to 13:30 on the owner's clock; the time zone is in the private overlay, [G-09]) |
+| Status | Specification for builders, written on Saturday 21 Nov 2026 for Phase 0 (Saturday 08:00 to 13:30 on the build clock; the time zone is in the private overlay, [G-09]) |
 | Part of | The fin-next plan (R13): `docs/plan/ARCHITECTURE.md`, `docs/plan/DECISIONS.md` and `docs/plan/EXECUTION.md`. This spec details EXECUTION §2 and applies the owner's later decisions of 21 Nov (§1) |
 | Requirements touched | R1, R2, R3, R4, R5, R6 (ground only), R7 (ground only), R8 (ground only), R9, R10, R11, R12, R13, R14, R15, R16 (§0.2) |
 | Lanes | Steward, P0-B (CI), P0-D (server, host, core), P0-E (data, crypto, audit), P0-F (ops), P0-G (UI foundation), the ops agent. fin-review (P0-C) and the spec lane (L-SPEC) appear only where named; the fin-review MVP has its own section in EXECUTION §2.4 |
-| Exit | §13: AC-P0-01 to AC-P0-39 (01 to 17 are EXECUTION §2.11's, 18 onwards this spec's) |
+| Exit | §13: AC-P0-01 to AC-P0-40 (01 to 17 are EXECUTION §2.11's, as EXECUTION words them; 18 onwards are this spec's and add to them). Phase 0 exits at 13:30; AC-P0-04, AC-P0-27 and AC-P0-36 are checked by the end of Saturday |
 
 ---
 
@@ -14,18 +14,24 @@
 
 ### 0.1 Precedence, IDs and placeholders
 
-**Precedence.** The plan's one order (README §8.3) holds here. (1) The owner's decisions of 21 Nov
-2026, which DECISIONS.md records and §1 lists as OD-1 to OD-6, override every other text.
-(2) DECISIONS.md, appendix C included. (3) The specification that owns the area: this spec for the
-platform (the repository and its rules, the monorepo, the CI skeleton, Railway, Cloudflare, Better
-Stack's set-up, Phase 0's secrets and spikes), the sibling that owns any other area, and spec 08 for
-the cross-cutting rules of audit, security email, personal data, scrubbing, secrets and
-observability. (4) ARCHITECTURE.md. (5) EXECUTION.md. A decision of this spec (S0-nn, §14) binds
-where everything above it is silent. One that would change a register entry binds only as DECISIONS
-appendix C settles it: S0-01, S0-03, S0-05 and S0-17 are folded (SF-01, SF-04, SF-05), and S0-04 and
-S0-18 are not adopted (SF-02, SF-03). A conflict with the register found later is settled the same
-way, and the register holds until it is. Where this spec repeats a rule, it names the section it
-comes from and keeps it short; where it differs from ARCHITECTURE or EXECUTION, §1 or §14 says so.
+**Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+specifications, and between two specifications the one that owns the area, as README §8.3 lists
+the owners. The owner's decisions are those DECISIONS.md records and §1 lists as OD-1 to OD-6, and
+they override every other text. Among the specifications, this spec owns the platform (the
+repository and its rules, the monorepo, the CI skeleton, Railway, Cloudflare, Better Stack's set-up,
+Phase 0's secrets and spikes), the sibling owns any other area, and spec 08 owns the cross-cutting
+rules of audit, security email, personal data, scrubbing, secrets and observability. A decision of
+this spec (S0-nn, §14) binds where everything above it is silent. One that differs from
+ARCHITECTURE.md or EXECUTION.md binds only once that file is changed to match; until then that
+file's text holds. One that would change a register entry binds only as DECISIONS appendix C
+settles it: S0-01, S0-03, S0-05 and S0-17 are folded (SF-01, SF-04, SF-05), and S0-04 and
+S0-18's first form (CR-20 in `staging`) are not adopted (SF-02, SF-03). S0-11 (the overlay in CI) and
+S0-18's later proposal (the zone name beside CR-20) would change register entries too, but have no
+appendix C row, so they do not bind until the owner settles them there (§15, item 14). A conflict
+with the register found later is settled the same way, and the register holds until it is. Where
+this spec repeats a rule, it names the section it comes from and keeps it short; where it differs
+from ARCHITECTURE or EXECUTION, §1 or §14 says so, and the higher file holds until it is amended.
 Anything marked **UNVERIFIED** is confirmed by the spike named beside it before work that depends on
 it merges.
 
@@ -38,7 +44,7 @@ it merges.
 | `P0-n` | A Phase 0 step | EXECUTION §2.1 |
 | `SP-nn`, `FW-Sn`, `S-nn` | A spike. `S-01` to `S-04` are EXECUTION's front-door spikes: S-01 is SP-25, S-02 is FW-S2's browser checks, S-03 is SP-07 and S-04 is SP-08's egress part | ARCHITECTURE §11.11, §5.15 and §3.4; EXECUTION §2.6; §11 here |
 | `AC-P0-nn` | A Phase 0 acceptance criterion | §13 (01 to 17 are EXECUTION §2.11's; 18 onwards are new here and follow EXECUTION's last number) |
-| `CR-nn` | A credential or account the owner provides | EXECUTION §2.9 (the whole list, CR-01 to CR-21) and §0.3 (the exact scope of those due before 10:00); §9.4 here |
+| `CR-nn` | A credential or account the owner provides | EXECUTION §2.9 (the whole list, CR-01 to CR-25, with CR-05b) and §0.3 (the exact scope of those due before 10:00); §9.4 here |
 | `PG-nn` | A production gate | EXECUTION §7.3. Production gates use `PG-` only; `G-` belongs to governance decisions |
 | `FW-Cnn`, `FW-Xn` | A framework condition or reversal trigger | ARCHITECTURE §3.4 |
 | `L-SAT-nn` | A Saturday lane that takes files from a Phase 0 lane | EXECUTION §3.2 |
@@ -74,9 +80,9 @@ written to the ops bucket before it changes anything (ARCHITECTURE §6.10).
 | R10 | The fast CI skeleton, driven by fin-review's deterministic `plan` | §5 |
 | R11 | The gate verifies fin-review's signed receipt, whose sessions R11 bounds (the validator itself is EXECUTION §2.4's) | §5.4 |
 | R12 | The public repository `aktharazif/fin-next` and its settings | §3 |
-| R13 | The plan as the first commit, before any code | §3.1 |
+| R13 | The plan merged first, as pull request 1, before any code | §3.1 |
 | R14 | The UI foundation on the UI SDK, the tokens, both frames with the edge toggle | §4.3, §12 |
-| R15 | Node 26.13.1 for everything; the Bun canary job skeleton | §4.1, §5.5 |
+| R15 | Node 26.13.1 for everything; the Bun canary job skeleton (`bun` in `ci.yml`) | §4.1, §5.3 |
 | R16 | `api.<zone>` straight to the tunnel; `developer.<zone>` as a static host; CORS on the edge for the docs origin only | §7.2 |
 
 ---
@@ -126,7 +132,7 @@ builders, not a change to it.
 
 At the Phase 0 exit (13:30), staging is a walking skeleton:
 
-- `aktharazif/fin-next` is public, with the plan as its first commit, its settings applied, the
+- `aktharazif/fin-next` is public, with the plan merged as pull request 1, its settings applied, the
   ruleset on, CODEOWNERS, Dependabot and the minimal CI whose `gate` is the only required check.
 - The monorepo builds, lints, typechecks and tests on Node 26.13.1 with pnpm and its supply-chain
   policy proven (SP-01).
@@ -168,15 +174,15 @@ Railway. `developer.<staging-zone>` has no `/api/` path at all.
 
 ## 3. The public repository
 
-### 3.1 Creating it, and the first commit
+### 3.1 The repository as it stands, and the plan's merge
 
 | Step | Who | What | Check |
 |---|---|---|---|
 | 0 | Owner | Before the plan is public, confirm outside this repository that the old product's staging is behind Access or on its dependencies' current security releases ([G-09]) | Recorded in the sitting's notes; step 4 waits for it |
-| 1 | Steward | Run the public-safety check (the script P0-4 commits as `scripts/public-safety.mjs`, run from the steward's scratch copy) over `docs/plan/` and the root `README.md` with the overlay's refuse list | Exit 0, recorded in the sitting's notes |
-| 2 | Owner | `gh repo create aktharazif/fin-next --public --disable-issues --disable-wiki` with **no initial commit** | The repository exists and is empty |
-| 3 | Owner | Apply every setting in §3.2 except the ruleset and the environments, so push protection is on before anything is pushed | `pnpm fin github verify` once it exists; until then the steward's read-back script prints each setting |
-| 4 | Owner | Push one commit to `main` holding `docs/plan/**` and the root `README.md` only, message `Add the fin-next plan`. The root `README.md` is the public repository's landing page and states [G-03]'s default; the `LICENSE` file follows with the root files of §3.8. This is the only direct push to `main` ever made | AC-P0-01 |
+| 1 | Steward | Run the public-safety check (the script P0-4 commits as `scripts/public-safety.mjs`, run from the steward's scratch copy) over the plan branch's `docs/plan/` and root `README.md` with the overlay's refuse list | Exit 0, recorded in the sitting's notes |
+| 2 | Owner | Nothing to create: the repository exists, public, and `main` holds one commit, its root commit `Initial commit`, a two-line `README.md`. The plan is on branch `plan/initial` as pull request 1, which adds `docs/plan/**` and replaces the root `README.md` and changes nothing else | `git log origin/main` shows the root commit only; the pull request's file list is those 13 files |
+| 3 | Owner | Apply every setting in §3.2 except the ruleset and the environments, so push protection is on before anything else is pushed | `pnpm fin github verify` once it exists; until then the steward's read-back script prints each setting |
+| 4 | Owner | Merge pull request 1 with a merge commit (`gh pr merge 1 --merge --match-head-commit <full head sha>`, the head the steps above checked). It is the bootstrap merge: no gate exists yet, and it is the first entry in `docs/review/bootstrap.json` (spec 07 §2.3.4). The root `README.md` is the public repository's landing page and states [G-03]'s default; the `LICENSE` file follows with the root files of §3.8. Nothing is ever pushed to `main` directly | AC-P0-01 |
 | 5 | Owner | Add the `<builder account>` as a collaborator with write access, and create the `staging` and `staging-static` environments (§3.4) | §3.5, SP-23 |
 
 ### 3.2 Repository settings
@@ -206,7 +212,7 @@ reported, never skipped silently.
 Discussions and Wiki stay off for good; GitHub keeps forking on for public repositories, and fork
 pull requests are handled by approval, no secrets and no AI review ([CI-08]).
 
-### 3.3 The ruleset on `main` (switched on at P0-3, after pull request 1 merges)
+### 3.3 The ruleset on `main` (switched on at P0-3, after the CI pull request merges)
 
 `POST /repos/{o}/{r}/rulesets` with exactly this body ([CI-01]). `15368` is the GitHub Actions app's
 ID; the implementer confirms it with `GET /apps/github-actions` before the call.
@@ -255,12 +261,12 @@ Two environments, so that no job ever holds both Railway's secrets and the stati
 
 | Field | `staging` | `staging-static` |
 |---|---|---|
-| Used by | `deploy-staging` only (the Railway deploy, `ops/fin`) | `deploy-static-staging` only (the static uploads, `tools/static-deploy`) |
+| Used by | `deploy-staging` and `finish-staging` (the Railway deploy's two halves around the static upload, `ops/fin`, §6.9) and `sourcemaps-staging` (the build's browser maps to Better Stack, [FD-19]), each naming in `env:` only the secret it needs | `deploy-static-staging` only (the render and the static uploads, `tools/static-deploy`) |
 | Required reviewers | the owner's account only (`reviewers: [{ "type": "User", "id": <owner's user ID, read at run time> }]`) | the same |
 | Prevent self-review | off (the owner approves runs the owner's merges triggered in the first hours) | off |
 | Deployment branches | custom policy, one rule: branch `main` | the same |
 | Wait timer | 0 | 0 |
-| Secrets | §9.5's three for `staging`, and nothing else | §9.5's two for `staging-static`, and nothing else |
+| Secrets | §9.5's two for `staging` (CR-04 and staging's CI Telemetry token, [CI-03]), and nothing else | CR-20 alone, and nothing else ([FD-19], SF-03) |
 
 ### 3.5 Identities
 
@@ -276,20 +282,21 @@ alone holds the receipt-signing key. Only the CI lane's session holds a second t
 `CODEOWNERS` at the root, the owner for every control path ([CI-14], ARCHITECTURE §11.1). By
 [CI-14]'s default these include the header profiles and their renderer
 (`packages/web-host/src/static/`, [SA-45]), each app's `static.json` and `tools/static-deploy/`,
-because they decide the page policy and what Cloudflare serves. S0-12 adds two more files:
+because they decide the page policy and what Cloudflare serves. The file holds [CI-14]'s list and
+nothing more. S0-12 proposes two more, `.githooks/` and `.gitleaks.toml`; they bind only once [CI-14]
+adopts them, and then one pull request adds both lines here and both entries to `controlPaths`
+(§4.3):
 
 ```
 # Control paths: the owner's approval is required (DECISIONS.md CI-14).
 /.github/                         @aktharazif
 /.claude/                         @aktharazif
-/.githooks/                       @aktharazif
 /CODEOWNERS                       @aktharazif
 /AGENTS.md                        @aktharazif
 /CLAUDE.md                        @aktharazif
 /CONTRIBUTING.md                  @aktharazif
 /SECURITY.md                      @aktharazif
 /pnpm-workspace.yaml              @aktharazif
-/.gitleaks.toml                   @aktharazif
 /scripts/check-supply-chain.mjs   @aktharazif
 /scripts/public-safety.mjs        @aktharazif
 /tools/fin-review/                @aktharazif
@@ -369,11 +376,12 @@ these additions:
 
 | Order | Change | Merged by | Server-side gate |
 |---|---|---|---|
-| 1 | First commit: `docs/plan/**` | Owner (direct push, the only one) | none |
-| 2 | Pull request 1: minimal `ci.yml` (§5.2) and `CODEOWNERS` | Owner, after the hand-started security and attack sessions (EX-18) | advisory |
+| 0 | The root commit `Initial commit`: a two-line `README.md` | already on `main` | none |
+| 1 | Pull request 1: the plan, `docs/plan/**` and the root `README.md` (§3.1) | Owner, a bootstrap merge listed in `docs/review/bootstrap.json` | none |
+| 2 | The CI pull request, the next number: minimal `ci.yml` (§5.2) and `CODEOWNERS` | Owner, after the hand-started security and attack sessions (EX-18) | advisory |
 | 3 | The ruleset (§3.3) | Owner, by API | `gate` required |
 | 4 | Rules files, the merge guard, `.claude/settings.json`, the workspace and root files | Owner (control paths) | `gate` required; receipts advisory |
-| 5 | The pull request that adds `tools/fin-review/src/check-receipt.ts` | Owner | receipts enforced from the moment it is on `main` (§5.4) |
+| 5 | The pull request that adds `tools/fin-review/src/receipt/check.ts` (spec 07 §13.4, RP-05) | Owner | receipts enforced (`enforcing-local`) from the moment it is on `main` (§5.4) |
 
 ---
 
@@ -520,18 +528,21 @@ paths (ARCHITECTURE §3.1). Shape:
 ```json
 {
   "version": 1,
-  "controlPaths": [".github/", ".claude/", ".githooks/", "CODEOWNERS", "AGENTS.md", "CLAUDE.md",
-    "CONTRIBUTING.md", "SECURITY.md", "pnpm-workspace.yaml", ".gitleaks.toml",
+  "controlPaths": [".github/", ".claude/", "CODEOWNERS", "AGENTS.md", "CLAUDE.md",
+    "CONTRIBUTING.md", "SECURITY.md", "pnpm-workspace.yaml",
     "scripts/check-supply-chain.mjs", "scripts/public-safety.mjs", "tools/fin-review/",
     "tools/layout.json", "docs/review/", "ops/fin/", "ops/docker/", "tools/static-deploy/",
     "packages/web-host/src/static/", "apps/*/static.json"],
   "entries": [
     { "path": "apps/console", "name": "@fin/console", "kind": "app", "status": "active",
-      "tiers": { "src/server/**": "S", "public/theme.js": "S", "static.json": "S", "**": "N" },
+      "tiers": { "src/server/**": "S", "static.json": "S", "**": "N" },
       "areas": ["console"], "image": "fin-next-console", "static": "console" }
   ]
 }
 ```
+
+`controlPaths` is [CI-14]'s list, as ARCHITECTURE §11.1 gives it. `.githooks/` and `.gitleaks.toml`
+join it only once [CI-14] adopts S0-12 (§3.6).
 
 `layout:check` fails when: a tracked file maps to no entry (longest path prefix wins; the root files
 are one `root` entry listing them by name); an `active` entry's path does not exist; a `planned`
@@ -549,7 +560,7 @@ Phase 0's entries. "Status" is the state at the Phase 0 exit; "Lane" is who crea
 | `apps/edge` | `@fin/edge` | S | active | P0-D | none |
 | `apps/api` | `@fin/api` | S | active | P0-D (skeleton), P0-E (`--migrate`) | none |
 | `apps/payments` | `@fin/payments` | S | active | P0-D | none |
-| `apps/console` | `@fin/console` | S for `src/server/**`, `public/theme.js` and `static.json` (a control path), N otherwise | active | P0-D (server), P0-G (client) | The server is the API half only (§4.4); `static.json` holds the assets-only settings (§7.4) |
+| `apps/console` | `@fin/console` | S for `src/server/**` and `static.json` (a control path), N otherwise, `public/theme.js` included until the register adopts spec 06's S6-24 | active | P0-D (server), P0-G (client) | The server is the API half only (§4.4); `static.json` holds the assets-only settings (§7.4) |
 | `apps/admin` | `@fin/admin` | as console | active | P0-D, P0-G | as console |
 | `apps/verify` | `@fin/verify` | as console | active | P0-D, P0-G | Two static outputs, `verify` and `selfie`, under one `static.json` (§7.4's invariant is the same for both) |
 | `apps/docs` | `@fin/docs` | N; S for `src/try-it/**` and `static.json` (a control path) | active | P0-G (placeholder) | Static only; no server and no Railway service (SF-01) |
@@ -564,9 +575,9 @@ Phase 0's entries. "Status" is the state at the Phase 0 exit; "Lane" is who crea
 | `packages/testing` | `@fin/testing` | S | active | L-SAT-08 (from 09:00) | Adds the static host (§4.7) |
 | `packages/tokens` | `@fin/tokens` | N | active | P0-G | Token values and CSS from the design system's export, not vendored source (OD-5) |
 | `packages/icons` | `@fin/icons` | N | active | P0-G | Lands in Phase 0 (ARCHITECTURE §3.1 and §3.4): glyph data, `createIcon`, flags and cues, the brand marks |
-| `packages/motion` | `@fin/motion` | N | active | P0-G | Lands in Phase 0: `fin-motion.css` from the pinned snapshot with its hash test, and the motion helpers |
+| `packages/motion` | `@fin/motion` | N | active | P0-G | Lands in Phase 0: `fin-motion.css` with its hash test, and the motion helpers. Under a yes to [UI-12] the file is the pinned snapshot's, byte for byte; under a no it is Fin's own file, rebuilt from the motion spec and the token values. Either way no selector is remapped (spec 06 §5.1) |
 | `packages/ui` | `@fin/ui` | N | active | P0-G | The design layer on the UI SDK: the port of the old product's redesign branch on a yes to [UI-12], else built from the specifications (§12) |
-| `packages/frame` | `@fin/frame` | N | active | P0-G | No nonce read (FW-C06 as rewritten) |
+| `packages/frame` | `@fin/frame` | N (all of it, until the register adopts spec 06's S6-24) | active | P0-G | No nonce read (FW-C06 as rewritten) |
 | `packages/app-contracts` | `@fin/app-contracts` | N | active | P0-G | none |
 | `packages/identity`, `access`, `orgs`, `staff`, `keys`, `kyc`, `money`, `events`, `contract` | `@fin/<name>` | S | planned | their day lanes | none |
 | `tools/fin-review` | `@fin/fin-review` | S, control path | active | P0-C | none |
@@ -599,8 +610,8 @@ apps/console/
 ```
 
 - **The client build** emits `dist/static/` with hashed files under `assets/`, source maps as
-  hidden maps kept as a private build artefact and deleted from `dist/static/` (a build check
-  refuses any `*.map` left), and nothing environment-specific: the build writes no `_headers`, and per-environment values arrive
+  hidden maps kept as the release's source-map artefact (`sourcemaps-staging` uploads it, §5.5) and
+  deleted from `dist/static/` (a build check refuses any `*.map` left), and nothing environment-specific: the build writes no `_headers`, and per-environment values arrive
   at deploy in the rendered `_headers` and `env.json` (§7.4), so production serves exactly the bytes staging tested (S0-05).
 - **The server bundle** is built with Vite's SSR build (`build.ssr`, everything bundled, `pg-native`
   ignored) to one `dist/server/main.js` with its map beside it, unserved (S0-13). SP-02 runs it on the
@@ -610,8 +621,10 @@ apps/console/
   under `/api`. Every answer carries `Cache-Control: no-store`, `Fin-Release: <sha>` and the API
   headers of ARCHITECTURE §7.12.
 - **The origin gate** (`packages/web-host`, FW-C09 under OD-4), on every method but GET, HEAD and
-  OPTIONS, in this order, each refusal a `403` problem with `type .../errors/invalid_origin` and a
-  `request` line with `outcome: refused` and `reason: origin_gate.<code>`:
+  OPTIONS, in this order, each refusal a `403` problem with `type .../errors/invalid_origin` and one
+  `csrf.refused` line with `reason` (the refusal code below) and `route` (the route pattern)
+  ([SA-44], §8.9); the request's `request` line also carries `outcome: refused` and
+  `reason: origin_gate.<code>`:
 
   | Order | Check | Refusal code |
   |---|---|---|
@@ -627,8 +640,9 @@ apps/console/
   settings of research note C3 §4: `baseURL: "https://<app>.<zone>"` as a static setting, never from
   `Host`; `basePath: "/api/auth"`; `trustedOrigins: ["https://<app>.<zone>"]`, the app's origin set
   explicitly ([SA-43]), and a refusal to start if `BETTER_AUTH_TRUSTED_ORIGINS` is set;
-  `advanced.cookiePrefix` `__Host-fin` (console), `__Host-fin-admin` (Fin Admin),
-  `__Host-fin-verify` (verify); `useSecureCookies: false` with
+  `advanced.cookiePrefix` `__Host-fin` (console) and `__Host-fin-admin` (Fin Admin), the only two
+  Better Auth instances: verify runs no Better Auth and sets only its own two cookies,
+  `__Host-fin-verify.ls` and `__Host-fin-selfie.s` ([SA-43]); `useSecureCookies: false` with
   `defaultCookieAttributes: { secure: true }` so no `__Secure-` prefix lands in front of `__Host-`;
   `cookies.session_token.attributes.sameSite: "strict"`; `disableOriginCheck: false` and
   `disableCSRFCheck: false` in every build; `crossSubDomainCookies` never set; passkey `rpID` the
@@ -679,8 +693,9 @@ after the steward prints each package's registry facts (`pnpm view <name>@<versi
 scripts dist.attestations repository dependencies license`). The set is [G-06]'s as DECISIONS.md
 records it (§15, item 2): the UI SDK in place of Radix, Phosphor, `clsx` and `tailwind-merge`, and
 `wrangler` in `tools/static-deploy` only ([FD-19]). Versions are ARCHITECTURE §3.3's unless stated.
-Installed in five grouped pull requests by layer, layer 0 first so that S-01 can use it (the one-time
-exception of [G-06]); every later change is one package per pull request.
+Installed in five grouped pull requests by layer, layer 0 first so that SP-26 and the first static
+deploy can use it (S-01 at 09:15 uploads through the console instead, §11.2), after SP-01 and the
+owner's yes for each install script (the one-time exception of [G-06]); every later change is one package per pull request.
 
 | Layer pull request | Packages |
 |---|---|
@@ -690,10 +705,16 @@ exception of [G-06]); every later change is one package per pull request.
 | 3 Web | `react` and `react-dom` 19.3.1, `@tanstack/react-router` 1.170.46, `@tanstack/router-plugin` 1.169.0, `vite` 8.3.8, `@vitejs/plugin-react` 6.3.0, `tailwindcss` and `@tailwindcss/vite` 4.3.5, `@sentry/react` 11.14.0, `@sentry/vite-plugin` (FSL-1.1-Apache-2.0 licence through Sentry's CLI, named as the rules require), `@ui-sdk/react` and `@ui-sdk/core` at one exact version (below) |
 | 4 Auth (for FW-S2) | `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` 1.7.25; `@simplewebauthn/browser` 13.3.0 |
 
-- **The UI SDK version** is the newest beta past the 4,320-minute release age when its pull request
-  is opened, both packages at the same version, no exclusion: 0.1.0-beta.9 clears at 21 Nov 03:02 UTC,
+- **The UI SDK version** is the newest exact beta past the 4,320-minute (three-day) release age when
+  the install pull request runs, both packages at the same version, no exclusion ([G-06]): beta.9 at
+  P0-4, or beta.10 only if the install pull request runs after 09:47 UTC. 0.1.0-beta.9 clears at 21 Nov 03:02 UTC,
   beta.10 at 21 Nov 09:47 UTC, beta.12 at 22 Nov 09:33 UTC and beta.13 at 22 Nov 12:24 UTC (research
   notes D1 §2 and D2 §8). The move to beta.13 is its own dependency pull request on Sunday.
+- **Outside [G-06]'s set:** `@types/react` and `@types/react-dom` (spec 06 §14 item 6), and the
+  `overrides` entry that pins `@better-auth/core` ([SA-02]). Approving the set does not approve
+  them: each needs its own owner yes at the 08:00 sitting (decision 1, DECISIONS short list), and
+  the `overrides` entry carries a dated comment naming that yes, or §4.2's supply-chain check
+  refuses it.
 - **Not installed:** Radix packages, `@phosphor-icons/react`, `clsx`, `tailwind-merge` (OD-5: icon
   path data lives in `packages/icons`, an in-house `cn` in `packages/ui`); `@fontsource-variable/inter` (Inter's
   variable woff2 and Fira Mono are committed as files with their OFL notices in `packages/tokens`,
@@ -744,9 +765,9 @@ Tool binaries (`zizmor` 1.32.0, `actionlint` 1.7.12, `gitleaks` 8.30.1, `osv-sca
 `squawk` 2.73.0, `hadolint` 2.15.1) come from their releases checked against published checksums, by
 `.github/scripts/install-tools.sh` with the checksums written in it.
 
-### 5.2 Pull request 1 (P0-2, 08:30 to 09:00)
+### 5.2 The CI pull request (P0-2, 08:30 to 09:00)
 
-Pull request 1 adds `CODEOWNERS`, `.github/workflows/ci.yml` and `.github/scripts/control-paths.mjs`,
+The CI pull request, the first after the plan's (normally number 2), adds `CODEOWNERS`, `.github/workflows/ci.yml` and `.github/scripts/control-paths.mjs`,
 and nothing else. Its `ci.yml` has two jobs:
 
 | Job | Steps |
@@ -764,14 +785,17 @@ head SHA without the other jobs having run there.
 
 | Job | Needs | Runs when `plan` says | What | Budget (p50 / p90, ARCHITECTURE §11.13) |
 |---|---|---|---|---|
-| `plan` | none | always | Blobless checkout with history; `node tools/fin-review/src/plan.ts --ci` (Node built-ins only): changed files, tier per file from `tools/layout.json`, the jobs to run, the e2e shards, the images and static apps affected. Writes one JSON output `plan` | 15 s / 30 s |
+| `plan` | none | always | Blobless checkout of the pull request with history, and `main`'s engine copy in `engine/` (sparse: `.github/scripts`, `tools/fin-review`, `docs/review`); `node engine/tools/fin-review/src/main.ts plan --ci` over the pull request's tree (Node built-ins only; spec 07 §10.1, S7-04): changed files, tier per file from `tools/layout.json`, the jobs to run, the e2e shards, the images and static apps affected. Writes one JSON output `plan` | 15 s / 30 s |
 | `check` | plan | always (a docs change still needs the public-safety and layout checks; Turborepo's cache makes the rest near free) | pnpm by checksum; `pnpm install --frozen-lockfile` (store cached by lockfile hash); `pnpm check` through Turborepo with its local cache restored from `actions/cache` | 4 min / 7 min warm |
 | `db` | plan | migrations, `packages/db`, `packages/audit`, `*.db.test.ts` or any global input | Postgres `18.7-trixie` service by digest; `pnpm test:db`; squawk and the migration-order check | |
 | `build` | plan | code | `turbo run build`: server bundles of both targets and the static builds; bundle checks (no seam markers in release bundles, no `*.map` in `dist/static`, no third-party origin in a built file, the built `index.html` has no inline script or handler) | |
 | `seams` | build | an app or `packages/server` changed | Starts each `release` image with each seam variable set; expects exit 78 | |
 | `e2e` | build | a web app, `packages/web-host`, `packages/ui`, `packages/frame`, `packages/testing` or a global input | Playwright in `mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579` with a Postgres service, against the `test` targets and the static host; 4 shards to start | 8 min / 12 min slowest shard |
+| `e2e-report` | e2e | whenever `e2e` ran (`if: ${{ !cancelled() }}`) | Merges the shards' blob reports; the HTML report kept 3 days; `e2e-summary.json` for `ci-report` (spec 07 §10.4) | |
 | `static` | plan | always | zizmor (offline audits), actionlint, gitleaks with `.gitleaks.toml` (redacted), hadolint | |
-| `gate` | all | always (`if: always()`) | §5.4 | |
+| `bun` | plan | `packages/**` changed | The Bun canary ([CI-10], R15), non-blocking (`continue-on-error: true`; not in `gate`'s `needs`): Bun 1.4.5 from `oven-sh/setup-bun` with the archive's SHA-256 checked; the shared packages' unit tests. The SSRF refusal and known-answer tests join on Sunday | |
+| `merge` | none | on `push` to `main` only | Spec 07 §2.3.4: the pushed commit is a merge, its reviewed head's receipt passes the checker from the engine copy, and the trees are equal, unless `docs/review/bootstrap.json` lists the merge. `deploy-staging` deploys a commit only after this job succeeded for it (§6.9; spec 07 S7-12) | 1 min / 3 min |
+| `gate` | every job but `bun` | always (`if: always()`) | §5.4 | |
 
 Global inputs that force every job: `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `turbo.json`,
 `tsconfig.base.json`, `biome.json`, `.node-version`, `tools/layout.json`, anything under `.github/`.
@@ -802,6 +826,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, filter: "blob:none", persist-credentials: false }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: engine
+          sparse-checkout: |
+            .github/scripts
+            tools/fin-review
+            docs/review
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version-file: .node-version }
       - id: plan
@@ -809,7 +842,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node tools/fin-review/src/plan.ts --ci --output "$GITHUB_OUTPUT"
+        run: node engine/tools/fin-review/src/main.ts plan --ci --tree . --output "$GITHUB_OUTPUT"
   check:
     needs: plan
     if: fromJSON(needs.plan.outputs.plan).jobs.check
@@ -832,7 +865,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
   gate:
-    needs: [plan, check, db, build, seams, e2e, static]
+    needs: [plan, check, db, build, seams, e2e, e2e-report, static, merge]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -840,53 +873,74 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: engine
+          sparse-checkout: |
+            .github/scripts
+            tools/fin-review
+            docs/review
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version-file: .node-version }
       - env:
           NEEDS: ${{ toJSON(needs) }}
           PLAN: ${{ needs.plan.outputs.plan }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          git show origin/main:.github/scripts/gate.mjs > "$RUNNER_TEMP/gate.mjs"
-          node "$RUNNER_TEMP/gate.mjs"
+        run: node engine/.github/scripts/gate.mjs
 ```
 
-(The pnpm store cache and the `db`, `build`, `seams`, `e2e` and `static` jobs follow the same
-pattern.) `gate.mjs` comes from `main`, so a pull request cannot weaken its own gate; a pull request
-that changes `gate.mjs` is a control path, and the owner approves it.
+(The pnpm store cache and the `db`, `build`, `seams`, `e2e`, `e2e-report`, `static`, `bun` and `merge`
+jobs follow the same pattern.) `plan` and `gate` run `main`'s engine copy, never the pull request's
+(spec 07 §11.2, S7-04): `gate.mjs` imports `engine/tools/fin-review/src/receipt/check.ts` and
+recomputes the plan, so a pull request cannot weaken its own gate or skip a job by editing its
+planner. A pull request that changes either is a control path, and the owner approves it. Until
+spec 07's RP-06 merges (§13.4 there), the engine files are not yet on `main`: `plan` runs the pull
+request's own planner, and `gate` fetches `main`'s `gate.mjs` alone and has no rule 0.
 
 ### 5.4 The gate
 
-`gate` passes only when all of these hold. Each failure prints one line naming the rule.
+`gate` passes only when all of these hold (spec 07 §11.2 has them in full). Each failure prints one
+line naming the rule.
 
+0. The plan is `main`'s: the engine copy recomputes the plan for the same base and head, and it must
+   equal the `plan` job's output (`plan_mismatch`), from RP-06 on.
 1. Every job in `NEEDS` is `success`, or `skipped` and `plan` listed it as not needed. A job that
    `plan` required and that was skipped, cancelled or failed fails the gate.
 2. Control paths: when the pull request touches one, the owner's latest review on the head SHA is
    `APPROVED` (read through the API with the job's read token) ([CI-14]).
-3. Receipts: when `main` contains `tools/fin-review/src/check-receipt.ts`, `gate` runs `main`'s copy
-   over `refs/fin-review/receipts/<head sha>` (SP-24). The receipt must be signed by a key in
+3. Receipts: when `main` contains `tools/fin-review/src/receipt/check.ts`, `gate` runs it from the
+   engine copy over `refs/fin-review/receipts/<head sha>` (SP-24), under the gate state below. The receipt must be signed by a key in
    `docs/review/receipt-keys/` on `main`, name the head SHA, cover every lens the tier needs, and record
    only sessions on models and efforts R11 and [RV-06]'s floor allow (AC-P0-03). Before that file
    exists on `main`, the gate prints `receipts: advisory` and does not fail on this rule.
-4. On `push` to `main`, the merge commit's tree equals the reviewed head's tree (the `merge` mode of
-   fin-review, EXECUTION §1.7).
+4. On `push` to `main`, the `merge` job's rules (spec 07 §2.3.4): the merge commit's tree equals the
+   reviewed head's tree.
+
+The gate states are spec 07 §11.1's:
 
 | Gate state | When | Receipt rule |
 |---|---|---|
-| `bootstrap` | from pull request 1 until the receipt checker is on `main` | advisory (printed, not enforced) |
-| `enforcing` | from the merge that adds `check-receipt.ts` | enforced |
+| `bootstrap` | from the CI pull request until `tools/fin-review/src/receipt/check.ts` is on `main` | advisory (printed, not enforced); EX-18's hand reviews |
+| `enforcing-local` | from the merge that adds `src/receipt/check.ts` (RP-05, about 10:30 on Saturday) | a local signed receipt in a gating chain |
+| `enforcing-ci` | the owner sets the repository variable `FIN_REVIEW_MODE` to `ci` ([RV-04], H-03) | a CI attested receipt |
+| `ci-outage` | the owner sets `FIN_REVIEW_MODE` to `ci-outage` | a local receipt with `origin: local-outage` |
 
 ### 5.5 The other workflows in Phase 0
 
 | Workflow | Trigger | Jobs in Phase 0 |
 |---|---|---|
-| `release.yml` | `push` to `main` | `images`: for each image `plan` marks affected, BuildKit build of the `release` target with **no cache** and `SOURCE_DATE_EPOCH`, push to `ghcr.io/aktharazif/fin-next-<name>` by digest, `actions/attest`. `static`: for each affected static app (`console`, `admin`, `verify`, `selfie`, `docs`), the client build with no cache; the previous release's `assets/` are downloaded from the previous release's artefact and merged in (FW-C13 under OD-2), then the result is uploaded as artefact `static-<app>-<sha>` (90 days) and attested. `manifest`: writes `release-manifest.json` (commit, image digests, static artefact SHA-256s, migrations, minimum schema version, the browser source-map artefact) as artefact `release-<sha>`. `deploy-staging` and `deploy-static-staging`: §6.9 |
-| `deploy-staging` (a job in `release.yml`) | after `manifest`, in the `staging` environment, waiting for the owner's approval ([CI-03]) | Checks out the commit with no install and no cache; runs `node ops/fin/src/main.ts deploy staging --release <sha>` with §9.5's `staging` secrets in `env:`. Permissions: `contents: read`, `actions: read`, `attestations: read`. Prints names, never IDs |
-| `deploy-static-staging` (a job in `release.yml`) | after `deploy-staging` reached `done`, in the `staging-static` environment, waiting for the owner's approval ([FD-19]) | Checks out the commit; installs only `tools/static-deploy`'s locked dependencies (`pnpm install --frozen-lockfile --filter @fin/static-deploy`, no cache, only the install scripts the owner allowed); downloads the attested static artefacts; runs `node ops/fin/src/main.ts static render staging --release <sha>`, then `node tools/static-deploy/src/main.ts staging --release <sha>` (§6.9), with §9.5's two `staging-static` secrets in `env:`. Permissions: `contents: read`, `actions: read`, `attestations: read`. Never shares a job with the Railway deploy; prints names, never IDs |
+| `release.yml` | `push` to `main` | `images`: for each image `plan` marks affected, BuildKit build of the `release` target with **no cache** and `SOURCE_DATE_EPOCH`, push to `ghcr.io/aktharazif/fin-next-<name>` by digest, `actions/attest`. `static`: for each affected static app (`console`, `admin`, `verify`, `selfie`, `docs`), the client build with no cache; the previous release's `assets/` are downloaded from the previous release's artefact and merged in (FW-C13 under OD-2), then the result is uploaded as artefact `static-<app>-<sha>` (90 days) and attested. `manifest`: writes `release-manifest.json` (commit, image digests, static artefact SHA-256s, migrations, minimum schema version, the browser source-map artefact) as artefact `release-<sha>`. `sourcemaps-staging`, `deploy-staging`, `deploy-static-staging` and `finish-staging`: §6.9 |
+| `sourcemaps-staging` (a job in `release.yml`) | after `manifest`, in the `staging` environment, waiting for the owner's approval with `deploy-staging` ([FD-19], [CI-03]) | Checks out the commit with no install and no cache; downloads the release's browser source-map artefact; runs `pnpm fin sourcemaps upload staging --release <sha>` (`node ops/fin/src/main.ts`, Node built-ins only) with only the CI Telemetry token (§9.5) in `env:`, which sends the maps to `fin-staging`'s browser Errors applications. Changes no service. Permissions: `contents: read`, `actions: read`. Prints names, never IDs |
+| `deploy-staging` (a job in `release.yml`) | after `manifest`, in the `staging` environment, waiting for the owner's approval ([CI-03]) | Checks out the commit with no install and no cache; runs `node ops/fin/src/main.ts deploy staging --release <sha>` with §9.5's `staging` secrets in `env:`, which rolls the services and ends at `rolled` with the run still open (§6.9). Permissions: `contents: read`, `actions: read`, `attestations: read`. Prints names, never IDs |
+| `deploy-static-staging` (a job in `release.yml`) | after `deploy-staging` reached `rolled`, in the `staging-static` environment, waiting for the owner's approval ([FD-19]) | Checks out the commit; installs only `tools/static-deploy`'s locked dependencies (`pnpm install --frozen-lockfile --filter @fin/static-deploy`, no cache, only the install scripts the owner allowed); downloads the attested static artefacts; runs `pnpm fin static render staging --release <sha>` (`node ops/fin/src/main.ts`, Node built-ins only), then `node tools/static-deploy/src/main.ts staging --release <sha>` (§6.9), with CR-20 alone in `env:`. Permissions: `contents: read`, `actions: read`, `attestations: read`. Never shares a job with the Railway deploy; prints names, never IDs |
+| `finish-staging` (a job in `release.yml`) | after `deploy-static-staging` has ended, passed or failed, when `deploy-staging` reached `rolled`; in the `staging` environment, waiting for the owner's approval ([CI-03]) | Checks out the commit with no install and no cache; runs `node ops/fin/src/main.ts deploy staging --release <sha> --finish` with §9.5's `staging` secrets in `env:`: the smoke tests and checks, the release registered, `deploy.done` (§6.9). Permissions: `contents: read`, `actions: read`. Prints names, never IDs |
 | `dependencies.yml` | pull requests touching a manifest or the lockfile; `push` to `main`; daily | `pnpm audit`, `pnpm audit signatures`, OSV-Scanner, `actions/dependency-review-action` (denying GPL and AGPL). No caches |
 | `containers.yml` | pull requests touching `ops/docker/**` or an app | hadolint; both targets built; SBOM; Grype (failing on fixable high and critical); non-root and no-secret-file checks; the Node version inside the image is 26.13.1 |
 | `nightly.yml` | schedule, 01:00 UTC | The full e2e suite on all three browsers; zizmor's online audits; full-history gitleaks; `pnpm outdated` (if Dependabot cannot read the lockfile, §3.7) |
-| `bun.yml` | pull requests touching `packages/**` | Non-blocking (`continue-on-error: true`, never in `gate`): Bun 1.4.5 from `oven-sh/setup-bun` with the archive's SHA-256 checked; the shared packages' unit tests. The SSRF refusal and known-answer tests join on Sunday ([CI-10]) |
 | CodeQL | GitHub's default setup | as GitHub configures it |
 
 ### 5.6 How CI stays fast, and how that is shown
@@ -1040,47 +1094,69 @@ egress addresses equal the overlay's; PITR on; the deployment webhook present.
 
 ### 6.9 Deploying staging
 
-A staging deploy is two jobs of `release.yml`, each waiting for the owner's approval in its own
-environment (§3.4), in ARCHITECTURE §11.8's order, the only one. No job holds both Railway's secrets
-and the static deploy token ([CI-03], [FD-19]).
+A staging deploy is three jobs of `release.yml` in two environments (§3.4), each waiting for the
+owner's approval, which together run ARCHITECTURE §11.8's order, the only one: the services roll,
+then the static deployments upload, then the smoke tests and checks run and `deploy.done` is
+written. No job holds both Railway's secrets and the static deploy token ([CI-03], [FD-19]), so the
+order is split: `deploy-staging` rolls the services and leaves the run open, `deploy-static-staging`
+uploads, and `finish-staging` closes the run. The browser source maps are not part of any of them:
+they go from the build ([FD-19]), uploaded by `sourcemaps-staging` (§5.5) once the owner approves it
+with `deploy-staging`.
 
 **`deploy-staging`** runs `pnpm fin deploy staging --release <sha>` with the `staging` secrets
-(§9.5). Each step writes a `deploy.step` line; the run is registered and holds the state lock.
+(§9.5). Each step writes a `deploy.step` line; the run is registered and holds the state lock until
+`finish-staging` releases it.
 
 | Order | Step | State |
 |---|---|---|
 | 1 | Register the run and take the lock (`fin-next-staging-state`); write the deploy window | `registered`, `locked`, `window_open` |
-| 2 | Verify every image and static artefact's attestation, that the run was a `push` to `main` of `release.yml`, and that each digest and artefact hash is in the release manifest | `attested` |
+| 2 | Check that `ci.yml`'s `merge` job succeeded for the commit (spec 07 §2.3.4, S7-12; the two jobs are in different workflows, so the job reads that result for the commit and stops on anything but `success`); verify every image and static artefact's attestation, that the run was a `push` to `main` of `release.yml`, and that each digest and artefact hash is in the release manifest | `attested` |
 | 3 | Run `migrate` with the new api image; wait for `migrate.done release=<sha>` and the schema version through `api`'s private health | `migrating` |
 | 4 | Roll `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`, each waiting for `SUCCESS`, `/readyz` and the running digest | `rolling` |
 | 5 | Roll `cloudflared-admin` and `cloudflared-public`, only when their image changed | `connectors` |
-| 6 | Smoke through the public hosts: `/health` on `api.`; `/api/health` on `console.` and `verify.`; `GET /v4/whoami` with no key is `401` with Fin's problem `type`; `admin.` answers Access's redirect | `smoke` |
-| 7 | No service has a domain or TCP proxy; the watcher reports the expected connectors | `checks` |
-| 8 | Upload browser source maps to Better Stack and register the release; record the release's static half as pending in the run; write `deploy.done`; close the window; release the lock | `done` |
-| any | A failed step stops the deploy, leaves the previous deployment serving, writes `deploy.failed` with the step and prints the mixed state | `failed` |
+| 6 | Record that every service and connector has rolled; leave the lock held and the window open for `finish-staging` | `rolled` |
+| any | A failed step stops the deploy, leaves the previous deployment serving, writes `deploy.failed` with the step, prints the mixed state, closes the window and releases the lock | `failed` |
 
-**`deploy-static-staging`** starts only after `deploy-staging` reached `done`, so a new page never
-meets an old API (S0-06). It holds only §9.5's two `staging-static` secrets and runs:
+**`deploy-static-staging`** starts only after `deploy-staging` reached `rolled`, so a new page never
+meets an old API (S0-06). It holds CR-20 alone (§9.5) and runs:
 
 | Order | Step |
 |---|---|
 | 1 | Check each static artefact's attestation and that its SHA-256 is the release manifest's |
-| 2 | `pnpm fin static render staging --release <sha>`: render `_headers` and `env.json` into each artefact's copy (§7.4) |
+| 2 | `pnpm fin static render staging --release <sha>`: render `_headers` and `env.json` into each artefact's copy from the profiles in `packages/web-host/src/static/` (§7.4; how the job learns the hostnames is §15, item 14) |
 | 3 | `tools/static-deploy staging --release <sha>`: refuse any `static.json` key outside the allowlist, then upload with the pinned `wrangler`, in the order `verify`, `selfie`, `admin`, `console`, `docs` (§7.4) |
 | 4 | Re-read each deployment through Cloudflare's API: no script module, no binding, `workers_dev` and previews off, the asset manifest hash equal to the release manifest's |
 | 5 | Fetch `index.html`, a deep link and one hashed asset on each static host, and compare the served headers with the rendered `_headers` |
 | any | A failed step stops the job; a host not yet uploaded keeps the previous release, and the job prints which host serves which release |
+
+**`finish-staging`** runs after `deploy-static-staging` has ended, whether it passed or failed, as
+long as `deploy-staging` reached `rolled`. It is in the `staging` environment and waits for the
+owner's approval, given at the same checkpoint once the static job has ended. It runs
+`pnpm fin deploy staging --release <sha> --finish` with the `staging` secrets (§9.5), in the run
+`deploy-staging` registered:
+
+| Order | Step | State |
+|---|---|---|
+| 7 | If `deploy-static-staging` failed: write `deploy.failed` with its step and the mixed state (which host serves which release), close the window, release the lock and stop. The services stay on the new release, which a page one release behind still works with (FW-C13) | `failed` |
+| 8 | Smoke through the public hosts: `/health` on `api.`; `/api/health` on `console.` and `verify.`; `GET /v4/whoami` with no key is `401` with Fin's problem `type`; `admin.` answers Access's redirect; the served headers of `/`, a deep link and an asset on each browser host equal the `_headers` rendered again from the release's artefacts | `smoke` |
+| 9 | No service has a domain or TCP proxy; the watcher reports the expected connectors and routes (that no static deployment has a script is `deploy-static-staging`'s step 4) | `checks` |
+| 10 | Register the release with Better Stack (the maps went from the build, through `sourcemaps-staging`); write `deploy.done`, which now covers both halves; close the window; release the lock | `done` |
+| any | A failed step writes `deploy.failed` with the step and prints the mixed state; it changes no service and no page; the window closes and the lock is released | `failed` |
 
 The job holds no Better Stack token, so its lines (`deploy.static_step`, `deploy.static_done`) stay in
 the job log and the watcher's next run (§7.11) records the deployments in Better Stack; a deployment
 whose asset manifest matches neither this release nor the previous one raises
 `static-deployment-changed`.
 
-**Rollback** takes the two halves separately, in reverse order, and never runs `migrate`: first
-`tools/static-deploy staging --release <previous sha>` re-uploads the previous release's attested static
-artefacts with CR-20, rendered again by `pnpm fin static render`; then `pnpm fin rollback staging`
-redeploys the previous manifest's digests in reverse order with the Railway token alone. In Phase 0
-the operator runs both, each token typed at the secure prompt.
+**Rollback** takes the two halves separately, in reverse order, and never runs `migrate`. First the
+static half: the owner re-runs the previous release's `deploy-static-staging` job (GitHub keeps a
+run re-runnable for 30 days, and the artefacts for 90), which renders the previous release's attested
+artefacts again with `pnpm fin static render` and re-uploads them with CR-20, after the owner's
+approval like any static deploy. CR-20 lives only in `staging-static` and is never typed at the secure
+prompt. If CI cannot run, the operator uses a one-run static token instead, minted by `pnpm fin` with
+CR-05 (Workers Scripts Edit on the staging account only, a one-hour expiry), and revokes it after the
+run. Then the operator runs `pnpm fin rollback staging`, which redeploys the previous manifest's
+digests in reverse order with the Railway token alone, typed at the secure prompt.
 
 ### 6.10 Data model (Phase 0)
 
@@ -1114,13 +1190,13 @@ lane writes the file, so the order below is also the order of the names):
 | `ops.schema_migrations` | `name text PRIMARY KEY` (the file name); `checksum bytea NOT NULL` (SHA-256 of the file); `release text NOT NULL`; `applied_at timestamptz NOT NULL`. The runner holds `LOCK TABLE ops.schema_migrations IN EXCLUSIVE MODE` for its whole run, so no other login can take the migration lock | `fin_owner` (the runner) | every service group and `fin_probe` (the minimum schema version in `/readyz`, ARCHITECTURE §6.4) | none |
 | `ops.privileged_login` | `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY`; `login_role text NOT NULL`; `application_name text`; `client_addr inet`; `backend_pid integer NOT NULL`; `logged_in_at timestamptz NOT NULL`. **Owned by the superuser.** A trigger refuses `UPDATE`, `DELETE` and `TRUNCATE`; rows come only from the `login` trigger's `SECURITY DEFINER` function, which returns at once on a standby and never raises ([P-19]). Because a schema's owner may drop any table in it, a superuser-owned event trigger refuses `DROP` or `ALTER` of this table by anyone but the superuser | the `login` trigger only | `fin_worker` (`SELECT`) | none |
 | `ops.privileged_login_check` | `login_id bigint PRIMARY KEY REFERENCES ops.privileged_login (id)`; `result text NOT NULL CHECK (result IN ('matched', 'unmatched', 'replication'))`; `run_id text` (the registered run it matched); `checked_at timestamptz NOT NULL` | `fin_worker` (`INSERT`), the duty that matches logins with registered runs and raises `privileged-login` (§8.7) | `fin_worker` | none |
-| `ops.kill_switch` | `name text PRIMARY KEY CHECK (name ~ '^[a-z][a-z_]*(:[a-z0-9][a-z0-9_-]{0,62})?$')`; `state text NOT NULL CHECK (state IN ('on', 'off'))` (`on` stops the work); `reason_code text`; `changed_by_kind text CHECK (changed_by_kind IN ('staff', 'operator', 'system'))`; `changed_by_id text`; `changed_at timestamptz NOT NULL`. Seeded `off`: `all_api`, `live_keys`, `live_money`, `signups`, `hosted_verify`, `outbound_webhooks`, `sumsub_writes` (ARCHITECTURE §15.1) | no direct write by any service role. `ops.set_switch(name, state, reason_code, actor jsonb)`: `EXECUTE` for `fin_admin` and for `fin_owner` in an operator task; the caller records `switch.set` or `switch.cleared` in the same transaction. `ops.trip_switch(name, reason_code)`: `EXECUTE` for `fin_payments` and `fin_worker`; it only sets `on`, never clears, and records `switch.tripped` itself. Until those events are in `audit.event_type`, both fail closed (`FA001`) | `SELECT` for `fin_edge`, `fin_api`, `fin_worker`, `fin_payments`, `fin_console`, `fin_admin`, read on every request with no cache | spec 02 (the switches route and screen, S2-27), spec 04 (`provider_instance:<instance>` rows; XC-03), spec 08 (the guard and the journal kinds) |
+| `ops.kill_switch` | `name text PRIMARY KEY CHECK (name ~ '^[a-z][a-z_]*(:[a-z0-9][a-z0-9_-]{0,62})?$')`; `state text NOT NULL CHECK (state IN ('on', 'off'))` (`on` stops the work); `reason_code text`; `changed_by_kind text CHECK (changed_by_kind IN ('staff', 'operator', 'system'))`; `changed_by_id text`; `changed_at timestamptz NOT NULL`. Seeded `off`: `live_keys`, `live_money`, `signups`, `hosted_verify`, `outbound_webhooks`, `sumsub_writes` (ARCHITECTURE §15.1, [OP-01]; there is no whole-API switch: all of `api.` is stopped only by the prepared Cloudflare rule of §7.6, spec 08 §8.6) | no direct write by any service role. `ops.set_switch(name, state, reason_code, actor jsonb)`: `EXECUTE` for `fin_admin` and for `fin_owner` in an operator task; the caller records `switch.set` or `switch.cleared` in the same transaction. `ops.trip_switch(name, reason_code)`: `EXECUTE` for `fin_payments` and `fin_worker`; it only sets `on`, never clears, and records `switch.tripped` itself. Until those events are in `audit.event_type`, both fail closed (`FA001`) | `SELECT` for `fin_edge`, `fin_api`, `fin_worker`, `fin_payments`, `fin_console`, `fin_admin`, read on every request with no cache | spec 02 (the switches route and screen, S2-27), spec 04 (`provider_instance:<instance>` rows; XC-03), spec 08 (the guard and the journal kinds) |
 | `ops.scheduler_lease` | `name text PRIMARY KEY CHECK (name IN ('worker', 'payments'))`; `holder text`; `until timestamptz`; `renewed_at timestamptz`. Both rows seeded. Row-level security: `fin_worker` sees and updates only `worker`, `fin_payments` only `payments` (ARCHITECTURE §4.6: only the scheduler's role may update its row) | its scheduler (`UPDATE` of `holder`, `until`, `renewed_at`) | its scheduler; `fin_probe` | none |
 | `ops.duty_state` | `scheduler text NOT NULL CHECK (scheduler IN ('worker', 'payments'))`; `duty text NOT NULL CHECK (duty ~ '^[a-z][a-z0-9-]{1,62}$')`; `last_success_at timestamptz`; `last_attempt_at timestamptz`; `last_result text CHECK (last_result IN ('ok', 'failed'))`; `consecutive_failures integer NOT NULL DEFAULT 0`; primary key `(scheduler, duty)`. The lease's row-level security, on `scheduler` | its scheduler (`INSERT`, `UPDATE`) | its scheduler; `fin_probe` | each area's duties are rows written at run time (Phase 0: the database probe, `email-delivery-check`, the privileged-login match, the grant drift check) |
 | `ops.rate_window` (`UNLOGGED`) | `key text NOT NULL`; `window_start timestamptz NOT NULL`; `count integer NOT NULL`; primary key `(key, window_start)` | `fin_edge`, `fin_console`, `fin_admin`, `fin_api` (`INSERT`, `UPDATE`); `fin_worker` deletes old windows only through `ops.sweep_rate_windows()` | the same writers | spec 02 (the auth limiter and `ops.lockout`), spec 05 (delivery caps) |
 | `ops.job_kind` | `kind text PRIMARY KEY`; `enqueue_roles text[] NOT NULL`; `runner text NOT NULL CHECK (runner IN ('worker', 'payments'))`. Phase 0 registers only `ops.noop`, for the tests | `fin_owner` (migrations) | the enqueue and claim functions | spec 03 (`kyc.golive_push`, `money.customer_changed`), spec 04 (`money.*`) |
 | `ops.job` | `id text PRIMARY KEY CHECK (id ~ '^job_[0-9a-hjkmnp-tv-z]{26}$')`; `kind text NOT NULL REFERENCES ops.job_kind (kind)`; `payload jsonb NOT NULL DEFAULT '{}'` (IDs only, at most 4 KB); `priority smallint NOT NULL DEFAULT 100`; `due_at timestamptz NOT NULL`; `lease_until timestamptz`; `leased_by text`; `attempts integer NOT NULL DEFAULT 0`; `max_attempts integer NOT NULL DEFAULT 10`; `state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'done', 'failed'))`; `last_error_code text`; `created_at`, `updated_at timestamptz NOT NULL`. Index `(priority, due_at) WHERE state = 'pending'` | rows are inserted only through `ops.enqueue_job(kind, payload, due_at)` (`EXECUTE` for `fin_api`, `fin_worker`, `fin_payments`; refuses a kind whose `enqueue_roles` lacks the caller's group); the kind's runner claims and updates rows (ARCHITECTURE §4.6's claim), under row-level security on the kind's `runner` | the runner | the kinds above |
-| `email.template_grant` | `template text NOT NULL`; `role text NOT NULL`; `category text NOT NULL CHECK (category IN ('code', 'security', 'notice'))`; primary key `(template, role)`. Phase 0 registers `ops.delivery_check` for `fin_worker` (S0-09) | `fin_owner` (migrations) | `email.enqueue()` | L-SAT-05 and each area's templates (spec 02, spec 08 §4) |
+| `email.template_grant` | `template text NOT NULL`; `role text NOT NULL`; `category text NOT NULL CHECK (category IN ('code', 'security', 'notice'))`; primary key `(template, role)`. Phase 0 registers `ops/delivery-check` for `fin_worker` (S0-09; spec 08 §4.4) | `fin_owner` (migrations) | `email.enqueue()` | L-SAT-05 and each area's templates (spec 02, spec 08 §4) |
 | `email.outbox` | `id text PRIMARY KEY CHECK (id ~ '^eml_[0-9a-hjkmnp-tv-z]{26}$')`; `template text NOT NULL`; `category text NOT NULL`; `priority smallint NOT NULL` (codes and security first); `recipient_kind text NOT NULL CHECK (recipient_kind IN ('address', 'customer', 'person'))`; `recipient text NOT NULL` (an address, or the customer's or person's ID, resolved by `worker`); `params jsonb NOT NULL` (IDs and the values the template allows); `carries_code boolean NOT NULL`; `due_at`, `lease_until`, `leased_by`, `attempts`, `last_error_code`; `enqueued_by text NOT NULL` (`session_user`, stamped); `created_at timestamptz NOT NULL`. Left out of dumps ([DA-15]) | inserted only through `email.enqueue(p jsonb)` (`SECURITY DEFINER`, `search_path` pinned; `EXECUTE` for `fin_api`, `fin_worker`, `fin_payments`, `fin_console`, `fin_admin`; refuses a template its role may not send); `fin_worker` claims, updates and deletes | `fin_worker` | L-SAT-05 (priorities, per-recipient counts, digests and budgets; ARCHITECTURE §9.4, spec 08 §4) |
 | `audit.event_type`, `audit.event`, `audit.event_context`, `audit.head` | as spec 08 §3.2, §3.3 and §3.6 give them | only through `audit.record()`, the sequencer and `audit.start_epoch()`; no service role holds `INSERT`, `UPDATE` or `DELETE` on any `audit` table | as spec 08 §3.3 and §3.11 | every area's events and guards (spec 02 §13.8, spec 03 §4.7, spec 04 §7.7) |
 | `audit.anchor`, `audit.anchor_conflict`, `audit.journal_entry`, `audit.journal_shipped` | as spec 08 §3.7 and §3.10 give them | the anchoring and journal duties, through their functions | `fin_worker` | anchoring runs once the vault's writer token exists (§7.9) |
@@ -1170,7 +1246,8 @@ zones ([FD-10]) are out of Phase 0's scope.
 
 **Tunnels** (`pnpm fin tunnel create staging <role>`): `fin-next-staging-public` and
 `fin-next-staging-admin`, created **locally managed** (`config_src: local` on
-`POST /accounts/{account_id}/cfd_tunnel`), so no dashboard or remote configuration applies (SP-04a).
+`POST /accounts/{account_id}/cfd_tunnel`), so no dashboard or remote configuration applies. They are created at 11:00, after SP-04a's result (§11.1;
+EXECUTION §2.5 step 4).
 The token is fetched with Tunnel Edit and set as the sealed `TUNNEL_TOKEN` of its one connector
 service, never printed ([FD-13]). The db tunnel waits for production ([FD-11]).
 
@@ -1280,8 +1357,10 @@ replaces `wrangler` only if SP-26 passes and the owner says yes (§15, item 4).
 (S0-05). In `deploy-static-staging`, before the upload, `pnpm fin static render` (Node built-ins, no
 Railway credential) renders two files into each artefact's copy from the profiles in
 `packages/web-host/src/static/` (one template per profile and the renderer, a control path, [SA-45]),
-the environment's settings and the zone name in `FIN_STATIC_ZONE` (S0-18), and checks both against
-the deploy's hostnames:
+the environment's settings and the overlay's zone name ([SA-45], SF-05), and checks both against the
+deploy's hostnames. The job holds CR-20 alone, so how it receives the zone name is open (§15,
+item 14): S0-18's masked `FIN_STATIC_ZONE` would put it beside CR-20, but binds only once DECISIONS
+appendix C adopts it:
 
 1. **`_headers`** (the parser in `packages/testing`'s static host reads the same file). Profile `app`,
    shown for the console on staging:
@@ -1414,7 +1493,11 @@ an unauthenticated request for `/`, a hashed asset and an `/api/` path all recei
 ### 7.9 The R2 vault (staging)
 
 `pnpm fin vault create staging` creates the five buckets of ARCHITECTURE §6.10 in the staging account
-(location hint `enam`, public access and custom domains off) and one writer token per bucket (CR-15):
+(location hint `enam`, public access and custom domains off) with the R2 bucket-administration token
+(CR-25), and one writer token per bucket (CR-15) with CR-05. It is the first registered run, at about
+10:00 once its command has merged (EXECUTION §2.1 and §2.5 step 0): it makes the ops and state buckets before anything else, registers itself there, and only then makes the rest, so
+every later run is registered and every secret escrowed first. The audit and backups buckets' writer
+tokens can wait for 12:00 (EXECUTION §2.9):
 
 | Bucket | Writer | Lock | Phase 0 use |
 |---|---|---|---|
@@ -1432,7 +1515,8 @@ an unauthenticated request for `/`, a hashed asset and an `/api/` path all recei
 | Static deploy token (CR-20) | Workers Scripts Edit on the staging account only; nothing else | the `staging-static` environment only | `tools/static-deploy` in `deploy-static-staging` ([FD-19]) |
 | Email token (CR-08) | Email Sending: Edit | `worker` only | the sender |
 | Watcher tokens (CR-18) | read-only: Zone, DNS, Rulesets, Tunnel, Access, Workers Scripts and Routes, Analytics, Account Settings | the watcher's own secrets | the watcher |
-| R2 writer tokens (CR-15) | one bucket each | the one writer | worker, backup, operator |
+| R2 bucket-administration token (CR-25) | Workers R2 Storage Edit on the staging account only | secure prompt, per run | `pnpm fin vault create` and the R2 rotation runbook |
+| R2 writer tokens (CR-15) | one bucket each | the one writer (the operator's at the secure prompt) | worker, backup, operator |
 
 A static deploy token can also upload a script with code; the watcher's check that every static
 deployment has no module, binding or `workers.dev` route is the control for that (§7.11);
@@ -1443,7 +1527,7 @@ deployment has no module, binding or `workers.dev` route is the control for that
 `ops/watcher` is the one Worker with code ([OB-11], ARCHITECTURE §10.6): `fin-next-staging-watcher`
 in the staging account, a cron of `* * * * *`, deployed by `pnpm fin watcher deploy staging` through
 the Workers API (no wrangler), read-only tokens only (CR-18), live before the first staging deploy
-(owner's answer on [OB-11] due 12:00). Its checks, one `watcher.check_failed` line per failure (field
+(owner's answer on [OB-11] due 11:00, when CR-18 is needed). Its checks, one `watcher.check_failed` line per failure (field
 `check`) and one `watcher.run` line per minute, shipped to source `fin-next-staging-watcher`, then a
 ping of its heartbeat:
 
@@ -1459,9 +1543,11 @@ ping of its heartbeat:
 | `access` | the application and policy hash, MFA required, binding cookie on | `cloudflare-config-changed` |
 | `email` | both sending domains have preview and drop-suppressed off; `_dmarc` exists | `email-setting-changed` |
 | `railway` | no service has a domain or TCP proxy (only if SP-21 gives a read-only credential) | `railway-exposed` |
+| `vault` | the inventory of every locked object in the staging vault's buckets (§7.9): none removed or changed before its lock ends; once the backup duty has run, the newest dumps are recent and of a sensible size (ARCHITECTURE §10.6), with the vault inventory token of CR-18 | `vault-inventory-changed`, `backup-stale` |
 
-The vault inventory and the hourly GitHub settings check join in hardening ([AU-09]); until then
-`pnpm fin verify` reads the GitHub settings daily.
+The vault inventory is part of the Phase 0 watcher (EXECUTION §2.5 step 10). The hourly GitHub
+settings check joins in hardening (H-04, [AU-09]); until then `pnpm fin verify` reads the GitHub
+settings daily.
 
 ### 7.12 If SP-25 fails: the fallback shape
 
@@ -1512,8 +1598,14 @@ repository links and AI off.
 | `watcher` | none (its failures are lines) | `watcher.*` |
 | `ops` (lines `pnpm fin` ships for its runs) | none | `deploy.*`, `run.*` |
 | (no source) | `console-web`, `admin-web`, `verify-web`, platform `react_errors` | browser errors through each app's `/api/monitoring/envelope` |
+| (no source) | `docs-web`, platform `react_errors` | the docs pages' failure reports, through the edge at `POST https://api.<staging-zone>/reports/docs` |
 
-The docs site has no `/api/` path, so its browser errors are not reported in Phase 0 (open item).
+The docs site has no `/api/` path, no ingress rule and no service ([FD-18], DECISIONS appendix C
+SF-01), so its pages report to the edge instead: `POST https://api.<staging-zone>/reports/docs`, which
+feeds the Errors application `fin-next-staging-docs-web` (spec 05 §8.13, spec 08 D08-32, ARCHITECTURE
+§10.5). Phase 0's `monitoring apply` makes `docs-web`; the edge's receiver (`apps/edge/src/reports/`)
+and the pages' reporter land with the docs lanes (spec 05 §12), and Phase 0's docs placeholder sends
+nothing until they do.
 
 ### 8.3 Metrics (logs to metrics, defined before the first deploy)
 
@@ -1549,14 +1641,14 @@ repository), and names the `staging-quiet` policy (ARCHITECTURE §10.6).
 | `scheduler-worker` | 60 s | worker's scheduler, each minute it holds the lease | `no-logs-worker` |
 | `scheduler-payments` | 60 s | payments' scheduler | `no-logs-payments` |
 | `email-delivery-check` | 1 day | worker, after the delivery check sends (S0-09) | `email-not-sent` |
-| `backup-nightly`, `backup-hourly` | 1 day, 1 hour | backup | the watcher's vault inventory (hardening) |
+| `backup-nightly`, `backup-hourly` | 1 day, 1 hour | backup | the watcher's vault inventory (`backup-stale`, §7.11) |
 | `verify-daily` | 1 day | the scheduled `pnpm fin verify` | none |
 
 Grace periods are in the overlay ([OB-13]). Each heartbeat URL is a sealed variable of the one
 process that pings it, and the scrubbers know the URL's shape.
 
 **The email delivery check** (S0-09): a `worker` duty, `email-delivery-check`, that enqueues template
-`ops.delivery_check` (a lean security-style template with no code and no personal data) to
+`ops/delivery-check` (spec 08 §4.4's name; a lean security-style template with no code and no personal data) to
 `FIN_SEED_INBOX` through `email.enqueue()` once after each new release and once a day, so the outbox,
 the sender and Cloudflare are proven continuously. It feeds AC-P0-10 and, later, PG-04's email soak.
 
@@ -1593,6 +1685,7 @@ N notifies); in staging every alert emails.
 | `static-deployment-changed` | B (new, S0-10) | `routes` or `static` checks | `static-deployment-changed.md` |
 | `cloudflare-config-changed` | J (ARCHITECTURE §5.9's "changed outside a `pnpm fin` run") | `rules`, `zone` or `access` checks | `cloudflare-config-changed.md` |
 | `email-not-sent`, `email-outbox-age`, `email-setting-changed` | G | `email.send_failed`; row age; the watcher's `email` check | `email.md` |
+| `vault-inventory-changed`, `backup-stale` | J; H | the watcher's `vault` check: a locked object removed or changed; the newest dump older than its period (spec 08 §7.8) | `vault-inventory-changed.md`, `backup.md` |
 | `database-unreachable`, `pool-exhausted`, `wal-archiving-stalled`, `privileged-login`, `grants-drift` | H | `dbOk` false; `poolWaiting`; the probe's archiver reading; a privileged login outside a registered run; the hourly grant drift check | `database.md`, `pitr-gap.md`, `privileged-login.md` |
 | `csp-reports` | B (notify only, above a volume threshold) | `csp.report` lines | `csp-reports.md` |
 | `github-settings-changed` | J | `pnpm fin github verify` finds a difference | `github-settings-changed.md` |
@@ -1621,6 +1714,7 @@ ARCHITECTURE §10.2's shape (one JSON object per line, at most 8 KB, common fiel
 | `process.start`, `process.health`, `shutdown.started`, `shutdown.done`, `shutdown.forced`, `process.uncaught_exception`, `process.unhandled_rejection`, `background.failed`, `database.pool_error`, `dns.lookup_failed` | unit and failure | every Fin process |
 | `connector.state`, `connector.health`, `connector.exited` | unit and failure | the supervisor |
 | `ingress.untrusted_peer` | security | web and API services |
+| `csrf.refused` (`reason`, the refusal code; `route`, the route pattern) | security | the origin gate (§4.4, [SA-44]) in each app's API half, one per refusal; watched by `csrf-refused-jump` (ARCHITECTURE §10.8 group B) from Saturday (spec 02 §18.2) |
 | `api.outside_request`, `caller.signature_invalid` | security | `api`, `payments` |
 | `telemetry.ship_failed` (stdout only), `telemetry.recovered` | failure | every Fin process |
 | `error.unexpected` (with `errorId`) | failure | beside every unexpected error, through `reportError` |
@@ -1647,19 +1741,28 @@ next command needs it, and nothing prints one.
 
 ### 9.2 The private overlay
 
-A JSON file outside the repository (path given at the secure prompt or by `FIN_OVERLAY_FILE`), never
-committed (`overlay*.json` is in `.gitignore` and the public-safety check refuses its keys' values).
-Phase 0 keys: `zone` (the staging zone name), `refuseList` (the zone names, the old product's names,
-the design system's private repository name, the redesign pull request's reference and the port's
-source commit), `port.sourceCommit` (read at run time by the port check and the ship-step similarity
-check, never written into `PORTED.md`), `cloudflare.accountName`, `access.team`, `access.aud`,
-`access.staff` (the exact staff addresses), `betterstack.team`, `email.seedInbox`,
-`staticEgress.<service>`, `db.caFingerprint`, `thresholds.<alert>`, `grace.<heartbeat>`. IDs are
-resolved at run time from names wherever an API allows it.
+A JSON file on the owner's machine outside the repository (CR-21; path given at the secure prompt or
+by `FIN_OVERLAY_FILE`), never committed (`overlay*.json` is in `.gitignore` and the public-safety
+check refuses its keys' values). It holds every item [G-09] lists, plus two this spec adds. Keys:
+`zone` (the staging zone name), `refuseList` (the zone names, the old product's names, the design
+system's private repository name, the redesign pull request's reference and the port's source
+commit), `port.sourceCommit` (read at run time by the port check and the ship-step similarity check,
+never written into `PORTED.md`), `cloudflare.accountName`, `access.team`, `access.aud` (the audience
+tags), `access.staff` (the exact staff addresses, which the owner supplies as CR-07), the account,
+workspace, team, source and tunnel IDs that no API can resolve from a name, `email.seedInbox`,
+`oncall.roster` with its time zone, quiet hours and escalation timings, `clock.timeZone` (the build
+clock's and the owner's decision times'), `annex` (the threat model's private annex, spec 08 §2.5),
+`providerNotes`, `thresholds.<alert>` and `grace.<heartbeat>` (every numeric alert threshold and
+grace period, [OB-13]), and this spec's additions, `staticEgress.<service>` and `db.caFingerprint`.
+IDs are resolved at run time from names wherever an API allows it. Fin's own labels (the Better Stack
+teams `fin-staging` and `fin-production`, the Railway project, the vault buckets, the static
+deployments) are public ([G-09]) and live in the public settings, not here.
 
-In the `staging` GitHub environment the overlay is one secret, `FIN_OVERLAY`; `staging-static` holds
-only its zone name, as `FIN_STATIC_ZONE` (S0-18). `pnpm fin` registers **every value** in them with `::add-mask::` before printing anything (GitHub masks only whole secret
-values, so a host name built from the zone would otherwise appear), and prints names, never IDs.
+The overlay is given at the secure prompt from the owner's machine and is never a GitHub secret
+([G-09], CR-21), unless the owner settles S0-11 in DECISIONS appendix C (§15, item 14). Wherever
+`pnpm fin` reads it, it registers **every value** with `::add-mask::` before printing anything (GitHub
+masks only whole secret values, so a host name built from the zone would otherwise appear), and prints
+names, never IDs.
 
 ### 9.3 Secrets generated in Phase 0
 
@@ -1680,28 +1783,35 @@ are generated by the lanes that first need them (Saturday to Monday), by the sam
 
 ### 9.4 Operator credentials Phase 0 needs
 
-EXECUTION §2.9's CR-01 to CR-21 hold, with the exact scope of those due before 10:00 in EXECUTION
-§0.3. Phase 0 needs CR-01, CR-02, CR-04, CR-05, CR-05b, CR-06, CR-07, CR-08, CR-09, CR-10, CR-15,
-CR-17, CR-18, CR-20 and CR-21. CR-20, as EXECUTION §2.9 gives it ([FD-19]):
+EXECUTION §2.9's whole list, CR-01 to CR-25 with CR-05b, holds, with the exact scope of those due
+before 10:00 in EXECUTION §0.3. Phase 0 needs CR-01, CR-02, CR-04, CR-05, CR-05b, CR-06, CR-07,
+CR-08, CR-09, CR-10, CR-15, CR-17, CR-18, CR-20, CR-21 and CR-25. CR-05, CR-10 and CR-25 are needed by
+08:30, ahead of the first registered run (ARCHITECTURE §6.10), and CR-15's operator part (the ops,
+escrow and state buckets with the operator's writer tokens) is made by that run, `pnpm fin vault
+create staging` at about 10:00 (EXECUTION §2.5 step 0). CR-20, as EXECUTION §2.9 gives it
+([FD-19]):
 
 | ID | What | Created by | Scope | Lives in | Needed by | Blocks |
 |---|---|---|---|---|---|---|
-| CR-20 | Cloudflare static deploy token | `pnpm fin` with CR-05 | Account-owned; Workers Scripts Edit on the staging account only, nothing else (routes are made by `pnpm fin routes apply` with CR-05); expiry 90 days, rotated with the front door's secrets ([FD-12]) | the `staging-static` environment secret `CF_STATIC_DEPLOY_TOKEN`, its only credential ([FD-19], SF-03); the inventory | Sat 11:30 | staging static deploys from CI (S-01's throwaway uses `tools/static-deploy` with CR-05 at the secure prompt) |
+| CR-20 | Cloudflare static deploy token | `pnpm fin` with CR-05 | Account-owned; Workers Scripts Edit on the staging account only, nothing else (routes are made by `pnpm fin routes apply` with CR-05); expiry 90 days, rotated with the front door's secrets ([FD-12]) | the `staging-static` environment secret `CF_STATIC_DEPLOY_TOKEN`, the environment's only secret ([FD-19], SF-03), never typed at the secure prompt; the inventory | Sat 11:30 | staging static deploys from CI (S-01's throwaway is uploaded through the console, recorded, before layer 0 of §4.8 has merged) |
 
 ### 9.5 What CI holds
 
-Only the two environments hold secrets, and each is used by one job ([CI-03], [FD-19]; SF-03):
+Only the two environments hold secrets ([CI-03], [FD-19]; SF-03). `staging-static` is used by
+`deploy-static-staging` alone; `staging` by `deploy-staging`, `finish-staging` and `sourcemaps-staging`,
+each naming in `env:` only what it needs:
 
 | Environment | Secret | What |
 |---|---|---|
-| `staging` | `RAILWAY_TOKEN` | the staging project token (CR-04) |
-| `staging` | `BETTERSTACK_TELEMETRY_TOKEN` | the `fin-staging` Telemetry token, for registering releases and uploading source maps (ARCHITECTURE §10.5) |
-| `staging` | `FIN_OVERLAY` | §9.2 |
-| `staging-static` | `CF_STATIC_DEPLOY_TOKEN` | CR-20, the environment's only credential |
-| `staging-static` | `FIN_STATIC_ZONE` | the overlay's zone name alone: not a credential, masked before any output, so `pnpm fin static render` can fill `_headers` and `env.json` (S0-18) |
+| `staging` | `RAILWAY_TOKEN` | the staging project token (CR-04), for `deploy-staging` and `finish-staging` |
+| `staging` | `BETTERSTACK_TELEMETRY_TOKEN` | CR-09's CI Telemetry token for `fin-staging`: `finish-staging` registers releases with it and `sourcemaps-staging` uploads the build's browser maps ([FD-19], ARCHITECTURE §10.5) |
+| `staging-static` | `CF_STATIC_DEPLOY_TOKEN` | CR-20, the environment's only secret |
 
-No repository-level secret exists. No job that restores a cache holds one. Pull-request jobs hold
-none. Whoever controls `deploy-staging` holds every staging secret on Railway, and whoever controls
+Neither environment holds any part of the overlay. S0-11 (the overlay as `FIN_OVERLAY` in `staging`)
+and S0-18's zone name (`FIN_STATIC_ZONE` in `staging-static`) are proposals that would change
+[G-09], [CI-03], [FD-19] and SF-03 and have no DECISIONS appendix C row, so they do not bind until
+the owner settles them there (§15, item 14). No repository-level secret exists. No job that restores a cache holds one. Pull-request jobs hold
+none. Whoever controls `deploy-staging` or `finish-staging` holds every staging secret on Railway, and whoever controls
 `deploy-static-staging` can replace every staging page; so the two never share a job, staging holds
 test data and sandbox credentials only, and the owner approves each job.
 
@@ -1709,8 +1819,9 @@ test data and sandbox credentials only, and the owner approves each job.
 
 `ops/credentials.json` ([OP-05]) gets a row for each Phase 0 credential: name, holder, issuer, created
 and expiry dates, cadence and runbook, never a value. Phase 0 rows: the staging Railway project token,
-CR-05 (per run), CR-20, the email token, each R2 token, the tunnel tokens, the ingress proofs, the
-caller keys, the database logins, the Better Stack tokens, the heartbeat URLs, the receipt-signing
+CR-05 (per run), CR-20, the email token, each R2 token (CR-25 and CR-15's), the tunnel tokens, the
+ingress proofs, the caller keys, the database logins, the Better Stack tokens, the heartbeat URLs,
+the watcher's read-only tokens (CR-18), the builder account's token (CR-17), the receipt-signing
 keys and the interaction-limit renewal date. `monitoring:check` validates the file and checks every
 runbook exists.
 
@@ -1733,7 +1844,7 @@ R9 covers the platforms' own changes and the operator's actions as well as the a
 |---|---|---|
 | Every mutating `pnpm fin` run (deploy, rollback, tunnel, routes, rules, access, static render, email, vault, secrets, db, task, monitoring apply, killswitch) | registered before it changes anything: who (the operator user), what, the commit, the start and end, the result; settings snapshots and rule-set hashes after it | `fin-next-staging-ops` (locked one year); a `run.registered` and `run.done` line |
 | Deploy windows | opened and closed by `pnpm fin deploy`; a Railway deployment outside one alerts | the ops bucket; `deploy-outside-window` |
-| Static deploys | run only by the approved `deploy-static-staging` job, or by the operator with CR-20 at the secure prompt; each run's release and asset manifest hashes are in its log, and the watcher compares every deployment with the release manifest every minute | the workflow run; Better Stack (`watcher.*` lines, `static-deployment-changed`) |
+| Static deploys | run only by the approved `deploy-static-staging` job (a rollback re-runs the previous release's job, §6.9), or, when CI cannot run, by the operator with a one-run static token minted with CR-05 and revoked after; each run's release and asset manifest hashes are in its log, and the watcher compares every deployment with the release manifest every minute | the workflow run; Better Stack (`watcher.*` lines, `static-deployment-changed`) |
 | Privileged database logins | the guarded `login` trigger writes `ops.privileged_login`, matched against registered runs by the worker | the database; `privileged-login` |
 | Operator tasks that change data | an audit event with actor `operator`, `via: operator` ([AU-08]) | `audit.event` |
 | GitHub settings | read back daily by `pnpm fin github verify`; the owner exports the account's security log weekly ([AU-09]) | the ops bucket |
@@ -1747,8 +1858,8 @@ R9 covers the platforms' own changes and the operator's actions as well as the a
 
 ### 11.1 Schedule
 
-Times are targets on the owner's clock and match EXECUTION §2.1, §2.6 and §2.9, which hold if the two
-ever differ. No spike stops Phase 0: each failure has a fallback, and the fallback is recorded the
+Times are targets on the build clock and match EXECUTION §2.1, §2.6 and §2.9, which hold if the two
+ever differ, because EXECUTION.md ranks above this spec (§0.1). No spike stops Phase 0: each failure has a fallback, and the fallback is recorded the
 moment it is taken. Spikes use throwaway names (`c1-spike.<staging-zone>`,
 `c1-spike-admin.<staging-zone>`, `fin-next-spike-*`) and are torn down at the end; no credential is
 printed, and any token a spike needs comes through the secure prompt.
@@ -1758,7 +1869,7 @@ printed, and any token a spike needs comes through the secure prompt.
 | SP-23 GitHub controls | 08:15 to 09:00 | Owner, steward | CR-01, CR-17 |
 | SP-03 Railway deploy path | 08:45 to 09:45 | Ops agent | CR-04 |
 | SP-01 pnpm 12.21.0 | 09:00 to 09:30 | Steward | P0-3 |
-| S-01 (SP-25) Same-host routing | 09:15 to 09:45 | Ops agent with the owner | CR-04 (the throwaway Railway connector), CR-05, CR-05b; layer 0 of §4.8 |
+| S-01 (SP-25) Same-host routing | 09:15 to 09:45 (its throwaway tunnel and connector kept until S-04 ends at 10:00) | Ops agent with the owner | CR-04 (the throwaway Railway connector), CR-05, CR-05b; the console's static-upload flow, since layer 0 of §4.8 has not merged by 09:15 |
 | SP-06 Better Stack | 09:30 to 10:30 | P0-F, ops agent | CR-09 |
 | S-04 (SP-08's egress part) | 09:45 to 10:00 | Ops agent | CR-04; S-01's throwaway connector |
 | SP-05 Postgres, SP-08's private-network part | 09:45 to 10:15 | Ops agent | CR-04 |
@@ -1770,17 +1881,17 @@ printed, and any token a spike needs comes through the secure prompt.
 | SP-21 Railway read-only credential | 11:00 to 11:30 | Ops agent with the owner | CR-04 |
 | SP-02 Node on Railway | 11:00 to 11:45 | P0-D, ops agent | the first `release` images |
 | SP-04b, f, g Tunnels with `fin-next-connector` | 11:30 to 12:30 | Ops agent, P0-D | the first connector image, the watcher |
-| FW-S6 Deploy skew | the first staging deploy, 12:00 to 13:30 | P0-B, ops agent | §6.9 |
+| FW-S6 Deploy skew | the first staging deploy, 13:00 to 13:30, once the owner approves it at C2 (EXECUTION EX-15) | P0-B, ops agent | §6.9 |
 | SP-09 Access MFA | 12:00 to 12:30 | Ops agent with the owner | CR-07 (due 12:00), the Access application (§7.7) |
 | FW-S1 The static page policy with the UI SDK (redefined) | 12:15 to 13:00 | P0-G | P0-9 |
-| S-02 (FW-S2's browser checks) | 12:30 to 13:00, on `console.<staging-zone>` | P0-E with L-SAT-02 | FW-S2's sign-in stub deployed |
+| S-02 (FW-S2's browser checks) | 13:00 to 13:30, on `console.<staging-zone>` | P0-E with L-SAT-02 | FW-S2's sign-in stub deployed by the first staging deploy, approved at C2 (EXECUTION EX-15) |
 | SP-12 Models and sessions | afternoon (fin-review doctor) | P0-C | CR-02 |
 
 ### 11.2 Pass rules and fallbacks
 
 | Spike | Steps and pass rule | If it fails |
 |---|---|---|
-| **SP-25** (S-01) Same-host routing ([FD-18]) | EXECUTION §2.6's S-01 is the one procedure, and its slot, hosts and connector hold: the throwaway hosts `c1-spike.<staging-zone>` and `c1-spike-admin.<staging-zone>`; a throwaway tunnel with one published route (`path: ^/api/`, service `http_status:418`) whose connector is a throwaway Railway service from the pinned `cloudflared` image with static egress on (S-04 reuses it); a throwaway assets-only deployment of `index.html` (body `STATIC-OK`) and `assets/a.js`, made with the pinned `wrangler` from `tools/static-deploy` (through the console's static-upload flow only if `wrangler` cannot be installed by 09:15, recorded). It passes when EXECUTION's checks (a) to (i) hold, and this spec cites that lettering. It adds two checks, recorded in the same row: **(j)** `/api/../settings`, `/API/ping` and `/api` with no slash reach the static deployment, as the edge's normalised path says; **(k)** the static test server of §4.7 gives the same answers as the edge for (a) to (g) and (j). **S-01b** repeats (a) to (f) on `console.<staging-zone>` at P0-12 | As EXECUTION §2.6: (c) shows `STATIC-OK` or a Workers error, or an assets-only deployment cannot hold a route: the fallback shape of §7.12, the owner told at C2; (g) or (j) disagrees: a WAF custom rule refuses paths containing `..`, `//`, `%2F`, `\` or `;` on the app hosts; (k) disagrees: the static test server is fixed to match the edge before any journey relies on it |
+| **SP-25** (S-01) Same-host routing ([FD-18]) | EXECUTION §2.6's S-01 is the one procedure, and its slot, hosts and connector hold: the throwaway hosts `c1-spike.<staging-zone>` and `c1-spike-admin.<staging-zone>`; a throwaway tunnel with one published route (`path: ^/api/`, service `http_status:418`) whose connector is a throwaway Railway service from the pinned `cloudflared` image with static egress on (S-04 reuses it); a throwaway assets-only deployment of `index.html` (body `STATIC-OK`) and `assets/a.js`, uploaded through the console's static-upload flow, recorded, because layer 0 of §4.8 with the pinned `wrangler` has not merged by 09:15 (EXECUTION P0-4). It passes when EXECUTION's checks (a) to (i) hold, and this spec cites that lettering. It adds two checks, recorded in the same row: **(j)** `/api/../settings`, `/API/ping` and `/api` with no slash reach the static deployment, as the edge's normalised path says; **(k)** the static test server of §4.7 gives the same answers as the edge for (a) to (g) and (j). **S-01b** repeats (a) to (f) on `console.<staging-zone>` at P0-12, after the first staging deploy that the owner approves at C2 (13:00) | As EXECUTION §2.6: (c) shows `STATIC-OK` or a Workers error, or an assets-only deployment cannot hold a route: the fallback shape of §7.12, the owner told at C2; (g) or (j) disagrees: a WAF custom rule refuses paths containing `..`, `//`, `%2F`, `\` or `;` on the app hosts; (k) disagrees: the static test server is fixed to match the edge before any journey relies on it |
 | **SP-26** Static deploys (ARCHITECTURE §5.15; before the first staging deploy) | With the pinned `wrangler` from `tools/static-deploy` and a rendered `app` profile, on a throwaway deployment: the served headers equal the rendered `_headers` for `/`, a deep link and an asset, and the asset carries `Cache-Control: public, max-age=31536000, immutable` exactly once (the `!` line replaced the general value); the single-page fallback; `workers_dev` and preview URLs off; a redeploy keeps the previous release's assets; reading the deployment back shows assets and no module or binding (the fields that say so are recorded for §7.11); and whether Cloudflare's API alone can make an assets-only deployment, recorded | `wrangler` stays the uploader ([FD-19]); if the API alone suffices, whether `pnpm fin static deploy` replaces it is the owner's later call (§15, item 4). If `!` does not detach: HTML and assets get disjoint path rules (HTML by `/` and `/index.html`, assets by `/assets/*`), re-tested. If the owner declines an install script `wrangler` needs: the operator uploads each static output through Cloudflare's console with CR-05 at each deploy, recorded per run, until the owner chooses between that script's `allowBuilds` entry and the API path |
 | **SP-01** pnpm | ARCHITECTURE §11.11's pass rule, plus: pnpm never fetches another pnpm version when `packageManager` differs; Dependabot can update the pnpm 12 lockfile (a test pull request on a throwaway branch) | pnpm 11.28.12 ([P-06]); without Dependabot, §3.7's nightly list |
 | **SP-02** Node on Railway | ARCHITECTURE §11.11's rule, plus: the Vite SSR bundle with `pg` runs on the distroless image; `process.constrainedMemory()` shows the service's limit | An explicit `--max-old-space-size` per service ([P-15]); if the bundle fails, ship the server's `node_modules` from `pnpm deploy` in the image and record the change |
@@ -1807,16 +1918,16 @@ only its own paths; anything else goes through the lane board (EXECUTION §1.3).
 
 | Lane | Machine | Owns in Phase 0 | Delivers (this spec) | Hands to |
 |---|---|---|---|---|
-| Steward | A | root files (`package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, `tsconfig.base.json`, `biome.json`, `vitest.config.ts`, `compose.yaml`, `.node-version`, `.gitignore`), `tools/layout.json`, `CODEOWNERS` after pull request 1, the rules files, `.claude/**`, `.githooks/**`, `.gitleaks.toml`, `scripts/**`, `docs/plan/**`, `docs/security/**` | §3.1, §3.6, §3.8, §3.9, §4.1 to §4.3, §4.6's scripts, §4.8's install pull requests, §11.3 | keeps them |
-| P0-B CI | B | `.github/**` (with the CI lane's token) | §3.7, §5, the `deploy-static-staging` job (§6.9) | the CI lane after Phase 0 |
-| P0-C fin-review | A | `tools/fin-review/**`, `docs/review/**` | `plan.ts` (§5.3), `check-receipt.ts` (§5.4), EXECUTION §2.4 | keeps them |
+| Steward | A | root files (`package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, `tsconfig.base.json`, `biome.json`, `vitest.config.ts`, `compose.yaml`, `.node-version`, `.gitignore`), `tools/layout.json`, `CODEOWNERS` after the CI pull request, the rules files, `.claude/**`, `.githooks/**`, `.gitleaks.toml`, `scripts/**`, `docs/plan/**`, `docs/security/**` | §3.1, §3.6, §3.8, §3.9, §4.1 to §4.3, §4.6's scripts, §4.8's install pull requests, §11.3 | keeps them |
+| P0-B CI | B | `.github/**` (with the CI lane's token) | §3.7, §5, the `sourcemaps-staging` and `deploy-static-staging` jobs (§5.5, §6.9) | the CI lane after Phase 0 |
+| P0-C fin-review | A | `tools/fin-review/**`, `docs/review/**` | `src/plan/plan.ts` (§5.3), `src/receipt/check.ts` (§5.4), EXECUTION §2.4, as spec 07 §13 splits them | keeps them |
 | P0-D Server, host, core | B | `packages/core/**`, `packages/server/**`, `packages/web-host/**`, `ops/docker/**`, `apps/connector/**`, `apps/edge/**`, `apps/payments/**`, `apps/api/src/{main.ts,server.node.ts,doors/**}`, each web app's `src/server/**` and `vite.server.config.ts` | §4.4 (API half, origin gate), §4.5, §4.9, §6.4's DNS cache and peer check, §7.3's supervisor and map, §7.4's header profiles and renderer with the header-matrix test | `apps/console/src/server` to L-SAT-06, `apps/admin/src/server` to L-SAT-07, `apps/edge` to L-SAT-11, `apps/verify/src/server` to Sunday's verify lane |
 | P0-E Data, crypto, audit | A | `packages/db/**`, `packages/crypto/**`, `packages/audit/**`, `apps/api/src/{migrate,tasks}/**`, `apps/api/src/worker/probe/**` | §6.6's bootstrap, migrate and task modes; §6.10's tables and functions; AC-P0-11 and AC-P0-39; FW-S2 with L-SAT-02 | `packages/db` fragments to each area's lane |
 | P0-F Ops | B | `ops/fin/**`, `ops/environments/**`, `ops/monitoring/**`, `ops/watcher/**`, `ops/backup/**`, `ops/credentials.json`, `tools/static-deploy/**`, Phase 0's `docs/runbooks/**` and `docs/flows/**` entries | §6 (commands and checks), §7 (commands), `tools/static-deploy` (§6.9, §7.4), §7.11, §8, §9's commands, §10 | L-SAT-09 after P0-7 |
 | P0-G UI foundation | B | `packages/tokens/**`, `packages/icons/**`, `packages/motion/**`, `packages/ui/**`, `packages/frame/**`, `packages/app-contracts/**`, `apps/docs/**`, each web app's `index.html`, `public/**`, `static.json` (a control path), `vite.config.ts` and `src/client/**` shell | The design layer on the UI SDK ([UI-10]) as EXECUTION §2.10 and spec 06 §3.4 give it: on a yes to [UI-12], the port of the old product's redesign branch's design layer through fin-review as new code, one pull request per group (tokens; icons and cues; motion; foundation; overlays; inputs; data and shell), re-checked against the SDK version in use, with private-document references stripped and sample domains moved to `example.com`; on a no, the same packages built from the specifications and canvases (about three times the effort, research note D2), Saturday keeping only its must-have states. Either way `packages/frame` is built fresh, with §4.4's client side, the edge toggle (OD-6) in AppFrame and AdminFrame, and `/theme.js`; then FW-S1 | the client shells to L-SAT-06, L-SAT-07 and Sunday's verify lane |
-| L-SAT-05 Email | B | `packages/email/**`, `apps/api/src/worker/email/**` (from 10:00) | the sender and the email delivery check (§8.5) for AC-P0-10 | keeps them |
+| L-SAT-05 Email | B | `packages/email/**` except other areas' template folders (EXECUTION §1.3; it keeps `ops/`), `apps/api/src/worker/email/**` (from 10:00) | the sender and the email delivery check (§8.5) for AC-P0-10 | keeps them |
 | L-SAT-08 Test harness | A | `packages/testing/**`, `playwright.config.ts` (from 09:00) | the static host (§4.7) | keeps them |
-| Ops agent | B | no files (spike rows go to the steward) | the spikes, the hand provisioning of §6.1 to §6.6, §7.1, §7.7 and §8.1, with the owner for credentials | |
+| Ops agent | B | no files (spike rows go to the steward) | the spikes, the hand provisioning of §6.1 to §6.6, §7.1 and §8.1, with the owner for credentials; the runs of P0-F's commands, among them `pnpm fin access apply staging` for §7.7 (the Access application is never built by hand; the owner gives the staff list, MFA and identity-provider settings, CR-07) | |
 
 **Pull requests per lane in Phase 0** (each small, tier from the layout, reviewed per EX-18 until the
 fin-review MVP gates them):
@@ -1824,10 +1935,10 @@ fin-review MVP gates them):
 | Lane | Pull requests, in order |
 |---|---|
 | Steward | rules files and merge guard; workspace and root files; `tools/layout.json` and `layout:check`; supply-chain, import and public-safety scripts with the pre-push hook; layers 0 to 4 of §4.8 (layer 0 first); `docs/security/threat-model.json` |
-| P0-B | pull request 1; `ci.yml` in full; `release.yml` with `deploy-staging` and `deploy-static-staging`; `dependencies.yml` and `containers.yml`; `nightly.yml` and `bun.yml`; `dependabot.yml` |
+| P0-B | the CI pull request (§5.2); `ci.yml` in full, with `plan` and `gate` on the engine copy and the `merge` job (spec 07 RP-06 and RP-09); `release.yml` with `sourcemaps-staging`, `deploy-staging`, `deploy-static-staging` and `finish-staging`; `dependencies.yml` and `containers.yml`; `nightly.yml`; `dependabot.yml` |
 | P0-D | `packages/core` (IDs, `Clock`, errors, scrubbers with tests); `packages/server` (config, log and telemetry, health, shutdown, DNS cache, ingress check, signatures and the door matrix shell); `packages/web-host`; `apps/connector`; the app skeletons; the Dockerfiles and the `seams` check |
 | P0-E | the pool and unit of work; the migration runner and bootstrap; roles, grants and the `login` trigger; `audit.record()` and the guard; crypto; §6.10's `ops` tables (leases, duty state, kill switches, rate windows, jobs), the outbox and the `events.emit()` shell; tasks |
-| P0-F | `pnpm fin` core (registered runs, the lock, the secure-prompt reader, masking); Railway verify and deploy; Cloudflare tunnels, routes, rules, Access, static render and verify, email, vault; `tools/static-deploy`; Better Stack apply; the watcher; the credential inventory |
+| P0-F | in EXECUTION §2.1's order, each merged under EXECUTION EX-18 before any step runs it: `pnpm fin` core (registered runs, the lock, the secure-prompt reader, masking) with `vault create`, `zone apply`, `email token` and Railway verify (about 10:00); tunnels and rules (about 10:30); the watcher's deploy and Access (about 11:00); static render and verify, routes, `sourcemaps upload` and Railway deploy (before the first staging deploy); `tools/static-deploy`; Better Stack apply; the watcher; the credential inventory |
 | P0-G | on a yes to [UI-12], one port pull request per group (tokens; icons and cues; motion; foundation; overlays; inputs; data and shell), else the same groups built from the specifications; frames with the edge toggle; app shells, `/theme.js` and each `static.json`; the docs placeholder |
 
 ---
@@ -1835,28 +1946,34 @@ fin-review MVP gates them):
 ## 13. Acceptance checklist (Phase 0 exit)
 
 Labels as in EXECUTION: `[U]` unit, `[I]` integration on real Postgres 18, `[E2E]` Playwright against
-the built static apps, `[CI]` a CI job or the gate, `[STG]` checked on staging. AC-P0-01 to AC-P0-17 are EXECUTION §2.11's, amended where §1 changes
-them; AC-P0-18 onwards are this spec's, numbered after EXECUTION's last.
+the built static apps, `[CI]` a CI job or the gate, `[STG]` checked on staging. AC-P0-01 to AC-P0-17 are
+EXECUTION §2.11's, repeated here as EXECUTION words them; EXECUTION holds if the two ever differ.
+AC-P0-18 onwards are this spec's and add to them, numbered after EXECUTION's last.
+
+Phase 0 runs from 08:00 to 13:30 and exits at 13:30, when every criterion below holds except the
+three marked "(end of Saturday)": AC-P0-04 (the self-test, fin-review's slice 3), AC-P0-27 (the CI
+numbers recorded at C2 and C4) and AC-P0-36 (the staging deploy and its rollback by C3). Those three
+are checked by 23:59 on Saturday (EXECUTION §2.11, §3.7). C2 at 13:00 is a checkpoint, not the exit.
 
 | ID | Statement |
 |---|---|
-| AC-P0-01 [CI] | The first commit on `main` holds only `docs/plan/` and the root `README.md`; every later commit on `main` is a merge commit of a pull request whose `gate` passed; control-path pull requests carry the owner's approval |
-| AC-P0-02 [U] | The R11 validator accepts exactly the 27 valid combinations and refuses the 9 with `--model fable` and `--attack-model opus`, every effort below `high`, `ultracode`, `auto`, any alias outside {opus, fable} and bare model IDs, at the CLI, the config file and the CI inputs; the second sceptic resolves to the attack model (EXECUTION §2.4) |
-| AC-P0-03 [CI] | Once the checker is on `main`, a pull request whose receipt is missing, unsigned, signed by an unknown key, names another head, lacks a required lens, or records a session outside R11 or the floor fails `gate`; a receipt posted as a comment counts as missing |
-| AC-P0-04 [CI] | The fin-review self-test finds at least 3 of its 4 planted items with real agents, the miss logged and fixed by Sunday (EXECUTION §2.4) |
-| AC-P0-05 [CI] | An install that breaks each supply-chain setting fails: a young version, a downgraded provenance, a git sub-dependency, an unlisted install script, a package FW-C01 or OD-5 refuses |
-| AC-P0-06 [CI] | The public-safety check fails on a planted staff-shaped address, a token-shaped string and a zone name from the refuse list; the pre-push hook refuses the same |
-| AC-P0-07 [STG] | No Railway service has a public domain or a TCP proxy; `/health` answers on `api.`, and `/api/health` on `console.` and `verify.`; `/readyz` answers from the private network and is 404 through every public host; a request from a non-connector peer, or without the host's ingress proof, gets 403 with `ingress.untrusted_peer` |
-| AC-P0-08 [STG] | The watcher lists each tunnel's connectors with the expected count, version and origin addresses; a connector run with a staging token from outside Railway emails the staging policy within 2 minutes |
-| AC-P0-09 [STG] | One `request` line per request reaches Better Stack with `release` equal to the deployed SHA; a forced error appears in Errors with `release` and `environment` |
-| AC-P0-10 [STG] | The email delivery check's message, sent through the outbox and Cloudflare Email Sending from `auth.<staging-zone>`, reaches the seed inbox with DKIM, SPF and DMARC passing (checked by the owner and recorded) |
-| AC-P0-11 [I] | Each service's login is refused (42501) on every statement its grant fragment does not allow; no role can update or delete audit rows; a critical-table insert with no audit row is refused at commit; a failing `login` trigger body does not block a login |
-| AC-P0-12 [U] | Each scrubber removes every shape it knows (codes, tokens, cookies, email addresses, IP addresses, query strings, ID-bearing paths, heartbeat URLs, tunnel tokens) |
+| AC-P0-01 [CI] | `main` starts with the root commit `Initial commit` (a two-line `README.md`) and the merge of pull request 1, which adds `docs/plan/` and replaces the root `README.md` and changes nothing else, listed in `docs/review/bootstrap.json`; every later commit on `main` is a merge commit of a pull request whose `gate` passed; control-path pull requests carry the owner's approval |
+| AC-P0-02 [U] | The R11 validator accepts exactly the 27 valid combinations and refuses the 9 with `--model fable` and `--attack-model opus`, every effort below `high`, `ultracode`, `auto`, any alias outside {opus, fable} and bare model IDs, at the CLI, the config file and the CI inputs; the second sceptic resolves to the attack model |
+| AC-P0-03 [CI] | A pull request whose receipt is missing, unsigned, signed by an unknown key, names another head, lacks a required lens, or records a session served by a model or effort outside R11 or the floor fails `gate`; a receipt posted as a comment counts as missing |
+| AC-P0-04 [CI] (end of Saturday) | The fin-review self-test finds at least 3 of its 4 planted items with real agents, the miss logged and fixed by Sunday |
+| AC-P0-05 [CI] | An install that breaks each supply-chain setting (a young version, a downgraded provenance, a git sub-dependency, an unlisted install script, a refused package from FW-C01 or Radix) fails |
+| AC-P0-06 [CI] | The public-safety check fails on a planted staff-shaped address, a token-shaped string, a tunnel-ID-shaped string and a zone name from the refuse list; the pre-push hook refuses the same |
+| AC-P0-07 [STG] | No Railway service has a public domain or a TCP proxy; `/api/health` answers through `console.` and `verify.` (and through `admin.` after Access), `/health` through `api.`, and no path of `developer.` reaches Railway; `/readyz` answers from the private network and is 404 through every public host; a request from a non-connector peer, or without the host's ingress proof, gets 403 with `ingress.untrusted_peer` |
+| AC-P0-08 [STG] | The watcher lists each tunnel's connectors with the expected count, version and origin addresses; a connector run with a staging token from outside Railway emails the staging policy within 2 minutes (staging alerts are email only, ARCHITECTURE §4.7) |
+| AC-P0-09 [STG] | One request line per request reaches Better Stack with `release` equal to the deployed SHA; a forced error appears in Better Stack Errors with `release` and `environment` |
+| AC-P0-10 [STG] | One email sent through the outbox and Cloudflare Email Sending, by `worker`, reaches the seed inbox with DKIM, SPF and DMARC passing (checked by the owner and recorded) |
+| AC-P0-11 [I] | Each service's database login is refused (42501) on every statement its grant fragment does not allow; no role can update or delete audit rows; a critical-table insert with no audit row in its transaction is refused at commit; a failing `login` trigger body does not block a login |
+| AC-P0-12 [U] | Each scrubber removes every shape it knows (codes, tokens, cookies, email addresses, IP addresses, query strings, ID-bearing paths) |
 | AC-P0-13 [CI] | The builder account's token cannot push a change to `.github/workflows/` (SP-23), and every `release` image exits 78 with any seam variable set |
-| AC-P0-14 [STG] | EXECUTION §2.11: each app host serves its SPA from its assets-only deployment with its `_headers`; `/api/health` through the tunnel on every app host but `developer.`; a same-origin POST sends no OPTIONS; no `/api/*` request returns the SPA (AC-P0-23 and AC-P0-24 detail it) |
-| AC-P0-15 [STG] | EXECUTION §2.11: every static deployment is assets-only with routes as rendered and the release's asset manifest; a change outside the deploy job pages within 2 minutes (AC-P0-25 details it) |
-| AC-P0-16 [E2E] | EXECUTION §2.11: the kit route under each app's production `_headers` raises no `securitypolicyviolation` on three engines, with the computed-style assertions (FW-S1 as redefined in §11; AC-P0-37) |
-| AC-P0-17 [CI] | EXECUTION §2.11: S-01 to S-04 and SP-26 are recorded in `docs/plan/spikes.md` with the front-door shape they chose (AC-P0-38 covers every other spike) |
+| AC-P0-14 [STG] | On each app host, `/` and a deep link answer the SPA from its assets-only deployment with the app's `_headers` (the page policy, `no-cache` on `index.html`, `immutable` on a hashed asset); on each app host but `developer.`, `/api/health` reaches the app's API service through its tunnel, and on `developer.` every path, `/api/` included, is answered by the static deployment; a same-origin POST to `/api/*` sends no OPTIONS; no `/api/*` request ever returns the SPA |
+| AC-P0-15 [STG] | Every static deployment has no script module, no bindings, `workers_dev` and preview URLs off, routes exactly as rendered, and an asset manifest equal to the release manifest's; changing one outside the deploy job (a drill on a throwaway file) emails the staging policy within 2 minutes |
+| AC-P0-16 [E2E] | Under each app's production `_headers`, the kit route raises no `securitypolicyviolation` on Chromium, Firefox or WebKit; a plain popover has no border, padding or fill; a layered utility beats the SDK's reset; `[data-slot][hidden]` stays hidden under a display class; no `style[id^="ui-sdk-"]` is in `<head>`; the page behind an open drawer does not scroll |
+| AC-P0-17 [CI] | S-01 to S-04 and SP-26 are recorded in `docs/plan/spikes.md`, with the front-door shape they chose |
 | AC-P0-18 [CI] | `pnpm fin github verify` reads back every setting of §3.2, the ruleset of §3.3 and both environments of §3.4 with no difference |
 | AC-P0-19 [CI] | `layout:check` passes; a planted unmapped file, a planted `docs/plan/` mention of an unlisted package and a CODEOWNERS line missing from `controlPaths` each fail it; so do a `packages/*` directory with no entry, and an app's `static.json` or a header profile outside `controlPaths` |
 | AC-P0-20 [CI] | `pnpm check` passes on a clean checkout with Node 26.13.1 and the pinned pnpm; no `TURBO_TOKEN` or remote cache is configured anywhere; Turborepo telemetry is off in every job |
@@ -1866,7 +1983,7 @@ them; AC-P0-18 onwards are this spec's, numbered after EXECUTION's last.
 | AC-P0-24 [STG] | On `console.` and `verify.`, `/api/health` is answered by the API half through the tunnel; a JSON POST from the page reaches the API half with no OPTIONS and no 3xx; `/api` without a slash is the SPA; on `developer.` no path reaches Railway |
 | AC-P0-25 [STG] | Every static deployment has assets only (no module, no binding, no `workers.dev` address, no preview URL), and the zone's Workers routes equal §7.5; a change made in a drill to a throwaway deployment raises `static-deployment-changed` within 2 minutes |
 | AC-P0-26 [STG] | Unauthenticated requests to `admin.<staging-zone>` for `/`, a hashed asset and `/api/health` all receive Access's redirect; a request to the admin API half from a non-connector peer with a forged `Cf-Access-Jwt-Assertion` gets 403 |
-| AC-P0-27 [CI] | Over the day's pull-request runs, `plan` p50 is at most 15 s and warm `check` p50 at most 4 minutes; a docs-only pull request runs only `plan`, `check`, `static` and `gate` (numbers recorded by the steward at C2 and C4) |
+| AC-P0-27 [CI] (end of Saturday) | Over the day's pull-request runs, `plan` p50 is at most 15 s and warm `check` p50 at most 4 minutes; a docs-only pull request runs only `plan`, `check`, `static` and `gate` (numbers recorded by the steward at C2 and C4) |
 | AC-P0-28 [STG] | `pnpm fin verify staging` exits 0: every row of §6.2, Serverless off, outbound IPv6 off, static egress on exactly the listed services with the overlay's addresses, PITR on, the deployment webhook present, no staged change |
 | AC-P0-29 [STG] | Postgres reports its version (recorded); every service connects with `verify-full` against `FIN_DB_CA_PEM`; `fin_owner` has no valid password outside a registered run; a privileged login outside a registered run raises `privileged-login` |
 | AC-P0-30 [STG] | Every Phase 0 secret has an escrow object written before its Railway variable was set (the run registration's timestamps); gitleaks with Fin's shapes finds nothing in the repository, in the deploy run's downloaded logs or in the release images' layers |
@@ -1875,20 +1992,27 @@ them; AC-P0-18 onwards are this spec's, numbered after EXECUTION's last.
 | AC-P0-33 [STG] | Both sending domains have preview and drop-suppressed off; `_dmarc` exists; the email token is refused from an address outside `worker`'s static egress (if SP-07 shows the filter is honoured; otherwise recorded) |
 | AC-P0-34 [STG] | Plain http: a GET to each browser host gets 308 to https; a POST gets 403; a request to `api.` reaches the edge and gets `403 https_required`; a client-sent `Fin-Ingress-Proof` is replaced by the rule's value |
 | AC-P0-35 [STG] | The connector's `/readyz` is 200 only in `ready`; its metrics port refuses connections from another service; a killed `cloudflared` makes the supervisor exit and Railway restart it; a request for an unknown host on the tunnel gets 404 |
-| AC-P0-36 [STG] | One staging deploy from CI after the owner's approval of both jobs: `deploy-staging` reaches `done` with a `deploy.done` line naming the release, then `deploy-static-staging` uploads every static output and its re-read matches the release manifest; by C3, the two-step rollback of §6.9 (the static half with CR-20, then `pnpm fin rollback staging` with the Railway token) returns staging to the previous release, static artefacts included |
+| AC-P0-36 [STG] (end of Saturday) | One staging deploy from CI after the owner's approval of each job, in ARCHITECTURE §11.8's order: `deploy-staging` reaches `rolled`, then `deploy-static-staging` uploads every static output and its re-read matches the release manifest, then `finish-staging` passes the smoke tests and reaches `done` with a `deploy.done` line naming the release; a planted static failure ends the run with `deploy.failed` from `finish-staging` and no `deploy.done`; by C3, the two-step rollback of §6.9 (the static half by re-running the previous release's approved `deploy-static-staging`, then `pnpm fin rollback staging` with the Railway token) returns staging to the previous release, static artefacts included |
 | AC-P0-37 [STG] | FW-S1 passed, or FW-X7 is applied and recorded; FW-S2 passed |
 | AC-P0-38 [CI] | Every Phase 0 spike has a row in `docs/plan/spikes.md` with its result and the fallback taken |
-| AC-P0-39 [I] | From an empty Postgres 18, the bootstrap and the Phase 0 migrations of §6.10 apply in order and create exactly its tables and functions with exactly its grants (any other statement fails with 42501); `ops.kill_switch` holds its seven seed rows `off`; each scheduler's role sees and updates only its own lease and duty rows; `fin_owner` cannot drop, alter, update, delete or truncate `ops.privileged_login`; `email.enqueue()` refuses a template the caller's role may not send, and `ops.enqueue_job()` a kind it may not enqueue |
+| AC-P0-39 [I] | From an empty Postgres 18, the bootstrap and the Phase 0 migrations of §6.10 apply in order and create exactly its tables and functions with exactly its grants (any other statement fails with 42501); `ops.kill_switch` holds its six seed rows `off`; each scheduler's role sees and updates only its own lease and duty rows; `fin_owner` cannot drop, alter, update, delete or truncate `ops.privileged_login`; `email.enqueue()` refuses a template the caller's role may not send, and `ops.enqueue_job()` a kind it may not enqueue |
+| AC-P0-40 [U] | Beyond AC-P0-12's shapes, the scrubbers also remove heartbeat URLs (§8.5) and tunnel tokens (§7.3) |
+
+Where this spec details EXECUTION's criteria: AC-P0-23 and AC-P0-24 detail AC-P0-14; AC-P0-25
+details AC-P0-15; AC-P0-37 and FW-S1 as redefined in §11 detail AC-P0-16; AC-P0-38 covers every spike
+AC-P0-17 does not name; AC-P0-26 details AC-P0-07's `admin.` part; AC-P0-40 adds to AC-P0-12's
+shapes. AC-P0-10's message is §8.5's email delivery check, sent from `auth.<staging-zone>`.
 
 ---
-
 ## 14. Decisions this spec makes
 
 Where the plan is silent or the owner's later decisions leave a gap, this spec decides. Six of these
 would change a register entry, and DECISIONS appendix C settled them before the first commit: S0-01,
-S0-03, S0-05 and S0-17 are folded into the register (SF-01, SF-05, SF-04), and S0-04 and S0-18 are
-not adopted (SF-02, SF-03). The steward copies the rest into DECISIONS.md, with their status as
-Recommended, in the plan's first follow-up pull request.
+S0-03, S0-05 and S0-17 are folded into the register (SF-01, SF-05, SF-04), and S0-04 and S0-18's
+first form (CR-20 in `staging`) are not adopted (SF-02, SF-03). S0-11 and S0-18's later proposal (the
+zone name beside CR-20) would change register entries too but have no appendix C row, so they are
+marked **Proposed, not binding** below and wait for the owner (§15, item 14). The steward copies the
+rest into DECISIONS.md, with their status as Recommended, in the plan's first follow-up pull request.
 
 | ID | Decision | Why |
 |---|---|---|
@@ -1897,19 +2021,19 @@ Recommended, in the plan's first follow-up pull request.
 | S0-03 | Five static deployments named `fin-next-<env>-<app>-static`, `selfie` among them; `developer.` is bound by a route with a proxied CNAME to the public tunnel, like every other host | [SA-26] keeps the selfie on its own origin; one shape for every host keeps the watcher's checks uniform |
 | S0-04 | **Not adopted** (DECISIONS appendix C, SF-02): proposed that static uploads go through Cloudflare's direct-upload API from `ops/fin` with Node built-ins, with no `wrangler`. The pinned `wrangler` of [FD-19] and [G-06] uploads; SP-26 tests the API path for the owner | The owner asked for a pinned CLI; `ops/fin` would have had no npm dependency |
 | S0-05 | Static builds are environment-neutral and write no `_headers`; `pnpm fin static render` renders `_headers` and `env.json` in `deploy-static-staging` from the profiles in `packages/web-host/src/static/` (control paths) | production serves exactly the bytes staging tested, and no zone name enters a public CI build (folded as SF-05) |
-| S0-06 | `deploy-static-staging` starts only after `deploy-staging` reached `done`, connectors included, and uploads `verify`, `selfie`, `admin`, `console` and `docs` in that order; a rollback takes the static half first | API changes are additive within a release (FW-C13), so new pages need the new API first; ARCHITECTURE §11.8's order |
+| S0-06 | `deploy-static-staging` starts only after `deploy-staging` reached `rolled` (every service and connector rolled), and uploads `verify`, `selfie`, `admin`, `console` and `docs` in that order; the smoke tests and `deploy.done` come after it, in `finish-staging`; a rollback takes the static half first | API changes are additive within a release (FW-C13), so new pages need the new API first; ARCHITECTURE §11.8's order |
 | S0-07 | Theme and sidebar choices live in `localStorage` under `fin-theme` and `fin-sidebar` (spec 06 S6-04), read by an external `/theme.js` | [UI-13]: no server reads cookies for a static document; [UI-05] is superseded |
 | S0-08 | The ingress-proof transform rules on app hosts match `/api/` paths only | the static half never needs the proof |
-| S0-09 | A daily and per-release `email-delivery-check` duty with template `ops.delivery_check` | proves the email path continuously; feeds AC-P0-10 and PG-04 |
+| S0-09 | A daily and per-release `email-delivery-check` duty with template `ops/delivery-check` (spec 08 §4.4) | proves the email path continuously; feeds AC-P0-10 and PG-04 |
 | S0-10 | New alerts `static-deployment-changed` and `csp-reports`; ARCHITECTURE §5.9's "changed outside a `pnpm fin` run" alert is named `cloudflare-config-changed` | the static invariant needs its own alarm |
-| S0-11 | The overlay reaches CI as one environment secret, `FIN_OVERLAY`, and its zone name alone as `FIN_STATIC_ZONE` in `staging-static` (S0-18), with every value masked by `::add-mask::` before output | GitHub masks only whole secret values |
-| S0-12 | `.githooks/` and `.gitleaks.toml` are control paths | they are part of the public-safety and supply-chain checks |
+| S0-11 | **Proposed, not binding** (no DECISIONS appendix C row; §15, item 14): the overlay would reach CI as one `staging` environment secret, `FIN_OVERLAY`, with every value masked by `::add-mask::` before output. It would change [G-09], [CI-03] and CR-21, so until the owner settles it in appendix C the overlay is given at the secure prompt from the owner's machine only, and no GitHub environment holds any of it. Wherever `pnpm fin` reads the overlay, it masks every value before printing | GitHub masks only whole secret values |
+| S0-12 | Proposed to [CI-14], not binding until [CI-14] adopts it: `.githooks/` and `.gitleaks.toml` become control paths, added to CODEOWNERS (§3.6) and `controlPaths` (§4.3) in one pull request. Until then they are tier S paths outside the control-path list | they are part of the public-safety and supply-chain checks |
 | S0-13 | Server bundles are built with Vite's SSR build | no new bundler dependency |
 | S0-14 | Inter and Fira Mono are committed as woff2 files with their OFL notices in `packages/tokens` | no font package dependency |
 | S0-15 | `tools/layout.json` entries carry `status: active` or `planned`; a planned path may be absent | day lanes create their packages without a control-path pull request each |
-| S0-16 | The backup uploader lives in `ops/backup` | ARCHITECTURE §3.1 names the image but no source path |
+| S0-16 | The backup uploader lives in `ops/backup` | ARCHITECTURE §3.1 named the image but no source path; it now lists `ops/backup`, and EXECUTION §2.10 gives it to P0-F |
 | S0-17 | Postgres has no TCP proxy in staging either, so `railway connect` is not used; operator work inside the database runs as registered `migrate --task` runs; the bootstrap hands the database SCRAM verifiers, never passwords, and references the superuser only for the length of a registered run | [FD-11]'s interim needs a TCP proxy, which AC-P0-07 forbids |
-| S0-18 | CR-20 sits in the `staging-static` environment as its only credential, as [FD-19] says (the proposal to put it in `staging` is not adopted, SF-03). Beside it sits one value that is not a credential, the overlay's zone name, as the masked secret `FIN_STATIC_ZONE`, so `pnpm fin static render` can fill `_headers` and `env.json` without the rest of the overlay | a zone name must never appear in a public workflow log or artefact, and the static job must not hold Railway's secrets (§15, item 14) |
+| S0-18 | CR-20 sits in the `staging-static` environment and nothing else does, as [FD-19] and SF-03 say (the first proposal, CR-20 in `staging`, is not adopted). **Proposed, not binding** (no appendix C row; §15, item 14): one value that is not a credential beside it, the overlay's zone name as the masked secret `FIN_STATIC_ZONE`, so `pnpm fin static render` can fill `_headers` and `env.json` without the rest of the overlay. It would change [FD-19], SF-03, EX-29 and ARCHITECTURE §11.1 | a zone name must never appear in a public workflow log or artefact, and the static job must not hold Railway's secrets |
 | S0-19 | The configuration variable names of §6.7 | builders need one set of names |
 | S0-20 | FW-S1 is redefined for a static policy with no nonce; SP-25 is EXECUTION's S-01 with the two checks §11.2 adds, and SP-26 is ARCHITECTURE §5.15's | OD-2 and OD-3 |
 | S0-21 | One Errors application per server process kind (the four connector services share one, `migrate` shares `api`'s) and one per browser app | fewer DSNs, the same triage |
@@ -1924,17 +2048,17 @@ Recommended, in the plan's first follow-up pull request.
 
 | # | Item | Who | By |
 |---|---|---|---|
-| 1 | Closed for registration: DECISIONS.md records OD-1 to OD-6 (§1), and ARCHITECTURE.md follows them, the `docs` service included. One text still differs: EXECUTION §1.3 and §2.10 and spec 06's app layout place a committed `_headers` at `apps/<app>/public/_headers`, where [SA-45] and §7.4 render every `_headers` at deploy from its profile in `packages/web-host/src/static/`; the steward aligns them | Steward | the plan's first follow-up pull request |
+| 1 | Closed: DECISIONS.md records OD-1 to OD-6 (§1), and ARCHITECTURE.md follows them, the `docs` service included. Every text now renders each `_headers` at deploy from its profile in `packages/web-host/src/static/` ([SA-45], SF-05, §7.4), owned by P0-D (EXECUTION §1.3), and no app commits one, verify's selfie output included (spec 06 §1.2, S6-27) | none | none |
 | 2 | The owner approves [G-06]'s set as DECISIONS.md records it (§4.8): the UI SDK instead of Radix, Phosphor, `clsx` and `tailwind-merge`; `wrangler` at one exact version in `tools/static-deploy` only, each install script its dependencies bring needing the owner's own yes; the fonts as files | Owner | the 08:00 sitting ([G-06] is blocking) |
 | 3 | The watcher is a Worker with code: [OB-18] asks whether it may stay one under the owner's portability rule (default yes, on DECISIONS' short list) | Owner | the 08:00 sitting (default at 09:00) |
 | 4 | If SP-26 shows that Cloudflare's API alone can make an assets-only deployment, whether `pnpm fin static deploy` replaces the pinned `wrangler` ([FD-19]'s alternative, SF-02). If the owner declines an install script `wrangler` brings, §11.2's console fallback holds until the owner chooses | Owner | when SP-26 reports |
 | 5 | Done before the first commit: S0-17 is folded into [FD-11] as its staging rule (DECISIONS appendix C, SF-04), and ARCHITECTURE §5.13 and EXECUTION §2.5 (steps 4 and 6) follow it: no db tunnel and no `railway connect` on staging until the db tunnel is built before production (EXECUTION H-05). The owner may still reverse it | Owner (to confirm) | Saturday |
 | 6 | How a registered run sets `fin_owner`'s per-run password in production without referencing the superuser into a service ([AU-08]); Phase 0's mechanism is staging-only | Data spec (P0-E) | before production |
-| 7 | Browser error reporting for the docs site, which has no `/api/` path | Docs lane with [AP-09] | Monday |
+| 7 | Closed by DECISIONS appendix C, SF-01: the docs site, which has no `/api/` path, reports its browser failures to the edge at `POST https://api.<zone>/reports/docs`, which feeds `fin-next-<env>-docs-web` (§8.2; spec 05 §8.13). The receiver and the reporter are the docs lanes' work (spec 05 §12) | none | none |
 | 8 | Whether Dependabot reads a pnpm 12 lockfile (SP-01) | Steward | Saturday |
 | 9 | Closed: research notes D1, D2 and D3 are all present and were read; P0-G follows D3 through ARCHITECTURE §3.4 and spec 06 (§12) | none | none |
 | 10 | Production static deploys: the operator's token for them belongs in CR-16's production list | Steward | before production |
 | 11 | [UI-12] (blocking) decides P0-G's starting point (§12): on a yes, the port of the old product's redesign branch's design layer through fin-review, one pull request per group; on a no, the same packages built from the specifications and canvases, at about three times the effort, with Saturday's screens cut to their must-have states | Owner | the 08:00 sitting |
 | 12 | Access's API field names for independent MFA and the binding cookie (SP-09) | Ops agent | Saturday |
 | 13 | If SP-25 fails, §7.12's shape changes cookie names, the passkey origin, the CSP `connect-src` and every app client; the steward opens the plan change at once | Steward | when SP-25 reports |
-| 14 | `staging-static` holds the zone name beside CR-20 (S0-18); ARCHITECTURE §5.16 and §11.1, EXECUTION EX-29 and DECISIONS SF-03 say it holds only the static deploy token, and need the same words | Steward | the plan's first follow-up pull request |
+| 14 | How CI learns the hostnames. `staging-static` holds CR-20 and nothing else ([FD-19], SF-03, EX-29, ARCHITECTURE §11.1), and the overlay is not a GitHub secret ([G-09], CR-21), yet `pnpm fin static render` needs the zone name and `deploy-staging`'s smoke needs the hosts. S0-11 (`FIN_OVERLAY` in `staging`) and S0-18's zone name (`FIN_STATIC_ZONE` in `staging-static`) would settle it but have no DECISIONS appendix C row, so they do not bind. Either the owner settles them in appendix C, and [FD-19], SF-03, EX-29, NB-08, CR-21 and ARCHITECTURE §5.16 and §11.1 then change in the same pull request, or this spec gets the hostnames some other way | Owner, then the steward | before `deploy-static-staging` first runs (Sat 12:00, EXECUTION §2.5 step 8) |

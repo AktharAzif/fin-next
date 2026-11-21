@@ -15,15 +15,17 @@ method table (its `dest_`, `orgn_` and `attr_` tokens) lives only in `payments`'
 
 ## How to read it
 
-**Precedence.** The plan's one order (README §8.3) holds here. (1) The owner's decisions of 21 Nov
-2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to OD-6. (2) DECISIONS.md, appendix C
-included. (3) The specification that owns the area: this file for providers, money, the ledger and
-reconciliation; the sibling that owns any other area (spec 02 for permissions and step-up, spec 03
-for onboarding, spec 05 for the public API's conventions, webhooks and events, spec 06 for
-components, frames and states); and spec 08 for the cross-cutting rules of audit, security email,
-personal data, scrubbing, secrets and observability. (4) ARCHITECTURE.md. (5) EXECUTION.md. A spec
-decision (MS-nn, §38) binds where everything above it is silent; the steward copies each into
-DECISIONS.md in the plan's first follow-up pull request. DECISIONS appendix C found none that
+**Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
+21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
+specifications, and between two specifications the one that owns the area, as README §8.3 lists
+the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
+OD-6. Among the specifications, this file owns providers, money, the ledger and reconciliation; the
+sibling owns any other area (spec 02 for permissions and step-up, spec 03 for onboarding, spec 05 for
+the public API's conventions, webhooks and events, spec 06 for components, frames and states); and
+spec 08 owns the cross-cutting rules of audit, security email, personal data, scrubbing, secrets and
+observability. A spec decision (MS-nn, §38) binds where everything above it is silent; one that
+differs from ARCHITECTURE.md or EXECUTION.md binds only once that file is changed to match. The
+steward copies each into DECISIONS.md in the plan's first follow-up pull request. DECISIONS appendix C found none that
 changes a register entry; if one is found later, the register holds until appendix C settles it.
 
 | Mark | Meaning |
@@ -981,7 +983,7 @@ The simulator's tables (`money.sim_*`) are §22.2.
 - Every other role: nothing. T-MON-31 runs each forbidden statement and expects SQLSTATE 42501.
 - **Audit guards** (ARCH §8.2): deferred constraint triggers on `money.beneficiary`, `money.transfer` and
   `money.ledger_entry` refuse a commit unless the same transaction wrote an `audit.event` row whose
-  `target_ids` contain the row's ID (T-MON-32).
+  `target` or `refs` name the row's ID (stored as `target_id` and `ref_ids`, spec 08 §3.5; T-MON-32).
 - **Append-only**: `money.ledger_entry` and `money.ledger_line` refuse `UPDATE`, `DELETE` and
   `TRUNCATE`, except that `money.sequence_ledger()` (a `SECURITY DEFINER` function owned by
   `fin_owner`, `search_path` pinned) may set `seq`, `prev_hash` and `hash` once. `money.ledger_hold`
@@ -1625,7 +1627,7 @@ the caller, failing closed (ARCH §13.6).
 1. The provider posts to `https://api.<zone>/hooks/money/<provider>/<instance>` (no API key). The
    Cloudflare rate rule excludes `/hooks/` (ARCH §5.7); an optional custom rule may allow only MassPay's
    published source addresses on `/hooks/money/masspay/*`, but the signature is the control.
-2. `edge` (`apps/edge`, a route owned by L-MON-04 as `apps/edge/src/routes/hooks/money.ts`, XC-07):
+2. `edge` (`apps/edge`, a route owned by L-MON-04 as `apps/edge/src/hooks/money.ts`, XC-07):
    `<provider>` and `<instance>` must name an enabled instance in the door matrix's hook list, else
    404 without forwarding; body at most 256 KB (413); a per-address limit from the overlay; forwards
    the raw bytes and only `content-type` and the provider's signature header
@@ -2178,6 +2180,10 @@ money call while the environment's live instance is disabled is 403 `sandbox_onl
 audited with `via: "api"`, the key ID and the mode, and money events carry the idempotency key's
 hash (ARCH §13.1 rule 12).
 
+Spec 05 owns the public API's names and conventions (README §8.3): the operation IDs, paths and scopes
+in spec 05 §6.8 and §6.9, and the paging and filter parameters of spec 05 §3.5. This section owns the
+money routes' bodies, answers, codes and door operations, and spec 05 §6.8 follows it on those.
+
 Routes are defined once in `packages/contract/src/money/*.ts` with `@hono/zod-openapi` and generate
 `packages/contract/openapi/money.json` (L-MON-05). `api`'s handlers
 (`apps/api/src/routes/{virtual-accounts,balances,beneficiaries,transfers,quotes,sandbox/money}/**`)
@@ -2228,13 +2234,13 @@ unknown values (MS-27). `Balance.balance` comes from Fin's ledger, never from a 
 | `listVirtualAccounts` | `GET /v4/customers/{id}/virtual_accounts` | `money:read` | `limit`, `cursor` | 200 list, no instructions | 400, 404 |
 | `openVirtualAccount` | `POST /v4/customers/{id}/virtual_account` | `money:write` | empty; `Idempotency-Key` accepted | 201 new (`opening` or `open`), 200 the existing one | 404; 409 `not_approved`, `not_supported`, `money_locked`, `account_not_ready`; 502; 503 |
 | `getBalance` | `GET /v4/customers/{id}/balance` | `money:read` | | 200 `Balance` | 404; 409 `not_supported` |
-| `createBeneficiary` | `POST /v4/customers/{id}/beneficiaries` | `beneficiaries:write` | §12.1 fields; `Idempotency-Key` accepted | 201 `Beneficiary` (200 on replay) | 400 `invalid_beneficiary`, `invalid_field`; 404; 409 `beneficiary_exists`, `rail_unsupported`, `not_approved`, `not_supported`, `money_locked`, `account_not_ready`; 413; 415; 422 `idempotency_key_reused`; 429 `beneficiary_limit`; 502; 503 |
+| `addBeneficiary` | `POST /v4/customers/{id}/beneficiaries` | `beneficiaries:write` | §12.1 fields; `Idempotency-Key` accepted | 201 `Beneficiary` (200 on replay) | 400 `invalid_beneficiary`, `invalid_field`; 404; 409 `beneficiary_exists`, `rail_unsupported`, `not_approved`, `not_supported`, `money_locked`, `account_not_ready`; 413; 415; 422 `idempotency_key_reused`; 429 `beneficiary_limit`; 502; 503 |
 | `listBeneficiaries` | `GET /v4/customers/{id}/beneficiaries` | `money:read` | `include_removed`, `limit`, `cursor` | 200 list | 400, 404 |
 | `getBeneficiary` | `GET /v4/customers/{id}/beneficiaries/{beneficiary_id}` | `money:read` | | 200 | 404 |
 | `removeBeneficiary` | `DELETE /v4/customers/{id}/beneficiaries/{beneficiary_id}` | `beneficiaries:write` | | 200 `Beneficiary` with `status: "removed"` | 404 |
 | `quoteTransfer` | `POST /v4/transfers/quote` | `money:read` | `customer_id`, `beneficiary_id`, `kind`, `amount`, `currency` | 200 `TransferQuote` | 400 `invalid_transfer`; 404; 409 as `createTransfer` except limits; 429 `rate_limited`; 502 |
 | `createTransfer` | `POST /v4/transfers` | `money:write` | `Idempotency-Key` required; `customer_id`, `beneficiary_id`, `kind`, `amount`, `currency`, `external_id?` | 201 `Transfer` (200 with `Idempotent-Replayed: true` on replay) | 400 `idempotency_key_missing`, `invalid_transfer`; 403 `sandbox_only`, `forbidden`; 404; 409 `insufficient_funds`, `beneficiary_removed`, `beneficiary_not_ready`, `rail_unavailable`, `not_approved`, `not_supported`, `money_locked`, `account_not_ready`; 413; 415; 422 `idempotency_key_reused`; 429 `transfer_limit`; 502; 503 `temporarily_unavailable` |
-| `listTransfers` | `GET /v4/transfers` | `money:read` | `customer_id`, `status`, `direction`, `created[gte]`, `created[lt]`, `limit`, `cursor`, `ending_before` | 200 list | 400 |
+| `listTransfers` | `GET /v4/transfers` | `money:read` | `customer_id`, `status`, `direction`, `created_gte`, `created_lt`, `limit`, `cursor`, `ending_before` (the Transfers screens page both ways, [AP-17]) | 200 list | 400 |
 | `getTransfer` | `GET /v4/transfers/{id}` | `money:read` | | 200 | 404 |
 | `cancelTransfer` | `POST /v4/transfers/{id}/cancel` | `money:write` | `Idempotency-Key` accepted | 200 `Transfer` | 404; 409 `not_cancellable`; 502; 503 |
 
@@ -2335,25 +2341,27 @@ reports it.
 ### 26.2 App API routes (`apps/console/src/server/routes/money/**`, policy `apps/console/src/server/policy/money.ts`)
 
 Contracts in `packages/app-contracts/src/money/**` (Zod, browser-safe), one contract test per route.
-Guard `requireActor` everywhere; "intent" and "window" are ARCH §7.4's kinds.
+Every route sits under the one prefix `console.<zone>/api/money/` (EXECUTION §5.1 item 12); the
+customer-scoped ones sit under `/api/money/customers/:customerId/`. Each carries `Fin-Organization`
+(spec 02 IF-02). Guard `requireActor` everywhere; "intent" and "window" are ARCH §7.4's kinds.
 
 | Method and path | Permission | Step-up | Door operation | Audit |
 |---|---|---|---|---|
-| `GET /api/customers/:customerId/money` | `money.read` | | `money_tab.get` | log line |
-| `GET /api/customers/:customerId/money/balance` | `money.read` | | `balance.get` | log line |
-| `POST /api/customers/:customerId/money/virtual-account` | `money.transfer` | window | `va.open` | `virtual_account.requested` |
-| `POST /api/customers/:customerId/money/virtual-account/reveal` | `money.read` | window | `va.reveal` | `virtual_account.instructions_revealed` |
-| `GET /api/customers/:customerId/money/beneficiaries` | `money.read` | | `beneficiary.list` | log line |
-| `POST /api/customers/:customerId/money/beneficiaries` | `money.beneficiaries` | intent | `beneficiary.create` | `beneficiary.added` |
-| `DELETE /api/customers/:customerId/money/beneficiaries/:beneficiaryId` | `money.beneficiaries` | intent | `beneficiary.remove` | `beneficiary.removed` |
-| `GET /api/customers/:customerId/money/transfers?cursor=&limit=` | `money.read` | | `transfer.list` | log line |
+| `GET /api/money/customers/:customerId` | `money.read` | | `money_tab.get` | log line |
+| `GET /api/money/customers/:customerId/balance` | `money.read` | | `balance.get` | log line |
+| `POST /api/money/customers/:customerId/virtual-account` | `money.transfer` | window | `va.open` | `virtual_account.requested` |
+| `POST /api/money/customers/:customerId/virtual-account/reveal` | `money.read` | window | `va.reveal` | `virtual_account.instructions_revealed` |
+| `GET /api/money/customers/:customerId/beneficiaries` | `money.read` | | `beneficiary.list` | log line |
+| `POST /api/money/customers/:customerId/beneficiaries` | `money.beneficiaries` | intent | `beneficiary.create` | `beneficiary.added` |
+| `DELETE /api/money/customers/:customerId/beneficiaries/:beneficiaryId` | `money.beneficiaries` | intent | `beneficiary.remove` | `beneficiary.removed` |
+| `GET /api/money/customers/:customerId/transfers?cursor=&limit=` | `money.read` | | `transfer.list` | log line |
 | `POST /api/money/transfer-intents` | `money.transfer`, or `money.simulate` for `kind: "deposit"` | | `transfer_intent.create` | log line |
 | `POST /api/money/transfers/quote` | `money.transfer` | | `transfer.quote` | log line |
 | `POST /api/money/transfers` | `money.transfer` | intent | `transfer.create` | `transfer.created` |
 | `GET /api/money/transfers/:transferId` | `money.read` | | `transfer.get` | log line |
 | `POST /api/money/transfers/:transferId/cancel` | `money.transfer` | intent | `transfer.cancel` | `transfer.cancel_requested` |
 | `POST /api/money/transfers/:transferId/simulate` | `simulator.use` | window | `sandbox.transfer_simulate` | `transfer.simulated` |
-| `POST /api/customers/:customerId/money/deposits` | `simulator.use` and `money.simulate` | window | `sandbox.deposit` or `sandbox.bank_deposit` | `transfer.created` |
+| `POST /api/money/customers/:customerId/deposits` | `simulator.use` and `money.simulate` | window | `sandbox.deposit` or `sandbox.bank_deposit` | `transfer.created` |
 | `GET /api/money/virtual-accounts?cursor=&limit=` | `customers.read` and `money.read` | | `va.list` | log line |
 | `GET /api/money/transfers?status=&cursor=&limit=` | `customers.read` and `money.read` | | `transfer.list` | log line |
 
@@ -2384,13 +2392,14 @@ type and status. `rails` and `kinds` come from the routed instance's capabilitie
 with Fin's labels ("Same Day ACH", "Standard ACH", "Fedwire"); the screens never list rails of their
 own. `can` mirrors the member's permissions; the server refuses regardless.
 
-### 26.4 CustomerMoney (`/customers/$customerId?tab=money`, the one Money tab)
+### 26.4 CustomerMoney (`/customers/$id?tab=money`, the one Money tab)
 
 BRIEF §11.2: tabs Overview · Details · People (businesses) · Documents · Money · Activity; the Money tab
 holds the virtual account panel (balance, Send money as the primary, Simulate a deposit as the
 secondary in Sandbox, deposit instructions), a Beneficiaries section with Add beneficiary, and a
 Transfers section whose rows open TransferDetails. Files:
-`apps/console/src/client/routes/customers/$id/money/**`. Data: `MoneyTab`, then balance,
+`apps/console/src/client/routes/customers/$id/-money/**` (a `-` folder, so the router makes no
+`/customers/$id/money` route; spec 06 S6-02). Data: `MoneyTab`, then balance,
 beneficiaries and transfers in parallel.
 
 | Board state | Reached when | Monday |
@@ -2497,8 +2506,9 @@ the bank.").
 ### 26.9 VirtualAccounts (`/virtual-accounts`) and Transfers (`/transfers`)
 
 Files `apps/console/src/client/routes/{virtual-accounts,transfers}/**`; sidebar items under "Money
-movement" for `customers.read` and `money.read` (nav fragment `apps/console/src/client/nav/money.ts`).
-VirtualAccounts: columns Customer, Bank, Last four, Status, Opened; rows open the customer's Money tab;
+movement" for `customers.read` and `money.read` (nav fragment
+`packages/frame/src/nav/console/money.ts`, EXECUTION §1.3). VirtualAccounts: columns Customer, Bank,
+Last four, Status, Opened; rows open the customer's Money tab;
 states `list`, `empty`, `failed` must; `refreshing`, `loading`, `pageFailed`, `noPermission` H-02.
 Transfers: status pills All, Pending, Processing, Completed, Failed, Cancelled, Returned; columns
 Customer, Direction, Kind, Amount, Fee, Status, Date; rows open TransferDetails; states `list`,
@@ -2519,7 +2529,7 @@ Each change is mirrored on the "Fin Dashboard · new design" canvas by L-MON-10 
 | Money tab and wizards, kill switch | "Money movement isn't switched on here yet." for every off case | that line when live money is not on in this environment; "Money movement is paused for now. Try again later." when a switch stops it | §31 |
 | The inventory's "Check Transactions" | | "Check Transfers" (the canvas already did this) | the page's name |
 
-### 26.11 Browser tests (`apps/console/e2e/money/**`, L-MON-06)
+### 26.11 Browser tests (`apps/console/e2e/mon/**`, L-MON-06)
 
 Against the `test` image with the simulator and the test-only controls (§22.6):
 
@@ -2564,8 +2574,8 @@ Sidebar item "Money" (Bank glyph) for staff `money.read`, route `/money` with ta
 
 No personal data is shown: customers by ID only, no holder names, no bank numbers. List reads are log
 lines (AU-01). Files `apps/admin/src/client/routes/money/**`, `apps/admin/src/server/routes/money/**`,
-`apps/admin/src/server/policy/money.ts`, `apps/admin/src/client/nav/money.ts`, contracts
-`packages/app-contracts/src/admin/money/**`. Browser test `apps/admin/e2e/money/view.spec.ts`
+`apps/admin/src/server/policy/money.ts`, the nav fragment `packages/frame/src/nav/admin/money.ts`,
+contracts `packages/app-contracts/src/admin/money/**`. Browser test `apps/admin/e2e/mon/view.spec.ts`
 (with the Access stand-in): each tab lists, a viewer without `money.read` sees no item and gets 403.
 
 ### 27.3 Operations (stretch, `money.operate`, each with a step-up intent)
@@ -2586,8 +2596,10 @@ Saturday's switches screen (ARCH §15.1).
 `packages/audit/src/events/money.ts` (L-MON-01). Category `money` for all. `recordAudit()` takes the
 actor (ARCH §8.2: `user`, `api_key`, `staff`, `system`, `provider`, `operator`) with `via` (`console`,
 `api`, `admin`, `job`, `webhook`, `reconciliation`, `operator`), the intent ID and factor method for a
-stepped-up action, the targets, and flat metadata. `target_ids` always include the row the event
-names, so the database guards of §7.7 can find it. Metadata never holds a bank number, a last four, a
+stepped-up action, the `target` and `refs` (spec 08 §3.3), and flat metadata. The Targets column
+below lists the IDs that `target` and `refs` carry between them. They always name the row the event
+names, so the database guards of §7.7 can find it (spec 08 §3.5 and D08-35 match `target_id` or any
+of `ref_ids`). Metadata never holds a bank number, a last four, a
 holder name, a provider token or body, or the idempotency key (its hash only). The organisation's log
 never shows a provider's name: organisation-scope events carry `partner: "bank"` or `"sandbox"`;
 staff-scope events carry the instance.
@@ -2854,13 +2866,14 @@ EX §5.2 holds; the files are made exact here.
 | L-MON-01 Money core | A | 08:00 | `packages/money/{package.json,src/index.ts}`; `packages/money/src/{schema,ledger,domain}/**`; `packages/db/migrations/*_money_*.sql` except `*_money_simulator_*`; `packages/db/roles/grants/money.json`; `packages/audit/src/events/money.ts`; `packages/events/src/types/money.ts`; `packages/email/src/templates/money/**`; `packages/testing/src/seed/money.ts`; `ops/monitoring/catalog/money-domain.ts`; `ops/monitoring/{staging,production}/alerts/money-domain.json` | §7 to §17, §28, §29 |
 | L-MON-02 Provider interface | B | 08:00 (Sunday evening for the pure types) | `packages/money/src/{provider,conformance}/**`; `packages/money/src/providers/fin-simulator/**`; `packages/money/src/providers/skeleton/**`; `packages/db/migrations/*_money_simulator_*.sql`; `packages/db/roles/grants/money-simulator.json`; `packages/contract/src/money/test-values.ts`; `packages/testing/src/money/**` | §3 to §6, §22, §23 |
 | L-MON-03 MassPay adapter and `payments` | A | 10:00 (on L-MON-02's types) | `packages/money/src/providers/masspay/**`; `apps/payments/**` except `src/{hooks,jobs}/**`; `packages/server/src/doors/payments.ts`; `ops/monitoring/catalog/money-provider.ts`; `ops/monitoring/{staging,production}/alerts/money-provider.json` | §2, §21, §24.1, §24.2 |
-| L-MON-04 Money jobs and hooks | B | 11:00 | `apps/payments/src/{hooks,jobs}/**`; `apps/edge/src/routes/hooks/money.ts`; `apps/api/src/worker/ledger-anchor/**`; `ops/monitoring/catalog/money-jobs.ts`; `ops/monitoring/{staging,production}/alerts/money-jobs.json` | §9.5, §10.1, §18 to §20 |
+| L-MON-04 Money jobs and hooks | B | 11:00 | `apps/payments/src/{hooks,jobs}/**`; `apps/edge/src/hooks/money.ts`; `apps/api/src/worker/ledger-anchor/**`; `ops/monitoring/catalog/money-jobs.ts`; `ops/monitoring/{staging,production}/alerts/money-jobs.json` | §9.5, §10.1, §18 to §20 |
 | L-MON-05 Money API | A | 12:00 | `apps/api/src/routes/{virtual-accounts,balances,beneficiaries,transfers,quotes,sandbox/money}/**`; `apps/api/src/doors/holder/**`; `packages/server/src/doors/api-holder.ts`; `packages/contract/src/money/**` except `test-values.ts`; `packages/contract/openapi/money.json`; `packages/contract/src/errors/money.ts` | §24.3, §25 |
-| L-MON-06 Console money | B | 12:00 | `apps/console/src/client/routes/{customers/$id/money,virtual-accounts,transfers}/**`; `apps/console/src/client/nav/money.ts`; `apps/console/src/server/routes/money/**`; `apps/console/src/server/policy/money.ts`; `packages/app-contracts/src/money/**`; `apps/console/e2e/money/**` | §26 |
-| L-MON-07 Fin Admin money | B | 14:00 | `apps/admin/src/client/routes/money/**`; `apps/admin/src/client/nav/money.ts`; `apps/admin/src/server/routes/money/**`; `apps/admin/src/server/policy/money.ts`; `packages/app-contracts/src/admin/money/**`; `apps/admin/e2e/money/**` | §27 |
+| L-MON-06 Console money | B | 12:00 | `apps/console/src/client/routes/{customers/$id/-money,virtual-accounts,transfers}/**`; `packages/frame/src/nav/console/money.ts`; `apps/console/src/server/routes/money/**`; `apps/console/src/server/policy/money.ts`; `packages/app-contracts/src/money/**`; `apps/console/e2e/mon/**` | §26 |
+| L-MON-07 Fin Admin money | B | 14:00 | `apps/admin/src/client/routes/money/**`; `packages/frame/src/nav/admin/money.ts`; `apps/admin/src/server/routes/money/**`; `apps/admin/src/server/policy/money.ts`; `packages/app-contracts/src/admin/money/**`; `apps/admin/e2e/mon/**` | §27 |
 | L-MON-08 Docs | A | 08:00 | `apps/docs/**` | §25.8 |
 | L-MON-09 Ops | B | 08:00 | `ops/fin/**` (money commands: `money fund`, `money webhook create|rotate|delete`); `ops/environments/*.json` (money settings); `ops/credentials.json` (money entries); `ops/monitoring/{staging,production}/heartbeats.json`; `ops/monitoring/dashboards/**`; `docs/runbooks/money-*.md`; `docs/flows/**` money flows (F11, F12, F13) | CR-14 set on `payments` only; `payments`' static IPs; SP-13; the MassPay webhook; heartbeats; runbooks; the prepared WAF rule; AC-MON-13 to AC-MON-15 |
 | L-MON-10 Design | canvas | 08:00 | the canvases (outside the repository) | §26.10's copy changes in light, dark and phone; a Fin Admin money board (stretch) |
+| L-MON-11 UI kit, money | B | 08:00 | `packages/{tokens,icons,motion,ui,frame}/**` (EX §5.2; spec 06 §11), except the area lanes' `packages/frame/src/nav/{console,admin}/money.ts` | The money components L-MON-06 and L-MON-07 build on (AmountInput, AmountPair, QuoteLine, MoneyRoute, the asset, network and rail icons, TableAmount, the identifier helpers, the businesses' "coming" state, the L-drawer wizards), before 13:00 |
 
 ```
 L-MON-02 types + routing + simulator + conformance ──► L-MON-03 MassPay adapter ──► payments door
@@ -2870,6 +2883,7 @@ L-MON-01 schema + ledger + domain ◄──────────────�
             ├──► L-MON-05 API ──► L-MON-06 console screens ──► money journeys
             └──► L-MON-07 Fin Admin view
 L-MON-08 docs: the reference regenerated after L-MON-05; L-MON-09 from 08:00 (SP-13 first)
+L-MON-11 money components ──► L-MON-06 console screens, L-MON-07 Fin Admin view
 ```
 
 Milestones: by **13:00 (C2)** L-MON-02's interface, simulator and CS-01 to CS-30 on the simulator are
@@ -3013,7 +3027,7 @@ Defaults apply from 09:00 Monday (DECISIONS "Monday").
 | XC-04 | The step-up intent store accepts the money operations and digests of §24.1 | Saturday's identity spec |
 | XC-05 | `api` (customer delete) and the console (organisation delete) call `customer.deletable` and `organization.deletable` before deleting | Sunday's and Saturday's specs |
 | XC-06 | The customer page's tab row includes "Money" for `money.read` and mounts §26.4's tab | Sunday's console spec |
-| XC-07 | The edge's router mounts `apps/edge/src/routes/hooks/money.ts` and lists money hook instances in the door matrix | the edge's owner (Sunday) |
+| XC-07 | The edge's router mounts `apps/edge/src/hooks/money.ts` and lists money hook instances in the door matrix | the edge's owner (Sunday) |
 | XC-08 | The money scrubber shapes of §21.7 in `packages/core/src/scrub.ts` | the `packages/core` owner |
 | XC-09 | The worker's anchoring duty writes the ledger head daily from `money.ledger_head_v` (code in `apps/api/src/worker/ledger-anchor/**`, owned by L-MON-04) | the audit area's owner, for the shared anchoring loop |
 | XC-10 | `audit.record()`'s per-role allowlist includes §28's events for `fin_payments` and `money.holder_details_shared` for `fin_api`; `events.emit()`'s allowlist includes §29.1's types for `fin_payments`; `email.enqueue()` allows `money/*` for `fin_payments` | the audit, events and email owners |
