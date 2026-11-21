@@ -53,8 +53,12 @@ and for the control paths. ARCHITECTURE §3.1 describes each entry.
 
 An entry is `active` once its path exists, or `planned`. A lane creates a planned package without
 editing `tools/layout.json` (a control path): `layout:check` warns that a planned path exists, and
-the steward flips the entries to `active` at the Phase 0 exit. A new top-level directory under
-`apps/` or `packages/`, or a file no entry covers, fails the check until the steward adds an entry.
+the steward flips the entries to `active` at the Phase 0 exit. Only that rule is relaxed: an app
+with a static output needs its `static.json` (a control path) as soon as its directory exists,
+planned or not. A new top-level directory under `apps/` or `packages/`, or a file no entry covers,
+fails the check until the steward adds an entry. A package's manifest is `package.json` only (pnpm
+would also read `package.yaml` or `package.json5`, which the checks refuse), and the repository
+holds no symbolic link or submodule.
 
 Tiers: **S** (security-relevant: the attack pass and both sceptic rounds before merge), **N**
 (normal), **D** (documents). An unmapped path counts as S.
@@ -82,9 +86,15 @@ another lane's paths goes through that lane or the steward, by the lane board.
 - **Control paths** (`CODEOWNERS`) need the owner's approval, whoever owns them.
 
 A package that has tests gives its `package.json` the scripts `lint` (`biome check .`),
-`typecheck` (`tsc -p tsconfig.json`) and `test` (`vitest run`), and `test:db` when it has
-integration tests; its `tsconfig.json` extends `../../tsconfig.base.json`. The root
-`vitest.config.ts` picks up every package whose `test` script runs Vitest.
+`typecheck` (`tsc -p tsconfig.json`) and `test` (`vitest run --config ../../vitest.config.ts`),
+and `test:db` (`vitest run --config ../../vitest.config.ts --mode db`) when it has integration
+tests; its `tsconfig.json` extends `../../tsconfig.base.json`. The root `vitest.config.ts` is the
+only Vitest configuration, and a package has none of its own: run from a package's directory (as
+`turbo run test` runs it) it selects that package, keeps `*.db.test.ts` out of the unit run and
+`e2e/**` out of both, and `--mode db` refuses to start without `FIN_TEST_DATABASE_URL`. Run from
+the root it covers every package whose `test` script runs Vitest. `layout:check` refuses any
+other script that runs Vitest, and a package's own `vitest.config.*`, which `--config` would
+ignore; a setting a package needs (as `?raw` stylesheets read as text) goes in the root file.
 
 ## Writing a spec
 
@@ -96,8 +106,11 @@ request.
 ## Tests that need a secret-shaped value
 
 `public-safety` and gitleaks scan every tracked file, tests included, and never print what they
-found. A test that needs a token-, ID- or private-address-shaped value builds it at run time (for
-example by joining parts), and email fixtures use `example.com`, `example.org` or `example.net`.
+found; `public-safety` reads binary and UTF-16 files too. A test that needs a token-, ID-,
+private-address- or local-path-shaped value builds it at run time (for example by joining parts),
+and email fixtures use `example.com`, `example.org` or `example.net`. `imports:check` reads
+import-shaped text anywhere, strings included, so a test that needs one builds its keywords at
+run time too.
 
 ## Definition of done for a pull request
 

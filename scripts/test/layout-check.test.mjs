@@ -2,21 +2,31 @@
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { after, describe, test } from "node:test";
-import { checkLayout, entryFor, parseCodeowners, validateLayout } from "../layout-check.mjs";
+import {
+  CONTROL_PATH_OWNER,
+  checkLayout,
+  checkTestScripts,
+  entryFor,
+  parseCodeowners,
+  VITEST_SCRIPTS,
+  validateLayout,
+} from "../layout-check.mjs";
 import { cleanUp, makeRepo, REPO_ROOT, rules, runScript } from "./helpers.mjs";
 
 after(cleanUp);
 
+const OWNER = CONTROL_PATH_OWNER;
 const CONTROL = [
   "CODEOWNERS",
   "tools/layout.json",
   "packages/web-host/src/static/",
   "apps/*/static.json",
 ];
+const CODEOWNERS = `# Control paths\n${CONTROL.map((p) => `/${p} ${OWNER}`).join("\n")}\n`;
 
 /**
  * A small, valid repository: a root entry, an active package, an active app with a static
- * output, a planned package and the plan's folder.
+ * output, a planned app and a planned package that do not exist yet, and the plan's folder.
  * @param {{ layout?: (layout: any) => void, files?: Record<string, string> }} [change]
  */
 function fixture(change = {}) {
@@ -71,6 +81,16 @@ function fixture(change = {}) {
         static: "console",
       },
       {
+        path: "apps/admin",
+        name: "@fin/admin",
+        kind: "app",
+        status: "planned",
+        lane: "P0-G",
+        tiers: { "src/server/**": "S", "static.json": "S", "**": "N" },
+        areas: ["admin"],
+        static: "admin",
+      },
+      {
         path: "packages/money",
         name: "@fin/money",
         kind: "package",
@@ -92,7 +112,7 @@ function fixture(change = {}) {
   change.layout?.(layout);
   return makeRepo({
     "README.md": "# fixture\n",
-    CODEOWNERS: `${CONTROL.map((p) => `/${p} @owner`).join("\n")}\n`,
+    CODEOWNERS,
     "tools/layout.json": JSON.stringify(layout, null, 2),
     "packages/core/package.json": JSON.stringify({ name: "@fin/core", private: true }),
     "packages/core/src/index.ts": "export {};\n",
@@ -103,7 +123,7 @@ function fixture(change = {}) {
     "docs/plan/README.md":
       "Uses @fin/core and packages/core, and apps/console/src/server/main.ts.\n" +
       "Calls `GET /apps/github-actions` and names the old apps/dashboard/** glue.\n" +
-      "The day lanes add packages/money and @fin/money later.\n",
+      "The day lanes add packages/money and @fin/money, and apps/admin, later.\n",
     ...change.files,
   });
 }
@@ -160,20 +180,16 @@ describe("layout:check", () => {
   });
 
   test("a CODEOWNERS line missing from controlPaths fails", () => {
-    const dir = fixture({
-      files: {
-        CODEOWNERS: `${CONTROL.map((p) => `/${p} @owner`).join("\n")}\n/ops/extra/ @owner\n`,
-      },
-    });
+    const dir = fixture({ files: { CODEOWNERS: `${CODEOWNERS}/ops/extra/ ${OWNER}\n` } });
     const { findings } = checkLayout(dir);
     assert.deepEqual(rules(findings), ["codeowners-drift"]);
-    assert.equal(findings[0]?.line, 5);
+    assert.equal(findings[0]?.line, 6);
   });
 
   test("a control path missing from CODEOWNERS fails", () => {
     const dir = fixture({
       files: {
-        CODEOWNERS: "/CODEOWNERS @owner\n/tools/layout.json @owner\n/apps/*/static.json @owner\n",
+        CODEOWNERS: `/CODEOWNERS ${OWNER}\n/tools/layout.json ${OWNER}\n/apps/*/static.json ${OWNER}\n`,
       },
     });
     const { findings } = checkLayout(dir);
@@ -184,6 +200,32 @@ describe("layout:check", () => {
   test("a CODEOWNERS line without an owner fails", () => {
     const dir = fixture({ files: { CODEOWNERS: `${CONTROL.map((p) => `/${p}`).join("\n")}\n` } });
     assert.deepEqual(rules(checkLayout(dir).findings), ["codeowners-owner"]);
+  });
+
+  test("a CODEOWNERS line that hands a control path to anyone else fails", () => {
+    for (const extra of [
+      "/CODEOWNERS @someone-else\n", // GitHub applies the last matching line
+      `/tools/layout.json ${OWNER} @someone-else\n`,
+      `/tools/layout.json ${OWNER}\n`, // a pattern twice
+    ]) {
+      const dir = fixture({ files: { CODEOWNERS: `${CODEOWNERS}${extra}` } });
+      assert.deepEqual(rules(checkLayout(dir).findings), ["codeowners-owner"], extra);
+    }
+    const other = fixture({
+      files: { CODEOWNERS: CODEOWNERS.replaceAll(OWNER, "@someone-else") },
+    });
+    assert.deepEqual(rules(checkLayout(other).findings), ["codeowners-owner"]);
+  });
+
+  test("a line hidden after a carriage return in CODEOWNERS is read, and the carriage return fails", () => {
+    const dir = fixture({
+      files: { CODEOWNERS: `# Control paths\r/CODEOWNERS @someone-else\n${CODEOWNERS}` },
+    });
+    assert.deepEqual(rules(checkLayout(dir).findings), ["codeowners-format", "codeowners-owner"]);
+    assert.deepEqual(rules(parseCodeowners(`/a ${OWNER}\u{200B}\n`).findings), [
+      "codeowners-format",
+      "codeowners-owner",
+    ]);
   });
 
   test("a packages/* directory with no entry fails", () => {
@@ -204,13 +246,12 @@ describe("layout:check", () => {
         );
       },
       files: {
-        CODEOWNERS:
-          "/CODEOWNERS @owner\n/tools/layout.json @owner\n/packages/web-host/src/static/ @owner\n",
+        CODEOWNERS: `/CODEOWNERS ${OWNER}\n/tools/layout.json ${OWNER}\n/packages/web-host/src/static/ ${OWNER}\n`,
       },
     });
     const found = checkLayout(dir).findings;
     assert.deepEqual(rules(found), ["static-not-control"]);
-    assert.ok(found.every((f) => f.file === "apps/console/static.json"));
+    assert.ok(found.every((f) => f.file.endsWith("/static.json")));
   });
 
   test("a header profile outside controlPaths fails", () => {
@@ -221,7 +262,7 @@ describe("layout:check", () => {
         );
       },
       files: {
-        CODEOWNERS: "/CODEOWNERS @owner\n/tools/layout.json @owner\n/apps/*/static.json @owner\n",
+        CODEOWNERS: `/CODEOWNERS ${OWNER}\n/tools/layout.json ${OWNER}\n/apps/*/static.json ${OWNER}\n`,
       },
     });
     const found = checkLayout(dir).findings;
@@ -233,6 +274,26 @@ describe("layout:check", () => {
     const dir = fixture();
     rmSync(`${dir}/apps/console/static.json`);
     assert.deepEqual(rules(checkLayout(dir).findings), ["static-json-missing"]);
+  });
+
+  test("a planned app that exists without its static.json fails too (BD-08 relaxes only the status rule)", () => {
+    const dir = fixture({
+      files: {
+        "apps/admin/package.json": JSON.stringify({ name: "@fin/admin", private: true }),
+        "apps/admin/src/client/main.ts": "export {};\n",
+      },
+    });
+    const { findings, warnings } = checkLayout(dir);
+    assert.deepEqual(rules(findings), ["static-json-missing"]);
+    assert.equal(findings[0]?.file, "apps/admin/static.json");
+    assert.deepEqual(rules(warnings), ["planned-exists"]);
+    const complete = fixture({
+      files: {
+        "apps/admin/package.json": JSON.stringify({ name: "@fin/admin", private: true }),
+        "apps/admin/static.json": "{}\n",
+      },
+    });
+    assert.deepEqual(checkLayout(complete).findings, []);
   });
 
   test("an active entry whose path does not exist fails", () => {
@@ -263,6 +324,18 @@ describe("layout:check", () => {
     assert.equal(runScript("scripts/layout-check.mjs", ["--root", dir]).status, 0);
   });
 
+  test("a manifest other than package.json fails, a planned package's included", () => {
+    for (const file of [
+      "packages/money/package.yaml",
+      "packages/money/package.yml",
+      "packages/money/package.json5",
+      "packages/core/package.yaml",
+    ]) {
+      const dir = fixture({ files: { [file]: 'name: "@fin/money"\n' } });
+      assert.deepEqual(rules(checkLayout(dir).findings), ["manifest-format"], file);
+    }
+  });
+
   test("a package whose name differs from its entry fails", () => {
     const dir = fixture({
       files: {
@@ -270,6 +343,40 @@ describe("layout:check", () => {
       },
     });
     assert.deepEqual(rules(checkLayout(dir).findings), ["package-name"]);
+  });
+
+  test("a package runs Vitest only through the root configuration", () => {
+    const manifest = (/** @type {Record<string, string>} */ scripts) => ({
+      "packages/core/package.json": JSON.stringify({ name: "@fin/core", private: true, scripts }),
+    });
+    const good = fixture({ files: manifest({ ...VITEST_SCRIPTS, lint: "biome check ." }) });
+    assert.deepEqual(checkLayout(good).findings, []);
+    for (const scripts of [
+      { test: "vitest run" },
+      { test: "vitest" },
+      { test: "vitest run --root ." },
+      { "test:db": "vitest run --mode db" },
+      { "test:watch": "vitest --config ../../vitest.config.ts" },
+    ]) {
+      const dir = fixture({ files: manifest(scripts) });
+      assert.deepEqual(
+        rules(checkLayout(dir).findings),
+        ["vitest-config"],
+        JSON.stringify(scripts),
+      );
+    }
+    assert.deepEqual(checkTestScripts("x/package.json", { test: "node --test" }), []);
+  });
+
+  test("a package's own Vitest configuration fails: the root's is the only one", () => {
+    for (const file of [
+      "packages/core/vitest.config.ts",
+      "packages/core/vitest.config.mts",
+      "packages/core/vitest.workspace.ts",
+    ]) {
+      const dir = fixture({ files: { [file]: "export default {};\n" } });
+      assert.deepEqual(rules(checkLayout(dir).findings), ["vitest-config"], file);
+    }
   });
 
   test("a malformed layout fails closed", () => {
@@ -347,10 +454,11 @@ describe("layout helpers", () => {
   });
 
   test("CODEOWNERS parsing drops the leading slash and keeps line numbers", () => {
-    const { patterns } = parseCodeowners("# c\n\n/a/ @o\n/b @o @p\n");
+    const { patterns, findings } = parseCodeowners(`# c\n\n/a/ ${OWNER}\n/b ${OWNER}\n`);
     assert.deepEqual(patterns, [
       { pattern: "a/", line: 3 },
       { pattern: "b", line: 4 },
     ]);
+    assert.deepEqual(findings, []);
   });
 });

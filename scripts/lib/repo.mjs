@@ -1,5 +1,8 @@
-// Shared helpers for the repository checks in scripts/. Node built-ins only: the checks must run
-// on a clean checkout before anything is installed.
+// Shared helpers for the repository checks in scripts/ that are not control paths (layout:check,
+// imports:check, static:check). Node built-ins only: the checks must run on a clean checkout
+// before anything is installed. The two control-path checks, check-supply-chain.mjs and
+// public-safety.mjs, never import this file: each keeps its own helpers, so that no file outside
+// the control paths can change their verdicts (CI-14).
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,19 +22,6 @@ export function git(root, args) {
 }
 
 /**
- * Runs git in `root` and returns its standard output as bytes.
- * @param {string} root
- * @param {string[]} args
- * @returns {Buffer}
- */
-export function gitBytes(root, args) {
-  return execFileSync("git", ["-C", root, ...args], {
-    maxBuffer: 256 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-}
-
-/**
  * The repository's files, as paths relative to `root` with forward slashes. Tracked files only by
  * default; with `untracked`, also files that are new and not ignored (so a check catches a new
  * file before it is added). Files deleted from the working tree are left out.
@@ -44,15 +34,6 @@ export function listFiles(root, options = {}) {
   if (options.untracked) args.push("--others", "--exclude-standard");
   const files = new Set(git(root, args).split("\0").filter(Boolean));
   return [...files].filter((file) => existsSync(join(root, file))).sort();
-}
-
-/**
- * Whether bytes look binary (a NUL byte in the first 8 KiB, as git decides).
- * @param {Buffer} bytes
- * @returns {boolean}
- */
-export function isBinary(bytes) {
-  return bytes.subarray(0, 8192).includes(0);
 }
 
 /**

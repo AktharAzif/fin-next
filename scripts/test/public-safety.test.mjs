@@ -2,15 +2,17 @@
 // built at run time, so this file itself stays clean, and every test that runs the command checks
 // that its output never repeats the value it found.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { prePush } from "../pre-push.mjs";
 import {
+  decodeContent,
   loadRefuseList,
   refuseMatcher,
   scanCommits,
+  scanContent,
   scanText,
   scanTree,
 } from "../public-safety.mjs";
@@ -38,6 +40,8 @@ const PLANTED = {
   pem: `-----BEGIN ${"RSA PRIVATE"} KEY-----`,
   credentialUrl: `postgres://fin:${alnum(20)}@localhost:5432/fin`,
   tunnelToken: Buffer.from(JSON.stringify({ a: hex(32), t: "x", s: alnum(40) })).toString("base64"),
+  localPath: ["", "Users", "someone", "notes", "plan.md"].join("/"),
+  windowsPath: ["C:", "Users", "someone", "notes"].join("\\"),
 };
 // A stand-in for a zone name from the overlay (the real one never appears in the repository).
 const ZONE = ["fin-staging-zone", "invalid"].join(".");
@@ -51,6 +55,28 @@ function overlayFile(content) {
   const file = join(dir, "overlay.json");
   writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content));
   return file;
+}
+
+/**
+ * Text as UTF-16 or UTF-32 bytes, with or without a byte-order mark.
+ * @param {string} text
+ * @param {"utf16le" | "utf16be" | "utf32le" | "utf32be"} encoding
+ * @param {boolean} [bom]
+ */
+function encode(text, encoding, bom = true) {
+  if (encoding === "utf16le" || encoding === "utf16be") {
+    const bytes = Buffer.from(`${bom ? "\u{FEFF}" : ""}${text}`, "utf16le");
+    if (encoding === "utf16be") bytes.swap16();
+    return bytes;
+  }
+  const chars = [...`${bom ? "\u{FEFF}" : ""}${text}`];
+  const bytes = Buffer.alloc(chars.length * 4);
+  for (const [i, char] of chars.entries()) {
+    const code = char.codePointAt(0) ?? 0;
+    if (encoding === "utf32le") bytes.writeUInt32LE(code, i * 4);
+    else bytes.writeUInt32BE(code, i * 4);
+  }
+  return bytes;
 }
 
 describe("public-safety rules", () => {
@@ -67,10 +93,21 @@ describe("public-safety rules", () => {
       pem: "token",
       credentialUrl: "token",
       tunnelToken: "token",
+      localPath: "local-path",
+      windowsPath: "local-path",
     };
     for (const [key, rule] of Object.entries(expected)) {
       const value = PLANTED[/** @type {keyof typeof PLANTED} */ (key)];
       assert.deepEqual(rules(scanText("f", `const x = "${value}";`, none)), [rule], key);
+    }
+  });
+
+  test("an account or zone ID is found in upper and mixed case too", () => {
+    for (const id of [
+      PLANTED.accountId.toUpperCase(),
+      `${hex(16, 13)}${hex(16, 5).toUpperCase()}`,
+    ]) {
+      assert.deepEqual(rules(scanText("f", `const acct="${id}";`, none)), ["account-id"]);
     }
   });
 
@@ -84,6 +121,8 @@ describe("public-safety rules", () => {
       "listen on 127.0.0.1:5432 and [::1]",
       "fin_test_ (a prefix alone), whsec_ and AGE-SECRET-KEY-1",
       "version 1.10.2.3 is not an address",
+      "GET /api/Users/list and https://example.com/Users/list and /Users/Shared/x",
+      'route "/users/me", "/users/:id" and "/users/" + id',
       // Two lines of the plan: a placeholder DSN on a reserved name, and a scrubber pattern.
       `dsn: "https://${["fin", "relay.invalid"].join("@")}/1"`,
       "| `postgres(ql)?://[^:/\\s]+:[^@\\s]+@` | `postgres://[login]:[secret]@` |",
@@ -117,6 +156,42 @@ describe("public-safety rules", () => {
   });
 });
 
+describe("public-safety reads every encoding", () => {
+  const text = `notes\n${PLANTED.staffAddress}\nkey ${PLANTED.token}\nhost ${PLANTED.privateIp}\n`;
+  const refused = refuseMatcher([ZONE]);
+
+  test("a NUL byte does not opt a file out of any rule", () => {
+    for (const bytes of [
+      Buffer.from(`\0${text}`),
+      Buffer.from(`notes\0${text}`),
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0x0d]), Buffer.from(text)]),
+    ]) {
+      const findings = scanContent("logo.png", bytes, refused);
+      assert.deepEqual(rules(findings), ["email-address", "private-ip", "token"]);
+      assert.ok(findings.every((f) => f.message.endsWith("(in binary content)")));
+    }
+  });
+
+  test("UTF-16 and UTF-32 text is decoded, with or without a byte-order mark", () => {
+    for (const encoding of /** @type {const} */ (["utf16le", "utf16be", "utf32le", "utf32be"])) {
+      for (const bom of [true, false]) {
+        const bytes = encode(`${text}console.${ZONE}\n`, encoding, bom);
+        assert.deepEqual(
+          rules(scanContent("notes16.txt", bytes, refused)),
+          ["email-address", "private-ip", "refuse-list", "token"],
+          `${encoding} ${bom ? "with" : "without"} a byte-order mark`,
+        );
+      }
+    }
+    assert.equal(decodeContent(encode(text, "utf16le")).binary, false);
+    assert.equal(decodeContent(Buffer.from(`\u{FEFF}${text}`)).views[0], text);
+  });
+
+  test("plain UTF-8 text is read once, as text", () => {
+    assert.deepEqual(decodeContent(Buffer.from(text)), { binary: false, views: [text] });
+  });
+});
+
 describe("public-safety over a repository", () => {
   test("a clean repository passes, and so does this one", () => {
     assert.deepEqual(scanTree(makeRepo({ "a.md": "fine\n" }), []), []);
@@ -147,6 +222,34 @@ describe("public-safety over a repository", () => {
         "the output repeats a value",
       );
     }
+  });
+
+  test("binary and UTF-16 files in the tree are scanned, and the command says where", () => {
+    const dir = makeRepo({ "a.md": "fine\n" });
+    writeFileSync(join(dir, "notes.md"), `\0${PLANTED.staffAddress}\n`);
+    writeFileSync(join(dir, "zone16.txt"), encode(`console.${ZONE}\n`, "utf16le"));
+    writeFileSync(join(dir, "logo.png"), Buffer.from(`\0\0\0const key="${PLANTED.token}";\n`));
+    git(dir, ["add", "-A"]);
+    const run = runScript("scripts/public-safety.mjs", ["--root", dir], {
+      env: { FIN_OVERLAY_FILE: overlayFile({ refuseList: [ZONE] }) },
+    });
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^notes\.md:1 email-address: .*\(in binary content\)$/m);
+    assert.match(run.output, /^zone16\.txt:1 refuse-list: /m);
+    assert.match(run.output, /^logo\.png:1 token: /m);
+    for (const value of [PLANTED.staffAddress, PLANTED.token, ZONE]) {
+      assert.ok(
+        !run.output.toLowerCase().includes(value.toLowerCase()),
+        "the output repeats a value",
+      );
+    }
+  });
+
+  test("a symbolic link is read as its target, which is what git publishes", () => {
+    const dir = makeRepo({ "a.md": "fine\n" });
+    symlinkSync(PLANTED.localPath, join(dir, "notes.md"));
+    git(dir, ["add", "-A"]);
+    assert.deepEqual(rules(scanTree(dir, [])), ["local-path"]);
   });
 
   test("a refused value in a file's path is found", () => {
@@ -188,6 +291,59 @@ describe("public-safety over a repository", () => {
       ],
     );
   });
+
+  test("commit mode reads binary content and symbolic links as the tree scan does", () => {
+    const dir = makeRepo({ "logo.png": `\0${PLANTED.staffAddress}\n` }, { commit: "add a" });
+    symlinkSync(PLANTED.localPath, join(dir, "link.md"));
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "link"]);
+    const commits = git(dir, ["rev-list", "HEAD"]).split("\n").filter(Boolean);
+    assert.deepEqual(rules(scanCommits(dir, commits, [])), ["email-address", "local-path"]);
+  });
+
+  test("only the two noreply trailer addresses pass in a message", () => {
+    const dir = makeRepo({ "a.md": "x\n" });
+    const message = (/** @type {string} */ address) => {
+      addFiles(dir, { "a.md": `${address}\n`.replace(/@/g, " at ") });
+      git(dir, ["commit", "-q", "-m", `change\n\nCo-Authored-By: B <${address}>`]);
+      return git(dir, ["rev-parse", "HEAD"]).trim();
+    };
+    const allowed = [
+      ["noreply", "anthropic.com"].join("@"),
+      ["12345+someone", "users.noreply.github.com"].join("@"),
+    ].map(message);
+    assert.deepEqual(scanCommits(dir, allowed, []), []);
+    const refused = [
+      ["noreply", "fin-staff-mail.co"].join("@"),
+      ["NoReply", "private-zone.net"].join("@"),
+      ["someone", "evil.users.noreply.github.com"].join("@"),
+    ].map(message);
+    assert.deepEqual(rules(scanCommits(dir, refused, [])), ["email-address"]);
+    assert.equal(scanCommits(dir, refused, []).length, 3);
+  });
+
+  test("a merge commit's own changes are scanned, a conflict's resolution included", () => {
+    const dir = makeRepo({ "a.txt": "base\n" }, { commit: "base" });
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "a.txt": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "a.txt": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"])); // a conflict
+    addFiles(dir, { "a.txt": `resolved\n${PLANTED.staffAddress}\n`, "b.md": `${PLANTED.token}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const commits = git(dir, ["rev-list", `${base}..HEAD`])
+      .split("\n")
+      .filter(Boolean);
+    const findings = scanCommits(dir, commits, []);
+    const merge = commits[0]?.slice(0, 12);
+    assert.deepEqual(findings.map((f) => `${f.file}:${f.line} ${f.rule}`).sort(), [
+      `a.txt (commit ${merge}):2 email-address`,
+      `b.md (commit ${merge}):1 token`,
+    ]);
+  });
 });
 
 describe("the pre-push hook refuses the same", () => {
@@ -204,18 +360,18 @@ describe("the pre-push hook refuses the same", () => {
   /**
    * @param {string} dir
    * @param {string} remoteRef
-   * @param {string} [overlay]
+   * @param {{ overlay?: string, localRef?: string, sha?: string, gitleaks?: string }} [options]
    */
-  const push = (dir, remoteRef, overlay) => {
+  const push = (dir, remoteRef, options = {}) => {
     /** @type {string[]} */
     const lines = [];
-    const head = git(dir, ["rev-parse", "HEAD"]).trim();
+    const sha = options.sha ?? git(dir, ["rev-parse", "HEAD"]).trim();
     const code = prePush({
       root: dir,
       remote: "origin",
-      input: `refs/heads/work ${head} ${remoteRef} ${"0".repeat(40)}\n`,
-      overlay,
-      gitleaks: "/nonexistent/gitleaks",
+      input: `${options.localRef ?? "refs/heads/work"} ${sha} ${remoteRef} ${"0".repeat(40)}\n`,
+      overlay: options.overlay,
+      gitleaks: options.gitleaks ?? "/nonexistent/gitleaks",
       log: (line) => lines.push(line),
     });
     return { code, output: lines.join("\n") };
@@ -241,7 +397,9 @@ describe("the pre-push hook refuses the same", () => {
       const dir = pushable();
       addFiles(dir, { [file]: `${content}\n` });
       git(dir, ["commit", "-q", "-m", "plant"]);
-      const { code, output } = push(dir, "refs/heads/feature", overlayFile({ refuseList: [ZONE] }));
+      const { code, output } = push(dir, "refs/heads/feature", {
+        overlay: overlayFile({ refuseList: [ZONE] }),
+      });
       assert.equal(code, 1, file);
       assert.match(
         output,
@@ -249,6 +407,73 @@ describe("the pre-push hook refuses the same", () => {
       );
       assert.ok(!output.toLowerCase().includes(content.toLowerCase()), "the hook repeats a value");
     }
+  });
+
+  test("a merge whose resolution adds an address is refused", () => {
+    const dir = pushable();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "README.md": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "README.md": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"]));
+    addFiles(dir, { "README.md": `resolved\n${PLANTED.staffAddress}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const { code, output } = push(dir, "refs/heads/feature");
+    assert.equal(code, 1);
+    assert.match(output, /^README\.md \(commit [0-9a-f]{12}\):2 email-address: /m);
+    assert.match(output, /scanned 3 commit\(s\)/);
+  });
+
+  test("an annotated tag's message and a pushed ref's name are scanned", () => {
+    const dir = pushable();
+    git(dir, [
+      "-c",
+      "tag.gpgsign=false",
+      "tag",
+      "-a",
+      "v1",
+      "-m",
+      `release for ${PLANTED.staffAddress}`,
+    ]);
+    const tag = git(dir, ["rev-parse", "v1"]).trim();
+    const tagged = push(dir, "refs/tags/v1", { localRef: "refs/tags/v1", sha: tag });
+    assert.equal(tagged.code, 1);
+    assert.match(tagged.output, /^pushed ref #1 \(tag message\):1 email-address: /m);
+    assert.match(tagged.output, /scanned 0 commit\(s\)/);
+    const named = push(dir, `refs/heads/${PLANTED.staffAddress}`);
+    assert.equal(named.code, 1);
+    assert.match(named.output, /^pushed ref #1 email-address: .*\(in the pushed ref's name\)$/m);
+    assert.ok(!`${tagged.output}${named.output}`.includes(PLANTED.staffAddress));
+  });
+
+  test("a ref that does not point at a commit is refused", () => {
+    const dir = pushable();
+    const blob = git(dir, ["rev-parse", "HEAD:README.md"]).trim();
+    const { code, output } = push(dir, "refs/tags/blob", { localRef: "refs/tags/blob", sha: blob });
+    assert.equal(code, 1);
+    assert.match(output, /does not point at a commit/);
+  });
+
+  test("gitleaks reads merges too", () => {
+    const dir = pushable();
+    addFiles(dir, { "b.md": "fine\n" });
+    git(dir, ["commit", "-q", "-m", "b"]);
+    const bin = mkdtempSync(join(tmpdir(), "fin-gitleaks-"));
+    const record = join(bin, "args.txt");
+    const fake = join(bin, "gitleaks");
+    writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" >> '${record}'\n`);
+    chmodSync(fake, 0o755);
+    const { code } = push(dir, "refs/heads/feature", { gitleaks: fake });
+    assert.equal(code, 0);
+    const args = readFileSync(record, "utf8").split("\n");
+    assert.ok(
+      args.some((a) =>
+        /^--log-opts=--diff-merges=first-parent [0-9a-f]{40} --not --remotes=origin$/.test(a),
+      ),
+      args.join(" "),
+    );
   });
 
   test("only the commits the remote does not have are scanned", () => {

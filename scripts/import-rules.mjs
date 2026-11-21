@@ -7,8 +7,12 @@
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
 //     packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
-//     packages/web-host/src/static and tools/static-deploy/src, and only relative imports in
-//     ops/watcher/src (Web APIs only); their test files may also import vitest;
+//     packages/web-host/src/static, tools/static-deploy/src and scripts/, and only relative
+//     imports in ops/watcher/src (Web APIs only); their test files may also import vitest;
+//   - a file under a control path (tools/layout.json's controlPaths) imports only node:* and
+//     files under the control paths (type-only imports aside; a test may also import vitest and
+//     any file of the repository, since a test does not change what the code does when it runs),
+//     so no file outside them can change what an owner-approved file does (CI-14);
 //   - no @tanstack/react-start*, @tanstack/start-*, @remix-run/*, react-router-dom, Radix,
 //     Phosphor, clsx, tailwind-merge or @fontsource*, anywhere (FW-C01, FW-C18, OD-5);
 //   - @ui-sdk/* only inside packages/ui, so screens take their controls from @fin/ui; the refused
@@ -16,13 +20,23 @@
 //   - no console.error(error): errors go through reportError with safeError;
 //   - Node built-ins by their node: name; relative imports with their file extension, .ts or
 //     .tsx where the source is TypeScript.
+// Imports are read wherever they stand: a static import or re-export anywhere in a line or across
+// lines (string names and comments in its clause included), import() and require() calls, and
+// getBuiltinModule() calls, which load a module like an import. An import(), require() or
+// getBuiltinModule() whose argument is not a single string literal is refused where the rules
+// must read every import, getBuiltinModule's everywhere, and so are the other ways to load code
+// unseen there (outside tests): createRequire, the process binding, eval and the Function
+// constructor. In code that runs, text in comments and strings is read too, so the check fails
+// closed: an import-shaped string that breaks a rule is reported. In a test file, whose fixtures
+// often hold import-shaped text, comments, strings and template text are skipped.
 import { existsSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { join, posix } from "node:path";
-import { globToRegExp, listFiles, report } from "./lib/repo.mjs";
+import { coveredBy, globToRegExp, isRecord, listFiles, readJson, report } from "./lib/repo.mjs";
 
 /** @typedef {import("./lib/repo.mjs").Finding} Finding */
-/** @typedef {{ specifier: string, line: number, names: string[], dynamic: boolean }} ImportRef */
+/** @typedef {{ specifier: string, line: number, names: string[], dynamic: boolean, typeOnly: boolean }} ImportRef */
+/** @typedef {{ line: number, loader: string }} DynamicExpression */
 
 const SOURCE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const TS_SOURCE = /\.(?:[cm]?ts|tsx)$/;
@@ -43,6 +57,7 @@ const BUILTINS_ONLY = [
   "tools/fin-review/src/",
   "packages/web-host/src/static/",
   "tools/static-deploy/src/",
+  "scripts/",
 ];
 const RELATIVE_ONLY = ["ops/watcher/src/"];
 const SERVER_PACKAGES = [
@@ -82,6 +97,7 @@ const REFUSED = [
   "clsx",
   "tailwind-merge",
   "@fontsource*",
+  "@fontsource*/*",
 ];
 const SDK_REFUSED = [
   /^@ui-sdk\/[^/]+\/agent(?:\/|$)/,
@@ -94,6 +110,27 @@ const SDK_CORE_REFUSED_NAMES = [
   "createCellRange",
   "createLasso",
 ];
+
+// One part of an import or export clause: any character but a quote, a backtick, a semicolon, a
+// parenthesis or a slash; or a whole string (a string name); or a comment. A clause never holds a
+// parenthesis or a semicolon, so a match cannot run past its statement.
+const CLAUSE_PART = String.raw`(?:[^'"\x60;()/]|\/(?![/*])|\/\/[^\n]*|\/\*[\s\S]*?\*\/|'[^'\n]*'|"[^"\n]*")`;
+// The forms a module specifier takes: a relative or absolute path, a URL with a scheme (node:,
+// data:, file:, ...), or a bare package name (no space, comma, colon, quote or bracket). Any text
+// that Node could load fits one of them; ordinary code such as `["import", "default"]` or
+// `case "import": return "x"` does not.
+const SPECIFIER = String.raw`(?:\.{0,2}\/[^'"\n]*|[A-Za-z][A-Za-z0-9+.-]*:[^'"\n]*|[^'"\s,;:(){}[\]<>\x60./][^'"\s,;:(){}[\]<>\x60]*)`;
+const STATIC_IMPORT = new RegExp(
+  String.raw`(?<![\w$.])(?:import|export)(?![\w$])(?:\s*(['"])(${SPECIFIER})\1|(${CLAUSE_PART}*?)(?<![\w$])from\s*(['"])(${SPECIFIER})\4)`,
+  "g",
+);
+// A call that loads a module: its argument is read when it is one string literal and nothing else.
+const LOADING_CALL =
+  /\b(import|require|getBuiltinModule)\s*\(\s*(?:(['"`])([^'"`\n]*)\2\s*(?=[,)]))?/g;
+// Other ways to load code that the rules cannot read, refused where every import must be read:
+// the calls themselves, and the same names reached as a computed member with a string key.
+const UNREAD_LOADERS =
+  /\b(?:createRequire|_linkedBinding|dlopen|_load|eval)\s*\(|\bprocess\s*\??\.\s*binding\b|\bnew\s+Function\b|\[\s*(['"`])(?:getBuiltinModule|createRequire|binding|_linkedBinding|dlopen|_load|require)\1\s*\]/g;
 
 /**
  * The package name of a bare specifier (`@scope/name` or `name`).
@@ -115,43 +152,151 @@ function matchesAny(name, patterns) {
 }
 
 /**
- * Finds the import specifiers in a source file, with their line numbers. Static imports and
- * re-exports are read at the start of a line (as the formatter writes them); dynamic import() and
- * require() anywhere outside a comment line.
+ * A function from a character offset to its 1-based line number.
  * @param {string} text
- * @returns {{ imports: ImportRef[], dynamicExpressions: number[] }}
+ * @returns {(index: number) => number}
  */
-export function findImports(text) {
+function lineFinder(text) {
+  /** @type {number[]} */
+  const starts = [0];
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) starts.push(i + 1);
+  return (index) => {
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if ((starts[mid] ?? 0) <= index) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+}
+
+/**
+ * Which characters of a JavaScript or TypeScript source are code rather than the inside of a
+ * comment, a string or a template literal's text (a template's `${...}` is code again). A string
+ * ends at its quote or at the end of its line; a regular expression literal is read as code. It
+ * is used for test files only, to skip the import-shaped text their fixtures hold: in code that
+ * runs, everything is read.
+ * @param {string} text
+ * @returns {Uint8Array} 1 for code, 0 otherwise, per character
+ */
+export function codeMask(text) {
+  const mask = new Uint8Array(text.length).fill(1);
+  /**
+   * @param {number} from
+   * @param {number} to
+   */
+  const clear = (from, to) => mask.fill(0, from, Math.min(to, text.length));
+  /** @type {number[]} */
+  const templates = []; // for each open `${`, the brace depth its `}` returns to
+  let depth = 0;
+  /**
+   * Reads template text from `start` to its closing backtick or its next `${`.
+   * @param {number} start
+   * @returns {number} where code resumes
+   */
+  const templateText = (start) => {
+    for (let j = start; j < text.length; j++) {
+      const ch = text.charAt(j);
+      if (ch === "\\") j++;
+      else if (ch === "`") {
+        clear(start, j);
+        return j + 1;
+      } else if (ch === "$" && text.charAt(j + 1) === "{") {
+        clear(start, j);
+        templates.push(depth++);
+        return j + 2;
+      }
+    }
+    clear(start, text.length);
+    return text.length;
+  };
+  let i = 0;
+  while (i < text.length) {
+    const ch = text.charAt(i);
+    const next = text.charAt(i + 1);
+    if (ch === "/" && next === "/") {
+      const end = text.indexOf("\n", i);
+      const stop = end < 0 ? text.length : end;
+      clear(i, stop);
+      i = stop;
+    } else if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end < 0 ? text.length : end + 2;
+      clear(i, stop);
+      i = stop;
+    } else if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text.charAt(j) !== ch && text.charAt(j) !== "\n") {
+        j += text.charAt(j) === "\\" ? 2 : 1;
+      }
+      clear(i + 1, j);
+      i = j + 1;
+    } else if (ch === "`") {
+      i = templateText(i + 1);
+    } else if (ch === "{") {
+      depth++;
+      i++;
+    } else if (ch === "}") {
+      depth--;
+      if (templates.length > 0 && templates[templates.length - 1] === depth) {
+        templates.pop();
+        i = templateText(i + 1);
+      } else {
+        i++;
+      }
+    } else {
+      i++;
+    }
+  }
+  return mask;
+}
+
+/**
+ * Finds the import specifiers in a source file, with their line numbers: static imports and
+ * re-exports wherever they stand, and import(), require() and getBuiltinModule() calls.
+ * @param {string} text
+ * @param {Uint8Array} [mask] when given, only matches whose keyword is code (see codeMask)
+ * @returns {{ imports: ImportRef[], dynamicExpressions: DynamicExpression[] }}
+ */
+export function findImports(text, mask) {
   /** @type {ImportRef[]} */
   const imports = [];
-  /** @type {number[]} */
+  /** @type {DynamicExpression[]} */
   const dynamicExpressions = [];
-  const lineAt = (/** @type {number} */ index) => text.slice(0, index).split("\n").length;
-  const staticImport =
-    /^[ \t]*(?:import|export)\b(?:\s*(['"])([^'"\n]+)\1|([^'"`;]*?)\bfrom\s*(['"])([^'"\n]+)\4)/gm;
-  for (const match of text.matchAll(staticImport)) {
+  const lineAt = lineFinder(text);
+  const isCode = (/** @type {number} */ index) => mask === undefined || mask[index] === 1;
+  for (const match of text.matchAll(STATIC_IMPORT)) {
+    if (!isCode(match.index)) continue;
     const specifier = match[2] ?? match[5] ?? "";
-    const clause = match[3] ?? "";
-    const names = [...clause.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]);
-    imports.push({ specifier, line: lineAt(match.index), names, dynamic: false });
+    const clause = (match[3] ?? "").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, " ");
+    const names = [
+      ...[...clause.replace(/'[^'\n]*'|"[^"\n]*"/g, " ").matchAll(/[A-Za-z_$][\w$]*/g)].map(
+        (m) => m[0],
+      ),
+      ...[...clause.matchAll(/'([^'\n]*)'|"([^"\n]*)"/g)].map((m) => m[1] ?? m[2] ?? ""),
+    ];
+    const typeOnly = /^\s*type\s+(?:[{*]|[A-Za-z_$][\w$]*\s*(?:,|$))/.test(clause);
+    imports.push({ specifier, line: lineAt(match.index), names, dynamic: false, typeOnly });
   }
-  const lines = text.split("\n");
-  for (const [index, line] of lines.entries()) {
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
-    for (const match of line.matchAll(/\b(?:import|require)\s*\(\s*(?:(['"`])([^'"`\n]+)\1)?/g)) {
-      if (/^\s*import\b/.test(line) && !line.includes("import(")) continue;
-      if (match[2] === undefined) {
-        if (!/^\s*\)/.test(line.slice((match.index ?? 0) + match[0].length)))
-          dynamicExpressions.push(index + 1);
-        continue;
+  for (const match of text.matchAll(LOADING_CALL)) {
+    if (!isCode(match.index)) continue;
+    const loader = match[1] ?? "";
+    const literal = match[3];
+    const line = lineAt(match.index);
+    if (literal === undefined) {
+      // `import()` with nothing inside is prose, not code: the call would not parse.
+      if (!/^\s*\)/.test(text.slice(match.index + match[0].length))) {
+        dynamicExpressions.push({ line, loader });
       }
-      if (match[1] === "`" && match[2].includes("${")) {
-        dynamicExpressions.push(index + 1);
-        continue;
-      }
-      imports.push({ specifier: match[2], line: index + 1, names: [], dynamic: true });
+      continue;
     }
+    if (match[2] === "`" && literal.includes("${")) {
+      dynamicExpressions.push({ line, loader });
+      continue;
+    }
+    imports.push({ specifier: literal, line, names: [], dynamic: true, typeOnly: false });
   }
   return { imports, dynamicExpressions };
 }
@@ -161,9 +306,10 @@ export function findImports(text) {
  * @param {string} file the repository path
  * @param {string} text the file's content
  * @param {(path: string) => boolean} [fileExists] for the .js-to-.ts check
+ * @param {{ controlPaths?: string[] }} [options] the control paths of tools/layout.json
  * @returns {Finding[]}
  */
-export function checkSource(file, text, fileExists = () => false) {
+export function checkSource(file, text, fileExists = () => false, options = {}) {
   /** @type {Finding[]} */
   const findings = [];
   /**
@@ -172,24 +318,39 @@ export function checkSource(file, text, fileExists = () => false) {
    * @param {string} message
    */
   const add = (line, rule, message) => findings.push({ file, line, rule, message });
+  const controlPaths = options.controlPaths ?? [];
+  const isControlled = (/** @type {string} */ path) =>
+    controlPaths.some((cp) => coveredBy(path, cp));
   const isTest = TEST_FILE.test(file);
   const isClient =
     /(^|\/)src\/client\//.test(file) || CLIENT_PACKAGES.some((p) => file.startsWith(p));
   const builtinsOnly = BUILTINS_ONLY.some((p) => file.startsWith(p));
   const relativeOnly = RELATIVE_ONLY.some((p) => file.startsWith(p));
-  const { imports, dynamicExpressions } = findImports(text);
+  const controlled = isControlled(file);
+  const mustReadAll = builtinsOnly || relativeOnly || isClient || controlled;
+  const { imports, dynamicExpressions } = findImports(text, isTest ? codeMask(text) : undefined);
 
-  for (const line of dynamicExpressions) {
-    if (builtinsOnly || relativeOnly || isClient) {
+  for (const { line, loader } of dynamicExpressions) {
+    if (mustReadAll || loader === "getBuiltinModule") {
       add(
         line,
         "dynamic-import",
-        "import() and require() take a string literal here, so the rules can read them",
+        `${loader}() takes one string literal here, so the rules can read what it loads`,
+      );
+    }
+  }
+  if (mustReadAll && !isTest) {
+    const lineAt = lineFinder(text);
+    for (const match of text.matchAll(UNREAD_LOADERS)) {
+      add(
+        lineAt(match.index),
+        "dynamic-import",
+        "code here loads modules only by import, so the rules can read every one (no createRequire, process binding, eval or Function constructor)",
       );
     }
   }
 
-  for (const { specifier, line, names } of imports) {
+  for (const { specifier, line, names, typeOnly } of imports) {
     const relative = specifier.startsWith("./") || specifier.startsWith("../");
     const bare =
       !relative &&
@@ -211,11 +372,11 @@ export function checkSource(file, text, fileExists = () => false) {
       add(line, "no-bun", "Node is the only runtime (ARCHITECTURE §3.2)");
       continue;
     }
-    if (specifier.startsWith("/")) {
+    if (specifier.startsWith("/") || /^(?:file|data|https?|blob):/i.test(specifier)) {
       add(
         line,
         "absolute-import",
-        "imports are relative or by package name, never an absolute path",
+        "imports are relative or by package name, never an absolute path or a URL (file:, data:, http:), whose own imports the rules could not read",
       );
       continue;
     }
@@ -273,19 +434,33 @@ export function checkSource(file, text, fileExists = () => false) {
         }
       }
     }
+    const testRunner = isTest && name === "vitest";
     if (relativeOnly && !relative) {
       add(line, "relative-only", "the watcher uses Web APIs and relative imports only");
-    } else if (
-      builtinsOnly &&
-      !relative &&
-      builtin === undefined &&
-      !(isTest && name === "vitest")
-    ) {
+    } else if (builtinsOnly && !relative && builtin === undefined && !testRunner) {
       add(
         line,
         "builtins-only",
         "this code runs with no install: node:* and relative imports only",
       );
+    } else if (controlled && bare && builtin === undefined && !testRunner && !typeOnly) {
+      add(
+        line,
+        "control-path-import",
+        "a control-path file imports Node built-ins and control-path files only (CI-14)",
+      );
+    }
+    if (controlled && relative && !typeOnly && !isTest) {
+      const target = posix.normalize(
+        posix.join(posix.dirname(file), specifier.replace(/[?#].*$/, "")),
+      );
+      if (target.startsWith("../") || !isControlled(target)) {
+        add(
+          line,
+          "control-path-import",
+          "a control-path file imports only files under the control paths, so a file outside them cannot change what it does (CI-14)",
+        );
+      }
     }
     if (relative) {
       const last = specifier.split("/").pop() ?? "";
@@ -326,6 +501,22 @@ export function checkSource(file, text, fileExists = () => false) {
 }
 
 /**
+ * The control paths tools/layout.json lists (none when it is missing or malformed; layout:check
+ * reports that).
+ * @param {string} root
+ * @returns {string[]}
+ */
+function readControlPaths(root) {
+  try {
+    const layout = readJson(join(root, "tools/layout.json"));
+    if (!isRecord(layout) || !Array.isArray(layout.controlPaths)) return [];
+    return layout.controlPaths.filter((p) => typeof p === "string" && p !== "");
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Runs the import rules over every source file in the repository at `root`.
  * @param {string} root
  * @returns {Finding[]}
@@ -334,7 +525,10 @@ export function checkImports(root) {
   const files = listFiles(root, { untracked: true }).filter((f) => SOURCE.test(f));
   const known = new Set(files);
   const exists = (/** @type {string} */ path) => known.has(path) || existsSync(join(root, path));
-  return files.flatMap((file) => checkSource(file, readFileSync(join(root, file), "utf8"), exists));
+  const controlPaths = readControlPaths(root);
+  return files.flatMap((file) =>
+    checkSource(file, readFileSync(join(root, file), "utf8"), exists, { controlPaths }),
+  );
 }
 
 if (import.meta.main) {
