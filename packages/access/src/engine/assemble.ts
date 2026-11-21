@@ -1,6 +1,7 @@
 // Assembles a catalogue from its areas' fragments and checks it (spec 02 §8.1: "the assembled
 // catalogue is built and checked, never edited by hand"). A catalogue that breaks a rule is refused
 // when its module loads, so a bad fragment fails every test and every build that imports it.
+import { hasInvisible, hasVisibleText } from "./text.ts";
 import type {
   BuiltInRole,
   Catalogue,
@@ -58,8 +59,12 @@ const PERMISSION_KEY = /^[a-z][A-Za-z]*\.[a-z]+(?:_[a-z]+)*$/;
 const GROUP_OR_ROLE_KEY = /^[a-z][a-z_]*$/;
 const ROLE_PREFIX = /^[a-z]{3}$/;
 
+/** Catalogue text that shows something: no space round it and no character that draws as nothing. */
 const filled = (value: unknown): value is string =>
-  typeof value === "string" && value.trim() !== "" && value === value.trim();
+  typeof value === "string" &&
+  hasVisibleText(value) &&
+  !hasInvisible(value) &&
+  value === value.trim();
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
