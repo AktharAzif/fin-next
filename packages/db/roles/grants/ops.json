@@ -1,0 +1,129 @@
+{
+  "$comment": "The ops area's grants (spec 01 §6.10). Rendered exactly by the migration runner; any statement not granted here fails with 42501 (AC-P0-11, AC-P0-39). ops.privileged_login is the superuser's and its grant is applied by migrate --bootstrap.",
+  "area": "ops",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "ops",
+      "privileges": ["USAGE"],
+      "to": [
+        "fin_edge",
+        "fin_api",
+        "fin_worker",
+        "fin_payments",
+        "fin_console",
+        "fin_admin",
+        "fin_probe"
+      ]
+    },
+    {
+      "on": "table",
+      "name": "ops.schema_migrations",
+      "privileges": ["SELECT"],
+      "to": [
+        "fin_edge",
+        "fin_api",
+        "fin_worker",
+        "fin_payments",
+        "fin_console",
+        "fin_admin",
+        "fin_probe"
+      ]
+    },
+    {
+      "on": "table",
+      "name": "ops.privileged_login",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "ops.privileged_login_check",
+      "privileges": ["SELECT", "INSERT"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "ops.kill_switch",
+      "privileges": ["SELECT"],
+      "to": ["fin_edge", "fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "ops.scheduler_lease",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker", "fin_payments", "fin_probe"]
+    },
+    {
+      "on": "table",
+      "name": "ops.scheduler_lease",
+      "privileges": ["UPDATE"],
+      "columns": ["holder", "until", "renewed_at"],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    {
+      "on": "table",
+      "name": "ops.duty_state",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    { "on": "table", "name": "ops.duty_state", "privileges": ["SELECT"], "to": ["fin_probe"] },
+    {
+      "on": "table",
+      "name": "ops.rate_window",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_edge", "fin_api", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "ops.job_kind",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    {
+      "on": "table",
+      "name": "ops.job",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    {
+      "on": "table",
+      "name": "ops.job",
+      "privileges": ["UPDATE"],
+      "columns": [
+        "due_at",
+        "lease_until",
+        "leased_by",
+        "attempts",
+        "state",
+        "last_error_code",
+        "updated_at"
+      ],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    {
+      "on": "function",
+      "name": "ops.set_switch(text, text, text, jsonb)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "function",
+      "name": "ops.trip_switch(text, text, text, text, text, text, text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker", "fin_payments"]
+    },
+    {
+      "on": "function",
+      "name": "ops.enqueue_job(text, text, jsonb, timestamptz)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api", "fin_worker", "fin_payments"]
+    },
+    {
+      "on": "function",
+      "name": "ops.sweep_rate_windows(interval)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    }
+  ]
+}

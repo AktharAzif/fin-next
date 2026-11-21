@@ -1,0 +1,19 @@
+{
+  "name": "@fin/audit",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "gen": "node src/gen.ts",
+    "lint": "node src/gen.ts && biome check .",
+    "typecheck": "node src/gen.ts && tsc -p tsconfig.json",
+    "test": "node src/gen.ts && vitest run",
+    "test:db": "node src/gen.ts && vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@fin/db": "workspace:*",
+    "zod": "catalog:"
+  }
+}

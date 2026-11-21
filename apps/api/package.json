@@ -7,13 +7,18 @@
     "build:server": "vite build --config vite.server.config.ts",
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
     "lint": "biome check .",
-    "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p tsconfig.json",
+    "test": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.config.ts && vitest run src/doors",
+    "test:db": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.db.config.ts"
   },
   "dependencies": {
+    "@fin/audit": "workspace:*",
     "@fin/core": "workspace:*",
+    "@fin/crypto": "workspace:*",
+    "@fin/db": "workspace:*",
     "@fin/server": "workspace:*",
-    "hono": "catalog:"
+    "hono": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@fin/web-host": "workspace:*",
