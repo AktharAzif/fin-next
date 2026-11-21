@@ -14,7 +14,9 @@
 //     any file of the repository, since a test does not change what the code does when it runs),
 //     so an owner-approved file imports only owner-approved files (CI-14);
 //   - code that runs imports no test file (a target is matched in any case, as a case-insensitive
-//     file system reads it), since a test's own imports are not held to these rules;
+//     file system reads it), since a test's own imports are not held to these rules, and no file
+//     under a test/, tests/, __tests__/, e2e/ or fixtures/ directory (in any case too), which the
+//     page policy below leaves out;
 //   - a module specifier names its module plainly: no surrounding white space, control character,
 //     backslash or percent-encoding (in a relative URL Node reads `%2e` as a dot and `\` as a
 //     slash, and drops a tab), and no subpath import, `#name`, which stands for a module the rules
@@ -28,9 +30,11 @@
 //   - @ui-sdk/* only inside packages/ui, so screens take their controls from @fin/ui; the refused
 //     SDK entries and core's experimental helpers nowhere; @ui-sdk/core/testing in tests only;
 //   - no console.error(error): errors go through reportError with safeError;
-//   - the page policy, in code that runs anywhere (tests and fixtures aside): no
-//     dangerouslySetInnerHTML, innerHTML or other markup parsed from a string, no style attribute
-//     written by script, no eval, Function constructor or string timer (spec 06 §6.2, §11.5);
+//   - the page policy, in code that runs anywhere (tests and fixtures aside): no markup parsed
+//     from a string (React's inner-HTML prop, the DOM's members that parse HTML, document.write),
+//     no style attribute written by script, no eval, Function constructor or string timer (spec 06
+//     §6.2, §11.5), read in the whole text, comments and strings included, as written and with
+//     every escape decoded, so no reading of the code's structure can hide one;
 //   - Node built-ins by their node: name; relative imports with their file extension, .ts or
 //     .tsx where the source is TypeScript.
 // What it guarantees (BD-19). imports:check refuses the imports these rules forbid and, in the
@@ -234,28 +238,36 @@ const EXPORT_DECLARATIONS = new Set([
 ]);
 
 // The page policy's refusals (spec 06 §6.2 and §11.5, FW-C18, AC-UI-01), in code that runs,
-// wherever it is: markup parsed from a string (dangerouslySetInnerHTML, innerHTML and its kin,
-// document.write), a style attribute written by script, and code built from a string (eval, the
-// Function constructor, a string handed to setTimeout or setInterval). The keyword must be code,
-// so a comment may name them; a computed member with a string key is read too. Tests, their
-// helpers and fixtures (files under test/, e2e/ or fixtures/) are left out, since a violation
-// fixture plants one on purpose; Biome's noDangerouslySetInnerHtml still covers their JSX. The
-// sink names are spelt inside strings, and no pattern below reads as a call to what it refuses,
-// so this file passes its own check.
+// wherever it is: markup parsed from a string (React's inner-HTML prop, the DOM's members that
+// parse HTML, document.write), a style attribute written by script, and code built from a string
+// (eval, the Function constructor, a string handed to setTimeout or setInterval). The whole text is
+// read, comments, strings and regular expressions included, as written and again with every
+// escape decoded (unescapeText): a reading of the code's structure can be led to take code for a
+// string or a comment, so the policy trusts none, and a comment that names a sink is refused too.
+// A computed member with a string key is read as well. Tests, their helpers and fixtures (files
+// under test/, e2e/ or fixtures/) are left out, since a violation fixture plants one on purpose,
+// and code that runs imports none of them (above); Biome's noDangerouslySetInnerHtml still covers
+// their JSX. The sink names are built at run time and no pattern below reads as a call to what it
+// refuses, so this file passes its own check.
 const TEST_CODE = /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\//;
-const HTML_SINKS = [
-  "dangerouslySetInnerHTML",
-  "innerHTML",
-  "outerHTML",
-  "insertAdjacentHTML",
-  "createContextualFragment",
-  "setHTMLUnsafe",
-  "parseHTMLUnsafe",
-].join("|");
+// Code that runs imports nothing from those directories, matched in any case as TEST_TARGET is.
+const TEST_CODE_TARGET = new RegExp(TEST_CODE.source, "iu");
+const HTML_SINK_NAMES = [
+  ["dangerously", "Set", "Inner", "HTML"],
+  ["inner", "HTML"],
+  ["outer", "HTML"],
+  ["insertAdjacent", "HTML"],
+  ["createContextual", "Fragment"],
+  ["set", "HTML", "Unsafe"],
+  ["parse", "HTML", "Unsafe"],
+].map((parts) => parts.join(""));
+const HTML_SINKS = HTML_SINK_NAMES.join("|");
+const CODE_FROM_STRING = "no code is built from a string (eval, the Function constructor)";
+/** @type {{ pattern: RegExp, message: string, codeFromString?: boolean }[]} */
 const PAGE_POLICY = [
   {
     pattern: new RegExp(String.raw`(?<![\w$])(?:${HTML_SINKS})(?![\w$])`, "g"),
-    message: "markup is never parsed from a string (dangerouslySetInnerHTML, innerHTML and kin)",
+    message: `markup is never parsed from a string (${HTML_SINK_NAMES.slice(0, 2).join(", ")} and kin)`,
   },
   {
     pattern: /(?<![\w$])document\s*\??\.\s*write(?:ln)?\s*\(/g,
@@ -263,46 +275,34 @@ const PAGE_POLICY = [
   },
   {
     pattern: /(?<![\w$])setAttribute(?:NS)?\s*\(\s*(?:[^,()'"`]*,\s*)?(['"`])style\1/gi,
-    message: 'styles go through the CSSOM (React\'s style prop), never setAttribute("style")',
+    message: "styles go through the CSSOM (React's style prop), never a style attribute",
   },
   {
     pattern: /(?<![\w$])(?:setTimeout|setInterval)\s*\(\s*['"`]/g,
     message: "setTimeout and setInterval take a function, never a string of code",
   },
   {
-    // Where every import must be read, UNREAD_LOADERS refuses these already, comments included.
     pattern: new RegExp(
       [
         String.raw`(?<![\w$.])eval\s*\(`,
         String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*eval\s*\(`,
-        String.raw`(?<![\w$])new\s+Function(?![\w$])`,
-      ].join("|"),
-      "g",
-    ),
-    message: "no code is built from a string (eval, the Function constructor)",
-    refusedWhereAllImportsAreRead: true,
-  },
-  {
-    // Where every load is checked, the name rules refuse Function itself.
-    pattern: new RegExp(
-      [
+        String.raw`(?<![\w$])new\s+Function\b(?!\$)`,
         String.raw`(?<![\w$.])(?<!new\s+)Function\s*\(`,
         String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*Function\s*\(`,
       ].join("|"),
       "g",
     ),
-    message: "no code is built from a string (eval, the Function constructor)",
-    refusedWhereLoadsAreChecked: true,
+    message: CODE_FROM_STRING,
+    codeFromString: true,
   },
   {
     pattern: new RegExp(String.raw`\[\s*(['"\x60])(?:${HTML_SINKS})\1\s*\]`, "g"),
     message: "a refused sink reached by a string key is refused the same",
   },
   {
-    // Where every import must be read, UNREAD_LOADERS refuses these keys already.
     pattern: /\[\s*(['"`])(?:eval|Function)\1\s*\]/g,
     message: "a refused sink reached by a string key is refused the same",
-    refusedWhereAllImportsAreRead: true,
+    codeFromString: true,
   },
 ];
 
@@ -543,31 +543,36 @@ function readIdentifier(text, at) {
 }
 
 /**
- * The text with its `\u`, `\x` and octal escapes decoded (an escaped backslash kept), for the
- * patterns that read the text as written. An escape that stands for a line terminator is kept,
- * so every line keeps its number.
+ * The text with every escape decoded, as a string literal reads it (readEscape): `\u` and `\x`
+ * escapes, legacy octal and one-letter escapes, any other character after a backslash as itself
+ * (`"\H"` is "H"), and a backslash before a line break dropped with the break (a line
+ * continuation); an escaped backslash stays one backslash. It is for the patterns that read the
+ * text as written, so escapes are decoded wherever they stand, a regular expression's or a
+ * comment's included (the patterns fail closed on them). `lineAt` gives, for a character of the
+ * decoded text, the line of the source it comes from.
  * @param {string} text
- * @returns {string}
+ * @returns {{ text: string, lineAt: (index: number) => number }}
  */
-function decodeEscapes(text) {
-  if (!text.includes("\\")) return text;
-  return text.replace(
-    /\\(?:u\{([0-9A-Fa-f]+)\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|([0-7]{1,3})|\\)/g,
-    (match, braced, hex4, hex2, octal) => {
-      const code =
-        braced !== undefined
-          ? Number.parseInt(braced, 16)
-          : hex4 !== undefined
-            ? Number.parseInt(hex4, 16)
-            : hex2 !== undefined
-              ? Number.parseInt(hex2, 16)
-              : octal !== undefined
-                ? Number.parseInt(octal, 8)
-                : -1;
-      if (code < 0 || code > 0x10ffff || [0x0a, 0x0d, 0x2028, 0x2029].includes(code)) return match;
-      return String.fromCodePoint(code);
-    },
-  );
+export function unescapeText(text) {
+  const sourceLine = lineFinder(text);
+  if (!text.includes("\\")) return { text, lineAt: sourceLine };
+  let out = "";
+  /** @type {number[]} */
+  const origin = []; // for each UTF-16 unit of `out`, where in `text` it comes from
+  let i = 0;
+  while (i < text.length) {
+    const slash = text.indexOf("\\", i);
+    const stop = slash < 0 ? text.length : slash;
+    for (let k = i; k < stop; k++) origin.push(k);
+    out += text.slice(i, stop);
+    if (slash < 0) break;
+    const sequence = readEscape(text, slash, false);
+    const value = sequence === undefined ? "\\" : sequence.value;
+    for (let k = 0; k < value.length; k++) origin.push(slash);
+    out += value;
+    i = sequence === undefined ? slash + 1 : sequence.end;
+  }
+  return { text: out, lineAt: (index) => sourceLine(origin[index] ?? text.length) };
 }
 
 // --- The lexer ------------------------------------------------------------------------------------
@@ -589,6 +594,7 @@ const REGEX_AFTER_WORDS = new Set([
   "yield",
   "await",
   "extends",
+  "default", // export default /x/
 ]);
 // After these words a `{` opens an object; after any other name it opens a block.
 const OBJECT_AFTER_WORDS = new Set([
@@ -604,6 +610,7 @@ const OBJECT_AFTER_WORDS = new Set([
   "case",
   "yield",
   "await",
+  "default", // export default { ... }
 ]);
 const PAREN_KEYWORDS = new Set(["if", "while", "for", "with"]);
 
@@ -1080,6 +1087,16 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     isTest ? lexed.mask : undefined,
   );
   const lineAt = lineFinder(text);
+  // The text as written, and with its escapes decoded, for the rules that read the whole text.
+  const unescaped = unescapeText(text);
+  /** @type {[string, (index: number) => number][]} */
+  const views =
+    unescaped.text === text
+      ? [[text, lineAt]]
+      : [
+          [text, lineAt],
+          [unescaped.text, unescaped.lineAt],
+        ];
 
   for (const { line, loader } of dynamicExpressions) {
     if (mustReadAll || loader === GET_BUILTIN) {
@@ -1093,8 +1110,7 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
   if (mustReadAll && !isTest) {
     /** @type {Set<number>} */
     const lines = new Set();
-    for (const view of new Set([text, decodeEscapes(text)])) {
-      const viewLineAt = view === text ? lineAt : lineFinder(view);
+    for (const [view, viewLineAt] of views) {
       for (const match of view.matchAll(UNREAD_LOADERS)) lines.add(viewLineAt(match.index));
     }
     for (const line of [...lines].sort((a, b) => a - b)) {
@@ -1230,6 +1246,16 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
         "test-file-import",
         "code that runs imports no test file: a test's own imports are not held to these rules",
       );
+    } else if (
+      !isTest &&
+      !TEST_CODE.test(file) &&
+      targets.some((t) => TEST_CODE_TARGET.test(`${t}/`))
+    ) {
+      add(
+        line,
+        "test-file-import",
+        "code that runs imports nothing under test/, e2e/ or fixtures/, which the page policy leaves out",
+      );
     }
     const testRunner = isTest && name === "vitest";
     if (relativeOnly && !relative) {
@@ -1298,16 +1324,24 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
   }
 
   if (!isTest && !TEST_CODE.test(file)) {
-    const mask = lexed.mask;
-    for (const policy of PAGE_POLICY) {
-      const { pattern, message, refusedWhereAllImportsAreRead, refusedWhereLoadsAreChecked } =
-        policy;
-      if (refusedWhereAllImportsAreRead === true && mustReadAll) continue;
-      if (refusedWhereLoadsAreChecked === true && loadsChecked) continue;
-      for (const match of text.matchAll(pattern)) {
-        if (mask[match.index] !== 1) continue;
-        add(lineAt(match.index), "page-policy", `${message} (spec 06 §6.2, FW-C18)`);
+    // A line the loader rules refused already for eval or the Function constructor is not
+    // reported twice.
+    const refusedLines = new Set(
+      findings.filter((f) => f.rule === "dynamic-import").map((f) => f.line),
+    );
+    /** @type {Map<string, { line: number, message: string }>} */
+    const found = new Map();
+    for (const [view, viewLineAt] of views) {
+      for (const { pattern, message, codeFromString } of PAGE_POLICY) {
+        for (const match of view.matchAll(pattern)) {
+          const line = viewLineAt(match.index);
+          if (codeFromString === true && refusedLines.has(line)) continue;
+          found.set(`${line}|${message}`, { line, message });
+        }
       }
+    }
+    for (const { line, message } of [...found.values()].sort((a, b) => a.line - b.line)) {
+      add(line, "page-policy", `${message} (spec 06 §6.2, FW-C18)`);
     }
   }
 

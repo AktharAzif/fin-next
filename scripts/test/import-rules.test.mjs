@@ -515,11 +515,18 @@ describe("imports:check", () => {
     }
   });
 
-  test("the page policy reads code only, and leaves tests, their helpers and fixtures alone", () => {
+  test("the page policy reads the whole text, and leaves tests, their helpers and fixtures alone", () => {
+    // A comment or a string that names a sink is refused too: no reading of the code's structure
+    // decides what the policy sees.
     for (const line of [
       "// rendered with createElement, never through markup strings or innerHTML",
       "/* eval(x), new Function(y) and setTimeout('z') are refused */",
       'const word = "innerHTML";',
+      "const re = /el\\.innerHTML/;",
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+    }
+    for (const line of [
       "el.textContent = text;",
       "el.style.setProperty('color', 'red');",
       "el.setAttribute('data-style', 'x');",
@@ -543,6 +550,111 @@ describe("imports:check", () => {
     ]) {
       assert.deepEqual(checkSource(file, violations), [], file);
     }
+  });
+
+  test("a regular expression, JSX text or an HTML-like comment before a sink hides nothing", () => {
+    const BT = "`";
+    // Each opens what a reader of the code's structure could take for a string, a template or a
+    // comment running past the line, though JavaScript reads it otherwise.
+    const openers = [
+      `const TICK = /${BT}/g;`,
+      "const QUOTE = /'/;",
+      'const DOUBLE = /"/;',
+      `const SLASH_STAR = /${BS}/*/;`,
+      `const CLASS = /[${BT}'"]/;`,
+      `export default /${BT}/;`,
+      `const text = <p>a ${BT} b</p>;`,
+      "const text = <p>It's /* here</p>;",
+      `const attr = <p title="a${BS}">x</p>;`,
+      `x = 1 <!-- ${BT}`,
+    ];
+    const violations = [
+      "el.innerHTML = s;",
+      'el.setAttribute("style", "color: red");',
+      "document.write(s);",
+      'setTimeout("tick()", 1);',
+      'const f = Function("return 1");',
+      'el["outerHTML"] = s;',
+    ];
+    for (const opener of openers) {
+      for (const file of ["packages/ui/src/code-span.tsx", "apps/console/src/client/re.tsx"]) {
+        const text = src(opener, ...violations, `const closing = /${BT}/;`);
+        const lines = checkSource(file, text)
+          .filter((f) => f.rule === "page-policy")
+          .map((f) => f.line);
+        assert.deepEqual([...new Set(lines)], [2, 3, 4, 5, 6, 7], `${file}: ${opener}`);
+      }
+    }
+    // A test file's fixtures are skipped, but a regular expression is not a string or a comment.
+    const imports = [`${IMP} clsx from "clsx";`, `${IMP} { createServer } from "node:http";`];
+    for (const opener of openers.slice(0, 6)) {
+      assert.deepEqual(
+        rules(checkSource("packages/ui/src/q.test.ts", src(opener, ...imports))),
+        ["client-node", "node-network", "refused-package"],
+        opener,
+      );
+    }
+  });
+
+  test("an escape in a name or a string hides no sink", () => {
+    for (const line of [
+      `el.inner${BS}u0048TML = s;`,
+      `el.inner${BS}u{48}TML = s;`,
+      `el["inner${BS}x48TML"] = s;`,
+      `el["inner${BS}HTML"] = s;`,
+      `el["inner${BS}110TML"] = s;`,
+      `el["inner${BS}\nHTML"] = s;`,
+      `el.setAttribute("st${BS}yle", css);`,
+      `docu${BS}u006dent.write(s);`,
+      `set${BS}u0054imeout("tick()", 1);`,
+      `const f = Fun${BS}u0063tion("return 1");`,
+      `window["ev${BS}al"]("1");`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      const client = checkSource("apps/console/src/client/a.ts", src("const a = 1;", line));
+      assert.ok(
+        client.some((f) => f.line === 2 && /page-policy|dynamic-import/.test(f.rule)),
+        line,
+      );
+    }
+    // The decoded text keeps every line's number, a line continuation's too.
+    const findings = checkSource(
+      "apps/api/src/a.ts",
+      src("const a = 1;", `el["inner${BS}`, `HTML"] = s;`, `el.inner${BS}u0048TML = s;`),
+    );
+    assert.deepEqual([...new Set(findings.map((f) => f.line))], [2, 4]);
+    assert.deepEqual(rules(findings), ["page-policy"]);
+  });
+
+  test("code that runs imports no test file and nothing under a test directory", () => {
+    for (const specifier of [
+      "./fixtures/markup.ts",
+      "../test/helpers.ts",
+      "./e2e/page.ts",
+      "./__tests__/x.ts",
+      "../tests/x.ts",
+      "./Fixtures/markup.ts",
+      "./TEST/helpers.ts",
+      "./x.TEST.ts",
+      "./x.Spec.tsx",
+    ]) {
+      assert.deepEqual(
+        rules(checkSource("apps/console/src/client/a.ts", imp(specifier))),
+        ["test-file-import"],
+        specifier,
+      );
+      assert.deepEqual(
+        rules(checkSource("apps/api/src/a.ts", imp(specifier))),
+        ["test-file-import"],
+        specifier,
+      );
+    }
+    // Tests, their helpers and fixtures may import one another; a package named test is no path.
+    assert.deepEqual(checkSource("packages/ui/test/helpers.ts", imp("./fixtures/a.ts")), []);
+    assert.deepEqual(checkSource("packages/ui/src/a.test.ts", imp("../test/helpers.ts")), []);
+    assert.deepEqual(checkSource("playwright.config.ts", imp("@playwright/test")), []);
+    assert.deepEqual(checkSource("apps/console/src/client/a.ts", imp("./testing.ts")), []);
+    assert.deepEqual(checkSource("apps/console/src/client/a.ts", imp("./latest/x.ts")), []);
   });
 
   test("a long export with comments and no `from` is read in linear time", {

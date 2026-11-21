@@ -1,4 +1,4 @@
-// Artwork as element data: rendered with createElement, never through markup strings or innerHTML
+// Artwork as element data: rendered with createElement, never from markup strings parsed as HTML
 // (the page policy and the lint rules refuse both).
 import { createElement, type ReactNode } from "react";
 
