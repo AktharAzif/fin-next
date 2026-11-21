@@ -49,8 +49,13 @@ Under `pool` exactly `ANTHROPIC_BASE_URL` (http or https to `127.0.0.1`, `[::1]`
 an explicit port, no path beyond `/`), `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (an existing
 folder that does not hold `$FIN_REVIEW_HOME`) are accepted, checked by the transport and passed into
 every session in place of the login (`CLAUDE_CODE_OAUTH_TOKEN` is then refused, so there is one
-credential); every other variable is refused as under `direct`, and the modelUsage check after each
-session still decides which model ran. An invalid transport exits 78 (`transport_refused`), naming
+credential); every other variable is refused as under `direct`. Sessions print Claude Code's stream
+(`--output-format stream-json --verbose`), and after each one the client's init line, `modelUsage`
+(keyed by the model the client asked for) and every assistant message's `message.model` (the model
+the forwarder's response names) must all name only the requested ID: a forwarder that maps, pools or
+falls back to another model and reports it fails the session as `model_mismatch`. The check covers
+the client and an honest forwarder only; a forwarder that names the requested model while serving
+another is trusted for it. An invalid transport exits 78 (`transport_refused`), naming
 the variable and never its value. Every run records `transport` in `plan.json`, `state.json` and
 `result.json`. A Claude Code session sets many other `CLAUDE*` variables (its effort among them),
 so start the engine from an environment that holds only what it needs, the token read from a file

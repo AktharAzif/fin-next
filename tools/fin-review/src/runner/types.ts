@@ -49,7 +49,7 @@ export interface SessionResult {
   readonly failureDetail?: string;
   /** The structured output, unvalidated; absent for a model mismatch (its output is discarded). */
   readonly output?: unknown;
-  /** The keys of modelUsage, across every attempt. */
+  /** The keys of modelUsage and the models the assistant messages name (not `<synthetic>`), across every attempt. */
   readonly modelObserved: string[];
   readonly effortObserved: Effort | null;
   readonly costMicroUsd: number;

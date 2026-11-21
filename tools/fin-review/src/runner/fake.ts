@@ -6,15 +6,22 @@
 import type { Clock } from "../clock.ts";
 import type { RunOutcome } from "../exec.ts";
 import { API_HOST } from "./cli.ts";
-import { runWithRetries } from "./check.ts";
+import { SYNTHETIC_MODEL, runWithRetries } from "./check.ts";
 import type { OutputCheck, SessionResult, SessionRunner, SessionSpec } from "./types.ts";
 
 export interface FakeResult {
   readonly kind: "result";
   /** The structured output; omit for none. */
   readonly output?: unknown;
-  /** modelUsage's keys; default: the requested model only. */
+  /** modelUsage's keys (the models the client asked for); default: the requested model only. */
   readonly models?: readonly string[];
+  /**
+   * The model each assistant message names (what the endpoint said served it); default: the
+   * requested model, or the client's own `<synthetic>` message for an error.
+   */
+  readonly served?: readonly string[];
+  /** The model the client's init line names; default: the requested model. */
+  readonly initModel?: string;
   readonly isError?: boolean;
   readonly subtype?: string;
   readonly stopReason?: string;
@@ -37,8 +44,24 @@ export interface FakeCall {
   readonly attempt: number;
 }
 
-/** Claude Code's JSON result for a scripted reply (the field names recorded from 2.1.328). */
-export function fakeResultJson(spec: SessionSpec, reply: FakeResult): string {
+/**
+ * Claude Code's stream-json output for a scripted reply, as 2.1.328 prints it: the init line, one
+ * assistant message per served model, and the result last (the field names recorded from 2.1.328).
+ */
+export function fakeSessionStream(spec: SessionSpec, reply: FakeResult): string {
+  const served = reply.served ?? [reply.isError === true ? SYNTHETIC_MODEL : spec.modelId];
+  const init = { type: "system", subtype: "init", model: reply.initModel ?? spec.modelId, session_id: "00000000-0000-4000-8000-000000000000", uuid: "00000000-0000-4000-8000-000000000002" };
+  const messages = served.map((model, index) => ({
+    type: "assistant",
+    message: { id: `msg_fake_${index}`, type: "message", role: "assistant", model, content: [], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
+    parent_tool_use_id: null,
+    session_id: "00000000-0000-4000-8000-000000000000",
+  }));
+  return [init, ...messages].map((line) => `${JSON.stringify(line)}\n`).join("") + fakeResultLine(spec, reply);
+}
+
+/** The result line alone (the last line of the stream). */
+function fakeResultLine(spec: SessionSpec, reply: FakeResult): string {
   const models = reply.models ?? [spec.modelId];
   const cost = reply.costUsd ?? 0.01;
   const modelUsage: Record<string, unknown> = {};
@@ -81,7 +104,7 @@ function toOutcome(spec: SessionSpec, reply: FakeReply): RunOutcome {
         kind: "exited",
         code: reply.exitCode ?? (reply.isError === true ? 1 : 0),
         signal: null,
-        stdout: Buffer.from(fakeResultJson(spec, reply), "utf8"),
+        stdout: Buffer.from(fakeSessionStream(spec, reply), "utf8"),
         stderr: Buffer.alloc(0),
       };
     default: {

@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import type { RunOutcome } from "../src/exec.ts";
 import { loadCommittedModels } from "../src/options.ts";
 import { THROTTLE_WAITS_MS, checkAttempt, runWithRetries } from "../src/runner/check.ts";
-import { FakeRunner, fakeResultJson } from "../src/runner/fake.ts";
+import { FakeRunner, fakeSessionStream } from "../src/runner/fake.ts";
 import type { FakeReply } from "../src/runner/fake.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
 import { fakeClock } from "./helpers/review-fixture.ts";
@@ -32,7 +32,7 @@ function exited(stdout: string, code = 0, stderr = ""): RunOutcome {
 
 function result(reply: Partial<Extract<FakeReply, { kind: "result" }>> = {}): RunOutcome {
   const full = { kind: "result" as const, output: { answer: "ready" }, ...reply };
-  return exited(fakeResultJson(SPEC, full), full.exitCode ?? (full.isError === true ? 1 : 0));
+  return exited(fakeSessionStream(SPEC, full), full.exitCode ?? (full.isError === true ? 1 : 0));
 }
 
 describe("checkAttempt (spec 07 §4.5)", () => {
@@ -55,6 +55,54 @@ describe("checkAttempt (spec 07 §4.5)", () => {
 
   it("an empty modelUsage on an otherwise good result is model_mismatch: the model is not proven", () => {
     assert.equal(checkAttempt(SPEC, result({ models: [] })).failure, "model_mismatch");
+  });
+
+  it("an assistant message naming another model is model_mismatch though modelUsage names only the requested one (a forwarder serving another model)", () => {
+    // The shape Claude Code 2.1.328 printed against a stand-in forwarder that answered every request
+    // as another model: the init line and modelUsage name the requested model, the message does not.
+    const stream = [
+      { type: "system", subtype: "init", model: MODELS.opus, session_id: "s" },
+      { type: "assistant", message: { id: "m", type: "message", role: "assistant", model: "claude-haiku-4-5", content: [] }, parent_tool_use_id: null, session_id: "s" },
+      { type: "user", message: { role: "user", content: [] }, parent_tool_use_id: null, session_id: "s" },
+      { type: "result", subtype: "success", is_error: false, result: "", modelUsage: { [MODELS.opus]: {} }, total_cost_usd: 0.01, structured_output: { answer: "ready" } },
+    ];
+    const check = checkAttempt(SPEC, exited(stream.map((line) => JSON.stringify(line)).join("\n")));
+    assert.equal(check.failure, "model_mismatch");
+    assert.match(check.detail, /an assistant message names claude-haiku-4-5, not /);
+    assert.deepEqual(check.modelObserved, ["claude-haiku-4-5", MODELS.opus].sort());
+    assert.equal(check.output, undefined, "a mismatch discards the output");
+    // Any one message of several, an error included, and a message that names no model at all.
+    assert.equal(checkAttempt(SPEC, result({ served: [MODELS.opus, MODELS.fable] })).failure, "model_mismatch");
+    assert.equal(checkAttempt(SPEC, result({ served: [MODELS.fable], isError: true, resultText: "boom" })).failure, "model_mismatch");
+    assert.equal(checkAttempt(SPEC, result({ served: [""] })).failure, "model_mismatch");
+    // A client that started on another model, whatever it was served.
+    assert.match(checkAttempt(SPEC, result({ initModel: MODELS.fable })).detail, /the client started on /);
+  });
+
+  it("a session that succeeded holds an assistant message naming the model; the client's own <synthetic> messages name none", () => {
+    assert.match(checkAttempt(SPEC, result({ served: [] })).detail, /no assistant message names the model/);
+    assert.equal(checkAttempt(SPEC, result({ served: ["<synthetic>"] })).failure, "model_mismatch");
+    assert.equal(checkAttempt(SPEC, result({ served: ["<synthetic>", MODELS.opus] })).ok, true);
+    // An API error is the client's own message: throttling stays throttling, not a mismatch.
+    const throttled = checkAttempt(SPEC, result({ isError: true, apiErrorStatus: 429, resultText: "API Error: 429 rate limited", models: [], output: undefined }));
+    assert.equal(throttled.failure, "throttled");
+  });
+
+  it("reads only a well-formed stream: one JSON object a line, and one result, last", () => {
+    const good = fakeSessionStream(SPEC, { kind: "result", output: { answer: "ready" } });
+    assert.equal(checkAttempt(SPEC, exited(good)).ok, true);
+    const lines = good.trimEnd().split("\n");
+    for (const bad of [
+      [...lines, lines[0] ?? ""].join("\n"),
+      [lines[lines.length - 1] ?? "", ...lines].join("\n"),
+      ["not json", ...lines].join("\n"),
+      ['"a string"', ...lines].join("\n"),
+      lines.slice(0, -1).join("\n"),
+    ]) {
+      const check = checkAttempt(SPEC, exited(bad));
+      assert.equal(check.failure, "exit", bad.slice(0, 80));
+      assert.match(check.detail, /no stream with a result/);
+    }
   });
 
   it("refuses a result whose modelUsage appears twice (the strict parser), as an exit failure", () => {
@@ -140,11 +188,16 @@ describe("runWithRetries (spec 07 §4.6, T-RV-11)", () => {
   });
 
   it("a model mismatch is never retried (T-RV-10), and neither is a budget stop", async () => {
-    const mismatch = await run([{ kind: "result", output: { answer: "ready" }, models: [MODELS.fable] }, ok]);
+    const mismatch = await run([{ kind: "result", output: { answer: "ready" }, models: [MODELS.fable], served: [MODELS.fable] }, ok]);
     assert.equal(mismatch.attempts, 1);
     assert.equal(mismatch.out.failure, "model_mismatch");
     assert.equal(mismatch.out.output, undefined);
     assert.deepEqual(mismatch.out.modelObserved, [MODELS.fable]);
+    // Served by another model with modelUsage naming the requested one: never retried either.
+    const served = await run([{ kind: "result", output: { answer: "ready" }, served: [MODELS.fable] }, ok]);
+    assert.equal(served.attempts, 1);
+    assert.equal(served.out.failure, "model_mismatch");
+    assert.deepEqual(served.out.modelObserved, [MODELS.fable, MODELS.opus].sort());
     const budget = await run([{ kind: "result", subtype: "error_max_budget_usd", isError: true }, ok]);
     assert.equal(budget.attempts, 1);
     assert.equal(budget.out.failure, "budget");

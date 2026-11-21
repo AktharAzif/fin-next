@@ -1,11 +1,23 @@
 // The checks after every session (spec 07 §4.5) and the retries (§4.6), shared by every runner.
 //
-// After each attempt, in order: the model check first, because a session served by another model
-// is never accepted and never retried whatever else went wrong; then the process exited 0 and
-// printed Claude Code's JSON result, which is not an error; then structured_output is present and
+// A session prints Claude Code's stream (`--output-format stream-json --verbose`): one JSON object
+// a line, the client's `system` init first, then every `assistant` and `user` message, and one
+// `result` last. After each attempt, in order: the model check first, because a session served by
+// another model is never accepted and never retried whatever else went wrong; then the process
+// exited 0 and printed the result, which is not an error; then structured_output is present and
 // matches the session's schema and the caller's own checks. Throttling (HTTP 429 or 529) is retried
 // up to four attempts with waits of 15, 60 and 180 seconds; any other failure but a budget stop is
 // retried once; never another model, never a lower effort, never --fallback-model.
+//
+// The model check reads two things. `modelUsage` in the result is keyed by the model the client
+// asked for, so it shows the client side: a configuration, flag or fallback that made the client
+// ask for another model. Each assistant message's `message.model` is what the endpoint that served
+// it named (Claude Code 2.1.328 copies the response's `model` there), so it shows the serving side:
+// under the pool transport, a forwarder that maps, pools or falls back to another model and says
+// so. Both must name only the requested ID, and a session that succeeded must hold at least one
+// assistant message naming it. Messages the client writes itself carry the model `<synthetic>` (an
+// API error, for one) and name no served model. What no check here can see is a forwarder that
+// names the requested model while serving another: under pool the forwarder is trusted for that.
 
 import type { Clock } from "../clock.ts";
 import type { RunOutcome } from "../exec.ts";
@@ -60,6 +72,58 @@ function failed(failure: SessionFailure, detail: string, rest: Partial<AttemptCh
 
 const POLICY_RE = /\bpolic(?:y|ies)\b|\brefus/i;
 const THROTTLE_TEXT_RE = /^API Error: (?:429|529)\b|rate_limit_error|overloaded_error/;
+/** The model Claude Code gives the assistant messages it writes itself (an API error, for one). */
+export const SYNTHETIC_MODEL = "<synthetic>";
+
+/** What a session's stream holds: the result, and the models the client asked for and was served. */
+export interface SessionStream {
+  readonly result: Record<string, unknown>;
+  /** The model the client's init line says it uses; null when the stream has no init line. */
+  readonly initModel: string | null;
+  /** The model each assistant message names, in order (SYNTHETIC_MODEL for the client's own; "" for none). */
+  readonly messageModels: readonly string[];
+}
+
+/**
+ * Reads Claude Code's stream-json output: every non-empty line one JSON object with a string
+ * `type`, exactly one `result`, and that the last line. Anything else is not a session's output.
+ */
+export function parseSessionStream(stdout: Buffer): { ok: true; value: SessionStream } | { ok: false; error: string } {
+  const lines = stdout
+    .toString("utf8")
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() !== "");
+  if (lines.length === 0) return { ok: false, error: "no output" };
+  let result: Record<string, unknown> | null = null;
+  let initModel: string | null = null;
+  const messageModels: string[] = [];
+  for (const [index, line] of lines.entries()) {
+    const parsed = parseJsonBytes(Buffer.from(line, "utf8"));
+    if (!parsed.ok) return { ok: false, error: `line ${index + 1}: ${parsed.error}` };
+    const value = parsed.value;
+    if (!isJsonObject(value) || typeof value["type"] !== "string") return { ok: false, error: `line ${index + 1} is not a typed message` };
+    switch (value["type"]) {
+      case "result":
+        if (result !== null || index !== lines.length - 1) return { ok: false, error: "the result is not the one last line" };
+        result = value;
+        break;
+      case "assistant": {
+        const message = value["message"];
+        const model = isJsonObject(message) ? message["model"] : undefined;
+        messageModels.push(typeof model === "string" ? model : "");
+        break;
+      }
+      case "system":
+        if (value["subtype"] === "init") initModel = typeof value["model"] === "string" ? value["model"] : "";
+        break;
+      default:
+        break;
+    }
+  }
+  if (result === null) return { ok: false, error: "no result" };
+  return { ok: true, value: { result, initModel, messageModels } };
+}
 
 /** Checks one attempt's outcome against `spec` (spec 07 §4.5). Pure. */
 export function checkAttempt(spec: SessionSpec, outcome: RunOutcome, accept?: OutputCheck): AttemptCheck {
@@ -80,16 +144,18 @@ export function checkAttempt(spec: SessionSpec, outcome: RunOutcome, accept?: Ou
     }
   }
   const exitText = outcome.code === null ? `signal ${outcome.signal ?? "?"}` : `exit ${outcome.code}`;
-  const parsed = parseJsonBytes(outcome.stdout);
-  if (!parsed.ok || !isJsonObject(parsed.value) || parsed.value["type"] !== "result") {
+  const parsed = parseSessionStream(outcome.stdout);
+  if (!parsed.ok) {
     const stderr = short(outcome.stderr.toString("utf8"));
-    return failed("exit", `${exitText}: no JSON result${parsed.ok ? "" : ` (${parsed.error})`}${stderr === "" ? "" : `; stderr: ${stderr}`}`);
+    return failed("exit", `${exitText}: no stream with a result (${short(parsed.error)})${stderr === "" ? "" : `; stderr: ${stderr}`}`);
   }
-  const result = parsed.value;
+  const { result, initModel, messageModels } = parsed.value;
   const resultFields = Object.keys(result).sort();
   const usage = isJsonObject(result["usage"]) ? result["usage"] : {};
   const modelUsage = result["modelUsage"];
-  const modelObserved = isJsonObject(modelUsage) ? Object.keys(modelUsage).sort() : [];
+  const usageModels = isJsonObject(modelUsage) ? Object.keys(modelUsage) : [];
+  const servedModels = messageModels.filter((id) => id !== SYNTHETIC_MODEL);
+  const modelObserved = [...new Set([...usageModels, ...servedModels.map((id) => (id === "" ? "(no model)" : id))])].sort();
   const cost = result["total_cost_usd"];
   const base = {
     modelObserved,
@@ -100,10 +166,18 @@ export function checkAttempt(spec: SessionSpec, outcome: RunOutcome, accept?: Ou
     resultFields,
   };
 
-  // §4.5 rule 3 first: any model but the requested one is a mismatch, whatever else happened.
-  const foreign = modelObserved.filter((id) => id !== spec.modelId);
-  if (foreign.length > 0) {
-    return failed("model_mismatch", `modelUsage names ${foreign.map((id) => short(id)).join(", ")}, not only ${spec.modelId}`, base);
+  // §4.5 rule 3 first: any model but the requested one is a mismatch, whatever else happened:
+  // the one the client says it uses, the ones it asked for, and the ones that served it.
+  if (initModel !== null && initModel !== spec.modelId) {
+    return failed("model_mismatch", `the client started on ${short(initModel === "" ? "(no model)" : initModel)}, not ${spec.modelId}`, base);
+  }
+  const foreignUsage = [...new Set(usageModels.filter((id) => id !== spec.modelId))].sort();
+  if (foreignUsage.length > 0) {
+    return failed("model_mismatch", `modelUsage names ${foreignUsage.map((id) => short(id)).join(", ")}, not only ${spec.modelId}`, base);
+  }
+  const foreignServed = [...new Set(servedModels.filter((id) => id !== spec.modelId))].sort();
+  if (foreignServed.length > 0) {
+    return failed("model_mismatch", `an assistant message names ${foreignServed.map((id) => short(id === "" ? "(no model)" : id)).join(", ")}, not ${spec.modelId}`, base);
   }
   const isError = result["is_error"] === true;
   const subtype = typeof result["subtype"] === "string" ? result["subtype"] : "";
@@ -123,7 +197,8 @@ export function checkAttempt(spec: SessionSpec, outcome: RunOutcome, accept?: Ou
   if (!Object.hasOwn(result, "structured_output") || result["structured_output"] === null) {
     return failed("refusal", "no structured_output (the request was declined)", base);
   }
-  if (modelObserved.length === 0) return failed("model_mismatch", "modelUsage names no model", base);
+  if (usageModels.length === 0) return failed("model_mismatch", "modelUsage names no model", base);
+  if (servedModels.length === 0) return failed("model_mismatch", "no assistant message names the model that served it", base);
   const output = result["structured_output"];
   const schemaErrors = compileSchema(spec.schema)(output);
   if (schemaErrors.length > 0) return failed("schema", `output does not match its schema: ${describeErrors(schemaErrors)}`, { ...base, output });

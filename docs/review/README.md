@@ -35,8 +35,12 @@ machine where Claude Code reaches Claude through a local pool forwarder: with
 `ANTHROPIC_BASE_URL` (http or https to `127.0.0.1`, `[::1]` or `localhost`, an explicit port, no
 path beyond `/`), `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CONFIG_DIR` are accepted and passed into each
 session in place of the login; every other model, effort, provider and credential variable is still
-refused, the modelUsage check still decides which model ran, and every record says
-`transport: "pool"` (`"direct"` otherwise). `tools/fin-review/README.md` shows how to start it.
+refused, and every record says `transport: "pool"` (`"direct"` otherwise). The model check after
+each session (below, under the locked session) reads both sides: what the client asked for
+(`modelUsage`, keyed by the requested model) and what the forwarder says served it (each assistant
+message's `message.model`); a forwarder that serves another model and reports it fails the session.
+It covers the client and an honest forwarder only: under pool the forwarder is trusted for the model
+it reports. `tools/fin-review/README.md` shows how to start it.
 
 Run it from a clean checkout of the default branch: a pull request is never judged by its own
 procedure (spec 07 §0.3). A gating `pr` or `commit` is refused (exit 78, `engine_not_default`)
@@ -226,7 +230,7 @@ doctor's D2 re-checks on every run:
 | `-p` | yes | `-p` |
 | `--model <modelId>` | yes | the exact model ID |
 | `--effort <effort>` | yes | `high`, `xhigh` or `max` |
-| `--output-format json` | yes | yes |
+| `--output-format json` | yes | **`stream-json` instead**, with `--verbose` (which 2.1.328 requires for it, and documents): the stream holds every assistant message with the model that served it, which the single JSON result does not (the model check, below) |
 | `--json-schema <schema>` | yes | the schema without its top-level `$schema` and `$id` (below) |
 | `--settings <file>` | yes | `runs/<run-id>/sessions/<id>/settings.json`, written fresh |
 | `--setting-sources ""` | yes | yes: no user, project or local settings |
@@ -241,6 +245,19 @@ doctor's D2 re-checks on every run:
 | `--no-session-persistence` | yes | yes |
 | `--exclude-dynamic-system-prompt-sections` | yes | yes |
 | `--append-system-prompt-file <file>` | **no** | **replaced by `--append-system-prompt`** with the text of `prompts/system.md` (the parser accepts the file form, but it is not documented) |
+
+**The model check** (§4.5 rule 3), first after every attempt and never retried: the stream must be
+one JSON object a line with one `result`, last; the client's init line, the result's `modelUsage`
+and every assistant message's `message.model` must name only the requested model ID, and a session
+that succeeded must hold at least one assistant message naming it. `modelUsage` alone cannot show
+which model served a session: 2.1.328 keys it by the model the client asked for, so it covers the
+client side (a setting, flag or fallback that changed the request). `message.model` is the model the
+endpoint's response names: on 21 Nov 2026, with 2.1.328 and a stand-in forwarder on loopback that
+answered every request as another model, `modelUsage` named only the requested model while the
+assistant message named the other one. Messages the client writes itself (an API error, for one)
+carry the model `<synthetic>` and name no served model. Under the pool transport this catches a
+forwarder that maps, pools or falls back to another model and says so; one that names the requested
+model while serving another is trusted for it.
 
 `--json-schema`: 2.1.328 refuses a schema whose `$schema` names the 2020-12 meta-schema ("no schema
 with key or ref"; found by `doctor --live` on 21 Nov 2026). The committed schemas keep their
@@ -329,7 +346,8 @@ sessions on the build machine, as today's merge gate.
 ## The doctor
 
 `doctor` runs D1 (the version of the file `claudePath` names equals the pin), D2 (every runner flag
-and the doctor's own `--debug-file` is in `--help`, and the CLI accepts every schema; the schemas are
+(`--verbose` among them) and the doctor's own `--debug-file` is in `--help`, so is the output format
+`"stream-json"`, and the CLI accepts every schema; the schemas are
 not probed while a settings or configuration source is refused), D3 (no settings or configuration
 source a session could read sets a refused key, as above; then the pinned client, started with the
 locked argument list, the session environment of the transport and an empty stdin, so it stops
@@ -338,7 +356,8 @@ configuration or its user settings (`globalEnv keys` and `settingsEnv keys` empt
 settings are recorded as unknown), D4 (the transport, and no refused variable in the engine's
 environment; the doctor reports it here instead of being refused at the start) and, with `--live`,
 D5: one locked session per model through the transport at effort `high` with a 0.50 USD budget,
-asked "Reply with the word ready.", whose `modelUsage` must name only that model ID. D5 never starts
+asked "Reply with the word ready.", which must pass the model check above (its init line,
+`modelUsage` and every assistant message name only that model ID). D5 never starts
 when another check failed. It writes `$FIN_REVIEW_HOME/state/doctor.json` (with `transport`) and
 exits 0 when every check it ran passed, else 78.
 

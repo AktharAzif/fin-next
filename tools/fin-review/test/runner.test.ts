@@ -63,7 +63,8 @@ describe("the argument list (T-RV-07, T-RV-08)", () => {
       "--effort",
       "xhigh",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
       "--json-schema",
       JSON.stringify(SCHEMA),
       "--settings",
@@ -259,8 +260,10 @@ describe("the CLI runner with a fake claude (T-RV-09)", () => {
     claudePath = join(userHome, "bin", "claude");
     mkdirSync(join(userHome, "bin"), { recursive: true });
     // A fake `claude`: records its argv, stdin, cwd and environment names, then answers as
-    // Claude Code does: a JSON result whose modelUsage names the --model it was given. With
-    // SLEEP set in the prompt it hangs, for the timeout path.
+    // Claude Code 2.1.328 does with --output-format stream-json --verbose: its init line, an
+    // assistant message naming the model that served it, and a result whose modelUsage names the
+    // --model it was given. With SLEEP in the prompt it hangs, for the timeout path; with MISMATCH
+    // modelUsage names a second model; with SERVED the assistant message names another model.
     writeFileSync(
       claudePath,
       `#!${process.execPath}
@@ -274,6 +277,8 @@ process.stdin.on("end", () => {
   previous.push({ args, input, cwd: process.cwd(), env: Object.keys(process.env).sort(), tmpExists: fs.existsSync(process.env.TMPDIR) });
   fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify(previous));
   if (input.includes("SLEEP")) { setTimeout(() => {}, 60000); return; }
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", model }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "assistant", message: { type: "message", role: "assistant", model: input.includes("SERVED") ? "claude-haiku-9-9" : model, content: [] }, parent_tool_use_id: null }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "", stop_reason: "end_turn", total_cost_usd: 0.25,
     usage: { input_tokens: 3, cache_creation_input_tokens: 4, cache_read_input_tokens: 5, output_tokens: 6 },
     modelUsage: input.includes("MISMATCH") ? { [model]: { inputTokens: 3, outputTokens: 6 }, "claude-haiku-9-9": { inputTokens: 1, outputTokens: 1 } } : { [model]: { inputTokens: 3, outputTokens: 6 } },
@@ -373,6 +378,26 @@ process.stdin.on("end", () => {
     assert.equal(result.failure, "model_mismatch");
     assert.equal(result.attempts, 1, "a mismatch is never retried");
     assert.deepEqual([...result.modelObserved].sort(), [MODELS.opus, "claude-haiku-9-9"].sort());
+  });
+
+  it("under the pool transport, a forwarder that serves another model and says so is refused, though modelUsage names only the requested one", async () => {
+    writeFileSync(record, "[]");
+    const engineEnv = { HOME: userHome, FIN_REVIEW_TRANSPORT: "pool", ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/", ANTHROPIC_AUTH_TOKEN: "t", CLAUDE_CONFIG_DIR: join(userHome, "pool-config") };
+    const resolved = resolveTransport(engineEnv);
+    assert.ok(resolved.ok);
+    const treeDir = join(home, "trees", "run1");
+    // With SERVED in the prompt the assistant message names another model, while modelUsage (keyed
+    // by what the client asked for) names only the requested one, as Claude Code 2.1.328 reports a
+    // forwarder that answered with another model.
+    const result = await runner(engineEnv, undefined, resolved.value).run(spec({ id: "pool-served-s0", treeDir, schema: SCHEMA, prompt: "SERVED" }), new AbortController().signal);
+    assert.equal(result.state, "failed");
+    assert.equal(result.failure, "model_mismatch");
+    assert.match(result.failureDetail ?? "", /an assistant message names claude-haiku-9-9/);
+    assert.equal(result.attempts, 1, "a mismatch is never retried");
+    const [seen] = JSON.parse(readFileSync(record, "utf8")) as Array<{ args: string[] }>;
+    const args = seen?.args ?? [];
+    assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+    assert.ok(args.includes("--verbose"));
   });
 
   it("times out, retries once in a fresh scratch home, then fails as timeout", async () => {

@@ -8,8 +8,12 @@
 // pool forwarder: ANTHROPIC_BASE_URL is a loopback URL, ANTHROPIC_AUTH_TOKEN the forwarder's token
 // and CLAUDE_CONFIG_DIR its configuration directory. Under pool those three, and only those, are
 // accepted, each checked here, and passed into every session's environment in place of the login;
-// every model, effort, provider and other credential variable is still refused, and the post-session
-// modelUsage check still decides which model ran. The base URL must be http or https to
+// every model, effort, provider and other credential variable is still refused. After each session
+// the model check (runner/check.ts) requires the client's init line, modelUsage (the model the client
+// asked for) and every assistant message (the model the forwarder's response names) to name only the
+// requested ID, so a forwarder that maps, pools or falls back to another model and says so fails the
+// session. A forwarder that names the requested model while serving another cannot be caught from
+// here: under pool the forwarder is trusted for the model it reports. The base URL must be http or https to
 // 127.0.0.1, ::1 or localhost, with an explicit port and no path beyond "/", no user, query or
 // fragment: a forwarder on this machine, never another endpoint.
 //

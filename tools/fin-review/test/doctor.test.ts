@@ -10,14 +10,14 @@ import type { RunOutcome } from "../src/exec.ts";
 import { loadCommittedModels } from "../src/options.ts";
 import { RUNNER_FLAGS } from "../src/runner/cli.ts";
 import type { CliRunnerOptions } from "../src/runner/cli.ts";
-import { fakeResultJson } from "../src/runner/fake.ts";
+import { fakeSessionStream } from "../src/runner/fake.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
 import { countingRandom, fakeClock, readJson, reviewFixture, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
 
 const MODELS = loadCommittedModels();
-const HELP = `Usage: claude [options]\n  -p, --print  Print\n${[...RUNNER_FLAGS, ...DOCTOR_FLAGS_USED].filter((flag) => flag !== "-p").map((flag) => `  ${flag} <x>  text`).join("\n")}\n`;
+const HELP = `Usage: claude [options]\n  -p, --print  Print\n${[...RUNNER_FLAGS, ...DOCTOR_FLAGS_USED].filter((flag) => flag !== "-p").map((flag) => `  ${flag} <x>  text`).join("\n")}\n    (choices: "text", "json", "stream-json")\n`;
 
 /** What 2.1.328's debug log says when it applied no env from its configuration. */
 const CLEAN_LOG = "2026-11-21T10:00:00.000Z [DEBUG] CA certs: Config fallback - globalEnv keys: , settingsEnv keys: none\n";
@@ -45,7 +45,7 @@ function services(overrides: Partial<DoctorServices> = {}): DoctorServices & { s
     runClaude: async (_path, args) => fakeClaude(args),
     startSession: async (spec): Promise<RunOutcome> => {
       started.push(spec);
-      return { kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", output: { answer: "ready" } })), stderr: Buffer.alloc(0) };
+      return { kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "ready" } })), stderr: Buffer.alloc(0) };
     },
     ...overrides,
   };
@@ -63,7 +63,7 @@ describe("doctor", () => {
     const run = await runFixtureCli(fx, ["doctor"], s);
     assert.equal(run.code, 0, run.stdout + run.stderr);
     assert.match(run.stdout, /^D1 pass: claude 2\.1\.328 equals the pin/m);
-    assert.match(run.stdout, /^D2 pass: all 17 runner flags are in --help; replaced: --max-turns, --append-system-prompt-file; --json-schema accepts all 14 schemas$/m);
+    assert.match(run.stdout, /^D2 pass: all 18 runner flags and the output format "stream-json" are in --help; replaced: --max-turns, --append-system-prompt-file; --json-schema accepts all 14 schemas$/m);
     assert.match(run.stdout, /^D4 pass: /m);
     assert.match(run.stdout, /^D5 skipped: /m);
     assert.equal(s.started.length, 0);
@@ -94,17 +94,24 @@ describe("doctor", () => {
 
   it("D5 fails when modelUsage names a second model, or the answer is not ready", async () => {
     const mismatch = services({
-      startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", output: { answer: "ready" }, models: [spec.modelId, "claude-haiku-9-9"] })), stderr: Buffer.alloc(0) }),
+      startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "ready" }, models: [spec.modelId, "claude-haiku-9-9"] })), stderr: Buffer.alloc(0) }),
     });
     const bad = await runFixtureCli(fx, ["doctor", "--live"], mismatch);
     assert.equal(bad.code, 78);
     assert.match(bad.stdout, /^D5 fail: .*model_mismatch/m);
+    // Served by another model: modelUsage names only the requested model, the assistant message does not.
+    const served = services({
+      startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "ready" }, served: ["claude-haiku-9-9"] })), stderr: Buffer.alloc(0) }),
+    });
+    const servedRun = await runFixtureCli(fx, ["doctor", "--live"], served);
+    assert.equal(servedRun.code, 78, servedRun.stdout + servedRun.stderr);
+    assert.match(servedRun.stdout, /^D5 fail: .*model_mismatch: an assistant message names claude-haiku-9-9/m);
     const notReady = services({
-      startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", output: { answer: "hello" } })), stderr: Buffer.alloc(0) }),
+      startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "hello" } })), stderr: Buffer.alloc(0) }),
     });
     assert.equal((await runFixtureCli(fx, ["doctor", "--live"], notReady)).code, 78);
     const loggedOut = services({
-      startSession: async (spec) => ({ kind: "exited", code: 1, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", isError: true, resultText: "Not logged in", models: [] })), stderr: Buffer.alloc(0) }),
+      startSession: async (spec) => ({ kind: "exited", code: 1, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", isError: true, resultText: "Not logged in", models: [] })), stderr: Buffer.alloc(0) }),
     });
     const out = await runFixtureCli(fx, ["doctor", "--live"], loggedOut);
     assert.equal(out.code, 78);
@@ -118,6 +125,9 @@ describe("doctor", () => {
     const noFlag = await runFixtureCli(fx, ["doctor"], services({ runClaude: async (_p, args) => fakeClaude(args, "2.1.328", HELP.replace("--restricted", "--other")) }));
     assert.equal(noFlag.code, 78);
     assert.match(noFlag.stdout, /^D2 fail: --help does not document --restricted/m);
+    const noStream = await runFixtureCli(fx, ["doctor"], services({ runClaude: async (_p, args) => fakeClaude(args, "2.1.328", HELP.replace('"stream-json"', '"ndjson"')) }));
+    assert.equal(noStream.code, 78);
+    assert.match(noStream.stdout, /^D2 fail: --help does not document "stream-json"/m);
     const s = services();
     const refused = await runFixtureCli(fx, ["doctor", "--live"], s, { ...fx.env, ANTHROPIC_AUTH_TOKEN: "secret-value", ANTHROPIC_BASE_URL: "http://127.0.0.1:1" });
     assert.equal(refused.code, 78);
@@ -218,7 +228,7 @@ describe("doctor", () => {
       const s = services({
         startSession: async (spec, options) => {
           seen.push(options);
-          return { kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", output: { answer: "ready" } })), stderr: Buffer.alloc(0) };
+          return { kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "ready" } })), stderr: Buffer.alloc(0) };
         },
       });
       const run = await runFixtureCli(fx, ["doctor", "--live"], s, pool);
@@ -231,6 +241,17 @@ describe("doctor", () => {
       const doc = readJson(join(fx.home, "state", "doctor.json"));
       assert.equal(doc["transport"], "pool");
       assert.ok(!readFileSync(join(fx.home, "state", "doctor.json"), "utf8").includes("pool-token-value"));
+      // A forwarder that serves another model and says so: Claude Code 2.1.328 keys modelUsage by
+      // the model it asked for, so only the assistant message shows it, and D5 fails on it.
+      const mapped = services({
+        startSession: async (spec) => ({ kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeSessionStream(spec, { kind: "result", output: { answer: "ready" }, served: ["claude-haiku-9-9"] })), stderr: Buffer.alloc(0) }),
+      });
+      const pooled = await runFixtureCli(fx, ["doctor", "--live"], mapped, pool);
+      assert.equal(pooled.code, 78, pooled.stdout + pooled.stderr);
+      assert.match(pooled.stdout, /^D5 fail: .*model_mismatch: an assistant message names claude-haiku-9-9.*\(transport pool\)$/m);
+      const mappedDoc = readJson(join(fx.home, "state", "doctor.json"));
+      const d5 = (mappedDoc["checks"] as Array<Record<string, unknown>>).find((check) => check["id"] === "D5");
+      assert.deepEqual((d5?.["data"] as Array<Record<string, unknown>>)[0]?.["modelObserved"], ["claude-haiku-9-9", MODELS.opus].sort());
       // A base URL that is not a loopback forwarder fails D4, and nothing starts.
       const far = services();
       const remote = await runFixtureCli(fx, ["doctor", "--live"], far, { ...pool, ANTHROPIC_BASE_URL: "https://example.com:443/" });

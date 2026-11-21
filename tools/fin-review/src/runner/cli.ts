@@ -27,6 +27,7 @@ export const RUNNER_FLAGS: readonly string[] = [
   "--model",
   "--effort",
   "--output-format",
+  "--verbose",
   "--json-schema",
   "--settings",
   "--setting-sources",
@@ -41,6 +42,9 @@ export const RUNNER_FLAGS: readonly string[] = [
   "--exclude-dynamic-system-prompt-sections",
   "--append-system-prompt",
 ];
+
+/** Values the runner passes that --help must name as choices (D2): the stream output format. */
+export const RUNNER_FLAG_VALUES: readonly string[] = ['"stream-json"'];
 
 /** Spec 07 §4.1's flags that 2.1.328's --help does not document, and what replaces each. */
 export const REPLACED_FLAGS: Readonly<Record<string, string>> = Object.freeze({
@@ -116,8 +120,11 @@ export function buildArgs(spec: SessionSpec, files: SessionFiles, systemPrompt: 
     spec.modelId,
     "--effort",
     spec.effort,
+    // The stream, not the single result: each assistant message names the model that served it,
+    // which the result's modelUsage does not (runner/check.ts). The client requires --verbose for it.
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--json-schema",
     schema,
     "--settings",

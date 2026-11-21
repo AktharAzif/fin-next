@@ -1,11 +1,12 @@
 // `doctor` (spec 07 §4.7), the minimal doctor of slice 1 (S7-25): D1 the pinned version (of the file
-// claudePath names now); D2 every flag the runner and the doctor pass is in the pinned CLI's --help,
-// and the CLI accepts every schema; D3 no settings or configuration file a session could read sets a
+// claudePath names now); D2 every flag the runner and the doctor pass, and the stream output format,
+// is in the pinned CLI's --help, and the CLI accepts every schema; D3 no settings or configuration file a session could read sets a
 // refused key, and the client, started with the locked argument list, the session environment and an
 // empty stdin (so no model is called), reports in its debug log that it applied no configuration
 // environment; D4 the transport (src/transport.ts) and no refused variable in the engine's
 // environment; and with --live D5: one locked session per allowed model answering "ready", through
-// the transport, with modelUsage naming only that model ID, at effort high and a 0.50 USD budget.
+// the transport, at effort high and a 0.50 USD budget, with the client's init line, modelUsage and
+// every assistant message (the model the endpoint says served it) naming only that model ID.
 // Server-managed settings cannot be read locally: D3 records them as unknown. Writes
 // $FIN_REVIEW_HOME/state/doctor.json (never inside the engine's repository); exits 0 when every check
 // it ran passed, else 78.
@@ -27,7 +28,7 @@ import { writeJson } from "./review/report.ts";
 import { engineTransport } from "./review/commands.ts";
 import { doctorSessions } from "./roles.ts";
 import { checkAttempt } from "./runner/check.ts";
-import { REPLACED_FLAGS, RUNNER_FLAGS, buildArgs, cliSchema, startAttempt } from "./runner/cli.ts";
+import { REPLACED_FLAGS, RUNNER_FLAGS, RUNNER_FLAG_VALUES, buildArgs, cliSchema, startAttempt } from "./runner/cli.ts";
 import type { CliRunnerOptions } from "./runner/cli.ts";
 import { compareVersions, parseVersionOutput, pinClient } from "./runner/client.ts";
 import type { PinnedClient } from "./runner/client.ts";
@@ -274,7 +275,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
     const out = await runClaude(claudePath, ["--help"]);
     if (out.code !== 0) checks.push({ id: "D2", result: "fail", detail: "claude --help failed" });
     else {
-      const missing = missingFlags(out.stdout, [...RUNNER_FLAGS, ...DOCTOR_FLAGS_USED]);
+      const missing = [...missingFlags(out.stdout, [...RUNNER_FLAGS, ...DOCTOR_FLAGS_USED]), ...RUNNER_FLAG_VALUES.filter((value) => !out.stdout.includes(value))];
       const replaced = Object.keys(REPLACED_FLAGS);
       const nowDocumented = replaced.filter((flag) => missingFlags(out.stdout, [flag]).length === 0);
       const schemas = engineSchemas(procedure);
@@ -287,7 +288,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
           if (BAD_SCHEMA_RE.test(text) || !NO_INPUT_RE.test(text)) refusedSchemas.push(name);
         }
       }
-      const data = { checked: RUNNER_FLAGS, doctorFlags: DOCTOR_FLAGS_USED, missing, replaced: REPLACED_FLAGS, replacedNowDocumented: nowDocumented, refusedSchemas };
+      const data = { checked: RUNNER_FLAGS, values: RUNNER_FLAG_VALUES, doctorFlags: DOCTOR_FLAGS_USED, missing, replaced: REPLACED_FLAGS, replacedNowDocumented: nowDocumented, refusedSchemas };
       const now = nowDocumented.length > 0 ? ` (now documented: ${nowDocumented.join(", ")})` : "";
       if (missing.length > 0) checks.push({ id: "D2", result: "fail", detail: `--help does not document ${missing.join(", ")}`, data });
       else if (!probing) checks.push({ id: "D2", result: "fail", detail: "--json-schema not probed: a settings or configuration file a session could read is refused (D3)", data });
@@ -296,7 +297,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
         checks.push({
           id: "D2",
           result: "pass",
-          detail: `all ${RUNNER_FLAGS.length} runner flags are in --help; replaced: ${replaced.join(", ")}${now}; --json-schema accepts all ${schemas.length} schemas`,
+          detail: `all ${RUNNER_FLAGS.length} runner flags and the output format ${RUNNER_FLAG_VALUES.join(", ")} are in --help; replaced: ${replaced.join(", ")}${now}; --json-schema accepts all ${schemas.length} schemas`,
           data,
         });
       }
@@ -402,7 +403,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
     const line = results
       .map((item) => {
         const r = item as { modelId: string; pass: boolean; failure: string | null; detail: string };
-        return `${r.modelId} ${r.pass ? "answered ready, modelUsage names only it" : `failed (${r.failure ?? "answer"}: ${r.detail})`}`;
+        return `${r.modelId} ${r.pass ? "answered ready; modelUsage and every assistant message name only it" : `failed (${r.failure ?? "answer"}: ${r.detail})`}`;
       })
       .join("; ");
     checks.push({ id: "D5", result: allPass ? "pass" : "fail", detail: `${line} (transport ${transport.kind})`, data: results });
