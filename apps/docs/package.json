@@ -1,0 +1,23 @@
+{
+  "name": "@fin/docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The docs site (spec 05 §8): a static placeholder until its lane builds the reference and Try it. No API half and no /api/ path",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --mode production",
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fin/tokens": "workspace:*"
+  },
+  "devDependencies": {
+    "@fin/frame": "workspace:*",
+    "@tailwindcss/vite": "catalog:",
+    "tailwindcss": "catalog:",
+    "vite": "catalog:"
+  }
+}

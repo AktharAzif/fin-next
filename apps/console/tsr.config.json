@@ -1,0 +1,11 @@
+{
+  "target": "react",
+  "routesDirectory": "./src/client/routes",
+  "generatedRouteTree": "./src/client/routeTree.gen.ts",
+  "routeFileIgnorePrefix": "-",
+  "autoCodeSplitting": true,
+  "addExtensions": true,
+  "quoteStyle": "double",
+  "semicolons": true,
+  "disableLogging": true
+}
