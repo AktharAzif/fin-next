@@ -9,7 +9,7 @@
 // too: the registered branch records a codeless request for the browser where the unknown one
 // records its code's, so the browser's next steps (a code tried, the code-link check, a code
 // asked again) answer alike.
-import { codeSendSubject, requestCodeless } from "./codes.ts";
+import { codeSendSubject, lockAddress, requestCodeless } from "./codes.ts";
 import { finCookieName, readCookie, serializeFinCookie } from "./cookies.ts";
 import { randomToken } from "./crypto/keyed.ts";
 import { AuthRefusal } from "./errors.ts";
@@ -57,13 +57,20 @@ export async function signUp(
     // Velocity per network and per address ([SA-40]), then the code request's own limits
     // (`code_send` per network and per address, §5.6), counted here for both branches so that a
     // used-up allowance refuses a registered and an unknown address alike. The code asked for
-    // below is therefore not counted again.
+    // below is therefore not counted again. The address's lock comes after the network's limits and
+    // before the address's code requests, the order a code request from the library takes them in
+    // (see lockAddress()), so a sign-up and a code request never wait on each other in a circle.
     for (const [bucket, subject] of [
       ["sign_up_network", rt.hasher.bucket("network", state.network)],
       ["sign_up_address", rt.hasher.bucket("email", email)],
       ["code_send", rt.hasher.bucket("network", state.network)],
+      ["lock", null],
       ["code_send", codeSendSubject(rt.hasher, email, false)],
     ] as const) {
+      if (subject === null) {
+        await lockAddress(tx, rt.hasher, email);
+        continue;
+      }
       const result = await rt.limits.consume(tx, bucket, subject);
       if (!result.allowed) {
         throw new AuthRefusal("rate_limited", `limits.${bucket}`, {
@@ -90,13 +97,15 @@ export async function signUp(
       // No code (§5.1): the notice goes instead. In the code's place the browser gets a codeless
       // request, bound to `codeToken` and counted against the same share and allowance of code
       // emails, which no code passes and which leaves a code the owner's known browser holds alone.
+      // A browser known for the account gets none and leaves every live request as it was.
       const recorded = await requestCodeless(tx, rt, {
         email,
         browserToken: codeToken,
         knownBrowserToken: sent("known_browser"),
         userId: person.id,
       });
-      // The line carries what the unknown branch's would: the reason only when nothing is recorded.
+      // The line carries what the unknown branch's would: the reason only when nothing is recorded
+      // (and for a known browser, which an unknown address never has).
       if (!recorded.recorded) state.line.reason = `codes.${recorded.reason}`;
       await rt.email(tx, { template: "identity/already-registered", to: email, params: {} });
       return { status: 202, body: { status: "code_sent" }, setCookies };

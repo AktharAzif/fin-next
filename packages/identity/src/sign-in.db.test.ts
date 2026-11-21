@@ -135,6 +135,75 @@ describe("one live code per address (§5.2, S2-38)", () => {
     expect(fresh.status).toBe(200);
   });
 
+  it("keeps one live code when requests for an address overlap, and one asking browser", async () => {
+    for (let run = 0; run < 4; run += 1) {
+      const email = unique("overlap");
+      const a = h.browser();
+      const b = h.browser();
+      const answers = await Promise.all([sendCode(a, email), sendCode(b, email)]);
+      expect(answers.map((x) => x.status)).toEqual([200, 200]);
+      const live = await h.admin.query<{ n: string }>(
+        `SELECT count(*) AS n FROM identity.email_code_request
+          WHERE email_hash = $1 AND superseded_at IS NULL AND used_at IS NULL`,
+        [h.realm.runtime.hasher.hash("email", email)],
+      );
+      expect(Number(live.rows[0]?.n)).toBe(1);
+      const linked = await Promise.all(
+        [a, b].map((x) =>
+          h.realm.run(x.context(), (tx) =>
+            codeLinkAsking(
+              tx,
+              h.realm.runtime,
+              email,
+              x.jar.get("__Host-fin.code_browser") ?? null,
+            ),
+          ),
+        ),
+      );
+      expect(linked.filter(Boolean)).toHaveLength(1);
+      // Only the browser whose request stands makes the account with the code.
+      const code = (await h.latestCode(email)) as string;
+      const [loser, winner] = linked[0] ? [b, a] : [a, b];
+      const refused = await post(loser, "/api/auth/sign-in/email-otp", { email, otp: code });
+      expect(refused.status).toBe(400);
+      expect(await userOf(email)).toBeNull();
+      const signedIn = await post(winner, "/api/auth/sign-in/email-otp", { email, otp: code });
+      expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+    }
+  });
+
+  it("finishes overlapping sign-ups, code requests and tries for one address from one network", async () => {
+    // Each takes the network's limits, then the address's lock, then the address's limits: none
+    // waits on another in a circle, whichever order they meet in.
+    for (const registered of [true, false]) {
+      const email = unique(registered ? "mixed.registered" : "mixed.fresh");
+      if (registered) await codeSignIn(h, h.browser(), email);
+      const ip = `2001:db8:${Math.floor(Math.random() * 0xffff).toString(16)}::9`;
+      const up = () => {
+        const b = h.browser({ ip });
+        return signUp(
+          h.realm,
+          b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
+          b.context(),
+          { name: "Ada Lovelace", email },
+        ).then((answer) => answer.status);
+      };
+      const ask = () => sendCode(h.browser({ ip }), email).then((answer) => answer.status);
+      const guess = () =>
+        post(h.browser({ ip }), "/api/auth/sign-in/email-otp", { email, otp: "00000000" }).then(
+          (answer) => answer.status,
+        );
+      const statuses = await Promise.all([up(), ask(), guess(), up(), ask(), guess()]);
+      for (const status of statuses) expect([200, 202, 400, 403, 429]).toContain(status);
+      const live = await h.admin.query<{ n: string }>(
+        `SELECT count(*) AS n FROM identity.email_code_request
+          WHERE email_hash = $1 AND superseded_at IS NULL AND used_at IS NULL AND NOT codeless`,
+        [h.realm.runtime.hasher.hash("email", email)],
+      );
+      expect(Number(live.rows[0]?.n)).toBeLessThanOrEqual(1);
+    }
+  });
+
   it("never lets a browser that is not known supersede a known browser's code", async () => {
     const owner = h.browser();
     const email = unique("contested");
@@ -471,6 +540,38 @@ describe("the same answers for registered and unknown addresses (T-SAT-32, AC-SA
       otp: ownersCode,
     });
     expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+
+  it("leaves the code alone when a known browser of the account signs up with its address", async () => {
+    // The browser that asked the code signs up, and so does the owner's other known browser:
+    // neither shows anything a known browser does not already know, so neither costs the code.
+    for (const signsUp of ["asker", "other"] as const) {
+      const registered = unique(`known.signup.${signsUp}`);
+      const owner = h.browser();
+      await codeSignIn(h, owner, registered); // the owner's browser is now known for the address
+      await owner.post("/api/auth/sign-out");
+      const other = h.browser();
+      await codeSignIn(h, other, registered);
+      await other.post("/api/auth/sign-out");
+      await sendCode(owner, registered);
+      const ownersCode = (await h.latestCode(registered)) as string;
+      const b = signsUp === "asker" ? owner : other;
+      const answer = await signUp(
+        h.realm,
+        b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email: registered }),
+        b.context(),
+        { name: "Ada Lovelace", email: registered },
+      );
+      expect(answer.status).toBe(202);
+      expect((await h.outbox(registered)).at(-1)?.template).toBe("identity/already-registered");
+      expect(await h.latestCode(registered)).toBe(ownersCode);
+      expect(await asking(owner, registered)).toBe(true);
+      const signedIn = await post(owner, "/api/auth/sign-in/email-otp", {
+        email: registered,
+        otp: ownersCode,
+      });
+      expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+    }
   });
 
   it("never lets a code through for the registered address's request from sign-up", async () => {

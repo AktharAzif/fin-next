@@ -9,7 +9,12 @@
 // code (§5.1), and records a codeless request bound to that browser in the code's place, so that
 // what the browser sees next (its tries, the code-link check, the allowance left) is the same for
 // both (T-SAT-32). No code is right for a codeless request, and it never supersedes a code that a
-// known browser of the account asked for.
+// known browser of the account asked for. A browser known for the account records none: it
+// already knows the account exists, so there is nothing to keep alike, and its sign-up leaves the
+// live code and its tries alone.
+//
+// Every request, codeless request and try for one address takes the address's lock first, so they
+// run one after another and "one live code" holds when they overlap (see lockAddress()).
 
 import { isKnownBrowserForEmail } from "./browsers.ts";
 import type { KeyedHasher } from "./crypto/keyed.ts";
@@ -35,8 +40,26 @@ export interface LiveCodeRequest {
 }
 
 /**
+ * Holds the address's lock until the unit ends: every request, codeless request and try for the
+ * address takes it before it reads the live requests, so two that overlap run one after the other
+ * and the second sees what the first recorded. Without it, two code requests for one address could
+ * each find no live code and both record one. Taken after the per-network limits and before any
+ * per-address one, in every path, so that two units never wait on each other in a circle.
+ */
+export async function lockAddress(
+  db: Queryable,
+  hasher: KeyedHasher,
+  email: string,
+): Promise<void> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `email_code_request:${hasher.bucket("email", email.toLowerCase())}`,
+  ]);
+}
+
+/**
  * The address's live requests, newest first: at most one with a code (the one whose code the
- * library holds) and at most one codeless one. `lock` holds them until the unit ends.
+ * library holds) and at most one codeless one, given every caller that writes them holds
+ * lockAddress(). `lock` holds the rows until the unit ends.
  */
 async function liveRequests(
   db: Queryable,
@@ -93,7 +116,7 @@ export type CodeRequestOutcome =
 
 export type CodelessOutcome =
   | { recorded: true; requestId: string }
-  | { recorded: false; reason: "unknown_share_used" | "allowance_used" };
+  | { recorded: false; reason: "unknown_share_used" | "allowance_used" | "known_browser" };
 
 export interface CodeRequestDeps {
   clock: Clock;
@@ -222,8 +245,9 @@ export async function requestCode(
     countRequest: boolean;
   },
 ): Promise<CodeRequestOutcome> {
-  const now = deps.clock.now();
   const email = input.email.toLowerCase();
+  await lockAddress(db, deps.hasher, email);
+  const now = deps.clock.now();
   const subject = deps.hasher.bucket("email", email);
   const live = await liveRequests(db, deps.hasher, email, now, { lock: true });
   const code = live.find((r) => !r.codeless) ?? null;
@@ -269,6 +293,10 @@ export async function requestCode(
  * no code (signUp()'s registered branch, §5.1). It replaces what that request would replace, and
  * where that request would be refused for a known browser's live code (S2-38), it leaves the code
  * alone and is recorded beside it, so the asking browser holds a request either way.
+ *
+ * A browser known for the account records nothing and touches nothing: it already knows the
+ * account exists, an unknown address never has a known browser, so there is nothing to keep alike,
+ * and the live code (its own or another known browser's) keeps its tries.
  */
 export async function requestCodeless(
   db: Queryable,
@@ -280,18 +308,20 @@ export async function requestCodeless(
     userId: string | null;
   },
 ): Promise<CodelessOutcome> {
-  const now = deps.clock.now();
   const email = input.email.toLowerCase();
+  await lockAddress(db, deps.hasher, email);
+  const now = deps.clock.now();
   const subject = deps.hasher.bucket("email", email);
   const live = await liveRequests(db, deps.hasher, email, now, { lock: true });
   const code = live.find((r) => !r.codeless) ?? null;
   const known = await askerKnown(db, deps.hasher, email, code, input);
+  if (known) return { recorded: false, reason: "known_browser" };
   const refused = await spendCodeEmail(db, deps, { subject, known, userId: input.userId, now });
   if (refused !== null) return { recorded: false, reason: refused.reason };
 
   // Where a code request from this browser would be refused (S2-38), the live code stays, and the
   // request is watched the same way; anything else it replaces as that request would.
-  const keepsCode = code?.browserKnown === true && !known;
+  const keepsCode = code?.browserKnown === true;
   if (keepsCode) noteContest(deps, "supersede_refused", input.userId);
   await supersede(
     db,
@@ -301,7 +331,7 @@ export async function requestCodeless(
   const id = await insertRequest(db, deps, {
     email,
     browserToken: input.browserToken,
-    known,
+    known: false,
     codeless: true,
     now,
   });
@@ -326,6 +356,7 @@ export async function attemptCode(
   deps: { clock: Clock; hasher: KeyedHasher },
   input: { email: string; browserToken: string | null; accountExists: boolean },
 ): Promise<CodeAttempt> {
+  await lockAddress(db, deps.hasher, input.email);
   const now = deps.clock.now();
   const live = await liveRequests(db, deps.hasher, input.email, now, { lock: true });
   const own = live.find((r) => sameBrowser(deps.hasher, r, input.browserToken));
