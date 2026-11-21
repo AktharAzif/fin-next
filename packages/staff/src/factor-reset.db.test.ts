@@ -11,6 +11,9 @@
 //     no factor; an intent works for its member only, and once; a notice that cannot be queued
 //     rolls the whole reset back.
 //   - A pending member mid-enrolment loses the window; two Admins resetting at once leave one code.
+//   - The member's own ceremonies cannot outlast it: a passkey sign-in or a further passkey that
+//     was in flight when it committed leaves no session and no factor, the code it showed still
+//     enrols the member, and a sign-in that overlaps it cannot make it fail.
 import type { RequestContext } from "@fin/identity";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,6 +29,7 @@ import {
   stepped,
   unique,
 } from "../test/harness.ts";
+import type { StaffDeps } from "./deps.ts";
 import { redeemCode, resetStaffFactors } from "./members.ts";
 import type { UnitTx } from "./ports.ts";
 import { requireStaff } from "./require-staff.ts";
@@ -149,6 +153,86 @@ async function reaches(browser: Browser): Promise<string> {
   return refused.code;
 }
 
+/** `POST /api/enrolment/redeem` from a pending member's own browser. */
+function redeemIn(browser: Browser, code: string) {
+  return h.route(
+    browser,
+    { method: "POST", path: "/api/enrolment/redeem", body: { code } },
+    async (tx, req, ctx) =>
+      redeemCode(h.deps, tx, await requireStaff(h.realm, req, ctx, { reach: ["pending"] }), code),
+  );
+}
+
+/** A new passkey registered in this browser's session (inside its enrolment window). */
+async function registerNewPasskey(browser: Browser) {
+  const fresh = new SoftAuthenticator(new URL(ADMIN_ORIGIN).hostname, ADMIN_ORIGIN);
+  const options = await browser.auth("GET", "/passkey/generate-register-options");
+  expect(options.status).toBe(200);
+  return browser.auth("POST", "/passkey/verify-registration", {
+    response: fresh.register(options.json as { challenge: string; user: { id: string } }),
+  });
+}
+
+/** A passkey assertion made in `browser` and not sent yet: the first half of a ceremony. */
+async function assertionFrom(browser: Browser, authenticator: SoftAuthenticator) {
+  const options = await browser.auth("GET", "/passkey/generate-authenticate-options");
+  expect(options.status).toBe(200);
+  return authenticator.authenticate(String(options.json?.challenge));
+}
+
+/** Waits until `n` backends of this test's database wait for a lock another transaction holds. */
+async function lockWaiters(n: number): Promise<void> {
+  for (let tries = 0; tries < 1000; tries += 1) {
+    const waiting = await h.admin.query<{ n: number }>(
+      `SELECT count(*)::integer AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+    );
+    if (Number(waiting.rows[0]?.n ?? 0) >= n) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${n} backends never waited for a lock`);
+}
+
+/**
+ * The reset of `staffId` with `intent`, held open inside its transaction at its first notice: by
+ * then it holds the member's row, has ended their sessions and removed their factors, and has not
+ * committed. `release()` lets it finish.
+ */
+function heldReset(staffId: string, intent: string) {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reached = () => {};
+  const atNotice = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let holding = true;
+  const deps: StaffDeps = {
+    ...h.deps,
+    notify: async (tx, notice) => {
+      if (holding) {
+        holding = false;
+        reached();
+        await gate;
+      }
+      return h.deps.notify(tx, notice);
+    },
+  };
+  const done = h.route(admin.browser, { ...resetPath(staffId), intent }, async (tx, req, ctx) =>
+    resetStaffFactors(
+      deps,
+      tx,
+      await requireStaff(h.realm, req, ctx, { permission: "staff.reset_factors" }),
+      staffId,
+    ),
+  );
+  const finishedEarly = done.then(() => {
+    throw new Error("the reset finished before its first notice");
+  });
+  return { done, atNotice: Promise.race([atNotice, finishedEarly]), release };
+}
+
 describe("resetting a member's second factors (§10.2, §10.4, [SA-14])", () => {
   it("ends every session and removes every factor; the old passkey no longer signs in; the new code enrols them again", async () => {
     const target = await enrolled("reset.target", "operator");
@@ -191,25 +275,8 @@ describe("resetting a member's second factors (§10.2, §10.4, [SA-14])", () => 
     const browser = h.browser(accessFor(target.email));
     await signInByCode(h, browser, target.email);
     expect(await reaches(browser)).toBe("factor_step_required");
-    const redeem = (code: string) =>
-      h.route(
-        browser,
-        { method: "POST", path: "/api/enrolment/redeem", body: { code } },
-        async (tx, req, ctx) =>
-          redeemCode(
-            h.deps,
-            tx,
-            await requireStaff(h.realm, req, ctx, { reach: ["pending"] }),
-            code,
-          ),
-      );
-    expect(await redeem(done.enrolmentCode.code)).toMatchObject({ ok: true });
-    const fresh = new SoftAuthenticator(new URL(ADMIN_ORIGIN).hostname, ADMIN_ORIGIN);
-    const options = await browser.auth("GET", "/passkey/generate-register-options");
-    expect(options.status).toBe(200);
-    const registered = await browser.auth("POST", "/passkey/verify-registration", {
-      response: fresh.register(options.json as { challenge: string; user: { id: string } }),
-    });
+    expect(await redeemIn(browser, done.enrolmentCode.code)).toMatchObject({ ok: true });
+    const registered = await registerNewPasskey(browser);
     expect(registered.status, JSON.stringify(registered.json)).toBe(200);
     expect(await memberRow(target.staffId)).toMatchObject({
       status: "active",
@@ -458,5 +525,122 @@ describe("resetting a member's second factors (§10.2, §10.4, [SA-14])", () => 
     expect(
       (await h.events("staff.factors_reset")).filter((e) => e.target_id === target.staffId),
     ).toHaveLength(2);
+  });
+});
+
+describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)", () => {
+  it("leaves no session from a passkey sign-in that was in flight when it committed, even once the member enrols again", async () => {
+    const target = await enrolled("reset.inflight", "operator");
+    const intent = await provedIntent(admin, target.staffId);
+    // Whoever holds the lost device begins a passkey sign-in, and the reset runs at that moment.
+    const device = h.browser(accessFor(target.email));
+    const response = await assertionFrom(device, target.authenticator);
+    const reset = heldReset(target.staffId, intent);
+    await reset.atNotice;
+    const signingIn = device.auth("POST", "/passkey/verify-authentication", { response });
+    await lockWaiters(1);
+    reset.release();
+    const [done, signIn] = await Promise.all([reset.done, signingIn]);
+
+    expect(done.status).toBe("pending");
+    // The passkey went with the reset, so the sign-in is refused as an unknown passkey would be.
+    expect(signIn.status).toBe(401);
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+    // The member enrols again with the reset's code; the device is signed out all the same.
+    const browser = h.browser(accessFor(target.email));
+    await signInByCode(h, browser, target.email);
+    expect(await redeemIn(browser, done.enrolmentCode.code)).toMatchObject({ ok: true });
+    expect((await registerNewPasskey(browser)).status).toBe(200);
+    expect(await reaches(browser)).toBe("none");
+    expect(await reaches(device)).toBe("unauthenticated");
+  });
+
+  it("is not made to fail by a passkey sign-in that overlaps it", async () => {
+    const target = await enrolled("reset.overlap", "viewer");
+    const intent = await provedIntent(admin, target.staffId);
+    const device = h.browser(accessFor(target.email));
+    const response = await assertionFrom(device, target.authenticator);
+    // Another transaction holds the member's row for a moment: the reset queues for it first and
+    // the sign-in second, and both go on when it lets go.
+    const blocker = await h.platform.superuser();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM staff.member WHERE id = $1 FOR UPDATE", [target.staffId]);
+      const resetting = h.route(
+        admin.browser,
+        { ...resetPath(target.staffId), intent },
+        resetFn(target.staffId),
+      );
+      resetting.catch(() => undefined);
+      await lockWaiters(1);
+      const signingIn = device.auth("POST", "/passkey/verify-authentication", { response });
+      signingIn.catch(() => undefined);
+      await lockWaiters(2);
+      await blocker.query("ROLLBACK");
+      const [reset, signIn] = await Promise.allSettled([resetting, signingIn]);
+
+      expect(reset.status).toBe("fulfilled");
+      expect(signIn).toMatchObject({ status: "fulfilled", value: { status: 401 } });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+  });
+
+  it("leaves no factor from a further passkey that was in flight when it committed, and its code still enrols the member", async () => {
+    const target = await enrolled("reset.adding", "viewer");
+    // Whoever holds the member's unlocked device proves `add_factor` and begins a further passkey.
+    const asked = await target.browser.auth("POST", "/passkey/verify-registration", {});
+    expect(asked.json).toMatchObject({ code: "step_up_required", reason_key: "add_factor" });
+    const addIntent = String(asked.json?.intent_id);
+    expect((await h.prove(target.browser, target.authenticator, addIntent)).status).toBe(200);
+    const extra = new SoftAuthenticator(new URL(ADMIN_ORIGIN).hostname, ADMIN_ORIGIN);
+    const options = await target.browser.auth(
+      "GET",
+      "/passkey/generate-register-options",
+      undefined,
+      { "fin-step-up-intent": addIntent },
+    );
+    expect(options.status).toBe(200);
+    const response = extra.register(options.json as { challenge: string; user: { id: string } });
+    const reset = heldReset(target.staffId, await provedIntent(admin, target.staffId));
+    await reset.atNotice;
+    const adding = target.browser.auth(
+      "POST",
+      "/passkey/verify-registration",
+      { response },
+      { "fin-step-up-intent": addIntent },
+    );
+    await lockWaiters(1);
+    reset.release();
+    const [done, added] = await Promise.all([reset.done, adding]);
+
+    // The session that asked for it ended with the reset, so the registration is refused.
+    expect(added.status).toBe(401);
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      authenticators: 0,
+      liveCodes: 1,
+    });
+    expect(
+      (await h.events("staff.factor_added")).filter((e) => e.ref_ids.includes(target.staffId)),
+    ).toHaveLength(0);
+    // The code the Admin was shown still opens enrolment, and the member gets back in.
+    const browser = h.browser(accessFor(target.email));
+    await signInByCode(h, browser, target.email);
+    expect(await reaches(browser)).toBe("factor_step_required");
+    expect(await redeemIn(browser, done.enrolmentCode.code)).toMatchObject({ ok: true });
+    expect((await registerNewPasskey(browser)).status).toBe(200);
+    expect(await memberRow(target.staffId)).toMatchObject({ status: "active" });
   });
 });

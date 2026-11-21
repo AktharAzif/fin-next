@@ -1,7 +1,8 @@
-// Passkeys (spec 02 §5.3, §6.1, §6.3, §7.4, §11.3; AC-SAT-06): the first one under the
+// Passkeys (spec 02 §5.3, §6.1, §6.3, §6.7, §7.4, §11.3; AC-SAT-06): the first one under the
 // first-factor rule raises the session; a passkey sign-in is aal2 at once; a passkey step-up
 // replaces the session without lengthening it and moves its proofs; another person's passkey is
-// refused; a challenge works once; a counter that goes backwards is refused and the person told.
+// refused; a challenge works once; a counter that goes backwards is refused and the person told; a
+// sign-in in flight while its passkey is removed finds it gone, and neither waits on the other.
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
@@ -229,6 +230,68 @@ describe("removing a passkey (§7.6 account.passkey_remove)", () => {
     expect(event?.step_up_ref).toBe(intent);
     const notices = (await h.outbox(email)).map((m) => String(m.params.kind ?? ""));
     expect(notices).toContain("passkey_removed");
+  });
+});
+
+/** Waits until `n` backends of this test's database wait for a lock another transaction holds. */
+async function lockWaiters(n: number): Promise<void> {
+  for (let tries = 0; tries < 1000; tries += 1) {
+    const waiting = await h.admin.query<{ n: number }>(
+      `SELECT count(*)::integer AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+    );
+    if (Number(waiting.rows[0]?.n ?? 0) >= n) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${n} backends never waited for a lock`);
+}
+
+describe("a passkey sign-in while that passkey is removed (§5.3, §6.7)", () => {
+  it("finds the passkey gone and makes no session, and the removal goes through", async () => {
+    const { browser, authenticator } = await personWithPasskey("removed.inflight");
+    const owned = await h.admin.query<{ id: string }>(
+      "SELECT p.id FROM identity.passkey p JOIN identity.session s ON s.user_id = p.user_id WHERE s.token = $1",
+      [browser.sessionToken()],
+    );
+    const id = String(owned.rows[0]?.id);
+    const asked = await browser.post("/api/auth/passkey/delete-passkey", { id });
+    const intent = String(asked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+    ).toBe(200);
+    // Whoever holds the lost device makes an assertion with the passkey in another browser.
+    const device = h.browser();
+    const challenge = await device.get("/api/auth/passkey/generate-authenticate-options");
+    const response = authenticator.authenticate(String(challenge.json?.challenge));
+    // The removal is held after it has deleted the passkey, before it commits: another transaction
+    // holds the row of the intent it spends last.
+    const holder = await h.admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM ops.step_up_intent WHERE id = $1 FOR UPDATE", [intent]);
+      const removing = browser.post(
+        "/api/auth/passkey/delete-passkey",
+        { id },
+        { "fin-step-up-intent": intent },
+      );
+      removing.catch(() => undefined);
+      await lockWaiters(1);
+      const signingIn = device.post("/api/auth/passkey/verify-authentication", { response });
+      signingIn.catch(() => undefined);
+      await lockWaiters(2);
+      await holder.query("ROLLBACK");
+      const [removed, signedIn] = await Promise.all([removing, signingIn]);
+
+      expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+      expect(signedIn.status).toBe(401);
+      expect(device.sessionToken()).toBeNull();
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    expect(
+      (await h.admin.query("SELECT 1 FROM identity.passkey WHERE id = $1", [id])).rowCount,
+    ).toBe(0);
   });
 });
 
