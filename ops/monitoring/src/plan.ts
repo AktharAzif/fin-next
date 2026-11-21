@@ -423,19 +423,26 @@ function displayed(field: string, value: unknown, nameOf: NameOf): unknown {
   return value;
 }
 
-/** A compared value as printed: a string bare, anything else as JSON, a query by its digest. */
-function text(field: string, shown: unknown): string {
+/** Hides private values (hostnames, zones, secrets) in a printed value: the run's own mask. */
+export type Mask = (text: string) => string;
+
+/**
+ * A compared value as printed: a string bare, anything else as JSON, a query by its digest. The
+ * whole value passes the run's mask here, before `clipPair` cuts it: the mask replaces only whole
+ * hostnames and zones, so a cut made first could leave part of one where no mask finds it.
+ */
+function text(field: string, shown: unknown, mask: Mask): string {
   if (SECRET_FIELDS.has(field)) return "(not shown)";
   if (field === "query") return `(query ${digest(str(shown)).slice(0, 8)})`;
   if (shown === undefined || shown === "") return "(none)";
-  return typeof shown === "string" ? shown : JSON.stringify(shown);
+  return mask(typeof shown === "string" ? shown : JSON.stringify(shown));
 }
 
 const WIDTH = 80;
 
 /**
- * Both sides of a change cut to WIDTH around their first difference, so a long value whose
- * change lies past the cut never prints as the same text on both sides.
+ * Both sides of a change, already masked, cut to WIDTH around their first difference, so a long
+ * value whose change lies past the cut never prints as the same text on both sides.
  */
 function clipPair(a: string, b: string): [string, string] {
   if (a.length <= WIDTH && b.length <= WIDTH) return [a, b];
@@ -465,12 +472,13 @@ function partChanges(
   [a, b]: readonly [unknown, unknown],
   [shownA, shownB]: readonly [unknown, unknown],
   out: Change[],
+  mask: Mask,
 ): void {
   if (sameValue(a, b)) return;
   const hidden = SECRET_FIELDS.has(field) || field === "query";
   if (!hidden && isRecord(a) && isRecord(b) && isRecord(shownA) && isRecord(shownB)) {
     for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
-      partChanges(field, `${path}.${key}`, [a[key], b[key]], [shownA[key], shownB[key]], out);
+      partChanges(field, `${path}.${key}`, [a[key], b[key]], [shownA[key], shownB[key]], out, mask);
     }
     return;
   }
@@ -485,11 +493,11 @@ function partChanges(
     Array.isArray(shownB)
   ) {
     for (const [i, item] of a.entries()) {
-      partChanges(field, `${path}[${i}]`, [item, b[i]], [shownA[i], shownB[i]], out);
+      partChanges(field, `${path}[${i}]`, [item, b[i]], [shownA[i], shownB[i]], out, mask);
     }
     return;
   }
-  const [from, to] = clipPair(text(field, shownA), text(field, shownB));
+  const [from, to] = clipPair(text(field, shownA, mask), text(field, shownB, mask));
   const differs = to.endsWith(")") ? `${to.slice(0, -1)}, differs)` : `${to} (differs)`;
   out.push({ field, path, from, to: from === to ? differs : to });
 }
@@ -498,6 +506,7 @@ function diffViews(
   a: Record<string, unknown>,
   b: Record<string, unknown>,
   nameOf: NameOf,
+  mask: Mask,
 ): Change[] {
   const changes: Change[] = [];
   for (const field of Object.keys(b)) {
@@ -507,6 +516,7 @@ function diffViews(
       [a[field], b[field]],
       [displayed(field, a[field], nameOf), displayed(field, b[field], nameOf)],
       changes,
+      mask,
     );
   }
   return changes;
@@ -520,6 +530,11 @@ export interface PlanOptions {
   readonly today: string;
   /** A dry run deletes and pauses nothing, so MA-03's cap is a note for it, not a refusal. */
   readonly dryRun?: boolean;
+  /**
+   * The run's mask, applied to each whole changed value before it is cut to fit a line (the
+   * apply's own `out` masks the joined text again). Without it, nothing is masked here.
+   */
+  readonly mask?: Mask;
 }
 
 const LOUD = ["call", "sms", "push", "critical_alert"] as const;
@@ -663,7 +678,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
           delete have[field];
         }
       }
-      const changes = diffViews(have, want, nameOf);
+      const changes = diffViews(have, want, nameOf, options.mask ?? ((t) => t));
       // MA-06: a managed object someone made loud is put back by this update; say so.
       const loud = LOUD.filter((c) => existing.attributes[c] === true && want[c] === false);
       if (loud.length > 0) {

@@ -714,6 +714,175 @@ describe("monitoring apply: applying", () => {
     expectNothingPrivate(failing.text());
   });
 
+  it("masks a long value before cutting it, so no part of a host or the zone is printed", async () => {
+    // A zone long enough that a cut around a change past the host could land inside it.
+    const zone = "qzvwlonghiddenzonename.example";
+    const hosts = Object.fromEntries(Object.keys(HOSTS).map((role) => [role, `${role}.${zone}`]));
+    const pieces = (text: string) => {
+      const found: string[] = [];
+      for (let i = 0; i + 6 <= zone.length; i += 1) {
+        if (text.includes(zone.slice(i, i + 6))) found.push(zone.slice(i, i + 6));
+      }
+      return found;
+    };
+    const first = setup(["--assert-empty-team", "fin-staging"]);
+    expect((await monitoringApply({ ...first.ctx, hosts, zones: [zone] })).exitCode).toBe(0);
+
+    // A hand edit in Better Stack that makes the remote URL long, its change past the host.
+    const edited = (bs: FakeBetterStack) => {
+      for (const name of ["api-unauthenticated", "api-health", "admin"]) {
+        const monitor = bs.items("monitors").find((m) => m.attributes.pronounceable_name === name);
+        if (monitor === undefined) throw new Error(`no monitor ${name}`);
+        monitor.attributes.url = `${String(monitor.attributes.url)}?probe=${"a".repeat(60)}`;
+      }
+    };
+    const dry = setup(["--dry-run"]);
+    for (const [k, v] of first.bs.store) dry.bs.store.set(k, v);
+    edited(dry.bs);
+    expect((await monitoringApply({ ...dry.ctx, hosts, zones: [zone] })).drift).toBe(true);
+    expect(dry.text()).toContain(
+      "~ monitor api-unauthenticated: url https://<api>/v4/whoami?probe=",
+    );
+    expect(dry.text()).toContain("-> https://<api>/v4/whoami");
+    expect(pieces(dry.text())).toEqual([]);
+
+    // Better Stack's own error text echoing the URL, long enough that a cut at its end would
+    // fall inside the zone.
+    const failing = setup([]);
+    for (const [k, v] of first.bs.store) failing.bs.store.set(k, v);
+    failing.bs.failWith = (method, path, body) => {
+      if (method !== "PATCH" || !path.includes("/monitors/")) return undefined;
+      const url = String((body as { url?: string }).url);
+      const pad = 400 - "url: ".length - 1 - (url.indexOf(zone) + 10);
+      return { status: 422, body: { errors: { url: `${"x".repeat(pad)} ${url} is invalid` } } };
+    };
+    const result = await monitoringApply({ ...failing.ctx, hosts, zones: [zone] });
+    expect(result.exitCode).toBe(1);
+    expect(failing.text()).toContain(
+      "Better Stack refused PATCH /api/v2/monitors/<id> answered 422",
+    );
+    expect(pieces(failing.text())).toEqual([]);
+  });
+
+  it("looks up a create that got no answer by name, and delivers its secrets", async () => {
+    const { config } = loadEnv(ROOT, "staging");
+    if (config === undefined) throw new Error("no config");
+    const desired = buildDesired(config, { hosts: HOSTS, thresholds: {}, grace: {} }).objects;
+    const labels = (o: (typeof desired)[number]) =>
+      (o.delivery?.services ?? []).flatMap((service) =>
+        Object.keys(o.delivery?.variables ?? {}).map((variable) => `${service} ${variable}`),
+      );
+    const cases = [
+      ["source", "/api/v3/sources"],
+      ["application", "/api/v3/applications"],
+      ["heartbeat", "/api/v2/heartbeats"],
+    ] as const;
+    for (const [kind, path] of cases) {
+      const target = desired.find((o) => o.kind === kind && labels(o).length > 0);
+      if (target === undefined) throw new Error(`no ${kind} with secrets`);
+      for (const failure of [
+        new TypeError("fetch failed"),
+        new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      ]) {
+        const run = setup(["--assert-empty-team", "fin-staging"]);
+        const serve = run.bs.fetch;
+        let lost = false;
+        // Better Stack makes the object, but its answer never arrives.
+        const fetch = async (input: string, init?: RequestInit) => {
+          const body = init?.body === undefined ? {} : JSON.parse(String(init.body));
+          if (!lost && init?.method === "POST" && new URL(input).pathname === path) {
+            if ((body as { name?: string }).name === target.key) {
+              lost = true;
+              await serve(input, init);
+              throw failure;
+            }
+          }
+          return serve(input, init);
+        };
+        const result = await monitoringApply({ ...run.ctx, fetch });
+        const what = `${kind} ${failure.name}`;
+        expect(lost, what).toBe(true);
+        expect(result.exitCode, what).toBe(1);
+        const delivered = run.delivered.map((d) => `${d.service} ${d.variable}`);
+        for (const label of labels(target)) expect(delivered, what).toContain(label);
+        expect(result.undelivered, what).toEqual([]);
+        expect(run.text(), what).toContain(
+          `created ${kind} ${target.key} (its create got no answer; found by name)`,
+        );
+        expect(run.text(), what).not.toContain("fetch failed");
+        expectNothingPrivate(run.text());
+
+        // The next plain run finds nothing left to deliver for it.
+        const next = setup([]);
+        for (const [k, v] of run.bs.store) next.bs.store.set(k, v);
+        expect((await monitoringApply(next.ctx)).exitCode, what).toBe(0);
+        expect(
+          next.bs.items(`${kind}s`).filter((i) => i.attributes.name === target.key),
+        ).toHaveLength(1);
+      }
+    }
+  });
+
+  it("lists the secrets of a create that got no answer for --redeliver when it cannot find the object", async () => {
+    const { config } = loadEnv(ROOT, "staging");
+    if (config === undefined) throw new Error("no config");
+    const target = buildDesired(config, { hosts: HOSTS, thresholds: {}, grace: {} }).objects.find(
+      (o) => o.kind === "source" && (o.delivery?.services.length ?? 0) > 0,
+    );
+    if (target === undefined) throw new Error("no source with secrets");
+    const run = setup(["--assert-empty-team", "fin-staging"]);
+    const serve = run.bs.fetch;
+    let lost = false;
+    // The answer is lost, and so is every read after it.
+    const fetch = async (input: string, init?: RequestInit) => {
+      if (lost) throw new TypeError("fetch failed");
+      const body = init?.body === undefined ? {} : JSON.parse(String(init.body));
+      if (init?.method === "POST" && (body as { name?: string }).name === target.key) {
+        lost = true;
+        await serve(input, init);
+        throw new TypeError("fetch failed");
+      }
+      return serve(input, init);
+    };
+    const result = await monitoringApply({ ...run.ctx, fetch });
+    expect(result.exitCode).toBe(1);
+    const services = target.delivery?.services ?? [];
+    const variables = Object.keys(target.delivery?.variables ?? {});
+    for (const service of services) {
+      for (const variable of variables) {
+        expect(result.undelivered).toContain(
+          `${service} ${variable} (its create got no answer; it may exist)`,
+        );
+      }
+    }
+    expect(run.text()).toContain("not delivered (set these sealed variables with");
+    expect(run.text()).toContain("--redeliver");
+    expectNothingPrivate(run.text());
+  });
+
+  it("lists every secret --redeliver could not read when a read stops it", async () => {
+    const { first, next } = await applied(["--redeliver"]);
+    const total = first.delivered.length;
+    let reads = 0;
+    // Each source, application and heartbeat is read back by its ID; the third read fails.
+    next.bs.failWith = (method, path) => {
+      if (method !== "GET" || !/\/(sources|applications|heartbeats)\/[^/]+$/.test(path)) {
+        return undefined;
+      }
+      reads += 1;
+      return reads >= 3 ? { status: 500, body: {} } : undefined;
+    };
+    const result = await monitoringApply(next.ctx);
+    expect(result.exitCode).toBe(1);
+    expect(result.delivered).toBeLessThan(total);
+    expect(result.delivered + result.undelivered.length).toBe(total);
+    expect(result.undelivered.every((u) => u.endsWith("(its secrets could not be read)"))).toBe(
+      true,
+    );
+    expect(next.text()).toContain("not delivered (set these sealed variables with");
+    expectNothingPrivate(next.text());
+  });
+
   it("delivers what it created even when a later write fails, and lists each delivery that failed", async () => {
     const failing = setup(["--assert-empty-team", "fin-staging"], {
       deliver: async (s) => {

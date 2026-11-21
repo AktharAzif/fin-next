@@ -84,7 +84,14 @@ export function redactPath(path: string): string {
   );
 }
 
-/** Better Stack's error strings from a failed response, without echoing any submitted value. */
+/** How much of Better Stack's error text an error keeps, in whole parts. */
+const ERROR_TEXT_BUDGET = 2000;
+
+/**
+ * Better Stack's error strings from a failed response. They can echo a submitted value (a URL with
+ * its hostname), so nothing here cuts one: each part is kept whole or left out, and the caller
+ * masks the text before it shortens it for printing.
+ */
 function errorText(body: unknown): string {
   if (!isRecord(body)) return "";
   const parts: string[] = [];
@@ -99,7 +106,17 @@ function errorText(body: unknown): string {
   if (Array.isArray(body.invalid_attributes)) {
     parts.push(`invalid: ${body.invalid_attributes.map(String).join(", ")}`);
   }
-  return parts.join("; ").slice(0, 400);
+  const kept: string[] = [];
+  let length = 0;
+  for (const part of parts) {
+    if (length + part.length > ERROR_TEXT_BUDGET) {
+      kept.push(`(${parts.length - kept.length} more not shown)`);
+      break;
+    }
+    kept.push(part);
+    length += part.length + 2;
+  }
+  return kept.join("; ");
 }
 
 function toResource(value: unknown): Resource {
@@ -190,21 +207,31 @@ export class BetterStackClient {
     return json;
   }
 
-  /** Every item of a paginated list. */
+  /**
+   * Every item of a paginated list. The list ends only where a page says so (`pagination.next`
+   * null): an answer without its pagination, or a next link that comes back, fails the read, so
+   * the plan is never made from part of a list.
+   */
   async list(path: string): Promise<Resource[]> {
     const out: Resource[] = [];
+    const where = `GET ${redactPath(path)}`;
+    const visited = new Set<string>();
     let url: string | null = `${this.#base}${path}${path.includes("?") ? "&" : "?"}per_page=250`;
     for (let page = 0; url !== null; page += 1) {
-      if (page >= MAX_PAGES) {
-        throw new BetterStackError(`GET ${redactPath(path)}: too many pages`, 0);
-      }
+      if (page >= MAX_PAGES) throw new BetterStackError(`${where}: too many pages`, 0);
+      visited.add(url);
       const body = await this.#send("GET", url);
       if (!isRecord(body) || !Array.isArray(body.data)) {
-        throw new BetterStackError(`GET ${redactPath(path)}: not a list`, 0);
+        throw new BetterStackError(`${where}: not a list`, 0);
       }
       for (const item of body.data) out.push(toResource(item));
-      const pagination = isRecord(body.pagination) ? body.pagination : {};
-      url = typeof pagination.next === "string" && pagination.next !== "" ? pagination.next : null;
+      const next = isRecord(body.pagination) ? body.pagination.next : undefined;
+      if (next === null || next === "") url = null;
+      else if (typeof next !== "string") {
+        throw new BetterStackError(`${where}: a page that does not say where the list ends`, 0);
+      } else if (visited.has(next)) {
+        throw new BetterStackError(`${where}: a next page that comes back`, 0);
+      } else url = next;
     }
     return out;
   }

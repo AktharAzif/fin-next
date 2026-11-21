@@ -46,9 +46,14 @@ watcher's and `pnpm fin verify`'s own are read from Better Stack by those comman
 names objects, never their IDs, and masks the hostnames, the zones (`ctx.zones`) and the monitor
 header, Better Stack's own error text included. Each change is printed by the part that changed
 (`steps[0].step_members`, `metadata.runbook`), cut around its first difference, so no change
-prints the same on both sides. Anything that stops the writes (a refusal from Better Stack, a
-call that gets no answer, a fault in the run) still has what was created before it delivered; a
-read that gets no answer is tried once more, a write never is.
+prints the same on both sides; a value, like an error text, is masked whole before it is cut, so
+no cut leaves part of a hostname or zone. Anything that stops the writes (a refusal from Better
+Stack, a call that gets no answer, a fault in the run) still has what was created before it
+delivered; a read that gets no answer is tried once more, a write never is. A create that gets
+no answer (or a server error) may have made its object: one with secrets is looked up by name,
+and delivered when found; otherwise its variables are listed as not delivered, for `--redeliver`.
+A list is read only to the end its pages name (`pagination.next` null); an answer without one
+fails the run.
 
 A dry run deletes and pauses nothing, so MA-03's cap is a note there, not a refusal. Its `drift`
 (what the daily dry run reports) is true for any difference, for a source or an Errors

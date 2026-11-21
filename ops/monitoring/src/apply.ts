@@ -96,6 +96,9 @@ export class UsageError extends Error {
   override readonly name = "UsageError";
 }
 
+/** The most of a Better Stack error message printed, after the mask. */
+const ERROR_WIDTH = 480;
+
 interface Flags {
   readonly dryRun: boolean;
   readonly confirmDelete?: number;
@@ -355,13 +358,16 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   };
   const desired = buildDesired(config, settings);
   // Better Stack's refusals, and calls that got no answer, are printed through the mask, never
-  // thrown past it.
+  // thrown past it. The message is masked whole and only then cut to length: a cut made first
+  // could leave part of a hostname or zone that the mask no longer finds.
   const refusedBy = (error: unknown): boolean => {
     if (!(error instanceof BetterStackError)) return false;
+    const masked = mask(error.message);
+    const message = masked.length > ERROR_WIDTH ? `${masked.slice(0, ERROR_WIDTH - 3)}...` : masked;
     out(
       error.status === 0
-        ? `monitoring apply: a Better Stack call failed: ${error.message}`
-        : `monitoring apply: Better Stack refused ${error.message}`,
+        ? `monitoring apply: a Better Stack call failed: ${message}`
+        : `monitoring apply: Better Stack refused ${message}`,
     );
     return true;
   };
@@ -380,6 +386,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     headerValues: monitorHeader !== undefined,
     today,
     dryRun: flags.dryRun,
+    mask,
   });
 
   // MA-01: the difference is printed before anything changes.
@@ -412,6 +419,39 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     const name = error instanceof Error ? error.name : typeof error;
     out(`monitoring apply: stopped by an unexpected ${name}`);
   };
+  /**
+   * A create that got no answer, or a server error, may have made the object all the same, and
+   * the next run would find it by name and deliver nothing. So an object with secrets is read back
+   * by name (a read is safe to repeat): found once, it is delivered like any object this run made;
+   * otherwise its variables are listed as not delivered, so the run says to use --redeliver.
+   */
+  const recoverLost = async (object: DesiredObject, error: BetterStackError) => {
+    if (object.delivery === undefined) return;
+    const how = error.status === 0 ? "got no answer" : `answered ${error.status}`;
+    // Every kind that carries secrets (sources, applications, heartbeats) is named by `name`.
+    const client = clientFor(clients, object.kind);
+    try {
+      const path = pathFor(object, ids);
+      const found = (await client.list(path)).filter((r) => r.attributes.name === object.key);
+      const [only] = found;
+      if (found.length === 1 && only !== undefined) {
+        const resource = await client.get(`${path}/${encodeURIComponent(only.id)}`);
+        createdResources.push({ object, resource });
+        result.created += 1;
+        out(`created ${object.kind} ${object.key} (its create ${how}; found by name)`);
+        return;
+      }
+    } catch (readError) {
+      if (!refusedBy(readError)) fault ??= { error: readError };
+    }
+    for (const service of object.delivery.services) {
+      for (const variable of Object.keys(object.delivery.variables)) {
+        result.undelivered.push(`${service} ${variable} (its create ${how}; it may exist)`);
+      }
+    }
+  };
+  // The create in flight, while its call is unanswered.
+  let creating: DesiredObject | undefined;
   try {
     const byKind = (a: Action) =>
       KIND_ORDER.indexOf(a.op === "create" || a.op === "update" ? a.object.kind : "heartbeat");
@@ -420,10 +460,11 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       .sort((a, b) => byKind(a) - byKind(b));
     for (const action of writes) {
       if (action.op === "create") {
-        const resource = await clientFor(clients, action.object.kind).create(
-          pathFor(action.object, ids),
-          sendable(action.object, ids, false),
-        );
+        const path = pathFor(action.object, ids);
+        const body = sendable(action.object, ids, false);
+        creating = action.object;
+        const resource = await clientFor(clients, action.object.kind).create(path, body);
+        creating = undefined;
         ids.set(`${action.object.kind}:${action.object.key}`, resource.id);
         createdResources.push({ object: action.object, resource });
         result.created += 1;
@@ -454,25 +495,43 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     }
   } catch (error) {
     stoppedBy(error);
+    // A refusal (4xx) made nothing; no answer or a server error may have made the object.
+    if (
+      creating !== undefined &&
+      error instanceof BetterStackError &&
+      !(error.status >= 400 && error.status < 500)
+    ) {
+      await recoverLost(creating, error);
+    }
   }
 
   // Hand the new secrets to their services, never printing one.
   const toDeliver: Delivery[] = [...createdResources];
   if (flags.redeliver && !failed) {
+    // A read that fails stops the reads; what was not read is listed, never silently skipped.
+    let stopped = false;
     for (const object of desired.objects) {
       if (object.delivery === undefined) continue;
       if (createdResources.some((c) => c.object === object)) continue;
       const id = ids.get(`${object.kind}:${object.key}`);
       if (id === undefined) continue;
-      const client = clientFor(clients, object.kind);
-      try {
-        toDeliver.push({
-          object,
-          resource: await client.get(`${pathFor(object, ids)}/${encodeURIComponent(id)}`),
-        });
-      } catch (error) {
-        stoppedBy(error);
-        break;
+      if (!stopped) {
+        const client = clientFor(clients, object.kind);
+        try {
+          toDeliver.push({
+            object,
+            resource: await client.get(`${pathFor(object, ids)}/${encodeURIComponent(id)}`),
+          });
+          continue;
+        } catch (error) {
+          stoppedBy(error);
+          stopped = true;
+        }
+      }
+      for (const service of object.delivery.services) {
+        for (const variable of Object.keys(object.delivery.variables)) {
+          result.undelivered.push(`${service} ${variable} (its secrets could not be read)`);
+        }
       }
     }
   }
