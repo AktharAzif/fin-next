@@ -1,5 +1,7 @@
 // overlays/: Modal, ConfirmDialog, Tabs and TabLinks, PageHeader, EmptyState, SecretReveal, Toaster.
-import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { tabs as tabsPrimitive } from "@ui-sdk/core/tabs";
+import { createTabsController, type TabsOptions } from "@ui-sdk/react/tabs";
+import type { AnchorHTMLAttributes, ReactElement, ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 import {
   Badge,
@@ -22,6 +24,7 @@ import {
 import type {
   TabLinkProps,
   TabLinksProps,
+  TabLinkTargetProps,
   TabPanelProps,
   TabProps,
   TabsListProps,
@@ -106,6 +109,10 @@ describe("ConfirmDialog", () => {
 });
 
 describe("Tabs and TabLinks", () => {
+  /** The attribute names on an opening tag, sorted. */
+  const attributeNames = (tag: string | undefined) =>
+    [...(tag ?? "").matchAll(/\s([a-zA-Z][\w:-]*)(?==")/g)].map((match) => match[1]).sort();
+
   it("tabs select the first and show counts only for waiting work", () => {
     const html = render(
       <Tabs defaultValue="money">
@@ -126,9 +133,17 @@ describe("Tabs and TabLinks", () => {
     expect(attr(tabs[1], "aria-selected")).toBe("true");
     expect(text(html)).toContain("Money3");
     expect(text(html)).not.toContain("Activity0");
+    // The chosen tab carries the mark in the primary colour; the others are secondary, and lift on
+    // hover.
+    expect(classes(tabs[1])).toEqual(
+      expect.arrayContaining(["text-text-primary", "after:opacity-100"]),
+    );
+    expect(classes(tabs[0])).toEqual(
+      expect.arrayContaining(["text-text-secondary", "after:opacity-0", "hover:text-text-primary"]),
+    );
   });
 
-  it("tab links are a named navigation with the current page marked", () => {
+  it("tab links are a named navigation holding a list, one item per link, the current marked", () => {
     const html = render(
       <TabLinks label="Settings">
         <TabLink href="/settings/organisation" current>
@@ -137,9 +152,19 @@ describe("Tabs and TabLinks", () => {
         <TabLink href="/settings/team">Team</TabLink>
       </TabLinks>,
     );
-    expect(html).toContain('<nav aria-label="Settings"');
+    // nav > ul > li > a, one item per link, nothing else in between.
+    expect(html).toMatch(
+      /^<nav aria-label="Settings"[^>]*><ul [^>]*>(?:<li [^>]*><a [^>]*>[^<]+<\/a><\/li>){2}<\/ul><\/nav>$/,
+    );
+    expect(classes(html.match(/<ul\b[^>]*>/)?.[0])).toEqual(
+      expect.arrayContaining(["list-none", "m-0"]),
+    );
     expect(tagsWith(html, "aria-current", "page")).toHaveLength(1);
     expect(attr(tagsWith(html, "aria-current", "page")[0], "href")).toBe("/settings/organisation");
+    expect(attr(tagsWith(html, "href", "/settings/team")[0], "aria-current")).toBeUndefined();
+    expect(classes(tagsWith(html, "href", "/settings/team")[0])).toContain(
+      "hover:text-text-primary",
+    );
   });
 
   it("the tablist carries the name it is given, by label or by a labelling element", () => {
@@ -182,9 +207,34 @@ describe("Tabs and TabLinks", () => {
     expect(attr(overview, "aria-selected")).toBe("true");
     expect(text(html)).toContain("Overview panel");
     expect(text(html)).not.toContain("People panel");
+    expect(classes(people)).toEqual(
+      expect.arrayContaining(["text-text-disabled", "cursor-not-allowed"]),
+    );
   });
 
-  it("a count is the plain number, however large, and never 0 or less", () => {
+  it("a disabled tab that value or defaultValue names still looks unavailable, with no mark", () => {
+    for (const named of [{ defaultValue: "people" }, { value: "people" }]) {
+      const html = render(
+        <Tabs {...named}>
+          <TabsList aria-label="Customer">
+            <Tab value="people" disabled>
+              People
+            </Tab>
+            <Tab value="overview">Overview</Tab>
+          </TabsList>
+        </Tabs>,
+      );
+      const people = classes(tagsWith(html, "role", "tab")[0]);
+      expect(people, JSON.stringify(named)).toEqual(
+        expect.arrayContaining(["text-text-disabled", "after:opacity-0", "cursor-not-allowed"]),
+      );
+      expect(people, JSON.stringify(named)).not.toContain("text-text-primary");
+      expect(people, JSON.stringify(named)).not.toContain("after:opacity-100");
+      expect(people.filter((name) => name.startsWith("hover:"))).toEqual([]);
+    }
+  });
+
+  it("a count is the number as given, however large, and never 0 or less", () => {
     const html = render(
       <Tabs defaultValue="money">
         <TabsList aria-label="Customer">
@@ -194,6 +244,9 @@ describe("Tabs and TabLinks", () => {
           <Tab value="documents" count={-2}>
             Documents
           </Tab>
+          <Tab value="activity" count={0}>
+            Activity
+          </Tab>
         </TabsList>
       </Tabs>,
     );
@@ -202,21 +255,10 @@ describe("Tabs and TabLinks", () => {
     expect(text(html)).toContain("Money1234");
     expect(text(html)).not.toContain("1,234");
     expect(text(html)).not.toContain("-2");
-    const links = render(
-      <TabLinks label="Customer">
-        <TabLink href="/customers/c1?tab=documents" count={1000}>
-          Documents
-        </TabLink>
-        <TabLink href="/customers/c1?tab=activity" count={0}>
-          Activity
-        </TabLink>
-      </TabLinks>,
-    );
-    expect(text(links)).toContain("Documents1000");
-    expect(text(links)).not.toContain("Activity0");
+    expect(text(html)).not.toContain("Activity0");
   });
 
-  it("under a page header the row pulls back to the content edge and a panel starts 24px down", () => {
+  it("under a page header the row keeps to its own box and a panel starts 24px down", () => {
     const html = render(
       <Tabs defaultValue="overview">
         <TabsList aria-label="Customer">
@@ -225,14 +267,31 @@ describe("Tabs and TabLinks", () => {
         <TabPanel value="overview">Overview panel</TabPanel>
       </Tabs>,
     );
-    expect(classes(tagsWith(html, "role", "tablist")[0])).toEqual(
-      expect.arrayContaining(["-mx-2", "overflow-x-auto"]),
+    const row = classes(tagsWith(html, "role", "tablist")[0]);
+    expect(row).toEqual(
+      expect.arrayContaining(["min-w-0", "overflow-x-auto", "border-b", "border-border"]),
     );
+    // No margin at all, so none can widen a scroll container or clip the first tab's ring.
+    expect(row.filter((name) => /^-?m[xylrtbse]?-/.test(name))).toEqual([]);
     expect(classes(tagsWith(html, "role", "tabpanel")[0])).toContain("pt-6");
-    // The root is a column, so a panel given flex-1 fills the height left under the row.
+    // The root may shrink below its row, and is a column, so a panel given flex-1 fills the height
+    // left under the row.
     expect(classes(tagsWith(html, "data-slot", "tabs")[0])).toEqual(
-      expect.arrayContaining(["flex", "flex-col"]),
+      expect.arrayContaining(["min-w-0", "flex", "flex-col"]),
     );
+    const links = render(
+      <TabLinks label="Customer">
+        <TabLink href="/customers/c1" current>
+          Overview
+        </TabLink>
+      </TabLinks>,
+    );
+    expect(classes(links.match(/<nav\b[^>]*>/)?.[0])).toEqual(
+      expect.arrayContaining(["min-w-0", "border-b"]),
+    );
+    const list = classes(links.match(/<ul\b[^>]*>/)?.[0]);
+    expect(list).toContain("overflow-x-auto");
+    expect(list.filter((name) => /^-m/.test(name))).toEqual([]);
   });
 
   it("in a drawer the row and its panels sit 24px in, for tabs and for tab links", () => {
@@ -245,8 +304,8 @@ describe("Tabs and TabLinks", () => {
       </Tabs>,
     );
     const list = classes(tagsWith(html, "role", "tablist")[0]);
-    expect(list).toEqual(expect.arrayContaining(["px-4", "overflow-x-auto"]));
-    expect(list).not.toContain("-mx-2");
+    expect(list).toEqual(expect.arrayContaining(["min-w-0", "px-4", "overflow-x-auto"]));
+    expect(list.filter((name) => /^-m/.test(name))).toEqual([]);
     expect(classes(tagsWith(html, "role", "tabpanel")[0])).toEqual(
       expect.arrayContaining(["px-6", "py-5"]),
     );
@@ -259,7 +318,68 @@ describe("Tabs and TabLinks", () => {
     );
     const row = classes(links.match(/<ul\b[^>]*>/)?.[0]);
     expect(row).toEqual(expect.arrayContaining(["px-4", "overflow-x-auto"]));
-    expect(row).not.toContain("-mx-2");
+    expect(row.filter((name) => /^-m/.test(name))).toEqual([]);
+  });
+
+  it("a panel draws its focus ring inside, in a drawer and under a page header alike", () => {
+    for (const variant of ["page", "drawer"] as const) {
+      const panel = classes(
+        tagsWith(
+          render(
+            <Tabs defaultValue="overview" variant={variant}>
+              <TabsList aria-label="Customer">
+                <Tab value="overview">Overview</Tab>
+              </TabsList>
+              <TabPanel value="overview">Overview panel</TabPanel>
+            </Tabs>,
+          ),
+          "role",
+          "tabpanel",
+        )[0],
+      );
+      expect(panel, variant).toContain("focus-visible:outline-focus-inset");
+      expect(panel, variant).not.toContain("focus-visible:outline-focus");
+    }
+  });
+
+  it("every part's className lands on its own element, a class of the same family replacing", () => {
+    const html = render(
+      <>
+        <Tabs defaultValue="overview" variant="drawer" className="flex-row">
+          <TabsList aria-label="Customer" className="mt-4 px-8">
+            <Tab value="overview" className="h-8">
+              Overview
+            </Tab>
+          </TabsList>
+          <TabPanel value="overview" className="py-2">
+            Overview panel
+          </TabPanel>
+        </Tabs>
+        <TabLinks label="Settings" className="border-transparent">
+          <TabLink href="/settings/team" current className="text-text-tertiary">
+            Team
+          </TabLink>
+        </TabLinks>
+      </>,
+    );
+    const root = classes(tagsWith(html, "data-slot", "tabs")[0]);
+    expect(root).toContain("flex-row");
+    expect(root).not.toContain("flex-col");
+    const list = classes(tagsWith(html, "role", "tablist")[0]);
+    expect(list).toEqual(expect.arrayContaining(["mt-4", "px-8", "border-b"]));
+    expect(list).not.toContain("px-4");
+    const tab = classes(tagsWith(html, "role", "tab")[0]);
+    expect(tab).toContain("h-8");
+    expect(tab).not.toContain("h-10");
+    const panel = classes(tagsWith(html, "role", "tabpanel")[0]);
+    expect(panel).toEqual(expect.arrayContaining(["py-2", "px-6"]));
+    expect(panel).not.toContain("py-5");
+    const nav = classes(html.match(/<nav\b[^>]*>/)?.[0]);
+    expect(nav).toEqual(expect.arrayContaining(["border-transparent", "border-b"]));
+    expect(nav).not.toContain("border-border");
+    const link = classes(tagsWith(html, "href", "/settings/team")[0]);
+    expect(link).toContain("text-text-tertiary");
+    expect(link).not.toContain("text-text-primary");
   });
 
   it("a caller's className wins: a panel's own padding, a row's margin", () => {
@@ -276,7 +396,7 @@ describe("Tabs and TabLinks", () => {
     const panel = classes(tagsWith(html, "role", "tabpanel")[0]);
     expect(panel).toContain("pt-2");
     expect(panel).not.toContain("pt-6");
-    expect(classes(tagsWith(html, "data-slot", "tabs-row")[0])).toContain("mt-4");
+    expect(classes(tagsWith(html, "role", "tablist")[0])).toContain("mt-4");
   });
 
   it("tab links render through the app's link, the current one marked", () => {
@@ -304,6 +424,13 @@ describe("Tabs and TabLinks", () => {
     expect(attr(links[0], "aria-current")).toBe("page");
     expect(attr(links[1], "aria-current")).toBeUndefined();
     expect(classes(links[0])).toContain("h-10");
+    // A tag name serves as the link too.
+    const tag = render(
+      <TabLinks label="Settings" linkAs="a">
+        <TabLink href="/settings/team">Team</TabLink>
+      </TabLinks>,
+    );
+    expect(attr(tagsWith(tag, "href", "/settings/team")[0], "class")).toContain("h-10");
   });
 
   it("follows a controlled value: the page's choice is the chosen tab, and null chooses none", () => {
@@ -328,29 +455,83 @@ describe("Tabs and TabLinks", () => {
     expect(tagsWith(none, "role", "tabpanel")).toHaveLength(0);
   });
 
-  it("in a drawer a panel draws its focus ring inside, where the drawer's edge cannot cut it", () => {
-    const panel = (variant: "page" | "drawer") =>
-      classes(
-        tagsWith(
-          render(
-            <Tabs defaultValue="overview" variant={variant}>
-              <TabsList aria-label="Customer">
-                <Tab value="overview">Overview</Tab>
-              </TabsList>
-              <TabPanel value="overview">Overview panel</TabPanel>
-            </Tabs>,
-          ),
-          "role",
-          "tabpanel",
-        )[0],
-      );
-    expect(panel("drawer")).toContain("focus-visible:outline-focus-inset");
-    expect(panel("page")).not.toContain("focus-visible:outline-focus-inset");
+  it("hands the SDK only its named options, and onValueChange the SDK's details: cancel() keeps", () => {
+    const asked: (string | null)[] = [];
+    const onValueChange: NonNullable<TabsProps["onValueChange"]> = (next, details) => {
+      asked.push(next);
+      if (next === "money") details.cancel();
+    };
+    const controller = createTabsController();
+    const smuggled: Record<string, unknown> = {
+      orientation: "vertical",
+      style: { color: "red" },
+      render: <section />,
+      dangerouslySetInnerHTML: { __html: "<img>" },
+      debug: true,
+      "data-smuggled": "",
+      tabIndex: 5,
+    };
+    // Tabs calls no hook, so calling it shows the element it hands the SDK's root.
+    const element = Tabs({
+      ...smuggled,
+      value: "overview",
+      defaultValue: "overview",
+      onValueChange,
+      activation: "manual",
+      loop: false,
+      hiddenUntilFound: true,
+      controller,
+      id: "customer-tabs",
+      variant: "drawer",
+      className: "gap-2",
+      children: "Tabs",
+    }) as ReactElement<{ children: ReactElement<Record<string, unknown>> }>;
+    const handed = element.props.children.props;
+    expect(Object.keys(handed).sort()).toEqual(
+      [
+        "value",
+        "defaultValue",
+        "onValueChange",
+        "activation",
+        "loop",
+        "hiddenUntilFound",
+        "controller",
+        "id",
+        "data-variant",
+        "className",
+        "children",
+      ].sort(),
+    );
+    expect(handed.onValueChange).toBe(onValueChange);
+    expect(handed.controller).toBe(controller);
+    expect([handed.activation, handed.loop, handed.hiddenUntilFound]).toEqual([
+      "manual",
+      false,
+      true,
+    ]);
+    // The SDK runs the change with the handler Tabs handed it: cancel() keeps the selection.
+    const sdk = tabsPrimitive({
+      id: "customer",
+      defaultValue: "overview",
+      onValueChange: handed.onValueChange as typeof onValueChange,
+    });
+    expect(sdk.api.select("money")).toBe(false);
+    expect(sdk.get().value).toBe("overview");
+    expect(sdk.api.select("activity")).toBe(true);
+    expect(sdk.get().value).toBe("activity");
+    expect(asked).toEqual(["money", "activity"]);
+    // The root takes an id; the tabs keep their own.
+    const html = render(
+      <Tabs id="customer-tabs" defaultValue="overview">
+        <TabsList aria-label="Customer">
+          <Tab value="overview">Overview</Tab>
+        </TabsList>
+      </Tabs>,
+    );
+    expect(attr(tagsWith(html, "data-slot", "tabs")[0], "id")).toBe("customer-tabs");
   });
 
-  it("hands nothing past its own props to the markup, even through a spread tsc cannot check", () => {
-    // Everything here is outside every part's prop list. A spread skips the excess-property
-    // check, so only the parts themselves can keep these out.
+  it("the tablist hands the SDK only its name", () => {
     const smuggled: Record<string, unknown> = {
       id: "smuggled-id",
       title: "smuggled-title",
@@ -360,35 +541,84 @@ describe("Tabs and TabLinks", () => {
       "data-smuggled": "",
       "aria-hidden": "true",
       "aria-describedby": "smuggled-description",
+      onKeyDown: noop,
+      dangerouslySetInnerHTML: { __html: "<img data-raw-markup>" },
+      render: <section data-swapped="" />,
+    };
+    const own = ["class", "data-activation-direction", "data-orientation", "data-slot", "role"];
+    const byLabel = render(
+      <Tabs defaultValue="a">
+        <TabsList aria-label="Customer" {...smuggled}>
+          <Tab value="a">A</Tab>
+        </TabsList>
+      </Tabs>,
+    );
+    const labelled = tagsWith(byLabel, "role", "tablist")[0];
+    expect(attributeNames(labelled)).toEqual(["aria-label", ...own].sort());
+    expect(attr(labelled, "role")).toBe("tablist");
+    const byElement = render(
+      <Tabs defaultValue="a">
+        <TabsList aria-labelledby="customer-name" {...smuggled}>
+          <Tab value="a">A</Tab>
+        </TabsList>
+      </Tabs>,
+    );
+    expect(attributeNames(tagsWith(byElement, "role", "tablist")[0])).toEqual(
+      ["aria-labelledby", ...own].sort(),
+    );
+    expect(byLabel + byElement).not.toContain("smuggled");
+  });
+
+  it("hands nothing past its own props to the markup, even through a spread tsc cannot check", () => {
+    // Everything here is outside every part's prop list. A spread skips the excess-property
+    // check, so only the parts themselves can keep these out.
+    const foreign: Record<string, unknown> = {
+      title: "smuggled-title",
+      style: { color: "red" },
+      tabIndex: 5,
+      role: "presentation",
+      "data-smuggled": "",
+      "aria-hidden": "true",
+      "aria-describedby": "smuggled-description",
       orientation: "vertical",
-      keepMounted: true,
-      hiddenUntilFound: true,
-      linkAs: ({ href }: { href: string }) => <b data-smuggled-link="">{href}</b>,
       target: "_blank",
       onClick: noop,
       dangerouslySetInnerHTML: { __html: "<img data-raw-markup>" },
       render: <section data-swapped="" />,
     };
-    // A panel's children are content; a function of the SDK's state is refused at run time too.
-    const functionChild: Record<string, unknown> = { children: () => "function content" };
+    // Each of these belongs to one part only, and must never reach the others.
+    const owned: Record<string, unknown> = {
+      id: "smuggled-id",
+      keepMounted: true,
+      hiddenUntilFound: true,
+      count: 777,
+      linkAs: ({ href }: { href: string }) => <b data-smuggled-link="">{href}</b>,
+    };
+    const smuggle = (...own: string[]): Record<string, unknown> => ({
+      ...foreign,
+      ...Object.fromEntries(Object.entries(owned).filter(([name]) => !own.includes(name))),
+    });
+    // A part's children are content; a function of the SDK's state, typed past tsc here, is
+    // refused at run time too.
+    const functionChild = { children: (() => "function content") as unknown as ReactNode };
     function SpreadLink(props: Record<string, unknown>) {
       return <a data-link="" {...props} />;
     }
     const html = render(
       <>
-        <Tabs defaultValue="overview" {...smuggled}>
-          <TabsList aria-label="Customer" {...smuggled}>
-            <Tab value="overview" {...smuggled}>
+        <Tabs defaultValue="overview" {...smuggle("id", "hiddenUntilFound")}>
+          <TabsList aria-label="Customer" {...smuggle()}>
+            <Tab value="overview" {...smuggle("count")}>
               Overview
             </Tab>
-            <Tab value="money" count={3} {...smuggled}>
+            <Tab value="money" count={3} {...smuggle("count")}>
               Money
             </Tab>
           </TabsList>
-          <TabPanel value="overview" {...smuggled}>
+          <TabPanel value="overview" {...smuggle("keepMounted")}>
             Overview panel
           </TabPanel>
-          <TabPanel value="money" {...smuggled}>
+          <TabPanel value="money" {...smuggle("keepMounted")} keepMounted={false}>
             Money panel
           </TabPanel>
         </Tabs>
@@ -398,11 +628,11 @@ describe("Tabs and TabLinks", () => {
           <TabPanel value="a" {...functionChild} />
         </Tabs>
         {/* TabLinks does take a link component, so the smuggled one comes first and is replaced. */}
-        <TabLinks {...smuggled} label="Settings" linkAs={SpreadLink}>
-          <TabLink href="/settings/team" current {...smuggled}>
+        <TabLinks {...smuggle("linkAs")} label="Settings" linkAs={SpreadLink}>
+          <TabLink href="/settings/team" current {...smuggle()}>
             Team
           </TabLink>
-          <TabLink href="/settings/roles" {...smuggled}>
+          <TabLink href="/settings/roles" {...smuggle()}>
             Roles
           </TabLink>
         </TabLinks>
@@ -414,6 +644,7 @@ describe("Tabs and TabLinks", () => {
       'tabindex="5"',
       'role="presentation"',
       "aria-hidden",
+      "aria-describedby",
       'aria-orientation="vertical"',
       'data-orientation="vertical"',
       "target=",
@@ -421,6 +652,8 @@ describe("Tabs and TabLinks", () => {
       "<section",
       "data-swapped",
       "function content",
+      "777",
+      "hidden=",
     ]) {
       expect(html, leak).not.toContain(leak);
     }
@@ -439,7 +672,7 @@ describe("Tabs and TabLinks", () => {
       <a {...props} />
     );
     const elements = [
-      <Tabs key="1">
+      <Tabs key="1" value={null}>
         <TabsList aria-label="Customer">
           <Tab value="a">A</Tab>
         </TabsList>
@@ -458,24 +691,94 @@ describe("Tabs and TabLinks", () => {
       <Tabs key="5" render={<section />}>
         x
       </Tabs>,
-      // @ts-expect-error: the tablist needs a name
-      <TabsList key="6">x</TabsList>,
       // @ts-expect-error: no part takes `style`
-      <Tab key="7" value="a" style={{}}>
+      <Tabs key="6" style={{}}>
+        x
+      </Tabs>,
+      <Tabs
+        key="7"
+        // @ts-expect-error: no part takes raw markup
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: the line proves tsc refuses it
+        dangerouslySetInnerHTML={{ __html: "" }}
+      >
+        x
+      </Tabs>,
+      // @ts-expect-error: no part takes DOM event handlers
+      <Tabs key="8" onClick={noop}>
+        x
+      </Tabs>,
+      // @ts-expect-error: the root's children are content, and required
+      <Tabs key="9" />,
+      // @ts-expect-error: the tablist needs a name
+      <TabsList key="10">x</TabsList>,
+      // @ts-expect-error: one name, not two
+      <TabsList key="11" aria-label="Customer" aria-labelledby="customer-name">
+        x
+      </TabsList>,
+      // @ts-expect-error: only the root takes an id
+      <TabsList key="12" aria-label="Customer" id="list">
+        x
+      </TabsList>,
+      // @ts-expect-error: no part takes `style`
+      <Tab key="13" value="a" style={{}}>
         A
       </Tab>,
-      <TabPanel key="9" value="a">
+      // @ts-expect-error: only the root takes an id
+      <Tab key="14" value="a" id="tab">
+        A
+      </Tab>,
+      // @ts-expect-error: the SDK owns the tab stop
+      <Tab key="15" value="a" tabIndex={0}>
+        A
+      </Tab>,
+      // @ts-expect-error: a tab is always a <button>
+      <Tab key="16" value="a" render={<a href="/a" />}>
+        A
+      </Tab>,
+      // @ts-expect-error: a tab needs its label
+      <Tab key="17" value="a" />,
+      <TabPanel key="18" value="a">
         {
           // @ts-expect-error: a panel's children are content, not a function of state
           () => "A"
         }
       </TabPanel>,
+      // @ts-expect-error: only the root takes an id
+      <TabPanel key="19" value="a" id="panel">
+        A
+      </TabPanel>,
+      // @ts-expect-error: find in page is the root's choice
+      <TabPanel key="20" value="a" hiddenUntilFound>
+        A
+      </TabPanel>,
+      // @ts-expect-error: no part takes `style`
+      <TabLinks key="21" label="Settings" style={{}}>
+        x
+      </TabLinks>,
       // @ts-expect-error: the link component comes in once, on TabLinks
-      <TabLink key="10" href="/a" linkAs={PlainLink}>
+      <TabLink key="22" href="/a" linkAs={PlainLink}>
         A
       </TabLink>,
+      // @ts-expect-error: a tab link carries no count
+      <TabLink key="23" href="/a" count={3}>
+        A
+      </TabLink>,
+      // @ts-expect-error: a tab link stays in this window
+      <TabLink key="24" href="/a" target="_blank">
+        A
+      </TabLink>,
+      // @ts-expect-error: a tab link needs its label
+      <TabLink key="25" href="/a" />,
     ];
-    expect(elements).toHaveLength(9);
+    expect(elements).toHaveLength(25);
+    // onValueChange is typed exactly as the SDK types it, details and all.
+    type Same<A, B> =
+      (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+    const exact: Same<
+      NonNullable<TabsProps["onValueChange"]>,
+      NonNullable<TabsOptions["onValueChange"]>
+    > = true;
+    expect(exact).toBe(true);
     // Each part's whole prop list: a prop added to a part (`style`, raw markup, any SDK or DOM
     // pass-through) makes its record incomplete, and tsc fails here.
     const lists: {
@@ -485,22 +788,29 @@ describe("Tabs and TabLinks", () => {
       panel: Record<keyof TabPanelProps, true>;
       links: Record<keyof TabLinksProps, true>;
       link: Record<keyof TabLinkProps, true>;
+      target: Record<keyof TabLinkTargetProps, true>;
     } = {
       tabs: {
         value: true,
         defaultValue: true,
         onValueChange: true,
+        activation: true,
+        loop: true,
+        hiddenUntilFound: true,
+        controller: true,
+        id: true,
         variant: true,
         className: true,
         children: true,
       },
       list: { "aria-label": true, "aria-labelledby": true, className: true, children: true },
       tab: { value: true, disabled: true, count: true, className: true, children: true },
-      panel: { value: true, className: true, children: true },
+      panel: { value: true, keepMounted: true, className: true, children: true },
       links: { label: true, variant: true, linkAs: true, className: true, children: true },
-      link: { href: true, current: true, count: true, className: true, children: true },
+      link: { href: true, current: true, className: true, children: true },
+      target: { href: true, className: true, "aria-current": true, children: true },
     };
-    expect(Object.keys(lists)).toHaveLength(6);
+    expect(Object.keys(lists)).toHaveLength(7);
   });
 });
 

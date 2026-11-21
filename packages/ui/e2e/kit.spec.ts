@@ -466,7 +466,7 @@ test.describe("the components @kit", () => {
     const customer = customerTabs(page);
     const look = await customer.evaluate((root) => {
       const px = (n: number) => Math.round(n) + 0;
-      const row = root.querySelector('[data-slot="tabs-row"]') as HTMLElement;
+      const row = root.querySelector('[role="tablist"]') as HTMLElement;
       const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[];
       const panel = root.querySelector('[role="tabpanel"]') as HTMLElement;
       const label = (tab: HTMLElement) => {
@@ -478,8 +478,13 @@ test.describe("the components @kit", () => {
       const rowBox = row.getBoundingClientRect();
       const panelBox = panel.getBoundingClientRect();
       return {
-        // The first label on the content edge; labels 28px apart; the panel's first line 24px
-        // under the 1px rule.
+        // The row keeps to its own box: it spans the root exactly (no negative margin), the first
+        // tab starts on its edge, its label inside the tab's 8px padding; labels 28px apart; the
+        // panel's first line 24px under the 1px rule.
+        box: [rowBox.left - root.getBoundingClientRect().left, rowBox.width - root.clientWidth].map(
+          px,
+        ),
+        start: px((tabs[0]?.getBoundingClientRect().left ?? 0) - rowBox.left),
         edge: px((overview?.left ?? 0) - rowBox.left),
         apart: [
           px((details?.left ?? 0) - (overview?.right ?? 0)),
@@ -492,7 +497,15 @@ test.describe("the components @kit", () => {
         height: px(tabs[0]?.getBoundingClientRect().height ?? 0),
       };
     });
-    expect(look).toEqual({ edge: 0, apart: [28, 28], under: 24, rule: "1px", height: 40 });
+    expect(look).toEqual({
+      box: [0, 0],
+      start: 0,
+      edge: 8,
+      apart: [28, 28],
+      under: 24,
+      rule: "1px",
+      height: 40,
+    });
 
     // Read at rest, before any click (a tab's colour fades between states): Overview is chosen.
     const token = await textTokens(page);
@@ -504,7 +517,8 @@ test.describe("the components @kit", () => {
         return {
           colour: getComputedStyle(el).color,
           weight: getComputedStyle(el).fontWeight,
-          mark: mark.backgroundColor,
+          // The mark shows only at full opacity; hidden, it has no colour to speak of.
+          mark: mark.opacity === "1" ? mark.backgroundColor : "rgba(0, 0, 0, 0)",
           markBox: [mark.height, mark.left, mark.right, mark.bottom].join(" "),
         };
       };
@@ -542,10 +556,13 @@ test.describe("the components @kit", () => {
 
     const settings = page.getByRole("navigation", { name: "Settings" });
     const linkPaint = (name: string) =>
-      settings.getByRole("link", { name }).evaluate((el) => ({
-        colour: getComputedStyle(el).color,
-        mark: getComputedStyle(el, "::after").backgroundColor,
-      }));
+      settings.getByRole("link", { name }).evaluate((el) => {
+        const mark = getComputedStyle(el, "::after");
+        return {
+          colour: getComputedStyle(el).color,
+          mark: mark.opacity === "1" ? mark.backgroundColor : "rgba(0, 0, 0, 0)",
+        };
+      });
     expect(await linkPaint("Organisation")).toEqual({ colour: token.primary, mark: token.primary });
     expect(await linkPaint("Team")).toEqual({ colour: token.secondary, mark: none });
   });
@@ -555,13 +572,13 @@ test.describe("the components @kit", () => {
   }) => {
     const drawer = page.locator('[data-kit="tabs-drawer"]');
     const fit = await drawer.evaluate((box) => {
-      const row = box.querySelector('[data-slot="tabs-row"]') as HTMLElement;
       const list = box.querySelector('[role="tablist"]') as HTMLElement;
       const panel = box.querySelector('[role="tabpanel"]') as HTMLElement;
       const px = (n: number) => Math.round(n) + 0;
       const range = document.createRange();
       range.selectNodeContents(list.querySelector('[role="tab"]')?.firstChild as Node);
-      const rowBox = row.getBoundingClientRect();
+      // The tablist is the row: it draws the rule and scrolls.
+      const rowBox = list.getBoundingClientRect();
       const panelBox = panel.getBoundingClientRect();
       const ps = getComputedStyle(panel);
       return {
@@ -606,6 +623,90 @@ test.describe("the components @kit", () => {
       style: "solid",
       edges: [0, 0],
     });
+    // Under a page header the panel draws the same inside ring.
+    const customer = customerTabs(page);
+    await keyboardFocus(page, customer.getByRole("tab", { name: "Overview" }));
+    await page.keyboard.press("Tab");
+    const pagePanel = customer.getByRole("tabpanel");
+    await expect(pagePanel).toBeFocused();
+    expect(
+      await pagePanel.evaluate((el) => {
+        const s = getComputedStyle(el);
+        return [el.matches(":focus-visible"), s.outlineWidth, s.outlineOffset, s.outlineStyle];
+      }),
+    ).toEqual([true, "2px", "-2px", "solid"]);
+  });
+
+  test("tabs: a row too wide scrolls inside itself in a grid and in a flex row; the page never grows", async ({
+    page,
+  }) => {
+    for (const name of ["tabs-grid", "tabs-flex"]) {
+      const fit = await page.locator(`[data-kit="${name}"]`).evaluate((parent) => {
+        const list = parent.querySelector('[role="tablist"]') as HTMLElement;
+        const outer = parent.getBoundingClientRect();
+        const row = list.getBoundingClientRect();
+        return {
+          scrolls:
+            getComputedStyle(list).overflowX === "auto" && list.scrollWidth > list.clientWidth,
+          inside:
+            Math.round(row.left) >= Math.round(outer.left) &&
+            Math.round(row.right) <= Math.round(outer.right),
+          parent: parent.scrollWidth - parent.clientWidth,
+          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      expect(fit, name).toEqual({ scrolls: true, inside: true, parent: 0, page: 0 });
+    }
+  });
+
+  test("tabs: a disabled tab the page names looks unavailable, with no chosen mark", async ({
+    page,
+  }) => {
+    const token = await textTokens(page);
+    const named = section(page, "tabs")
+      .locator('[data-slot="tabs"]')
+      .filter({ has: page.getByRole("tablist", { name: "Customer with Documents named" }) });
+    const documents = named.getByRole("tab", { name: "Documents" });
+    await expect(documents).toHaveAttribute("aria-disabled", "true");
+    const look = await documents.evaluate((el) => ({
+      colour: getComputedStyle(el).color,
+      mark: getComputedStyle(el, "::after").opacity,
+    }));
+    expect(look).toEqual({ colour: token.disabled, mark: "0" });
+    // Leaving it, the page cannot come back to it by a click.
+    const overview = named.getByRole("tab", { name: "Overview" });
+    await overview.click();
+    await expect(overview).toHaveAttribute("aria-selected", "true");
+    await documents.click({ force: true });
+    await expect(overview).toHaveAttribute("aria-selected", "true");
+    await expect(documents).toHaveAttribute("aria-selected", "false");
+  });
+
+  test("tabs: hover lifts an unchosen tab and a tab link to the primary colour, never a disabled tab", async ({
+    page,
+  }) => {
+    // Tailwind's hover: answers a pointer that can hover; a touch screen has none.
+    test.skip(
+      !(await page.evaluate(() => matchMedia("(hover: hover)").matches)),
+      "a touch screen has no hover",
+    );
+    const token = await textTokens(page);
+    const customer = customerTabs(page);
+    const details = customer.getByRole("tab", { name: "Details" });
+    await expect(details).toHaveCSS("color", token.secondary);
+    await details.hover();
+    await expect(details).toHaveCSS("color", token.primary);
+    const team = page
+      .getByRole("navigation", { name: "Settings" })
+      .getByRole("link", { name: "Team" });
+    await expect(team).toHaveCSS("color", token.secondary);
+    await team.hover();
+    await expect(team).toHaveCSS("color", token.primary);
+    const documents = customer.getByRole("tab", { name: "Documents" });
+    await documents.hover();
+    // Past the 200ms fade a hover colour would take, the disabled tab keeps its own.
+    await page.waitForTimeout(400);
+    expect(await documents.evaluate((el) => getComputedStyle(el).color)).toBe(token.disabled);
   });
 
   test("tabs: a choice the page holds moves the selection from outside the tabs", async ({

@@ -91,6 +91,37 @@ function Row(props: { children: ReactNode }) {
   return <div className="flex flex-wrap items-center gap-3">{props.children}</div>;
 }
 
+/** More tabs than any column holds, even at 1440: the row must scroll inside itself. */
+const WIDE_TABS = [
+  "Overview and tasks",
+  "Details",
+  "People",
+  "Documents",
+  "Virtual accounts",
+  "Beneficiaries",
+  "Transactions",
+  "Transfers",
+  "Money",
+  "Activity",
+  "Webhooks",
+  "Audit log",
+];
+
+function WideTabs(props: { name: string }) {
+  return (
+    <Tabs defaultValue="tab-0">
+      <TabsList aria-label={props.name}>
+        {WIDE_TABS.map((label, index) => (
+          <Tab key={label} value={`tab-${index}`}>
+            {label}
+          </Tab>
+        ))}
+      </TabsList>
+      <TabPanel value="tab-0">No open tasks.</TabPanel>
+    </Tabs>
+  );
+}
+
 // Sample values shaped like secrets are joined at run time, so the source holds no string the
 // public-safety check would take for a credential (CONTRIBUTING, "Tests that need a
 // secret-shaped value").
@@ -681,6 +712,24 @@ export function Kit(props: { onReady: () => void }) {
                 <TabPanel value="transactions">No transactions yet.</TabPanel>
               </Tabs>
             </div>
+            {/* A row too wide for its column, in a grid and in a flex row: it scrolls in itself. */}
+            <div data-kit="tabs-grid" className="grid">
+              <WideTabs name="Customer in a grid" />
+            </div>
+            <div data-kit="tabs-flex" className="flex">
+              <WideTabs name="Customer in a flex row" />
+            </div>
+            {/* A disabled tab the page names: it still looks unavailable, with no chosen mark. */}
+            <Tabs defaultValue="documents">
+              <TabsList aria-label="Customer with Documents named">
+                <Tab value="overview">Overview</Tab>
+                <Tab value="documents" disabled>
+                  Documents
+                </Tab>
+              </TabsList>
+              <TabPanel value="overview">The overview.</TabPanel>
+              <TabPanel value="documents">The documents.</TabPanel>
+            </Tabs>
           </Section>
 
           <Section name="states" title="EmptyState and ErrorState">
