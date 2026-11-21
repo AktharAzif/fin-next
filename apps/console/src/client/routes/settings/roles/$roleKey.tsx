@@ -138,7 +138,7 @@ function RoleEditorPage() {
     .filter((role) => !role.builtIn && role.roleKey !== (isNew ? "" : roleKey))
     .map((role) => role.label);
   // Keyed by the role, not its version: the save's own reload brings a new version, and the editor
-  // takes it in place (keeping its "saved" state) rather than starting again.
+  // takes it in place rather than starting again, so "saved" stays until the draft next changes.
   return (
     <Editor
       key={`${roleKey}:${from ?? ""}`}
@@ -193,16 +193,22 @@ function Editor(props: {
       detail !== null &&
       [...toPermissions(detail.permissions)].some((key) => !draft.permissions.has(key)),
   );
-  // The version the draft was read at. A newer one (the save's own reload) is taken in place:
-  // the draft becomes what the server now holds, and the "saved" state stays on screen.
+  // The version the draft was read at. A newer one (the save's own reload) is taken in place. While
+  // nothing has changed since the save, the draft becomes what the server now holds and "saved"
+  // stays on screen; a change made while the reload was on its way is kept, unsaved, on top of it.
   const [version, setVersion] = useState(detail?.version ?? null);
+  const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   if (!isNew && detail !== null && detail.version !== version) {
     setVersion(detail.version);
-    setDraft(savedDraft(detail));
+    if (state === "saved") setDraft(savedDraft(detail));
   }
-  const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   const [failed, setFailed] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
+  // Every change to the draft goes through here: a change made after a save is not saved yet.
+  const edit = (change: (d: Draft) => Draft) => {
+    setDraft(change);
+    setState((s) => (s === "saved" ? "idle" : s));
+  };
   const problems = readOnly ? [] : draftProblems(draft, actor, props.takenNames);
   const why = whySaveIsOff(problems, draft.name);
   const fieldProblem = problems.map(problemSentence).find((s) => s !== null) ?? null;
@@ -312,10 +318,7 @@ function Editor(props: {
                     maxLength={40}
                     readOnly={readOnly}
                     disabled={busy}
-                    onValueChange={(name) => {
-                      setDraft((d) => ({ ...d, name }));
-                      if (state === "saved") setState("idle");
-                    }}
+                    onValueChange={(name) => edit((d) => ({ ...d, name }))}
                   />
                 </Field>
                 <Field
@@ -332,8 +335,7 @@ function Editor(props: {
                     disabled={busy}
                     onChange={(event) => {
                       const description = event.currentTarget.value;
-                      setDraft((d) => ({ ...d, description }));
-                      if (state === "saved") setState("idle");
+                      edit((d) => ({ ...d, description }));
                     }}
                   />
                 </Field>
@@ -363,7 +365,7 @@ function Editor(props: {
                     }
                     disabled={readOnly || busy || !anyGivable}
                     onCheckedChange={(checked) =>
-                      setDraft((d) => ({
+                      edit((d) => ({
                         ...d,
                         permissions: toggleGroup(d.permissions, keys, checked === true, givable),
                       }))
@@ -394,7 +396,7 @@ function Editor(props: {
                             readOnly || busy || (lock !== null && !draft.permissions.has(key))
                           }
                           onCheckedChange={(checked) =>
-                            setDraft((d) => ({
+                            edit((d) => ({
                               ...d,
                               permissions: toggle(d.permissions, key, checked === true),
                             }))

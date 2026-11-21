@@ -16,6 +16,7 @@ import {
   noContent,
   ok,
   problem,
+  type Recorded,
   stepUpRequired,
   viewer,
 } from "../support/api-double.ts";
@@ -931,29 +932,7 @@ test.describe("roles", () => {
   });
 
   test("@journey an edited role saves with its intent and says it is saved", async ({ page }) => {
-    let version = 1;
-    let description: string = DEVELOPER_ROLE.description;
-    const api = signedIn()
-      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
-      .on("GET /api/roles/:roleKey", () =>
-        ok({
-          roleKey: "rol_dev",
-          roleId: "rol_dev",
-          label: "Developer",
-          description,
-          builtIn: false,
-          permissions: DEVELOPER_ROLE.permissions,
-          version,
-          holders: 2,
-        }),
-      )
-      .on("PUT /api/roles/:roleId", (request, nth) => {
-        if (nth === 0) return stepUpRequired("role.update", { intentId: "sti_save" });
-        description = (request.body as { description: string }).description;
-        version += 1;
-        return ok({});
-      })
-      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    const api = developerRoleServer();
     await api.install(page);
     await gotoReady(page, "/settings/roles/rol_dev");
     await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
@@ -966,20 +945,115 @@ test.describe("roles", () => {
     await enterCode(page, "Authenticator code", "123456");
     // The save's own reload brings version 2; the editor keeps saying it is saved.
     const summary = page.getByRole("complementary", { name: "Summary" });
-    await expect(
-      summary.getByText("Saved. Changes apply on each person’s next request."),
-    ).toBeVisible();
-    await expect.poll(() => api.calls("GET /api/roles/:roleKey").length).toBe(2);
-    await expect(
-      summary.getByText("Saved. Changes apply on each person’s next request."),
-    ).toBeVisible();
+    const saved = summary.getByText("Saved. Changes apply on each person’s next request.");
+    await expect(saved).toBeVisible();
+    await expect(summary.getByText("3 people have this role.")).toBeVisible();
+    await expect(saved).toBeVisible();
     await expect(field).toHaveValue("Builds the integration.");
     const saves = api.calls("PUT /api/roles/:roleId");
     expect(saves).toHaveLength(2);
     expect(saves[1]?.body).toMatchObject({ description: "Builds the integration.", version: 1 });
     expect(saves[1]?.headers["fin-step-up-intent"]).toBe("sti_save");
+
+    // A permission changed after the save is not saved yet: the line goes, and Save sends it.
+    const customers = page.getByRole("checkbox", { name: /^See customers/ });
+    await customers.click();
+    await expect(customers).not.toBeChecked();
+    await expect(saved).toBeHidden();
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(summary.getByText("4 people have this role.")).toBeVisible();
+    await expect(saved).toBeVisible();
+    await expect(customers).not.toBeChecked();
+    const again = api.calls("PUT /api/roles/:roleId");
+    expect(again).toHaveLength(3);
+    expect(again[2]?.body).toMatchObject({ version: 2 });
+    expect(sentPermissions(again[2])).toEqual(["apiKey.read", "member.read", "webhooks.read"]);
+
+    // So is a whole group ticked after a save.
+    await page.getByRole("checkbox", { name: /^Customers/ }).click();
+    await expect(customers).toBeChecked();
+    await expect(saved).toBeHidden();
+    expect(api.calls("PUT /api/roles/:roleId")).toHaveLength(3);
+  });
+
+  test("@journey a change made while the save reloads is kept and not called saved", async ({
+    page,
+  }) => {
+    const reload = Promise.withResolvers<void>();
+    const api = developerRoleServer({ nth: 1, until: reload.promise });
+    await api.install(page);
+    await gotoReady(page, "/settings/roles/rol_dev");
+    await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
+    const field = page.getByRole("textbox", { name: /^Description/ });
+    await field.fill("Builds the integration.");
+    await page.getByRole("button", { name: "Save" }).click();
+    await enterCode(page, "Authenticator code", "123456");
+    const summary = page.getByRole("complementary", { name: "Summary" });
+    const saved = summary.getByText("Saved. Changes apply on each person’s next request.");
+    await expect(saved).toBeVisible();
+    // The save's reload is still on its way when a permission is unticked.
+    await expect.poll(() => api.calls("GET /api/roles/:roleKey").length).toBe(2);
+    const customers = page.getByRole("checkbox", { name: /^See customers/ });
+    await customers.click();
+    await expect(saved).toBeHidden();
+    reload.resolve();
+    // The reload is drawn (version 2), and the untick is neither lost nor called saved.
+    await expect(summary.getByText("3 people have this role.")).toBeVisible();
+    await expect(customers).not.toBeChecked();
+    await expect(field).toHaveValue("Builds the integration.");
+    await expect(saved).toBeHidden();
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(summary.getByText("4 people have this role.")).toBeVisible();
+    await expect(saved).toBeVisible();
+    const saves = api.calls("PUT /api/roles/:roleId");
+    expect(saves).toHaveLength(3);
+    expect(saves[2]?.body).toMatchObject({ description: "Builds the integration.", version: 2 });
+    expect(sentPermissions(saves[2])).toEqual(["apiKey.read", "member.read", "webhooks.read"]);
   });
 });
+
+/** The permissions a role save sent, sorted. */
+function sentPermissions(request: Recorded | undefined): string[] {
+  const body = request?.body as { permissions?: string[] } | undefined;
+  return [...(body?.permissions ?? [])].sort();
+}
+
+/**
+ * Developer's role as a server holds it: a save (after one step-up) replaces it and moves its
+ * version on. Each version has its own holders count, so a spec sees when a reload is drawn.
+ * `hold` keeps the nth GET of the role waiting until `until` settles.
+ */
+function developerRoleServer(hold?: { nth: number; until: Promise<void> }): ApiDouble {
+  const role = {
+    description: DEVELOPER_ROLE.description,
+    permissions: [...DEVELOPER_ROLE.permissions],
+    version: 1,
+  };
+  return signedIn()
+    .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+    .on("GET /api/roles/:roleKey", async (_request, nth) => {
+      if (hold !== undefined && nth === hold.nth) await hold.until;
+      return ok({
+        roleKey: "rol_dev",
+        roleId: "rol_dev",
+        label: "Developer",
+        description: role.description,
+        builtIn: false,
+        permissions: role.permissions,
+        version: role.version,
+        holders: role.version + 1,
+      });
+    })
+    .on("PUT /api/roles/:roleId", (request, nth) => {
+      if (nth === 0) return stepUpRequired("role.update", { intentId: "sti_save" });
+      const body = request.body as { description: string; permissions: string[] };
+      role.description = body.description;
+      role.permissions = body.permissions;
+      role.version += 1;
+      return ok({});
+    })
+    .on("POST /api/auth/two-factor/verify-totp", ok({}));
+}
 
 test.describe("the audit log", () => {
   test("@journey filtered to one member from the Team row menu, with its entry", async ({
