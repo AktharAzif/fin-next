@@ -1,0 +1,19 @@
+# Control paths: the owner's approval is required (DECISIONS.md CI-14).
+/.github/                         @aktharazif
+/.claude/                         @aktharazif
+/CODEOWNERS                       @aktharazif
+/AGENTS.md                        @aktharazif
+/CLAUDE.md                        @aktharazif
+/CONTRIBUTING.md                  @aktharazif
+/SECURITY.md                      @aktharazif
+/pnpm-workspace.yaml              @aktharazif
+/scripts/check-supply-chain.mjs   @aktharazif
+/scripts/public-safety.mjs        @aktharazif
+/tools/fin-review/                @aktharazif
+/tools/layout.json                @aktharazif
+/docs/review/                     @aktharazif
+/ops/fin/                         @aktharazif
+/ops/docker/                      @aktharazif
+/tools/static-deploy/             @aktharazif
+/packages/web-host/src/static/    @aktharazif
+/apps/*/static.json               @aktharazif
