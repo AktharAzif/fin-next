@@ -1,6 +1,7 @@
 // release-static: the static outputs, staging and map strip, FW-C13's carry and its test, the
 // asset manifest hash the deploy compares, the previous-release lookup and the manifest.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -544,6 +545,7 @@ describe("build, merge, record and manifest end to end", () => {
       "packages/db/migrations/20261121101000_audit_core.sql": "--",
       "packages/db/migrations/20261121101100_audit_journal.sql": "--",
       "packages/db/migrations/README.md": "not a migration",
+      "packages/identity/migrations/20261121120000_identity_realm.sql": "--",
     });
     return root;
   }
@@ -643,11 +645,13 @@ describe("build, merge, record and manifest end to end", () => {
       assetManifestHash(join(root, "release", "static", "console")),
     );
     assert.deepEqual(onDisk.sourceMaps, { artefact: `source-maps-${SHA}`, sha256: HEX("d") });
+    // Every package's migrations, not packages/db's alone, and the newest of them all.
     assert.deepEqual(onDisk.migrations, [
       "20261121101000_audit_core.sql",
       "20261121101100_audit_journal.sql",
+      "20261121120000_identity_realm.sql",
     ]);
-    assert.equal(onDisk.minimumSchemaVersion, "20261121101100_audit_journal.sql");
+    assert.equal(onDisk.minimumSchemaVersion, "20261121120000_identity_realm.sql");
     assert.deepEqual(
       onDisk.skipped.images.map((/** @type {any} */ s) => s.image),
       RELEASE_IMAGES.filter((i) => i !== "api").map((i) => `fin-next-${i}`),
@@ -1002,18 +1006,108 @@ describe("the manifest's pieces", () => {
     );
   });
 
-  it("lists migrations in name order and ignores other files", (t) => {
+  it("lists every package's migrations in one name order, as migrate applies them", (t) => {
     const root = tempDir(t);
     assert.deepEqual(readMigrations(root), { migrations: [], minimumSchemaVersion: null });
     writeTree(root, {
-      "packages/db/migrations/20261122000000_b_two.sql": "",
-      "packages/db/migrations/20261121000000_a_one.sql": "",
-      "packages/db/migrations/notes.sql": "",
+      "packages/db/migrations/20261121101000_audit_core.sql": "",
+      "packages/db/migrations/20261121101400_events_shell.sql": "",
+      "packages/db/migrations/README.md": "not a migration",
+      "packages/identity/migrations/20261121120000_identity_realm.sql": "",
+      "packages/identity/migrations/20261121120600_identity_guards.sql": "",
+      "packages/email/migrations/20261121110000_email_sender.sql": "",
+      "packages/email/README.md": "no migration here",
+      "packages/ui/package.json": "{}",
+      // Folders migrate does not read: a name that is not a package's, and loose files.
+      "packages/Scratch/migrations/20261201000000_scratch_one.sql": "",
+      "packages/.cache/migrations/20261201000000_cache_one.sql": "",
+      "packages/notes.sql": "",
     });
-    assert.deepEqual(readMigrations(root).migrations, [
-      "20261121000000_a_one.sql",
-      "20261122000000_b_two.sql",
-    ]);
+    assert.deepEqual(readMigrations(root), {
+      migrations: [
+        "20261121101000_audit_core.sql",
+        "20261121101400_events_shell.sql",
+        "20261121110000_email_sender.sql",
+        "20261121120000_identity_realm.sql",
+        "20261121120600_identity_guards.sql",
+      ],
+      minimumSchemaVersion: "20261121120600_identity_guards.sql",
+    });
+  });
+
+  it("refuses what migrate would refuse, so the manifest never lists other than it applies", (t) => {
+    /**
+     * @param {Record<string, string>} files
+     * @param {RegExp} why
+     */
+    const refused = (files, why) => {
+      const root = tempDir(t);
+      writeTree(root, { "packages/db/migrations/20261121101000_audit_core.sql": "", ...files });
+      assert.throws(() => readMigrations(root), why, JSON.stringify(Object.keys(files)));
+    };
+    refused(
+      { "packages/identity/migrations/20261121101000_audit_core.sql": "" },
+      /20261121101000_audit_core\.sql is in both packages\/db\/migrations and packages\/identity\/migrations/,
+    );
+    refused(
+      { "packages/identity/migrations/20261121101000_identity_realm.sql": "" },
+      /shares its timestamp/,
+    );
+    refused({ "packages/db/migrations/notes.sql": "" }, /notes\.sql is not named/);
+    refused(
+      { "packages/email/migrations/20261121110000_email_sender.SQL": "" },
+      /email_sender\.SQL is not named/,
+    );
+    refused({ "packages/email/migrations/2026112111_email_sender.sql": "" }, /is not named/);
+
+    const linkedFolder = tempDir(t);
+    writeTree(linkedFolder, {
+      "elsewhere/20261121110000_email_sender.sql": "",
+      "packages/db/migrations/20261121101000_audit_core.sql": "",
+      "packages/email/package.json": "{}",
+    });
+    symlinkSync(
+      join(linkedFolder, "elsewhere"),
+      join(linkedFolder, "packages", "email", "migrations"),
+    );
+    assert.throws(
+      () => readMigrations(linkedFolder),
+      /packages\/email\/migrations is not a plain folder/,
+    );
+
+    const linkedFile = tempDir(t);
+    writeTree(linkedFile, {
+      "elsewhere.sql": "",
+      "packages/db/migrations/20261121101000_audit_core.sql": "",
+    });
+    symlinkSync(
+      join(linkedFile, "elsewhere.sql"),
+      join(linkedFile, "packages", "db", "migrations", "20261121101100_audit_journal.sql"),
+    );
+    assert.throws(() => readMigrations(linkedFile), /audit_journal\.sql is not a plain file/);
+  });
+
+  // The data layer's own list (packages/db/src/assets-cli.ts `migrations`, the rule migrate and the
+  // image build follow), on this repository: the manifest names exactly the migrations migrate
+  // applies. Skipped only on a tree without the data layer.
+  const assetsCli = join(ROOT, "packages", "db", "src", "assets-cli.ts");
+  it("lists the same migrations as packages/db's assets-cli.ts on this repository", {
+    skip: existsSync(assetsCli) ? false : "packages/db's assets-cli.ts is not on this tree",
+  }, () => {
+    const printed = execFileSync(process.execPath, [assetsCli, "migrations"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const lines = printed.split("\n").filter((line) => line !== "");
+    assert.equal(lines.length, 1);
+    const listed = JSON.parse(lines[0] ?? "");
+    const ours = readMigrations(ROOT);
+    assert.deepEqual(ours, {
+      migrations: listed.migrations,
+      minimumSchemaVersion: listed.minimumSchemaVersion,
+    });
+    assert.ok(ours.migrations.length > 0);
   });
 
   it("applies the deploy's own manifest checks", () => {

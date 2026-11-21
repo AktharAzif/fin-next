@@ -26,10 +26,11 @@
 //             signs, and gives the static record's own SHA-256 as the step output record_sha256
 //   manifest  writes release-manifest.json: the commit, each image's digest from exactly one
 //             record per release image (readImageRecords), each static artefact's name, SHA-256
-//             and asset manifest hash, the source-map artefact, the migrations and the minimum
-//             schema version. Any job of a run can replace an artefact of that run, but only a
-//             job sets its own outputs: each record is taken only when its SHA-256 equals the one
-//             the job that wrote it gave as an output (RECORD_SHA256_<IMAGE>, RECORD_SHA256_STATIC)
+//             and asset manifest hash, the source-map artefact, every package's migrations by
+//             migrate's own rule (readMigrations) and the minimum schema version, the newest of
+//             them. Any job of a run can replace an artefact of that run, but only a job sets
+//             its own outputs: each record is taken only when its SHA-256 equals the one the job
+//             that wrote it gave as an output (RECORD_SHA256_<IMAGE>, RECORD_SHA256_STATIC)
 //
 // Only the previous release's *own* assets travel (the ones its build produced, which its
 // manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
@@ -76,8 +77,10 @@ export const REFUSED_NAMES = new Set([
 /** tools/static-deploy's limits: Cloudflare's 25 MiB per asset, 20,000 files per artefact. */
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const MAX_ARTEFACT_FILES = 20_000;
-/** packages/db's migration file names (DA-04). */
+/** A migration's file name, in whichever package (DA-04; packages/db's MIGRATION_NAME). */
 const MIGRATION = /^\d{14}_[a-z][a-z0-9-]*_[a-z0-9][a-z0-9_]*\.sql$/;
+/** A package folder whose files migrate reads (packages/db/src/assets.ts's PACKAGE_NAME). */
+const PACKAGE = /^[a-z][a-z0-9-]*$/;
 
 /**
  * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy,
@@ -768,15 +771,60 @@ export function readImageRecords(dir, { sha, owner, hashes }) {
 }
 
 /**
- * The migration files packages/db ships, in name order, and the newest as the minimum schema.
+ * The migrations the release's migrate applies, in the order it applies them, and the newest as
+ * the minimum schema version (ARCHITECTURE §6.4). Found by the runner's own rule (packages/db/src/
+ * assets.ts, discoverDbAssets and listMigrations): every `.sql` file, in any case, of
+ * packages/<package>/migrations for each package folder with a lower-case name, in one name order
+ * across the packages. This job attests the manifest, so it runs only control-path code and reads
+ * the files itself rather than running packages/db's `assets-cli.ts migrations`; a test compares
+ * the two on this repository. So that the manifest never lists other than migrate applies, a
+ * `.sql` file whose name is not a migration's, a name two packages hold, a timestamp two files
+ * share, or a link refuses the release, as each would refuse migrate. A tree with no packages
+ * (before the data layer is on main) has none.
  * @param {string} root
+ * @returns {{ migrations: string[], minimumSchemaVersion: string | null }}
  */
 export function readMigrations(root) {
-  const dir = join(root, "packages", "db", "migrations");
-  if (!existsSync(dir)) return { migrations: [], minimumSchemaVersion: null };
-  const migrations = readdirSync(dir)
-    .filter((name) => MIGRATION.test(name))
+  const packagesDir = join(root, "packages");
+  if (!existsSync(packagesDir)) return { migrations: [], minimumSchemaVersion: null };
+  /** @param {string} abs @param {string} shown */
+  const plainFolder = (abs, shown) => {
+    const stat = lstatSync(abs);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`${shown} is not a plain folder`);
+    }
+  };
+  plainFolder(packagesDir, "packages");
+  /** @type {Map<string, string>} each migration to the folder that holds it */
+  const found = new Map();
+  const packages = readdirSync(packagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && PACKAGE.test(entry.name))
+    .map((entry) => entry.name)
     .sort();
+  for (const pkg of packages) {
+    const folder = `packages/${pkg}/migrations`;
+    const dir = join(packagesDir, pkg, "migrations");
+    if (!existsSync(dir)) continue;
+    plainFolder(dir, folder);
+    for (const name of readdirSync(dir).sort()) {
+      if (!/\.sql$/i.test(name)) continue;
+      const shown = `${folder}/${clean(name, 120)}`;
+      if (!lstatSync(join(dir, name)).isFile()) throw new Error(`${shown} is not a plain file`);
+      if (!MIGRATION.test(name)) {
+        throw new Error(`${shown} is not named <YYYYMMDDHHMMSS>_<area>_<what>.sql`);
+      }
+      const other = found.get(name);
+      if (other !== undefined) throw new Error(`${name} is in both ${other} and ${folder}`);
+      found.set(name, folder);
+    }
+  }
+  const migrations = [...found.keys()].sort();
+  for (let i = 1; i < migrations.length; i++) {
+    const [before, name] = [migrations[i - 1] ?? "", migrations[i] ?? ""];
+    if (before.slice(0, 14) === name.slice(0, 14)) {
+      throw new Error(`${name} shares its timestamp with ${before}`);
+    }
+  }
   return { migrations, minimumSchemaVersion: migrations.at(-1) ?? null };
 }
 
@@ -895,7 +943,7 @@ export function writeManifest(ctx) {
   const imageCount = Object.keys(manifest.images).length;
   const staticCount = Object.keys(manifest.static).length;
   say(
-    `release.manifest commit=${sha} images=${imageCount} static=${staticCount} migrations=${migrations.length}`,
+    `release.manifest commit=${sha} images=${imageCount} static=${staticCount} migrations=${migrations.length} minimumSchemaVersion=${minimumSchemaVersion ?? "none"}`,
   );
   addSummary(
     [
@@ -907,6 +955,8 @@ export function writeManifest(ctx) {
       ...Object.entries(manifest.static).map(
         ([k, e]) => `| static | ${k} | \`${isRecord(e) ? String(e.sha256) : ""}\` |`,
       ),
+      "",
+      `Migrations: ${migrations.length}, minimum schema version ${minimumSchemaVersion === null ? "none" : `\`${minimumSchemaVersion}\``}.`,
       "",
       `Skipped: ${[...manifest.skipped.images.map((s) => s.image), ...manifest.skipped.static.map((s) => (isRecord(s) ? String(s.key) : ""))].join(", ") || "none"}.`,
     ].join("\n"),
