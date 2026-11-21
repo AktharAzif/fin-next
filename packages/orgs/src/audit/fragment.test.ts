@@ -1,10 +1,7 @@
 // The registry's copy of this area's events (spec 08 §3.2): packages/audit/src/events/orgs.ts is what
 // `migrate` syncs to audit.event_type, so audit.record() takes exactly what this package records.
 // Every event matches there field by field: category, scope, roles, actors, target prefix, metadata
-// schema and revocation-journal entry. This package does not depend on @fin/audit, so its
-// turbo.json lists the registry files read here among its test and typecheck inputs: an edit to
-// the registry's copy alone reruns this test rather than replaying it from cache (layout:check's
-// task-inputs rule holds the list complete).
+// schema and revocation-journal entry.
 import { describe, expect, it } from "vitest";
 import * as z from "zod";
 import { events as fragment } from "../../../audit/src/events/orgs.ts";

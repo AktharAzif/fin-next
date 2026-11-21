@@ -3,9 +3,6 @@
 // the staff realm record (`migrate --task staff-bootstrap` included). It holds this package's
 // events and @fin/identity's staff-realm events and nothing else, each matching field by field:
 // category, scope, roles, actors, target prefix, metadata schema and revocation-journal entry.
-// This package does not depend on @fin/audit, so its turbo.json lists the registry files read
-// here among its test and typecheck inputs: an edit to the registry's copy alone reruns this test
-// rather than replaying it from cache (layout:check's task-inputs rule holds the list complete).
 import { STAFF_REALM_EVENTS } from "@fin/identity";
 import { describe, expect, it } from "vitest";
 import * as z from "zod";
