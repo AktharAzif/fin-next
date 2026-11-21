@@ -1,8 +1,9 @@
 // The audit events the identity realms write (spec 02 §16.2 and §16.4; spec 08 §3.4's
 // canonical names). The person-scope events are the `identity.ts` fragment of
 // packages/audit/src/events/ (L-SAT-02); the staff-realm sign-in events are the part of the
-// `staff.ts` fragment (L-SAT-04) that this lane's realm writes. Until packages/audit lands they
-// live here, in defineEvents' shape (spec 08 §3.2), and move into those fragments then.
+// `staff.ts` fragment (L-SAT-04) that this lane's realm writes. They are declared here, in
+// defineEvents' shape (spec 08 §3.2), for this package's recorder; those fragments are what
+// `migrate` syncs to audit.event_type, and fragment.test.ts holds them equal to these.
 //
 // Metadata is flat and strict: IDs, statuses, codes, counts and enums. Never a name, an
 // address, a code, a token or typed text (spec 02 §16.1, ARCHITECTURE §8.2).
