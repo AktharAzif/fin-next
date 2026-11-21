@@ -101,6 +101,54 @@ const SAMPLES: { [E in AuditEventName]: Omit<RecordInput<E>, "event"> } = {
     target: "ops.rate_window",
     metadata: { deleted: 5, olderThan: "P1D" },
   },
+  // The API keys area's fragment (events/api-keys.ts, L-SAT-11): organisation scope, the key's
+  // 10-character ID as the target.
+  "api_key.created": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    mode: "sandbox",
+    metadata: {
+      key_id: "K8D2M4P6Q1",
+      mode: "test",
+      kind: "rk",
+      scopes: ["customers:read"],
+      expires_at: null,
+      allowlist_count: 0,
+      shown_to: "usr_01jd0000000000000000000001",
+    },
+  },
+  "api_key.updated": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: {
+      key_id: "K8D2M4P6Q1",
+      changed: ["name"],
+      scopes_removed: [],
+      expiry_shortened: false,
+      allowlist_count: 0,
+    },
+  },
+  "api_key.rolled": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    refs: ["W6N4R3T5V7"],
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", new_key_id: "W6N4R3T5V7", overlap: "1h", shown_to: null },
+  },
+  "api_key.revoked": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", reason: "member", source: null },
+  },
+  "api_key.exposed": {
+    actor: { kind: "system", id: null, via: "api" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", source: "plain_http" },
+  },
 };
 
 const GROUPS: readonly ServiceGroup[] = [

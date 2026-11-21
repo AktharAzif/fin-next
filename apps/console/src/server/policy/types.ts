@@ -17,7 +17,7 @@ export type Scope = "public" | "person" | "organization";
 export type StepUpKind = "none" | "window" | "intent" | "intent_if_factor";
 
 /** The ID prefixes a path parameter must carry; another shape is answered as `404 not_found`. */
-export type PathId = "inv" | "mem" | "rol" | "ses" | "tbr" | "role_key";
+export type PathId = "inv" | "mem" | "rol" | "ses" | "tbr" | "role_key" | "key_id";
 
 export interface RoutePolicy {
   /** A stable name for the route, the key of its handler. */

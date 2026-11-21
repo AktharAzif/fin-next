@@ -28,7 +28,14 @@ import {
   steppedUp,
 } from "../../test/client.ts";
 import { defineConsoleService } from "./main.ts";
-import { CONSOLE_POLICY, type RouteId } from "./policy/index.ts";
+import { CONSOLE_POLICY as ALL_ROUTES, type RouteId as AnyRouteId } from "./policy/index.ts";
+import { KEYS_ROUTES } from "./policy/keys.ts";
+
+// The API keys routes stand on the keys schema, which this file's database (the organisation area's
+// template) does not hold: keys.db.test.ts runs the same matrix for them on the keys platform.
+type RouteId = Exclude<AnyRouteId, (typeof KEYS_ROUTES)[number]["id"]>;
+const KEY_ROUTE_IDS = new Set<string>(KEYS_ROUTES.map((r) => r.id));
+const CONSOLE_POLICY = ALL_ROUTES.filter((p) => !KEY_ROUTE_IDS.has(p.id));
 
 let database: TestDatabase;
 let api: Booted;
