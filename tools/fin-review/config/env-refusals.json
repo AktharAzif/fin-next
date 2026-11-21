@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "variables": [
+    { "name": "ANTHROPIC_BASE_URL", "kind": "endpoint", "allowedValue": "https://api.anthropic.com" },
+    { "name": "ANTHROPIC_BEDROCK_BASE_URL", "kind": "endpoint" },
+    { "name": "ANTHROPIC_VERTEX_BASE_URL", "kind": "endpoint" },
+    { "name": "CLAUDE_CODE_USE_BEDROCK", "kind": "endpoint" },
+    { "name": "CLAUDE_CODE_USE_VERTEX", "kind": "endpoint" },
+    { "name": "CLAUDE_CODE_USE_FOUNDRY", "kind": "endpoint" },
+    { "name": "HTTPS_PROXY", "kind": "endpoint" },
+    { "name": "HTTP_PROXY", "kind": "endpoint" },
+    { "name": "ALL_PROXY", "kind": "endpoint" },
+    { "name": "ANTHROPIC_MODEL", "kind": "model" },
+    { "name": "ANTHROPIC_DEFAULT_OPUS_MODEL", "kind": "model" },
+    { "name": "ANTHROPIC_DEFAULT_SONNET_MODEL", "kind": "model" },
+    { "name": "ANTHROPIC_DEFAULT_HAIKU_MODEL", "kind": "model" },
+    { "name": "ANTHROPIC_SMALL_FAST_MODEL", "kind": "model" },
+    { "name": "CLAUDE_CODE_SUBAGENT_MODEL", "kind": "model" },
+    { "name": "CLAUDE_CODE_EFFORT_LEVEL", "kind": "model" },
+    { "name": "MAX_THINKING_TOKENS", "kind": "model" },
+    { "name": "ANTHROPIC_API_KEY", "kind": "credential" },
+    { "name": "ANTHROPIC_AUTH_TOKEN", "kind": "credential" },
+    { "name": "NODE_OPTIONS", "kind": "injection" }
+  ],
+  "settingsKeys": [
+    "model", "availableModels", "effortLevel", "maxEffortLevel", "modelSettings", "apiKeyHelper", "fallbackModel"
+  ]
+}
