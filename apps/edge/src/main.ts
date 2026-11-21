@@ -16,7 +16,7 @@
 //
 // Everything is built inside main() through `buildEdge(ctx)`, never at module scope: the settings
 // and secrets, the pool, the shedder, the app.
-import { ConfigError } from "@fin/core";
+import { type Clock, ConfigError } from "@fin/core";
 import { type Keyring, KeyringConfigError, keyringFromEnv } from "@fin/crypto";
 import {
   createPool,
@@ -43,6 +43,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { docsCors } from "./cors.ts";
 import { checkKey, type EdgeRoute, type KeyCheckDeps } from "./keycheck.ts";
+import { LastUsed } from "./last-used.ts";
 import { problemAnswer } from "./problems.ts";
 import { edgeRequestUnit, factsOf } from "./request-line.ts";
 import { addressKey, Shedder, type ShedSettings, shedSettings } from "./shed.ts";
@@ -71,6 +72,8 @@ export interface EdgeOverrides {
   store?: KeyStore;
   peppers?: Keyring;
   shed?: Partial<ShedSettings>;
+  /** The clock of the in-memory minutes (shedding and "last used"), for tests that cross one. */
+  clock?: Clock;
 }
 
 export interface EdgeSettings {
@@ -185,12 +188,15 @@ export async function buildEdge(
     });
     store = keyStore(poolQueryable(pool));
   }
-  const shedder = new Shedder({ ...settings.shed, ...overrides.shed }, ctx.clock);
+  const memoryClock = overrides.clock ?? ctx.clock;
+  const shed = { ...settings.shed, ...overrides.shed };
+  const shedder = new Shedder(shed, memoryClock);
   const deps: KeyCheckDeps = {
     store,
     peppers,
     salt: settings.salt,
     shedder,
+    lastUsed: new LastUsed(memoryClock, shed.maxEntries),
     clock: ctx.clock,
     docsOrigin,
     telemetry: ctx.telemetry,
@@ -290,13 +296,17 @@ export async function buildEdge(
     }),
   );
   app.on(["GET", "HEAD"], "/health", (c) => c.json({ status: "ok" }, 200));
+  // The request line's /v4 facts (spec 05 §10.1): a call from the docs origin (Try it, `fromDocs`)
+  // and a preflight (`corsPreflight`), written before CORS answers a preflight itself, below.
+  app.use("/v4/*", async (c, next) => {
+    const facts = factsOf(c);
+    if (c.req.header("origin") === docsOrigin) facts.fromDocs = true;
+    if (c.req.method === "OPTIONS") facts.corsPreflight = true;
+    await next();
+  });
   // 9: CORS for the docs origin; a preflight is answered here and never forwarded.
   app.use(docsCors(docsOrigin));
   app.use("/v4/*", async (c, next) => {
-    if (c.req.method === "OPTIONS") {
-      factsOf(c).corsPreflight = true;
-      return next();
-    }
     // 10: the route table; an unknown route is 404 before any key is read.
     const route = routeOf(c);
     if (route === undefined) {

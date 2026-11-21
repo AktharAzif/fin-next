@@ -3,11 +3,14 @@
 // key check against an in-memory store: a working key's `GET /v4/whoami`, every refusal the same 401
 // apart from `request_id` (T05-08), the reason only in the request line, load shedding and the
 // negative filter before any statement (T05-10), a docs-origin live key refused before any lookup
-// (T05-42), the live gate (T05-12), both windows, and "last used" after the answer (T05-16). The real
-// statements on Postgres 18 are edge.db.test.ts's.
+// (T05-42), the live gate (T05-12), both windows, "last used" after the answer and at most once a
+// minute per key (T05-16), a key ID with no row reaching the refused-key window's 429 after as many
+// refusals as one with a row, and the request line's preflight and docs facts. The real statements
+// on Postgres 18 are edge.db.test.ts's.
+import { newKey } from "@fin/keys";
 import { bootApi, NEIGHBOUR_ADDRESS } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { FakeStore, ORG, PEPPERS } from "../test/fake-store.ts";
+import { FakeStore, ORG, PEPPERS, SALT } from "../test/fake-store.ts";
 import { defineEdgeService } from "./main.ts";
 
 const HOST = "gateway.example.net";
@@ -99,6 +102,36 @@ describe("the edge's Phase 0 layers", () => {
       },
     });
     expect(Object.keys(refused.headers).filter((k) => k.startsWith("access-control-"))).toEqual([]);
+  });
+
+  it("writes corsPreflight on a preflight's request line, and fromDocs for the docs origin", async () => {
+    const preflight = (origin: string) =>
+      api.send({
+        host: HOST,
+        path: "/v4/whoami",
+        method: "OPTIONS",
+        headers: { ...HTTPS, origin, "access-control-request-method": "GET" },
+      });
+    expect((await preflight(DOCS)).status).toBe(204);
+    expect(lastRequestLine()).toMatchObject({
+      method: "OPTIONS",
+      status: 204,
+      corsPreflight: true,
+      fromDocs: true,
+    });
+    expect((await preflight("https://evil.example.com")).status).toBe(204);
+    const refused = lastRequestLine();
+    expect(refused).toMatchObject({ corsPreflight: true, reason: "cors_refused" });
+    expect(refused).not.toHaveProperty("fromDocs");
+    // A Try-it call refused before the key check is still a docs call, and no preflight.
+    const unknown = await api.send({
+      host: HOST,
+      path: "/v4/customers",
+      headers: { ...HTTPS, origin: DOCS },
+    });
+    expect(unknown.status).toBe(404);
+    expect(lastRequestLine()).toMatchObject({ status: 404, fromDocs: true });
+    expect(lastRequestLine()).not.toHaveProperty("corsPreflight");
   });
 
   it("refuses a neighbour at the ingress check", async () => {
@@ -339,6 +372,84 @@ describe("load shedding", () => {
     } finally {
       await shedApi.stop();
     }
+  });
+});
+
+describe("on a clock the test moves", () => {
+  let now = Date.parse("2026-11-22T10:00:01.000Z");
+  const own = new FakeStore();
+  let edge: Awaited<ReturnType<typeof bootApi>>;
+
+  beforeAll(async () => {
+    edge = await bootApi(
+      defineEdgeService({
+        store: own,
+        peppers: PEPPERS,
+        clock: { now: () => now },
+        shed: { addressBurst: 400, addressRate: 1 },
+      }),
+      { service: "edge", roles: ["api"], env: ENV },
+    );
+  });
+
+  afterAll(async () => {
+    await edge.stop();
+  });
+
+  const call = (key: string, ip = "8.8.8.8") =>
+    edge.send({
+      host: HOST,
+      path: "/v4/whoami",
+      headers: { ...HTTPS, "cf-connecting-ip": ip, authorization: `Bearer ${key}` },
+    });
+  /** Lets the work registered after each answer run. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it("touches 'last used' once a minute per key, not on every request", async () => {
+    const key = own.add("test", "rk");
+    const id = key.slice(12, 22);
+    for (let i = 0; i < 3; i++) expect((await call(key)).status).toBe(200);
+    await settle();
+    expect(own.touched.filter((t) => t === id)).toHaveLength(1);
+    now += 60_000;
+    expect((await call(key)).status).toBe(200);
+    await settle();
+    expect(own.touched.filter((t) => t === id)).toHaveLength(2);
+  });
+
+  it("answers a key ID with no row the same 401s, then 429s, as a key ID with a row", async () => {
+    const existing = own.add("test", "rk");
+    const wrongSecret = newKey("test", "rk", SALT, undefined, existing.slice(12, 22)).key;
+    const noRow = newKey("test", "rk", SALT).key;
+    const statuses = async (key: string, ip: string) => {
+      const out: number[] = [];
+      for (let i = 0; i < 35; i++) out.push((await call(key, ip)).status);
+      return out;
+    };
+    const withRow = await statuses(wrongSecret, "8.8.9.1");
+    const before = own.statements;
+    const withoutRow = await statuses(noRow, "8.8.9.2");
+    expect(withRow).toEqual([...Array<number>(30).fill(401), ...Array<number>(5).fill(429)]);
+    expect(withoutRow).toEqual(withRow);
+    // Only the first refusal of the ID with no row reached the store: its lookup and its count.
+    expect(own.statements - before).toBe(2);
+    const line = edge.stdout.filter((l) => l.event === "request").at(-1) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(line).toMatchObject({
+      status: 429,
+      keyReason: "unknown",
+      rateLimited: true,
+      violatedPolicies: ["refused_keys"],
+      dbQueries: 0,
+    });
+    const limited = await call(noRow, "8.8.9.2");
+    expect(limited.json()).toMatchObject({
+      code: "rate_limited",
+      violated_policies: ["refused_keys"],
+    });
+    expect(limited.headers["retry-after"]).toBe("59");
   });
 });
 
