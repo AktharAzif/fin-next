@@ -130,12 +130,28 @@ export function pullBaseRef(pr: number): string {
   return `refs/fin-review/pull/${pr}/base`;
 }
 
-/** Fetches the pull request's head and its base branch into the mirror. Throws RemoteError. */
-export async function fetchPull(mirror: string, url: string, pr: number, baseRef: string, env: Readonly<Record<string, string | undefined>>): Promise<void> {
+/** Where the repository's default branch is fetched for a run of pull request `pr`. */
+export function pullDefaultRef(pr: number): string {
+  return `refs/fin-review/pull/${pr}/default`;
+}
+
+/**
+ * Fetches the pull request's head, its base branch and the repository's default branch into the
+ * mirror. Throws RemoteError.
+ */
+export async function fetchPull(
+  mirror: string,
+  url: string,
+  pr: number,
+  baseRef: string,
+  defaultBranch: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
   assertDir(mirror, "the mirror");
   if (!isRemoteUrl(url)) throw new TypeError("refusing an origin URL");
   if (!Number.isInteger(pr) || !isPrNumber(String(pr))) throw new TypeError("refusing a pull request number");
   if (!isRefName(baseRef)) throw new TypeError("refusing a base branch name");
+  if (!isRefName(defaultBranch)) throw new TypeError("refusing a default branch name");
   try {
     await git({
       cwd: mirror,
@@ -151,6 +167,7 @@ export async function fetchPull(mirror: string, url: string, pr: number, baseRef
         url,
         `+refs/pull/${pr}/head:${pullHeadRef(pr)}`,
         `+refs/heads/${baseRef}:${pullBaseRef(pr)}`,
+        `+refs/heads/${defaultBranch}:${pullDefaultRef(pr)}`,
       ],
       env,
       timeoutMs: FETCH_TIMEOUT_MS,

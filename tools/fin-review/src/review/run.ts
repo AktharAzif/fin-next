@@ -59,8 +59,10 @@ import {
   ensureMirror,
   fetchPull,
   isAncestor,
+  isRefName,
   mergeBase,
   pullBaseRef,
+  pullDefaultRef,
   pullHeadRef,
   RemoteError,
   resolveCommit,
@@ -119,11 +121,15 @@ interface ChangedPath {
 
 interface PriorRun {
   readonly runId: string;
+  /** The tier the gating chain recorded at that head. */
   readonly tier: Tier | null;
   readonly result: RunResultName;
   readonly lensNames: readonly string[];
   readonly profiles: readonly string[];
   readonly openBlockers: readonly OpenBlocker[];
+  /** The default branch and the merge base the run reviewed from; null in a record that has none. */
+  readonly defaultBranch: string | null;
+  readonly mergeBase: string | null;
 }
 
 interface SessionPlan {
@@ -253,25 +259,31 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-/** The newest gating run record of pull request `pr` at `head` in runs/, or null. */
-export function readPriorRun(home: string, pr: number, head: string): PriorRun | null {
+/** A run record as `commit` and the carried blockers read it: its head and when it finished, too. */
+export interface RunRecord extends PriorRun {
+  readonly head: string;
+  readonly finishedAt: string;
+}
+
+/** Every gating (non-advisory, finished) run record of pull request `pr` in runs/, newest first. */
+export function readRunRecords(home: string, pr: number): RunRecord[] {
   const runsDir = join(home, "runs");
   let names: string[];
   try {
     names = readdirSync(runsDir);
   } catch {
-    return null;
+    return [];
   }
-  let best: { finishedAt: string; run: PriorRun } | null = null;
+  const out: RunRecord[] = [];
   for (const name of names) {
     if (!RUN_ID_RE.test(name)) continue;
     const read = readJsonFile(join(runsDir, name, "result.json"), 16 << 20);
     if (!read.ok || !isJsonObject(read.value)) continue;
     const doc = read.value;
-    if (doc["pr"] !== pr || doc["head"] !== head || doc["advisory"] !== false) continue;
+    const head = doc["head"];
+    if (doc["pr"] !== pr || !isSha(head) || doc["advisory"] !== false) continue;
     const result = doc["result"];
     if (result !== "pass" && result !== "blocked" && result !== "could_not_check") continue;
-    const finishedAt = typeof doc["finishedAt"] === "string" ? doc["finishedAt"] : "";
     const tier = doc["tier"];
     const openBlockers: OpenBlocker[] = [];
     for (const item of Array.isArray(doc["openBlockers"]) ? doc["openBlockers"] : []) {
@@ -280,17 +292,27 @@ export function readPriorRun(home: string, pr: number, head: string): PriorRun |
       const profile = typeof item["profile"] === "string" ? item["profile"] : null;
       openBlockers.push({ id: item["id"], lensKey: item["lensKey"], lens: item["lens"], profile, finding: item["finding"] as unknown as Finding });
     }
-    const run: PriorRun = {
+    const defaultBranch = doc["defaultBranch"];
+    const recordedBase = doc["mergeBase"];
+    out.push({
       runId: name,
+      head,
+      finishedAt: typeof doc["finishedAt"] === "string" ? doc["finishedAt"] : "",
       tier: tier === "S" || tier === "N" || tier === "D" ? tier : null,
       result,
       lensNames: strings(doc["lensNames"]),
       profiles: strings(doc["profiles"]),
       openBlockers,
-    };
-    if (best === null || finishedAt > best.finishedAt) best = { finishedAt, run };
+      defaultBranch: typeof defaultBranch === "string" && isRefName(defaultBranch) ? defaultBranch : null,
+      mergeBase: isSha(recordedBase) ? recordedBase : null,
+    });
   }
-  return best?.run ?? null;
+  return out.sort((a, b) => (a.finishedAt !== b.finishedAt ? (a.finishedAt < b.finishedAt ? 1 : -1) : a.runId < b.runId ? 1 : -1));
+}
+
+/** The newest gating run record of pull request `pr` at `head` in runs/, or null. */
+export function readPriorRun(home: string, pr: number, head: string): RunRecord | null {
+  return readRunRecords(home, pr).find((record) => record.head === head) ?? null;
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
@@ -431,29 +453,32 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     let mirror: string;
     let head: string | null;
     let baseTip: string | null;
+    let defaultTip: string | null;
     try {
       facts = await deps.facts(req.pr);
       mirror = await ensureMirror(home, deps.originUrl, env);
-      await fetchPull(mirror, deps.originUrl, req.pr, facts.baseRef, env);
+      await fetchPull(mirror, deps.originUrl, req.pr, facts.baseRef, facts.defaultBranch, env);
       head = await resolveCommit(mirror, pullHeadRef(req.pr), env);
       if (head !== facts.head) {
         // The pull request moved between the two reads; read and fetch once more.
         facts = await deps.facts(req.pr);
-        await fetchPull(mirror, deps.originUrl, req.pr, facts.baseRef, env);
+        await fetchPull(mirror, deps.originUrl, req.pr, facts.baseRef, facts.defaultBranch, env);
         head = await resolveCommit(mirror, pullHeadRef(req.pr), env);
       }
       baseTip = await resolveCommit(mirror, pullBaseRef(req.pr), env);
+      defaultTip = await resolveCommit(mirror, pullDefaultRef(req.pr), env);
     } catch (error) {
       if (!(error instanceof RemoteError)) throw error;
       deps.stderr(`fin-review: unavailable: ${error.message}\n`);
       state.to("failed", { reason: "unavailable" });
       return EXIT.unavailable;
     }
-    if (head === null || head !== facts.head || baseTip === null) {
+    if (head === null || head !== facts.head || baseTip === null || defaultTip === null) {
       deps.stderr("fin-review: unavailable: the pull request's head moved while it was fetched; run again\n");
       state.to("failed", { reason: "head_moved" });
       return EXIT.unavailable;
     }
+    const defaultBranch = facts.defaultBranch;
     try {
       lock = acquireLock(home, req.pr, { runId, head }, clock, (stale, why) => lines.write("review.lock_broken", { staleRunId: stale, why }));
     } catch (error) {
@@ -462,13 +487,20 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       state.to("refused", { reason: "busy" });
       return EXIT.busy;
     }
-    const base = await mergeBase(mirror, baseTip, head, env);
+    // Tiers and scope come from the default branch, never from the base the pull request names
+    // (spec 07 §2.4): the layout is the default branch's, and the change is everything on the head
+    // since its merge base with that branch, so a pull request stacked on an unmerged branch is
+    // reviewed with the branch's changes and cannot lower its own tier through it.
+    const base = await mergeBase(mirror, defaultTip, head, env);
     if (base === null) {
-      deps.stderr("fin-review: error: the pull request's head shares no history with its base\n");
+      deps.stderr(`fin-review: error: the pull request's head shares no history with ${defaultBranch}\n`);
       state.to("refused", { reason: "no_merge_base" });
       return EXIT.data;
     }
-    const layout = await layoutAt(mirror, baseTip, env);
+    if (facts.baseRef !== defaultBranch) {
+      deps.stderr(`fin-review: the base is ${facts.baseRef}, not ${defaultBranch}: the run reviews everything on the head since its merge base with ${defaultBranch}\n`);
+    }
+    const layout = await layoutAt(mirror, defaultTip, env);
     const prDiff = await diffRaw(mirror, base, head, env);
 
     // `commit`: stay a delta, or escalate to `pr` (§2.3.2).
@@ -479,7 +511,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     let deltaFrom: string | null = null;
     if (req.mode === "commit") {
       const since = req.since ?? "";
-      const decision = await commitDecision(req, deps, mirror, since, head, layout);
+      const decision = await commitDecision(req, deps, mirror, since, head, layout, { defaultBranch, mergeBase: base });
       if (decision.escalate !== null) {
         mode = "pr";
         escalated = decision.escalate;
@@ -490,9 +522,10 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       }
     }
     const changed = changedPaths(scopeDiff, layout);
+    // The change's own tier picks the lenses; a delta's tier never lowers the gating chain's, so the
+    // floor, the budget and the recorded tier use the higher of the two (spec 07 §2.3.2, §2.4).
     const tier = highestTier(changed);
-    // The tier the floor and the budget use: the change's, or for an empty delta the last reviewed head's.
-    const gateTier: Tier | null = tier ?? prior?.tier ?? null;
+    const gateTier: Tier | null = prior === null ? tier : tier === null ? prior.tier : prior.tier === null ? tier : maxTier(tier, prior.tier);
     const changedAtHead = sortedUnique(scopeDiff.filter((entry) => entry.status !== "D").map((entry) => entry.path));
 
     // The effort floor ([RV-06]) for a gating run, before any session or checkout.
@@ -586,7 +619,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // The diffs the sessions see: the patch for joins, and each changed unit's delta in `commit`.
-    const patch = await unifiedDiff(mirror, deltaFrom ?? baseTip, head, deltaFrom === null, MAX_DIFF_BYTES, env);
+    const patch = await unifiedDiff(mirror, deltaFrom ?? defaultTip, head, deltaFrom === null, MAX_DIFF_BYTES, env);
     const unitDiffs = new Map<string, string>();
     if (deltaFrom !== null) {
       for (const path of changedAtHead) {
@@ -605,10 +638,14 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       escalated,
       pr: req.pr,
       head,
+      baseRef: facts.baseRef,
       base: baseTip,
+      defaultBranch,
+      defaultTip,
       mergeBase: base,
       since: req.since,
-      tier,
+      tier: gateTier,
+      deltaTier: tier,
       changed,
       units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier, kind: unit.kind })),
       excluded,
@@ -617,7 +654,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       profiles: Object.fromEntries(profileMap),
       sessions: plans.map((plan) => ({ id: plan.id, role: plan.role, lensKey: plan.lensKey, shard: plan.shard, units: plan.units.map((unit) => unit.id) })),
     });
-    state.to("planned", { mode, escalated, head, base: baseTip, mergeBase: base, tier });
+    state.to("planned", { mode, escalated, head, baseRef: facts.baseRef, base: baseTip, defaultBranch, defaultTip, mergeBase: base, tier: gateTier });
 
     const cap = mode === "commit" ? config.budgets.runUsd.commit : config.budgets.runUsd.pr[gateTier ?? "D"];
     const budget = new RunBudget(cap);
@@ -877,9 +914,13 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       since: req.since,
       pr: req.pr,
       head,
+      baseRef: facts.baseRef,
       base: baseTip,
+      defaultBranch,
+      defaultTip,
       mergeBase: base,
-      tier,
+      tier: gateTier,
+      deltaTier: tier,
       result,
       exitCode,
       advisory: req.advisory,
@@ -905,7 +946,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     writeJson(join(runDir, "sessions.json"), { v: 1, runId, sessions: records });
     writeJson(join(runDir, "result.json"), summary);
     writeFileSync(join(runDir, "summary.md"), summaryMarkdown(summary, findings), { mode: 0o600 });
-    lines.write("review.run", { mode, pr: req.pr, tier, result, sessions: sessionCount, costMicroUsd: budget.spentMicroUsd, findings: summary.counts.findings, blockers: blockers.length });
+    lines.write("review.run", { mode, pr: req.pr, tier: gateTier, result, sessions: sessionCount, costMicroUsd: budget.spentMicroUsd, findings: summary.counts.findings, blockers: blockers.length });
     state.to("done", { result });
     deps.stdout(countLines(summary));
     return exitCode;
@@ -922,12 +963,30 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
 
 type CommitDecision = { escalate: string; prior: null; delta: readonly DiffEntry[] } | { escalate: null; prior: PriorRun; delta: readonly DiffEntry[] };
 
-async function commitDecision(req: ReviewRequest, deps: ReviewDeps, mirror: string, since: string, head: string, layout: Layout | null): Promise<CommitDecision> {
+/** The scope a run reviews from: the default branch and the head's merge base with it. */
+interface Scope {
+  readonly defaultBranch: string;
+  readonly mergeBase: string;
+}
+
+async function commitDecision(
+  req: ReviewRequest,
+  deps: ReviewDeps,
+  mirror: string,
+  since: string,
+  head: string,
+  layout: Layout | null,
+  scope: Scope,
+): Promise<CommitDecision> {
   const { env, config, procedure } = deps;
   const escalate = (reason: string): CommitDecision => ({ escalate: reason, prior: null, delta: [] });
   const prior = readPriorRun(deps.home, req.pr, since);
   if (prior === null) return escalate("no_prior_run");
   if (!isSha(since) || (await resolveCommit(mirror, since, env)) === null || !(await isAncestor(mirror, since, head, env))) return escalate("not_ancestor");
+  // The prior run must have reviewed from the same branch and from a merge base this one still
+  // contains; otherwise what lies between the two bases was never reviewed with the head.
+  if (prior.defaultBranch !== scope.defaultBranch || prior.mergeBase === null || (await resolveCommit(mirror, prior.mergeBase, env)) === null) return escalate("base_changed");
+  if (prior.mergeBase !== scope.mergeBase && !(await isAncestor(mirror, prior.mergeBase, scope.mergeBase, env))) return escalate("base_changed");
   if ((await changedLines(mirror, since, head, env)) > COMMIT_MAX_LINES) return escalate("delta_lines");
   const delta = await diffTwoDot(mirror, since, head, env);
   const changed = changedPaths(delta, layout);

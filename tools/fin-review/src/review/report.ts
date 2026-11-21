@@ -85,9 +85,17 @@ export interface RunSummary {
   readonly since: string | null;
   readonly pr: number;
   readonly head: string;
+  /** The base branch the pull request names, and its tip when the run read it. */
+  readonly baseRef: string;
   readonly base: string;
+  /** The default branch, whose layout gave the tiers and whose merge base with the head the run reviewed from. */
+  readonly defaultBranch: string;
+  readonly defaultTip: string;
   readonly mergeBase: string;
+  /** The gating chain's tier: the change's, and in `commit` never below the last reviewed head's. */
   readonly tier: Tier | null;
+  /** The tier of what this run reviewed (in `commit`, the delta's), which chose its lenses. */
+  readonly deltaTier: Tier | null;
   readonly result: RunResultName;
   readonly exitCode: number;
   readonly advisory: boolean;
@@ -160,7 +168,11 @@ function md(text: string): string {
 export function summaryMarkdown(summary: RunSummary, records: readonly FindingRecord[]): string {
   const out: string[] = [];
   out.push(`# fin-review ${summary.mode} #${summary.pr}`, "");
-  out.push(`- Head: \`${summary.head}\``, `- Base: \`${summary.base}\` (merge base \`${summary.mergeBase}\`)`, `- Tier: ${summary.tier ?? "-"}`);
+  out.push(
+    `- Head: \`${summary.head}\``,
+    `- Base: ${summary.baseRef} at \`${summary.base}\`; reviewed from the merge base \`${summary.mergeBase}\` with ${summary.defaultBranch} (\`${summary.defaultTip}\`)`,
+    `- Tier: ${summary.tier ?? "-"}${summary.deltaTier === summary.tier ? "" : ` (this run's change: ${summary.deltaTier ?? "-"})`}`,
+  );
   out.push(`- Result: **${summary.result}** (exit ${summary.exitCode})${summary.advisory ? ", advisory: not a gate receipt" : ""}`);
   if (summary.escalated !== null) out.push(`- Escalated from \`commit\` to \`pr\`: ${summary.escalated}`);
   out.push(`- Run: \`${summary.runId}\`; ${summary.counts.sessions} sessions; estimated cost ${(summary.costMicroUsd / 1_000_000).toFixed(2)} USD`, "");

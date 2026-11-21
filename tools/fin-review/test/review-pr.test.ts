@@ -22,6 +22,7 @@ import {
   runFixtureCli,
 } from "./helpers/review-fixture.ts";
 import type { FakeClock, ReviewFixture } from "./helpers/review-fixture.ts";
+import { fixtureLayout } from "./helpers/monorepo.ts";
 
 const MODELS = loadCommittedModels();
 const CONFIRMED = { verdict: "CONFIRMED", guardQuotes: [], reason: "The comparison is plain ===." };
@@ -633,5 +634,95 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     fx.pr(5, { "docs/plan/README.md": "# plan\n\nD.\n" });
     const notAncestor = await runFixtureCli(fx, ["commit", "--pr", "5", "--since", other], harness(fx, script(), random).services);
     assert.match(notAncestor.stdout, /escalated from commit: not_ancestor/);
+  });
+
+  it("a delta never lowers the chain's tier: after a tier S pr, a docs-only commit keeps the tier S floor and records tier S", async () => {
+    const h0 = fx.pr(6, { "packages/crypto/src/index.ts": "export const VERSION = 4;\n" });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "6"], harness(fx, script(), random).services)).code, 0);
+    fx.pr(6, { "docs/plan/README.md": "# plan\n\nDocs only.\n" }, h0);
+    const high = harness(fx, script(), random);
+    const refused = await runFixtureCli(fx, ["commit", "--pr", "6", "--since", h0, "--effort", "high"], high.services);
+    assert.equal(refused.code, 64, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /^fin-review: refused: floor_tier_s: /m);
+    assert.equal(calls(high).length, 0);
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["commit", "--pr", "6", "--since", h0], h.services);
+    assert.equal(run.code, 0, run.stderr);
+    assert.match(run.stdout, /^fin-review commit #6 /);
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["tier"], "S", "the chain's tier is recorded");
+    assert.equal(result["deltaTier"], "D");
+    assert.deepEqual(calls(h).map((call) => call.spec.lens).sort(), ["correctness", "rules"], "the delta's tier picks the lenses");
+    for (const call of calls(h)) assert.equal(call.spec.effort, "xhigh");
+  });
+
+  it("escalates when the default branch no longer holds the prior run's merge base (base_changed), or the record names none", async () => {
+    const moved = fx.origin.commit(fx.base, { "docs/plan/notes.md": "B\n" });
+    try {
+      fx.origin.git(["update-ref", "refs/heads/main", moved]);
+      const h0 = fx.pr(7, { "docs/plan/README.md": "# plan\n\nE.\n" }, moved);
+      assert.equal((await runFixtureCli(fx, ["pr", "--pr", "7"], harness(fx, script(), random).services)).code, 0);
+      const priorDir = lastRun(fx);
+      assert.equal(readJson(join(priorDir, "result.json"))["mergeBase"], moved);
+      // main is rewritten to a sibling of the commit the pull request was reviewed on.
+      const sibling = fx.origin.commit(fx.base, { "docs/plan/other.md": "B2\n" });
+      fx.origin.git(["update-ref", "refs/heads/main", sibling]);
+      fx.pr(7, { "docs/plan/README.md": "# plan\n\nF.\n" }, h0);
+      const rewritten = await runFixtureCli(fx, ["commit", "--pr", "7", "--since", h0], harness(fx, script(), random).services);
+      assert.match(rewritten.stdout, /escalated from commit: base_changed/);
+      // A record that names no default branch cannot show what it was reviewed against.
+      fx.origin.git(["update-ref", "refs/heads/main", moved]);
+      const record = readJson(join(priorDir, "result.json"));
+      delete record["defaultBranch"];
+      writeFileSync(join(priorDir, "result.json"), JSON.stringify(record));
+      for (const dir of runDirs(fx.home)) {
+        if (dir === priorDir || !existsSync(join(dir, "result.json"))) continue;
+        const other = readJson(join(dir, "result.json"));
+        if (other["pr"] === 7 && other["head"] === h0) rmSync(dir, { recursive: true, force: true });
+      }
+      const unnamed = await runFixtureCli(fx, ["commit", "--pr", "7", "--since", h0], harness(fx, script(), random).services);
+      assert.match(unnamed.stdout, /escalated from commit: base_changed/);
+    } finally {
+      fx.origin.git(["update-ref", "refs/heads/main", fx.base]);
+    }
+  });
+});
+
+describe("tiers and scope come from the default branch (§2.4)", () => {
+  let fx: ReviewFixture;
+  const random = countingRandom();
+  before(() => {
+    fx = reviewFixture();
+  });
+  after(() => fx.cleanup());
+
+  it("a stacked pull request is reviewed with its base branch's changes, at main's tiers", async () => {
+    // A branch off main whose layout maps packages/crypto to D, and which changes the crypto code.
+    const layout = JSON.parse(fixtureLayout()) as { entries: Array<Record<string, unknown>> };
+    const crypto = layout.entries.find((entry) => entry["path"] === "packages/crypto");
+    assert.ok(crypto !== undefined);
+    crypto["tier"] = "D";
+    const stack = fx.origin.commit(fx.base, { "tools/layout.json": `${JSON.stringify(layout, null, 2)}\n`, "packages/crypto/src/index.ts": "export const VERSION = 9; // STACK-BODY\n" });
+    fx.origin.git(["update-ref", "refs/heads/stack", stack]);
+    fx.pr(50, { "docs/plan/README.md": "# plan\n\nStacked.\n" }, stack);
+    fx.retarget(50, "stack");
+    const high = harness(fx, script(), random);
+    const refused = await runFixtureCli(fx, ["pr", "--pr", "50", "--effort", "high"], high.services);
+    assert.equal(refused.code, 64, refused.stdout + refused.stderr);
+    assert.equal(calls(high).length, 0);
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "50"], h.services);
+    assert.equal(run.code, 0, run.stderr);
+    assert.match(run.stderr, /the base is stack, not main: the run reviews everything on the head since its merge base with main/);
+    const plan = readJson(join(lastRun(fx), "plan.json"));
+    const changed = plan["changed"] as Array<Record<string, unknown>>;
+    assert.equal(changed.find((item) => item["path"] === "packages/crypto/src/index.ts")?.["tier"], "S", "main's layout, not the base branch's");
+    assert.deepEqual((plan["units"] as Array<Record<string, unknown>>).map((unit) => unit["path"]), ["docs/plan/README.md", "packages/crypto/src/index.ts", "tools/layout.json"]);
+    assert.match(calls(h).find((call) => call.spec.lens === "security")?.spec.prompt ?? "", /STACK-BODY/);
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["tier"], "S");
+    assert.equal(result["baseRef"], "stack");
+    assert.equal(result["defaultBranch"], "main");
+    assert.equal(result["mergeBase"], fx.base);
   });
 });

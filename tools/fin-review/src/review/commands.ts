@@ -150,7 +150,7 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
   if (facts === undefined) {
     const slug = githubSlug(url);
     if (slug === null) throw new DataError("the origin is not a GitHub repository, so its pull requests cannot be read");
-    facts = (pr: number) => pullFacts(slug, pr, ctx.env);
+    facts = (pr: number) => pullFacts(slug, pr, home, ctx.env);
   }
   const denied = extraDenied(ctx.env);
   const makeRunner = services?.makeRunner ?? ((options: CliRunnerOptions) => new CliRunner(options));

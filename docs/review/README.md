@@ -29,9 +29,10 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
 `tools/fin-review/config/env-refusals.json` is in its environment, which includes
 `ANTHROPIC_BASE_URL` (other than `https://api.anthropic.com`) and `ANTHROPIC_AUTH_TOKEN`.
 
-- **`pr`** reads the pull request's head SHA and base branch with `gh api` (nothing else: never a
-  title, body, comment or head branch name), fetches the head and the base into a bare mirror under
-  `$FIN_REVIEW_HOME/repos/` (default `~/.fin-review`; refused inside the repository), and writes the
+- **`pr`** reads the pull request's head SHA, its base branch and the repository's default branch
+  with `gh api` (nothing else: never a title, body, comment or head branch name), fetches the head,
+  the base and the default branch into a bare mirror under `$FIN_REVIEW_HOME/repos/` (default
+  `~/.fin-review`; refused inside the repository), and writes the
   head's blobs, by the object IDs of its tree, as `$FIN_REVIEW_HOME/trees/<run-id>`. Nothing is
   checked out, so no `.gitattributes` encoding, filter or line-ending rule and no git configuration
   acts on the tree; it has no `.git`, a symbolic link is a plain file holding its target, and a
@@ -40,9 +41,12 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
   any session: a path with a control or format character or bytes that are not UTF-8, an empty,
   `.` or `..` segment, a segment a disk reads as `.git`, or two paths (or a path and a folder) that
   a disk ignoring case or Unicode normalisation takes for one; every file is also created
-  exclusively, so a fold the check misses still fails closed. It plans the units (every changed
-  path at the head, chunked past 1,200 lines; see below) and the change's tier (the highest of its
-  paths', from `tools/layout.json` at the base),
+  exclusively, so a fold the check misses still fails closed. The change is everything on the head
+  since its merge base with the default branch, and the tiers come from `tools/layout.json` on the
+  default branch (spec 07 §2.4), whatever base the pull request names: one stacked on an unmerged
+  branch is reviewed with that branch's changes and cannot lower its own tier through it. It plans
+  the units (every changed path at the head, chunked past 1,200 lines; see below) and the change's
+  tier (the highest of its paths'),
   refuses a gating run below the effort floor (exit 64, `floor_tier_s`) before any session, and runs
   the lenses of that tier (`tools/fin-review/config/lenses.json`), one `joins` pass over the patch,
   and on tier S the attack pass once per mapped profile, at most `maxSessions` (default 8) at once.
@@ -60,8 +64,12 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
 - **`commit`** reviews the delta since `--since` (the last reviewed head), and the files that import
   the changed ones. It stays a delta only when spec 07 §2.3.2's conditions hold against the newest
   local, non-advisory `pr` or `commit` run of the same pull request at `--since`; otherwise it runs
-  as `pr` and records `escalated`: `no_prior_run`, `not_ancestor`, `delta_lines` (over 400),
-  `tier_raised`, `new_lens`, `new_profile` or `prior_could_not_check`. Each blocker open at `--since`
+  as `pr` and records `escalated`: `no_prior_run`, `not_ancestor`, `base_changed` (the prior run
+  was reviewed from another default branch, or from a merge base the current one does not contain),
+  `delta_lines` (over 400), `tier_raised`, `new_lens`, `new_profile` or `prior_could_not_check`.
+  The delta's own tier picks its lenses, but a tier only goes up along the chain: the floor, the
+  budget and the recorded `tier` are the higher of the delta's and the prior run's (`deltaTier`
+  records the delta's). Each blocker open at `--since`
   is shown again (as `P1`, `P2`, ...) to the lens that found it; it closes only when that lens marks
   it `fixed` with a quote of the fix that is in the tree; silence keeps it open.
 - **Output.** stdout holds counts only. `$FIN_REVIEW_HOME/runs/<run-id>/` holds `state.json`,

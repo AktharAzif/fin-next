@@ -1,6 +1,7 @@
 // The GitHub facts a review run reads (spec 07 §2.3.3, [CI-15]): a pull request's head SHA, its base
-// branch and base SHA, its state and whether it comes from the same repository. Nothing else is
-// read: never a title, body, comment or branch name of the head, so no session can be shown one.
+// branch and base SHA, the repository's default branch, its state and whether it comes from the
+// same repository. Nothing else is read: never a title, body, comment or branch name of the head, so
+// no session can be shown one.
 
 import { runProgram } from "./exec.ts";
 import { isSha } from "./git.ts";
@@ -11,6 +12,8 @@ export interface PullFacts {
   readonly head: string;
   readonly baseRef: string;
   readonly baseSha: string;
+  /** The repository's default branch: tiers and the review's scope come from it (spec 07 §2.4). */
+  readonly defaultBranch: string;
   readonly state: "open" | "closed";
   readonly sameRepository: boolean;
 }
@@ -19,7 +22,7 @@ const SLUG_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const GH_TIMEOUT_MS = 60_000;
 /** The only fields read (a jq filter, so nothing else leaves gh). */
 export const PULL_FILTER =
-  "{head: .head.sha, baseRef: .base.ref, baseSha: .base.sha, state: .state, sameRepository: (.head.repo.full_name == .base.repo.full_name)}";
+  "{head: .head.sha, baseRef: .base.ref, baseSha: .base.sha, defaultBranch: .base.repo.default_branch, state: .state, sameRepository: (.head.repo.full_name == .base.repo.full_name)}";
 
 /** The `gh` argument list for one pull request's facts. */
 export function pullFactsArgs(slug: string, pr: number): string[] {
@@ -32,16 +35,21 @@ export function pullFactsArgs(slug: string, pr: number): string[] {
 export function parsePullFacts(stdout: Uint8Array): PullFacts {
   const parsed = parseJsonBytes(stdout);
   if (!parsed.ok || !isJsonObject(parsed.value)) throw new RemoteError("gh returned no JSON object for the pull request");
-  const { head, baseRef, baseSha, state, sameRepository } = parsed.value;
+  const { head, baseRef, baseSha, defaultBranch, state, sameRepository } = parsed.value;
   if (!isSha(head) || !isSha(baseSha)) throw new RemoteError("gh returned a head or base that is not a SHA");
   if (typeof baseRef !== "string" || !isRefName(baseRef)) throw new RemoteError("gh returned a base branch name the engine refuses");
+  if (typeof defaultBranch !== "string" || !isRefName(defaultBranch)) throw new RemoteError("gh returned a default branch name the engine refuses");
   if (state !== "open" && state !== "closed") throw new RemoteError("gh returned an unknown pull request state");
   if (typeof sameRepository !== "boolean") throw new RemoteError("gh returned no same-repository flag");
-  return Object.freeze({ head, baseRef, baseSha, state, sameRepository });
+  return Object.freeze({ head, baseRef, baseSha, defaultBranch, state, sameRepository });
 }
 
-/** Reads a pull request's facts with `gh api`. Throws RemoteError when gh fails. */
-export async function pullFacts(slug: string, pr: number, env: Readonly<Record<string, string | undefined>>): Promise<PullFacts> {
+/**
+ * Reads a pull request's facts with `gh api`, run in `cwd` (an engine-owned folder: the program
+ * lookup never takes gh from a PATH folder in or below the working directory, so `/` would find
+ * none). Throws RemoteError when gh fails.
+ */
+export async function pullFacts(slug: string, pr: number, cwd: string, env: Readonly<Record<string, string | undefined>>): Promise<PullFacts> {
   const args = pullFactsArgs(slug, pr);
   const clean: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) if (value !== undefined) clean[name] = value;
@@ -49,7 +57,7 @@ export async function pullFacts(slug: string, pr: number, env: Readonly<Record<s
   clean["NO_COLOR"] = "1";
   let result;
   try {
-    result = await runProgram("gh", args, { cwd: "/", env: clean, timeoutMs: GH_TIMEOUT_MS, maxOutputBytes: 1 << 20 });
+    result = await runProgram("gh", args, { cwd, env: clean, timeoutMs: GH_TIMEOUT_MS, maxOutputBytes: 1 << 20 });
   } catch (error) {
     throw new RemoteError(`gh could not be run: ${(error as Error).message}`);
   }

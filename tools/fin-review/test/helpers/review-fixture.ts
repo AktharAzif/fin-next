@@ -90,6 +90,8 @@ export interface ReviewFixture {
   readonly env: Record<string, string>;
   /** Commits `changes` on `parent` (default: the base) and points refs/pull/<n>/head at it. */
   pr(n: number, changes: FileChanges, parent?: string): string;
+  /** Makes branch `ref` of the origin pull request `n`'s base (default: main, the default branch). */
+  retarget(n: number, ref: string): void;
   facts(n: number): Promise<PullFacts>;
   cleanup(): void;
 }
@@ -107,6 +109,7 @@ export function reviewFixture(): ReviewFixture {
   const userHome = join(tmp.dir, "user-home");
   mkdirSync(userHome, { recursive: true });
   const env = { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: userHome, FIN_REVIEW_HOME: home };
+  const bases = new Map<number, string>();
   return {
     dir: tmp.dir,
     origin,
@@ -120,13 +123,20 @@ export function reviewFixture(): ReviewFixture {
       origin.git(["update-ref", `refs/pull/${n}/head`, head]);
       return head;
     },
-    facts: async (n) => ({
-      head: origin.git(["rev-parse", `refs/pull/${n}/head`]).trim(),
-      baseRef: "main",
-      baseSha: base,
-      state: "open",
-      sameRepository: true,
-    }),
+    retarget: (n, ref) => {
+      bases.set(n, ref);
+    },
+    facts: async (n) => {
+      const baseRef = bases.get(n) ?? "main";
+      return {
+        head: origin.git(["rev-parse", `refs/pull/${n}/head`]).trim(),
+        baseRef,
+        baseSha: origin.git(["rev-parse", `refs/heads/${baseRef}`]).trim(),
+        defaultBranch: "main",
+        state: "open",
+        sameRepository: true,
+      };
+    },
     cleanup: tmp.cleanup,
   };
 }

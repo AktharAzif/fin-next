@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { PULL_FILTER, parsePullFacts, pullFactsArgs } from "../src/gh.ts";
+import { PULL_FILTER, parsePullFacts, pullFacts, pullFactsArgs } from "../src/gh.ts";
 import { LockHeldError, acquireLock } from "../src/review/lock.ts";
 import { Pool } from "../src/review/pool.ts";
-import { ensureMirror, fetchPull, githubSlug, isRefName, isRemoteUrl, pullHeadRef, resolveCommit } from "../src/review/repo.ts";
+import { ensureMirror, fetchPull, githubSlug, isRefName, isRemoteUrl, pullBaseRef, pullDefaultRef, pullHeadRef, resolveCommit } from "../src/review/repo.ts";
 import { FixtureRepo, tempDir } from "./helpers/git-fixture.ts";
 import { fakeClock } from "./helpers/review-fixture.ts";
 
@@ -34,11 +34,30 @@ describe("argument validation (spec 07 §2.1)", () => {
     assert.ok(!PULL_FILTER.includes("title") && !PULL_FILTER.includes("body") && !PULL_FILTER.includes(".head.ref"));
     assert.throws(() => pullFactsArgs("o/r;rm", 1));
     assert.throws(() => pullFactsArgs("o/r", 0));
+    assert.match(PULL_FILTER, /defaultBranch: \.base\.repo\.default_branch/);
     const sha = "a".repeat(40);
-    const facts = parsePullFacts(Buffer.from(JSON.stringify({ head: sha, baseRef: "main", baseSha: "b".repeat(40), state: "open", sameRepository: true })));
+    const good = { head: sha, baseRef: "p0/stack", baseSha: "b".repeat(40), defaultBranch: "main", state: "open", sameRepository: true };
+    const facts = parsePullFacts(Buffer.from(JSON.stringify(good)));
     assert.equal(facts.head, sha);
-    for (const bad of [{ head: "x" }, { head: sha, baseRef: "-x", baseSha: sha, state: "open", sameRepository: true }, { head: sha, baseRef: "main", baseSha: sha, state: "merged", sameRepository: true }]) {
+    assert.equal(facts.defaultBranch, "main");
+    for (const bad of [{ head: "x" }, { ...good, baseRef: "-x" }, { ...good, state: "merged" }, { ...good, defaultBranch: "../main" }, { ...good, defaultBranch: undefined }]) {
       assert.throws(() => parsePullFacts(Buffer.from(JSON.stringify(bad))));
+    }
+  });
+
+  it("finds gh on PATH from an engine-owned working directory", async () => {
+    const tmp = tempDir("gh");
+    try {
+      const bin = join(tmp.dir, "bin");
+      const work = join(tmp.dir, "home");
+      mkdirSync(bin);
+      mkdirSync(work);
+      const answer = { head: "a".repeat(40), baseRef: "main", baseSha: "b".repeat(40), defaultBranch: "main", state: "open", sameRepository: true };
+      writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s' '${JSON.stringify(answer)}'\n`, { mode: 0o755 });
+      const facts = await pullFacts("o/r", 3, work, { PATH: `${bin}:/usr/bin:/bin` });
+      assert.equal(facts.defaultBranch, "main");
+    } finally {
+      tmp.cleanup();
     }
   });
 });
@@ -64,14 +83,16 @@ describe("the mirror and the scratch tree", () => {
     const home = join(tmp.dir, "home");
     const mirror = await ensureMirror(home, origin.dir, env());
     assert.ok(mirror.startsWith(join(home, "repos")));
-    await fetchPull(mirror, origin.dir, 7, "main", env());
+    await fetchPull(mirror, origin.dir, 7, "main", "main", env());
     assert.equal(await resolveCommit(mirror, pullHeadRef(7), env()), head);
+    assert.equal(await resolveCommit(mirror, pullDefaultRef(7), env()), await resolveCommit(mirror, pullBaseRef(7), env()));
     assert.equal(await ensureMirror(home, origin.dir, env()), mirror, "the same origin reuses its mirror");
   });
 
   it("refuses unsafe values before any git call", async () => {
-    await assert.rejects(fetchPull("/x", "ext::sh", 1, "main", env()), TypeError);
-    await assert.rejects(fetchPull("/x", origin.dir, 1, "-x", env()), TypeError);
+    await assert.rejects(fetchPull("/x", "ext::sh", 1, "main", "main", env()), TypeError);
+    await assert.rejects(fetchPull("/x", origin.dir, 1, "-x", "main", env()), TypeError);
+    await assert.rejects(fetchPull("/x", origin.dir, 1, "main", "-x", env()), TypeError);
   });
 });
 
