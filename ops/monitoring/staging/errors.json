@@ -1,0 +1,108 @@
+{
+  "$comment": "Better Stack Errors applications for staging (spec 01 §8.2, S0-21): one per server process kind, correlated with its source, and one per browser app. migrate shares api's application. Tokens and DSNs are resolved at run time and never committed. holders and variable say where each DSN is delivered.",
+  "namePrefix": "fin-next-staging-",
+  "retentionDays": 90,
+  "applications": [
+    {
+      "name": "edge",
+      "platform": "node_errors",
+      "source": "edge",
+      "holders": ["edge"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "api",
+      "platform": "node_errors",
+      "source": "api",
+      "alsoUsedBy": ["migrate"],
+      "holders": ["api", "migrate"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "worker",
+      "platform": "node_errors",
+      "source": "worker",
+      "holders": ["worker"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "payments",
+      "platform": "node_errors",
+      "source": "payments",
+      "holders": ["payments"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "console",
+      "platform": "node_errors",
+      "source": "console",
+      "holders": ["console"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "admin",
+      "platform": "node_errors",
+      "source": "admin",
+      "holders": ["admin"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "verify",
+      "platform": "node_errors",
+      "source": "verify",
+      "holders": ["verify"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "backup",
+      "platform": "node_errors",
+      "source": "backup",
+      "holders": ["backup"],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "connector",
+      "platform": "node_errors",
+      "source": "connector",
+      "holders": [
+        "cloudflared-public",
+        "cloudflared-public-b",
+        "cloudflared-admin",
+        "cloudflared-admin-b"
+      ],
+      "variable": "FIN_ERRORS_DSN"
+    },
+    {
+      "name": "console-web",
+      "platform": "react_errors",
+      "feeds": "the console's browser errors through /api/monitoring/envelope",
+      "holders": ["console"],
+      "variable": "FIN_BROWSER_ERRORS_DSN"
+    },
+    {
+      "name": "admin-web",
+      "platform": "react_errors",
+      "feeds": "Fin Admin's browser errors through /api/monitoring/envelope",
+      "holders": ["admin"],
+      "variable": "FIN_BROWSER_ERRORS_DSN"
+    },
+    {
+      "name": "verify-web",
+      "platform": "react_errors",
+      "feeds": "the hosted pages' browser errors through /api/monitoring/envelope",
+      "holders": ["verify"],
+      "variable": "FIN_BROWSER_ERRORS_DSN"
+    },
+    {
+      "name": "docs-web",
+      "platform": "react_errors",
+      "feeds": "the docs pages' failure reports, through the edge at POST /reports/docs on the api host",
+      "holders": ["edge"],
+      "variable": "FIN_DOCS_ERRORS_DSN"
+    }
+  ],
+  "noApplication": {
+    "watcher": "its failures are lines (watcher.check_failed)",
+    "ops": "pnpm fin's failures are its deploy.failed and run.done lines and its exit code"
+  }
+}

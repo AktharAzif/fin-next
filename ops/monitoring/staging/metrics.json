@@ -1,0 +1,200 @@
+{
+  "$comment": "Logs-to-metrics per source (spec 01 §8.3, spec 08 §7.4), defined before the first deploy. A metric with no aggregations is a label (type string_low_cardinality). Each sql_expression is rendered as JSONExtract(raw, '<field>', 'Nullable(<String|Float64>)'). No ID is ever a label (MC-06).",
+  "sets": {
+    "common": [
+      { "name": "event", "field": "event", "type": "string_low_cardinality", "aggregations": [] },
+      { "name": "level", "field": "level", "type": "string_low_cardinality", "aggregations": [] },
+      {
+        "name": "service",
+        "field": "service",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      {
+        "name": "environment",
+        "field": "environment",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      }
+    ],
+    "request": [
+      {
+        "name": "status_class",
+        "field": "statusClass",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      { "name": "route", "field": "route", "type": "string_low_cardinality", "aggregations": [] },
+      {
+        "name": "outcome",
+        "field": "outcome",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      { "name": "reason", "field": "reason", "type": "string_low_cardinality", "aggregations": [] },
+      {
+        "name": "duration_ms",
+        "field": "durationMs",
+        "type": "float64_delta",
+        "aggregations": ["avg", "max", "histogram"]
+      },
+      { "name": "db_ms", "field": "dbMs", "type": "float64_delta", "aggregations": ["avg", "max"] },
+      {
+        "name": "db_queries",
+        "field": "dbQueries",
+        "type": "float64_delta",
+        "aggregations": ["avg", "max"]
+      },
+      {
+        "name": "provider_ms",
+        "field": "providerMs",
+        "type": "float64_delta",
+        "aggregations": ["avg", "max", "sum"]
+      },
+      {
+        "name": "provider_calls",
+        "field": "providerCalls",
+        "type": "float64_delta",
+        "aggregations": ["avg", "max", "sum"]
+      }
+    ],
+    "process": [
+      {
+        "name": "event_loop_p99_ms",
+        "field": "eventLoopP99Ms",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      },
+      {
+        "name": "heap_used_mb",
+        "field": "heapUsedMb",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      },
+      { "name": "rss_mb", "field": "rssMb", "type": "float64_delta", "aggregations": ["max"] },
+      {
+        "name": "pool_waiting",
+        "field": "poolWaiting",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      },
+      {
+        "name": "clock_skew_ms",
+        "field": "clockSkewMs",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      }
+    ],
+    "job": [
+      { "name": "job", "field": "job", "type": "string_low_cardinality", "aggregations": [] },
+      { "name": "result", "field": "result", "type": "string_low_cardinality", "aggregations": [] },
+      {
+        "name": "skip_reason",
+        "field": "skipReason",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      {
+        "name": "lag_ms",
+        "field": "lagMs",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      },
+      {
+        "name": "oldest_due_s",
+        "field": "oldestDueS",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      },
+      {
+        "name": "stuck",
+        "field": "stuck",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      },
+      {
+        "name": "processed",
+        "field": "processed",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      },
+      {
+        "name": "failed",
+        "field": "failed",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      }
+    ],
+    "probe": [
+      {
+        "name": "archiver_lag_s",
+        "field": "archiverLagS",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      },
+      {
+        "name": "longest_tx_s",
+        "field": "longestTxS",
+        "type": "float64_delta",
+        "aggregations": ["max"]
+      },
+      { "name": "size_mb", "field": "sizeMb", "type": "float64_delta", "aggregations": ["max"] }
+    ],
+    "email": [
+      {
+        "name": "template",
+        "field": "template",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      { "name": "class", "field": "class", "type": "string_low_cardinality", "aggregations": [] }
+    ],
+    "connector": [
+      {
+        "name": "connections",
+        "field": "connections",
+        "type": "float64_delta",
+        "aggregations": ["min", "max"]
+      },
+      {
+        "name": "restarts",
+        "field": "restarts",
+        "type": "float64_delta",
+        "aggregations": ["min", "max"]
+      }
+    ],
+    "watcher": [
+      { "name": "check", "field": "check", "type": "string_low_cardinality", "aggregations": [] },
+      { "name": "checks", "field": "checks", "type": "float64_delta", "aggregations": ["max"] },
+      {
+        "name": "failed",
+        "field": "failed",
+        "type": "float64_delta",
+        "aggregations": ["max", "sum"]
+      }
+    ],
+    "ops": [
+      {
+        "name": "command",
+        "field": "command",
+        "type": "string_low_cardinality",
+        "aggregations": []
+      },
+      { "name": "result", "field": "result", "type": "string_low_cardinality", "aggregations": [] }
+    ]
+  },
+  "sources": {
+    "edge": ["common", "request", "process"],
+    "api": ["common", "request", "process"],
+    "worker": ["common", "process", "job", "probe", "email"],
+    "payments": ["common", "request", "process", "job"],
+    "console": ["common", "request", "process"],
+    "admin": ["common", "request", "process"],
+    "verify": ["common", "request", "process"],
+    "migrate": ["common", "process"],
+    "backup": ["common", "process", "job"],
+    "connector": ["common", "process", "connector"],
+    "watcher": ["common", "watcher"],
+    "ops": ["common", "ops"]
+  }
+}
