@@ -96,6 +96,14 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    what the interrupted run left undone. Only SIGKILL (and a crash of Node or of the machine)
    leaves a run open; its lock then needs `lock break` (below).
 
+   However a run closes, what its cleanup has not undone is recorded as well as printed, since the
+   output may have had no reader (a closed terminal): `run.done` carries `leftover`, what to do by
+   hand, and, when the cleanup failed, `cleanupFailed` and its `cleanupError`, masked like every
+   field. A `run.leftover` line (level `error`) with the same fields is written just before
+   `run.done`'s line, so it is kept in `lines.jsonl` and shipped with it. After a stop nobody saw,
+   read the last `run.done` in `runs.jsonl` (`pnpm fin log verify <env>` first) or look for
+   `run.leftover` in the `ops` source.
+
 ### The allow-list guard (BD-11)
 
 Every Cloudflare write that names a host is checked before it is sent: the name must be under the

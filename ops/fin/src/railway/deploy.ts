@@ -25,8 +25,8 @@
 //      read migrate's variables back to confirm it is gone, sealed or not (again, for up to 10 s,
 //      while a lagging read still shows it; on every way the run ends: a failure,
 //      and a stop, which cuts the wait short, or, while the write that sets the reference is in
-//      flight, waits for that write and starts no migrate; a run closed at once first says to
-//      remove it by hand);
+//      flight, waits for that write and starts no migrate; a run closed at once first, or a
+//      removal that failed, says to remove it by hand, and run.done records that as `leftover`);
 //   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT (a
 //      commit that starts no deployment of its own, like migrate's), then the one deploy that
@@ -467,15 +467,16 @@ export const railwayDeploy: Command = {
      * removal runs once, whoever asks first: migrate's own change once migrate ends, or the plan's
      * cleanup on any other way out (an error, a stop), while the run may still write. It waits for
      * the write that sets the reference (`setting`) to settle first, so a stop while that write is
-     * in flight (slow, or waiting out a 429) cannot delete before it lands; until the removal
-     * settles, a run closed at once says to remove the reference by hand.
+     * in flight (slow, or waiting out a 429) cannot delete before it lands. Until the removal is
+     * confirmed (pending, or failed), a run closed at once says to remove the reference by hand,
+     * and run.done records it (the plan's leftover).
      */
     let migrateReference:
       | {
           serviceId: string;
           setting: Promise<void>;
           removal: Promise<void> | undefined;
-          settled: boolean;
+          removed: boolean;
         }
       | undefined;
     const byHand = "remove it by hand now (spec 01 §6.3, §6.6)";
@@ -495,11 +496,10 @@ export const railwayDeploy: Command = {
             );
           }
           await confirmRemoved(set.serviceId);
+          set.removed = true;
         } catch (error) {
           ctx.out.error(`${reference.variable} could not be removed from migrate: ${byHand}`);
           throw error;
-        } finally {
-          set.settled = true;
         }
       })();
       return set.removal;
@@ -577,7 +577,7 @@ export const railwayDeploy: Command = {
           // between the call and this line, so no answer or stop comes first); its removal waits
           // for the write to settle.
           if (roll.task) {
-            migrateReference = { serviceId, setting, removal: undefined, settled: false };
+            migrateReference = { serviceId, setting, removal: undefined, removed: false };
           }
           await setting;
           if (roll.task) await runMigrate(serviceId);
@@ -608,7 +608,7 @@ export const railwayDeploy: Command = {
       {
         cleanup: removeReference,
         leftover: () =>
-          migrateReference !== undefined && !migrateReference.settled
+          migrateReference !== undefined && !migrateReference.removed
             ? `${reference.variable} may still be on migrate: ${byHand}`
             : undefined,
         after: async () => {

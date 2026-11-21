@@ -130,6 +130,37 @@ function migrateWaits(holdLog = false) {
 
 const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL", skipDeploys: true }];
 
+/** What a stop that could not remove the superuser reference says to do (the plan's leftover). */
+const REMOVE_BY_HAND =
+  /^FIN_BOOTSTRAP_DATABASE_URL may still be on migrate: remove it by hand now \(spec 01 §6\.3, §6\.6\)$/;
+
+/**
+ * The run log's run.done and the run.leftover line kept (and shipped) with it, once each has said
+ * that the superuser reference may still be on migrate and that it is removed by hand. The output
+ * is closed in these tests, so the record is all there is.
+ */
+function leftoverRecorded(h: H): {
+  done: Record<string, unknown>;
+  line: Record<string, unknown>;
+} {
+  const done = h.records().at(-1) ?? {};
+  assert.equal(done.event, "run.done");
+  assert.match(String(done.leftover), REMOVE_BY_HAND);
+  const lines = h.lines();
+  const at = lines.findIndex((l) => l.event === "run.leftover");
+  const line = lines[at] ?? {};
+  assert.equal(line.level, "error");
+  assert.equal(line.command, "railway deploy");
+  assert.match(String(line.leftover), REMOVE_BY_HAND);
+  assert.equal(lines[at + 1]?.event, "run.done", "written just before run.done's own line");
+  assert.doesNotMatch(h.runtime.err(), /by hand/, "nothing printed reached anyone");
+  return { done, line };
+}
+
+/** Whether the superuser reference is still on migrate. */
+const standing = (h: H) =>
+  h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL !== undefined;
+
 /** Lets the work in progress run for a while (no real I/O happens in these tests). */
 async function settle(): Promise<void> {
   for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
@@ -715,6 +746,118 @@ describe("railway deploy", () => {
     await stopping;
     await pending;
     assert.equal(h.rw.operations.includes("finDeploy"), false);
+  });
+
+  it("records in the run log the superuser reference a hangup leaves while the write setting it is in flight, with no one reading the output", async () => {
+    const h = provisioned();
+    const file = manifest(h, { migrations: ["x.sql"] });
+    const { write, reached } = referenceWriteHeld(h);
+    const pending = deploy(h, file);
+    await reached;
+    // The operator's terminal closed: the hangup comes, and nothing printed reaches anyone.
+    h.runtime.closeOutput();
+    const stopping = h.runtime.interrupt("SIGHUP");
+    await settle();
+    assert.deepEqual(h.rw.variableDeletes, [], "the removal waits for the write");
+    // The write is still in flight at the five-second deadline.
+    assert.equal(h.runtime.forceClose("deadline"), true);
+    const { done, line } = leftoverRecorded(h);
+    assert.equal(done.interrupted, "SIGHUP");
+    assert.equal(done.forced, "deadline");
+    assert.equal(done.cleanupFailed, undefined, "the removal had not failed: it had not run");
+    assert.equal(line.cleanupFailed, undefined);
+    write.open();
+    await stopping;
+    assert.equal(await pending, EXIT.hangup);
+    // The real process exits at the deadline; here the removal comes too late to write.
+    assert.equal(standing(h), true, "the record names a reference that is really there");
+    assert.equal(h.rw.operations.includes("finDeploy"), false);
+    h.assertNoLeak();
+  });
+
+  it("records in the run log the superuser reference a hangup leaves while a removal Railway accepted without removing anything is read back", async () => {
+    const { h, file } = migrateWaits();
+    h.rw.variableDeleteNoop = true;
+    const readBack = gate();
+    // The migrate wait and the stop's settle wait end only when the run stops or closes; the
+    // read-back after the removal waits until the test opens it, so the deadline comes first.
+    Object.assign(h.runtime, {
+      sleep: (ms: number) =>
+        ms === READ_BACK_PAUSE_MS ? readBack.wait : new Promise<void>(() => {}),
+    });
+    const pending = deploy(h, file);
+    await until(() => h.rw.operations.includes("finLogs"));
+    h.runtime.closeOutput();
+    const stopping = h.runtime.interrupt("SIGHUP");
+    await until(() => h.rw.variableDeletes.length === 1);
+    await settle();
+    assert.notEqual(h.records().at(-1)?.event, "run.done", "the run waits for the read-back");
+    assert.equal(h.runtime.forceClose("deadline"), true);
+    const { done } = leftoverRecorded(h);
+    assert.equal(done.interrupted, "SIGHUP");
+    assert.equal(done.forced, "deadline");
+    readBack.open();
+    await stopping;
+    assert.equal(await pending, EXIT.hangup);
+    assert.deepEqual(h.rw.variableDeletes, REMOVED);
+    assert.equal(standing(h), true, "Railway accepted the removal and removed nothing");
+    h.assertNoLeak();
+  });
+
+  for (const closer of ["the stop's trap", "applyPlan"] as const) {
+    it(`records in the run log a removal that failed after a hangup, when ${closer} closes the run, with no one reading the output`, async () => {
+      // With the log read held past the settle wait, the trap runs the removal and closes the run;
+      // with the migrate wait cut short by the stop, migrate's own change removes it and applyPlan
+      // closes the run.
+      const trap = closer === "the stop's trap";
+      const { h, file, log, reached } = migrateWaits(trap);
+      h.rw.variableDeleteNoop = true;
+      if (!trap) {
+        Object.assign(h.runtime, {
+          sleep: (ms: number) =>
+            ms === READ_BACK_PAUSE_MS ? Promise.resolve() : new Promise<void>(() => {}),
+        });
+      }
+      const pending = deploy(h, file);
+      if (trap) await reached;
+      else await until(() => h.rw.operations.includes("finLogs"));
+      h.runtime.closeOutput();
+      const stopping = h.runtime.interrupt("SIGHUP");
+      if (trap) await stopping;
+      log.open();
+      assert.equal(await pending, EXIT.hangup);
+      await stopping;
+      const { done, line } = leftoverRecorded(h);
+      assert.equal(
+        done.error,
+        trap ? "interrupted by SIGHUP" : "interrupted by SIGHUP: nothing more is sent",
+        `${closer} closed the run`,
+      );
+      assert.equal(done.interrupted, "SIGHUP");
+      for (const record of [done, line]) {
+        assert.equal(record.cleanupFailed, true);
+        assert.match(
+          String(record.cleanupError),
+          /^FIN_BOOTSTRAP_DATABASE_URL is still on migrate after its removal: remove it by hand now/,
+        );
+      }
+      assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed once");
+      assert.equal(standing(h), true);
+      h.assertNoLeak();
+    });
+  }
+
+  it("records nothing left over when the superuser reference is removed", async () => {
+    const h = provisioned();
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    const done = h.records().at(-1);
+    assert.equal(done?.result, "ok");
+    assert.equal(done?.leftover, undefined);
+    assert.equal(done?.cleanupFailed, undefined);
+    assert.equal(
+      h.lines().some((l) => l.event === "run.leftover"),
+      false,
+    );
   });
 
   it("reads migrate's log lines as JSON objects only", () => {

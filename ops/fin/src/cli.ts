@@ -10,7 +10,9 @@
 // the process exits 130, 143, 129 or 70. SIGQUIT, a later second Ctrl-C or SIGTERM, and the
 // clean-up's deadline close it at once instead (run.done naming the change in flight, what the
 // cleanup has not done printed as something to do by hand, the lock released) and exit
-// (core/runtime.ts).
+// (core/runtime.ts). However the run closes, run.done records what the cleanup left to do by hand
+// or failed with, and a run.leftover line goes with it (Context.finishRun): the output may have
+// no reader (a closed terminal).
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
@@ -18,7 +20,7 @@ import { CLOUDFLARE_COMMANDS } from "./commands/cloudflare.ts";
 import { CORE_COMMANDS } from "./commands/core.ts";
 import { DEPLOY_COMMANDS } from "./commands/deploy.ts";
 import { parseArgs } from "./core/args.ts";
-import { Context, resultOf } from "./core/context.ts";
+import { Context, messageOf, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
 import { Masker } from "./core/mask.ts";
 import { Output } from "./core/output.ts";
@@ -81,7 +83,9 @@ function report(out: Output, error: unknown): number {
  * while the run may still write) and is then closed, its run.done naming the change in flight. An
  * uncaught error does not wait. A run that registered nothing has its lock released. When the stop
  * insists (closeNow), the run is closed at once, and what the cleanup has not done yet is printed
- * as something to do by hand.
+ * as something to do by hand. Either way, run.done records what the cleanup has not undone
+ * (`leftover`, and `cleanupFailed` with `cleanupError` when it failed) and a run.leftover line goes
+ * with it, so a stop with no one reading the output still leaves the instruction on record.
  */
 function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
   return runtime.trap({
@@ -96,10 +100,10 @@ function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
           try {
             await ctx.cleanUp();
           } catch {
-            // The cleanup said what to do by hand.
+            // The cleanup said what to do by hand, and run.done records it (finishRun).
           }
         }
-        if (!ctx.run.finished) ctx.run.finish("failed", { error: stopDescription(cause) });
+        ctx.finishRun("failed", { error: stopDescription(cause) });
       } else ctx.run.close();
       await ctx.run.flushLines();
     },
@@ -118,10 +122,15 @@ function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
         ctx.run.close();
         return;
       }
-      const left = ctx.leftover();
-      if (left !== undefined) out.error(left);
+      // Printed for whoever is watching, and recorded by finishRun for whoever is not.
+      try {
+        const left = ctx.leftover();
+        if (left !== undefined) out.error(left);
+      } catch {
+        // finishRun records that it could not be read.
+      }
       const stopped = ctx.run.stopped;
-      ctx.run.finish("failed", {
+      ctx.finishRun("failed", {
         error: stopped === undefined ? what : stopDescription(stopped),
         forced: why,
       });
@@ -193,9 +202,7 @@ export async function runCli(
     const code = report(out, error);
     if (ctx?.run.registered && !ctx.run.finished) {
       try {
-        ctx.run.finish(resultOf(error), {
-          error: error instanceof Error ? error.message : "failed",
-        });
+        ctx.finishRun(resultOf(error), { error: messageOf(error) });
       } catch {
         out.warn("the run could not be closed in the run log");
       }

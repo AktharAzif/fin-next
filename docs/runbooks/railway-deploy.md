@@ -106,8 +106,12 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    a signal that comes while the write setting the reference is still in flight (slow, or waiting
    out a 429) starts no `migrate`, and the removal waits for that write to settle first.
    If the removal fails, the reference stays, or the run is closed at once before it could (Ctrl-\,
-   a later second Ctrl-C, the five-second deadline; the output says so), remove the variable from
-   `migrate` by hand at once.
+   a later second Ctrl-C, the five-second deadline), remove the variable from `migrate` by hand at
+   once. The output says so, and so does the record, which outlives a closed terminal: the run's
+   `run.done` in the run log carries `leftover` (`FIN_BOOTSTRAP_DATABASE_URL may still be on
+   migrate: remove it by hand now (spec 01 §6.3, §6.6)`) and, when the removal failed,
+   `cleanupFailed` and its `cleanupError`; a `run.leftover` line with the same fields goes just
+   before `run.done`'s line, in `lines.jsonl` and to the `ops` source.
 9. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
    then a deploy, waiting up to 15 minutes for `SUCCESS` (step 5's health check).

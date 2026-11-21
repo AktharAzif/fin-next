@@ -110,6 +110,11 @@ export interface FakeRuntime extends Runtime {
   interrupt(cause: StopCause): Promise<boolean>;
   /** Closes the trapped run at once, as the real runtime does before it exits; false when none is. */
   forceClose(why: ForcedClose): boolean;
+  /**
+   * Drops everything printed from now on, as a closed terminal does (the real runtime writes
+   * nothing to a closed stream), so what a test then finds can only come from the run log.
+   */
+  closeOutput(): void;
 }
 
 export interface FakeRuntimeOptions {
@@ -131,6 +136,7 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
   let now = (options.start ?? new Date("2026-11-21T06:00:00.000Z")).getTime();
   let counter = 0;
   let trapped: StopHandlers | undefined;
+  let closed = false;
   return {
     env: options.env ?? {},
     repoRoot: options.repoRoot ?? REPO_ROOT,
@@ -146,10 +152,12 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
       }),
     sleep: options.sleep ?? (async () => {}),
     stdout: (text) => {
+      if (closed) return;
       stdout += text;
       all += text;
     },
     stderr: (text) => {
+      if (closed) return;
       stderr += text;
       all += text;
     },
@@ -180,6 +188,9 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
       if (handlers === undefined) return false;
       handlers.closeNow(why);
       return true;
+    },
+    closeOutput: () => {
+      closed = true;
     },
   };
 }

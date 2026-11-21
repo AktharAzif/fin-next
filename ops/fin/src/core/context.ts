@@ -26,6 +26,11 @@ export function resultOf(error: unknown): RunResult {
   return error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed";
 }
 
+/** The text a run.done records for an error (the run log masks it like every field). */
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : "failed";
+}
+
 export interface PlanHooks {
   /**
    * Checks one pending change without sending anything (the writer's check: the guard, the
@@ -39,11 +44,14 @@ export interface PlanHooks {
    * after an error or a refusal, and after a stop (the trap runs it before it closes a run the plan
    * has not closed). It runs once, however many ask, and prints what to do by hand when it fails.
    * Its failure fails a run that would have passed; it never hides the error a run ends with.
+   * run.done records a failure (`cleanupFailed`, `cleanupError`; Context.finishRun).
    */
   cleanup?: () => Promise<void>;
   /**
-   * What is left to do by hand while the cleanup has not finished: the trap prints it when a stop
-   * closes the run at once (SIGQUIT, a later signal, the deadline) before the cleanup could.
+   * What is left to do by hand while the cleanup has not undone it: before it has finished, and
+   * once it has failed. The trap prints it when a stop closes the run at once (SIGQUIT, a later
+   * signal, the deadline) before the cleanup could, and run.done records it (`leftover`) on every
+   * way the run ends, so the run log names it even when no one saw the output.
    */
   leftover?: () => string | undefined;
   /** Read back after a registered run's changes; its fields join `run.done` (never printed). */
@@ -82,6 +90,8 @@ export class Context {
   /** The applied plan's hooks, from its registration on (cleanUp() and leftover() use them). */
   #hooks: PlanHooks = {};
   #cleaning: Promise<void> | undefined;
+  /** What the cleanup failed with, once it has failed. */
+  #cleanupFailure: { error: unknown } | undefined;
 
   constructor(options: ContextOptions) {
     this.runtime = options.runtime;
@@ -144,18 +154,69 @@ export class Context {
 
   /**
    * Runs the applied plan's cleanup (PlanHooks.cleanup) once; every later call gets the same
-   * promise. applyPlan calls it on each way out, and the stop's trap before it closes the run.
+   * promise. applyPlan calls it on each way out, and the stop's trap before it closes the run. A
+   * failure is kept for run.done (finishRun).
    */
   cleanUp(): Promise<void> {
     const cleanup = this.#hooks.cleanup;
     if (cleanup === undefined) return Promise.resolve();
-    this.#cleaning ??= cleanup();
+    this.#cleaning ??= this.#clean(cleanup);
     return this.#cleaning;
   }
 
-  /** What the applied plan's cleanup has left to do by hand, while it has not finished. */
+  async #clean(cleanup: () => Promise<void>): Promise<void> {
+    try {
+      await cleanup();
+    } catch (error) {
+      this.#cleanupFailure = { error };
+      throw error;
+    }
+  }
+
+  /**
+   * What the applied plan's cleanup has left to do by hand: before it has finished, and once it
+   * has failed.
+   */
   leftover(): string | undefined {
     return this.#hooks.leftover?.();
+  }
+
+  /**
+   * Closes a run with run.done (Run.finish), recording what the plan's cleanup has not undone, so
+   * that the run log names it on every way a run ends, when no one saw the output too (a closed
+   * terminal): `leftover`, what to do by hand (PlanHooks.leftover), and, once the cleanup failed,
+   * `cleanupFailed` and the cleanup's `cleanupError`, masked like every other field. When there is
+   * any, a `run.leftover` line (level error) carrying the same is written just before run.done's
+   * own, so it is kept and shipped with it. Does nothing once the run is closed; never throws.
+   */
+  finishRun(result: RunResult, fields: Record<string, unknown> = {}): void {
+    if (this.run.finished) return;
+    const left = this.#left();
+    if (this.run.registered && Object.keys(left).length > 0) {
+      try {
+        this.run.line("run.leftover", "error", { command: this.run.command, ...left });
+      } catch {
+        // run.done records it all the same.
+      }
+    }
+    this.run.finish(result, { ...fields, ...left });
+  }
+
+  /** What finishRun records about the cleanup: nothing when it has nothing left to undo. */
+  #left(): Record<string, unknown> {
+    let leftover: string | undefined;
+    try {
+      leftover = this.leftover();
+    } catch {
+      leftover = "what the cleanup left could not be read: check by hand what this run changed";
+    }
+    const failure = this.#cleanupFailure;
+    return {
+      ...(leftover === undefined ? {} : { leftover }),
+      ...(failure === undefined
+        ? {}
+        : { cleanupFailed: true, cleanupError: messageOf(failure.error) }),
+    };
   }
 
   /**
@@ -163,10 +224,10 @@ export class Context {
    * registered run: run.registered (shipped at once) before the first change, one run.step per
    * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Every pending
    * change is checked first (hooks.check), so a refusal sends nothing; hooks.cleanup runs before
-   * run.done on every way out (after the changes, an error, a stop); what hooks.after reads back
-   * after the changes joins run.done. Returns the exit code: 0 when everything planned was applied
-   * (or, in a dry run, when nothing differs), 1 when a dry run shows changes or some changes were
-   * held. A run applies one plan.
+   * run.done on every way out (after the changes, an error, a stop), and run.done records what it
+   * left undone (finishRun); what hooks.after reads back after the changes joins run.done. Returns
+   * the exit code: 0 when everything planned was applied (or, in a dry run, when nothing differs),
+   * 1 when a dry run shows changes or some changes were held. A run applies one plan.
    *
    * Before each change it checks that the run may still send (Run.assertCanStart: not stopped by a
    * signal or a closed output, still registered and open, still holding the lock), so no change
@@ -224,15 +285,13 @@ export class Context {
       try {
         await this.cleanUp();
       } catch {
-        // The cleanup said what to do by hand; the run ends with its own error.
+        // The cleanup said what to do by hand, and run.done records it; the run ends with its own
+        // error.
       }
-      this.run.finish(resultOf(error), {
-        plan: summary,
-        error: error instanceof Error ? error.message : "failed",
-      });
+      this.finishRun(resultOf(error), { plan: summary, error: messageOf(error) });
       throw error;
     }
-    this.run.finish("ok", { plan: summary, ...fields, ...readBack });
+    this.finishRun("ok", { plan: summary, ...fields, ...readBack });
     return summary.held === 0 ? 0 : 1;
   }
 }
