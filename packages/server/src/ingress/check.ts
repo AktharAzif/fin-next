@@ -2,9 +2,11 @@
 // after private health. A request is tunnel traffic only when its TCP peer is a current replica of
 // the service's own connector services AND its host's `Fin-Ingress-Proof` matches [current,
 // previous]. Anything else loses every Cloudflare-set header and gets 403 with an alerting
-// `ingress.untrusted_peer` line. The proof is removed before any handler and never logged; `Host`
-// must be a configured host (421 otherwise); the request target starts with exactly one `/` and
-// holds no `\` (400 otherwise); the URL the app uses is the configured origin plus the raw target.
+// `ingress.untrusted_peer` line. The proof is removed before any handler and never logged, from
+// the Request and from Node's message behind it; `Host` must be a configured host (421 otherwise);
+// the request target is canonical (one leading `/`, no `\`, no dot segment, no encoded alias of a
+// plain character: 400 otherwise); and the Request handlers see is rebuilt on the URL the app uses,
+// the configured origin plus the raw target, so the path checked here is the path routed.
 import type { MiddlewareHandler } from "hono";
 import type { HostRole } from "../config/index.ts";
 import type { FinContext, FinEnv, IngressFacts } from "../http/context.ts";
@@ -134,7 +136,7 @@ export function ingressCheck(options: IngressCheckOptions): MiddlewareHandler<Fi
       scheme: visitorScheme(c.req.header("cf-visitor")),
       cfRay: bounded(c.req.header("cf-ray"), /^[A-Za-z0-9-]{8,40}$/),
     };
-    dropRequestHeaders(c, [PROOF_HEADER]);
+    dropRequestHeaders(c, [PROOF_HEADER], url);
     c.set("ingress", facts);
     await next();
   };

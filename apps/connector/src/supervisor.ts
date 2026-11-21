@@ -21,6 +21,8 @@ export type ExitReason = "cloudflared_exited" | "not_ready" | "sigterm" | "spawn
 export interface ChildHandle {
   kill(signal: NodeJS.Signals): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+  /** cloudflared could not be started (Node reports a missing binary as an event, not a throw). */
+  onSpawnError(listener: () => void): void;
 }
 
 export interface ProbeResult {
@@ -99,12 +101,18 @@ export class Supervisor {
 
   /** Starts cloudflared and the poll and health timers. */
   start(): void {
+    const spawnFailed = (): void => {
+      if (this.current === "exiting") return;
+      this.move("exiting", "spawn_failed");
+      void this.finish(1, "spawn_failed");
+    };
     try {
       this.child = this.options.spawnChild();
     } catch {
-      void this.finish(1, "spawn_failed");
+      spawnFailed();
       return;
     }
+    this.child.onSpawnError(spawnFailed);
     this.child.onExit((code) => {
       this.childExited = true;
       this.childCode = code;

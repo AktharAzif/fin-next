@@ -53,22 +53,31 @@ export interface PrivateHealthOptions {
 
 const HEALTH_PATHS = new Set(["/healthz", "/readyz"]);
 
+/** A Host compared with the public hosts: any case, any port, a trailing dot, all the same host. */
+function hostName(value: string): string {
+  const lower = value.trim().toLowerCase();
+  const name = lower.startsWith("[") ? lower.slice(0, lower.indexOf("]") + 1) : lower.split(":")[0];
+  return (name ?? "").replace(/\.$/, "");
+}
+
 /** Step 1 of the front door: private health for private callers only. */
 export function privateHealth(options: PrivateHealthOptions): MiddlewareHandler<FinEnv> {
-  const publicHosts = new Set((options.publicHosts ?? []).map((h) => h.toLowerCase()));
+  const publicHosts = new Set((options.publicHosts ?? []).map(hostName));
   return async (c, next) => {
     const path = new URL(c.req.url).pathname;
     if (!HEALTH_PATHS.has(path)) return next();
     c.set("route", path);
-    const host = (c.req.header("host") ?? "").toLowerCase();
+    const host = hostName(c.req.header("host") ?? "");
     const viaTunnel =
       c.req.header(PROOF_HEADER) !== undefined ||
       publicHosts.has(host) ||
       (options.peers?.has(peerAddress(c)) ?? false);
     if (viaTunnel || (c.req.method !== "GET" && c.req.method !== "HEAD")) {
+      const answer = await options.notFound(c);
+      // Set after the not-found answer, which marks its own reason: the line says why.
       c.set("outcome", "refused");
       c.set("reason", "health.public");
-      return options.notFound(c);
+      return answer;
     }
     if (path === "/healthz") return c.json({ status: "ok" }, 200);
     const result = await options.readiness.evaluate();

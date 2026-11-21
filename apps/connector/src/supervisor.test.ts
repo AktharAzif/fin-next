@@ -5,6 +5,7 @@ import { type ChildHandle, type ProbeResult, Supervisor } from "./supervisor.ts"
 
 function fakeChild() {
   const listeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
+  const spawnErrors: (() => void)[] = [];
   const signals: string[] = [];
   const child: ChildHandle = {
     kill: (signal) => {
@@ -16,6 +17,7 @@ function fakeChild() {
       }
     },
     onExit: (listener) => listeners.push(listener),
+    onSpawnError: (listener) => spawnErrors.push(listener),
   };
   return {
     child,
@@ -23,12 +25,15 @@ function fakeChild() {
     die: (code: number) => {
       for (const l of listeners) l(code, null);
     },
+    failSpawn: () => {
+      for (const l of spawnErrors) l();
+    },
   };
 }
 
 function setup(probes: (ProbeResult | "throw")[]) {
   const captured = capture({ service: "cloudflared-public" });
-  const { child, signals, die } = fakeChild();
+  const { child, signals, die, failSpawn } = fakeChild();
   const exits: number[] = [];
   let i = 0;
   const supervisor = new Supervisor({
@@ -47,7 +52,7 @@ function setup(probes: (ProbeResult | "throw")[]) {
     killGraceMs: 50,
   });
   const states = () => captured.events("connector.state").map((l) => l.to);
-  return { supervisor, captured, signals, die, exits, states };
+  return { supervisor, captured, signals, die, failSpawn, exits, states };
 }
 
 const OK: ProbeResult = { ok: true, connections: 4 };
@@ -107,6 +112,18 @@ describe("Supervisor", () => {
       reason: "cloudflared_exited",
       cloudflaredCode: 2,
     });
+  });
+
+  it("exits 1 with spawn_failed when cloudflared cannot be started", async () => {
+    const { supervisor, failSpawn, exits, captured, states } = setup([OK]);
+    supervisor.start();
+    failSpawn();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(states()).toEqual(["connecting", "exiting"]);
+    expect(exits).toEqual([1]);
+    expect(captured.events("connector.exited")).toEqual([
+      expect.objectContaining({ reason: "spawn_failed", exitCode: 1, level: "error" }),
+    ]);
   });
 
   it("forwards SIGTERM and exits 0", async () => {

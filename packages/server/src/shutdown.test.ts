@@ -93,6 +93,42 @@ describe("createShutdown", () => {
     expect(events("shutdown.forced")[0]).toMatchObject({ phase: "in_flight", level: "error" });
   });
 
+  it("has shipped shutdown.done to Better Stack by the time it exits 0", async () => {
+    const { telemetry, reporter, shipped } = capture({ ship: true });
+    const atExit: { code: number; shipped: unknown[] }[] = [];
+    const shutdown = createShutdown({
+      drainSeconds: 40,
+      telemetry,
+      reporter,
+      readiness: new Readiness(),
+      server: fakeServer(),
+      hooks: [],
+      exit: (code) => atExit.push({ code, shipped: shipped.flat().map((l) => l.event) }),
+      // A realistic pre-stop: shutdown.started has long been sent when shutdown.done is written.
+      plan: { preStopMs: 300, inFlightMs: 50, forcedAtMs: 5000 },
+    });
+    await shutdown.begin("SIGTERM");
+    expect(atExit).toEqual([{ code: 0, shipped: ["shutdown.started", "shutdown.done"] }]);
+  });
+
+  it("has shipped shutdown.forced to Better Stack by the time it exits 1", async () => {
+    const { telemetry, reporter, shipped } = capture({ ship: true });
+    const atExit: { code: number; shipped: unknown[] }[] = [];
+    const shutdown = createShutdown({
+      drainSeconds: 40,
+      telemetry,
+      reporter,
+      readiness: new Readiness(),
+      server: fakeServer(10_000),
+      hooks: [],
+      exit: (code) => atExit.push({ code, shipped: shipped.flat().map((l) => l.event) }),
+      plan: { preStopMs: 5, inFlightMs: 10_000, forcedAtMs: 100 },
+    });
+    void shutdown.begin("SIGTERM");
+    await new Promise((r) => setTimeout(r, 700));
+    expect(atExit).toEqual([{ code: 1, shipped: ["shutdown.started", "shutdown.forced"] }]);
+  });
+
   it("listens for SIGTERM and SIGINT", async () => {
     const { telemetry, reporter } = capture();
     const target = new EventEmitter();
@@ -128,5 +164,20 @@ describe("onCrash", () => {
     expect(events("error.unexpected")).toHaveLength(2);
     expect(JSON.stringify(events("process.unhandled_rejection"))).not.toContain("example.com");
     expect(exits).toEqual([1]);
+  });
+
+  it("works with no error reporter, and the shipped line says where the process failed", async () => {
+    const { telemetry, shipped } = capture({ ship: true });
+    const target = new EventEmitter();
+    const atExit: unknown[][] = [];
+    onCrash({ telemetry, exit: () => atExit.push(shipped.flat()) }, target);
+    target.emit("uncaughtException", new RangeError("boom"));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(atExit).toHaveLength(1);
+    expect(atExit[0]?.[0]).toMatchObject({
+      event: "process.uncaught_exception",
+      errorName: "RangeError",
+      frames: expect.arrayContaining([expect.objectContaining({ line: expect.any(Number) })]),
+    });
   });
 });

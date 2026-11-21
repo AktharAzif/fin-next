@@ -102,9 +102,37 @@ const HTTP_CODES: Readonly<Record<number, string>> = {
   503: "unavailable",
 };
 
-/** app.onError: a FinError refusal answers its code; anything else is a reported, safe 500. */
+/** Seconds a 503 asks the caller to wait, unless the error names its own (spec 05 D05-28). */
+export const RETRY_AFTER_S = 5;
+
+function retryAfterOf(error: { extensions: Readonly<Record<string, unknown>> }): number {
+  const named = error.extensions.retry_after;
+  return typeof named === "number" && Number.isInteger(named) && named > 0 && named <= 3600
+    ? named
+    : RETRY_AFTER_S;
+}
+
+/**
+ * app.onError: a FinError refusal answers its code; a FinError of 503 (UnavailableError: a
+ * dependency is down) answers 503 with its code, `retry_after` and `Retry-After`, and is not an
+ * unexpected error (the code that throws it writes its own failure line); anything else is a
+ * reported, safe 500.
+ */
 export function errorHandler(options: RequestOptions): ErrorHandler<FinEnv> {
   return (error, c) => {
+    if (isFinError(error) && error.status === 503) {
+      const retryAfter = retryAfterOf(error);
+      c.set("outcome", "error");
+      c.set("reason", error.code);
+      return refuse(
+        options,
+        c,
+        503,
+        error.code.split(".")[0] ?? "unavailable",
+        { ...error.extensions, retry_after: retryAfter },
+        { "retry-after": String(retryAfter) },
+      );
+    }
     if (isFinError(error) && error.status < 500) {
       c.set("outcome", "refused");
       c.set("reason", error.code);

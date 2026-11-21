@@ -5,9 +5,35 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SEAM_VARIABLES } from "@fin/server/seams";
 import { TEST_RELEASE } from "@fin/server/testing";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { childEnvironment, cloudflaredArgs, main } from "./main.ts";
+
+/** A complete, valid public-connector environment: only the variable under test is wrong. */
+function validEnv(port: number, cloudflared: string): Record<string, string | undefined> {
+  return {
+    FIN_SERVICE: "cloudflared-public",
+    FIN_ENVIRONMENT: "ci",
+    FIN_RELEASE: TEST_RELEASE,
+    FIN_DRAIN_SECONDS: "5",
+    PORT: String(port),
+    FIN_TUNNEL_ROLE: "public",
+    FIN_ZONE: "staging.example.net",
+    FIN_TUNNEL_HOSTS: JSON.stringify({
+      api: "gateway.staging.example.net",
+      console: "console.staging.example.net",
+      verify: "onboard.staging.example.net",
+      selfie: "selfie.staging.example.net",
+    }),
+    TUNNEL_TOKEN: `eyJhIjoi${"x".repeat(60)}`,
+    FIN_CLOUDFLARED_PATH: cloudflared,
+  };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -144,4 +170,90 @@ describe("main", () => {
   it("gives the child nothing but the token and a home", () => {
     expect(childEnvironment("t")).toEqual({ TUNNEL_TOKEN: "t", HOME: "/tmp" });
   });
+
+  it("built for release, exits 78 naming each seam variable, before reading anything else", async () => {
+    // What Vite's define compiles into the release bundle (packages/server/src/build).
+    vi.stubGlobal("__FIN_BUILD_TARGET__", "release");
+    for (const name of [...SEAM_VARIABLES, "FIN_SEAM_clock"]) {
+      const lines: Record<string, unknown>[] = [];
+      const exits: number[] = [];
+      const supervisor = await main({
+        env: { ...validEnv(await freePort(), "/nonexistent/cloudflared"), [name]: "1" },
+        exit: (code) => exits.push(code),
+        signals: false,
+        stdout: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+      });
+      expect(supervisor, name).toBeUndefined();
+      expect(exits, name).toEqual([78]);
+      expect(lines, name).toEqual([
+        expect.objectContaining({
+          event: "config.invalid",
+          variable: name === "FIN_SEAM_clock" ? "FIN_SEAM" : name,
+          problem: "refused",
+        }),
+      ]);
+    }
+  });
+
+  it("exits 78 for NODE_OPTIONS: the command carries Node's flags", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const exits: number[] = [];
+    await main({
+      env: { ...validEnv(await freePort(), "/nonexistent/cloudflared"), NODE_OPTIONS: "--inspect" },
+      exit: (code) => exits.push(code),
+      signals: false,
+      stdout: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+    });
+    expect(exits).toEqual([78]);
+    expect(lines[0]).toMatchObject({ variable: "NODE_OPTIONS", problem: "refused" });
+  });
+
+  it("exits 1 with process.start_failed when its health port is taken, rather than idle", async () => {
+    const taken = createServer();
+    await new Promise<void>((resolve) => taken.listen(0, "127.0.0.1", resolve));
+    const address = taken.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const dir = mkdtempSync(join(tmpdir(), "fin-connector-port-"));
+    try {
+      const lines: Record<string, unknown>[] = [];
+      const exits: number[] = [];
+      const supervisor = await main({
+        env: validEnv(port, join(dir, "no-such-cloudflared")),
+        exit: (code) => exits.push(code),
+        configPath: join(dir, "cloudflared", "config.yml"),
+        host: "127.0.0.1",
+        signals: false,
+        stdout: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+      });
+      expect(supervisor).toBeUndefined();
+      expect(exits).toEqual([1]);
+      expect(lines.at(-1)).toMatchObject({
+        event: "process.start_failed",
+        errorCode: "EADDRINUSE",
+      });
+    } finally {
+      await new Promise((resolve) => taken.close(resolve));
+    }
+  });
+
+  it("writes connector.exited with spawn_failed and exits 1 when cloudflared is missing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fin-connector-missing-"));
+    const lines: Record<string, unknown>[] = [];
+    const exits: number[] = [];
+    await main({
+      env: validEnv(await freePort(), join(dir, "no-such-cloudflared")),
+      exit: (code) => exits.push(code),
+      configPath: join(dir, "cloudflared", "config.yml"),
+      metrics: `127.0.0.1:${await freePort()}`,
+      host: "127.0.0.1",
+      signals: false,
+      stdout: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
+    });
+    for (let i = 0; i < 100 && exits.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(exits).toEqual([1]);
+    expect(lines.filter((l) => l.event === "connector.exited")).toEqual([
+      expect.objectContaining({ reason: "spawn_failed", exitCode: 1 }),
+    ]);
+    expect(lines.at(-1)?.event).toBe("connector.exited");
+  }, 20_000);
 });

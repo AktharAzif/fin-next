@@ -9,6 +9,7 @@
     "./seams": "./src/config/seams.ts",
     "./telemetry": "./src/telemetry/index.ts",
     "./process-health": "./src/health/process-health.ts",
+    "./shutdown": "./src/shutdown.ts",
     "./report": "./src/report.ts",
     "./http": "./src/http/index.ts",
     "./ingress": "./src/ingress/index.ts",

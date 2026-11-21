@@ -109,6 +109,40 @@ describe("units", () => {
     expect(sent).toBe(1);
   });
 
+  it("has a process line's send registered before a flush that follows it at once", async () => {
+    const { telemetry, shipped } = capture({ ship: true });
+    telemetry.logUnit("shutdown.done", { durationMs: 1 });
+    await telemetry.flush(2000);
+    expect(shipped.flat().map((l) => l.event)).toEqual(["shutdown.done"]);
+  });
+
+  it("ships what a unit's background work logs after the unit ended, with the unit's IDs", async () => {
+    const { telemetry, reporter, shipped, stdout } = capture({ ship: true });
+    telemetry.onBackgroundFailure((error, name) => reporter.reportError(error, { job: name }));
+    await telemetry.withUnit({ requestId: "req_late" }, async () => {
+      telemetry.log("request", { status: 202 });
+      telemetry.shipAfter(
+        new Promise((resolve) => setTimeout(resolve, 50)).then(() =>
+          telemetry.log("email.sent", { template: "code" }),
+        ),
+        "email.send",
+      );
+      telemetry.shipAfter(
+        new Promise((_, reject) => setTimeout(() => reject(new Error("smtp")), 20)),
+        "email.retry",
+      );
+    });
+    await telemetry.flush(2000);
+    const events = shipped.flat();
+    expect(stdout.map((l) => l.event).sort()).toEqual(
+      ["background.failed", "email.sent", "error.unexpected", "request"].sort(),
+    );
+    expect(events.map((l) => l.event).sort()).toEqual(
+      ["background.failed", "email.sent", "error.unexpected", "request"].sort(),
+    );
+    expect(events.every((l) => l.requestId === "req_late")).toBe(true);
+  });
+
   it("puts lines outside a unit on the bounded process queue, oldest dropped first", async () => {
     const { telemetry, shipped } = capture({ ship: true });
     for (let i = 0; i < 1005; i++) telemetry.log("process.health", { i });
@@ -205,6 +239,60 @@ describe("the transport", () => {
     await telemetry.withUnit({}, async () => telemetry.log("request", {}));
     await settle(telemetry);
     expect(received[1]?.some((l) => l.event === "telemetry.recovered")).toBe(false);
+  });
+
+  it("reports a gap once when sends recover side by side, and a later gap again", async () => {
+    let fail = true;
+    const received: Line[][] = [];
+    const transport: Transport = async (body) => {
+      if (fail) return 503;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      received.push(JSON.parse(gunzipSync(body).toString("utf8")) as Line[]);
+      return 202;
+    };
+    const { telemetry } = capture({ transport });
+    await telemetry.withUnit({}, async () => telemetry.log("request", {}));
+    await settle(telemetry);
+    fail = false;
+    await Promise.all([
+      telemetry.withUnit({ requestId: "req_1" }, async () => telemetry.log("request", {})),
+      telemetry.withUnit({ requestId: "req_2" }, async () => telemetry.log("request", {})),
+    ]);
+    await settle(telemetry);
+    const recovered = () => received.flat().filter((l) => l.event === "telemetry.recovered");
+    expect(recovered()).toEqual([
+      expect.objectContaining({ failedSends: 1, linesLost: 1, statuses: [503] }),
+    ]);
+    fail = true;
+    await telemetry.withUnit({}, async () => telemetry.log("request", {}));
+    await settle(telemetry);
+    fail = false;
+    await telemetry.withUnit({}, async () => telemetry.log("request", {}));
+    await settle(telemetry);
+    expect(recovered()).toHaveLength(2);
+    expect(recovered()[1]).toMatchObject({ failedSends: 1, linesLost: 1, statuses: [503] });
+  });
+
+  it("hands a claimed gap back when the batch that reported it fails", async () => {
+    let calls = 0;
+    const received: Line[][] = [];
+    const transport: Transport = async (body) => {
+      calls++;
+      if (calls <= 4) return 500;
+      received.push(JSON.parse(gunzipSync(body).toString("utf8")) as Line[]);
+      return 202;
+    };
+    const { telemetry } = capture({ transport });
+    for (let i = 0; i < 3; i++) {
+      await telemetry.withUnit({}, async () => telemetry.log("request", {}));
+      await settle(telemetry);
+    }
+    expect(received[0]?.[0]).toMatchObject({
+      event: "telemetry.recovered",
+      failedSends: 2,
+      linesLost: 2,
+      statuses: [500],
+    });
   });
 
   it("never ships when no source is configured, and still writes stdout", async () => {

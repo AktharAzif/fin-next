@@ -3,13 +3,21 @@
 // shipping; a unit's batch is POSTed after its answer, and lines outside a unit go to a bounded
 // process queue sent every 5 seconds. Shipping failures are swallowed: `telemetry.ship_failed` goes
 // to stdout and the next good batch carries `telemetry.recovered`. Monitoring never breaks the work.
+//
+// Three rules keep the direct shipment the record:
+//   - a process line (`logUnit`) is registered for sending before the call returns, so the flush
+//     that follows it on shutdown and on a crash waits for it;
+//   - once a unit's batch is taken, lines its background work writes later (`shipAfter`) go to the
+//     process queue with the unit's IDs, never into the batch already sent;
+//   - a send claims the gap it reports before its first await, so concurrent sends after an outage
+//     report it once, and a failed send hands it back.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type Clock, isBoundedCode, rfc3339, safeError, scrubLine } from "@fin/core";
 import type { Environment, ServiceName } from "../config/index.ts";
 import { type StdoutWriter, writeStdout } from "../log/stdout.ts";
 import { capLine } from "./cap.ts";
 import { ENVELOPE_KEYS, type Fields, type Level } from "./lines.ts";
-import { batches, gzipLines, sendWithRetry, type Transport } from "./ship.ts";
+import { batches, gzipLines, type SendResult, sendWithRetry, type Transport } from "./ship.ts";
 
 export const QUEUE_LIMIT = 1000;
 export const QUEUE_INTERVAL_MS = 5000;
@@ -22,7 +30,20 @@ export interface UnitStart {
 interface UnitState extends UnitStart {
   lines: string[];
   dropped: number;
+  /** Set when the unit ends and its batch is taken. */
+  closed: boolean;
 }
+
+/** Sends that failed and lines lost since the last good batch reported them. */
+interface Gap {
+  failedSends: number;
+  linesLost: number;
+  statuses: Set<number>;
+}
+
+const noGap = (): Gap => ({ failedSends: 0, linesLost: 0, statuses: new Set() });
+
+const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 export interface TelemetryOptions {
   service: ServiceName;
@@ -55,7 +76,7 @@ export class Telemetry {
   private queue: string[] = [];
   private queueDropped = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private gap = { failedSends: 0, linesLost: 0, statuses: new Set<number>() };
+  private gap: Gap = noGap();
   private backgroundFailure: BackgroundFailureHook | undefined;
 
   constructor(options: TelemetryOptions) {
@@ -143,15 +164,13 @@ export class Telemetry {
       const text = this.format(event, fields, level, unit);
       this.stdout(text);
       if (this.transport === undefined) return;
-      if (unit !== undefined) {
+      if (unit !== undefined && !unit.closed) {
         if (unit.lines.length < this.queueLimit) unit.lines.push(text);
         else unit.dropped++;
       } else {
-        this.queue.push(text);
-        if (this.queue.length > this.queueLimit) {
-          this.queue.shift();
-          this.queueDropped++;
-        }
+        // Outside a unit, or after the unit's batch went: background work that logs after the
+        // answer (spec 08 §7.3) still reaches Better Stack, with the unit's IDs on the line.
+        this.enqueue(text);
       }
     } catch {
       // Monitoring never breaks the work.
@@ -160,28 +179,50 @@ export class Telemetry {
 
   /** Runs `fn` as one unit of work; its batch ships after it ends, even when it throws. */
   async withUnit<T>(unit: UnitStart, fn: () => Promise<T>): Promise<T> {
-    const state: UnitState = { ...unit, lines: [], dropped: 0 };
+    const state: UnitState = { ...unit, lines: [], dropped: 0, closed: false };
     try {
       return await this.storage.run(state, fn);
     } finally {
-      this.shipUnit(state);
+      this.closeUnit(state);
     }
   }
 
-  /** Writes a line in a unit of its own (process lines: spec 08 §7.2), shipped at once. */
+  /**
+   * Writes a line in a unit of its own (process lines: spec 08 §7.2). Its send is registered
+   * before this returns, so `flush` called next (shutdown, the crash path, a failed start) waits
+   * for it.
+   */
   logUnit(event: string, fields: Fields = {}, level: Level = "info", unit: UnitStart = {}): void {
-    void this.withUnit(unit, async () => this.log(event, fields, level));
+    try {
+      const text = this.format(event, fields, level, unit);
+      this.stdout(text);
+      if (this.transport !== undefined) this.shipLines([text], "telemetry.unit");
+    } catch {
+      // Monitoring never breaks the work.
+    }
   }
 
-  private shipUnit(state: UnitState): void {
+  private enqueue(text: string): void {
+    this.queue.push(text);
+    if (this.queue.length > this.queueLimit) {
+      this.queue.shift();
+      this.queueDropped++;
+    }
+  }
+
+  private closeUnit(state: UnitState): void {
+    state.closed = true;
     if (this.transport === undefined) return;
     const lines = state.lines.splice(0);
     if (state.dropped > 0) this.gap.linesLost += state.dropped;
-    if (lines.length === 0) return;
-    // After the answer: the next turn of the event loop, never in the request's path.
+    if (lines.length > 0) this.shipLines(lines, "telemetry.unit");
+  }
+
+  /** Registers a send now; it starts on the next turn of the event loop, after the answer. */
+  private shipLines(lines: string[], name: string): void {
     this.shipAfter(
-      new Promise<void>((resolve) => setImmediate(resolve)).then(() => this.send(lines)),
-      "telemetry.unit",
+      nextTurn().then(() => this.send(lines)),
+      name,
     );
   }
 
@@ -195,37 +236,60 @@ export class Telemetry {
     if (lines.length > 0) this.shipAfter(this.send(lines), "telemetry.queue");
   }
 
+  /** Takes the gap to report: whoever claims it reports it, once. */
+  private claimGap(): Gap | undefined {
+    if (this.gap.failedSends === 0 && this.gap.linesLost === 0) return undefined;
+    const claimed = this.gap;
+    this.gap = noGap();
+    return claimed;
+  }
+
+  /** Hands a claimed gap back when the batch that reported it failed. */
+  private returnGap(claimed: Gap): void {
+    this.gap.failedSends += claimed.failedSends;
+    this.gap.linesLost += claimed.linesLost;
+    for (const status of claimed.statuses) this.gap.statuses.add(status);
+  }
+
   private async send(lines: string[]): Promise<void> {
     const transport = this.transport;
     if (transport === undefined) return;
-    const recovering = this.gap.failedSends > 0 || this.gap.linesLost > 0;
-    const snapshot = {
-      failedSends: this.gap.failedSends,
-      linesLost: this.gap.linesLost,
-      statuses: [...this.gap.statuses].sort((a, b) => a - b),
-    };
-    const all = recovering
-      ? [this.format("telemetry.recovered", snapshot, "warn", this.currentUnit()), ...lines]
-      : lines;
+    // Claimed before the first await: a send running beside this one reports no gap of its own.
+    const claimed = this.claimGap();
+    const all =
+      claimed !== undefined
+        ? [
+            this.format(
+              "telemetry.recovered",
+              {
+                failedSends: claimed.failedSends,
+                linesLost: claimed.linesLost,
+                statuses: [...claimed.statuses].sort((a, b) => a - b),
+              },
+              "warn",
+            ),
+            ...lines,
+          ]
+        : lines;
     let first = true;
     for (const batch of batches(all)) {
-      const result = await sendWithRetry(transport, await gzipLines(batch), this.sendTimeoutMs);
-      const real = first && recovering ? batch.length - 1 : batch.length;
-      if (result.ok) {
-        if (first && recovering) {
-          this.gap.failedSends -= snapshot.failedSends;
-          this.gap.linesLost -= snapshot.linesLost;
-          for (const status of snapshot.statuses) this.gap.statuses.delete(status);
-        }
-      } else {
-        this.gap.failedSends++;
-        this.gap.linesLost += real;
-        this.gap.statuses.add(result.status);
-        this.stdout(
-          this.format("telemetry.ship_failed", { status: result.status, linesLost: real }, "warn"),
-        );
-      }
+      const reports = first && claimed !== undefined;
       first = false;
+      let result: SendResult;
+      try {
+        result = await sendWithRetry(transport, await gzipLines(batch), this.sendTimeoutMs);
+      } catch {
+        result = { ok: false, status: 0 };
+      }
+      if (result.ok) continue;
+      const real = reports ? batch.length - 1 : batch.length;
+      if (reports) this.returnGap(claimed);
+      this.gap.failedSends++;
+      this.gap.linesLost += real;
+      this.gap.statuses.add(result.status);
+      this.stdout(
+        this.format("telemetry.ship_failed", { status: result.status, linesLost: real }, "warn"),
+      );
     }
   }
 
@@ -255,8 +319,8 @@ export class Telemetry {
   }
 
   /**
-   * Sends the process queue and waits for every send and background task, for at most
-   * `deadlineMs` (the shutdown and crash paths).
+   * Sends the process queue and waits for every send and background task, and for the lines they
+   * write in turn, for at most `deadlineMs` (the shutdown and crash paths).
    */
   async flush(deadlineMs: number): Promise<void> {
     this.shipQueue();
@@ -266,9 +330,12 @@ export class Telemetry {
       timer.unref();
     });
     const settle = async (): Promise<void> => {
-      while (this.background.size > 0) await Promise.allSettled([...this.background]);
-      this.shipQueue();
-      while (this.background.size > 0) await Promise.allSettled([...this.background]);
+      // A unit that is ending now hands over its batch in a `finally` still queued: let it run.
+      await nextTurn();
+      while (this.background.size > 0 || this.queue.length > 0) {
+        this.shipQueue();
+        await Promise.allSettled([...this.background]);
+      }
     };
     await Promise.race([settle(), deadline]);
     if (timer !== undefined) clearTimeout(timer);

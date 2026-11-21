@@ -104,14 +104,36 @@ export function renderConfig(input: RenderInput): { rules: IngressRule[]; yaml: 
 }
 
 /**
- * Which rule cloudflared picks for a request (its documented matching: the first rule whose
- * hostname equals the request's, case-insensitively, and whose path regex matches the path as
- * received; a rule with neither matches everything). Used by the tests of S-01's paths.
+ * The path cloudflared matches a rule's regex against: Go's `URL.Path`, every `%XX` decoded (so
+ * `/api%2Fping` and `/%61pi/ping` are `/api/ping`), dot segments and repeated slashes kept as sent
+ * (cloudflared's path normalisation is off by default). A malformed escape is no URL at all.
+ */
+export function cloudflaredPath(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw.charAt(i);
+    if (char !== "%") {
+      out += char;
+      continue;
+    }
+    const hex = raw.slice(i + 1, i + 3);
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) throw new Error("not a valid URL: a malformed escape");
+    out += String.fromCharCode(Number.parseInt(hex, 16));
+    i += 2;
+  }
+  return out;
+}
+
+/**
+ * Which rule cloudflared picks for a request (the first rule whose hostname equals the request's,
+ * case-insensitively, and whose path regex matches the decoded path; a rule with neither matches
+ * everything). Checked against the pinned cloudflared by the test of S-01's paths.
  */
 export function matchRule(rules: readonly IngressRule[], url: string): IngressRule {
   const parsed = /^https?:\/\/([^/?#]+)([^?#]*)/i.exec(url);
   const host = (parsed?.[1] ?? "").toLowerCase().replace(/:\d+$/, "");
-  const path = parsed?.[2] === "" || parsed?.[2] === undefined ? "/" : parsed[2];
+  const raw = parsed?.[2] === "" || parsed?.[2] === undefined ? "/" : parsed[2];
+  const path = cloudflaredPath(raw);
   for (const rule of rules) {
     if (rule.hostname !== undefined && rule.hostname !== host) continue;
     if (rule.path !== undefined && !new RegExp(rule.path).test(path)) continue;

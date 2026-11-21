@@ -3,7 +3,11 @@
 // tracing, no context lines, `sendDefaultPii: false`, `release` and `environment` set, and every
 // event and breadcrumb through Fin's scrubbers. `reportError` returns the errorId and writes
 // `error.unexpected` with safeError's fields only. Errors never go to the console.
-import { isFinError, safeError, scrubBreadcrumb, scrubEvent } from "@fin/core";
+//
+// Sentry is handed safeException's stand-in, never the thrown value: its stack parser reads every
+// line after the first, so a multi-line message would otherwise become frames, and its type would
+// be whatever the error's name says.
+import { isFinError, safeError, safeException, scrubBreadcrumb, scrubEvent } from "@fin/core";
 import {
   type BaseTransportOptions,
   createStackParser,
@@ -121,7 +125,8 @@ export class Reporter {
           if (value !== undefined) tags[key] = value;
         }
         scope.setTags(tags);
-        errorId = this.client.captureException(error, { originalException: error }, scope);
+        const stand = safeException(error);
+        errorId = this.client.captureException(stand, { originalException: stand }, scope);
       } catch {
         // Reporting never breaks the work; the line below still records the error.
       }

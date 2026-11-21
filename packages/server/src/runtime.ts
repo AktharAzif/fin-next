@@ -16,10 +16,10 @@ import {
   type Env,
   loadProcessConfig,
   type ProcessConfig,
-  refuseForbidden,
+  SERVICE_NAMES,
   type ServiceName,
 } from "./config/index.ts";
-import { buildTarget, checkSeams } from "./config/seams.ts";
+import { buildTarget, checkSeams, refuseForbidden } from "./config/seams.ts";
 import { createPrivateResolver, type PrivateResolver } from "./dns/railway-lookup.ts";
 import { type ProcessHealth, startProcessHealth } from "./health/process-health.ts";
 import { Readiness } from "./health/readiness.ts";
@@ -83,7 +83,11 @@ export interface RunningService {
   health: ProcessHealth;
 }
 
-/** Writes `config.invalid` (the variable and the problem, never the value) before telemetry exists. */
+/**
+ * Writes `config.invalid` (the variable and the problem, never the value) before telemetry exists.
+ * `service` is written only when FIN_SERVICE is one of Fin's service names, so a value pasted into
+ * the wrong variable is never echoed, FIN_SERVICE's own included.
+ */
 export function writeConfigInvalid(
   error: ConfigError,
   env: Env,
@@ -91,6 +95,7 @@ export function writeConfigInvalid(
   clock: Clock = systemClock,
 ): void {
   const service = env.FIN_SERVICE;
+  const known = (SERVICE_NAMES as readonly string[]).includes(service ?? "");
   stdout(
     JSON.stringify(
       scrubLine({
@@ -98,9 +103,7 @@ export function writeConfigInvalid(
         message: "config.invalid",
         event: "config.invalid",
         level: "error",
-        ...(typeof service === "string" && /^[a-z][a-z0-9-]{1,30}$/.test(service)
-          ? { service }
-          : {}),
+        ...(known ? { service } : {}),
         variable: error.variable,
         problem: error.problem,
       }),
@@ -178,6 +181,21 @@ export async function runService(
     onStop: (name, run) => hooks.push({ name, run }),
   };
 
+  // A start that fails is a line, flushed, then an exit: never a process left running with no
+  // server (the crash handlers only log a rejection).
+  const startFailed = async (error: unknown): Promise<undefined> => {
+    const safe = safeError(error);
+    telemetry.logUnit(
+      "process.start_failed",
+      { errorName: safe.errorName, errorCode: safe.errorCode },
+      "error",
+    );
+    reporter.reportError(error, { job: "start" });
+    await Promise.allSettled([telemetry.flush(2000), reporter.flush(2000)]);
+    exit(1);
+    return undefined;
+  };
+
   let built: BuiltService;
   try {
     built = await definition.build(ctx);
@@ -192,16 +210,7 @@ export async function runService(
       exit(EXIT_CONFIG);
       return undefined;
     }
-    const safe = safeError(error);
-    telemetry.logUnit(
-      "process.start_failed",
-      { errorName: safe.errorName, errorCode: safe.errorCode },
-      "error",
-    );
-    reporter.reportError(error, { job: "start" });
-    await Promise.allSettled([telemetry.flush(2000), reporter.flush(2000)]);
-    exit(1);
-    return undefined;
+    return startFailed(error);
   }
 
   if (built.peers !== undefined) {
@@ -211,14 +220,20 @@ export async function runService(
     hooks.push({ name: "peers", run: () => peers.stop() });
   }
 
-  const server = await startHttpServer({
-    fetch: built.fetch,
-    port: options.port ?? config.port,
-    ...(options.host !== undefined ? { host: options.host } : {}),
-  });
+  let server: HttpServerHandle;
+  try {
+    server = await startHttpServer({
+      fetch: built.fetch,
+      port: options.port ?? config.port,
+      ...(options.host !== undefined ? { host: options.host } : {}),
+    });
+  } catch (error) {
+    built.peers?.stop();
+    return startFailed(error);
+  }
   const health = startProcessHealth({
     telemetry,
-    connections: () => server.connections(),
+    httpConnections: () => server.connections(),
     ...(built.health !== undefined ? { extra: built.health } : {}),
   });
   hooks.unshift({ name: "health", run: () => health.stop() });

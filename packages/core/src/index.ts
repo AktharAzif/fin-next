@@ -20,9 +20,17 @@ export {
   newId,
   type RandomFill,
 } from "./ids.ts";
-export { type SafeError, type SafeFrame, safeError } from "./safe-error.ts";
+export {
+  type SafeError,
+  type SafeFrame,
+  safeError,
+  safeException,
+  stackFrameLines,
+} from "./safe-error.ts";
 export {
   assertNoPersonalShapes,
+  FRAME_FILE,
+  FRAME_FUNCTION,
   hasPersonalShape,
   isWithheldField,
   scrubBreadcrumb,

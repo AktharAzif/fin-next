@@ -111,7 +111,9 @@ export function loadConnectorConfig(env: Env): ConnectorConfig {
     const parsed: unknown = JSON.parse(read(env, "FIN_TUNNEL_HOSTS"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
       throw new Error("shape");
-    hosts = {};
+    // No prototype: a role spelled `__proto__` is kept as a key, so the renderer refuses it as an
+    // unknown role instead of losing it to the prototype setter.
+    hosts = Object.create(null) as Record<string, string>;
     for (const [role, host] of Object.entries(parsed)) {
       if (typeof host !== "string" || !HOSTNAME.test(host)) throw new Error("shape");
       hosts[role] = host;

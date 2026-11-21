@@ -4,6 +4,7 @@ export {
   type BuildTarget,
   buildTarget,
   checkSeams,
+  SEAM_FAMILY,
   SEAM_PREFIX,
   SEAM_VARIABLES,
 } from "./config/seams.ts";

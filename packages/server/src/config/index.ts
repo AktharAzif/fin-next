@@ -24,13 +24,21 @@ export function readEnv<S extends EnvSpec>(spec: S, env: Env): EnvValues<S> {
   return out as EnvValues<S>;
 }
 
-/** Parses a JSON variable, then validates it; a parse failure is "malformed". */
+const PROTO_KEY = "__proto__";
+
+/**
+ * Parses a JSON variable, then validates it; a parse failure is "malformed". A `__proto__` key is
+ * malformed too: a record schema would drop it silently, so a check for unknown keys would miss it.
+ */
 export function json<T extends z.ZodType>(schema: T): z.ZodType<z.output<T>> {
   return z
     .string()
     .transform((text, ctx) => {
       try {
-        return JSON.parse(text) as unknown;
+        return JSON.parse(text, (key, value: unknown) => {
+          if (key === PROTO_KEY) throw new SyntaxError("a __proto__ key");
+          return value;
+        }) as unknown;
       } catch {
         ctx.addIssue({ code: "custom", message: "not JSON" });
         return z.NEVER;
@@ -172,12 +180,31 @@ export function loadProcessConfig(
   };
 }
 
-/** An origin variable: https, or http only in development and CI (ARCHITECTURE §3.5). */
+/** A loopback host: `localhost` and its subdomains, 127.0.0.0/8, `[::1]`. */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  );
+}
+
+/**
+ * Whether an origin may be plain http (ARCHITECTURE §3.5: https outside development). CI serves
+ * its journeys on loopback, which browsers treat as secure, so CI may use http for a loopback
+ * host and nothing else; staging and production never.
+ */
+export function plainHttpAllowed(value: string, environment: Environment): boolean {
+  if (value.startsWith("https://")) return true;
+  if (environment === "development") return true;
+  return environment === "ci" && isLoopbackHost(new URL(value).hostname);
+}
+
+/** An origin variable: https, or http only in development and on loopback in CI. */
 export function readOrigin(env: Env, name: string, environment: Environment): string {
   const value = readEnv({ [name]: origin }, env)[name] as string;
-  if (!value.startsWith("https://") && isDeployed(environment)) {
-    throw new ConfigError(name, "refused");
-  }
+  if (!plainHttpAllowed(value, environment)) throw new ConfigError(name, "refused");
   return value;
 }
 
@@ -210,7 +237,7 @@ export function loadIngressConfig(
     for (const role of roles) {
       const value = parsed.FIN_PUBLIC_ORIGIN[role];
       if (value === undefined) throw new ConfigError("FIN_PUBLIC_ORIGIN", "malformed");
-      if (!value.startsWith("https://") && isDeployed(environment)) {
+      if (!plainHttpAllowed(value, environment)) {
         throw new ConfigError("FIN_PUBLIC_ORIGIN", "refused");
       }
       origins[role] = value;
@@ -263,12 +290,6 @@ export function loadDocsOrigin(env: Env, environment: Environment): string {
   return readOrigin(env, "FIN_DOCS_ORIGIN", environment);
 }
 
-/**
- * Settings that must never be set (spec 02 §2.6): Better Auth's trusted origins come from code,
- * exactly the app's origin.
- */
-export function refuseForbidden(env: Env): void {
-  for (const name of ["BETTER_AUTH_TRUSTED_ORIGINS", "BETTER_AUTH_URL", "NODE_OPTIONS"]) {
-    if (env[name] !== undefined && env[name] !== "") throw new ConfigError(name, "refused");
-  }
-}
+// The settings that must never be set are refused with the seams, in the module that needs no
+// dependency, so the connector supervisor refuses them too.
+export { FORBIDDEN_VARIABLES, refuseForbidden } from "./seams.ts";

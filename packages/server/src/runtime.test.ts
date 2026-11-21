@@ -1,10 +1,51 @@
+import { type AddressInfo, createServer } from "node:net";
+import { gunzipSync } from "node:zlib";
+import { ConfigError } from "@fin/core";
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SEAM_VARIABLES } from "./config/seams.ts";
 import { privateHealth } from "./health/readiness.ts";
 import type { FinEnv } from "./http/context.ts";
 import { errorHandler, notFoundHandler, requestUnit } from "./http/request.ts";
 import { runService, type ServiceDefinition } from "./runtime.ts";
+import type { Transport } from "./telemetry/ship.ts";
 import { baseEnv, type Line } from "./testing/capture.ts";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+/** A run whose build fails, recording what had been shipped when it exits. */
+async function failedBuild(error: Error): Promise<{ exits: number[]; atExit: string[][] }> {
+  const shipped: Line[] = [];
+  const transport: Transport = async (body) => {
+    shipped.push(...(JSON.parse(gunzipSync(body).toString("utf8")) as Line[]));
+    return 202;
+  };
+  const exits: number[] = [];
+  const atExit: string[][] = [];
+  await runService(
+    {
+      services: ["api"],
+      build: () => {
+        throw error;
+      },
+    },
+    {
+      env: baseEnv("api"),
+      exit: (code) => {
+        exits.push(code);
+        atExit.push(shipped.map((l) => String(l.event)));
+      },
+      processHandlers: false,
+      host: "127.0.0.1",
+      port: 0,
+      stdout: () => undefined,
+      transport,
+    },
+  );
+  return { exits, atExit };
+}
 
 const definition: ServiceDefinition = {
   services: ["api"],
@@ -69,6 +110,67 @@ describe("runService", () => {
     expect(JSON.stringify(stdout)).not.toContain(secret);
   });
 
+  it("never echoes a FIN_SERVICE value it refuses", async () => {
+    const value = ["hunter2", "is", "my", "password"].join("-");
+    const { run, stdout, exits } = harness(baseEnv("api", { FIN_SERVICE: value }));
+    await run;
+    expect(exits).toEqual([78]);
+    expect(stdout[0]).toMatchObject({ variable: "FIN_SERVICE", problem: "malformed" });
+    expect(stdout[0]?.service).toBeUndefined();
+    expect(JSON.stringify(stdout)).not.toContain(value);
+  });
+
+  it("built for release, exits 78 naming a seam variable, before reading the configuration", async () => {
+    vi.stubGlobal("__FIN_BUILD_TARGET__", "release");
+    for (const name of SEAM_VARIABLES) {
+      const env = baseEnv("api", { [name]: "1" });
+      delete env.FIN_RELEASE;
+      const { run, stdout, exits } = harness(env);
+      expect(await run, name).toBeUndefined();
+      expect(exits, name).toEqual([78]);
+      expect(stdout[0], name).toMatchObject({ variable: name, problem: "refused" });
+    }
+  });
+
+  it("has config.invalid shipped when a failed build exits 78", async () => {
+    const { exits, atExit } = await failedBuild(new ConfigError("FIN_DOCS_ORIGIN", "missing"));
+    expect(exits).toEqual([78]);
+    expect(atExit[0]).toEqual(["config.invalid"]);
+  });
+
+  it("exits 1 with process.start_failed when it cannot listen, rather than run with no server", async () => {
+    const taken = createServer();
+    await new Promise<void>((resolve) => taken.listen(0, "127.0.0.1", resolve));
+    const port = (taken.address() as AddressInfo).port;
+    try {
+      const stdout: Line[] = [];
+      const exits: number[] = [];
+      const service = await runService(definition, {
+        env: baseEnv("api"),
+        exit: (code) => exits.push(code),
+        processHandlers: false,
+        host: "127.0.0.1",
+        port,
+        stdout: (text) => stdout.push(JSON.parse(text) as Line),
+      });
+      expect(service).toBeUndefined();
+      expect(exits).toEqual([1]);
+      expect(stdout.find((l) => l.event === "process.start_failed")).toMatchObject({
+        errorCode: "EADDRINUSE",
+        level: "error",
+      });
+      expect(stdout.some((l) => l.event === "process.start")).toBe(false);
+    } finally {
+      await new Promise((resolve) => taken.close(resolve));
+    }
+  });
+
+  it("has process.start_failed and error.unexpected shipped when a failed build exits 1", async () => {
+    const { exits, atExit } = await failedBuild(new TypeError("boom"));
+    expect(exits).toEqual([1]);
+    expect([...(atExit[0] ?? [])].sort()).toEqual(["error.unexpected", "process.start_failed"]);
+  });
+
   it("exits 78 when the entry does not run that service, and when a forbidden setting is set", async () => {
     expect((await harness(baseEnv("console")).run) === undefined).toBe(true);
     const forbidden = harness(
@@ -106,7 +208,10 @@ describe("runService", () => {
     expect(health).toMatchObject({
       background: expect.any(Number),
       heapUsedMb: expect.any(Number),
+      httpConnections: expect.any(Number),
     });
+    // listenConnected is the Postgres LISTEN connection's, written only by the database layer.
+    expect(health).not.toHaveProperty("listenConnected");
     const done = service.shutdown.begin("SIGTERM");
     await new Promise((r) => setTimeout(r, 20));
     const during = await fetch(`${base}/readyz`).catch(() => undefined);

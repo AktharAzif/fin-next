@@ -7,8 +7,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError } from "@fin/core";
 import { describe, expect, it } from "vitest";
+import { loadConnectorConfig } from "./config.ts";
 import { ALLOWED_TARGETS, CATCH_ALL, INGRESS_MAP } from "./map.ts";
-import { buildRules, matchRule, type RenderInput, renderConfig } from "./render.ts";
+import {
+  buildRules,
+  cloudflaredPath,
+  matchRule,
+  type RenderInput,
+  renderConfig,
+} from "./render.ts";
 
 const ZONE = "staging.example.net";
 const host = (label: string): string => `${label}.${ZONE}`;
@@ -139,16 +146,41 @@ describe("renderConfig", () => {
     expect(refusal(noAccess)).toBe("FIN_ACCESS_TEAM:missing");
     expect(refusal({ ...PUBLIC, zone: "not a zone" })).toBe("FIN_ZONE:malformed");
   });
+
+  it("refuses a role spelled __proto__ rather than losing it", () => {
+    const config = loadConnectorConfig({
+      FIN_SERVICE: "cloudflared-public",
+      FIN_ENVIRONMENT: "ci",
+      FIN_RELEASE: "a".repeat(40),
+      FIN_DRAIN_SECONDS: "35",
+      FIN_TUNNEL_ROLE: "public",
+      FIN_ZONE: ZONE,
+      FIN_TUNNEL_HOSTS: `{"__proto__":"${host("app")}",${JSON.stringify(PUBLIC.hosts).slice(1)}`,
+      TUNNEL_TOKEN: `eyJhIjoi${"x".repeat(60)}`,
+    });
+    expect(Object.keys(config.hosts)).toContain("__proto__");
+    expect(refusal({ ...PUBLIC, hosts: config.hosts })).toBe("FIN_TUNNEL_HOSTS:refused");
+  });
 });
 
-// S-01 (g) and §11.2 check (j): the paths as the tunnel receives them.
+// S-01 (g) and §11.2 check (j): the paths as the tunnel receives them. cloudflared matches the
+// percent-decoded path and keeps dot segments, so an encoded or dotted alias of /api/ reaches the
+// API half; the API half's ingress check then refuses it (400, packages/server isSafeTarget).
 const S01: [string, string][] = [
   [`https://${host("console")}/api/x`, "http://console.railway.internal:8080"],
   [`https://${host("console")}/api/auth/get-session`, "http://console.railway.internal:8080"],
   [`https://${host("console")}/x/../api/y`, CATCH_ALL],
   [`https://${host("console")}//api/y`, CATCH_ALL],
   [`https://${host("console")}/API/x`, CATCH_ALL],
+  [`https://${host("console")}/API/ping`, CATCH_ALL],
   [`https://${host("console")}/api`, CATCH_ALL],
+  [`https://${host("console")}/apix`, CATCH_ALL],
+  [`https://${host("console")}/api%2Fping`, "http://console.railway.internal:8080"],
+  [`https://${host("console")}/api%2fping`, "http://console.railway.internal:8080"],
+  [`https://${host("console")}/%61pi/ping`, "http://console.railway.internal:8080"],
+  [`https://${host("console")}/api%2F..%2Freadyz`, "http://console.railway.internal:8080"],
+  [`https://${host("console")}/api/../settings`, "http://console.railway.internal:8080"],
+  [`https://${host("console")}/%2Fapi/x`, CATCH_ALL],
   [`https://${host("console")}/`, CATCH_ALL],
   [`https://${host("console")}/assets/a.js`, CATCH_ALL],
   [`https://${host("onboard")}/api/link/open`, "http://verify.railway.internal:8080"],
@@ -172,6 +204,12 @@ describe("S-01's paths through the rendered public tunnel", () => {
   it("never sends a path that is not /api/... on an app host to an app service", () => {
     const normalised = `https://${host("console")}${new URL(`https://${host("console")}/x/../api/y`).pathname}`;
     expect(matchRule(rules, normalised).service).toBe("http://console.railway.internal:8080");
+  });
+
+  it("decodes the path as cloudflared does, and refuses a malformed escape", () => {
+    expect(cloudflaredPath("/api%2Fping")).toBe("/api/ping");
+    expect(cloudflaredPath("/%61pi/%2e%2e/x")).toBe("/api/../x");
+    expect(() => matchRule(rules, `https://${host("console")}/api%zz`)).toThrow("not a valid URL");
   });
 
   it("matches the admin tunnel's rule only for the staff host's /api/", () => {

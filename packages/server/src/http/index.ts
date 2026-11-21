@@ -28,6 +28,7 @@ export {
 export {
   errorHandler,
   notFoundHandler,
+  RETRY_AFTER_S,
   type RequestOptions,
   refuse,
   requestUnit,

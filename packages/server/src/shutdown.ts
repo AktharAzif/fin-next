@@ -4,6 +4,9 @@
 // error client and telemetry flush, `shutdown.done`, exit 0. Everything fits inside
 // FIN_DRAIN_SECONDS, Railway's draining time for the service; if it does not, `shutdown.forced`
 // and exit 1, still before Railway's kill.
+//
+// Node built-ins and @fin/core only at run time (the other imports are types), so the connector
+// supervisor installs the same crash handlers (`@fin/server/shutdown`).
 import { safeError } from "@fin/core";
 import type { Readiness } from "./health/readiness.ts";
 import type { HttpServerHandle } from "./http/serve.ts";
@@ -126,34 +129,37 @@ export function onSignals(shutdown: Shutdown, target: NodeJS.EventEmitter = proc
   }
 }
 
+/** What the crash handlers need of the error reporter; the connector, which has none, passes none. */
+export type CrashReporter = Pick<Reporter, "reportError" | "flush">;
+
 /**
  * Crash handlers (ARCHITECTURE §3.5, §10.3): an uncaught exception is logged, reported and flushed
  * for at most 2 seconds, then the process exits 1; an unhandled rejection is logged and reported,
- * never silent.
+ * never silent. The line carries safeError's fields and first frames, so a process with no error
+ * reporter (the connector supervisor, decision 12) still records where it failed.
  */
 export function onCrash(
-  options: { telemetry: Telemetry; reporter: Reporter; exit: (code: number) => void },
+  options: { telemetry: Telemetry; reporter?: CrashReporter; exit: (code: number) => void },
   target: NodeJS.EventEmitter = process,
 ): void {
-  target.on("uncaughtException", (error: unknown) => {
+  const fields = (error: unknown) => {
     const safe = safeError(error);
-    options.telemetry.logUnit(
-      "process.uncaught_exception",
-      { errorName: safe.errorName, errorCode: safe.errorCode },
-      "error",
-    );
-    options.reporter.reportError(error, { job: "process" });
-    void Promise.allSettled([options.telemetry.flush(2000), options.reporter.flush(2000)]).finally(
-      () => options.exit(1),
-    );
+    return {
+      errorName: safe.errorName,
+      errorCode: safe.errorCode,
+      frames: safe.frames.slice(0, 5),
+    };
+  };
+  target.on("uncaughtException", (error: unknown) => {
+    options.telemetry.logUnit("process.uncaught_exception", fields(error), "error");
+    options.reporter?.reportError(error, { job: "process" });
+    void Promise.allSettled([
+      options.telemetry.flush(2000),
+      options.reporter?.flush(2000) ?? Promise.resolve(true),
+    ]).finally(() => options.exit(1));
   });
   target.on("unhandledRejection", (reason: unknown) => {
-    const safe = safeError(reason);
-    options.telemetry.logUnit(
-      "process.unhandled_rejection",
-      { errorName: safe.errorName, errorCode: safe.errorCode },
-      "error",
-    );
-    options.reporter.reportError(reason, { job: "process" });
+    options.telemetry.logUnit("process.unhandled_rejection", fields(reason), "error");
+    options.reporter?.reportError(reason, { job: "process" });
   });
 }

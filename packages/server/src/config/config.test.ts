@@ -138,6 +138,40 @@ describe("loadIngressConfig", () => {
     expect(config.proofs.console).toHaveLength(2);
   });
 
+  it("refuses a role spelled __proto__, which a record would drop without a word", () => {
+    const origins = JSON.stringify({
+      verify: "https://verify.example.net",
+      selfie: "https://selfie.example.net",
+    }).replace("}", ',"__proto__":"https://other.example.net"}');
+    expect(
+      configError(() =>
+        loadIngressConfig(
+          {
+            FIN_PUBLIC_ORIGIN: origins,
+            FIN_CONNECTOR_SERVICES: "cloudflared-public",
+            FIN_INGRESS_PROOFS: proofs(["verify", "selfie"]),
+          },
+          "staging",
+          ["verify", "selfie"],
+        ),
+      ),
+    ).toMatchObject({ variable: "FIN_PUBLIC_ORIGIN", problem: "malformed" });
+    const proofsWithProto = proofs(["console"]).replace("}", `,"__proto__":["${"a".repeat(43)}"]}`);
+    expect(
+      configError(() =>
+        loadIngressConfig(
+          {
+            FIN_PUBLIC_ORIGIN: "https://console.example.net",
+            FIN_CONNECTOR_SERVICES: "cloudflared-public",
+            FIN_INGRESS_PROOFS: proofsWithProto,
+          },
+          "staging",
+          ["console"],
+        ),
+      ),
+    ).toMatchObject({ variable: "FIN_INGRESS_PROOFS", problem: "malformed" });
+  });
+
   it("reads verify's JSON origin object for both of its hosts", () => {
     const config = loadIngressConfig(
       {
@@ -172,6 +206,43 @@ describe("loadIngressConfig", () => {
         "console",
       ]).origins.console,
     ).toBe("http://localhost:5173");
+    // CI serves its journeys on loopback; any other host is https there too.
+    for (const loopback of ["http://localhost:5173", "http://console.localhost:8080"]) {
+      expect(
+        loadIngressConfig({ ...base, FIN_PUBLIC_ORIGIN: loopback }, "ci", ["console"]).origins
+          .console,
+      ).toBe(loopback);
+    }
+    expect(
+      loadIngressConfig({ ...base, FIN_PUBLIC_ORIGIN: "http://127.0.0.1:8080" }, "ci", ["console"])
+        .origins.console,
+    ).toBe("http://127.0.0.1:8080");
+    expect(
+      configError(() =>
+        loadIngressConfig({ ...base, FIN_PUBLIC_ORIGIN: "http://console.example.net" }, "ci", [
+          "console",
+        ]),
+      ),
+    ).toMatchObject({ variable: "FIN_PUBLIC_ORIGIN", problem: "refused" });
+    expect(
+      configError(() =>
+        loadIngressConfig(
+          {
+            ...base,
+            FIN_PUBLIC_ORIGIN: JSON.stringify({
+              verify: "https://verify.example.net",
+              selfie: "http://selfie.example.net",
+            }),
+            FIN_INGRESS_PROOFS: proofs(["verify", "selfie"]),
+          },
+          "ci",
+          ["verify", "selfie"],
+        ),
+      ),
+    ).toMatchObject({ variable: "FIN_PUBLIC_ORIGIN", problem: "refused" });
+    expect(
+      configError(() => loadDocsOrigin({ FIN_DOCS_ORIGIN: "http://docs.example.net" }, "ci")),
+    ).toMatchObject({ variable: "FIN_DOCS_ORIGIN", problem: "refused" });
     expect(
       configError(() =>
         loadIngressConfig(
@@ -257,6 +328,15 @@ describe("seams (AC-P0-13)", () => {
     expect(() =>
       checkSeams(baseEnv("console", { FIN_ENVIRONMENT: "staging" }), "release"),
     ).not.toThrow();
+  });
+
+  it("refuses a seam variable in any case and with any name, always as a ConfigError", () => {
+    for (const name of ["FIN_SEAM_clock", "FIN_SEAM_X.Y", "fin_seam_clock", "Fin_Seam_Clock"]) {
+      const error = configError(() =>
+        checkSeams({ ...baseEnv("console"), [name]: "1" }, "release"),
+      );
+      expect(error, name).toMatchObject({ variable: "FIN_SEAM", problem: "refused" });
+    }
   });
 
   it("refuses a test build in staging or production", () => {

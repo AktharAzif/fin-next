@@ -1,7 +1,9 @@
 // `process.health` every minute (ARCHITECTURE §10.2; spec 01 §8.3): event-loop p99, heap and RSS,
-// background work, open connections, and whatever the process adds (the pool, `dbOk`, `doorOk` and
-// `clockSkewMs` once P0-E's pool and the database probe exist). Node-only diagnostics report null,
-// never zeros, when unavailable (ARCHITECTURE §3.2).
+// background work, the HTTP server's open connections (`httpConnections`), and whatever the
+// process adds (the pool, `listenConnected` from the LISTEN client, `dbOk`, `doorOk` and
+// `clockSkewMs` once P0-E's pool and the database probe exist). `listenConnected` means the Postgres
+// LISTEN connection (ARCHITECTURE §4.5) and only the database layer writes it. Node-only
+// diagnostics report null, never zeros, when unavailable (ARCHITECTURE §3.2).
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { Fields } from "../telemetry/lines.ts";
 import type { Telemetry } from "../telemetry/telemetry.ts";
@@ -10,7 +12,9 @@ export const HEALTH_INTERVAL_MS = 60_000;
 
 export interface ProcessHealthOptions {
   telemetry: Telemetry;
-  connections?: () => Promise<number>;
+  /** The open sockets of the service's HTTP server, where it has one. */
+  httpConnections?: () => Promise<number>;
+  /** Fields the process adds; they never replace the ones above. */
   extra?: () => Promise<Fields>;
   intervalMs?: number;
 }
@@ -36,11 +40,12 @@ export function startProcessHealth(options: ProcessHealthOptions): ProcessHealth
     const p99 =
       histogram !== undefined && histogram.count > 0 ? histogram.percentile(99) / 1e6 : null;
     histogram?.reset();
-    let listenConnected: number | null = null;
+    let httpConnections: number | null = null;
     try {
-      listenConnected = options.connections !== undefined ? await options.connections() : null;
+      httpConnections =
+        options.httpConnections !== undefined ? await options.httpConnections() : null;
     } catch {
-      listenConnected = null;
+      httpConnections = null;
     }
     let extra: Fields = {};
     try {
@@ -49,12 +54,12 @@ export function startProcessHealth(options: ProcessHealthOptions): ProcessHealth
       extra = {};
     }
     return {
+      ...extra,
       eventLoopP99Ms: p99 === null ? null : Math.round(p99 * 100) / 100,
       heapUsedMb: Math.round((memory.heapUsed / MB) * 10) / 10,
       rssMb: Math.round((memory.rss / MB) * 10) / 10,
       background: options.telemetry.backgroundCount,
-      listenConnected,
-      ...extra,
+      httpConnections,
     };
   };
 

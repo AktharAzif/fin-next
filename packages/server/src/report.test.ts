@@ -126,6 +126,43 @@ describe("Reporter", () => {
     expect(event.exception.values[0]?.value).toBe("Fin's own words");
   });
 
+  it("sends no message text as a frame or a type, whatever the message and the name hold", async () => {
+    const { telemetry, events } = capture();
+    const { envelopes, fake } = fakeErrors();
+    const reporter = new Reporter({
+      dsn: dsn(),
+      release: TEST_RELEASE,
+      environment: "staging",
+      service: "console",
+      telemetry,
+      fetch: fake,
+    });
+    const error = new Error(
+      'invalid input syntax for type integer: "1\n    at Jane Doe of 12 High Street (/vault/hunter2-Password/card:4111:1111)',
+    );
+    reporter.reportError(error);
+    const named = new TypeError("x");
+    named.name = "Refused for Jane Doe hunter2-Password";
+    reporter.reportError(named);
+    await reporter.flush(2000);
+    expect(envelopes).toHaveLength(2);
+    type Sent = {
+      exception: { values: { type: string; stacktrace?: { frames: { filename?: string }[] } }[] };
+    };
+    const types: string[] = [];
+    for (const envelope of envelopes) {
+      const event = envelope.items[2] as Sent;
+      const text = JSON.stringify(event);
+      expect(text).not.toMatch(/Jane|High Street|hunter2|vault|4111/);
+      const value = event.exception.values[0];
+      types.push(value?.type ?? "");
+      expect(value?.stacktrace?.frames.length).toBeGreaterThan(0);
+      expect(value?.stacktrace?.frames.at(-1)?.filename).toMatch(/report\.test\.ts$/);
+    }
+    expect(types).toEqual(["Error", "TypeError"]);
+    expect(JSON.stringify(events("error.unexpected"))).not.toMatch(/Jane|hunter2|vault/);
+  });
+
   it("never throws when the Errors endpoint fails", async () => {
     const { telemetry, events } = capture();
     const failing = (async () => {

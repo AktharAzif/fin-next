@@ -2,17 +2,23 @@
 // the order of SHAPES. Every pattern carries the g and u flags; those spec 08 marks (i) add i.
 //
 // Where this file differs from spec 08 §5.4's table (each recorded in the pull request):
-//   - IPV6 matches a full address or one written with `::`, not any run of two or more hex groups,
-//     so an RFC 3339 time ("09:48:23") is never mistaken for an address;
+//   - IPV6 takes every run of hex groups and colons and removes it when it is address-shaped: it
+//     holds `::` or eight groups or more. So an RFC 3339 time ("09:48:23") or a MAC address is never
+//     mistaken for an address, while an address beside a `:` ("ip:<address>", "<address>:443", as
+//     Node writes a host and port) is still removed;
+//   - EMAIL starts only where a run of local-part characters starts, so a long run with no `@`
+//     costs one pass, not one pass per character (the unanchored form is quadratic);
 //   - TOKEN_JSON also takes `+`, `/` and `=`, so a tunnel token (standard base64 of JSON) is removed
 //     whole, not cut at its first `+`;
-//   - LONG_SEGMENT removes a path segment of 24 or more base64url characters only when it holds a
-//     digit or both cases, so a route template such as "/passkey/generate-authenticate-options"
-//     survives while IDs, tokens and keys in paths do not;
+//   - LONG_SEGMENT removes a path segment of 24 or more base64url characters, whatever follows it,
+//     only when it holds a digit or both cases, so a route template such as
+//     "/passkey/generate-authenticate-options" survives while IDs, tokens and keys in paths do not;
 //   - ID_PATH keeps its one-letter route ("/c/[segment]"), which identifies no one;
 //   - CLOUDFLARE_TOKEN also takes the user-token prefix `cfut_`, BASIC_AUTH and ACCESS_COOKIE are
 //     added beside the bearer and cookie rows, FIN_KEY_LIKE catches a malformed Fin key, and
 //     BEARER also takes `_`, which base64url tokens carry.
+//
+// Every pattern is linear in its input: a test scrubs 256 KB of each adversarial shape.
 
 export interface Shape {
   readonly name: string;
@@ -115,7 +121,7 @@ export const INGRESS_PROOF: Shape = {
 
 export const EMAIL: Shape = {
   name: "email",
-  pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu,
+  pattern: /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu,
   token: "[email]",
 };
 
@@ -126,13 +132,27 @@ export const IPV4: Shape = {
 };
 
 const H = "[0-9A-Fa-f]{1,4}";
+
+/**
+ * Whether a run of hex groups and colons is an IPv6 address: it compresses with `::`, or it has
+ * eight groups (seven colons) or more. A shorter run with single colons is a time, a ratio or a MAC
+ * address and is kept. A longer run is removed whole: "<address>:443" (as Node writes a host and
+ * port) and "<hex label>:<address>" cannot be told apart, so no group of either is left.
+ */
+function ipv6Token(match: string): string {
+  const address = match.replace(/%[0-9A-Za-z]+$/u, "");
+  return address.includes("::") || address.split(":").length >= 8 ? "[ip]" : match;
+}
+
 export const IPV6: Shape = {
   name: "ipv6",
+  // A candidate starts where no letter or digit is before it (a `:` may be, as in "ip:<address>")
+  // and ends where no letter or digit follows; ipv6Token decides whether it is an address.
   pattern: new RegExp(
-    `(?<![0-9A-Fa-f:])(?:(?:${H}:){7}${H}|(?:${H}:){1,7}:|(?:${H}:){1,6}:${H}|(?:${H}:){1,5}(?::${H}){1,2}|(?:${H}:){1,4}(?::${H}){1,3}|(?:${H}:){1,3}(?::${H}){1,4}|(?:${H}:){1,2}(?::${H}){1,5}|${H}:(?::${H}){1,6}|:(?:(?::${H}){1,7}|:))(?:%[0-9A-Za-z]+)?(?![0-9A-Fa-f:])`,
+    `(?<![0-9A-Za-z])(?:${H}(?::{1,2}${H})+(?:::)?|${H}::|::(?:${H}(?::{1,2}${H})*)?)(?:%[0-9A-Za-z]+)?(?![0-9A-Za-z])`,
     "gu",
   ),
-  token: "[ip]",
+  token: ipv6Token,
 };
 
 export const QUERY_STRING: Shape = {
@@ -149,7 +169,8 @@ export const ID_PATH: Shape = {
 
 export const LONG_SEGMENT: Shape = {
   name: "long-segment",
-  pattern: /\/([A-Za-z0-9_-]{24,})(?=[/?#\s"'),;\]]|$)/gu,
+  // Whatever follows the run (`/`, `?`, `:`, `=`, `.`, a quote): a segment is any run after a `/`.
+  pattern: /\/([A-Za-z0-9_-]{24,})/gu,
   token: (match, segment = "") =>
     /[0-9]/.test(segment) || (/[a-z]/.test(segment) && /[A-Z]/.test(segment))
       ? "/[segment]"

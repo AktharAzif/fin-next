@@ -9,7 +9,7 @@ import {
   Refusal,
   UnavailableError,
 } from "./errors.ts";
-import { safeError } from "./safe-error.ts";
+import { safeError, safeException, stackFrameLines } from "./safe-error.ts";
 
 describe("FinError and its kinds", () => {
   it("carries a bounded code, a status and frozen extensions", () => {
@@ -97,6 +97,76 @@ describe("safeError", () => {
     expect(frames[0]).toEqual({ file: "/app/dist/main.js", line: 10, column: 3, fn: "handle" });
     expect(frames[1]).toEqual({ file: "/app/dist/main.js", line: 11, column: 4 });
     expect(frames).toHaveLength(20);
+  });
+
+  it("never reads a frame from a message line, however it is shaped", () => {
+    for (const message of [
+      "lookup failed for customer\n    at Jane Doe (12 Acacia Avenue, Leeds:1:1)",
+      'invalid input syntax for type integer: "1\n    at Jane (/customers/jane/iban:4111:1111)',
+      "first\n    at /vault/hunter2-Password/card:1:1\n    at Evil (file:///x.js:2:2)",
+    ]) {
+      const safe = safeError(new Error(message));
+      const text = JSON.stringify(safe);
+      expect(text, message).not.toMatch(/Jane|Acacia|customers|hunter2|Evil|x\.js/);
+      expect(safe.frames.length, message).toBeGreaterThan(0);
+      expect(safe.frames[0]?.file).toMatch(/safe-error\.test\.ts$/);
+    }
+  });
+
+  it("finds the header of Node's own errors, which carry their code in it", () => {
+    let caught: unknown;
+    try {
+      new URL("not a url\n    at Jane (/a:1:1)");
+    } catch (error) {
+      caught = error;
+    }
+    const safe = safeError(caught);
+    expect(safe.errorCode).toBe("ERR_INVALID_URL");
+    expect(JSON.stringify(safe)).not.toContain("Jane");
+    expect(safe.frames.length).toBeGreaterThan(0);
+    const coded = Object.assign(new TypeError("bad\n    at Jane (/a:1:1)"), {
+      code: "ERR_X",
+    });
+    coded.stack = `TypeError [ERR_X]: bad\n    at Jane (/a:1:1)\n    at real (/app/dist/main.js:3:4)`;
+    expect(safeError(coded).frames).toEqual([
+      { file: "/app/dist/main.js", line: 3, column: 4, fn: "real" },
+    ]);
+  });
+
+  it("keeps no frame when the header cannot be found, nor a line V8 could not have written", () => {
+    const changed = new Error("first\n    at Jane (/a:1:1)");
+    void changed.stack;
+    changed.message = "second";
+    expect(safeError(changed).frames).toEqual([]);
+    const replaced = new Error("x");
+    replaced.stack = "Something else\n    at Jane (/a:1:1)";
+    expect(stackFrameLines(replaced)).toEqual([]);
+    const long = new Error("x");
+    long.stack = `Error: x\n    at ${"f".repeat(2000)} (/app/a.js:1:1)\n    at ok (/app/a.js:2:2)`;
+    expect(safeError(long).frames).toEqual([{ file: "/app/a.js", line: 2, column: 2, fn: "ok" }]);
+    const odd = new Error("x");
+    odd.stack = "Error: x\n    at fn (some words, here:1:1)\n    at fn2 (/app/a.js:2:2)";
+    expect(safeError(odd).frames).toEqual([{ file: "/app/a.js", line: 2, column: 2, fn: "fn2" }]);
+  });
+});
+
+describe("safeException", () => {
+  it("stands in for an error with its class, a withheld message and the kept frames only", () => {
+    const error = new TypeError("for jane@example.com\n    at Jane (/customers/jane:1:1)");
+    const stand = safeException(error);
+    expect(stand.name).toBe("TypeError");
+    expect(stand.message).toBe("[withheld]");
+    const lines = String(stand.stack).split("\n");
+    expect(lines[0]).toBe("TypeError: [withheld]");
+    expect(lines.slice(1).every((line) => /^ {4}at /.test(line))).toBe(true);
+    expect(stand.stack).not.toMatch(/jane|Jane|customers/);
+    expect(lines.length - 1).toBe(safeError(error).frames.length);
+  });
+
+  it("keeps a FinError's fixed words, on one line", () => {
+    const stand = safeException(new Refusal("forbidden", 403, "Fin's own\nwords"));
+    expect(stand.name).toBe("Refusal");
+    expect(stand.message).toBe("Fin's own words");
   });
 });
 

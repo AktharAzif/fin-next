@@ -45,9 +45,17 @@ function errorCodeOf(error: unknown): string {
   return typeof code === "string" && /^[A-Z][A-Z0-9_]{1,40}$/.test(code) ? code : "unknown";
 }
 
+export interface ResolveOptions {
+  /**
+   * Ask DNS now instead of answering from the fresh cache (the connector peers, which must see a
+   * redeployed connector at once). A failed lookup still falls back to a stale answer.
+   */
+  fresh?: boolean;
+}
+
 export interface PrivateResolver {
   /** Every address of a private name, from the cache when fresh, stale when the lookup fails. */
-  resolveAll(hostname: string): Promise<ResolvedAddress[]>;
+  resolveAll(hostname: string, options?: ResolveOptions): Promise<ResolvedAddress[]>;
   /** A `lookup` for `pg` and internal `fetch`: private names cached, public names untouched. */
   lookup: LookupFunction;
 }
@@ -65,11 +73,17 @@ export function createPrivateResolver(options: {
   const cache = new Map<string, Entry>();
   const inFlight = new Map<string, Promise<ResolvedAddress[]>>();
 
-  const resolveAll = async (hostname: string): Promise<ResolvedAddress[]> => {
+  const resolveAll = async (
+    hostname: string,
+    resolveOptions: ResolveOptions = {},
+  ): Promise<ResolvedAddress[]> => {
     const name = hostname.toLowerCase();
     const now = options.clock.now();
     const cached = cache.get(name);
-    if (cached !== undefined && now - cached.at < freshMs) return cached.addresses;
+    if (resolveOptions.fresh !== true && cached !== undefined && now - cached.at < freshMs) {
+      return cached.addresses;
+    }
+    // A lookup already in flight is as fresh as a new one would be.
     const pending = inFlight.get(name);
     if (pending !== undefined) return pending;
     const work = (async () => {
