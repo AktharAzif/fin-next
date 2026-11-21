@@ -570,6 +570,32 @@ describe("static builds", () => {
         "assets/a.js",
         `jsx("img",{srcSet:\`${"$"}{b}/a.png, //evil.example/b.png 2x\`})`,
       ],
+      // The first candidate, the run a quote opens, may hold anything a URL or code does.
+      [
+        "a bracket in the first candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/hero(1).png, //evil.example/b.png 2x"})',
+      ],
+      [
+        "a semicolon in the first candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png;v=2, //evil.example/b.png 2x"})',
+      ],
+      [
+        "a helper call in the first candidate",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{asset("a.png")}, //evil.example/b.png 2x\`})`,
+      ],
+      [
+        "a helper call as the minifier prints it",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{asset(\`a.png\`)}, //evil.example/b.png 2x\`})`,
+      ],
+      [
+        "a condition in the first candidate",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{dark?"/d.png":"/l.png"}, //evil.example/b.png 2x\`})`,
+      ],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -578,10 +604,13 @@ describe("static builds", () => {
         `${what}: ${found.join()}`,
       );
     }
+    // No list: code, a quote right before the comma (a string's end), prose.
     for (const text of [
       'jsx("img",{srcSet:"/a.png 1x, /b.png 2x"})',
       "e.srcset=t.srcset,e.sizes=n;x=/\\/\\//.test(b);",
       "a=[1, //evil.example/x\n2]",
+      'f("a", //evil.example/x\nb)',
+      'x="see the docs, //evil.example/x";',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -753,6 +782,36 @@ describe("static builds", () => {
         "a value an escaped apostrophe opens, over three strings",
         `e.innerHTML='<img alt=\\''+n+' > '+m+'\\' src=//evil.example/p.png>';`,
       ],
+      // The code between two strings concatenates strings of its own, or the tag is built over
+      // statements, from a list, or in two quote kinds: each later string may go on with it.
+      [
+        "a string concatenated in the code between two strings",
+        "e.innerHTML=`<a `+(n>0?t+` active`:r>0?`muted`:``)+` href=//evil.example/>go</a>`;",
+      ],
+      [
+        "the same, as written before the minifier",
+        'el.innerHTML = "<a " + (n > 0 ? c + " active" : m > 0 ? "muted" : "") + " href=//evil.example/>go</a>";',
+      ],
+      [
+        "two conditions between two strings",
+        'e.innerHTML="<a "+(x?a+"b":c)+(n>0?"on":"")+" href=//evil.example/>go</a>";',
+      ],
+      [
+        "a tag built over statements",
+        "let n=`<a `;t&&(n+=`class=x `),n+=`href=//evil.example/>go</a>`;e.innerHTML=n;",
+      ],
+      [
+        "a tag joined from a list",
+        "e.innerHTML=[`<a`,n>r?`class=x`:``,`href=//evil.example/>go</a>`].join(` `);",
+      ],
+      [
+        "two quote kinds",
+        `e.innerHTML='<a class="'+c+'" '+(a>b?"hidden":"")+" href=//evil.example/>go</a>";`,
+      ],
+      [
+        "a branch's string that ends as a string may start",
+        'e.innerHTML="<a "+(t?"title: ":x)+(n>0?"a":"")+" href=//evil.example/>go</a>";',
+      ],
     ];
     for (const [what, text] of cases) {
       const found = staticRules(t, { "assets/a.js": text });
@@ -762,7 +821,9 @@ describe("static builds", () => {
       );
     }
     // A regular expression's `=/\/x\//` is in no start tag, whatever `<` stands before it, nor
-    // is code after a tag a substitution or a concatenation stood in, once the tag has ended.
+    // is code after a tag a substitution or a concatenation stood in, once the tag has ended (a
+    // string read as the tag's next piece is read up to its own closing quote), nor a string
+    // past MAX_PIECE_GAP after the tag's last string.
     for (const text of [
       "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;}",
       "if(a<b){x=1}y=/\\/assets\\//;",
@@ -771,6 +832,9 @@ describe("static builds", () => {
       `e.innerHTML=\`<b ${"$"}{a}>\`;f("x");const r = /\\\\/g;`,
       'e.innerHTML="<b "+a+">";f("x");const r = /\\\\/g;',
       `e.innerHTML=\`<b ${"$"}{a?"{":""}>\`;f("x");const r = /\\\\/g;`,
+      `const esc=(s)=>s.replace(/\\${"$"}\\{/g,"\\\\${"$"}{");\ne.innerHTML=\`<b ${"$"}{a?"{":""}>\`;if(c){d()}y=/\\/assets\\//;`,
+      `e.innerHTML="<b "+a+">";f(${"z".repeat(1100)},"href=//evil.example/x");`,
+      `e.innerHTML="<a "+(n>0?"x":"")+${"z".repeat(1100)}+" href=//evil.example/>";`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1107,6 +1171,51 @@ describe("static builds", () => {
         `i.src=\`${d}{a.replace(/{/g,"")}//evil.example/x.png\``,
         "https://evil.example",
       ],
+      // A `${` in a plain string or a regular expression earlier in the file (a tokenizer's
+      // `"${"`, a template-escaping regular expression) starts no substitution: the ones after it
+      // are still paired, and the text after each `}` read.
+      [
+        "a protocol picked at run time after a dollar-brace string",
+        "assets/a.js",
+        `if(m[1]==="${d}{")depth++;${nl}s.src = \`${d}{secure ? "https:" : "http:"}//cdn.example/x.png\`;${nl}log("done");`,
+        "https://cdn.example",
+      ],
+      [
+        "the same in single quotes",
+        "assets/a.js",
+        `if(m[1]==='${d}{')depth++;${nl}s.src = \`${d}{secure ? 'https:' : 'http:'}//cdn.example/x.png\`;${nl}log('done');`,
+        "https://cdn.example",
+      ],
+      [
+        "a space after a substitution, after a dollar-brace string",
+        "assets/a.js",
+        `if(m[1]==="${d}{")depth++;${nl}fetch(\`${d}{a?"x":""}https://react.dev @evil.example/x\`);log("done");`,
+        "https://evil.example",
+      ],
+      [
+        "a protocol picked at run time after a split on a dollar-brace",
+        "assets/a.js",
+        `n=s.split("${d}{").length;${nl}i.src=\`${d}{secure?"https:":"http:"}//cdn.evil.example/lib.js\`;f("x");`,
+        "https://cdn.evil.example",
+      ],
+      [
+        "a protocol picked at run time after a template-escaping regular expression",
+        "assets/a.js",
+        `const esc=(s)=>s.replace(/\\${d}\\{/g,"\\\\${d}{");${nl}i.src=\`${d}{secure?"https:":"http:"}//cdn.evil.example/lib.js\`;`,
+        "https://cdn.evil.example",
+      ],
+      [
+        "a WebSocket's protocol picked at run time after it",
+        "assets/a.js",
+        `const esc=(s)=>s.replace(/\\${d}\\{/g,"\\\\${d}{");${nl}new WebSocket(\`${d}{secure?"wss:":"ws:"}//cdn.evil.example/live\`);`,
+        "https://cdn.evil.example",
+      ],
+      [
+        "a closing brace in a string in the substitution, after it",
+        "assets/a.js",
+        `const esc=(s)=>s.replace(/\\${d}\\{/g,"\\\\${d}{");${nl}i.src=\`${d}{a?"}":""}//evil.example/x.png\``,
+        "https://evil.example",
+      ],
       // Outside a script nothing is built at run time: a `$` is the host's own.
       [
         "a $ in markup",
@@ -1157,6 +1266,17 @@ describe("static builds", () => {
     assert.deepEqual(urlsIn(code, { kind: "script" }), []);
     const written = `${code}e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
     assert.deepEqual(originsIn(written, { kind: "script" }), ["https://collector.evil.example"]);
+  });
+
+  it("pairs a large script's substitutions in time linear in the text", { timeout: 10_000 }, () => {
+    // Each `${` in a plain string starts a lexer run that reads out of step, up to its bound.
+    const d = "$";
+    const strings = `"${d}{" '${d}{' x=/${d}{/g;`.repeat(40_000);
+    const text = `${strings}i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
+    const started = performance.now();
+    assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]);
+    const took = performance.now() - started;
+    assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
   });
 
   it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {
