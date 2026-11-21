@@ -27,7 +27,10 @@ export function registerId(ctx: Context, id: unknown, kind: string, label?: stri
 
 export function cloudflare(ctx: Context, settingIds: Iterable<string> = []): Clients {
   const api = new CloudflareApi(ctx.credential("FIN_CF_TOKEN_FILE"), ctx.runtime, ctx.masker);
-  const writer = new CloudflareWriter(api, ctx.guard, ctx.run, ctx.overlay, settingIds);
+  const writer = new CloudflareWriter(api, ctx.guard, ctx.run, ctx.overlay, {
+    settings: settingIds,
+    now: () => ctx.runtime.now(),
+  });
   return {
     api,
     writer,

@@ -18,7 +18,9 @@ EXECUTION §2.5 steps 6 and 8). It is the only command that writes those records
    for the database host until the db tunnel exists (hardening).
 
 Routes and records on any other host are never written. A name that already holds another record
-type (an A record, say) is held, not overwritten: resolve it by hand.
+type (an A record, say) is held, not overwritten: resolve it by hand. An update or delete is sent
+only to a route or record ID read under that pattern or name, and a CNAME only ever points at one of
+Fin's own tunnels as read, proxied.
 
 A route of any other shape that still matches one of Fin's hosts (another product's `*.<zone>/*` or
 `*gateway.<zone>/*`, which would send the API host's requests to that product's Worker) makes the

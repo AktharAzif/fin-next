@@ -22,10 +22,11 @@ import {
   hex,
   overlayFixture,
   tempDir,
+  uuid,
   ZONE,
   ZONE_ID,
 } from "./helpers/fixtures.ts";
-import { FakeCloudflare } from "./helpers/providers.ts";
+import { FakeCloudflare, type Rule } from "./helpers/providers.ts";
 
 const overlay = parseOverlay(overlayFixture(), "staging");
 const Z = `/zones/${ZONE_ID}`;
@@ -51,15 +52,39 @@ function setup(dryRun = false) {
       dryRun,
     },
   );
-  const writer = new CloudflareWriter(
-    new CloudflareApi(new Secret(token), runtime, masker),
-    new Guard(overlay),
-    run,
-    overlay,
-    ["0rtt"],
-  );
-  return { cf, run, writer };
+  const api = new CloudflareApi(new Secret(token), runtime, masker);
+  const writer = new CloudflareWriter(api, new Guard(overlay), run, overlay, {
+    settings: ["0rtt"],
+    now: () => runtime.now(),
+  });
+  return { api, cf, run, runtime, writer };
 }
+
+/** A rule set the fake holds as a phase entrypoint, read through the API so the writer knows it. */
+async function readEntrypoint(
+  s: ReturnType<typeof setup>,
+  id: string,
+  phase: string,
+  rules: Rule[] = [],
+): Promise<void> {
+  s.cf.rulesets.set(id, { id, phase, rules });
+  await s.api.getOptional(`${Z}/rulesets/phases/${phase}/entrypoint`);
+}
+
+/** One of the account's tunnels, read through the API so the writer knows it; returns its ID. */
+async function readTunnel(s: ReturnType<typeof setup>, name: string, seed = "3"): Promise<string> {
+  const id = uuid(seed);
+  s.cf.tunnels.push({ id, name, config_src: "local", deleted_at: null });
+  await s.api.list(`${A}/cfd_tunnel`, { name });
+  return id;
+}
+
+const APP: WriteTarget = {
+  kind: "access-app",
+  name: "fin-next-staging-admin",
+  host: `staff.${ZONE}`,
+  policy: "fin-next-staging-staff",
+};
 
 function refused(fn: () => void, pattern: RegExp): void {
   assert.throws(fn, (e: unknown) => e instanceof RefusedError && pattern.test(e.message));
@@ -101,10 +126,14 @@ describe("the Cloudflare writer", () => {
     run.finish("ok");
   });
 
-  it("refuses a whole-phase replace, a foreign rule ref and a non-rule endpoint", () => {
-    const { run, writer } = setup();
+  it("refuses a whole-phase replace, a foreign rule ref and a non-rule endpoint", async () => {
+    const s = setup();
+    const { run, writer } = s;
     run.register();
     const rs = hex(32, "3");
+    await readEntrypoint(s, rs, "http_request_firewall_custom", [
+      { id: hex(32, "4"), ref: "fin_next_x" },
+    ]);
     const rule: WriteTarget = { kind: "rule", ref: "fin_next_x", hosts: [CONSOLE], rulesetId: rs };
     const body = ruleBody("fin_next_x", `(http.host eq "${CONSOLE}")`);
     refused(() => writer.check(rule, "PUT", `${Z}/rulesets/${rs}`, body), /never replaced whole/);
@@ -147,10 +176,20 @@ describe("the Cloudflare writer", () => {
     );
   });
 
-  it("checks what a write sends and which object it names, not only the label it is given", () => {
-    const { writer } = setup();
+  it("checks what a write sends and which object it names, not only the label it is given", async () => {
+    const s = setup();
+    const { writer } = s;
+    const tunnel = await readTunnel(s, "fin-next-staging-public");
+    const id = hex(32, "6");
+    s.cf.dns.push({ id, type: "CNAME", name: CONSOLE, content: "old.example.net", proxied: true });
+    await s.api.list(`${Z}/dns_records`, { name: CONSOLE });
     const dns: WriteTarget = { kind: "dns", name: CONSOLE };
-    const record = (name: string) => ({ type: "CNAME", name, content: "x.example.net" });
+    const record = (name: string) => ({
+      type: "CNAME",
+      name,
+      content: `${tunnel}.cfargotunnel.com`,
+      proxied: true,
+    });
     for (const name of [`www.${ZONE}`, `_dmarc.${ZONE}`, `*.${ZONE}`, `staff.${ZONE}`]) {
       refused(() => writer.check(dns, "POST", `${Z}/dns_records`, record(name)), /body names/);
     }
@@ -164,7 +203,6 @@ describe("the Cloudflare writer", () => {
         /DNS records endpoint/,
       );
     }
-    const id = hex(32, "6");
     refused(() => writer.check(dns, "DELETE", `${Z}/dns_records/${id}`), /object it names/);
     refused(
       () =>
@@ -184,6 +222,7 @@ describe("the Cloudflare writer", () => {
     );
     // A rule needs Fin's hosts in its expression, and only Fin's.
     const rs = hex(32, "3");
+    await readEntrypoint(s, rs, "http_request_firewall_custom");
     const rule: WriteTarget = { kind: "rule", ref: "fin_next_x", hosts: [CONSOLE], rulesetId: rs };
     for (const expression of ["true", "(not ssl)", `(http.host eq "legacy.${ZONE}")`]) {
       refused(
@@ -222,11 +261,7 @@ describe("the Cloudflare writer", () => {
       /fin-next-staging-/,
     );
     // Access: every domain the body names is the staff host, and the policy is an Allow of a list.
-    const app: WriteTarget = {
-      kind: "access-app",
-      name: "fin-next-staging-admin",
-      host: `staff.${ZONE}`,
-    };
+    const app = APP;
     const appBody = (domain: string, uris: string[]) => ({
       name: "fin-next-staging-admin",
       type: "self_hosted",
@@ -268,8 +303,10 @@ describe("the Cloudflare writer", () => {
     );
   });
 
-  it("mints a token only for this account, its declared groups and, for email, an IP filter", () => {
-    const { writer } = setup();
+  it("mints a token only for this account, its declared groups and, for email, an IP filter", async () => {
+    const s = setup();
+    const { writer } = s;
+    await s.api.list(`${A}/tokens/permission_groups`);
     const group = { name: "Email Sending Write", id: hex(32, "6") };
     const target: WriteTarget = {
       kind: "token",
@@ -283,25 +320,21 @@ describe("the Cloudflare writer", () => {
       expires_on: "2027-05-20T06:00:00Z",
     });
     const own = { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" };
-    writer.check(target, "POST", `${A}/tokens`, body(own, [group.id], ["192.0.2.1/32"]));
+    const egress = "203.0.113.10/32";
+    writer.check(target, "POST", `${A}/tokens`, body(own, [group.id], [egress]));
     refused(
       () =>
         writer.check(
           target,
           "POST",
           `${A}/tokens`,
-          body({ "com.cloudflare.api.account.*": "*" }, [group.id], ["192.0.2.1/32"]),
+          body({ "com.cloudflare.api.account.*": "*" }, [group.id], [egress]),
         ),
       /this account only/,
     );
     refused(
       () =>
-        writer.check(
-          target,
-          "POST",
-          `${A}/tokens`,
-          body(own, [group.id, hex(32, "8")], ["192.0.2.1/32"]),
-        ),
+        writer.check(target, "POST", `${A}/tokens`, body(own, [group.id, hex(32, "8")], [egress])),
       /permission groups/,
     );
     refused(() => writer.check(target, "POST", `${A}/tokens`, body(own, [group.id])), /IP filter/);
@@ -357,7 +390,10 @@ describe("the Cloudflare writer", () => {
       { command: "test", environment: "staging", dryRun: false },
     );
     const api = new CloudflareApi(new Secret(token), runtime, masker);
-    const writer = new CloudflareWriter(api, new Guard(overlay), run, overlay, ["0rtt", "x|.*"]);
+    const writer = new CloudflareWriter(api, new Guard(overlay), run, overlay, {
+      settings: ["0rtt", "x|.*"],
+      now: () => runtime.now(),
+    });
     refused(
       () =>
         writer.check({ kind: "setting", id: "x|.*" }, "PATCH", `${Z}/dns_records`, { value: 1 }),
@@ -366,25 +402,33 @@ describe("the Cloudflare writer", () => {
     assert.equal(typeof (api as unknown as Record<string, unknown>).sendWrite, "undefined");
   });
 
-  it("deletes a stale route on a Fin host or a stale fin_next_ rule whatever its spelling", () => {
-    const { writer } = setup();
+  it("deletes a stale route on a Fin host or a stale fin_next_ rule whatever its spelling", async () => {
+    const s = setup();
+    const { writer } = s;
     const id = hex(32, "9");
+    const old = hex(32, "a");
+    s.cf.routes.push(
+      { id, pattern: `${CONSOLE}/api*` },
+      { id: old, pattern: `${CONSOLE}/old/*` },
+      { id: hex(32, "b"), pattern: `legacy.${ZONE}/*` },
+    );
+    await s.api.list(`${Z}/workers/routes`);
     writer.check(
       { kind: "route", pattern: `${CONSOLE}/api*`, id },
       "DELETE",
       `${Z}/workers/routes/${id}`,
     );
     writer.check(
-      { kind: "route", pattern: `${CONSOLE}/old/*`, id },
+      { kind: "route", pattern: `${CONSOLE}/old/*`, id: old },
       "DELETE",
-      `${Z}/workers/routes/${id}`,
+      `${Z}/workers/routes/${old}`,
     );
     refused(
       () =>
         writer.check(
-          { kind: "route", pattern: `legacy.${ZONE}/*`, id },
+          { kind: "route", pattern: `legacy.${ZONE}/*`, id: hex(32, "b") },
           "DELETE",
-          `${Z}/workers/routes/${id}`,
+          `${Z}/workers/routes/${hex(32, "b")}`,
         ),
       /never-touch/,
     );
@@ -396,6 +440,7 @@ describe("the Cloudflare writer", () => {
       /\/api\*/,
     );
     const rs = hex(32, "3");
+    await readEntrypoint(s, rs, "http_request_firewall_custom", [{ id, ref: "fin_next_Old-Rule" }]);
     writer.check(
       { kind: "rule", ref: "fin_next_Old-Rule", hosts: [], rulesetId: rs, id },
       "DELETE",
@@ -478,15 +523,7 @@ describe("the Cloudflare writer", () => {
         ),
       /never edited/,
     );
-    refused(
-      () =>
-        writer.check(
-          { kind: "access-app", name: "fin-next-staging-admin", host: `staff.${ZONE}` },
-          "DELETE",
-          `${A}/access/apps/x`,
-        ),
-      /never deleted/,
-    );
+    refused(() => writer.check(APP, "DELETE", `${A}/access/apps/x`), /never deleted/);
     refused(
       () =>
         writer.check(
@@ -499,20 +536,29 @@ describe("the Cloudflare writer", () => {
   });
 
   it("sends the token only in the Authorization header, and a refusal never carries it", async () => {
-    const { cf, run, writer } = setup();
-    run.register();
-    await writer.write({ kind: "dns", name: `console.${ZONE}` }, "POST", `${Z}/dns_records`, {
+    const s = setup();
+    const { cf, run, writer } = s;
+    const tunnel = await readTunnel(s, "fin-next-staging-public");
+    const cname = {
       type: "CNAME",
-      name: `console.${ZONE}`,
-      content: "x",
-    });
+      name: CONSOLE,
+      content: `${tunnel}.cfargotunnel.com`,
+      proxied: true,
+    };
+    run.register();
+    await writer.write({ kind: "dns", name: CONSOLE }, "POST", `${Z}/dns_records`, cname);
     assert.equal(cf.dns.length, 1);
+    // A record read, then removed by someone else: the PATCH reaches Cloudflare and gets a 404.
+    const gone = hex(32, "0");
+    cf.dns.push({ id: gone, type: "CNAME", name: CONSOLE, content: "old.example.net" });
+    await s.api.list(`${Z}/dns_records`, { name: CONSOLE });
+    cf.dns = cf.dns.filter((r) => r.id !== gone);
     try {
       await writer.write(
-        { kind: "dns", name: `console.${ZONE}`, id: hex(32, "0") },
+        { kind: "dns", name: CONSOLE, id: gone },
         "PATCH",
-        `${Z}/dns_records/${hex(32, "0")}`,
-        { type: "CNAME", name: `console.${ZONE}`, content: "x" },
+        `${Z}/dns_records/${gone}`,
+        cname,
       );
       assert.fail("should fail");
     } catch (error) {
@@ -521,6 +567,326 @@ describe("the Cloudflare writer", () => {
       assert.equal(String(error).includes(hex(32, "0")), false, "names no object ID");
     }
     run.finish("ok");
+  });
+});
+
+describe("the IDs a write carries", () => {
+  it("are ones a read showed in the write's collection under the target's name, pattern or ref", async () => {
+    const s = setup();
+    const { writer } = s;
+    // Another product's route, read: its ID under one of Fin's patterns is refused.
+    const foreign = hex(32, "c");
+    s.cf.routes.push({ id: foreign, pattern: `legacy.${ZONE}/*`, script: "other" });
+    await s.api.list(`${Z}/workers/routes`);
+    for (const id of [foreign, hex(32, "d")]) {
+      refused(
+        () =>
+          writer.check(
+            { kind: "route", pattern: `${CONSOLE}/old/*`, id },
+            "DELETE",
+            `${Z}/workers/routes/${id}`,
+          ),
+        /not read as the object/,
+      );
+    }
+    // Another record's ID under the console host's name.
+    const tunnel = await readTunnel(s, "fin-next-staging-public");
+    const other = hex(32, "e");
+    s.cf.dns.push({ id: other, type: "CNAME", name: `legacy.${ZONE}`, content: "x.example.net" });
+    await s.api.list(`${Z}/dns_records`);
+    refused(
+      () =>
+        writer.check(
+          { kind: "dns", name: CONSOLE, id: other },
+          "PATCH",
+          `${Z}/dns_records/${other}`,
+          {
+            type: "CNAME",
+            name: CONSOLE,
+            content: `${tunnel}.cfargotunnel.com`,
+            proxied: true,
+          },
+        ),
+      /not read as the object/,
+    );
+    // A rule read under another ref, and a rule set never read as a phase entrypoint.
+    const rs = hex(32, "3");
+    const theirs = hex(32, "4");
+    await readEntrypoint(s, rs, "http_request_firewall_custom", [
+      { id: theirs, ref: "legacy_block" },
+    ]);
+    refused(
+      () =>
+        writer.check(
+          { kind: "rule", ref: "fin_next_x", hosts: [], rulesetId: rs, id: theirs },
+          "DELETE",
+          `${Z}/rulesets/${rs}/rules/${theirs}`,
+        ),
+      /not read as the object/,
+    );
+    const custom = hex(32, "5");
+    refused(
+      () =>
+        writer.check(
+          { kind: "rule", ref: "fin_next_x", hosts: [CONSOLE], rulesetId: custom },
+          "POST",
+          `${Z}/rulesets/${custom}/rules`,
+          ruleBody("fin_next_x", `(http.host eq "${CONSOLE}")`),
+        ),
+      /phase entrypoints/,
+    );
+    // A token and an Access application read under other names.
+    const token = hex(32, "6");
+    s.cf.tokens.push({ id: token, name: "other-product-token", status: "active" });
+    await s.api.list(`${A}/tokens`);
+    refused(
+      () =>
+        writer.check(
+          { kind: "token", name: "fin-next-staging-email", permissionGroups: [], id: token },
+          "DELETE",
+          `${A}/tokens/${token}`,
+        ),
+      /not read as the object/,
+    );
+    const app = uuid("7");
+    s.cf.apps.push({ id: app, name: "other-product-app" });
+    await s.api.list(`${A}/access/apps`);
+    refused(
+      () => writer.check({ ...APP, id: app }, "PUT", `${A}/access/apps/${app}`, {}),
+      /not read as the object/,
+    );
+  });
+
+  it("forgets an object once it is deleted", async () => {
+    const s = setup();
+    const id = hex(32, "9");
+    s.cf.routes.push({ id, pattern: `${CONSOLE}/old/*` });
+    await s.api.list(`${Z}/workers/routes`);
+    const route: WriteTarget = { kind: "route", pattern: `${CONSOLE}/old/*`, id };
+    s.run.register();
+    await s.writer.write(route, "DELETE", `${Z}/workers/routes/${id}`);
+    refused(
+      () => s.writer.check(route, "DELETE", `${Z}/workers/routes/${id}`),
+      /not read as the object/,
+    );
+    s.run.finish("ok");
+  });
+
+  it("ties a token's groups to the names read, its IP filter to single egress addresses and its expiry to 180 days", async () => {
+    const s = setup();
+    const { writer } = s;
+    await s.api.list(`${A}/tokens/permission_groups`);
+    const own = { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" };
+    const mint = (groupId: string, extra: Record<string, unknown> = {}) => {
+      const body: Record<string, unknown> = {
+        name: "fin-next-staging-email",
+        policies: [{ effect: "allow", resources: own, permission_groups: [{ id: groupId }] }],
+        condition: { request_ip: { in: ["203.0.113.10/32", "203.0.113.11/32"] } },
+        not_before: "2026-11-21T06:00:00Z",
+        expires_on: "2027-05-20T06:00:00Z",
+        ...extra,
+      };
+      return body;
+    };
+    const target = (name: string, id: string): WriteTarget => ({
+      kind: "token",
+      name: "fin-next-staging-email",
+      permissionGroups: [{ name, id }],
+    });
+    const email = hex(32, "6");
+    writer.check(target("Email Sending Write", email), "POST", `${A}/tokens`, mint(email));
+    // Another group's ID under the mintable name it is declared with.
+    const settings = hex(32, "8");
+    refused(
+      () =>
+        writer.check(
+          target("Email Sending Write", settings),
+          "POST",
+          `${A}/tokens`,
+          mint(settings),
+        ),
+      /not the one read under that name/,
+    );
+    // The email group's ID under a name that needs no IP filter, sent without one.
+    const unfiltered = mint(email);
+    delete unfiltered.condition;
+    refused(
+      () => writer.check(target("Workers Scripts Write", email), "POST", `${A}/tokens`, unfiltered),
+      /not the one read under that name/,
+    );
+    // A range, every address, a bare address, or an address that is not the overlay's egress.
+    for (const entry of ["0.0.0.0/0", "203.0.113.0/24", "203.0.113.10", "198.51.100.7/32"]) {
+      refused(
+        () =>
+          writer.check(
+            target("Email Sending Write", email),
+            "POST",
+            `${A}/tokens`,
+            mint(email, { condition: { request_ip: { in: [entry] } } }),
+          ),
+        /one IPv4 address \(\/32\)|static egress/,
+      );
+    }
+    refused(
+      () =>
+        writer.check(
+          target("Email Sending Write", email),
+          "POST",
+          `${A}/tokens`,
+          mint(email, { condition: { request_ip: { in: ["203.0.113.10/32"], not_in: [] } } }),
+        ),
+      /only condition/,
+    );
+    // An expiry past 180 days, or already past.
+    for (const expires of [
+      "2099-01-01T00:00:00Z",
+      "2027-05-21T06:00:00Z",
+      "2026-11-20T06:00:00Z",
+    ]) {
+      refused(
+        () =>
+          writer.check(
+            target("Email Sending Write", email),
+            "POST",
+            `${A}/tokens`,
+            mint(email, { expires_on: expires }),
+          ),
+        /within 180 days/,
+      );
+    }
+  });
+
+  it("attaches to Fin's application exactly the policy read under its name, and only login methods read", async () => {
+    const s = setup();
+    const { writer } = s;
+    const ours = uuid("8");
+    const everyone = uuid("9");
+    s.cf.policies.push(
+      { id: ours, name: "fin-next-staging-staff", decision: "allow" },
+      { id: everyone, name: "other-product-everyone", decision: "allow" },
+    );
+    await s.api.list(`${A}/access/policies`);
+    await s.api.list(`${A}/access/identity_providers`);
+    const idp = uuid("1");
+    const body = (policies: unknown[], idps: unknown[] = [idp]) => ({
+      name: "fin-next-staging-admin",
+      type: "self_hosted",
+      domain: `staff.${ZONE}`,
+      destinations: [{ type: "public", uri: `staff.${ZONE}` }],
+      allowed_idps: idps,
+      policies,
+    });
+    writer.check(APP, "POST", `${A}/access/apps`, body([{ id: ours, precedence: 1 }]));
+    for (const policies of [
+      [{ id: everyone, precedence: 1 }],
+      [
+        { id: ours, precedence: 1 },
+        { id: everyone, precedence: 2 },
+      ],
+      [{ id: uuid("6"), precedence: 1 }],
+      [],
+    ]) {
+      refused(
+        () => writer.check(APP, "POST", `${A}/access/apps`, body(policies)),
+        /exactly one policy/,
+      );
+    }
+    for (const idps of [[], [uuid("6")]]) {
+      refused(
+        () =>
+          writer.check(APP, "POST", `${A}/access/apps`, body([{ id: ours, precedence: 1 }], idps)),
+        /login methods read/,
+      );
+    }
+  });
+
+  it("lets the preflight name the policy a checked POST will create, but never sends without its ID", async () => {
+    const s = setup();
+    const { run, writer } = s;
+    await s.api.list(`${A}/access/identity_providers`);
+    const policy: WriteTarget = { kind: "access-policy", name: "fin-next-staging-staff" };
+    const policyBody = {
+      name: "fin-next-staging-staff",
+      decision: "allow",
+      include: [{ email: { email: "a@example.com" } }],
+    };
+    const app = (id: string) => ({
+      name: "fin-next-staging-admin",
+      type: "self_hosted",
+      domain: `staff.${ZONE}`,
+      allowed_idps: [uuid("1")],
+      policies: [{ id, precedence: 1 }],
+    });
+    refused(() => writer.check(APP, "POST", `${A}/access/apps`, app("")), /exactly one policy/);
+    writer.check(policy, "POST", `${A}/access/policies`, policyBody);
+    writer.check(APP, "POST", `${A}/access/apps`, app(""));
+    run.register();
+    await assert.rejects(
+      writer.write(APP, "POST", `${A}/access/apps`, app("")),
+      /exactly one policy/,
+    );
+    const created = await writer.write<{ id: string }>(
+      policy,
+      "POST",
+      `${A}/access/policies`,
+      policyBody,
+    );
+    await writer.write(APP, "POST", `${A}/access/apps`, app(created.id));
+    run.finish("ok");
+  });
+
+  it("points a CNAME only at one of Fin's own tunnels, proxied, and writes TXT only as DMARC", async () => {
+    const s = setup();
+    const { writer } = s;
+    const ours = await readTunnel(s, "fin-next-staging-public", "3");
+    const theirs = await readTunnel(s, "other-product-tunnel", "4");
+    const dns: WriteTarget = { kind: "dns", name: CONSOLE };
+    const cname = (content: string, proxied = true) => ({
+      type: "CNAME",
+      name: CONSOLE,
+      content,
+      proxied,
+    });
+    writer.check(dns, "POST", `${Z}/dns_records`, cname(`${ours}.cfargotunnel.com`));
+    for (const content of [
+      `${theirs}.cfargotunnel.com`,
+      `${uuid("5")}.cfargotunnel.com`,
+      "origin.example.net",
+    ]) {
+      refused(
+        () => writer.check(dns, "POST", `${Z}/dns_records`, cname(content)),
+        /Fin's own tunnels/,
+      );
+    }
+    refused(
+      () => writer.check(dns, "POST", `${Z}/dns_records`, cname(`${ours}.cfargotunnel.com`, false)),
+      /proxied/,
+    );
+    refused(
+      () =>
+        writer.check(dns, "POST", `${Z}/dns_records`, {
+          type: "TXT",
+          name: CONSOLE,
+          content: "v=DMARC1; p=none",
+        }),
+      /DMARC/,
+    );
+    const name = `_dmarc.auth.${ZONE}`;
+    const dmarc: WriteTarget = { kind: "dns", name };
+    writer.check(dmarc, "POST", `${Z}/dns_records`, {
+      type: "TXT",
+      name,
+      content: "v=DMARC1; p=none; rua=mailto:reports@example.com",
+    });
+    refused(
+      () =>
+        writer.check(dmarc, "POST", `${Z}/dns_records`, {
+          type: "TXT",
+          name,
+          content: "v=spf1 include:example.net -all",
+        }),
+      /DMARC/,
+    );
   });
 });
 

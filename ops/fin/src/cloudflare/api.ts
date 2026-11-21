@@ -1,17 +1,26 @@
 // Cloudflare's v4 API: reads, and the one guarded path for writes.
 //
 // CloudflareApi only reads in public. Its raw send is keyed by a symbol this module keeps, so only
-// CloudflareWriter.write() can send a write. Before it sends anything, write() refuses outside a
-// registered run and in every dry run, and check() refuses unless all of these hold (BD-11, EX-27):
+// CloudflareWriter.write() can send a write. CloudflareApi also keeps, privately, every object its
+// reads and write answers showed (by collection and ID, with its name, pattern or ref), so the
+// writer can tie the IDs a write carries to objects as Cloudflare showed them, not to the caller's
+// label. Before it sends anything, write() refuses outside a registered run and in every dry run,
+// and check() refuses unless all of these hold (BD-11, EX-27):
 //
 //   - the target passes the allow-list guard (hostnames, rule refs, Fin's own names);
 //   - the path is the one endpoint that kind of write may use, on the overlay's own account and
 //     zone: a POST goes to the collection itself (never a bulk endpoint such as `dns_records/batch`),
-//     and any other method to `<collection>/<id>` where `<id>` is the ID of the object the target
-//     was read as, so a write cannot change an object other than the one it names;
+//     and any other method to `<collection>/<id>`, where `<id>` was read in that collection under
+//     the target's name, pattern or ref, so a write cannot change an object other than the one it
+//     names; a rule is written only into a rule set read (or created) as a phase entrypoint;
 //   - the body names what the target names: a record's name, a route's pattern, a rule's ref and
-//     the hostnames in its expression, every domain of an Access application, a token's account,
-//     permission groups and IP filter, an assets-only script upload;
+//     the hostnames in its expression, every domain of an Access application;
+//   - every ID the body carries was read: a CNAME's tunnel (one of Fin's own), an Access
+//     application's one policy (read or created under the policy's name) and its login methods, a
+//     token's permission groups (read under the names they are declared with);
+//   - a token is for this account only, its client IP filter (required for the groups that need
+//     it) holds single IPv4 addresses, the overlay's static egress addresses when it lists any, and
+//     it expires within MAX_TOKEN_DAYS;
 //   - no PUT replaces a rule set (a whole-phase replace would remove another product's rules).
 //
 // The body checks read the request the writer is about to send, not a label beside it. They are a
@@ -21,8 +30,7 @@
 // is cut (a value cut in two would no longer match the masker), a value only one write carries (the
 // rate rule's threshold, a short number the masker must never hold) is redacted from that write's
 // error alone, and every ID-shaped segment of the path is replaced by `<id>` (spec 01 §9.2: names,
-// never IDs). Context.applyPlan records each change
-// as a run step once its writes have succeeded.
+// never IDs). Context.applyPlan records each change as a run step once its writes have succeeded.
 
 import { ProviderError, RefusedError } from "../core/errors.ts";
 import { type Guard, RULE_REF_PREFIX } from "../core/guard.ts";
@@ -44,6 +52,34 @@ export const OBJECT_ID =
 
 /** The raw send. Not exported: only CloudflareWriter, in this module, can call it. */
 const SEND = Symbol("cloudflare write");
+
+/** The objects reads showed. Not exported: only CloudflareWriter, in this module, looks. */
+const SEEN = Symbol("cloudflare reads");
+
+/**
+ * A path whose answer is one whole rule set: a phase entrypoint (group 2 names the phase), the
+ * rule sets collection (a create), or one rule of a set (a rule's create, update or delete answers
+ * the whole set). Group 1 is the zone's rule sets collection.
+ */
+const RULESET_ANSWER =
+  /^(\/zones\/[^/]+\/rulesets)(?:\/phases\/([a-z_]+)\/entrypoint|\/([0-9a-fA-F]{32})\/rules(?:\/[0-9a-fA-F]{32})?)?$/;
+
+/** Where the phase entrypoints read or created are kept, by rule set ID, under a zone. */
+function entrypointsOf(zonePath: string): string {
+  return `${zonePath}/rulesets/phases`;
+}
+
+/** The longest a token pnpm fin mints may live (spec 01 §7.8: at most 180 days). */
+export const MAX_TOKEN_DAYS = 180;
+
+const DAY_MS = 86_400_000;
+
+/** One IPv4 address. */
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+
+/** A tunnel's CNAME target: `<tunnel ID>.cfargotunnel.com`. */
+const TUNNEL_TARGET =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.cfargotunnel\.com$/i;
 
 interface Envelope<T> {
   success?: boolean;
@@ -122,6 +158,8 @@ export class CloudflareApi {
   readonly #runtime: Pick<Runtime, "fetch" | "sleep">;
   readonly #masker: Masker;
   readonly #base: string;
+  /** Every object a read or a write's answer showed: collection path, then ID (or tag). */
+  readonly #seen = new Map<string, Map<string, Readonly<Record<string, unknown>>>>();
 
   constructor(
     token: Secret,
@@ -192,12 +230,65 @@ export class CloudflareApi {
     );
   }
 
+  #keep(collection: string, id: unknown, object: Record<string, unknown>): void {
+    if (typeof id !== "string" || id === "") return;
+    let objects = this.#seen.get(collection);
+    if (objects === undefined) {
+      objects = new Map();
+      this.#seen.set(collection, objects);
+    }
+    objects.set(id, Object.freeze(structuredClone(object)));
+  }
+
+  /**
+   * Keeps what an answer showed, so the writer can tie a write's IDs to objects as read: each
+   * object under the collection it was read from (by `id`, and by `tag` where it has one); a rule
+   * set's rules under `<sets>/<set id>/rules`, replacing the earlier ones (the answer is the set as
+   * it stands); a phase entrypoint, read as one or created, under entrypointsOf(); and a deleted
+   * object is forgotten.
+   */
+  #remember(method: "GET" | WriteMethod, path: string, result: unknown): void {
+    const bare = path.split("?")[0] ?? path;
+    const set = RULESET_ANSWER.exec(bare);
+    if (set !== null) {
+      if (!isRecord(result) || typeof result.id !== "string") return;
+      const [, sets = "", phase, setId] = set;
+      const entrypoints = `${sets}/phases`;
+      if (phase !== undefined) this.#keep(entrypoints, result.id, { ...result, phase });
+      else if (setId === undefined && method === "POST") this.#keep(entrypoints, result.id, result);
+      const rules = `${sets}/${result.id}/rules`;
+      this.#seen.delete(rules);
+      for (const rule of Array.isArray(result.rules) ? result.rules : []) {
+        if (isRecord(rule)) this.#keep(rules, rule.id, rule);
+      }
+      return;
+    }
+    if (method === "DELETE") {
+      const id = bare.slice(bare.lastIndexOf("/") + 1);
+      this.#seen.get(bare.slice(0, bare.lastIndexOf("/")))?.delete(id);
+      return;
+    }
+    for (const item of Array.isArray(result) ? result : [result]) {
+      if (!isRecord(item)) continue;
+      for (const id of [item.id, item.tag]) {
+        if (typeof id !== "string" || id === "") continue;
+        this.#keep(bare.endsWith(`/${id}`) ? bare.slice(0, -(id.length + 1)) : bare, id, item);
+      }
+    }
+  }
+
+  /** The object a read or a write's answer showed in `collection` under `id`, if any. */
+  [SEEN](collection: string, id: string): Readonly<Record<string, unknown>> | undefined {
+    return this.#seen.get(collection)?.get(id);
+  }
+
   async get<T>(path: string, query?: Query): Promise<T> {
     const full = withQuery(path, query);
     const { status, envelope } = await this.#call<T>("GET", full);
     if (status >= 300 || envelope === undefined || envelope.success === false) {
       this.#fail("GET", full, status, envelope);
     }
+    this.#remember("GET", full, envelope.result);
     return envelope.result;
   }
 
@@ -209,6 +300,7 @@ export class CloudflareApi {
     if (status >= 300 || envelope === undefined || envelope.success === false) {
       this.#fail("GET", full, status, envelope);
     }
+    this.#remember("GET", full, envelope.result);
     return envelope.result;
   }
 
@@ -222,6 +314,7 @@ export class CloudflareApi {
         this.#fail("GET", full, status, envelope);
       }
       const result = Array.isArray(envelope.result) ? envelope.result : [];
+      this.#remember("GET", path, result);
       all.push(...result);
       const total = envelope.result_info?.total_pages;
       if (total === undefined || page >= total || result.length === 0) return all;
@@ -244,13 +337,15 @@ export class CloudflareApi {
     if (status >= 300 || envelope === undefined || envelope.success === false) {
       this.#fail(method, path, status, envelope, redact);
     }
+    this.#remember(method, path, envelope.result);
     return envelope.result;
   }
 }
 
 /**
  * What a write touches, for the guard. A write addressed to one object (any method but POST)
- * carries that object's `id` as it was read, with the name, pattern or ref it was read with.
+ * carries that object's `id`, which the writer accepts only when a read showed it in the write's
+ * collection under the same name, pattern or ref.
  */
 export type WriteTarget =
   | { kind: "dns"; name: string; id?: string }
@@ -258,7 +353,14 @@ export type WriteTarget =
   | { kind: "rule"; ref: string; hosts: readonly string[]; rulesetId: string; id?: string }
   | { kind: "ruleset"; phase: string; refs: readonly string[]; hosts: readonly string[] }
   | { kind: "setting"; id: string }
-  | { kind: "access-app"; name: string; host: string; id?: string }
+  | {
+      kind: "access-app";
+      name: string;
+      host: string;
+      /** The name of the one Access policy the application holds. */
+      policy: string;
+      id?: string;
+    }
   | { kind: "access-policy"; name: string; id?: string }
   | { kind: "email-domain"; name: string; id?: string }
   | { kind: "tunnel"; name: string }
@@ -335,6 +437,15 @@ export function expressionHosts(expression: string): string[] {
 const WIDENING_HOST_TEST =
   /not\s+http\.host|http\.host\s+(?:ne|!=|contains|matches|~|wildcard|strict)\b|lower\(\s*http\.host/;
 
+export interface WriterOptions {
+  /** The zone settings the public settings list: the only ones a write may change. */
+  settings?: Iterable<string>;
+  /** The run's clock (a token's expiry is bounded from it). */
+  now: () => Date;
+}
+
+type Seen = Readonly<Record<string, unknown>>;
+
 export class CloudflareWriter {
   readonly #api: CloudflareApi;
   readonly #guard: Guard;
@@ -342,28 +453,66 @@ export class CloudflareWriter {
   readonly #account: string;
   readonly #zone: string;
   readonly #settings: ReadonlySet<string>;
+  readonly #now: () => Date;
+  /** Every static egress address the overlay lists (for any service). */
+  readonly #egress: ReadonlySet<string>;
+  /** Objects a checked (not yet sent) POST will create, as `<kind>:<name>`, for check() alone. */
+  readonly #planned = new Set<string>();
 
   constructor(
     api: CloudflareApi,
     guard: Guard,
     run: Run,
     overlay: Overlay,
-    settings: Iterable<string> = [],
+    options: WriterOptions,
   ) {
     this.#api = api;
     this.#guard = guard;
     this.#run = run;
     this.#account = overlay.cloudflare.accountId;
     this.#zone = overlay.cloudflare.zoneId;
-    this.#settings = new Set(settings);
+    this.#settings = new Set(options.settings ?? []);
+    this.#now = options.now;
+    this.#egress = new Set(Object.values(overlay.staticEgress).flat());
+  }
+
+  /** The object a read (or a write's answer) showed in `collection` under `id`. */
+  #seen(collection: string, id: unknown): Seen | undefined {
+    return typeof id === "string" && id !== "" ? this.#api[SEEN](collection, id) : undefined;
+  }
+
+  /** Whether a name read from Cloudflare is one Fin gives its own objects. */
+  #ownName(name: unknown): boolean {
+    try {
+      this.#guard.checkOwnName(String(name ?? ""), "object");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
    * Checks a write without sending it: the guard on the target, the endpoint and the object it
-   * names, and the body against the target. Context.applyPlan's preflight calls it for every
-   * pending change before the run registers, and write() again just before it sends.
+   * names, and the body against the target and the objects read. Context.applyPlan's preflight
+   * calls it for every pending change before the run registers, and write() again, strictly, just
+   * before it sends.
    */
   check(target: WriteTarget, method: WriteMethod, path: string, body?: unknown): void {
+    this.#check(target, method, path, body, false);
+  }
+
+  /**
+   * `sending` is false in the preflight: there, and only there, an Access application may name the
+   * policy a POST checked just before will create (its ID is not known until that POST answers;
+   * write() checks the application again with the ID it answered).
+   */
+  #check(
+    target: WriteTarget,
+    method: WriteMethod,
+    path: string,
+    body: unknown,
+    sending: boolean,
+  ): void {
     const zone = `/zones/${this.#zone}`;
     const account = `/accounts/${this.#account}`;
     const refuse = (why: string): never => {
@@ -376,8 +525,17 @@ export class CloudflareWriter {
     const noBody = (): void => {
       if (body !== undefined) refuse("a delete sends no body");
     };
-    /** A POST goes to the collection; any other method to `<collection>/<the object's id>`. */
-    const addressed = (collection: string, id: string | undefined, endpoint: string): void => {
+    /**
+     * A POST goes to the collection; any other method to `<collection>/<id>`, where `<id>` was read
+     * in that collection as the object the target names (`readAs` compares its name, pattern or
+     * ref with the target's).
+     */
+    const addressed = (
+      collection: string,
+      id: string | undefined,
+      endpoint: string,
+      readAs: (seen: Seen) => boolean,
+    ): void => {
       if (method === "POST") {
         if (path !== collection) refuse(`not ${endpoint}`);
         return;
@@ -385,6 +543,10 @@ export class CloudflareWriter {
       if (!path.startsWith(`${collection}/`)) refuse(`not ${endpoint}`);
       if (id === undefined || !OBJECT_ID.test(id) || path !== `${collection}/${id}`) {
         refuse("the path is not the ID of the object it names, as that object was read");
+      }
+      const seen = this.#seen(collection, id);
+      if (seen === undefined || !readAs(seen)) {
+        refuse("the ID was not read as the object the write names");
       }
     };
     const bodyNames = (field: string, sent: unknown, want: string): void => {
@@ -399,7 +561,12 @@ export class CloudflareWriter {
     switch (target.kind) {
       case "dns": {
         this.#guard.checkName(target.name, "dns record");
-        addressed(`${zone}/dns_records`, target.id, "the zone's DNS records endpoint");
+        addressed(
+          `${zone}/dns_records`,
+          target.id,
+          "the zone's DNS records endpoint",
+          (seen) => lowerName(seen.name) === lowerName(target.name),
+        );
         if (method === "DELETE") {
           noBody();
           return;
@@ -408,6 +575,22 @@ export class CloudflareWriter {
         bodyNames("the record", b.name, target.name);
         if (!RECORD_TYPES.has(String(b.type)))
           refuse(`pnpm fin writes no ${String(b.type)} record`);
+        if (b.type === "CNAME") {
+          // A host's record points at one of Fin's own tunnels, as read, and is proxied.
+          const tunnel = this.#seen(
+            `${account}/cfd_tunnel`,
+            TUNNEL_TARGET.exec(String(b.content ?? ""))?.[1],
+          );
+          if (tunnel === undefined || !this.#ownName(tunnel.name) || tunnel.deleted_at) {
+            refuse("a CNAME points only at one of Fin's own tunnels, as read");
+          }
+          if (b.proxied !== true) refuse("a tunnel's CNAME is proxied");
+        } else if (
+          !lowerName(target.name).startsWith("_dmarc.") ||
+          !String(b.content ?? "").startsWith("v=DMARC1;")
+        ) {
+          refuse("a TXT record is only a sending subdomain's own DMARC record");
+        }
         return;
       }
       case "route": {
@@ -416,7 +599,12 @@ export class CloudflareWriter {
         if (method === "DELETE") {
           this.#guard.checkName(patternHost(target.pattern), `route ${target.pattern}`);
         } else this.#guard.checkRoutePattern(target.pattern);
-        addressed(`${zone}/workers/routes`, target.id, "the zone's Workers routes endpoint");
+        addressed(
+          `${zone}/workers/routes`,
+          target.id,
+          "the zone's Workers routes endpoint",
+          (seen) => seen.pattern === target.pattern,
+        );
         if (method === "DELETE") {
           noBody();
           return;
@@ -440,7 +628,15 @@ export class CloudflareWriter {
         } else this.#guard.checkRuleRef(target.ref, "zone rule");
         for (const host of target.hosts) this.#guard.checkName(host, `zone rule ${target.ref}`);
         if (!OBJECT_ID.test(target.rulesetId)) refuse("not a per-rule endpoint");
-        addressed(`${zone}/rulesets/${target.rulesetId}/rules`, target.id, "a per-rule endpoint");
+        if (this.#seen(entrypointsOf(zone), target.rulesetId) === undefined) {
+          refuse("the rule set was not read (or created) as one of this zone's phase entrypoints");
+        }
+        addressed(
+          `${zone}/rulesets/${target.rulesetId}/rules`,
+          target.id,
+          "a per-rule endpoint",
+          (seen) => seen.ref === target.ref,
+        );
         if (method === "DELETE") {
           noBody();
           return;
@@ -484,8 +680,14 @@ export class CloudflareWriter {
       case "access-app": {
         this.#guard.checkOwnName(target.name, "Access application");
         this.#guard.checkName(target.host, "Access application");
+        this.#guard.checkOwnName(target.policy, "Access policy");
         if (method === "DELETE") refuse("an Access application is never deleted by pnpm fin");
-        addressed(`${account}/access/apps`, target.id, "the Access applications endpoint");
+        addressed(
+          `${account}/access/apps`,
+          target.id,
+          "the Access applications endpoint",
+          (seen) => seen.name === target.name,
+        );
         const b = object();
         if (b.name !== target.name) bodyNames("the application", b.name, target.name);
         if (b.type !== "self_hosted") refuse("Fin's Access application is self-hosted");
@@ -502,12 +704,36 @@ export class CloudflareWriter {
         if (b.cors_headers !== undefined && b.cors_headers !== null) {
           refuse("Access sends no CORS headers for Fin's application");
         }
+        // Exactly one policy, the one read (or created) under the policy's name: any other
+        // policy attached here (an Everyone allow, a bypass) would open the application.
+        const policies = Array.isArray(b.policies) ? b.policies : [];
+        const attached =
+          policies.length === 1 && isRecord(policies[0]) ? policies[0].id : undefined;
+        const policy = this.#seen(`${account}/access/policies`, attached);
+        const planned =
+          !sending && attached === "" && this.#planned.has(`access-policy:${target.policy}`);
+        if (!planned && (policy === undefined || policy.name !== target.policy)) {
+          refuse(`the application holds exactly one policy, ${target.policy}, as read`);
+        }
+        // Only login methods read from this account (an empty list would allow every method).
+        const idps = Array.isArray(b.allowed_idps) ? b.allowed_idps : [];
+        if (
+          idps.length === 0 ||
+          idps.some((idp) => this.#seen(`${account}/access/identity_providers`, idp) === undefined)
+        ) {
+          refuse("the application allows only login methods read from this account");
+        }
         return;
       }
       case "access-policy": {
         this.#guard.checkOwnName(target.name, "Access policy");
         if (method === "DELETE") refuse("an Access policy is never deleted by pnpm fin");
-        addressed(`${account}/access/policies`, target.id, "the Access policies endpoint");
+        addressed(
+          `${account}/access/policies`,
+          target.id,
+          "the Access policies endpoint",
+          (seen) => seen.name === target.name,
+        );
         const b = object();
         if (b.name !== target.name) bodyNames("the policy", b.name, target.name);
         if (b.decision !== "allow") refuse("the policy's decision is allow, nothing else");
@@ -521,13 +747,19 @@ export class CloudflareWriter {
             "the policy includes only staff addresses and email domains, never Everyone or a bare login method",
           );
         }
+        if (method === "POST" && !sending) this.#planned.add(`access-policy:${target.name}`);
         return;
       }
       case "email-domain": {
         this.#guard.checkName(target.name, "Email Sending domain");
         if (method === "DELETE")
           refuse("a sending domain is never removed by pnpm fin (DMARC first)");
-        addressed(`${zone}/email/sending/subdomains`, target.id, "the Email Sending endpoint");
+        addressed(
+          `${zone}/email/sending/subdomains`,
+          target.id,
+          "the Email Sending endpoint",
+          (seen) => lowerName(seen.name) === lowerName(target.name),
+        );
         const b = object();
         if (method === "POST") {
           if (Object.keys(b).join(",") !== "name") refuse("onboarding sends only the name");
@@ -561,7 +793,12 @@ export class CloudflareWriter {
         }
         if (method === "PUT" || method === "PATCH")
           refuse("tokens are minted and revoked, never edited");
-        addressed(`${account}/tokens`, target.id, "the account tokens endpoint");
+        addressed(
+          `${account}/tokens`,
+          target.id,
+          "the account tokens endpoint",
+          (seen) => seen.name === target.name,
+        );
         if (method === "DELETE") {
           noBody();
           return;
@@ -624,12 +861,24 @@ export class CloudflareWriter {
     }
   }
 
-  /** A token mint: this account only, exactly the declared groups, and an IP filter where needed. */
+  /**
+   * A token mint: this account only; exactly the declared groups, each read from the account's
+   * permission groups under the name it is declared with (so a group's name, which decides whether
+   * the IP filter is required, is Cloudflare's, not a label); a client IP filter of single IPv4
+   * addresses (the overlay's static egress addresses, when it lists any), required where the
+   * group needs it; and an expiry within MAX_TOKEN_DAYS of now.
+   */
   #checkToken(
     b: Record<string, unknown>,
     target: Extract<WriteTarget, { kind: "token" }>,
     refuse: (why: string) => never,
   ): void {
+    const groups = `/accounts/${this.#account}/tokens/permission_groups`;
+    for (const group of target.permissionGroups) {
+      if (this.#seen(groups, group.id)?.name !== group.name) {
+        refuse(`the permission group ${group.name} is not the one read under that name`);
+      }
+    }
     if (b.name !== target.name)
       refuse(`the body names token ${String(b.name)}, not ${target.name}`);
     const policies = Array.isArray(b.policies) ? b.policies : [];
@@ -656,14 +905,38 @@ export class CloudflareWriter {
     if (sent.size !== declared.size || [...sent].some((id) => !declared.has(id))) {
       refuse("the body's permission groups are not the ones the write declares");
     }
-    if (target.permissionGroups.some((g) => IP_FILTERED_GROUPS.has(g.name))) {
+    if (b.condition !== undefined) {
       const condition = isRecord(b.condition) ? b.condition : {};
       const ip = isRecord(condition.request_ip) ? condition.request_ip : {};
-      if (!Array.isArray(ip.in) || ip.in.length === 0) {
-        refuse("this token is never minted without its client IP filter");
+      if (Object.keys(condition).join(",") !== "request_ip" || Object.keys(ip).join(",") !== "in") {
+        refuse("a token's only condition is its client IP filter (request_ip.in)");
+      }
+      const entries = Array.isArray(ip.in) ? ip.in : [];
+      if (entries.length === 0) refuse("a client IP filter lists at least one address");
+      for (const entry of entries) {
+        const address = /^(.+)\/32$/.exec(String(entry))?.[1] ?? "";
+        if (!IPV4.test(address)) {
+          refuse("each client IP filter entry is one IPv4 address (/32), never a range");
+        }
+        if (this.#egress.size > 0 && !this.#egress.has(address)) {
+          refuse("each client IP filter entry is one of the overlay's static egress addresses");
+        }
+      }
+    } else if (target.permissionGroups.some((g) => IP_FILTERED_GROUPS.has(g.name))) {
+      refuse("this token is never minted without its client IP filter");
+    }
+    const now = this.#now().getTime();
+    const expires = typeof b.expires_on === "string" ? Date.parse(b.expires_on) : Number.NaN;
+    if (!Number.isFinite(expires)) refuse("a token is minted with an expiry");
+    if (expires <= now || expires > now + MAX_TOKEN_DAYS * DAY_MS) {
+      refuse(`a token is minted to expire within ${MAX_TOKEN_DAYS} days`);
+    }
+    if (b.not_before !== undefined) {
+      const notBefore = Date.parse(String(b.not_before));
+      if (!Number.isFinite(notBefore) || notBefore >= expires) {
+        refuse("a token's not_before comes before its expiry");
       }
     }
-    if (typeof b.expires_on !== "string") refuse("a token is minted with an expiry");
   }
 
   async write<T>(
@@ -674,7 +947,7 @@ export class CloudflareWriter {
     options: WriteOptions = {},
   ): Promise<T> {
     this.#run.assertWritable(`${method} ${target.kind}`);
-    this.check(target, method, path, body);
+    this.#check(target, method, path, body, true);
     return this.#api[SEND]<T>(method, path, body, options.redact ?? []);
   }
 }

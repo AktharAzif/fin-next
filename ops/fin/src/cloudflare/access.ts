@@ -267,6 +267,7 @@ export const accessApply: Command = {
       kind: "access-app",
       name: ctx.settings.access.application,
       host,
+      policy: ctx.settings.access.policy,
       ...(app === undefined ? {} : { id: app.id }),
     });
     // An application is only ever written back without CORS headers and with destinations alone.
