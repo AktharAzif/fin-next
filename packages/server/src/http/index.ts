@@ -1,4 +1,5 @@
 export {
+  type AccessIdentity,
   type FinContext,
   type FinEnv,
   type FinVariables,

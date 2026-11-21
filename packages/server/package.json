@@ -10,13 +10,15 @@
     "./telemetry": "./src/telemetry/index.ts",
     "./process-health": "./src/health/process-health.ts",
     "./shutdown": "./src/shutdown.ts",
+    "./health": "./src/health/readiness.ts",
     "./report": "./src/report.ts",
     "./http": "./src/http/index.ts",
     "./ingress": "./src/ingress/index.ts",
     "./dns": "./src/dns/railway-lookup.ts",
     "./fetch": "./src/fetch/delivery-fetch.ts",
     "./vite": "./src/build/vite-server.ts",
-    "./testing": "./src/testing/capture.ts"
+    "./testing": "./src/testing/capture.ts",
+    "./testing/http": "./src/testing/http.ts"
   },
   "scripts": {
     "lint": "biome check .",
