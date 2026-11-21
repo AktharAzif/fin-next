@@ -39,11 +39,13 @@ import {
   envLine,
   fieldSentence,
   lastUsedLine,
+  type ModeAbilities,
   parseAllowlist,
   SANDBOX_ONLY,
   SCOPE_ORDER,
   STATUS,
   statusLine,
+  withinRole,
 } from "./-model.ts";
 
 export interface Abilities {
@@ -53,6 +55,8 @@ export interface Abilities {
 }
 
 const ROLE_REASON = "You can’t make a key that can do more than your role.";
+const ALLOWLIST_REASON =
+  "You can’t change where a key works from while it can do more than your role.";
 
 function Radios<T extends string>(props: {
   label: string;
@@ -487,6 +491,8 @@ export function CreateKeyDialog(props: {
 /** Edit a key: its name, fewer scopes, a shorter life, its allowlist (spec 05 §4.6). */
 export function EditKeyDialog(props: {
   keyRow: KeyRow;
+  /** What the role may make in the key's mode: an allowlist change needs the key, as edited, within it. */
+  abilities: ModeAbilities | undefined;
   onClose: () => void;
   onSaved: (key: KeyRow) => void;
 }) {
@@ -500,6 +506,7 @@ export function EditKeyDialog(props: {
   const [busy, setBusy] = useState(false);
   const shorter = (days: number) =>
     k.expiresAt === null || Date.parse(k.expiresAt) > Date.now() + days * 86_400_000;
+  const allowlistLocked = !withinRole(props.abilities, k.kind, scopes);
 
   const save = async () => {
     setProblem(null);
@@ -527,6 +534,10 @@ export function EditKeyDialog(props: {
     }
     if (k.kind === "rk" && scopes.length === 0) {
       setProblem("Keep at least one scope.");
+      return;
+    }
+    if (body.ipAllowlist !== undefined && allowlistLocked) {
+      setProblem(ALLOWLIST_REASON);
       return;
     }
     setBusy(true);
@@ -607,11 +618,15 @@ export function EditKeyDialog(props: {
         <Field
           label="IP allowlist"
           optional
-          helper="Up to 20 addresses or ranges, separated by commas."
+          helper={
+            allowlistLocked
+              ? ALLOWLIST_REASON
+              : "Up to 20 addresses or ranges, separated by commas."
+          }
         >
           <Input
             value={allowlist}
-            disabled={busy}
+            disabled={busy || allowlistLocked}
             className="font-mono text-mono"
             onValueChange={setAllowlist}
           />

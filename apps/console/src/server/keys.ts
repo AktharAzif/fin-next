@@ -177,9 +177,10 @@ export const KEYS_HANDLERS = {
 } satisfies Record<string, (input: RouteInput, deps: ConsoleDeps) => Promise<RouteAnswer>>;
 
 /**
- * API keys as a credential source of the organisation area's registry (spec 02 §9.4, IF-07): the
- * working keys a leaving or demoted member made or was shown, rolled in the removal's transaction.
- * A Sandbox key rolls at once for an actor holding apiKey.sandbox, a Production key for one holding
+ * API keys as a credential source of the organisation area's registry (spec 02 §9.4, IF-07): every
+ * key a leaving or demoted member made or was shown that the edge still accepts, an old key inside a
+ * roll's overlap included, rolled in the removal's transaction (an old key's overlap is cut). A
+ * Sandbox key rolls at once for an actor holding apiKey.sandbox, a Production key for one holding
  * apiKey.live; otherwise with a 1-hour overlap (S2-42).
  */
 export function apiKeyCredentials(keys: Keys): CredentialSource {

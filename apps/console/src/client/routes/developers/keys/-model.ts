@@ -46,6 +46,34 @@ export function lastUsedLine(key: KeyRow): string {
   return key.lastUsedAt === null ? "Never used" : `Last used ${formatDay(key.lastUsedAt)}`;
 }
 
+/** Keys per page of a mode's list (the server's largest page). */
+export const KEYS_PAGE_SIZE = 100;
+
+/** How many pages a mode's list has, at least one. */
+export function pageCountOf(total: number, size = KEYS_PAGE_SIZE): number {
+  return Math.max(1, Math.ceil(total / size));
+}
+
+/** What a role may make in one mode, as `GET /api/keys` answers it (`can.test`, `can.live`). */
+export interface ModeAbilities {
+  manage: boolean;
+  fullAccess: boolean;
+  scopes: readonly string[];
+}
+
+/**
+ * Whether the role holds everything a key of this kind and these scopes can do, which an allowlist
+ * change asks of the editor, as rolling does (the server checks it again).
+ */
+export function withinRole(
+  abilities: ModeAbilities | undefined,
+  kind: KeyRow["kind"],
+  scopes: readonly string[],
+): boolean {
+  if (abilities === undefined || !abilities.manage) return false;
+  return kind === "sk" ? abilities.fullAccess : scopes.every((s) => abilities.scopes.includes(s));
+}
+
 export function environmentLabel(mode: KeyRow["mode"]): string {
   return mode === "live" ? "Production" : "Sandbox";
 }

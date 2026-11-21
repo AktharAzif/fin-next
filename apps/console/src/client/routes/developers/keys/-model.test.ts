@@ -6,11 +6,14 @@ import {
   draftProblems,
   envLine,
   fieldSentence,
+  KEYS_PAGE_SIZE,
   lastUsedLine,
+  pageCountOf,
   parseAllowlist,
   SCOPE_ORDER,
   STATUS,
   statusLine,
+  withinRole,
 } from "./-model.ts";
 
 const base = keyRow.parse({
@@ -92,6 +95,26 @@ describe("the form", () => {
     expect(fieldSentence("name", "web_address").field).toBe("name");
     expect(SCOPE_ORDER).toHaveLength(8);
     expect(envLine("x")).toBe("FIN_KEY=x");
+  });
+});
+
+describe("paging and the role", () => {
+  it("pages a mode's list by the server's largest page, at least one page", () => {
+    expect(KEYS_PAGE_SIZE).toBe(100);
+    expect(pageCountOf(0)).toBe(1);
+    expect(pageCountOf(100)).toBe(1);
+    expect(pageCountOf(101)).toBe(2);
+    expect(pageCountOf(250)).toBe(3);
+  });
+
+  it("reads whether the role holds a key, as an allowlist change asks", () => {
+    const role = { manage: true, fullAccess: false, scopes: ["customers:read", "money:read"] };
+    expect(withinRole(role, "rk", ["customers:read"])).toBe(true);
+    expect(withinRole(role, "rk", ["customers:read", "money:write"])).toBe(false);
+    expect(withinRole(role, "sk", [])).toBe(false);
+    expect(withinRole({ ...role, fullAccess: true }, "sk", [])).toBe(true);
+    expect(withinRole({ ...role, manage: false }, "rk", ["customers:read"])).toBe(false);
+    expect(withinRole(undefined, "rk", ["customers:read"])).toBe(false);
   });
 });
 
