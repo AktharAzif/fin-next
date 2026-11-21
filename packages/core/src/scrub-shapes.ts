@@ -6,11 +6,15 @@
 //     back off to a shorter run that is kept, and removes it when it is address-shaped: it holds
 //     `::` or eight groups or more, whatever stands beside it. So an RFC 3339 time ("09:48:23") or
 //     a MAC address is never mistaken for an address, while "ip:<address>", "<address>:443" (as
-//     Node writes a host and port) and an address run together with a word are removed. A run of
-//     one group or none with a letter beside it is a scope operator ("std::vector") and is kept;
+//     Node writes a host and port), an address after a percent escape ("%20<address>") and an
+//     address run together with a word are removed. A run of one group or none with a letter
+//     beside it is a scope operator ("std::vector") and is kept. A zone goes with the run only
+//     where no letter, digit or colon follows it, so a zone never takes the start of an address
+//     after it ("%eth0:<address>");
 //   - IPV4 is bounded by digits, not by word boundaries, so a letter or `_` beside an address does
-//     not keep it ("ip_<address>"). DIGITS keeps the table's `\b`: digits inside a word belong to
-//     a digest (the release, on every line) or an ID;
+//     not keep it ("ip_<address>"), and the digits of a percent escape do not either
+//     ("%20<address>"). DIGITS keeps the table's `\b`: digits inside a word belong to a digest
+//     (the release, on every line) or an ID;
 //   - EMAIL starts only where a run of local-part characters starts, so a long run with no `@`
 //     costs one pass, not one pass per character (the unanchored form is quadratic);
 //   - TOKEN_JSON also takes `+`, `/` and `=`, so a tunnel token (standard base64 of JSON) is removed
@@ -159,8 +163,9 @@ export const EMAIL: Shape = {
 
 export const IPV4: Shape = {
   name: "ipv4",
-  // Bounded by digits rather than by word boundaries: "ip_<address>" and "<address>in" lose it.
-  pattern: /(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)/gu,
+  // Bounded by digits rather than by word boundaries: "ip_<address>" and "<address>in" lose it. A
+  // percent escape's digits are not the address's ("%2010.1.2.3" is an encoded space before one).
+  pattern: /(?:(?<!\d)|(?<=%[0-9A-Fa-f]{2}))(?:\d{1,3}\.){3}\d{1,3}(?!\d)/gu,
   token: "[ip]",
 };
 
@@ -214,10 +219,13 @@ function ipv6Token(match: string, at: ShapeMatch): string {
 
 export const IPV6: Shape = {
   name: "ipv6",
-  // The whole run of hex digits and colons holding a colon, with its zone: the lookbehind starts it
-  // at the run's first character and the greedy parts end it at the run's last, so there is no
-  // shorter candidate to back off to; ipv6Token decides.
-  pattern: /(?<![0-9A-Fa-f:])[0-9A-Fa-f]*:[0-9A-Fa-f:]*(?:%[0-9A-Za-z]+)?/gu,
+  // The whole run of hex digits and colons holding a colon: the lookbehind starts it at the run's
+  // first character and the greedy parts end it at the run's last, so there is no shorter
+  // candidate to back off to; ipv6Token decides. A zone joins the run only where no letter, digit
+  // or colon follows it: a run that is kept is returned with its zone, so a zone that ran on into
+  // more hex digits and colons ("%20<address>", "%eth0:<address>") would keep the address it took
+  // the start of. A zone's letters and digits hold no colon, so taken this way it hides nothing.
+  pattern: /(?<![0-9A-Fa-f:])[0-9A-Fa-f]*:[0-9A-Fa-f:]*(?:%[0-9A-Za-z]+(?![0-9A-Za-z:]))?/gu,
   token: ipv6Token,
 };
 

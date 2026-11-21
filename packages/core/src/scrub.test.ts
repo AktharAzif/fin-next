@@ -309,6 +309,37 @@ describe("scrubText", () => {
     }
   });
 
+  it("removes an address after a percent escape or a zone, whatever ran on before it", () => {
+    // Percent-encoded text whose colons stay literal (encodeURI, a URL as a proxy logs it): an
+    // escape's hex digits stand right before the address. A zone ran on into the next address.
+    const full = ["2001", "db8", "85a3", "0", "0", "8a2e", "370", "7334"].join(":");
+    const v4 = ["10", "1", "2", "3"].join(".");
+    const v4b = ["203", "0", "113", "7"].join(".");
+    for (const [text, expected] of [
+      [encodeURI("peer: 2001:db8::8a2e:7334"), "peer:%[ip]"],
+      [`at%2009:48:23%20${full}:443`, "at%2009:48:23%[ip]"],
+      ["load:%2001:db8::8a2e:7334", "load:%[ip]"],
+      ["fe80::1%eth0:2001:db8::8a2e:7334", "[ip]%eth[ip]"],
+      ["2001:db8::1%2C2001:db8::2", "[ip]%[ip]"],
+      ["fe80::1%25eth0 up", "[ip] up"],
+      ["x::1%eth0:2001:db8::1", "x::1%eth[ip]"],
+      [encodeURI(`peer ${v4}`), "peer%20[ip]"],
+      [encodeURI(`peer ${v4b} refused`), "peer%20[ip]%20refused"],
+      [`x%30${v4b}`, "x%30[ip]"],
+      [encodeURI(`via 2001:db8::1 ${v4}`), "via%[ip][ip]"],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+    }
+    // A zone after a run that is kept stays, and so does what follows it.
+    for (const keep of ["x::1%eth0", "at%2009:48:23", "ratio 16:9%20ok", "std::vector%3Cint%3E"]) {
+      expect(scrubText(keep), keep).toBe(keep);
+    }
+    const detail = encodeURI("peer: 2001:db8::8a2e:7334");
+    expect(scrubLine({ event: "x", message: "x", detail }).detail).toBe("peer:%[ip]");
+    expect(() => assertNoPersonalShapes({ detail })).toThrow();
+    expect(() => assertNoPersonalShapes({ detail: encodeURI(`peer ${v4}`) })).toThrow();
+  });
+
   it("removes an IPv4 address whatever letter or _ stands beside it", () => {
     for (const [text, expected] of [
       ["x203.0.113.7", "x[ip]"],
@@ -365,10 +396,15 @@ describe("scrubText", () => {
       "email, @ after @": fill("@a"),
       "email, a long domain": `a@${fill("a.")}`,
       "IPv4, dots and no end": fill("1.1.1."),
+      "IPv4, escapes and dots": fill("%201.1."),
       "IPv6, hex and colons and no end": fill("a:", "g"),
       "IPv6, compressed runs": fill("1::", "x"),
       "IPv6, hex and no colon": fill("0123456789abcdef"),
       "IPv6, zones": fill("::1%a"),
+      "IPv6, one long zone": `::1%${fill("a")}`,
+      "IPv6, one long zone and a colon": `::1%${fill("g")}:`,
+      "IPv6, zones that run on": fill("::1%a:"),
+      "IPv6, escapes between runs": fill("1::1%20"),
       "IPv6, colons then a hex digit": fill(":", "a"),
       "IPv6, a hex digit between colons": `${fill(":")}a${fill(":")}`,
       "IPv6, colons and no hex": fill(":"),
@@ -578,11 +614,11 @@ describe("scrubLine", () => {
     const rand = prng(20261121);
     const keys = ["route", "reason", "detail_text", "items", "note_list", "context", "status"];
     // Shapes are planted between neighbours a log line really has: spaces, a label's colon, an
-    // assignment, list and call punctuation, a host and port, a sentence's end; and glued to a
-    // word, as text run together leaves them.
-    const glued = ["x", "in", "Z", "_"];
-    const before = [" ", ":", "=", ",", "(", "[", "ip:", "for ", ...glued];
-    const after = [" ", ":", ",", ")", "]", ";", ".", ":443", ...glued];
+    // assignment, list and call punctuation, a host and port, a sentence's end, percent escapes
+    // and a zone; and glued to a word, as text run together leaves them ("%5B" ends in a letter).
+    const glued = ["x", "in", "Z", "_", "%5B"];
+    const before = [" ", ":", "=", ",", "(", "[", "ip:", "for ", "%20", "%", "%eth0:", ...glued];
+    const after = [" ", ":", ",", ")", "]", ";", ".", ":443", "%20", ...glued];
     const choose = (list: readonly string[], sample: Sample): string => {
       const usable = sample.wordBound ? list.filter((item) => !glued.includes(item)) : list;
       return usable[Math.floor(rand() * usable.length)] ?? " ";
