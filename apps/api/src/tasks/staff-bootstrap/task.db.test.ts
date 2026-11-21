@@ -4,7 +4,7 @@
 // its events with actor `operator`, `via: operator`; the code itself never reaches the database.
 import { createHash } from "node:crypto";
 import { createIdSource, type UnitTx } from "@fin/db";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // The staff area's test platform (packages/staff, L-SAT-04): P0-E's bootstrap and runner with the
 // identity and staff migrations and grants. Read by path: apps/api does not list @fin/staff.
 import {
@@ -16,17 +16,12 @@ import { EXIT_FAILED, runMigrateCli } from "../../migrate/main.ts";
 import { TaskError } from "../run.ts";
 import { staffBootstrap } from "./task.ts";
 
-// `migrate --task` finds a task in the registry, which lists staff-bootstrap once its one line is
-// added there (the pull request's open item); until then this file registers it, so a refusal is
-// read where the operator reads it: migrate's `task.failed` line.
-const registered = vi.hoisted(() => ({}) as Record<string, unknown>);
-vi.mock("../registry.ts", () => ({ TASKS: registered }));
-
+// `migrate --task staff-bootstrap` below finds the task in the real registry, as the image does: a
+// refusal is read where the operator reads it, migrate's `task.failed` line, never `task_unknown`.
 let platform: StaffPlatform;
 let su: PlatformClient;
 
 beforeAll(async () => {
-  registered[staffBootstrap.name] = staffBootstrap;
   platform = await createStaffPlatform("sat04task");
   su = await platform.superuser();
 }, 120_000);

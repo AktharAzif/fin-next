@@ -4,16 +4,9 @@
 import { recordAudit } from "@fin/audit";
 import type { FinDatabase, LineSink, UnitContext } from "@fin/db";
 import { TASKS } from "./registry.ts";
-import type { TaskContext, TaskResult } from "./types.ts";
+import { type TaskContext, TaskError, type TaskResult } from "./types.ts";
 
-export class TaskError extends Error {
-  override readonly name = "TaskError";
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-  }
-}
+export { TaskError };
 
 export function parseTaskParams(text: string | undefined): unknown {
   if (text === undefined || text === "") return {};
@@ -30,7 +23,8 @@ export async function runTask(
   rawParams: unknown,
   context: TaskContext & { unit: UnitContext; log: LineSink },
 ): Promise<TaskResult> {
-  const task = TASKS[name];
+  // Only the registry's own names: `constructor` and the rest of Object.prototype are unknown too.
+  const task = Object.hasOwn(TASKS, name) ? TASKS[name] : undefined;
   if (task === undefined) throw new TaskError("task_unknown", `no task named ${name}`);
   const parsed = task.params.safeParse(rawParams);
   if (!parsed.success) {

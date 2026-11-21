@@ -9,12 +9,8 @@
 // `staff.enrolment_code_issued` and `staff.bootstrapped` with actor `operator`, `via: operator`.
 // The answer and the `task.done` line are IDs only. A refusal is a TaskError carrying the task's
 // own code, which `migrate` prints as `task.failed`'s `code` for the operator.
-//
-// TaskError is used only while the task runs, never while this module loads: run.ts reads the
-// registry, which lists this task, so the two modules import each other.
 import { z } from "zod";
-import { TaskError } from "../run.ts";
-import { defineTask } from "../types.ts";
+import { defineTask, TaskError } from "../types.ts";
 
 /** What the database refuses with, as the task's own failure codes (never a value). */
 export const BOOTSTRAP_REFUSALS: Readonly<Record<string, string>> = {
