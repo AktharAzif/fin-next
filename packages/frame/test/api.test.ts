@@ -365,6 +365,42 @@ describe("api()", () => {
     });
   });
 
+  it("keeps the hooks a later configure call does not name", async () => {
+    const { stepUp, settled } = (() => {
+      const outcomes: string[] = [];
+      const proof: StepUpProof = { intentId: "sti_1", settle: (outcome) => outcomes.push(outcome) };
+      return { stepUp: vi.fn(async () => proof), settled: outcomes };
+    })();
+    const unauthenticated = vi.fn();
+    const answers = [
+      problem(403, "step_up_required", {
+        step_up_kind: "intent",
+        intent_id: "sti_1",
+        methods: ["passkey"],
+        reason_key: "team.invite",
+      }),
+      json(201, { invitationId: "inv_1" }),
+      problem(401, "unauthenticated"),
+    ];
+    const fetchImpl = vi.fn(async () => answers.shift() ?? new Response(null, { status: 500 }));
+    const { api, configure } = createApiClient({
+      app: "console",
+      fetch: fetchImpl as unknown as typeof fetch,
+      randomUUID: () => GENERATED_KEY,
+    });
+    configure({ stepUp, unauthenticated });
+    // A lane adds one reaction of its own later; the frame's stay.
+    const freshSessionRequired = vi.fn();
+    configure({ freshSessionRequired });
+    await expect(
+      api(inviteMember, { email: "a@example.com", roleKey: "developer" }),
+    ).resolves.toEqual({ invitationId: "inv_1" });
+    expect(stepUp).toHaveBeenCalledOnce();
+    expect(settled).toEqual(["done"]);
+    await api(health, {}).catch(() => {});
+    expect(unauthenticated).toHaveBeenCalledOnce();
+  });
+
   it("on Fin Admin, does not follow redirects and reloads on an opaque one", async () => {
     const opaqueRedirect = vi.fn();
     const opaque = {

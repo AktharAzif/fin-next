@@ -14,6 +14,7 @@ export {
 export { ApiError, type ApiErrorKind, isApiError, isUnreachable } from "./api/errors.ts";
 export { buildRequest, parseRetryAfter } from "./api/request.ts";
 export { signOut } from "./api/sign-out.ts";
+export { type FrameApiHooksInput, frameApiHooks, routeFrame } from "./boot/api-hooks.ts";
 export { adminGate, consoleGate } from "./boot/gates.ts";
 export {
   adminHome,
@@ -100,6 +101,7 @@ export {
   type StepUpContentProps,
   type StepUpController,
   StepUpHost,
+  type StepUpNotice,
   type StepUpState,
   type StepUpStatus,
 } from "./step-up/step-up.tsx";

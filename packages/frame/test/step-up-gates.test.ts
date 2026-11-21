@@ -22,11 +22,11 @@ describe("the StepUp controller", () => {
     const controller = createStepUpController();
     controller.attach(true);
     const pending = controller.request(required);
-    expect(controller.state.get()).toEqual({ required, status: "asking" });
+    expect(controller.state.get()).toEqual({ kind: "proof", required, status: "asking" });
     controller.prove("sti_1");
     const proof = await pending;
     expect(proof?.intentId).toBe("sti_1");
-    expect(controller.state.get()?.status).toBe("sending");
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "sending" });
     proof?.settle("done");
     expect(controller.state.get()).toBeNull();
   });
@@ -39,7 +39,7 @@ describe("the StepUp controller", () => {
     const proof = await pending;
     proof?.settle("invalid");
     proof?.settle("done");
-    expect(controller.state.get()?.status).toBe("invalid");
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "invalid" });
     controller.cancel();
     expect(controller.state.get()).toBeNull();
   });
@@ -85,7 +85,7 @@ describe("the StepUp controller", () => {
     const first = controller.request(required);
     controller.prove("sti_1");
     const proof = await first;
-    expect(controller.state.get()?.status).toBe("sending");
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "sending" });
     await expect(controller.request(later)).resolves.toBeNull();
     proof?.settle("done");
     expect(controller.state.get()).toBeNull();
@@ -111,6 +111,40 @@ describe("the StepUp controller", () => {
       secondProof?.settle("done");
       expect(controller.state.get()).toBeNull();
     }
+  });
+
+  it("opens its notices (StepUp board) for the answers that need a factor first", () => {
+    const controller = createStepUpController();
+    controller.notify("second_factor_required");
+    expect(controller.state.get()).toBeNull(); // no content mounted: the screen shows the refusal
+    controller.attach(true);
+    for (const notice of ["second_factor_required", "fresh_session_required"] as const) {
+      controller.notify(notice);
+      expect(controller.state.get()).toEqual({ kind: "notice", notice });
+      controller.cancel();
+      expect(controller.state.get()).toBeNull();
+    }
+  });
+
+  it("never lets a notice replace a request that is asking or sending", async () => {
+    const controller = createStepUpController();
+    controller.attach(true);
+    const pending = controller.request(required);
+    controller.notify("fresh_session_required");
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "asking" });
+    controller.prove("sti_1");
+    const proof = await pending;
+    controller.notify("second_factor_required");
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "sending" });
+    // Once the re-send has answered, the notice may take the dialog.
+    proof?.settle("failed");
+    controller.notify("second_factor_required");
+    expect(controller.state.get()).toEqual({ kind: "notice", notice: "second_factor_required" });
+    // A proof asked for later replaces a notice, and an old outcome never touches either.
+    const next = controller.request(required);
+    expect(controller.state.get()).toMatchObject({ kind: "proof", status: "asking" });
+    controller.cancel();
+    await expect(next).resolves.toBeNull();
   });
 
   it("ignores a proof's outcome once the content has unmounted and a new request is open", async () => {

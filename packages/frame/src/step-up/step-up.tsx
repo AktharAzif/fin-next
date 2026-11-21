@@ -6,6 +6,11 @@
 // work. Try again."), or failed. One request at a time: a second that asks while one is asking or
 // its re-send is in flight is refused, and each outcome reaches only the request it was proved for,
 // so a late answer can never close or change a request opened after it.
+//
+// The same dialog has two notices of its own (the StepUp board's "add a second factor first" and
+// "sign in by email to add a second factor"): `403 second_factor_required` without a hold, and
+// `403 fresh_session_required`, open them through `notify`. A notice asks for no proof; nobody
+// waits on it, and the call that met it fails to its screen as before.
 import type { StepUpRequired } from "@fin/app-contracts";
 import { type ReactNode, useEffect } from "react";
 import type { StepUpProof } from "../api/client.ts";
@@ -13,15 +18,25 @@ import { createStore, type Store, useStore } from "../runtime/store.ts";
 
 export type StepUpStatus = "asking" | "sending" | "invalid" | "failed";
 
-export interface StepUpState {
-  readonly required: StepUpRequired;
-  readonly status: StepUpStatus;
-}
+/** The answers that need a factor before any proof can be given (spec 02 §6.3, §7.5). */
+export type StepUpNotice = "second_factor_required" | "fresh_session_required";
+
+export type StepUpState =
+  /** A proof for the named intent or window, and how its re-send went. */
+  | {
+      readonly kind: "proof";
+      readonly required: StepUpRequired;
+      readonly status: StepUpStatus;
+    }
+  /** One of the dialog's notices; Close is the only way on. */
+  | { readonly kind: "notice"; readonly notice: StepUpNotice };
 
 export interface StepUpController {
   /** For `api()`'s `stepUp` hook. Resolves null at once when no modal content is mounted. */
   request(required: StepUpRequired): Promise<StepUpProof | null>;
-  /** The open request, or null. */
+  /** Opens one of the dialog's notices, unless a proof is asking or sending. */
+  notify(notice: StepUpNotice): void;
+  /** What the dialog shows, or null. */
   readonly state: Store<StepUpState | null>;
   /** The modal content calls this after the ceremony succeeded (null intent for a window). */
   prove(intentId: string | null): void;
@@ -36,10 +51,16 @@ interface Ticket {
   waiting: ((proof: StepUpProof | null) => void) | null;
 }
 
+/** True while the dialog holds a proof that is not finished: it may not be replaced. */
+function busy(state: StepUpState | null): boolean {
+  return state?.kind === "proof" && (state.status === "asking" || state.status === "sending");
+}
+
 export function createStepUpController(): StepUpController {
   const state = createStore<StepUpState | null>(null);
   let attached = false;
-  // The request the dialog shows, or null. Every change checks it is still the same ticket.
+  // The request the dialog shows, or null (nothing open, or a notice). Every change to a proof
+  // checks it is still the same ticket.
   let current: Ticket | null = null;
 
   /** Closes the dialog: the waiting api() call (if any) hears null, a late outcome is ignored. */
@@ -56,26 +77,28 @@ export function createStepUpController(): StepUpController {
     state,
     attach(next) {
       attached = next;
-      if (!next && current !== null) close();
+      if (!next && state.get() !== null) close();
     },
     request(required) {
-      const open = state.get();
-      if (!attached || open?.status === "asking" || open?.status === "sending") {
-        return Promise.resolve(null);
-      }
-      // A finished request still on screen ("That didn't work") gives way to the new one.
+      if (!attached || busy(state.get())) return Promise.resolve(null);
+      // A finished request still on screen ("That didn't work") or a notice gives way.
       const ticket: Ticket = { waiting: null };
       current = ticket;
-      state.set({ required, status: "asking" });
+      state.set({ kind: "proof", required, status: "asking" });
       return new Promise<StepUpProof | null>((resolve) => {
         ticket.waiting = resolve;
       });
+    },
+    notify(notice) {
+      if (!attached || busy(state.get())) return;
+      current = null;
+      state.set({ kind: "notice", notice });
     },
     prove(intentId) {
       const ticket = current;
       const open = state.get();
       const waiting = ticket?.waiting ?? null;
-      if (ticket === null || open === null || waiting === null) return;
+      if (ticket === null || open?.kind !== "proof" || waiting === null) return;
       ticket.waiting = null;
       state.set({ ...open, status: "sending" });
       let settled = false;
@@ -84,10 +107,10 @@ export function createStepUpController(): StepUpController {
         settle(outcome) {
           if (settled) return;
           settled = true;
-          // The dialog was closed, or now shows a later request: this outcome is not its own.
+          // The dialog was closed, or now shows something later: this outcome is not its own.
           if (current !== ticket) return;
           const shown = state.get();
-          if (shown === null) return;
+          if (shown?.kind !== "proof") return;
           if (outcome === "done") {
             current = null;
             state.set(null);
@@ -106,7 +129,7 @@ export function createStepUpController(): StepUpController {
 export interface StepUpContentProps {
   readonly state: StepUpState;
   prove(intentId: string | null): void;
-  /** Closes the modal; after `invalid` or `failed` it is the only way out (never a loop). */
+  /** Closes the modal; after `invalid`, `failed` or a notice it is the only way out (never a loop). */
   close(): void;
 }
 

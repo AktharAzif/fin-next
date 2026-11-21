@@ -17,13 +17,12 @@ import { createApiClient } from "../api/client.ts";
 import { loadEnv } from "../env/env.ts";
 import { createReleaseWatch, installPreloadErrorReload } from "../release/release.ts";
 import { installGlobalErrorReporting, reportBrowserError } from "../report/report.ts";
-import { deepestStaticData } from "../router/matches.ts";
-import { signInHref } from "../router/next.ts";
 import type { FrameKind } from "../router/static-data.ts";
 import { type FinRouterContext, type FinRuntime, FinRuntimeProvider } from "../runtime/runtime.tsx";
 import { createStore } from "../runtime/store.ts";
 import { createViewerStore, fetchViewer } from "../runtime/viewer.ts";
 import { createStepUpController } from "../step-up/step-up.tsx";
+import { frameApiHooks } from "./api-hooks.ts";
 import { routeMatcher } from "./root.tsx";
 
 export interface StartOptions<C extends AppContract> {
@@ -123,36 +122,22 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
   };
   const router = options.createRouter({ fin: runtime });
   matches = routeMatcher(router);
-  const frameNow = () => deepestStaticData(router.state.matches)?.frame ?? options.fallbackFrame;
-  const go = (href: string) => {
-    void router.navigate({ href, replace: true });
-  };
 
-  client.configure({
-    stepUp: (required) => runtime.stepUp.request(required),
-    unauthenticated: () => {
-      // On an `auth` route a 401 is the call's own answer and goes to the page.
-      if (frameNow() !== "app") return;
-      viewer.set(null);
-      const { pathname, search } = window.location;
-      go(
-        options.app === "admin"
-          ? "/sign-in?ended=1"
-          : signInHref({ pathname, search }, matches, { signedOut: true }),
-      );
-    },
-    secondFactorRequired: (hold) => {
-      if (hold && options.app === "console") go("/welcome/secure");
-    },
-    factorStepRequired: () =>
-      go(options.app === "admin" ? "/sign-in/factor" : "/sign-in/two-factor"),
-    release: createReleaseWatch(envResult.env.release, (release) => {
-      runtime.newRelease.set(release);
-      showReleaseToast();
+  client.configure(
+    frameApiHooks({
+      app: options.app,
+      router,
+      fallbackFrame: options.fallbackFrame,
+      viewer,
+      stepUp: runtime.stepUp,
+      release: createReleaseWatch(envResult.env.release, (release) => {
+        runtime.newRelease.set(release);
+        showReleaseToast();
+      }),
+      reload: () => window.location.reload(),
+      report: reportBrowserError,
     }),
-    opaqueRedirect: () => window.location.reload(),
-    report: reportBrowserError,
-  });
+  );
 
   reactRoot.render(
     <FinRuntimeProvider runtime={runtime as FinRuntime}>

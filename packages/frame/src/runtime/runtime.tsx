@@ -14,6 +14,10 @@ export interface FinRuntime<V = unknown> {
   readonly app: AppName;
   readonly env: FinEnv;
   readonly api: Api;
+  /**
+   * Adds or replaces the api() hooks it names. The frame's own (spec 06 §2.4's whole table) are in
+   * place from boot; a hook not named here stays as the frame installed it.
+   */
   configureApi(hooks: ApiHooks): void;
   readonly viewer: ViewerStore<V>;
   readonly stepUp: StepUpController;

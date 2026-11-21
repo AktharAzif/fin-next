@@ -41,11 +41,14 @@ export interface ApiHooks {
   stepUp?: (required: StepUpRequired) => Promise<StepUpProof | null>;
   /** A 401: on an `app`-frame route the session has gone; on an `auth` route it is the answer. */
   unauthenticated?: (problem: Problem) => void;
-  /** `second_factor_required`; `hold` sends the person to `/welcome/secure`. */
+  /**
+   * `second_factor_required`: the root dialog's "Add a second factor first"; with `hold`, the
+   * console sends the person to `/welcome/secure` instead.
+   */
   secondFactorRequired?: (hold: boolean) => void;
   /** `factor_step_required`: back to the sign-in's factor step. */
   factorStepRequired?: () => void;
-  /** `fresh_session_required`: "Sign in by email to add a second factor". */
+  /** `fresh_session_required`: the root dialog's "Sign in by email to add a second factor". */
   freshSessionRequired?: () => void;
   /** Every answer's `Fin-Release`; the frame compares it with env.json's release (FW-C13). */
   release?: (release: string) => void;
@@ -86,7 +89,11 @@ export type Api = <C extends AppContract>(
 
 export interface ApiClient {
   api: Api;
-  /** The frame installs its hooks once its root has mounted; later calls replace earlier ones. */
+  /**
+   * Adds or replaces the hooks it names; every hook it does not name stays as it was. The frame
+   * installs its own at boot (startApp), so a later call from an app can never switch off the
+   * step-up re-send, the sign-in redirect or the release toast by leaving them out.
+   */
   configure(hooks: ApiHooks): void;
 }
 
@@ -288,7 +295,7 @@ export function createApiClient(config: ApiConfig): ApiClient {
   return {
     api,
     configure(next) {
-      hooks = { ...next };
+      hooks = { ...hooks, ...next };
     },
   };
 }
