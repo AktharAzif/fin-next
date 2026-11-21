@@ -254,7 +254,9 @@ test("@journey closing Confirm it's you resets nothing; a refusal after the proo
   await stepUpDialog(page).getByRole("button", { name: "Cancel" }).click();
   await expect(stepUpDialog(page)).toBeHidden();
   await expect(confirm).toBeVisible();
-  await expect(confirm.getByRole("alert")).toHaveCount(0);
+  // The dialog draws a refusal as the kit's InlineAlert (it speaks through the page's one live
+  // region and has no alert role of its own): none is drawn.
+  await expect(confirm.locator("[data-slot=inline-alert]")).toHaveCount(0);
   await confirm.getByRole("button", { name: "Cancel" }).click();
   await dialogsGone(page);
   expect((await server.audit()).map((e) => e.event)).not.toContain("staff.factors_reset");

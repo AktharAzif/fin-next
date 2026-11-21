@@ -55,7 +55,8 @@ test("@journey closing Confirm it's you adds nobody", async ({
   await stepUpDialog(page).getByRole("button", { name: "Cancel" }).click();
   await expect(stepUpDialog(page)).toBeHidden();
   await expect(add).toBeVisible();
-  await expect(add.getByRole("alert")).toHaveCount(0);
+  // A refusal is drawn as the kit's InlineAlert, which has no alert role of its own: none is drawn.
+  await expect(add.locator("[data-slot=inline-alert]")).toHaveCount(0);
   await add.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("row").filter({ hasText: mei })).toHaveCount(0);
   expect((await server.audit()).map((e) => e.event)).not.toContain("staff.member_added");
