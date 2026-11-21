@@ -95,16 +95,23 @@ the bytes on the disk) and whether it was the default branch's engine copy.
 - **Units, by content.** A code file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
   `.cjs`) is always a unit, whatever its name or bytes. A path that `exclusions.json` names is left
   out only when its bytes are what the name says: the pnpm lockfile, a source map, or an image or a
-  font laid out end to end as the format its extension names (every PNG chunk with its CRC up to
-  IEND, every JPEG segment up to EOI, every GIF block up to the trailer, and the RIFF, box, directory
-  and table structures of WebP, AVIF, ICO, BMP, TrueType and OpenType, WOFF, WOFF2 and EOT), with
-  nothing after the format's end, and never bytes the engine would read as text. A planted header,
-  a format's first bytes in front of other content, or one format under another's extension is not
-  an image or a font. What no layout check can rule out is a real image that also carries text in a
-  part the format leaves free; such a file is still never sent to a model, so whatever reads or runs
-  it is the reviewed code. A file with a NUL in its first 8,000 bytes is binary; every other file is
-  a unit, decoded as UTF-8 with any invalid byte replaced, so one stray byte never takes it out of
-  the review. A symbolic link is a unit holding its target, with the target one hop away; a
+  font laid out end to end as the format its extension names, every byte in a structure the walk
+  reads (every PNG chunk with its CRC up to IEND, every JPEG segment up to EOI, every GIF block up to
+  the trailer, WebP's RIFF chunks, an AVIF still image's boxes with its item locations covering all
+  of its media data, an ICO's images and a bitmap's header, palette and rows end to end, a font's
+  tables end to end), only zero padding between them, nothing after the format's end, and never
+  bytes the engine would read as text. A font's compressed parts (WOFF's zlib tables and metadata,
+  WOFF2's brotli stream and metadata, an EOT's XOR obfuscation) are decoded and must come out at
+  exactly their stated lengths, every compressed byte read; what the walk cannot read (an AVIF
+  sequence, a compressed EOT, a bitmap with run-length compression or a colour profile, a font
+  collection) is not exempt. A planted header, a format's first bytes in front of other content, a
+  length field that covers bytes no structure holds, or one format under another's extension is not
+  an image or a font. What no layout check can rule out is a real image that also carries content in
+  a part the format leaves free (coded pixel or glyph data, which is never decoded, a comment,
+  metadata, a WOFF private block); such a file is still never sent to a model, so whatever reads or
+  runs it is the reviewed code. A file with a NUL in its first 8,000 bytes is binary; every other
+  file is a unit, decoded as UTF-8 with any invalid byte replaced, so one stray byte never takes it
+  out of the review. A symbolic link is a unit holding its target, with the target one hop away; a
   submodule is never a unit. Every changed path that is not a unit (deleted, excluded, binary, a
   submodule, missing) is named with its reason in every lens's context, in `plan.json`,
   `result.json` (`notUnits`) and `summary.md`; test-truth also gets the text of every test the
@@ -128,8 +135,9 @@ the bytes on the disk) and whether it was the default branch's engine copy.
 - **Prior blockers.** Every run, `pr` and an escalated `commit` included, carries the blockers left
   open by the newest gating run of the pull request at the head or at one of its ancestors. Each is
   shown again (as `P1`, `P2`, ...) to the lens that found it, with `fixMayBeIn`: the files where a
-  fix of it may lie (and `quotedCodeAlsoIn`, below). A blocker closes in two steps. First the engine must accept the lens's `fixed`
-  claim: a `fixWhere` and a `fixQuote` from the same file, the quote within those lines and touching
+  fix of it may lie (and `quotedCodeAlsoIn`, below). A blocker closes in two steps. First the engine
+  must accept the lens's `fixed` claim: a `fixWhere` and a `fixQuote` from the same file, the quote
+  within those lines and touching
   a line that changed since the blocker was found (compared with the file before its rename, so a
   file moved as it was has no changed line), in a file tied to the blocker: one it names (or that
   file renamed since, found with git's rename detection), a file changed since in which the code
@@ -146,8 +154,9 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   comment holding the old line hides a move; an unrelated line that matches the quote looks like
   one), so the engine never refuses a claim on that ground: it follows the quoted code, and the fix
   check judges it. A confirmation, an UNSURE, an unguarded refutation or a check that could not run
-  keeps it open (a model mismatch or a budget stop in a check makes the run could-not-check). Text that was already there cannot be a fix, so a run on an unchanged head,
-  or a changed line of a file unrelated to the blocker, closes nothing; silence keeps a blocker open.
+  keeps it open (a model mismatch or a budget stop in a check makes the run could-not-check). Text
+  that was already there cannot be a fix, so a run on an unchanged head, or a changed line of a file
+  unrelated to the blocker, closes nothing; silence keeps a blocker open.
   A claim the engine cannot accept keeps the blocker open without failing the lens (its reasons are
   in `findings.json`); a claim whose place or quote is not in the tree is a wrong answer, which fails
   the output as any finding's would. A claim counts only in an output the engine accepted whole: a

@@ -4,21 +4,30 @@
 // end to end as the format its extension names, the pnpm lockfile, or a source map. Anything else
 // is reviewed, or, when it cannot be, counted as a file no lens saw.
 //
-// An image or a font is walked from its first byte to its last: every chunk, box, block, segment
-// or table the format defines, each within the file, the walk ending exactly at the file's end
-// (PNG's chunk CRCs included). A few planted magic bytes, a valid header in front of other content,
-// or bytes left over after the format ends never pass. A media-named file the inventory would read
-// as text (all valid UTF-8, no NUL in its first 8,000 bytes) is never exempt either: real image and
-// font data is not text, so such a file is reviewed as text.
+// An image or a font is walked from its first byte to its last, and every byte must belong to a
+// structure the format defines and the walk reads: each PNG chunk with its CRC, JPEG segment, GIF
+// block, RIFF chunk; an AVIF's boxes, with its item locations covering every byte of the media data;
+// an ICO's images and a bitmap's header, palette and rows, end to end; a font's tables end to end.
+// Only zero bytes may pad between them (where the format aligns) or after a bitmap's rows. A font's
+// compressed parts are decompressed and must come out at exactly their stated lengths with every
+// compressed byte read (WOFF's zlib tables and metadata, WOFF2's brotli stream and metadata, an EOT's
+// XOR obfuscation undone). A layout the walk cannot read is never exempt: an AVIF image sequence, an
+// EOT compressed with MicroType Express, a compressed bitmap (run-length, JPEG or PNG) or one with a
+// colour profile, a font collection. So a few planted magic bytes, a valid header in front of other content,
+// a length field that covers bytes no structure holds, or bytes after the format's end never pass. A
+// media-named file the inventory would read as text (all valid UTF-8, no NUL in its first 8,000
+// bytes) is never exempt either: real image and font data is not text, so it is reviewed as text.
 //
-// What this cannot do is tell a real image from a real image that also hides text in its free-form
-// parts (a comment, a metadata chunk, the pixel data itself). Such a file is still never a unit,
+// What this cannot do is tell a real image from a real image that also hides content in the parts a
+// format leaves free: the coded data a structure holds is never decoded (the pixel data of a PNG
+// IDAT, a JPEG scan, a GIF image, a WebP or AVIF bitstream, a bitmap's rows; a font table's
+// contents), nor are comments, metadata and a WOFF private block. Such a file is still never a unit,
 // so whatever reads or runs it (a loader, a script, a workflow step) is the reviewed code, and the
 // lenses are told which media files changed (src/review/run.ts).
 
 import { isUtf8 } from "node:buffer";
 import { posix } from "node:path";
-import { crc32 } from "node:zlib";
+import { brotliDecompressSync, crc32, inflateSync } from "node:zlib";
 
 export type ContentKind = "image" | "font" | "lockfile" | "sourcemap";
 export type MediaFormat = "png" | "jpeg" | "gif" | "webp" | "avif" | "ico" | "bmp" | "sfnt" | "woff" | "woff2" | "eot";
@@ -45,12 +54,22 @@ const BMP_BIT_COUNTS: ReadonlySet<number> = new Set([1, 4, 8, 16, 24, 32]);
 const PNG_SIGNATURE: readonly number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 /** JPEG's start-of-frame markers (every SOFn but DHT C4, JPG C8 and DAC CC). */
 const JPEG_FRAMES: ReadonlySet<number> = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
-/** WOFF2's known-table indexes of glyf and loca, whose transform version 0 means transformed. */
+/** WOFF2's known-table indexes of head, and of glyf and loca, whose transform version 0 means transformed. */
+const WOFF2_HEAD = 1;
 const WOFF2_GLYF = 10;
 const WOFF2_LOCA = 11;
+/** The magic number of a font's head table, at offset 12. */
+const HEAD_MAGIC = 0x5f0f3cf5;
 const EOT_VERSIONS: ReadonlySet<number> = new Set([0x00010000, 0x00020001, 0x00020002]);
+/** BMP compressions laid out as plain rows: BI_RGB, and BI_BITFIELDS (16 or 32 bits a pixel). */
+const BMP_RGB = 0;
+const BMP_BITFIELDS = 3;
+/** The boxes an AVIF's meta box may hold, each at most once. */
+const AVIF_META_BOXES: ReadonlySet<string> = new Set(["hdlr", "pitm", "iloc", "iinf", "iprp", "iref", "idat", "dinf", "grpl"]);
 const PRINTABLE_TAG_RE = /^[\x20-\x7e]{4}$/;
 const MAX_SOURCE_MAP_BYTES = 64 * 1024 * 1024;
+/** Most bytes a font's compressed tables or metadata may stand for; past it the font is not exempt. */
+const MAX_FONT_BYTES = 64 * 1024 * 1024;
 
 function startsWith(bytes: Uint8Array, prefix: readonly number[], at = 0): boolean {
   if (bytes.length < at + prefix.length) return false;
@@ -66,6 +85,43 @@ function ascii(bytes: Uint8Array, from: number, to: number): string {
 
 function view(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/**
+ * True when `blocks` (start, end) cover `from` to the end of the file and nothing else: in order of
+ * start, none overlapping, with fewer than `align` bytes, all zero, before each and after the last
+ * (an alignment's padding). With `align` 1 they lie end to end.
+ */
+function tiled(bytes: Uint8Array, from: number, blocks: ReadonlyArray<readonly [number, number]>, align: number): boolean {
+  let at = from;
+  for (const [start, end] of [...blocks].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    if (start < at || start - at >= align || end < start || !zeros(bytes, at, start)) return false;
+    at = end;
+  }
+  return at <= bytes.length && bytes.length - at < align && zeros(bytes, at, bytes.length);
+}
+
+/** True when every byte from `from` to `to` is zero. */
+function zeros(bytes: Uint8Array, from: number, to: number): boolean {
+  for (let i = from; i < to; i++) if (bytes[i] !== 0) return false;
+  return true;
+}
+
+/** A decoder's output and how many input bytes it took (node:zlib's `info` form). */
+type Decoded = { readonly buffer: Buffer; readonly engine: { readonly bytesWritten: number } };
+
+/**
+ * `data` decompressed when it is one whole zlib or brotli stream, every byte of it read, that comes
+ * out at exactly `size` bytes; null otherwise (a stream with bytes after its end, or the wrong size).
+ */
+function decompressed(kind: "zlib" | "brotli", data: Uint8Array, size: number): Buffer | null {
+  if (size < 1 || size > MAX_FONT_BYTES || data.length === 0) return null;
+  try {
+    const out = (kind === "zlib" ? inflateSync(data, { info: true, maxOutputLength: size }) : brotliDecompressSync(data, { info: true, maxOutputLength: size })) as unknown as Decoded;
+    return out.buffer.length === size && out.engine.bytesWritten === data.length ? out.buffer : null;
+  } catch {
+    return null;
+  }
 }
 
 /** PNG: the signature, IHDR first, every chunk within the file with its CRC, IDAT, and IEND last at the end. */
@@ -176,7 +232,7 @@ function isGif(bytes: Uint8Array): boolean {
   }
 }
 
-/** WebP: RIFF's size is the file's, VP8, VP8L or VP8X first, every chunk within the file, and an image chunk. */
+/** WebP: RIFF's size is the file's, VP8, VP8L or VP8X first, every chunk within the file (an odd one padded with a zero), and an image chunk. */
 function isWebp(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 12) !== "WEBP" || bytes.length < 20) return false;
   const v = view(bytes);
@@ -190,7 +246,7 @@ function isWebp(bytes: Uint8Array): boolean {
     if (!PRINTABLE_TAG_RE.test(type)) return false;
     const size = v.getUint32(at + 4, true);
     const end = at + 8 + size + (size & 1);
-    if (end > bytes.length) return false;
+    if (end > bytes.length || ((size & 1) === 1 && bytes[end - 1] !== 0)) return false;
     if (first && type !== "VP8 " && type !== "VP8L" && type !== "VP8X") return false;
     if (type === "VP8 ") {
       if (size < 10 || !startsWith(bytes, [0x9d, 0x01, 0x2a], at + 11)) return false;
@@ -205,88 +261,324 @@ function isWebp(bytes: Uint8Array): boolean {
   return image && at === bytes.length;
 }
 
-/** AVIF: top-level boxes end to end, a small ftyp first naming avif or avis, and a meta box. */
-function isAvif(bytes: Uint8Array): boolean {
+/** An ISOBMFF box: its type, where it starts, where its body starts and where it ends. */
+interface Box {
+  readonly type: string;
+  readonly start: number;
+  readonly body: number;
+  readonly end: number;
+}
+
+/**
+ * The ISOBMFF boxes laid end to end from `from` to exactly `to`, each with a printable type and its
+ * size stated (a size of 0, "to the end of the file", is refused); null when they are not.
+ */
+function boxes(bytes: Uint8Array, from: number, to: number): Box[] | null {
   const v = view(bytes);
-  let at = 0;
-  let first = true;
-  let meta = false;
-  while (at < bytes.length) {
-    if (at + 8 > bytes.length) return false;
+  const out: Box[] = [];
+  let at = from;
+  while (at < to) {
+    if (at + 8 > to) return null;
     let size = v.getUint32(at);
     const type = ascii(bytes, at + 4, at + 8);
-    if (!PRINTABLE_TAG_RE.test(type)) return false;
+    if (!PRINTABLE_TAG_RE.test(type)) return null;
     let header = 8;
     if (size === 1) {
-      if (at + 16 > bytes.length) return false;
+      if (at + 16 > to) return null;
       const large = v.getBigUint64(at + 8);
-      if (large > BigInt(bytes.length - at)) return false;
+      if (large > BigInt(to - at)) return null;
       size = Number(large);
       header = 16;
-    } else if (size === 0) size = bytes.length - at;
-    if (size < header || at + size > bytes.length) return false;
-    if (first) {
-      // ftyp is a few brands long; a small size also keeps the file's first byte a zero.
-      if (type !== "ftyp" || header !== 8 || size < 16 || size > 4096 || (size - 16) % 4 !== 0) return false;
-      const brands = [ascii(bytes, at + 8, at + 12)];
-      for (let brand = at + 16; brand < at + size; brand += 4) brands.push(ascii(bytes, brand, brand + 4));
-      if (!brands.includes("avif") && !brands.includes("avis")) return false;
     }
-    if (type === "meta") meta = true;
-    first = false;
+    if (size < header || at + size > to) return null;
+    out.push({ type, start: at, body: at + header, end: at + size });
     at += size;
   }
-  return !first && meta && at === bytes.length;
+  return out;
 }
 
-/** BMP: its size field is the file's, a known header, one plane, a known bit count, and the pixels within the file. */
-function isBmp(bytes: Uint8Array, embedded = false): boolean {
+/** A full box's version, when its flags hold no bit outside `flags`; null otherwise. */
+function fullBoxVersion(bytes: Uint8Array, box: Box, flags = 0): number | null {
+  if (box.body + 4 > box.end) return null;
+  const word = view(bytes).getUint32(box.body);
+  return (word & 0xffffff & ~flags) === 0 ? word >>> 24 : null;
+}
+
+/** True when `extents` lie within `regions` (which do not overlap) and leave no byte of one uncovered. */
+function covers(extents: ReadonlyArray<readonly [number, number]>, regions: ReadonlyArray<readonly [number, number]>): boolean {
+  const sorted = [...extents].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let next = 0;
+  for (const [from, to] of [...regions].sort((a, b) => a[0] - b[0])) {
+    let at = from;
+    for (let extent = sorted[next]; extent !== undefined && extent[0] < to; extent = sorted[++next]) {
+      if (extent[0] < from || extent[1] > to || extent[0] > at) return false;
+      at = Math.max(at, extent[1]);
+    }
+    if (at < to) return false;
+  }
+  return next === sorted.length;
+}
+
+/**
+ * AVIF, a still image (an image sequence is not walked here): top-level boxes end to end, a small
+ * ftyp first naming avif, then one meta box and the mdat boxes, and nothing else. meta holds hdlr
+ * ('pict') first, pitm, iinf, iloc and iprp, and only the other boxes an image's meta may hold, each
+ * laid out in full; and iloc's extents cover every byte of each mdat (and of idat), so no byte of the
+ * file lies outside a box the walk reads or an item's data.
+ */
+function isAvif(bytes: Uint8Array): boolean {
+  const top = boxes(bytes, 0, bytes.length);
+  const ftyp = top?.[0];
+  if (top === null || ftyp === undefined) return false;
+  // ftyp is a few brands long; a small size also keeps the file's first byte a zero.
+  const size = ftyp.end - ftyp.start;
+  if (ftyp.type !== "ftyp" || ftyp.body !== ftyp.start + 8 || size < 16 || size > 4096 || (size - 16) % 4 !== 0) return false;
+  const brands = [ascii(bytes, ftyp.body, ftyp.body + 4)];
+  for (let brand = ftyp.body + 8; brand < ftyp.end; brand += 4) brands.push(ascii(bytes, brand, brand + 4));
+  if (!brands.includes("avif")) return false;
+  const rest = top.slice(1);
+  const metas = rest.filter((box) => box.type === "meta");
+  const mdats = rest.filter((box) => box.type === "mdat");
+  const meta = metas[0];
+  if (meta === undefined || metas.length !== 1 || metas.length + mdats.length !== rest.length) return false;
+  return avifMeta(bytes, meta, mdats);
+}
+
+/** An AVIF's meta box laid out in full, with its items' data covering every byte of `mdats` and of its idat. */
+function avifMeta(bytes: Uint8Array, meta: Box, mdats: readonly Box[]): boolean {
   const v = view(bytes);
-  // In an ICO the file header is left out: the image starts at the info header.
-  const base = embedded ? 0 : 14;
-  if (!embedded && (ascii(bytes, 0, 2) !== "BM" || bytes.length < 26 || v.getUint32(2, true) !== bytes.length)) return false;
-  if (bytes.length < base + 12) return false;
+  if (fullBoxVersion(bytes, meta) !== 0) return false;
+  const children = boxes(bytes, meta.body + 4, meta.end);
+  if (children === null || children[0]?.type !== "hdlr") return false;
+  const byType = new Map<string, Box>();
+  for (const child of children) {
+    if (!AVIF_META_BOXES.has(child.type) || byType.has(child.type)) return false;
+    byType.set(child.type, child);
+  }
+  const hdlr = byType.get("hdlr");
+  const pitm = byType.get("pitm");
+  const iinf = byType.get("iinf");
+  const iloc = byType.get("iloc");
+  const iprp = byType.get("iprp");
+  if (hdlr === undefined || pitm === undefined || iinf === undefined || iloc === undefined || iprp === undefined) return false;
+  // hdlr: pre_defined 0, handler pict, three reserved zero words, and a name ending in a NUL.
+  if (fullBoxVersion(bytes, hdlr) !== 0 || hdlr.end - hdlr.body < 25 || v.getUint32(hdlr.body + 4) !== 0 || ascii(bytes, hdlr.body + 8, hdlr.body + 12) !== "pict" || bytes[hdlr.end - 1] !== 0) return false;
+  for (let reserved = hdlr.body + 12; reserved < hdlr.body + 24; reserved += 4) if (v.getUint32(reserved) !== 0) return false;
+  // pitm: the primary item, one of iinf's.
+  const pitmVersion = fullBoxVersion(bytes, pitm);
+  if (pitmVersion === null || pitmVersion > 1 || pitm.end - pitm.body !== (pitmVersion === 0 ? 6 : 8)) return false;
+  const primary = pitmVersion === 0 ? v.getUint16(pitm.body + 4) : v.getUint32(pitm.body + 4);
+  const items = avifItems(bytes, iinf);
+  if (items === null || !items.has(primary)) return false;
+  const extents = avifExtents(bytes, iloc, items);
+  if (extents === null || !avifProperties(bytes, iprp, items)) return false;
+  // iref (a full box), dinf and grpl: each a list of boxes laid out in full.
+  for (const [type, full] of [["iref", true], ["dinf", false], ["grpl", false]] as const) {
+    const box = byType.get(type);
+    if (box === undefined) continue;
+    if (full && fullBoxVersion(bytes, box) === null) return false;
+    if (boxes(bytes, box.body + (full ? 4 : 0), box.end) === null) return false;
+  }
+  const idat = byType.get("idat");
+  const inFile = mdats.map((box): [number, number] => [box.body, box.end]);
+  const inIdat: Array<[number, number]> = idat === undefined ? [] : [[0, idat.end - idat.body]];
+  return extents.file.length + extents.idat.length > 0 && covers(extents.file, inFile) && covers(extents.idat, inIdat);
+}
+
+/** The item IDs of an iinf box whose infe entries (version 2 or 3) fill it exactly, as many as it says; null otherwise. */
+function avifItems(bytes: Uint8Array, iinf: Box): Set<number> | null {
+  const v = view(bytes);
+  const version = fullBoxVersion(bytes, iinf);
+  if (version === null || version > 1) return null;
+  const countAt = iinf.body + 4;
+  const listAt = countAt + (version === 0 ? 2 : 4);
+  if (listAt > iinf.end) return null;
+  const count = version === 0 ? v.getUint16(countAt) : v.getUint32(countAt);
+  const entries = boxes(bytes, listAt, iinf.end);
+  if (entries === null || count === 0 || entries.length !== count) return null;
+  const ids = new Set<number>();
+  for (const infe of entries) {
+    // Flag 1 marks a hidden item.
+    const infeVersion = infe.type === "infe" ? fullBoxVersion(bytes, infe, 1) : null;
+    if (infeVersion !== 2 && infeVersion !== 3) return null;
+    const idSize = infeVersion === 2 ? 2 : 4;
+    // item_ID, item_protection_index, item_type, then NUL-terminated strings (the name, and a MIME item's type).
+    const typeAt = infe.body + 4 + idSize + 2;
+    if (typeAt + 5 > infe.end || !PRINTABLE_TAG_RE.test(ascii(bytes, typeAt, typeAt + 4)) || bytes[infe.end - 1] !== 0) return null;
+    const id = idSize === 2 ? v.getUint16(infe.body + 4) : v.getUint32(infe.body + 4);
+    if (ids.has(id)) return null;
+    ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * The extents of an iloc box (version 0 to 2) read to its last byte: each item one of iinf's, its
+ * data in this file (data reference 0) at a file offset or in idat, every extent of stated, non-zero
+ * length. Null otherwise.
+ */
+function avifExtents(bytes: Uint8Array, iloc: Box, items: ReadonlySet<number>): { file: Array<[number, number]>; idat: Array<[number, number]> } | null {
+  const v = view(bytes);
+  const version = fullBoxVersion(bytes, iloc);
+  if (version === null || version > 2) return null;
+  let at = iloc.body + 4;
+  const read = (size: number): number | null => {
+    if (size === 0) return 0;
+    if (at + size > iloc.end) return null;
+    let value: number;
+    if (size === 2) value = v.getUint16(at);
+    else if (size === 4) value = v.getUint32(at);
+    else {
+      const large = v.getBigUint64(at);
+      if (large > BigInt(bytes.length)) return null;
+      value = Number(large);
+    }
+    at += size;
+    return value;
+  };
+  const sizes = read(2);
+  if (sizes === null || (version === 0 && (sizes & 15) !== 0)) return null;
+  const offsetSize = sizes >> 12;
+  const lengthSize = (sizes >> 8) & 15;
+  const baseSize = (sizes >> 4) & 15;
+  const indexSize = version === 0 ? 0 : sizes & 15;
+  if (![offsetSize, lengthSize, baseSize, indexSize].every((size) => size === 0 || size === 4 || size === 8)) return null;
+  const count = read(version < 2 ? 2 : 4);
+  if (count === null) return null;
+  const file: Array<[number, number]> = [];
+  const idat: Array<[number, number]> = [];
+  const seen = new Set<number>();
+  for (let item = 0; item < count; item++) {
+    const id = read(version < 2 ? 2 : 4);
+    if (id === null || !items.has(id) || seen.has(id)) return null;
+    seen.add(id);
+    // Construction method 0 (a file offset) or 1 (in idat), its twelve reserved bits zero.
+    const method = version === 0 ? 0 : read(2);
+    if ((method !== 0 && method !== 1) || read(2) !== 0) return null;
+    const base = read(baseSize);
+    const extents = read(2);
+    if (base === null || extents === null || extents === 0) return null;
+    for (let extent = 0; extent < extents; extent++) {
+      if (read(indexSize) === null) return null;
+      const offset = read(offsetSize);
+      const length = read(lengthSize);
+      if (offset === null || length === null || length === 0) return null;
+      (method === 0 ? file : idat).push([base + offset, base + offset + length]);
+    }
+  }
+  return at === iloc.end ? { file, idat } : null;
+}
+
+/** iprp: ipco first, its properties laid out in full, then ipma boxes that associate iinf's items with them. */
+function avifProperties(bytes: Uint8Array, iprp: Box, items: ReadonlySet<number>): boolean {
+  const children = boxes(bytes, iprp.body, iprp.end);
+  const ipco = children?.[0];
+  if (children === null || ipco === undefined || ipco.type !== "ipco" || children.length < 2) return false;
+  const properties = boxes(bytes, ipco.body, ipco.end);
+  if (properties === null || properties.length === 0) return false;
+  return children.slice(1).every((ipma) => ipma.type === "ipma" && ipmaLaidOut(bytes, ipma, properties.length, items));
+}
+
+/** ipma: as many entries as it says, each an item and its property indexes (from 1; 0 for none), filling the box exactly. */
+function ipmaLaidOut(bytes: Uint8Array, ipma: Box, properties: number, items: ReadonlySet<number>): boolean {
+  const v = view(bytes);
+  const version = fullBoxVersion(bytes, ipma, 1);
+  if (version === null || version > 1 || ipma.body + 8 > ipma.end) return false;
+  const wide = (v.getUint32(ipma.body) & 1) === 1;
+  const idSize = version === 0 ? 2 : 4;
+  const count = v.getUint32(ipma.body + 4);
+  let at = ipma.body + 8;
+  for (let entry = 0; entry < count; entry++) {
+    if (at + idSize + 1 > ipma.end) return false;
+    if (!items.has(idSize === 2 ? v.getUint16(at) : v.getUint32(at))) return false;
+    const associations = bytes[at + idSize] ?? 0;
+    at += idSize + 1;
+    if (at + associations * (wide ? 2 : 1) > ipma.end) return false;
+    for (let association = 0; association < associations; association++) {
+      if ((wide ? v.getUint16(at) & 0x7fff : (bytes[at] ?? 0) & 0x7f) > properties) return false;
+      at += wide ? 2 : 1;
+    }
+  }
+  return at === ipma.end;
+}
+
+/**
+ * A bitmap's layout from its info header at `base`: a known header, one plane, a known bit count,
+ * plain rows (BI_RGB, or BI_BITFIELDS at 16 or 32 bits), a positive width and a non-zero height, and
+ * no linked or embedded colour profile. Returns the bytes of the header with its masks and palette,
+ * and of the rows (each padded to four bytes); in an ICO (`embedded`) the height counts the colour
+ * rows and then the one-bit mask rows, half each. Null when the header is not such a bitmap's.
+ */
+function bitmapLayout(bytes: Uint8Array, base: number, embedded: boolean): { readonly header: number; readonly pixels: number } | null {
+  const v = view(bytes);
+  if (bytes.length < base + 12) return null;
   const headerSize = v.getUint32(base, true);
-  if (!BMP_HEADER_SIZES.has(headerSize) || base + headerSize > bytes.length) return false;
+  if (!BMP_HEADER_SIZES.has(headerSize) || base + headerSize > bytes.length) return null;
   const core = headerSize === 12;
+  const width = core ? v.getUint16(base + 4, true) : v.getInt32(base + 4, true);
+  const height = core ? v.getUint16(base + 6, true) : v.getInt32(base + 8, true);
   const planes = v.getUint16(base + (core ? 8 : 12), true);
   const bits = v.getUint16(base + (core ? 10 : 14), true);
-  if (planes !== 1 || !BMP_BIT_COUNTS.has(bits)) return false;
-  if (embedded) return true;
-  const pixels = v.getUint32(10, true);
-  return pixels >= base + headerSize && pixels < bytes.length;
+  if (planes !== 1 || !BMP_BIT_COUNTS.has(bits) || width <= 0 || height === 0) return null;
+  const compression = core ? BMP_RGB : v.getUint32(base + 16, true);
+  if (compression !== BMP_RGB && !(compression === BMP_BITFIELDS && (bits === 16 || bits === 32))) return null;
+  // A V4 or V5 header's colour space: a linked ('LINK') or embedded ('MBED') profile is not walked here.
+  if (headerSize >= 108 && [0x4c494e4b, 0x4d424544].includes(v.getUint32(base + 56, true))) return null;
+  if (embedded && (height < 0 || height % 2 !== 0)) return null;
+  const rows = embedded ? height / 2 : Math.abs(height);
+  const used = core ? 0 : v.getUint32(base + 32, true);
+  if (bits <= 8 && used > 1 << bits) return null;
+  const colours = bits <= 8 && used === 0 ? 1 << bits : used;
+  const masks = compression === BMP_BITFIELDS && headerSize === 40 ? 12 : 0;
+  const stride = Math.ceil((width * bits) / 32) * 4;
+  const mask = embedded ? Math.ceil(width / 32) * 4 : 0;
+  return { header: headerSize + masks + colours * (core ? 3 : 4), pixels: (stride + mask) * rows };
 }
 
-/** ICO: 1 to 255 images, each entry within the file past the directory, each image a PNG or a bitmap, the last one ending the file. */
+/**
+ * BMP: its size field is the file's; the header, masks and palette, then the rows from the pixel
+ * offset, with only zero bytes between the two and after the last row (padding some writers add).
+ */
+function isBmp(bytes: Uint8Array): boolean {
+  const v = view(bytes);
+  if (ascii(bytes, 0, 2) !== "BM" || bytes.length < 26 || v.getUint32(2, true) !== bytes.length) return false;
+  const layout = bitmapLayout(bytes, 14, false);
+  if (layout === null) return false;
+  const pixels = v.getUint32(10, true);
+  const end = pixels + layout.pixels;
+  return pixels >= 14 + layout.header && end <= bytes.length && zeros(bytes, 14 + layout.header, pixels) && zeros(bytes, end, bytes.length);
+}
+
+/** A bitmap as an ICO holds it (no file header): its header, masks, palette, colour rows and mask rows, then only zero bytes. */
+function isIcoBitmap(image: Uint8Array): boolean {
+  const layout = bitmapLayout(image, 0, true);
+  const end = layout === null ? Number.POSITIVE_INFINITY : layout.header + layout.pixels;
+  return end <= image.length && zeros(image, end, image.length);
+}
+
+/** ICO: 1 to 255 images, each a PNG or a bitmap laid out in full, end to end from the directory to the end of the file. */
 function isIco(bytes: Uint8Array): boolean {
   if (!startsWith(bytes, [0x00, 0x00, 0x01, 0x00]) || bytes.length < 22) return false;
   const v = view(bytes);
   const count = v.getUint16(4, true);
   const directory = 6 + 16 * count;
   if (count < 1 || count > 255 || bytes.length < directory) return false;
-  let end = directory;
+  const images: Array<[number, number]> = [];
   for (let i = 0; i < count; i++) {
     const entry = 6 + 16 * i;
     const size = v.getUint32(entry + 8, true);
     const offset = v.getUint32(entry + 12, true);
     if (bytes[entry + 3] !== 0 || size === 0 || offset < directory || offset + size > bytes.length) return false;
     const image = bytes.subarray(offset, offset + size);
-    if (!isPng(image) && !isBmp(image, true)) return false;
-    end = Math.max(end, offset + size);
+    if (!isPng(image) && !isIcoBitmap(image)) return false;
+    images.push([offset, offset + size]);
   }
-  return end === bytes.length;
-}
-
-/** Up to three zero bytes of padding from `end` to the end of the file, and nothing else. */
-function paddedEnd(bytes: Uint8Array, end: number): boolean {
-  if (end > bytes.length || bytes.length - end > 3) return false;
-  for (let i = end; i < bytes.length; i++) if (bytes[i] !== 0) return false;
-  return true;
+  return tiled(bytes, directory, images, 1);
 }
 
 /**
- * An sfnt font (TrueType, OpenType): 1 to 512 tables, each within the file past the directory, a
- * head table with its magic number, and the file ending with the last table (and its padding).
+ * An sfnt font (TrueType, OpenType): 1 to 512 tables, a head table with its magic number, and the
+ * tables laid out from the directory to the end of the file with only zero padding between them.
  */
 function isSfnt(bytes: Uint8Array): boolean {
   if (bytes.length < 12) return false;
@@ -297,7 +589,7 @@ function isSfnt(bytes: Uint8Array): boolean {
   const directory = 12 + 16 * tables;
   if (tables < 1 || tables > 512 || bytes.length < directory) return false;
   let head = false;
-  let end = directory;
+  const blocks: Array<[number, number]> = [];
   for (let i = 0; i < tables; i++) {
     const record = 12 + 16 * i;
     const name = ascii(bytes, record, record + 4);
@@ -305,34 +597,57 @@ function isSfnt(bytes: Uint8Array): boolean {
     const length = v.getUint32(record + 12);
     if (!PRINTABLE_TAG_RE.test(name) || offset < directory || offset + length > bytes.length) return false;
     if (name === "head") {
-      if (length < 54 || v.getUint32(offset + 12) !== 0x5f0f3cf5) return false;
+      if (length < 54 || v.getUint32(offset + 12) !== HEAD_MAGIC) return false;
       head = true;
     }
-    end = Math.max(end, offset + length);
+    blocks.push([offset, offset + length]);
   }
-  return head && paddedEnd(bytes, end);
+  return head && tiled(bytes, directory, blocks, 4);
 }
 
-/** WOFF: the length field is the file's, and every table, metadata and private block lies within it past the directory. */
+/**
+ * WOFF: the length field is the file's; each table, inflated when stored compressed, comes out at
+ * its stated length, every stored byte read (head with its magic); the metadata block inflates to its
+ * stated length; and the tables, the metadata and the private block lie from the directory to the end
+ * of the file with only zero padding between them.
+ */
 function isWoff(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "wOFF" || bytes.length < 44) return false;
   const v = view(bytes);
   const tables = v.getUint16(12);
   const directory = 44 + 20 * tables;
   if (v.getUint32(8) !== bytes.length || tables < 1 || v.getUint16(14) !== 0 || bytes.length < directory) return false;
+  const blocks: Array<[number, number]> = [];
+  let total = 0;
+  let head = false;
   for (let i = 0; i < tables; i++) {
     const entry = 44 + 20 * i;
+    const tag = ascii(bytes, entry, entry + 4);
     const offset = v.getUint32(entry + 4);
-    const compressed = v.getUint32(entry + 8);
-    const original = v.getUint32(entry + 12);
-    if (!PRINTABLE_TAG_RE.test(ascii(bytes, entry, entry + 4)) || offset % 4 !== 0 || offset < directory || compressed > original || offset + compressed > bytes.length) return false;
+    const stored = v.getUint32(entry + 8);
+    const length = v.getUint32(entry + 12);
+    total += length;
+    if (!PRINTABLE_TAG_RE.test(tag) || stored > length || total > MAX_FONT_BYTES || offset < directory || offset + stored > bytes.length) return false;
+    const data = bytes.subarray(offset, offset + stored);
+    const table = stored === length ? data : decompressed("zlib", data, length);
+    if (table === null) return false;
+    if (tag === "head") {
+      if (length < 54 || view(table).getUint32(12) !== HEAD_MAGIC) return false;
+      head = true;
+    }
+    blocks.push([offset, offset + stored]);
   }
-  for (const field of [24, 36]) {
-    const offset = v.getUint32(field);
-    const length = v.getUint32(field + 4);
-    if (offset !== 0 && (offset < directory || offset + length > bytes.length)) return false;
+  const metaOffset = v.getUint32(24);
+  const metaLength = v.getUint32(28);
+  const metaOriginal = v.getUint32(32);
+  if (metaOffset !== 0 || metaLength !== 0 || metaOriginal !== 0) {
+    if (metaOffset + metaLength > bytes.length || decompressed("zlib", bytes.subarray(metaOffset, metaOffset + metaLength), metaOriginal) === null) return false;
+    blocks.push([metaOffset, metaOffset + metaLength]);
   }
-  return true;
+  const privateOffset = v.getUint32(36);
+  const privateLength = v.getUint32(40);
+  if (privateOffset !== 0 || privateLength !== 0) blocks.push([privateOffset, privateOffset + privateLength]);
+  return head && tiled(bytes, directory, blocks, 4);
 }
 
 /** A WOFF2 UIntBase128 at `at`: its value and length, or null when it is not one. */
@@ -347,7 +662,12 @@ function base128(bytes: Uint8Array, at: number): { value: number; length: number
   return null;
 }
 
-/** WOFF2: the length field is the file's, the table directory, then the compressed data, metadata and private blocks in order, within the file. */
+/**
+ * WOFF2: the length field is the file's; the table directory; one brotli stream that decompresses,
+ * every byte of it read, to exactly the tables' lengths (head, never transformed, with its magic);
+ * a metadata block that decompresses to its stated length; and the stream, the metadata and the
+ * private block from the directory to the end of the file with only zero padding between them.
+ */
 function isWoff2(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "wOF2" || bytes.length < 48) return false;
   const v = view(bytes);
@@ -355,13 +675,17 @@ function isWoff2(bytes: Uint8Array): boolean {
   // A collection carries a second directory this walk does not read: never exempt.
   if (v.getUint32(8) !== bytes.length || tables < 1 || v.getUint16(14) !== 0 || ascii(bytes, 4, 8) === "ttcf") return false;
   let at = 48;
+  let total = 0;
+  let head = -1;
   for (let i = 0; i < tables; i++) {
     const flags = bytes[at];
     if (flags === undefined) return false;
     at++;
     const index = flags & 0x3f;
+    let tag: string | null = null;
     if (index === 0x3f) {
-      if (!PRINTABLE_TAG_RE.test(ascii(bytes, at, at + 4))) return false;
+      tag = ascii(bytes, at, at + 4);
+      if (!PRINTABLE_TAG_RE.test(tag)) return false;
       at += 4;
     }
     const original = base128(bytes, at);
@@ -369,25 +693,43 @@ function isWoff2(bytes: Uint8Array): boolean {
     at += original.length;
     const version = flags >> 6;
     const transformed = index === WOFF2_GLYF || index === WOFF2_LOCA ? version === 0 : version !== 0;
+    let size = original.value;
     if (transformed) {
       const length = base128(bytes, at);
       if (length === null) return false;
       at += length.length;
+      size = length.value;
     }
+    if (index === WOFF2_HEAD || tag === "head") {
+      if (transformed || original.value < 54) return false;
+      head = total;
+    }
+    total += size;
+    if (total > MAX_FONT_BYTES) return false;
   }
-  let end = at + v.getUint32(20);
-  if (end > bytes.length) return false;
-  for (const field of [28, 40]) {
-    const offset = v.getUint32(field);
-    const length = v.getUint32(field + 4);
-    if (offset === 0) continue;
-    if (offset < end || offset % 4 !== 0 || offset - end > 3 || offset + length > bytes.length) return false;
-    end = offset + length;
+  const streamEnd = at + v.getUint32(20);
+  if (head < 0 || streamEnd > bytes.length) return false;
+  const font = decompressed("brotli", bytes.subarray(at, streamEnd), total);
+  if (font === null || view(font).getUint32(head + 12) !== HEAD_MAGIC) return false;
+  const blocks: Array<[number, number]> = [[at, streamEnd]];
+  const metaOffset = v.getUint32(28);
+  const metaLength = v.getUint32(32);
+  const metaOriginal = v.getUint32(36);
+  if (metaOffset !== 0 || metaLength !== 0 || metaOriginal !== 0) {
+    if (metaOffset + metaLength > bytes.length || decompressed("brotli", bytes.subarray(metaOffset, metaOffset + metaLength), metaOriginal) === null) return false;
+    blocks.push([metaOffset, metaOffset + metaLength]);
   }
-  return paddedEnd(bytes, end);
+  const privateOffset = v.getUint32(40);
+  const privateLength = v.getUint32(44);
+  if (privateOffset !== 0 || privateLength !== 0) blocks.push([privateOffset, privateOffset + privateLength]);
+  return tiled(bytes, at, blocks, 4);
 }
 
-/** EOT: its fixed header, every name string in turn, and the font data ending at the file's end (an sfnt when stored plain). */
+/**
+ * EOT: its fixed header, every name string in turn, and the font data ending at the file's end: an
+ * sfnt, stored plain or XOR-obfuscated. MicroType Express compression is not walked here, so a
+ * compressed EOT is never exempt.
+ */
 function isEot(bytes: Uint8Array): boolean {
   if (bytes.length < 82) return false;
   const v = view(bytes);
@@ -414,9 +756,10 @@ function isEot(bytes: Uint8Array): boolean {
   }
   if (at + fontDataSize !== bytes.length) return false;
   const flags = v.getUint32(12, true);
-  // Compressed (0x4) or XOR-obfuscated (0x10000000) data is not readable as an sfnt here.
-  if ((flags & 0x4) === 0 && (flags & 0x10000000) === 0) return isSfnt(bytes.subarray(at));
-  return true;
+  if ((flags & 0x4) !== 0) return false;
+  // XOR-obfuscated data (0x10000000) is the font with every byte XORed with 0x50.
+  const data = bytes.subarray(at);
+  return isSfnt((flags & 0x10000000) !== 0 ? data.map((byte) => byte ^ 0x50) : data);
 }
 
 const FORMAT_CHECKS: ReadonlyArray<readonly [MediaFormat, (bytes: Uint8Array) => boolean]> = [

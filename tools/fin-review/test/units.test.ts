@@ -14,7 +14,8 @@ import { buildContextPack, dataBlock, numbered } from "../src/review/prompts.ts"
 import { DATA_RULE, loadProcedure } from "../src/review/procedure.ts";
 import { mediaFormat, verifiedExclusion } from "../src/units/content.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
-import { avif, bmp, eot, gif, ico, jpeg, png, pngChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
+import { brotliCompressSync, deflateSync } from "node:zlib";
+import { avif, bmp, bmp8, eot, gif, headTable, ico, icoBitmap, jpeg, planted, png, pngChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
 
 function declarations(count: number, lines: number): string {
   const out: string[] = ['import { x } from "./x.ts";', ""];
@@ -220,6 +221,75 @@ describe("inventory and shards", () => {
     assert.equal(mediaFormat(badCrc), null);
     assert.equal(mediaFormat(Buffer.concat([png(), pngChunk("tEXt", Buffer.from("k\0v"))])), null);
     assert.equal(mediaFormat(png([pngChunk("tEXt", Buffer.from("k\0v"))])), "png", "a chunk before IEND is part of the layout");
+  });
+
+  it("a format's header whose length fields cover bytes of any kind is no image or font: every byte must lie in a structure the walk reads", () => {
+    const files = planted(Buffer.from("\0#!/bin/sh\necho MARKER-PAYLOAD\n"));
+    for (const [name, bytes] of Object.entries(files)) {
+      assert.equal(mediaFormat(bytes), null, name);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
+    }
+    // On tier S with the committed exclusions, each is a binary file no lens could review, and blocks.
+    const { exclusions } = loadProcedure(join(TOOL_ROOT, "..", "..", "docs", "review"));
+    const dir = "packages/server/assets/";
+    const { units, excluded } = inventory(
+      Object.keys(files).map((name) => ({ path: `${dir}${name}`, tier: "S" as Tier, kind: "file" as const })),
+      (path) => files[path.slice(dir.length)] ?? null,
+      exclusions,
+    );
+    assert.deepEqual(units, []);
+    assert.deepEqual(
+      excluded.map((item) => [item.path.slice(dir.length), item.reason, blocksCoverage(item)]),
+      Object.keys(files).map((name) => [name, "binary", true]),
+    );
+  });
+
+  it("the layouts real images and fonts use stay exempt, and each walk reads what its lengths cover", () => {
+    const head = headTable();
+    // Some writers pad a bitmap with zero bytes after its last row.
+    const paddedBmp = Buffer.concat([bmp(), Buffer.alloc(2)]);
+    paddedBmp.writeUInt32LE(paddedBmp.length, 2);
+    const exempt: Record<string, Buffer> = {
+      "padded.bmp": paddedBmp,
+      "padded.ico": ico([Buffer.concat([icoBitmap(), Buffer.alloc(28)])]),
+      "compressed.woff": woff({ compressed: true, metadata: '<?xml version="1.0"?><metadata version="1.0"/>', private: Buffer.from([1, 2, 3]) }),
+      "private.woff": woff({ private: Buffer.from("free-form") }),
+      "obfuscated.eot": eot({ xor: true }),
+      "palette.bmp": bmp8(),
+      "both.ico": ico([icoBitmap(), png()]),
+      "larger.avif": avif(Buffer.alloc(300, 7)),
+    };
+    for (const [name, bytes] of Object.entries(exempt)) assert.equal(verifiedExclusion(`assets/${name}`, bytes), /\.(?:woff|eot)$/.test(name) ? "font" : "image", name);
+
+    // WOFF: a compressed table must inflate to its stated length, using every byte stored for it.
+    assert.equal(mediaFormat(woff({ table: Buffer.concat([deflateSync(head), Buffer.from("tail")]) })), null, "bytes after a table's zlib stream");
+    assert.equal(mediaFormat(woff({ table: deflateSync(head.subarray(0, 50)) })), null, "a table that inflates short");
+    // WOFF2: the stream must be one brotli stream that decompresses to exactly the tables' lengths.
+    const longer = Buffer.concat([woff2(), Buffer.from("tail")]);
+    longer.writeUInt32BE(longer.length, 8);
+    longer.writeUInt32BE(longer.readUInt32BE(20) + 4, 20);
+    assert.equal(mediaFormat(longer), null, "bytes after the brotli stream, inside its stated size");
+    const short = woff2();
+    const shortStream = brotliCompressSync(head.subarray(0, 50));
+    const resized = Buffer.concat([short.subarray(0, 50), shortStream]);
+    resized.writeUInt32BE(resized.length, 8);
+    resized.writeUInt32BE(shortStream.length, 20);
+    assert.equal(mediaFormat(resized), null, "a stream shorter than the tables");
+    // EOT: XOR-obfuscated data must be a font once the XOR is undone (here its head magic is not).
+    const scrambled = eot({ xor: true });
+    const magic = scrambled.length - ttf().length + 28 + 12;
+    scrambled[magic] = (scrambled[magic] ?? 0) ^ 0xff;
+    assert.equal(mediaFormat(scrambled), null);
+    // AVIF: iloc's extents must cover every byte of mdat; no other top-level box.
+    const uncovered = avif(Buffer.alloc(16, 7));
+    const iloc = uncovered.indexOf("iloc") - 4;
+    uncovered.writeUInt32BE(uncovered.readUInt32BE(iloc + 26) - 4, iloc + 26);
+    assert.equal(mediaFormat(uncovered), null, "mdat bytes no item holds");
+    assert.equal(mediaFormat(Buffer.concat([avif(), Buffer.from([0, 0, 0, 12]), Buffer.from("free"), Buffer.from("data")])), null, "a free box");
+    // BMP: the pixels are exactly the rows the header describes.
+    const wide = bmp8();
+    wide.writeInt32LE(5, 18);
+    assert.equal(mediaFormat(wide), null, "a header that does not describe the pixels");
   });
 
   it("text or a planted header under an image name is never exempt: it is reviewed as text, or blocks on tier S as binary", () => {
