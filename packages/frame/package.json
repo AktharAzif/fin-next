@@ -11,7 +11,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./report": "./src/report/index.ts",
-    "./boot/*": "./boot/*"
+    "./boot/admin-skeleton.html": "./boot/admin-skeleton.html",
+    "./boot/app-skeleton.html": "./boot/app-skeleton.html",
+    "./boot/auth-skeleton.html": "./boot/auth-skeleton.html",
+    "./boot/boot.css": "./boot/boot.css",
+    "./boot/theme.js": "./boot/theme.js"
   },
   "scripts": {
     "lint": "biome check .",
