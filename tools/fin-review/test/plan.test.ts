@@ -11,7 +11,7 @@ import { computePlan, linkTarget } from "../src/plan/plan.ts";
 import type { PlanDocument, PlanResult } from "../src/plan/plan.ts";
 import { CONFIG_DIR, cli } from "./helpers/cli.ts";
 import { FixtureRepo, fixtureEnv, tempDir } from "./helpers/git-fixture.ts";
-import type { FileChanges } from "./helpers/git-fixture.ts";
+import type { FileChanges, SpecialEntry } from "./helpers/git-fixture.ts";
 import { fixtureLayout, manifest, monorepoFiles, W } from "./helpers/monorepo.ts";
 
 const loaded = loadEngineConfig(CONFIG_DIR);
@@ -90,20 +90,46 @@ describe("plan over the fixture monorepo", () => {
     assert.equal(document.layout, "ok");
   });
 
-  it("names with spaces, quotes, tabs, newlines and non-ASCII letters survive", async () => {
-    const names = [
-      "docs/plan/with space.md",
-      'docs/plan/"quoted".md',
-      "docs/plan/tab\there.md",
-      "docs/plan/line\nbreak.md",
-      "docs/plan/ünïcödé.md",
-      "README two.md",
-    ];
+  it("names with spaces, quotes, tabs, newlines and non-ASCII letters survive; a name outside printable ASCII runs everything", async () => {
+    const plain = ["docs/plan/with space.md", 'docs/plan/"quoted".md', "README two.md"];
+    const notPlain = ["docs/plan/tab\there.md", "docs/plan/line\nbreak.md", "docs/plan/ünïcödé.md"];
+    const names = [...plain, ...notPlain];
     const result = await plan(Object.fromEntries(names.map((name) => [name, `${name}\n`])));
     assert.deepEqual(result.files.map((file) => file.path).sort(), [...names].sort());
-    assert.deepEqual(result.document.classes, ["docs"]);
     assert.equal(result.document.changed, names.length);
-    assert.equal(result.document.tier, "S", "README two.md is not a root file the layout lists, so it is unmapped for tiers");
+    const placed = (path: string): unknown[] => {
+      const file = result.files.find((candidate) => candidate.path === path);
+      return [file?.tier, file?.tierSource, file?.classes];
+    };
+    assert.deepEqual(placed("docs/plan/with space.md"), ["D", "entry", ["docs"]]);
+    assert.deepEqual(placed('docs/plan/"quoted".md'), ["D", "entry", ["docs"]]);
+    assert.deepEqual(placed("README two.md"), ["S", "unmapped", ["docs"]], "not a root file the layout lists, so unmapped for tiers");
+    for (const path of notPlain) assert.deepEqual(placed(path), ["S", "not-plain", ["unmapped"]], JSON.stringify(path));
+    assertEverything(result.document, "unmapped");
+    assert.equal(result.document.tier, "S");
+    assert.equal(result.document.jobs.selfTest, true, "a name that is not plain may be the engine's own on the build machine");
+  });
+
+  it("a look-alike letter that a case-folding disk reads as ASCII is tier S and runs everything, self-test included", async () => {
+    // U+017F (long s) is s, and U+212A (Kelvin sign) is k, on the build machine's disk.
+    const paths = [
+      "apps/console/src/ſerver/main.ts", // the server code of a web app (tier S there)
+      "apps/console/ſtatic.json", // a control path
+      "packages/core/turbo.jſon", // a global input
+      "pacKages/core/src/index.ts",
+      "apps/admin/src/server/Keys.ts",
+      "docs/plan/Kelvin.md",
+    ];
+    const { files } = await plan(Object.fromEntries(paths.map((path) => [path, "export const x = 1;\n"])));
+    for (const path of paths) {
+      const file = files.find((candidate) => candidate.path === path);
+      assert.deepEqual([file?.tier, file?.tierSource, file?.classes], ["S", "not-plain", ["unmapped"]], path);
+    }
+    // Alone, each runs everything; the engine's procedure (under the docs class's exclusion) shows it.
+    const { document } = await plan({ "docſ/review/prompts/system.md": "# system\n" });
+    assertEverything(document, "unmapped");
+    assert.equal(document.tier, "S");
+    assert.equal(document.jobs.selfTest, true);
   });
 
   for (const path of [
@@ -293,6 +319,48 @@ describe("plan over the fixture monorepo", () => {
     assert.equal(gone.document.everything, false);
     assert.deepEqual(gone.document.e2e.apps, []);
     assert.deepEqual([gone.document.images, gone.document.static], [[], []]);
+  });
+
+  it("an app whose package.json is deleted, renamed or replaced by another manifest runs everything, and keeps its e2e and outputs", async () => {
+    const consoleManifest = manifest("@fin/console", { "@fin/server": W, "@fin/ui": W });
+    const serverChange = { "apps/console/src/server/main.ts": "export const x = 3;\n" };
+    const cases: Array<[string, FileChanges]> = [
+      ["deleted", { ...serverChange, "apps/console/package.json": null }],
+      ["renamed to package.yaml", { ...serverChange, "apps/console/package.json": null, "apps/console/package.yaml": "name: '@fin/console'\n" }],
+      ["renamed to Package.json", { ...serverChange, "apps/console/package.json": null, "apps/console/Package.json": consoleManifest }],
+      ["renamed to package.json5", { "packages/server/src/index.ts": "export const server = 3;\n", "apps/console/package.json": null, "apps/console/package.json5": consoleManifest }],
+      ["joined by PACKAGE.JSON", { "apps/console/PACKAGE.JSON": manifest("@fin/console", { "@fin/money": W }) }],
+    ];
+    for (const [label, changes] of cases) {
+      const { document } = await plan(changes);
+      assertEverything(document, "workspace");
+      assert.deepEqual(document.e2e, e2eOf(ALL_APPS), label);
+      assert.deepEqual(document.images, ALL_IMAGES, label);
+      assert.deepEqual(document.static, ALL_STATIC, label);
+    }
+  });
+
+  it("an app folder renamed only by case, or a package folder spelled unlike the workspace globs, runs everything with every e2e", async () => {
+    const changes: Record<string, string | null> = {};
+    for (const [path, content] of Object.entries(monorepoFiles())) {
+      if (!path.startsWith("apps/console/")) continue;
+      changes[path] = null;
+      changes[`apps/Console/${path.slice("apps/console/".length)}`] = content;
+    }
+    const renamed = await plan(changes);
+    assertEverything(renamed.document, "workspace");
+    assert.deepEqual(renamed.document.e2e, e2eOf(ALL_APPS), "console's e2e stays, and fails on CI rather than vanishing");
+    assert.deepEqual(renamed.document.images, ALL_IMAGES);
+    const shouted = await plan({ "APPS/kiosk/package.json": manifest("@fin/kiosk", { "@fin/server": W }), "APPS/kiosk/src/main.ts": "export {};\n" });
+    assertEverything(shouted.document, "workspace");
+    assert.match(shouted.workspaceProblem ?? "", /APPS\/kiosk\/package\.json/);
+  });
+
+  it("a *.db.test.ts in any case turns on the db job for its package", async () => {
+    const withDbTest = repo.commit(base, { "packages/crypto/src/keys.DB.Test.ts": "export {};\n" });
+    const { document } = await plan({ "packages/crypto/src/index.ts": "export const crypto = 3;\n" }, "pull_request", withDbTest);
+    assert.equal(document.everything, false);
+    assert.equal(document.jobs.db, true);
   });
 
   it("an edge present at the base or the head counts", async () => {
@@ -511,6 +579,66 @@ describe("plan over the fixture monorepo", () => {
     assert.equal(linkTarget("a/b/link", Buffer.from("../../../outside")), "", "a link out of the tree reaches all of it");
     assert.equal(linkTarget("a/link", Buffer.from("/etc")), "");
     assert.equal(linkTarget("a/link", Buffer.from("../c/./d/")), "c/d");
+  });
+
+  it("a target that climbs out of a folder it names reaches what the kernel finds, so it counts as the whole tree", () => {
+    for (const target of ["../c/../d", "x/./../y", "../../docs/plan/d/../y", "a/b/../../c"]) {
+      assert.equal(linkTarget("p/q/link", Buffer.from(target)), "", target);
+    }
+    assert.equal(linkTarget("p/q/link", Buffer.from("../../c/./d")), "c/d", "leading .. climbs the link's own folders");
+    assert.equal(linkTarget("p/q/link", Buffer.from("./../c")), "p/c");
+    assert.equal(linkTarget("p/q/link", Buffer.from("../ſerver")), "", "a target that is not plain may name another folder on the disk");
+  });
+
+  it("a link that may reach any path runs everything at tier S, whatever it is reached through", async () => {
+    // A link to the root, and a link into the tree through it: the kernel reaches packages/ui
+    // through both, and the second is server code.
+    const throughRoot = repo.commit(base, {
+      "apps/console/src/client/root": { symlink: "../../../.." },
+      "apps/api/src/server/rt": { symlink: "../../../console/src/client/root/packages/ui" },
+    });
+    // A target that climbs out of a link it names: docs/plan/d leads to packages/ui/src/x, so
+    // ../y from there is packages/ui/src/y, not docs/plan/y.
+    const climbing = repo.commit(base, {
+      "docs/plan/d": { symlink: "../../packages/ui/src/x" },
+      "apps/api/src/server/lib": { symlink: "../../../../docs/plan/d/../y" },
+    });
+    for (const from of [throughRoot, climbing]) {
+      const { document, notes } = await plan({ "packages/ui/src/y/a.ts": "export const a = 1;\n" }, "pull_request", from);
+      assertEverything(document, "link");
+      assert.equal(document.tier, "S");
+      assert.equal(document.jobs.selfTest, true, "what the change reaches is unknown");
+      assert.match(notes.join("\n"), /may reach any path/);
+    }
+  });
+
+  it("a chain of links is followed as far as a kernel follows it, and a longer one runs everything", async () => {
+    // packages/ui/chain/l0 -> ../src, each further link to the one before, and server code at the end.
+    const chain = (length: number): Record<string, SpecialEntry> => {
+      const out: Record<string, SpecialEntry> = { "packages/ui/chain/l0": { symlink: "../src" } };
+      for (let i = 1; i < length; i++) out[`packages/ui/chain/l${i}`] = { symlink: `l${i - 1}` };
+      out["apps/api/src/server/deep"] = { symlink: `../../../../packages/ui/chain/l${length - 1}` };
+      return out;
+    };
+    const ten = await plan({ "packages/ui/src/y/a.ts": "export const a = 1;\n" }, "pull_request", repo.commit(base, chain(10)));
+    assert.equal(ten.document.everything, false);
+    assert.equal(ten.files.filter((file) => file.side === "link").length, 11);
+    assert.deepEqual(
+      ten.files.filter((file) => file.path.startsWith("apps/")).map((file) => [file.side, file.path, file.tier, file.link]),
+      [["link", "apps/api/src/server/deep/y/a.ts", "S", "apps/api/src/server/deep"]],
+    );
+    assert.equal(ten.document.tier, "S");
+    assert.deepEqual(ten.document.classes, ["server", "client"]);
+    assert.equal(ten.document.jobs.seams, true);
+    assert.equal(ten.document.jobs.db, true, "apps/api reaches @fin/db");
+    const forty = await plan({ "packages/ui/src/y/a.ts": "export const a = 2;\n" }, "pull_request", repo.commit(base, chain(39)));
+    assert.equal(forty.document.everything, false, "40 links in a row is as far as Linux goes");
+    const longer = await plan({ "packages/ui/src/y/a.ts": "export const a = 3;\n" }, "pull_request", repo.commit(base, chain(40)));
+    assertEverything(longer.document, "link");
+    assert.match(longer.notes.join("\n"), /longer chains than the plan follows/);
+    // A link to its own folder reaches every path below it again and again.
+    const loop = await plan({ "packages/ui/src/y/a.ts": "export const a = 4;\n" }, "pull_request", repo.commit(base, { "packages/ui/src/again": { symlink: "." } }));
+    assertEverything(loop.document, "link");
   });
 
   it("code under docs/ is not documentation: tier S and everything", async () => {

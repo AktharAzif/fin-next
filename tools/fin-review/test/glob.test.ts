@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compileGlob, globError } from "../src/plan/glob.ts";
+import { compileGlob, foldAscii, globError, isPlainPath } from "../src/plan/glob.ts";
 
 function matches(pattern: string, path: string): boolean {
   return compileGlob(pattern).test(path);
@@ -46,6 +46,23 @@ describe("compileGlob", () => {
     assert.equal(matches("docs/**", "docs/line\nbreak.md"), true);
     assert.equal(matches("*.md", "a\nb.md"), true);
     assert.equal(matches("docs/*.md", "docs/a\n/b.md"), false);
+  });
+
+  it("folds ASCII only, so a look-alike letter matches nothing; exact keeps the pattern's case", () => {
+    // U+017F (long s) and U+212A (Kelvin sign) fold to s and k on some disks, and in Unicode regexps.
+    assert.equal(matches("apps/*/src/server/**", "apps/console/src/ſerver/main.ts"), false);
+    assert.equal(matches("packages/**", "pacKages/core/x.ts"), false);
+    assert.equal(compileGlob("apps/*").exact("apps/console"), true);
+    assert.equal(compileGlob("apps/*").exact("Apps/console"), false);
+    assert.equal(compileGlob("apps/*").test("Apps/console"), true);
+    assert.equal(foldAscii("Apps/K/ſ/É"), "apps/K/ſ/É", "only A to Z fold, so every offset is kept");
+  });
+
+  it("a plain path is printable ASCII only", () => {
+    for (const path of ["docs/a b.md", 'docs/"q".md', "a/b~c/[d]{e}.ts", "x"]) assert.equal(isPlainPath(path), true, path);
+    for (const path of ["docs/tab\t.md", "docs/line\n.md", "docs/ü.md", "apps/ſerver", "pacKages", "a\u0000b", "a\u007fb", "a​b"]) {
+      assert.equal(isPlainPath(path), false, JSON.stringify(path));
+    }
   });
 
   it("dots and other regular-expression characters are literal", () => {

@@ -9,12 +9,18 @@
 // package folder, a package name outside npm's grammar, and two package folders whose names differ
 // only by case (one folder on a case-insensitive disk) make the graph unusable, which runs
 // everything.
+//
+// A package is a package.json in a folder the workspace globs name in their own case: what pnpm
+// reads on a case-sensitive disk (CI's). Any other file pnpm, or a disk that ignores case, could
+// read as a workspace package's manifest (package.yaml, package.json5, Package.json, a package.json
+// in a folder spelled in another case, or in a folder whose name is not plain ASCII) makes the
+// graph unusable too: the machines would not agree on it, and the plan cannot read YAML or JSON5.
 
 import { posix } from "node:path";
 import { shownText } from "../display.ts";
 import type { TreeEntry } from "../git.ts";
 import { isJsonObject, parseJsonBytes } from "../json.ts";
-import { matchesAny } from "./glob.ts";
+import { foldAscii, isPlainPath, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
 
 export interface Workspace {
@@ -33,6 +39,9 @@ export interface Workspace {
 export type WorkspaceResult = { ok: true; value: Workspace } | { ok: false; error: string };
 
 const MANIFEST = "package.json";
+/** The file names, ASCII case folded, that pnpm reads as a project's manifest. */
+const MANIFEST_NAMES: ReadonlySet<string> = new Set([MANIFEST, "package.json5", "package.yaml"]);
+const DB_TEST_SUFFIX = ".db.test.ts";
 const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
 const MAX_MANIFEST_BYTES = 1 << 20;
 const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
@@ -46,15 +55,38 @@ export function isPackageName(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_PACKAGE_NAME_LENGTH && PACKAGE_NAME_RE.test(value);
 }
 
-/** The package.json entries of a tree that sit directly in a workspace folder. */
+/** True when `dir` is a workspace folder as pnpm reads the globs on a case-sensitive disk. */
+function isPackageFolder(dir: string, workspaces: readonly Glob[]): boolean {
+  return isPlainPath(dir) && workspaces.some((glob) => glob.exact(dir));
+}
+
+/** The package.json entries of a tree that sit directly in a workspace folder (named in the globs' own case). */
 export function manifestEntries(tree: readonly TreeEntry[], workspaces: readonly Glob[]): TreeEntry[] {
   const out: TreeEntry[] = [];
   for (const entry of tree) {
     if (entry.type !== "blob" || !entry.path.endsWith(`/${MANIFEST}`)) continue;
     const dir = entry.path.slice(0, -(MANIFEST.length + 1));
-    if (matchesAny(workspaces, dir)) out.push(entry);
+    if (isPackageFolder(dir, workspaces)) out.push(entry);
   }
   return out;
+}
+
+/**
+ * The first entry of `tree` that pnpm, or a disk that ignores case, could read as a workspace
+ * package's manifest but that manifestEntries does not take; null when there is none.
+ */
+export function unreadManifest(tree: readonly TreeEntry[], workspaces: readonly Glob[]): string | null {
+  for (const entry of tree) {
+    if (entry.type !== "blob") continue;
+    const slash = entry.path.lastIndexOf("/");
+    const name = entry.path.slice(slash + 1);
+    if (slash < 0 || name.length < MANIFEST.length || name.length > MANIFEST.length + 1 || !MANIFEST_NAMES.has(foldAscii(name))) continue;
+    const dir = entry.path.slice(0, slash);
+    if (!matchesAny(workspaces, dir)) continue;
+    if (name === MANIFEST && isPackageFolder(dir, workspaces)) continue;
+    return entry.path;
+  }
+  return null;
 }
 
 /** The folder of a package.json entry. */
@@ -137,6 +169,10 @@ export function buildWorkspace(sides: readonly WorkspaceSide[], workspaces: read
   const dirsByFolded = new Map<string, string>();
 
   for (const side of sides) {
+    const unread = unreadManifest(side.tree, workspaces);
+    if (unread !== null) {
+      return { ok: false, error: `${shownText(unread)} is a manifest pnpm or a case-insensitive disk may read, and the plan reads only package.json in a folder the workspace globs name in their own case` };
+    }
     const sideDirs = new Map<string, string>();
     const sideNames = new Map<string, string>();
     const manifests: Array<{ dir: string; manifest: Manifest }> = [];
@@ -151,7 +187,7 @@ export function buildWorkspace(sides: readonly WorkspaceSide[], workspaces: read
       if (other !== undefined) {
         return { ok: false, error: `${shownText(manifest.name)} is the name of both ${shownText(other)} and ${shownText(dir)}` };
       }
-      const folded = dir.toLowerCase();
+      const folded = foldAscii(dir);
       const twin = dirsByFolded.get(folded);
       if (twin !== undefined && twin !== dir) {
         return { ok: false, error: `the package folders ${shownText(twin)} and ${shownText(dir)} differ only by case` };
@@ -176,7 +212,8 @@ export function buildWorkspace(sides: readonly WorkspaceSide[], workspaces: read
       deps.set(manifest.name, set);
     }
     for (const entry of side.tree) {
-      if (entry.type !== "blob" || !entry.path.endsWith(".db.test.ts")) continue;
+      // A case-insensitive disk runs x.DB.test.ts as a db test too.
+      if (entry.type !== "blob" || foldAscii(entry.path.slice(-DB_TEST_SUFFIX.length)) !== DB_TEST_SUFFIX) continue;
       const dir = ownerDirIn(entry.path, depths, (candidate) => sideDirs.has(candidate));
       const name = dir === null ? undefined : sideDirs.get(dir);
       if (name !== undefined) withDbTests.add(name);

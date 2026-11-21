@@ -3,7 +3,9 @@
 // A path's tier is S when it is a control path or no entry maps it. Otherwise the entry with the
 // longest path prefix (whole segments) maps it, and the first glob of that entry's `tiers` map
 // that matches the path below the entry decides; an entry with a single `tier` uses that, and an
-// entry whose globs all miss gives S. Matching ignores case. The root entry (path "" or ".")
+// entry whose globs all miss gives S. Matching ignores ASCII case (glob.ts's foldAscii, the one
+// fold of the planner), and a path with a character outside printable ASCII is S, since a disk
+// that folds more than ASCII may read it as any path (glob.ts). The root entry (path "" or ".")
 // maps files at the repository root, only those it lists in `files` when it has that list. A
 // control path written as a folder (`docs/review/`) covers the folder's own path as well as
 // everything below it, so a file or link put in the folder's place is a control path too.
@@ -12,7 +14,7 @@ import { shownText } from "../display.ts";
 import { isJsonObject } from "../json.ts";
 import { isTier } from "../roles.ts";
 import type { Tier } from "../roles.ts";
-import { compileGlob, globError, matchesAny } from "./glob.ts";
+import { compileGlob, foldAscii, globError, isPlainPath, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
 
 /** An image name (one repository path component), as release.yml pushes it. */
@@ -23,7 +25,7 @@ const STATIC_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export interface LayoutEntry {
   /** The entry's path as written, without a trailing slash; "" for the root entry. */
   readonly path: string;
-  /** Lower-cased path segments, for prefix matching. */
+  /** The path's segments with ASCII case folded, for prefix matching. */
   readonly segments: readonly string[];
   readonly isRoot: boolean;
   readonly name: string | null;
@@ -32,7 +34,7 @@ export interface LayoutEntry {
   readonly static: readonly string[];
   readonly tiers: ReadonlyArray<{ readonly glob: Glob; readonly tier: Tier }>;
   readonly tier: Tier | null;
-  /** The root entry's listed files, lower-cased; null when it lists none. */
+  /** The root entry's listed files, ASCII case folded; null when it lists none. */
   readonly files: ReadonlySet<string> | null;
 }
 
@@ -44,8 +46,9 @@ export interface Layout {
 /**
  * Where a path's tier came from. `not-documentation` is a path the layout calls D that is not a
  * documentation file (plan.ts): tier D is documentation (EXECUTION §1.7), so it counts as S.
+ * `not-plain` is a path with a character outside printable ASCII (glob.ts's isPlainPath).
  */
-export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout" | "not-documentation";
+export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout" | "not-documentation" | "not-plain";
 
 export interface PathTier {
   readonly tier: Tier;
@@ -128,7 +131,7 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
           return;
         }
       }
-      const key = path.toLowerCase();
+      const key = foldAscii(path);
       if (seenPaths.has(key)) errors.push(`${where}.path ${shownText(path)} appears twice`);
       seenPaths.add(key);
 
@@ -181,14 +184,14 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
         if (!isRoot) errors.push(`${where}.files is only for the root entry`);
         else if (!Array.isArray(rawFiles) || !rawFiles.every((item) => typeof item === "string" && item !== "" && !item.includes("/"))) {
           errors.push(`${where}.files must be an array of root file names`);
-        } else files = new Set(rawFiles.map((item) => (item as string).toLowerCase()));
+        } else files = new Set(rawFiles.map((item) => foldAscii(item as string)));
       }
       const name = raw["name"];
       const image = raw["image"];
       entries.push(
         Object.freeze({
           path,
-          segments: path === "" ? [] : path.toLowerCase().split("/"),
+          segments: path === "" ? [] : foldAscii(path).split("/"),
           isRoot,
           name: typeof name === "string" ? name : null,
           kind: typeof kind === "string" ? kind : null,
@@ -208,7 +211,7 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
 /** The entry with the longest path prefix that maps `path`, or null. */
 export function entryOf(layout: Layout, path: string): LayoutEntry | null {
   const segments = path.split("/");
-  const lower = segments.map((segment) => segment.toLowerCase());
+  const lower = segments.map(foldAscii);
   let best: LayoutEntry | null = null;
   for (const entry of layout.entries) {
     if (entry.isRoot) {
@@ -238,9 +241,13 @@ function relativeTo(entry: LayoutEntry, path: string): string {
   return segments.slice(entry.segments.length).join("/");
 }
 
-/** The tier of one path (spec 07 §2.4). With no valid layout every path is S. */
+/**
+ * The tier of one path (spec 07 §2.4). With no valid layout every path is S, and so is a path with
+ * a character outside printable ASCII, whatever entry or glob it resembles.
+ */
 export function tierOf(layout: Layout | null, path: string): PathTier {
   if (layout === null) return { tier: "S", source: "no-layout", entry: null };
+  if (!isPlainPath(path)) return { tier: "S", source: "not-plain", entry: null };
   if (matchesAny(layout.controlPaths, path)) return { tier: "S", source: "control", entry: entryOf(layout, path) };
   const entry = entryOf(layout, path);
   if (entry === null) return { tier: "S", source: "unmapped", entry: null };

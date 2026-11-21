@@ -2,10 +2,12 @@
 // settings of config/ci.json.
 //
 // A path belongs to every class whose `paths` match it and whose `exclude` does not; a path no
-// class takes is `unmapped`, which, like the `global` class, runs everything.
+// class takes is `unmapped`, which, like the `global` class, runs everything. A path with a
+// character outside printable ASCII is unmapped whatever it resembles: a disk that folds more than
+// ASCII may read it as a global input or a control path (glob.ts).
 
 import { isJsonObject } from "../json.ts";
-import { compileGlob, globError, matchesAny } from "./glob.ts";
+import { compileGlob, globError, isPlainPath, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
 import { isPackageName } from "./workspace.ts";
 
@@ -247,8 +249,9 @@ export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | {
   };
 }
 
-/** The classes of one path, in config order; empty means unmapped. */
+/** The classes of one path, in config order; empty means unmapped (as is every path that is not plain). */
 export function classesOf(map: CiMap, path: string): CiClass[] {
+  if (!isPlainPath(path)) return [];
   const out: CiClass[] = [];
   for (const cls of map.classes) {
     if (matchesAny(cls.paths, path) && !matchesAny(cls.exclude, path)) out.push(cls);

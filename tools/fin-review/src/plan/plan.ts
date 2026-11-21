@@ -8,14 +8,21 @@
 // at tier S. Tiers come from tools/layout.json as it is at the base, which is main's for a pull
 // request, so a pull request that edits the layout cannot lower its own tier; with no base, from
 // the head. Images and static outputs come from the layout at the head, what the commit builds
-// (for a pull request, from the base's as well), and only for packages that exist at the head. The
-// path classes come from this engine's own config/ci-map.json (the engine copy from main in CI,
-// S7-04). The package graph is the union of the base's and the head's manifests.
+// (for a pull request, from the base's as well), for the folders that are live at the head; so do
+// the e2e apps. A folder is live when it is a package there, or when it was a package at the base
+// and still holds tracked files: such a folder stopped being a package, so the plan runs
+// everything (spec 07 §10.2's non-package folder) and keeps its jobs, which then fail rather than
+// vanish. The path classes come from this engine's own config/ci-map.json (the engine copy from
+// main in CI, S7-04). The package graph is the union of the base's and the head's manifests.
 //
 // Links: a changed symbolic link or submodule runs everything at tier S, and a changed path that a
 // symbolic link in either tree reaches also counts at the link's path (code reached through a link
-// is the link's code). Tier D is documentation (EXECUTION §1.7): a path the layout calls D that is
-// not a documentation file, as the docs class of ci-map.json defines it, counts as S.
+// is the link's code), through chains of links as a kernel follows them. When that reach cannot be
+// bounded (a link that may reach any path, a chain longer than a kernel follows, or more link paths
+// than the caps), the plan runs everything at tier S. Tier D is documentation (EXECUTION §1.7): a
+// path the layout calls D that is not a documentation file, as the docs class of ci-map.json
+// defines it, counts as S. A path with a character outside printable ASCII is tier S and unmapped
+// (glob.ts: a disk that folds more than ASCII may read it as any path), and turns on the self-test.
 
 import { posix } from "node:path";
 import type { EngineConfig } from "../config.ts";
@@ -26,7 +33,7 @@ import { parseJsonBytes } from "../json.ts";
 import type { Tier } from "../roles.ts";
 import { CLASS_NAMES, UNMAPPED, classesOf } from "./ci-map.ts";
 import type { CiClass, JobName } from "./ci-map.ts";
-import { compileGlob, matchesAny } from "./glob.ts";
+import { compileGlob, foldAscii, isPlainPath, matchesAny } from "./glob.ts";
 import { maxTier, parseLayout, tierOf } from "./tiers.ts";
 import type { Layout, PathTier, TierSource } from "./tiers.ts";
 import { buildWorkspace, dependencyClosure, dependentsClosure, manifestDir, manifestEntries, ownerDir, ownerNames } from "./workspace.ts";
@@ -37,9 +44,14 @@ export const MAX_PLAN_BYTES = 64 * 1024;
 const MAX_LAYOUT_BYTES = 4 << 20;
 /** More merge bases than this is no history a pull request has; the plan refuses it. */
 const MAX_MERGE_BASES = 64;
-/** How many links deep a changed path is followed, and how many link paths one path may have. */
-const MAX_LINK_DEPTH = 8;
+/**
+ * How many links in a row a changed path is followed through: Linux's limit (macOS stops at 32).
+ * A path reached through a longer chain, a path with more link paths than MAX_LINK_ALIASES, and a
+ * change with more than MAX_LINK_ALIASES_TOTAL run everything at tier S.
+ */
+const MAX_LINK_DEPTH = 40;
 const MAX_LINK_ALIASES = 64;
+const MAX_LINK_ALIASES_TOTAL = 2_000;
 /** The paths whose change turns on the engine's self-test (spec 07 §10.1's selfTest). */
 const SELF_TEST_PATTERNS: readonly string[] = ["tools/fin-review", "tools/fin-review/**", "docs/review", "docs/review/**"];
 
@@ -102,7 +114,7 @@ export interface PlanDocument {
    * the package graph could not be read, which runs everything: every package counts.
    */
   packages: string[] | null;
-  /** The images and static outputs (from tools/layout.json) of the affected packages that exist at the head. */
+  /** The images and static outputs (from tools/layout.json) of the affected packages whose folders are live at the head. */
   images: string[];
   static: string[];
   /** Whether the tier layout (the base's) was usable; when not, every path is tier S and everything runs. */
@@ -170,8 +182,19 @@ export function linkTarget(linkPath: string, bytes: Uint8Array | undefined): str
     return "";
   }
   // An absolute target, or one that leaves the tree, may land anywhere on the machine that runs
-  // the code, the checkout included; so may one this cannot read. Each counts as the whole tree.
-  if (text === "" || text.includes("\0") || text.includes("\\") || posix.isAbsolute(text)) return "";
+  // the code, the checkout included; so may one this cannot read, and one outside printable ASCII
+  // (a disk that folds more than ASCII may read it as another path). Each counts as the whole tree.
+  if (text === "" || !isPlainPath(text) || text.includes("\\") || posix.isAbsolute(text)) return "";
+  // Leading ".." segments climb the link's own folders, which are real folders of the tree, so
+  // they resolve by name. A ".." after a folder the target names climbs out of wherever that
+  // folder leads, and the folder may itself be a link: the kernel follows it first, so the name
+  // alone cannot tell where the target lands.
+  let named = false;
+  for (const segment of text.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment !== "..") named = true;
+    else if (named) return "";
+  }
   const joined = posix.normalize(posix.join(posix.dirname(linkPath), text)).replace(/\/+$/, "");
   if (joined === "." || joined === "" || joined === ".." || joined.startsWith("../")) return "";
   return joined;
@@ -254,7 +277,8 @@ export async function computePlan(request: PlanRequest): Promise<PlanResult> {
   const headLayoutEntry = findBlob(headTree, LAYOUT_PATH);
   const baseLayoutEntry = baseTree === null ? null : findBlob(baseTree, LAYOUT_PATH);
   const headManifests = manifestEntries(headTree, workspaces);
-  const manifests = [...headManifests, ...(baseTree === null ? [] : manifestEntries(baseTree, workspaces))];
+  const baseManifests = baseTree === null ? [] : manifestEntries(baseTree, workspaces);
+  const manifests = [...headManifests, ...baseManifests];
   const linkEntries = [...headTree, ...(baseTree ?? [])].filter((entry) => entry.mode === SYMLINK_MODE);
   const read = await readBlobs(
     treeDir,
@@ -290,6 +314,7 @@ export async function computePlan(request: PlanRequest): Promise<PlanResult> {
     const link = { path: entry.path, target: linkTarget(entry.path, blobs.get(entry.oid)) };
     links.set(`${link.path}\0${link.target}`, link);
   }
+  const folders = liveFolders(headTree, headManifests, baseManifests);
 
   return assemble({
     event,
@@ -304,10 +329,40 @@ export async function computePlan(request: PlanRequest): Promise<PlanResult> {
     layoutProblems,
     workspace: built.ok ? built.value : null,
     workspaceProblem: built.ok ? null : built.error,
-    headPackageDirs: new Set(headManifests.map(manifestDir)),
+    liveDirs: folders.live,
+    stalePackageDirs: folders.stale,
     links: [...links.values()],
     notes,
   });
+}
+
+/**
+ * The folders, ASCII case folded, whose e2e, image and static outputs count: each package folder
+ * of the head, and each package folder of the base that still holds tracked files at the head.
+ * Those last are `stale` as well: they stopped being packages (a deleted or renamed package.json).
+ */
+function liveFolders(headTree: readonly TreeEntry[], headManifests: readonly TreeEntry[], baseManifests: readonly TreeEntry[]): { live: Set<string>; stale: string[] } {
+  const live = new Set(headManifests.map((entry) => foldAscii(manifestDir(entry))));
+  const stale: string[] = [];
+  let held: Set<string> | null = null;
+  for (const entry of baseManifests) {
+    const dir = manifestDir(entry);
+    if (live.has(foldAscii(dir))) continue;
+    held ??= heldFolders(headTree);
+    if (held.has(foldAscii(dir))) stale.push(dir);
+  }
+  for (const dir of stale) live.add(foldAscii(dir));
+  return { live, stale };
+}
+
+/** Every folder that holds a tracked entry of `tree`, ASCII case folded (as the disk that ignores case sees it). */
+function heldFolders(tree: readonly TreeEntry[]): Set<string> {
+  const out = new Set<string>();
+  for (const entry of tree) {
+    const folded = foldAscii(entry.path);
+    for (let slash = folded.indexOf("/"); slash > 0; slash = folded.indexOf("/", slash + 1)) out.add(folded.slice(0, slash));
+  }
+  return out;
 }
 
 export interface AssembleInput {
@@ -327,8 +382,14 @@ export interface AssembleInput {
   layoutProblems?: readonly string[];
   workspace: Workspace | null;
   workspaceProblem: string | null;
-  /** The package folders at the head (a package.json there, readable or not); the workspace's when absent. */
-  headPackageDirs?: ReadonlySet<string>;
+  /**
+   * The folders, ASCII case folded, whose e2e, image and static outputs count (a package at the
+   * head, or a package of the base that still holds tracked files there); the workspace's package
+   * folders when absent.
+   */
+  liveDirs?: ReadonlySet<string>;
+  /** The package folders of the base that hold tracked files at the head but are no package there. */
+  stalePackageDirs?: readonly string[];
   /** The symbolic links of the base and head trees. */
   links?: readonly TreeLink[];
   notes?: readonly string[];
@@ -338,38 +399,60 @@ function sortedNames(set: Iterable<string>): string[] {
   return [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** Folds ASCII letters only, so the length (and every slice offset) is kept. */
-function foldAscii(text: string): string {
-  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+/** The links of the trees, looked up by the folded path each one reaches. */
+export interface LinkIndex {
+  /** A link that may reach any path (its target is "", the whole tree), or null when none does. */
+  readonly wholeTree: TreeLink | null;
+  readonly byTarget: ReadonlyMap<string, readonly TreeLink[]>;
+}
+
+/** Indexes the links once, so each changed path looks up its own folders rather than every link. */
+export function indexLinks(links: readonly TreeLink[]): LinkIndex {
+  let wholeTree: TreeLink | null = null;
+  const byTarget = new Map<string, TreeLink[]>();
+  for (const link of links) {
+    if (link.target === "") {
+      wholeTree ??= link;
+      continue;
+    }
+    const key = foldAscii(link.target);
+    const list = byTarget.get(key);
+    if (list === undefined) byTarget.set(key, [link]);
+    else list.push(link);
+  }
+  return { wholeTree, byTarget };
 }
 
 /**
- * The paths through which the links reach `path`, or null when there are more than the cap.
- * A link to the whole tree reaches every path once; other links are followed up to the depth cap.
+ * The paths through which the links reach `path`: for each link whose target is `path` or a folder
+ * above it, the link's path with the rest of `path` below it, and again through the links that
+ * reach those paths. Null when the reach cannot be bounded: a link may reach any path, a chain is
+ * longer than MAX_LINK_DEPTH, or there are more than `cap` paths.
  */
-export function linkPaths(path: string, links: readonly TreeLink[]): Array<{ path: string; link: string }> | null {
+export function linkPaths(path: string, index: LinkIndex, cap: number = MAX_LINK_ALIASES): Array<{ path: string; link: string }> | null {
+  if (index.wholeTree !== null) return null;
   const out: Array<{ path: string; link: string }> = [];
   const seen = new Set<string>([foldAscii(path)]);
   let frontier = [path];
-  for (let depth = 0; depth < MAX_LINK_DEPTH && frontier.length > 0; depth++) {
+  for (let hops = 1; frontier.length > 0; hops++) {
     const next: string[] = [];
     for (const current of frontier) {
       const folded = foldAscii(current);
-      for (const link of links) {
-        const target = foldAscii(link.target);
-        let rest: string | null = null;
-        if (target === "") rest = current;
-        else if (folded === target) rest = "";
-        else if (folded.startsWith(`${target}/`)) rest = current.slice(target.length + 1);
-        if (rest === null) continue;
-        const alias = rest === "" ? link.path : `${link.path}/${rest}`;
-        const key = foldAscii(alias);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ path: alias, link: link.path });
-        if (out.length > MAX_LINK_ALIASES) return null;
-        // Through a link to the whole tree every path is reached once; going round again adds nothing.
-        if (target !== "") next.push(alias);
+      // The path itself, then each folder above it. foldAscii keeps every offset.
+      for (let end = folded.length; end > 0; end = folded.lastIndexOf("/", end - 1)) {
+        const reaching = index.byTarget.get(end === folded.length ? folded : folded.slice(0, end));
+        if (reaching === undefined) continue;
+        const rest = current.slice(end + 1);
+        for (const link of reaching) {
+          const alias = rest === "" ? link.path : `${link.path}/${rest}`;
+          const key = foldAscii(alias);
+          if (seen.has(key)) continue;
+          if (hops > MAX_LINK_DEPTH) return null;
+          seen.add(key);
+          out.push({ path: alias, link: link.path });
+          if (out.length > cap) return null;
+          next.push(alias);
+        }
       }
     }
     frontier = next;
@@ -384,7 +467,9 @@ export function assemble(input: AssembleInput): PlanResult {
   const layout = loaded.layout;
   const historyAmbiguous = input.historyAmbiguous ?? false;
   const links = input.links ?? [];
-  const headPackageDirs = input.headPackageDirs ?? new Set(workspace === null ? [] : workspace.namesByDir.keys());
+  const liveDirs = input.liveDirs ?? new Set(workspace === null ? [] : [...workspace.namesByDir.keys()].map(foldAscii));
+  const stalePackageDirs = input.stalePackageDirs ?? [];
+  const notes = [...(input.notes ?? [])];
 
   // Every path of the change: a rename or copy counts at its old and its new path, and a path a
   // link reaches also counts at the link's path.
@@ -394,23 +479,34 @@ export function assemble(input: AssembleInput): PlanResult {
     if (entry.oldPath !== null) changedPaths.push({ path: entry.oldPath, status: entry.status, side: "old", link: null });
   }
   let linkOverflow = false;
-  if (links.length > 0) {
-    const seen = new Set(changedPaths.map(({ path }) => foldAscii(path)));
-    const reached: typeof changedPaths = [];
-    for (const { path, status } of changedPaths) {
-      const aliases = linkPaths(path, links);
-      if (aliases === null) {
-        linkOverflow = true;
-        continue;
+  if (links.length > 0 && changedPaths.length > 0) {
+    const index = indexLinks(links);
+    if (index.wholeTree !== null) {
+      linkOverflow = true;
+      notes.push(`the symbolic link ${index.wholeTree.path} may reach any path, so what the change reaches cannot be bounded; planning everything at tier S`);
+    } else {
+      const seen = new Set(changedPaths.map(({ path }) => foldAscii(path)));
+      const reached: typeof changedPaths = [];
+      let budget = MAX_LINK_ALIASES_TOTAL;
+      for (const { path, status } of changedPaths) {
+        const aliases = linkPaths(path, index, Math.min(MAX_LINK_ALIASES, budget));
+        if (aliases === null) {
+          linkOverflow = true;
+          notes.push(
+            `symbolic links reach ${path} by more paths or longer chains than the plan follows (${MAX_LINK_ALIASES} a path, ${MAX_LINK_ALIASES_TOTAL} a change, ${MAX_LINK_DEPTH} links in a row); planning everything at tier S`,
+          );
+          break;
+        }
+        budget -= aliases.length;
+        for (const alias of aliases) {
+          const key = foldAscii(alias.path);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          reached.push({ path: alias.path, status, side: "link", link: alias.link });
+        }
       }
-      for (const alias of aliases) {
-        const key = foldAscii(alias.path);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        reached.push({ path: alias.path, status, side: "link", link: alias.link });
-      }
+      changedPaths.push(...reached);
     }
-    changedPaths.push(...reached);
   }
   const linkChanged = (diff ?? []).some((entry) => [entry.oldMode, entry.newMode].some((mode) => mode === SYMLINK_MODE || mode === GITLINK_MODE));
 
@@ -418,7 +514,8 @@ export function assemble(input: AssembleInput): PlanResult {
   const classSet = new Set<string>();
   const files: PlanFile[] = [];
   const pathClasses: Array<{ path: string; classes: CiClass[]; owners: string[] }> = [];
-  let nonPackageFolder = false;
+  // A folder that stopped being a package but still holds files is a non-package folder (§10.2).
+  let nonPackageFolder = stalePackageDirs.some((dir) => ci.packageRoots.includes(foldAscii(dir.split("/")[0] ?? "")));
 
   for (const { path, status, side, link } of changedPaths) {
     const classes = classesOf(ciMap, path);
@@ -430,7 +527,7 @@ export function assemble(input: AssembleInput): PlanResult {
     if (classes.length === 0) classSet.add(UNMAPPED);
     for (const cls of classes) classSet.add(cls.name);
     const owners = workspace === null ? [] : ownerNames(workspace, path);
-    const top = (path.split("/")[0] ?? "").toLowerCase();
+    const top = foldAscii(path.split("/")[0] ?? "");
     if (workspace !== null && ci.packageRoots.includes(top) && ownerDir(workspace, path) === null) nonPackageFolder = true;
     pathClasses.push({ path, classes, owners });
     files.push(
@@ -458,13 +555,9 @@ export function assemble(input: AssembleInput): PlanResult {
   else if (workspace === null || nonPackageFolder) reason = "workspace";
   const everything = reason !== "classes";
 
-  // The e2e apps that exist as packages at the head.
-  const existingE2eApps = ci.e2eApps.filter((dir) => headPackageDirs.has(dir));
-  const appNames = (dirs: readonly string[]): Set<string> => {
-    const out = new Set<string>();
-    for (const dir of dirs) for (const name of workspace?.namesByDir.get(dir) ?? []) out.add(name);
-    return out;
-  };
+  // The e2e apps whose folders are live at the head, by their folded folder.
+  const existingE2eApps = ci.e2eApps.filter((dir) => liveDirs.has(foldAscii(dir)));
+  const e2eAppByFolded = new Map(existingE2eApps.map((dir) => [foldAscii(dir), dir]));
 
   const jobs: PlanJobs = {
     check: true,
@@ -493,11 +586,12 @@ export function assemble(input: AssembleInput): PlanResult {
     const changedNames = new Set<string>();
     for (const { owners } of pathClasses) for (const name of owners) changedNames.add(name);
     affected = dependentsClosure(workspace, changedNames);
-    const e2eAppNames = appNames(existingE2eApps);
     const dirsOf = (names: Iterable<string>): void => {
       for (const name of names) {
-        if (!e2eAppNames.has(name)) continue;
-        for (const dir of workspace.dirsByName.get(name) ?? []) if (existingE2eApps.includes(dir)) e2eDirs.add(dir);
+        for (const dir of workspace.dirsByName.get(name) ?? []) {
+          const app = e2eAppByFolded.get(foldAscii(dir));
+          if (app !== undefined) e2eDirs.add(app);
+        }
       }
     };
     for (const { path, classes, owners } of pathClasses) {
@@ -525,21 +619,22 @@ export function assemble(input: AssembleInput): PlanResult {
   }
   jobs.e2e = everything || e2eDirs.size > 0;
   jobs.e2e_shards = jobs.e2e ? ci.e2eShards : 0;
+  // The engine's paths changed, or may have: a path that is not plain may be one of them on the
+  // build machine, and an unbounded link reach may include them.
   const selfTest = SELF_TEST_PATTERNS.map(compileGlob);
-  jobs.selfTest = diff === null || changedPaths.some(({ path }) => matchesAny(selfTest, path));
+  jobs.selfTest = diff === null || linkOverflow || changedPaths.some(({ path }) => !isPlainPath(path) || matchesAny(selfTest, path));
 
-  // Images and static outputs: the layout entries of the affected packages, for packages that
-  // exist at the head (a planned entry's package may not exist yet).
+  // Images and static outputs: the layout entries of the affected packages whose folders are live
+  // at the head (a planned entry's package may not exist yet).
   const images = new Set<string>();
   const statics = new Set<string>();
-  const headDirs = new Set([...headPackageDirs].map((dir) => dir.toLowerCase()));
   const affectedDirs = new Set<string>();
-  if (everything) for (const dir of headDirs) affectedDirs.add(dir);
-  else for (const name of affected) for (const dir of workspace?.dirsByName.get(name) ?? []) affectedDirs.add(dir.toLowerCase());
+  if (everything) for (const dir of liveDirs) affectedDirs.add(dir);
+  else for (const name of affected) for (const dir of workspace?.dirsByName.get(name) ?? []) affectedDirs.add(foldAscii(dir));
   for (const outputs of input.outputLayouts ?? (layout === null ? [] : [layout])) {
     for (const entry of outputs.entries) {
-      const key = entry.path.toLowerCase();
-      if (entry.isRoot || !headDirs.has(key)) continue;
+      const key = foldAscii(entry.path);
+      if (entry.isRoot || !liveDirs.has(key)) continue;
       const hit = affectedDirs.has(key);
       if (entry.image !== null && (allImages || hit)) images.add(entry.image);
       if (hit) for (const output of entry.static) statics.add(output);
@@ -573,7 +668,7 @@ export function assemble(input: AssembleInput): PlanResult {
     files: Object.freeze(files),
     layoutProblems: input.layoutProblems ?? loaded.problems,
     workspaceProblem: input.workspaceProblem,
-    notes: input.notes ?? [],
+    notes,
   });
 }
 

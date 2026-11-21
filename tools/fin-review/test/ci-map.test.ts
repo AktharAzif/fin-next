@@ -237,6 +237,12 @@ describe("config/ci-map.json", () => {
     assert.deepEqual(names(map, "planted/unmapped.ts"), []);
   });
 
+  it("a path outside printable ASCII is unmapped, even one a folding disk reads as a global input or a document", () => {
+    for (const path of ["docſ/review/prompts/system.md", "packages/core/turbo.jſon", ".github/worKflows/ci.yml", "docs/plan/über.md", "apps/console/src/client/é.tsx"]) {
+      assert.deepEqual(names(map, path), [], JSON.stringify(path));
+    }
+  });
+
   it("maps the example paths (spec 07 §10.1's table and its additions) to their classes", () => {
     for (const [path, expected] of EXAMPLES) assert.deepEqual(names(map, path), expected, path);
   });

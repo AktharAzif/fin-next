@@ -73,23 +73,38 @@ JSON:
 `everything` is true, with `reason`, for every event but `pull_request` (`event`: a push to `main`,
 `workflow_dispatch`, `schedule`); a base and head with no single merge base (`history`: criss-cross
 merges or unrelated histories, planned against every merge base, or the two trees, at tier S); a
-missing or invalid `tools/layout.json` (`layout`); a changed symbolic link or submodule (`link`, at
-tier S); any global input (`global`); a path no class maps (`unmapped`); and a folder under `apps/`
-or `packages/` that is no package, or a package graph that cannot be read (`workspace`). `check` and
-`static` always run.
+missing or invalid `tools/layout.json` (`layout`); a changed symbolic link or submodule, or links
+whose reach cannot be bounded (`link`, at tier S, below); any global input (`global`); a path no
+class maps (`unmapped`), which includes every path with a character outside printable ASCII; and a
+folder under `apps/` or `packages/` that is no package (one that stopped being a package but still
+holds files counts too), or a package graph that cannot be read (`workspace`). `check` and `static`
+always run.
 
 - `e2e.apps` names the web apps under `apps/` whose e2e runs, and `e2e.projects` their Playwright
   projects, `<app>-<variant>` for each variant in `config/ci.json`'s `e2eProjects` (spec 06 §10.2).
-  Only apps whose package exists at the head are named; with `everything`, all of them.
+  Only apps whose folder is live at the head are named (a package there, or a package of the base
+  that still holds files, whose e2e then fails rather than vanishes); with `everything`, all of them.
 - `packages` lists the affected packages, from each `package.json`'s workspace dependencies at the
   base and at the head (`workspace:*`, pnpm's `workspace:<name>@<range>` alias, or a path into the
-  workspace). It is `null` when the graph cannot be read: everything runs and every package counts.
+  workspace). A package is a `package.json` in a folder the workspace globs name in their own case.
+  Any other manifest pnpm or a case-insensitive disk could read (`package.yaml`, `package.json5`,
+  `Package.json`, a folder spelled in another case) makes the graph unreadable. It is `null` when the
+  graph cannot be read: everything runs and every package counts.
 - `images` and `static` come from the head's layout (on a pull request, from the base's as well), and
-  only for packages that exist at the head, so a `planned` entry lists nothing until its package does.
+  only for folders live at the head, so a `planned` entry lists nothing until its package exists.
 - `jobs.review` is false until H-03's CI review job exists; `jobs.selfTest` is true when
-  `tools/fin-review/**` or `docs/review/**` changed, or when there is no diff to tell.
-- A path a symbolic link in either tree reaches also counts at the link's path. Tier D is
-  documentation: a path the layout calls D that is not a documentation file (the `docs` class) is S.
+  `tools/fin-review/**` or `docs/review/**` changed, when a changed path is not plain ASCII, when the
+  links' reach is unbounded, or when there is no diff to tell.
+- A path a symbolic link in either tree reaches also counts at the link's path, through chains of
+  links up to 40 in a row (Linux's limit). A link that may reach any path (absolute, out of the
+  tree, unreadable, not plain ASCII, or with a `..` after a folder it names, which may itself be a
+  link), a longer chain, or more than 64 link paths for one path (2,000 for the change) runs
+  everything at tier S. Tier D is documentation: a path the layout calls D that is not a
+  documentation file (the `docs` class) is S.
+- Matching ignores ASCII case only, with the same fold everywhere. A path with a character outside
+  printable ASCII (a tab, a newline, any letter outside ASCII) is tier S and unmapped: the build
+  machine's disk folds some such letters onto ASCII ones (U+017F to `s`, U+212A to `k`), so no fold
+  here could promise to see the paths it sees.
 
 ## Tests
 

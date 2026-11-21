@@ -84,6 +84,12 @@ describe("T-RV-23: tiers", () => {
     assert.equal(tierOf(fixture, "Docs/Review/x.md").source, "control");
   });
 
+  it("a path outside printable ASCII is S, whatever entry or glob it resembles", () => {
+    for (const path of ["apps/console/src/ſerver/main.ts", "apps/console/src/client/é.tsx", "pacKages/ui/src/x.ts", "docs/plan/Kelvin.md", "docs/plan/tab\there.md"]) {
+      assert.deepEqual(tierOf(fixture, path), { tier: "S", source: "not-plain", entry: null }, JSON.stringify(path));
+    }
+  });
+
   it("a prefix matches whole segments only", () => {
     assert.equal(tierOf(fixture, "apps/console2/src/client/x.tsx").source, "unmapped");
     assert.equal(tierOf(fixture, "packages/ui-extra/x.ts").source, "unmapped");
