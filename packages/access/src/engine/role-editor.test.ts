@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { dashboardCatalogue as dash } from "../catalogue/dashboard/index.ts";
 import { staffCatalogue as staff } from "../catalogue/staff/index.ts";
 import { propertyRuns, propertySeeds, seeded } from "../test-support/seeded.ts";
+import { bidiClassOf, drawnOrder } from "./drawn-order.ts";
 import { missingNeed } from "./permissions.ts";
 import {
+  glyphsOf,
   LOOK_ALIKE_ROWS,
   normaliseRoleText,
   readingOf,
@@ -13,6 +15,7 @@ import {
   validateRole,
 } from "./role-editor.ts";
 import { describePermissions, permissionsOf, summary } from "./roles.ts";
+import { withoutInvisible } from "./text.ts";
 import type { Catalogue, RoleProblem } from "./types.ts";
 
 // Typed loosely, as a route handler holds them before the schema narrows a body.
@@ -163,6 +166,16 @@ describe("names already taken in the realm", () => {
     // Right-to-left letters, in the order they are drawn: Arabic heh (o) and alef (l).
     ["right-to-left letters, drawn as the name", "Po\u{627}\u{647}", ["Pool"]],
     ["right-to-left letters, stored as the name", "Po\u{647}\u{627}", ["Pool"]],
+    // Circled digits between Hebrew maqafs are neutrals, drawn reversed: "Tier ־②①־", as "Tier
+    // ־21־" is drawn, whose digits a number keeps in order.
+    [
+      "circled digits, drawn as the name's",
+      "Tier \u{5be}\u{2460}\u{2461}\u{5be}",
+      ["Tier \u{5be}21\u{5be}"],
+    ],
+    // A ligature of right-to-left letters is drawn right to left within itself, as its letters are.
+    ["a Hebrew ligature, drawn as its letters", "Tier \u{fb4f}", ["Tier \u{5d0}\u{5dc}"]],
+    ["an Arabic ligature, drawn as its letters", "Tier \u{fefb}", ["Tier \u{644}\u{627}"]],
     // Letters of one of Unicode's classes, read as the others are.
     ["a sharp s, drawn as β", "\u{df}illing", ["Billing"]],
     ["a kra, drawn as κ", "Ris\u{138}", ["Risk"]],
@@ -212,6 +225,9 @@ describe("names already taken in the realm", () => {
     ["no names taken", "Support desk", []],
     // Each order is compared with the same order: on one line the two are drawn apart.
     ["punctuation at the other end", "!Team", ["Team!"]],
+    // The ligature ﭏ draws alef to the right of lamed, as "אל" is drawn; "לא" is drawn the other
+    // way round, and is stored otherwise too.
+    ["a ligature's letters the other way round", "Tier \u{fb4f}", ["Tier \u{5dc}\u{5d0}"]],
   ])("is not taken: %s", (_what, name, takenNames) => {
     expect(taken(name, takenNames)).toEqual([]);
   });
@@ -475,6 +491,59 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     for (const cat of cats as readonly Catalogue[]) {
       expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
     }
+  });
+
+  // A line orders the characters a name holds, by their own classes, not their foldings': circled
+  // digits are neutrals, drawn reversed between right-to-left letters, though they fold to European
+  // digits that a number keeps in order; U+2024 ONE DOT LEADER is a neutral, though it folds to a
+  // full stop that joins two digits into one number; U+FE70 ARABIC FATHATAN ISOLATED FORM is an
+  // Arabic letter, after which digits are Arabic numbers, though it folds to a space and a mark;
+  // U+2135 ALEF SYMBOL and U+037A GREEK YPOGEGRAMMENI are left to right, though they fold to a
+  // Hebrew letter and to a space and a mark.
+  it.each([
+    ["Administ\u{647}\u{2466}\u{2463}\u{5e8}r", [dash]], // drawn "Administ\u{5e8}\u{2463}\u{2466}\u{647}r"
+    ["Ope\u{647}\u{2466}\u{2463}\u{5e8}r", [staff]], // drawn "Ope\u{5e8}\u{2463}\u{2466}\u{647}r"
+    ["Administr\u{647}\u{2466}\u{2463}\u{5be}r", [dash, staff]],
+    ["Oper\u{647}7\u{2024}4\u{5be}r", [staff]], // drawn "Oper\u{5be}4\u{2024}7\u{647}r"
+    ["Comp\u{5e1}\u{2463}\u{2460}\u{5e1}ce", [staff]], // drawn "Comp\u{5e1}\u{2460}\u{2463}\u{5e1}ce"
+    ["Oper\u{5be}\u{24ea}\u{2466}\u{2463}\u{5be}r", [staff]], // drawn "...\u{2463}\u{2466}\u{24ea}..."
+    ["V\u{5be}\u{2462}\u{2460}\u{5be}wer", [staff]], // drawn "V\u{5be}\u{2460}\u{2462}\u{5be}wer"
+    ["Administra\u{fe70}0-7r", [dash]], // drawn "Administra7-0\u{fe70}r"
+    ["Adm\u{fe70}\u{2229}1", [dash]], // drawn "Adm1\u{2229}\u{fe70}"
+    ["V\u{fe70}3-1wer", [staff]], // drawn "V1-3\u{fe70}wer"
+    ["Oper\u{fe70}0+4r", [staff]], // drawn "Oper4+0\u{fe70}r"
+    ["Ad\u{5d5}\u{10c21}\u{2135}", [dash]], // drawn "Ad\u{10c21}\u{5d5}\u{2135}"
+    ["Ad\u{5d5}\u{10c21}\u{37a}\u{5d7}", [dash]], // drawn "Ad\u{10c21}\u{5d5}\u{37a}\u{5d7}"
+    ["\u{5d5}\u{5d8}\u{37a}3wer", [staff]], // drawn "\u{5d8}\u{5d5}\u{37a}3wer"
+  ] as const)("%j, ordered by the classes of the characters drawn, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  it("reads every character whose folding has another class in the order a line draws it", () => {
+    const rightToLeft = (char: string) => ["R", "AL"].includes(bidiClassOf(char));
+    const wrong: string[] = [];
+    let changed = 0;
+    for (let cp = 0x20; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const char = String.fromCodePoint(cp);
+      if (!/^[\p{L}\p{N}\p{P}\p{S}]$/u.test(char) || withoutInvisible(char) !== char) continue;
+      const folding = [...char.normalize("NFKD")];
+      if (folding.length === 1 && bidiClassOf(folding[0] ?? "") === bidiClassOf(char)) continue;
+      // A ligature of right-to-left letters is drawn right to left within itself (below).
+      if (rightToLeft(char) && folding.filter(rightToLeft).length > 1) continue;
+      changed++;
+      // Between a right-to-left letter and a number, then another right-to-left letter.
+      const name = `\u{5e1}${char}7\u{5d8}`;
+      for (const line of ["ltr", "rtl"] as const) {
+        const drawn = glyphsOf(name, line).map((g) => g.char);
+        const expected = glyphsOf(drawnOrder(name, line), "stored").map((g) => g.char);
+        if (drawn.join("") !== expected.join("")) wrong.push(`U+${cp.toString(16)} ${line}`);
+      }
+    }
+    expect(changed).toBeGreaterThan(600);
+    expect(wrong).toEqual([]);
   });
 
   // A capital Unicode draws unlike its small letter reads as no Latin letter (Armenian Ա, though ա

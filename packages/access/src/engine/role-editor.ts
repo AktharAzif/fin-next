@@ -3,7 +3,7 @@
 // `roleDescription` rules live in packages/identity/src/names.ts (§8.6), which the server passes in
 // as `options.names`, so the server always runs both. Comparing a name with the built-in roles'
 // and with the realm's other custom roles is this file's alone.
-import { drawnOrder } from "./drawn-order.ts";
+import { bidiClassOf, drawnOrder } from "./drawn-order.ts";
 import { isPermission, missingNeed } from "./permissions.ts";
 import { hasInvisible, withoutInvisible } from "./text.ts";
 import type { Catalogue, RoleProblem } from "./types.ts";
@@ -146,16 +146,23 @@ export type ReadingOrder = "stored" | "ltr" | "rtl";
 const READING_ORDERS: readonly ReadingOrder[] = ["stored", "ltr", "rtl"];
 
 /**
- * A text's characters folded as they are read: a character that compatibility folding would turn
- * into one drawn otherwise read first (`BEFORE_FOLDING`), then compatibility-folded (NFKD), then
- * put in the reading order.
+ * A text's characters folded as they are read: put in the reading order first, by the classes of
+ * the characters themselves, as a line draws them (folding changes some classes: a circled digit
+ * is a neutral, its folding a European digit); then each character that compatibility folding
+ * would turn into one drawn otherwise read first (`BEFORE_FOLDING`), and compatibility-folded
+ * (NFKD). A character drawn as one glyph keeps its folding together, in the folding's own order,
+ * but a right-to-left letter's (an Arabic or Hebrew ligature's), which is drawn right to left.
  */
 function folded(text: string, order: ReadingOrder): string {
   let out = "";
-  for (const char of text) out += BEFORE_FOLDING.get(char) ?? char;
-  const folding = out.normalize("NFKD");
-  return order === "stored" ? folding : drawnOrder(folding, order);
+  for (const char of order === "stored" ? text : drawnOrder(text, order)) {
+    const folding = (BEFORE_FOLDING.get(char) ?? char).normalize("NFKD");
+    const rightToLeft = order !== "stored" && RIGHT_TO_LEFT.has(bidiClassOf(char));
+    out += rightToLeft ? drawnOrder(folding, "rtl") : folding;
+  }
+  return out.normalize("NFKD");
 }
+const RIGHT_TO_LEFT: ReadonlySet<string> = new Set(["R", "AL"]);
 
 /**
  * What one folded character's small letter is drawn as: the character lower-cased and each
