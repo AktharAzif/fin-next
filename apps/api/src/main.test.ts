@@ -2,9 +2,11 @@
 // `--migrate`, `--bootstrap`, `--print-db-cert` and `--task <name>` the migrate CLI. Each is reached
 // through its entry's own injection points (runService's options, the migrate CLI's environment, clock
 // and output); anything else exits 64 with one line that names only the mode.
+import { ConfigError } from "@fin/core";
+import { SEAM_VARIABLES } from "@fin/server";
 import { baseEnv, type Line } from "@fin/server/testing";
 import { afterEach, describe, expect, it } from "vitest";
-import { MIGRATE_FLAGS, main, selectEntry, USAGE } from "./main.ts";
+import { MIGRATE_FLAGS, main, refuseAtStart, selectEntry, USAGE } from "./main.ts";
 
 const NOW = Date.UTC(2026, 10, 21, 12);
 const clock = { now: () => NOW };
@@ -158,6 +160,62 @@ describe("the migrate flags", () => {
     expect(lines.map((l) => l.event)).toEqual(["migrate.started", "task.failed"]);
     expect(lines[0]).toMatchObject({ mode: "task", task: "audit-note" });
     expect(lines[1]).toMatchObject({ task: "audit-note", code: "config" });
+  });
+
+  it("take every process's start-up refusals first, naming the variable and running nothing", async () => {
+    // Built at run time: a refused setting's value is never echoed.
+    const value = ["never", "echoed", "setting"].join("-");
+    for (const argv of [
+      ["--migrate"],
+      ["--bootstrap"],
+      ["--print-db-cert"],
+      ["--task", "audit-note"],
+    ]) {
+      for (const [extra, variable] of [
+        [{ NODE_OPTIONS: `--require=${value}` }, "NODE_OPTIONS"],
+        [{ BETTER_AUTH_URL: `https://${value}.example.com` }, "BETTER_AUTH_URL"],
+        // Vitest runs the source, which refuses a deployed environment as the test build does.
+        [{ FIN_ENVIRONMENT: "staging" }, "FIN_ENVIRONMENT"],
+        [{ FIN_ENVIRONMENT: "production" }, "FIN_ENVIRONMENT"],
+        [{ FIN_CONTAINER: "1", FIN_ENVIRONMENT: "development" }, "FIN_ENVIRONMENT"],
+      ] as const) {
+        const { running, out, exits, lines } = await run([...argv], { ...env, ...extra });
+        const label = `${argv.join(" ")} ${variable}`;
+        expect(running, label).toBeUndefined();
+        expect(exits, label).toEqual([78]);
+        expect(lines, label).toEqual([
+          {
+            dt: "2026-11-21T12:00:00.000Z",
+            message: "config.invalid",
+            event: "config.invalid",
+            level: "error",
+            variable,
+            problem: "refused",
+          },
+        ]);
+        expect(out, label).not.toContain(value);
+      }
+    }
+  });
+
+  it("refuse a seam in a release build and a test build in staging or production", () => {
+    const refusal = (env: Record<string, string>, target: "release" | "test") => {
+      try {
+        refuseAtStart(env, target);
+        return null;
+      } catch (error) {
+        if (error instanceof ConfigError) return `${error.variable} ${error.problem}`;
+        throw error;
+      }
+    };
+    for (const seam of SEAM_VARIABLES) {
+      expect(refusal({ ...env, [seam]: "1" }, "release"), seam).toBe(`${seam} refused`);
+    }
+    expect(refusal({ ...env, fin_seam_clock: "1" }, "release")).toBe("FIN_SEAM refused");
+    expect(refusal({ ...env, FIN_ENVIRONMENT: "production" }, "release")).toBeNull();
+    expect(refusal({ ...env, FIN_ENVIRONMENT: "staging" }, "test")).toBe("FIN_ENVIRONMENT refused");
+    expect(refusal({ ...env, FIN_SEAM_CLOCK: "1" }, "test")).toBeNull();
+    expect(refusal({ ...env, FIN_CONTAINER: "1" }, "release")).toBeNull();
   });
 
   it("reads main's environment, never the process's", async () => {
