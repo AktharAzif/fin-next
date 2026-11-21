@@ -9,10 +9,12 @@ import { after, describe, test } from "node:test";
 import { prePush } from "../pre-push.mjs";
 import {
   decodeContent,
+  foldText,
   loadRefuseList,
   refuseMatcher,
   scanCommits,
   scanContent,
+  scanName,
   scanText,
   scanTree,
 } from "../public-safety.mjs";
@@ -188,7 +190,136 @@ describe("public-safety reads every encoding", () => {
   });
 
   test("plain UTF-8 text is read once, as text", () => {
-    assert.deepEqual(decodeContent(Buffer.from(text)), { binary: false, views: [text] });
+    assert.deepEqual(decodeContent(Buffer.from(text)), {
+      binary: false,
+      views: [text],
+      texts: [text],
+    });
+  });
+
+  test("a byte-order mark, or another encoding after the first page, hides nothing", () => {
+    const payload = `contact ${PLANTED.personalAddress}\nacct ${PLANTED.accountId}\nhost console.${ZONE}\n`;
+    const utf16le = (/** @type {string} */ s) => Buffer.from(s, "utf16le");
+    const expected = ["account-id", "email-address", "refuse-list"];
+    assert.deepEqual(rules(scanContent("notes.txt", Buffer.from(payload), refused)), expected);
+    for (const [form, bytes] of /** @type {[string, Buffer][]} */ ([
+      ["FF FE, then UTF-8", Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(payload)])],
+      ["FE FF, then UTF-8", Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(payload)])],
+      [
+        "EF BB BF, then UTF-16LE",
+        Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), utf16le(payload)]),
+      ],
+      [
+        "8193 ASCII bytes, then UTF-16LE",
+        Buffer.concat([Buffer.from("x".repeat(8193)), utf16le(payload)]),
+      ],
+      [
+        "88 lines of ASCII, then UTF-16LE",
+        Buffer.concat([Buffer.from(`${"y".repeat(99)}\n`.repeat(88)), utf16le(payload)]),
+      ],
+      [
+        "FF FE 41, then UTF-16LE at an odd offset",
+        Buffer.concat([Buffer.from([0xff, 0xfe, 0x41]), utf16le(payload)]),
+      ],
+      ["UTF-16BE without a mark", encode(payload, "utf16be", false)],
+    ])) {
+      assert.deepEqual(rules(scanContent("notes.txt", bytes, refused)), expected, form);
+    }
+  });
+});
+
+describe("public-safety matches the refuse list across lines and separators", () => {
+  const refused = refuseMatcher(["Jane Q Public", ["oldproduct-zone", "invalid"].join(".")]);
+  const found = (/** @type {string} */ text) =>
+    scanText("a.md", text, refused).map((f) => `${f.line} ${f.rule} ${f.message.slice(-2)}`);
+
+  test("a wrap, a run of spaces or an invisible character between its words hides no entry", () => {
+    for (const text of [
+      "see Jane Q\nPublic",
+      "see Jane Q\r\nPublic",
+      "see Jane Q\n    // Public",
+      "see Jane Q\n * Public",
+      "see Jane Q\n> Public",
+      "see Jane\u{A0}Q\u{2003}Public",
+      "see Jane  Q\t\tPublic",
+      "see Jane Q\u{200B} Public",
+      "see \u{FF2A}\u{FF41}\u{FF4E}\u{FF45} Q Public",
+    ]) {
+      assert.deepEqual(found(text), ["1 refuse-list #1"], JSON.stringify(text));
+    }
+  });
+
+  test("an escape, a soft hyphen, a defanged dot or a hyphenated wrap hides no entry", () => {
+    for (const text of [
+      "see oldproduct\\-zone.invalid",
+      "see oldproduct\u{AD}-zone.invalid",
+      "see oldproduct-zone[.]invalid",
+      "see oldproduct-zone(.)invalid",
+      "see oldproduct-\nzone.invalid",
+      "see OLDPRODUCT-ZONE.INVALID",
+    ]) {
+      assert.deepEqual(found(text), ["1 refuse-list #2"], JSON.stringify(text));
+    }
+  });
+
+  test("a match across lines is reported once, at the line where it starts", () => {
+    assert.deepEqual(found("one\ntwo\nsee Jane Q\nPublic\nthree\n"), ["3 refuse-list #1"]);
+    assert.deepEqual(found("Jane Q Public and Jane Q\nPublic"), ["1 refuse-list #1"]);
+    assert.deepEqual(found("Jane Q.\nPublic and Jane Public Q"), []);
+  });
+
+  test("the folding keeps every line's number", () => {
+    for (const join of [false, true]) {
+      const view = foldText("ab  \n\n  // cd\r\nEF", join);
+      assert.equal(view.text, join ? "abcdef" : "ab cd ef");
+      assert.deepEqual(
+        [...view.text].map((_, i) => view.lineAt(i)).filter((_, i) => view.text.charAt(i) !== " "),
+        [1, 1, 3, 3, 4, 4],
+      );
+    }
+  });
+
+  test("names, messages and paths are matched the same way", () => {
+    assert.deepEqual(rules(scanText("m", "release notes for Jane Q\nPublic", refused)), [
+      "refuse-list",
+    ]);
+    assert.deepEqual(rules(scanName(["notes", "Jane\u{200B}Q Public.md"].join("/"), refused)), []);
+    assert.deepEqual(rules(scanName("notes/Jane\u{200B} Q Public.md", refused)), ["refuse-list"]);
+  });
+});
+
+describe("public-safety refuses encoded files end to end", () => {
+  test("the command and the pre-push hook find a value behind a byte-order mark", () => {
+    const remote = mkdtempSync(join(tmpdir(), "fin-remote-"));
+    git(remote, ["init", "-q", "--bare"]);
+    const dir = makeRepo({ "README.md": "x\n" }, { commit: "root" });
+    git(dir, ["remote", "add", "origin", remote]);
+    git(dir, ["push", "-q", "origin", "work"]);
+    writeFileSync(
+      join(dir, "notes.txt"),
+      Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`contact ${PLANTED.staffAddress}\n`)]),
+    );
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "notes"]);
+    const tree = runScript("scripts/public-safety.mjs", ["--root", dir]);
+    assert.equal(tree.status, 1);
+    assert.match(tree.output, /^notes\.txt:1 email-address: /m);
+    const range = runScript("scripts/public-safety.mjs", ["--root", dir, "--range", "HEAD"]);
+    assert.equal(range.status, 1);
+    /** @type {string[]} */
+    const lines = [];
+    const code = prePush({
+      root: dir,
+      remote: "origin",
+      input: `refs/heads/work ${git(dir, ["rev-parse", "HEAD"]).trim()} refs/heads/feature ${"0".repeat(40)}\n`,
+      gitleaks: "/nonexistent/gitleaks",
+      log: (line) => lines.push(line),
+    });
+    assert.equal(code, 1);
+    assert.match(lines.join("\n"), /^notes\.txt \(commit [0-9a-f]{12}\):1 email-address: /m);
+    for (const output of [tree.output, range.output, lines.join("\n")]) {
+      assert.ok(!output.includes(PLANTED.staffAddress), "the output repeats a value");
+    }
   });
 });
 
