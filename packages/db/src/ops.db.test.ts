@@ -534,7 +534,7 @@ describe("email.enqueue (AC-P0-39, T08-22's Phase 0 part)", () => {
       ]),
     );
     const row = await su.query(
-      "SELECT template, category, priority, carries_code, enqueued_by FROM email.outbox WHERE id = $1",
+      "SELECT template, category, priority, carries_code, enqueued_by FROM email_private.outbox WHERE id = $1",
       [id],
     );
     expect(row.rows).toEqual([
@@ -610,9 +610,160 @@ describe("email.enqueue (AC-P0-39, T08-22's Phase 0 part)", () => {
         );
       expect(codes).toEqual(["FE001", "FE002", "FE002", "FE002", "FE002"]);
       expect(
-        await codeOf(worker, "INSERT INTO email.outbox (id) VALUES ($1)", [testId("eml")]),
+        await codeOf(worker, "INSERT INTO email_private.outbox (id) VALUES ($1)", [testId("eml")]),
       ).toBe("42501");
     });
+  });
+});
+
+describe("email_private: the worker's tables, out of every other login's reach", () => {
+  // Postgres takes a statement's table lock before it checks the statement's privileges (a PREPARE
+  // when it is parsed; CREATE RULE and CREATE TRIGGER queue theirs before the ownership check), so a
+  // login that can name a table can hold it up. One with no USAGE on the schema cannot name it.
+  const OTHERS = [
+    "fin_edge_a",
+    "fin_api_a",
+    "fin_payments_a",
+    "fin_console_a",
+    "fin_admin_a",
+    "fin_probe",
+  ];
+
+  it("gives USAGE to the worker and enqueue's owner only, CREATE to its owner only, nothing to PUBLIC", async () => {
+    const result = await su.query<{ role: string; usage: boolean; create: boolean }>(
+      `SELECT r.rolname AS role, has_schema_privilege(r.oid, 'email_private', 'USAGE') AS usage,
+              has_schema_privilege(r.oid, 'email_private', 'CREATE') AS create
+       FROM pg_roles r WHERE r.rolname LIKE 'fin\\_%' ORDER BY 1`,
+    );
+    // fin_backup reads every schema through pg_read_all_data, by design (DA-15); it holds no grant.
+    expect(result.rows.filter((r) => r.usage).map((r) => r.role)).toEqual([
+      "fin_backup",
+      "fin_email_enqueue",
+      "fin_owner",
+      "fin_worker",
+      "fin_worker_a",
+      "fin_worker_b",
+    ]);
+    expect(result.rows.filter((r) => r.create).map((r) => r.role)).toEqual(["fin_owner"]);
+    const acl = await su.query<{ grantee: string; privilege: string }>(
+      `SELECT CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+              a.privilege_type AS privilege
+       FROM pg_namespace n, aclexplode(n.nspacl) a WHERE n.nspname = 'email_private' ORDER BY 1, 2`,
+    );
+    expect(acl.rows).toEqual([
+      { grantee: "fin_email_enqueue", privilege: "USAGE" },
+      { grantee: "fin_owner", privilege: "CREATE" },
+      { grantee: "fin_owner", privilege: "USAGE" },
+      { grantee: "fin_worker", privilege: "USAGE" },
+    ]);
+    const tables = await su.query<{ name: string; public: number }>(
+      `SELECT c.relname AS name,
+              (SELECT count(*)::int FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+                WHERE a.grantee = 0) AS public
+       FROM pg_class c WHERE c.relnamespace = 'email_private'::regnamespace AND c.relkind = 'r'`,
+    );
+    expect(tables.rows).toEqual([{ name: "outbox", public: 0 }]);
+  });
+
+  it("runs email.enqueue() as a role that cannot log in, holding only INSERT on the outbox and SELECT on the template grants", async () => {
+    const fn = await su.query(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config,
+              r.rolcanlogin AS can_login
+       FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+       WHERE p.oid = 'email.enqueue(jsonb)'::regprocedure`,
+    );
+    expect(fn.rows).toEqual([
+      {
+        owner: "fin_email_enqueue",
+        definer: true,
+        config: ["search_path=pg_catalog, pg_temp"],
+        can_login: false,
+      },
+    ]);
+    const schemas = ["identity", "staff", "keys", "kyc", "money", "events", "email"]
+      .concat(["email_private", "audit", "ops", "ops_guard"])
+      .map((s) => `'${s}'`)
+      .join(", ");
+    const tables = await su.query<{ name: string; privilege: string }>(
+      `SELECT n.nspname || '.' || c.relname AS name, p.privilege
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+            unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(privilege)
+       WHERE n.nspname IN (${schemas}) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+         AND has_table_privilege('fin_email_enqueue', c.oid, p.privilege)
+       ORDER BY 1, 2`,
+    );
+    expect(tables.rows).toEqual([
+      { name: "email.template_grant", privilege: "SELECT" },
+      { name: "email_private.outbox", privilege: "INSERT" },
+    ]);
+    const held = await su.query<{ name: string; usage: boolean; create: boolean }>(
+      `SELECT n.nspname AS name, has_schema_privilege('fin_email_enqueue', n.oid, 'USAGE') AS usage,
+              has_schema_privilege('fin_email_enqueue', n.oid, 'CREATE') AS create
+       FROM pg_namespace n WHERE n.nspname IN (${schemas}) ORDER BY 1`,
+    );
+    expect(held.rows.filter((r) => r.usage).map((r) => r.name)).toEqual(["email", "email_private"]);
+    expect(held.rows.filter((r) => r.create)).toEqual([]);
+    // EXECUTE on email.enqueue() for the five sending services only (its owner's own aside).
+    const callers = await su.query<{ role: string }>(
+      `SELECT r.rolname AS role FROM pg_roles r
+       WHERE has_function_privilege(r.oid, 'email.enqueue(jsonb)', 'EXECUTE')
+         AND r.rolname NOT IN ('fin_owner', 'fin_email_enqueue') AND NOT r.rolsuper
+       ORDER BY 1`,
+    );
+    expect(callers.rows.map((r) => r.role)).toEqual(
+      ["fin_admin", "fin_api", "fin_console", "fin_payments", "fin_worker"].flatMap((g) => [
+        g,
+        `${g}_a`,
+        `${g}_b`,
+      ]),
+    );
+  });
+
+  it("refuses every other login any name in it before any lock: a SELECT, a PREPARE, a rule or a trigger", async () => {
+    const relations = await su.query<{ name: string }>(
+      `SELECT 'email_private.' || c.relname AS name FROM pg_class c
+       WHERE c.relnamespace = 'email_private'::regnamespace AND c.relkind IN ('r', 'i') ORDER BY 1`,
+    );
+    expect(relations.rows.map((r) => r.name)).toEqual([
+      "email_private.outbox",
+      "email_private.outbox_due",
+      "email_private.outbox_pkey",
+    ]);
+    // The superuser holds every table in the schema: a statement that locked before it checked would
+    // wait, and end with the lock timeout (55P03), not with 42501.
+    const holder = await db.superuser();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE email_private.outbox IN ACCESS EXCLUSIVE MODE");
+      for (const login of OTHERS) {
+        await withClient(login, async (client) => {
+          await client.query("SET lock_timeout = '2s'");
+          for (const { name } of relations.rows) {
+            for (const sql of [
+              `SELECT 1 FROM ${name}`,
+              `PREPARE p AS SELECT 1 FROM ${name}`,
+              `CREATE RULE r AS ON INSERT TO ${name} DO NOTHING`,
+              `CREATE TRIGGER t BEFORE UPDATE ON ${name} FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()`,
+            ]) {
+              await client.query("BEGIN");
+              const error = await client.query(sql).then(
+                () => undefined,
+                (e: unknown) => e as { code?: string; message?: string },
+              );
+              expect({ login, sql, code: error?.code }).toEqual({ login, sql, code: "42501" });
+              expect(error?.message).toBe("permission denied for schema email_private");
+              await client.query("ROLLBACK");
+            }
+          }
+          // Nor through the search path, which skips a schema the login may not use.
+          await client.query("SET search_path = email_private");
+          expect(await codeOf(client, "SELECT 1 FROM outbox")).toBe("42P01");
+        });
+      }
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      await holder.end();
+    }
   });
 });
 

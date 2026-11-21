@@ -4,6 +4,28 @@ Fin's email: `EmailPort` and the Cloudflare Email Sending adapter, the template 
 templates, the outbox store and the one sender (ARCHITECTURE §9; spec 08 §4; spec 01 §6.10, §8.5).
 Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in its own transaction.
 
+## The private schema
+
+The outbox and every table only the worker's sender and delivery check use (`outbox`,
+`delivery_check`, `delivery_check_turn`, `send_bucket`, `daily_budget`, `recipient_window`) live in
+`email_private`. Only `fin_worker` and `email.enqueue()`'s owner have USAGE on it; nobody but its owner
+may create there, and PUBLIC holds nothing on it or in it. `email.template_grant` stays in `email`.
+
+The reason is how Postgres locks. It takes a statement's table lock before it checks the statement's
+privileges: a PREPARE locks its tables when it is parsed, and CREATE RULE or CREATE TRIGGER queues its
+lock before the ownership check fails. So a login that can name a table can hold it up with no
+privilege on it, two sessions being enough: one keeps a lock in an open transaction, the other queues
+DDL behind it, and every later lock on the table waits behind the DDL. A login with no USAGE on the
+schema cannot name the table: Postgres refuses the name (`42501`, permission denied for schema) before
+it locks anything.
+
+`email.enqueue()` is the only way in for every other service. It is `SECURITY DEFINER`, owned by
+`fin_email_enqueue`, a role that cannot log in and holds only INSERT on `email_private.outbox` and
+SELECT on `email.template_grant`; its search path is `pg_catalog, pg_temp` and every name inside is
+schema-qualified. EXECUTE is revoked from PUBLIC and granted to the five sending services only.
+`email.template_grant`, which `email.enqueue()` reads for every caller, is still in `email`, where every
+sending service can name it.
+
 ## Layout
 
 | Path | What |
@@ -15,12 +37,12 @@ Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in it
 | `src/catalogue.ts` | Every template, and `email.enqueue()`'s per-role allowlist generated from the folders |
 | `src/headers.ts` | Cloudflare's header allowlist, checked in code, and Fin's three headers |
 | `src/providers/cloudflare/` | The REST adapter and its host allowlist |
-| `src/outbox/` | The database seam and every statement the sender runs; `enqueue()` checks the params against the template before the row is written, so a notice that could never be sent fails the caller's transaction |
+| `src/outbox/` | The database seam and every statement the sender runs (all on `email_private`); `enqueue()` checks the params against the template before the row is written, so a notice that could never be sent fails the caller's transaction |
 | `src/sender/` | The sender: claims, leases, limits, the digest, the bucket, budgets and retries |
 | `src/testing/` | A fake transport, a line recorder and the integration-test database helper |
-| `sql/email_sender.sql` | This lane's extension of the outbox, to land as `packages/db/migrations/<ts>_email_sender.sql` |
+| `sql/email_sender.sql` | This lane's extension of the outbox (its tables in `email_private`, `email.enqueue()` replaced), to land as `packages/db/migrations/<ts>_email_sender.sql` |
 | `sql/email_sender.grants.sql` | Its grants, to land in `packages/db/roles/grants/email.json` |
-| `test/fixture/outbox-base.sql` | A test-only stand-in for P0-E's `<ts>_email_outbox.sql` (spec 01 §6.10), with its seeded `ops/delivery-check` grant, and for the one `ops` table the delivery check writes (`ops.duty_state`) |
+| `test/fixture/outbox-base.sql` | A test-only stand-in for P0-E's `<ts>_email_outbox.sql` (spec 01 §6.10), with its seeded `ops/delivery-check` grant, the two schemas the bootstrap makes, and the one `ops` table the delivery check writes (`ops.duty_state`) |
 
 ## Adding a template (area lanes)
 
@@ -37,4 +59,5 @@ Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in it
 
 - `pnpm --filter @fin/email test`: unit tests (templates, adapter against a fake fetch, units).
 - `pnpm --filter @fin/email test:db` with `FIN_TEST_DATABASE_URL` naming a Postgres 18 database the
-  login may create databases and roles in: the sender as the worker's own login.
+  login may create databases and roles in: the sender as the worker's own login, and `email_private`
+  refusing every other login's names before any lock.

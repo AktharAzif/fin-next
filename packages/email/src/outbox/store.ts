@@ -1,7 +1,9 @@
 // Every statement the sender runs on the outbox and its tables (spec 01 §6.10 plus
-// `sql/email_sender.sql`). Times are passed in from the injected clock, never read from the
-// database's own clock, so the tests control time; every write after a claim is fenced on
-// `leased_by`, so a replica whose lease was taken over changes nothing.
+// `sql/email_sender.sql`). They are all in `email_private`, which only the worker and
+// email.enqueue()'s owner may use, so no other login can name, and so lock, any of them; other
+// services reach the outbox only through `email.enqueue()`. Times are passed in from the injected
+// clock, never read from the database's own clock, so the tests control time; every write after a
+// claim is fenced on `leased_by`, so a replica whose lease was taken over changes nothing.
 import { findTemplate } from "../catalogue.ts";
 import type { EmailClass } from "../classes.ts";
 import { inTransaction, type PoolLike, type Queryable } from "./db.ts";
@@ -84,11 +86,11 @@ export interface ClaimOptions {
 export async function claimRows(db: Queryable, o: ClaimOptions): Promise<OutboxRow[]> {
   if (o.limit <= 0) return [];
   const result = await db.query<RawRow>(
-    `UPDATE email.outbox o
+    `UPDATE email_private.outbox o
         SET lease_until = $1::timestamptz + make_interval(secs => $2::double precision / 1000),
             leased_by = $3, attempts = o.attempts + 1
       WHERE o.id IN (
-        SELECT id FROM email.outbox
+        SELECT id FROM email_private.outbox
          WHERE folded_into IS NULL AND due_at <= $1::timestamptz
            AND (lease_until IS NULL OR lease_until < $1::timestamptz)
            AND priority BETWEEN $4 AND $5
@@ -105,10 +107,10 @@ export async function claimRows(db: Queryable, o: ClaimOptions): Promise<OutboxR
 
 /** Deletes a row the sender is done with (sent, or ended for good). */
 export async function deleteRow(db: Queryable, id: string, holder: string): Promise<boolean> {
-  const result = await db.query("DELETE FROM email.outbox WHERE id = $1 AND leased_by = $2", [
-    id,
-    holder,
-  ]);
+  const result = await db.query(
+    "DELETE FROM email_private.outbox WHERE id = $1 AND leased_by = $2",
+    [id, holder],
+  );
   return (result.rowCount ?? 0) > 0;
 }
 
@@ -128,7 +130,7 @@ export async function rescheduleRow(
   r: Reschedule,
 ): Promise<boolean> {
   const result = await db.query(
-    `UPDATE email.outbox
+    `UPDATE email_private.outbox
         SET due_at = $3::timestamptz, lease_until = NULL, leased_by = NULL,
             last_error_code = coalesce($4, last_error_code),
             attempts = CASE WHEN $5 THEN greatest(attempts - 1, 0) ELSE attempts END,
@@ -170,12 +172,12 @@ export async function countRecipient(
 ): Promise<number | undefined> {
   const result = await db.query<{ count: number }>(
     `WITH c AS (
-       UPDATE email.outbox SET counted = true
+       UPDATE email_private.outbox SET counted = true
         WHERE id = $1 AND leased_by = $2 AND NOT counted
         RETURNING id)
-     INSERT INTO email.recipient_window (key, kind, window_start, count)
+     INSERT INTO email_private.recipient_window (key, kind, window_start, count)
      SELECT $3, $4, $5::timestamptz, 1 FROM c
-     ON CONFLICT (key, kind, window_start) DO UPDATE SET count = email.recipient_window.count + 1
+     ON CONFLICT (key, kind, window_start) DO UPDATE SET count = email_private.recipient_window.count + 1
      RETURNING count`,
     [id, holder, key, kind, iso(windowStart)],
   );
@@ -192,7 +194,7 @@ export async function foldRow(
   now: number,
 ): Promise<boolean> {
   const result = await db.query(
-    `UPDATE email.outbox
+    `UPDATE email_private.outbox
         SET folded_into = $3, folded_at = $4::timestamptz, lease_until = NULL, leased_by = NULL
       WHERE id = $1 AND leased_by = $2`,
     [id, holder, digestKey, iso(now)],
@@ -210,7 +212,7 @@ export interface BucketSettings {
 export class BucketMissing extends Error {
   readonly code = "bucket_missing";
   constructor() {
-    super("email.send_bucket has no row for the bucket");
+    super("email_private.send_bucket has no row for the bucket");
     this.name = "BucketMissing";
   }
 }
@@ -232,9 +234,9 @@ export async function takeToken(
       `WITH cur AS (
          SELECT name,
                 least($2::float8, tokens + greatest(0, extract(epoch FROM ($4::timestamptz - refilled_at))) * $3::float8) AS avail
-           FROM email.send_bucket WHERE name = $1 FOR UPDATE),
+           FROM email_private.send_bucket WHERE name = $1 FOR UPDATE),
        upd AS (
-         UPDATE email.send_bucket b
+         UPDATE email_private.send_bucket b
             SET tokens = cur.avail - 1, refilled_at = greatest(b.refilled_at, $4::timestamptz)
            FROM cur
           WHERE b.name = cur.name AND cur.avail >= 1 + $5::float8
@@ -245,7 +247,7 @@ export async function takeToken(
   let row = (await take()).rows[0];
   if (row === undefined) {
     await db.query(
-      `INSERT INTO email.send_bucket (name, tokens, refilled_at) VALUES ($1, 0, '-infinity')
+      `INSERT INTO email_private.send_bucket (name, tokens, refilled_at) VALUES ($1, 0, '-infinity')
        ON CONFLICT (name) DO NOTHING`,
       [bucket.name],
     );
@@ -266,7 +268,7 @@ export async function takeToken(
  */
 export async function refundToken(db: Queryable, bucket: BucketSettings): Promise<void> {
   await db.query(
-    "UPDATE email.send_bucket SET tokens = least($2::float8, tokens + 1) WHERE name = $1",
+    "UPDATE email_private.send_bucket SET tokens = least($2::float8, tokens + 1) WHERE name = $1",
     [bucket.name, bucket.capacity],
   );
 }
@@ -295,13 +297,13 @@ export async function takeBudget<R>(
   const raise = [...new Set(scopes.raise)];
   return inTransaction(pool, async (tx) => {
     await tx.query(
-      `INSERT INTO email.daily_budget (day, scope, count)
+      `INSERT INTO email_private.daily_budget (day, scope, count)
        SELECT $1::date, s, 0 FROM unnest($2::text[]) AS s ORDER BY s
        ON CONFLICT (day, scope) DO NOTHING`,
       [day, read],
     );
     const locked = await tx.query<{ scope: string; count: number }>(
-      `SELECT scope, count FROM email.daily_budget
+      `SELECT scope, count FROM email_private.daily_budget
         WHERE day = $1::date AND scope = ANY($2::text[]) ORDER BY scope FOR UPDATE`,
       [day, read],
     );
@@ -310,7 +312,7 @@ export async function takeBudget<R>(
     const refusedBy = refuse(counts);
     if (refusedBy !== undefined) return { refusedBy, counts };
     const raised = await tx.query<{ scope: string; count: number }>(
-      `UPDATE email.daily_budget SET count = count + 1
+      `UPDATE email_private.daily_budget SET count = count + 1
         WHERE day = $1::date AND scope = ANY($2::text[]) RETURNING scope, count`,
       [day, raise],
     );
@@ -326,7 +328,7 @@ export async function refundBudget(
   scopes: readonly string[],
 ): Promise<void> {
   await db.query(
-    `UPDATE email.daily_budget SET count = greatest(count - 1, 0)
+    `UPDATE email_private.daily_budget SET count = greatest(count - 1, 0)
       WHERE day = $1::date AND scope = ANY($2::text[])`,
     [day, [...new Set(scopes)]],
   );
@@ -346,7 +348,7 @@ export async function dueDigests(
 ): Promise<DueDigest[]> {
   const result = await db.query<{ key: string; first: Date; rows: string | number }>(
     `SELECT folded_into AS key, min(folded_at) AS first, count(*) AS rows
-       FROM email.outbox WHERE folded_into IS NOT NULL
+       FROM email_private.outbox WHERE folded_into IS NOT NULL
       GROUP BY folded_into
      HAVING min(folded_at) <= $1::timestamptz - make_interval(secs => $2::double precision / 1000)
          OR (to_timestamp(right(folded_into, 10), 'YYYYMMDDHH24')::timestamp AT TIME ZONE 'UTC') + interval '1 hour' <= $1::timestamptz`,
@@ -374,7 +376,7 @@ export async function lockFolded(db: Queryable, key: string): Promise<FoldedRow[
     recipient_kind: RecipientKind;
     recipient: string;
   }>(
-    `SELECT id, template, recipient_kind, recipient FROM email.outbox
+    `SELECT id, template, recipient_kind, recipient FROM email_private.outbox
       WHERE folded_into = $1 ORDER BY id FOR UPDATE SKIP LOCKED`,
     [key],
   );
@@ -473,7 +475,9 @@ export async function enqueue(db: Queryable, input: EnqueueInput): Promise<strin
 
 export async function deleteRows(db: Queryable, ids: readonly string[]): Promise<number> {
   if (ids.length === 0) return 0;
-  const result = await db.query("DELETE FROM email.outbox WHERE id = ANY($1::text[])", [ids]);
+  const result = await db.query("DELETE FROM email_private.outbox WHERE id = ANY($1::text[])", [
+    ids,
+  ]);
   return result.rowCount ?? 0;
 }
 
@@ -499,7 +503,7 @@ export async function outboxAge(db: Queryable, now: number): Promise<OutboxAge> 
     `SELECT extract(epoch FROM ($1::timestamptz - min(first_due_at) FILTER (WHERE priority <= 2)))::float8 AS urgent,
             extract(epoch FROM ($1::timestamptz - min(first_due_at) FILTER (WHERE priority > 2)))::float8 AS other,
             count(*) AS waiting
-       FROM email.outbox
+       FROM email_private.outbox
       WHERE folded_into IS NULL AND first_due_at <= $1::timestamptz`,
     [iso(now)],
   );
@@ -516,11 +520,11 @@ export async function outboxAge(db: Queryable, now: number): Promise<OutboxAge> 
 /** Removes windows and budgets nobody reads any more. */
 export async function sweep(db: Queryable, now: number): Promise<void> {
   await db.query(
-    "DELETE FROM email.recipient_window WHERE window_start < $1::timestamptz - interval '2 days'",
+    "DELETE FROM email_private.recipient_window WHERE window_start < $1::timestamptz - interval '2 days'",
     [iso(now)],
   );
   await db.query(
-    "DELETE FROM email.daily_budget WHERE day < ($1::timestamptz AT TIME ZONE 'UTC')::date - 7",
+    "DELETE FROM email_private.daily_budget WHERE day < ($1::timestamptz AT TIME ZONE 'UTC')::date - 7",
     [iso(now)],
   );
 }

@@ -14,7 +14,9 @@ registrations, and typed access to Phase 0's `ops` tables.
 - **Grants** go in `roles/grants/<area>.json` (`{ area, grants: [{ on, name, privileges, columns?, to }] }`).
   The runner applies them exactly: everything Fin's roles hold on an object fin_owner owns is revoked and
   re-granted from the fragments, so a statement no fragment allows fails with SQLSTATE 42501. Grant to
-  the group roles (`fin_api`, …), never to a login.
+  the group roles (`fin_api`, …), never to a login. `email.enqueue()` is owned by `fin_email_enqueue`
+  (NOLOGIN; fin_owner is its one member), whose grants the runner applies the same way; it may use
+  `email_private`, the worker's schema, and holds only what the function needs.
 - **A guarded table** (a write that must carry its audit event, spec 08 §3.5) is registered in
   `src/guards/<area>.ts` with `defineGuards`, and the area's migration calls
   `audit.install_guard('<table>'::regclass, ARRAY[<ops>], '<key column>', ARRAY[<events>])` with the same

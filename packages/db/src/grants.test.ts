@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { MigrationError } from "./errors.ts";
-import { expandMatrix, loadFragments, normaliseSignature, parseFragment } from "./grants.ts";
+import {
+  expandMatrix,
+  loadFragments,
+  normaliseSignature,
+  parseFragment,
+  privilegeKey,
+} from "./grants.ts";
 import { GRANTS_DIR } from "./migrations.ts";
 
 function codeOf(fn: () => unknown): string {
@@ -47,6 +53,39 @@ describe("grant fragments", () => {
     expect(holders("audit.sequence(integer)")).toEqual(["fin_worker"]);
     expect(holders("audit.unsequenced_age()")).toEqual(["fin_probe"]);
     expect(holders("ops.set_switch(text, text, text, jsonb)")).toEqual(["fin_admin"]);
+  });
+
+  it("opens email_private to the worker and enqueue's owner only, and gives that owner only what enqueue needs", () => {
+    const matrix = expandMatrix(loadFragments(GRANTS_DIR));
+    expect(
+      matrix
+        .filter((p) => p.kind === "schema" && p.object === "email_private")
+        .map((p) => p.role)
+        .sort(),
+    ).toEqual(["fin_email_enqueue", "fin_worker"]);
+    expect(
+      matrix
+        .filter((p) => p.role === "fin_email_enqueue")
+        .map((p) => privilegeKey(p))
+        .sort(),
+    ).toEqual([
+      "schema email USAGE fin_email_enqueue",
+      "schema email_private USAGE fin_email_enqueue",
+      "table email.template_grant SELECT fin_email_enqueue",
+      "table email_private.outbox INSERT fin_email_enqueue",
+    ]);
+    // Nothing but enqueue's owner inserts into the outbox; nothing but the worker reads or changes it.
+    expect(
+      matrix
+        .filter((p) => p.object === "email_private.outbox")
+        .map((p) => `${p.privilege} ${p.role}`)
+        .sort(),
+    ).toEqual([
+      "DELETE fin_worker",
+      "INSERT fin_email_enqueue",
+      "SELECT fin_worker",
+      "UPDATE fin_worker",
+    ]);
   });
 
   it("expands column grants to one privilege per column", () => {
