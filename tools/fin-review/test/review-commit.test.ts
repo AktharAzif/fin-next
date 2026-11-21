@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { cleanOutput, countingRandom, cryptoFinding, readJson, reviewFixture, runDirs, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
-import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script, shownElsewhere } from "./helpers/review-harness.ts";
+import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script, shownElsewhere, shownRenamed } from "./helpers/review-harness.ts";
 import type { Handler, Harness } from "./helpers/review-harness.ts";
 
 describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
@@ -249,6 +249,58 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     fx.pr(16, { "packages/crypto/src/secret.ts": fixed }, h3);
     const closed = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/secret.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/secret.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" }).services);
     assert.equal(closed.code, 0, closed.stdout + closed.stderr);
+  });
+
+  it("a fix check is never shown part of where a moved defect went: past the cap no claim is taken, and a renamed file is shown with its new path", async () => {
+    const defect = "// Comparing secrets.\n// They come from the caller.\n// Keep this small.\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const VERSION = 1;\n";
+    const stub = 'export { sameSecret } from "./compare.ts";\n';
+    const seesMove: Handler = (spec) =>
+      isFixCheck(spec) && (shownElsewhere(spec).includes("packages/crypto/src/compare.ts") || shownRenamed(spec).some((rename) => rename.to === "packages/crypto/src/compare.ts"))
+        ? { kind: "result", output: { verdict: "CONFIRMED", guardQuotes: [], reason: "The same comparison now lives in compare.ts." } }
+        : undefined;
+    const claiming = (path: string, handlers: Handler[] = [seesMove]) =>
+      harness(
+        fx,
+        script(...handlers, (spec) =>
+          spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path, startLine: 1, endLine: 1 }, fixQuote: { path, text: stub.trim() } }] } } : undefined,
+        ),
+        random,
+      );
+    const prior = (): Record<string, unknown> => (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
+    const finder = (): Harness => harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec)]) } : undefined)), random);
+
+    // The defect moved word for word, and 64 more changed files that sort before it hold the quoted line.
+    const h0 = fx.pr(24, { "packages/crypto/src/index.ts": defect });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "24"], finder().services)).code, 1);
+    const crowd: Record<string, string> = {};
+    for (let i = 1; i <= 64; i++) crowd[`docs/plan/case-${String(i).padStart(2, "0")}.md`] = `# case ${i}\n\n    return a === b;\n`;
+    fx.pr(24, { "packages/crypto/src/index.ts": stub, "packages/crypto/src/compare.ts": defect, ...crowd }, h0);
+    const crowded = claiming("packages/crypto/src/index.ts");
+    const run = await runFixtureCli(fx, ["pr", "--pr", "24"], crowded.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    assert.equal((prior()["quotedElsewhere"] as unknown[]).length, 65);
+    const claim = prior()["claim"] as Record<string, unknown>;
+    assert.equal(claim["outcome"], "not_accepted");
+    assert.match(String((claim["notAccepted"] as unknown[])[0]), /more than a fix check is shown/);
+    assert.deepEqual(calls(crowded).filter((call) => isFixCheck(call.spec)), [], "no check is shown part of the list");
+
+    // The defect's file renamed as it was (git pairs the two), and a new file claimed as the fix.
+    const h1 = fx.pr(25, { "packages/crypto/src/index.ts": defect });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "25"], finder().services)).code, 1);
+    fx.pr(25, { "packages/crypto/src/index.ts": null, "packages/crypto/src/compare.ts": defect, "packages/crypto/src/main.ts": stub }, h1);
+    const rename = [{ from: "packages/crypto/src/index.ts", to: "packages/crypto/src/compare.ts" }];
+    const renamedRun = claiming("packages/crypto/src/main.ts");
+    const renamed = await runFixtureCli(fx, ["pr", "--pr", "25"], renamedRun.services);
+    assert.equal(renamed.code, 1, renamed.stdout + renamed.stderr);
+    assert.equal((prior()["claim"] as Record<string, unknown>)["outcome"], "still_there");
+    assert.deepEqual(prior()["renamed"], rename);
+    assert.deepEqual(calls(renamedRun).filter((call) => isFixCheck(call.spec)).map((call) => shownRenamed(call.spec)), [rename]);
+    assert.match(calls(renamedRun).find((call) => call.spec.lens === "security")?.spec.prompt ?? "", /"renamedSince": \[\n\s*\{\n\s*"from": "packages\/crypto\/src\/index\.ts",\n\s*"to": "packages\/crypto\/src\/compare\.ts"/);
+    // Checks that both find the defect gone close it: a rename takes two, each shown it.
+    const both = claiming("packages/crypto/src/main.ts", []);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "25"], both.services)).code, 0);
+    assert.deepEqual(calls(both).filter((call) => isFixCheck(call.spec)).map((call) => [call.spec.role, shownRenamed(call.spec)]), [["sceptic1", rename], ["sceptic2", rename]]);
   });
 
   it("a real fix is taken although the quoted code now also appears in another changed file: both fix checks decide, shown that file", async () => {

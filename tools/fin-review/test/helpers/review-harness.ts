@@ -43,6 +43,16 @@ export function shownElsewhere(spec: SessionSpec): string[] {
   return JSON.parse(rest.slice(0, rest.indexOf(`\n\n${CLAIM_HEADER}`))) as string[];
 }
 
+const RENAMED_HEADER = "# Where the files the finding names are now (renamed since it was reported)\n";
+
+/** The renames of the files a blocker names that a fix check was shown; [] when it was shown none. */
+export function shownRenamed(spec: SessionSpec): Array<{ from: string; to: string }> {
+  const at = spec.prompt.indexOf(RENAMED_HEADER);
+  if (at < 0) return [];
+  const rest = spec.prompt.slice(at + RENAMED_HEADER.length);
+  return JSON.parse(rest.slice(0, rest.indexOf("\n\n# "))) as Array<{ from: string; to: string }>;
+}
+
 /** A fix check that finds the defect gone, quoting the claimed fix as its guard. */
 export function fixHolds(spec: SessionSpec): FakeReply {
   return { kind: "result", output: { verdict: "REFUTED", guardQuotes: [claimedFix(spec).fixQuote], reason: "Every path to the defect passes through the fix." } };

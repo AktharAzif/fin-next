@@ -89,10 +89,23 @@ export interface FixScope {
   /**
    * The files changed since the blocker was found, other than a quote's own file, in which code the
    * blocker quotes (white space taken out) now occurs more often than it did then: where the defect
-   * may have moved or been copied. Its fix check is shown them and takes two sceptics. Sorted.
+   * may have moved or been copied. Its fix check is shown every one of them and takes two sceptics;
+   * past MAX_FIX_CHECK_PATHS no fix claim is accepted. Sorted.
    */
   readonly quotedElsewhere: readonly string[];
+  /**
+   * Each path the blocker names (in `where` or a quote) that git reads as renamed since it was found,
+   * with its path at the head: the code it names may live there now. Its fix check is shown them and
+   * takes two sceptics. Sorted by `from`.
+   */
+  readonly renamed: ReadonlyArray<{ readonly from: string; readonly to: string }>;
 }
+
+/**
+ * Most files a fix check is shown as where a blocker's quoted code now also appears. A check is never
+ * shown part of that list: past it, a fix claim for the blocker is not accepted, and it stays open.
+ */
+export const MAX_FIX_CHECK_PATHS = 64;
 
 export interface FindingCheck {
   readonly index: number;
@@ -159,11 +172,15 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
  * `where` names, a file tied to the blocker (FixScope.files), lie within its lines, and touch a line
  * that changed since the blocker was found. Nothing that was already there when the blocker was
  * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
- * fix check's to judge (src/review/run.ts).
+ * fix check's to judge (src/review/run.ts), so no claim is taken when the check could not be shown
+ * every file the blocker's quoted code now also appears in.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);
   if (scope === undefined) return [`${id} is not a prior blocker shown to this session`];
+  if (scope.quotedElsewhere.length > MAX_FIX_CHECK_PATHS) {
+    return [`${id}: the code the blocker quotes now also appears in ${scope.quotedElsewhere.length} changed files, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken`];
+  }
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
   const changed = scope.files.get(where.path);
   if (changed === undefined) {
