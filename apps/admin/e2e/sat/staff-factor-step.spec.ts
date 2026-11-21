@@ -6,6 +6,7 @@ import { expect, test } from "@fin/testing/playwright";
 import type { Page, Route } from "@playwright/test";
 import {
   authenticatorCode,
+  dialogsGone,
   emailedCodeSignIn,
   enrol,
   ORIGIN,
@@ -18,6 +19,7 @@ test.beforeEach(async () => {
 });
 
 async function logOut(page: Page, email: string) {
+  await dialogsGone(page);
   await page.getByRole("button", { name: `Account menu, ${email}` }).click();
   await page.getByRole("menuitem", { name: "Log out" }).click();
   await expect(page).toHaveURL(`${ORIGIN}/sign-in`);
