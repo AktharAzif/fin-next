@@ -1,7 +1,6 @@
 // The web-host area's events: the API half's front door (spec 02 §4.1, §10.5 and §18.1), written by
-// packages/web-host. The alerts spec 02 §18.2 names for them come with the identity and staff
-// areas' alert fragments; until then each entry names the alerts it is owed (`owed`, listed in
-// owed.ts with their lane and date), or why none.
+// packages/web-host. The alerts spec 02 §18.2 names for them are in the identity and staff areas'
+// alert fragments (alerts/identity.json, alerts/staff.json), or the entry says why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -11,8 +10,7 @@ export const entries: readonly CatalogEntry[] = [
     level: "warn",
     writtenBy: "every API half, for a /api/auth/* path its realm does not list or blocks (404)",
     fields: { realm: "string", class: "string" },
-    alerts: [],
-    owed: ["auth-endpoint-unlisted"],
+    alerts: ["auth-endpoint-unlisted"],
   },
   {
     event: "access.keys_unavailable",
@@ -20,8 +18,7 @@ export const entries: readonly CatalogEntry[] = [
     level: "error",
     writtenBy: "Fin Admin's API half, when Cloudflare Access's signing keys cannot be read (503)",
     fields: {},
-    alerts: [],
-    owed: ["access-keys-unavailable"],
+    alerts: ["access-keys-unavailable"],
   },
   {
     event: "access.jwt_refused",

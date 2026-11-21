@@ -1,8 +1,7 @@
 // The email area's events (spec 08 §4.1 to §4.3 and §7.2), written by packages/email's sender.
 // email.sent and email.send_failed are in platform.ts, beside Phase 0's email-not-sent alert. The
-// group G alerts these lines feed (spec 08 §7.8) come with the email area's alert fragment
-// (L-SAT-05); until then each entry names the alerts it is owed (`owed`, listed in owed.ts with
-// their lane and date).
+// group G alerts these lines feed (spec 08 §7.8) are in the email area's alert fragment
+// (alerts/email.json).
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -28,15 +27,14 @@ export const entries: readonly CatalogEntry[] = [
       share: "string",
       orgId: "string",
     },
-    alerts: [],
-    owed: ["email-budget-reached"],
+    alerts: ["email-budget-reached"],
   },
   {
     event: "email.security_unsent",
     kind: "failure",
     level: "error",
     writtenBy:
-      "worker's sender, once for a security row that could not be sent (suppressed, failed, budget, invalid recipient)",
+      "worker's sender, for a security row that could not be sent (suppressed, failed, budget, invalid recipient), once while it waits and once if it ends; identity's email.enqueue() on console and admin, for a notice that could not be queued (not_allowed, enqueue_failed)",
     fields: {
       template: "string",
       class: "string",
@@ -45,7 +43,6 @@ export const entries: readonly CatalogEntry[] = [
       reason: "string",
       final: "boolean",
     },
-    alerts: [],
-    owed: ["security-email-unsent"],
+    alerts: ["security-email-unsent"],
   },
 ];

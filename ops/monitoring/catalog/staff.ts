@@ -2,8 +2,9 @@
 // (sign-in, enrolment) and by packages/staff (the guard, the member changes, the Access drift
 // duty), through the same line port. access.keys_unavailable and access.jwt_refused, the API
 // half's front door, are in web-host.ts. The alerts spec 02 §18.2 names for these lines come with
-// the staff area's alert fragment (alerts/staff.json), which has not landed; until then each entry
-// names the alerts it is owed (`owed`, listed in owed.ts with their lane and date), or why none.
+// the staff area's alert fragment (alerts/staff.json), which so far holds only web-host.ts's
+// access-keys-unavailable; until the rest land each entry names the alerts it is owed (`owed`,
+// listed in owed.ts with their lane and date), or why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [

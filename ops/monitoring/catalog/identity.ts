@@ -3,9 +3,9 @@
 // where they run identity's gates. packages/identity/src/monitoring.ts keeps the same list beside
 // the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
 // are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
-// identity area's alert fragment (alerts/identity.json), which has not landed; until then each
-// failure or security entry names the alerts it is owed (`owed`, listed in owed.ts with their lane
-// and date), or why none.
+// identity area's alert fragment (alerts/identity.json), which so far holds only web-host.ts's
+// auth-endpoint-unlisted; until the rest land each failure or security entry names the alerts it is
+// owed (`owed`, listed in owed.ts with their lane and date), or why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [

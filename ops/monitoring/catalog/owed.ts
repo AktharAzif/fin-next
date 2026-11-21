@@ -9,9 +9,9 @@
 //
 // The lane is the one whose row in EXECUTION's lane tables carries the fragment's work: L-SAT-09
 // ("Auth alerts and catalogue fragments", ops/monitoring/**) for spec 02 §18.2's identity and
-// staff alerts, P0-F (ops/monitoring/** in Phase 0) for the audit fragment, the email lane for its
-// own alerts, fin-review's lane for its alerts and the Monday ops lane for the money alerts. A
-// Saturday lane's unfinished work is finished in Sunday's spill block (L-SUN-00).
+// staff alerts, P0-F (ops/monitoring/** in Phase 0) for the audit fragment, fin-review's lane for
+// its alerts and the Monday ops lane for the money alerts. A Saturday lane's unfinished work is
+// finished in Sunday's spill block (L-SUN-00).
 
 export interface OwedAlert {
   /** The alert's name, as its fragment will define it. */
@@ -158,42 +158,10 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 08 §3.14",
   },
-  // Named as owed by the catalogue (and the first two by identity's line list as well), in the
-  // same fragments or their areas' own; the steward confirms each lane and date.
-  {
-    name: "auth-endpoint-unlisted",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "security-email-unsent",
-    severity: "P",
-    fragment: "email",
-    lane: "L-SAT-05",
-    due: SUNDAY,
-    spec: "spec 08 §7.8 group G",
-  },
-  {
-    name: "email-budget-reached",
-    severity: "N",
-    fragment: "email",
-    lane: "L-SAT-05",
-    due: SUNDAY,
-    spec: "spec 08 §7.8 group G",
-  },
+  // Named as owed by the catalogue, in the same fragments or their areas' own; the steward
+  // confirms each lane and date.
   {
     name: "admin-access-drift",
-    severity: "P",
-    fragment: "staff",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "access-keys-unavailable",
     severity: "P",
     fragment: "staff",
     lane: "L-SAT-09",

@@ -6,7 +6,7 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | Path | What |
 |---|---|
 | `staging/*.json` | sources, Errors applications, logs-to-metrics, monitors, heartbeats, the `staging-quiet` policy |
-| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`) |
+| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`, `identity`, `staff`) |
 | `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it or are owed for it (listed in `catalog/index.ts`) |
 | `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due |
 | `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
