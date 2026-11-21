@@ -238,6 +238,7 @@ function TableDemo() {
 function OtpDemo() {
   const [status, setStatus] = useState<OTPStatus>("idle");
   const [handed, setHanded] = useState<string[]>([]);
+  const [sent, setSent] = useState(false);
   return (
     <div className="flex flex-col gap-3">
       <OTPInput
@@ -278,6 +279,13 @@ function OtpDemo() {
         resendCooldown={60}
         initialCooldown={0}
       />
+      {/* Mounts with the cooldown running, as a sign-in code page does when it opens (R-12). */}
+      <Button variant="secondary" size="sm" data-kit="otp-mount" onClick={() => setSent(true)}>
+        Show a code just sent
+      </Button>
+      {sent ? (
+        <OTPInput label="Sign-in code" length={8} onResend={() => wait(300)} resendCooldown={45} />
+      ) : null}
     </div>
   );
 }

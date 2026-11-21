@@ -9,9 +9,10 @@
 // - The sentence under the boxes says the status; resend has a cooldown that restarts after each
 //   send and reads "Sending" while it runs. The resend control stays in place throughout
 //   (disabled but focusable), so keyboard focus is never dropped; the cooldown is announced when
-//   it starts and when it ends (spec 06 §9), and only then: the control's name stays "Send a new
-//   code" while the clock beside it ticks for the eye only; a resend that fails is reported and
-//   says so.
+//   it starts (after a resend, or as the input mounts with one running) and when it ends (spec 06
+//   §9), and only then: the control's name stays "Send a new code" while the clock beside it
+//   ticks, plain text outside any live region that can be read but is never spoken as it changes;
+//   a resend that fails is reported and says so.
 // - The boxes shrink to fit a narrow column: 8 of them fit 288px (a 320px phone, AC-UI-28).
 import { OTPInputGroup, OTPInputSlot, OTPInput as SdkOTPInput } from "@ui-sdk/react/otp-input";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
@@ -93,6 +94,17 @@ export function OTPInput(props: OTPInputProps) {
   const [cooldown, setCooldown] = useState(props.initialCooldown ?? props.resendCooldown ?? 0);
   const [sending, setSending] = useState(false);
   const resendable = props.onResend !== undefined;
+
+  // An input that mounts with the cooldown running (a code was just sent) says the wait once, as
+  // a resend says its own start.
+  const startSaid = useRef(false);
+  useEffect(() => {
+    if (startSaid.current) return;
+    startSaid.current = true;
+    if (resendable && cooldown > 0) {
+      announce(`You can send a new code in ${Math.ceil(cooldown)} seconds.`);
+    }
+  }, [resendable, cooldown]);
 
   // One tick a second; the end of a countdown is announced (its start is, after a resend).
   useEffect(() => {
@@ -249,8 +261,9 @@ export function OTPInput(props: OTPInputProps) {
           {sending || waiting ? null : "Didn’t get it? "}
           {/* The control's name comes from its text, and focus can sit on it for the whole
               cooldown: a name that changed every second would have the countdown read out every
-              second. So its text stays "Send a new code", and the clock is beside it, hidden from
-              assistive technology (announce() says the start and the end). */}
+              second. So its text stays "Send a new code", and the clock is beside it: plain text,
+              in no live region and named by nothing, so it is never spoken as it ticks but can
+              be read (announce() says the start and the end). */}
           <TextButton
             disabled={sending || waiting}
             focusableWhenDisabled
@@ -261,9 +274,7 @@ export function OTPInput(props: OTPInputProps) {
             {sending ? "Sending" : "Send a new code"}
           </TextButton>
           {waiting && !sending ? (
-            <span aria-hidden="true" data-slot="fin-otp-clock">
-              {` in ${clock(cooldown)}`}
-            </span>
+            <span data-slot="fin-otp-clock">{` in ${clock(cooldown)}`}</span>
           ) : null}
         </p>
       ) : null}

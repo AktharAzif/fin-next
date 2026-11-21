@@ -711,6 +711,34 @@ test.describe("the components @kit", () => {
     );
   });
 
+  test("OTP resend: one that mounts mid-cooldown says the wait, and its time can be read", async ({
+    page,
+  }) => {
+    await onTestClock(page);
+    await page.locator('[data-kit="otp-mount"]').click();
+    const sent = section(page, "otp").locator('[data-slot="fin-otp"]').nth(2);
+    await expect(sent.getByRole("textbox", { name: "Sign-in code" })).toHaveCount(1);
+    const line = sent.locator('[data-slot="fin-otp-resend"]');
+    const resend = sent.getByRole("button", { name: "Send a new code" });
+    await expect(line).toHaveText("Send a new code in 0:45");
+    // The start is said as it mounts (spec 06 §9), with no resend first.
+    await page.clock.runFor(200);
+    await expect(page.locator('[data-ui-sdk-announcer=""]')).toHaveText(
+      "You can send a new code in 45 seconds.",
+    );
+    // The time is in the accessibility tree beside the control, never in its name, so it can be
+    // read but is not spoken each second.
+    await keyboardFocus(page, resend);
+    const waitingName = '- button "Send a new code" [disabled]';
+    for (let second = 44; second > 40; second -= 1) {
+      await page.clock.runFor(1000);
+      const time = `0:${String(second).padStart(2, "0")}`;
+      await expect(line).toHaveText(`Send a new code in ${time}`);
+      expect(await line.ariaSnapshot()).toContain(`in ${time}`);
+      expect(await page.locator(":focus").ariaSnapshot()).toBe(waitingName);
+    }
+  });
+
   test("OTP resend: a refused resend is reported and said, and focus stays", async ({ page }) => {
     const otp = section(page, "otp").locator('[data-slot="fin-otp"]').nth(1);
     const resend = otp.getByRole("button", { name: "Send a new code" });

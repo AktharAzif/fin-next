@@ -75,11 +75,15 @@ describe("OTPInput", () => {
     expect(attr(button, "tabindex") ?? "0").toBe("0");
     expect(text(resend)).toContain("Send a new code in 0:30");
     // Focus can sit on it for the whole cooldown, so its name (its text) never carries the clock:
-    // a name that changed every second would be read out every second. The clock the eye sees is
-    // beside it, hidden from assistive technology.
+    // a name that changed every second would be read out every second. The clock is beside it,
+    // plain text outside the button and outside any live region: never spoken as it ticks, but
+    // there to be read (R-12), so nobody is left with a dimmed control and no reason.
     expect(text(/<button\b[^>]*>(.*?)<\/button>/s.exec(resend)?.[1] ?? "")).toBe("Send a new code");
     const [clock] = tagsWith(resend, "data-slot", "fin-otp-clock");
-    expect(attr(clock, "aria-hidden")).toBe("true");
+    expect(clock).toBeDefined();
+    expect(attr(clock, "aria-hidden")).toBeUndefined();
+    expect(attr(clock, "aria-live")).toBeUndefined();
+    expect(attr(clock, "role")).toBeUndefined();
     expect(/data-slot="fin-otp-clock"[^>]*>([^<]*)<\/span>/.exec(resend)?.[1]).toBe(" in 0:30");
     expect(
       text(
