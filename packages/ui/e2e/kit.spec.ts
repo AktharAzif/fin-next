@@ -541,14 +541,56 @@ test.describe("the components @kit", () => {
     await expect(section(page, "copy").getByText(SIGNING_SECRET)).toBeVisible();
   });
 
-  test("table: one row in the Tab order, arrows, Home, End, Enter; aria-sort", async ({ page }) => {
+  test("table: one row in the Tab order, arrows, Home, End, Enter; aria-sort", async ({
+    page,
+    browserName,
+  }) => {
     const table = section(page, "table").getByRole("table", { name: "Team members" });
     const rows = table.locator("tbody tr");
     await expect(rows).toHaveCount(4);
-    expect(await table.locator('tbody tr[tabindex="0"]').count()).toBe(1);
+    // Every Tab stop in the body: the one row in the Tab order, and only that row's own controls.
+    const stops = () =>
+      table.locator("tbody").evaluate((body) => {
+        const all = [...body.querySelectorAll<HTMLElement>("*")].filter(
+          (el) =>
+            el.tabIndex >= 0 &&
+            !el.matches(":disabled") &&
+            el.checkVisibility({ visibilityProperty: true }),
+        );
+        const rowsOf = new Set(all.map((el) => el.closest("tr")?.getAttribute("data-row-id")));
+        const rowStops = all.filter((el) => el.matches("tr"));
+        return {
+          rows: [...rowsOf],
+          rowStops: rowStops.map((el) => el.getAttribute("data-row-id")),
+          controls: all.length - rowStops.length,
+        };
+      });
+    const idColumn = (page.viewportSize()?.width ?? 0) >= 1280;
+    // The ID cell holds the full ID's trigger and its copy button; below 1280px it is hidden.
+    const ownControls = idColumn ? 2 : 0;
+    expect(await stops()).toEqual({
+      rows: ["mem_02"],
+      rowStops: ["mem_02"],
+      controls: ownControls,
+    });
     await rows.first().focus();
+    // Tab from the current row reaches its own controls, then leaves the table.
+    if (idColumn && browserName !== "webkit") {
+      await page.keyboard.press("Tab");
+      expect(
+        await page.evaluate(() =>
+          document.activeElement?.closest("tr")?.getAttribute("data-row-id"),
+        ),
+      ).toBe("mem_02");
+      await rows.first().focus();
+    }
     await page.keyboard.press("ArrowDown");
     await expect(rows.nth(1)).toBeFocused();
+    expect(await stops()).toEqual({
+      rows: ["mem_04"],
+      rowStops: ["mem_04"],
+      controls: ownControls,
+    });
     await page.keyboard.press("End");
     await expect(rows.nth(3)).toBeFocused();
     await page.keyboard.press("Home");

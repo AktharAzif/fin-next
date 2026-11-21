@@ -1,7 +1,8 @@
 // The Table family, basics (spec 06 §3.3; the export's Table spec): Table, TableId, TableAmount and
-// TablePagination. A native <table>; one row in the Tab order, moved with ArrowUp and ArrowDown,
-// Home and End, opened with Enter; rows that open a drawer are real links (getRowHref) so they open
-// in a new tab and the drawer is addressable; sorted headers carry aria-sort; loading draws
+// TablePagination. A native <table>; one row in the Tab order (with its own controls, and no other
+// row's), moved with ArrowUp and ArrowDown, Home and End, opened with Enter; rows that open a
+// drawer are real links (getRowHref) so they open in a new tab and the drawer is addressable;
+// sorted headers carry aria-sort; loading draws
 // skeleton rows, refreshing keeps the rows, error keeps the header. Selection, filter menus and
 // the narrow two-line layout come with wave 2 (L-SAT-12).
 import { ArrowDownIcon, ArrowUpIcon, CaretLeftIcon, CaretRightIcon } from "@fin/icons";
@@ -118,6 +119,34 @@ function isInteractive(target: EventTarget | null, row: HTMLElement): boolean {
   return false;
 }
 
+/** What can take focus inside a row: links, form controls and anything with a tabindex. */
+const ROW_CONTROLS = "a[href], button, input, select, textarea, [tabindex], [contenteditable]";
+
+/**
+ * Keeps one row in the Tab order with everything in it (spec 06 §9): the controls inside a row (a
+ * TableId's full value and its copy button, a link) are tabbable only in the row that holds the
+ * roving focus, so Tab from that row reaches its own controls and the next Tab leaves the table.
+ * Each control taken out keeps what it had in data-row-tabindex, and gets it back in the current
+ * row. Rows' content is the screens', so this works on the DOM rather than on known components.
+ */
+function rovingControls(rows: readonly (HTMLTableRowElement | null)[], current: number): void {
+  rows.forEach((row, index) => {
+    if (row === null) return;
+    for (const el of row.querySelectorAll<HTMLElement>(ROW_CONTROLS)) {
+      const saved = el.getAttribute("data-row-tabindex");
+      if (index === current) {
+        if (saved === null) continue;
+        if (saved === "") el.removeAttribute("tabindex");
+        else el.setAttribute("tabindex", saved);
+        el.removeAttribute("data-row-tabindex");
+      } else if (saved === null && el.tabIndex >= 0) {
+        el.setAttribute("data-row-tabindex", el.getAttribute("tabindex") ?? "");
+        el.setAttribute("tabindex", "-1");
+      }
+    }
+  });
+}
+
 function LoadingNote(props: { plural: string }) {
   useAnnounceOnMount(`Loading ${props.plural}`);
   return null;
@@ -131,6 +160,12 @@ export function Table<Row>(props: TableProps<Row>) {
   useEffect(() => {
     if (focusIndex >= props.rows.length) setFocusIndex(Math.max(0, props.rows.length - 1));
   }, [focusIndex, props.rows.length]);
+  const opens = props.onRowClick !== undefined || props.getRowHref !== undefined;
+  // After every render: rows, sorting or the current row may have changed. Only when rows take
+  // focus; otherwise the controls stay in the Tab order, the only way to reach them.
+  useEffect(() => {
+    if (opens) rovingControls(rowRefs.current.slice(0, props.rows.length), focusIndex);
+  });
 
   const open = (row: Row, event?: MouseEvent | KeyboardEvent) => {
     if (props.onRowClick !== undefined) {
@@ -160,7 +195,6 @@ export function Table<Row>(props: TableProps<Row>) {
     event.preventDefault();
   };
 
-  const opens = props.onRowClick !== undefined || props.getRowHref !== undefined;
   const span = props.columns.length;
   const surface = SURFACES[props.surface ?? "bg"];
 
