@@ -120,6 +120,44 @@ test.describe("the report seam (spec 06 §2.6, AC-UI-29)", () => {
   });
 });
 
+test.describe("the console guard (spec 06 §2.3 step 1)", () => {
+  test("hands the console one scrubbed string, never parts it would join or a format it would fill", async ({
+    page,
+  }) => {
+    record = await openHarness(page, "/a", signedIn());
+    const calls: Promise<unknown[]>[] = [];
+    page.on("console", (message) => {
+      calls.push(Promise.all(message.args().map((arg) => arg.jsonValue())));
+    });
+    const [name = "", domain = ""] = ADDRESS.split("@");
+    // An opaque bearer value: only the word before it says what it is.
+    const opaque = ["k7Qm", "2Xw9", "Lp4Z", "t8Rb", "N3vY", "q6Hd"].join("");
+    await page.evaluate(
+      ([local, host, value]) => {
+        // The page's own console, which the guard wraps: printing through it is what this checks.
+        const pageConsole = console;
+        pageConsole.error("%s@%s", local, host);
+        pageConsole.info("Authorization: Bearer", value);
+        pageConsole.warn("%s", `${local}%s`, `@${host}`);
+      },
+      [name, domain, opaque] as const,
+    );
+    await expect.poll(() => calls.length).toBeGreaterThanOrEqual(3);
+    const seen = await Promise.all(calls);
+    // What the console prints for each call: the guard's one string, alone or behind a lone `%s`
+    // (Firefox reports the call with that `%s` already applied, and reads no format in the text).
+    const printed = seen.map((args) =>
+      args.length === 2 && args[0] === "%s" ? args[1] : args.length === 1 ? args[0] : args,
+    );
+    expect(printed.slice(-3)).toEqual([
+      "[email]",
+      "Authorization: Bearer [secret]",
+      `${name}%s @${domain}`,
+    ]);
+    expect(JSON.stringify(seen)).not.toContain(opaque);
+  });
+});
+
 test.describe("a 401 (spec 06 §2.4)", () => {
   test("on an auth page's cold load is that page's own answer", async ({ page }) => {
     record = await openHarness(page, "/invite", {

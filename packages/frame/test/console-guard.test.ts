@@ -1,5 +1,6 @@
 // The scrubbing console guard (spec 06 §2.3 step 1, FW-C15's browser twin): nothing the page logs
-// prints an Error whole, or an address, a token or a query string.
+// prints an Error whole, or an address, a token, a code or a query string, however the call splits
+// it across a format string and its arguments.
 import { describe, expect, it } from "vitest";
 import packageJson from "../package.json" with { type: "json" };
 import { ApiError } from "../src/api/errors.ts";
@@ -10,33 +11,64 @@ import { installConsoleGuard, safeConsoleValue } from "../src/report/console-gua
 const ADDRESS = ["maya.rivera", "example.com"].join("@");
 const TOKEN = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJ1c3JfMSJ9", "c2lnbmF0dXJl"].join(".");
 const API_KEY = ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdefghij0123456789abcdefgh"].join("_");
+// An opaque bearer value: no shape of its own, only the word before it says what it is.
+const OPAQUE = ["k7Qm", "2Xw9", "Lp4Z", "t8Rb", "N3vY", "q6Hd", "s1Fj", "c5Ug"].join("");
+const DASHES = "-".repeat(5);
+
+type Recorded = unknown[];
 
 /** A console that records what reaches it, after the guard. */
 function recordingConsole() {
-  const lines: unknown[][] = [];
+  const lines: Recorded[] = [];
+  const contexts: { lines: Recorded[] }[] = [];
   const record =
     (method: string) =>
     (...args: unknown[]) =>
       lines.push([method, ...args]);
-  const target = {
-    log: record("log"),
-    info: record("info"),
-    warn: record("warn"),
-    error: record("error"),
-    debug: record("debug"),
-    trace: record("trace"),
-    dir: record("dir"),
-    dirxml: record("dirxml"),
-    table: record("table"),
-    group: record("group"),
-    groupCollapsed: record("groupCollapsed"),
-    groupEnd: record("groupEnd"),
+  const target: Record<string, unknown> = {
     assert: (condition: unknown, ...args: unknown[]) => lines.push(["assert", condition, ...args]),
+    context: () => {
+      const inner = recordingConsole();
+      contexts.push(inner);
+      return inner.target;
+    },
   };
-  return { target: target as unknown as Console, lines };
+  for (const method of [
+    "log",
+    "info",
+    "warn",
+    "error",
+    "debug",
+    "trace",
+    "dir",
+    "dirxml",
+    "table",
+    "group",
+    "groupCollapsed",
+    "groupEnd",
+    "count",
+    "countReset",
+    "time",
+    "timeLog",
+    "timeEnd",
+  ]) {
+    target[method] = record(method);
+  }
+  return { target: target as unknown as Console, lines, contexts };
 }
 
-const printed = (lines: unknown[][]) => JSON.stringify(lines);
+const printed = (lines: readonly Recorded[]) => JSON.stringify(lines);
+
+/**
+ * What the browser prints for each recorded line printing call: one string it can read no
+ * directive in, either alone with no `%` in it or as the argument of a lone `%s`.
+ */
+function printedText(line: Recorded): string {
+  const [, ...args] = line;
+  if (args.length === 1 && typeof args[0] === "string" && !args[0].includes("%")) return args[0];
+  if (args.length === 2 && args[0] === "%s" && typeof args[1] === "string") return args[1];
+  throw new Error(`not one string the browser prints as it is: ${JSON.stringify(line)}`);
+}
 
 describe("the console guard", () => {
   it("never prints an Error whole: its name and code stay, its message and stack do not", () => {
@@ -46,13 +78,17 @@ describe("the console guard", () => {
     target.error(error);
     target.warn("Warning:", error);
     target.log(new Error(`token ${TOKEN}`));
+    target.error("%s", error);
     remove();
     expect(printed(lines)).not.toContain(ADDRESS);
     expect(printed(lines)).not.toContain(TOKEN);
     expect(printed(lines)).not.toContain("at ");
-    expect(lines[0]).toEqual(["error", "TypeError [not_found]"]);
-    expect(lines[1]).toEqual(["warn", "Warning:", "TypeError [not_found]"]);
-    expect(lines[2]).toEqual(["log", "Error"]);
+    expect(lines).toEqual([
+      ["error", "TypeError [not_found]"],
+      ["warn", "Warning: TypeError [not_found]"],
+      ["log", "Error"],
+      ["error", "TypeError [not_found]"],
+    ]);
   });
 
   it("keeps the frame's own ApiError message, which names a contract and codes only", () => {
@@ -71,8 +107,8 @@ describe("the console guard", () => {
     target.info(`signed in as ${ADDRESS} with ${API_KEY}`);
     target.debug(`GET /api/invitation?token=${TOKEN} failed`, { email: ADDRESS }, [ADDRESS]);
     target.error("Bearer abcdefghijklmnop rejected", "__Host-fin_session=abc123def456; Path=/");
-    target.table([{ email: ADDRESS }]);
-    target.dir({ nested: { error: new Error(ADDRESS) } });
+    target.table([{ email: ADDRESS }], ["email"]);
+    target.dir({ nested: { error: new Error(ADDRESS) } }, { depth: 3 });
     target.assert(false, `assertion about ${ADDRESS}`);
     target.trace(ADDRESS);
     target.group(ADDRESS);
@@ -83,14 +119,143 @@ describe("the console guard", () => {
     for (const secret of [ADDRESS, TOKEN, API_KEY, "abcdefghijklmnop", "abc123def456"]) {
       expect(text).not.toContain(secret);
     }
-    expect(lines[0]).toEqual(["info", "signed in as [email] with [api-key]"]);
-    expect(lines[1]).toEqual([
-      "debug",
-      "GET /api/invitation?[query] failed",
-      "[Object]",
-      "[Array]",
+    expect(lines).toEqual([
+      ["info", "signed in as [email] with [api-key]"],
+      ["debug", "GET /api/invitation?[query] failed [Object] [Array]"],
+      ["error", "Bearer [secret] rejected [cookie]; Path=/"],
+      // A table's columns and dir's options are never printed: only the value, reduced.
+      ["table", "[Array]"],
+      ["dir", "[Object]"],
+      ["assert", false, "assertion about [email]"],
+      ["trace", "[email]"],
+      ["group", "[email]"],
+      ["groupCollapsed", "[email]"],
+      ["dirxml", "[email]"],
     ]);
-    expect(lines[5]).toEqual(["assert", false, "assertion about [email]"]);
+  });
+
+  it("scrubs the codes, digit runs and IPv6 addresses people type (spec 08 §5.4)", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    for (const text of [
+      "code: 123456",
+      "otp=12345678",
+      "account 123456789012",
+      "phone 447700900123",
+      "client 2001:db8:85a3::8a2e:370:7334",
+      "ip 2001:db8::1",
+    ]) {
+      target.log(text);
+    }
+    remove();
+    expect(lines.map(printedText)).toEqual([
+      "code [code]",
+      "otp [code]",
+      "account [digits]",
+      "phone [digits]",
+      "client [ip]",
+      "ip [ip]",
+    ]);
+  });
+
+  it("applies a format string before it scrubs, so a shape split by directives is found whole", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    const [name, domain] = ADDRESS.split("@");
+    target.error("%s@%s", name, domain);
+    target.log("GET %s?%s", "/api/invitation", `token=${OPAQUE}`);
+    target.info("%s: %d", "account", 123456789012);
+    target.warn("%c%s %d %i %f %o %O", "color: red", "x", 42.9, "7px", "1.5", { email: ADDRESS }, [
+      ADDRESS,
+    ]);
+    // A directive with no argument left stays as it is; `%%` is a percent sign.
+    target.info("%s and %s", "one");
+    target.log("%d%% done", 50);
+    // A value is never read as a format: its directive stays text, and so does the browser's.
+    target.log("%s", `${name}%s`, `@${domain}`);
+    remove();
+    expect(printed(lines)).not.toContain(ADDRESS);
+    expect(printed(lines)).not.toContain(OPAQUE);
+    expect(lines.map(printedText)).toEqual([
+      "[email]",
+      "GET /api/invitation?[query]",
+      "account: [digits]",
+      "x 42 7 1.5 [Object] [Array]",
+      "one and %s",
+      "50% done",
+      `${name}%s @${domain}`,
+    ]);
+  });
+
+  it("joins the arguments as the browser does before it scrubs, so a shape split across them is found", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    target.info("Authorization: Bearer", OPAQUE);
+    target.log(
+      `${DASHES}BEGIN PRIVATE KEY${DASHES}`,
+      "MIIEvQIBADANBgkqhkiG9w0B",
+      `${DASHES}END`,
+      `PRIVATE KEY${DASHES}`,
+    );
+    target.log("account", 123456789012, "ok", true, null, undefined, 10n);
+    target.log();
+    remove();
+    expect(printed(lines)).not.toContain(OPAQUE);
+    expect(printed(lines)).not.toContain("MIIEvQIBADANBgkqhkiG9w0B");
+    expect(lines).toEqual([
+      ["info", "Authorization: Bearer [secret]"],
+      ["log", "[private-key]"],
+      ["log", "account [digits] ok true null undefined 10n"],
+      ["log"],
+    ]);
+  });
+
+  it("scrubs a counter's or a timer's label, and a timer's data as one line", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    target.time(ADDRESS);
+    target.timeLog(ADDRESS, "for", ADDRESS, { email: ADDRESS });
+    target.timeEnd(ADDRESS);
+    target.count(ADDRESS);
+    target.countReset(ADDRESS);
+    target.count();
+    // A `%` in a label is never a directive the timer's data could fill: it shows as U+FF05.
+    target.timeLog("load%s", `@${ADDRESS.split("@")[1]}`);
+    remove();
+    expect(printed(lines)).not.toContain(ADDRESS);
+    expect(lines).toEqual([
+      ["time", "[email]"],
+      ["timeLog", "[email]", "for [email] [Object]"],
+      ["timeEnd", "[email]"],
+      ["count", "[email]"],
+      ["countReset", "[email]"],
+      ["count", undefined],
+      ["timeLog", `load${String.fromCharCode(0xff05)}s`, "@example.com"],
+    ]);
+  });
+
+  it("asserts with the condition as it is, and prints nothing it builds when it holds", () => {
+    const { target, lines } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    const [name, domain] = ADDRESS.split("@");
+    target.assert(false, "%s@%s", name, domain);
+    target.assert(true, ADDRESS);
+    target.assert(false);
+    remove();
+    expect(lines).toEqual([
+      ["assert", false, "[email]"],
+      ["assert", true],
+      ["assert", false],
+    ]);
+  });
+
+  it("guards a console context the console makes (Chromium's console.context)", () => {
+    const { target, contexts } = recordingConsole();
+    const remove = installConsoleGuard(target);
+    const context = (target as unknown as { context: (name: string) => Console }).context(ADDRESS);
+    context.error("for %s", ADDRESS);
+    remove();
+    expect(contexts.map((inner) => inner.lines)).toEqual([[["error", "for [email]"]]]);
   });
 
   it("prints numbers, booleans, null and undefined as they are", () => {
@@ -104,6 +269,7 @@ describe("the console guard", () => {
   it("is installed once per console, and removing it gives the console back", () => {
     const { target, lines } = recordingConsole();
     const original = target.error;
+    const originalTime = target.time;
     const remove = installConsoleGuard(target);
     const again = installConsoleGuard(target);
     target.error(new Error(ADDRESS));
@@ -111,6 +277,7 @@ describe("the console guard", () => {
     target.error(new Error(ADDRESS));
     remove();
     expect(target.error).toBe(original);
+    expect(target.time).toBe(originalTime);
     target.error("after");
     expect(printed(lines.slice(0, 2))).not.toContain(ADDRESS);
     expect(lines[2]).toEqual(["error", "after"]);
