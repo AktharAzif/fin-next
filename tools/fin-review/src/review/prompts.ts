@@ -159,7 +159,7 @@ export function lensPrompt(input: LensPromptInput): string {
     parts.push(
       "## Prior blockers",
       "",
-      `The blocking findings open at the last reviewed head are in the DATA block headed "Prior blockers" (${input.priorIds.join(", ")}). For each, return an entry in \`priorBlockers\` with its \`id\`: \`fixed\` only with \`fixWhere\` and \`fixQuote\` quoting the fix exactly as it is in the tree, otherwise \`open\`. Saying nothing keeps a blocker open.`,
+      `The blocking findings open at the last reviewed head are in the DATA block headed "Prior blockers" (${input.priorIds.join(", ")}). For each, return an entry in \`priorBlockers\` with its \`id\`: \`fixed\` only when a change made since the blocker was found fixes it, with \`fixWhere\` giving the lines of that fix (they must include a line that changed since then) and \`fixQuote\` quoting the fix exactly, from those lines of the same file; otherwise \`open\`. Saying nothing keeps a blocker open.`,
       "",
     );
   }

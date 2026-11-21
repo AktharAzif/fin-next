@@ -234,3 +234,28 @@ export async function unifiedDiff(
   if (out.length <= maxBytes) return { text: out.toString("utf8"), truncated: false };
   return { text: out.subarray(0, maxBytes).toString("utf8"), truncated: true };
 }
+
+const HUNK_RE = /^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@/;
+
+/**
+ * The line numbers of `path` at `b` that `a b` adds or changes, plus the lines either side of a
+ * place where lines were only deleted (a fix that removes code is quoted by its neighbours).
+ */
+export async function changedLineNumbers(mirror: string, a: string, b: string, path: string, env: Readonly<Record<string, string | undefined>>): Promise<Set<number>> {
+  if (!isSha(a) || !isSha(b)) throw new TypeError("a diff needs two SHAs");
+  if (path.includes("\0")) throw new TypeError("refusing a diff path");
+  const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "--unified=0", "--no-relative", a, b, "--", `:(literal)${path}`], env })).stdout;
+  const lines = new Set<number>();
+  for (const line of out.toString("utf8").split("\n")) {
+    const match = HUNK_RE.exec(line);
+    if (match === null) continue;
+    const start = Number(match[1]);
+    const count = match[2] === undefined ? 1 : Number(match[2]);
+    if (count > 0) for (let n = start; n < start + count; n++) lines.add(n);
+    else {
+      if (start > 0) lines.add(start);
+      lines.add(start + 1);
+    }
+  }
+  return lines;
+}

@@ -5,6 +5,10 @@
 // the length caps (in the schema); rule 6 `checked` names every checklist item. Rule 5 (the
 // injection filter) lands with the procedure's pattern list (open item).
 //
+// A prior blocker is `fixed` only with a quote of the fix (spec 07 §2.3.2) that comes from the file
+// its `fixWhere` names, lies within those lines, and touches a line changed since the blocker was
+// found: what was already there then cannot be its fix, so an unchanged tree closes nothing.
+//
 // An output that breaks any rule is retried once in a fresh session (§4.6). Findings are judged one
 // by one: an invalid finding is recorded as `invalid` and never shown, and the valid findings of the
 // last attempt are kept even when the lens ends `incomplete`.
@@ -56,6 +60,11 @@ export interface ValidationContext {
   /** The paths a finding may name; null for the whole tree (joins, attack, sibling). */
   readonly allowed: ReadonlySet<string> | null;
   readonly files: FileSource;
+  /**
+   * For each prior blocker shown to the session (by its prompt ID), the lines of each path at the
+   * head that changed since the blocker was found. A fix can only be quoted from such lines.
+   */
+  readonly fixLines?: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
 }
 
 export interface FindingCheck {
@@ -111,6 +120,28 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
   if (wanted.trim() === "") return [`quote of ${quote.path} is blank`];
   if (!text.includes(wanted)) return [`quote is not an exact substring of ${quote.path}`];
   return [];
+}
+
+/**
+ * Why a quoted fix of prior blocker `id` cannot show that it was fixed: the quote must come from
+ * the file `where` names, lie within its lines, and touch a line that changed since the blocker
+ * was found. Nothing that was already there when the blocker was found can be its fix.
+ */
+function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
+  if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
+  const text = ctx.files.text(where.path) ?? "";
+  const slice = text.split("\n").slice(where.startLine - 1, where.endLine).join("\n");
+  const wanted = lf(quote.text);
+  const changed = ctx.fixLines?.get(id)?.get(where.path);
+  let found = false;
+  for (let at = slice.indexOf(wanted); at >= 0; at = slice.indexOf(wanted, at + 1)) {
+    found = true;
+    const first = where.startLine + (slice.slice(0, at).match(/\n/g)?.length ?? 0);
+    const last = first + (wanted.match(/\n/g)?.length ?? 0);
+    for (let line = first; line <= last; line++) if (changed?.has(line) === true) return [];
+  }
+  if (!found) return [`${id}: the fix's quote is not within ${where.path}:${where.startLine}-${where.endLine}`];
+  return [`${id}: the quoted fix touches no line of ${where.path} that changed since the blocker was found`];
 }
 
 function errorsUnder(errors: readonly SchemaError[], prefix: string): SchemaError[] {
@@ -183,6 +214,7 @@ export function validateOutput(output: unknown, ctx: ValidationContext): Validat
       return;
     }
     const problems = [...whereProblems(fixWhere, ctx, null), ...quoteProblems(fixQuote, ctx)];
+    if (problems.length === 0) problems.push(...fixProblems(id, fixWhere, fixQuote, ctx));
     prior.push(problems.length === 0 ? { id, status: "fixed", problems, fixWhere, fixQuote } : { id, status: "open", problems });
   });
 

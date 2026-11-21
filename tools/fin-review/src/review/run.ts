@@ -54,6 +54,7 @@ import type { Refutation } from "./prompts.ts";
 import { entryKind, pathTextProblem, TreeError, treeProblems, writeTree } from "./tree.ts";
 import type { EntryKind } from "./tree.ts";
 import {
+  changedLineNumbers,
   changedLines,
   diffTwoDot,
   ensureMirror,
@@ -146,6 +147,8 @@ interface SessionPlan {
   readonly allowed: ReadonlySet<string> | null;
   /** Prompt IDs (P1, P2, ...) of the prior blockers shown to this session. */
   readonly priors: ReadonlyMap<string, OpenBlocker>;
+  /** For each prompt ID, the lines changed since that blocker was found; a fix must touch one. */
+  readonly fixLines: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
 }
 
 interface SessionRecord {
@@ -290,7 +293,10 @@ export function readRunRecords(home: string, pr: number): RunRecord[] {
       if (!isJsonObject(item) || typeof item["id"] !== "string" || typeof item["lensKey"] !== "string" || typeof item["lens"] !== "string") continue;
       if (!isJsonObject(item["finding"])) continue;
       const profile = typeof item["profile"] === "string" ? item["profile"] : null;
-      openBlockers.push({ id: item["id"], lensKey: item["lensKey"], lens: item["lens"], profile, finding: item["finding"] as unknown as Finding });
+      // A record that does not say where a blocker was found gives the run's own head: a fix must
+      // then change something since that head.
+      const foundAt = isSha(item["foundAt"]) ? item["foundAt"] : head;
+      openBlockers.push({ id: item["id"], lensKey: item["lensKey"], lens: item["lens"], profile, finding: item["finding"] as unknown as Finding, foundAt });
     }
     const defaultBranch = doc["defaultBranch"];
     const recordedBase = doc["mergeBase"];
@@ -313,6 +319,32 @@ export function readRunRecords(home: string, pr: number): RunRecord[] {
 /** The newest gating run record of pull request `pr` at `head` in runs/, or null. */
 export function readPriorRun(home: string, pr: number, head: string): RunRecord | null {
   return readRunRecords(home, pr).find((record) => record.head === head) ?? null;
+}
+
+/**
+ * The newest gating run of pull request `pr` at `head` or at one of its ancestors: the blockers it
+ * left open are carried into this run, whatever the mode (spec 07 §2.3.2, §5.3).
+ */
+async function newestRunOnHistory(home: string, pr: number, head: string, mirror: string, env: Readonly<Record<string, string | undefined>>): Promise<RunRecord | null> {
+  for (const record of readRunRecords(home, pr)) {
+    if (record.head === head) return record;
+    if ((await resolveCommit(mirror, record.head, env)) === null) continue;
+    if (await isAncestor(mirror, record.head, head, env)) return record;
+  }
+  return null;
+}
+
+/** Most paths whose changed lines are read for checking quoted fixes; past it, no fix can be shown. */
+const MAX_FIX_PATHS = 1000;
+
+/** For each path changed at `head` since `from`, the lines that changed (see changedLineNumbers). */
+async function linesChangedSince(mirror: string, from: string, head: string, env: Readonly<Record<string, string | undefined>>): Promise<Map<string, Set<number>>> {
+  const out = new Map<string, Set<number>>();
+  if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) return out;
+  const paths = sortedUnique((await diffTwoDot(mirror, from, head, env)).filter((entry) => entry.status !== "D").map((entry) => entry.path));
+  if (paths.length > MAX_FIX_PATHS) return out;
+  for (const path of paths) out.set(path, await changedLineNumbers(mirror, from, head, path, env));
+  return out;
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
@@ -604,8 +636,15 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       }),
     ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
+    // The blockers left open by the newest gating run on the head's history, in every mode (an
+    // escalated `commit` and a second `pr` included): each is shown again to the lens that found
+    // it and stays open until that lens quotes its fix on lines changed since it was found.
+    const carriedFrom = await newestRunOnHistory(deps.home, req.pr, head, mirror, env);
+    const priorBlockers = carriedFrom?.openBlockers ?? [];
+    const fixLinesFrom = new Map<string, Map<string, Set<number>>>();
+    for (const foundAt of new Set(priorBlockers.map((blocker) => blocker.foundAt))) fixLinesFrom.set(foundAt, await linesChangedSince(mirror, foundAt, head, env));
+
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
-    const priorBlockers = prior?.openBlockers ?? [];
     const lensSet = new Set<Lens>(tier === null ? [] : requiredLenses(config.lenses, tier, changed.map((path) => path.path)));
     for (const blocker of priorBlockers) if (blocker.profile === null && isLens(blocker.lens)) lensSet.add(blocker.lens);
     const lenses = [...lensSet];
@@ -629,7 +668,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // ---- sessions ----
-    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, patch, unitDiffs });
+    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, fixLinesFrom, patch, unitDiffs });
     writeJson(join(runDir, "plan.json"), {
       v: 1,
       runId,
@@ -650,6 +689,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier, kind: unit.kind })),
       excluded,
       notUnits: nonUnits,
+      priorRun: carriedFrom === null ? null : { runId: carriedFrom.runId, head: carriedFrom.head, openBlockers: priorBlockers.map((blocker) => ({ id: blocker.id, lensKey: blocker.lensKey, foundAt: blocker.foundAt })) },
       lenses,
       profiles: Object.fromEntries(profileMap),
       sessions: plans.map((plan) => ({ id: plan.id, role: plan.role, lensKey: plan.lensKey, shard: plan.shard, units: plan.units.map((unit) => unit.id) })),
@@ -804,7 +844,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     const runLens = async (plan: SessionPlan): Promise<void> => {
       const record: SessionRecord = { id: plan.id, role: plan.role, lensKey: plan.lensKey, state: "pending", result: null, unitIds: plan.units.map((unit) => unit.id) };
       records.push(record);
-      const ctx: ValidationContext = { schema: plan.schema, checklist: plan.checklist, allowed: plan.allowed, files };
+      const ctx: ValidationContext = { schema: plan.schema, checklist: plan.checklist, allowed: plan.allowed, files, fixLines: plan.fixLines };
       const extra: { lens?: string; profile?: string; shard?: number } = {
         lens: plan.lens,
         ...(plan.profile === null ? {} : { profile: plan.profile.id }),
@@ -900,7 +940,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         .filter((rec) => rec.blocking)
         .map((rec) => {
           const finding = rec.finding as Finding;
-          return { id: rec.id, lensKey: rec.lensKey, lens: finding.lens, profile: finding.profile ?? null, finding };
+          return { id: rec.id, lensKey: rec.lensKey, lens: finding.lens, profile: finding.profile ?? null, finding, foundAt: head };
         }),
       ...stillOpen,
     ];
@@ -1019,6 +1059,8 @@ interface PlanInput {
   /** The text of each deleted path as it was before the change. */
   readonly deleted: ReadonlyMap<string, string>;
   readonly priorBlockers: readonly OpenBlocker[];
+  /** By the head a blocker was found at: the lines of each path changed since then. */
+  readonly fixLinesFrom: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
   readonly patch: { readonly text: string; readonly truncated: boolean };
   /** `commit` only: each changed unit's diff since the last reviewed head. */
   readonly unitDiffs: ReadonlyMap<string, string>;
@@ -1145,6 +1187,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
       checklist: items.map((item) => item.id),
       allowed: opts.allowed,
       priors,
+      fixLines: new Map([...priors].map(([promptId, blocker]) => [promptId, input.fixLinesFrom.get(blocker.foundAt) ?? new Map<string, Set<number>>()])),
     };
   };
 

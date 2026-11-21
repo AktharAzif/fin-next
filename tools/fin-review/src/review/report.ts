@@ -74,6 +74,8 @@ export interface OpenBlocker {
   readonly lens: string;
   readonly profile: string | null;
   readonly finding: Finding;
+  /** The head the blocker was found at: a fix must change something since then. */
+  readonly foundAt: string;
 }
 
 export interface RunSummary {

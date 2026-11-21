@@ -636,6 +636,56 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.match(notAncestor.stdout, /escalated from commit: not_ancestor/);
   });
 
+  it("a prior blocker is not closed by a quote of text that did not change since it was found", async () => {
+    const h0 = fx.pr(8, { "packages/crypto/src/index.ts": "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n" });
+    const first = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec)]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "8"], first.services)).code, 1);
+    fx.pr(8, { "docs/plan/README.md": "# plan\n\nNothing about the blocker.\n" }, h0);
+    for (const claim of [
+      { fixWhere: { path: "packages/crypto/src/index.ts", startLine: 2, endLine: 2 }, fixQuote: { path: "packages/crypto/src/index.ts", text: "return a === b;" } },
+      { fixWhere: { path: "README.md", startLine: 1, endLine: 1 }, fixQuote: { path: "packages/crypto/src/index.ts", text: "return a === b;" } },
+      { fixWhere: { path: "README.md", startLine: 1, endLine: 1 }, fixQuote: { path: "README.md", text: "# fin-next" } },
+    ]) {
+      const h = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", ...claim }] } } : undefined)), random);
+      const run = await runFixtureCli(fx, ["commit", "--pr", "8", "--since", h0], h.services);
+      assert.notEqual(run.code, 0, JSON.stringify(claim));
+      const result = readJson(join(lastRun(fx), "result.json"));
+      assert.equal((result["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    }
+  });
+
+  it("blockers open at the last reviewed head survive an escalation to pr and a second pr, and close only with a real fix", async () => {
+    const h0 = fx.pr(9, { "packages/crypto/src/index.ts": "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n" });
+    const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { severity: "critical" })]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "9"], finder.services)).code, 1);
+    // 450 lines of notes and the defect left alone: the commit escalates, and the fresh pass finds nothing.
+    const h1 = fx.pr(9, { "docs/plan/notes.md": "note\n".repeat(450) }, h0);
+    const escalated = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["commit", "--pr", "9", "--since", h0], escalated.services);
+    assert.match(run.stdout, /escalated from commit: delta_lines/);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    assert.match(calls(escalated).find((call) => call.spec.lens === "security")?.spec.prompt ?? "", /# Prior blockers\n/);
+    const blockers = (readJson(join(lastRun(fx), "result.json"))["blockers"] as Array<Record<string, unknown>>).map((blocker) => blocker["rule"]);
+    assert.deepEqual(blockers, ["prior"]);
+    // A second pr on the same head carries it too.
+    const again = await runFixtureCli(fx, ["pr", "--pr", "9"], harness(fx, script(), random).services);
+    assert.equal(again.code, 1, again.stdout + again.stderr);
+    // The fix, quoted from the lines it changed, closes it.
+    const fixed = "import { timingSafeEqual } from \"node:crypto\";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n";
+    fx.pr(9, { "packages/crypto/src/index.ts": fixed }, h1);
+    const closing = harness(
+      fx,
+      script((spec) =>
+        spec.lens === "security"
+          ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "packages/crypto/src/index.ts", startLine: 4, endLine: 4 }, fixQuote: { path: "packages/crypto/src/index.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" } }] } }
+          : undefined,
+      ),
+      random,
+    );
+    const closed = await runFixtureCli(fx, ["pr", "--pr", "9"], closing.services);
+    assert.equal(closed.code, 0, closed.stdout + closed.stderr);
+  });
+
   it("a delta never lowers the chain's tier: after a tier S pr, a docs-only commit keeps the tier S floor and records tier S", async () => {
     const h0 = fx.pr(6, { "packages/crypto/src/index.ts": "export const VERSION = 4;\n" });
     assert.equal((await runFixtureCli(fx, ["pr", "--pr", "6"], harness(fx, script(), random).services)).code, 0);

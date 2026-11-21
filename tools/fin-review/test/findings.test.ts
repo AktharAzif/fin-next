@@ -112,7 +112,10 @@ describe("finding validation (T-RV-13)", () => {
   });
 
   it("a prior blocker is fixed only with a valid quote of the fix; anything else keeps it open", () => {
-    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1", "P2", "P3"]) });
+    const ids = ["P1", "P2", "P3"];
+    // Line 2 of src/a.ts changed since each blocker was found.
+    const changed = new Map([["src/a.ts", new Set([2])]]);
+    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ids), fixLines: new Map(ids.map((id) => [id, changed])) });
     const validated = validateOutput(
       output([], {
         priorBlockers: [
@@ -127,6 +130,26 @@ describe("finding validation (T-RV-13)", () => {
     assert.match(outputProblem(validated) ?? "", /prior blocker P2/);
     // Without prior blockers the schema has no priorBlockers field at all.
     assert.match(problem(output([], { priorBlockers: [] })) ?? "", /priorBlockers is not allowed/);
+  });
+
+  it("a quoted fix must come from its own file, within its lines, and touch a line changed since the blocker was found", () => {
+    const fixed = (where: Record<string, unknown>, quote: Record<string, unknown>, changed: Map<string, Set<number>>): ReturnType<typeof validateOutput>["prior"][number] | undefined => {
+      const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixLines: new Map([["P1", changed]]) });
+      return validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: where, fixQuote: quote }] }), c).prior[0];
+    };
+    const line2 = { path: "src/a.ts", startLine: 2, endLine: 2 };
+    const quote = { path: "src/a.ts", text: "return x + 1;" };
+    assert.equal(fixed(line2, quote, new Map([["src/a.ts", new Set([2])]]))?.status, "fixed");
+    // Nothing changed since the blocker was found: the line it named is no fix of itself.
+    assert.match(fixed(line2, quote, new Map())?.problems[0] ?? "", /touches no line of src\/a\.ts that changed since the blocker was found/);
+    // A change elsewhere in the tree does not make an unchanged line a fix.
+    assert.equal(fixed(line2, quote, new Map([["src/other.ts", new Set([1])], ["src/a.ts", new Set([3])]]))?.status, "open");
+    // The quote must come from the file fixWhere names, and from within its lines.
+    assert.match(fixed({ path: "src/other.ts", startLine: 1, endLine: 1 }, quote, new Map([["src/other.ts", new Set([1])]]))?.problems[0] ?? "", /quoted from "src\/a\.ts", not from "src\/other\.ts"/);
+    assert.match(fixed({ path: "src/a.ts", startLine: 3, endLine: 3 }, quote, new Map([["src/a.ts", new Set([3])]]))?.problems[0] ?? "", /not within src\/a\.ts:3-3/);
+    // A wide fixWhere does not help: the quoted text itself must touch a changed line.
+    assert.equal(fixed({ path: "src/a.ts", startLine: 1, endLine: 3 }, quote, new Map([["src/a.ts", new Set([3])]]))?.status, "open");
+    assert.equal(fixed({ path: "src/a.ts", startLine: 1, endLine: 3 }, { path: "src/a.ts", text: "x + 1;\n}" }, new Map([["src/a.ts", new Set([3])]]))?.status, "fixed");
   });
 });
 

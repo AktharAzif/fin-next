@@ -69,9 +69,14 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
   `delta_lines` (over 400), `tier_raised`, `new_lens`, `new_profile` or `prior_could_not_check`.
   The delta's own tier picks its lenses, but a tier only goes up along the chain: the floor, the
   budget and the recorded `tier` are the higher of the delta's and the prior run's (`deltaTier`
-  records the delta's). Each blocker open at `--since`
-  is shown again (as `P1`, `P2`, ...) to the lens that found it; it closes only when that lens marks
-  it `fixed` with a quote of the fix that is in the tree; silence keeps it open.
+  records the delta's).
+- **Prior blockers.** Every run, `pr` and an escalated `commit` included, carries the blockers left
+  open by the newest gating run of the pull request at the head or at one of its ancestors. Each is
+  shown again (as `P1`, `P2`, ...) to the lens that found it, and it closes only when that lens marks
+  it `fixed` with a `fixWhere` and a `fixQuote` from the same file, the quote within those lines and
+  touching a line that changed since the blocker was found. Text that was already there cannot be a
+  fix, so a run on an unchanged head, or a quote of an unrelated file, closes nothing; silence keeps
+  a blocker open. No sceptic checks a fix claim in this slice.
 - **Output.** stdout holds counts only. `$FIN_REVIEW_HOME/runs/<run-id>/` holds `state.json`,
   `plan.json`, each session's settings, MCP config and result, `findings.json` (every candidate,
   invalid ones included with their reasons), `summary.md` (the findings' text; invalid ones are never
@@ -200,7 +205,8 @@ sessions on the build machine, as today's merge gate.
 - **Refusal of settings files** (§4.3's second half, the doctor's D3) comes with the full doctor;
   this slice refuses the engine's own environment only.
 - **No receipts**: `pr` reads no coverage from a receipt chain, so it reviews every unit of the
-  patch; `commit`'s last reviewed head is `--since` and its local run record, not a signed receipt.
+  patch; `commit`'s last reviewed head is `--since` and its local run record, not a signed receipt;
+  the open blockers every run carries come from the same local records.
   Run records live in `$FIN_REVIEW_HOME`, which any process of the same user can write; with no
   separate OS user, that is the trust the trimmed phase has.
 - **Not yet in this slice**: the injection filter of free text (§2.8 rule 5) and de-duplication;
