@@ -1,0 +1,640 @@
+{
+  "version": 1,
+  "controlPaths": [
+    ".github/",
+    ".claude/",
+    "CODEOWNERS",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "pnpm-workspace.yaml",
+    "scripts/check-supply-chain.mjs",
+    "scripts/public-safety.mjs",
+    "tools/fin-review/",
+    "tools/layout.json",
+    "docs/review/",
+    "ops/fin/",
+    "ops/docker/",
+    "tools/static-deploy/",
+    "packages/web-host/src/static/",
+    "apps/*/static.json"
+  ],
+  "notFin": [
+    {
+      "path": "apps/dashboard",
+      "why": "The old product's app glue, which spec 06 §3.4 names as not ported"
+    }
+  ],
+  "entries": [
+    {
+      "path": ".",
+      "kind": "root",
+      "status": "active",
+      "lane": "steward",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["platform"],
+      "files": [
+        ".gitignore",
+        ".gitleaks.toml",
+        ".node-version",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CODEOWNERS",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "SECURITY.md",
+        "biome.json",
+        "compose.yaml",
+        "package.json",
+        "playwright.config.ts",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "tsconfig.base.json",
+        "tsconfig.json",
+        "turbo.json",
+        "vitest.config.ts"
+      ]
+    },
+    {
+      "path": "tools/layout.json",
+      "kind": "file",
+      "status": "active",
+      "lane": "steward",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["platform"]
+    },
+    {
+      "path": "scripts",
+      "kind": "dir",
+      "status": "active",
+      "lane": "steward",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["platform"]
+    },
+    {
+      "path": ".githooks",
+      "kind": "dir",
+      "status": "active",
+      "lane": "steward",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["platform"]
+    },
+    {
+      "path": ".github",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-B",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["ci"]
+    },
+    {
+      "path": ".claude",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "steward",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["platform"]
+    },
+    {
+      "path": "apps/edge",
+      "name": "@fin/edge",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["edge"],
+      "image": "fin-next-edge"
+    },
+    {
+      "path": "apps/api",
+      "name": "@fin/api",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D, P0-E",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["api"],
+      "image": "fin-next-api"
+    },
+    {
+      "path": "apps/payments",
+      "name": "@fin/payments",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["payments"],
+      "image": "fin-next-payments"
+    },
+    {
+      "path": "apps/console",
+      "name": "@fin/console",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D, P0-G",
+      "tiers": {
+        "src/server/**": "S",
+        "static.json": "S",
+        "**": "N"
+      },
+      "areas": ["console"],
+      "image": "fin-next-console",
+      "static": "console"
+    },
+    {
+      "path": "apps/admin",
+      "name": "@fin/admin",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D, P0-G",
+      "tiers": {
+        "src/server/**": "S",
+        "static.json": "S",
+        "**": "N"
+      },
+      "areas": ["admin"],
+      "image": "fin-next-admin",
+      "static": "admin"
+    },
+    {
+      "path": "apps/verify",
+      "name": "@fin/verify",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D, P0-G",
+      "tiers": {
+        "src/server/**": "S",
+        "static.json": "S",
+        "**": "N"
+      },
+      "areas": ["verify"],
+      "image": "fin-next-verify",
+      "static": ["verify", "selfie"]
+    },
+    {
+      "path": "apps/docs",
+      "name": "@fin/docs",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "src/try-it/**": "S",
+        "static.json": "S",
+        "**": "N"
+      },
+      "areas": ["docs"],
+      "static": "docs"
+    },
+    {
+      "path": "apps/connector",
+      "name": "@fin/connector",
+      "kind": "app",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["connector"],
+      "image": "fin-next-connector"
+    },
+    {
+      "path": "packages/core",
+      "name": "@fin/core",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["core"]
+    },
+    {
+      "path": "packages/server",
+      "name": "@fin/server",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["server"]
+    },
+    {
+      "path": "packages/web-host",
+      "name": "@fin/web-host",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["web-host"]
+    },
+    {
+      "path": "packages/db",
+      "name": "@fin/db",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-E",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["db"]
+    },
+    {
+      "path": "packages/crypto",
+      "name": "@fin/crypto",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-E",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["crypto"]
+    },
+    {
+      "path": "packages/audit",
+      "name": "@fin/audit",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-E",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["audit"]
+    },
+    {
+      "path": "packages/email",
+      "name": "@fin/email",
+      "kind": "package",
+      "status": "planned",
+      "lane": "L-SAT-05",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["email"]
+    },
+    {
+      "path": "packages/testing",
+      "name": "@fin/testing",
+      "kind": "package",
+      "status": "planned",
+      "lane": "L-SAT-08",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["testing"]
+    },
+    {
+      "path": "packages/tokens",
+      "name": "@fin/tokens",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/icons",
+      "name": "@fin/icons",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/motion",
+      "name": "@fin/motion",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/ui",
+      "name": "@fin/ui",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/frame",
+      "name": "@fin/frame",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/app-contracts",
+      "name": "@fin/app-contracts",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-G",
+      "tiers": {
+        "**": "N"
+      },
+      "areas": ["ui"]
+    },
+    {
+      "path": "packages/identity",
+      "name": "@fin/identity",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["identity"]
+    },
+    {
+      "path": "packages/access",
+      "name": "@fin/access",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["access"]
+    },
+    {
+      "path": "packages/orgs",
+      "name": "@fin/orgs",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["orgs"]
+    },
+    {
+      "path": "packages/staff",
+      "name": "@fin/staff",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["staff"]
+    },
+    {
+      "path": "packages/keys",
+      "name": "@fin/keys",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["keys"]
+    },
+    {
+      "path": "packages/kyc",
+      "name": "@fin/kyc",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["kyc"]
+    },
+    {
+      "path": "packages/money",
+      "name": "@fin/money",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["money"]
+    },
+    {
+      "path": "packages/events",
+      "name": "@fin/events",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["events"]
+    },
+    {
+      "path": "packages/contract",
+      "name": "@fin/contract",
+      "kind": "package",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["contract"]
+    },
+    {
+      "path": "tools/fin-review",
+      "name": "@fin/fin-review",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-C",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["review"]
+    },
+    {
+      "path": "tools/static-deploy",
+      "name": "@fin/static-deploy",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["static-deploy"]
+    },
+    {
+      "path": "ops/fin",
+      "name": "@fin/ops-fin",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["ops"]
+    },
+    {
+      "path": "ops/monitoring",
+      "name": "@fin/ops-monitoring",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["monitoring"]
+    },
+    {
+      "path": "ops/watcher",
+      "name": "@fin/ops-watcher",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["watcher"]
+    },
+    {
+      "path": "ops/backup",
+      "name": "@fin/ops-backup",
+      "kind": "package",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["backup"],
+      "image": "fin-next-backup"
+    },
+    {
+      "path": "ops/docker",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-D",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["images"]
+    },
+    {
+      "path": "ops/environments",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["ops"]
+    },
+    {
+      "path": "ops/credentials.json",
+      "kind": "file",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "S"
+      },
+      "areas": ["ops"]
+    },
+    {
+      "path": "docs/plan",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "steward, L-SPEC",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["plan"]
+    },
+    {
+      "path": "docs/flows",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["flows"]
+    },
+    {
+      "path": "docs/security",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "steward",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["security"]
+    },
+    {
+      "path": "docs/review",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-C",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["review"]
+    },
+    {
+      "path": "docs/operations",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "steward",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["operations"]
+    },
+    {
+      "path": "docs/runbooks",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "P0-F",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["runbooks"]
+    },
+    {
+      "path": "docs/api-changelog",
+      "kind": "dir",
+      "status": "planned",
+      "lane": "day lane",
+      "tiers": {
+        "**": "D"
+      },
+      "areas": ["api"]
+    }
+  ]
+}
