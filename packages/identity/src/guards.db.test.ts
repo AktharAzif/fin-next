@@ -5,7 +5,7 @@
 // raise an assurance or change an address quietly.
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase, testRole } from "../test/db.ts";
+import { createTestDatabase, ROLE_PREFIX, seed, type TestDatabase, testRole } from "../test/db.ts";
 import { eventTypeRows } from "./audit/events.ts";
 import { REALM_GUARDS } from "./guards.ts";
 import { systemClock } from "./ports/clock.ts";
@@ -307,6 +307,7 @@ describe("audit.record's role allowlist", () => {
     expect(
       await inTransaction(consolePool, [recordEvent("staff.signed_out", id("sts"), [], null)]),
     ).toBe("FA002");
-    expect(testRole("fin_console")).toMatch(/^l_sat_02_/);
+    expect(testRole("fin_console")).toBe(`${ROLE_PREFIX}fin_console`);
+    expect(ROLE_PREFIX).toMatch(/^[a-z][a-z0-9_]+_$/);
   });
 });

@@ -2,6 +2,13 @@
 // absolute limit no refresh passes, and who may create an account.
 
 import { FACTOR_STEP_LIFETIME_MS } from "../gate.ts";
+import {
+  googleAccountCreate,
+  googleAccountUpdateDropped,
+  googleSessionFields,
+  googleUserFields,
+  isCallbackPath,
+} from "../google/hooks.ts";
 import { DAY, HOUR } from "../ports/clock.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
 import type { SessionRow } from "../store.ts";
@@ -100,6 +107,9 @@ export function databaseHooks(rt: RealmRuntime) {
         fields.accessSub = access.sub;
         fields.enrolmentOpenUntil = null;
       }
+    } else if (realm === "developer" && isCallbackPath(path)) {
+      // Google (§5.8, §6.1): `aal1`, at the factor step when the person has a factor.
+      fields = await googleSessionFields(rt, state, unitOf(rt), userId);
     } else if (
       (path === "/two-factor/verify-totp" || path === "/two-factor/disable") &&
       prior !== null &&
@@ -154,6 +164,10 @@ export function databaseHooks(rt: RealmRuntime) {
 
   async function userCreate(user: Data, ctx: HookEndpoint | null): Promise<{ data: Data }> {
     const state = requestState(rt);
+    if (realm === "developer" && isCallbackPath(ctx?.path ?? "")) {
+      // A Google sign-up (§5.8): a verified address, sign-ups open, the velocity limits.
+      return { data: await googleUserFields(rt, state, unitOf(rt), user) };
+    }
     const signIn = state.signIn;
     if (
       realm !== "developer" ||
@@ -184,6 +198,17 @@ export function databaseHooks(rt: RealmRuntime) {
     if (typeof user.id === "string") state.createdUserId = user.id;
   }
 
+  /** A Google account row keeps no provider token; only the callback makes one (§5.8). */
+  async function accountCreate(account: Data, ctx: HookEndpoint | null): Promise<{ data: Data }> {
+    const stripped = googleAccountCreate(requestState(rt), ctx?.path ?? "", account);
+    return { data: stripped ?? account };
+  }
+
+  /** The library's token refresh of a Google row on a re-link changes nothing Fin keeps. */
+  async function accountUpdate(update: Data): Promise<{ data: Data } | false> {
+    return googleAccountUpdateDropped(update) ? false : { data: update };
+  }
+
   return {
     session: {
       create: { before: sessionCreate },
@@ -191,6 +216,10 @@ export function databaseHooks(rt: RealmRuntime) {
     },
     user: {
       create: { before: userCreate, after: userCreated },
+    },
+    account: {
+      create: { before: accountCreate },
+      update: { before: accountUpdate },
     },
   };
 }

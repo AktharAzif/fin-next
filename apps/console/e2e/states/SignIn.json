@@ -20,44 +20,52 @@
       "test": "@journey too many emails, and offline, are said on the card"
     },
     "googleNotLinked": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with account_not_linked says so on the card"
     },
     "googleCancelled": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with access_denied says so on the card"
     },
     "googleUnconfirmed": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with email_unverified says so on the card"
     },
     "googleNoSignup": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with unable_to_create_user says so on the card"
     },
     "googleUnfinished": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with state_mismatch says so on the card"
     },
     "googleOurSide": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with google_failed says so on the card"
     },
     "googleIncomplete": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with email_not_found says so on the card"
     },
     "googleBusy": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey @security Continue with Google: busy, then sent where the server says, with the page kept"
     },
     "passkeyBusy": {
       "status": "covered",

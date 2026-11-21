@@ -15,6 +15,8 @@ import { registerRoutes } from "./routes.ts";
 const SPEC_ROUTES = [
   "POST /api/sign-up",
   "POST /api/sign-in/code-link",
+  // Stretch 5 (Google, §5.8): whether the sign-in pages show "Continue with Google".
+  "GET /api/sign-in/methods",
   "GET /api/viewer",
   "PUT /api/viewer/organization",
   "POST /api/invitations/open",

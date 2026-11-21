@@ -1,7 +1,9 @@
 // Create your Fin account (SignUp board; spec 02 §5.1): the name and work email, then an emailed
 // code. The answer is the same whether or not the address has an account (an existing one is told
 // by email), so the page never says which. With an invitation waiting in the cookie, the address
-// field says whom it is for. The password field comes with passwords (stretch 2).
+// field says whom it is for. The password field comes with passwords (stretch 2). "Continue with
+// Google" shows only when Google is on (stretch 5, §5.8); a refused round trip comes back here
+// with `?error=`.
 import { useFin } from "@fin/frame";
 import { AuthCard, Button, Field, Input } from "@fin/ui";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
@@ -12,9 +14,25 @@ import { commonAlert, type Failure, failureOf, invalidFields } from "../../api/f
 import { looksLikeEmail, rememberEmail } from "../../auth/pending.ts";
 import { AlertFrom, AuthLoading, LeadLink } from "../../components/auth.tsx";
 import { NAME_RULE } from "../../format/text.ts";
+import { GoogleButton, GoogleRefusal } from "../-google/GoogleButton.tsx";
+import { type GoogleError, isGoogleError } from "../-google/google.ts";
+
+export interface SignUpSearch {
+  /** A refused Google round trip (stretch 5). */
+  error?: GoogleError;
+  next?: string;
+}
+
+function readSignUpSearch(search: Record<string, unknown>): SignUpSearch {
+  const out: SignUpSearch = {};
+  if (isGoogleError(search.error)) out.error = search.error;
+  if (typeof search.next === "string" && search.next !== "") out.next = search.next;
+  return out;
+}
 
 export const Route = createFileRoute("/sign-up/")({
   staticData: { frame: "auth", navId: null, pageName: "Create your account" },
+  validateSearch: readSignUpSearch,
   pendingComponent: AuthLoading,
   component: SignUpPage,
 });
@@ -22,6 +40,7 @@ export const Route = createFileRoute("/sign-up/")({
 function SignUpPage() {
   const fin = useFin();
   const router = useRouter();
+  const search = Route.useSearch();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [nameRefused, setNameRefused] = useState(false);
@@ -82,6 +101,14 @@ function SignUpPage() {
       }
     >
       {alert === null ? null : <AlertFrom alert={commonAlert(alert)} />}
+      {alert === null && search.error !== undefined ? <GoogleRefusal error={search.error} /> : null}
+      <GoogleButton
+        page="/sign-up"
+        next={search.next ?? null}
+        disabled={creating}
+        rule
+        onFailure={(failure) => setAlert(failure)}
+      />
       <form
         noValidate
         className="flex flex-col gap-5"

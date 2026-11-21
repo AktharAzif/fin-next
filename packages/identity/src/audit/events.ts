@@ -125,6 +125,9 @@ export const IDENTITY_EVENTS = {
     }),
   ),
   "step_up.locked": person("security", "ses", empty),
+  // Google sign-in (stretch 5, §5.8): a Google account linked to, or unlinked from, a person.
+  "account.linked": person("security", "acc", z.strictObject({ provider: z.enum(["google"]) })),
+  "account.unlinked": person("security", "acc", z.strictObject({ provider: z.enum(["google"]) })),
   "browser.trusted": person("security", "tbr", empty),
   "browser.trust_revoked": {
     ...person(

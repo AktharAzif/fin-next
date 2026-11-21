@@ -16,7 +16,22 @@ import pg, { type Client, type Pool, type PoolConfig } from "pg";
 import { eventTypeRows } from "../src/audit/events.ts";
 import { ORG_TEMPLATES } from "../src/email.ts";
 
-export const ROLE_PREFIX = "l_sat_03_";
+/**
+ * The cluster-wide prefix of this harness's roles and databases. FIN_TEST_DB_PREFIX gives a
+ * parallel lane its own, so lanes that change the template's inputs on one shared server never
+ * rebuild each other's template mid-run; the default keeps `l_sat_03_`.
+ */
+export const ROLE_PREFIX = testPrefix(process.env.FIN_TEST_DB_PREFIX, "l_sat_03_");
+
+function testPrefix(given: string | undefined, fallback: string): string {
+  if (given === undefined || given === "") return fallback;
+  if (!/^[a-z][a-z0-9_]{1,24}_$/.test(given)) {
+    throw new Error("FIN_TEST_DB_PREFIX is lower-case letters, digits and _, ending in _");
+  }
+  // The identity harness takes the bare prefix; this one adds `o_`, so the two never share a
+  // template database.
+  return `${given}o_`;
+}
 export const SERVICE_ROLES = [
   "fin_console",
   "fin_admin",
@@ -313,7 +328,7 @@ export async function ensureTemplate(): Promise<void> {
   const admin = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
   await admin.connect();
   try {
-    await admin.query("SELECT pg_advisory_lock(hashtext('l_sat_03_template'))");
+    await admin.query("SELECT pg_advisory_lock(hashtext($1))", [TEMPLATE_DB]);
     await ensureRoles(admin, url);
     const print = fingerprint();
     const current = await admin.query<{ comment: string | null }>(
@@ -323,7 +338,7 @@ export async function ensureTemplate(): Promise<void> {
     if (current.rows[0]?.comment !== print) await buildTemplate(url, admin, print);
   } finally {
     await admin
-      .query("SELECT pg_advisory_unlock(hashtext('l_sat_03_template'))")
+      .query("SELECT pg_advisory_unlock(hashtext($1))", [TEMPLATE_DB])
       .catch(() => undefined);
     await admin.end();
   }
@@ -350,9 +365,9 @@ export async function createTestDatabase(label: string): Promise<TestDatabase> {
   const server = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
   await server.connect();
   try {
-    await server.query("SELECT pg_advisory_lock(hashtext('l_sat_03_template'))");
+    await server.query("SELECT pg_advisory_lock(hashtext($1))", [TEMPLATE_DB]);
     await server.query(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE_DB}"`);
-    await server.query("SELECT pg_advisory_unlock(hashtext('l_sat_03_template'))");
+    await server.query("SELECT pg_advisory_unlock(hashtext($1))", [TEMPLATE_DB]);
   } finally {
     await server.end();
   }

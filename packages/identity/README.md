@@ -61,6 +61,33 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
 - The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
   Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
 
+## Google sign-in (stretch 5, spec 02 §5.8)
+
+Off by default: with `FIN_FEATURE_GOOGLE` unset or `off`, `/sign-in/social`, `/callback/:id`,
+`/link-social` and `/unlink-account` are blocked in the allowlist and answer 404. It is on only for
+the developer realm, with `FIN_FEATURE_GOOGLE=on` and the console's OAuth client
+(`FIN_GOOGLE_CLIENT_ID`, `FIN_GOOGLE_CLIENT_SECRET`, a sealed variable on `console`, CR-12),
+registered with the redirect URI `<FIN_PUBLIC_ORIGIN>/api/auth/callback/google` exactly. The staff
+realm refuses to start with it on. `FIN_GOOGLE_TEST_ISSUER` points the provider at the fixture
+(packages/testing/src/oauth) and is refused outside development and test.
+
+- Fin's own provider (`src/google/provider.ts`, mounted by a plugin with no routes of its own):
+  authorization code with PKCE (S256), a nonce the library keeps in the state, the exact redirect
+  URI, `prompt=select_account`, redirect only. The callback's code exchange and the provider's key
+  set are fetched before the request's unit of work opens, so no pooled client is held across them;
+  the ID token is verified on node:crypto (RS256, issuer, audience, expiry, age, nonce, a verified
+  address) before the library sees anything from it.
+- A Google session is `aal1` (`createdVia: google`), at the factor step when the person has a
+  factor, and proves the mailbox only when Google verified the account's own address. A person is
+  made from a verified address while sign-ups are open and within the sign-up limits; an address
+  that already has an account is never linked implicitly (`?error=account_not_linked`).
+- Linking is `/link-social` from Account security with an `account.google_link` intent (bound to
+  the provider), which rides the OAuth state's server context and is consumed in the callback's
+  transaction with `account.linked`; only the same address links. `/unlink-account` takes an
+  `account.google_unlink` intent bound to the account, only for the person's own Google row.
+- No provider token is kept: the account row's token columns stay empty, and the library's update
+  on a later sign-in is off.
+
 ## Layout
 
 | Path | What |
