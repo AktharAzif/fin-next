@@ -27,9 +27,11 @@
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
 //      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
 //      release's minimum schema version, recorded with every step) and the running digest;
-//   9. roll cloudflared-admin and cloudflared-public only when their image changed;
-//  10. check again everything steps 2 and 4 refuse on, and that every service runs the digest
-//      recorded for it; with --smoke, fetch the public health paths; write `deploy.done`, and record
+//   9. roll cloudflared-admin and cloudflared-public unless they run the release's image now (set
+//      to it, with a newest deployment that ended SUCCESS on it);
+//  10. check again everything steps 2 and 4 refuse on, and that every service is set to the digest
+//      recorded for it with a newest deployment that ended SUCCESS; with --smoke, fetch the public
+//      health paths; write `deploy.done`, and record
 //      in `run.done` the digest of every service on the release, rolled or kept, which `railway
 //      verify` checks.
 //
@@ -56,6 +58,7 @@ import {
   ROLL_CHECKS,
   readVariables,
 } from "./inspect.ts";
+import { imageRef, readRunning } from "./running.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
 const POLL_MS = 5_000;
@@ -72,11 +75,6 @@ const LOGS =
   "query finLogs($deploymentId: String!) { deploymentLogs(deploymentId: $deploymentId, limit: 500) { message } }";
 const VARIABLE_DELETE =
   "mutation finVariableDelete($input: VariableDeleteInput!) { variableDelete(input: $input) }";
-
-/** The image reference a service runs for a release. */
-export function imageRef(repository: string, image: string, digest: string): string {
-  return `${repository}${image}@${digest}`;
-}
 
 async function deploymentStatus(rw: RailwayApi, id: string): Promise<string> {
   const data = await rw.query<{ deployment: { status: string } }>(DEPLOYMENT, { id });
@@ -320,6 +318,23 @@ export const railwayDeploy: Command = {
       if (taken) ctx.out.warn(`${what}; deploying on the operator's word`);
     }
 
+    /**
+     * The connectors that run the release's image now, so they need no roll: set to it, with a
+     * newest deployment that ended SUCCESS on it. One whose deployment Railway does not describe
+     * rolls (a roll is harmless; keeping a connector that does not run the image is not).
+     */
+    const runsRelease = new Set<string>();
+    for (const service of s.connectorOrder) {
+      const image = own(s.services, service)?.image;
+      const digest = image === undefined ? undefined : own(manifest.images, image);
+      if (image === undefined || digest === undefined) continue;
+      const ref = imageRef(s.imageRepository, image, digest);
+      const instance = before.instances.get(service);
+      if (instance?.image !== ref) continue;
+      const running = await readRunning(ctx, rw, service, instance);
+      if (running.status === "SUCCESS" && running.image === ref) runsRelease.add(service);
+    }
+
     const rolls: Roll[] = [];
     const changes: Change[] = [];
     /** Every service on the release after the run: rolled, or kept because its image is unchanged. */
@@ -354,9 +369,14 @@ export const railwayDeploy: Command = {
         return;
       }
       const ref = imageRef(s.imageRepository, image, digest);
-      if (connector && running === ref) {
+      if (connector && runsRelease.has(service)) {
         onRelease.set(service, ref);
-        changes.push({ kind: "service", name: service, action: "keep", detail: "image unchanged" });
+        changes.push({
+          kind: "service",
+          name: service,
+          action: "keep",
+          detail: "runs the release's image",
+        });
         return;
       }
       rolls.push({ service, ref, task });
@@ -379,6 +399,7 @@ export const railwayDeploy: Command = {
     for (const service of s.connectorOrder) plan(service, false, true);
 
     const rolled = new Set(rolls.map((r) => r.service));
+    const tasks = new Set(rolls.filter((r) => r.task).map((r) => r.service));
     const health = refusals(ctx, before, rolled).filter((r) => !refused.includes(r));
     if (health.length > 0) {
       throw new RefusedError(
@@ -527,9 +548,19 @@ export const railwayDeploy: Command = {
           throw new RefusedError(`after the deploy: ${problems.join(", ")}`);
         }
         for (const [service, ref] of onRelease) {
-          if (after.instances.get(service)?.image !== ref) {
+          const instance = after.instances.get(service);
+          if (instance?.image !== ref) {
             ctx.run.line("deploy.failed", "error", { release, step: "digest" });
             throw new ProviderError("railway", `${service} does not report the deployed digest`, 0);
+          }
+          // migrate runs to its end and serves nothing; migrate.done is its proof (step 7).
+          if (!tasks.has(service) && instance.latestDeployment?.status !== "SUCCESS") {
+            ctx.run.line("deploy.failed", "error", { release, step: "digest" });
+            throw new ProviderError(
+              "railway",
+              `${service}'s newest deployment is ${instance.latestDeployment?.status ?? "missing"}, not SUCCESS`,
+              0,
+            );
           }
         }
         if (flagBool(ctx.args, "smoke")) await smoke(ctx);

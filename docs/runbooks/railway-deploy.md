@@ -22,7 +22,10 @@ read (`?`), which never counts as passing:
 - the health check (`/readyz`, 60 s), overlap and draining, start command and cron;
 - the image is set by digest from `ghcr.io/aktharazif/`, is the service's own image, and is the
   digest the registered deploys recorded for that service (every deploy records every service it
-  rolled or kept, connectors included);
+  rolled or kept, connectors included); and, for every service that serves (not `migrate` or a cron
+  job), its newest deployment ended `SUCCESS` (`deployment`) and runs that digest (`digest`): the
+  image a service is set to is only what its next deployment takes, so a deploy that crashed or a
+  rollback in Railway's dashboard shows here;
 - no secret-named variable (spec 01 §6.7) is readable: every one is sealed;
 - static egress on exactly the services §6.5 lists, with the overlay's `staticEgress` addresses.
 
@@ -33,8 +36,9 @@ variables holding a secret; each service's database login; that the no-token ser
 returns a sealed variable); Config as Code and a repository source. Check those by hand. Also
 listed: any read Railway refused (SP-03, SP-08), naming what it leaves unchecked (a refused
 variables read leaves the superuser-reference check unchecked), any field Railway answered with no
-value, and the digest of a service no registered deploy in this machine's run log recorded. Only a
-schema or authorisation error counts as Railway refusing a read. Any other failure (no answer, a
+value, the digest of a service no registered deploy in this machine's run log recorded, and the
+image a newest deployment runs when Railway does not say (SP-03). Only a schema or authorisation
+error counts as Railway refusing a read. Any other failure (no answer, a
 429 or a 5xx after the retries, or a GraphQL error that is Railway's own) stops the command with
 exit 69 instead: run it again.
 
@@ -96,17 +100,22 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
 9. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
    then a deploy, waiting up to 15 minutes for `SUCCESS` (step 5's health check).
-10. Rolls `cloudflared-admin` and `cloudflared-public` only when their image changed. The standby
-    `-b` services and `cloudflared-db` are never rolled here.
+10. Rolls `cloudflared-admin` and `cloudflared-public` unless they run the release's image now: set
+    to it, with a newest deployment that ended `SUCCESS` on it. A connector whose newest deployment
+    crashed, runs another image, or whose image Railway does not say, rolls. The standby `-b`
+    services and `cloudflared-db` are never rolled here.
 11. Checks again everything steps 3 and 5 refuse on, and that each service on the release reports
-    its digest; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console
+    its digest and (but for `migrate`, which runs to its end) a newest deployment that ended
+    `SUCCESS`; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console
     and verify hosts. `deploy.done` is written and `run.done` records the digest of every service on
     the release, kept connectors included, which `railway verify` then checks.
 
 Not done here yet: reading the schema version through `api`'s private health (the operator machine
 has no route into Railway's private network; `/readyz` enforces it per service, steps 5 and 9).
 
-Then upload the static builds (`static-deploy.md`): a new page must never meet an old API.
+Then upload the static builds (`static-deploy.md`): a new page must never meet an old API, so the
+upload checks that the services run this release at that moment, and that this deploy is the newest
+registered one.
 
 ## If a deploy fails
 

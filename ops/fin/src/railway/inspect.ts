@@ -122,11 +122,11 @@ export interface Inspection {
 }
 
 /**
- * The messages that say Railway refused the query itself: the schema has no such field or argument
- * (SP-03's unverified names), or the token may not make it.
+ * The messages that say Railway refused the query itself: the schema has no such field or argument,
+ * or the field has another shape (SP-03's unverified names), or the token may not make it.
  */
 const REFUSAL =
-  /Cannot query field|Unknown argument|Unknown type|Unknown field|is not defined by type|Not Authori[sz]ed|Unauthori[sz]ed|Forbidden|Permission denied|not permitted/i;
+  /Cannot query field|Unknown argument|Unknown type|Unknown field|is not defined by type|must have a selection of subfields|must not have a selection|Not Authori[sz]ed|Unauthori[sz]ed|Forbidden|Permission denied|not permitted/i;
 
 /**
  * Whether a failed read is Railway refusing the query (an answer with a schema or authorisation
@@ -195,10 +195,15 @@ export async function readVariables(
   };
 }
 
-/** Reads every service of the project in this environment. */
-export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Inspection> {
-  const notChecked: string[] = [];
-  let settingsUnread = false;
+/**
+ * The core read: every service of the project with its instance in this environment (exposure, the
+ * image it is set to, its newest deployment) and its instances elsewhere. IDs and domains are
+ * masked as they are read.
+ */
+export async function readInstances(
+  ctx: Context,
+  rw: RailwayApi,
+): Promise<Map<string, InstanceState>> {
   const data = await rw.query<{ project: { services: { edges: Array<{ node: StatusNode }> } } }>(
     STATUS,
     { projectId: rw.projectId },
@@ -238,6 +243,14 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
       otherDomains,
     });
   }
+  return instances;
+}
+
+/** Reads every service of the project in this environment. */
+export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Inspection> {
+  const notChecked: string[] = [];
+  let settingsUnread = false;
+  const instances = await readInstances(ctx, rw);
   try {
     const extended = await rw.query<{
       project: {

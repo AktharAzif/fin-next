@@ -397,9 +397,10 @@ export class FakeRailway {
   readonly operations: string[] = [];
   egress = new Map<string, string[]>();
   readonly instances = new Map<string, FakeInstance>();
+  /** Every deployment, with the image it runs (the instance's image when it was made). */
   readonly deployments = new Map<
     string,
-    { service: string; statuses: string[]; logs: string[]; reads: number }
+    { service: string; statuses: string[]; logs: string[]; reads: number; image: string | null }
   >();
   readonly updates: Array<{ service: string; input: Json }> = [];
   environmentId = "";
@@ -433,6 +434,11 @@ export class FakeRailway {
   egressAnswer: "ok" | "refused" | "unavailable" = "ok";
   /** Instances of a service in another environment of the project, with their domains. */
   readonly otherEnvironment = new Map<string, string[]>();
+  /**
+   * How the read of a deployment's image answers: with its image, a GraphQL refusal, or a meta
+   * that names no image.
+   */
+  deploymentImageAnswer: "ok" | "refused" | "no-image" = "ok";
 
   constructor(token: string, names: readonly string[]) {
     this.token = token;
@@ -468,6 +474,19 @@ export class FakeRailway {
         ...instance,
       });
     }
+  }
+
+  /**
+   * Makes a service run an image the way a finished deploy leaves it: the instance set to the
+   * image, and a newest deployment of that image that ended with the status (SUCCESS: serving).
+   */
+  running(service: string, image: string, status = "SUCCESS"): void {
+    const instance = this.instances.get(service);
+    if (instance === undefined) throw new Error(`no instance of ${service}`);
+    const id = `dep-${this.deployments.size + 1}`;
+    this.deployments.set(id, { service, statuses: [status], logs: [], reads: 0, image });
+    instance.image = image;
+    instance.latestDeployment = { id, status };
   }
 
   nameOf(id: string): string | undefined {
@@ -680,6 +699,7 @@ export class FakeRailway {
         statuses: [...this.deployStatuses],
         logs: service === "migrate" ? this.migrateLogs(release) : [],
         reads: 0,
+        image: this.instances.get(service)?.image ?? null,
       });
       const instance = this.instances.get(service);
       if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
@@ -695,6 +715,19 @@ export class FakeRailway {
         instance.latestDeployment = { id: String(variables.id), status };
       }
       return ok({ deployment: { id: variables.id, status } });
+    }
+    if (op === "finDeploymentImage") {
+      if (this.deploymentImageAnswer === "refused") return refused("meta");
+      const d = this.deployments.get(String(variables.id));
+      if (d === undefined) return refused("deployment");
+      return ok({
+        deployment: {
+          id: variables.id,
+          status: d.statuses[0] ?? "SUCCESS",
+          meta:
+            this.deploymentImageAnswer === "no-image" ? { reason: "deploy" } : { image: d.image },
+        },
+      });
     }
     if (op === "finLogs") {
       const d = this.deployments.get(String(variables.deploymentId));

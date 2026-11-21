@@ -218,9 +218,43 @@ describe("railway verify", () => {
     assert.equal(isRefusal(answered('Cannot query field "variables" on type "Query".')), true);
     assert.equal(isRefusal(answered("Not Authorized")), true);
     assert.equal(isRefusal(answered('Unknown argument "unrendered"', 400)), true);
+    assert.equal(
+      isRefusal(
+        answered(
+          'Field "meta" of type "DeploymentMeta" must have a selection of subfields. Did you mean "meta { ... }"?',
+          400,
+        ),
+      ),
+      true,
+      "a field of another shape than the query assumed is the schema refusing it (SP-03)",
+    );
     assert.equal(isRefusal(answered("Problem processing request")), false);
     assert.equal(isRefusal(answered("Internal server error")), false);
     assert.equal(isRefusal(answered("Not Authorized", 503)), false);
+  });
+
+  it("checks what each service's newest deployment runs, not only the image it is set to", async () => {
+    const h = provisioned();
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    // A rollback in Railway's dashboard: an older deployment serves, the source still says the release.
+    const api = h.rw.instances.get("api");
+    if (api === undefined) throw new Error("fixture");
+    h.rw.running("api", `ghcr.io/aktharazif/fin-next-api@${DIGEST("c")}`);
+    api.image = ref("fin-next-api");
+    // A deploy that crashed: the previous deployment still serves.
+    h.rw.running("edge", ref("fin-next-edge"), "CRASHED");
+    assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.drift);
+    const out = h.runtime.out().split("railway staging:").at(-1) ?? "";
+    assert.match(out, /! api digest: the newest deployment runs a digest other than/);
+    assert.match(out, /! edge deployment: the newest deployment is CRASHED, not SUCCESS/);
+    assert.doesNotMatch(out, /! migrate /, "a task runs to its end and serves nothing");
+    assert.doesNotMatch(out, /! (worker|console|cloudflared-public) /);
+    h.rw.deploymentImageAnswer = "refused";
+    await h.run(["railway", "verify", "staging"]);
+    assert.match(
+      h.runtime.out().split("railway staging:").at(-1) ?? "",
+      /\? not checked: the image the newest deployment of [^\n]*console[^\n]* runs/,
+    );
   });
 });
 
@@ -289,10 +323,8 @@ describe("railway deploy", () => {
 
   it("records kept connectors, so verify still checks their digest after a deploy that kept them", async () => {
     const h = provisioned((x) => {
-      for (const name of ["cloudflared-public", "cloudflared-admin"]) {
-        const c = x.rw.instances.get(name);
-        if (c) c.image = ref("fin-next-connector");
-      }
+      for (const name of ["cloudflared-public", "cloudflared-admin"])
+        x.rw.running(name, ref("fin-next-connector"));
     });
     assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
     assert.equal(
@@ -306,7 +338,62 @@ describe("railway deploy", () => {
     if (pub === undefined) throw new Error("fixture");
     pub.image = `ghcr.io/aktharazif/fin-next-connector@${DIGEST("c")}`;
     assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.drift);
-    assert.match(h.runtime.out(), /! cloudflared-public digest: runs a digest other than/);
+    assert.match(h.runtime.out(), /! cloudflared-public digest: is set to a digest other than/);
+  });
+
+  it("keeps a connector only when its newest deployment ended SUCCESS on the release's image", async () => {
+    const other = `ghcr.io/aktharazif/fin-next-connector@${DIGEST("c")}`;
+    const cases: Array<[string, (x: H) => void]> = [
+      ["crashed", (x) => x.rw.running("cloudflared-public", ref("fin-next-connector"), "CRASHED")],
+      [
+        "an older deployment serving, the source set to the release's image",
+        (x) => {
+          x.rw.running("cloudflared-public", other);
+          const c = x.rw.instances.get("cloudflared-public");
+          if (c) c.image = ref("fin-next-connector");
+        },
+      ],
+      [
+        "set to the release's image with no deployment",
+        (x) => {
+          const c = x.rw.instances.get("cloudflared-public");
+          if (c) c.image = ref("fin-next-connector");
+        },
+      ],
+      [
+        "a deployment image Railway does not say",
+        (x) => {
+          x.rw.running("cloudflared-public", ref("fin-next-connector"));
+          x.rw.deploymentImageAnswer = "refused";
+        },
+      ],
+    ];
+    for (const [name, change] of cases) {
+      const h = provisioned((x) => {
+        x.rw.running("cloudflared-admin", ref("fin-next-connector"));
+        change(x);
+      });
+      assert.equal(await deploy(h, manifest(h)), EXIT.ok, `${name}: ${h.runtime.err()}`);
+      const rolled = h.rw.updates.map((u) => u.service);
+      assert.ok(rolled.includes("cloudflared-public"), `${name}: rolled`);
+      if (name !== "a deployment image Railway does not say")
+        assert.equal(rolled.includes("cloudflared-admin"), false, `${name}: the other is kept`);
+    }
+  });
+
+  it("stops after the roll when a kept connector's newest deployment is no longer SUCCESS", async () => {
+    const h = provisioned((x) => {
+      for (const name of ["cloudflared-public", "cloudflared-admin"])
+        x.rw.running(name, ref("fin-next-connector"));
+      x.rw.onUpdate = (service) => {
+        const c = x.rw.instances.get("cloudflared-admin");
+        if (service === "console" && c?.latestDeployment)
+          c.latestDeployment = { ...c.latestDeployment, status: "CRASHED" };
+      };
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.unavailable);
+    assert.match(h.runtime.err(), /cloudflared-admin's newest deployment is CRASHED, not SUCCESS/);
+    assert.equal(h.records().at(-1)?.result, "failed");
   });
 
   it("lists the digest check as not checked when no registered deploy recorded one", async () => {

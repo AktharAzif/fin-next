@@ -5,10 +5,15 @@
 //
 // Before any write, and so in a dry run too: ci.yml's `merge` job succeeded for the commit (spec 01
 // §6.9 step 2: release.yml is the pushed commit's own workflow, so the merge job is what says the
-// commit was reviewed); this machine's run log records a successful `railway deploy` of the release,
-// so its services rolled first and a new page never meets an old API (S0-06, FW-C13), unless the
-// operator re-uploads an earlier release's pages with `--static-rollback`, which the run records;
-// the release manifest's attestation verifies; every selected deployment is checked (its
+// commit was reviewed); the release manifest's attestation verifies; the services run the release
+// now, so a new page never meets an old API (S0-06, FW-C13): the newest registered `railway deploy`
+// in this machine's run log is a successful one of the release, and Railway says that every
+// service a deploy rolls has a newest deployment that ended SUCCESS on the manifest's digest (a
+// past deploy of the release proves nothing once a later one, a failed one or a change by hand has
+// moved the services). Only `--static-rollback`, which puts an earlier release's pages back ahead
+// of its services and which the run records, skips that; a deployment image Railway did not say
+// refuses unless the operator checked it and passes `--accept-unchecked-deployments` (recorded).
+// Then every selected deployment is checked (its
 // static.json, its build's hash against that manifest, its rendered files); and its `_headers` and
 // `env.json` are rendered again from packages/web-host's profiles and must equal, byte for byte,
 // the files in `--dir`. Any problem refuses the whole run, so no host is left on one release while
@@ -34,14 +39,15 @@ import {
   stopSummary,
   uploadPrepared,
 } from "../../../../tools/static-deploy/src/run.ts";
-import { cloudflare } from "../cloudflare/common.ts";
+import { cloudflare, railway } from "../cloudflare/common.ts";
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
 import type { Context } from "../core/context.ts";
 import { ConfigError, DataError, ProviderError, RefusedError, UsageError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
-import { railwayDeployed } from "../railway/verify.ts";
+import { servicesOnRelease } from "../railway/running.ts";
+import { newestRailwayDeployProblem } from "../railway/verify.ts";
 import { checkMergeJob, verifiedManifest } from "../release/provenance.ts";
 import { renderFor, requireRenderer } from "./render.ts";
 import { loadWebHostRenderer, type RendererLoader } from "./renderer.ts";
@@ -131,7 +137,13 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         name: "static-rollback",
         kind: "boolean",
         description:
-          "re-upload a release's pages although this machine's run log records no railway deploy of it (a rollback; recorded in the run)",
+          "put a release's pages back although the services do not run it (a rollback, pages first; recorded in the run)",
+      },
+      {
+        name: "accept-unchecked-deployments",
+        kind: "boolean",
+        description:
+          "upload although Railway did not say which image a service's newest deployment runs (checked by hand; recorded)",
       },
     ],
     overlay: true,
@@ -155,17 +167,36 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
       const renderer = await requireRenderer(load);
       checkMergeJob(ctx, release);
       const rollback = flagBool(ctx.args, "static-rollback");
-      if (!railwayDeployed(ctx, release)) {
-        if (!rollback) {
+      const ROLL_FIRST =
+        "the services roll first, so a new page never meets an old API (spec 01 §6.9, S0-06); run railway deploy for this release, or pass --static-rollback to put an earlier release's pages back";
+      const logged = rollback ? undefined : newestRailwayDeployProblem(ctx, release);
+      if (logged !== undefined)
+        throw new RefusedError(`this machine's run log ${logged}: ${ROLL_FIRST}`);
+      const manifest = verifiedManifest(ctx, manifestFile, release);
+      let deploymentsUnchecked = false;
+      if (rollback) {
+        ctx.out.warn(
+          "uploading this release's pages without checking that the services run it, as a rollback (--static-rollback, recorded)",
+        );
+      } else {
+        // What the services run now, read from Railway, with the manifest's digests now trusted.
+        const { problems, unread } = await servicesOnRelease(ctx, railway(ctx), manifest);
+        if (problems.length > 0)
           throw new RefusedError(
-            "this machine's run log records no successful railway deploy of this release: the services roll first, so a new page never meets an old API (spec 01 §6.9, S0-06); run railway deploy, or pass --static-rollback to re-upload an earlier release's pages",
+            `the services do not run this release now: ${problems.join("; ")}; ${ROLL_FIRST}`,
+          );
+        if (unread.length > 0) {
+          if (!flagBool(ctx.args, "accept-unchecked-deployments"))
+            throw new RefusedError(
+              `Railway did not say which image the newest deployment of ${unread.join(", ")} runs; check in Railway that each runs this release's digest, then pass --accept-unchecked-deployments`,
+            );
+          deploymentsUnchecked = true;
+          ctx.out.warn(
+            `the image the newest deployment of ${unread.join(", ")} runs was not read; uploading on the operator's word (--accept-unchecked-deployments)`,
           );
         }
-        ctx.out.warn(
-          "no railway deploy of this release is recorded here; uploading its pages as a rollback (--static-rollback)",
-        );
+        ctx.out.info("static: every service runs this release now");
       }
-      const manifest = verifiedManifest(ctx, manifestFile, release);
       let prepared: PreparedDeployment[];
       try {
         prepared = prepareStaticDeploy({
@@ -286,7 +317,11 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
             throw translate(error);
           }
         },
-        { release, ...(rollback ? { staticRollback: true } : {}) },
+        {
+          release,
+          ...(rollback ? { staticRollback: true } : {}),
+          ...(deploymentsUnchecked ? { deploymentsUnchecked: true } : {}),
+        },
         async () => {
           await revoke();
           ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });

@@ -8,6 +8,7 @@ import { runCli } from "../src/cli.ts";
 import { EXIT } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import { RunLog } from "../src/core/runlog.ts";
+import { loadSettings } from "../src/core/settings.ts";
 import { staticDeployCommand } from "../src/static/deploy.ts";
 import { buildHash, staticRenderCommand } from "../src/static/render.ts";
 import type { RenderInput, StaticRenderer } from "../src/static/renderer.ts";
@@ -17,16 +18,43 @@ import {
   fakeRuntime,
   fakeToken,
   hex,
+  overlayFixture,
   REPO_ROOT,
+  uuid,
   writePrivate,
   ZONE,
 } from "./helpers/fixtures.ts";
-import { FakeCloudflare } from "./helpers/providers.ts";
+import { FakeCloudflare, FakeRailway } from "./helpers/providers.ts";
 import { type ZipInput, zipOf } from "./helpers/zip.ts";
 
 const RELEASE = hex(40, "c");
+/** Another release, deployed after RELEASE in some tests. */
+const OTHER = hex(40, "d");
 const KEYS = ["verify", "selfie", "admin", "console", "docs"];
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
+const settings = loadSettings(REPO_ROOT, "staging");
+const IMAGE_NAMES = [
+  "fin-next-api",
+  "fin-next-edge",
+  "fin-next-payments",
+  "fin-next-console",
+  "fin-next-admin",
+  "fin-next-verify",
+  "fin-next-connector",
+];
+/** A release's image digests, one per image and different for each seed. */
+const imagesOf = (seed: string): Record<string, string> =>
+  Object.fromEntries(IMAGE_NAMES.map((name, i) => [name, `sha256:${hex(63, seed)}${i}`]));
+/** The image reference each service a deploy rolls runs on a release, as `railway deploy` sets it. */
+function refsOf(images: Record<string, string>): Map<string, string> {
+  const s = settings.railway;
+  const refs = new Map<string, string>();
+  for (const service of [...s.deployOrder, ...s.connectorOrder]) {
+    const image = s.services[service]?.image ?? "";
+    refs.set(service, `${s.imageRepository}${image}@${images[image]}`);
+  }
+  return refs;
+}
 
 /** A renderer that behaves like packages/web-host's will: headers from the profile, env.json. */
 function fakeRenderer(
@@ -95,7 +123,12 @@ function release(
     };
   }
   change.manifest?.(statics);
-  const text = JSON.stringify({ commit: RELEASE, images: {}, static: statics, migrations: [] });
+  const text = JSON.stringify({
+    commit: RELEASE,
+    images: imagesOf("3"),
+    static: statics,
+    migrations: [],
+  });
   const manifestFile = join(dir, "release-manifest.json");
   writeFileSync(manifestFile, text);
   if (change.attestManifest ?? true) gh.attest(text);
@@ -326,27 +359,43 @@ describe("static deploy (pnpm fin)", () => {
   const MINTED = `mintedvalue${"Q".repeat(30)}1`;
 
   /**
-   * What this machine's run log holds about the release's Railway half: a successful registered
-   * `railway deploy` of it (the services rolled, S0-06), a failed one, one of another release, or
-   * nothing.
+   * A registered `railway deploy` in this machine's run log: its release, and how it ended (with no
+   * result it has no `run.done`, as when it is still running or was stopped).
    */
-  type RailwayHalf = "ok" | "failed" | "other" | "none";
-  function seedRunLog(env: Record<string, string>, half: RailwayHalf): void {
-    if (half === "none") return;
+  interface Logged {
+    release: string;
+    result?: "ok" | "failed";
+  }
+  function seedRunLog(env: Record<string, string>, runs: readonly Logged[]): void {
     const log = new RunLog(join(env.FIN_STATE_DIR ?? "", "staging"), new Masker());
     const at = new Date("2026-11-21T05:00:00Z");
-    log.append(at, "run_railway", "run.registered", { command: "railway deploy" });
-    log.append(at, "run_railway", "run.done", {
-      command: "railway deploy",
-      result: half === "failed" ? "failed" : "ok",
-      release: half === "other" ? hex(40, "d") : RELEASE,
+    runs.forEach(({ release: sha, result }, i) => {
+      const runId = `run_railway${i}`;
+      log.append(at, runId, "run.registered", { command: "railway deploy", release: sha });
+      // As applyPlan writes them: a failed run's run.done carries no release.
+      if (result !== undefined)
+        log.append(at, runId, "run.done", {
+          command: "railway deploy",
+          result,
+          ...(result === "ok" ? { release: sha } : {}),
+        });
     });
   }
 
-  /** A rendered release, and the fakes a deploy talks to (the token mint and the uploads). */
-  async function rendered(change: Parameters<typeof release>[1] = {}, half: RailwayHalf = "ok") {
+  /**
+   * A rendered release, and the fakes a deploy talks to (Railway, the token mint and the uploads).
+   * By default the run log holds a successful `railway deploy` of the release and every service
+   * runs its digests; `live: false` leaves the services as provisioned, with no image.
+   */
+  async function rendered(
+    change: Parameters<typeof release>[1] = {},
+    {
+      runs = [{ release: RELEASE, result: "ok" }],
+      live = true,
+    }: { runs?: readonly Logged[]; live?: boolean } = {},
+  ) {
     const { env, dir } = commandEnv();
-    seedRunLog(env, half);
+    seedRunLog(env, runs);
     const r = release(dir, change);
     const out = join(dir, "rendered");
     const { code, rt } = await render(r, env, out);
@@ -355,12 +404,18 @@ describe("static deploy (pnpm fin)", () => {
     env.FIN_CF_TOKEN_FILE = writePrivate(dir, "cf-token", cfToken);
     // CR-20 never reaches the operator machine: a static token file named here is never read.
     env.FIN_CF_STATIC_TOKEN_FILE = join(dir, "no-such-static-token");
+    const rwToken = fakeToken("rw");
+    env.FIN_RAILWAY_TOKEN_FILE = writePrivate(dir, "railway-token", rwToken);
+    const rw = new FakeRailway(rwToken, Object.keys(settings.railway.services));
+    rw.provision(settings.railway, uuid("d"), overlayFixture().staticEgress);
+    if (live) for (const [service, ref] of refsOf(imagesOf("3"))) rw.running(service, ref);
     const cf = new FakeCloudflare(cfToken);
     cf.groups.push({ id: hex(32, "9"), name: "Workers Scripts Write" });
     const statics = new FakeStatic(MINTED);
     const sequence: string[] = [];
     let failPut: string | undefined;
     const fetch = async (url: string, init: RequestInit) => {
+      if (url.startsWith("https://backboard.railway.com/")) return rw.fetch(url, init);
       const path = new URL(url).pathname;
       sequence.push(`${init.method ?? "GET"} ${path}`);
       if (path.includes("/tokens")) return cf.fetch(url, init);
@@ -390,20 +445,47 @@ describe("static deploy (pnpm fin)", () => {
       );
       return { code, rt };
     };
+    /** A real `railway deploy` of RELEASE (its manifest) or OTHER (other digests), attested. */
+    const railwayDeploy = async (sha: string): Promise<number> => {
+      let manifestFile = r.manifestFile;
+      if (sha !== RELEASE) {
+        const text = JSON.stringify({
+          commit: sha,
+          images: imagesOf("4"),
+          static: {},
+          migrations: [],
+        });
+        manifestFile = join(dir, `release-manifest-${sha}.json`);
+        writeFileSync(manifestFile, text);
+        r.gh.attest(text);
+      }
+      const rt = fakeRuntime({ env, fetch, exec: r.gh.exec });
+      const code = await runCli(
+        ["railway", "deploy", "staging", "--release", sha, "--manifest", manifestFile],
+        rt,
+      );
+      assert.equal(code, EXIT.ok, rt.err());
+      return code;
+    };
     return {
       env,
       dir,
       out,
       r,
+      rw,
       cf,
       statics,
       sequence,
       run,
+      railwayDeploy,
       failAt: (script: string) => {
         failPut = script;
       },
     };
   }
+
+  const runsLog = (t: { env: Record<string, string> }) =>
+    readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
 
   it("uploads every rendered build with a one-run token it mints and revokes, inside a registered run", async () => {
     const t = await rendered();
@@ -439,9 +521,14 @@ describe("static deploy (pnpm fin)", () => {
       true,
       "revoked after the last upload's re-read",
     );
-    for (const value of [ACCOUNT, MINTED, fakeToken("cf")])
+    for (const value of [ACCOUNT, MINTED, fakeToken("cf"), fakeToken("rw"), uuid("c"), uuid("d")])
       assert.equal(rt.out().includes(value), false);
-    const log = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
+    assert.match(rt.out(), /every service runs this release now/);
+    assert.ok(
+      t.rw.operations.includes("finDeploymentImage"),
+      "what each service runs is read from Railway",
+    );
+    const log = runsLog(t);
     assert.match(log, /"event":"run.registered"/);
     assert.match(log, /"result":"ok"/);
     const lines = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8");
@@ -466,25 +553,118 @@ describe("static deploy (pnpm fin)", () => {
     }
   });
 
-  it("refuses unless this machine's run log records a successful railway deploy of the release (S0-06), in a dry run too", async () => {
-    for (const half of ["none", "failed", "other"] as const) {
-      const t = await rendered({}, half);
+  it("refuses unless the newest railway deploy in this machine's run log is a successful one of the release (S0-06), in a dry run too", async () => {
+    const ok = (sha: string): Logged => ({ release: sha, result: "ok" });
+    const cases: Array<[string, Logged[]]> = [
+      ["no deploy", []],
+      ["a failed deploy", [{ release: RELEASE, result: "failed" }]],
+      ["a deploy of another release", [ok(OTHER)]],
+      ["a later deploy of another release", [ok(RELEASE), ok(OTHER)]],
+      ["a later failed deploy", [ok(RELEASE), { release: OTHER, result: "failed" }]],
+      ["a later deploy that did not finish", [ok(RELEASE), { release: RELEASE }]],
+    ];
+    for (const [name, runs] of cases) {
+      // Every service runs the release, so only the run log can refuse here.
+      const t = await rendered({}, { runs });
       for (const extra of [[], ["--dry-run"]]) {
         const { code, rt } = await t.run(extra);
-        assert.equal(code, EXIT.refused, `${half} ${extra.join(" ")}`);
-        assert.match(rt.err(), /no successful railway deploy of this release/);
+        assert.equal(code, EXIT.refused, `${name} ${extra.join(" ")}`);
+        assert.match(rt.err(), /this machine's run log (records no|has a newest) railway deploy/);
       }
-      assert.equal(t.sequence.length, 0, half);
+      assert.equal(t.sequence.length, 0, `${name}: no token minted, nothing uploaded`);
     }
   });
 
+  it("refuses unless every service runs the release's digest now, as Railway says (S0-06), in a dry run too", async () => {
+    const ours = refsOf(imagesOf("3"));
+    const theirs = refsOf(imagesOf("4"));
+    const at = (refs: Map<string, string>, service: string) => refs.get(service) ?? "";
+    const cases: Array<[string, (rw: FakeRailway) => void]> = [
+      ["a service set to another digest", (rw) => rw.running("api", at(theirs, "api"))],
+      [
+        "a newest deployment that crashed",
+        (rw) => rw.running("worker", at(ours, "worker"), "CRASHED"),
+      ],
+      [
+        "a newest deployment of another digest, the source set back by hand",
+        (rw) => {
+          rw.running("console", at(theirs, "console"));
+          const instance = rw.instances.get("console");
+          if (instance) instance.image = at(ours, "console");
+        },
+      ],
+      [
+        "a connector on another digest",
+        (rw) => rw.running("cloudflared-public", at(theirs, "cloudflared-public")),
+      ],
+      [
+        "a service with no deployment",
+        (rw) => {
+          const edge = rw.instances.get("edge");
+          if (edge) edge.latestDeployment = null;
+        },
+      ],
+    ];
+    for (const [name, change] of cases) {
+      // The run log's newest railway deploy is a successful one of the release.
+      const t = await rendered();
+      change(t.rw);
+      for (const extra of [[], ["--dry-run"]]) {
+        const { code, rt } = await t.run(extra);
+        assert.equal(code, EXIT.refused, `${name} ${extra.join(" ")}`);
+        assert.match(rt.err(), /the services do not run this release now/);
+      }
+      assert.equal(t.sequence.length, 0, `${name}: no token minted, nothing uploaded`);
+    }
+  });
+
+  it("follows what real railway deploys left running: a later deploy of another release refuses the earlier release's pages until the services run it again", async () => {
+    const t = await rendered({}, { runs: [], live: false });
+    await t.railwayDeploy(RELEASE);
+    const first = await t.run(["--dry-run"]);
+    assert.equal(first.code, 1, first.rt.err());
+    await t.railwayDeploy(OTHER);
+    const refused = await t.run();
+    assert.equal(refused.code, EXIT.refused);
+    assert.match(refused.rt.err(), /has a newest railway deploy of another release/);
+    assert.equal(t.statics.calls.length, 0, "no page of the earlier release meets the later API");
+    assert.doesNotMatch(runsLog(t), /"staticRollback"/);
+    // A rollback takes the pages back first, on the operator's recorded word.
+    const back = await t.run(["--static-rollback"]);
+    assert.equal(back.code, EXIT.ok, back.rt.err());
+    assert.match(runsLog(t), /"event":"run.registered"[^\n]*"staticRollback":true/);
+    await t.railwayDeploy(RELEASE);
+    const again = await t.run();
+    assert.equal(again.code, EXIT.ok, again.rt.err());
+    assert.match(again.rt.out(), /every service runs this release now/);
+  });
+
+  it("refuses when Railway does not say which image a deployment runs, unless --accept-unchecked-deployments, which the run records", async () => {
+    for (const answer of ["refused", "no-image"] as const) {
+      const t = await rendered();
+      t.rw.deploymentImageAnswer = answer;
+      const { code, rt } = await t.run();
+      assert.equal(code, EXIT.refused, answer);
+      assert.match(rt.err(), /did not say which image the newest deployment of payments, api/);
+      assert.equal(t.statics.calls.length, 0, answer);
+      const accepted = await t.run(["--accept-unchecked-deployments"]);
+      assert.equal(accepted.code, EXIT.ok, accepted.rt.err());
+      assert.match(runsLog(t), /"event":"run.registered"[^\n]*"deploymentsUnchecked":true/);
+    }
+    const t = await rendered();
+    t.rw.deploymentImageAnswer = "refused";
+    t.rw.running("api", refsOf(imagesOf("4")).get("api") ?? "");
+    const { code, rt } = await t.run(["--accept-unchecked-deployments"]);
+    assert.equal(code, EXIT.refused, "the flag accepts an unread image only, never another digest");
+    assert.match(rt.err(), /api is set to an image other than the release's/);
+  });
+
   it("uploads a static-only rollback with --static-rollback, which the run records", async () => {
-    const t = await rendered({}, "none");
+    const t = await rendered({}, { runs: [], live: false });
     const { code, rt } = await t.run(["--static-rollback"]);
     assert.equal(code, EXIT.ok, rt.err());
-    const log = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
-    assert.match(log, /"event":"run.registered"[^\n]*"staticRollback":true/);
-    const refused = await rendered({}, "none");
+    assert.match(runsLog(t), /"event":"run.registered"[^\n]*"staticRollback":true/);
+    const refused = await rendered({}, { runs: [] });
     refused.r.gh.mergeConclusion = "failure";
     assert.equal(
       (await refused.run(["--static-rollback"])).code,

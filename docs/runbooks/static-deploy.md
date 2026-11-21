@@ -45,7 +45,8 @@ rendered files.
 ## 2. Upload
 
 On the operator machine (BD-05), inside a registered run, with the operator token
-(`FIN_CF_TOKEN_FILE`, CR-05). CR-20 never reaches the operator machine:
+(`FIN_CF_TOKEN_FILE`, CR-05) and, to read what the services run, the Railway project token
+(`FIN_RAILWAY_TOKEN_FILE`, CR-04, reads only). CR-20 never reaches the operator machine:
 
 ```sh
 node ops/fin/src/main.ts static deploy staging --release <sha> --manifest release-manifest.json --dir <rendered> --dry-run
@@ -57,11 +58,22 @@ Before any write, and so in the dry run too:
 - `ci.yml`'s `merge` job succeeded for exactly this commit, on a push to main (spec 01 §6.9 step 2;
   release.yml is the pushed commit's own workflow, so the merge job is what says the commit was
   reviewed). Anything else refuses (exit 77);
-- this machine's run log records a successful `railway deploy` of this release, so its services have
-  rolled and a new page never meets an old API (S0-06). Without one the upload refuses (exit 77). To
-  put an earlier release's pages back (a rollback, which takes the pages back before the services,
-  spec 01 §6.9) when this machine's log does not record that release's Railway deploy, pass
-  `--static-rollback`, which the run records; the merge job is still checked;
+- the services run this release now, so a new page never meets an old API (S0-06). Two checks, and
+  both must pass; a past deploy of the release proves nothing once a later deploy, a failed one or a
+  change by hand has moved the services:
+  - the newest registered `railway deploy` in this machine's run log, whatever its result, is a
+    successful one of this release. No deploy, a newest deploy that failed or never finished, or one
+    of another release refuses (exit 77);
+  - Railway says that every service a deploy rolls (payments, api, worker, edge, verify, admin,
+    console and the two connectors) is set to the manifest's digest and has a newest deployment that
+    ended `SUCCESS` and runs that digest; a service the release builds no image for must run none.
+    Anything else refuses (exit 77) and names the service. If Railway does not say which image a
+    newest deployment runs (SP-03), the upload refuses; check in Railway's dashboard that each
+    service named runs this release's digest, then pass `--accept-unchecked-deployments`, which the
+    run records (it accepts only that unread image, never another digest or status);
+- to put an earlier release's pages back while the services still run a later one (a rollback, which
+  takes the pages back before the services, spec 01 §6.9), pass `--static-rollback`: it skips both
+  checks above, and the run records it. The merge job is still checked;
 - the manifest's attestation verifies; every selected deployment's `apps/<app>/static.json` holds
   only the allowlisted keys; every rendered build hashes to the manifest's `assetManifestHash`;
   every `env.json` carries this release and environment and every `_headers` holds a
@@ -113,6 +125,7 @@ The first upload comes before `pnpm fin routes apply` (the routes need the deplo
 
 Render and upload the previous release's attested artefacts the same way, with the previous
 release's manifest and `--release`; the previous release's `/assets/` are carried in every build
-(FW-C13), so open tabs keep working. If this machine's run log does not record that release's
-`railway deploy`, add `--static-rollback` (recorded in the run). Then take the services back by
-deploying the previous release's manifest (`railway-deploy.md`, "If a deploy fails").
+(FW-C13), so open tabs keep working. The services still run the later release at this point, so add
+`--static-rollback` (recorded in the run). Then take the services back by deploying the previous
+release's manifest (`railway-deploy.md`, "If a deploy fails"). If the static upload has to run again
+after that, it passes without the flag: the services now run that release.

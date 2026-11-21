@@ -4,7 +4,8 @@
 // environment and no variable that refers to the database template (§6.3), runs in the region with
 // its replicas, restart policy, health check, overlap and draining, has app sleeping and outbound
 // IPv6 off and PORT=8080, runs an image by digest from the release repository (and the digest the
-// registered deploys recorded for it), keeps every secret sealed, and has static egress exactly
+// registered deploys recorded for it, set as its source and run by its newest deployment, which
+// ended SUCCESS), keeps every secret sealed, and has static egress exactly
 // where §6.5 says, with the overlay's addresses. Read-only: it registers no run. Exit 1 on any
 // drift; what it could not read is listed, never passed.
 
@@ -13,6 +14,7 @@ import type { Command } from "../command.ts";
 import type { Context } from "../core/context.ts";
 import { EXIT } from "../core/errors.ts";
 import { type Finding, findings, inspectRailway } from "./inspect.ts";
+import { readRunning } from "./running.ts";
 
 /**
  * The image each service should run, by service: for each one, the digest the newest successful
@@ -36,19 +38,27 @@ export function lastDeployed(ctx: Context): Map<string, string> {
 }
 
 /**
- * Whether this machine's run log records a successful registered `railway deploy` of the release:
- * its services rolled, so its pages may follow (spec 01 §6.9, S0-06).
+ * Why the newest registered `railway deploy` in this machine's run log is not a successful one of
+ * the release, or undefined when it is. Only the newest counts, whatever its result, and one with
+ * no `run.done` (still running, or stopped) counts as not finished: a later deploy of another
+ * release, or a failed one, may have moved the services off the release (spec 01 §6.9, S0-06).
  */
-export function railwayDeployed(ctx: Context, release: string): boolean {
-  return ctx.log
-    .records()
-    .some(
-      (r) =>
-        r.event === "run.done" &&
-        r.command === "railway deploy" &&
-        r.result === "ok" &&
-        r.release === release,
-    );
+export function newestRailwayDeployProblem(ctx: Context, release: string): string | undefined {
+  const records = ctx.log.records();
+  const registered = records.filter(
+    (r) => r.event === "run.registered" && r.command === "railway deploy",
+  );
+  const newest = registered.at(-1);
+  if (newest === undefined) return "records no railway deploy";
+  const done = records.find(
+    (r) => r.event === "run.done" && r.runId === newest.runId && r.seq > newest.seq,
+  );
+  if (done === undefined) return "has a newest railway deploy that did not finish";
+  if (done.result !== "ok") return "has a newest railway deploy that failed";
+  const ran = [newest.release, done.release].filter((r) => r !== undefined);
+  if (ran.length === 0 || ran.some((r) => r !== release))
+    return "has a newest railway deploy of another release";
+  return undefined;
 }
 
 export const railwayVerify: Command = {
@@ -65,25 +75,52 @@ export const railwayVerify: Command = {
     const found: Finding[] = findings(ctx, inspection);
     const expected = lastDeployed(ctx);
     const unrecorded: string[] = [];
+    const unread: string[] = [];
     for (const [service, want] of Object.entries(ctx.settings.railway.services)) {
       if (want.template === true) continue;
-      const running = inspection.instances.get(service)?.image;
+      const instance = inspection.instances.get(service);
+      const source = instance?.image;
       const image = expected.get(service);
       if (image === undefined) {
-        if (running !== null && running !== undefined && running !== "") unrecorded.push(service);
+        if (source !== null && source !== undefined && source !== "") unrecorded.push(service);
         continue;
       }
-      if (running !== image) {
+      if (source !== image) {
         found.push({
           service,
           check: "digest",
-          detail: "runs a digest other than the one the registered deploys recorded",
+          detail: "is set to a digest other than the one the registered deploys recorded",
+        });
+        continue;
+      }
+      // The source is what the next deployment takes; what serves is the newest deployment. A task
+      // or a cron job runs to its end and serves nothing, so only its source is compared.
+      if (want.task === true || want.cron !== undefined) continue;
+      const running = await readRunning(ctx, rw, service, instance);
+      if (running.status !== "SUCCESS") {
+        found.push({
+          service,
+          check: "deployment",
+          detail: `the newest deployment is ${running.status ?? "missing"}, not SUCCESS`,
+        });
+      } else if (running.image === undefined) {
+        unread.push(service);
+      } else if (running.image !== image) {
+        found.push({
+          service,
+          check: "digest",
+          detail:
+            "the newest deployment runs a digest other than the one the registered deploys recorded",
         });
       }
     }
     if (unrecorded.length > 0)
       inspection.notChecked.push(
         `the running digest of ${unrecorded.join(", ")} (no registered deploy in this machine's run log recorded one)`,
+      );
+    if (unread.length > 0)
+      inspection.notChecked.push(
+        `the image the newest deployment of ${unread.join(", ")} runs (Railway did not say; SP-03)`,
       );
     ctx.out.info(`railway ${ctx.environment}: ${inspection.instances.size} service(s) read`);
     for (const f of found) ctx.out.info(`  ! ${f.service} ${f.check}: ${f.detail}`);
