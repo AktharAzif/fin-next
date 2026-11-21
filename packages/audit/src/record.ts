@@ -4,9 +4,10 @@
 //   - checks the actor's kind against the event's `actors`;
 //   - parses the metadata with the event's strict schema;
 //   - refuses an email, IP, token or key shape, URL with a query, or nine digits in any string, and any
-//     string Postgres cannot store as JSON (a lone UTF-16 surrogate) (AuditMetadataError);
+//     string Postgres cannot store as JSON (a lone UTF-16 surrogate or a U+0000) (AuditMetadataError);
 //   - keeps at most 400 characters of the client's user agent, cut between characters, never inside
-//     one, so a header the client chooses can never make the row unstorable.
+//     one, with lone surrogates and U+0000 replaced, so a header the client chooses can never make the
+//     row unstorable.
 // It then writes the event and the journal entry the event declares, in the same transaction. On any
 // FA error from the database it writes `audit.write_failed` (`auditEvent`, `sqlstate`) and throws
 // AuditWriteError; the unit rolls back and the action answers 500 with the request ID only.
@@ -20,11 +21,14 @@ import { AuditMetadataError, assertNoPersonalShapes, assertStorableText } from "
 export const USER_AGENT_MAX = 400;
 
 /**
- * A client's user agent as the context row keeps it: lone surrogates replaced, then cut to at most
- * 400 characters by code point, so the cut never splits a character in two.
+ * A client's user agent as the context row keeps it: lone surrogates and U+0000 (which no Postgres
+ * text holds) replaced with U+FFFD, then cut to at most 400 characters by code point, so the cut never
+ * splits a character in two.
  */
 export function storedUserAgent(userAgent: string): string {
-  return Array.from(userAgent.toWellFormed()).slice(0, USER_AGENT_MAX).join("");
+  return Array.from(userAgent.toWellFormed().replaceAll("\u0000", "�"))
+    .slice(0, USER_AGENT_MAX)
+    .join("");
 }
 
 declare const auditEventIdBrand: unique symbol;

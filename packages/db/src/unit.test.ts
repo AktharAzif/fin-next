@@ -1,7 +1,55 @@
 import { describe, expect, it } from "vitest";
+import { discardLines } from "./context.ts";
+import { TransactionAbortedError } from "./errors.ts";
 import { defineGuards } from "./guards/types.ts";
 import { createIdSource, idPattern, isId } from "./ids.ts";
-import { refusesSessionState } from "./unit.ts";
+import { PgDatabaseError, type PgPool } from "./pg.ts";
+import { createDatabase, refusesSessionState } from "./unit.ts";
+
+describe("a savepoint whose statement failed with its error caught", () => {
+  it("throws TransactionAbortedError even before the client's status has caught up with the failure", async () => {
+    const sent: string[] = [];
+    let failed = false;
+    const refusal = (message: string, code: string) =>
+      Object.assign(new PgDatabaseError(message), { code });
+    const client = {
+      async query(text: string) {
+        sent.push(text);
+        if (text === "SELECT 1/0") {
+          failed = true;
+          throw refusal("division by zero", "22012");
+        }
+        if (failed && text.startsWith("RELEASE SAVEPOINT")) {
+          throw refusal("current transaction is aborted", "25P02");
+        }
+        if (text.startsWith("ROLLBACK TO SAVEPOINT")) failed = false;
+        return { rows: [], rowCount: 0, command: text.split(" ")[0], fields: [] };
+      },
+      // The status the last ReadyForQuery gave: Postgres flushes an error before it, so a caller can
+      // catch a failure while the status still says the transaction is fine.
+      getTransactionStatus: () => "T",
+      release() {},
+    };
+    const db = createDatabase({ pool: { connect: async () => client } as unknown as PgPool });
+    const context = { clock: { now: () => 0 }, release: "r", log: discardLines };
+    await db.unit(context, async (tx) => {
+      await expect(
+        tx.savepoint(async (inner) => {
+          await inner.query("SELECT 1/0").catch(() => {});
+          return "done";
+        }),
+      ).rejects.toBeInstanceOf(TransactionAbortedError);
+    });
+    expect(sent).toEqual([
+      "BEGIN",
+      "SAVEPOINT fin_sp_1",
+      "SELECT 1/0",
+      "RELEASE SAVEPOINT fin_sp_1",
+      "ROLLBACK TO SAVEPOINT fin_sp_1",
+      "COMMIT",
+    ]);
+  });
+});
 
 describe("refusesSessionState (no session-level SET on a pooled client)", () => {
   it("refuses SET, SET SESSION, RESET, DISCARD and set_config(..., false)", () => {

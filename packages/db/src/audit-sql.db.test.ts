@@ -1,8 +1,9 @@
 // The audit schema's SQL (spec 08 §3.3, §3.5 to §3.10): audit.record()'s refusals and stamps (T08-03),
-// immutability for every login including fin_owner and the superuser, by DML and by DDL (T08-05,
-// AC-P0-11), the sequencer's gapless chaining with no writer waiting on another (T08-10), epochs and
-// the environment's refusals (T08-15, §3.9), and the journal and anchor functions. recordAudit, the
-// registry and the TypeScript hash are @fin/audit's.
+// immutability for every login including fin_owner and the superuser, by DML and by DDL, including the
+// DDL that would change what rows say or who sees them without touching one (T08-05, AC-P0-11), the
+// sequencer's gapless chaining with no writer waiting on another (T08-10), epochs (a start holds new
+// writers off and its wait is bounded) and the environment's refusals (T08-15, §3.9), and the journal
+// and anchor functions. recordAudit, the registry and the TypeScript hash are @fin/audit's.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
@@ -16,6 +17,31 @@ import {
 
 let db: TestDatabase;
 let su: PgClient;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function backendPid(client: PgClient): Promise<number> {
+  const result = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+  return result.rows[0]?.pid ?? -1;
+}
+
+/** Resolves once the backend is waiting for a lock (its statement has started and is held). */
+async function waitingOnLock(pid: number): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const row = await su.query<{ wait: string | null }>(
+      "SELECT wait_event_type AS wait FROM pg_stat_activity WHERE pid = $1",
+      [pid],
+    );
+    if (row.rows[0]?.wait === "Lock") return;
+    await sleep(50);
+  }
+  throw new Error("the statement never waited for its lock");
+}
+
+/** Indexes of audit tables that no longer enforce anything (not valid, ready and live). */
+const DEAD_AUDIT_INDEXES = `SELECT c.relname FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'audit' AND NOT (i.indisvalid AND i.indisready AND i.indislive) ORDER BY 1`;
 
 beforeAll(async () => {
   db = await createTestDatabase({ prefix: "p0e" });
@@ -389,7 +415,114 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
     expect(triggers.rows).toEqual([{ n: 0 }]);
   });
 
-  it("lets fin_owner add to the audit trail: a table, an index, a column, and the same guard again", async () => {
+  it("refuses fin_owner the DDL that would change what the rows say, or who sees them, without touching a row", async () => {
+    const before = await su.query(
+      "SELECT id, actor_id, target_id, metadata, seq, hash FROM audit.event ORDER BY id",
+    );
+    const owner = await db.connect("fin_owner");
+    try {
+      // Each statement on its own: a rename always leaves a recorded column missing when it ends, so a
+      // swap or a rename followed by a column of the old name is refused at its first step.
+      for (const sql of [
+        "ALTER TABLE audit.event RENAME COLUMN target_id TO target_id_orig",
+        "ALTER TABLE audit.event RENAME COLUMN actor_id TO zz_swap",
+        "ALTER TABLE audit.event RENAME COLUMN seq TO seq_orig",
+        "ALTER TABLE audit.head RENAME COLUMN seq TO seq_orig",
+        "ALTER TABLE audit.journal_entry RENAME COLUMN kind TO kind_orig",
+        "ALTER TABLE audit.journal_entry RENAME COLUMN subject_ids TO subject_ids_orig",
+        "ALTER TABLE audit.event_type RENAME COLUMN roles TO roles_orig",
+        // A new column that is not plain: what existing rows read in it would be fin_owner's choice.
+        "ALTER TABLE audit.event ADD COLUMN scratch_default text DEFAULT 'forged'",
+        "ALTER TABLE audit.event ADD COLUMN scratch_generated text GENERATED ALWAYS AS ('forged') VIRTUAL",
+        "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_identity bigint GENERATED ALWAYS AS IDENTITY",
+        // A recorded column changed in place, with no rewrite.
+        "ALTER TABLE audit.event ALTER COLUMN target_id SET DEFAULT 'forged'",
+        "ALTER TABLE audit.event ALTER COLUMN request_id TYPE varchar",
+        'ALTER TABLE audit.event ALTER COLUMN target_id TYPE text COLLATE "C"',
+        "ALTER TABLE audit.event ALTER COLUMN target_id DROP NOT NULL",
+        // Row-level security and policies, rules, a child table or a parent, another trigger.
+        "ALTER TABLE audit.event ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE audit.event FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY hide ON audit.event USING (false)",
+        "CREATE RULE vanish AS ON INSERT TO audit.journal_entry DO INSTEAD NOTHING",
+        "CREATE TABLE audit.event_shadow () INHERITS (audit.event)",
+        "CREATE TABLE audit.scratch_parent (); ALTER TABLE audit.event INHERIT audit.scratch_parent",
+        "CREATE FUNCTION audit.scratch_touch() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; CREATE TRIGGER zz_touch BEFORE UPDATE ON audit.event FOR EACH ROW EXECUTE FUNCTION audit.scratch_touch()",
+        // The constraints that keep one row per ID, per chain position and per event's journal entry,
+        // and one current epoch.
+        "ALTER TABLE audit.event DROP CONSTRAINT event_epoch_seq",
+        "ALTER TABLE audit.head DROP CONSTRAINT head_current",
+        "ALTER TABLE audit.journal_entry DROP CONSTRAINT journal_entry_event",
+        "ALTER INDEX audit.head_current RENAME TO head_current_moved",
+        "ALTER TABLE audit.event DROP CONSTRAINT event_check",
+        "ALTER TABLE audit.journal_entry DROP CONSTRAINT journal_entry_kind_check",
+        // A guard's key column renamed (the guard would check whatever then holds the name) or dropped.
+        "ALTER TABLE ops.kill_switch RENAME COLUMN name TO name_orig",
+        "ALTER TABLE ops.kill_switch DROP COLUMN name CASCADE",
+        // A grant or a comment passes unchecked, but only on its own.
+        "COMMENT ON TABLE audit.event IS 'events'; ALTER TABLE audit.event RENAME COLUMN target_id TO t2",
+      ]) {
+        expect(await codeOf(owner, sql), sql).toBe("42501");
+      }
+      // Their indexes belong to the constraints, so DROP INDEX is refused before it starts, even
+      // CONCURRENTLY, whose first steps would otherwise commit before the guard could refuse it.
+      for (const index of [
+        "audit.event_epoch_seq",
+        "audit.head_current",
+        "audit.journal_entry_event",
+      ]) {
+        expect(await codeOf(owner, `DROP INDEX ${index}`), index).toBe("2BP01");
+        expect(await codeOf(owner, `DROP INDEX CONCURRENTLY ${index}`), index).toBe("2BP01");
+      }
+    } finally {
+      await owner.end();
+    }
+    // Every row reads as it did, and the readers still see every row.
+    expect(
+      (
+        await su.query(
+          "SELECT id, actor_id, target_id, metadata, seq, hash FROM audit.event ORDER BY id",
+        )
+      ).rows,
+    ).toEqual(before.rows);
+    await withClient("fin_worker_a", async (worker) => {
+      expect(
+        (await worker.query<{ n: number }>("SELECT count(*)::int AS n FROM audit.event")).rows,
+      ).toEqual([{ n: before.rows.length }]);
+    });
+    const exposed = await su.query(
+      `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'audit' AND (c.relrowsecurity OR c.relhasrules OR c.relhassubclass)`,
+    );
+    expect(exposed.rows).toEqual([]);
+    expect((await su.query(DEAD_AUDIT_INDEXES)).rows).toEqual([]);
+  });
+
+  it("notices a unique index a refused DROP INDEX CONCURRENTLY left dead, and refuses fin_owner's DDL until the superuser repairs it", async () => {
+    const owner = await db.connect("fin_owner");
+    try {
+      // fin_owner's own unique index joins the record; dropping it concurrently is refused only once
+      // the drop's first steps have committed, which leaves it dead.
+      expect(
+        await codeOf(owner, "CREATE UNIQUE INDEX event_scratch_unique ON audit.event (id, epoch)"),
+      ).toBe("ok");
+      expect(await codeOf(owner, "DROP INDEX CONCURRENTLY audit.event_scratch_unique")).toBe(
+        "42501",
+      );
+      expect((await su.query(DEAD_AUDIT_INDEXES)).rows).toEqual([
+        { relname: "event_scratch_unique" },
+      ]);
+      // Every later command is refused while the record's index is not live.
+      expect(await codeOf(owner, "CREATE TABLE audit.ddl_probe (id int)")).toBe("42501");
+      await su.query("DROP INDEX audit.event_scratch_unique");
+      expect(await codeOf(owner, "CREATE TABLE audit.ddl_probe (id int)")).toBe("ok");
+      expect(await codeOf(owner, "DROP TABLE audit.ddl_probe")).toBe("ok");
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it("lets fin_owner add to the audit trail: a table, an index, a plain column, and the same guard again", async () => {
     const owner = await db.connect("fin_owner");
     try {
       for (const sql of [
@@ -399,13 +532,25 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
         "DROP INDEX audit.event_release_scratch",
         "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_note text",
         "COMMENT ON FUNCTION audit.append_only() IS 'append-only'",
+        "COMMENT ON COLUMN audit.event.target_id IS 'the target'",
+        "GRANT SELECT ON audit.event TO fin_owner",
         "SELECT audit.install_guard('ops.kill_switch'::regclass, ARRAY['INSERT', 'UPDATE OF state'], 'name', ARRAY['switch.set', 'switch.cleared', 'switch.tripped'])",
+        // A guarded business table stays fin_owner's to migrate, its key column apart.
+        "ALTER TABLE ops.kill_switch ADD COLUMN scratch_note text DEFAULT 'x'",
+        "ALTER TABLE ops.kill_switch RENAME COLUMN scratch_note TO scratch_note_moved",
+        "ALTER TABLE ops.kill_switch DROP COLUMN scratch_note_moved",
       ]) {
         expect(await codeOf(owner, sql), sql).toBe("ok");
       }
-      // Adding is allowed; taking the column away again is a drop from an append-only table.
+      // The plain column joined the record: taking it away or renaming it is refused.
       expect(
         await codeOf(owner, "ALTER TABLE audit.anchor_conflict DROP COLUMN scratch_note"),
+      ).toBe("42501");
+      expect(
+        await codeOf(
+          owner,
+          "ALTER TABLE audit.anchor_conflict RENAME COLUMN scratch_note TO scratch_note_moved",
+        ),
       ).toBe("42501");
     } finally {
       await owner.end();
@@ -419,13 +564,23 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
   it("lets the superuser change a protection on purpose, which becomes the record fin_owner is held to", async () => {
     await su.query("ALTER TABLE audit.anchor_conflict DROP COLUMN scratch_note");
     await su.query("ALTER TABLE audit.anchor DISABLE TRIGGER anchor_append_only");
+    await su.query(
+      "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_flag boolean NOT NULL DEFAULT false",
+    );
     const owner = await db.connect("fin_owner");
     try {
       expect(await codeOf(owner, "CREATE TABLE audit.ddl_scratch (id int)")).toBe("ok");
       expect(
         await codeOf(owner, "ALTER TABLE audit.anchor ENABLE TRIGGER anchor_append_only"),
       ).toBe("42501");
+      expect(
+        await codeOf(
+          owner,
+          "ALTER TABLE audit.anchor_conflict ALTER COLUMN scratch_flag DROP DEFAULT",
+        ),
+      ).toBe("42501");
       await su.query("ALTER TABLE audit.anchor ENABLE TRIGGER anchor_append_only");
+      await su.query("ALTER TABLE audit.anchor_conflict DROP COLUMN scratch_flag");
       expect(await codeOf(owner, "DROP TABLE audit.ddl_scratch")).toBe("ok");
       expect(
         await codeOf(owner, "ALTER TABLE audit.anchor DISABLE TRIGGER anchor_append_only"),
@@ -433,6 +588,29 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
     } finally {
       await owner.end();
     }
+  });
+
+  it("records each audit table's shape by name, so the record still holds after a logical restore", async () => {
+    const recorded = await su.query<{ table_name: string }>(
+      "SELECT table_name FROM ops_guard.protected_table ORDER BY 1",
+    );
+    expect(recorded.rows.map((r) => r.table_name)).toEqual([
+      "audit.anchor",
+      "audit.anchor_conflict",
+      "audit.event",
+      "audit.event_context",
+      "audit.event_type",
+      "audit.head",
+      "audit.journal_entry",
+      "audit.journal_shipped",
+    ]);
+    // Taking the record again from the catalogue changes nothing: the shape holds no OID or position.
+    const shapes = () =>
+      su.query("SELECT table_name, shape FROM ops_guard.protected_table ORDER BY 1");
+    const first = (await shapes()).rows;
+    await su.query("SELECT ops_guard.record_audit_protections()");
+    expect((await shapes()).rows).toEqual(first);
+    expect(JSON.stringify(first)).not.toMatch(/"(attnum|oid|attrelid)"/);
   });
 });
 
@@ -681,6 +859,163 @@ describe("epochs (T08-15, §3.9)", () => {
     expect((await su.query("SELECT epoch FROM audit.head WHERE current")).rows).toEqual([
       { epoch: 3 },
     ]);
+  });
+
+  it("reads only the bootstrap's own row: a child table's row never counts, and a row it cannot see is no environment", async () => {
+    // Only the superuser can shape ops.environment, so the test does it as the superuser.
+    await su.query("CREATE TABLE ops.environment_extra () INHERITS (ops.environment)");
+    await su.query(
+      "INSERT INTO ops.environment_extra (only_row, name, recorded_at) VALUES (true, 'staging', now())",
+    );
+    await su.query("ALTER TABLE ops.environment ENABLE ROW LEVEL SECURITY");
+    await su.query(
+      "CREATE POLICY hide_recorded ON ops.environment FOR SELECT TO fin_owner USING (name <> 'ci')",
+    );
+    try {
+      await withClient("fin_owner", async (owner) => {
+        for (const environment of ["staging", "ci"]) {
+          expect(
+            await codeOf(owner, START, [
+              "restore",
+              Buffer.alloc(32),
+              "ops/restore/x.json",
+              testId("aud"),
+              environment,
+            ]),
+            environment,
+          ).toBe("FA012");
+        }
+      });
+    } finally {
+      await su.query("DROP POLICY hide_recorded ON ops.environment");
+      await su.query("ALTER TABLE ops.environment DISABLE ROW LEVEL SECURITY");
+      await su.query("DROP TABLE ops.environment_extra");
+    }
+    expect((await su.query("SELECT epoch FROM audit.head WHERE current")).rows).toEqual([
+      { epoch: 3 },
+    ]);
+  });
+
+  it("holds a writer that arrives while it waits until it commits, so that writer records in the new epoch", async () => {
+    const holder = await db.connect("fin_admin_a");
+    const late = await db.connect("fin_admin_a");
+    const owner = await db.connect("fin_owner");
+    try {
+      const [ownerPid, latePid] = [await backendPid(owner), await backendPid(late)];
+      await holder.query("BEGIN");
+      const heldId = await record(holder, input());
+      const starting = owner.query<{ epoch: number }>(START, [
+        "reset",
+        Buffer.alloc(32, 9),
+        "ops/reset/20261121T140000Z.json",
+        testId("aud"),
+        "ci",
+      ]);
+      await waitingOnLock(ownerPid);
+      let lateDone = false;
+      const lateId = record(late, input()).then((id) => {
+        lateDone = true;
+        return id;
+      });
+      await waitingOnLock(latePid);
+      await sleep(200);
+      // The late writer waits behind the start instead of taking the ending epoch's head.
+      expect(lateDone).toBe(false);
+      await holder.query("COMMIT");
+      const epoch = (await starting).rows[0]?.epoch;
+      expect(epoch).toBe(4);
+      const rows = await su.query<{ id: string; epoch: number; chained: boolean }>(
+        "SELECT id, epoch, seq IS NOT NULL AS chained FROM audit.event WHERE id = ANY ($1) ORDER BY epoch",
+        [[heldId, await lateId]],
+      );
+      expect(rows.rows).toEqual([
+        { id: heldId, epoch: 3, chained: true },
+        { id: await lateId, epoch: 4, chained: false },
+      ]);
+    } finally {
+      await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+      await late.end();
+      await owner.end();
+    }
+    await withClient("fin_worker_a", (worker) => worker.query("SELECT audit.sequence(50000)"));
+    expect(await unchainedCount()).toBe(0);
+  });
+
+  it("ends its wait while writers keep overlapping: one lock wait, bounded, and every later row in the new epoch", async () => {
+    const stop = { now: false };
+    const written: { id: string; begunAt: number }[] = [];
+    // Two writers whose transactions always overlap: each holds a recorded row open for 200 ms,
+    // the second 100 ms behind the first, so some writer holds the head at every moment.
+    const writers = [0, 100].map(async (offset) => {
+      const client = await db.connect("fin_worker_a");
+      try {
+        await sleep(offset);
+        while (!stop.now) {
+          await client.query("BEGIN");
+          const begunAt = Date.now();
+          const id = await record(
+            client,
+            input({ actor_kind: "system", actor_id: null, actor_via: "job" }),
+          );
+          await sleep(200);
+          await client.query("COMMIT");
+          written.push({ id, begunAt });
+        }
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        await client.end();
+      }
+    });
+    let started = 0;
+    let finished = 0;
+    let epoch: number | undefined;
+    try {
+      epoch = await withClient("fin_owner", async (owner) => {
+        // The backstop: with a row lock alone, each new writer went in ahead of the start, which
+        // waited for as long as the writers kept coming.
+        await owner.query("SET statement_timeout = '10s'");
+        await sleep(500);
+        started = Date.now();
+        const result = await owner.query<{ epoch: number }>(START, [
+          "reset",
+          Buffer.alloc(32, 10),
+          "ops/reset/20261121T150000Z.json",
+          testId("aud"),
+          "ci",
+        ]);
+        finished = Date.now();
+        return result.rows[0]?.epoch;
+      });
+      await sleep(600);
+    } finally {
+      stop.now = true;
+      await Promise.all(writers);
+    }
+    expect(epoch).toBe(5);
+    expect(finished - started).toBeLessThan(5_000);
+    expect(written.every((w) => w.id.startsWith("aud_"))).toBe(true);
+    // Only the writers already in flight when the start asked for its lock wrote into the old epoch.
+    const late = await su.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM audit.event WHERE epoch = 4 AND recorded_at >= to_timestamp($1::double precision / 1000)",
+      [started],
+    );
+    expect(late.rows[0]?.n).toBeLessThanOrEqual(2);
+    // A row whose transaction began once the start had returned is in the new epoch.
+    const after = written.filter((w) => w.begunAt > finished).map((w) => w.id);
+    expect(after.length).toBeGreaterThan(0);
+    expect(
+      (await su.query("SELECT DISTINCT epoch FROM audit.event WHERE id = ANY ($1)", [after])).rows,
+    ).toEqual([{ epoch: 5 }]);
+    expect(
+      (
+        await su.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM audit.event WHERE epoch = 4 AND seq IS NULL",
+        )
+      ).rows,
+    ).toEqual([{ n: 0 }]);
+    await withClient("fin_worker_a", (worker) => worker.query("SELECT audit.sequence(50000)"));
+    expect(await unchainedCount()).toBe(0);
   });
 
   it("refuses a start for any role but fin_owner, a bad reason, a short hash or a bad marker", async () => {

@@ -69,12 +69,25 @@ export function assertNoPersonalShapes(value: unknown, field = "metadata"): void
 }
 
 /**
- * Throws AuditMetadataError (shape `lone-surrogate`) when any string in the value is not well-formed
- * Unicode: JSON.stringify writes a lone surrogate as `\udXXX`, which Postgres's jsonb refuses (22P02),
- * so the row could not be stored and the action would fail with a code no audit alert reads.
+ * The reason Postgres could not store a string as JSON text, or undefined when it can. JSON.stringify
+ * writes a lone surrogate as `\udXXX`, which jsonb refuses (22P02), and U+0000 as `\u0000`, which jsonb
+ * refuses too (22P05): no Postgres text value holds a NUL. Every other character, control characters
+ * included, is stored as it is.
+ */
+export function unstorableShapeOf(text: string): "lone-surrogate" | "nul" | undefined {
+  if (!text.isWellFormed()) return "lone-surrogate";
+  if (text.includes("\u0000")) return "nul";
+  return undefined;
+}
+
+/**
+ * Throws AuditMetadataError (shape `lone-surrogate` or `nul`) when any string in the value is one
+ * Postgres could not store (unstorableShapeOf), so the row could not be written and the action would
+ * fail with a code no audit alert reads.
  */
 export function assertStorableText(value: unknown, field: string): void {
   eachString(value, field, (text, path) => {
-    if (!text.isWellFormed()) throw new AuditMetadataError(path, "lone-surrogate");
+    const shape = unstorableShapeOf(text);
+    if (shape !== undefined) throw new AuditMetadataError(path, shape);
   });
 }

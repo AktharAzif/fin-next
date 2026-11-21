@@ -55,6 +55,7 @@ const EXPECTED_RELATIONS = [
   "ops.schema_migrations table fin_owner",
   "ops.scheduler_lease table fin_owner",
   "ops_guard.protected_function table postgres",
+  "ops_guard.protected_table table postgres",
   "ops_guard.protected_trigger table postgres",
 ];
 
@@ -78,7 +79,11 @@ const EXPECTED_FUNCTIONS = [
   "ops.set_switch(text, text, text, jsonb) fin_owner definer",
   "ops.sweep_rate_windows(interval) fin_owner definer",
   "ops.trip_switch(text, text, text, text, text, text, text) fin_owner definer",
+  "ops_guard.assert_bootstrap_table(text) postgres invoker",
+  "ops_guard.audit_table_change(jsonb, jsonb) postgres invoker",
+  "ops_guard.audit_table_shape(oid) postgres invoker",
   "ops_guard.guard_audit_protections() postgres definer",
+  "ops_guard.record_audit_protections() postgres invoker",
   "ops_guard.record_privileged_login() postgres definer",
   "ops_guard.refuse_environment_change() postgres invoker",
   "ops_guard.refuse_privileged_login_change() postgres invoker",

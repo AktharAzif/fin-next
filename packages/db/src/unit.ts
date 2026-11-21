@@ -137,7 +137,15 @@ export function createDatabase(options: DatabaseOptions): FinDatabase {
           const result = await fn(tx);
           // A statement inside failed and its error was caught: the savepoint's work is lost.
           if (client.getTransactionStatus() === "E") throw new TransactionAbortedError();
-          await client.query(`RELEASE SAVEPOINT ${name}`);
+          try {
+            await client.query(`RELEASE SAVEPOINT ${name}`);
+          } catch (error) {
+            // The status can still read "in a transaction" when the failure was caught: Postgres
+            // flushes the error before it says the transaction failed. RELEASE in a failed
+            // transaction is refused with 25P02, which is the same news.
+            if (sqlState(error) === "25P02") throw new TransactionAbortedError();
+            throw error;
+          }
           return result;
         } catch (error) {
           await client.query(`ROLLBACK TO SAVEPOINT ${name}`);

@@ -44,6 +44,7 @@ await recordAudit(tx, {
 ```
 
 It runs inside the action's unit of work (`UnitTx`), refuses personal or secret shapes in metadata
-and any string Postgres could not store (a lone surrogate) before any SQL, keeps at most 400
-characters of a user agent (cut between characters), and on a database refusal writes
-`audit.write_failed` (`auditEvent`, `sqlstate`) and throws `AuditWriteError`, so the action rolls back.
+and any string Postgres could not store (a lone surrogate or a U+0000) before any SQL, keeps at most
+400 characters of a user agent (cut between characters, with lone surrogates and U+0000 replaced),
+and on a database refusal writes `audit.write_failed` (`auditEvent`, `sqlstate`) and throws
+`AuditWriteError`, so the action rolls back. `tripSwitch` refuses an unstorable string the same way.

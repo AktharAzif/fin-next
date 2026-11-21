@@ -31,13 +31,28 @@ order, in one transaction:
   the table past the function's one-second lock timeout) is refused, so no fin_owner login goes
   unrecorded.
 - `030_environment.sql`: `ops.environment`, written once from `FIN_ENVIRONMENT`. `audit.start_epoch()`
-  refuses a reset in production and any start whose task names another environment (FA012).
+  refuses a reset in production and any start whose task names another environment (FA012), reading
+  the bootstrap's one row only (`ONLY`, exactly one row).
+- The bootstrap adopts an existing `ops.privileged_login` or `ops.environment` only if it is its own: a
+  plain table owned by a superuser, with no inheritance, row-level security, policy, rule or trigger of
+  anyone else's. Otherwise it stops (42501, naming the table): a superuser inspects the table, drops it
+  and bootstraps again.
 - `040_audit_guard.sql`: the guard on the audit trail's protections. Every trigger calling
-  `audit.append_only()` or `audit.require_event()`, and those two functions, are recorded when a
-  migration creates them; afterwards anyone but the superuser is refused DDL that would drop, disable,
-  rename, re-target or replace one, and the rewrite or a dropped column of an append-only table. Adding
-  (tables, columns, indexes, functions, guards) is never refused. A later change to a protection is a
-  registered superuser run, not a migration.
+  `audit.append_only()` or `audit.require_event()`, those two functions, and the shape of every audit
+  table (each column's type, collation, not-null, default, generation and identity; its constraints
+  and unique indexes; row-level security, policies, rules, inheritance and other triggers) are
+  recorded when a migration creates them, by name. Afterwards anyone but the superuser is refused DDL
+  that would drop, disable, rename, re-target or replace a protected trigger or function, change an
+  audit table's shape (a rename, a swap, a column added under a renamed one's name, a policy, a rule, a
+  child table, a dropped unique index) or rewrite it or drop one of its columns, or rename, drop or
+  replace a guard's key column. An audit table may still gain a plain column (no default, not
+  generated, not an identity), a constraint or an index, which joins the record; any other table,
+  guarded business tables included apart from their guards' key columns, is the migrations' to change.
+  A later change to a protection is a registered superuser run, not a migration; after a major-version
+  upgrade the superuser runs `SELECT ops_guard.record_audit_protections()`. A migration adds a unique
+  index to an audit table as a constraint (`ADD CONSTRAINT … UNIQUE`, or `EXCLUDE` for a partial
+  one): DROP INDEX refuses a constraint's index before it starts, where a refused `DROP INDEX
+  CONCURRENTLY` of a plain unique index has already left it dead.
 
 ## The unit of work
 
@@ -54,7 +69,9 @@ refuses one, and `installFetchGuard()` from `@fin/db/testing` makes every `fetch
 tests. A commit the audit guard refuses writes `database.audit_guard` (the table only) and throws
 `AuditGuardError`. A unit whose transaction failed (a statement's error caught and the work carried on)
 throws `TransactionAbortedError` rather than returning as if it had committed: run a statement that
-may fail on purpose (a unique key mapped to a 409) inside `tx.savepoint()`.
+may fail on purpose (a unique key mapped to a 409) inside `tx.savepoint()`. A savepoint whose
+statement failed with its error caught throws `TransactionAbortedError` too, even when the client has
+not yet read that the transaction failed.
 
 ## Tests
 

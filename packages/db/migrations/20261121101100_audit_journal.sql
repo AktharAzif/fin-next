@@ -28,7 +28,9 @@ CREATE TABLE audit.journal_entry (
   audit_event_id  text NOT NULL REFERENCES audit.event (id),
   recorded_at     timestamptz NOT NULL
 );
-CREATE UNIQUE INDEX journal_entry_event ON audit.journal_entry (audit_event_id);
+-- One entry per event, as a constraint, so DROP INDEX CONCURRENTLY cannot leave it half-dropped
+-- (20261121101000_audit_core.sql's event_epoch_seq).
+ALTER TABLE audit.journal_entry ADD CONSTRAINT journal_entry_event UNIQUE (audit_event_id);
 CREATE INDEX journal_entry_recorded ON audit.journal_entry (recorded_at, id);
 
 CREATE TABLE audit.journal_shipped (

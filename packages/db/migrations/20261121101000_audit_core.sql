@@ -78,7 +78,10 @@ CREATE INDEX event_person_log ON audit.event (subject_user_id, id DESC) WHERE sc
 CREATE INDEX event_staff_log  ON audit.event (id DESC) WHERE scope = 'staff';
 CREATE INDEX event_target     ON audit.event (target_id, id DESC);
 CREATE INDEX event_unchained  ON audit.event (xid, id) WHERE seq IS NULL;
-CREATE UNIQUE INDEX event_epoch_seq ON audit.event (epoch, seq);
+-- One row per chain position (spec 08 §3.3's unique index), as a constraint: an index a constraint
+-- owns cannot be dropped with DROP INDEX, so DROP INDEX CONCURRENTLY, whose first steps commit before
+-- the bootstrap's guard could refuse it, never leaves it half-dropped (040_audit_guard.sql).
+ALTER TABLE audit.event ADD CONSTRAINT event_epoch_seq UNIQUE (epoch, seq);
 
 -- The client address and user agent of console and Fin Admin actors (BC-03), outside the chain so
 -- their retention can differ (13 months, D08-02).
@@ -101,7 +104,9 @@ CREATE TABLE audit.head (
   marker_key      text,
   current         boolean NOT NULL
 );
-CREATE UNIQUE INDEX head_current ON audit.head (current) WHERE current;
+-- Exactly one current epoch (§3.6's unique partial index), as an exclusion constraint for the reason
+-- event_epoch_seq is a constraint.
+ALTER TABLE audit.head ADD CONSTRAINT head_current EXCLUDE USING btree (current WITH =) WHERE (current);
 INSERT INTO audit.head (epoch, seq, hash, moved_at, started_at, start_reason, start_prev_hash, marker_key, current)
 VALUES (1, 0, decode(repeat('00', 32), 'hex'), now(), now(), 'created', decode(repeat('00', 32), 'hex'), NULL, true);
 
@@ -334,10 +339,12 @@ BEGIN
   END IF;
 
   -- 7. The row, with what the database stamps. The epoch is the current head's, held FOR KEY SHARE
-  -- until this transaction ends: the lock a foreign key to the head would take. It never waits on
-  -- another writer or on the sequencer (FOR NO KEY UPDATE); only audit.start_epoch() (FOR UPDATE)
-  -- waits for it, so no row can still be uncommitted in an epoch that has ended (§3.9). A start
-  -- committing while this waits leaves the old head no longer current, so the read is retried.
+  -- until this transaction ends: the lock a foreign key to the head would take, with ROW SHARE on the
+  -- table. It never waits on another writer or on the sequencer (FOR NO KEY UPDATE). Only
+  -- audit.start_epoch() waits for it (EXCLUSIVE on the table), so no row can still be uncommitted in an
+  -- epoch that has ended (§3.9), and a writer that arrives while a start waits queues behind it and
+  -- records in the new epoch. A start committing while this waits leaves the old head no longer
+  -- current, so the read is retried.
   FOR attempt IN 1..3 LOOP
     SELECT h.epoch INTO cur_epoch FROM audit.head h WHERE h.current FOR KEY SHARE;
     EXIT WHEN cur_epoch IS NOT NULL;
@@ -561,8 +568,9 @@ $fn$;
 
 -- The sequencer (§3.6): chains up to p_max committed, unchained rows of the current epoch and moves
 -- the head. EXECUTE for fin_worker only. It locks the head FOR NO KEY UPDATE, which writers' FOR KEY
--- SHARE never conflicts with, so a transaction held open never stalls it; a start_epoch committing
--- while it waits leaves the old head no longer current, so the read is retried.
+-- SHARE never conflicts with, so a transaction held open never stalls it; like a writer, it queues
+-- behind an epoch start, and a start committing while it waits leaves the old head no longer current,
+-- so the read is retried.
 CREATE FUNCTION audit.sequence(p_max integer DEFAULT 5000) RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -604,9 +612,12 @@ $fn$;
 -- A new epoch (§3.9), only through a registered `migrate --task` run as fin_owner. In order, it:
 --   1. refuses a start the environment does not allow: the task's FIN_ENVIRONMENT must be the one the
 --      bootstrap wrote to ops.environment, and production refuses a reset (FA012);
---   2. locks the current head FOR UPDATE, which waits until every transaction that recorded a row in
---      the old epoch has ended (audit.record() holds the head FOR KEY SHARE) and holds new ones off
---      until this commits;
+--   2. locks audit.head IN EXCLUSIVE MODE, which waits until every transaction that recorded a row in
+--      the old epoch has ended (audit.record() holds the head FOR KEY SHARE, so ROW SHARE on the table)
+--      and holds new ones off until this commits: a writer's ROW SHARE request queues behind the
+--      waiting EXCLUSIVE one, where a row lock alone would let each new KEY SHARE locker in ahead of
+--      it, without end. That is one lock wait, so its 30-second lock timeout bounds it; readers
+--      (ACCESS SHARE) are never held;
 --   3. chains the old epoch's remaining committed rows into the old epoch, so none is left outside the
 --      chain, and records the head it reached as `previousSeq`;
 --   4. inserts the new head (seq 0, hash = p_prev_hash), clears current on the old one, records
@@ -625,6 +636,7 @@ AS $fn$
 DECLARE
   old audit.head%ROWTYPE;
   new_epoch integer;
+  recorded_rows bigint;
   recorded_environment text;
 BEGIN
   IF p_reason IS NULL OR p_reason NOT IN ('restore', 'reset', 'failover') THEN
@@ -636,8 +648,11 @@ BEGIN
   IF p_marker_key IS NULL OR p_marker_key !~ '^ops/(restore|reset|failover)/[A-Za-z0-9._-]{1,120}\.json$' THEN
     RAISE EXCEPTION 'audit.start_epoch: marker key shape' USING ERRCODE = '22023';
   END IF;
-  SELECT e.name INTO recorded_environment FROM ops.environment e;
-  IF recorded_environment IS NULL THEN
+  -- The bootstrap's one row, and only it: ONLY leaves out any child table, and anything but exactly
+  -- one row is refused rather than read.
+  SELECT count(*), min(e.name) INTO recorded_rows, recorded_environment
+  FROM ONLY ops.environment e WHERE e.only_row;
+  IF recorded_rows <> 1 OR recorded_environment IS NULL THEN
     RAISE EXCEPTION 'audit.start_epoch: the bootstrap recorded no environment' USING ERRCODE = 'FA012';
   END IF;
   IF p_environment IS DISTINCT FROM recorded_environment THEN
@@ -647,6 +662,7 @@ BEGIN
   IF p_reason = 'reset' AND recorded_environment = 'production' THEN
     RAISE EXCEPTION 'audit.start_epoch: production refuses a reset' USING ERRCODE = 'FA012';
   END IF;
+  LOCK TABLE audit.head IN EXCLUSIVE MODE;
   SELECT * INTO old FROM audit.head WHERE current FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'audit.start_epoch: no current epoch' USING ERRCODE = 'FA011';

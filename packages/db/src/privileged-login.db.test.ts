@@ -1,10 +1,19 @@
 // AC-P0-11 (a failing login trigger never blocks a superuser's or a service's login), AC-P0-29 (no
 // fin_owner login goes unrecorded), AC-P0-39 (fin_owner cannot drop, alter, update, delete or truncate
-// ops.privileged_login) and the record itself (ARCHITECTURE §6.3, DECISIONS P-19).
+// ops.privileged_login) and the record itself (ARCHITECTURE §6.3, DECISIONS P-19); and the bootstrap
+// adopting only the superuser's tables it made itself (the record and ops.environment).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bootstrap, type Environment } from "./bootstrap.ts";
+import { loadFragments } from "./grants.ts";
+import { BOOTSTRAP_DIR, GRANTS_DIR } from "./migrations.ts";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
-import { createTestDatabase, type TestDatabase } from "./testing/index.ts";
+import {
+  createTestDatabase,
+  type TestDatabase,
+  testReplicas,
+  testVerifiers,
+} from "./testing/index.ts";
 
 let db: TestDatabase;
 let su: PgClient;
@@ -251,5 +260,106 @@ describe("AC-P0-39: fin_owner cannot remove or change the record", () => {
     expect(await codeOf(su, "UPDATE ops.privileged_login SET login_role = 'x'")).toBe("42501");
     expect(await codeOf(su, "DELETE FROM ops.privileged_login")).toBe("42501");
     expect(await codeOf(su, "TRUNCATE ops.privileged_login CASCADE")).toBe("42501");
+  });
+});
+
+/** Runs the bootstrap again on a test database; resolves "ok" or the refusal's message. */
+async function bootstrapAgain(target: TestDatabase, environment: Environment): Promise<string> {
+  return target.withLock(async () => {
+    const again = await target.superuser();
+    try {
+      await bootstrap(again, {
+        verifiers: testVerifiers(),
+        replicas: testReplicas(),
+        environment,
+        bootstrapDir: BOOTSTRAP_DIR,
+        fragments: loadFragments(GRANTS_DIR),
+      });
+      return "ok";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      await again.end();
+    }
+  });
+}
+
+async function ownerOf(client: PgClient, table: string): Promise<string | undefined> {
+  const result = await client.query<{ owner: string }>(
+    "SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid = to_regclass($1)",
+    [table],
+  );
+  return result.rows[0]?.owner;
+}
+
+describe("the bootstrap adopts only the superuser's tables it made itself", () => {
+  // fin_owner owns `ops`: when the superuser's table is missing (a database bootstrapped before the
+  // file that makes it, or the table dropped by hand), fin_owner can create one of that name first,
+  // shaped to hide or swallow rows, and an ownership change would keep every part of it.
+  let scratch: TestDatabase | undefined;
+  let scratchSu: PgClient | undefined;
+
+  afterAll(async () => {
+    await scratchSu?.end();
+    await scratch?.drop();
+  });
+
+  it("runs again on its own tables, and refuses an ops.environment fin_owner created", async () => {
+    scratch = await createTestDatabase({ prefix: "p0e", migrate: false });
+    scratchSu = await scratch.superuser();
+    expect(await bootstrapAgain(scratch, "ci")).toBe("ok");
+    await scratchSu.query("DROP TABLE ops.environment");
+    const owner = await scratch.connect("fin_owner");
+    try {
+      for (const sql of [
+        "CREATE TABLE ops.environment (only_row boolean PRIMARY KEY DEFAULT true, name text NOT NULL, recorded_at timestamptz NOT NULL)",
+        "CREATE TABLE ops.environment_shadow () INHERITS (ops.environment)",
+        "INSERT INTO ops.environment_shadow VALUES (false, 'staging', now())",
+        "ALTER TABLE ops.environment ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY only_fake ON ops.environment FOR SELECT USING (name <> 'production')",
+      ]) {
+        expect(await codeOf(owner, sql), sql).toBe("ok");
+      }
+    } finally {
+      await owner.end();
+    }
+    expect(await bootstrapAgain(scratch, "production")).toMatch(
+      /ops\.environment exists but is not the bootstrap's own table/,
+    );
+    // Nothing was adopted: the table is still fin_owner's, and no row says production.
+    expect(await ownerOf(scratchSu, "ops.environment")).toBe("fin_owner");
+    expect(
+      (
+        await scratchSu.query(
+          "SELECT count(*)::int AS n FROM ops.environment WHERE name = 'production'",
+        )
+      ).rows,
+    ).toEqual([{ n: 0 }]);
+  });
+
+  it("refuses an ops.privileged_login fin_owner created, so no rule of its own can swallow the records", async () => {
+    const target = await createTestDatabase({ prefix: "p0e", migrate: false });
+    const targetSu = await target.superuser();
+    try {
+      await targetSu.query("DROP TABLE ops.privileged_login");
+      const owner = await target.connect("fin_owner");
+      try {
+        for (const sql of [
+          "CREATE TABLE ops.privileged_login (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, login_role text NOT NULL, application_name text, client_addr inet, backend_pid integer NOT NULL, logged_in_at timestamptz NOT NULL)",
+          "CREATE RULE swallow AS ON INSERT TO ops.privileged_login DO INSTEAD NOTHING",
+        ]) {
+          expect(await codeOf(owner, sql), sql).toBe("ok");
+        }
+      } finally {
+        await owner.end();
+      }
+      expect(await bootstrapAgain(target, "ci")).toMatch(
+        /ops\.privileged_login exists but is not the bootstrap's own table/,
+      );
+      expect(await ownerOf(targetSu, "ops.privileged_login")).toBe("fin_owner");
+    } finally {
+      await targetSu.end();
+      await target.drop();
+    }
   });
 });

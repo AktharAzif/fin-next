@@ -54,6 +54,7 @@ export {
   assertNoPersonalShapes,
   assertStorableText,
   personalShapeOf,
+  unstorableShapeOf,
 } from "./shapes.ts";
 export { type Trip, type TripReason, tripSwitch } from "./switches.ts";
 export { type EventTypeRow, eventTypeRows, type SyncResult, syncEventTypes } from "./sync.ts";

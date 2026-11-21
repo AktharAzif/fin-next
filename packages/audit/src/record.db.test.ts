@@ -211,18 +211,20 @@ describe("what recordAudit writes", () => {
     ]);
   });
 
-  it("stores whatever user agent a client sends: one cut inside a character is not refused by Postgres", async () => {
+  it("stores whatever user agent a client sends: one cut inside a character, or holding a U+0000, is not refused by Postgres", async () => {
     const worker = db.database("fin_worker");
-    const id = await worker.unit(testContext(), (tx) =>
-      recordAudit(tx, {
-        event: "system.sweep_completed",
-        ...SAMPLES["system.sweep_completed"],
-        context: { clientIp: null, userAgent: `${"a".repeat(399)}\u{1F600}\u{1F600}` },
-      }),
-    );
-    expect(
-      (await su.query("SELECT count(*)::int AS n FROM audit.event WHERE id = $1", [id])).rows,
-    ).toEqual([{ n: 1 }]);
+    for (const userAgent of [`${"a".repeat(399)}\u{1F600}\u{1F600}`, "agent\u0000/1.0"]) {
+      const id = await worker.unit(testContext(), (tx) =>
+        recordAudit(tx, {
+          event: "system.sweep_completed",
+          ...SAMPLES["system.sweep_completed"],
+          context: { clientIp: null, userAgent },
+        }),
+      );
+      expect(
+        (await su.query("SELECT count(*)::int AS n FROM audit.event WHERE id = $1", [id])).rows,
+      ).toEqual([{ n: 1 }]);
+    }
   });
 
   it("writes audit.write_failed and rolls the action back when the database refuses the event", async () => {

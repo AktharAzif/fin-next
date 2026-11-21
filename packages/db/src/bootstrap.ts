@@ -206,8 +206,12 @@ export async function bootstrap(client: PgClient, input: BootstrapInput): Promis
       "INSERT INTO ops.environment (only_row, name, recorded_at) VALUES (true, $1, statement_timestamp()) ON CONFLICT (only_row) DO NOTHING",
       [input.environment],
     );
-    const recorded = await client.query<{ name: string }>("SELECT name FROM ops.environment");
-    if (recorded.rows[0]?.name !== input.environment) {
+    // The bootstrap's own row and only it: ONLY leaves out any child table, and anything but exactly
+    // one row is refused (030 refuses to adopt a table the bootstrap did not make).
+    const recorded = await client.query<{ name: string }>(
+      "SELECT name FROM ONLY ops.environment WHERE only_row",
+    );
+    if (recorded.rows.length !== 1 || recorded.rows[0]?.name !== input.environment) {
       throw new MigrationError(
         "bootstrap_environment",
         "this database was bootstrapped for another environment",

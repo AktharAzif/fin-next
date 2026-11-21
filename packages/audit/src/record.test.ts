@@ -1,6 +1,7 @@
 // T08-07: recordAudit throws on an email, IP, token shape, URL with a query or nine digits in any
 // metadata string, and on an actor kind the event does not allow, before any SQL. And the payload it
-// hands audit.record(), the journal entry, and the failure line.
+// hands audit.record(), the journal entry, the failure line, and the strings no Postgres row can hold
+// (recordAudit's and tripSwitch's).
 import { createIdSource, type Line, PgDatabaseError, type UnitTx } from "@fin/db";
 import { describe, expect, it } from "vitest";
 import { AuditEventError, AuditWriteError, recordAudit, storedUserAgent } from "./record.ts";
@@ -9,7 +10,9 @@ import {
   assertNoPersonalShapes,
   assertStorableText,
   personalShapeOf,
+  unstorableShapeOf,
 } from "./shapes.ts";
+import { tripSwitch } from "./switches.ts";
 
 interface FakeTx {
   tx: UnitTx;
@@ -227,5 +230,58 @@ describe("recordAudit's write", () => {
       await expect(recordAudit(tx, input)).rejects.toBeInstanceOf(AuditMetadataError);
       expect(queries).toEqual([]);
     }
+  });
+
+  it("refuses, before any SQL, a U+0000 in any field: well-formed, but no Postgres text holds one", async () => {
+    // JSON.stringify writes it as `\u0000`, which jsonb refuses (22P05), a code no audit alert reads.
+    expect(unstorableShapeOf("a\u0000b")).toBe("nul");
+    expect(unstorableShapeOf("a\u0001b\u007f")).toBeUndefined();
+    try {
+      assertStorableText({ a: ["fine", "note\u0000id"] }, "event");
+      throw new Error("expected a refusal");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AuditMetadataError);
+      expect((error as AuditMetadataError).field).toBe("event.a[1]");
+      expect((error as AuditMetadataError).shape).toBe("nul");
+    }
+    for (const input of [
+      { ...sweep, target: "ops.rate_window\u0000" },
+      { ...sweep, refs: ["job_\u0000"] },
+      { ...sweep, actor: { kind: "system" as const, id: "sys\u0000", via: "job" as const } },
+      { ...sweep, context: { clientIp: "192.0.2.1\u0000", userAgent: null } },
+    ]) {
+      const { tx, queries } = fakeTx();
+      await expect(recordAudit(tx, input)).rejects.toBeInstanceOf(AuditMetadataError);
+      expect(queries).toEqual([]);
+    }
+    // The unit's request ID reaches audit.record() the same way.
+    const { tx, queries } = fakeTx();
+    (tx.context as { requestId?: string }).requestId = "req_\u0000";
+    await expect(recordAudit(tx, sweep)).rejects.toBeInstanceOf(AuditMetadataError);
+    expect(queries).toEqual([]);
+  });
+
+  it("replaces a U+0000 in a client's user agent rather than refusing the action", async () => {
+    expect(storedUserAgent("agent\u0000/1.0")).toBe("agent�/1.0");
+    const { tx, queries } = fakeTx();
+    await recordAudit(tx, { ...sweep, context: { clientIp: null, userAgent: "agent\u0000/1.0" } });
+    const text = String(queries[0]?.values?.[0]);
+    expect(text).not.toContain("\\u0000");
+    expect(JSON.parse(text).context.user_agent).toBe("agent�/1.0");
+  });
+});
+
+describe("tripSwitch before any SQL", () => {
+  it("refuses a string Postgres could not store in the trip or the unit's request ID", async () => {
+    const trip = { name: "live_money", reasonCode: "orphan_payout", via: "job" } as const;
+    for (const ref of [`trf_${"0".repeat(25)}\u0000`, `trf_${"0".repeat(25)}\ud800`]) {
+      const { tx, queries } = fakeTx();
+      await expect(tripSwitch(tx, { ...trip, ref })).rejects.toBeInstanceOf(AuditMetadataError);
+      expect(queries).toEqual([]);
+    }
+    const { tx, queries } = fakeTx();
+    (tx.context as { requestId?: string }).requestId = "req_\u0000";
+    await expect(tripSwitch(tx, { ...trip, ref: null })).rejects.toBeInstanceOf(AuditMetadataError);
+    expect(queries).toEqual([]);
   });
 });

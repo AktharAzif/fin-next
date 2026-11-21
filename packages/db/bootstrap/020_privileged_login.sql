@@ -21,7 +21,12 @@
 --     `DROP FUNCTION ... CASCADE` and take the event triggers with them;
 --   - an event trigger refuses, for anyone but a superuser, any DROP that takes the superuser's tables in
 --     `ops` (this record and ops.environment, 030) or anything in ops_guard, and any ALTER of those
---     tables or of the schema holding them (a rename would send the inserts nowhere).
+--     tables or of the schema holding them (a rename would send the inserts nowhere);
+--   - the bootstrap adopts a table in `ops` only if it made it (ops_guard.assert_bootstrap_table).
+--     fin_owner owns `ops`, so a table of this name it created first (before the bootstrap, or after
+--     the superuser dropped the real one) could carry a child table, row-level security and a policy,
+--     a rule or a trigger of fin_owner's, all of which an ownership change would keep: a rule
+--     `DO INSTEAD NOTHING` would send every login record nowhere.
 -- The disable path (`event_triggers = off`, superuser only) is in the restore and incident runbooks.
 
 CREATE SCHEMA IF NOT EXISTS ops_guard;
@@ -32,6 +37,40 @@ END
 $owner$;
 REVOKE ALL ON SCHEMA ops_guard FROM PUBLIC;
 
+-- Refuses an existing table the bootstrap did not make: it must be a plain table owned by a superuser
+-- (only a superuser can make a table a superuser's), with no inheritance parent or child, no row-level
+-- security, policy or rule, and no trigger but the bootstrap's own (functions in ops_guard, which only
+-- the superuser can create). A missing table is fine: the bootstrap creates it next.
+CREATE OR REPLACE FUNCTION ops_guard.assert_bootstrap_table(p_table text) RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  rel oid := pg_catalog.to_regclass(p_table);
+BEGIN
+  IF rel IS NULL THEN
+    RETURN;
+  END IF;
+  IF NOT EXISTS (
+       SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles r ON r.oid = c.relowner
+       WHERE c.oid = rel AND c.relkind = 'r' AND r.rolsuper
+         AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity)
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = rel OR i.inhparent = rel)
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = rel)
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = rel)
+     OR EXISTS (
+       SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc f ON f.oid = t.tgfoid
+       WHERE t.tgrelid = rel AND NOT t.tgisinternal
+         AND f.pronamespace <> pg_catalog.to_regnamespace('ops_guard'))
+  THEN
+    RAISE EXCEPTION '% exists but is not the bootstrap''s own table: a superuser inspects and drops it, then bootstraps again',
+      p_table USING ERRCODE = '42501';
+  END IF;
+END
+$fn$;
+REVOKE ALL ON FUNCTION ops_guard.assert_bootstrap_table(text) FROM PUBLIC;
+
+SELECT ops_guard.assert_bootstrap_table('ops.privileged_login');
 CREATE TABLE IF NOT EXISTS ops.privileged_login (
   id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   login_role       text NOT NULL,
