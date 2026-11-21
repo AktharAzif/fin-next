@@ -11,9 +11,10 @@ audited (R9). fin-next replaces a private repository, called "the old product" i
 
 ## Status
 
-**Planning, 21 Nov 2026.** No code yet. As the owner asked (R13), the plan is the first thing
-committed to this public repository (R12), ahead of any code. The build starts on Saturday 21 Nov
-2026, and production is not promised for any date.
+**The build started on Saturday 21 Nov 2026.** As the owner asked (R13), the plan is the first
+thing committed to this public repository (R12), ahead of any code: it merged as pull request 1.
+The code follows in pull requests, starting with the monorepo scaffold in pull request 2.
+Production is not promised for any date.
 
 ## The plan
 
@@ -25,9 +26,9 @@ Start with [docs/plan/README.md](docs/plan/README.md). It holds:
 - the decisions of 21 Nov 2026;
 - a table that traces each of the owner's requirements, R1 to R16, to where it is covered;
 - the timeline;
-- what the owner provides before the build starts;
-- links to the architecture, the decision register, the execution plan and the eight
-  specifications.
+- what the owner provides, and the owner steps still open;
+- links to the architecture, the decision register, the execution plan, the spike log and the
+  eight specifications.
 
 ## Nothing here is a credential
 
@@ -39,20 +40,25 @@ This repository is public, so nothing in it is a secret. No file holds any of th
 - the name of another private repository, or a commit or pull request reference from one;
 - a real person's data.
 
-Hosts are written as placeholders, such as `<app>.<zone>`. Private settings live outside the
-repository, in a private overlay that is given at a secure prompt. Credentials are typed only into
-that prompt and are never committed. If you find something here that looks like a secret, report it
-through the repository's private vulnerability reporting. Do not open a public issue.
+Hosts are written as placeholders, such as `<app>.<zone>`. Until hardening, private settings are
+kept only on the build machines (machine A and machine B), outside every repository, where
+`pnpm fin` and the public-safety check read them. Giving them as a private overlay at a secure
+prompt, with its encryption and escrow, moves to hardening. Credentials are given only at the
+secure prompt and are never committed. Until the owner is back, the staging and sandbox
+credentials the owner gave on 21 Nov are kept on the build machine, outside every repository
+(decision SA-22 in [docs/plan/DECISIONS.md](docs/plan/DECISIONS.md)). If you find something here
+that looks like a secret, report it through the repository's private vulnerability reporting. Do
+not open a public issue.
 
 ## Licence
 
-All rights are reserved. This is the default of decision G-03 in
-[docs/plan/DECISIONS.md](docs/plan/DECISIONS.md), which the owner may change: no open-source
-licence, with the source public so that it can be reviewed and built in CI, not as an open-source
-release. Fin's name, logo and other brand assets are reserved.
+All rights are reserved. This is decision G-03 in
+[docs/plan/DECISIONS.md](docs/plan/DECISIONS.md), which the owner took at its default on
+21 Nov 2026: no open-source licence, with the source public so that it can be reviewed and built
+in CI, not as an open-source release. Fin's name, logo and other brand assets are reserved.
 
-The repository's root commit is a two-line README. The plan and this page arrive together in pull
-request 1, the repository's first merge and its only change before any code. A `LICENSE` file that
-says the same arrives with the repository's root files in Phase 0, together with the notices for the
-third-party code, icons and fonts that later commits carry. Until it does, this section is the
-licence statement.
+The repository's root commit is a two-line README. The plan and this page arrived together in pull
+request 1, the repository's first merge and its only change before any code. The `LICENSE` file
+says the same, and it is the licence statement. It arrived with the repository's root files in pull
+request 2, the monorepo scaffold. Third-party code, icons and fonts keep their own licences, and
+their notices sit beside the packages that carry them.

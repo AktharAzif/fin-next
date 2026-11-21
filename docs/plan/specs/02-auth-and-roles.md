@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Status | Build specification for Saturday's lanes L-SAT-01 to L-SAT-11, written on Saturday 21 Nov 2026 from ARCHITECTURE.md, DECISIONS.md, EXECUTION.md, spec 01 and the owner's decisions of 21 Nov. Builders build from this file alone |
-| Part of | The fin-next plan (R13). It details EXECUTION §3 and ARCHITECTURE §7.1 to §7.7, §8 and the auth parts of §10, under the owner's later decisions as spec 01 §1 lists them (OD-1 to OD-6) |
+| Part of | The fin-next plan (R13). It details EXECUTION §3 and ARCHITECTURE §7.1 to §7.7, §8 and the auth parts of §10, under the owner's later decisions as spec 01 §1 lists them (OD-1 to OD-6, and the answers of Saturday morning in spec 01 §1.2) |
 | Requirements touched | R1, R2, R3, R4, R5, R6, R9, R10, R11, R12, R13, R14, R15, R16 (§0.2) |
 | Lanes | L-SAT-01 to L-SAT-11 (§20), on top of Phase 0's P0-D, P0-E, P0-F and P0-G |
 | Exit | §21: AC-SAT-01 to AC-SAT-24 (EXECUTION §3.6) and AC-SAT-25 to AC-SAT-48 (new here) |
@@ -21,11 +21,14 @@ zone is `<staging-zone>`. Test addresses use `example.com`, `example.org` or `ex
 **Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
 specifications, and between two specifications the one that owns the area, as README §8.3 lists
-the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
-OD-6. Among the specifications, this spec owns sign-in in both realms, the second factor, step-up,
-permissions and roles, organisations and teams, staff management and sessions; the sibling owns any
-other area (spec 05 for API keys' public conventions, webhooks and events); and spec 08 owns the
-cross-cutting rules of audit, security email, personal data, scrubbing, secrets and observability.
+the owners. The owner's decisions are those DECISIONS.md records as the owner's: the overnight
+ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning, which spec 01
+§1.2 lists. The decisions taken while the owner was away, the build's [BD-01] to [BD-17] among
+them (BD-15 is withdrawn), are register entries, for the owner's review. Among the specifications,
+this spec owns sign-in in both realms, the second factor, step-up, permissions and roles,
+organisations and teams, staff management and sessions; the sibling owns any other area (spec 05
+for API keys' public conventions, webhooks and events); and spec 08 owns the cross-cutting rules of
+audit, security email, personal data, scrubbing, secrets and observability.
 A decision of this spec (S2-nn, §22) binds where everything above it is silent. DECISIONS appendix C
 found none that changes a register entry; if one is found later, the register holds until appendix C
 settles it. Where this spec repeats a rule it names the section and keeps it short; where it differs
@@ -35,10 +38,10 @@ confirms before work that depends on it merges.
 
 | ID form | Meaning | Register |
 |---|---|---|
-| `[XX-nn]` | A decision | DECISIONS.md. Owner decisions due "before Saturday's start" apply their default from 09:00 unless answered |
+| `[XX-nn]` | A decision | DECISIONS.md. Owner decisions due "before Saturday's start" were decided by the owner at the Saturday sitting (21 Nov): the defaults, except [UI-12] (no) and [FD-09] (the shared staging zone) |
 | `OD-n` | An owner decision of 21 Nov 2026, by spec 01's short name; DECISIONS.md records each in its overnight table | spec 01 §1 |
 | `S0-nn` | A decision spec 01 made | spec 01 §14 |
-| `S2-nn` | A decision this spec makes where the plan is silent | §22; the steward copies each into DECISIONS.md in the plan's first follow-up pull request |
+| `S2-nn` | A decision this spec makes where the plan is silent | §22; the steward copies each into DECISIONS.md in a later pull request of the plan |
 | `SF-nn` | A spec decision settled in the register before the first commit, folded or not adopted | DECISIONS appendix C |
 | `IF-nn` | An interface this spec provides to, or needs from, other specs and Phase 0 | §20.6 |
 | `AC-SAT-nn` | A Saturday acceptance criterion | 01 to 24 are EXECUTION §3.6's; 25 onwards are new here and follow EXECUTION's last number (§21) |
@@ -47,11 +50,12 @@ confirms before work that depends on it merges.
 | `PG-nn` | A production gate | EXECUTION §7.3. Production gates use `PG-` only; `G-` belongs to governance decisions |
 | `SP-nn`, `FW-Cnn` | A spike; a framework condition | ARCHITECTURE §11.11 and §3.4, spec 01 §11 (SP-25, SP-26) |
 | `F1` to `F24`, `F-<slug>` | A flow in ARCHITECTURE §2.3; a new flow for the Flow Atlas | §18.5 |
+| `(D6)` | Marks work that the owner's trim of Phase 0 on 21 Nov (about 08:25) moved to hardening, before production, as in "moves to hardening (D6)": the builder account, the agents' own OS users, signed review receipts and the private overlay's ceremony, and what stands in until then. It is not the 19 Nov decision D6 | spec 01 §1.2 |
 
 | Placeholder | Stands for |
 |---|---|
 | `<zone>` | The zone that holds the host in question. Under [FD-10] production puts Fin Admin on a registrable domain of its own, so `admin.<zone>` and `console.<zone>` need not share a zone |
-| `<staging-zone>` | The staging zone ([FD-09]); every Saturday host lives here |
+| `<staging-zone>` | The staging zone ([FD-09]): the shared zone that the old product's staging also uses; every Saturday host lives here |
 | `<team>`, `<aud>` | The Cloudflare Access team name and the application's audience tag, from the private overlay ([G-09]) |
 | `<docs origin>` | `https://developer.<zone>`, the base of every problem `type` (spec 01 §4.4) |
 
@@ -77,8 +81,8 @@ and this spec disagree on a rule, this spec wins and L-SAT-10 updates the board.
 | R6 | Both realms; passkeys first; the mandatory second factor; step-up intents for adding or inviting someone; granular catalogues with prebuilt and custom roles; organisations, teams, invitations and staff | §3 to §12 |
 | R9 | Every sign-in, session change, factor change, team, role, organisation and staff change audited in its transaction, with database guards on the critical tables, the sign-in tables of both realms included; the Audit log page and its entry points filtered to one object | §13.8, §15.2.1, §16 |
 | R10 | Tier S review of every server path here, Saturday's attack profiles, the test-truth check | §20.4 |
-| R11 | Receipts whose sessions stay within R11 and the effort floor gate every merge | §20.4 |
-| R12 | Nothing private in code, tests, fixtures or this file; enrolment codes and secrets never leave their one screen | throughout |
+| R11 | fin-review's local run on each pull request's exact head, recorded in the pull request with sessions within R11 and the effort floor, gates every merge ([G-10]'s interim merge rule); signed receipts move to hardening (D6) | §20.4 |
+| R12 | Nothing private in code, tests, fixtures or this file; enrolment codes and secrets never leave their one screen, except, on staging only, the first staff admin's two TOTP secrets, Fin Admin's and Access's own factor, which an agent keeps in local secret files on the build machine, outside every repository (§10.6) | throughout |
 | R13 | This spec is part of the plan in `docs/plan/` | this file |
 | R14 | Screens from the "Fin Dashboard · new design" and "Fin Admin · new design" canvases, with the boards that R6 still needs | §15 |
 | R15 | Node 26.13.1 only; Web Crypto and `node:crypto` for every ceremony, no native module | §3.1 |
@@ -156,15 +160,21 @@ Turnstile token that is ignored until then.
 | `console.<zone>` | Workers route `console.<zone>/*` to the assets-only deployment `console` (spec 01 §7) | Zone route `console.<zone>/api/*` with no Worker; the proxied CNAME sends it to the public tunnel; ingress `hostname: console.<zone>`, `path: ^/api/` to `http://console.railway.internal:8080` | `console` | developer | `console.<zone>` |
 | `admin.<zone>` | The same on the admin host, behind the Access application that covers the whole host | Through the admin tunnel; the connector requires a valid Access token (`originRequest.access.required`, `<team>`, `<aud>`) | `admin` | staff | `admin.<zone>` |
 
+On staging the hosts are `console.<staging-zone>` and `staff.<staging-zone>` ([FD-09]), and each
+realm's passkey RP ID and origin follow its host. The names are final for staging, so no staging
+passkey is re-enrolled at the cutover.
+
 Each tunnel ends with `http_status:404`. `/healthz` and `/readyz` are never reachable from outside
 (spec 01 §6.4). A request for `/api` without a trailing slash reaches the static SPA, which defines no
 route under `/api`.
 
-**The spike first** (SP-25, run as S-01 at EXECUTION §2.6's one slot, 09:15 to 09:45 on the
-throwaway host `c1-spike.<staging-zone>`, with spec 01 §11's added checks; owner: the ops agent): the no-Worker
-route falls through to the tunnel on a throwaway host. **If SP-25 fails**, the fallback is per-app API
-hosts on the same site (`console-api.<zone>`, `admin-api.<zone>`), and §2.6 gives every setting that
-changes. The code reads one mode from configuration, so the fallback is a settings change plus a
+**The spike passed.** SP-25, run as S-01 on 21 Nov from 09:10 to 09:25 on the throwaway host
+`c1-spike.<staging-zone>` (owner: the ops agent), showed that the no-Worker route falls through to
+the tunnel, so the shape is same-origin (`docs/plan/spikes.md`). Spec 01 §11's added check (j)
+passed too; its check (k) waits for the static test server. Check (g) needed its fallback, a WAF
+rule on the app hosts and the docs host, which [BD-13] adopts (spec 01 §7.6). The per-app API hosts
+of §2.6 (`console-api.<zone>`, `admin-api.<zone>`), the split-host fallback, are not needed. The code
+reads one mode from configuration, so taking that fallback would be a settings change plus a
 `_headers` change, never a code change (S2-01).
 
 ### 2.2 The API half's front door, in order
@@ -207,16 +217,17 @@ cookie is `__Host-`; GET never changes state (below). Redirect targets (`next` i
 and is in the app's route list, or an absolute URL on `FIN_PUBLIC_ORIGIN`; anything else is refused
 (`400 invalid`).
 
-**GETs** ([SA-44]). The gate skips GET, and a sibling page on the same site (every staging host shares
-`<staging-zone>`) can make a GET that carries the `Strict` session cookie. So no GET writes an audit
-row, spends a budget or uses up a step-up intent; whatever is audited or counted happens at a gated
-POST. The one kind of GET that changes anything is the redeeming of a single-use URL that a gated POST
-minted for this session (Fin Admin's document view, spec 03 §12.2): its policy entry declares
-`fetchSite: "same-origin-or-none"`, and `Sec-Fetch-Site` must be present and `same-origin`, or `none`
-for the URL opened directly in a tab; anything else is `403 invalid_origin` with code `fetch_site`.
-The route-policy test (§14.1) fails on a GET that declares `audit`, a budget in `limits` or
-`stepUp: "intent"`, and on a redeeming GET without `fetchSite`. Under the split-host fallback (§2.6)
-a redeeming GET also accepts `same-site`, as the gate does.
+**GETs** ([SA-44]). The gate skips GET, and a sibling page on the same site (every staging host, the
+old product's included, shares `<staging-zone>`, [FD-09]) can make a GET that carries the `Strict`
+session cookie. So no GET writes an audit row, spends a budget or uses up a step-up intent; whatever
+is audited or counted happens at a gated POST. The one kind of GET that changes anything is the
+redeeming of a single-use URL that a gated POST minted for this session (Fin Admin's document view,
+spec 03 §12.2): its policy entry declares `fetchSite: "same-origin-or-none"`, and `Sec-Fetch-Site`
+must be present and `same-origin`, or `none` for the URL opened directly in a tab; anything else is
+`403 invalid_origin` with code `fetch_site`. The route-policy test (§14.1) fails on a GET that
+declares `audit`, a budget in `limits` or `stepUp: "intent"`, and on a redeeming GET without
+`fetchSite`. Under the split-host fallback (§2.6) a redeeming GET also accepts `same-site`, as the
+gate does.
 
 ### 2.4 Cookies
 
@@ -262,6 +273,8 @@ same-origin shape; `Referrer-Policy: same-origin`; `form-action 'self'`; `frame-
 
 ### 2.6 The split-host fallback (only if SP-25 fails)
 
+Not needed: S-01 passed on 21 Nov (SP-25, §2.1). The settings stay documented.
+
 | Setting | Same-origin (default) | Split host (fallback) |
 |---|---|---|
 | `FIN_PUBLIC_ORIGIN` (the page) | `https://console.<zone>` | `https://console.<zone>` |
@@ -287,7 +300,7 @@ start if `BETTER_AUTH_TRUSTED_ORIGINS` is set in either mode.
 
 | Package | Pin | Notes |
 |---|---|---|
-| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov after 10:53 UTC, in one dependency pull request gated by T-SAT-01 and T-SAT-02 | `overrides` pins `@better-auth/core` exactly, with a dated comment; the entry is outside [G-06]'s set and needs the owner's own yes at the 08:00 sitting ([SA-02]). Never `1.8.0-beta`. The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin goes to the owner ([SA-27]) |
+| `better-auth`, `@better-auth/core`, `@better-auth/passkey`, `@better-auth/drizzle-adapter` | 1.7.25 now; all four to 1.7.27 together on Monday 23 Nov after 10:53 UTC, in one dependency pull request gated by T-SAT-01 and T-SAT-02 | `overrides` pins `@better-auth/core` exactly, with a dated comment; the entry is outside [G-06]'s set, so the build approved it under the owner's away-time authority ([BD-09]), and the away-time log flags it for the owner's explicit review ([SA-02]). Never `1.8.0-beta`. The identity lane reads the 1.7.26 and 1.7.27 release notes before its first merge; an advisory on a mounted plugin goes to the owner ([SA-27]) |
 | `@better-auth/utils`, `better-call` | exactly what the pinned `better-auth` declares | moved with the group |
 | `@simplewebauthn/browser` | 13.3.0 | the passkey plugin's peer; `@simplewebauthn/server` 13.3.2 arrives with the plugin |
 | `hono` 4.13.19, `@hono/node-server` 2.1.9 (2.1.11 from 23 Nov), `zod` 4.6.7, `drizzle-orm` 0.45.4, `pg` 8.23.1 | | spec 01 §4.8 |
@@ -682,10 +695,11 @@ already has a membership, and counts towards §5.6's organisation limits. The SP
 frame when the viewer has no membership and no waiting invitation; after a declined invitation it
 calls it then.
 
-**Consequence of [SA-05]'s default:** a Super admin is privileged, so every developer who owns their
-first organisation is held at "Protect your account" with no "Skip" straight after sign-up. Only an
-invitee who joins in a role with no privileged permission, and owns no organisation, may skip. This is
-recorded for the owner (§23).
+**Consequence of [SA-05]** (decided yes at the Saturday sitting): a Super admin is privileged, so
+every developer who owns their first organisation is held at "Protect your account" with no "Skip"
+straight after sign-up. Only an invitee who joins in a role with no privileged permission, and owns
+no organisation, may skip. The owner took this default at the sitting, so [SA-05] is not narrowed
+(§23, item 1, resolved).
 
 ---
 
@@ -753,7 +767,7 @@ No trusted browser and no backup codes for staff, ever ([SA-31], [SA-04]).
 
 - 16 characters of Crockford base32 in four groups of four (80 bits), made with
   `crypto.getRandomValues`, shown once to the Admin who added or reset the member (or, for the first
-  Admin, on the operator's terminal by `pnpm fin task <env> staff-bootstrap`, §10.6), stored as its
+  Admin, on the operator's terminal by `pnpm fin staff bootstrap <env>`, §10.6), stored as its
   SHA-256 in `staff.enrolment_code`, alive 30 minutes, single use, bound to one member.
 - Handed over out of band, never by email; no template may carry it (T-SAT-41 renders every template
   with a planted code and fails if it appears).
@@ -1259,6 +1273,17 @@ reverse: remove in Fin Admin first (sessions end at once), then `pnpm fin access
 `pnpm fin access revoke <env> <address>` to end their Access sessions. Until both lists agree,
 `admin-access-drift` pages every hour (§10.9).
 
+On the shared staging account ([FD-09]) Cloudflare can revoke one person's Access sessions only
+across every application in the account, the old product's included, and that call needs an
+organisation-level permission that CR-05 does not hold. So on staging
+`pnpm fin access revoke staging` takes no address: like spec 08's `access revoke-sessions`, it
+revokes the tokens of fin-next's own application, `fin-next-staging-admin`
+(`POST /accounts/{account_id}/access/apps/{app_id}/revoke_tokens`, within CR-05's Access: Apps and
+Policies Edit). That ends every Access session on `staff.<staging-zone>` and none of the old
+product's. The others on the staff list can start a new one; the removed person cannot, because the
+sync has taken them off the list. The account-wide per-person call
+(`POST /accounts/{account_id}/access/organizations/revoke_user`) is never used on staging (EX-27).
+
 ### 10.2 Staff routes and rules
 
 | Action | Route | Rules |
@@ -1285,7 +1310,7 @@ last factor is refused (§6.7).
 ### 10.4 Losing every factor
 
 A staff member who loses every factor is reset by an Admin (§10.2). The last Admin is reset by
-`pnpm fin task <env> staff-bootstrap --reset <address> --reason <text>` (§10.6). There is no backup
+`pnpm fin staff bootstrap <env> --reset <address> --reason <text>` (§10.6). There is no backup
 code and no self-service path.
 
 ### 10.5 The Access check, eligibility and the same person
@@ -1315,14 +1340,29 @@ code and no self-service path.
 
 ### 10.6 The first Admin (CR-11, S0-17)
 
-`pnpm fin task staging staff-bootstrap` asks for the address at the secure prompt, makes the
-enrolment code on the operator's machine and shows it there once, and passes only the address and the
-code's SHA-256 to the `migrate` service's `--task staff-bootstrap` run. The task
+`pnpm fin staff bootstrap staging` takes the address from the private staff list on the build
+machine (the overlay's `access.staff`, [G-09]) and never prints it, makes the enrolment code on the
+operator's machine and shows it there once, and passes only the address and the code's SHA-256 to
+the `migrate` service's `--task staff-bootstrap` run. The task
 (`apps/api/src/tasks/staff-bootstrap.ts`) calls `staff.bootstrap_admin(address, code_hash, reason)`, a
 `SECURITY DEFINER` function owned by `fin_owner`, which: refuses while an active Admin exists unless
 `--reset` names that Admin and a reason is given; inserts or reactivates the member as `pending` with
 role `admin`; stores the code hash; writes `staff.bootstrapped` with actor `operator`, `via:
 operator`. Its output is IDs only.
+
+On staging the address is the owner's staff address, the staff list's first entry. The owner named
+it on 21 Nov at about 08:49; it is never written here. An agent runs the task on the build machine,
+redeems the enrolment code there, and enrols a TOTP authenticator as the second factor (staging
+allows one, §10.3). At that address's first Access sign-in an agent also enrols Access's own
+factor, a TOTP ([FD-05]; spec 01 §7.7). Each of the two secrets, Fin Admin's and Access's, stays
+only in a local secret file on the build machine, outside every repository, never printed or logged
+and never in CI. So agents can pass Access and sign in to Fin Admin on staging and run its journeys,
+reading the Fin and Cloudflare sign-in emails (codes and links) that [G-10] allows on staging only.
+The owner may add their own passkey later and then remove the TOTP (§6.7). Holding both TOTP
+secrets on the build machine is the steward's decision, 21 Nov 2026, for the owner's review
+([SA-04], [FD-05]).
+In production no agent holds any staff member's factor: the first production staff admin redeems
+the code and enrols their own passkey ([SA-04]).
 
 ### 10.7 Custom staff roles (stretch 3)
 
@@ -2259,7 +2299,7 @@ can pass Access, and none is meant to (S2-35).
 | `console-sign-in` | `GET https://console.<zone>/sign-in` | 200 with the shell's keyword |
 | `console-api-health` | `GET https://console.<zone>/api/health` | 200 JSON |
 | `admin` | `GET https://admin.<zone>/`, no Access cookie | Access's own redirect to the team sign-in |
-| `admin-api-health` | `GET https://admin.<zone>/api/health`, no Access cookie | Access's own refusal, as SP-25's check (d) records it. It **fails, and pages**, when the answer carries `Fin-Release` or the problem type `<docs origin>/errors/access_required`: only the admin API half sends those, so seeing one from outside proves that Access or the connector's check was bypassed |
+| `admin-api-health` | `GET https://admin.<zone>/api/health`, no Access cookie | Access's own redirect, as S-01's check (i) recorded on 21 Nov for `/api/` and `/api/ping`. It **fails, and pages**, when the answer carries `Fin-Release` or the problem type `<docs origin>/errors/access_required`: only the admin API half sends those, so seeing one from outside proves that Access or the connector's check was bypassed |
 
 The API half's `401 access_required` (§2.2 step 4) stays as defence in depth and is never expected
 from outside. The admin API half's liveness comes from its `process.health` lines and
@@ -2372,10 +2412,10 @@ code and authenticator paths (S2-25).
 
 | ID | Check |
 |---|---|
-| T-SAT-70 [STG] | The release smoke signs in to the console with the read-only smoke account and opens the Audit log; the owner signs in to Fin Admin through Access, is held at the factor step until it is shown, and opens Staff (recorded) (AC-SAT-19) |
-| T-SAT-71 [STG] | One sign-up delivers its code and the `new-sign-in` email to the seed inbox from `auth.<staging-zone>` with DKIM, SPF and DMARC passing (owner check, recorded) (AC-SAT-20) |
+| T-SAT-70 [STG] | The release smoke signs in to the console with the read-only smoke account and opens the Audit log; the first staff admin (an agent on the build machine, with §10.6's two TOTPs, Access's own factor and Fin Admin's, and the sign-in emails [G-10] allows, or the owner) signs in to Fin Admin through Access, is held at the factor step until it is shown, and opens Staff (recorded) (AC-SAT-19); its Fin Admin part waits only if SP-09 shows that a needed Access MFA setting exists only in the Zero Trust organisation's settings, which then waits for the owner (EXECUTION §2.5 step 9, CR-07) |
+| T-SAT-71 [STG] | One sign-up delivers its code and the `new-sign-in` email to the seed inbox from `auth.<staging-zone>`, as Email Sending's own delivery record shows (recorded); DKIM, SPF and DMARC passing on both (owner check, recorded): waiting for the owner, not met ([G-10]) (AC-SAT-20) |
 | T-SAT-72 [STG] | A drill sends 10 failed staff sign-ins; `staff-sign-in-failures` emails the staging policy (AC-SAT-21) |
-| T-SAT-73 [STG] | SP-25's result recorded; on the same-origin shape a POST to `console.<staging-zone>/api/auth/sign-out` reaches the API half with no OPTIONS and no redirect |
+| T-SAT-73 [STG] | SP-25's result recorded (S-01 passed on 21 Nov, `docs/plan/spikes.md`); on the same-origin shape a POST to `console.<staging-zone>/api/auth/sign-out` reaches the API half with no OPTIONS and no redirect |
 
 ---
 
@@ -2396,7 +2436,7 @@ fragments belong to the area's lane wherever they live; anything else goes throu
 | L-SAT-06 Console | A | `apps/console/**` except L-SAT-11's key paths | 12:30 on route stubs; screens after the CSP and kit check (12:15 to 13:00, research note D3 §9) | L-SAT-02, L-SAT-03, P0-G (`@fin/ui`, `packages/frame`, `api()`) | §14.2's routes and policy fragments; the StepUp modal; §15.2's screens; T-SAT-04, T-SAT-05, T-SAT-30, T-SAT-31 (console), T-SAT-50 to T-SAT-63 | S for `src/server/**`, N for `src/client/**` |
 | L-SAT-07 Fin Admin | B | `apps/admin/**` | 13:30 | L-SAT-04, P0-G | §14.3's routes and policy fragments; the AdminStepUp modal; §15.3's Saturday screens; T-SAT-04, T-SAT-05, T-SAT-14, T-SAT-30, T-SAT-31 (Fin Admin), T-SAT-64 to T-SAT-67 | S, N as console |
 | L-SAT-08 Test harness | A | `packages/testing/**`, `playwright.config.ts`, `e2e/fixtures/**` | 09:00 | P0-D | the canon seed with `example.*` addresses; the email-sink reader; the virtual-authenticator and TOTP helpers; the frozen clock; the Access stand-in; the static host (spec 01 §4.7); a seeded random generator for property tests (no new dependency) | S |
-| L-SAT-09 Ops and monitoring | B | `ops/fin/**`, `ops/monitoring/**` except area fragments, `ops/watcher/**` | after P0-7 | | the Access application and `pnpm fin access sync` and `revoke`; `pnpm fin task <env> staff-bootstrap`'s local half (§10.6); `FIN_ACCESS_READ_TOKEN` on `worker` (S2-11); §18.3's panels and §18.4's monitors; staging deploys at C2, C3 and C4 | S |
+| L-SAT-09 Ops and monitoring | B | `ops/fin/**`, `ops/monitoring/**` except area fragments, `ops/watcher/**` | after P0-7 | | the Access application and `pnpm fin access sync` and `revoke`; `pnpm fin staff bootstrap <env>`, the local half of the `staff-bootstrap` task (§10.6); `FIN_ACCESS_READ_TOKEN` on `worker` (S2-11); §18.3's panels and §18.4's monitors; staging deploys at C2, C3 and C4 | S |
 | L-SAT-10 Design | canvas | the two canvases (outside the repository) | 08:30 | | §15.4, in light, dark and phone, before the code that needs it merges; from 18:00 the verify boards ([KY-09]) | n/a |
 | L-SAT-11 API keys and the edge (stretch) | A | `packages/keys/**`; `apps/edge/**`; `apps/console/src/client/routes/developers/keys/**`; `apps/console/src/server/routes/keys.ts` and `src/server/policy/keys.ts`; `packages/db/src/schema/keys.ts`; migrations `*_keys_*`; grants `keys.json`; guards `keys.ts`; `packages/audit/src/events/api-keys.ts`; `packages/email/src/templates/api-keys/**`; monitoring `keys` | after C3, only if L-SAT-02 is green | L-SAT-02, L-SAT-03 | §12; T-SAT-40; `apps/console/e2e/sat/api-keys.spec.ts` | S |
 
@@ -2412,7 +2452,7 @@ P0-E db, audit ─► L-SAT-02 realms ┴─────────────
 P0-E outbox ─► L-SAT-05 email ───┘ (security emails for 02, 03, 04)
 P0-G ui, frame, api() ─► CSP and kit check (12:15 to 13:00) ─────────► 06, 07 screens
 L-SAT-08 harness ──────────────────────────────────────────────────► every journey
-SP-25 (09:15) ─► same-origin or split-host settings for 02, 06, 07
+SP-25 (passed 09:25) ─► same-origin settings for 02, 06, 07
 L-SAT-10 design ─► ProtectAccount, AdminSecondFactor, AdminStaff ─► 06, 07; AdminRoles and AdminRoleEditor ─► Sunday
 C3 18:00: L-SAT-02 green (AC-SAT-02 to AC-SAT-06)? ─► L-SAT-11 API keys and the edge
 ```
@@ -2437,14 +2477,17 @@ Better Auth endpoint; invitation hijack; giving more than one holds; removing th
 origin checks; a forged Access identity; a leaked service login writing a critical table). Extra
 checks: the test-truth check on every guard in `packages/identity`, `access`, `orgs` and `staff`; the
 endpoint-policy set reviewed against the installed Better Auth router by reading its source. Every
-merge carries a signed receipt whose sessions are within R11 and [RV-06]'s floor (AC-SAT-22). The
-nightly review at 01:00 Sunday is `all --cold` over everything merged.
+merge follows [G-10]'s interim merge rule: green CI, and fin-review's local run on the exact head,
+recorded in the pull request, with sessions within R11 and [RV-06]'s floor (AC-SAT-22). Signed
+receipts move to hardening (D6). The nightly review at 01:00 Sunday is `all --cold` over everything
+merged.
 
 ### 20.5 Checkpoints and cut lines (EXECUTION §3.7)
 
-- **C2 13:00:** a checkpoint, not Phase 0's exit, which is at 13:30 (EXECUTION §2.11). The owner
-  approves Phase 0's first staging deploy here (EXECUTION EX-15), and S-02 runs on it from 13:00 to
-  13:30. L-SAT-01 and L-SAT-05 have a merged first milestone; L-SAT-02 is on P0-E.
+- **C2 13:00:** a checkpoint, not Phase 0's exit, which is at 13:30 (EXECUTION §2.11). Phase 0's
+  first staging deploy runs here from the operator machine through `pnpm fin`, with no approval gate
+  until the owner is back ([BD-05]), and S-02 runs on it from 13:00 to 13:30. L-SAT-01 and L-SAT-05
+  have a merged first milestone; L-SAT-02 is on P0-E.
 - **C3 18:00:** if L-SAT-02 has not merged with AC-SAT-02 to AC-SAT-06 green, CUT-01 applies (Google,
   passwords, the staff reset screen, custom staff roles and AdminRoleEditor, API keys move, in that
   order). Otherwise L-SAT-11 starts.
@@ -2496,10 +2539,10 @@ nightly review at 01:00 Sunday is `all --cold` over everything merged.
 | AC-SAT-16 [E2E] | A custom read-only role sees no Team or Roles controls and the no-permission page | T-SAT-56 |
 | AC-SAT-17 [E2E] | Fin Admin: code, forced enrolment with the enrolment code, add with an intent and the code once, the new member enrols, a Viewer refused, change role, remove, passkey-alone sign-in | T-SAT-64 to T-SAT-67 |
 | AC-SAT-18 [E2E] | No page-policy violation; scroll stops behind a drawer; no inline script | T-SAT-62 |
-| AC-SAT-19 [STG] | The release smoke and the owner's Fin Admin check; request lines with the release SHA | T-SAT-70 |
-| AC-SAT-20 [STG] | Sign-up code and `new-sign-in` delivered with DKIM, SPF and DMARC passing | T-SAT-71 |
+| AC-SAT-19 [STG] | The release smoke and the Fin Admin check by the first staff admin (an agent on the build machine, or the owner), which waits only if SP-09 shows that a needed Access MFA setting exists only in the Zero Trust organisation's settings, which then waits for the owner (EXECUTION §2.5 step 9, CR-07; [FD-05]); request lines with the release SHA | T-SAT-70 |
+| AC-SAT-20 [STG] | Sign-up code and `new-sign-in` delivered; DKIM, SPF and DMARC passing, the owner's check, waiting for the owner | T-SAT-71 |
 | AC-SAT-21 [STG] | Ten failed staff sign-ins notify the staging policy | T-SAT-72 |
-| AC-SAT-22 [CI] | Every Saturday pull request merged with a signed receipt, the attack pass on its S files, sessions within R11 and the floor | the `gate` |
+| AC-SAT-22 [CI] | Every Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run showing the attack pass on its S files and sessions within R11 and the floor | the pull request's record until hardening (D6), when the `gate` checks signed receipts |
 | AC-SAT-23 [U, E2E] | Every cookie `__Host-`, `Secure`, `HttpOnly`, `Path=/`, no `Domain`; `session_token` `Strict`, the rest `Lax`; each origin-gate refusal reason; a cross-site form POST and a sibling host's `fetch` refused in three engines; no OPTIONS on the console's own calls | T-SAT-03, T-SAT-04, T-SAT-06, P0-D's gate tests; spec 06's `@security` project |
 | AC-SAT-24 [E2E] | The edge toggle in both frames: collapse and expand, focus, `aria-expanded`, remembered, hidden below 1280px, under a drawer's scrim, the specs' geometry; the rail's 24px brand mark | spec 06 AC-UI-09 |
 
@@ -2507,7 +2550,7 @@ nightly review at 01:00 Sunday is `all --cold` over everything merged.
 
 | ID | Statement |
 |---|---|
-| AC-SAT-25 [STG] | SP-25 passes on the staging zone, or the split-host fallback of §2.6 is chosen and recorded, before L-SAT-06's first ready pull request (T-SAT-73) |
+| AC-SAT-25 [STG] | SP-25 passed on the staging zone on 21 Nov (S-01, `docs/plan/spikes.md`), before L-SAT-06's first ready pull request; the split-host fallback of §2.6 is not needed (T-SAT-73) |
 | AC-SAT-26 [I] | Every cookie either realm sets matches §2.4 exactly (T-SAT-03, T-SAT-04) |
 | AC-SAT-27 [I] | Every unsafe request to either API half, `/api/auth/*` included, without the exact `Origin`, a `same-origin` `Sec-Fetch-Site` when sent, the right `X-Fin-App` and a JSON body is refused with `invalid_origin` and one `csrf.refused` line naming its reason and route pattern; the Google callback GET is the only exemption (T-SAT-06 and P0-D's gate tests) |
 | AC-SAT-28 [I] | On Fin Admin, every `/api/*` request without a valid Access JWT is refused before any handler, `/api/auth/*` included; when the key set cannot be fetched the API half fails closed (T-SAT-11, T-SAT-34) |
@@ -2541,7 +2584,7 @@ overturn any.
 
 | ID | Decision | Why |
 |---|---|---|
-| S2-01 | One routing mode read from configuration (`FIN_API_ORIGIN` set or not) switches between same-origin and the split-host fallback; both modes are unit-tested | SP-25 can fail on the day; a code change then would cost hours |
+| S2-01 | One routing mode read from configuration (`FIN_API_ORIGIN` set or not) switches between same-origin and the split-host fallback; both modes are unit-tested | SP-25 could have failed on the day, and a code change then would have cost hours; it passed on 21 Nov (§2.1), so the split-host mode stays only as the documented fallback (§2.6) |
 | S2-02 | The TOTP issuer is "Fin" in production and "Fin (staging)" in staging | Authenticator apps must not mix the two |
 | S2-03 | Staff backup codes are removed from `/two-factor/enable` answers and stored as an empty list, beside blocking the backup-code endpoints | [SA-04] says staff have none; the plugin makes them anyway |
 | S2-04 | Every library endpoint that writes a sign-in table runs inside Fin's unit of work, so its rows and their events share one transaction, and the sign-in tables of both realms are guarded (§13.8). If SP-10 shows that cannot hold for an endpoint, that endpoint is blocked and Fin writes its own route; no table leaves the guard list | R9 and the important-actions rule name sign-in-method changes; a leaked console login must not add a passkey or mint a session quietly, and the library's hook timing must not decide that |
@@ -2591,8 +2634,8 @@ overturn any.
 
 | # | Item | For |
 |---|---|---|
-| 1 | With [SA-05]'s default and S2-08, every developer who owns their first organisation must add a factor at sign-up; "Skip for now" shows only for invitees in non-privileged roles. Confirm, or narrow [SA-05] | owner, before Saturday's start |
-| 2 | SP-25's result decides between same-origin and the split-host fallback (§2.6) | ops agent, 09:15 to 09:45 (EXECUTION §2.6, S-01) |
+| 1 | Resolved: the owner took [SA-05]'s default (yes) at the Saturday sitting, 21 Nov. With S2-08, every developer who owns their first organisation must add a factor at sign-up; "Skip for now" shows only for invitees in non-privileged roles | none |
+| 2 | Resolved: SP-25 passed on 21 Nov (S-01, 09:10 to 09:25), so the shape is same-origin and the split-host fallback of §2.6 is not needed | none |
 | 3 | SP-10's pins on 1.7.25: that every adapter write of a request goes through Fin's unit of work and `hooks.after` runs before the handler returns (S2-04; an endpoint where it does not is blocked and replaced), the versioned-secrets option, TOTP reuse within a step, counter regression, `returnHeaders` on `getSession` | L-SAT-02, Saturday morning |
 | 4 | `FIN_ACCESS_READ_TOKEN` is a new credential (S2-11): it needs a CR entry, a row in `ops/credentials.json` and a rotation runbook | owner, L-SAT-09 |
 | 5 | Research note D3's Q5 (a QR encoder for the Authenticator board) | owner |
@@ -2603,7 +2646,7 @@ overturn any.
 | 10 | Copy changes against the inventory: the name-change sentence loses the name (S2-17); invitation links change to `/invite`; Team gains "Change role" and "Resend" on invitations; ProtectAccount's held state has no "Skip" | L-SAT-10 |
 | 11 | Spec 04 should send `Fin-Organization` on `/api/money/*` (IF-02) and add its intents through IF-03 | Monday's spec writer |
 | 12 | P0-D must provide `X-Fin-App` in the origin gate, the app-route idempotency store and the problem envelope fields (IF-10); P0-E the guard registrations with `refs` and the journal API (IF-11) | P0-D, P0-E |
-| 13 | `pnpm fin access sync` and `revoke`, and the staff-bootstrap task's local half, are new `ops/fin` commands (control paths) | L-SAT-09, owner approval |
+| 13 | `pnpm fin access sync` and `revoke`, and the staff-bootstrap task's local half, are new `ops/fin` commands (control paths, [CI-14]) | L-SAT-09, owner approval; GitHub does not enforce that approval until hardening ([BD-02]), so their pull request, if merged while the owner is away, is listed in the away-time log for the owner's review |
 | 14 | Developer account recovery (S2-28) and the switches screen (S2-27) are scheduled for Sunday's spill block, which is already full | steward at C1 Sunday |
 | 15 | Split `member.invite` ("Invite and remove people", [SA-11]) into `member.invite` and a privileged `member.remove` with its own intent. Recommended: yes, for R6's granular roles (a role meant to add people should not be able to remove them). It changes the owner-approved catalogue to 27 permissions, the RoleEditor board, T-SAT-09, §7.6, §8.2, §9.2 and §14.2. Until answered, removal stays under `member.invite`, and S2-42 already takes the outage lever away | owner, before L-SAT-01's first merge |
 | 16 | Spec 03's go-live approval transaction calls `identity.revoke_trusted_browsers(org_id, 'production_access')` (IF-09, §6.6), and spec 03's Fin Admin organisation screens carry the staff recovery routes of §6.8 | Sunday's spec writer |
