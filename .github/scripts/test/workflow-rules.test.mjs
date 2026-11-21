@@ -1,17 +1,19 @@
 // workflow-rules (spec 07 §10.8, T-RV-40): each refusal planted in a workflow that is otherwise
 // clean, the outline reader on the YAML shapes the workflows use, and this repository's own files.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GATED_JOBS } from "../gate.mjs";
 import {
+  checkAction,
   checkPins,
   checkRepository,
   checkWorkflow,
   child,
   EXPRESSION_OPEN as E,
+  parseFlow,
   parseOutline,
   stripComment,
 } from "../workflow-rules.mjs";
@@ -324,6 +326,378 @@ describe("checkWorkflow", () => {
       "    runs-on: ubuntu-24.04\n    uses: ./.github/workflows/other.yml\n",
     );
     assert.ok(rules(text).includes("reusable-workflow"));
+  });
+
+  it("refuses an expression in a shell: value, which a runner runs as a command", () => {
+    const text = planted(
+      "        run: |\n",
+      `        shell: bash -c "${E} env.X }} {0}"\n        run: |\n`,
+    );
+    assert.ok(rules(text).includes("expression-in-run"));
+  });
+});
+
+describe("flow style reads as block style does", () => {
+  const at = { line: 1, indent: 0, raw: "" };
+
+  it("parses one-line flow mappings and sequences into the outline", () => {
+    const parsed = parseFlow(
+      `{ a: 1, "b, c": 'it''s', d: [x, "y: z", { e: f }], g: {}, h, url: https://example.com/x, }`,
+      at,
+    );
+    assert.ok(parsed.ok && parsed.mapping);
+    const keys = parsed.ok ? parsed.children.map((c) => `${c.key}=${c.value}`) : [];
+    assert.deepEqual(keys, [
+      "a=1",
+      "b, c='it''s'",
+      `d=[x, "y: z", { e: f }]`,
+      "g={}",
+      "h=",
+      "url=https://example.com/x",
+    ]);
+    const d = parsed.ok ? parsed.children[2] : undefined;
+    assert.deepEqual(
+      d?.children.map((item) => item.children.map((c) => `${c.key ?? ""}:${c.value}`).join(",")),
+      [":x", ':"y: z"', "e:f"],
+    );
+    const seq = parseFlow("[push, pull_request: { types: [opened] }]", at);
+    assert.ok(seq.ok && !seq.mapping);
+    assert.deepEqual(
+      seq.ok ? seq.children.map((item) => item.children[0]?.key ?? item.children[0]?.value) : [],
+      ["push", "pull_request"],
+    );
+  });
+
+  it("refuses a flow collection it cannot read", () => {
+    for (const [text, why] of [
+      ["{ a: b", "unclosed"],
+      ['[ "a ]', "unclosed"],
+      ["{ a: *x }", "alias"],
+      ["[ &x a ]", "alias"],
+      ["{ a: !!str b }", "alias"],
+      ["{ a: b } c", "syntax"],
+      ["{ ? a : b }", "syntax"],
+      ["{ [a]: b }", "syntax"],
+      ["{ a: b c: d }", "syntax"],
+      [`{ a: ci-${E} github.sha }} }`, "syntax"],
+    ]) {
+      const parsed = parseFlow(String(text), at);
+      assert.deepEqual(parsed, { ok: false, why }, String(text));
+    }
+  });
+
+  for (const trigger of [
+    "pull_request_target",
+    "issue_comment",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "workflow_run",
+  ]) {
+    it(`refuses the ${trigger} trigger in a flow mapping and in a block sequence`, () => {
+      const on = "on:\n  pull_request:\n  push:\n    branches: [main]\n";
+      assert.ok(rules(planted(on, `on: { push: {}, ${trigger}: {} }\n`)).includes("triggers"));
+      assert.ok(rules(planted(on, `on:\n  - push\n  - ${trigger}\n`)).includes("triggers"));
+    });
+  }
+
+  it("applies every step rule to a flow-style step and to a flow sequence of steps", () => {
+    const step = `      - uses: actions/checkout@${SHA} # v7.0.1\n        with:\n          persist-credentials: false\n`;
+    const flow = (/** @type {string} */ text) => planted(step, `${text}\n`);
+    assert.deepEqual(
+      rules(
+        flow(
+          `      - { uses: actions/checkout@${SHA}, with: { persist-credentials: false } } # v7.0.1`,
+        ),
+      ),
+      [],
+    );
+    assert.ok(
+      rules(flow(`      - { uses: someone/thing@${SHA} } # v1.0.0`)).includes("action-owner"),
+    );
+    assert.ok(
+      rules(flow(`      - { uses: actions/checkout@${SHA} } # v7.0.1`)).includes(
+        "checkout-credentials",
+      ),
+    );
+    assert.ok(rules(flow(`      - { uses: actions/checkout@${SHA} }`)).includes("action-pin"));
+    assert.ok(rules(flow(`      - { uses: "docker://alpine:3" }`)).includes("action-docker"));
+    assert.ok(
+      rules(flow(`      - { run: "echo ${E} github.sha }}" }`)).includes("expression-in-run"),
+    );
+    const steps = planted(
+      "    steps:\n",
+      `    steps: [{ uses: someone/thing@${SHA} }, { run: "echo ${E} github.sha }}" }] # v1.0.0\n    x-steps:\n`,
+    );
+    const found = rules(steps);
+    assert.ok(found.includes("action-owner") && found.includes("expression-in-run"), found.join());
+  });
+
+  it("applies the job rules to a flow-style job, its services and its container", () => {
+    const flowJob = planted(
+      "    runs-on: ubuntu-24.04\n",
+      "    runs-on: ubuntu-24.04\n    services: { pg: { image: postgres:18.7-trixie } }\n",
+    );
+    assert.ok(rules(flowJob).includes("image-digest"));
+    const pinned = flowJob.replace("trixie }", `trixie@sha256:${"e".repeat(64)} }`);
+    assert.deepEqual(rules(pinned), []);
+    const call = planted(
+      "jobs:\n",
+      "jobs:\n  call: { uses: ./.github/workflows/x.yml, secrets: inherit, runs-on: ubuntu-24.04, timeout-minutes: 5, permissions: {} }\n",
+    );
+    const found = rules(call);
+    assert.ok(
+      found.includes("reusable-workflow") && found.includes("secrets-inherit"),
+      found.join(),
+    );
+  });
+});
+
+describe("forms the reader refuses rather than misreads", () => {
+  /** @type {[string, string, string, string][]} */
+  const cases = [
+    [
+      "a run continued on the next line",
+      'run: |\n          echo "$VALUE" # a shell comment',
+      `run: echo\n          ${E} github.sha }}`,
+      "multi-line-value",
+    ],
+    [
+      "a run value started on the next line",
+      'run: |\n          echo "$VALUE" # a shell comment',
+      `run:\n          echo ${E} github.sha }}`,
+      "expression-in-run",
+    ],
+    [
+      "a quoted run value that does not close on its line",
+      'run: |\n          echo "$VALUE" # a shell comment',
+      `run: "echo\n          ${E} github.sha }}"`,
+      "multi-line-value",
+    ],
+    [
+      "a flow collection on a line of its own",
+      "        with:\n          persist-credentials: false",
+      "        with:\n          { persist-credentials: false }",
+      "multi-line-value",
+    ],
+    [
+      "an item's scalar followed by a key",
+      "      - name: Run",
+      "      - Run\n        name: x",
+      "multi-line-value",
+    ],
+    ["an explicit key", "  pull_request:\n", "  ? pull_request_review\n", "explicit-key"],
+    [
+      "an alias as a step",
+      "      - name: Run\n",
+      "      - *step\n      - name: Run\n",
+      "yaml-alias",
+    ],
+    ["an anchor", "  pull_request:\n", "  pull_request: &trigger {}\n", "yaml-alias"],
+    ["a tag", "    timeout-minutes: 5", "    timeout-minutes: !!int 5", "yaml-alias"],
+    ["a merge key", "    timeout-minutes: 5", "    <<: { timeout-minutes: 5 }", "yaml-alias"],
+    [
+      "a key given twice",
+      `      - uses: actions/checkout@${SHA} # v7.0.1\n`,
+      `      - uses: actions/checkout@${SHA} # v7.0.1\n        uses: someone/thing@${SHA} # v1.0.0\n`,
+      "duplicate-key",
+    ],
+    ["a second document", "name: sample\n", "name: sample\n---\nname: other\n", "yaml-document"],
+  ];
+  for (const [what, from, to, rule] of cases) {
+    it(`refuses ${what}`, () => {
+      const found = rules(planted(from, to));
+      assert.ok(found.includes(rule), `${what}: ${found.join(", ")}`);
+    });
+  }
+
+  it("passes a document marker at the top and ordinary block scalars", () => {
+    assert.deepEqual(rules(`---\n${CLEAN}`), []);
+    const folded = planted(
+      `          VALUE: ${E} github.sha }}\n`,
+      `          VALUE: ${E} github.sha }}\n          OPTIONS: >-\n            --a\n\n            --b\n`,
+    );
+    assert.deepEqual(rules(folded), []);
+  });
+});
+
+describe("strangers' text in other spellings", () => {
+  for (const spelling of [
+    "github.event['pull_request']['title']",
+    'github.event["pull_request"].body',
+    "github.EVENT.Pull_Request.TITLE",
+    "github . head_ref",
+    "github['head_ref']",
+    "toJSON(github.event)",
+    "toJSON(github.event.pull_request)",
+    "toJSON( github )",
+    "github.event.commits[0].message",
+    "github.event.commits.*.author.email",
+    "github.event.head_commit.message",
+    "github.event.pull_request.head.label",
+    "github.event.pull_request.head.repo.default_branch",
+    "github.event.review_comment.body",
+    "github.*",
+  ]) {
+    it(`refuses ${spelling}`, () => {
+      const text = planted(`VALUE: ${E} github.sha }}`, `VALUE: ${E} ${spelling} }}`);
+      assert.ok(rules(text).includes("untrusted-context"), spelling);
+    });
+  }
+
+  it("refuses them in a YAML-quoted bracket, and keeps the safe fields", () => {
+    const quoted = planted(
+      `VALUE: ${E} github.sha }}`,
+      `VALUE: '${E} github.event[''pull_request''][''title''] }}'`,
+    );
+    assert.ok(rules(quoted).includes("untrusted-context"));
+    for (const safe of [
+      "github.event.pull_request.number",
+      "github.event.pull_request.head.sha",
+      "github.event.pull_request.base.sha",
+      "github.event.before",
+      "github.event_name",
+      "github.sha",
+      "github.ref_name",
+    ]) {
+      const text = planted(`VALUE: ${E} github.sha }}`, `VALUE: ${E} ${safe} }}`);
+      assert.deepEqual(rules(text), [], safe);
+    }
+  });
+});
+
+describe("the gate needs every job that can fail", () => {
+  const gate = (/** @type {string} */ needs, /** @type {string} */ extra = "") =>
+    `${CLEAN}  canary:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    continue-on-error: true\n    permissions: {}\n    steps:\n      - run: echo\n${extra}  gate:\n    needs: ${needs}\n    if: always()\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: echo\n`;
+
+  it("passes a gate that needs every blocking job, the canary left out", () => {
+    assert.deepEqual(rules(gate("[build]")), []);
+    assert.deepEqual(rules(gate("\n      - build")), []);
+  });
+
+  it("refuses a job left out of gate's needs, however needs is written", () => {
+    const extra =
+      "  lint:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions: {}\n    steps:\n      - run: echo\n";
+    for (const needs of ["[build]", "build", "\n      - build"]) {
+      const found = checkWorkflow("ci.yml", gate(needs, extra));
+      assert.ok(
+        found.some((f) => f.rule === "gate-needs" && f.message.includes("lint")),
+        needs,
+      );
+    }
+  });
+
+  it("refuses a gate that does not run always()", () => {
+    for (const when of ["success()", `${E} !cancelled() }}`, ""]) {
+      const text = gate("[build]").replace(
+        "    if: always()\n",
+        when === "" ? "" : `    if: ${when}\n`,
+      );
+      assert.ok(rules(text).includes("gate-needs"), when);
+    }
+    assert.deepEqual(rules(gate("[build]").replace("if: always()", `if: ${E} always() }}`)), []);
+  });
+});
+
+describe("caches a pull request's run could leave", () => {
+  const save = (/** @type {string} */ when, /** @type {string} */ action = "actions/cache/save") =>
+    planted(
+      "      - name: Run\n",
+      `      - uses: ${action}@${SHA} # v6.1.0\n${when === "" ? "" : `        if: ${when}\n`}        with:\n          path: .turbo/cache\n          key: y\n      - name: Run\n`,
+    );
+
+  it("refuses a save that can run on a pull request, and actions/cache's own save", () => {
+    for (const when of [
+      "",
+      "always()",
+      "github.event_name == 'push' || true",
+      "github.ref == 'refs/heads/main'",
+    ]) {
+      assert.ok(rules(save(when), "ci.yml").includes("cache-save"), when);
+    }
+    assert.ok(rules(save("", "actions/cache"), "ci.yml").includes("cache-save"));
+  });
+
+  it("passes a save on push only, and any save in a workflow no pull request starts", () => {
+    assert.deepEqual(rules(save("github.event_name == 'push'"), "ci.yml"), []);
+    assert.deepEqual(
+      rules(save("github.event_name == 'push' && steps.c.outputs.cache-hit != 'true'"), "ci.yml"),
+      [],
+    );
+    assert.deepEqual(rules(save("").replace("  pull_request:\n", ""), "ci.yml"), []);
+  });
+});
+
+describe("actions under .github/", () => {
+  const ACTION = `name: local
+description: a composite action
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@${SHA} # v7.0.1
+      with:
+        persist-credentials: false
+    - shell: bash
+      env:
+        VALUE: \${{ inputs.value }}
+      run: echo "$VALUE"
+`;
+
+  it("keeps the step and text rules in a composite action", () => {
+    assert.deepEqual(checkAction("action.yml", ACTION), []);
+    const actionRules = (/** @type {string} */ text) =>
+      checkAction("action.yml", text).map((f) => f.rule);
+    assert.ok(
+      actionRules(ACTION.replace(`actions/checkout@${SHA}`, "someone/thing@main")).includes(
+        "action-pin",
+      ),
+    );
+    assert.ok(
+      actionRules(ACTION.replace(`actions/checkout@${SHA}`, `someone/thing@${SHA}`)).includes(
+        "action-owner",
+      ),
+    );
+    assert.ok(
+      actionRules(ACTION.replace('echo "$VALUE"', `echo "${E} inputs.value }}"`)).includes(
+        "expression-in-run",
+      ),
+    );
+    assert.ok(
+      actionRules(
+        ACTION.replace(`${E} inputs.value }}`, `${E} github.event.pull_request.title }}`),
+      ).includes("untrusted-context"),
+    );
+    assert.ok(
+      actionRules("runs:\n  using: docker\n  image: Dockerfile\n").includes("action-docker"),
+    );
+    assert.ok(actionRules("name: x\n").includes("action"));
+  });
+
+  it("reads every action and workflow under .github/, and refuses a link there", (t) => {
+    const root = tempDir(t);
+    writeTree(root, {
+      ".github/workflows/sample.yml": CLEAN,
+      ".github/workflows/action.yml": CLEAN.replace(
+        "  pull_request:\n",
+        "  pull_request_target:\n",
+      ),
+      ".github/workflows/old/ignored.yml": "not: a workflow GitHub runs\n",
+      ".github/actions/thing/action.yml": ACTION.replace(
+        `actions/checkout@${SHA}`,
+        "someone/thing@main",
+      ),
+      ".github/dependabot.yml": "version: 2\n",
+    });
+    symlinkSync("/etc/hosts", join(root, ".github", "actions", "linked.yml"));
+    const { files, findings } = checkRepository(root);
+    assert.equal(files, 3);
+    const where = findings.map((f) => `${f.file}:${f.rule}`);
+    assert.ok(where.includes(".github/actions/thing/action.yml:action-pin"), where.join());
+    assert.ok(where.includes(".github/workflows/action.yml:triggers"), where.join());
+    assert.ok(where.includes(".github/actions/linked.yml:link"), where.join());
+    assert.ok(
+      !where.some((w) => w.includes("ignored.yml") || w.includes("dependabot")),
+      where.join(),
+    );
   });
 });
 

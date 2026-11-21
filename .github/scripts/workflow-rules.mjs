@@ -1,40 +1,56 @@
 #!/usr/bin/env node
 // workflow-rules (spec 07 §10.8; spec 01 §5.1; ARCHITECTURE §11.2, §11.5; EXECUTION §2.3). A
-// control path, run by ci.yml's static job beside zizmor and actionlint. It refuses, in every
-// workflow under .github/workflows:
+// control path, run by ci.yml's static job beside zizmor and actionlint. It reads every workflow
+// in .github/workflows and every action (action.yml or action.yaml) anywhere under .github/, and
+// refuses:
 //   - the triggers pull_request_target, issue_comment, pull_request_review,
-//     pull_request_review_comment and workflow_run (no comment or review trigger, ever);
-//   - `${{ }}` inside a run: value (values reach a shell through env: only);
-//   - a reference to github.event.pull_request.title, .body, .head.ref, github.head_ref,
-//     github.event.comment, github.event.review or github.event.issue (strangers' text, CI-15);
+//     pull_request_review_comment and workflow_run (no comment or review trigger, ever), however
+//     `on:` is written;
+//   - `${{ }}` inside a run: or shell: value (values reach a shell through env: only);
+//   - a reference to text strangers write (CI-15): github.event.pull_request.title, .body,
+//     .head.ref, .head.label, .head.repo.default_branch, github.head_ref, github.event.comment,
+//     .review, .issue, .pages, .commits, .head_commit's message and author, a whole object that
+//     holds any of them (toJSON(github.event)) or a wildcard over github; matched as GitHub reads
+//     an expression: property names in any case, `['name']` as `.name`, spaces around a dot;
 //   - `secrets: inherit`;
 //   - a workflow without a top-level `permissions: {}`, `concurrency:` or
 //     `TURBO_TELEMETRY_DISABLED: "1"` in its top-level env;
 //   - a job without `timeout-minutes`, without its own `permissions`, or on a runner other than
-//     ubuntu-24.04;
+//     ubuntu-24.04; a job that calls a reusable workflow;
+//   - in a workflow with a `gate` job: a job that can fail (no `continue-on-error: true`) left out
+//     of gate's needs, and a gate without `if: always()` (spec 01 §5.3: gate needs every job
+//     but the non-blocking canary);
 //   - a checkout without `persist-credentials: false`; a setup-node without
 //     `package-manager-cache: false`, or with `cache:`;
-//   - a `uses:` that is not a GitHub-owned action (actions/*, github/*) or a local action, or is
-//     not pinned to a 40-character commit SHA with its version in a comment; a docker:// action;
+//   - a `uses:` that is not a GitHub-owned action (actions/*, github/*) or a local action under
+//     .github/, or is not pinned to a 40-character commit SHA with its version in a comment; a
+//     docker:// action, and a local action that runs a container;
 //   - a container or service image not pinned by digest;
 //   - a cache in release.yml, dependencies.yml or nightly.yml (release builds and scans restore no
-//     cache, ARCHITECTURE §11.3), and a cache of the review ledger in a workflow a pull request
-//     can start (spec 07 §10.3);
-//   - a sequence item indented no deeper than its key, a tab in the indentation, and a flow
-//     collection that does not close on its own line (the reader below relies on all three);
+//     cache, ARCHITECTURE §11.3); in a workflow a pull request can start, a cache saved other than
+//     on push (an actions/cache/save whose `if:` is not `github.event_name == 'push' && ...`, or
+//     actions/cache, which saves in its post step), and a cache of the review ledger;
+//   - and every YAML form the reader below does not read, so no rule is ever skipped by a file it
+//     misreads: a tab in the indentation, a sequence item no deeper than its key, a flow
+//     collection that does not close on its line or that it cannot read, a value continued on
+//     the next line other than as a block scalar (| or >), an explicit key (`? `), an anchor,
+//     alias, tag or merge key, a key given twice in one mapping, and more than one document;
 // and, across files, a Postgres image in a workflow that differs from compose.yaml's.
 //
-// The reader is a small outline of YAML's block style, the style these files are written in;
-// actionlint parses them fully, so a file this reader misreads still fails CI there.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+// The reader outlines YAML's block style and reads a flow collection that closes on its own line
+// ({ ... } or [ ... ]) into the same outline, so every rule reads both styles alike. It is not a
+// full YAML parser: what it does not read, it refuses (the last item above) rather than skip.
+// actionlint and zizmor run beside it, but no rule here relies on them.
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join, relative, sep } from "node:path";
 import { clean, isMain, say } from "./lib/ci.mjs";
 
 /** @typedef {{ file: string, line: number, rule: string, message: string }} Finding */
 /**
  * @typedef {{
  *   key: string | null, value: string, raw: string, line: number, indent: number,
- *   item: boolean, children: OutlineNode[], scalar: { line: number, text: string }[],
+ *   item: boolean, inline: boolean, flow: boolean, children: OutlineNode[],
+ *   scalar: { line: number, text: string }[],
  * }} OutlineNode
  */
 
@@ -45,14 +61,25 @@ export const FORBIDDEN_TRIGGERS = [
   "pull_request_review_comment",
   "workflow_run",
 ];
+/** Strangers' text (GitHub's list of untrusted inputs), matched in expressionText's form. */
 export const UNTRUSTED_CONTEXTS = [
   /github\.event\.pull_request\.title/,
   /github\.event\.pull_request\.body/,
   /github\.event\.pull_request\.head\.ref/,
+  /github\.event\.pull_request\.head\.label/,
+  /github\.event\.pull_request\.head\.repo\.default_branch/,
   /github\.head_ref/,
   /github\.event\.comment/,
   /github\.event\.review/,
   /github\.event\.issue/,
+  /github\.event\.pages/,
+  /github\.event\.commits/,
+  /github\.event\.head_commit\.(?:message|author)/,
+  // A whole object that holds any of the above, read at once (toJSON, format, a comparison).
+  /\bgithub\.event(?:\.pull_request(?:\.head(?:\.repo)?)?|\.head_commit(?:\.author)?)?(?![\w.-])/,
+  /\btojson\(\s*github\s*\)/,
+  // A wildcard over the github context reads every field below it.
+  /\bgithub(?:\.[\w-]+)*\.\*/,
 ];
 export const RUNNER = "ubuntu-24.04";
 /** The opening of a GitHub expression, spelled so that no linter reads it as a template. */
@@ -60,9 +87,16 @@ export const EXPRESSION_OPEN = `${"$"}{{`;
 export const ACTION_OWNERS = new Set(["actions", "github"]);
 /** Workflows that restore no cache (release builds and scans, ARCHITECTURE §11.3). */
 export const NO_CACHE_WORKFLOWS = new Set(["release.yml", "dependencies.yml", "nightly.yml"]);
+/** Keys whose value a runner hands to a shell as a command. */
+const COMMAND_KEYS = new Set(["run", "shell"]);
 
 const KEY = /^("[^"]*"|'[^']*'|[^\s"'#:{}[\],&*!|>%@`][^:#]*?)\s*:(?=\s|$)/;
 const PINNED = /^([\w.-]+)\/([\w.-]+)(\/[\w./-]+)?@([0-9a-f]{40})$/;
+const BLOCK_SCALAR = /^[|>][1-9+-]*$/;
+/** An anchor, an alias or a tag where a value or an entry starts. */
+const ALIAS_START = /^[&*!]/;
+/** A save that runs on push only: `github.event_name == 'push'`, alone or first in a conjunction. */
+const PUSH_ONLY = /^github\.event_name\s*==\s*'push'\s*(?:&&[^|]*)?$/;
 
 /**
  * The text of a line before its comment: a `#` at the start or after a space, outside quotes.
@@ -104,6 +138,28 @@ function unquote(key) {
 }
 
 /**
+ * Whether a value that opens a quote closes it, with nothing after (a quoted scalar on one line).
+ * @param {string} value
+ */
+function quoteCloses(value) {
+  const q = value[0];
+  if (q !== '"' && q !== "'") return true;
+  for (let i = 1; i < value.length; i++) {
+    if (q === '"' && value[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (value[i] !== q) continue;
+    if (q === "'" && value[i + 1] === "'") {
+      i++;
+      continue;
+    }
+    return value.slice(i + 1).trim() === "";
+  }
+  return false;
+}
+
+/**
  * @param {string | null} key
  * @param {string} value
  * @param {string} raw
@@ -113,12 +169,184 @@ function unquote(key) {
  * @returns {OutlineNode}
  */
 function makeNode(key, value, raw, line, indent, item) {
-  return { key, value, raw, line, indent, item, children: [], scalar: [] };
+  return {
+    key,
+    value,
+    raw,
+    line,
+    indent,
+    item,
+    inline: false,
+    flow: false,
+    children: [],
+    scalar: [],
+  };
+}
+
+class FlowError extends Error {
+  /** @param {"unclosed" | "alias" | "syntax"} why */
+  constructor(why) {
+    super(why);
+    this.why = why;
+  }
 }
 
 /**
- * Reads the block-style outline of a YAML file: mappings, sequences, inline values and block
- * scalars (kept as lines). Structure problems the reader depends on are returned as findings.
+ * Reads a flow collection that closes on its line ({ ... } or [ ... ], its comment already
+ * stripped) into outline nodes, as YAML reads it: quoted and plain scalars, nested collections,
+ * `key: value` pairs (a key alone has no value), and a single-pair mapping as a sequence entry. A
+ * mapping's pairs become key nodes, a sequence's entries item nodes, as the block style's would.
+ * @param {string} text
+ * @param {{ line: number, indent: number, raw: string }} at
+ * @returns {{ ok: true, mapping: boolean, children: OutlineNode[] }
+ *   | { ok: false, why: "unclosed" | "alias" | "syntax" }}
+ */
+export function parseFlow(text, at) {
+  let i = 0;
+  /** @param {"unclosed" | "alias" | "syntax"} why @returns {never} */
+  const fail = (why) => {
+    throw new FlowError(why);
+  };
+  const space = () => {
+    while (i < text.length && (text[i] === " " || text[i] === "\t")) i++;
+  };
+  /**
+   * @param {string | null} key
+   * @param {string} value
+   * @param {boolean} item
+   */
+  const node = (key, value, item) => {
+    const n = makeNode(key, value, at.raw, at.line, at.indent + 1, item);
+    n.flow = true;
+    n.inline = true;
+    return n;
+  };
+  /** A quoted or plain scalar, as written. */
+  const scalar = () => {
+    const c = text[i] ?? "";
+    if (c === '"' || c === "'") {
+      const start = i++;
+      while (i < text.length) {
+        if (c === '"' && text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === c) {
+          if (c === "'" && text[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i++;
+          return text.slice(start, i);
+        }
+        i++;
+      }
+      return fail("unclosed");
+    }
+    if (ALIAS_START.test(c)) fail("alias");
+    if ("?|>%@`".includes(c) || (c === "-" && /\s/.test(text[i + 1] ?? " "))) fail("syntax");
+    const start = i;
+    while (i < text.length) {
+      const d = text[i] ?? "";
+      if (",[]{}".includes(d)) break;
+      if (d === ":" && (i + 1 === text.length || /[\s,[\]{}]/.test(text[i + 1] ?? ""))) break;
+      i++;
+    }
+    return text.slice(start, i).trimEnd();
+  };
+  /** @returns {{ text: string, children: OutlineNode[] }} */
+  const value = () => {
+    space();
+    const c = text[i] ?? "";
+    if (i >= text.length || ",}]".includes(c)) return { text: "", children: [] };
+    if (c === "{" || c === "[") {
+      const start = i;
+      const children = collection();
+      return { text: text.slice(start, i), children };
+    }
+    return { text: scalar(), children: [] };
+  };
+  /** @returns {OutlineNode} */
+  const pair = () => {
+    if (text[i] === "{" || text[i] === "[") fail("syntax");
+    const key = scalar();
+    if (key === "") fail("syntax");
+    space();
+    const n = node(unquote(key), "", false);
+    if (text[i] === ":") {
+      i++;
+      const v = value();
+      n.value = v.text;
+      n.children = v.children;
+    }
+    return n;
+  };
+  /** @returns {OutlineNode} */
+  const entry = () => {
+    const item = node(null, "", true);
+    if (text[i] === "{" || text[i] === "[") {
+      const start = i;
+      const children = collection();
+      if (text[start] === "{") item.children = children;
+      else {
+        const inner = node(null, text.slice(start, i), false);
+        inner.children = children;
+        item.children = [inner];
+      }
+      return item;
+    }
+    const s = scalar();
+    space();
+    if (text[i] === ":") {
+      i++;
+      const v = value();
+      const n = node(unquote(s), v.text, false);
+      n.children = v.children;
+      item.children = [n];
+    } else {
+      item.children = [node(null, s, false)];
+    }
+    return item;
+  };
+  /** @returns {OutlineNode[]} */
+  const collection = () => {
+    const mapping = text[i] === "{";
+    const close = mapping ? "}" : "]";
+    i++;
+    /** @type {OutlineNode[]} */
+    const children = [];
+    for (;;) {
+      space();
+      if (i >= text.length) fail("unclosed");
+      if (text[i] === close) {
+        i++;
+        return children;
+      }
+      children.push(mapping ? pair() : entry());
+      space();
+      if (i >= text.length) fail("unclosed");
+      if (text[i] === ",") i++;
+      else if (text[i] !== close) fail("syntax");
+    }
+  };
+  try {
+    space();
+    const mapping = text[i] === "{";
+    if (!mapping && text[i] !== "[") return { ok: false, why: "syntax" };
+    const children = collection();
+    space();
+    if (i < text.length) return { ok: false, why: "syntax" };
+    return { ok: true, mapping, children };
+  } catch (error) {
+    if (error instanceof FlowError) return { ok: false, why: error.why };
+    throw error;
+  }
+}
+
+/**
+ * Reads the outline of a YAML file: block mappings and sequences, inline values, block scalars
+ * (kept as lines) and flow collections that close on their line (read into child nodes). Every
+ * form it does not read is returned as a finding (see the header).
  * @param {string} file
  * @param {string} text
  * @returns {{ root: OutlineNode, findings: Finding[] }}
@@ -126,12 +354,42 @@ function makeNode(key, value, raw, line, indent, item) {
 export function parseOutline(file, text) {
   /** @type {Finding[]} */
   const findings = [];
+  /**
+   * @param {number} line
+   * @param {string} rule
+   * @param {string} message
+   */
+  const add = (line, rule, message) => findings.push({ file, line, rule, message });
+  const multiLine = (/** @type {number} */ line) =>
+    add(
+      line,
+      "multi-line-value",
+      "continue a value on the next line only as a block scalar (| or >); write it on its key's line",
+    );
   const root = makeNode(null, "", "", 0, -1, false);
   /** @type {OutlineNode[]} */
   const stack = [root];
   const top = () => /** @type {OutlineNode} */ (stack.at(-1));
   /** @type {{ node: OutlineNode, parentIndent: number } | null} */
   let block = null;
+  let content = false;
+  /**
+   * Reads a flow collection, or refuses it (null).
+   * @param {string} flowText
+   * @param {{ line: number, indent: number, raw: string }} at
+   */
+  const readFlow = (flowText, at) => {
+    const parsed = parseFlow(flowText, at);
+    if (parsed.ok) return parsed;
+    if (parsed.why === "alias") {
+      add(at.line, "yaml-alias", "no anchor, alias or tag: the reader does not follow them");
+    } else if (parsed.why === "unclosed") {
+      add(at.line, "flow-collection", "close a flow collection on the line that opens it");
+    } else {
+      add(at.line, "flow-collection", "write this flow collection in block style");
+    }
+    return null;
+  };
   const lines = text.split(/\r?\n/);
   for (const [index, raw] of lines.entries()) {
     const line = index + 1;
@@ -144,72 +402,112 @@ export function parseOutline(file, text) {
       block = null;
     }
     if (lead.includes("\t")) {
-      findings.push({ file, line, rule: "indentation", message: "a tab in the indentation" });
+      add(line, "indentation", "a tab in the indentation");
     }
-    const content = stripComment(raw);
-    if (content.trim() === "") continue;
+    const stripped = stripComment(raw);
+    if (stripped.trim() === "") continue;
     let col = lead.length;
-    let rest = content.slice(col).trimEnd();
-    if (rest === "---" || rest === "...") continue;
+    let rest = stripped.slice(col).trimEnd();
+    if (/^(?:---|\.\.\.)(?:\s|$)/.test(rest) || rest.startsWith("%")) {
+      if (content || rest !== "---") {
+        add(line, "yaml-document", "one YAML document per file, with no directive or end marker");
+      }
+      continue;
+    }
+    content = true;
+    /** @type {OutlineNode | null} */
+    let fresh = null;
     while (rest === "-" || rest.startsWith("- ")) {
       const parent = top();
       if (parent.key !== null && !parent.item && parent.value === "" && parent.indent >= col) {
-        findings.push({
-          file,
-          line,
-          rule: "indentation",
-          message: "indent a sequence item deeper than its key",
-        });
+        add(line, "indentation", "indent a sequence item deeper than its key");
       }
       while (top().indent >= col) stack.pop();
+      if (top().inline) multiLine(line);
       const item = makeNode(null, "", raw, line, col, true);
       top().children.push(item);
       stack.push(item);
+      fresh = item;
       const after = rest === "-" ? "" : rest.slice(2);
       col += 2 + (after.length - after.trimStart().length);
       rest = after.trimStart();
     }
     if (rest === "") continue;
     while (top().indent >= col) stack.pop();
+    const parent = top();
+    if (/^[?:](?:\s|$)/.test(rest)) {
+      add(line, "explicit-key", "no explicit key (`? ` or `: `): write `key: value`");
+    }
+    if (ALIAS_START.test(rest)) {
+      add(line, "yaml-alias", "no anchor, alias or tag: the reader does not follow them");
+    }
+    if (parent.inline) multiLine(line);
     const match = KEY.exec(rest);
     if (match !== null) {
       const value = rest.slice(match[0].length).trim();
       const node = makeNode(unquote(match[1] ?? ""), value, raw, line, col, false);
-      top().children.push(node);
+      parent.children.push(node);
       stack.push(node);
-      if (/^[|>][1-9+-]*$/.test(value)) block = { node, parentIndent: col };
-      if (/^[[{]/.test(value) && !balanced(value)) {
-        findings.push({
-          file,
-          line,
-          rule: "flow-collection",
-          message: "close a flow collection on the line that opens it",
-        });
+      if (node.key === "<<") {
+        add(line, "yaml-alias", "no merge key (<<): the reader does not follow it");
+      }
+      if (ALIAS_START.test(value)) {
+        add(line, "yaml-alias", "no anchor, alias or tag: the reader does not follow them");
+      } else if (BLOCK_SCALAR.test(value)) {
+        block = { node, parentIndent: col };
+      } else if (value !== "") {
+        node.inline = true;
+        if (/^[[{]/.test(value)) {
+          const parsed = readFlow(value, { line, indent: col, raw });
+          if (parsed !== null) {
+            node.flow = true;
+            node.children.push(...parsed.children);
+          }
+        } else if (!quoteCloses(value)) {
+          multiLine(line);
+        }
+      }
+    } else if (parent === fresh && fresh.children.length === 0) {
+      // The scalar or flow collection of the sequence item this line opened: a flow mapping's
+      // pairs become the item's own, as `- key: value` lines would.
+      fresh.inline = true;
+      const holder = makeNode(null, rest, raw, line, col, false);
+      holder.inline = true;
+      if (/^[[{]/.test(rest)) {
+        const parsed = readFlow(rest, { line, indent: col, raw });
+        if (parsed?.mapping) {
+          fresh.flow = true;
+          fresh.children.push(...parsed.children);
+        } else {
+          holder.flow = parsed !== null;
+          holder.children.push(...(parsed?.children ?? []));
+          fresh.children.push(holder);
+        }
+      } else {
+        fresh.children.push(holder);
+        if (!quoteCloses(rest)) multiLine(line);
       }
     } else {
-      top().children.push(makeNode(null, rest, raw, line, col, false));
+      // A scalar or a flow collection on a line of its own: a value continued from the line
+      // before, or started below its key; YAML may read either, the outline reads neither.
+      multiLine(line);
+      const node = makeNode(null, rest, raw, line, col, false);
+      node.inline = true;
+      parent.children.push(node);
+    }
+  }
+  for (const node of [root, ...walk(root)]) {
+    /** @type {Set<string>} */
+    const seen = new Set();
+    for (const c of node.children) {
+      if (c.key === null) continue;
+      if (seen.has(c.key)) {
+        add(c.line, "duplicate-key", `the key ${clean(c.key, 60)} is given twice in one mapping`);
+      }
+      seen.add(c.key);
     }
   }
   return { root, findings };
-}
-
-/**
- * Whether the brackets of a flow collection balance on one line (quotes respected).
- * @param {string} text
- */
-function balanced(text) {
-  let depth = 0;
-  let quote = "";
-  for (const c of text) {
-    if (quote !== "") {
-      if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'") quote = c;
-    else if (c === "[" || c === "{") depth++;
-    else if (c === "]" || c === "}") depth--;
-  }
-  return depth === 0;
 }
 
 /**
@@ -234,49 +532,144 @@ function* walk(node) {
 }
 
 /**
- * Whether a mapping (block, or flow on one line) sets `key` to `value`.
+ * Whether a mapping sets `key` to `value`.
  * @param {OutlineNode | undefined} node
  * @param {string} key
  * @param {string} value
  */
 function sets(node, key, value) {
-  if (node === undefined) return false;
-  const inner = child(node, key);
-  if (inner !== undefined) return unquote(inner.value) === value;
-  const flow = new RegExp(`(?:^\\{|,)\\s*${key}\\s*:\\s*["']?${value}["']?\\s*(?:,|\\})`);
-  return flow.test(node.value.replace(/\s+/g, " "));
+  const inner = node === undefined ? undefined : child(node, key);
+  return inner !== undefined && unquote(inner.value) === value;
 }
 
 /**
- * Whether a mapping (block, or flow on one line) has `key` at all.
+ * Whether a mapping has `key` at all.
  * @param {OutlineNode | undefined} node
  * @param {string} key
  */
 function has(node, key) {
-  if (node === undefined) return false;
-  return child(node, key) !== undefined || new RegExp(`(?:^\\{|,)\\s*${key}\\s*:`).test(node.value);
+  return node !== undefined && child(node, key) !== undefined;
 }
 
 /**
- * The trigger names under `on:`.
+ * The scalars of a value written as one scalar, or as a sequence of them (block or flow).
+ * @param {OutlineNode | undefined} node
+ * @returns {string[]}
+ */
+function scalarList(node) {
+  if (node === undefined) return [];
+  if (node.children.length === 0) return node.value === "" ? [] : [unquote(node.value)];
+  return node.children.flatMap((c) =>
+    c.item ? c.children.map((s) => s.key ?? unquote(s.value)) : [c.key ?? unquote(c.value)],
+  );
+}
+
+/**
+ * An expression's text in the form the context rules match: a YAML quote's escapes undone,
+ * `['name']` and `["name"]` read as `.name`, no space around a dot, and lower case (GitHub reads
+ * property names in any case).
+ * @param {string} text
+ * @returns {string}
+ */
+export function expressionText(text) {
+  return text
+    .replace(/''/g, "'")
+    .replace(/\\(["'])/g, "$1")
+    .replace(/\s*\[\s*(["'])([^"'\]]*)\1\s*\]/g, ".$2")
+    .replace(/\s*\.\s*/g, ".")
+    .toLowerCase();
+}
+
+/**
+ * A condition's text without the `${{ }}` that may wrap it.
+ * @param {string} value
+ */
+function condition(value) {
+  const t = unquote(value);
+  const wrapped = new RegExp(`^\\${EXPRESSION_OPEN}\\s*([\\s\\S]*?)\\s*}}$`).exec(t);
+  return (wrapped?.[1] ?? t).trim();
+}
+
+/**
+ * The rules every file under .github/ keeps, wherever in it a value is: strangers' text,
+ * `secrets: inherit`, and expressions inside a command.
+ * @param {OutlineNode} root
+ * @param {(line: number, rule: string, message: string) => void} add
+ */
+function checkTexts(root, add) {
+  for (const node of walk(root)) {
+    const texts = [
+      { line: node.line, text: `${node.key ?? ""} ${node.value}` },
+      ...node.scalar.map((s) => ({ line: s.line, text: s.text })),
+    ];
+    for (const { line, text: t } of texts) {
+      const expression = expressionText(t);
+      for (const pattern of UNTRUSTED_CONTEXTS) {
+        if (pattern.test(expression)) {
+          add(line, "untrusted-context", `${pattern.source} is strangers' text and never read`);
+        }
+      }
+    }
+    if (node.key === "secrets" && unquote(node.value) === "inherit") {
+      add(node.line, "secrets-inherit", "`secrets: inherit` is refused");
+    }
+    if (node.key !== null && COMMAND_KEYS.has(node.key)) {
+      const commandTexts = [{ line: node.line, text: node.value }, ...node.scalar];
+      // A command continued, or started, on lines the outline holds as children (refused as a
+      // shape too); a mapping under the key (defaults: run: shell:) is not a command.
+      for (const c of walk(node)) {
+        if (node.inline || c.key === null) {
+          commandTexts.push({ line: c.line, text: `${c.key ?? ""} ${c.value}` });
+        }
+      }
+      for (const { line, text: t } of commandTexts) {
+        if (t.includes(EXPRESSION_OPEN)) {
+          add(
+            line,
+            "expression-in-run",
+            `pass values to ${node.key}: through env:, never an expression (${EXPRESSION_OPEN} }})`,
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The trigger names under `on:`, however it is written: a name, a list of names, or a mapping.
  * @param {OutlineNode | undefined} on
  * @returns {{ name: string, line: number }[]}
  */
 function triggers(on) {
   if (on === undefined) return [];
-  if (on.value !== "") {
-    return on.value
-      .replace(/^\[|\]$/g, "")
-      .split(",")
-      .map((name) => ({ name: unquote(name), line: on.line }))
-      .filter((t) => t.name !== "");
+  if (on.children.length === 0) {
+    return on.value === "" ? [] : [{ name: unquote(on.value), line: on.line }];
   }
-  return on.children.map((c) => ({ name: c.key ?? unquote(c.value), line: c.line }));
+  return on.children.flatMap((c) =>
+    c.item
+      ? c.children.map((s) => ({ name: s.key ?? unquote(s.value), line: s.line }))
+      : [{ name: c.key ?? unquote(c.value), line: c.line }],
+  );
+}
+
+/**
+ * The same finding once (a flow collection's text is read on its key's line and on its pairs').
+ * @param {Finding[]} findings
+ */
+function unique(findings) {
+  /** @type {Set<string>} */
+  const seen = new Set();
+  return findings.filter((f) => {
+    const key = `${f.file}\u0000${f.line}\u0000${f.rule}\u0000${f.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
  * Checks one workflow file.
- * @param {string} file the file's name under .github/workflows
+ * @param {string} file the workflow's path (its base name decides the per-file rules)
  * @param {string} text
  * @returns {Finding[]}
  */
@@ -315,34 +708,7 @@ export function checkWorkflow(file, text) {
   const pullRequests = triggerList.some((t) => t.name === "pull_request");
 
   // Anywhere in the file.
-  for (const node of walk(root)) {
-    const texts = [
-      { line: node.line, text: `${node.key ?? ""} ${node.value}` },
-      ...node.scalar.map((s) => ({ line: s.line, text: s.text })),
-    ];
-    for (const { line, text: t } of texts) {
-      for (const pattern of UNTRUSTED_CONTEXTS) {
-        if (pattern.test(t)) {
-          add(line, "untrusted-context", `${pattern.source} is strangers' text and never read`);
-        }
-      }
-    }
-    if (node.key === "secrets" && unquote(node.value) === "inherit") {
-      add(node.line, "secrets-inherit", "`secrets: inherit` is refused");
-    }
-    if (node.key === "run") {
-      const runTexts = [{ line: node.line, text: node.value }, ...node.scalar];
-      for (const { line, text: t } of runTexts) {
-        if (t.includes(EXPRESSION_OPEN)) {
-          add(
-            line,
-            "expression-in-run",
-            `pass values to run: through env:, never an expression (${EXPRESSION_OPEN} }})`,
-          );
-        }
-      }
-    }
-  }
+  checkTexts(root, add);
 
   // Jobs and steps.
   const jobs = child(root, "jobs");
@@ -378,6 +744,43 @@ export function checkWorkflow(file, text) {
       findings.push(...checkStep(file, step, { pullRequests }));
     }
   }
+  if (jobs !== undefined) findings.push(...checkGate(file, jobs));
+  return unique(findings);
+}
+
+/**
+ * The gate job, when a workflow has one: it needs every job that can fail, and runs always().
+ * @param {string} file
+ * @param {OutlineNode} jobs
+ * @returns {Finding[]}
+ */
+function checkGate(file, jobs) {
+  const gate = child(jobs, "gate");
+  if (gate === undefined) return [];
+  /** @type {Finding[]} */
+  const findings = [];
+  const needs = scalarList(child(gate, "needs"));
+  for (const job of jobs.children) {
+    if (job.key === null || job === gate) continue;
+    const blocking = unquote(child(job, "continue-on-error")?.value ?? "") !== "true";
+    if (blocking && !needs.includes(job.key)) {
+      findings.push({
+        file,
+        line: gate.line,
+        rule: "gate-needs",
+        message: `gate needs every job that can fail; ${clean(job.key, 60)} is not in its needs`,
+      });
+    }
+  }
+  const when = child(gate, "if");
+  if (when === undefined || condition(when.value) !== "always()") {
+    findings.push({
+      file,
+      line: when?.line ?? gate.line,
+      rule: "gate-needs",
+      message: "gate runs `if: always()`, so a skipped or cancelled job fails it",
+    });
+  }
   return findings;
 }
 
@@ -401,7 +804,9 @@ function checkStep(file, step, context) {
     return findings;
   }
   if (ref.startsWith("./")) {
-    if (!ref.startsWith("./.github/")) add("action-local", "a local action lives under .github/");
+    if (!ref.startsWith("./.github/") || ref.split("/").includes("..")) {
+      add("action-local", "a local action lives under .github/");
+    }
     return findings;
   }
   const pinned = PINNED.exec(ref);
@@ -426,16 +831,69 @@ function checkStep(file, step, context) {
     if (has(withNode, "cache")) add("setup-node-cache", "setup-node never caches (cache:)");
   }
   if (action.startsWith("actions/cache")) {
-    if (NO_CACHE_WORKFLOWS.has(file)) {
-      add("no-cache", `${file} restores and saves no cache (ARCHITECTURE §11.3)`);
+    if (NO_CACHE_WORKFLOWS.has(basename(file))) {
+      add("no-cache", `${basename(file)} restores and saves no cache (ARCHITECTURE §11.3)`);
     }
     const path = child(withNode ?? step, "path");
     const paths = [path?.value ?? "", ...(path?.scalar.map((s) => s.text) ?? [])].join("\n");
     if (context.pullRequests && paths.includes(".fin-review/ledger")) {
       add("ledger-cache", "the review ledger is never cached by a workflow a pull request starts");
     }
+    if (context.pullRequests && action === "actions/cache") {
+      add(
+        "cache-save",
+        "actions/cache saves in its post step on every run; use actions/cache/restore, and actions/cache/save on push only",
+      );
+    }
+    const when = child(step, "if");
+    if (
+      context.pullRequests &&
+      action === "actions/cache/save" &&
+      !PUSH_ONLY.test(condition(when?.value ?? ""))
+    ) {
+      add(
+        "cache-save",
+        "a workflow a pull request starts saves a cache on push only (if: github.event_name == 'push' && ...)",
+      );
+    }
   }
   return findings;
+}
+
+/**
+ * Checks one action's metadata file (action.yml): its steps keep the workflows' step rules, and
+ * every value the rules for any file under .github/.
+ * @param {string} file
+ * @param {string} text
+ * @returns {Finding[]}
+ */
+export function checkAction(file, text) {
+  const { root, findings } = parseOutline(file, text);
+  /**
+   * @param {number} line
+   * @param {string} rule
+   * @param {string} message
+   */
+  const add = (line, rule, message) => findings.push({ file, line, rule, message });
+  checkTexts(root, add);
+  const runs = child(root, "runs");
+  if (runs === undefined) {
+    add(1, "action", "an action needs runs:");
+    return unique(findings);
+  }
+  const using = unquote(child(runs, "using")?.value ?? "");
+  if (/^docker$/i.test(using) || has(runs, "image")) {
+    add(
+      runs.line,
+      "action-docker",
+      "a local action runs no container; Docker runs through the docker CLI only",
+    );
+  }
+  for (const step of child(runs, "steps")?.children ?? []) {
+    // An action can be called from any workflow, a pull request's included.
+    findings.push(...checkStep(file, step, { pullRequests: true }));
+  }
+  return unique(findings);
 }
 
 /**
@@ -469,24 +927,60 @@ export function checkPins(root, workflows) {
 }
 
 /**
- * Checks every workflow under <root>/.github/workflows.
+ * The files under <root>/.github the rules read: the workflows GitHub runs (directly in
+ * .github/workflows) and every action's metadata file; and every link there, which is refused,
+ * since a link could point the runner at a file this check never reads.
+ * @param {string} root
+ */
+export function githubFiles(root) {
+  const dir = join(root, ".github");
+  /** @type {string[]} */
+  const workflows = [];
+  /** @type {string[]} */
+  const actions = [];
+  /** @type {string[]} */
+  const links = [];
+  /** @param {string} current */
+  const visit = (current) => {
+    for (const name of readdirSync(current).sort()) {
+      const abs = join(current, name);
+      const path = relative(root, abs).split(sep).join("/");
+      const stat = lstatSync(abs);
+      if (stat.isSymbolicLink()) links.push(path);
+      else if (stat.isDirectory()) visit(abs);
+      else if (current === join(dir, "workflows") && /\.ya?ml$/i.test(name)) workflows.push(path);
+      else if (/^action\.ya?ml$/i.test(name)) actions.push(path);
+    }
+  };
+  if (existsSync(dir)) visit(dir);
+  return { workflows, actions, links };
+}
+
+/**
+ * Checks every workflow and action under <root>/.github.
  * @param {string} root
  * @returns {{ files: number, findings: Finding[] }}
  */
 export function checkRepository(root) {
-  const dir = join(root, ".github", "workflows");
-  /** @type {Map<string, string>} */
-  const workflows = new Map();
-  if (existsSync(dir)) {
-    for (const name of readdirSync(dir).sort()) {
-      if (/\.ya?ml$/i.test(name)) workflows.set(name, readFileSync(join(dir, name), "utf8"));
-    }
-  }
+  const { workflows, actions, links } = githubFiles(root);
   /** @type {Finding[]} */
-  const findings = [];
-  for (const [file, text] of workflows) findings.push(...checkWorkflow(file, text));
-  findings.push(...checkPins(root, workflows));
-  return { files: workflows.size, findings };
+  const findings = links.map((file) => ({
+    file,
+    line: 1,
+    rule: "link",
+    message: "no link under .github/: a runner would follow it to a file this check never reads",
+  }));
+  /** @type {Map<string, string>} */
+  const texts = new Map();
+  for (const file of workflows) {
+    const text = readFileSync(join(root, file), "utf8");
+    texts.set(file, text);
+    findings.push(...checkWorkflow(file, text));
+  }
+  for (const file of actions)
+    findings.push(...checkAction(file, readFileSync(join(root, file), "utf8")));
+  findings.push(...checkPins(root, texts));
+  return { files: workflows.length + actions.length, findings };
 }
 
 if (isMain(import.meta)) {
@@ -494,7 +988,7 @@ if (isMain(import.meta)) {
   const root = index > 0 ? (process.argv[index + 1] ?? ".") : process.cwd();
   const { files, findings } = checkRepository(root);
   for (const f of findings) {
-    say(`workflow-rules: .github/workflows/${f.file}:${f.line}: ${f.rule}: ${f.message}`);
+    say(`workflow-rules: ${clean(f.file, 200)}:${f.line}: ${f.rule}: ${f.message}`);
   }
   say(
     `workflow-rules.result result=${findings.length === 0 ? "pass" : "fail"} files=${files} findings=${findings.length}`,
