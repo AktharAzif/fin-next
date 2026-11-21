@@ -8,7 +8,7 @@
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run --config ../../vitest.config.ts"
   },
   "dependencies": {
     "@fin/core": "workspace:*",

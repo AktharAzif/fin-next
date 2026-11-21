@@ -11,8 +11,8 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --exclude \"**/*.db.test.ts\"",
-    "test:db": "vitest run db.test"
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
   },
   "dependencies": {
     "zod": "catalog:"
