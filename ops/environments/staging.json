@@ -45,14 +45,23 @@
       "name": "fin-next-staging-public",
       "connector": "cloudflared-public",
       "standby": "cloudflared-public-b",
-      "hosts": ["api", "console", "verify", "selfie", "docs"]
+      "hosts": ["api", "console", "verify", "selfie", "docs"],
+      "ingress": ["api", "console", "verify", "selfie"]
     },
     "admin": {
       "name": "fin-next-staging-admin",
       "connector": "cloudflared-admin",
       "standby": "cloudflared-admin-b",
-      "hosts": ["admin"]
+      "hosts": ["admin"],
+      "ingress": ["admin"]
     }
+  },
+  "ingressProofs": {
+    "$comment": "Which service holds which host roles' ingress proofs (FIN_INGRESS_PROOFS, spec 01 §6.7, §7.6).",
+    "edge": ["api"],
+    "console": ["console"],
+    "admin": ["admin"],
+    "verify": ["verify", "selfie"]
   },
   "static": {
     "console": {
