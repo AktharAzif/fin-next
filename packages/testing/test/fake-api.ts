@@ -1,7 +1,7 @@
 // A stand-in for an app's API test server in the harness's own tests: it answers every request
 // with what it received, so a test can see exactly what the static host forwarded. Like the API
 // half behind the tunnel, it is reached with the app's public `Host`, so it answers any `Host`.
-import { headerValue, type Listening, listen } from "@fin/server/testing/node-http";
+import { headerValue, type Listening, listen } from "../src/http/node.ts";
 
 export interface Echo {
   readonly method: string;

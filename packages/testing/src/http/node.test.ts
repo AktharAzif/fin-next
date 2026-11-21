@@ -1,3 +1,5 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { selfSignedIdentity } from "./certificate.ts";
 import {
   forward,
   type Handler,
@@ -6,9 +8,7 @@ import {
   type Listening,
   type ListenOptions,
   listen,
-} from "@fin/server/testing/node-http";
-import { afterEach, describe, expect, it } from "vitest";
-import { selfSignedIdentity } from "./certificate.ts";
+} from "./node.ts";
 
 const open: Listening[] = [];
 afterEach(async () => {

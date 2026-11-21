@@ -6,7 +6,6 @@
 // own, the virtual authenticator, Access in front of a host, the off-origin recorder, and the
 // bypassCSP refusals on every way a test can make a context.
 import { join } from "node:path";
-import { type Listening, listen } from "@fin/server/testing/node-http";
 import {
   AccessStandIn,
   type RunningAccessStandIn,
@@ -14,6 +13,7 @@ import {
 } from "../src/access/stand-in.ts";
 import { CANON_TIME } from "../src/clock.ts";
 import { selfSignedIdentity } from "../src/http/certificate.ts";
+import { type Listening, listen } from "../src/http/node.ts";
 import { signInThroughAccess } from "../src/playwright/access.ts";
 import { expect, test as fin } from "../src/playwright/fixtures.ts";
 import { gotoReady } from "../src/playwright/ready.ts";

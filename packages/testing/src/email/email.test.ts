@@ -1,5 +1,5 @@
-import { forward } from "@fin/server/testing/node-http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { forward } from "../http/node.ts";
 import {
   AUTH_CODE,
   COMPANY_EMAIL_CODE,

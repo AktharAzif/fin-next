@@ -1,27 +1,24 @@
-// The test harness's one bridge to Node's HTTP stack (@fin/testing's static host, email sink and
-// Access stand-in): a listener that hands each request to a handler as Web types, and a forwarder
-// that sends a request upstream exactly as given (the raw target, every header in order, the `Host`
-// the caller chose). Everything else in @fin/testing works on Web `Response` objects and these
-// plain request records, so it stays testable without sockets. Test-only: nothing that runs in a
-// deployed service imports it.
+// The harness's one bridge to Node's HTTP stack: a listener that hands each request to a handler
+// as Web types, and a forwarder that sends a request upstream exactly as given (the raw target,
+// every header in order, the `Host` the caller chose). Everything else in @fin/testing works on
+// Web `Response` objects and these plain request records, so it stays testable without sockets.
 //
-// node:http and node:https are needed because the static host must proxy `/api/` with the
-// configured `Host` header and the browser's headers unchanged (spec 01 §4.7), which `fetch()`
-// cannot do: it drops a caller's `Host` and adds `accept-language`, `sec-fetch-mode` and
-// `user-agent` of its own. The app hosts answer over https, as the zone does, so that every engine
-// keeps Fin's `__Host-` cookies. The import rules allow these modules only in packages/server and
-// apps/connector (spec 01 §4.6), so the bridge lives here and @fin/testing imports it as
-// `@fin/server/testing/node-http`, as the apps' tests import `@fin/server/testing/http`.
+// node:http and node:https are used here, and only here, because the static host must proxy
+// `/api/` with the configured `Host` header and the browser's headers unchanged (spec 01 §4.7),
+// which `fetch()` cannot do: it drops a caller's `Host` and adds `accept-language`,
+// `sec-fetch-mode` and `user-agent` of its own. The app hosts answer over https, as the zone does,
+// so that every engine keeps Fin's `__Host-` cookies. The import rules allow these modules only in
+// packages/server and apps/connector (spec 01 §4.6), and in this one test-only file by the
+// steward's decision of 21 Nov: imports:check names it by its full path, and keeps @fin/testing
+// out of deployable code, so this file is never deployed.
+//
+// biome-ignore lint/style/noRestrictedImports: the static host is Node built-ins only and must set Host (spec 01 §4.7); allowed in this one test-only file by the steward's decision of 21 Nov
 import * as http from "node:http";
+// biome-ignore lint/style/noRestrictedImports: the app hosts answer over https as the zone does, so WebKit keeps Secure cookies; allowed in this one test-only file by the steward's decision of 21 Nov
 import * as https from "node:https";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-
-/** A certificate and its private key, both PEM (as @fin/testing's `selfSignedIdentity` makes). */
-export interface TlsIdentity {
-  readonly cert: string;
-  readonly key: string;
-}
+import type { TlsIdentity } from "./certificate.ts";
 
 /** Header pairs in the order they arrived, names as sent. */
 export type RawHeaders = ReadonlyArray<readonly [name: string, value: string]>;
