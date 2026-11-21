@@ -5,8 +5,50 @@
 // Every line printed from data a script read (a path, a commit header, a job result) goes through
 // `clean` first, so it can carry neither a new line that a runner would read as a workflow command
 // nor a terminal control sequence.
+//
+// The scripts fail closed on a Node they were not written for. Each runs its command line only
+// when `isMain(import.meta)` holds; a Node without `import.meta.main` (before 22.18 and 24.2)
+// would otherwise skip that block and exit 0 having checked nothing. So importing this file on
+// such a Node, or on one older than NODE_FLOOR (the repository's engines floor), throws, and every
+// script that imports it exits non-zero before it runs.
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
+
+/** The oldest Node major the scripts run on: package.json's engines floor. */
+export const NODE_FLOOR = 26;
+
+/**
+ * Why a runtime cannot run the CI scripts, or null when it can.
+ * @param {{ main?: unknown }} meta a module's import.meta
+ * @param {string} version process.versions.node
+ * @returns {string | null}
+ */
+export function runtimeProblem(meta, version) {
+  const major = Number(/^(\d+)\./.exec(version)?.[1] ?? Number.NaN);
+  if (Number.isNaN(major) || major < NODE_FLOOR) {
+    return `the CI scripts need Node ${NODE_FLOOR} or newer; this is Node ${version}`;
+  }
+  if (typeof meta.main !== "boolean") {
+    return `this Node (${version}) has no import.meta.main, so a script could not tell it was run`;
+  }
+  return null;
+}
+
+/**
+ * Whether the module whose import.meta this is was run as the program. Throws when the runtime
+ * cannot say, so a script never mistakes "unknown" for "imported" and exits 0 unchecked.
+ * @param {{ main?: unknown }} meta
+ * @returns {boolean}
+ */
+export function isMain(meta) {
+  if (typeof meta.main !== "boolean") {
+    throw new Error(runtimeProblem(meta, process.versions.node) ?? "import.meta.main is missing");
+  }
+  return meta.main;
+}
+
+const RUNTIME_PROBLEM = runtimeProblem(import.meta, process.versions.node);
+if (RUNTIME_PROBLEM !== null) throw new Error(RUNTIME_PROBLEM);
 
 export const ZERO_SHA = "0".repeat(40);
 const SHA = /^[0-9a-f]{40}$/;

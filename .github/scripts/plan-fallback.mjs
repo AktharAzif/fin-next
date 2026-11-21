@@ -7,7 +7,7 @@
 // job whatever the plan says (gate.mjs, rule plan-is-mains).
 //
 // Inputs (environment): EVENT_NAME, BASE_SHA, HEAD_SHA, as the engine reads them.
-import { isSha, say, ZERO_SHA } from "./lib/ci.mjs";
+import { isMain, isSha, say, ZERO_SHA } from "./lib/ci.mjs";
 
 /** The e2e shard count the engine's config/ci.json starts at (spec 07 §10.4). */
 export const E2E_SHARDS = 4;
@@ -51,6 +51,6 @@ export function everythingPlan(env) {
   };
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   say(`plan=${JSON.stringify(everythingPlan(process.env))}`);
 }

@@ -28,7 +28,7 @@
 // actionlint parses them fully, so a file this reader misreads still fails CI there.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { clean, say } from "./lib/ci.mjs";
+import { clean, isMain, say } from "./lib/ci.mjs";
 
 /** @typedef {{ file: string, line: number, rule: string, message: string }} Finding */
 /**
@@ -489,7 +489,7 @@ export function checkRepository(root) {
   return { files: workflows.size, findings };
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   const index = process.argv.indexOf("--root");
   const root = index > 0 ? (process.argv[index + 1] ?? ".") : process.cwd();
   const { files, findings } = checkRepository(root);

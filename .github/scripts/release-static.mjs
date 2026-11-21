@@ -35,7 +35,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, join, posix, relative, sep } from "node:path";
-import { addSummary, annotate, clean, isRecord, isSha, say, setOutput } from "./lib/ci.mjs";
+import { addSummary, annotate, clean, isMain, isRecord, isSha, say, setOutput } from "./lib/ci.mjs";
 
 export const RELEASE = "release";
 const KEY = /^[a-z]+$/;
@@ -706,7 +706,7 @@ export async function main(command, env, root) {
   }
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   try {
     process.exitCode = await main(process.argv[2], process.env, process.cwd());
   } catch (error) {

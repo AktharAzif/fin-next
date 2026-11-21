@@ -20,7 +20,7 @@
 // check passes with a notice.
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
-import { annotate, clean, say } from "./lib/ci.mjs";
+import { annotate, clean, isMain, say } from "./lib/ci.mjs";
 
 /** @typedef {{ file: string, rule: string, message: string }} Finding */
 
@@ -232,7 +232,7 @@ export function checkBundles(root) {
   return { server, static: statics, findings };
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   const index = process.argv.indexOf("--root");
   const root = index > 0 ? (process.argv[index + 1] ?? ".") : process.cwd();
   const result = checkBundles(root);

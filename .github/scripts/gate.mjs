@@ -23,7 +23,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { addSummary, canonicalJson, clean, gitEnv, isRecord, say } from "./lib/ci.mjs";
+import { addSummary, canonicalJson, clean, gitEnv, isMain, isRecord, say } from "./lib/ci.mjs";
 
 /** The jobs ci.yml's gate needs today; each must appear in NEEDS. */
 export const GATED_JOBS = ["plan", "check", "db", "build", "static", "commit-dates-utc"];
@@ -262,6 +262,6 @@ export function runGate(ctx) {
   return failed.length === 0 ? 0 : 1;
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   process.exitCode = runGate({ env: process.env, cwd: process.cwd(), print: say });
 }

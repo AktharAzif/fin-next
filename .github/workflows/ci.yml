@@ -55,9 +55,10 @@ jobs:
             tools/fin-review
             docs/review
           persist-credentials: false
+      # main's Node runs main's engine: the pull request's .node-version is not a control path.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version-file: engine/.node-version
           package-manager-cache: false
       - name: Plan
         id: plan
@@ -96,6 +97,8 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+      - name: The Node the checks need (fails before a check can exit 0 unchecked)
+        run: node .github/scripts/node-check.mjs
       - name: Install pnpm (release asset, by checksum)
         run: .github/scripts/install-pnpm.sh
       - name: Find the pnpm store
@@ -216,6 +219,8 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+      - name: The Node the checks need (fails before a check can exit 0 unchecked)
+        run: node .github/scripts/node-check.mjs
       - name: Install pnpm (release asset, by checksum)
         run: .github/scripts/install-pnpm.sh
       - name: Find the pnpm store
@@ -365,9 +370,10 @@ jobs:
           sparse-checkout: |
             .github/scripts
           persist-credentials: false
+      # main's Node, as in plan and gate: a required check never runs on the change's choice.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version-file: engine/.node-version
           package-manager-cache: false
       - name: Every commit's author and committer offsets are +0000
         env:
@@ -416,9 +422,10 @@ jobs:
             tools/fin-review
             docs/review
           persist-credentials: false
+      # main's Node runs main's gate.mjs: the pull request's .node-version is not a control path.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version-file: engine/.node-version
           package-manager-cache: false
       - name: Gate
         env:

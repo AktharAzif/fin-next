@@ -1,6 +1,7 @@
 // workflow-rules (spec 07 §10.8, T-RV-40): each refusal planted in a workflow that is otherwise
 // clean, the outline reader on the YAML shapes the workflows use, and this repository's own files.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -347,8 +348,7 @@ describe("this repository", () => {
     assert.deepEqual(findings, []);
   });
 
-  it("names the job the ruleset requires exactly commit-dates-utc, and gate needs it", async () => {
-    const { readFileSync } = await import("node:fs");
+  it("names the job the ruleset requires exactly commit-dates-utc, and gate needs it", () => {
     const text = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
     const { root } = parseOutline("ci.yml", text);
     const jobs = child(root, "jobs");
@@ -366,4 +366,62 @@ describe("this repository", () => {
       "true",
     );
   });
+
+  it("runs plan, commit-dates-utc and gate on main's Node, never the change's .node-version", () => {
+    for (const name of ["plan", "commit-dates-utc", "gate"]) {
+      const setup = steps("ci.yml", name).find((s) => usesOf(s).startsWith("actions/setup-node@"));
+      assert.equal(
+        setup === undefined ? undefined : valueAt(setup, "with", "node-version-file"),
+        "engine/.node-version",
+        name,
+      );
+    }
+  });
+
+  it("checks the Node in check and build before any check script can run on it", () => {
+    for (const name of ["check", "build"]) {
+      const list = steps("ci.yml", name);
+      const guard = list.findIndex((s) => runOf(s) === "node .github/scripts/node-check.mjs");
+      const setup = list.findIndex((s) => usesOf(s).startsWith("actions/setup-node@"));
+      assert.equal(guard, setup + 1, `${name}: the Node check follows setup-node`);
+    }
+  });
 });
+
+/**
+ * A job's steps in one of this repository's workflows.
+ * @param {string} file
+ * @param {string} job
+ * @returns {import("../workflow-rules.mjs").OutlineNode[]}
+ */
+function steps(file, job) {
+  const text = readFileSync(join(ROOT, ".github", "workflows", file), "utf8");
+  const { root } = parseOutline(file, text);
+  const jobs = child(root, "jobs");
+  const node = jobs === undefined ? undefined : child(jobs, job);
+  const list = node === undefined ? undefined : child(node, "steps");
+  assert.ok(list !== undefined, `${file} has the job ${job} with steps`);
+  return list.children;
+}
+
+/**
+ * The text at a path of keys under a node, unquoted, or undefined.
+ * @param {import("../workflow-rules.mjs").OutlineNode} node
+ * @param {...string} keys
+ */
+function valueAt(node, ...keys) {
+  /** @type {import("../workflow-rules.mjs").OutlineNode | undefined} */
+  let at = node;
+  for (const key of keys) at = at === undefined ? undefined : child(at, key);
+  return at?.value.replace(/^(["'])(.*)\1$/, "$2");
+}
+
+/** @param {import("../workflow-rules.mjs").OutlineNode} step */
+function usesOf(step) {
+  return valueAt(step, "uses") ?? "";
+}
+
+/** @param {import("../workflow-rules.mjs").OutlineNode} step */
+function runOf(step) {
+  return valueAt(step, "run") ?? "";
+}

@@ -18,7 +18,7 @@
 //
 // Output: one `commit-dates-utc.commit` line per commit and a closing `commit-dates-utc.result`.
 // Exit 0 when every checked commit is UTC, 1 when one is not, 2 when the input is unusable.
-import { annotation, clean, git, isSha, say, ZERO_SHA } from "./lib/ci.mjs";
+import { annotation, clean, git, isMain, isSha, say, ZERO_SHA } from "./lib/ci.mjs";
 
 /** The most commits one run reads; more means the range is not a pull request's. */
 export const MAX_COMMITS = 5000;
@@ -169,6 +169,6 @@ export function run(ctx) {
   return failed === 0 ? 0 : 1;
 }
 
-if (import.meta.main) {
+if (isMain(import.meta)) {
   process.exitCode = run({ env: process.env, cwd: process.cwd(), print: say });
 }
