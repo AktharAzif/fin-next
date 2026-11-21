@@ -250,16 +250,37 @@ importers:
 
   apps/admin:
     dependencies:
+      '@fin/access':
+        specifier: workspace:*
+        version: link:../../packages/access
       '@fin/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@fin/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@fin/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@fin/server':
         specifier: workspace:*
         version: link:../../packages/server
+      '@fin/staff':
+        specifier: workspace:*
+        version: link:../../packages/staff
       '@fin/web-host':
         specifier: workspace:*
         version: link:../../packages/web-host
+      hono:
+        specifier: 'catalog:'
+        version: 4.13.19
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
     devDependencies:
+      '@fin/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -558,6 +579,40 @@ importers:
       vite:
         specifier: 'catalog:'
         version: 8.3.8(@types/node@26.6.6)
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6))
+
+  packages/staff:
+    dependencies:
+      '@fin/access':
+        specifier: workspace:*
+        version: link:../access
+      '@fin/email':
+        specifier: workspace:*
+        version: link:../email
+      '@fin/identity':
+        specifier: workspace:*
+        version: link:../identity
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 'catalog:'
+        version: 2.6.8
+      '@fin/db':
+        specifier: workspace:*
+        version: link:../db
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      pg:
+        specifier: 'catalog:'
+        version: 8.23.1
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
       vitest:
         specifier: 'catalog:'
         version: 5.1.0(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6))
