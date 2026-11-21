@@ -1,15 +1,18 @@
 -- L-SAT-05's extension of the email outbox (ARCHITECTURE §9.4, §9.5; spec 08 §4.2, §4.3; spec 01
--- §6.10 "Extended by L-SAT-05"). It applies on top of P0-E's `<ts>_email_outbox.sql` and is meant to
--- land as `packages/db/migrations/<ts>_email_sender.sql` (the data lane owns that folder; this file
--- is the reviewed text, and the integration tests apply exactly it, over a copy of P0-E's migration
--- with its seeded `ops/delivery-check` grant). Run as `fin_owner`. The grants are in
--- `email_sender.grants.sql`, to be rendered into `packages/db/roles/grants/email.json`.
+-- §6.10 "Extended by L-SAT-05"). It applies on top of P0-E's `20261121101300_email_outbox.sql`, and
+-- `migrate` finds it by the database files' rule (packages/db/src/assets.ts), as fin_owner. This
+-- package's own integration tests apply exactly it over a copy of P0-E's migration with its seeded
+-- `ops/delivery-check` grant (src/testing). The grants are `grants/email-sender.json`; the rows of
+-- `email.template_grant` come from the template catalogue, which `migrate` syncs after the files
+-- (apps/api/src/migrate/main.ts, afterMigrations).
 --
 -- Every table here is logged ([DA-16]): a restart or failover never resets an allowance, a budget or
 -- the token bucket. The outbox stays out of dumps ([DA-15]); so do these tables, which hold only
 -- keyed hashes, counts and release SHAs. After a restore they are empty: the sender puts back the
 -- token bucket's row itself, and the delivery check puts back its turn's row and runs again for the
 -- release.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 -- 1. Five classes (spec 08 §4.2), each grant carrying its priority and whether its rows bear a secret.
 DO $$

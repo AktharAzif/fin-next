@@ -1,7 +1,7 @@
 -- A STAND-IN for P0-E's `packages/db/migrations/<ts>_email_outbox.sql` (spec 01 §6.10), for this
 -- package's integration tests only. It is that migration's text with two changes, because the tests
 -- run against lane-prefixed roles: the grant table's role CHECK is left out, and the seeded
--- `ops/delivery-check` grant names `{{fin_worker}}`. So `email_sender.sql` is tested on the real
+-- `ops/delivery-check` grant names `{{fin_worker}}`. So `<ts>_email_sender.sql` is tested on the real
 -- upgrade path, seed row included. It also stands in for the one `ops` table the worker's delivery
 -- check writes (`ops.duty_state`, P0-E's `<ts>_ops_core.sql`). It is never applied anywhere but the
 -- test database; when the data lane's migrations are on main, the tests apply those instead (open

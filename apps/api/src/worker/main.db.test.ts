@@ -5,11 +5,11 @@
 // runService's fetch, as the release image calls it.
 import type { FinDatabase } from "@fin/db";
 import { createTestDatabase, type TestDatabase, testLoginPassword } from "@fin/db/testing";
-import { enqueue, grantInsertSql, newId } from "@fin/email";
-import { outboxSchemaSql } from "@fin/email/testing";
+import { enqueue, newId } from "@fin/email";
 import { baseEnv, type Line } from "@fin/server/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { main } from "../main.ts";
+import { afterMigrations } from "../migrate/main.ts";
 import { emailPool } from "./main.ts";
 
 // The integration timeouts, which the root Vitest configuration leaves to each file: a file's
@@ -19,23 +19,9 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 let db: TestDatabase;
 
 beforeAll(async () => {
-  db = await createTestDatabase({ prefix: "apiwk" });
-  // L-SAT-05's extension of the outbox (packages/email/sql), which is meant to land as a migration of
-  // the data lane's; until it does, this file applies it as fin_owner, exactly as reviewed.
-  const owner = await db.connect("fin_owner");
-  try {
-    const present = await owner.query<{ name: string | null }>(
-      "SELECT to_regclass('email.send_bucket')::text AS name",
-    );
-    if (present.rows[0]?.name === null) {
-      const sql = outboxSchemaSql();
-      await owner.query(sql.extension);
-      await owner.query(sql.grants.replace(/\{\{(fin_[a-z]+)\}\}/g, "$1"));
-      await owner.query(grantInsertSql());
-    }
-  } finally {
-    await owner.end();
-  }
+  // Exactly what `migrate --migrate` builds: every package's files, then its own after-step. Nothing
+  // is applied by hand, so the worker runs on the schema an environment gets.
+  db = await createTestDatabase({ prefix: "apiwk", after: afterMigrations("test-release") });
 });
 
 afterAll(async () => {

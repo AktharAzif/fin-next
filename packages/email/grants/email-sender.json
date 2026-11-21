@@ -1,0 +1,42 @@
+{
+  "$comment": "The grants the email sender's tables need (migrations/20261121194000_email_sender.sql; ARCHITECTURE §9.4, §9.5; spec 08 §4.2, §4.3), beside P0-E's `email` fragment (packages/db/roles/grants/email.json), which holds the schema, email.enqueue() and the outbox. Only the worker reads the grants, counts, budgets and bucket. INSERT on the bucket and on the delivery check's turn lets the worker put back their rows after a restore; UPDATE on the turn's row is what lets the worker, and no other service, take the delivery check's turn.",
+  "area": "email-sender",
+  "grants": [
+    {
+      "on": "table",
+      "name": "email.template_grant",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "email.recipient_window",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "email.daily_budget",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "email.send_bucket",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "email.delivery_check",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "email.delivery_check_turn",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_worker"]
+    }
+  ]
+}

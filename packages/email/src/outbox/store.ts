@@ -1,7 +1,7 @@
 // Every statement the sender runs on the outbox and its tables (spec 01 §6.10 plus
-// `sql/email_sender.sql`). Times are passed in from the injected clock, never read from the
-// database's own clock, so the tests control time; every write after a claim is fenced on
-// `leased_by`, so a replica whose lease was taken over changes nothing.
+// `migrations/20261121194000_email_sender.sql`). Times are passed in from the injected clock, never
+// read from the database's own clock, so the tests control time; every write after a claim is fenced
+// on `leased_by`, so a replica whose lease was taken over changes nothing.
 import { findTemplate } from "../catalogue.ts";
 import type { EmailClass } from "../classes.ts";
 import { inTransaction, type PoolLike, type Queryable } from "./db.ts";

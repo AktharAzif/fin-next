@@ -1,6 +1,7 @@
 // The `migrate` service (spec 01 §6.2, §6.6; ARCHITECTURE §6.4): the api image started with one of
 //   --bootstrap       create the roles, schemas and privileged-login guard (once per environment)
-//   --migrate         apply pending migrations, render the grants and sync the audit registry
+//   --migrate         apply pending migrations, render the grants, and sync the audit registry and
+//                     email.enqueue()'s template allowlist (afterMigrations)
 //   --print-db-cert   print the certificate chain the database presents, to pin as FIN_DB_CA_PEM
 //   --task <name>     run one operator task as fin_owner (spec 01 §6.6 "Operator tasks")
 // P0-D's apps/api/src/main.ts dispatches these flags here. Every mode reads its configuration once,
@@ -23,12 +24,14 @@ import {
   parseReplicas,
   parseRoleVerifiers,
   parseSuperuserUrl,
+  type Queryable,
   readPresentedCertificate,
   runMigrations,
   sqlState,
   type TlsSettings,
   withOwnerSession,
 } from "@fin/db";
+import { grantInsertSql } from "@fin/email";
 import { z } from "zod";
 import { parseTaskParams, runTask, TaskError } from "../tasks/run.ts";
 import { stdoutLines } from "./lines.ts";
@@ -182,6 +185,19 @@ async function bootstrapMode(
   }
 }
 
+/**
+ * What `--migrate` runs after the files and the grants, in the run's transaction as fin_owner: the
+ * audit registry sync (spec 08 §3.2) and `email.enqueue()`'s per-role allowlist, generated from the
+ * template catalogue's folders (spec 08 §4.4, [DA-14]). Both only add and update rows, so a release
+ * never takes away a newer one's. Tests that need the schema `migrate` builds pass it as theirs.
+ */
+export function afterMigrations(release: string): (q: Queryable) => Promise<void> {
+  return async (q) => {
+    await syncEventTypes(q, release);
+    await q.query(grantInsertSql());
+  };
+}
+
 async function migrateMode(
   env: Readonly<Record<string, string | undefined>>,
   base: BaseEnv,
@@ -208,9 +224,7 @@ async function migrateMode(
           files,
           release: base.FIN_RELEASE,
           fragments,
-          after: async (q) => {
-            await syncEventTypes(q, base.FIN_RELEASE);
-          },
+          after: afterMigrations(base.FIN_RELEASE),
         }),
     );
     log.write({

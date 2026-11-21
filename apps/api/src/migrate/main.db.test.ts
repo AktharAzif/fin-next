@@ -13,6 +13,7 @@ import {
   testSuperuserUrl,
   testVerifiersJson,
 } from "@fin/db/testing";
+import { grantRows } from "@fin/email";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { EXIT_CONFIG, EXIT_FAILED, EXIT_OK, runMigrateCli } from "./main.ts";
 
@@ -141,6 +142,85 @@ describe("migrate --migrate", () => {
     const { code, lines } = await cli(["--migrate"]);
     expect(code).toBe(EXIT_OK);
     expect(lines[1]).toMatchObject({ applied: 0 });
+  });
+
+  it("builds the email sender's schema and email.enqueue()'s allowlist from the template catalogue", async () => {
+    // The sender's tables and the outbox's sender columns (packages/email's migration).
+    const objects = await su.query<{ name: string; found: boolean }>(
+      `SELECT name, pg_catalog.to_regclass(name) IS NOT NULL AS found
+       FROM unnest($1::text[]) AS t(name) ORDER BY name`,
+      [
+        [
+          "email.recipient_window",
+          "email.daily_budget",
+          "email.send_bucket",
+          "email.delivery_check",
+          "email.delivery_check_turn",
+        ],
+      ],
+    );
+    for (const row of objects.rows) expect(row.found, row.name).toBe(true);
+    const columns = await su.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_schema = 'email' AND table_name = 'outbox'
+         AND column_name IN ('folded_into', 'first_due_at', 'counted')`,
+    );
+    expect(columns.rows[0]?.n).toBe(3);
+
+    // Exactly the catalogue's rows, each with its class's priority and secret flag.
+    const rows = await su.query<{
+      template: string;
+      role: string;
+      category: string;
+      priority: number;
+      carries_secret: boolean;
+    }>("SELECT template, role, category, priority, carries_secret FROM email.template_grant");
+    const byKey = (a: { template: string; role: string }, b: { template: string; role: string }) =>
+      `${a.template} ${a.role}` < `${b.template} ${b.role}` ? -1 : 1;
+    const want = grantRows().map((g) => ({
+      template: g.template,
+      role: g.role,
+      category: g.category,
+      priority: g.priority,
+      carries_secret: g.carriesSecret,
+    }));
+    expect(rows.rows.sort(byKey)).toEqual(want.sort(byKey));
+
+    // Only the worker holds the sender's tables.
+    const privileges = await su.query<{ worker: boolean; console: boolean }>(
+      `SELECT has_table_privilege('fin_worker', 'email.send_bucket', 'UPDATE') AS worker,
+              has_table_privilege('fin_console', 'email.send_bucket', 'SELECT') AS console`,
+    );
+    expect(privileges.rows).toEqual([{ worker: true, console: false }]);
+
+    // The console may queue a sign-in code; the api's login may not (FE001).
+    const signInCode = (id: string) =>
+      JSON.stringify({
+        id,
+        template: "identity/sign-in-code",
+        recipient_kind: "address",
+        recipient: "person@example.com",
+        params: { code: "12345678" },
+      });
+    const consoleLogin = await db.connect("fin_console_a");
+    try {
+      const queued = await consoleLogin.query<{ id: string }>(
+        "SELECT email.enqueue($1::jsonb) AS id",
+        [signInCode(`eml_${"0".repeat(26)}`)],
+      );
+      expect(queued.rows).toEqual([{ id: `eml_${"0".repeat(26)}` }]);
+    } finally {
+      await consoleLogin.end();
+    }
+    const apiLogin = await db.connect("fin_api_a");
+    try {
+      await expect(
+        apiLogin.query("SELECT email.enqueue($1::jsonb)", [signInCode(`eml_${"1".repeat(26)}`)]),
+      ).rejects.toMatchObject({ code: "FE001" });
+    } finally {
+      await apiLogin.end();
+    }
+    await su.query("DELETE FROM email.outbox");
   });
 
   it("reads the image's layout at FIN_DB_ASSETS_DIR: the same files, so nothing is pending", async () => {

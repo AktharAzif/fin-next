@@ -65,7 +65,7 @@ describe("every package's files, from an empty database", () => {
   it("takes the migrations of more than one package", () => {
     const discovered = discoverDbAssets(assets.root);
     expect(new Set(discovered.migrations.map((f) => f.package))).toEqual(
-      new Set(["db", "identity", ...discovered.migrations.map((f) => f.package)]),
+      new Set(["db", "email", "identity", ...discovered.migrations.map((f) => f.package)]),
     );
     expect(discovered.migrations.map((f) => f.name)).toEqual(assets.migrations.map((f) => f.name));
   });
@@ -96,6 +96,7 @@ describe("every package's files, from an empty database", () => {
         [
           "audit.event",
           "email.outbox",
+          "email.send_bucket",
           "ops.kill_switch",
           "identity.user",
           "identity.session_view",

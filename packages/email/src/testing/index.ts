@@ -88,20 +88,56 @@ export class LineRecorder implements EmailLog {
 
 const SQL_DIR = join(import.meta.dirname, "..", "..");
 
-/** The fixture schema text: the spec 01 §6.10 stand-in, then this lane's extension. */
+/** This package's migration, which `migrate` applies over P0-E's outbox. */
+export const SENDER_MIGRATION = "20261121194000_email_sender.sql";
+
+/**
+ * The grant fragments the sender's objects take in `migrate` (packages/db/src/grants.ts's shape): P0-E's
+ * `email` fragment (the schema, email.enqueue() and the outbox) and this package's own.
+ */
+export const SENDER_GRANT_FRAGMENTS: readonly string[] = [
+  join(SQL_DIR, "..", "db", "roles", "grants", "email.json"),
+  join(SQL_DIR, "grants", "email-sender.json"),
+];
+
+interface FragmentEntry {
+  on: "schema" | "table" | "function";
+  name: string;
+  privileges: string[];
+  columns?: string[];
+  to: string[];
+}
+
+/** The fragments as GRANT statements, each group written `{{fin_worker}}` for the tests to map. */
+export function senderGrantSql(fragments: readonly string[] = SENDER_GRANT_FRAGMENTS): string {
+  const lines: string[] = [];
+  for (const file of fragments) {
+    const { grants } = JSON.parse(readFileSync(file, "utf8")) as { grants: FragmentEntry[] };
+    for (const entry of grants) {
+      const columns = entry.columns === undefined ? "" : ` (${entry.columns.join(", ")})`;
+      const privileges = entry.privileges.map((p) => `${p}${columns}`).join(", ");
+      const target = entry.on === "table" ? "TABLE" : entry.on === "schema" ? "SCHEMA" : "FUNCTION";
+      const to = entry.to.map((role) => `{{${role}}}`).join(", ");
+      lines.push(`GRANT ${privileges} ON ${target} ${entry.name} TO ${to};`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** The fixture schema text: the spec 01 §6.10 stand-in, then this lane's migration and its grants. */
 export function outboxSchemaSql(): { base: string; extension: string; grants: string } {
   return {
     base: readFileSync(join(SQL_DIR, "test", "fixture", "outbox-base.sql"), "utf8"),
-    extension: readFileSync(join(SQL_DIR, "sql", "email_sender.sql"), "utf8"),
-    grants: readFileSync(join(SQL_DIR, "sql", "email_sender.grants.sql"), "utf8"),
+    extension: readFileSync(join(SQL_DIR, "migrations", SENDER_MIGRATION), "utf8"),
+    grants: senderGrantSql(),
   };
 }
 
 /**
  * Drops and recreates the `email` (and stand-in `ops`) schema in the connected (lane-owned)
  * database: the base migration with its seeded grant, then the extension and its grants with each
- * group role mapped by `roleName`, then the generated template grants, exactly as the data lane's
- * runner would load them over the seeded row.
+ * group role mapped by `roleName`, then the generated template grants, exactly as `migrate` loads
+ * them over the seeded row.
  */
 export async function installOutboxSchema(
   db: Queryable,

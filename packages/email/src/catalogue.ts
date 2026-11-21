@@ -2,9 +2,9 @@
 //
 // The allowlist is generated from the folders: a role may queue a template only when the template's
 // folder (or the template itself) is listed for it below, so no service can queue a look-alike
-// sign-in code or "key revoked" notice. `grantRows()` is what `email.template_grant` holds; the
-// data lane's migration inserts exactly these rows, and a test proves the database refuses the rest
-// (T08-22).
+// sign-in code or "key revoked" notice. `grantRows()` is what `email.template_grant` holds: `migrate`
+// loads exactly these rows after every run (grantInsertSql, from apps/api's afterMigrations), and a
+// test proves the database refuses the rest (T08-22).
 import { CLASS_RULES, type EmailClass, type Template, type TemplateArea } from "./classes.ts";
 import { accountLocked } from "./templates/identity/account-locked.ts";
 import { accountRecoveryFinished } from "./templates/identity/account-recovery-finished.ts";

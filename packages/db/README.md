@@ -38,7 +38,10 @@ before any statement runs, since an empty grant set would revoke everything.
   `{"migrations":[…],"minimumSchemaVersion":"<newest>"}`.
 - **Tests**: `createTestDatabase()` applies every package's files, as `migrate` does; pass
   `packages: ["db"]` for Phase 0's alone (the AC-P0-39, role and guard-registry tests do).
-  `assets.db.test.ts` applies the whole set to an empty database.
+  `assets.db.test.ts` applies the whole set to an empty database. After the files and grants,
+  `migrate --migrate` runs its own step in the same transaction (apps/api's `afterMigrations`: the
+  audit registry and `email.enqueue()`'s template allowlist from the catalogue); a test that needs the
+  database exactly as `migrate` leaves it passes that step as `after`.
 - **A guarded table** (a write that must carry its audit event, spec 08 §3.5) is registered in
   `src/guards/<area>.ts` with `defineGuards`, and the area's migration calls
   `audit.install_guard('<table>'::regclass, ARRAY[<ops>], '<key column>', ARRAY[<events>])` with the same

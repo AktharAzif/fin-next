@@ -18,8 +18,8 @@ Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in it
 | `src/outbox/` | The database seam and every statement the sender runs; `enqueue()` checks the params against the template before the row is written, so a notice that could never be sent fails the caller's transaction |
 | `src/sender/` | The sender: claims, leases, limits, the digest, the bucket, budgets and retries |
 | `src/testing/` | A fake transport, a line recorder and the integration-test database helper |
-| `sql/email_sender.sql` | This lane's extension of the outbox, to land as `packages/db/migrations/<ts>_email_sender.sql` |
-| `sql/email_sender.grants.sql` | Its grants, to land in `packages/db/roles/grants/email.json` |
+| `migrations/20261121194000_email_sender.sql` | This lane's extension of the outbox, which `migrate` applies after P0-E's `<ts>_email_outbox.sql` (the database files' rule, `packages/db/src/assets.ts`) |
+| `grants/email-sender.json` | Its grants, beside P0-E's `email` fragment (`packages/db/roles/grants/email.json`); the template grants are not here but in `src/catalogue.ts`, which `migrate` syncs into `email.template_grant` after every run |
 | `test/fixture/outbox-base.sql` | A test-only stand-in for P0-E's `<ts>_email_outbox.sql` (spec 01 §6.10), with its seeded `ops/delivery-check` grant, and for the one `ops` table the delivery check writes (`ops.duty_state`) |
 
 ## Adding a template (area lanes)
@@ -27,7 +27,8 @@ Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in it
 1. Add `src/templates/<folder>/<name>.ts` with `defineTemplate({ ... })`: the class fixes the
    subdomain; a `security` template needs its `digestLine`; a `code` template its `codeTtlMs`.
    Subject, heading and preview are fixed words; typed values go only in `boxes`.
-2. Add it to `TEMPLATES` in `src/catalogue.ts`. The role allowlist follows from the folder. A
+2. Add it to `TEMPLATES` in `src/catalogue.ts`. The role allowlist follows from the folder, and
+   the next `migrate` run writes its rows to `email.template_grant` (no migration is needed). A
    worker still on an older release keeps a row whose template or params it does not know and
    tries it again every 5 minutes, so a newer replica sends it; it never deletes it at once.
 3. `pnpm --filter @fin/email test` renders it with its `sample` and checks the rules (T08-20,
