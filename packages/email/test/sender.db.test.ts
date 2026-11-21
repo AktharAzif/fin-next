@@ -123,13 +123,13 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       { userId: USER, device: "Safari on macOS", time: TIME },
       to,
     );
-  const invite = (to = "invitee@example.com") =>
+  const invite = (to = "invitee@example.com", orgId = ORG) =>
     queue(
       "fin_console",
       "orgs/invitation",
       {
         invitationId: "inv_01jd0000000000000000000000",
-        orgId: ORG,
+        orgId,
         token: "Abcdefghijklmnopqrstuvwxyz012345",
         orgName: "Example Payments",
         roleLabel: "Developer",
@@ -790,11 +790,16 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         dailyBudget: 3,
         dailySecurityReserve: 1,
         dailyCodeOnlyReserve: 0,
-        dailySecurityOnlyReserve: 0,
+        dailySecurityOnlyReserve: 1,
+        dailyAccountSecurityReserve: 0,
+        dailySecurityPerOrganisation: 0,
+        dailyPerOrganisation: 1,
         concurrency: 6,
         reservedUrgent: 1,
       };
-      for (let i = 0; i < 3; i++) await invite(`p${i}@example.com`);
+      for (let i = 0; i < 3; i++) {
+        await invite(`p${i}@example.com`, `org_01jd${String(i + 1).padStart(22, "0")}`);
+      }
       const r = await sender(limits).runOnce();
       expect(r).toMatchObject({ sent: 2, deferred: 1 });
       const [held] = await rows();
@@ -905,7 +910,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         dailyBudget: 4,
         dailySecurityReserve: 1,
         dailyCodeOnlyReserve: 0,
-        dailySecurityOnlyReserve: 0,
+        dailySecurityOnlyReserve: 1,
+        dailyAccountSecurityReserve: 0,
+        dailySecurityPerOrganisation: 0,
+        dailyPerOrganisation: 1,
         concurrency: 6,
         reservedUrgent: 1,
       };
@@ -934,6 +942,9 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         dailySecurityReserve: 4,
         dailyCodeOnlyReserve: 2,
         dailySecurityOnlyReserve: 2,
+        dailyAccountSecurityReserve: 1,
+        dailySecurityPerOrganisation: 0,
+        dailyPerOrganisation: 1,
         concurrency: 10,
         reservedUrgent: 1,
       };
@@ -976,6 +987,109 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       await code();
       await sender(limits).runOnce();
       expect(port.of("identity/sign-in-code")).toHaveLength(1);
+    });
+
+    /** Queues one organisation's bypass notice (it names the organisation, so it counts against it). */
+    const orgNotice = (orgId: string, to: string) =>
+      queue(
+        "fin_console",
+        "orgs/role-permissions-changed",
+        {
+          ...(findTemplate("orgs/role-permissions-changed")?.sample as Record<string, unknown>),
+          orgId,
+        },
+        to,
+      );
+    const orgIds = (n: number) =>
+      Array.from({ length: n }, (_, i) => `org_01jd${String(i + 1).padStart(22, "0")}`);
+
+    /** Runs the sender until a pass claims nothing (rows held until tomorrow are not claimed). */
+    async function drain(s: Sender): Promise<void> {
+      for (let i = 0; i < 20; i++) if ((await s.runOnce()).claimed === 0) return;
+      throw new Error("the outbox did not drain");
+    }
+
+    it("keeps the account share for notices that name no organisation, after ordinary mail, organisations' notices and codes", async () => {
+      const limits = {
+        dailyBudget: 20,
+        dailySecurityReserve: 10,
+        dailyCodeOnlyReserve: 3,
+        dailySecurityOnlyReserve: 5,
+        dailyAccountSecurityReserve: 2,
+        dailySecurityPerOrganisation: 2,
+        dailyPerOrganisation: 5,
+        concurrency: 16,
+        reservedUrgent: 1,
+      };
+      // Ordinary mail has used its part of the day first.
+      await db.admin.query(
+        "INSERT INTO email.daily_budget (day, scope, count) VALUES ($1::date, 'environment', 10)",
+        [new Date(clock.now()).toISOString().slice(0, 10)],
+      );
+      const s = sender(limits);
+      for (const [i, org] of orgIds(4).entries()) {
+        for (let j = 0; j < 3; j++) await orgNotice(org, `holder${i}-${j}@example.com`);
+      }
+      await drain(s);
+      for (let i = 0; i < 8; i++) {
+        await queue(
+          "fin_console",
+          "identity/sign-in-code",
+          { code: "12345678" },
+          `c${i}@example.com`,
+        );
+      }
+      await drain(s);
+      expect(port.of("identity/sign-in-code").length).toBeGreaterThan(0);
+      // Sign-in alerts for two other people are still sent that day.
+      await notice("first@example.com");
+      await notice("second@example.com");
+      await drain(s);
+      expect(port.of("identity/new-sign-in")).toHaveLength(2);
+    });
+
+    it("never spends a token on a row the budget holds back, holds it until the next UTC day, and lets other organisations' mail go", async () => {
+      const limits = {
+        bucket: { name: "cloudflare", capacity: 5, ratePerSecond: 0.001 },
+        bucketReserve: 1,
+        dailySecurityPerOrganisation: 1,
+        concurrency: 6,
+        reservedUrgent: 1,
+      };
+      const [orgA, orgB] = orgIds(2) as [string, string];
+      for (let i = 0; i < 4; i++) await orgNotice(orgA, `holder${i}@example.com`);
+      expect(await sender(limits).runOnce()).toMatchObject({ sent: 1, deferred: 3 });
+      const bucket = await db.admin.query<{ tokens: number }>(
+        "SELECT tokens FROM email.send_bucket WHERE name = 'cloudflare'",
+      );
+      expect(Number(bucket.rows[0]?.tokens)).toBeCloseTo(4, 1);
+      const tomorrow = Math.floor(clock.now() / (24 * HOUR)) * 24 * HOUR + 24 * HOUR;
+      const held = await rows();
+      expect(held).toHaveLength(3);
+      for (const r of held) {
+        expect(r).toMatchObject({ attempts: 0, last_error_code: "budget" });
+        expect(new Date(r.due_at).getTime()).toBeGreaterThanOrEqual(tomorrow);
+      }
+      expect(log.named("email.security_unsent").map((l) => l.fields.reason)).toEqual([
+        "budget",
+        "budget",
+        "budget",
+      ]);
+
+      // Another organisation's notice and invitation, and a code, all still go at once.
+      await orgNotice(orgB, "member@example.com");
+      await queue(
+        "fin_console",
+        "orgs/invitation",
+        {
+          ...(findTemplate("orgs/invitation")?.sample as Record<string, unknown>),
+          orgId: orgB,
+        },
+        "invitee@example.com",
+      );
+      await code();
+      expect(await sender(limits).runOnce()).toMatchObject({ sent: 3, deferred: 0 });
+      expect(port.of("orgs/invitation")).toHaveLength(1);
     });
   });
 

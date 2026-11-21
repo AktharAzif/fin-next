@@ -6,8 +6,10 @@
 //      past 5 an hour fold into a digest, never dropped; other classes have a backstop, one window
 //      per code template and one per class and folder for the rest); resolves the recipient; renders
 //      Fin's own template; takes a token from the shared bucket (ordinary mail leaves a reserve);
-//      takes the daily budgets (ordinary mail leaves the reserved share, codes and security notices
-//      each keep a part of it); sends;
+//      takes the daily budgets (ordinary mail leaves the reserved share; codes, security notices and
+//      security mail that names no organisation each keep a part of it; each organisation has its
+//      ceilings); sends. A row the budgets refuse gives its token back, so it never spends the
+//      bucket, and waits until the next UTC day (a code ends);
 //   3. a sent row is deleted, so a code-bearing row never outlives its send; a failed one waits with
 //      backoff, or ends for good with `email.send_failed`, and a security row that cannot be sent
 //      writes `email.security_unsent`. A send Cloudflare refused gives its budget back, and a token
@@ -41,6 +43,7 @@ import {
   type OutboxRow,
   outboxAge,
   refundBudget,
+  refundToken,
   rescheduleRow,
   sweep,
   takeBudget,
@@ -346,7 +349,12 @@ export class Sender {
     }
 
     const budget = await this.takeBudgets(row, template, now);
-    if (typeof budget === "string") return budget;
+    if (typeof budget === "string") {
+      // Nothing is sent: the token goes back, so a row the budget holds back never spends the bucket
+      // that every other row's sends depend on.
+      await refundToken(this.o.db, this.limits.bucket);
+      return budget;
+    }
 
     const outcome = await this.o.port.send({
       from,
@@ -379,7 +387,7 @@ export class Sender {
     const day = utcDay(now);
     const scopes = budgetScopes(group, orgId);
     const taken = await takeBudget(this.o.db, day, scopes, (counts) =>
-      budgetRefusal(group, counts, this.limits),
+      budgetRefusal(group, counts, this.limits, orgId),
     );
     const base = { template: row.template, class: row.category, emailId: row.id };
     if (taken.refusedBy === undefined) {
@@ -394,34 +402,54 @@ export class Sender {
       }
       return { day, scopes: scopes.raise };
     }
-    const scope = taken.refusedBy === "environment" ? "environment" : "organisation";
-    const spentAll = (taken.counts.environment ?? 0) >= this.limits.dailyBudget;
-    const share = !reservedShare
-      ? "ordinary"
-      : scope === "organisation" || spentAll
-        ? "all"
-        : group === "code"
-          ? "security_only"
-          : "code_only";
+    const scope = taken.refusedBy.scope === "environment" ? "environment" : "organisation";
     this.o.log.log(
       "email.budget_reached",
-      { ...base, scope, share, ...(orgId === undefined ? {} : { orgId }) },
+      {
+        ...base,
+        scope,
+        share: taken.refusedBy.share,
+        ...(orgId === undefined ? {} : { orgId }),
+      },
       "warn",
     );
     if (template.class === "code") return this.end(row, template, "budget", "permanent");
-    // Security and ops rows past their share, or a security notice past its organisation's ceiling.
-    if (reservedShare) {
-      // Security and ops rows are never dropped for the budget: they wait and try again.
-      return this.retry(row, template, "budget", "budget", this.limits.budgetWaitMs);
-    }
+    return this.holdForBudget(row, template, now);
+  }
+
+  /**
+   * Holds a row the budgets refused until the next UTC day, when they start again: a day's counts
+   * only grow (but for a send Cloudflare refused, which gives its count back), so trying sooner would
+   * mostly take claims and writes from other rows. The claim's attempt is given back (it was not a
+   * try at sending), so no row ends for the budget, and a security row writes
+   * `email.security_unsent` (reason `budget`) once, which pages.
+   */
+  private async holdForBudget(row: OutboxRow, template: Template, now: number): Promise<RowResult> {
     const tomorrow =
       Math.floor(now / DAY_MS) * DAY_MS + DAY_MS + Math.round(this.random() * 15 * 60_000);
-    await rescheduleRow(this.o.db, row.id, this.o.holder, {
+    let markUnsent: number | undefined;
+    if (template.class === "security" && row.securityUnsentAt === null) {
+      markUnsent = now;
+      this.o.log.log(
+        "email.security_unsent",
+        {
+          template: row.template,
+          class: template.class,
+          emailId: row.id,
+          code: "budget",
+          reason: "budget",
+          final: false,
+        },
+        "error",
+      );
+    }
+    const updated = await rescheduleRow(this.o.db, row.id, this.o.holder, {
       dueAt: tomorrow,
       errorCode: "budget",
       refundAttempt: true,
+      ...(markUnsent === undefined ? {} : { markSecurityUnsent: markUnsent }),
     });
-    return "deferred";
+    return updated ? "deferred" : "lost";
   }
 
   private async record(
@@ -505,7 +533,7 @@ export class Sender {
     const wait =
       reason === "blocked" || reason === "release"
         ? Math.max(this.limits.blockedWaitMs, waitHintMs ?? 0)
-        : Math.max(waitHintMs ?? 0, reason === "budget" ? 0 : backoff);
+        : Math.max(waitHintMs ?? 0, backoff);
     const cls: EmailClass = template?.class ?? row.category;
     const codeTtlMs = template?.codeTtlMs ?? (cls === "code" ? LONGEST_CODE_MS : undefined);
     const codeExpired = codeTtlMs !== undefined && now + wait >= row.createdAt + codeTtlMs;
@@ -524,7 +552,7 @@ export class Sender {
     if (
       cls === "security" &&
       row.securityUnsentAt === null &&
-      (reason === "budget" || row.attempts >= this.limits.securityUnsentAfter)
+      row.attempts >= this.limits.securityUnsentAfter
     ) {
       markUnsent = now;
       this.o.log.log(
@@ -534,7 +562,7 @@ export class Sender {
           class: cls,
           emailId: row.id,
           code,
-          reason: reason === "budget" ? "budget" : "failed",
+          reason: "failed",
           final: false,
         },
         "error",

@@ -72,6 +72,8 @@ export {
 export { escapeHtml, RenderError, type Rendered, renderTemplate } from "./render.ts";
 export {
   type BudgetGroup,
+  type BudgetRefusal,
+  type BudgetShare,
   backoffMs,
   budgetRefusal,
   budgetScopes,

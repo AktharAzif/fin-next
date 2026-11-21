@@ -6,7 +6,15 @@ import { EMAIL_ID, newId } from "../src/ids.ts";
 import { displayText, formatTime, HIDDEN_VALUE, param, secretShapeIn } from "../src/params.ts";
 import { normaliseAddress, recipientHasher } from "../src/recipient-key.ts";
 import { escapeHtml } from "../src/render.ts";
-import { backoffMs, DEFAULT_LIMITS } from "../src/sender/limits.ts";
+import {
+  type BudgetGroup,
+  backoffMs,
+  budgetRefusal,
+  budgetScopes,
+  checkLimits,
+  DEFAULT_LIMITS,
+  type SenderLimits,
+} from "../src/sender/limits.ts";
 
 describe("checkHeaders", () => {
   it("accepts Fin's headers and Cloudflare's allowlisted names in any case", () => {
@@ -176,6 +184,80 @@ describe("the recipient hash", () => {
 
   it("refuses a short key", () => {
     expect(() => recipientHasher({ version: 1, secret: new Uint8Array(16) })).toThrow();
+  });
+});
+
+describe("the daily budget's shares", () => {
+  const ORG_A = "org_01jd00000000000000000000aa";
+  const ORG_B = "org_01jd00000000000000000000bb";
+
+  /** The budget's counters, raised as `takeBudget` would. */
+  function day(limits: SenderLimits = DEFAULT_LIMITS, start: Record<string, number> = {}) {
+    const counts: Record<string, number> = { ...start };
+    const send = (group: BudgetGroup, orgId?: string): boolean => {
+      const scopes = budgetScopes(group, orgId);
+      const seen = Object.fromEntries(scopes.read.map((s) => [s, counts[s] ?? 0]));
+      if (budgetRefusal(group, seen, limits, orgId) !== undefined) return false;
+      for (const s of scopes.raise) counts[s] = (counts[s] ?? 0) + 1;
+      return true;
+    };
+    const flood = (group: BudgetGroup, orgId?: string): number => {
+      let n = 0;
+      while (n < 10_000 && send(group, orgId)) n += 1;
+      return n;
+    };
+    return { counts, send, flood };
+  }
+
+  it("keeps a part of the security share that no organisation's notices may spend", () => {
+    // Ordinary mail has used its part first, then one organisation's bypass notices run.
+    const d = day(DEFAULT_LIMITS, { environment: 1500 });
+    expect(d.flood("security", ORG_A)).toBe(DEFAULT_LIMITS.dailySecurityPerOrganisation);
+    // Another organisation's notice, and a notice that names no organisation, still go.
+    expect(d.send("security", ORG_B)).toBe(true);
+    expect(d.send("security")).toBe(true);
+  });
+
+  it("never lets organisations' notices and codes together take the account share", () => {
+    const limits = DEFAULT_LIMITS;
+    for (const order of ["orgs first", "codes first"] as const) {
+      const d = day(limits, { environment: 1500 });
+      const orgs = Array.from({ length: 40 }, (_, i) => `org_01jd${String(i).padStart(22, "0")}`);
+      if (order === "codes first") d.flood("code");
+      for (const org of orgs) d.flood("security", org);
+      d.flood("code");
+      expect(d.flood("security"), order).toBeGreaterThanOrEqual(limits.dailyAccountSecurityReserve);
+    }
+  });
+
+  it("still leaves codes their own part when organisations' notices run first", () => {
+    const d = day(DEFAULT_LIMITS, { environment: 1500 });
+    for (let i = 0; i < 40; i++) d.flood("security", `org_01jd${String(i).padStart(22, "0")}`);
+    d.flood("security");
+    expect(d.flood("code")).toBeGreaterThanOrEqual(DEFAULT_LIMITS.dailyCodeOnlyReserve);
+  });
+
+  it("refuses limits in which one organisation could spend all of what organisations may", () => {
+    expect(() => checkLimits(DEFAULT_LIMITS)).not.toThrow();
+    const share =
+      DEFAULT_LIMITS.dailySecurityOnlyReserve - DEFAULT_LIMITS.dailyAccountSecurityReserve;
+    expect(() => checkLimits({ ...DEFAULT_LIMITS, dailySecurityPerOrganisation: share })).toThrow();
+    expect(() =>
+      checkLimits({ ...DEFAULT_LIMITS, dailySecurityPerOrganisation: share - 1 }),
+    ).not.toThrow();
+    expect(() =>
+      checkLimits({
+        ...DEFAULT_LIMITS,
+        dailyAccountSecurityReserve: DEFAULT_LIMITS.dailySecurityOnlyReserve + 1,
+      }),
+    ).toThrow();
+    // Ordinary mail's ceiling per organisation stays below ordinary mail's part in the same way.
+    const ordinary = DEFAULT_LIMITS.dailyBudget - DEFAULT_LIMITS.dailySecurityReserve;
+    expect(() => checkLimits({ ...DEFAULT_LIMITS, dailyPerOrganisation: ordinary })).toThrow();
+    const d = day();
+    expect(d.flood("ordinary", ORG_A)).toBe(DEFAULT_LIMITS.dailyPerOrganisation);
+    expect(d.send("ordinary", ORG_B)).toBe(true);
+    expect(d.send("ordinary")).toBe(true);
   });
 });
 

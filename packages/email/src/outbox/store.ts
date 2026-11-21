@@ -260,9 +260,20 @@ export async function takeToken(
   };
 }
 
-export interface BudgetTake {
-  /** The scope that refused, or undefined when the send was counted. */
-  readonly refusedBy: string | undefined;
+/**
+ * Gives back a token taken for a send that was then held back before Cloudflare was called (the
+ * daily budget refused it), so a row that waits on a budget never spends the bucket.
+ */
+export async function refundToken(db: Queryable, bucket: BucketSettings): Promise<void> {
+  await db.query(
+    "UPDATE email.send_bucket SET tokens = least($2::float8, tokens + 1) WHERE name = $1",
+    [bucket.name, bucket.capacity],
+  );
+}
+
+export interface BudgetTake<R> {
+  /** Why the send was refused, or undefined when it was counted. */
+  readonly refusedBy: R | undefined;
   /** Each scope's count: before the take when refused, after it when counted. */
   readonly counts: Readonly<Record<string, number>>;
 }
@@ -274,12 +285,12 @@ export interface BudgetTake {
  * and only then are the `raise` counts raised. Agreement across replicas is Postgres's, never
  * process memory's.
  */
-export async function takeBudget(
+export async function takeBudget<R>(
   pool: PoolLike,
   day: string,
   scopes: { readonly read: readonly string[]; readonly raise: readonly string[] },
-  refuse: (counts: Readonly<Record<string, number>>) => string | undefined,
-): Promise<BudgetTake> {
+  refuse: (counts: Readonly<Record<string, number>>) => R | undefined,
+): Promise<BudgetTake<R>> {
   const read = [...new Set([...scopes.read, ...scopes.raise])].sort();
   const raise = [...new Set(scopes.raise)];
   return inTransaction(pool, async (tx) => {

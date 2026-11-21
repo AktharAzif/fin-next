@@ -72,11 +72,13 @@ CREATE TABLE email.recipient_window (
 CREATE INDEX recipient_window_age ON email.recipient_window (window_start);
 
 -- 4. Daily send budgets (ARCHITECTURE §9.5, [SA-40]): `environment`; `class:code` and
---    `class:security` (security and ops), so each keeps a share the other cannot spend; `org:<id>`
---    for an organisation's ordinary mail and `org-security:<id>` for its security notices.
+--    `class:security` (security and ops), so each keeps a share the other cannot spend;
+--    `class:org-security` (security notices that name an organisation), so mail that names none
+--    keeps a share no organisation can spend; `org:<id>` for an organisation's ordinary mail and
+--    `org-security:<id>` for its security notices.
 CREATE TABLE email.daily_budget (
   day   date NOT NULL,
-  scope text NOT NULL CHECK (scope ~ '^(environment|class:(code|security)|(org|org-security):org_[0-9a-hjkmnp-tv-z]{26})$'),
+  scope text NOT NULL CHECK (scope ~ '^(environment|class:(code|security|org-security)|(org|org-security):org_[0-9a-hjkmnp-tv-z]{26})$'),
   count integer NOT NULL CHECK (count >= 0),
   PRIMARY KEY (day, scope)
 );
