@@ -37,6 +37,12 @@ const PREV = "2".repeat(40);
 const REPO = "owner/fin-next";
 const OWNER = "owner";
 const HEX = (/** @type {string} */ c) => c.repeat(64);
+/** The opening of a GitHub expression, spelled so that no linter reads it as a template. */
+const E = `${"$"}{{`;
+/** The static outputs tools/layout.json names, each uploaded as static-<key>-<sha>. */
+const RELEASE_KEYS = staticOutputs(
+  JSON.parse(readFileSync(join(ROOT, "tools", "layout.json"), "utf8")),
+).map((o) => o.key);
 
 /**
  * The image records as the manifest job downloads them: one artefact folder per release image,
@@ -992,6 +998,53 @@ describe("release.yml", () => {
     assert.ok(take >= 0 && take < previous && previous < merge, "take, previous, then merge");
     assert.ok(merge < scan && merge < gitleaks, "the scans read the merged artefacts");
     assert.ok(scan < firstUpload && gitleaks < firstUpload && firstUpload < attest);
+  });
+
+  it("names no artefact the previous-release download could take but the static outputs", () => {
+    /** @param {string} value an artefact name or pattern, with this run's and the previous SHA */
+    const fill = (value) =>
+      value
+        .replace(/^(["'])(.*)\1$/, "$2")
+        .replaceAll(`${E} github.sha }}`, SHA)
+        .replaceAll(`${E} steps.previous.outputs.sha }}`, SHA);
+    /** @type {string[]} */
+    const uploads = [];
+    /** @type {string[]} */
+    const patterns = [];
+    for (const name of ["images", "static-build", "static", "manifest"]) {
+      for (const step of child(job(name), "steps")?.children ?? []) {
+        const uses = child(step, "uses")?.value ?? "";
+        const withNode = child(step, "with");
+        const value = (/** @type {string} */ key) =>
+          withNode === undefined ? undefined : child(withNode, key)?.value;
+        if (uses.startsWith("actions/upload-artifact@")) {
+          const upload = fill(value("name") ?? "");
+          uploads.push(
+            ...(upload.includes(`${E} matrix.image }}`)
+              ? RELEASE_IMAGES.map((image) => upload.replace(`${E} matrix.image }}`, image))
+              : [upload]),
+          );
+        }
+        const pattern = value("pattern");
+        if (uses.startsWith("actions/download-artifact@") && pattern !== undefined) {
+          if ((value("run-id") ?? "").includes("steps.previous.outputs.run_id")) {
+            patterns.push(fill(pattern));
+          }
+        }
+      }
+    }
+    assert.equal(patterns.length, 1, "one download takes the previous release's static outputs");
+    assert.ok(uploads.length > 6 && uploads.every((u) => !u.includes(E)), uploads.join());
+    // download-artifact matches a name with minimatch: `*` is any run of characters but `/`.
+    const glob = new RegExp(
+      `^${(patterns[0] ?? "")
+        .split("*")
+        .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+        .join("[^/]*")}$`,
+    );
+    const taken = uploads.filter((u) => glob.test(u)).sort();
+    const outputs = RELEASE_KEYS.map((key) => `static-${key}-${SHA}`).sort();
+    assert.deepEqual(taken, outputs);
   });
 
   it("downloads each image record into its own folder, never merged into one", () => {
