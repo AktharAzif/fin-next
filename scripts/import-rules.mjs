@@ -16,7 +16,9 @@
 //   - code that runs imports no test file (a target is matched in any case, as a case-insensitive
 //     file system reads it), since a test's own imports are not held to these rules, and no file
 //     under a test/, tests/, __tests__/, e2e/ or fixtures/ directory (in any case too), which the
-//     page policy below leaves out;
+//     page policy below leaves out: not by a relative path, a workspace package's subpath or a
+//     target of its exports map, nor by a module URL Vite bundles or import.meta's resolve names;
+//     and it uses no Vite glob import, which loads files no rule reads as imports;
 //   - a module specifier names its module plainly: no surrounding white space, control character,
 //     backslash or percent-encoding (in a relative URL Node reads `%2e` as a dot and `\` as a
 //     slash, and drops a tab), and no subpath import, `#name`, which stands for a module the rules
@@ -31,10 +33,11 @@
 //     SDK entries and core's experimental helpers nowhere; @ui-sdk/core/testing in tests only;
 //   - no console.error(error): errors go through reportError with safeError;
 //   - the page policy, in code that runs anywhere (tests and fixtures aside): no markup parsed
-//     from a string (React's inner-HTML prop, the DOM's members that parse HTML, document.write),
-//     no style attribute written by script, no eval, Function constructor or string timer (spec 06
-//     §6.2, §11.5), read in the whole text, comments and strings included, as written and with
-//     every escape decoded, so no reading of the code's structure can hide one;
+//     from a string (React's inner-HTML prop, the DOM's members that parse HTML, an iframe's
+//     inline document, a document's write), no style attribute written by script, no eval,
+//     Function constructor or string timer (spec 06 §6.2, §11.5), read in the whole text, comments
+//     and strings included, as written and with every escape decoded, so no reading of the code's
+//     structure can hide one;
 //   - Node built-ins by their node: name; relative imports with their file extension, .ts or
 //     .tsx where the source is TypeScript.
 // What it guarantees (BD-19). imports:check refuses the imports these rules forbid and, in the
@@ -177,6 +180,31 @@ const SDK_CORE_REFUSED_NAMES = [
   "createLasso",
 ];
 
+// The parts of the patterns that read the whole text (the loaders below and the page policy).
+// White space and comments, which JavaScript allows between the parts of a call or a member
+// access: a block comment is read up to its first `*/` and a line comment to its line's end, so a
+// run of them reads one way only and a failed match never backtracks through its splits.
+const TRIVIA = String.raw`\s|/\*(?:[^*]|\*(?!/))*\*/|//[^\n\r\u2028\u2029]*(?![^\n\r\u2028\u2029])`;
+const GAP = `(?:${TRIVIA})*`;
+const GAP1 = `(?:${TRIVIA})+`; // at least one, as between `new` and its name
+const QUOTE = String.raw`['"\x60]`;
+// A member access, `.` or `?.`.
+const DOT = String.raw`${GAP}\??\.${GAP}`;
+// What follows a name reached by a string key (`el["name"]`) rather than as a member.
+const KEY_END = String.raw`(?:${QUOTE}${GAP}\])?`;
+// The opening of a call's arguments, `(` or `?.(`.
+const OPEN = String.raw`${GAP}(?:\?\.${GAP})?\(`;
+// The receiver that call, apply and bind take first, up to its comma (one level of parentheses in
+// it read too).
+const RECEIVER = String.raw`(?:[^,()]|\([^()]*\))*,`;
+// A call of the function named just before: `f(`, `f?.(`, a tagged template, or one through its
+// call, apply or bind.
+const CALLED = String.raw`(?:${OPEN}|${GAP}\x60|${DOT}(?:call|apply|bind)(?![\w$]))`;
+// Up to a call's first argument: past `(` or `?.(`, or past the receiver of call, apply or bind,
+// then past any `(` or `[` before it (a parenthesised argument; an array, which apply reads, and
+// which a timer or an attribute name reads as its text).
+const FIRST_ARG = `(?:${OPEN}|${DOT}(?:call|apply|bind)${OPEN}${RECEIVER})${GAP}(?:[[(]${GAP})*`;
+
 // The names of the loaders, built at run time like the test fixtures: a string that names a
 // loader is refused in this file's own area, so this file holds none.
 const words = (/** @type {string} */ list) => list.split(" ");
@@ -184,14 +212,15 @@ const GET_BUILTIN = ["getBuiltin", "Module"].join("");
 const CREATE_REQUIRE = ["create", "Require"].join("");
 const INTERNAL_LOADERS = words("_linkedBinding dlopen _load mainModule registerHooks");
 // Other ways to load code that the rules cannot read, refused where every import must be read:
-// the calls themselves, and the same names reached as a computed member with a string key. They
-// are matched in the text as written and again with its escapes decoded.
+// the calls themselves (an optional call, or a comment before the parenthesis, included), and the
+// same names reached as a computed member with a string key. They are matched in the text as
+// written and again with its escapes decoded.
 const UNREAD_LOADERS = new RegExp(
   [
-    String.raw`\b(?:${CREATE_REQUIRE}|_linkedBinding|dlopen|_load|eval)\s*\(`,
-    String.raw`\bprocess\s*\??\.\s*binding\b`,
-    String.raw`\bnew\s+Function\b`,
-    String.raw`\[\s*(['"\x60])(?:${GET_BUILTIN}|${CREATE_REQUIRE}|binding|_linkedBinding|dlopen|_load|require|eval|Function|constructor|mainModule|register|registerHooks)\1\s*\]`,
+    String.raw`\b(?:${CREATE_REQUIRE}|_linkedBinding|dlopen|_load|eval)${GAP}(?:\?\.${GAP})?\(`,
+    String.raw`\bprocess${DOT}binding\b`,
+    String.raw`\bnew${GAP1}Function\b`,
+    String.raw`\[${GAP}(['"\x60])(?:${GET_BUILTIN}|${CREATE_REQUIRE}|binding|_linkedBinding|dlopen|_load|require|eval|Function|constructor|mainModule|register|registerHooks)\1${GAP}\]`,
   ].join("|"),
   "g",
 );
@@ -241,20 +270,28 @@ const EXPORT_DECLARATIONS = new Set([
 
 // The page policy's refusals (spec 06 §6.2 and §11.5, FW-C18, AC-UI-01), in code that runs,
 // wherever it is: markup parsed from a string (React's inner-HTML prop, the DOM's members that
-// parse HTML, document.write), a style attribute written by script, and code built from a string
-// (eval, the Function constructor, a string handed to setTimeout or setInterval). The whole text is
-// read, comments, strings and regular expressions included, as written and again with every
-// escape decoded (unescapeText): a reading of the code's structure can be led to take code for a
-// string or a comment, so the policy trusts none, and a comment that names a sink is refused too.
-// A computed member with a string key is read as well. Tests, their helpers and fixtures (files
-// under test/, e2e/ or fixtures/) are left out, since a violation fixture plants one on purpose,
-// and code that runs imports none of them (above); Biome's noDangerouslySetInnerHtml still covers
-// their JSX. The sink names are built at run time and no pattern below reads as a call to what it
-// refuses, so this file passes its own check.
+// parse HTML, an iframe's inline document, a document's write and writeln), a style attribute
+// written by script, and code built from a string (eval, the Function constructor, a string handed
+// to setTimeout or setInterval). The whole text is read, comments, strings and regular expressions
+// included, as written and again with every escape decoded (unescapeText): a reading of the code's
+// structure can be led to take code for a string or a comment, so the policy trusts none, and a
+// comment that names a sink is refused too. Every direct spelling of a sink is read: a member, an
+// optional member or a string key; a call, an optional call, a tagged template or a call through
+// call, apply or bind (and, for eval and the Function constructor, through Reflect's apply and
+// construct, or in parentheses); with white space and comments anywhere JavaScript allows them.
+// A sink reached by another name (a destructured or assigned alias) is beyond a reading of the
+// text, as BD-19 says of loading code. Tests, their helpers and fixtures (files under test/, e2e/
+// or fixtures/) are left out, since a violation fixture plants one on purpose, and code that runs
+// reaches none of them (above, and the module URLs below); Biome's noDangerouslySetInnerHtml still
+// covers their JSX. The sink names are built at run time and no pattern below reads as a use of
+// what it refuses, so this file passes its own check.
 const TEST_CODE = /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\//;
 // Code that runs imports nothing from those directories, matched in any case as TEST_TARGET is.
 const TEST_CODE_TARGET = new RegExp(TEST_CODE.source, "iu");
-const HTML_SINK_NAMES = [
+const joined = (/** @type {string[][]} */ names) => names.map((parts) => parts.join(""));
+// The DOM's members that parse a string as markup (the Trusted Types HTML sinks, and the Sanitizer
+// API's methods and DOMParser's, which parse it too), as JavaScript names them, in their case.
+const HTML_SINK_NAMES = joined([
   ["dangerously", "Set", "Inner", "HTML"],
   ["inner", "HTML"],
   ["outer", "HTML"],
@@ -262,35 +299,82 @@ const HTML_SINK_NAMES = [
   ["createContextual", "Fragment"],
   ["set", "HTML", "Unsafe"],
   ["parse", "HTML", "Unsafe"],
-].map((parts) => parts.join(""));
+  ["set", "HTML"],
+  ["parse", "HTML"],
+  ["parse", "From", "String"],
+]);
 const HTML_SINKS = HTML_SINK_NAMES.join("|");
+// Names a browser reads in any case: the iframe attribute (and React's prop) that holds a whole
+// document as markup, and the editing command that inserts markup.
+const HTML_SINKS_ANY_CASE = joined([
+  ["src", "doc"],
+  ["insert", "HTML"],
+]).join("|");
+const MARKUP_MESSAGE = `markup is never parsed from a string (${HTML_SINK_NAMES.slice(0, 2).join(", ")} and kin)`;
+// A document's write and writeln. A document is reached by a name that ends in doc or document
+// (document, ownerDocument, contentDocument, a local doc), plain or as a string key, or by a call
+// that returns one (a getter's, or open's), and its prototype's are the same; writeln is refused on
+// anything, since only a document has one, and a string key naming either on anything.
+const [WRITE, WRITELN] = joined([
+  ["wri", "te"],
+  ["wri", "teln"],
+]);
+const DOCUMENT_NAME = String.raw`(?<![\w$])[\w$]*(?:doc|Doc|DOC)(?:ument|UMENT)?${KEY_END}(?:${GAP}(?:\([^()]*\)|[)!]))*(?:${DOT}open${GAP}\([^()]*\))?(?:${DOT}prototype)?`;
+const STYLE = `${QUOTE}style${QUOTE}`;
+// What sets or creates an attribute, or reaches an attribute node that can be written.
+const ATTRIBUTE_WRITERS = "setAttribute|createAttribute|getAttributeNode|getNamedItem";
+// The globals whose eval and Function are the page's own or a frame's.
+const GLOBAL = `(?:globalThis|window|self|top|parent|frames|opener|contentWindow|defaultView)${DOT}`;
 const CODE_FROM_STRING = "no code is built from a string (eval, the Function constructor)";
 /** @type {{ pattern: RegExp, message: string, codeFromString?: boolean }[]} */
 const PAGE_POLICY = [
   {
     pattern: new RegExp(String.raw`(?<![\w$])(?:${HTML_SINKS})(?![\w$])`, "g"),
-    message: `markup is never parsed from a string (${HTML_SINK_NAMES.slice(0, 2).join(", ")} and kin)`,
+    message: MARKUP_MESSAGE,
   },
   {
-    pattern: /(?<![\w$])document\s*\??\.\s*write(?:ln)?\s*\(/g,
-    message: "markup is never written from a string (document.write)",
+    pattern: new RegExp(String.raw`(?<![\w$])(?:${HTML_SINKS_ANY_CASE})(?![\w$])`, "gi"),
+    message: MARKUP_MESSAGE,
   },
   {
-    pattern: /(?<![\w$])setAttribute(?:NS)?\s*\(\s*(?:[^,()'"`]*,\s*)?(['"`])style\1/gi,
+    pattern: new RegExp(
+      [
+        String.raw`${DOCUMENT_NAME}${DOT}${WRITE}(?:ln)?(?![\w$])`,
+        String.raw`\??\.${GAP}${WRITELN}(?![\w$])`,
+        String.raw`\[${GAP}${QUOTE}${WRITE}(?:ln)?${QUOTE}${GAP}\]`,
+      ].join("|"),
+      "g",
+    ),
+    message: "markup is never written from a string (a document's write and writeln)",
+  },
+  {
+    pattern: new RegExp(
+      [
+        String.raw`(?<![\w$])(?:${ATTRIBUTE_WRITERS}|toggleAttribute)${KEY_END}${FIRST_ARG}${STYLE}`,
+        String.raw`(?<![\w$])(?:${ATTRIBUTE_WRITERS})NS${KEY_END}${FIRST_ARG}(?:${QUOTE}[^'"\x60]*${QUOTE}|[^,()'"\x60]*)${GAP},${GAP}(?:[[(]${GAP})*${STYLE}`,
+        String.raw`(?<![\w$])attributes(?:${DOT}style(?![\w$])|${GAP}(?:\?\.${GAP})?\[${GAP}${STYLE})`,
+      ].join("|"),
+      "gi",
+    ),
     message: "styles go through the CSSOM (React's style prop), never a style attribute",
   },
   {
-    pattern: /(?<![\w$])(?:setTimeout|setInterval)\s*\(\s*['"`]/g,
+    pattern: new RegExp(
+      String.raw`(?<![\w$])(?:setTimeout|setInterval)${KEY_END}(?:${FIRST_ARG}${QUOTE}|${GAP}\x60)`,
+      "g",
+    ),
     message: "setTimeout and setInterval take a function, never a string of code",
   },
   {
     pattern: new RegExp(
       [
-        String.raw`(?<![\w$.])eval\s*\(`,
-        String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*eval\s*\(`,
-        String.raw`(?<![\w$])new\s+Function\b(?!\$)`,
-        String.raw`(?<![\w$.])(?<!new\s+)Function\s*\(`,
-        String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*Function\s*\(`,
+        String.raw`(?<![\w$.])(?:eval|Function)${CALLED}`,
+        String.raw`(?<![\w$])${GLOBAL}(?:eval|Function)${CALLED}`,
+        String.raw`(?<![\w$])new${GAP1}(?:${GLOBAL})?Function\b(?!\$)`,
+        // In parentheses, as an indirect call or a construction: a comma's last operand, or the
+        // whole of the parentheses.
+        String.raw`[(,]${GAP}(?:${GLOBAL})?(?:eval|Function)${GAP}\)${CALLED}`,
+        String.raw`(?<![\w$])Reflect${DOT}(?:apply|construct)${OPEN}${GAP}(?:${GLOBAL})?(?:eval|Function)(?![\w$])`,
       ].join("|"),
       "g",
     ),
@@ -298,15 +382,40 @@ const PAGE_POLICY = [
     codeFromString: true,
   },
   {
-    pattern: new RegExp(String.raw`\[\s*(['"\x60])(?:${HTML_SINKS})\1\s*\]`, "g"),
+    pattern: new RegExp(String.raw`\[${GAP}(['"\x60])(?:${HTML_SINKS})\1${GAP}\]`, "g"),
     message: "a refused sink reached by a string key is refused the same",
   },
   {
-    pattern: /\[\s*(['"`])(?:eval|Function)\1\s*\]/g,
+    pattern: new RegExp(String.raw`\[${GAP}(['"\x60])(?:eval|Function)\1${GAP}\]`, "g"),
     message: "a refused sink reached by a string key is refused the same",
     codeFromString: true,
   },
 ];
+
+// Other ways code names a module or a file, read in the whole text like the page policy, in code
+// that runs (tests, their helpers and fixtures aside). Vite's glob import, the member of
+// import.meta named glob, loads every module its pattern matches, which can be a test file or a
+// fixture, and none of them is read as an import, so code that runs uses none. A URL resolved
+// against the module's own (the second argument of URL's constructor) names a file Vite bundles (a
+// worker, an asset), and import.meta's resolve names a module, so the file a literal names is held
+// to the test-code rule, as an import's is; where every import must be read, either takes one
+// string literal. A literal here holds no escape in the text as written, so one that does is
+// read in the decoded text, and where every import must be read the written one is refused.
+const META = String.raw`(?<![\w$.])import${GAP}\.${GAP}meta${DOT}`;
+const LITERAL = String.raw`(?:'([^'\\\n\r]*)'|"([^"\\\n\r]*)"|\x60([^\x60\\$]*)\x60)`;
+const META_GLOB = new RegExp(`${META}glob`, "g");
+const META_URL = String.raw`${META}url(?![\w$])`;
+const URL_CONSTRUCTOR = String.raw`(?<![\w$])new${GAP1}URL${GAP}\(`;
+const URL_FROM_LITERAL = new RegExp(
+  `${URL_CONSTRUCTOR}${GAP}${LITERAL}${GAP},${GAP}${META_URL}`,
+  "g",
+);
+const URL_FROM_EXPRESSION = new RegExp(
+  `${URL_CONSTRUCTOR}(?!${GAP}${LITERAL}${GAP},)[^;]*?,${GAP}${META_URL}`,
+  "g",
+);
+const META_RESOLVE = new RegExp(String.raw`${META}resolve(?![\w$])`, "g");
+const META_RESOLVE_LITERAL = new RegExp(`${META}resolve${OPEN}${GAP}${LITERAL}${GAP}[,)]`, "g");
 
 /**
  * The package name of a bare specifier (`@scope/name` or `name`).
@@ -1054,10 +1163,12 @@ function relativeTargets(file, specifier) {
  * @param {string} file the repository path
  * @param {string} text the file's content
  * @param {(path: string) => boolean} [fileExists] for the .js-to-.ts check
- * @param {{ controlPaths?: string[], isFile?: (path: string) => boolean }} [options] the control
- *   paths of tools/layout.json, and whether a repository path is a regular file the repository
- *   lists. checkImports always passes `isFile`; with it, a relative import where every import must
- *   be read names such a file, and without it (one file checked alone) that is not checked.
+ * @param {{ controlPaths?: string[], isFile?: (path: string) => boolean,
+ *   packageTargets?: (specifier: string) => string[] | undefined }} [options] the control paths of
+ *   tools/layout.json; whether a repository path is a regular file the repository lists
+ *   (checkImports always passes `isFile`; with it, a relative import where every import must be
+ *   read names such a file, and without it, one file checked alone, that is not checked); and the
+ *   repository paths a workspace package's specifier can resolve to (packageTargets).
  * @returns {Finding[]}
  */
 export function checkSource(file, text, fileExists = () => false, options = {}) {
@@ -1238,11 +1349,21 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
       }
     }
     const targets = relative ? relativeTargets(file, specifier) : [];
+    // What a workspace package's specifier reaches: the files its exports map (or, with none, its
+    // path) names, as checkImports reads the package, and the subpath as written after the name.
+    const packagePaths =
+      bare && builtin === undefined
+        ? [
+            ...(options.packageTargets?.(specifier) ?? []),
+            ...(name.startsWith("@fin/") ? [specifier.slice(name.length)] : []),
+          ]
+        : [];
     if (
       !isTest &&
-      (relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some((t) =>
-        TEST_TARGET.test(t.replace(/\/+$/, "")),
-      )
+      [
+        ...(relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]),
+        ...packagePaths,
+      ].some((t) => TEST_TARGET.test(t.replace(/\/+$/, "")))
     ) {
       add(
         line,
@@ -1252,12 +1373,12 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     } else if (
       !isTest &&
       !TEST_CODE.test(file) &&
-      targets.some((t) => TEST_CODE_TARGET.test(`${t}/`))
+      [...targets, ...packagePaths].some((t) => TEST_CODE_TARGET.test(`${t}/`))
     ) {
       add(
         line,
         "test-file-import",
-        "code that runs imports nothing under test/, e2e/ or fixtures/, which the page policy leaves out",
+        "code that runs imports nothing under test/, e2e/ or fixtures/ (by a path, a package's subpath or its exports map), which the page policy leaves out",
       );
     }
     const testRunner = isTest && name === "vitest";
@@ -1346,14 +1467,20 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     for (const { line, message } of [...found.values()].sort((a, b) => a.line - b.line)) {
       add(line, "page-policy", `${message} (spec 06 §6.2, FW-C18)`);
     }
+    checkModuleUrls(file, views, mustReadAll, options.packageTargets, add);
   }
 
   for (const [index, line] of text.split("\n").entries()) {
     const trimmed = line.trimStart();
     if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
-    if (/(?<![\w$.])Bun\.[A-Za-z]/.test(line))
+    // A member, an optional member or a string key; a call or an optional call.
+    if (/(?<![\w$.])(?:globalThis\s*\??\.\s*)?Bun\s*(?:\??\.\s*[A-Za-z]|(?:\?\.)?\s*\[)/.test(line))
       add(index + 1, "no-bun", "Node is the only runtime: no Bun.* (ARCHITECTURE §3.2)");
-    if (/\bconsole\.error\(\s*(?:error|err|e)\s*[,)]/.test(line)) {
+    if (
+      /\bconsole\s*(?:\??\.\s*error\b|(?:\?\.)?\s*\[\s*(['"`])error\1\s*\])\s*(?:\?\.\s*)?\(\s*(?:error|err|e)\s*[,)]/.test(
+        line,
+      )
+    ) {
       add(
         index + 1,
         "console-error",
@@ -1362,6 +1489,86 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     }
   }
   return findings;
+}
+
+/**
+ * The module URLs of code that runs (see META above): no glob import; the file a URL resolved
+ * against the module's own, or a module import.meta's resolve, names by a literal is held to the
+ * test-code rule as an import's is; where every import must be read, either takes a literal.
+ * @param {string} file
+ * @param {[string, (index: number) => number][]} views the text as written and decoded
+ * @param {boolean} mustReadAll
+ * @param {((specifier: string) => string[] | undefined) | undefined} packageTargets
+ * @param {(line: number, rule: string, message: string) => void} add
+ */
+function checkModuleUrls(file, views, mustReadAll, packageTargets, add) {
+  /** @type {Map<string, { line: number, rule: string, message: string }>} */
+  const found = new Map();
+  /**
+   * @param {number} line
+   * @param {string} rule
+   * @param {string} message
+   */
+  const refuse = (line, rule, message) =>
+    found.set(`${line}|${rule}|${message}`, { line, rule, message });
+  for (const [view, lineAt] of views) {
+    for (const match of view.matchAll(META_GLOB)) {
+      refuse(
+        lineAt(match.index),
+        "glob-import",
+        "code that runs uses no glob import, import.meta's glob: it loads what its pattern matches, a test file or a fixture included, and the rules read none of it as an import",
+      );
+    }
+    /** @type {Set<number>} */
+    const literalAt = new Set();
+    for (const pattern of [URL_FROM_LITERAL, META_RESOLVE_LITERAL]) {
+      for (const match of view.matchAll(pattern)) {
+        literalAt.add(match.index);
+        const value = match[1] ?? match[2] ?? match[3] ?? "";
+        const line = lineAt(match.index);
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) continue; // a URL elsewhere, not a file
+        if (/^\s|\s$|[\\%\p{Cc}]/u.test(value) || value === "") {
+          refuse(
+            line,
+            "specifier-form",
+            "a module URL names its file plainly: no surrounding white space, control character, backslash or percent-encoding",
+          );
+          continue;
+        }
+        const relative = /^\.\.?(?:\/|$)/.test(value);
+        const rooted = value.startsWith("/");
+        const paths = [
+          value.replace(/[?#].*$/, ""),
+          value,
+          ...(rooted ? [] : relativeTargets(file, value)),
+          ...(relative || rooted ? [] : (packageTargets?.(value) ?? [])),
+        ];
+        if (
+          paths.some(
+            (t) => TEST_TARGET.test(t.replace(/\/+$/, "")) || TEST_CODE_TARGET.test(`${t}/`),
+          )
+        ) {
+          refuse(
+            line,
+            "test-file-import",
+            "code that runs names no test file and nothing under test/, e2e/ or fixtures/ in a module URL (one Vite bundles, or one import.meta's resolve names), which the page policy leaves out",
+          );
+        }
+      }
+    }
+    if (!mustReadAll) continue;
+    const message =
+      "a module URL (URL's constructor with import.meta's url, or import.meta's resolve) takes one string literal with no escape here, so the rules can read what it names";
+    for (const match of view.matchAll(URL_FROM_EXPRESSION)) {
+      refuse(lineAt(match.index), "dynamic-import", message);
+    }
+    for (const match of view.matchAll(META_RESOLVE)) {
+      if (!literalAt.has(match.index)) refuse(lineAt(match.index), "dynamic-import", message);
+    }
+  }
+  for (const { line, rule, message } of [...found.values()].sort((a, b) => a.line - b.line)) {
+    add(line, rule, message);
+  }
 }
 
 /**
@@ -1510,9 +1717,116 @@ export function checkImports(root) {
     }
   };
   const controlPaths = readControlPaths(root);
+  const packages = readWorkspacePackages(root, listed);
+  /** @param {string} specifier */
+  const packageTargets = (specifier) => {
+    const found = packages.get(packageName(specifier));
+    return found?.flatMap((pkg) => resolvePackage(pkg, specifier));
+  };
   return files.flatMap((file) =>
-    checkSource(file, readFileSync(join(root, file), "utf8"), exists, { controlPaths, isFile }),
+    checkSource(file, readFileSync(join(root, file), "utf8"), exists, {
+      controlPaths,
+      isFile,
+      packageTargets,
+    }),
   );
+}
+
+/** @typedef {{ name: string, dir: string, manifest: Record<string, unknown> }} WorkspacePackage */
+
+/**
+ * The repository's packages by name: every package.json the repository lists with a name, but
+ * those under node_modules or a test, e2e or fixtures directory (a fixture may copy a real
+ * package's name). Two with one name are both kept, so a target of either is read.
+ * @param {string} root
+ * @param {Set<string>} listed
+ * @returns {Map<string, WorkspacePackage[]>}
+ */
+function readWorkspacePackages(root, listed) {
+  /** @type {Map<string, WorkspacePackage[]>} */
+  const packages = new Map();
+  for (const path of listed) {
+    if (path !== "package.json" && !path.endsWith("/package.json")) continue;
+    if (/(?:^|\/)node_modules\//.test(path) || TEST_CODE_TARGET.test(path)) continue;
+    /** @type {unknown} */
+    let manifest;
+    try {
+      manifest = readJson(join(root, path));
+    } catch {
+      continue;
+    }
+    if (!isRecord(manifest) || typeof manifest.name !== "string") continue;
+    const dir = posix.dirname(path);
+    const entry = { name: manifest.name, dir, manifest };
+    packages.set(manifest.name, [...(packages.get(manifest.name) ?? []), entry]);
+  }
+  return packages;
+}
+
+/**
+ * The repository paths a workspace package's specifier can resolve to, with its query and
+ * fragment dropped and whole: through the package's exports map when it has one (every
+ * condition's target, a pattern's `*` filled in, a folder mapping's rest appended, whichever
+ * entries match), else its main fields or the path itself; and the path itself in any case, so a
+ * subpath no export lists is read too. A superset of what Node or Vite loads, so the rules fail
+ * closed.
+ * @param {WorkspacePackage} pkg
+ * @param {string} specifier
+ * @returns {string[]}
+ */
+function resolvePackage(pkg, specifier) {
+  /** @type {Set<string>} */
+  const out = new Set();
+  /** @param {string} target */
+  const addTarget = (target) => {
+    out.add(posix.normalize(posix.join(pkg.dir, target)).replace(/\/+$/, ""));
+  };
+  /**
+   * Every string target under an exports value, with `*` filled in.
+   * @param {unknown} value
+   * @param {string} star
+   */
+  const collect = (value, star) => {
+    if (typeof value === "string") addTarget(value.replaceAll("*", star));
+    else if (Array.isArray(value)) for (const v of value) collect(v, star);
+    else if (isRecord(value)) for (const v of Object.values(value)) collect(v, star);
+  };
+  const { exports } = pkg.manifest;
+  for (const spelled of new Set([specifier.replace(/[?#].*$/, ""), specifier])) {
+    const subpath = `.${spelled.slice(pkg.name.length)}`;
+    addTarget(subpath);
+    if (exports === undefined || exports === null) {
+      if (subpath === ".") {
+        for (const field of ["main", "module", "browser"]) {
+          const value = pkg.manifest[field];
+          if (typeof value === "string") addTarget(value);
+        }
+      }
+      continue;
+    }
+    const subpaths =
+      isRecord(exports) && Object.keys(exports).some((key) => key.startsWith("."))
+        ? exports
+        : { ".": exports };
+    for (const [key, value] of Object.entries(subpaths)) {
+      const star = key.indexOf("*");
+      if (key === subpath) collect(value, "");
+      else if (star >= 0) {
+        const prefix = key.slice(0, star);
+        const suffix = key.slice(star + 1);
+        if (
+          subpath.length >= prefix.length + suffix.length &&
+          subpath.startsWith(prefix) &&
+          subpath.endsWith(suffix)
+        ) {
+          collect(value, subpath.slice(prefix.length, subpath.length - suffix.length));
+        }
+      } else if (key.endsWith("/") && subpath.startsWith(key) && typeof value === "string") {
+        addTarget(value + subpath.slice(key.length));
+      }
+    }
+  }
+  return [...out];
 }
 
 if (import.meta.main) {

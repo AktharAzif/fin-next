@@ -172,6 +172,17 @@ describe("imports:check", () => {
     assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(`const s = ${BUN_SERVE}({});`))), [
       "no-bun",
     ]);
+    // An optional member, a string key, the global's own member.
+    const bun = BUN_SERVE.split(".")[0] ?? "";
+    for (const line of [
+      `const s = ${bun}?.serve({});`,
+      `const s = ${bun} . serve({});`,
+      `const s = ${bun}["serve"]({});`,
+      `const s = globalThis.${bun}.serve({});`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["no-bun"], line);
+    }
+    assert.deepEqual(checkSource("apps/api/src/a.ts", src("const bundle = x.Bunch;")), []);
   });
 
   test("dynamic import() and require() are read too", () => {
@@ -423,6 +434,16 @@ describe("imports:check", () => {
       ),
       ["console-error"],
     );
+    // An optional call, an optional member, a string key.
+    const consoleName = CONSOLE_ERROR.split(".")[0] ?? "";
+    for (const line of [
+      `${CONSOLE_ERROR}?.(error);`,
+      `${consoleName}?.error(err);`,
+      `${consoleName} . error ( e );`,
+      `${consoleName}["error"](error);`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["console-error"], line);
+    }
     assert.deepEqual(checkSource("apps/api/src/a.ts", src(`${CONSOLE_ERROR}("starting");`)), []);
   });
 
@@ -675,6 +696,206 @@ describe("imports:check", () => {
     assert.deepEqual(checkSource("apps/console/src/client/a.ts", imp("./latest/x.ts")), []);
   });
 
+  test("every direct spelling of a markup, style-attribute or timer sink fails", () => {
+    const BT = "`";
+    const planted = [
+      // A document's write and writeln: an optional call, a comment, any name of a document, a
+      // string key, call or apply, its prototype.
+      "document.write?.(s);",
+      "document.write /* c */ (s);",
+      "document.write // c\n  (s);",
+      "el.ownerDocument.write(html);",
+      "f.contentDocument?.write(html);",
+      "doc.write(html);",
+      'document["write"](html);',
+      "document.write.call(document, html);",
+      "Document.prototype.write.apply(document, [html]);",
+      'window["document"].write(html);',
+      "document.open().write(html);",
+      "(el.ownerDocument as Document).write(html);",
+      "node.writeln(html);",
+      // A style attribute: an optional call, a comment, a string key, call or apply, an array, the
+      // namespaced form, an attribute node.
+      'el.setAttribute?.("style", s);',
+      'el.setAttribute(/* c */ "style", s);',
+      'el["setAttribute"]("style", css);',
+      'el.setAttribute.call(el, "style", css);',
+      'Element.prototype.setAttribute.apply(el, ["style", css]);',
+      'el.setAttribute(["style"], css);',
+      'el.setAttributeNS(null, /* c */ "style", css);',
+      "el.attributes.style.value = css;",
+      'el.getAttributeNode("style").value = css;',
+      'const a = document.createAttribute("style");',
+      // A string of code for a timer: an optional call, a comment, call or apply, a tagged
+      // template, a string key, parentheses.
+      'setTimeout?.("alert(1)");',
+      'setTimeout(/* c */ "alert(1)");',
+      'setInterval?.("tick()", 1);',
+      'setTimeout.call(window, "tick()", 1);',
+      'setInterval.apply(window, ["tick()", 1]);',
+      `setTimeout${BT}tick()${BT};`,
+      'window["setTimeout"]("tick()");',
+      'setTimeout(("tick()"), 1);',
+      // Markup an iframe holds as its whole document, in any case, and the other parsers.
+      "iframe.srcdoc = s;",
+      '<iframe title="p" srcDoc={s} />',
+      'el.setAttribute("SRCDOC", s);',
+      'const d = new DOMParser().parseFromString(s, "text/html");',
+      "el.setHTML(s);",
+      'document.execCommand("insertHTML", false, s);',
+    ];
+    for (const file of [
+      "packages/ui/src/a.tsx",
+      "packages/frame/src/kit/gallery.tsx",
+      "apps/console/src/client/x.ts",
+      "apps/api/src/a.ts",
+    ]) {
+      for (const line of planted) {
+        assert.deepEqual(rules(checkSource(file, src(line))), ["page-policy"], `${file}: ${line}`);
+      }
+    }
+    // Code from a string: the page policy, or where it applies the loader rule on the same line.
+    for (const line of [
+      "eval?.(s);",
+      'Function?.("x");',
+      'new (Function)("x");',
+      'new /* c */ Function("x");',
+      "(0, eval)(s);",
+      `Function${BT}alert(1)${BT}${BT};`,
+      'Function.call(null, "x");',
+      "eval.call(null, s);",
+      "Reflect.apply(eval, null, [s]);",
+      'Reflect.construct(Function, ["x"]);',
+      'globalThis.Function?.("x");',
+      'new window.Function("x");',
+      "top.eval(s);",
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      for (const file of ["packages/ui/src/a.tsx", "apps/console/src/client/x.ts"]) {
+        const found = rules(checkSource(file, src(line)));
+        assert.ok(
+          found.length === 1 && ["page-policy", "dynamic-import"].includes(found[0] ?? ""),
+          `${file}: ${line}: ${found}`,
+        );
+      }
+    }
+    // Writes to streams, CSSOM styles, timers and types are no sink.
+    for (const line of [
+      'process.stdout.write("x");',
+      "stream.write(chunk);",
+      "res.write(body);",
+      "const docs = [];\ndocs.write;",
+      "el.setAttribute('data-style', x);",
+      "el.style.cssText = css;",
+      "setTimeout(() => tick(), 1);",
+      "setTimeout(tick, 1);",
+      "Function.prototype.toString.call(f);",
+      "const f: Function = g;",
+      "const fn = (cb: Function) => cb;",
+    ]) {
+      assert.deepEqual(checkSource("apps/console/src/client/x.ts", src(line)), [], line);
+    }
+  });
+
+  test("code that runs uses no glob import, and a module URL reaches no test code", () => {
+    const META = `${IMP}.meta`;
+    for (const file of [
+      "packages/frame/src/kit/gallery.tsx",
+      "packages/ui/src/a.tsx",
+      "apps/console/src/client/x.ts",
+    ]) {
+      for (const [line, expected] of /** @type {[string, string[]][]} */ ([
+        [`const boards = ${META}.glob("../fixtures/*.tsx", { eager: true });`, ["glob-import"]],
+        [`const tests = ${META}.glob("./*.test.ts", { eager: true });`, ["glob-import"]],
+        [`const all = ${META} . glob(["./a/*.ts", "./b/*.ts"]);`, ["glob-import"]],
+        [
+          `new Worker(new URL("../test/worker.ts", ${META}.url), { type: "module" });`,
+          ["test-file-import"],
+        ],
+        [`new Worker(new URL("./x.test.ts", ${META}.url));`, ["test-file-import"]],
+        [`const u = new URL(/* c */ "../Fixtures/a.png", ${META}.url);`, ["test-file-import"]],
+        [`const u = ${META}.resolve("./e2e/page.ts");`, ["test-file-import"]],
+        [`new Worker(new URL(name, ${META}.url));`, ["dynamic-import"]],
+        [`new Worker(new URL(\`./w/\${name}.ts\`, ${META}.url));`, ["dynamic-import"]],
+        [`const u = ${META}.resolve(name);`, ["dynamic-import"]],
+        [`new URL("./te${BS}x73t/w.ts", ${META}.url);`, ["dynamic-import", "test-file-import"]],
+        [`${IMP} { put } from "@fin/ui/test/sink.ts";`, ["test-file-import"]],
+        [`const m = await ${IMP}("@fin/ui/fixtures/sink.ts");`, ["test-file-import"]],
+      ])) {
+        assert.deepEqual(rules(checkSource(file, src(line))), expected, `${file}: ${line}`);
+      }
+    }
+    // Where not every import must be read, a URL of an expression is beyond the check, but a
+    // glob or a literal that names test code is refused the same.
+    for (const [line, expected] of /** @type {[string, string[]][]} */ ([
+      [`const boards = ${META}.glob("./*.ts");`, ["glob-import"]],
+      [`const u = new URL("./fixtures/a.json", ${META}.url);`, ["test-file-import"]],
+      [`const u = new URL(name, ${META}.url);`, []],
+    ])) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), expected, line);
+    }
+    // Tests and their helpers may glob; a URL that names no test code, or another origin, passes.
+    for (const [file, line] of [
+      ["packages/ui/test/rules.test.ts", `const s = ${META}.glob("../src/**/*.tsx");`],
+      ["packages/ui/e2e/serve.ts", `const d = new URL("../dist/kit/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `new Worker(new URL("./worker.ts", ${META}.url));`],
+      ["tools/fin-review/src/main.ts", `const c = new URL("../config/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `const u = ${META}.resolve("./a.ts");`],
+      ["apps/console/src/client/x.ts", `const u = new URL("https://example.com/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `${IMP} { a } from "@fin/ui/testing-guide.ts";`],
+    ]) {
+      assert.deepEqual(checkSource(file ?? "", src(line ?? "")), [], `${file}: ${line}`);
+    }
+  });
+
+  test("a workspace package's exports map is read, so code that runs reaches no test code through it", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      JSON.stringify({ private: true, ...fields });
+    const dir = makeRepo({
+      "tools/layout.json": JSON.stringify({ version: 1, controlPaths: [], entries: [] }),
+      "packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        exports: {
+          ".": "./src/index.ts",
+          "./testing": "./test/index.ts",
+          "./kit/*": { types: "./src/kit/*.ts", default: "./fixtures/*.ts" },
+          "./checks": { import: "./src/checks.test.ts" },
+        },
+      }),
+      "packages/ui/src/index.ts": src(`${EXP} const a = 1;`),
+      "packages/ui/test/index.ts": src(
+        `${EXP} const put = (el: HTMLElement, h: string) => {`,
+        "  el.innerHTML = h;",
+        "};",
+      ),
+      "packages/staff/package.json": manifest({ name: "@fin/staff" }),
+      "packages/frame/src/render.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      "packages/frame/src/kit.ts": src(`${IMP} { b } from "@fin/ui/kit/board";`),
+      "packages/frame/src/checks.ts": src(`${IMP} { c } from "@fin/ui/checks";`),
+      "apps/api/src/a.ts": src(`${IMP} { h } from "@fin/staff/test/harness.ts";`),
+      // What may: the package's own entry, a test's and a helper's import of the harness.
+      "packages/frame/src/ok.ts": src(`${IMP} { a } from "@fin/ui";`),
+      "packages/frame/test/harness.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      "apps/admin/src/server/policy.db.test.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      // A fixture that copies a package's name changes nothing.
+      "tools/fin-review/fixtures/plan/packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        exports: "./test/index.ts",
+      }),
+    });
+    const findings = checkImports(dir);
+    assert.deepEqual(rules(findings), ["test-file-import"]);
+    assert.deepEqual([...new Set(findings.map((f) => f.file))].sort(), [
+      "apps/api/src/a.ts",
+      "packages/frame/src/checks.ts",
+      "packages/frame/src/kit.ts",
+      "packages/frame/src/render.ts",
+    ]);
+    const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^packages\/frame\/src\/render\.ts:1 test-file-import: /m);
+  });
+
   test("a long export with comments and no `from` is read in linear time", {
     timeout: 10_000,
   }, () => {
@@ -896,8 +1117,11 @@ describe("imports:check", () => {
         line,
       );
     }
-    // Outside those areas only getBuiltinModule's rule applies, and node:module's names are free.
-    assert.deepEqual(checkSource("apps/api/src/a.ts", src("const r = (0, eval)(code);")), []);
+    // Outside those areas only getBuiltinModule's rule applies, and node:module's names are free;
+    // an indirect eval is still the page policy's.
+    assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src("const r = (0, eval)(code);"))), [
+      "page-policy",
+    ]);
     assert.deepEqual(checkSource("apps/api/src/a.ts", src(lines[1] ?? "")), []);
     // node:module's listing names, and type-only imports, are fine.
     assert.deepEqual(
