@@ -1112,6 +1112,50 @@ describe("imports:check", () => {
     assert.match(run.output, /^packages\/ui\/package\.json package-manifest: /m);
   });
 
+  test("a package.json that writes a key twice in one object is refused, at any depth", () => {
+    const layout = JSON.stringify({ version: 1, controlPaths: [], entries: [] });
+    // JSON.parse keeps the last of a repeated key and Vite's resolver the first: each of these
+    // reads harmless to JSON.parse, while Vite would map, export or enter through test code.
+    const dir = makeRepo({
+      "tools/layout.json": layout,
+      "apps/console/src/client/package.json":
+        '{"private":true,"browser":{"./render.ts":"./e2e/sink.ts"},"browser":"./main.ts"}',
+      "packages/icons/package.json":
+        '{"name":"@fin/icons","exports":"./test/sink.ts","exports":"./src/index.ts"}',
+      "packages/motion/package.json":
+        '\uFEFF{"name":"@fin/motion","main":"./test/sink.ts","main":"./src/index.ts"}',
+      "packages/tokens/package.json":
+        '{"name":"@fin/tokens","exports":{".":"./test/sink.ts",".":"./src/index.ts"}}',
+      // An escape spells the same key.
+      "packages/frame/package.json":
+        '{"name":"@fin/frame","\\u0062rowser":{"./src/a.ts":"./test/sink.ts"},"browser":"./src/index.ts"}',
+      "apps/admin/src/client/main.ts": src(`${IMP} { a } from "@fin/icons";`),
+      // What may: one key in two objects, a key's name as a value, quotes inside a string.
+      "packages/ui/package.json": JSON.stringify({
+        name: "@fin/ui",
+        description: 'reads "name" and \\"exports\\"',
+        keywords: ["name", "name"],
+        exports: { ".": { import: "./src/index.ts" }, "./x": { import: "./src/x.ts" } },
+        files: [{ name: "a" }, { name: "a" }],
+      }),
+    });
+    assert.deepEqual(
+      checkImports(dir)
+        .map((f) => `${f.file} ${f.rule}`)
+        .sort(),
+      [
+        "apps/console/src/client/package.json package-manifest",
+        "packages/frame/package.json package-manifest",
+        "packages/icons/package.json package-manifest",
+        "packages/motion/package.json package-manifest",
+        "packages/tokens/package.json package-manifest",
+      ],
+    );
+    const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^packages\/icons\/package\.json package-manifest: .*key twice/m);
+  });
+
   test("a long export with comments and no `from` is read in linear time", {
     timeout: 10_000,
   }, () => {

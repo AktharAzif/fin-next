@@ -1801,7 +1801,9 @@ const ENTRY_FIELDS = ["browser", "module", "jsnext:main", "jsnext", "main"];
  * e2e or fixtures directory (a fixture may copy a real package's name, or plant a violation on
  * purpose). Each is read as Vite and Node read it, one leading byte-order mark stripped first; one
  * that still does not parse, or is no JSON object, is a finding, so a manifest the rules cannot
- * read never goes unchecked (Vite might still read it, a browser map included).
+ * read never goes unchecked (Vite might still read it, a browser map included). So is one that
+ * writes a key twice in an object: JSON.parse keeps the last and Vite's resolver the first, so the
+ * rules would read one manifest and the build another (it is still checked as JSON.parse reads it).
  * @param {string} root
  * @param {Set<string>} listed
  * @returns {{ manifests: Manifest[], findings: Finding[] }}
@@ -1814,15 +1816,25 @@ function readManifests(root, listed) {
   for (const path of listed) {
     if (path !== "package.json" && !path.endsWith("/package.json")) continue;
     if (/(?:^|\/)node_modules\//.test(path) || TEST_CODE_TARGET.test(path)) continue;
+    const text = readFileSync(join(root, path), "utf8").replace(/^\uFEFF/, "");
     /** @type {unknown} */
     let manifest;
     try {
-      manifest = JSON.parse(readFileSync(join(root, path), "utf8").replace(/^\uFEFF/, ""));
+      manifest = JSON.parse(text);
     } catch {
       manifest = undefined;
     }
-    if (isRecord(manifest)) manifests.push({ path, dir: posix.dirname(path), manifest });
-    else {
+    if (isRecord(manifest)) {
+      manifests.push({ path, dir: posix.dirname(path), manifest });
+      if (repeatsKey(text)) {
+        findings.push({
+          file: path,
+          rule: "package-manifest",
+          message:
+            "a package.json writes no key twice in one object: JSON.parse keeps the last and Vite's resolver the first, so the rules would check one manifest and the build use another",
+        });
+      }
+    } else {
       findings.push({
         file: path,
         rule: "package-manifest",
@@ -1832,6 +1844,48 @@ function readManifests(root, listed) {
     }
   }
   return { manifests, findings };
+}
+
+/**
+ * Whether a JSON text that JSON.parse accepted writes one key twice in an object, at any depth
+ * (keys compared as decoded, so an escape spells the same key). JSON.parse cannot show it: it
+ * keeps the last. One pass over the text, which is valid JSON, so a string is all that needs
+ * skipping.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function repeatsKey(text) {
+  /** The open containers: an object's keys so far, or null for an array. */
+  /** @type {(Set<string> | null)[]} */
+  const open = [];
+  let keyNext = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text.charAt(index);
+    if (char === '"') {
+      let end = index + 1;
+      while (text.charAt(end) !== '"') end += text.charAt(end) === "\\" ? 2 : 1;
+      const keys = open.at(-1);
+      if (keyNext && keys) {
+        const key = JSON.parse(text.slice(index, end + 1));
+        if (keys.has(key)) return true;
+        keys.add(key);
+        keyNext = false;
+      }
+      index = end;
+    } else if (char === "{") {
+      open.push(new Set());
+      keyNext = true;
+    } else if (char === "[") {
+      open.push(null);
+      keyNext = false;
+    } else if (char === "}" || char === "]") {
+      open.pop();
+      keyNext = false;
+    } else if (char === ",") {
+      keyNext = open.at(-1) instanceof Set;
+    }
+  }
+  return false;
 }
 
 /**
