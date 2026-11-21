@@ -23,7 +23,10 @@
 // It prints file:line and the rule's name, never the matched value, so its output is safe in a
 // public log. With --commits or --range it scans what a push would publish instead: each commit's
 // message and the full content of every file it adds or changes (for a merge, every file that
-// differs from its first parent, so what the merge itself adds is read too).
+// differs from its first parent, so what the merge itself adds is read too), and its author and
+// committer dates, which must carry the offset +0000: git records the committing machine's UTC
+// offset with each date, the public repository shows it, and the build clock's time zone is
+// private (G-09), so every commit is made with TZ=UTC. A finding names the date, never its offset.
 //
 // This file is self-contained (Node built-ins only, no import from another file of the
 // repository), so every line that decides its verdict is under the control path and the owner's
@@ -721,7 +724,48 @@ function changedFiles(root, commit) {
 }
 
 /**
- * Scans what pushing these commits would publish: each message and each added or changed file.
+ * Which dates of each commit carry a UTC offset other than +0000. Git records the committing
+ * machine's offset with the author and the committer date, and the public repository shows both,
+ * so every commit is made with TZ=UTC (G-09). The offsets themselves are never returned.
+ * @param {string} root
+ * @param {string[]} commits full SHAs
+ * @returns {Map<string, ("author" | "committer")[]>} a commit whose dates git does not give
+ *   counts as both
+ */
+export function datesOffUtc(root, commits) {
+  /** @type {Map<string, ("author" | "committer")[]>} */
+  const read = new Map();
+  if (commits.length > 0) {
+    const out = execFileSync(
+      "git",
+      ["-C", root, "log", "--no-walk=unsorted", "--stdin", "--date=raw", "--format=%H %ad %cd"],
+      {
+        input: `${commits.join("\n")}\n`,
+        encoding: "utf8",
+        maxBuffer: 256 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    for (const line of out.split("\n")) {
+      const match = /^([0-9a-f]{40,64}) -?\d+ ([+-]\d{4}) -?\d+ ([+-]\d{4})$/.exec(line);
+      if (match === null) continue;
+      /** @type {("author" | "committer")[]} */
+      const off = [];
+      if (match[2] !== "+0000") off.push("author");
+      if (match[3] !== "+0000") off.push("committer");
+      read.set(match[1] ?? "", off);
+    }
+  }
+  return new Map(commits.map((commit) => [commit, read.get(commit) ?? ["author", "committer"]]));
+}
+
+/** The message of a finding about a date's offset, which never names the offset. */
+export const DATE_OFF_UTC =
+  "carries a UTC offset other than +0000 (G-09: commit and tag with TZ=UTC)";
+
+/**
+ * Scans what pushing these commits would publish: each commit's author and committer dates
+ * (+0000 only, G-09), its message and each file it adds or changes.
  * @param {string} root
  * @param {string[]} commits full SHAs
  * @param {string[]} refuseList
@@ -731,8 +775,16 @@ export function scanCommits(root, commits, refuseList) {
   const refused = refuseMatcher(refuseList);
   /** @type {Finding[]} */
   const findings = [];
+  const offUtc = datesOffUtc(root, commits);
   for (const commit of commits) {
     const short = commit.slice(0, 12);
+    for (const which of offUtc.get(commit) ?? []) {
+      findings.push({
+        file: `commit ${short} (${which} date)`,
+        rule: "commit-date",
+        message: `the ${which} date ${DATE_OFF_UTC}`,
+      });
+    }
     const message = git(root, ["log", "-1", "--format=%B", commit]);
     findings.push(...scanMessage(`commit ${short} (message)`, message, refused));
     for (const { path, mode, blob } of changedFiles(root, commit)) {

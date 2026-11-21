@@ -507,6 +507,42 @@ describe("public-safety over a repository", () => {
     assert.deepEqual(rules(scanCommits(dir, commits, [])), ["email-address", "local-path"]);
   });
 
+  test("commit mode refuses an author or committer date whose offset is not +0000", () => {
+    // Offsets no build machine of this project uses; the finding never repeats one.
+    const EAST = "2026-11-21T10:00:00+0100";
+    const WEST = "2026-11-21T10:00:00-0300";
+    const dir = makeRepo({ "a.md": "x\n" });
+    const commit = (/** @type {string} */ name, /** @type {Record<string, string>} */ env) => {
+      addFiles(dir, { "a.md": `${name}\n` });
+      git(dir, ["commit", "-q", "-m", name], env);
+      return git(dir, ["rev-parse", "HEAD"]).trim();
+    };
+    const utc = commit("utc", {});
+    const author = commit("author", { GIT_AUTHOR_DATE: EAST });
+    const committer = commit("committer", { GIT_COMMITTER_DATE: WEST });
+    const both = commit("both", { GIT_AUTHOR_DATE: WEST, GIT_COMMITTER_DATE: EAST });
+    const explicitUtc = commit("explicit", {
+      GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0000",
+      GIT_COMMITTER_DATE: "2026-11-21T10:00:00Z",
+    });
+    const found = scanCommits(dir, [utc, author, committer, both, explicitUtc], []);
+    assert.deepEqual(
+      found.map((f) => `${f.file} ${f.rule}`),
+      [
+        `commit ${author.slice(0, 12)} (author date) commit-date`,
+        `commit ${committer.slice(0, 12)} (committer date) commit-date`,
+        `commit ${both.slice(0, 12)} (author date) commit-date`,
+        `commit ${both.slice(0, 12)} (committer date) commit-date`,
+      ],
+    );
+    const run = runScript("scripts/public-safety.mjs", ["--root", dir, "--range", "HEAD"]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /\(author date\) commit-date: the author date carries a UTC offset/);
+    for (const offset of ["+0100", "-0300", "+01:00", "-03:00"]) {
+      assert.ok(!run.output.includes(offset), "the output repeats an offset");
+    }
+  });
+
   test("only the two noreply trailer addresses pass in a message", () => {
     const dir = makeRepo({ "a.md": "x\n" });
     const message = (/** @type {string} */ address) => {
@@ -729,6 +765,53 @@ describe("the pre-push hook refuses the same", () => {
     const { code, output } = push(dir, "refs/heads/feature");
     assert.equal(code, 0);
     assert.match(output, /scanned 0 commit\(s\)/);
+  });
+
+  test("a new commit or tag dated with another offset is refused, and the offset not printed", () => {
+    const dir = pushable();
+    addFiles(dir, { "b.md": "fine\n" });
+    git(dir, ["commit", "-q", "-m", "b"], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
+    const dated = push(dir, "refs/heads/feature");
+    assert.equal(dated.code, 1);
+    assert.match(dated.output, /^commit [0-9a-f]{12} \(author date\) commit-date: /m);
+    git(dir, ["-c", "tag.gpgsign=false", "tag", "-a", "v2", "-m", "release", "HEAD~1"], {
+      GIT_COMMITTER_DATE: "2026-11-21T10:00:00-0300",
+    });
+    const tag = git(dir, ["rev-parse", "v2"]).trim();
+    const tagged = push(dir, "refs/tags/v2", { localRef: "refs/tags/v2", sha: tag });
+    assert.equal(tagged.code, 1);
+    assert.match(tagged.output, /^pushed ref #1 \(tag date\) commit-date: /m);
+    assert.match(tagged.output, /scanned 0 commit\(s\)/);
+    git(dir, ["-c", "tag.gpgsign=false", "tag", "-a", "v3", "-m", "release", "HEAD~1"]);
+    const utc = git(dir, ["rev-parse", "v3"]).trim();
+    assert.equal(push(dir, "refs/tags/v3", { localRef: "refs/tags/v3", sha: utc }).code, 0);
+    for (const output of [dated.output, tagged.output]) {
+      assert.ok(!/[+-]0[13]00/.test(output), "the hook repeats an offset");
+    }
+  });
+
+  test("a commit already on one of the remote's branches is not scanned again", () => {
+    const dir = pushable();
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    // Another branch, published before this rule, holds a commit with another offset.
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "side.md": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
+    git(dir, ["push", "-q", "origin", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    git(dir, ["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
+    const head = git(dir, ["rev-parse", "HEAD"]).trim();
+    /** @type {string[]} */
+    const lines = [];
+    const code = prePush({
+      root: dir,
+      remote: "origin",
+      input: `refs/heads/work ${head} refs/heads/work ${base}\n`,
+      gitleaks: "/nonexistent/gitleaks",
+      log: (line) => lines.push(line),
+    });
+    assert.equal(code, 0, lines.join("\n"));
+    assert.match(lines.join("\n"), /scanned 1 commit\(s\)/);
   });
 
   test("a push to main is refused", () => {
