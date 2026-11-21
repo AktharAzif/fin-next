@@ -4,13 +4,14 @@
 // once the first route has resolved (FW-C16), and a check of the session when the page comes back
 // from the back-forward cache (FW-C14). The guards run in the root route's `beforeLoad`.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
-import { Toaster, TooltipProvider } from "@fin/ui";
+import { ReportFailures, Toaster, TooltipProvider } from "@fin/ui";
 import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
 import { type ComponentType, type ReactNode, useEffect, useRef } from "react";
 import { consoleEnvironment } from "../frames/AppFrame.tsx";
 import { AuthFrame } from "../frames/AuthFrame.tsx";
 import { adminNav } from "../nav/admin/index.ts";
 import { filterNav } from "../nav/filter.ts";
+import { reportBrowserError } from "../report/report.ts";
 import { FrameSwitch } from "../router/FrameSwitch.tsx";
 import {
   deepestStaticData,
@@ -157,19 +158,26 @@ export interface FinRootProps {
   stepUpContent?: (props: StepUpContentProps) => ReactNode;
 }
 
+/**
+ * The app's root: the providers every page shares, mounted once here and never by a page (the
+ * report seam for every control that throws, AC-UI-29; tooltips; the toast region), the frame
+ * around the outlet, and the root StepUp dialog.
+ */
 export function FinRoot({ appFrame, fallbackFrame, stepUpContent }: FinRootProps) {
   const fin = useFin();
   useRootEffects(fallbackFrame);
   return (
-    <TooltipProvider>
-      <FrameSwitch
-        frames={{ ...(appFrame === undefined ? {} : { app: appFrame }), auth: AuthFrame }}
-        fallback={fallbackFrame}
-      >
-        <Outlet />
-      </FrameSwitch>
-      <StepUpHost controller={fin.stepUp} content={stepUpContent} />
-      <Toaster />
-    </TooltipProvider>
+    <ReportFailures report={reportBrowserError}>
+      <TooltipProvider>
+        <FrameSwitch
+          frames={{ ...(appFrame === undefined ? {} : { app: appFrame }), auth: AuthFrame }}
+          fallback={fallbackFrame}
+        >
+          <Outlet />
+        </FrameSwitch>
+        <StepUpHost controller={fin.stepUp} content={stepUpContent} />
+        <Toaster />
+      </TooltipProvider>
+    </ReportFailures>
   );
 }

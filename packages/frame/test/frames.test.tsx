@@ -1,6 +1,7 @@
 // The frames composed with a real router in memory, rendered to static markup: the root's guard,
 // FrameSwitch, AppFrame and AdminFrame with the sidebar filtered by the viewer, and the route states.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
+import { type FailureReporter, useReportFailure } from "@fin/ui";
 import {
   createMemoryHistory,
   createRootRouteWithContext,
@@ -14,6 +15,7 @@ import { createApiClient } from "../src/api/client.ts";
 import { FinRoot, guardAdmin, guardConsole, routeMatcher } from "../src/boot/root.tsx";
 import { AdminFrame } from "../src/frames/AdminFrame.tsx";
 import { AppFrame } from "../src/frames/AppFrame.tsx";
+import { type ReportIds, setReportSink } from "../src/report/report.ts";
 import {
   type FinRouterContext,
   type FinRuntime,
@@ -253,5 +255,48 @@ describe("Fin Admin's root and AdminFrame", () => {
         .location.pathname,
     ).toBe("/sign-in/factor");
     expect((await renderAdmin("/staff", null)).router.state.location.pathname).toBe("/sign-in");
+  });
+});
+
+describe("the root's providers", () => {
+  it("hands every control below it the browser's report seam (spec 06 §2.6, AC-UI-29)", async () => {
+    const captured: FailureReporter[] = [];
+    function Probe() {
+      captured.push(useReportFailure());
+      return <h1>Probe</h1>;
+    }
+    const fin = runtime<ConsoleViewer>("console", maya, ["/"]);
+    const rootRoute = createRootRouteWithContext<FinRouterContext<ConsoleViewer>>()({
+      component: () => <FinRoot appFrame={AppFrame} fallbackFrame="app" />,
+    });
+    const home = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/",
+      staticData: { frame: "app", navId: "home", pageName: "Home" },
+      component: Probe,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([home]),
+      context: { fin },
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+      isServer: false,
+    });
+    await router.load();
+    const html = renderToStaticMarkup(
+      <FinRuntimeProvider runtime={fin as FinRuntime}>
+        <RouterProvider router={router} />
+      </FinRuntimeProvider>,
+    );
+    expect(html).toContain(">Probe</h1>");
+    const report = captured.at(-1);
+    const seen: { error: unknown; ids: ReportIds }[] = [];
+    setReportSink((error, ids) => seen.push({ error, ids }));
+    try {
+      const failure = new Error("the action threw");
+      report?.(failure, { action: "probe" });
+      expect(seen).toEqual([{ error: failure, ids: { action: "probe" } }]);
+    } finally {
+      setReportSink(null);
+    }
   });
 });
