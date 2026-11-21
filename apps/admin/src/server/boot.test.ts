@@ -14,6 +14,24 @@ let token: string;
 const certsFetched: string[] = [];
 
 const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+const random = (bytes: number) =>
+  Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url");
+
+/**
+ * The staff realm's and the pool's settings, made at run time (L-SAT-04). The pool opens no
+ * connection until a request needs the database, which /api/health does not.
+ */
+function realmTestEnv(): Record<string, string> {
+  return {
+    BETTER_AUTH_SECRETS: `2:${random(32)},1:${random(32)}`,
+    FIN_LIMIT_KEY_1: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex"),
+    FIN_DB_HOST: "127.0.0.1",
+    FIN_DB_PORT: "5432",
+    FIN_DB_NAME: "fin",
+    FIN_DB_USER: "fin_admin_a",
+    FIN_DB_PASSWORD: random(24),
+  };
+}
 
 beforeAll(async () => {
   const pair = (await crypto.subtle.generateKey(
@@ -59,6 +77,7 @@ beforeAll(async () => {
       FIN_CONNECTOR_SERVICES: "cloudflared-admin,cloudflared-admin-b",
       FIN_ACCESS_TEAM: TEAM,
       FIN_ACCESS_AUD: AUD,
+      ...realmTestEnv(),
     },
     fetch: certs,
   });

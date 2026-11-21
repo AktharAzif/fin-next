@@ -1,0 +1,131 @@
+// The kill switches from Fin Admin (spec 02 §14.3, S2-27; OP-01; spec 08 §3.4, §3.10): a member
+// holding `switches.manage` sets and clears a switch through `ops.set_switch()` with an intent bound
+// to the switch, the state and the reason; the event, its journal entry and the notice to every
+// Admin commit with it; the guard on ops.kill_switch refuses any change without its event.
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  createStaffHarness,
+  refusalOf,
+  type StaffHarness,
+  stepped,
+  unique,
+} from "../test/harness.ts";
+import { requireStaff } from "./require-staff.ts";
+import { listSwitches, setSwitch } from "./switches.ts";
+
+let h: StaffHarness;
+
+beforeAll(async () => {
+  h = await createStaffHarness("sat04switch");
+}, 120_000);
+
+afterAll(async () => {
+  await h?.close();
+});
+
+describe("the kill switches", () => {
+  it("are set and cleared by an Operator with an intent, recorded, journalled and told to every Admin", async () => {
+    const adminEmail = unique("switch.admin");
+    await h.enrolled(adminEmail, "admin");
+    const operator = await h.enrolled(unique("switch.operator"), "operator");
+    const set = (state: "on" | "off", reasonCode: string) =>
+      stepped(
+        h,
+        operator.browser,
+        operator.authenticator,
+        { method: "POST", path: "/api/switches/signups" },
+        async (tx, req, ctx) =>
+          setSwitch(
+            h.deps,
+            tx,
+            await requireStaff(h.realm, req, ctx, { permission: "switches.manage" }),
+            "signups",
+            { state, reasonCode },
+          ),
+      );
+    const on = await set("on", "abuse_wave");
+    expect(on).toMatchObject({
+      name: "signups",
+      state: "on",
+      reasonCode: "abuse_wave",
+      changedBy: { kind: "staff", id: operator.staffId },
+    });
+    const off = await set("off", "resolved");
+    expect(off.state).toBe("off");
+    const events = (await h.events()).filter((e) => e.target_id === "signups");
+    expect(events.map((e) => [e.event, e.metadata.reasonCode, e.step_up_kind])).toEqual([
+      ["switch.set", "abuse_wave", "intent"],
+      ["switch.cleared", "resolved", "intent"],
+    ]);
+    const journal = await h.admin.query<{ kind: string }>(
+      "SELECT kind FROM audit.journal_entry WHERE audit_event_id = ANY ($1) ORDER BY recorded_at",
+      [events.map((e) => e.id)],
+    );
+    expect(journal.rows.map((r) => r.kind)).toEqual(["switch_set", "switch_cleared"]);
+    const notices = await h.outbox("staff/staff-switch-changed");
+    expect(notices.map((n) => [n.recipient, n.params.state])).toEqual([
+      [adminEmail, "on"],
+      [adminEmail, "off"],
+    ]);
+    expect(h.lines.named("switch.set").at(-1)).toMatchObject({
+      switch: "signups",
+      reasonCode: "abuse_wave",
+      staffId: operator.staffId,
+    });
+  });
+
+  it("refuses an unchanged state, an unknown switch, and anyone without switches.manage", async () => {
+    const operator = await h.enrolled(unique("switch.operator.two"), "operator");
+    const attempt = (who: typeof operator, name: string, state: "on" | "off") =>
+      refusalOf(
+        h.route(
+          who.browser,
+          { method: "POST", path: `/api/switches/${name}` },
+          async (tx, req, ctx) =>
+            setSwitch(
+              h.deps,
+              tx,
+              await requireStaff(h.realm, req, ctx, { permission: "switches.manage" }),
+              name,
+              { state, reasonCode: "drill" },
+            ),
+        ),
+      );
+    expect(await attempt(operator, "signups", "off")).toMatchObject({
+      code: "conflict",
+      extensions: { reason: "unchanged" },
+    });
+    expect(await attempt(operator, "no_such_switch", "on")).toMatchObject({ code: "not_found" });
+    const compliance = await h.enrolled(unique("switch.compliance"), "compliance");
+    expect(await attempt(compliance, "signups", "on")).toMatchObject({
+      code: "forbidden",
+      extensions: { permission: "switches.manage" },
+    });
+    const listed = await h.route(
+      operator.browser,
+      { method: "GET", path: "/api/switches" },
+      async (tx, req, ctx) => {
+        await requireStaff(h.realm, req, ctx, { permission: "switches.manage" });
+        return listSwitches(tx);
+      },
+    );
+    expect(listed.map((s) => s.name)).toContain("live_money");
+  });
+
+  it("cannot be moved by Fin Admin's login without its event", async () => {
+    const client = await h.login("fin_admin_a", 1).connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "SELECT ops.set_switch('live_keys', 'on', 'drill', '{\"kind\":\"staff\",\"id\":\"stf_01jd0000000000000000000000\"}'::jsonb)",
+      );
+      await expect(client.query("COMMIT")).rejects.toMatchObject({ code: "FA010" });
+    } finally {
+      client.release();
+    }
+    const state = await h.admin.query<{ state: string }>(
+      "SELECT state FROM ops.kill_switch WHERE name = 'live_keys'",
+    );
+    expect(state.rows[0]?.state).toBe("off");
+  });
+});

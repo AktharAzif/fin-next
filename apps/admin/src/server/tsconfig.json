@@ -3,5 +3,10 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["./**/*.ts", "../../vite.server.config.ts"]
+  "include": [
+    "./**/*.ts",
+    "./**/*.d.mts",
+    "../../vite.server.config.ts",
+    "../../../../packages/identity/src/ports/pg.d.ts"
+  ]
 }

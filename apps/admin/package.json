@@ -16,22 +16,30 @@
     "lint": "biome check .",
     "pretest": "pnpm run routes",
     "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db",
     "e2e": "pnpm run build && playwright test"
   },
   "dependencies": {
+    "@fin/access": "workspace:*",
     "@fin/app-contracts": "workspace:*",
     "@fin/core": "workspace:*",
+    "@fin/db": "workspace:*",
     "@fin/frame": "workspace:*",
+    "@fin/identity": "workspace:*",
     "@fin/motion": "workspace:*",
     "@fin/server": "workspace:*",
+    "@fin/staff": "workspace:*",
     "@fin/tokens": "workspace:*",
     "@fin/ui": "workspace:*",
     "@fin/web-host": "workspace:*",
     "@tanstack/react-router": "catalog:",
+    "hono": "catalog:",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
+    "@fin/testing": "workspace:*",
     "@playwright/test": "catalog:",
     "@tailwindcss/vite": "catalog:",
     "@tanstack/router-plugin": "catalog:",

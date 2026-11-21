@@ -1,0 +1,30 @@
+{
+  "name": "@fin/staff",
+  "private": true,
+  "type": "module",
+  "description": "Fin Admin's staff: requireStaff, members and roles, the staff-change lock and the last Admin, enrolment codes, switches, the Access drift check and the staff audit events (spec 02 §6.4, §6.5, §10).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./test/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@fin/access": "workspace:*",
+    "@fin/email": "workspace:*",
+    "@fin/identity": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/db": "workspace:*",
+    "@types/node": "catalog:",
+    "pg": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
