@@ -1,6 +1,6 @@
 // spec 02 §2.2's front door, step by step, on the shared API host.
 import { Readiness } from "@fin/server/health";
-import type { FinEnv } from "@fin/server/http";
+import type { FinContext, FinEnv } from "@fin/server/http";
 import { ConnectorPeers } from "@fin/server/ingress";
 import { capture, randomProof } from "@fin/server/testing";
 import type { MiddlewareHandler } from "hono";
@@ -702,6 +702,69 @@ describe("createApiHost", () => {
         ["content_type", "/api/media/:id"],
       ]);
       expect(routeLines(captured)).toEqual([[403, "/api/media/:id"]]);
+    });
+
+    // `api.all` registers a route that answers every method, which Hono records as it records
+    // `api.use`'s middleware: the host tells the two apart as the app registers them.
+    const hook = (c: FinContext) => c.json({ hook: c.req.param("provider") }, 200);
+
+    it("an all route behind an app-wide middleware names its own lines", async () => {
+      const { send, post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use(passthrough);
+          api.all("/hooks/:provider", hook);
+          api.post("/items", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/hooks/stripe", good())).status).toBe(200);
+      expect((await send("/api/hooks/stripe")).status).toBe(200);
+      expect((await post("/api/hooks/stripe", crossSite(good))).status).toBe(403);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual(["/api/hooks/:provider"]);
+      expect(routeLines(captured)).toEqual([
+        [200, "/api/hooks/:provider"],
+        [200, "/api/hooks/:provider"],
+        [403, "/api/hooks/:provider"],
+      ]);
+    });
+
+    it("an all route behind a path-scoped middleware names its own lines", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use("/hooks/*", passthrough);
+          api.all("/hooks/:provider", hook);
+        },
+      });
+      expect((await post("/api/hooks/stripe", good())).status).toBe(200);
+      expect(routeLines(captured)).toEqual([[200, "/api/hooks/:provider"]]);
+    });
+
+    it("an all route registered before an overlapping route names the request it answers", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.all("/hooks/:provider", hook);
+          api.post("/:area/:id", (c) => c.json({ other: true }, 201));
+        },
+      });
+      const res = await post("/api/hooks/stripe", good());
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ hook: "stripe" });
+      expect((await post("/api/hooks/stripe", crossSite(good))).status).toBe(403);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual(["/api/hooks/:provider"]);
+      expect(routeLines(captured)).toEqual([
+        [200, "/api/hooks/:provider"],
+        [403, "/api/hooks/:provider"],
+      ]);
+    });
+
+    it("an all route that answers after a route hands the request on names the request", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.post("/items/:id", passthrough);
+          api.all("/items/*", (c) => c.json({ fallback: true }, 202));
+        },
+      });
+      expect((await post("/api/items/itm_1", good())).status).toBe(202);
+      expect(routeLines(captured)).toEqual([[202, "/api/items/*"]]);
     });
   });
 
