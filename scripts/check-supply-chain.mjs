@@ -24,12 +24,13 @@
 //   - a refused package (FW-C01, OD-5, ARCHITECTURE §3.3's "not used" list) in a manifest, the
 //     catalog or the lockfile; wrangler outside tools/static-deploy/package.json; @ui-sdk/*
 //     outside packages/ui/package.json; seroval or seroval-plugins below 1.6.11;
-//   - a lockfile line outside the one canonical form pnpm writes, a lockfile package resolved
-//     from anything but the registry by integrity, an importer whose version is not the registry
-//     version (or, for catalog:, not the catalog's), a dependency a snapshot lists by anything but
-//     a registry version or alias (a link, a path, a tarball, a git URL), a dependency or a
-//     snapshot with no registry package in its document, or a lockfile catalog entry that is not
-//     the workspace catalog's;
+//   - a lockfile line outside the one canonical form pnpm writes, an empty importer (`path: {}`)
+//     for anything but a workspace project whose package.json declares no dependency at all, a
+//     lockfile package resolved from anything but the registry by integrity, an importer whose
+//     version is not the registry version (or, for catalog:, not the catalog's), a dependency a
+//     snapshot lists by anything but a registry version or alias (a link, a path, a tarball, a git
+//     URL), a dependency or a snapshot with no registry package in its document, or a lockfile
+//     catalog entry that is not the workspace catalog's;
 //   - a root package.json whose pnpm pin is not exact, or lacks devEngines.packageManager with
 //     onFail "error" (without it pnpm 12 downloads whatever packageManager names; SP-01);
 //   - a `uses:` in .github/ (or in any action.yml) not pinned to a 40-character commit SHA with a
@@ -1035,6 +1036,52 @@ function lockScalar(value) {
 }
 
 /**
+ * The workspace projects that declare no dependency at all, by path: pnpm writes each one's
+ * importer as `path: {}`, the one empty importer the lockfile check accepts. A path is listed only
+ * when the package globs select it (checkWorkspace refuses a pnpm-workspace.yaml whose `packages`
+ * are not exactly these globs), no directory on it is one pnpm skips (node_modules,
+ * bower_components) or a hidden one, its package.json is a tracked regular file by that exact name
+ * holding a JSON object, and that object's dependencies, devDependencies, optionalDependencies and
+ * peerDependencies are each absent or an empty object. Anything else, a manifest that cannot be
+ * read included, leaves the path out, so its `{}` is refused.
+ * @param {string} root
+ * @param {[string, string][]} [entries] the tracked entries with their git modes (trackedEntries)
+ * @returns {Set<string>}
+ */
+export function projectsWithoutDependencies(root, entries = trackedEntries(root)) {
+  const dirs = PACKAGE_GLOBS.map((glob) => globToRegExp(glob));
+  const skipped = (/** @type {string} */ segment) =>
+    segment === "" ||
+    segment.startsWith(".") ||
+    segment === "node_modules" ||
+    segment === "bower_components";
+  /** @type {Set<string>} */
+  const projects = new Set();
+  for (const [file, mode] of entries) {
+    if (mode !== "100644" && mode !== "100755") continue;
+    if (!file.endsWith("/package.json")) continue;
+    const dir = file.slice(0, -"/package.json".length);
+    if (dir.split("/").some(skipped) || !dirs.some((glob) => glob.test(dir))) continue;
+    /** @type {unknown} */
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(join(root, file), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    const manifest = parsed;
+    const declaresNone = DEP_FIELDS.every((field) => {
+      if (!Object.hasOwn(manifest, field)) return true;
+      const deps = manifest[field];
+      return isRecord(deps) && Object.keys(deps).length === 0;
+    });
+    if (declaresNone) projects.add(dir);
+  }
+  return projects;
+}
+
+/**
  * Checks the lockfile, every document in it. pnpm writes one canonical form: LF line endings,
  * two spaces per level, `name@version` keys, a `resolution: {integrity: ...}` for every package,
  * one complete value per line. This check reads only that form, and any line it cannot place is
@@ -1043,11 +1090,16 @@ function lockScalar(value) {
  * installs is read, an importer's or a snapshot's: a snapshot's is a registry version (`1.2.3`,
  * with any peer suffix) or a registry alias (`name@1.2.3`), never a link, a path, a tarball or a
  * git URL, and each one, like each snapshot, must be a registry package the same document holds.
+ * An importer has its fields below its path, with one exception: pnpm writes a workspace project
+ * that declares no dependency as `path: {}`, and that line is accepted only for a path in
+ * `emptyProjects` (see projectsWithoutDependencies). With no `emptyProjects`, every `{}` importer
+ * is refused.
  * @param {string} text
  * @param {Map<string, Item>} [catalog] the workspace catalog, to compare catalog: importers with
+ * @param {Set<string>} [emptyProjects] the workspace projects whose importer may be `{}`
  * @returns {Finding[]}
  */
-export function checkLockfile(text, catalog = new Map()) {
+export function checkLockfile(text, catalog = new Map(), emptyProjects = new Set()) {
   /** @type {Finding[]} */
   const findings = [];
   /**
@@ -1383,8 +1435,17 @@ export function checkLockfile(text, catalog = new Map()) {
       if (depth === 2) {
         field = "";
         importer = entry.key;
-        if (entry.value !== "")
+        if (entry.value === "{}") {
+          if (!emptyProjects.has(entry.key)) {
+            add(
+              line,
+              "lockfile-format",
+              `the empty importer ${entry.key} is accepted only for a workspace project whose package.json declares no dependency`,
+            );
+          }
+        } else if (entry.value !== "") {
           add(line, "lockfile-format", "an importer is a path with its fields below");
+        }
       } else if (depth === 4) {
         field = entry.key;
         const inline = field === "publishDirectory" || entry.value === "" || entry.value === "{}";
@@ -1671,7 +1732,8 @@ export function checkSupplyChain(root) {
       message: "the lockfile must be committed",
     });
   } else {
-    findings.push(...checkLockfile(readFileSync(join(root, LOCKFILE), "utf8"), catalog));
+    const text = readFileSync(join(root, LOCKFILE), "utf8");
+    findings.push(...checkLockfile(text, catalog, projectsWithoutDependencies(root, entries)));
   }
 
   const actionFiles = files.filter(
