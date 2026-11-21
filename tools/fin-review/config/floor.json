@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "decision": "RV-06 default: on tier S every role on the overall effort needs xhigh or above; attack and sceptic2 need high or above everywhere",
+  "tiers": {
+    "S": {
+      "lens": "xhigh",
+      "joins": "xhigh",
+      "test-truth": "xhigh",
+      "sibling": "xhigh",
+      "sceptic1": "xhigh",
+      "sceptic2": "high",
+      "sceptic3": "xhigh",
+      "second-look": "xhigh",
+      "attack": "high",
+      "doctor": "high"
+    },
+    "N": {
+      "lens": "high",
+      "joins": "high",
+      "test-truth": "high",
+      "sibling": "high",
+      "sceptic1": "high",
+      "sceptic2": "high",
+      "sceptic3": "high",
+      "second-look": "high",
+      "attack": "high",
+      "doctor": "high"
+    },
+    "D": {
+      "lens": "high",
+      "joins": "high",
+      "test-truth": "high",
+      "sibling": "high",
+      "sceptic1": "high",
+      "sceptic2": "high",
+      "sceptic3": "high",
+      "second-look": "high",
+      "attack": "high",
+      "doctor": "high"
+    }
+  }
+}
