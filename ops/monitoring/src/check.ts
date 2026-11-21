@@ -5,7 +5,7 @@
 //   MC-01 an event written in code (any telemetry writer's line; see eventsInCode) is missing
 //         from the catalogue, a catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0
 //         events is missing;
-//   MC-02 a failure, security or money entry has no alert and no noAlert reason;
+//   MC-02 a failure, security or money entry has no alert, no owed alert and no noAlert reason;
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
 //         an alert no fragment defines (or an alert watches an event whose entry does not name
@@ -28,6 +28,10 @@
 //   MC-13 a staging object names a production policy, or the files name another environment's
 //         team (`fin-<env>`), environment or name prefix (`fin-next-<env>-`);
 //   MC-14 an alert name is used twice;
+//   MC-15 an alert name the code (see alertsInCode) or the catalogue (an entry's owed, or a noAlert
+//         reason's `<name> (P|N, …)`) gives is neither a rule of the environment nor listed in
+//         catalog/owed.ts; an owed alert has no lane, no due date or no fragment, is listed twice,
+//         or is a rule of the environment already (in owed.ts or in an entry's owed);
 //   RT-01 an alert, monitor or heartbeat has no policy, or a staging one names anything but
 //         staging-quiet, or names a policy the files do not define;
 //   RT-02 staging-quiet is not email only: a severity that calls, texts, pushes or sends critical
@@ -37,6 +41,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fragments as defaultFragments } from "../catalog/index.ts";
+import { OWED_ALERTS, type OwedAlert } from "../catalog/owed.ts";
 import { type CatalogEntry, ENVELOPE_FIELDS, kindsOf } from "../catalog/types.ts";
 import {
   type AlertDef,
@@ -169,9 +174,14 @@ const IDENTIFIER_SHAPES: readonly { name: string; pattern: RegExp }[] = [
 export interface CheckOptions {
   readonly envs?: readonly string[];
   readonly fragments?: Readonly<Record<string, readonly CatalogEntry[]>>;
+  /** The owed alerts (MC-15); catalog/owed.ts's by default. */
+  readonly owed?: readonly OwedAlert[];
   /** Extra files scanned for MC-12, relative to root (directories are walked). */
   readonly scan?: readonly string[];
-  /** Whether to scan the repository's code for the events its telemetry writers write (MC-01). */
+  /**
+   * Whether to scan the repository's code for the events its telemetry writers write (MC-01) and
+   * the alerts it names (MC-15).
+   */
   readonly scanCode?: boolean;
 }
 
@@ -346,17 +356,15 @@ function lineAt(text: string, index: number): number {
 }
 
 /** Events written in code, each with the first place that writes it (see the rule above). */
-export function eventsInCode(root: string): Map<string, CodeEvent> {
-  const files: string[] = [];
-  for (const dir of CODE_DIRS) walk(root, dir, files);
+export function eventsInCode(
+  root: string,
+  code: readonly CodeFile[] = readCode(root),
+): Map<string, CodeEvent> {
   const found = new Map<string, CodeEvent>();
   const add = (event: string, at: CodeEvent) => {
     if (!found.has(event)) found.set(event, at);
   };
-  for (const file of files.sort()) {
-    if (!/\.tsx?$/.test(file) || /\.(?:db\.)?test\.tsx?$/.test(file)) continue;
-    if (file.startsWith("ops/monitoring/")) continue;
-    const text = readFileSync(join(root, file), "utf8");
+  for (const { file, text } of code) {
     for (const match of text.matchAll(WRITER_CALL)) {
       const method = match[0].slice(0, -1);
       const arg = firstArgument(text, match.index + match[0].length);
@@ -381,6 +389,204 @@ export function eventsInCode(root: string): Map<string, CodeEvent> {
   return found;
 }
 
+/** A source file the code scans read, and its text. */
+export interface CodeFile {
+  readonly file: string;
+  readonly text: string;
+}
+
+/** The files both code scans read, once: TypeScript outside tests and ops/monitoring. */
+export function readCode(root: string): CodeFile[] {
+  const files: string[] = [];
+  for (const dir of CODE_DIRS) walk(root, dir, files);
+  return files
+    .sort()
+    .filter(
+      (file) =>
+        /\.tsx?$/.test(file) &&
+        !/\.(?:db\.)?test\.tsx?$/.test(file) &&
+        !file.startsWith("ops/monitoring/"),
+    )
+    .map((file) => ({ file, text: readFileSync(join(root, file), "utf8") }));
+}
+
+// MC-15's scan: the alert names the code gives, in the same files as MC-01's (ops/monitoring's own
+// catalogue is read as data). The code names an alert in two ways, and the scan reads each:
+//   1. a line list: an `alerts` property whose value is a string or an array, each string at the
+//      array's top level a name (packages/identity/src/monitoring.ts's IDENTITY_LINES; a value of
+//      another kind, such as `{ none: "…" }` or a type, names none);
+//   2. text that calls a backquoted name an alert, in a comment or a string: "alert (`x`)",
+//      "alert `x`" or "the `x` alert"; and the duty alerts' family name `duty-stalled-<duty>`
+//      (ARCHITECTURE §10.8 group I) wherever it stands.
+// Prose that names an alert in other words ("`x` watches it") is beyond a lexical scan, as a writer
+// reached another way is for MC-01: a review finding.
+const ALERT_NAME = /^[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+$/;
+const ALERTS_PROPERTY = /(?<![\w$.])(?:alerts|"alerts"|'alerts')\s*:\s*/g;
+const ALERT_PROSE =
+  /\balerts?\s*\(?\s*`([a-z0-9]+(?:-[a-z0-9]+)+)`|`([a-z0-9]+(?:-[a-z0-9]+)+)`\s+alert\b|(?<![\w-])(duty-stalled-[a-z0-9]+(?:-[a-z0-9]+)*)/g;
+/** A noAlert reason that names an alert the way the specs' tables do: `<name> (P, …)`. */
+const SEVERITY_NAMED = /(?<![\w-])([a-z0-9]+(?:-[a-z0-9]+)+) \((?:P|N)\b/g;
+
+/** Where the code names an alert. */
+export interface CodeAlert {
+  readonly file: string;
+  readonly line: number;
+}
+
+/** The strings at the top level of the array at `open` (none for a template with `${`). */
+function topLevelStrings(text: string, open: number): { value: string; at: number }[] {
+  const end = closing(text, open);
+  if (end < 0) return [];
+  const out: { value: string; at: number }[] = [];
+  for (let i = open + 1; i < end - 1; i++) {
+    const c = text[i] ?? "";
+    if (c === '"' || c === "'" || c === "`") {
+      const close = stringEnd(text, i);
+      if (close < 0) return out;
+      const value = text.slice(i + 1, close);
+      if (!value.includes("${")) out.push({ value, at: i });
+      i = close;
+      continue;
+    }
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return out;
+      i = skip;
+      continue;
+    }
+    if (c === "(" || c === "{" || c === "[") {
+      const inner = closing(text, i);
+      if (inner < 0) return out;
+      i = inner - 1;
+    }
+  }
+  return out;
+}
+
+/** Alert names the code gives, each with the first place that names it (see the rule above). */
+export function alertsInCode(
+  root: string,
+  code: readonly CodeFile[] = readCode(root),
+): Map<string, CodeAlert> {
+  const found = new Map<string, CodeAlert>();
+  for (const { file, text } of code) {
+    if (!text.includes("alert") && !text.includes("duty-stalled-")) continue;
+    const add = (name: string, index: number) => {
+      if (!found.has(name)) found.set(name, { file, line: lineAt(text, index) });
+    };
+    for (const match of text.matchAll(ALERTS_PROPERTY)) {
+      const at = match.index + match[0].length;
+      const c = text[at];
+      if (c === "[") {
+        for (const s of topLevelStrings(text, at)) add(s.value, s.at);
+      } else if (c === '"' || c === "'" || c === "`") {
+        const close = stringEnd(text, at);
+        const value = close < 0 ? "" : text.slice(at + 1, close);
+        if (value !== "" && !value.includes("${")) add(value, at);
+      }
+    }
+    for (const match of text.matchAll(ALERT_PROSE)) {
+      add(match[1] ?? match[2] ?? match[3] ?? "", match.index);
+    }
+  }
+  return found;
+}
+
+function isDate(value: unknown): boolean {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+const OWED_FILE = "ops/monitoring/catalog/owed.ts";
+const LANE = /^(?:P0-[A-Z][0-9]?|L-[A-Z]{3,4}-[0-9]{2})$/;
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * MC-15: every alert name the code or the catalogue gives is a rule of each environment or owed,
+ * with a lane and a due date; an owed alert that has become a rule leaves the list.
+ */
+function checkOwed(
+  fragments: Readonly<Record<string, readonly CatalogEntry[]>>,
+  owed: readonly OwedAlert[],
+  configs: readonly EnvConfig[],
+  root: string,
+  code: readonly CodeFile[] | undefined,
+): Finding[] {
+  const findings: Finding[] = [];
+  const owedNames = new Set<string>();
+  for (const alert of owed) {
+    const add = (message: string) =>
+      findings.push({ file: OWED_FILE, rule: "MC-15", message: `${alert.name}: ${message}` });
+    if (owedNames.has(alert.name)) add("is listed twice");
+    owedNames.add(alert.name);
+    if (!ALERT_NAME.test(alert.name)) add("is not an alert name (words joined by hyphens)");
+    if (typeof alert.lane !== "string" || !LANE.test(alert.lane)) {
+      add("names no lane (a lane of EXECUTION's tables, such as L-SAT-09)");
+    }
+    if (!isDate(alert.due)) add("has no due date (YYYY-MM-DD)");
+    if (alert.severity !== "P" && alert.severity !== "N") add("severity must be P or N");
+    if (typeof alert.fragment !== "string" || !SLUG.test(alert.fragment)) {
+      add("names no fragment (ops/monitoring/<env>/alerts/<fragment>.json)");
+    }
+    if (typeof alert.spec !== "string" || alert.spec.trim() === "") add("names no spec section");
+    if (alert.heartbeat !== undefined && !SLUG.test(alert.heartbeat)) {
+      add(`its heartbeat ${String(alert.heartbeat)} is not a heartbeat name`);
+    }
+  }
+
+  // The names the catalogue and the code give, each with where it is given.
+  const named = new Map<string, { file: string; by: string }>();
+  const entryOwes: { file: string; event: string; name: string }[] = [];
+  for (const [area, entries] of Object.entries(fragments)) {
+    const file = `ops/monitoring/catalog/${area}.ts`;
+    for (const entry of entries) {
+      for (const name of entry.owed ?? []) {
+        entryOwes.push({ file, event: entry.event, name });
+        if (!named.has(name)) named.set(name, { file, by: `${entry.event} owes` });
+      }
+      for (const match of (entry.noAlert ?? "").matchAll(SEVERITY_NAMED)) {
+        const name = match[1] ?? "";
+        if (!named.has(name)) named.set(name, { file, by: `${entry.event}'s noAlert names` });
+      }
+    }
+  }
+  if (code !== undefined) {
+    for (const [name, at] of alertsInCode(root, code)) {
+      if (!named.has(name)) named.set(name, { file: `${at.file}:${at.line}`, by: "names" });
+    }
+  }
+
+  for (const config of configs) {
+    const defined = new Set(config.alerts.flatMap((a) => [a.name, a.template]));
+    for (const [name, at] of named) {
+      if (defined.has(name) || owedNames.has(name)) continue;
+      findings.push({
+        file: at.file,
+        rule: "MC-15",
+        message: `${at.by} the alert ${name}, which is no ${config.env} rule and is not listed in catalog/owed.ts with a lane and a date`,
+      });
+    }
+    for (const alert of owed) {
+      if (!defined.has(alert.name)) continue;
+      findings.push({
+        file: OWED_FILE,
+        rule: "MC-15",
+        message: `${alert.name} is a ${config.env} rule now: name it in its catalogue entries' alerts and drop it from the owed list`,
+      });
+    }
+    for (const { file, event, name } of entryOwes) {
+      if (!defined.has(name)) continue;
+      findings.push({
+        file,
+        rule: "MC-15",
+        message: `${event} owes ${name}, which is a ${config.env} rule now: name it in alerts`,
+      });
+    }
+  }
+  return findings;
+}
+
 function envDirs(root: string): string[] {
   const base = join(root, "ops", "monitoring");
   if (!existsSync(base)) return [];
@@ -401,7 +607,7 @@ function notifyFindings(file: string, what: string, notify: Notify | undefined):
 function checkCatalogue(
   fragments: Readonly<Record<string, readonly CatalogEntry[]>>,
   root: string,
-  scanCode: boolean,
+  code: readonly CodeFile[] | undefined,
 ): { findings: Finding[]; byEvent: Map<string, CatalogEntry> } {
   const findings: Finding[] = [];
   const byEvent = new Map<string, CatalogEntry>();
@@ -414,7 +620,8 @@ function checkCatalogue(
       byEvent.set(entry.event, entry);
       const kinds = kindsOf(entry);
       const watched = kinds.some((k) => k === "failure" || k === "security" || k === "money");
-      if (watched && entry.alerts.length === 0 && (entry.noAlert ?? "").trim() === "") {
+      const covered = entry.alerts.length > 0 || (entry.owed ?? []).length > 0;
+      if (watched && !covered && (entry.noAlert ?? "").trim() === "") {
         findings.push({
           file,
           rule: "MC-02",
@@ -445,7 +652,7 @@ function checkCatalogue(
   if (existsSync(catalogDir)) {
     for (const name of readdirSync(catalogDir)) {
       const area = name.replace(/\.ts$/, "");
-      if (!name.endsWith(".ts") || area === "types" || area === "index") continue;
+      if (!name.endsWith(".ts") || ["types", "index", "owed"].includes(area)) continue;
       if (!(area in fragments)) {
         findings.push({
           file: `ops/monitoring/catalog/${name}`,
@@ -464,8 +671,8 @@ function checkCatalogue(
       });
     }
   }
-  if (scanCode) {
-    for (const [event, at] of eventsInCode(root)) {
+  if (code !== undefined) {
+    for (const [event, at] of eventsInCode(root, code)) {
       if (!byEvent.has(event)) {
         findings.push({
           file: `${at.file}:${at.line}`,
@@ -1070,16 +1277,22 @@ function scanIdentifiers(root: string, paths: readonly string[]): Finding[] {
 /** Runs every rule. Returns the findings, empty when the files pass. */
 export function checkMonitoring(root: string, options: CheckOptions = {}): Finding[] {
   const fragments = options.fragments ?? defaultFragments;
-  const { findings, byEvent } = checkCatalogue(fragments, root, options.scanCode ?? true);
+  // The code is read once, for both scans (MC-01 and MC-15).
+  const code = (options.scanCode ?? true) ? readCode(root) : undefined;
+  const { findings, byEvent } = checkCatalogue(fragments, root, code);
   const envs = options.envs ?? envDirs(root);
   if (envs.length === 0) {
     findings.push({ file: "ops/monitoring", rule: "MC-00", message: "no environment files" });
   }
+  const configs: EnvConfig[] = [];
   for (const env of envs) {
     const loaded = loadEnv(root, env);
     findings.push(...loaded.findings);
-    if (loaded.config !== undefined) findings.push(...checkEnv(loaded.config, byEvent, root));
+    if (loaded.config === undefined) continue;
+    configs.push(loaded.config);
+    findings.push(...checkEnv(loaded.config, byEvent, root));
   }
+  findings.push(...checkOwed(fragments, options.owed ?? OWED_ALERTS, configs, root, code));
   // MC-12 over every file, not only those the loader parses: each environment's whole directory
   // (dashboards, webhooks and the status page included), the catalogue, the README and the
   // runbooks, and the watcher's settings.

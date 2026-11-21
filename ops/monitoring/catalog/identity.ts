@@ -4,10 +4,9 @@
 // the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
 // are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
 // identity area's alert fragment (alerts/identity.json), which has not landed; until then each
-// failure or security entry names the alert it is owed, or why none.
+// failure or security entry names the alerts it is owed (`owed`, listed in owed.ts with their lane
+// and date), or why none.
 import type { CatalogEntry } from "./types.ts";
-
-const OWED = "is owed by the identity area's alert fragment, which has not landed";
 
 export const entries: readonly CatalogEntry[] = [
   {
@@ -29,7 +28,7 @@ export const entries: readonly CatalogEntry[] = [
       "the sign-in code requests, when a browser the address does not know is refused a new code over a live one, or uses the strangers' share (spec 02 §5.2)",
     fields: { reason: "string", userId: "string" },
     alerts: [],
-    noAlert: `sign-in-code-contested (N, spec 02 §18.2) ${OWED}`,
+    owed: ["sign-in-code-contested"],
   },
   {
     event: "auth.secret_unreadable",
@@ -39,7 +38,7 @@ export const entries: readonly CatalogEntry[] = [
       "the TOTP check and the console's viewer, when no configured secret version opens a stored secret",
     fields: { realm: "string", kind: "string" },
     alerts: [],
-    noAlert: `secret-unreadable (P, spec 02 §18.2) ${OWED}`,
+    owed: ["secret-unreadable"],
   },
   {
     event: "auth.unhandled_error",
@@ -49,7 +48,9 @@ export const entries: readonly CatalogEntry[] = [
       "the realm's error handler, beside error.unexpected with the same errorId, for an error no refusal names (500)",
     fields: { realm: "string", authPath: "string", errorId: "string" },
     alerts: [],
-    noAlert: `sign-in-failing (P, spec 02 §18.2) ${OWED}; meanwhile the error reaches the service's Errors application through error.unexpected`,
+    owed: ["sign-in-failing"],
+    noAlert:
+      "Meanwhile the error reaches the service's Errors application through error.unexpected",
   },
   {
     event: "auth.library_log",
@@ -68,7 +69,8 @@ export const entries: readonly CatalogEntry[] = [
       "the step-up intents and ceremonies (identity, and the orgs and staff guards), for an intent or a ceremony that cannot serve (spec 02 §7.5)",
     fields: { realm: "string", action: "string", reason: "string" },
     alerts: [],
-    noAlert: `step-up-failing (N, spec 02 §18.2, on reason digest above its threshold) ${OWED}`,
+    // step-up-failing watches reason digest above its threshold (spec 02 §18.2).
+    owed: ["step-up-failing"],
   },
   {
     event: "step_up.locked",
@@ -77,7 +79,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy: "the step-up counter, when the fifth failure ends the session (spec 02 §7.7)",
     fields: { realm: "string" },
     alerts: [],
-    noAlert: `step-up-locked (N, spec 02 §18.2) ${OWED}`,
+    owed: ["step-up-locked"],
   },
   {
     event: "limits.refused",
@@ -95,6 +97,6 @@ export const entries: readonly CatalogEntry[] = [
       "the auth limiter, when its store cannot be read or written; it fails closed, so the request is refused (503)",
     fields: { bucket: "string" },
     alerts: [],
-    noAlert: `rate-limiter-failing (P, spec 02 §18.2) ${OWED}`,
+    owed: ["rate-limiter-failing"],
   },
 ];

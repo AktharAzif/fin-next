@@ -2,7 +2,8 @@
 // the run's own lines.jsonl. They are local only for now: nothing ships them to Better Stack's
 // fin-review sources yet, so no alert can read them. The alerts spec 07 §12.3 names come with the
 // review area's alert fragment (alerts/review.json) and the shipping; until then each entry names
-// the alert it is owed. The rest of §12.2's lines join here when the code writes them.
+// the alerts it is owed (`owed`, listed in owed.ts with their lane and date). The rest of §12.2's
+// lines join here when the code writes them.
 import type { CatalogEntry } from "./types.ts";
 
 const LOCAL =
@@ -33,7 +34,8 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy: "fin-review, for a session whose lens or profile refused or did not finish",
     fields: { session: "string", role: "string", failure: "string" },
     alerts: [],
-    noAlert: `${LOCAL}; review-refusals (N, spec 07 §12.3) is owed by the review area's alert fragment`,
+    owed: ["review-refusals"],
+    noAlert: LOCAL,
   },
   {
     event: "review.model_mismatch",
@@ -43,7 +45,8 @@ export const entries: readonly CatalogEntry[] = [
       "fin-review, when a session reports another model than the one it asked for; the run blocks",
     fields: { session: "string", role: "string", requested: "string", observed: "string" },
     alerts: [],
-    noAlert: `${LOCAL}; review-model-mismatch (P, spec 07 §12.3) is owed by the review area's alert fragment`,
+    owed: ["review-model-mismatch"],
+    noAlert: LOCAL,
   },
   {
     event: "review.lock_broken",

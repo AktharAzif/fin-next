@@ -1,7 +1,8 @@
 // The email area's events (spec 08 §4.1 to §4.3 and §7.2), written by packages/email's sender.
 // email.sent and email.send_failed are in platform.ts, beside Phase 0's email-not-sent alert. The
 // group G alerts these lines feed (spec 08 §7.8) come with the email area's alert fragment
-// (L-SAT-05); until then each entry says which alert it is owed.
+// (L-SAT-05); until then each entry names the alerts it is owed (`owed`, listed in owed.ts with
+// their lane and date).
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -28,8 +29,7 @@ export const entries: readonly CatalogEntry[] = [
       orgId: "string",
     },
     alerts: [],
-    noAlert:
-      "email-budget-reached (N, spec 08 §7.8 group G) is owed by the email area's alert fragment (L-SAT-05), which has not landed",
+    owed: ["email-budget-reached"],
   },
   {
     event: "email.security_unsent",
@@ -46,7 +46,6 @@ export const entries: readonly CatalogEntry[] = [
       final: "boolean",
     },
     alerts: [],
-    noAlert:
-      "security-email-unsent (P, spec 08 §7.8 group G) is owed by the email area's alert fragment (L-SAT-05), with its runbook, which have not landed",
+    owed: ["security-email-unsent"],
   },
 ];

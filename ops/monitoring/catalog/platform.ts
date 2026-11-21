@@ -43,6 +43,13 @@ export const entries: readonly CatalogEntry[] = [
       errorId: "string",
     },
     alerts: ["5xx-rate-{service}", "5xx-count-{service}"],
+    // Spec 02 §18.2's, over the auth paths and Fin Admin's requests.
+    owed: [
+      "sign-in-failing",
+      "second-factor-step-failing",
+      "step-up-failing",
+      "admin-without-second-factor",
+    ],
   },
   {
     event: "process.start",
@@ -235,8 +242,8 @@ export const entries: readonly CatalogEntry[] = [
       "origin_gate.content_type",
     ],
     alerts: [],
-    noAlert:
-      "Watched by csrf-refused-jump, which spec 02 §18.2 defines in the sign-in area's alerts fragment (its lane adds it with the origin gate's first caller); single refusals are expected traffic",
+    // A jump above the pre-deploy baseline; single refusals are expected traffic.
+    owed: ["csrf-refused-jump"],
   },
   {
     event: "api.outside_request",
