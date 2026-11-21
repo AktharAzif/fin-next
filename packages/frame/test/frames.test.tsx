@@ -12,10 +12,11 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApiClient } from "../src/api/client.ts";
-import { FinRoot, guardAdmin, guardConsole, routeMatcher } from "../src/boot/root.tsx";
+import { FinRoot, guardAdmin, guardConsole } from "../src/boot/root.tsx";
 import { AdminFrame } from "../src/frames/AdminFrame.tsx";
 import { AppFrame } from "../src/frames/AppFrame.tsx";
 import { type ReportIds, setReportSink } from "../src/report/report.ts";
+import { routeMatcher } from "../src/router/routes.ts";
 import {
   type FinRouterContext,
   type FinRuntime,
@@ -86,7 +87,12 @@ const maya: ConsoleViewer = {
   invitations: [],
 };
 
-async function renderConsole(path: string, viewer: ConsoleViewer | null) {
+/** The console's root over Home, Audit log, Team and Sign in, plus a plain page at each `extra`. */
+async function renderConsole(
+  path: string,
+  viewer: ConsoleViewer | null,
+  extra: readonly string[] = [],
+) {
   const fin = runtime<ConsoleViewer>("console", viewer, [
     "/",
     "/audit-log",
@@ -127,8 +133,16 @@ async function renderConsole(path: string, viewer: ConsoleViewer | null) {
     staticData: { frame: "auth", navId: null, pageName: "Sign in" },
     component: () => <h1>Sign in to Fin</h1>,
   });
+  const extras = extra.map((extraPath) =>
+    createRoute({
+      getParentRoute: () => rootRoute,
+      path: extraPath,
+      staticData: { frame: "app", navId: null, pageName: extraPath },
+      component: () => <h1>{extraPath}</h1>,
+    }),
+  );
   const router = createRouter({
-    routeTree: rootRoute.addChildren([home, auditLog, team, signIn]),
+    routeTree: rootRoute.addChildren([home, auditLog, team, signIn, ...extras]),
     context: { fin },
     history: createMemoryHistory({ initialEntries: [path] }),
     isServer: false,
@@ -186,6 +200,37 @@ describe("the console's root and AppFrame", () => {
     const { html } = await renderConsole("/nowhere", maya);
     expect(html).toContain("Page not found");
     expect(html).toContain('data-app-shell="console"');
+  });
+
+  it("draws a path below a page as the not-found page, whatever that page needs", async () => {
+    // Maya cannot open Team, and Audit log is hers: below either, the page drawn is not found,
+    // with no sidebar item current.
+    for (const path of ["/settings/team/zzz", "/audit-log/zzz"]) {
+      const { html } = await renderConsole(path, maya);
+      expect(html, path).toContain("Page not found");
+      expect(html, path).not.toContain("You can’t open this page");
+      expect(html, path).not.toContain('aria-current="page"');
+    }
+  });
+
+  it("draws a path below an auth page as the not-found page of the signed-in frame", async () => {
+    const { html, router } = await renderConsole("/sign-in/zzz", maya);
+    expect(router.state.location.pathname).toBe("/sign-in/zzz");
+    expect(html).toContain('data-app-shell="console"');
+    expect(html).not.toContain('data-slot="auth-layout"');
+    expect(html).toContain("Page not found");
+    // Signed out, it goes to sign-in, as any path no route matches does, with no `next`.
+    const signedOut = await renderConsole("/sign-in/zzz", null);
+    expect(signedOut.router.state.location.pathname).toBe("/sign-in");
+    expect(signedOut.router.state.location.searchStr).toBe("");
+  });
+
+  it("leaves out a sidebar item whose path only falls below a route", async () => {
+    // Settings' item opens /settings/organisation: a /settings route alone does not open it.
+    const { html } = await renderConsole("/", maya, ["/settings"]);
+    expect(html).not.toContain('data-nav-item="settings"');
+    const withRoute = await renderConsole("/", maya, ["/settings/organisation"]);
+    expect(withRoute.html).toContain('data-nav-item="settings"');
   });
 });
 

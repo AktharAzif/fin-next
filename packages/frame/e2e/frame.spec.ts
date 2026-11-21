@@ -73,6 +73,25 @@ test.describe("the page's entrance (spec 06 §5.1)", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Page A" })).not.toBeFocused();
     expect(await mounts(page)).toEqual(["mount A"]);
   });
+
+  test("a path below a page is the not-found page: its own entrance, title and focus", async ({
+    page,
+  }) => {
+    record = await openHarness(page, "/a", signedIn());
+    await page.evaluate(() =>
+      document.querySelector(".fin-enter")?.setAttribute("data-marked", ""),
+    );
+    await page.getByRole("link", { name: "A page below this one" }).click();
+    await expect(page).toHaveURL(/\/a\/missing$/);
+    const heading = page.getByRole("heading", { level: 1, name: "Page not found" });
+    await expect(heading).toBeVisible();
+    // A new wrapper: the not-found page is another page than A, with its own entrance.
+    await expect(page.locator(".fin-enter")).toHaveCount(1);
+    await expect(page.locator(".fin-enter[data-marked]")).toHaveCount(0);
+    await expect(page).toHaveTitle("Sandbox · Page not found · Fin");
+    await expect(heading).toBeFocused();
+    expect(await mounts(page)).toEqual(["mount A", "unmount A"]);
+  });
 });
 
 test.describe("focus on navigation (S6-17, AC-UI-27)", () => {

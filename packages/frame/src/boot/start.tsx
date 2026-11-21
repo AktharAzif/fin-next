@@ -26,6 +26,7 @@ import {
   reactFailureHandlers,
   reportBrowserError,
 } from "../report/report.ts";
+import { routeMatcher } from "../router/routes.ts";
 import type { FrameKind } from "../router/static-data.ts";
 import { type FinRouterContext, type FinRuntime, FinRuntimeProvider } from "../runtime/runtime.tsx";
 import { createStore } from "../runtime/store.ts";
@@ -33,7 +34,6 @@ import { createViewerStore, fetchViewer } from "../runtime/viewer.ts";
 import { createStepUpController } from "../step-up/step-up.tsx";
 import { frameApiHooks } from "./api-hooks.ts";
 import { installBackForwardGuard } from "./page-effects.ts";
-import { routeMatcher } from "./root.tsx";
 
 export interface StartOptions<C extends AppContract> {
   app: AppName;

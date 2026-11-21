@@ -6,7 +6,7 @@
 // holds the element the app renders into.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
 import { ReportFailures, Toaster, TooltipProvider } from "@fin/ui";
-import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
+import { Outlet, redirect } from "@tanstack/react-router";
 import { type ComponentType, type ReactNode, useEffect, useRef } from "react";
 import { consoleEnvironment } from "../frames/AppFrame.tsx";
 import { AuthFrame } from "../frames/AuthFrame.tsx";
@@ -16,6 +16,7 @@ import { reportBrowserError } from "../report/report.ts";
 import { FrameSwitch } from "../router/FrameSwitch.tsx";
 import {
   deepestStaticData,
+  type MatchLike,
   useRouterValue,
   useRouteStaticData,
   useSearch,
@@ -28,24 +29,11 @@ import { type StepUpContentProps, StepUpHost } from "../step-up/step-up.tsx";
 import { adminGate, consoleGate } from "./gates.ts";
 import { focusNewPage } from "./page-effects.ts";
 
-/**
- * Whether the app has a route for a pathname (not counting the root's catch-all not-found). A path
- * that does not start with a single `/` is never a route of this app, whatever a splat would match:
- * a browser reads `//host` as another origin.
- */
-export function routeMatcher(
-  router: Pick<AnyRouter, "getMatchedRoutes">,
-): (pathname: string) => boolean {
-  return (pathname) =>
-    pathname.startsWith("/") &&
-    !pathname.startsWith("//") &&
-    router.getMatchedRoutes(pathname)[2] !== undefined;
-}
-
 interface GuardInput<V> {
   context: FinRouterContext<V>;
   location: { pathname: string; searchStr: string };
-  matches: readonly { staticData?: unknown }[];
+  /** The matches being loaded, the not-found marks included: the frame is the page drawn's. */
+  matches: readonly MatchLike[];
 }
 
 function throwRedirect(href: string | null): void {

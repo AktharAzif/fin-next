@@ -12,26 +12,24 @@
 import type { AppName } from "@fin/app-contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import type { ApiHooks } from "../api/client.ts";
-import { deepestStaticData } from "../router/matches.ts";
+import { deepestStaticData, type MatchLike } from "../router/matches.ts";
 import { signInHref } from "../router/next.ts";
+import { routeMatcher } from "../router/routes.ts";
 import type { FrameKind } from "../router/static-data.ts";
 import type { Store } from "../runtime/store.ts";
 import type { StepUpController } from "../step-up/step-up.tsx";
-import { routeMatcher } from "./root.tsx";
 
 /**
- * The frame of the route a pathname matches, from its routes' static data, deepest first; null
- * when no route declares one (a path no route matches).
+ * The frame of the page a pathname draws, from the static data of the matches the router makes for
+ * it, deepest first, as FrameSwitch reads them; null when none declares one (a path no route
+ * matches, a path below a route included: the router marks where it draws the not-found page).
  */
 export function routeFrame(
-  router: Pick<AnyRouter, "getMatchedRoutes">,
+  router: Pick<AnyRouter, "matchRoutes">,
   pathname: string,
 ): FrameKind | null {
-  const [routes] = router.getMatchedRoutes(pathname);
-  return (
-    deepestStaticData(routes.map((route) => ({ staticData: route.options.staticData })))?.frame ??
-    null
-  );
+  const matches: readonly MatchLike[] = router.matchRoutes(pathname);
+  return deepestStaticData(matches)?.frame ?? null;
 }
 
 export interface FrameApiHooksInput {

@@ -28,6 +28,7 @@ import {
   useSearch,
 } from "../router/matches.ts";
 import { RouterLink } from "../router/RouterLink.tsx";
+import { routeMatcher } from "../router/routes.ts";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
 import { RoutePending } from "../states/RouteStates.tsx";
@@ -71,7 +72,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const can = (permission: string) => permissions.has(permission);
   const tree = filterNav(consoleNav, {
     can,
-    hasRoute: (path) => router.getMatchedRoutes(path)[2] !== undefined,
+    hasRoute: routeMatcher(router),
     environment,
     docsOrigin: fin.env.docsOrigin,
   });

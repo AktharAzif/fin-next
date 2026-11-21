@@ -13,6 +13,7 @@ import { filterNav } from "../nav/filter.ts";
 import { useSidebar } from "../prefs/sidebar.ts";
 import { useAnyRouter, useNavigationPending, useRouteStaticData } from "../router/matches.ts";
 import { RouterLink } from "../router/RouterLink.tsx";
+import { routeMatcher } from "../router/routes.ts";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
 import { RoutePending } from "../states/RouteStates.tsx";
@@ -36,7 +37,7 @@ export function AdminFrame({ children }: { children: ReactNode }) {
   const can = (permission: string) => permissions.has(permission);
   const tree = filterNav(adminNav, {
     can,
-    hasRoute: (path) => router.getMatchedRoutes(path)[2] !== undefined,
+    hasRoute: routeMatcher(router),
     environment: "production",
   });
   // Behind Cloudflare Access on staging and production; the development stand-in elsewhere.

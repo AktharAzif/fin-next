@@ -11,7 +11,14 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { presentedPage, usePathname, usePresentedPage, useSearch } from "../src/router/matches.ts";
+import {
+  presentedPage,
+  presentedSearch,
+  usePathname,
+  usePresentedPage,
+  useRouteStaticData,
+  useSearch,
+} from "../src/router/matches.ts";
 
 beforeAll(() => {
   vi.stubGlobal("window", {
@@ -33,11 +40,15 @@ async function until(check: () => boolean): Promise<void> {
 
 /** A page that prints the readings, so static markup shows what each hook returns. */
 function Readings() {
+  const staticData = useRouteStaticData();
   return (
     <p
       data-page={usePresentedPage()}
       data-location={usePathname()}
       data-search={JSON.stringify(useSearch())}
+      data-name={staticData?.pageName ?? "none"}
+      data-nav={staticData?.navId ?? "none"}
+      data-needs={(staticData?.needs ?? []).join(",")}
     />
   );
 }
@@ -52,14 +63,27 @@ function app(initial: string) {
     createRoute({
       getParentRoute: () => rootRoute,
       path,
+      staticData: { frame: "app", navId: path, pageName: `Page ${path}`, needs: [`${path}.read`] },
       ...(loader === undefined ? {} : { loader }),
     });
+  // A route with a child of its own: a path below the child is drawn in this route's outlet.
+  const settings = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/settings",
+    staticData: { frame: "app", navId: "settings", pageName: "Settings" },
+  });
+  const team = createRoute({
+    getParentRoute: () => settings,
+    path: "/team",
+    staticData: { frame: "app", navId: "team", pageName: "Team", needs: ["member.read"] },
+  });
   const router = createRouter({
     routeTree: rootRoute.addChildren([
       page("/"),
       page("/a"),
       page("/b", () => held),
       page("/customers/$id"),
+      settings.addChildren([team]),
     ]),
     history: createMemoryHistory({ initialEntries: [initial] }),
     isServer: false,
@@ -116,6 +140,38 @@ describe("the page key (spec 06 §5.1)", () => {
     expect(presentedPage(router.state.matches)).toBe(notFound);
   });
 
+  it("keys a path below a route as the not-found page, never as that route", async () => {
+    // The router still matches the route a path starts with, and marks the root as drawing the
+    // not-found page in its outlet: the route below the mark is never drawn.
+    const { router, render } = app("/customers/cus_1");
+    await router.load();
+    expect(presentedPage(router.state.matches)).toBe("/customers/cus_1");
+    await router.navigate({ href: "/nowhere" });
+    const notFound = presentedPage(router.state.matches);
+    for (const href of ["/customers/cus_1/zzz", "/a/zzz", "/a/b/c", "/customers/cus_1/zzz?x=1"]) {
+      await router.navigate({ href });
+      expect(presentedPage(router.state.matches), href).toBe(notFound);
+      // Neither that route's name for the title, nor its sidebar item, nor what it needs.
+      expect(render(), href).toContain('data-name="none" data-nav="none" data-needs=""');
+    }
+    expect(notFound).not.toBe("/customers/cus_1");
+    expect(notFound).not.toBe("/a");
+  });
+
+  it("keys a path below a nested route as the not-found page its parent route draws", async () => {
+    const { router, render } = app("/settings/team");
+    await router.load();
+    expect(presentedPage(router.state.matches)).toBe("/settings/team");
+    expect(render()).toContain('data-name="Team" data-nav="team" data-needs="member.read"');
+    await router.navigate({ href: "/settings/team/extra" });
+    const below = presentedPage(router.state.matches);
+    expect(below).not.toBe("/settings/team");
+    // The settings route is drawn, with the not-found page in its outlet; Team is not.
+    expect(render()).toContain('data-name="Settings" data-nav="settings" data-needs=""');
+    await router.navigate({ href: "/settings/elsewhere" });
+    expect(presentedPage(router.state.matches)).toBe(below);
+  });
+
   it("is empty before anything is drawn", () => {
     expect(presentedPage([])).toBe("");
   });
@@ -136,5 +192,17 @@ describe("the frame's search parameters", () => {
     await navigation;
     await until(() => router.state.status === "idle");
     expect(render()).toContain('data-search="{}"');
+  });
+
+  it("are the not-found page's on a path below a route, never that route's", () => {
+    expect(
+      presentedSearch([
+        { search: { env: "production" }, _notFound: true },
+        { search: { env: "production", tab: "overview" } },
+      ]),
+    ).toEqual({ env: "production" });
+    expect(presentedSearch([{ search: {} }, { search: { tab: "overview" } }])).toEqual({
+      tab: "overview",
+    });
   });
 });

@@ -20,31 +20,55 @@ export interface MatchLike {
   readonly _notFound?: unknown;
 }
 
-/** The deepest match that declares Fin's static data, or null (the root's not-found, a redirect). */
+/**
+ * Whether a match draws the not-found page: a path no route matches marks the route it falls under
+ * (`_notFound`; the root, unless a route on the way has children or its own not-found component),
+ * and a loader's `notFound()` marks the route that draws it (`status: "notFound"`).
+ */
+export function drawsNotFound(match: MatchLike): boolean {
+  return match._notFound === true || match.status === "notFound";
+}
+
+/**
+ * The matches the router draws: all of them, or those up to the first that draws the not-found
+ * page. A path below a route (`/customers/cus_1/zzz` under `/customers/$id`) still matches that
+ * route, with the root marked as drawing the not-found page in its outlet; the routes past the
+ * mark are never drawn, so their path, static data and search parameters say nothing about the
+ * page on screen.
+ */
+export function drawnMatches<M extends MatchLike>(matches: readonly M[]): readonly M[] {
+  const end = matches.findIndex(drawsNotFound);
+  return end === -1 ? matches : matches.slice(0, end + 1);
+}
+
+/**
+ * The deepest drawn match that declares Fin's static data, or null: a path no route matches (the
+ * root's not-found page, a path below a route included), a redirect. So the frame, the title, the
+ * current sidebar item and what the page needs are always the page drawn's.
+ */
 export function deepestStaticData(matches: readonly MatchLike[]): FinStaticData | null {
-  for (let index = matches.length - 1; index >= 0; index--) {
-    const data = readStaticData(matches[index]?.staticData);
+  const drawn = drawnMatches(matches);
+  for (let index = drawn.length - 1; index >= 0; index--) {
+    const data = readStaticData(drawn[index]?.staticData);
     if (data !== null) return data;
   }
   return null;
 }
 
 /**
- * The page drawn, as a key for its entrance (spec 06 §5.1): the deepest presented match's path. It
+ * The page drawn, as a key for its entrance (spec 06 §5.1): the deepest drawn match's path. It
  * changes when the router draws another route (its page, or that route's pending component), and
  * never while a navigation is only pending: the router moves `state.location` to the new path as
  * the navigation starts, while the page being left is still drawn. Search parameters are not part
  * of it, so `?tab=`, `?view=` and filters never replay the entrance. The not-found page keys apart
- * from the route whose match it hangs off (the root's `/` is Home's path too), and alike for any
- * unknown path: it is the same page.
+ * from the route that draws it (the root's `/` is Home's path too), and alike for any path that
+ * route draws it for, a path below one of its routes included: it is the same page.
  */
 export function presentedPage(matches: readonly MatchLike[]): string {
-  const leaf = matches.at(-1);
+  const leaf = drawnMatches(matches).at(-1);
   if (leaf === undefined) return "";
   const pathname = typeof leaf.pathname === "string" ? leaf.pathname : "";
-  return leaf._notFound === true || leaf.status === "notFound"
-    ? `${pathname} (not found)`
-    : pathname;
+  return drawsNotFound(leaf) ? `${pathname} (not found)` : pathname;
 }
 
 /** The app's router, typed as any router. */
@@ -83,9 +107,9 @@ export function usePresentedPage(): string {
   return useAnyMatches({ select: presentedPage });
 }
 
-/** The search parameters of the page drawn: the deepest presented match's, or none. */
+/** The search parameters of the page drawn: the deepest drawn match's, or none. */
 export function presentedSearch(matches: readonly MatchLike[]): unknown {
-  return matches.at(-1)?.search;
+  return drawnMatches(matches).at(-1)?.search;
 }
 
 /**

@@ -23,7 +23,6 @@ export {
   guardAdmin,
   guardAdminHome,
   guardConsole,
-  routeMatcher,
 } from "./boot/root.tsx";
 export { type StartOptions, startApp } from "./boot/start.tsx";
 export {
@@ -88,6 +87,7 @@ export {
 } from "./router/matches.ts";
 export { safeNext, signInHref } from "./router/next.ts";
 export { isRouterHref, RouterLink, type RouterLinkProps } from "./router/RouterLink.tsx";
+export { routeMatcher } from "./router/routes.ts";
 export { type FinStaticData, type FrameKind, readStaticData } from "./router/static-data.ts";
 export { documentTitle, type TitleInput } from "./router/titles.ts";
 export {

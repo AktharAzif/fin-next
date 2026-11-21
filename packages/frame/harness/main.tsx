@@ -71,6 +71,8 @@ function PageA() {
       </label>
       <RouterLink href="/slow">Go to the slow page</RouterLink>
       <RouterLink href="/a?tab=details">Details tab</RouterLink>
+      {/* A path below this page's route: the router matches /a, and draws the not-found page. */}
+      <RouterLink href="/a/missing">A page below this one</RouterLink>
     </>
   );
 }

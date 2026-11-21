@@ -18,7 +18,7 @@ import {
 } from "@tanstack/react-router";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApiClient } from "../src/api/client.ts";
-import { frameApiHooks } from "../src/boot/api-hooks.ts";
+import { frameApiHooks, routeFrame } from "../src/boot/api-hooks.ts";
 import { guardAdmin, guardConsole } from "../src/boot/root.tsx";
 import type { FinRouterContext, FinRuntime } from "../src/runtime/runtime.tsx";
 import { createStore } from "../src/runtime/store.ts";
@@ -218,6 +218,20 @@ describe("a 401 (spec 06 §2.4)", () => {
     expect(router.state.location.searchStr).toBe("?next=%2Fsettings%2Fteam&error=signed_out");
   });
 
+  it("on a path below an auth page, is the not-found page's: goes to sign-in", async () => {
+    // The router matches /sign-in for /sign-in/zzz, but draws the not-found page in the app's
+    // frame there, as for any path no route matches.
+    const answers: Answers = {};
+    const { router, fin } = consoleApp("/sign-in/zzz", answers);
+    await router.load();
+    expect(router.state.location.pathname).toBe("/sign-in/zzz");
+    answers["/api/team/members"] = () => problem(401, "unauthenticated");
+    await fin.api(teamList, {}).catch(() => null);
+    await settlesOn(router as unknown as AnyRouter, "/sign-in");
+    expect(router.state.location.searchStr).toBe("?error=signed_out");
+    expect(fin.viewer.get()).toBeNull();
+  });
+
   it("on Fin Admin, goes to its sign-in saying the session ended", async () => {
     const stepUp = createStepUpController();
     const client = createApiClient({
@@ -277,6 +291,18 @@ describe("a 401 (spec 06 §2.4)", () => {
     await settlesOn(router as unknown as AnyRouter, "/sign-in");
     expect(router.state.location.searchStr).toBe("?ended=1");
     expect(viewer.get()).toBeNull();
+  });
+});
+
+describe("routeFrame", () => {
+  it("is the frame of the page a path draws: none for the not-found page, below a route too", () => {
+    const { router } = consoleApp("/", {});
+    const any = router as unknown as AnyRouter;
+    expect(routeFrame(any, "/sign-in")).toBe("auth");
+    expect(routeFrame(any, "/settings/team")).toBe("app");
+    expect(routeFrame(any, "/nowhere")).toBeNull();
+    expect(routeFrame(any, "/sign-in/zzz")).toBeNull();
+    expect(routeFrame(any, "/settings/team/zzz")).toBeNull();
   });
 });
 

@@ -1,9 +1,9 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
-import { routeMatcher } from "../src/boot/root.tsx";
 import { deepestStaticData } from "../src/router/matches.ts";
 import { safeNext, signInHref } from "../src/router/next.ts";
 import { isRouterHref } from "../src/router/RouterLink.tsx";
+import { routeMatcher } from "../src/router/routes.ts";
 import { readStaticData } from "../src/router/static-data.ts";
 import { documentTitle } from "../src/router/titles.ts";
 
@@ -108,6 +108,38 @@ describe("routeMatcher", () => {
     expect(matches("//evil.example.com")).toBe(false);
     expect(safeNext("/x/..//evil.example.com", matches)).toBeNull();
   });
+
+  it("matches a route's own paths only, never a path below one", () => {
+    // The router also matches the route a longer path starts with, and draws the not-found page
+    // there: such a path is no route of the app.
+    const rootRoute = createRootRoute();
+    const settings = createRoute({ getParentRoute: () => rootRoute, path: "/settings" });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([
+        createRoute({ getParentRoute: () => rootRoute, path: "/" }),
+        createRoute({ getParentRoute: () => rootRoute, path: "/a" }),
+        createRoute({ getParentRoute: () => rootRoute, path: "/customers/$id" }),
+        settings.addChildren([createRoute({ getParentRoute: () => settings, path: "/team" })]),
+      ]),
+    });
+    const matches = routeMatcher(router);
+    for (const path of ["/", "/a", "/a/", "/customers/cus_1", "/settings", "/settings/team"]) {
+      expect(matches(path), path).toBe(true);
+    }
+    for (const path of [
+      "/nowhere",
+      "/a/zzz",
+      "/a/b/c",
+      "/customers/cus_1/zzz",
+      "/settings/zzz",
+      "/settings/team/extra",
+    ]) {
+      expect(matches(path), path).toBe(false);
+    }
+    // So a path below a route is never kept as a sign-in's next.
+    expect(safeNext("/a/zzz", matches)).toBeNull();
+    expect(safeNext("/customers/cus_1?tab=money", matches)).toBe("/customers/cus_1?tab=money");
+  });
 });
 
 describe("static data", () => {
@@ -146,6 +178,32 @@ describe("static data", () => {
       ])?.pageName,
     ).toBe("Team");
     expect(deepestStaticData([{ staticData: {} }])).toBeNull();
+  });
+
+  it("ignores the routes past the one that draws the not-found page", () => {
+    const auditLog = {
+      frame: "app",
+      navId: "audit-log",
+      pageName: "Audit log",
+      needs: ["auditLog.read"],
+    };
+    // A path below a route: the root draws the not-found page, and the route is never drawn.
+    expect(deepestStaticData([{ staticData: {}, _notFound: true }, { staticData: auditLog }])).toBe(
+      null,
+    );
+    // A route with children draws it in its outlet: that route's data, never its child's.
+    expect(
+      deepestStaticData([
+        { staticData: {} },
+        { staticData: { frame: "app", navId: "settings", pageName: "Settings" }, _notFound: true },
+        { staticData: auditLog },
+      ])?.pageName,
+    ).toBe("Settings");
+    // A loader's notFound() is drawn by its own route, whose data stay.
+    expect(
+      deepestStaticData([{ staticData: {} }, { staticData: auditLog, status: "notFound" }])
+        ?.pageName,
+    ).toBe("Audit log");
   });
 });
 
