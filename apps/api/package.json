@@ -1,0 +1,17 @@
+{
+  "name": "@fin/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "biome check src/migrate src/tasks src/worker/probe",
+    "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p src/migrate/tsconfig.json",
+    "test": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.config.ts",
+    "test:db": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@fin/audit": "workspace:*",
+    "@fin/crypto": "workspace:*",
+    "@fin/db": "workspace:*",
+    "zod": "catalog:"
+  }
+}
