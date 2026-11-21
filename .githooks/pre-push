@@ -1,0 +1,7 @@
+#!/bin/sh
+# The pre-push check (spec 01 §3.8, CI-16): public-safety over what the push would publish, with
+# the overlay's refuse list when FIN_OVERLAY_FILE is set, and gitleaks when it is installed.
+# Enable it once per clone: git config core.hooksPath .githooks
+set -eu
+root=$(git rev-parse --show-toplevel)
+exec node "$root/scripts/pre-push.mjs" "$@"

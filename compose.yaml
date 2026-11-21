@@ -1,0 +1,26 @@
+# Postgres 18 for local development (spec 01 §4.2, S0-24). The image is pinned by the digest of the
+# multi-platform index read from Docker Hub on 2026-11-21; CI's db and e2e jobs use the same one.
+# It listens on loopback only. The password is a throwaway kept in .env.local (git-ignored):
+#   POSTGRES_PASSWORD=<a long random value>
+name: fin-next
+services:
+  postgres:
+    image: postgres:18.7-trixie@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a
+    env_file:
+      - path: .env.local
+        required: true
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: fin
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - fin-next-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "fin"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+volumes:
+  fin-next-postgres: {}
