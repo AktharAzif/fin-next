@@ -16,7 +16,9 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:harness": "vite build --config vite.harness.config.ts",
+    "e2e": "pnpm run build:harness && playwright test"
   },
   "dependencies": {
     "@fin/app-contracts": "workspace:*",
@@ -30,9 +32,11 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@playwright/test": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "vite": "catalog:"
   }
 }
