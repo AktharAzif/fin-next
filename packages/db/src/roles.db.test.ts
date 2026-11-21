@@ -2,15 +2,25 @@
 // statement its grant fragments do not allow, and is not refused with 42501 on the ones they do. The
 // cases are generated from the live catalogue (every table, column, sequence and function in Fin's
 // schemas) and the expected answer from the fragments, so a new object without a grant is covered the
-// moment its migration lands.
+// moment its migration lands. And the roles themselves: memberships (the boot check and the drift
+// check), attributes, and the backup login's reach past row-level security (DA-15).
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { expandMatrix, loadFragments } from "./grants.ts";
+import { expandMatrix, grantDrift, liveMemberships, loadFragments } from "./grants.ts";
 import { assertServiceLogin } from "./login-check.ts";
 import { GRANTS_DIR } from "./migrations.ts";
+import { enqueueJob, recordDutyRun } from "./ops.ts";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
-import { SERVICE_GROUPS, SERVICE_LOGINS } from "./roles.ts";
-import { createTestDatabase, type TestDatabase } from "./testing/index.ts";
+import { connectionLimit, SERVICE_GROUPS, SERVICE_LOGINS } from "./roles.ts";
+import {
+  createTestDatabase,
+  TEST_REPLICAS,
+  type TestDatabase,
+  testContext,
+  testLoginPassword,
+} from "./testing/index.ts";
 
 let db: TestDatabase;
 let su: PgClient;
@@ -317,7 +327,8 @@ describe("the roles themselves (spec 01 §6.6 step 4, P-20, AU-08)", () => {
     }
     expect(byName.fin_api?.rolcanlogin).toBe(false);
     expect(byName.fin_api_a?.rolcanlogin).toBe(true);
-    expect(byName.fin_api_a?.rolconnlimit).toBe(18);
+    // (pool max + LISTEN) × replicas × 2 + 2, for the replicas the test bootstrap was given.
+    expect(byName.fin_api_a?.rolconnlimit).toBe(connectionLimit("api", TEST_REPLICAS));
     expect(byName.fin_owner?.config).toContain("log_statement=all");
     expect(byName.fin_readonly?.config).toContain("log_statement=all");
     expect(byName.fin_api_a?.config).toEqual(
@@ -361,11 +372,115 @@ describe("the roles themselves (spec 01 §6.6 step 4, P-20, AU-08)", () => {
       try {
         await expect(
           assertServiceLogin(client, { login: "fin_api_b", group: "fin_api" }),
-        ).rejects.toThrow(/SET ROLE/);
+        ).rejects.toThrow(/member of something other than its own group/);
       } finally {
         await client.end();
         await su.query("REVOKE fin_worker FROM fin_api_b");
       }
     });
   });
+
+  it("finds no drift, in grants or memberships, on a freshly migrated database", async () => {
+    const owner = await db.connect("fin_owner");
+    try {
+      expect(await grantDrift(owner, loadFragments(GRANTS_DIR))).toEqual([]);
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it("fails the boot check, and the drift check reports it, for a membership that inherits without SET", async () => {
+    // pg_write_all_data hands over INSERT, UPDATE and DELETE everywhere without SET ROLE to it.
+    await db.withLock(async () => {
+      await su.query("GRANT pg_write_all_data TO fin_api_b WITH INHERIT TRUE, SET FALSE");
+      const client = await db.connect("fin_api_b");
+      try {
+        // The inherited role really does hand over the writes (a table the matrix gives it nothing on).
+        await expect(
+          client.query(
+            "INSERT INTO ops.job_kind (kind, enqueue_roles, runner) VALUES ('test.inherited', ARRAY['fin_api'], 'worker')",
+          ),
+        ).resolves.toBeDefined();
+        await expect(
+          assertServiceLogin(client, { login: "fin_api_b", group: "fin_api" }),
+        ).rejects.toThrow(/member of something other than its own group/);
+        expect(await grantDrift(su, loadFragments(GRANTS_DIR))).toEqual([
+          { role: "fin_api_b", missing: 0, extra: 1 },
+        ]);
+        expect((await liveMemberships(su)).filter((m) => m.member === "fin_api_b")).toEqual([
+          { member: "fin_api_b", role: "fin_api", admin: false, inherit: true, set: true },
+          {
+            member: "fin_api_b",
+            role: "pg_write_all_data",
+            admin: false,
+            inherit: true,
+            set: false,
+          },
+        ]);
+      } finally {
+        await client.end();
+        await su.query("REVOKE pg_write_all_data FROM fin_api_b");
+        await su.query("DELETE FROM ops.job_kind WHERE kind = 'test.inherited'");
+      }
+    });
+  });
+
+  it("lets the backup login read every row of the tables under row-level security, as pg_dump does", async () => {
+    const worker = db.database("fin_worker");
+    await worker.unit(testContext(), (tx) => enqueueJob(tx, { kind: "ops.noop" }));
+    await worker.unit(testContext(), (tx) =>
+      recordDutyRun(tx, { scheduler: "worker", duty: "backup-probe", result: "ok" }),
+    );
+    const attributes = await su.query(
+      "SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = 'fin_backup'",
+    );
+    expect(attributes.rows).toEqual([
+      {
+        rolsuper: false,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolreplication: false,
+        rolbypassrls: true,
+      },
+    ]);
+    const backup = await db.connect("fin_backup");
+    try {
+      // pg_dump's default: row_security off, so a table whose rows a policy would filter is an error.
+      await backup.query("SET row_security = off");
+      for (const table of ["ops.job", "ops.duty_state", "ops.scheduler_lease"]) {
+        const seen = await backup.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
+        const all = await su.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
+        expect(seen.rows[0]?.n, table).toBe(all.rows[0]?.n);
+        expect(all.rows[0]?.n, table).toBeGreaterThan(0);
+      }
+    } finally {
+      await backup.end();
+    }
+  });
+
+  // pg_dump itself, as the nightly backup runs it, when the Postgres binaries are at hand
+  // (FIN_TEST_PG_BINDIR, as for the TLS test).
+  it.skipIf((process.env.FIN_TEST_PG_BINDIR ?? "") === "")(
+    "dumps every row of the jobs table as the backup login with pg_dump's defaults",
+    () => {
+      const out = execFileSync(
+        join(process.env.FIN_TEST_PG_BINDIR ?? "", "pg_dump"),
+        [
+          "--host",
+          db.target.host,
+          "--port",
+          String(db.target.port),
+          "--username",
+          "fin_backup",
+          "--dbname",
+          db.name,
+          "--data-only",
+          "--table",
+          "ops.job",
+        ],
+        { env: { ...process.env, PGPASSWORD: testLoginPassword("fin_backup") }, encoding: "utf8" },
+      );
+      expect(out).toMatch(/\njob_[0-9a-hjkmnp-tv-z]{26}\tops\.noop\t/);
+    },
+  );
 });

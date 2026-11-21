@@ -6,6 +6,7 @@ import type { PgClient } from "@fin/db";
 import {
   createTestDatabase,
   type TestDatabase,
+  testReplicasJson,
   testSuperuserUrl,
   testVerifiersJson,
 } from "@fin/db/testing";
@@ -60,10 +61,14 @@ async function cli(
 }
 
 describe("migrate --bootstrap", () => {
-  it("creates the roles, schemas and the privileged-login guard from an empty database", async () => {
-    const { code, lines, raw } = await cli(["--bootstrap"], {
-      FIN_ROLE_VERIFIERS: testVerifiersJson(),
-    });
+  // The connection limits are cluster-wide: the test bootstrap sizes them as every other test file's.
+  const bootstrapEnv = {
+    FIN_ROLE_VERIFIERS: testVerifiersJson(),
+    FIN_DB_REPLICAS: testReplicasJson(),
+  };
+
+  it("creates the roles, schemas, the environment row and the guards from an empty database", async () => {
+    const { code, lines, raw } = await cli(["--bootstrap"], bootstrapEnv);
     expect(code).toBe(EXIT_OK);
     expect(lines.map((l) => l.event)).toEqual(["migrate.started", "migrate.done"]);
     expect(lines[1]).toMatchObject({ mode: "bootstrap", verifiersSet: 14, runId: RUN_ID });
@@ -72,10 +77,24 @@ describe("migrate --bootstrap", () => {
       "SELECT evtname FROM pg_event_trigger ORDER BY evtname",
     );
     expect(triggers.rows.map((r) => r.evtname)).toEqual([
+      "fin_audit_guard_change",
+      "fin_audit_guard_drop",
+      "fin_audit_guard_rewrite",
       "fin_privileged_login",
       "fin_privileged_login_guard_alter",
       "fin_privileged_login_guard_drop",
     ]);
+    expect((await su.query("SELECT name FROM ops.environment")).rows).toEqual([{ name: "ci" }]);
+  });
+
+  it("refuses a second bootstrap for another environment (exit 78), changing nothing", async () => {
+    const { code, lines } = await cli(["--bootstrap"], {
+      ...bootstrapEnv,
+      FIN_ENVIRONMENT: "development",
+    });
+    expect(code).toBe(EXIT_CONFIG);
+    expect(lines.at(-1)).toMatchObject({ event: "migrate.failed", code: "bootstrap_environment" });
+    expect((await su.query("SELECT name FROM ops.environment")).rows).toEqual([{ name: "ci" }]);
   });
 });
 
@@ -163,6 +182,11 @@ describe("migrate --task", () => {
       "audit.epoch_started",
       "operator.task_completed",
     ]);
+    // The old epoch's rows (the audit-note above) were chained into it before the switch.
+    expect(
+      (await su.query("SELECT count(*)::int AS n FROM audit.event WHERE epoch = 1 AND seq IS NULL"))
+        .rows,
+    ).toEqual([{ n: 0 }]);
   });
 
   it("refuses unknown parameters and an unknown task, changing nothing", async () => {

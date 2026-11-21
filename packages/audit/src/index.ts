@@ -39,6 +39,8 @@ export {
   eventSpec,
   type RecordInput,
   recordAudit,
+  storedUserAgent,
+  USER_AGENT_MAX,
 } from "./record.ts";
 export {
   oldestUnsequencedSeconds,
@@ -47,6 +49,11 @@ export {
   type SequencerOptions,
   sequencePass,
 } from "./sequencer.ts";
-export { AuditMetadataError, assertNoPersonalShapes, personalShapeOf } from "./shapes.ts";
+export {
+  AuditMetadataError,
+  assertNoPersonalShapes,
+  assertStorableText,
+  personalShapeOf,
+} from "./shapes.ts";
 export { type Trip, type TripReason, tripSwitch } from "./switches.ts";
 export { type EventTypeRow, eventTypeRows, type SyncResult, syncEventTypes } from "./sync.ts";

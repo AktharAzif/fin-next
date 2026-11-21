@@ -2,11 +2,23 @@
 // in order and create exactly its tables and functions with exactly its grants; the kill switches hold
 // their six seeds `off`. And the runner's own contract: checksums, the lock, idempotence.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bootstrap, bootstrapFiles } from "./bootstrap.ts";
 import { expandMatrix, livePrivileges, loadFragments, privilegeKey } from "./grants.ts";
-import { GRANTS_DIR, MIGRATIONS_DIR, parseMigration, readMigrations } from "./migrations.ts";
+import {
+  BOOTSTRAP_DIR,
+  GRANTS_DIR,
+  MIGRATIONS_DIR,
+  parseMigration,
+  readMigrations,
+} from "./migrations.ts";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
-import { createTestDatabase, type TestDatabase } from "./testing/index.ts";
+import {
+  createTestDatabase,
+  type TestDatabase,
+  testReplicas,
+  testVerifiers,
+} from "./testing/index.ts";
 
 let db: TestDatabase;
 let su: PgClient;
@@ -33,6 +45,7 @@ const EXPECTED_RELATIONS = [
   "email.outbox table fin_owner",
   "email.template_grant table fin_owner",
   "ops.duty_state table fin_owner",
+  "ops.environment table postgres",
   "ops.job table fin_owner",
   "ops.job_kind table fin_owner",
   "ops.kill_switch table fin_owner",
@@ -41,10 +54,13 @@ const EXPECTED_RELATIONS = [
   "ops.rate_window table fin_owner",
   "ops.schema_migrations table fin_owner",
   "ops.scheduler_lease table fin_owner",
+  "ops_guard.protected_function table postgres",
+  "ops_guard.protected_trigger table postgres",
 ];
 
 const EXPECTED_FUNCTIONS = [
   "audit.append_only() fin_owner invoker",
+  "audit.chain_epoch(integer, integer) fin_owner invoker",
   "audit.install_guard(regclass, text[], name, text[]) fin_owner definer",
   "audit.mark_journal_shipped(text, text) fin_owner definer",
   "audit.record(jsonb) fin_owner definer",
@@ -54,7 +70,7 @@ const EXPECTED_FUNCTIONS = [
   "audit.require_event() fin_owner definer",
   "audit.row_hash(audit.event, bytea) fin_owner definer",
   "audit.sequence(integer) fin_owner definer",
-  "audit.start_epoch(text, bytea, text, text, text, text) fin_owner definer",
+  "audit.start_epoch(text, bytea, text, text, text, text, text) fin_owner definer",
   "audit.unsequenced_age() fin_owner definer",
   "email.enqueue(jsonb) fin_owner definer",
   "events.emit(jsonb) fin_owner definer",
@@ -62,7 +78,9 @@ const EXPECTED_FUNCTIONS = [
   "ops.set_switch(text, text, text, jsonb) fin_owner definer",
   "ops.sweep_rate_windows(interval) fin_owner definer",
   "ops.trip_switch(text, text, text, text, text, text, text) fin_owner definer",
+  "ops_guard.guard_audit_protections() postgres definer",
   "ops_guard.record_privileged_login() postgres definer",
+  "ops_guard.refuse_environment_change() postgres invoker",
   "ops_guard.refuse_privileged_login_change() postgres invoker",
   "ops_guard.refuse_privileged_login_ddl() postgres definer",
 ];
@@ -181,6 +199,36 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
     expect(
       (await su.query("SELECT template, role, category FROM email.template_grant")).rows,
     ).toEqual([{ template: "ops/delivery-check", role: "fin_worker", category: "ops" }]);
+  });
+
+  it("runs the bootstrap's files roles first, then by name", () => {
+    expect(bootstrapFiles(BOOTSTRAP_DIR)).toEqual([
+      "010_roles.sql",
+      "020_privileged_login.sql",
+      "030_environment.sql",
+      "040_audit_guard.sql",
+    ]);
+  });
+
+  it("records the environment the bootstrap was given, and refuses a second bootstrap for another", async () => {
+    expect((await su.query("SELECT name FROM ops.environment")).rows).toEqual([{ name: "ci" }]);
+    await db.withLock(async () => {
+      const again = await db.superuser();
+      try {
+        await expect(
+          bootstrap(again, {
+            verifiers: testVerifiers(),
+            replicas: testReplicas(),
+            environment: "development",
+            bootstrapDir: BOOTSTRAP_DIR,
+            fragments: loadFragments(GRANTS_DIR),
+          }),
+        ).rejects.toThrow(/another environment/);
+      } finally {
+        await again.end();
+      }
+    });
+    expect((await su.query("SELECT name FROM ops.environment")).rows).toEqual([{ name: "ci" }]);
   });
 
   it("records every applied file with its checksum and release", async () => {

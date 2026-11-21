@@ -1,5 +1,6 @@
-// AC-P0-11 (a failing login trigger never blocks a login), AC-P0-39 (fin_owner cannot drop, alter,
-// update, delete or truncate ops.privileged_login) and the record itself (ARCHITECTURE §6.3, P-19).
+// AC-P0-11 (a failing login trigger never blocks a superuser's or a service's login), AC-P0-29 (no
+// fin_owner login goes unrecorded), AC-P0-39 (fin_owner cannot drop, alter, update, delete or truncate
+// ops.privileged_login) and the record itself (ARCHITECTURE §6.3, DECISIONS P-19).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
@@ -27,10 +28,31 @@ async function codeOf(client: PgClient, sql: string): Promise<string> {
   }
 }
 
+/** Connects, runs one query and disconnects; resolves "ok" or the refusal's SQLSTATE. */
+async function loginOutcome(connect: () => Promise<PgClient>): Promise<string> {
+  let client: PgClient | undefined;
+  try {
+    client = await connect();
+    await client.query("SELECT 1");
+    return "ok";
+  } catch (error) {
+    return sqlState(error) ?? (error instanceof Error ? error.message : "error");
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function rowsFor(role: string, applicationName: string): Promise<number> {
   const result = await su.query<{ n: number }>(
     "SELECT count(*)::int AS n FROM ops.privileged_login WHERE login_role = $1 AND application_name = $2",
     [role, applicationName],
+  );
+  return result.rows[0]?.n ?? -1;
+}
+
+async function superuserRows(): Promise<number> {
+  const result = await su.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM ops.privileged_login WHERE login_role = current_user",
   );
   return result.rows[0]?.n ?? -1;
 }
@@ -52,15 +74,10 @@ describe("the privileged-login record", () => {
   });
 
   it("records a superuser login", async () => {
-    const before = await su.query<{ n: number }>(
-      "SELECT count(*)::int AS n FROM ops.privileged_login WHERE login_role = current_user",
-    );
+    const before = await superuserRows();
     const another = await db.superuser();
     await another.end();
-    const after = await su.query<{ n: number }>(
-      "SELECT count(*)::int AS n FROM ops.privileged_login WHERE login_role = current_user",
-    );
-    expect((after.rows[0]?.n ?? 0) - (before.rows[0]?.n ?? 0)).toBe(1);
+    expect((await superuserRows()) - before).toBe(1);
   });
 
   it("records nothing for a service login", async () => {
@@ -92,34 +109,74 @@ describe("the privileged-login record", () => {
   });
 });
 
-describe("a failing login trigger never blocks a login (P-19)", () => {
-  it("lets fin_owner and the superuser in while the insert fails, and records nothing", async () => {
+describe("no fin_owner login goes unrecorded, whatever session settings the client chooses", () => {
+  it("refuses a fin_owner login that starts read-only, so it cannot record and then write", async () => {
+    const outcome = await loginOutcome(() =>
+      db.connect("fin_owner", "fin-test-read-only", "-c default_transaction_read_only=on"),
+    );
+    expect(outcome).toBe("42501");
+    expect(await rowsFor("fin_owner", "fin-test-read-only")).toBe(0);
+  });
+
+  it("still lets the superuser in when it starts read-only (P-19), and fin_owner in a normal start", async () => {
+    expect(await loginOutcome(() => db.superuser("-c default_transaction_read_only=on"))).toBe(
+      "ok",
+    );
+    expect(await loginOutcome(() => db.connect("fin_owner", "fin-test-normal"))).toBe("ok");
+    expect(await rowsFor("fin_owner", "fin-test-normal")).toBe(1);
+  });
+
+  it("bounds the wait on a lock held on the record: the superuser gets in, fin_owner is refused", async () => {
+    // fin_owner holds REFERENCES on the record's ID (for ops.privileged_login_check), so it can lock
+    // the table by creating a foreign key to it and keeping its transaction open.
+    const holder = await db.connect("fin_owner", "fin-test-lock-holder");
+    try {
+      await holder.query("BEGIN");
+      await holder.query(
+        "CREATE TABLE ops.lock_probe (id bigint REFERENCES ops.privileged_login (id))",
+      );
+      const started = Date.now();
+      expect(await loginOutcome(() => db.superuser())).toBe("ok");
+      expect(Date.now() - started).toBeLessThan(5_000);
+      const owner = await loginOutcome(() =>
+        db.connect("fin_owner", "fin-test-locked-out", "-c lock_timeout=1ms"),
+      );
+      expect(owner).toBe("42501");
+      expect(Date.now() - started).toBeLessThan(10_000);
+    } finally {
+      await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+    expect(await rowsFor("fin_owner", "fin-test-locked-out")).toBe(0);
+  });
+});
+
+describe("a failing login trigger never blocks the superuser or a service (P-19)", () => {
+  it("lets the superuser and a service in while the insert fails, and refuses fin_owner", async () => {
     await su.query(
       "ALTER TABLE ops.privileged_login ADD CONSTRAINT always_fails CHECK (false) NOT VALID",
     );
     try {
-      const owner = await db.connect("fin_owner", "fin-test-broken-trigger");
-      try {
-        expect((await owner.query("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
-      } finally {
-        await owner.end();
-      }
-      const another = await db.superuser();
-      expect((await another.query("SELECT 1 AS one")).rows).toEqual([{ one: 1 }]);
-      await another.end();
+      expect(await loginOutcome(() => db.superuser())).toBe("ok");
+      expect(await loginOutcome(() => db.connect("fin_api_a", "fin-test-broken-trigger"))).toBe(
+        "ok",
+      );
+      expect(await loginOutcome(() => db.connect("fin_owner", "fin-test-broken-trigger"))).toBe(
+        "42501",
+      );
       expect(await rowsFor("fin_owner", "fin-test-broken-trigger")).toBe(0);
     } finally {
       await su.query("ALTER TABLE ops.privileged_login DROP CONSTRAINT always_fails");
     }
   });
 
-  it("lets a login in even when the record's table is gone", async () => {
+  it("lets a login in even when the record's table is gone (only the superuser can move it)", async () => {
     await su.query("BEGIN");
     try {
       await su.query("ALTER TABLE ops.privileged_login RENAME TO privileged_login_moved");
       await su.query("COMMIT");
-      const owner = await db.connect("fin_owner", "fin-test-moved");
-      await owner.end();
+      expect(await loginOutcome(() => db.connect("fin_owner", "fin-test-moved"))).toBe("ok");
+      expect(await loginOutcome(() => db.superuser())).toBe("ok");
     } finally {
       await su.query("ROLLBACK").catch(() => {});
       await su
@@ -172,6 +229,22 @@ describe("AC-P0-39: fin_owner cannot remove or change the record", () => {
     expect((await su.query("SELECT to_regnamespace('ops') IS NOT NULL AS ok")).rows).toEqual([
       { ok: true },
     ]);
+  });
+
+  it("refuses fin_owner any change to ops.environment, and the superuser's UPDATE by trigger", async () => {
+    const owner = await db.connect("fin_owner");
+    try {
+      expect((await owner.query("SELECT name FROM ops.environment")).rows).toEqual([
+        { name: "ci" },
+      ]);
+      expect(await codeOf(owner, "UPDATE ops.environment SET name = 'production'")).toBe("42501");
+      expect(await codeOf(owner, "DROP TABLE ops.environment")).toBe("42501");
+      expect(await codeOf(owner, "ALTER TABLE ops.environment RENAME TO gone")).toBe("42501");
+    } finally {
+      await owner.end();
+    }
+    expect(await codeOf(su, "UPDATE ops.environment SET name = 'production'")).toBe("42501");
+    expect(await codeOf(su, "DELETE FROM ops.environment")).toBe("42501");
   });
 
   it("refuses even the superuser's UPDATE, DELETE and TRUNCATE by trigger", async () => {

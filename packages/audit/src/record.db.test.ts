@@ -20,6 +20,9 @@ import { eventTypeRows, syncEventTypes } from "./sync.ts";
 let db: TestDatabase;
 let su: PgClient;
 let owner: FinDatabase;
+// One pool per login for the whole file: a pool per attempt would hold idle connections against the
+// logins' cluster-wide CONNECTION LIMIT while the other packages' tests use the same logins.
+const databases = new Map<AuditRole, FinDatabase>();
 
 beforeAll(async () => {
   db = await createTestDatabase({
@@ -28,6 +31,8 @@ beforeAll(async () => {
   });
   su = await db.superuser();
   owner = await db.ownerDatabase();
+  databases.set("fin_owner", owner);
+  for (const group of GROUPS) databases.set(group, db.database(group));
 });
 
 afterAll(async () => {
@@ -103,15 +108,17 @@ const GROUPS: readonly ServiceGroup[] = [
   "fin_admin",
 ];
 
-function databaseFor(role: AuditRole): FinDatabase | Promise<FinDatabase> {
-  return role === "fin_owner" ? owner : db.database(role as ServiceGroup);
+function databaseFor(role: AuditRole): FinDatabase {
+  const database = databases.get(role);
+  if (database === undefined) throw new Error(`no pool for ${role}`);
+  return database;
 }
 
 class Rollback extends Error {}
 
 /** Records the sample in a unit that is then rolled back; resolves "ok" or the refusal's code. */
 async function attempt(role: AuditRole, event: AuditEventName): Promise<string> {
-  const database = await databaseFor(role);
+  const database = databaseFor(role);
   try {
     await database.unit(testContext(), async (tx) => {
       await recordAudit(tx, { event, ...SAMPLES[event] } as RecordInput<typeof event>);
@@ -128,9 +135,14 @@ async function attempt(role: AuditRole, event: AuditEventName): Promise<string> 
 describe("T08-02: the registry in the database", () => {
   it("equals the compiled AUDIT_EVENTS after migrating a fresh database", async () => {
     const rows = await su.query(
-      "SELECT name, area, category, scope, roles, retired FROM audit.event_type ORDER BY name",
+      "SELECT name, area, category, scope, roles, journal_kind, retired FROM audit.event_type ORDER BY name",
     );
     expect(rows.rows).toEqual(eventTypeRows());
+    // The journal kind an event declares is the registry's, synced with it (§3.10).
+    expect(
+      (await su.query("SELECT journal_kind FROM audit.event_type WHERE name = 'switch.tripped'"))
+        .rows,
+    ).toEqual([{ journal_kind: "switch_set" }]);
   });
 
   it("changes nothing on a second sync, and never deletes a row it does not know", async () => {
@@ -199,6 +211,20 @@ describe("what recordAudit writes", () => {
     ]);
   });
 
+  it("stores whatever user agent a client sends: one cut inside a character is not refused by Postgres", async () => {
+    const worker = db.database("fin_worker");
+    const id = await worker.unit(testContext(), (tx) =>
+      recordAudit(tx, {
+        event: "system.sweep_completed",
+        ...SAMPLES["system.sweep_completed"],
+        context: { clientIp: null, userAgent: `${"a".repeat(399)}\u{1F600}\u{1F600}` },
+      }),
+    );
+    expect(
+      (await su.query("SELECT count(*)::int AS n FROM audit.event WHERE id = $1", [id])).rows,
+    ).toEqual([{ n: 1 }]);
+  });
+
   it("writes audit.write_failed and rolls the action back when the database refuses the event", async () => {
     await su.query(
       "UPDATE audit.event_type SET retired = true WHERE name = 'system.sweep_completed'",
@@ -220,7 +246,7 @@ describe("what recordAudit writes", () => {
       expect(lines.lines).toEqual([
         {
           event: "audit.write_failed",
-          fields: { event: "system.sweep_completed", sqlstate: "FA001" },
+          fields: { auditEvent: "system.sweep_completed", sqlstate: "FA001" },
         },
       ]);
       expect(

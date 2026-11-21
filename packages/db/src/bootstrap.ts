@@ -1,16 +1,19 @@
 // `migrate --bootstrap` (spec 01 §6.6 steps 3 and 4): run once per environment, by a registered run,
-// as the template's superuser. It creates the roles and schemas (bootstrap/010_roles.sql), sets each
-// login's SCRAM verifier and CONNECTION LIMIT, installs the privileged-login record and its guards
-// (bootstrap/020_privileged_login.sql) and the superuser-owned grants, all in one transaction.
+// as the template's superuser. In one transaction it creates the roles and schemas
+// (bootstrap/010_roles.sql), sets each login's SCRAM verifier and CONNECTION LIMIT, then runs the
+// superuser's other files in name order: the privileged-login record and its guards
+// (020_privileged_login.sql), the environment row (030_environment.sql, written here from
+// FIN_ENVIRONMENT) and the guard on the audit trail's protections (040_audit_guard.sql); and it applies
+// the grants on the superuser's own objects.
 //
 // It is handed verifiers only (FIN_ROLE_VERIFIERS), never a password: anything that is not a
 // SCRAM-SHA-256 verifier is refused before a statement runs, and nothing it logs carries one.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isScramVerifier } from "@fin/crypto";
 import { MigrationError } from "./errors.ts";
 import { applyGrants, type GrantFragment } from "./grants.ts";
-import { escapeIdentifier, escapeLiteral, type PgClient } from "./pg.ts";
+import { commitTransaction, escapeIdentifier, escapeLiteral, type PgClient } from "./pg.ts";
 import {
   auxiliaryConnectionLimit,
   connectionLimit,
@@ -25,13 +28,35 @@ import type { Queryable } from "./unit.ts";
 
 export const MIN_SERVER_VERSION = 180_000;
 
+export type Environment = "development" | "ci" | "staging" | "production";
+
+/** The roles file, run first; the rest of the directory's `NNN_<what>.sql` files follow in name order. */
+export const ROLES_FILE = "010_roles.sql";
+const BOOTSTRAP_FILE = /^\d{3}_[a-z][a-z0-9_]*\.sql$/;
+
 export interface BootstrapInput {
   /** Login to SCRAM-SHA-256 verifier. Every `_a` login needs one; the others are optional. */
   verifiers: Partial<Record<VerifierLogin, string>>;
   /** Replicas per service, for the connection limits; 1 when absent (staging). */
   replicas?: Partial<Record<ServiceName, number>>;
+  /** FIN_ENVIRONMENT: written once to ops.environment, which audit.start_epoch() checks. */
+  environment: Environment;
   bootstrapDir: string;
   fragments: readonly GrantFragment[];
+}
+
+/** The bootstrap files in the order they run: the roles first, then the others by name. */
+export function bootstrapFiles(dir: string): string[] {
+  const names = readdirSync(dir)
+    .filter((name) => BOOTSTRAP_FILE.test(name))
+    .sort();
+  if (names[0] !== ROLES_FILE) {
+    throw new MigrationError(
+      "bootstrap_files",
+      `the bootstrap directory must start with ${ROLES_FILE}`,
+    );
+  }
+  return names;
 }
 
 export interface BootstrapResult {
@@ -147,8 +172,12 @@ export async function bootstrap(client: PgClient, input: BootstrapInput): Promis
       "the database must be UTF8 (the audit hash reads UTF-8 bytes)",
     );
   }
-  const roles = readFileSync(join(input.bootstrapDir, "010_roles.sql"), "utf8");
-  const privileged = readFileSync(join(input.bootstrapDir, "020_privileged_login.sql"), "utf8");
+  if (!["development", "ci", "staging", "production"].includes(input.environment)) {
+    throw new MigrationError("bootstrap_environment", "the environment is not one of Fin's four");
+  }
+  const [rolesFile, ...others] = bootstrapFiles(input.bootstrapDir);
+  const roles = readFileSync(join(input.bootstrapDir, rolesFile ?? ROLES_FILE), "utf8");
+  const rest = others.map((name) => readFileSync(join(input.bootstrapDir, name), "utf8"));
   const replicas = input.replicas ?? {};
   const q: Queryable = { query: (text, values) => client.query(text, values) };
 
@@ -171,11 +200,23 @@ export async function bootstrap(client: PgClient, input: BootstrapInput): Promis
     await client.query(
       `ALTER ROLE fin_owner WITH CONNECTION LIMIT ${auxiliaryConnectionLimit("fin_owner")}`,
     );
-    await client.query(privileged);
+    for (const sql of rest) await client.query(sql);
+    // Written once; a second bootstrap for another environment is refused rather than relabelling it.
+    await client.query(
+      "INSERT INTO ops.environment (only_row, name, recorded_at) VALUES (true, $1, statement_timestamp()) ON CONFLICT (only_row) DO NOTHING",
+      [input.environment],
+    );
+    const recorded = await client.query<{ name: string }>("SELECT name FROM ops.environment");
+    if (recorded.rows[0]?.name !== input.environment) {
+      throw new MigrationError(
+        "bootstrap_environment",
+        "this database was bootstrapped for another environment",
+      );
+    }
     await applyGrants(q, input.fragments, { missing: "skip" });
-    await client.query("COMMIT");
+    await commitTransaction(client);
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client.getTransactionStatus() !== "I") await client.query("ROLLBACK").catch(() => {});
     throw error;
   }
   return {

@@ -16,7 +16,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MigrationError } from "./errors.ts";
 import { applyGrants, type GrantFragment } from "./grants.ts";
-import type { PgClient } from "./pg.ts";
+import { commitTransaction, type PgClient } from "./pg.ts";
 import type { Queryable } from "./unit.ts";
 
 export const MIGRATION_NAME = /^(\d{14})_([a-z][a-z0-9-]*)_([a-z0-9][a-z0-9_]*)\.sql$/;
@@ -204,8 +204,8 @@ export async function runMigrations(client: PgClient, options: RunOptions): Prom
         await client.query(file.sql);
       } else {
         // Commit what came before, run the one statement on its own, then take the lock again.
-        await client.query("COMMIT");
         inTransaction = false;
+        await commitTransaction(client);
         await client.query("SELECT pg_catalog.set_config('lock_timeout', '5s', false)");
         await client.query("SELECT pg_catalog.set_config('statement_timeout', '30min', false)");
         await client.query(file.sql);
@@ -231,8 +231,8 @@ export async function runMigrations(client: PgClient, options: RunOptions): Prom
     const newest = await client.query<{ name: string | null }>(
       "SELECT max(name) AS name FROM ops.schema_migrations",
     );
-    await client.query("COMMIT");
     inTransaction = false;
+    await commitTransaction(client);
     return {
       applied: newlyApplied,
       unknown: [...applied.keys()].filter((name) => !known.has(name)).length,

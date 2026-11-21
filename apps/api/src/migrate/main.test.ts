@@ -126,6 +126,87 @@ describe("runMigrateCli's refusals", () => {
 });
 
 describe("the migrate lines", () => {
+  function sink(): { lines: () => Record<string, unknown>[]; write: (text: string) => void } {
+    let out = "";
+    return {
+      write: (text) => {
+        out += text;
+      },
+      lines: () =>
+        out
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l) as Record<string, unknown>),
+    };
+  }
+
+  it("never let a field overwrite the envelope: audit.write_failed keeps its event, and its audit event", () => {
+    const out = sink();
+    const lines = stdoutLines(
+      { environment: "staging", release: RELEASE, replica: "r1", runId: "run_1" },
+      clock,
+      out.write,
+    );
+    lines.write({
+      event: "audit.write_failed",
+      level: "error",
+      fields: { auditEvent: "operator.task_completed", sqlstate: "FA002" },
+    });
+    // The field name the plan's table gives (`event`) would relabel the line; it is dropped instead.
+    lines.write({
+      event: "audit.write_failed",
+      level: "error",
+      fields: { event: "operator.task_completed", sqlstate: "FA002" },
+    });
+    lines.write({
+      event: "task.done",
+      level: "info",
+      fields: {
+        event: "spoofed",
+        level: "info",
+        service: "api",
+        environment: "production",
+        release: "x",
+        replica: "x",
+        runId: "x",
+        requestId: "x",
+        message: "x",
+        dt: "x",
+        truncated: false,
+        task: "audit-note",
+      },
+    });
+    const [failed, colliding, done] = out.lines();
+    expect(failed).toMatchObject({
+      event: "audit.write_failed",
+      message: "audit.write_failed",
+      level: "error",
+      auditEvent: "operator.task_completed",
+      sqlstate: "FA002",
+    });
+    expect(colliding).toMatchObject({ event: "audit.write_failed", sqlstate: "FA002" });
+    expect(done).toEqual({
+      dt: "2026-11-21T12:00:00.000Z",
+      message: "task.done",
+      event: "task.done",
+      level: "info",
+      service: "migrate",
+      environment: "staging",
+      release: RELEASE,
+      replica: "r1",
+      runId: "run_1",
+      task: "audit-note",
+    });
+  });
+
+  it("cut a line over 8 KB of UTF-8, counting bytes, not UTF-16 units", () => {
+    const out = sink();
+    const lines = stdoutLines({ environment: "ci", release: "r", replica: "r1" }, clock, out.write);
+    // 3,000 three-byte characters: 3,000 UTF-16 units but 9,000 bytes.
+    lines.write({ event: "migrate.done", level: "info", fields: { mode: "€".repeat(3_000) } });
+    expect(out.lines()[0]).toMatchObject({ event: "migrate.done", mode: null, truncated: true });
+  });
+
   it("carry the envelope and the fields, one JSON object per line", () => {
     let out = "";
     const sink = stdoutLines(

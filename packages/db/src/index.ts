@@ -5,6 +5,8 @@ export {
   type BootstrapInput,
   type BootstrapResult,
   bootstrap,
+  bootstrapFiles,
+  type Environment,
   parseReplicas,
   parseRoleVerifiers,
 } from "./bootstrap.ts";
@@ -33,16 +35,21 @@ export {
   MigrationError,
   NestedUnitError,
   SessionStateError,
+  TransactionAbortedError,
   UnitClosedError,
 } from "./errors.ts";
 export {
   applyGrants,
   expandMatrix,
+  expectedMemberships,
   type GrantDrift,
   type GrantFragment,
   grantDrift,
+  liveMemberships,
   livePrivileges,
   loadFragments,
+  type Membership,
+  membershipKey,
   type Privilege,
 } from "./grants.ts";
 export { defineGuards, type GuardOperation, type GuardRegistration } from "./guards/types.ts";
@@ -75,7 +82,13 @@ export {
   releaseLease,
   type Scheduler,
 } from "./ops.ts";
-export { type PgClient, PgDatabaseError, type PgPool, sqlState } from "./pg.ts";
+export {
+  commitTransaction,
+  type PgClient,
+  PgDatabaseError,
+  type PgPool,
+  sqlState,
+} from "./pg.ts";
 export {
   type ConnectionSettings,
   clientConfig,

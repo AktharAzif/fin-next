@@ -6,7 +6,11 @@
 //   - every login's test password is derived from its name (deterministic, never a secret: the
 //     cluster is a local throwaway), and concurrent runs set the same ones;
 //   - everything that changes a role (the bootstrap, fin_owner's password) runs under one
-//     cluster-wide advisory lock held on the admin database, so two files never race on pg_authid.
+//     cluster-wide advisory lock held on the admin database, so two files never race on pg_authid;
+//   - every test bootstrap sizes the logins' CONNECTION LIMIT for TEST_REPLICAS replicas, because
+//     turbo runs each package's test:db at the same time and the limits are shared by all of them;
+//   - `database(group)` hands out one pool per login for the file, so a test never leaves idle
+//     connections of its own behind against those limits.
 import { createHash } from "node:crypto";
 import { scramSha256Verifier } from "@fin/crypto";
 import { bootstrap } from "../bootstrap.ts";
@@ -28,10 +32,17 @@ import {
   runMigrations,
 } from "../migrations.ts";
 import { escapeIdentifier, escapeLiteral, type PgClient, type PgPool } from "../pg.ts";
-import { createPool, type TlsSettings } from "../pool.ts";
+import {
+  type ConnectionSettings,
+  clientConfig,
+  createPool,
+  ScramOnlyClient,
+  type TlsSettings,
+} from "../pool.ts";
 import {
   SERVICE_GROUPS,
   type ServiceGroup,
+  type ServiceName,
   VERIFIER_LOGINS,
   type VerifierLogin,
 } from "../roles.ts";
@@ -40,6 +51,47 @@ import { createDatabase, type FinDatabase, isHoldingClient } from "../unit.ts";
 export { registerEventTypes, type TestEventType, testId } from "./events.ts";
 
 const CLUSTER_LOCK = 0x46494e30; // "FIN0": the one advisory lock every role change in tests takes.
+
+/** The replicas every test bootstrap sizes connection limits for (see the header). */
+export const TEST_REPLICAS = 4;
+
+/** TEST_REPLICAS for every service, as bootstrap's `replicas` and FIN_DB_REPLICAS take it. */
+export function testReplicas(): Record<ServiceName, number> {
+  return {
+    edge: TEST_REPLICAS,
+    api: TEST_REPLICAS,
+    worker: TEST_REPLICAS,
+    payments: TEST_REPLICAS,
+    console: TEST_REPLICAS,
+    admin: TEST_REPLICAS,
+  };
+}
+
+/** testReplicas() as FIN_DB_REPLICAS holds it, for tests that drive `migrate --bootstrap` itself. */
+export function testReplicasJson(): string {
+  return JSON.stringify(testReplicas());
+}
+
+/** The environment every test database is bootstrapped for. */
+export const TEST_ENVIRONMENT = "ci";
+
+/**
+ * A connection, optionally with session settings in the startup packet (`-c name=value`), the way a
+ * client chooses them before any trigger or statement of ours runs.
+ */
+async function connectWith(
+  settings: ConnectionSettings,
+  startupOptions?: string,
+): Promise<PgClient> {
+  if (startupOptions === undefined) return connectClient(settings);
+  const client = new ScramOnlyClient({
+    ...clientConfig(settings),
+    options: startupOptions,
+    connectionTimeoutMillis: 10_000,
+  });
+  await client.connect();
+  return client;
+}
 
 /** A login's test password: derived from its name, so concurrent runs agree. */
 export function testLoginPassword(login: string): string {
@@ -115,11 +167,14 @@ async function withClusterLock<T>(cluster: TestClusterSettings, fn: () => Promis
 export interface TestDatabase {
   readonly name: string;
   readonly target: DatabaseTarget;
-  /** A superuser connection to this database. */
-  superuser(): Promise<PgClient>;
-  /** A connection as a login; fin_owner's test password is set first, under the cluster lock. */
-  connect(login: string, applicationName?: string): Promise<PgClient>;
-  /** A pool and unit of work for a service group's `_a` login (or `_b`). */
+  /** A superuser connection to this database, optionally with startup settings (`-c name=value`). */
+  superuser(startupOptions?: string): Promise<PgClient>;
+  /**
+   * A connection as a login, with its application name and optional startup settings; fin_owner's
+   * test password is set first, under the cluster lock.
+   */
+  connect(login: string, applicationName?: string, startupOptions?: string): Promise<PgClient>;
+  /** The file's pool and unit of work for a service group's `_a` login (or `_b`), made once. */
   database(group: ServiceGroup, login?: "a" | "b"): FinDatabase;
   /** A pool and unit of work as fin_owner (operator tasks), its test password set under the lock. */
   ownerDatabase(): Promise<FinDatabase>;
@@ -150,6 +205,7 @@ export async function createTestDatabase(
   const name = `${options.prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const target: DatabaseTarget = { host: cluster.host, port: cluster.port, database: name };
   const pools: PgPool[] = [];
+  const databases = new Map<string, FinDatabase>();
 
   const admin = await connectClient({
     ...cluster,
@@ -164,13 +220,11 @@ export async function createTestDatabase(
     await admin.end();
   }
 
-  const superuser = () =>
-    connectClient({
-      ...cluster,
-      database: name,
-      tls: LOOPBACK_TLS,
-      applicationName: "fin-test-superuser",
-    });
+  const superuser = (startupOptions?: string) =>
+    connectWith(
+      { ...cluster, database: name, tls: LOOPBACK_TLS, applicationName: "fin-test-superuser" },
+      startupOptions,
+    );
 
   const setOwnerPassword = async () => {
     const su = await superuser();
@@ -183,14 +237,17 @@ export async function createTestDatabase(
     }
   };
 
-  const connectOwner = () =>
-    connectClient({
-      ...target,
-      user: "fin_owner",
-      password: testLoginPassword("fin_owner"),
-      tls: LOOPBACK_TLS,
-      applicationName: "fin-test-owner",
-    });
+  const connectOwner = (applicationName = "fin-test-owner", startupOptions?: string) =>
+    connectWith(
+      {
+        ...target,
+        user: "fin_owner",
+        password: testLoginPassword("fin_owner"),
+        tls: LOOPBACK_TLS,
+        applicationName,
+      },
+      startupOptions,
+    );
 
   const migrate = async (overrides: Partial<RunOptions> = {}) => {
     await withClusterLock(cluster, async () => {
@@ -216,6 +273,8 @@ export async function createTestDatabase(
       try {
         await bootstrap(su, {
           verifiers: testVerifiers(),
+          replicas: testReplicas(),
+          environment: TEST_ENVIRONMENT,
           bootstrapDir: BOOTSTRAP_DIR,
           fragments: loadFragments(GRANTS_DIR),
         });
@@ -231,23 +290,28 @@ export async function createTestDatabase(
     name,
     target,
     superuser,
-    async connect(login, applicationName = "fin-test") {
+    async connect(login, applicationName, startupOptions) {
       if (login === "fin_owner") {
         return withClusterLock(cluster, async () => {
           await setOwnerPassword();
-          return connectOwner();
+          return connectOwner(applicationName, startupOptions);
         });
       }
-      return connectClient({
-        ...target,
-        user: login,
-        password: testLoginPassword(login),
-        tls: LOOPBACK_TLS,
-        applicationName,
-      });
+      return connectWith(
+        {
+          ...target,
+          user: login,
+          password: testLoginPassword(login),
+          tls: LOOPBACK_TLS,
+          applicationName: applicationName ?? "fin-test",
+        },
+        startupOptions,
+      );
     },
     database(group, login = "a") {
       if (!(SERVICE_GROUPS as readonly string[]).includes(group)) throw new TypeError("group");
+      const made = databases.get(`${group}_${login}`);
+      if (made !== undefined) return made;
       const pool = createPool(
         {
           ...target,
@@ -260,7 +324,9 @@ export async function createTestDatabase(
         discardLines,
       );
       pools.push(pool);
-      return createDatabase({ pool });
+      const database = createDatabase({ pool });
+      databases.set(`${group}_${login}`, database);
+      return database;
     },
     async ownerDatabase() {
       // One connection, opened under the lock and kept: another file's bootstrap may clear the owner's

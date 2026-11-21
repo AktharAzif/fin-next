@@ -1,7 +1,9 @@
 // `migrate --task audit-start-epoch` (spec 08 §3.9): starts a new audit epoch after a restore, a failover
 // with lost commits or a staging reset, linked to the previous head's hash, with the marker the operator
-// wrote to the ops bucket first. audit.start_epoch() records audit.epoch_started as the new epoch's
-// first row. Production refuses a reset here, before the database is asked.
+// wrote to the ops bucket first. audit.start_epoch() chains what is left of the old epoch, then records
+// audit.epoch_started as the new epoch's first row. Production refuses a reset twice: here, before the
+// database is asked, and in audit.start_epoch(), which also refuses any start whose environment is not
+// the one the bootstrap recorded (FA012).
 import { z } from "zod";
 import { defineTask } from "./types.ts";
 
@@ -25,7 +27,7 @@ export const startEpoch = defineTask({
     }
     const eventId = tx.ids.newId("aud");
     const result = await tx.query<{ epoch: number }>(
-      "SELECT audit.start_epoch($1, $2, $3, $4, $5, $6) AS epoch",
+      "SELECT audit.start_epoch($1, $2, $3, $4, $5, $6, $7) AS epoch",
       [
         p.reason,
         Buffer.from(p.previousHeadHash, "hex"),
@@ -33,6 +35,7 @@ export const startEpoch = defineTask({
         eventId,
         context.runId,
         context.release,
+        context.environment,
       ],
     );
     const epoch = result.rows[0]?.epoch ?? 0;

@@ -5,6 +5,7 @@ import {
   ClientHeldAcrossCallError,
   NestedUnitError,
   SessionStateError,
+  TransactionAbortedError,
   UnitClosedError,
 } from "./errors.ts";
 import {
@@ -76,6 +77,53 @@ describe("one transaction per unit", () => {
       q.query<{ key: string }>("SELECT key FROM ops.rate_window WHERE key LIKE 'sp-%'"),
     );
     expect(rows.rows).toEqual([{ key: "sp-outer" }]);
+  });
+
+  it("never reports a unit as done when a statement failed and its error was caught", async () => {
+    const lines: string[] = [];
+    await expect(
+      edge.unit(ctx, async (tx) => {
+        await tx.query(
+          "INSERT INTO ops.rate_window (key, window_start, count) VALUES ('aborted-unit', now(), 1)",
+        );
+        try {
+          await tx.query("SELECT 1/0");
+        } catch {
+          lines.push("caught");
+        }
+        return "done";
+      }),
+    ).rejects.toBeInstanceOf(TransactionAbortedError);
+    expect(lines).toEqual(["caught"]);
+    const rows = await edge.read(ctx, (q) =>
+      q.query("SELECT key FROM ops.rate_window WHERE key = 'aborted-unit'"),
+    );
+    expect(rows.rows).toEqual([]);
+    // The pool's client is usable by the next unit.
+    await expect(edge.unit(ctx, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+  });
+
+  it("fails a savepoint whose statement failed with its error caught, and keeps the rest of the unit", async () => {
+    await edge.unit(ctx, async (tx) => {
+      await tx.query(
+        "INSERT INTO ops.rate_window (key, window_start, count) VALUES ('aborted-sp-kept', now(), 1)",
+      );
+      await expect(
+        tx.savepoint(async (inner) => {
+          await inner.query(
+            "INSERT INTO ops.rate_window (key, window_start, count) VALUES ('aborted-sp-lost', now(), 1)",
+          );
+          await inner.query("SELECT 1/0").catch(() => {});
+          return "done";
+        }),
+      ).rejects.toBeInstanceOf(TransactionAbortedError);
+    });
+    const rows = await edge.read(ctx, (q) =>
+      q.query<{ key: string }>(
+        "SELECT key FROM ops.rate_window WHERE key IN ('aborted-sp-kept', 'aborted-sp-lost') ORDER BY key",
+      ),
+    );
+    expect(rows.rows).toEqual([{ key: "aborted-sp-kept" }]);
   });
 
   it("binds the transaction to the async context for adapters, and only while the unit runs", async () => {

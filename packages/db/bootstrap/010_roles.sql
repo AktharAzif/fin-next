@@ -59,6 +59,11 @@ BEGIN
     EXECUTE format('ALTER ROLE %I SET lock_timeout = %L', login, '5s');
     EXECUTE format('ALTER ROLE %I SET idle_in_transaction_session_timeout = %L', login, '30s');
   END LOOP;
+  -- pg_read_all_data does not reach past row-level security, so without this a dump of a table with
+  -- policies (the jobs, the leases, the duty state) fails under pg_dump's default, or comes out empty
+  -- with --enable-row-security (DA-15: "a junk dump of the right size"). The backup login reads every
+  -- row of every table it dumps, so it bypasses row-level security, and nothing else.
+  ALTER ROLE fin_backup WITH BYPASSRLS;
   ALTER ROLE fin_readonly WITH PASSWORD NULL;
   GRANT pg_read_all_data TO fin_backup WITH INHERIT TRUE, SET FALSE;
   GRANT pg_monitor TO fin_probe WITH INHERIT TRUE, SET FALSE;

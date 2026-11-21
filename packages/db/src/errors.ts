@@ -50,6 +50,18 @@ export class UnitClosedError extends Error {
   }
 }
 
+/**
+ * A transaction that had already failed when it was to be committed: a statement's error was caught
+ * and the work went on, so Postgres would only roll it back. Nothing was committed. A statement that
+ * may fail on purpose belongs in `tx.savepoint()`.
+ */
+export class TransactionAbortedError extends Error {
+  override readonly name = "TransactionAbortedError";
+  constructor() {
+    super("the transaction had failed before its commit; nothing was committed");
+  }
+}
+
 export class MigrationError extends Error {
   override readonly name = "MigrationError";
   readonly file: string | undefined;

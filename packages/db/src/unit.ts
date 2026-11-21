@@ -9,7 +9,11 @@
 //   - no session-level SET, RESET or DISCARD on a pooled client, only SET LOCAL;
 //   - a client whose transaction status is not idle when the unit ends is destroyed, not returned;
 //   - a commit the audit guard refuses (FA010) writes `database.audit_guard` with the table only, and
-//     throws AuditGuardError, so the caller answers 500 with the request ID alone.
+//     throws AuditGuardError, so the caller answers 500 with the request ID alone;
+//   - a unit (or savepoint) whose transaction failed is never reported as done: when a statement's
+//     error was caught and `fn` still resolved, Postgres would answer COMMIT with a rollback, so the
+//     unit rolls back and throws TransactionAbortedError instead of returning `fn`'s result. A
+//     statement that may fail on purpose (a unique key mapped to a 409) runs in `tx.savepoint()`.
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Line, UnitContext } from "./context.ts";
 import {
@@ -17,11 +21,12 @@ import {
   ClientHeldAcrossCallError,
   NestedUnitError,
   SessionStateError,
+  TransactionAbortedError,
   UnitClosedError,
 } from "./errors.ts";
 import { createIdSource, type IdSource } from "./ids.ts";
 import type { PgPool, PoolClient, QueryResult, QueryResultRow } from "./pg.ts";
-import { sqlState } from "./pg.ts";
+import { commitTransaction, sqlState } from "./pg.ts";
 
 export interface Queryable {
   query<R extends QueryResultRow = QueryResultRow>(
@@ -130,6 +135,8 @@ export function createDatabase(options: DatabaseOptions): FinDatabase {
         await client.query(`SAVEPOINT ${name}`);
         try {
           const result = await fn(tx);
+          // A statement inside failed and its error was caught: the savepoint's work is lost.
+          if (client.getTransactionStatus() === "E") throw new TransactionAbortedError();
           await client.query(`RELEASE SAVEPOINT ${name}`);
           return result;
         } catch (error) {
@@ -171,7 +178,7 @@ export function createDatabase(options: DatabaseOptions): FinDatabase {
             throw error;
           }
           try {
-            await client.query("COMMIT");
+            await commitTransaction(client);
           } catch (error) {
             if (client.getTransactionStatus() !== "I")
               await client.query("ROLLBACK").catch(() => {});

@@ -11,7 +11,13 @@ import { join } from "node:path";
 import { z } from "zod";
 import { MigrationError } from "./errors.ts";
 import { escapeIdentifier } from "./pg.ts";
-import { FIN_SCHEMAS, GRANTEE_ROLES, type GranteeRole, SERVICE_LOGINS } from "./roles.ts";
+import {
+  FIN_ROLES,
+  FIN_SCHEMAS,
+  GRANTEE_ROLES,
+  type GranteeRole,
+  SERVICE_LOGINS,
+} from "./roles.ts";
 import type { Queryable } from "./unit.ts";
 
 const roleSchema = z.enum(GRANTEE_ROLES);
@@ -363,29 +369,86 @@ export async function livePrivileges(
     );
 }
 
+/** One role membership: `member` is granted `role`, with the grant's options. */
+export interface Membership {
+  member: string;
+  role: string;
+  admin: boolean;
+  inherit: boolean;
+  set: boolean;
+}
+
+/**
+ * The memberships Fin's roles must have, and the only ones (P-20, ARCHITECTURE §6.3): each service
+ * login in exactly its group, `fin_backup` in pg_read_all_data and `fin_probe` in pg_monitor (inherited,
+ * never SET), and nothing else for any Fin role, as member or as the role granted.
+ */
+export function expectedMemberships(): Membership[] {
+  return [
+    ...SERVICE_LOGINS.map((login) => ({
+      member: login,
+      role: login.replace(/_[ab]$/, ""),
+      admin: false,
+      inherit: true,
+      set: true,
+    })),
+    { member: "fin_backup", role: "pg_read_all_data", admin: false, inherit: true, set: false },
+    { member: "fin_probe", role: "pg_monitor", admin: false, inherit: true, set: false },
+  ].sort((a, b) => membershipKey(a).localeCompare(membershipKey(b)));
+}
+
+export function membershipKey(m: Membership): string {
+  return `${m.member} ${m.role} admin=${m.admin} inherit=${m.inherit} set=${m.set}`;
+}
+
+/** The live memberships in which a Fin role is the member or the role granted, one per grant. */
+export async function liveMemberships(q: Queryable): Promise<Membership[]> {
+  const result = await q.query<Membership>(
+    `SELECT DISTINCT m.rolname::text AS member, g.rolname::text AS role, a.admin_option AS admin,
+            a.inherit_option AS inherit, a.set_option AS set
+     FROM pg_catalog.pg_auth_members a
+     JOIN pg_catalog.pg_roles m ON m.oid = a.member
+     JOIN pg_catalog.pg_roles g ON g.oid = a.roleid
+     WHERE m.rolname = ANY ($1) OR g.rolname = ANY ($1)`,
+    [FIN_ROLES],
+  );
+  return result.rows.sort((a, b) => membershipKey(a).localeCompare(membershipKey(b)));
+}
+
 export interface GrantDrift {
   role: string;
   missing: number;
   extra: number;
 }
 
-/** Per role, how many matrix privileges are missing live and how many live ones the matrix lacks. */
+/**
+ * Per role, how many matrix privileges and expected memberships are missing live, and how many live
+ * ones the matrix and the expected memberships lack (`database.grants_drift`). A membership counts
+ * against its member: a login granted pg_write_all_data shows as one extra on that login.
+ */
 export async function grantDrift(
   q: Queryable,
   fragments: readonly GrantFragment[],
 ): Promise<GrantDrift[]> {
-  const expected = new Set(expandMatrix(fragments).map(privilegeKey));
-  const live = new Set(
-    (await livePrivileges(q)).map((p) => `${p.kind} ${p.object} ${p.privilege} ${p.role}`),
-  );
   const drift = new Map<string, GrantDrift>();
-  const bump = (key: string, field: "missing" | "extra") => {
-    const role = key.split(" ").at(-1) ?? "unknown";
+  const bump = (role: string, field: "missing" | "extra") => {
     const row = drift.get(role) ?? { role, missing: 0, extra: 0 };
     row[field] += 1;
     drift.set(role, row);
   };
-  for (const key of expected) if (!live.has(key)) bump(key, "missing");
-  for (const key of live) if (!expected.has(key)) bump(key, "extra");
+
+  const expected = new Set(expandMatrix(fragments).map(privilegeKey));
+  const live = new Set(
+    (await livePrivileges(q)).map((p) => `${p.kind} ${p.object} ${p.privilege} ${p.role}`),
+  );
+  const roleOf = (key: string) => key.split(" ").at(-1) ?? "unknown";
+  for (const key of expected) if (!live.has(key)) bump(roleOf(key), "missing");
+  for (const key of live) if (!expected.has(key)) bump(roleOf(key), "extra");
+
+  const wanted = new Map(expectedMemberships().map((m) => [membershipKey(m), m]));
+  const held = new Map((await liveMemberships(q)).map((m) => [membershipKey(m), m]));
+  for (const [key, m] of wanted) if (!held.has(key)) bump(m.member, "missing");
+  for (const [key, m] of held) if (!wanted.has(key)) bump(m.member, "extra");
+
   return [...drift.values()].sort((a, b) => a.role.localeCompare(b.role));
 }

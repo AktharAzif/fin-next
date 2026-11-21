@@ -5,17 +5,19 @@ import { TASKS } from "./registry.ts";
 import { parseTaskParams, TaskError } from "./run.ts";
 import { StartEpochRefused, startEpoch } from "./start-epoch.ts";
 
-function fakeTx(): { tx: UnitTx; queries: string[] } {
+function fakeTx(): { tx: UnitTx; queries: string[]; values: (readonly unknown[])[] } {
   const queries: string[] = [];
+  const values: (readonly unknown[])[] = [];
   const tx = {
     context: { clock: { now: () => Date.now() }, release: "r", log: { write: () => {} } },
     ids: createIdSource({ now: () => Date.now() }),
-    async query(text: string) {
+    async query(text: string, params?: readonly unknown[]) {
       queries.push(text);
+      values.push(params ?? []);
       return { rows: [{ epoch: 2 }], rowCount: 1, command: "SELECT", fields: [] };
     },
   } as unknown as UnitTx;
-  return { tx, queries };
+  return { tx, queries, values };
 }
 
 const context = { runId: "run_1", release: "r", environment: "staging" as const };
@@ -92,10 +94,12 @@ describe("audit-start-epoch", () => {
     expect(queries).toEqual([]);
   });
 
-  it("calls audit.start_epoch with the run's ID and release, and returns the new epoch", async () => {
-    const { tx, queries } = fakeTx();
+  it("calls audit.start_epoch with the run's ID, release and environment, and returns the new epoch", async () => {
+    const { tx, queries, values } = fakeTx();
     const result = await startEpoch.run(tx, params, context);
-    expect(queries).toEqual(["SELECT audit.start_epoch($1, $2, $3, $4, $5, $6) AS epoch"]);
+    expect(queries).toEqual(["SELECT audit.start_epoch($1, $2, $3, $4, $5, $6, $7) AS epoch"]);
+    // The database checks the environment against the row its bootstrap wrote (spec 08 §3.9).
+    expect(values[0]?.slice(4)).toEqual(["run_1", "r", "staging"]);
     expect(result.ids).toMatchObject({ epoch: 2 });
   });
 

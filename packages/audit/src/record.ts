@@ -3,16 +3,29 @@
 //   - makes the `aud_` ID from the unit's clock, and takes the request ID and release from its context;
 //   - checks the actor's kind against the event's `actors`;
 //   - parses the metadata with the event's strict schema;
-//   - refuses an email, IP, token or key shape, URL with a query, or nine digits in any string
-//     (AuditMetadataError).
+//   - refuses an email, IP, token or key shape, URL with a query, or nine digits in any string, and any
+//     string Postgres cannot store as JSON (a lone UTF-16 surrogate) (AuditMetadataError);
+//   - keeps at most 400 characters of the client's user agent, cut between characters, never inside
+//     one, so a header the client chooses can never make the row unstorable.
 // It then writes the event and the journal entry the event declares, in the same transaction. On any
-// FA error from the database it writes `audit.write_failed` (event, sqlstate) and throws AuditWriteError;
-// the unit rolls back and the action answers 500 with the request ID only.
+// FA error from the database it writes `audit.write_failed` (`auditEvent`, `sqlstate`) and throws
+// AuditWriteError; the unit rolls back and the action answers 500 with the request ID only.
 import { sqlState, type UnitTx } from "@fin/db";
 import type { z } from "zod";
 import type { ActorKind, ActorVia, EventSpec } from "./define.ts";
 import { AUDIT_EVENTS, type AuditEventName, type AuditEvents } from "./events/_index.gen.ts";
-import { AuditMetadataError, assertNoPersonalShapes } from "./shapes.ts";
+import { AuditMetadataError, assertNoPersonalShapes, assertStorableText } from "./shapes.ts";
+
+/** The longest user agent kept, in characters (code points), as audit.event_context allows. */
+export const USER_AGENT_MAX = 400;
+
+/**
+ * A client's user agent as the context row keeps it: lone surrogates replaced, then cut to at most
+ * 400 characters by code point, so the cut never splits a character in two.
+ */
+export function storedUserAgent(userAgent: string): string {
+  return Array.from(userAgent.toWellFormed()).slice(0, USER_AGENT_MAX).join("");
+}
 
 declare const auditEventIdBrand: unique symbol;
 export type AuditEventId = string & { readonly [auditEventIdBrand]: true };
@@ -72,32 +85,33 @@ function checkTarget(spec: EventSpec, name: string, target: string): void {
   }
 }
 
-/** Writes `audit.write_failed` and rethrows an FA error as AuditWriteError; other errors pass through. */
+/**
+ * Writes `audit.write_failed` and rethrows an FA error as AuditWriteError; other errors pass through.
+ * The audit event's name is the field `auditEvent`: the line's own `event` is `audit.write_failed`,
+ * and a line writer never lets a field overwrite its envelope.
+ */
 export function rethrowAuditFailure(tx: UnitTx, event: string, error: unknown): never {
   const state = sqlState(error);
   if (state?.startsWith("FA")) {
     tx.context.log.write({
       event: "audit.write_failed",
       level: "error",
-      fields: { event, sqlstate: state },
+      fields: { auditEvent: event, sqlstate: state },
     });
     throw new AuditWriteError(event, state);
   }
   throw error;
 }
 
-/** Writes the journal entry an event declares, in the caller's transaction (§3.10). */
+/**
+ * Writes the journal entry an event declares, in the caller's transaction (§3.10). Whether to write
+ * it is the fragment's (`journal.when`); what it says is the database's: audit.record_journal() takes
+ * the kind from the event's type and the organisation and subjects from the event's row.
+ */
 export async function writeJournalEntry(
   tx: UnitTx,
   spec: EventSpec,
-  input: {
-    event: string;
-    eventId: string;
-    target: string;
-    refs: readonly string[];
-    organizationId?: string;
-    metadata: unknown;
-  },
+  input: { event: string; eventId: string; metadata: unknown },
 ): Promise<string | undefined> {
   if (spec.journal === undefined) return undefined;
   if (spec.journal.when !== undefined && !spec.journal.when(input.metadata as never))
@@ -105,13 +119,7 @@ export async function writeJournalEntry(
   const id = tx.ids.newId("jrn");
   try {
     await tx.query("SELECT audit.record_journal($1::jsonb)", [
-      JSON.stringify({
-        id,
-        kind: spec.journal.kind,
-        audit_event_id: input.eventId,
-        subject_ids: [input.target, ...input.refs],
-        ...(input.organizationId === undefined ? {} : { organization_id: input.organizationId }),
-      }),
+      JSON.stringify({ id, audit_event_id: input.eventId }),
     ]);
   } catch (error) {
     rethrowAuditFailure(tx, input.event, error);
@@ -168,22 +176,19 @@ export async function recordAudit<E extends AuditEventName>(
   if (input.context !== undefined) {
     payload.context = {
       client_ip: input.context.clientIp,
-      user_agent: input.context.userAgent === null ? null : input.context.userAgent.slice(0, 400),
+      user_agent:
+        input.context.userAgent === null ? null : storedUserAgent(input.context.userAgent),
     };
   }
+  // Every string reaches Postgres as JSON; one it cannot store would fail the action with a code no
+  // audit alert reads, so it is refused here, naming the field.
+  assertStorableText(payload, "event");
 
   try {
     await tx.query("SELECT audit.record($1::jsonb)", [JSON.stringify(payload)]);
   } catch (error) {
     rethrowAuditFailure(tx, input.event, error);
   }
-  await writeJournalEntry(tx, spec, {
-    event: input.event,
-    eventId: id,
-    target: input.target,
-    refs,
-    ...(input.organizationId === undefined ? {} : { organizationId: input.organizationId }),
-    metadata,
-  });
+  await writeJournalEntry(tx, spec, { event: input.event, eventId: id, metadata });
   return id as AuditEventId;
 }

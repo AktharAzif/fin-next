@@ -1,7 +1,8 @@
 // The audit schema's SQL (spec 08 §3.3, §3.5 to §3.10): audit.record()'s refusals and stamps (T08-03),
-// immutability for every login including fin_owner and the superuser (T08-05, AC-P0-11), the
-// sequencer's gapless chaining without a lock on the write path (T08-10), epochs (T08-15), and the
-// journal and anchor functions. recordAudit, the registry and the TypeScript hash are @fin/audit's.
+// immutability for every login including fin_owner and the superuser, by DML and by DDL (T08-05,
+// AC-P0-11), the sequencer's gapless chaining with no writer waiting on another (T08-10), epochs and
+// the environment's refusals (T08-15, §3.9), and the journal and anchor functions. recordAudit, the
+// registry and the TypeScript hash are @fin/audit's.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
@@ -27,6 +28,7 @@ beforeAll(async () => {
         roles: ["fin_api", "fin_console"],
         scope: "organisation",
         category: "organisation",
+        journalKind: "member_removed",
       },
       { name: "test.person_thing", roles: ["fin_console"], scope: "person", category: "security" },
       {
@@ -34,6 +36,13 @@ beforeAll(async () => {
         roles: ["fin_admin", "fin_worker", "fin_owner"],
         scope: "staff",
         category: "staff",
+      },
+      {
+        name: "test.staff_removed",
+        roles: ["fin_admin", "fin_worker"],
+        scope: "staff",
+        category: "staff",
+        journalKind: "staff_removed",
       },
       { name: "test.retired_thing", roles: ["fin_api"], scope: "staff", retired: true },
       { name: "audit.epoch_started", roles: ["fin_owner"], scope: "staff", category: "system" },
@@ -328,6 +337,103 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
       ),
     ).toBe("42501");
   });
+
+  it("refuses fin_owner the DDL that would switch a protection off, so no row can be changed that way", async () => {
+    const guard = await su.query<{ tgname: string }>(
+      "SELECT tgname FROM pg_trigger WHERE tgrelid = 'ops.kill_switch'::regclass AND tgname LIKE 'audit_guard_%' ORDER BY tgname LIMIT 1",
+    );
+    const guardTrigger = guard.rows[0]?.tgname ?? "missing";
+    const owner = await db.connect("fin_owner");
+    try {
+      for (const sql of [
+        "ALTER TABLE audit.event DISABLE TRIGGER event_append_only",
+        "ALTER TABLE audit.event DISABLE TRIGGER USER",
+        "ALTER TABLE audit.event ENABLE REPLICA TRIGGER event_append_only",
+        "DROP TRIGGER event_append_only ON audit.event",
+        "CREATE OR REPLACE TRIGGER event_append_only BEFORE INSERT ON audit.event FOR EACH ROW EXECUTE FUNCTION audit.append_only()",
+        "ALTER TRIGGER event_append_only ON audit.event RENAME TO event_moved",
+        "CREATE OR REPLACE FUNCTION audit.append_only() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN coalesce(NEW, OLD); END $$",
+        "ALTER FUNCTION audit.append_only() SET search_path = audit, pg_temp",
+        "DROP FUNCTION audit.append_only() CASCADE",
+        "CREATE OR REPLACE FUNCTION audit.require_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+        "ALTER TABLE audit.event ALTER COLUMN target_id TYPE text USING 'rewritten'",
+        "ALTER TABLE audit.anchor_conflict SET UNLOGGED",
+        "ALTER TABLE audit.event DROP COLUMN request_id",
+        "DROP TABLE audit.event_context",
+        "DROP SCHEMA audit CASCADE",
+        "ALTER TABLE ops.kill_switch DISABLE TRIGGER USER",
+        `DROP TRIGGER "${guardTrigger}" ON ops.kill_switch`,
+        "DROP TABLE ops.kill_switch",
+      ]) {
+        expect(await codeOf(owner, sql), sql).toBe("42501");
+      }
+      // With every protection in place, the rows are as they were and still cannot be changed.
+      expect(
+        await codeOf(owner, "UPDATE audit.event SET target_id = 'x' WHERE id = $1", [chained]),
+      ).toBe("42501");
+    } finally {
+      await owner.end();
+    }
+    expect(
+      (
+        await su.query("SELECT target_id FROM audit.event WHERE id = ANY ($1)", [
+          [chained, unchained],
+        ])
+      ).rows,
+    ).toEqual([{ target_id: "target-1" }, { target_id: "target-1" }]);
+    const triggers = await su.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_trigger t
+       WHERE t.tgfoid IN ('audit.append_only()'::regprocedure, 'audit.require_event()'::regprocedure)
+         AND t.tgenabled <> 'O'`,
+    );
+    expect(triggers.rows).toEqual([{ n: 0 }]);
+  });
+
+  it("lets fin_owner add to the audit trail: a table, an index, a column, and the same guard again", async () => {
+    const owner = await db.connect("fin_owner");
+    try {
+      for (const sql of [
+        "CREATE TABLE audit.ddl_scratch (id int)",
+        "DROP TABLE audit.ddl_scratch",
+        "CREATE INDEX event_release_scratch ON audit.event (release)",
+        "DROP INDEX audit.event_release_scratch",
+        "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_note text",
+        "COMMENT ON FUNCTION audit.append_only() IS 'append-only'",
+        "SELECT audit.install_guard('ops.kill_switch'::regclass, ARRAY['INSERT', 'UPDATE OF state'], 'name', ARRAY['switch.set', 'switch.cleared', 'switch.tripped'])",
+      ]) {
+        expect(await codeOf(owner, sql), sql).toBe("ok");
+      }
+      // Adding is allowed; taking the column away again is a drop from an append-only table.
+      expect(
+        await codeOf(owner, "ALTER TABLE audit.anchor_conflict DROP COLUMN scratch_note"),
+      ).toBe("42501");
+    } finally {
+      await owner.end();
+    }
+    const guards = await su.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'ops.kill_switch'::regclass AND tgname LIKE 'audit_guard_%'",
+    );
+    expect(guards.rows).toEqual([{ n: 2 }]);
+  });
+
+  it("lets the superuser change a protection on purpose, which becomes the record fin_owner is held to", async () => {
+    await su.query("ALTER TABLE audit.anchor_conflict DROP COLUMN scratch_note");
+    await su.query("ALTER TABLE audit.anchor DISABLE TRIGGER anchor_append_only");
+    const owner = await db.connect("fin_owner");
+    try {
+      expect(await codeOf(owner, "CREATE TABLE audit.ddl_scratch (id int)")).toBe("ok");
+      expect(
+        await codeOf(owner, "ALTER TABLE audit.anchor ENABLE TRIGGER anchor_append_only"),
+      ).toBe("42501");
+      await su.query("ALTER TABLE audit.anchor ENABLE TRIGGER anchor_append_only");
+      expect(await codeOf(owner, "DROP TABLE audit.ddl_scratch")).toBe("ok");
+      expect(
+        await codeOf(owner, "ALTER TABLE audit.anchor DISABLE TRIGGER anchor_append_only"),
+      ).toBe("42501");
+    } finally {
+      await owner.end();
+    }
+  });
 });
 
 describe("the sequencer (T08-10, §3.6)", () => {
@@ -424,49 +530,169 @@ describe("the sequencer (T08-10, §3.6)", () => {
 });
 
 describe("epochs (T08-15, §3.9)", () => {
-  it("starts a new epoch whose first row is audit.epoch_started, linked to the given previous hash", async () => {
+  const START = "SELECT audit.start_epoch($1, $2, $3, $4, 'run_test', 'test-release', $5) AS epoch";
+
+  async function unchainedCount(): Promise<number> {
+    const result = await su.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM audit.event WHERE seq IS NULL",
+    );
+    return result.rows[0]?.n ?? -1;
+  }
+
+  it("chains the old epoch's remaining rows into it, then starts the new one with audit.epoch_started first", async () => {
+    // A committed row the sequencer has not reached yet, as a restored database always holds a few.
+    const leftover = await withClient("fin_admin_a", (admin) => record(admin, input()));
     const prev = Buffer.alloc(32, 7);
     const eventId = testId("aud");
     await withClient("fin_owner", async (owner) => {
-      const result = await owner.query<{ epoch: number }>(
-        "SELECT audit.start_epoch('reset', $1, 'ops/reset/20261121T120000Z.json', $2, 'run_test', 'test-release') AS epoch",
-        [prev, eventId],
-      );
+      const result = await owner.query<{ epoch: number }>(START, [
+        "reset",
+        prev,
+        "ops/reset/20261121T120000Z.json",
+        eventId,
+        "ci",
+      ]);
       expect(result.rows[0]?.epoch).toBe(2);
     });
+    const left = await su.query<{ epoch: number; seq: string | null }>(
+      "SELECT epoch, seq FROM audit.event WHERE id = $1",
+      [leftover],
+    );
+    expect(left.rows[0]?.epoch).toBe(1);
+    expect(left.rows[0]?.seq).not.toBeNull();
     const heads = await su.query("SELECT epoch, seq, current FROM audit.head ORDER BY epoch");
     expect(heads.rows).toEqual([
-      { epoch: 1, seq: expect.any(String), current: false },
-      { epoch: 2, seq: "0", current: true },
+      { epoch: 1, seq: left.rows[0]?.seq, current: false },
+      { epoch: 2, seq: "1", current: true },
     ]);
-    await withClient("fin_worker_a", (worker) => worker.query("SELECT audit.sequence(50000)"));
+    // Nothing is left outside the chain, so the probe's age has nothing to report.
+    expect(await unchainedCount()).toBe(0);
+    await withClient("fin_probe", async (probe) => {
+      expect((await probe.query("SELECT audit.unsequenced_age() AS age")).rows).toEqual([
+        { age: 0 },
+      ]);
+    });
     const first = await su.query<{
       id: string;
       seq: string;
       prev_hash: Buffer;
-      event: string;
       metadata: unknown;
-    }>(
-      "SELECT id, seq, prev_hash, event, metadata FROM audit.event WHERE epoch = 2 ORDER BY seq LIMIT 1",
-    );
+    }>("SELECT id, seq, prev_hash, metadata FROM audit.event WHERE epoch = 2 ORDER BY seq LIMIT 1");
     expect(first.rows[0]?.id).toBe(eventId);
     expect(first.rows[0]?.seq).toBe("1");
     expect(first.rows[0]?.prev_hash.equals(prev)).toBe(true);
-    expect(first.rows[0]?.metadata).toMatchObject({
+    expect(first.rows[0]?.metadata).toEqual({
       reason: "reset",
       previousEpoch: 1,
+      previousSeq: Number(left.rows[0]?.seq),
       markerKey: "ops/reset/20261121T120000Z.json",
     });
+  });
+
+  it("waits for a transaction that recorded a row in the old epoch, and chains that row there", async () => {
+    const holder = await db.connect("fin_admin_a");
+    let heldId = "";
+    try {
+      await holder.query("BEGIN");
+      heldId = await record(holder, input());
+      const starting = withClient("fin_owner", (owner) =>
+        owner.query<{ epoch: number }>(START, [
+          "reset",
+          Buffer.alloc(32, 8),
+          "ops/reset/20261121T130000Z.json",
+          testId("aud"),
+          "ci",
+        ]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Still epoch 2: the start waits for the open transaction rather than leaving its row behind.
+      expect((await su.query("SELECT epoch FROM audit.head WHERE current")).rows).toEqual([
+        { epoch: 2 },
+      ]);
+      await holder.query("COMMIT");
+      expect((await starting).rows[0]?.epoch).toBe(3);
+    } finally {
+      await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+    const held = await su.query<{ epoch: number; seq: string | null }>(
+      "SELECT epoch, seq FROM audit.event WHERE id = $1",
+      [heldId],
+    );
+    expect(held.rows[0]?.epoch).toBe(2);
+    expect(held.rows[0]?.seq).not.toBeNull();
+    // A row recorded once the new epoch has started carries it, and the sequencer chains it.
+    const later = await withClient("fin_admin_a", (admin) => record(admin, input()));
+    expect((await su.query("SELECT epoch FROM audit.event WHERE id = $1", [later])).rows).toEqual([
+      { epoch: 3 },
+    ]);
+    await withClient("fin_worker_a", (worker) => worker.query("SELECT audit.sequence(50000)"));
+    expect(await unchainedCount()).toBe(0);
+  });
+
+  it("refuses a reset in production, and any start whose environment is not the database's (FA012)", async () => {
+    await withClient("fin_owner", async (owner) => {
+      for (const environment of ["production", "staging", null]) {
+        expect(
+          await codeOf(owner, START, [
+            "restore",
+            Buffer.alloc(32),
+            "ops/restore/x.json",
+            testId("aud"),
+            environment,
+          ]),
+          String(environment),
+        ).toBe("FA012");
+      }
+    });
+    // A production database: the row is the bootstrap's, so the test changes it as the superuser.
+    await su.query("ALTER TABLE ops.environment DISABLE TRIGGER environment_unchanged");
+    try {
+      await su.query("UPDATE ops.environment SET name = 'production'");
+      await withClient("fin_owner", async (owner) => {
+        expect(
+          await codeOf(owner, START, [
+            "reset",
+            Buffer.alloc(32),
+            "ops/reset/x.json",
+            testId("aud"),
+            "production",
+          ]),
+        ).toBe("FA012");
+      });
+      await su.query("DELETE FROM ops.environment");
+      await withClient("fin_owner", async (owner) => {
+        expect(
+          await codeOf(owner, START, [
+            "restore",
+            Buffer.alloc(32),
+            "ops/restore/x.json",
+            testId("aud"),
+            "ci",
+          ]),
+        ).toBe("FA012");
+      });
+    } finally {
+      await su.query(
+        "INSERT INTO ops.environment (only_row, name, recorded_at) VALUES (true, 'ci', now()) ON CONFLICT (only_row) DO UPDATE SET name = 'ci'",
+      );
+      await su.query("ALTER TABLE ops.environment ENABLE TRIGGER environment_unchanged");
+    }
+    expect((await su.query("SELECT epoch FROM audit.head WHERE current")).rows).toEqual([
+      { epoch: 3 },
+    ]);
   });
 
   it("refuses a start for any role but fin_owner, a bad reason, a short hash or a bad marker", async () => {
     await withClient("fin_worker_a", async (worker) => {
       expect(
-        await codeOf(
-          worker,
-          "SELECT audit.start_epoch('reset', $1, 'ops/reset/x.json', $2, 'run', 'r')",
-          [Buffer.alloc(32), testId("aud")],
-        ),
+        await codeOf(worker, START, [
+          "reset",
+          Buffer.alloc(32),
+          "ops/reset/x.json",
+          testId("aud"),
+          "ci",
+        ]),
       ).toBe("42501");
     });
     await withClient("fin_owner", async (owner) => {
@@ -475,51 +701,73 @@ describe("epochs (T08-15, §3.9)", () => {
         ["reset", Buffer.alloc(31), "ops/reset/x.json"],
         ["reset", Buffer.alloc(32), "../x.json"],
       ] as const) {
-        expect(
-          await codeOf(owner, "SELECT audit.start_epoch($1, $2, $3, $4, 'run', 'r')", [
-            reason,
-            hash,
-            marker,
-            testId("aud"),
-          ]),
-        ).toBe("22023");
+        expect(await codeOf(owner, START, [reason, hash, marker, testId("aud"), "ci"])).toBe(
+          "22023",
+        );
       }
     });
   });
 });
 
 describe("the journal and the anchors (§3.7, §3.10)", () => {
+  async function journalOutcome(
+    login: string,
+    event: Record<string, unknown>,
+    entries: (eventId: string) => Record<string, unknown>[],
+  ): Promise<string[]> {
+    return withClient(login, async (client) => {
+      const outcomes: string[] = [];
+      await client.query("BEGIN");
+      try {
+        const eventId = await record(client, event);
+        for (const entry of entries(eventId)) {
+          await client.query("SAVEPOINT entry");
+          outcomes.push(
+            await codeOf(client, "SELECT audit.record_journal($1::jsonb)", [JSON.stringify(entry)]),
+          );
+          await client.query(
+            outcomes.at(-1) === "ok" ? "RELEASE SAVEPOINT entry" : "ROLLBACK TO SAVEPOINT entry",
+          );
+        }
+      } finally {
+        await client.query("ROLLBACK");
+      }
+      return outcomes;
+    });
+  }
+
   it("writes a journal entry only for an event of the same transaction and login (FA007)", async () => {
     await withClient("fin_admin_a", async (admin) => {
-      const earlier = await record(admin, input());
+      const earlier = await record(
+        admin,
+        input({ event: "test.staff_removed", target_id: "stf_x" }),
+      );
       expect(
         await codeOf(admin, "SELECT audit.record_journal($1::jsonb)", [
-          JSON.stringify({
-            id: testId("jrn"),
-            kind: "staff_removed",
-            audit_event_id: earlier,
-            subject_ids: ["stf_x"],
-          }),
+          JSON.stringify({ id: testId("jrn"), audit_event_id: earlier }),
         ]),
       ).toBe("FA007");
       await admin.query("BEGIN");
-      const now = await record(admin, input());
+      const now = await record(
+        admin,
+        input({ event: "test.staff_removed", target_id: "stf_x", ref_ids: ["ses_1", "ses_2"] }),
+      );
       const journalId = testId("jrn");
       await admin.query("SELECT audit.record_journal($1::jsonb)", [
-        JSON.stringify({
-          id: journalId,
-          kind: "staff_removed",
-          audit_event_id: now,
-          subject_ids: ["stf_x"],
-        }),
+        JSON.stringify({ id: journalId, audit_event_id: now }),
       ]);
       await admin.query("COMMIT");
       const row = await su.query(
-        "SELECT kind, subject_ids, audit_event_id FROM audit.journal_entry WHERE id = $1",
+        "SELECT kind, organization_id, subject_ids, audit_event_id FROM audit.journal_entry WHERE id = $1",
         [journalId],
       );
       expect(row.rows).toEqual([
-        { kind: "staff_removed", subject_ids: ["stf_x"], audit_event_id: now },
+        {
+          kind: "staff_removed",
+          organization_id: null,
+          subject_ids: ["stf_x", "ses_1", "ses_2"],
+          audit_event_id: now,
+        },
       ]);
       expect(await codeOf(admin, "INSERT INTO audit.journal_entry (id) VALUES ('x')")).toBe(
         "42501",
@@ -527,7 +775,57 @@ describe("the journal and the anchors (§3.7, §3.10)", () => {
     });
   });
 
-  it("records an anchor only for a head the chain reached, under the key that names it", async () => {
+  it("takes what an entry says from its event: never a caller's kind, organisation or subjects", async () => {
+    const worker = { actor_kind: "system", actor_id: null, actor_via: "job" };
+    const outcomes = await journalOutcome(
+      "fin_worker_a",
+      input({ ...worker, event: "test.staff_removed", target_id: "stf_y" }),
+      (eventId) => [
+        { id: testId("jrn"), audit_event_id: eventId, kind: "customer_erased" },
+        { id: testId("jrn"), audit_event_id: eventId, organization_id: "org_victim" },
+        { id: testId("jrn"), audit_event_id: eventId, subject_ids: ["cus_victim1"] },
+        { id: "jrn_short", audit_event_id: eventId },
+        { id: testId("jrn"), audit_event_id: eventId },
+        // One entry per event.
+        { id: testId("jrn"), audit_event_id: eventId },
+      ],
+    );
+    expect(outcomes).toEqual(["FA006", "FA006", "FA006", "FA005", "ok", "FA009"]);
+    // An event that declares no journal kind has no entry to write.
+    expect(
+      await journalOutcome(
+        "fin_worker_a",
+        input({ ...worker, event: "test.staff_thing" }),
+        (id) => [{ id: testId("jrn"), audit_event_id: id }],
+      ),
+    ).toEqual(["FA009"]);
+  });
+
+  it("names the event's own organisation and subjects in an organisation event's entry", async () => {
+    const org = testId("org");
+    const journalId = testId("jrn");
+    await withClient("fin_console_a", async (console) => {
+      await console.query("BEGIN");
+      const eventId = await record(
+        console,
+        input({ event: "test.org_thing", organization_id: org, target_id: "mem_1" }),
+      );
+      await console.query("SELECT audit.record_journal($1::jsonb)", [
+        JSON.stringify({ id: journalId, audit_event_id: eventId }),
+      ]);
+      await console.query("COMMIT");
+    });
+    expect(
+      (
+        await su.query(
+          "SELECT kind, organization_id, subject_ids FROM audit.journal_entry WHERE id = $1",
+          [journalId],
+        )
+      ).rows,
+    ).toEqual([{ kind: "member_removed", organization_id: org, subject_ids: ["mem_1"] }]);
+  });
+
+  it("records an anchor, or a conflict, only for a head the chain reached, under the key that names it", async () => {
     await withClient("fin_worker_a", async (worker) => {
       await worker.query("SELECT audit.sequence(50000)");
       const head = await worker.query<{ epoch: number; seq: string; hash: Buffer }>(
@@ -565,6 +863,22 @@ describe("the journal and the anchors (§3.7, §3.10)", () => {
         key,
         h.hash,
       ]);
+      expect(
+        await codeOf(worker, "SELECT audit.record_anchor_conflict('audit', $1, $2, $3, $4, NULL)", [
+          h.epoch,
+          h.seq,
+          forged,
+          h.hash,
+        ]),
+      ).toBe("22023");
+      expect(
+        await codeOf(worker, "SELECT audit.record_anchor_conflict('audit', $1, $2, $3, $4, NULL)", [
+          h.epoch,
+          h.seq,
+          forged,
+          Buffer.alloc(32, 1),
+        ]),
+      ).toBe("FA008");
       expect((await worker.query("SELECT count(*)::int AS n FROM audit.anchor")).rows).toEqual([
         { n: 1 },
       ]);

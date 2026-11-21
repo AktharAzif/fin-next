@@ -29,6 +29,8 @@ declare module "pg" {
     password?: string;
     ssl?: false | ConnectionOptions;
     application_name?: string;
+    /** Startup-packet settings (`-c name=value`); only the tests set them, as a client would. */
+    options?: string;
     connectionTimeoutMillis?: number;
     query_timeout?: number;
     keepAlive?: boolean;

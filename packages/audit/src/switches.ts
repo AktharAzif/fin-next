@@ -40,8 +40,6 @@ export async function tripSwitch(tx: UnitTx, trip: Trip): Promise<string> {
   await writeJournalEntry(tx, spec, {
     event: "switch.tripped",
     eventId: id,
-    target: trip.name,
-    refs: [],
     metadata: { reasonCode: trip.reasonCode, ref: trip.ref },
   });
   tx.context.log.write({

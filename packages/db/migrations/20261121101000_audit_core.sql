@@ -2,14 +2,17 @@
 --
 -- audit.event is written only through audit.record(), which stamps what the caller cannot choose
 -- (the login, application_name, backend PID, transaction ID and the server's time) and checks the
--- event against the per-role registry. Rows are inserted unchained, with no lock on the write path;
--- the sequencer gives each a gapless seq and its hash afterwards. No service role holds INSERT,
--- UPDATE or DELETE on any audit table; triggers refuse every change but the sequencer's one write of
--- the chain fields.
+-- event against the per-role registry. Rows are inserted unchained, and writers never wait on each
+-- other or on the sequencer; the sequencer gives each row a gapless seq and its hash afterwards. No
+-- service role holds INSERT, UPDATE or DELETE on any audit table; triggers refuse every change but the
+-- sequencer's one write of the chain fields, and the bootstrap's guard (040_audit_guard.sql) refuses
+-- anyone but the superuser the DDL that would switch those triggers off.
 --
 -- SQLSTATE class FA is Fin's audit class: FA001 unknown or retired event, FA002 role not allowed,
 -- FA003 scope fields missing, FA004 metadata shape, FA005 refs or ID, FA006 any other input shape
--- (an unknown key, a missing field, a value outside its list), FA010 the guard.
+-- (an unknown key, a missing field, a value outside its list), FA010 the guard, FA011 no current
+-- epoch, FA012 an epoch start the environment refuses (a reset in production, or a task that names
+-- another environment than the one the bootstrap recorded).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -24,6 +27,14 @@ CREATE TABLE audit.event_type (
                    cardinality(roles) >= 1
                    AND roles <@ ARRAY['fin_edge', 'fin_api', 'fin_worker', 'fin_payments',
                      'fin_console', 'fin_admin', 'fin_owner']::text[]),
+  -- The revocation-journal kind the event declares (§3.10), synced from the registry's `journal.kind`.
+  -- audit.record_journal() takes the kind from here, never from its caller.
+  journal_kind   text CHECK (journal_kind IN ('key_revoked', 'key_rolled', 'sessions_ended',
+                   'member_removed', 'invitation_cancelled', 'role_lowered', 'organisation_deleted',
+                   'organisation_paused', 'factor_removed', 'trusted_browser_revoked', 'staff_removed',
+                   'staff_factors_reset', 'staff_role_lowered', 'links_revoked', 'customer_erased',
+                   'webhook_secret_rolled', 'webhook_endpoint_deleted', 'beneficiary_removed',
+                   'switch_set', 'switch_cleared')),
   retired        boolean NOT NULL DEFAULT false,
   synced_release text NOT NULL
 );
@@ -95,15 +106,16 @@ INSERT INTO audit.head (epoch, seq, hash, moved_at, started_at, start_reason, st
 VALUES (1, 0, decode(repeat('00', 32), 'hex'), now(), now(), 'created', decode(repeat('00', 32), 'hex'), NULL, true);
 
 -- One trigger function guards every audit table (the journal migration attaches it to its own).
--- It is SECURITY INVOKER on purpose, the one function here that is: its rule is "only fin_owner",
--- and inside a SECURITY DEFINER function current_user would always be the owner. As an invoker it
--- sees the statement's own role: fin_owner inside the sequencer and start_epoch (SECURITY DEFINER,
--- owned by fin_owner) or a watched fin_owner login, and anyone else, the superuser included, is
--- refused.
+-- It is SECURITY INVOKER on purpose: its rule is "only fin_owner", and inside a SECURITY DEFINER
+-- function current_user would always be the owner. As an invoker it sees the statement's own role:
+-- fin_owner inside the sequencer and start_epoch (SECURITY DEFINER, owned by fin_owner) or a watched
+-- fin_owner login, and anyone else, the superuser included, is refused. Its search_path holds no
+-- schema fin_owner can create objects in, so no function or operator it calls can be shadowed; the
+-- bootstrap's guard refuses any later change to it but the superuser's.
 CREATE FUNCTION audit.append_only() RETURNS trigger
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = audit, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
   IF TG_OP = 'TRUNCATE' THEN
@@ -321,8 +333,18 @@ BEGIN
     ctx := NULL;
   END IF;
 
-  -- 7. The row, with what the database stamps. No lock: the head is read, never locked, here.
-  SELECT h.epoch INTO cur_epoch FROM audit.head h WHERE h.current;
+  -- 7. The row, with what the database stamps. The epoch is the current head's, held FOR KEY SHARE
+  -- until this transaction ends: the lock a foreign key to the head would take. It never waits on
+  -- another writer or on the sequencer (FOR NO KEY UPDATE); only audit.start_epoch() (FOR UPDATE)
+  -- waits for it, so no row can still be uncommitted in an epoch that has ended (§3.9). A start
+  -- committing while this waits leaves the old head no longer current, so the read is retried.
+  FOR attempt IN 1..3 LOOP
+    SELECT h.epoch INTO cur_epoch FROM audit.head h WHERE h.current FOR KEY SHARE;
+    EXIT WHEN cur_epoch IS NOT NULL;
+  END LOOP;
+  IF cur_epoch IS NULL THEN
+    RAISE EXCEPTION 'audit.record: no current epoch' USING ERRCODE = 'FA011';
+  END IF;
   INSERT INTO audit.event (id, epoch, event, category, scope, organization_id, subject_user_id, mode,
     actor_kind, actor_id, actor_via, actor_key_id, actor_link_session_id, step_up_kind, step_up_method,
     step_up_ref, target_id, ref_ids, metadata, request_id, release, db_login, app_name, backend_pid,
@@ -347,11 +369,13 @@ END
 $fn$;
 
 -- The guard (§3.5): a deferred constraint trigger per guarded operation checks, at commit, that the
--- same transaction recorded an accepted event naming the row's key.
+-- same transaction recorded an accepted event naming the row's key. Like audit.append_only(), its
+-- search_path holds no schema fin_owner can create objects in, and the bootstrap's guard refuses any
+-- later change to it, or to a trigger calling it, but the superuser's.
 CREATE FUNCTION audit.require_event() RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = audit, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
   key_value text;
@@ -376,7 +400,10 @@ BEGIN
 END
 $fn$;
 
--- audit.install_guard(table, ops, key column, events): run only by migrations, as fin_owner.
+-- audit.install_guard(table, ops, key column, events): run only by migrations, as fin_owner. A guard's
+-- trigger name is made from its operation, key column and events, so installing the same guard again
+-- finds it in place and leaves it: a guard, once installed, is changed or removed only by the
+-- superuser (040_audit_guard.sql).
 CREATE FUNCTION audit.install_guard(p_table regclass, p_ops text[], p_key_column name, p_events text[])
 RETURNS void
 LANGUAGE plpgsql
@@ -423,7 +450,9 @@ BEGIN
       lower(split_part(op, ' ', 1)),
       left(p_key_column::text, 30),
       left(md5(op || '|' || p_key_column || '|' || array_to_string(p_events, ',')), 8));
-    EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, p_table);
+    CONTINUE WHEN EXISTS (
+      SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = p_table AND t.tgname = trigger_name
+    );
     EXECUTE format(
       'CREATE CONSTRAINT TRIGGER %I AFTER %s ON %s DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit.require_event(%L, %L)',
       trigger_name, op, p_table, p_key_column, array_to_string(p_events, ','));
@@ -432,7 +461,9 @@ END
 $fn$;
 
 -- The row hash, version 1 (§3.6), recomputed in packages/audit/src/chain.ts. SHA-256 over the fields
--- in order, each as a 4-byte big-endian length and its UTF-8 bytes, a null as FF FF FF FF.
+-- in order, each as a 4-byte big-endian length and its UTF-8 bytes, a null as FF FF FF FF. Every byte
+-- comes from a function, never from a string literal, so no session setting (such as
+-- standard_conforming_strings) can change what is hashed.
 CREATE FUNCTION audit.row_hash(r audit.event, p_prev_hash bytea) RETURNS bytea
 LANGUAGE plpgsql
 STABLE
@@ -440,6 +471,7 @@ SECURITY DEFINER
 SET search_path = audit, pg_temp
 AS $fn$
 DECLARE
+  null_field constant bytea := decode('ffffffff', 'hex');
   buf bytea := ''::bytea;
   f text;
   b bytea;
@@ -458,20 +490,20 @@ BEGIN
                      to_char(r.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')];
   FOREACH f IN ARRAY head_fields LOOP
     IF f IS NULL THEN
-      buf := buf || '\xffffffff'::bytea;
+      buf := buf || null_field;
     ELSE
       b := convert_to(f, 'UTF8');
       buf := buf || int4send(octet_length(b)) || b;
     END IF;
   END LOOP;
   IF p_prev_hash IS NULL THEN
-    buf := buf || '\xffffffff'::bytea;
+    buf := buf || null_field;
   ELSE
     buf := buf || int4send(octet_length(p_prev_hash)) || p_prev_hash;
   END IF;
   FOREACH f IN ARRAY fields LOOP
     IF f IS NULL THEN
-      buf := buf || '\xffffffff'::bytea;
+      buf := buf || null_field;
     ELSE
       b := convert_to(f, 'UTF8');
       buf := buf || int4send(octet_length(b)) || b;
@@ -481,11 +513,14 @@ BEGIN
 END
 $fn$;
 
--- The sequencer (§3.6): chains up to p_max committed, unchained rows of the current epoch in
--- (xid, id) order, gaplessly, and moves the head. EXECUTE for fin_worker only.
-CREATE FUNCTION audit.sequence(p_max integer DEFAULT 5000) RETURNS integer
+-- Chains up to p_max (all when null) committed, unchained rows of epoch p_epoch onto that epoch's
+-- head, in (xid, id) order, gaplessly, and moves the head. Only committed rows are visible, so a row of
+-- an open transaction waits for the next pass. It runs inside audit.sequence() and
+-- audit.start_epoch(), as fin_owner (it is SECURITY INVOKER and granted to no one), and takes the head
+-- row itself, so a caller that has not locked it still chains under the lock.
+CREATE FUNCTION audit.chain_epoch(p_epoch integer, p_max integer) RETURNS integer
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = audit, pg_temp
 AS $fn$
 DECLARE
@@ -496,18 +531,15 @@ DECLARE
   new_hash bytea;
   n integer := 0;
 BEGIN
-  IF p_max IS NULL OR p_max < 1 OR p_max > 50000 THEN
-    RAISE EXCEPTION 'audit.sequence: p_max must be between 1 and 50000' USING ERRCODE = '22023';
-  END IF;
-  SELECT * INTO h FROM audit.head WHERE current FOR UPDATE;
+  SELECT * INTO h FROM audit.head WHERE epoch = p_epoch FOR NO KEY UPDATE;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'audit.sequence: no current epoch' USING ERRCODE = 'FA011';
+    RAISE EXCEPTION 'audit.chain_epoch: no such epoch' USING ERRCODE = 'FA011';
   END IF;
   next_seq := h.seq;
   prev := h.hash;
   FOR r IN
     SELECT * FROM audit.event
-    WHERE seq IS NULL AND epoch = h.epoch
+    WHERE seq IS NULL AND epoch = p_epoch
     ORDER BY xid, id
     LIMIT p_max
     FOR UPDATE
@@ -521,14 +553,42 @@ BEGIN
   END LOOP;
   IF n > 0 THEN
     UPDATE audit.head SET seq = next_seq, hash = prev, moved_at = pg_catalog.clock_timestamp()
-    WHERE epoch = h.epoch;
+    WHERE epoch = p_epoch;
   END IF;
   RETURN n;
 END
 $fn$;
 
--- Seconds since the oldest unchained row, 0 when none: the probe reads it even when the sequencer
--- has stopped (audit-unsequenced). EXECUTE for fin_probe.
+-- The sequencer (§3.6): chains up to p_max committed, unchained rows of the current epoch and moves
+-- the head. EXECUTE for fin_worker only. It locks the head FOR NO KEY UPDATE, which writers' FOR KEY
+-- SHARE never conflicts with, so a transaction held open never stalls it; a start_epoch committing
+-- while it waits leaves the old head no longer current, so the read is retried.
+CREATE FUNCTION audit.sequence(p_max integer DEFAULT 5000) RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = audit, pg_temp
+AS $fn$
+DECLARE
+  cur_epoch integer;
+BEGIN
+  IF p_max IS NULL OR p_max < 1 OR p_max > 50000 THEN
+    RAISE EXCEPTION 'audit.sequence: p_max must be between 1 and 50000' USING ERRCODE = '22023';
+  END IF;
+  FOR attempt IN 1..3 LOOP
+    SELECT h.epoch INTO cur_epoch FROM audit.head h WHERE h.current FOR NO KEY UPDATE;
+    EXIT WHEN cur_epoch IS NOT NULL;
+  END LOOP;
+  IF cur_epoch IS NULL THEN
+    RAISE EXCEPTION 'audit.sequence: no current epoch' USING ERRCODE = 'FA011';
+  END IF;
+  RETURN audit.chain_epoch(cur_epoch, p_max);
+END
+$fn$;
+
+-- Seconds since the oldest unchained row of any epoch, 0 when none: the probe reads it even when the
+-- sequencer has stopped (audit-unsequenced). No row is left unchained in an epoch that has ended
+-- (audit.start_epoch() chains them first), so a row counted here is always one the sequencer will
+-- reach, or one that should page. EXECUTE for fin_probe.
 CREATE FUNCTION audit.unsequenced_age() RETURNS integer
 LANGUAGE sql
 STABLE
@@ -541,20 +601,31 @@ AS $fn$
   WHERE e.seq IS NULL
 $fn$;
 
--- A new epoch (§3.9), only through a registered `migrate --task` run as fin_owner. It inserts the new
--- head (seq 0, hash = p_prev_hash), clears current on the old one, and records audit.epoch_started as
--- the new epoch's first row. The row's ID, the run ID and the release come from the task, because
--- IDs are made in the application (DA-02).
+-- A new epoch (§3.9), only through a registered `migrate --task` run as fin_owner. In order, it:
+--   1. refuses a start the environment does not allow: the task's FIN_ENVIRONMENT must be the one the
+--      bootstrap wrote to ops.environment, and production refuses a reset (FA012);
+--   2. locks the current head FOR UPDATE, which waits until every transaction that recorded a row in
+--      the old epoch has ended (audit.record() holds the head FOR KEY SHARE) and holds new ones off
+--      until this commits;
+--   3. chains the old epoch's remaining committed rows into the old epoch, so none is left outside the
+--      chain, and records the head it reached as `previousSeq`;
+--   4. inserts the new head (seq 0, hash = p_prev_hash), clears current on the old one, records
+--      audit.epoch_started, and chains it at once as the new epoch's first row, so no row of a
+--      transaction that waited on this one can come before it.
+-- The row's ID, the run ID and the release come from the task, because IDs are made in the
+-- application (DA-02).
 CREATE FUNCTION audit.start_epoch(p_reason text, p_prev_hash bytea, p_marker_key text,
-  p_event_id text, p_run_id text, p_release text)
+  p_event_id text, p_run_id text, p_release text, p_environment text)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = audit, pg_temp
+SET lock_timeout = '30s'
 AS $fn$
 DECLARE
   old audit.head%ROWTYPE;
   new_epoch integer;
+  recorded_environment text;
 BEGIN
   IF p_reason IS NULL OR p_reason NOT IN ('restore', 'reset', 'failover') THEN
     RAISE EXCEPTION 'audit.start_epoch: reason must be restore, reset or failover' USING ERRCODE = '22023';
@@ -565,10 +636,23 @@ BEGIN
   IF p_marker_key IS NULL OR p_marker_key !~ '^ops/(restore|reset|failover)/[A-Za-z0-9._-]{1,120}\.json$' THEN
     RAISE EXCEPTION 'audit.start_epoch: marker key shape' USING ERRCODE = '22023';
   END IF;
+  SELECT e.name INTO recorded_environment FROM ops.environment e;
+  IF recorded_environment IS NULL THEN
+    RAISE EXCEPTION 'audit.start_epoch: the bootstrap recorded no environment' USING ERRCODE = 'FA012';
+  END IF;
+  IF p_environment IS DISTINCT FROM recorded_environment THEN
+    RAISE EXCEPTION 'audit.start_epoch: the task names another environment than this database''s'
+      USING ERRCODE = 'FA012';
+  END IF;
+  IF p_reason = 'reset' AND recorded_environment = 'production' THEN
+    RAISE EXCEPTION 'audit.start_epoch: production refuses a reset' USING ERRCODE = 'FA012';
+  END IF;
   SELECT * INTO old FROM audit.head WHERE current FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'audit.start_epoch: no current epoch' USING ERRCODE = 'FA011';
   END IF;
+  PERFORM audit.chain_epoch(old.epoch, NULL);
+  SELECT * INTO old FROM audit.head WHERE epoch = old.epoch;
   SELECT max(epoch) + 1 INTO new_epoch FROM audit.head;
   UPDATE audit.head SET current = false WHERE epoch = old.epoch;
   INSERT INTO audit.head (epoch, seq, hash, moved_at, started_at, start_reason, start_prev_hash, marker_key, current)
@@ -584,6 +668,7 @@ BEGIN
     'metadata', jsonb_build_object('reason', p_reason, 'previousEpoch', old.epoch,
                                    'previousSeq', old.seq, 'markerKey', p_marker_key),
     'release', p_release));
+  PERFORM audit.chain_epoch(new_epoch, NULL);
   RETURN new_epoch;
 END
 $fn$;
@@ -593,6 +678,7 @@ REVOKE ALL ON FUNCTION audit.record(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit.require_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit.install_guard(regclass, text[], name, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit.row_hash(audit.event, bytea) FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.chain_epoch(integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit.sequence(integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit.unsequenced_age() FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit.start_epoch(text, bytea, text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.start_epoch(text, bytea, text, text, text, text, text) FROM PUBLIC;

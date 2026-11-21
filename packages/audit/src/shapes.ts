@@ -39,21 +39,42 @@ export function personalShapeOf(text: string): string | undefined {
   return SHAPES.find((shape) => shape.pattern.test(text))?.name;
 }
 
-/** Throws AuditMetadataError when any string in the value (at any depth) holds a refused shape. */
-export function assertNoPersonalShapes(value: unknown, field = "metadata"): void {
+/** Calls `visit` with every string in the value, at any depth, and the path that names it. */
+function eachString(
+  value: unknown,
+  field: string,
+  visit: (text: string, field: string) => void,
+): void {
   if (typeof value === "string") {
-    const shape = personalShapeOf(value);
-    if (shape !== undefined) throw new AuditMetadataError(field, shape);
+    visit(value, field);
     return;
   }
   if (Array.isArray(value)) {
     value.forEach((item, i) => {
-      assertNoPersonalShapes(item, `${field}[${i}]`);
+      eachString(item, `${field}[${i}]`, visit);
     });
     return;
   }
   if (typeof value === "object" && value !== null) {
-    for (const [key, item] of Object.entries(value))
-      assertNoPersonalShapes(item, `${field}.${key}`);
+    for (const [key, item] of Object.entries(value)) eachString(item, `${field}.${key}`, visit);
   }
+}
+
+/** Throws AuditMetadataError when any string in the value (at any depth) holds a refused shape. */
+export function assertNoPersonalShapes(value: unknown, field = "metadata"): void {
+  eachString(value, field, (text, path) => {
+    const shape = personalShapeOf(text);
+    if (shape !== undefined) throw new AuditMetadataError(path, shape);
+  });
+}
+
+/**
+ * Throws AuditMetadataError (shape `lone-surrogate`) when any string in the value is not well-formed
+ * Unicode: JSON.stringify writes a lone surrogate as `\udXXX`, which Postgres's jsonb refuses (22P02),
+ * so the row could not be stored and the action would fail with a code no audit alert reads.
+ */
+export function assertStorableText(value: unknown, field: string): void {
+  eachString(value, field, (text, path) => {
+    if (!text.isWellFormed()) throw new AuditMetadataError(path, "lone-surrogate");
+  });
 }

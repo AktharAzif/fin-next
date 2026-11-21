@@ -136,7 +136,9 @@ function exitCodeFor(error: unknown): number {
   if (error instanceof DatabaseConfigError) return EXIT_CONFIG;
   if (
     error instanceof MigrationError &&
-    /^(bootstrap_verifiers|bootstrap_replicas|migration_release|grants_invalid)$/.test(error.code)
+    /^(bootstrap_verifiers|bootstrap_replicas|bootstrap_environment|migration_release|grants_invalid)$/.test(
+      error.code,
+    )
   ) {
     return EXIT_CONFIG;
   }
@@ -168,6 +170,7 @@ async function bootstrapMode(
     const result = await bootstrap(client, {
       verifiers,
       replicas,
+      environment: base.FIN_ENVIRONMENT,
       bootstrapDir: dirs.bootstrap,
       fragments: loadFragments(dirs.grants),
     });
