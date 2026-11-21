@@ -274,11 +274,13 @@ describe("Tabs and TabLinks", () => {
     // No margin at all, so none can widen a scroll container or clip the first tab's ring.
     expect(row.filter((name) => /^-?m[xylrtbse]?-/.test(name))).toEqual([]);
     expect(classes(tagsWith(html, "role", "tabpanel")[0])).toContain("pt-6");
-    // The root may shrink below its row, and is a column, so a panel given flex-1 fills the height
-    // left under the row.
+    // The root may shrink below its row and never grows past its parent, and is a column, so a
+    // panel given flex-1 fills the height left under the row.
     expect(classes(tagsWith(html, "data-slot", "tabs")[0])).toEqual(
-      expect.arrayContaining(["min-w-0", "flex", "flex-col"]),
+      expect.arrayContaining(["min-w-0", "max-w-full", "flex", "flex-col"]),
     );
+    // The row is a scroll container, which a column may shrink to nothing: it never shrinks.
+    expect(row).toEqual(expect.arrayContaining(["shrink-0", "max-w-full"]));
     const links = render(
       <TabLinks label="Customer">
         <TabLink href="/customers/c1" current>
@@ -287,7 +289,7 @@ describe("Tabs and TabLinks", () => {
       </TabLinks>,
     );
     expect(classes(links.match(/<nav\b[^>]*>/)?.[0])).toEqual(
-      expect.arrayContaining(["min-w-0", "border-b"]),
+      expect.arrayContaining(["min-w-0", "max-w-full", "border-b"]),
     );
     const list = classes(links.match(/<ul\b[^>]*>/)?.[0]);
     expect(list).toContain("overflow-x-auto");
@@ -346,7 +348,7 @@ describe("Tabs and TabLinks", () => {
     const html = render(
       <>
         <Tabs defaultValue="overview" variant="drawer" className="flex-row">
-          <TabsList aria-label="Customer" className="mt-4 px-8">
+          <TabsList aria-label="Customer" className="mt-4 px-8 shrink">
             <Tab value="overview" className="h-8">
               Overview
             </Tab>
@@ -366,8 +368,9 @@ describe("Tabs and TabLinks", () => {
     expect(root).toContain("flex-row");
     expect(root).not.toContain("flex-col");
     const list = classes(tagsWith(html, "role", "tablist")[0]);
-    expect(list).toEqual(expect.arrayContaining(["mt-4", "px-8", "border-b"]));
+    expect(list).toEqual(expect.arrayContaining(["mt-4", "px-8", "shrink", "border-b"]));
     expect(list).not.toContain("px-4");
+    expect(list).not.toContain("shrink-0");
     const tab = classes(tagsWith(html, "role", "tab")[0]);
     expect(tab).toContain("h-8");
     expect(tab).not.toContain("h-10");
@@ -470,6 +473,8 @@ describe("Tabs and TabLinks", () => {
       debug: true,
       "data-smuggled": "",
       tabIndex: 5,
+      // Left out: the SDK would keep each hidden panel's box and Tab stop.
+      hiddenUntilFound: true,
     };
     // Tabs calls no hook, so calling it shows the element it hands the SDK's root.
     const element = Tabs({
@@ -479,7 +484,6 @@ describe("Tabs and TabLinks", () => {
       onValueChange,
       activation: "manual",
       loop: false,
-      hiddenUntilFound: true,
       controller,
       id: "customer-tabs",
       variant: "drawer",
@@ -494,7 +498,6 @@ describe("Tabs and TabLinks", () => {
         "onValueChange",
         "activation",
         "loop",
-        "hiddenUntilFound",
         "controller",
         "id",
         "data-variant",
@@ -504,11 +507,7 @@ describe("Tabs and TabLinks", () => {
     );
     expect(handed.onValueChange).toBe(onValueChange);
     expect(handed.controller).toBe(controller);
-    expect([handed.activation, handed.loop, handed.hiddenUntilFound]).toEqual([
-      "manual",
-      false,
-      true,
-    ]);
+    expect([handed.activation, handed.loop]).toEqual(["manual", false]);
     // The SDK runs the change with the handler Tabs handed it: cancel() keeps the selection.
     const sdk = tabsPrimitive({
       id: "customer",
@@ -581,6 +580,8 @@ describe("Tabs and TabLinks", () => {
       "aria-hidden": "true",
       "aria-describedby": "smuggled-description",
       orientation: "vertical",
+      // Find in page: with it the SDK would render every hidden panel, and `hidden=` with it.
+      hiddenUntilFound: true,
       target: "_blank",
       onClick: noop,
       dangerouslySetInnerHTML: { __html: "<img data-raw-markup>" },
@@ -590,7 +591,6 @@ describe("Tabs and TabLinks", () => {
     const owned: Record<string, unknown> = {
       id: "smuggled-id",
       keepMounted: true,
-      hiddenUntilFound: true,
       count: 777,
       linkAs: ({ href }: { href: string }) => <b data-smuggled-link="">{href}</b>,
     };
@@ -606,7 +606,7 @@ describe("Tabs and TabLinks", () => {
     }
     const html = render(
       <>
-        <Tabs defaultValue="overview" {...smuggle("id", "hiddenUntilFound")}>
+        <Tabs defaultValue="overview" {...smuggle("id")}>
           <TabsList aria-label="Customer" {...smuggle()}>
             <Tab value="overview" {...smuggle("count")}>
               Overview
@@ -747,7 +747,7 @@ describe("Tabs and TabLinks", () => {
       <TabPanel key="19" value="a" id="panel">
         A
       </TabPanel>,
-      // @ts-expect-error: find in page is the root's choice
+      // @ts-expect-error: no part takes find in page (hidden panels would keep a box and a Tab stop)
       <TabPanel key="20" value="a" hiddenUntilFound>
         A
       </TabPanel>,
@@ -769,8 +769,12 @@ describe("Tabs and TabLinks", () => {
       </TabLink>,
       // @ts-expect-error: a tab link needs its label
       <TabLink key="25" href="/a" />,
+      // @ts-expect-error: no part takes find in page, the root included
+      <Tabs key="26" hiddenUntilFound>
+        x
+      </Tabs>,
     ];
-    expect(elements).toHaveLength(25);
+    expect(elements).toHaveLength(26);
     // onValueChange is typed exactly as the SDK types it, details and all.
     type Same<A, B> =
       (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -796,7 +800,6 @@ describe("Tabs and TabLinks", () => {
         onValueChange: true,
         activation: true,
         loop: true,
-        hiddenUntilFound: true,
         controller: true,
         id: true,
         variant: true,

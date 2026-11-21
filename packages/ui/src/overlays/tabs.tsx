@@ -14,10 +14,12 @@
 //   content start on the drawer's 24px content edge.
 //
 // In both, a row too wide for its box (several tabs on a phone) scrolls sideways inside itself
-// instead of widening the page, whether the parent is a block, a grid or a flex row. Tabs and
-// panels draw their focus ring inside their own box, where no edge can clip it. A count follows a
-// label only for work that waits for someone ("To settle 3"); with nothing waiting there is no
-// count at all, never a 0.
+// instead of widening the page, whether the parent is a block, a grid or a flex box, stretching
+// the tabs or not (a wrapper of the caller's own in between needs `min-w-0 max-w-full` too). Given
+// a height, the tabs keep their row whole and leave the panels what is left. Tabs and panels draw
+// their focus ring inside their own box, where no edge can clip it. A count follows a label only
+// for work that waits for someone ("To settle 3"); with nothing waiting there is no count at all,
+// never a 0.
 //
 // TabLinks draw the same row as a named <nav> holding a list of ordinary links, for tabs that are
 // addresses of their own (Settings' sections, a customer's `?tab=`). They are not a tablist: every
@@ -46,8 +48,11 @@ type Layout = "page" | "drawer";
 
 const LayoutContext = createContext<Layout>("page");
 
-/** The box that holds a row: it may shrink below its content, and draws the 1px rule under it. */
-const BAR = "min-w-0 border-b border-border";
+/**
+ * The box that holds a row: it may shrink below its content, never grows past its parent, and
+ * draws the 1px rule under it.
+ */
+const BAR = "min-w-0 max-w-full border-b border-border";
 
 /** The row itself, per layout; it scrolls sideways rather than overflow its box. */
 const ROW: Record<Layout, string> = {
@@ -95,14 +100,16 @@ function only<P extends object, K extends keyof P>(props: P, names: readonly K[]
   return picked as Pick<P, K>;
 }
 
-/** The SDK root's documented options that Fin's tabs take; `orientation` is not one (always a row). */
+/**
+ * The SDK root's documented options that Fin's tabs take. `orientation` is not one (always a row),
+ * nor `hiddenUntilFound`: the SDK keeps each hidden panel's box and Tab stop under it.
+ */
 const ROOT_OPTIONS = [
   "value",
   "defaultValue",
   "onValueChange",
   "activation",
   "loop",
-  "hiddenUntilFound",
   "controller",
   "id",
 ] as const;
@@ -127,7 +134,7 @@ export function Tabs(props: TabsProps) {
       <SdkTabs
         {...only(props, ROOT_OPTIONS)}
         data-variant={variant}
-        className={cn("flex min-w-0 flex-col", props.className)}
+        className={cn("flex min-w-0 max-w-full flex-col", props.className)}
       >
         {content(props.children)}
       </SdkTabs>
@@ -146,14 +153,17 @@ export type TabsListProps = TabsListName & {
   children: ReactNode;
 };
 
-/** The row of tabs over its rule. */
+/**
+ * The row of tabs over its rule. It never shrinks in the root's column: as a scroll container it
+ * could, so a panel taller than a Tabs given a height would squash it.
+ */
 export function TabsList(props: TabsListProps) {
   const layout = useContext(LayoutContext);
   return (
     <SdkTabsList
       aria-label={props["aria-label"]}
       aria-labelledby={props["aria-labelledby"]}
-      className={cn(BAR, ROW[layout], props.className)}
+      className={cn(BAR, ROW[layout], "shrink-0", props.className)}
     >
       {content(props.children)}
     </SdkTabsList>

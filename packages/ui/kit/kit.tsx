@@ -122,6 +122,29 @@ function WideTabs(props: { name: string }) {
   );
 }
 
+function WideTabLinks(props: { name: string }) {
+  return (
+    <TabLinks label={props.name}>
+      {WIDE_TABS.map((label, index) => (
+        <TabLink key={label} href={`#section-${index}`} current={index === 0}>
+          {label}
+        </TabLink>
+      ))}
+    </TabLinks>
+  );
+}
+
+/** More lines than a 160px box holds: a panel taller than the tabs it sits in. */
+function TallLines() {
+  return (
+    <>
+      {Array.from({ length: 30 }, (_, index) => `Line ${index + 1}`).map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+    </>
+  );
+}
+
 // Sample values shaped like secrets are joined at run time, so the source holds no string the
 // public-safety check would take for a credential (CONTRIBUTING, "Tests that need a
 // secret-shaped value").
@@ -718,6 +741,38 @@ export function Kit(props: { onReady: () => void }) {
             </div>
             <div data-kit="tabs-flex" className="flex">
               <WideTabs name="Customer in a flex row" />
+            </div>
+            {/* The same in parents that leave the tabs their own width instead of stretching them. */}
+            <div data-kit="tabs-grid-start" className="grid justify-items-start">
+              <WideTabs name="Customer in a start-aligned grid" />
+            </div>
+            <div data-kit="tabs-grid-centre" className="grid place-items-center">
+              <WideTabs name="Customer in a centred grid" />
+            </div>
+            <div data-kit="tabs-column-start" className="flex flex-col items-start">
+              <WideTabs name="Customer in a start-aligned column" />
+            </div>
+            <div data-kit="tab-links-grid-start" className="grid justify-items-start">
+              <WideTabLinks name="Sections in a start-aligned grid" />
+            </div>
+            {/* Tabs given a height, each panel taller than it: the row keeps its height and rule. */}
+            <div data-kit="tabs-bounded" className="h-40 overflow-hidden">
+              <Tabs defaultValue="plain" className="h-full">
+                <TabsList aria-label="Customer in a bounded box">
+                  <Tab value="plain">Plain</Tab>
+                  <Tab value="filling">Filling</Tab>
+                  <Tab value="scrolling">Scrolling</Tab>
+                </TabsList>
+                <TabPanel value="plain">
+                  <TallLines />
+                </TabPanel>
+                <TabPanel value="filling" className="flex-1">
+                  <TallLines />
+                </TabPanel>
+                <TabPanel value="scrolling" className="overflow-y-auto">
+                  <TallLines />
+                </TabPanel>
+              </Tabs>
             </div>
             {/* A disabled tab the page names: it still looks unavailable, with no chosen mark. */}
             <Tabs defaultValue="documents">

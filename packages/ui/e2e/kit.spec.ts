@@ -640,9 +640,17 @@ test.describe("the components @kit", () => {
   test("tabs: a row too wide scrolls inside itself in a grid and in a flex row; the page never grows", async ({
     page,
   }) => {
-    for (const name of ["tabs-grid", "tabs-flex"]) {
+    for (const name of [
+      "tabs-grid",
+      "tabs-flex",
+      // Parents that leave the tabs their own width instead of stretching them.
+      "tabs-grid-start",
+      "tabs-grid-centre",
+      "tabs-column-start",
+      "tab-links-grid-start",
+    ]) {
       const fit = await page.locator(`[data-kit="${name}"]`).evaluate((parent) => {
-        const list = parent.querySelector('[role="tablist"]') as HTMLElement;
+        const list = parent.querySelector('[role="tablist"], nav > ul') as HTMLElement;
         const outer = parent.getBoundingClientRect();
         const row = list.getBoundingClientRect();
         return {
@@ -656,6 +664,23 @@ test.describe("the components @kit", () => {
         };
       });
       expect(fit, name).toEqual({ scrolls: true, inside: true, parent: 0, page: 0 });
+    }
+  });
+
+  test("tabs given a height keep their row whole when a panel is taller than they are", async ({
+    page,
+  }) => {
+    const bounded = page.locator('[data-kit="tabs-bounded"]');
+    // A plain panel, one given flex-1 and one that scrolls itself: none squashes the row.
+    for (const name of ["Plain", "Filling", "Scrolling"]) {
+      await bounded.getByRole("tab", { name }).click();
+      await expect(bounded.getByRole("tabpanel")).toBeVisible();
+      const row = await bounded.getByRole("tablist").evaluate((list) => ({
+        height: Math.round(list.getBoundingClientRect().height) + 0,
+        // No scroll inside the row's height: every tab is shown whole above the rule.
+        whole: list.clientHeight === list.scrollHeight,
+      }));
+      expect(row, name).toEqual({ height: 41, whole: true });
     }
   });
 
