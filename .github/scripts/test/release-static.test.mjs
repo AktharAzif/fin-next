@@ -670,6 +670,16 @@ describe("build, merge, record and manifest end to end", () => {
           symlinkSync("/etc/hosts", join(root, "release", "source-maps", "console", "hosts.map")),
         /is a link/,
       ],
+      [
+        "a skipped output that was also built",
+        (root) => {
+          const file = join(root, "release", "meta", "static-build.json");
+          const meta = JSON.parse(readFileSync(file, "utf8"));
+          meta.skipped.push({ key: "console", why: "x" });
+          writeTree(root, { "release/meta/static-build.json": JSON.stringify(meta) });
+        },
+        /lists a skipped output that is not one/,
+      ],
     ];
     for (const [what, plant, why] of cases) {
       const root = repo(t);
@@ -678,6 +688,19 @@ describe("build, merge, record and manifest end to end", () => {
       plant(root);
       assert.throws(() => merge({ root, env }), why, what);
     }
+    // A skipped output's reason reaches the attested manifest only as printable text.
+    const root = repo(t);
+    const env = { GITHUB_OUTPUT: join(root, "out.txt"), GITHUB_SHA: SHA };
+    build({ root, env, runBuild: () => {} });
+    const file = join(root, "release", "meta", "static-build.json");
+    const meta = JSON.parse(readFileSync(file, "utf8"));
+    meta.skipped[0].why = "line one\n::error::line two";
+    writeTree(root, { "release/meta/static-build.json": JSON.stringify(meta) });
+    merge({ root, env });
+    const merged = JSON.parse(
+      readFileSync(join(root, "release", "meta", "static-merged.json"), "utf8"),
+    );
+    assert.deepEqual(merged.skipped, [{ key: "docs", why: "line one?::error::line two" }]);
   });
 });
 

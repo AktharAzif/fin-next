@@ -112,14 +112,6 @@ export function isSourceMap(path) {
 }
 
 /**
- * Whether a file name is one no artefact holds (REFUSED_NAMES), in any case.
- * @param {string} path
- */
-export function isRefusedName(path) {
-  return REFUSED_NAMES.has((path.split("/").pop() ?? "").toLowerCase());
-}
-
-/**
  * @typedef {{ app: string, name: string, key: string, dir: string, mapsDir: string }} StaticOutput
  * @typedef {{ path: string, abs: string }} FileEntry
  */
@@ -622,9 +614,16 @@ export function merge(ctx) {
       `release.static.merge key=${key} files=${merged.length} own=${carry.own.length} carried=${carry.carried.length} from=${previousDir === null ? "none" : previousSha}`,
     );
   }
-  const skipped = isRecord(meta) && Array.isArray(meta.skipped) ? meta.skipped : [];
-  for (const s of skipped) {
-    if (isRecord(s) && typeof s.key === "string" && KEY.test(s.key)) setOutput(s.key, "false", env);
+  // The build job's list of skipped outputs, rebuilt from its keys and printable reasons only:
+  // it ends up in the attested manifest.
+  /** @type {{ key: string, why: string }[]} */
+  const skipped = [];
+  for (const s of isRecord(meta) && Array.isArray(meta.skipped) ? meta.skipped : []) {
+    if (!isRecord(s) || typeof s.key !== "string" || !KEY.test(s.key) || built.includes(s.key)) {
+      throw new Error("static-build.json lists a skipped output that is not one");
+    }
+    skipped.push({ key: s.key, why: clean(typeof s.why === "string" ? s.why : "skipped", 200) });
+    setOutput(s.key, "false", env);
   }
   const maps = walkFiles(join(root, RELEASE, "source-maps")).length;
   setOutput("maps", maps > 0 ? "true" : "false", env);
