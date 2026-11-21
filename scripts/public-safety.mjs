@@ -16,10 +16,17 @@
 // UTF-16 in both byte orders and both alignments; and as UTF-32 by its byte-order mark. Every
 // rule runs on every reading, so no encoding and no NUL byte opts a file out. A symbolic link is
 // read as what git publishes for it: its target.
+// A tracked file is read as git stores it in the index, which is what a commit publishes, from
+// the object store, so no checkout setting (a working-tree-encoding or filter attribute, line-end
+// conversion) changes what is read; the working tree's copy is read as well where it differs, so
+// a change not staged yet is found before it is committed.
 // It prints file:line and the rule's name, never the matched value, so its output is safe in a
 // public log. With --commits or --range it scans what a push would publish instead: each commit's
 // message and the full content of every file it adds or changes (for a merge, every file that
-// differs from its first parent, so what the merge itself adds is read too).
+// differs from its first parent, so what the merge itself adds is read too), and its author and
+// committer dates, which must carry the offset +0000: git records the committing machine's UTC
+// offset with each date, the public repository shows it, and the build clock's time zone is
+// private (G-09), so every commit is made with TZ=UTC. A finding names the date, never its offset.
 //
 // This file is self-contained (Node built-ins only, no import from another file of the
 // repository), so every line that decides its verdict is under the control path and the owner's
@@ -73,21 +80,51 @@ function isRecord(value) {
 }
 
 /**
- * The tracked entries of the repository at `root` with their git modes, as [path, mode] pairs
- * sorted by path. Entries deleted from the working tree are left out.
+ * The entries of the index of the repository at `root`, sorted by path: each path with the mode
+ * and blob of every stage it has (a path in a merge conflict has several).
  * @param {string} root
- * @returns {[string, string][]}
+ * @returns {[string, { mode: string, blob: string }[]][]}
  */
-function trackedEntries(root) {
-  /** @type {Map<string, string>} */
+function indexEntries(root) {
+  /** @type {Map<string, { mode: string, blob: string }[]>} */
   const entries = new Map();
   for (const record of git(root, ["ls-files", "-z", "--stage"]).split("\0")) {
     const tab = record.indexOf("\t");
-    if (tab >= 0) entries.set(record.slice(tab + 1), record.slice(0, record.indexOf(" ")));
+    if (tab < 0) continue;
+    const [mode = "", blob = ""] = record.slice(0, tab).split(" ");
+    const path = record.slice(tab + 1);
+    entries.set(path, [...(entries.get(path) ?? []), { mode, blob }]);
   }
-  return [...entries]
-    .filter(([path]) => lstatSync(join(root, path), { throwIfNoEntry: false }) !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Reads blobs from the object store in one `git cat-file --batch`.
+ * @param {string} root
+ * @param {string[]} blobs object names
+ * @returns {Map<string, Buffer>} each blob's bytes (a missing one is left out)
+ */
+function readBlobs(root, blobs) {
+  /** @type {Map<string, Buffer>} */
+  const contents = new Map();
+  const wanted = [...new Set(blobs)];
+  if (wanted.length === 0) return contents;
+  const out = execFileSync("git", ["-C", root, "cat-file", "--batch"], {
+    input: `${wanted.join("\n")}\n`,
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let at = 0;
+  while (at < out.length) {
+    const end = out.indexOf(0x0a, at);
+    if (end < 0) break;
+    const [name = "", type = "", size = ""] = out.subarray(at, end).toString("latin1").split(" ");
+    at = end + 1;
+    if (type === "missing" || !/^\d+$/.test(size)) continue;
+    contents.set(name, out.subarray(at, at + Number(size)));
+    at += Number(size) + 1; // the content, then a line feed
+  }
+  return contents;
 }
 
 /**
@@ -568,24 +605,78 @@ export function scanName(name, refused, where = "in the file's path", label = na
 }
 
 /**
- * Scans the tracked files of the working tree.
+ * Scans the tracked files: each path's content as git stores it in the index, which is what a
+ * commit publishes (read from the object store, so no checkout setting such as a
+ * working-tree-encoding or a filter attribute changes what is read), and the working tree's copy
+ * too where it differs, so a change not staged yet is found before it is committed. A finding in
+ * only one of the two copies says which. A symbolic link is read as its target, which is what git
+ * stores for it; a submodule has no content here.
  * @param {string} root
  * @param {string[]} refuseList
  * @returns {Finding[]}
  */
 export function scanTree(root, refuseList) {
   const refused = refuseMatcher(refuseList);
+  const entries = indexEntries(root);
+  const blobs = readBlobs(
+    root,
+    entries.flatMap(([, stages]) => stages.filter((s) => s.mode !== "160000").map((s) => s.blob)),
+  );
   /** @type {Finding[]} */
   const findings = [];
-  for (const [file, mode] of trackedEntries(root)) {
+  for (const [file, stages] of entries) {
     findings.push(...scanName(file, refused));
-    if (mode === "160000") continue; // a submodule: its files are not in this repository
+    const stored = stages.filter((s) => s.mode !== "160000"); // a submodule: no content here
+    if (stored.length === 0) continue;
+    /** @type {{ link: boolean, bytes: Buffer }[]} */
+    const copies = stored.map((s) => ({
+      link: s.mode === "120000",
+      bytes: blobs.get(s.blob) ?? Buffer.alloc(0),
+    }));
+    if (stored.some((s) => !blobs.has(s.blob))) {
+      findings.push({ file, rule: "unreadable", message: "git could not read this file's blob" });
+    }
     const full = join(root, file);
-    const stat = lstatSync(full);
-    if (stat.isSymbolicLink()) {
-      findings.push(...scanText(file, readlinkSync(full), refused)); // git publishes the target
-    } else if (stat.isFile()) {
-      findings.push(...scanContent(file, readFileSync(full), refused));
+    const stat = lstatSync(full, { throwIfNoEntry: false });
+    /** @type {{ link: boolean, bytes: Buffer } | undefined} */
+    let working;
+    if (stat?.isSymbolicLink()) working = { link: true, bytes: Buffer.from(readlinkSync(full)) };
+    else if (stat?.isFile()) working = { link: false, bytes: readFileSync(full) };
+    // A file deleted from the working tree but still in the index differs too.
+    const differs =
+      working === undefined ||
+      !copies.some((c) => c.link === working.link && c.bytes.equals(working.bytes));
+    /**
+     * @param {{ link: boolean, bytes: Buffer }} copy
+     * @returns {Finding[]}
+     */
+    const scan = (copy) =>
+      copy.link
+        ? scanText(file, copy.bytes.toString("utf8"), refused)
+        : scanContent(file, copy.bytes, refused);
+    const inIndex = copies.flatMap(scan);
+    const inWorkingTree = differs && working !== undefined ? scan(working) : [];
+    const key = (/** @type {Finding} */ f) => `${f.line}|${f.rule}|${f.message}`;
+    const indexKeys = new Set(inIndex.map(key));
+    const workingKeys = new Set(inWorkingTree.map(key));
+    /** @type {Set<string>} */
+    const seen = new Set();
+    for (const finding of inIndex) {
+      if (seen.has(key(finding))) continue;
+      seen.add(key(finding));
+      findings.push(
+        differs && !workingKeys.has(key(finding))
+          ? { ...finding, message: `${finding.message} (in the copy git has staged)` }
+          : finding,
+      );
+    }
+    for (const finding of inWorkingTree) {
+      if (indexKeys.has(key(finding)) || seen.has(key(finding))) continue;
+      seen.add(key(finding));
+      findings.push({
+        ...finding,
+        message: `${finding.message} (in the working tree, not staged)`,
+      });
     }
   }
   return findings;
@@ -633,7 +724,48 @@ function changedFiles(root, commit) {
 }
 
 /**
- * Scans what pushing these commits would publish: each message and each added or changed file.
+ * Which dates of each commit carry a UTC offset other than +0000. Git records the committing
+ * machine's offset with the author and the committer date, and the public repository shows both,
+ * so every commit is made with TZ=UTC (G-09). The offsets themselves are never returned.
+ * @param {string} root
+ * @param {string[]} commits full SHAs
+ * @returns {Map<string, ("author" | "committer")[]>} a commit whose dates git does not give
+ *   counts as both
+ */
+export function datesOffUtc(root, commits) {
+  /** @type {Map<string, ("author" | "committer")[]>} */
+  const read = new Map();
+  if (commits.length > 0) {
+    const out = execFileSync(
+      "git",
+      ["-C", root, "log", "--no-walk=unsorted", "--stdin", "--date=raw", "--format=%H %ad %cd"],
+      {
+        input: `${commits.join("\n")}\n`,
+        encoding: "utf8",
+        maxBuffer: 256 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    for (const line of out.split("\n")) {
+      const match = /^([0-9a-f]{40,64}) -?\d+ ([+-]\d{4}) -?\d+ ([+-]\d{4})$/.exec(line);
+      if (match === null) continue;
+      /** @type {("author" | "committer")[]} */
+      const off = [];
+      if (match[2] !== "+0000") off.push("author");
+      if (match[3] !== "+0000") off.push("committer");
+      read.set(match[1] ?? "", off);
+    }
+  }
+  return new Map(commits.map((commit) => [commit, read.get(commit) ?? ["author", "committer"]]));
+}
+
+/** The message of a finding about a date's offset, which never names the offset. */
+export const DATE_OFF_UTC =
+  "carries a UTC offset other than +0000 (G-09: commit and tag with TZ=UTC)";
+
+/**
+ * Scans what pushing these commits would publish: each commit's author and committer dates
+ * (+0000 only, G-09), its message and each file it adds or changes.
  * @param {string} root
  * @param {string[]} commits full SHAs
  * @param {string[]} refuseList
@@ -643,8 +775,16 @@ export function scanCommits(root, commits, refuseList) {
   const refused = refuseMatcher(refuseList);
   /** @type {Finding[]} */
   const findings = [];
+  const offUtc = datesOffUtc(root, commits);
   for (const commit of commits) {
     const short = commit.slice(0, 12);
+    for (const which of offUtc.get(commit) ?? []) {
+      findings.push({
+        file: `commit ${short} (${which} date)`,
+        rule: "commit-date",
+        message: `the ${which} date ${DATE_OFF_UTC}`,
+      });
+    }
     const message = git(root, ["log", "-1", "--format=%B", commit]);
     findings.push(...scanMessage(`commit ${short} (message)`, message, refused));
     for (const { path, mode, blob } of changedFiles(root, commit)) {

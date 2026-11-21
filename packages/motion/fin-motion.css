@@ -1,0 +1,555 @@
+/*
+ * fin-motion.css: Fin's motion layer (spec 06 §5.1; BRIEF §4; UR-09).
+ *
+ * Fin's own file. Under the owner's no to UI-12 nothing is copied from the canvases' stylesheet:
+ * this file is written from the motion rules the canvases document and from the token values in
+ * @fin/tokens. PIN.json holds its SHA-256, and test/motion.test.tsx fails on any other hash, so a
+ * change here is a reviewed change to PIN.json as well.
+ *
+ * The owner overrode the design system's "not allowed" list on 20 Nov 2026: icons move a little
+ * while their control is hovered or focused from the keyboard, pages and views fade in, and
+ * skeletons shimmer. Motion confirms what the pointer or the page is doing; nothing loops except
+ * spinners and the shimmer; nothing bounces or overshoots. Durations and easing are the tokens'
+ * (--fin-duration-fast 140ms, -base 200ms, -slow 240ms, exits at 0.75, --fin-ease-out).
+ *
+ * Never touched here: overlays (Drawer, Modal, popovers, Toast animate themselves on the SDK's
+ * data-starting-style and data-ending-style), presses, and colour changes.
+ *
+ * Classes
+ *   fin-shimmer         once, on <body>: every [data-skeleton] below it shimmers, overlays included
+ *   fin-enter           a page's content wrapper (keyed by the pathname) and each AuthCard: fades in,
+ *                       rising 4px, over 200ms when it mounts
+ *   fin-swap            content replacing a skeleton or another view in place: fades in over 200ms
+ *   fin-swap-out        a skeleton leaving while the content is drawn over it: fades out over 140ms
+ *   fin-progress        the navigation bar over the content: grows from the left once, over 700ms
+ *   fin-ico, fin-ico--<Name>, fin-ico--duo
+ *                       written by @fin/icons' createIcon only, never by hand
+ *   fin-ico-spin        a busy ArrowClockwise (createIcon's `busy`); also any ArrowClockwise inside
+ *                       [aria-busy="true"]: turns as a spinner, 600ms a turn
+ *
+ * Glyphs: each moves while the control holding it (a link, a button, a menu item, an option, a tab
+ * or a label) is hovered or focused from the keyboard, or is drawn so (data-hover, data-focus,
+ * data-highlighted); never on a disabled or busy control, except the lock. In over 200ms (240ms
+ * for the bigger turns), back at 0.75 of that.
+ *   lift 1.5px       House
+ *   lift 1px         Bank, Buildings, CurrencyDollar, Archive, Fingerprint, DeviceMobile,
+ *                    ShieldCheck, EnvelopeSimple, FileText, UserCircle
+ *   1px right        Users, UsersThree, UserPlus, UserMinus, DotsThree, Code, Play
+ *   1.5px right      ListBullets, ListChecks
+ *   2px right        ArrowsLeftRight, ArrowRight, CaretRight, SignOut
+ *   2px left         ArrowLeft, CaretLeft
+ *   1.5px up         ArrowUp, UploadSimple
+ *   1.5px down       ArrowDown, DownloadSimple
+ *   up and right     ArrowUpRight (1.5px each), PaperPlaneTilt (2px each), Rocket (1px right, 1.5px up)
+ *   turn             Key -20deg, WebhooksLogo 12deg, ClockCounterClockwise -30deg, Flask -10deg,
+ *                    MagnifyingGlass, MagnifyingGlassPlus, MagnifyingGlassMinus and PencilSimple
+ *                    -12deg, Trash and ChatCircleText -8deg, Sun, Moon and Desktop 20deg
+ *   bigger turn      GearSix 60deg, Plus and X 90deg, ArrowClockwise 180deg (240ms)
+ *   spread           CaretUpDown, scaleY 1.15
+ *   blink once       Eye, EyeSlash (scaleY to 0.15 and back, 240ms)
+ *   shake once       LockSimple (2px each way, 240ms) whenever its control is hovered, disabled or
+ *                    not; so does the lock that is the first svg of a locked Production option
+ *                    ([data-env="production"])
+ *   pop in           Check, when it appears: scale 0.6 to 1 and fade in, 200ms, once
+ *   open state       CaretDown is turned 180deg while its control is open (aria-expanded="true"
+ *                    or data-open), in every setting, since it shows a state; the turn is animated
+ *                    only when no reduced motion is asked for; no hover motion
+ *   current item     a sidebar item's duo glyph cross-fades from bold to fill over 140ms
+ *   still            BookOpen, Copy (CopyField has its own copy-to-check cross-fade), Pause,
+ *                    GoogleLogo, QrCode, Power (UR-20): they never move
+ * The edge toggle needs nothing of its own: its CaretLeft or CaretRight nudges 2px toward where
+ * the sidebar goes. The external arrow beside "API docs" is an ArrowUpRight inside the link.
+ *
+ * Only the glyphs listed above are touched, and each only in the property that moves it: a lift or
+ * shift sets translate, a turn rotate, the spread scale. This file is unlayered, so it beats every
+ * utility; any other icon, and any other property of a moving one, keeps what its utilities say
+ * (CopyField's cross-fade on Copy and Check, a translate that places an icon in a field).
+ *
+ * Reduced motion (prefers-reduced-motion: reduce): nothing moves, turns or scales and the shimmer
+ * stops; opacity changes stay, at most 140ms; spinners keep turning; CaretDown's open state shows
+ * at once.
+ */
+
+/* The shimmer's band: a little lighter than the shape it crosses, in either theme. */
+:root,
+[data-theme="light"] {
+  --shimmer-band: color-mix(in srgb, var(--fin-color-bg) 72%, transparent);
+}
+[data-theme="dark"] {
+  --shimmer-band: color-mix(in srgb, var(--fin-color-text-primary) 7%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --shimmer-band: color-mix(in srgb, var(--fin-color-text-primary) 7%, transparent);
+  }
+}
+
+@keyframes fin-rise-in {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+}
+@keyframes fin-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fin-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes fin-sweep {
+  from {
+    background-position: -100% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+@keyframes fin-turn {
+  to {
+    rotate: 360deg;
+  }
+}
+@keyframes fin-blink {
+  50% {
+    scale: 1 0.15;
+  }
+}
+@keyframes fin-shake {
+  25% {
+    translate: -2px 0;
+  }
+  75% {
+    translate: 2px 0;
+  }
+}
+@keyframes fin-pop-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+@keyframes fin-grow-x {
+  from {
+    scale: 0 1;
+  }
+}
+
+/* Every setting: fades only, at the fast duration (140ms). */
+.fin-enter,
+.fin-swap,
+.fin-progress,
+.fin-ico--Check {
+  animation: fin-fade-in var(--fin-duration-fast) var(--fin-ease-out) backwards;
+}
+.fin-swap-out {
+  animation: fin-fade-out var(--fin-duration-fast) var(--fin-ease-out) forwards;
+}
+.fin-ico--duo > path {
+  transition: opacity var(--fin-duration-fast) var(--fin-ease-out);
+}
+
+/* Spinners turn in every setting, as the design system's do. */
+.fin-ico--ArrowClockwise.fin-ico-spin,
+[aria-busy="true"] .fin-ico--ArrowClockwise {
+  animation: fin-turn var(--fin-motion-spin) linear infinite;
+}
+
+/* CaretDown shows a state, not a hover: turned while its control is open, in every setting. Only
+   the turn's transition waits for no-preference, so under reduced motion it shows at once. */
+:is([aria-expanded="true"], [data-open]) .fin-ico--CaretDown {
+  rotate: 180deg;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .fin-enter {
+    animation: fin-rise-in var(--fin-duration-base) var(--fin-ease-out) backwards;
+  }
+  .fin-swap {
+    animation: fin-fade-in var(--fin-duration-base) var(--fin-ease-out) backwards;
+  }
+  .fin-progress {
+    transform-origin: left center;
+    animation: fin-grow-x 700ms var(--fin-ease-out) backwards;
+  }
+
+  /* The band crosses each shape over its own fill, so the design system's colours stay. */
+  .fin-shimmer [data-skeleton] {
+    background-image: linear-gradient(90deg, transparent, var(--shimmer-band), transparent);
+    background-repeat: no-repeat;
+    background-size: 50% 100%;
+    background-position: -100% 0;
+    animation: fin-sweep 1.6s linear infinite;
+  }
+
+  /* Each moving glyph's way in: a lift or a shift (--ico-move), a turn (--ico-turn) or the
+     spread (--ico-grow). */
+
+  /* Lifts. */
+  .fin-ico--House {
+    --ico-move: 0 -1.5px;
+  }
+  .fin-ico--Bank,
+  .fin-ico--Buildings,
+  .fin-ico--CurrencyDollar,
+  .fin-ico--Archive,
+  .fin-ico--Fingerprint,
+  .fin-ico--DeviceMobile,
+  .fin-ico--ShieldCheck,
+  .fin-ico--EnvelopeSimple,
+  .fin-ico--FileText,
+  .fin-ico--UserCircle {
+    --ico-move: 0 -1px;
+  }
+
+  /* Shifts along the line. */
+  .fin-ico--Users,
+  .fin-ico--UsersThree,
+  .fin-ico--UserPlus,
+  .fin-ico--UserMinus,
+  .fin-ico--DotsThree,
+  .fin-ico--Code,
+  .fin-ico--Play {
+    --ico-move: 1px 0;
+  }
+  .fin-ico--ListBullets,
+  .fin-ico--ListChecks {
+    --ico-move: 1.5px 0;
+  }
+  .fin-ico--ArrowsLeftRight,
+  .fin-ico--ArrowRight,
+  .fin-ico--CaretRight,
+  .fin-ico--SignOut {
+    --ico-move: 2px 0;
+  }
+  .fin-ico--ArrowLeft,
+  .fin-ico--CaretLeft {
+    --ico-move: -2px 0;
+  }
+  .fin-ico--ArrowUp,
+  .fin-ico--UploadSimple {
+    --ico-move: 0 -1.5px;
+  }
+  .fin-ico--ArrowDown,
+  .fin-ico--DownloadSimple {
+    --ico-move: 0 1.5px;
+  }
+  .fin-ico--ArrowUpRight {
+    --ico-move: 1.5px -1.5px;
+  }
+  .fin-ico--PaperPlaneTilt {
+    --ico-move: 2px -2px;
+  }
+  .fin-ico--Rocket {
+    --ico-move: 1px -1.5px;
+  }
+
+  /* Turns. */
+  .fin-ico--Key {
+    --ico-turn: -20deg;
+  }
+  .fin-ico--WebhooksLogo {
+    --ico-turn: 12deg;
+  }
+  .fin-ico--ClockCounterClockwise {
+    --ico-turn: -30deg;
+  }
+  .fin-ico--Flask {
+    --ico-turn: -10deg;
+  }
+  .fin-ico--MagnifyingGlass,
+  .fin-ico--MagnifyingGlassPlus,
+  .fin-ico--MagnifyingGlassMinus,
+  .fin-ico--PencilSimple {
+    --ico-turn: -12deg;
+  }
+  .fin-ico--Trash,
+  .fin-ico--ChatCircleText {
+    --ico-turn: -8deg;
+  }
+  .fin-ico--Sun,
+  .fin-ico--Moon,
+  .fin-ico--Desktop {
+    --ico-turn: 20deg;
+  }
+
+  /* The bigger turns take the slow duration both ways. */
+  .fin-ico--GearSix,
+  .fin-ico--Plus,
+  .fin-ico--X,
+  .fin-ico--ArrowClockwise {
+    --ico-in: var(--fin-duration-slow);
+    --ico-out: var(--fin-duration-slow-exit);
+  }
+  .fin-ico--GearSix {
+    --ico-turn: 60deg;
+  }
+  .fin-ico--Plus,
+  .fin-ico--X {
+    --ico-turn: 90deg;
+  }
+  .fin-ico--ArrowClockwise {
+    --ico-turn: 180deg;
+  }
+
+  /* The spread. */
+  .fin-ico--CaretUpDown {
+    --ico-grow: 1 1.15;
+  }
+
+  /* Only the glyphs above move, each in the one property that moves it, and nothing else: the
+     lifts and shifts (translate), the turns (rotate; CaretDown's open state too) and the spread
+     (scale). At rest a glyph returns at 0.75 of the way in. */
+  :is(
+    .fin-ico--House,
+    .fin-ico--Bank,
+    .fin-ico--Buildings,
+    .fin-ico--CurrencyDollar,
+    .fin-ico--Archive,
+    .fin-ico--Fingerprint,
+    .fin-ico--DeviceMobile,
+    .fin-ico--ShieldCheck,
+    .fin-ico--EnvelopeSimple,
+    .fin-ico--FileText,
+    .fin-ico--UserCircle,
+    .fin-ico--Users,
+    .fin-ico--UsersThree,
+    .fin-ico--UserPlus,
+    .fin-ico--UserMinus,
+    .fin-ico--DotsThree,
+    .fin-ico--Code,
+    .fin-ico--Play,
+    .fin-ico--ListBullets,
+    .fin-ico--ListChecks,
+    .fin-ico--ArrowsLeftRight,
+    .fin-ico--ArrowRight,
+    .fin-ico--CaretRight,
+    .fin-ico--SignOut,
+    .fin-ico--ArrowLeft,
+    .fin-ico--CaretLeft,
+    .fin-ico--ArrowUp,
+    .fin-ico--UploadSimple,
+    .fin-ico--ArrowDown,
+    .fin-ico--DownloadSimple,
+    .fin-ico--ArrowUpRight,
+    .fin-ico--PaperPlaneTilt,
+    .fin-ico--Rocket
+  ) {
+    transition: translate var(--ico-out, var(--fin-duration-base-exit)) var(--fin-ease-out);
+  }
+  :is(
+    .fin-ico--Key,
+    .fin-ico--WebhooksLogo,
+    .fin-ico--ClockCounterClockwise,
+    .fin-ico--Flask,
+    .fin-ico--MagnifyingGlass,
+    .fin-ico--MagnifyingGlassPlus,
+    .fin-ico--MagnifyingGlassMinus,
+    .fin-ico--PencilSimple,
+    .fin-ico--Trash,
+    .fin-ico--ChatCircleText,
+    .fin-ico--Sun,
+    .fin-ico--Moon,
+    .fin-ico--Desktop,
+    .fin-ico--GearSix,
+    .fin-ico--Plus,
+    .fin-ico--X,
+    .fin-ico--ArrowClockwise,
+    .fin-ico--CaretDown
+  ) {
+    transition: rotate var(--ico-out, var(--fin-duration-base-exit)) var(--fin-ease-out);
+  }
+  .fin-ico--CaretUpDown {
+    transition: scale var(--ico-out, var(--fin-duration-base-exit)) var(--fin-ease-out);
+  }
+
+  /* The way in, while the control holding the glyph is drawn hovered or focused (data-hover,
+     data-focus, data-highlighted) or the pointer or the keyboard is on it. */
+  :is(
+      :where([data-hover], [data-focus], [data-highlighted]):not(
+        :disabled,
+        [aria-disabled="true"],
+        [data-disabled]
+      ),
+      :where(
+        a,
+        button,
+        label,
+        [role="menuitem"],
+        [role="menuitemradio"],
+        [role="menuitemcheckbox"],
+        [role="option"],
+        [role="tab"]
+      ):not(:disabled, [aria-disabled="true"], [data-disabled], [aria-busy="true"], [data-busy]):is(
+        :hover,
+        :focus-visible
+      )
+    )
+    :is(
+      .fin-ico--House,
+      .fin-ico--Bank,
+      .fin-ico--Buildings,
+      .fin-ico--CurrencyDollar,
+      .fin-ico--Archive,
+      .fin-ico--Fingerprint,
+      .fin-ico--DeviceMobile,
+      .fin-ico--ShieldCheck,
+      .fin-ico--EnvelopeSimple,
+      .fin-ico--FileText,
+      .fin-ico--UserCircle,
+      .fin-ico--Users,
+      .fin-ico--UsersThree,
+      .fin-ico--UserPlus,
+      .fin-ico--UserMinus,
+      .fin-ico--DotsThree,
+      .fin-ico--Code,
+      .fin-ico--Play,
+      .fin-ico--ListBullets,
+      .fin-ico--ListChecks,
+      .fin-ico--ArrowsLeftRight,
+      .fin-ico--ArrowRight,
+      .fin-ico--CaretRight,
+      .fin-ico--SignOut,
+      .fin-ico--ArrowLeft,
+      .fin-ico--CaretLeft,
+      .fin-ico--ArrowUp,
+      .fin-ico--UploadSimple,
+      .fin-ico--ArrowDown,
+      .fin-ico--DownloadSimple,
+      .fin-ico--ArrowUpRight,
+      .fin-ico--PaperPlaneTilt,
+      .fin-ico--Rocket
+    ) {
+    translate: var(--ico-move);
+    transition-duration: var(--ico-in, var(--fin-duration-base));
+  }
+  :is(
+      :where([data-hover], [data-focus], [data-highlighted]):not(
+        :disabled,
+        [aria-disabled="true"],
+        [data-disabled]
+      ),
+      :where(
+        a,
+        button,
+        label,
+        [role="menuitem"],
+        [role="menuitemradio"],
+        [role="menuitemcheckbox"],
+        [role="option"],
+        [role="tab"]
+      ):not(:disabled, [aria-disabled="true"], [data-disabled], [aria-busy="true"], [data-busy]):is(
+        :hover,
+        :focus-visible
+      )
+    )
+    :is(
+      .fin-ico--Key,
+      .fin-ico--WebhooksLogo,
+      .fin-ico--ClockCounterClockwise,
+      .fin-ico--Flask,
+      .fin-ico--MagnifyingGlass,
+      .fin-ico--MagnifyingGlassPlus,
+      .fin-ico--MagnifyingGlassMinus,
+      .fin-ico--PencilSimple,
+      .fin-ico--Trash,
+      .fin-ico--ChatCircleText,
+      .fin-ico--Sun,
+      .fin-ico--Moon,
+      .fin-ico--Desktop,
+      .fin-ico--GearSix,
+      .fin-ico--Plus,
+      .fin-ico--X,
+      .fin-ico--ArrowClockwise
+    ) {
+    rotate: var(--ico-turn);
+    transition-duration: var(--ico-in, var(--fin-duration-base));
+  }
+  :is(
+      :where([data-hover], [data-focus], [data-highlighted]):not(
+        :disabled,
+        [aria-disabled="true"],
+        [data-disabled]
+      ),
+      :where(
+        a,
+        button,
+        label,
+        [role="menuitem"],
+        [role="menuitemradio"],
+        [role="menuitemcheckbox"],
+        [role="option"],
+        [role="tab"]
+      ):not(:disabled, [aria-disabled="true"], [data-disabled], [aria-busy="true"], [data-busy]):is(
+        :hover,
+        :focus-visible
+      )
+    )
+    .fin-ico--CaretUpDown {
+    scale: var(--ico-grow);
+    transition-duration: var(--ico-in, var(--fin-duration-base));
+  }
+
+  /* One-off plays belong to the glyphs that have one, so a hover never cancels a pop or a spin. */
+  :where([data-hover], [data-focus], [data-highlighted]):not(
+      :disabled,
+      [aria-disabled="true"],
+      [data-disabled]
+    )
+    :is(.fin-ico--Eye, .fin-ico--EyeSlash) {
+    animation: fin-blink var(--fin-duration-slow) var(--fin-ease-in-out) 1;
+  }
+  :where(
+      a,
+      button,
+      label,
+      [role="menuitem"],
+      [role="menuitemradio"],
+      [role="menuitemcheckbox"],
+      [role="option"],
+      [role="tab"]
+    ):not(:disabled, [aria-disabled="true"], [data-disabled], [aria-busy="true"], [data-busy]):is(
+      :hover,
+      :focus-visible
+    )
+    :is(.fin-ico--Eye, .fin-ico--EyeSlash) {
+    animation: fin-blink var(--fin-duration-slow) var(--fin-ease-in-out) 1;
+  }
+
+  /* CaretDown turns open over the base duration and back at 0.75 of it (the turn itself is the
+     every-setting rule above). */
+  :is([aria-expanded="true"], [data-open]) .fin-ico--CaretDown {
+    transition-duration: var(--fin-duration-base);
+  }
+
+  .fin-ico--Check {
+    animation: fin-pop-in var(--fin-duration-base) var(--fin-ease-out) backwards;
+  }
+
+  /* A locked control is disabled on purpose, so the lock shakes whether or not it is. */
+  [data-hover] .fin-ico--LockSimple {
+    animation: fin-shake var(--fin-duration-slow) var(--fin-ease-in-out) 1;
+  }
+  :is(
+      a,
+      button,
+      label,
+      span,
+      [role="menuitem"],
+      [role="option"],
+      [role="radio"],
+      [role="tab"]
+    ):hover
+    .fin-ico--LockSimple {
+    animation: fin-shake var(--fin-duration-slow) var(--fin-ease-in-out) 1;
+  }
+  [data-env="production"]:hover > svg:first-child,
+  :hover
+    > [data-env="production"]:is(:disabled, [aria-disabled="true"], [data-disabled])
+    > svg:first-child {
+    animation: fin-shake var(--fin-duration-slow) var(--fin-ease-in-out) 1;
+  }
+}
