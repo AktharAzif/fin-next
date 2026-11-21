@@ -79,8 +79,11 @@ export {
 export { FrameSwitch, type FrameSwitchProps } from "./router/FrameSwitch.tsx";
 export {
   deepestStaticData,
+  type MatchLike,
+  presentedPage,
   useNavigationPending,
   usePathname,
+  usePresentedPage,
   useRouteStaticData,
 } from "./router/matches.ts";
 export { safeNext, signInHref } from "./router/next.ts";

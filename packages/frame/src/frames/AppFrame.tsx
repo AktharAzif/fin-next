@@ -24,7 +24,6 @@ import { useTheme } from "../prefs/theme.ts";
 import {
   useAnyRouter,
   useNavigationPending,
-  usePathname,
   useRouteStaticData,
   useSearch,
 } from "../router/matches.ts";
@@ -57,7 +56,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const fin = useFin<ConsoleViewer>();
   const viewer = signedIn(useStore(fin.viewer));
   const router = useAnyRouter();
-  const pathname = usePathname();
   const search = useSearch();
   const pending = useNavigationPending();
   const staticData = useRouteStaticData();
@@ -152,12 +150,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
         {viewer === null ? (
           <RoutePending />
         ) : (
-          <FrameContent
-            pathname={pathname}
-            staticData={staticData}
-            can={can}
-            environment={environment}
-          >
+          <FrameContent staticData={staticData} can={can} environment={environment}>
             {children}
           </FrameContent>
         )}
