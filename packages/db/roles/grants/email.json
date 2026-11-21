@@ -1,0 +1,24 @@
+{
+  "$comment": "The email area's grants (spec 01 §6.10; ARCHITECTURE §9.4). Rows reach the outbox only through email.enqueue(); only the worker claims, updates and deletes them. L-SAT-05 extends this fragment.",
+  "area": "email",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "email",
+      "privileges": ["USAGE"],
+      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "function",
+      "name": "email.enqueue(jsonb)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "email.outbox",
+      "privileges": ["SELECT", "UPDATE", "DELETE"],
+      "to": ["fin_worker"]
+    }
+  ]
+}

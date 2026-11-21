@@ -1,0 +1,20 @@
+{
+  "name": "@fin/db",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@fin/crypto": "workspace:*",
+    "pg": "catalog:",
+    "zod": "catalog:"
+  }
+}
