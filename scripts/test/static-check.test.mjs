@@ -1,0 +1,166 @@
+// static:check: the static.json allowlist, the built output's rules, and rendered _headers.
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, test } from "node:test";
+import {
+  checkCss,
+  checkHeaders,
+  checkIndexHtml,
+  checkStatic,
+  checkStaticJson,
+} from "../static-check.mjs";
+import { cleanUp, makeRepo, REPO_ROOT, rules, runScript, writeFiles } from "./helpers.mjs";
+
+after(cleanUp);
+
+const STATIC_JSON = {
+  compatibility_date: "2026-11-20",
+  assets: { not_found_handling: "single-page-application", html_handling: "auto-trailing-slash" },
+  workers_dev: false,
+  preview_urls: false,
+};
+const INDEX = [
+  "<!doctype html>",
+  '<html lang="en"><head>',
+  '<meta charset="utf-8"><meta property="csp-nonce">',
+  '<script src="/theme.js"></script>',
+  '<script type="module" src="/assets/index-abc123.js"></script>',
+  '<link rel="stylesheet" href="/assets/index-abc123.css">',
+  '</head><body><div id="root" class="skeleton"></div></body></html>',
+].join("\n");
+const CSS = "@layer ui-sdk;\n@layer base{body{margin:0}}\n";
+const LAYOUT = JSON.stringify({
+  version: 1,
+  controlPaths: [],
+  entries: [
+    { path: "apps/console", static: "console" },
+    { path: "apps/verify", static: ["verify", "selfie"] },
+  ],
+});
+
+/** @param {Record<string, string>} files */
+function repo(files) {
+  return makeRepo({ "tools/layout.json": LAYOUT, ...files });
+}
+
+const built = (/** @type {string} */ base, /** @type {Record<string, string>} */ extra = {}) => ({
+  [`${base}/index.html`]: INDEX,
+  [`${base}/assets/index-abc123.css`]: CSS,
+  [`${base}/assets/index-abc123.js`]: "console.log(1);\n",
+  ...extra,
+});
+
+describe("static:check", () => {
+  test("passes with a notice while no app has a static build", () => {
+    const { findings, notices } = checkStatic(repo({}));
+    assert.deepEqual(findings, []);
+    assert.equal(notices.length, 1);
+    const run = runScript("scripts/static-check.mjs", ["--root", REPO_ROOT]);
+    assert.equal(run.status, 0);
+    assert.match(run.output, /notice: no app has a static build yet/);
+  });
+
+  test("a valid static.json and build pass, verify's two outputs included", () => {
+    const dir = repo({
+      "apps/console/static.json": JSON.stringify(STATIC_JSON),
+      ...built("apps/console/dist/static"),
+      ...built("apps/verify/dist/static/verify"),
+      ...built("apps/verify/dist/static/selfie"),
+    });
+    const { findings, notices } = checkStatic(dir);
+    assert.deepEqual(findings, []);
+    assert.deepEqual(notices, []);
+  });
+
+  test("static.json outside the allowlist fails", () => {
+    for (const bad of [
+      { ...STATIC_JSON, main: "src/worker.ts" },
+      { ...STATIC_JSON, workers_dev: true },
+      { ...STATIC_JSON, preview_urls: true },
+      { ...STATIC_JSON, kv_namespaces: [] },
+      { ...STATIC_JSON, assets: { ...STATIC_JSON.assets, run_worker_first: true } },
+      { ...STATIC_JSON, assets: { ...STATIC_JSON.assets, binding: "ASSETS" } },
+      { ...STATIC_JSON, assets: { ...STATIC_JSON.assets, not_found_handling: "404-page" } },
+      { compatibility_date: "2026-11-20", workers_dev: false, preview_urls: false },
+    ]) {
+      assert.deepEqual(
+        rules(checkStaticJson("apps/console/static.json", bad)),
+        ["static-json"],
+        JSON.stringify(bad),
+      );
+    }
+    assert.deepEqual(checkStaticJson("s.json", STATIC_JSON), []);
+  });
+
+  test("index.html breaking the page policy fails", () => {
+    for (const bad of [
+      INDEX.replace('<meta property="csp-nonce">', ""),
+      INDEX.replace('<meta property="csp-nonce">', '<meta property="csp-nonce" nonce="abc">'),
+      INDEX.replace("</head>", "<script>window.x=1</script></head>"),
+      INDEX.replace('class="skeleton"', 'style="color:red"'),
+      INDEX.replace('class="skeleton"', 'onclick="go()"'),
+      INDEX.replace("</head>", "<style>body{}</style></head>"),
+    ]) {
+      assert.deepEqual(rules(checkIndexHtml("index.html", bad)), ["static-html"], bad);
+    }
+    assert.deepEqual(checkIndexHtml("index.html", INDEX), []);
+  });
+
+  test("CSS must start with @layer ui-sdk and hold no data: URL", () => {
+    assert.deepEqual(rules(checkCss("a.css", "body{margin:0}\n")), ["static-css"]);
+    assert.deepEqual(
+      rules(checkCss("a.css", `${CSS}.x{background:url(data:image/png;base64,AAAA)}`)),
+      ["static-css"],
+    );
+    assert.deepEqual(checkCss("a.css", `/* banner */\n${CSS}`), []);
+  });
+
+  test("a source map, a built _headers or env.json fails", () => {
+    for (const extra of [
+      { "assets/index-abc123.js.map": "{}" },
+      { _headers: "/*\n" },
+      { "env.json": "{}" },
+    ]) {
+      const files = built("apps/console/dist/static");
+      for (const [k, v] of Object.entries(extra)) files[`apps/console/dist/static/${k}`] = v;
+      assert.equal(checkStatic(repo(files)).findings.length, 1, String(Object.keys(extra)[0]));
+    }
+  });
+
+  test("rendered _headers: no unsafe-* or data: outside the docs exception", () => {
+    const csp = (/** @type {string} */ policy) => `/*\n  Content-Security-Policy: ${policy}\n`;
+    assert.deepEqual(
+      checkHeaders(
+        "console/_headers",
+        csp("default-src 'none'; script-src 'self'; style-src 'self'"),
+        "console",
+      ),
+      [],
+    );
+    assert.deepEqual(
+      rules(checkHeaders("console/_headers", csp("script-src 'self' 'unsafe-inline'"), "console")),
+      ["static-headers"],
+    );
+    assert.deepEqual(
+      rules(checkHeaders("console/_headers", csp("img-src 'self' data:"), "console")),
+      ["static-headers"],
+    );
+    assert.deepEqual(
+      checkHeaders(
+        "docs/_headers",
+        csp("style-src 'self' 'unsafe-inline'; img-src 'self' data:"),
+        "docs",
+      ),
+      [],
+    );
+    assert.deepEqual(
+      rules(checkHeaders("docs/_headers", csp("script-src 'self' 'unsafe-eval'"), "docs")),
+      ["static-headers"],
+    );
+    const rendered = mkdtempSync(join(tmpdir(), "fin-rendered-"));
+    writeFiles(rendered, { "console/_headers": csp("script-src 'self' 'unsafe-inline'") });
+    assert.equal(checkStatic(repo({}), { rendered }).findings.length, 1);
+  });
+});

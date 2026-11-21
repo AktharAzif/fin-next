@@ -1,0 +1,33 @@
+{
+  "name": "@fin/motion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fin's motion layer: fin-motion.css, its pin, and the Enter, Swap and NavigationBar helpers (spec 06 §5.1)",
+  "sideEffects": [
+    "*.css"
+  ],
+  "exports": {
+    ".": "./src/index.tsx",
+    "./fin-motion.css": "./fin-motion.css",
+    "./PIN.json": "./PIN.json"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/tokens": "workspace:*",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

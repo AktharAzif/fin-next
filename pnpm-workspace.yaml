@@ -1,0 +1,64 @@
+packages:
+  - apps/*
+  - packages/*
+  - tools/fin-review
+  - tools/static-deploy
+  - ops/fin
+  - ops/monitoring
+  - ops/watcher
+  - ops/backup
+minimumReleaseAge: 4320
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+strictDepBuilds: true
+allowBuilds: {}        # an entry only for an install script the owner approved, with a dated comment ([G-06])
+engineStrict: true
+catalog:
+  # One version per package, exact (DECISIONS G-06, ARCHITECTURE §3.3). Each was read from the
+  # registry on 2026-11-21: the newest version the plan names that had cleared the 4,320-minute
+  # release age, or, where the plan names none (wrangler, @sentry/vite-plugin, @types/react,
+  # @types/react-dom), the newest release that had. scripts/check-supply-chain.mjs refuses a range.
+  # Layer 0, static deploy: tools/static-deploy/package.json only (FD-19).
+  wrangler: 4.164.0
+  # Layer 1, toolchain.
+  typescript: 7.0.2
+  '@biomejs/biome': 2.6.8
+  turbo: 2.11.11
+  vitest: 5.1.0
+  '@playwright/test': 1.65.1
+  '@types/node': 26.6.6
+  # Layer 2, server.
+  hono: 4.13.19
+  '@hono/node-server': 2.1.9
+  pg: 8.23.1
+  drizzle-orm: 0.45.4
+  zod: 4.6.7
+  '@hono/zod-openapi': 1.6.3
+  '@sentry/core': 11.14.0
+  # Layer 3, web apps. vite is also the root's, as vitest's required peer.
+  react: 19.3.1
+  react-dom: 19.3.1
+  '@tanstack/react-router': 1.170.46
+  '@tanstack/router-plugin': 1.169.0
+  vite: 8.3.8
+  '@vitejs/plugin-react': 6.3.0
+  tailwindcss: 4.3.5
+  '@tailwindcss/vite': 4.3.5
+  '@sentry/react': 11.14.0
+  '@sentry/vite-plugin': 11.14.0
+  '@ui-sdk/react': 0.1.0-beta.9
+  '@ui-sdk/core': 0.1.0-beta.9
+  '@types/react': 19.3.0        # 2026-11-21: approved by the orchestrator under the owner's delegation
+  '@types/react-dom': 19.3.0    # 2026-11-21: approved by the orchestrator under the owner's delegation
+  # Layer 4, auth (FW-S2): the four Better Auth packages move together (SA-02).
+  better-auth: 1.7.25
+  '@better-auth/core': 1.7.25
+  '@better-auth/passkey': 1.7.25
+  '@better-auth/drizzle-adapter': 1.7.25
+  '@simplewebauthn/browser': 13.3.0
+  # Docs (Monday).
+  '@scalar/api-reference': 1.78.1
+overrides:
+  '@better-auth/core': 1.7.25   # 2026-11-21: approved by the orchestrator under the owner's delegation
