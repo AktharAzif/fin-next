@@ -11,7 +11,7 @@ SELECT audit.install_guard('identity.organization'::regclass, ARRAY['UPDATE OF c
 SELECT audit.install_guard('identity.member'::regclass, ARRAY['INSERT', 'UPDATE OF role_key'], 'id', ARRAY['member.joined', 'member.role_changed', 'organization.created']);
 SELECT audit.install_guard('identity.member'::regclass, ARRAY['DELETE'], 'organization_id', ARRAY['member.removed', 'organization.deleted']);
 SELECT audit.install_guard('identity.member'::regclass, ARRAY['UPDATE OF organization_id, user_id'], 'id', ARRAY['guard.never_allowed']);
-SELECT audit.install_guard('identity.invitation'::regclass, ARRAY['INSERT', 'UPDATE OF role_key, status, token_hash'], 'id', ARRAY['member.invited', 'member.invitation_changed', 'member.invitation_resent', 'member.invitation_cancelled', 'member.invitation_declined', 'member.joined']);
-SELECT audit.install_guard('identity.invitation'::regclass, ARRAY['UPDATE OF organization_id, email, invited_by'], 'id', ARRAY['guard.never_allowed']);
+SELECT audit.install_guard('identity.invitation'::regclass, ARRAY['INSERT', 'UPDATE OF role_key, status, token_hash, invited_by'], 'id', ARRAY['member.invited', 'member.invitation_changed', 'member.invitation_resent', 'member.invitation_cancelled', 'member.invitation_declined', 'member.joined']);
+SELECT audit.install_guard('identity.invitation'::regclass, ARRAY['UPDATE OF organization_id, email'], 'id', ARRAY['guard.never_allowed']);
 SELECT audit.install_guard('identity.role'::regclass, ARRAY['INSERT', 'UPDATE', 'DELETE'], 'id', ARRAY['role.created', 'role.updated', 'role.deleted', 'organization.deleted']);
 SELECT audit.install_guard('identity.role_permission'::regclass, ARRAY['INSERT', 'DELETE'], 'role_id', ARRAY['role.created', 'role.updated', 'role.deleted', 'organization.deleted']);

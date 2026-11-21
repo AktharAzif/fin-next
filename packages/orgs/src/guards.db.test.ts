@@ -153,6 +153,15 @@ describe("the organisation guards", () => {
         [["UPDATE identity.invitation SET role_key = 'super_admin' WHERE id = $1", [invitationId]]],
       ],
       [
+        "invitation inviter",
+        [
+          [
+            "UPDATE identity.invitation SET invited_by = $2 WHERE id = $1",
+            [invitationId, spare.userId],
+          ],
+        ],
+      ],
+      [
         "role insert",
         [
           [
@@ -189,7 +198,32 @@ describe("the organisation guards", () => {
   it("refuse, as the owner too, the changes no event may make", async () => {
     const { orgId, memberId, who } = await ownerWithOrganization(h, "never");
     const other = await ownerWithOrganization(h, "never_other");
+    const invitationId = "inv_01jd00000000000000000000g3";
+    await seed(
+      h.admin,
+      `INSERT INTO identity.invitation (id, organization_id, email, role_key, token_hash, invited_by, expires_at)
+       VALUES ($1, $2, 'never.invitee@example.com', 'admin', decode(repeat('ce', 32), 'hex'), $3, now() + interval '7 days')`,
+      [invitationId, orgId, who.userId],
+    );
     const cases: [string, [string, unknown[]][]][] = [
+      [
+        "invitation readdressed",
+        [
+          [
+            "UPDATE identity.invitation SET email = 'elsewhere@example.com' WHERE id = $1",
+            [invitationId],
+          ],
+        ],
+      ],
+      [
+        "invitation moved",
+        [
+          [
+            "UPDATE identity.invitation SET organization_id = $2 WHERE id = $1",
+            [invitationId, other.orgId],
+          ],
+        ],
+      ],
       [
         "organization creator",
         [

@@ -28,6 +28,7 @@ import {
   changeInvitation,
   declineInvitation,
   invitationFromCookie,
+  inviteMember,
   myInvitations,
   openInvitation,
   resendInvitation,
@@ -249,6 +250,93 @@ describe("an invitation", () => {
       await h.events({ event: "member.invitation_cancelled", organizationId: orgId })
     ).at(-1);
     expect(event?.metadata).toEqual({ reason: "cancelled" });
+  });
+
+  it("is replaced only by someone it does not outrank (§8.5, as a cancellation)", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "owner_replace_rank");
+    const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
+    const low = await memberOf(h, who, orgId, "low_inviter", inviters);
+    const admin = await memberOf(h, who, orgId, "replace_admin", "admin");
+    const email = unique("victim");
+    const top = await inviteAs(h, who, orgId, email, "super_admin");
+    const topId = top.ok ? top.value.invitationId : "";
+    const statusOf = async (id: string) =>
+      (
+        await h.admin.query<{ status: string }>(
+          "SELECT status FROM identity.invitation WHERE id = $1",
+          [id],
+        )
+      ).rows[0]?.status;
+    // Neither a member.invite-only role nor an Admin may replace a Super admin invitation, and
+    // neither is asked for a factor first (S2-31).
+    for (const actor of [low.who, admin.who]) {
+      const asked = await asActor(
+        h,
+        actor,
+        orgId,
+        { body: { email, roleKey: inviters } },
+        { ...INVITE, stepUp: { kind: "intent", action: "member.invite" } },
+        (tx, a) => inviteMember(h.orgs, tx, a, { email, roleKey: inviters }),
+      );
+      expect(codeOf(asked)).toBe("outranked");
+    }
+    expect(await statusOf(topId)).toBe("pending");
+    const cancelled = await h.events({
+      event: "member.invitation_cancelled",
+      organizationId: orgId,
+    });
+    expect(cancelled.filter((e) => e.target_id === topId)).toEqual([]);
+    // An invitation within the actor's permissions is replaced as before, the same role included.
+    const own = await inviteAs(h, low.who, orgId, unique("own"), inviters);
+    const ownId = own.ok ? own.value.invitationId : "";
+    const ownEmail = (
+      await h.admin.query<{ email: string }>(
+        "SELECT email FROM identity.invitation WHERE id = $1",
+        [ownId],
+      )
+    ).rows[0]?.email as string;
+    expect((await inviteAs(h, low.who, orgId, ownEmail, inviters)).ok).toBe(true);
+    expect(await statusOf(ownId)).toBe("cancelled");
+    // The Super admin may replace it.
+    expect((await inviteAs(h, who, orgId, email, "admin")).ok).toBe(true);
+    expect(await statusOf(topId)).toBe("cancelled");
+  });
+
+  it("is accepted after another member changed its role, under the member who changed it", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "owner_changer");
+    const admin = await memberOf(h, who, orgId, "first_inviter", "admin");
+    const email = unique("raised");
+    const sent = await inviteAs(h, admin.who, orgId, email, "admin");
+    const id = sent.ok ? sent.value.invitationId : "";
+    const changed = await withIntent(h, who, (headers) =>
+      asActor(
+        h,
+        who,
+        orgId,
+        { method: "PATCH", body: { roleKey: "super_admin" }, headers },
+        { ...INVITE, stepUp: { kind: "intent", action: "invitation.change" } },
+        (tx, a) => changeInvitation(h.orgs, tx, a, id, { roleKey: "super_admin" }),
+      ),
+    );
+    expect(changed.ok).toBe(true);
+    const row = await h.admin.query<{ invited_by: string }>(
+      "SELECT invited_by FROM identity.invitation WHERE id = $1",
+      [id],
+    );
+    expect(row.rows[0]?.invited_by).toBe(who.userId);
+    const event = (
+      await h.events({ event: "member.invitation_changed", organizationId: orgId })
+    ).at(-1);
+    expect(event?.ref_ids).toEqual(expect.arrayContaining([admin.who.userId]));
+    const invitee = await person(h, "raised", { email });
+    const joined = await acceptAs(h, invitee, id);
+    expect(codeOf(joined)).toBe("ok");
+    expect(joined.ok && joined.value.roleKey).toBe("super_admin");
+    const member = await h.admin.query<{ invited_by: string }>(
+      "SELECT invited_by FROM identity.member WHERE organization_id = $1 AND user_id = $2",
+      [orgId, invitee.userId],
+    );
+    expect(member.rows[0]?.invited_by).toBe(who.userId);
   });
 
   it("is withdrawn when its inviter is demoted below it, or removed", async () => {

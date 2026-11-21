@@ -26,8 +26,9 @@ import { displayValue, orgNameForEmail, roleLabelForEmail } from "./email.ts";
 import { type FieldProblem, invalid, notFound, OrgRefusal } from "./errors.ts";
 import type { OrgActor } from "./guard.ts";
 import { isId, newId } from "./ids.ts";
+import { withdrawInvitations } from "./invitations.ts";
 import { notifyEach, type Orgs } from "./orgs.ts";
-import { givingRefusal, type LockedActor, lockTeam } from "./rules.ts";
+import { givingRefusal, type LockedActor, lockTeam, mayInvite } from "./rules.ts";
 import { CATALOGUE, type CustomRole, labelOf, lookupRole, permissionsFor } from "./store.ts";
 
 export interface RoleDetail {
@@ -303,6 +304,24 @@ export async function updateRole(
     metadata: { added, removed, holders: holders.length, renamed: name !== record.name },
     context: actor.context,
   });
+  if (added.length > 0 || removed.length > 0) {
+    // The invitations this edit leaves their inviter unable to give, read after it: those its
+    // holders sent, when the role lost a permission, and those offering it, when it gained one the
+    // inviter lacks. Accepting one could never pass the inviter's re-check (§9.3), so each is
+    // withdrawn as a demoted inviter's are (§9.2): the inviter now stands below the invitation.
+    await withdrawInvitations(orgs, tx, actor, {
+      reason: "inviter_demoted",
+      inviters: holders.map((h) => h.userId),
+      invitationIds: (
+        await tx.query<{ id: string }>(
+          `SELECT id FROM identity.invitation
+            WHERE organization_id = $1 AND role_key = $2 AND status = 'pending'`,
+          [orgId, roleId],
+        )
+      ).rows.map((r) => r.id),
+      refs: [roleId],
+    });
+  }
   if (added.length > 0) {
     // A role elevation revokes its holders' trusted browsers (§6.6); a privileged permission
     // added also holds those without a factor at "Protect your account" (§6.2, read by the gate).
@@ -411,7 +430,38 @@ export async function deleteRole(
       context: actor.context,
     });
   }
-  for (const invitation of invitations.rows) {
+  // Each invitation moves only when its inviter, in their role after the holders moved, may give the
+  // new role; otherwise accepting it could never pass the inviter's re-check (§9.3), so it is
+  // withdrawn (`role_deleted`) rather than left looking live.
+  const inviters = await tx.query<{ id: string; inviter_role: string | null }>(
+    `SELECT i.id, m.role_key AS inviter_role FROM identity.invitation i
+       LEFT JOIN identity.member m ON m.organization_id = i.organization_id AND m.user_id = i.invited_by
+      WHERE i.id = ANY($1::text[]) ORDER BY i.id`,
+    [invitations.rows.map((r) => r.id)],
+  );
+  let invitationsMoved = 0;
+  for (const invitation of inviters.rows) {
+    const movable =
+      moveTo !== undefined &&
+      invitation.inviter_role !== null &&
+      mayInvite(lookupRole(me.roles, invitation.inviter_role), moveTo);
+    if (!movable) {
+      await tx.query(
+        `UPDATE identity.invitation SET status = 'cancelled', cancel_reason = 'role_deleted', answered_at = $2
+          WHERE id = $1`,
+        [invitation.id, now],
+      );
+      await orgs.audit(tx, {
+        event: "member.invitation_cancelled",
+        actor: actor.actor,
+        target: invitation.id,
+        refs: [orgId, roleId],
+        organizationId: orgId,
+        metadata: { reason: "role_deleted" },
+        context: actor.context,
+      });
+      continue;
+    }
     await tx.query("UPDATE identity.invitation SET role_key = $2 WHERE id = $1", [
       invitation.id,
       movedTo,
@@ -424,6 +474,16 @@ export async function deleteRole(
       organizationId: orgId,
       metadata: { fromRole: roleId, toRole: movedTo ?? roleId, reason: "role_deleted" },
       context: actor.context,
+    });
+    invitationsMoved += 1;
+  }
+  if (lowered && holders.length > 0) {
+    // Holders moved to a role that does less: the invitations they sent that it no longer lets them
+    // give are withdrawn, as for any demotion (§9.2).
+    await withdrawInvitations(orgs, tx, actor, {
+      reason: "role_deleted",
+      inviters: holders.map((h) => h.userId),
+      refs: [roleId],
     });
   }
   if (moveTo !== undefined && [...movePerms].some((p) => !rolePerms.has(p))) {
@@ -446,7 +506,7 @@ export async function deleteRole(
     metadata: {
       movedTo,
       membersMoved: holders.length,
-      invitationsMoved: invitations.rows.length,
+      invitationsMoved,
     },
     context: actor.context,
   });
@@ -481,5 +541,5 @@ export async function deleteRole(
       })),
     ]);
   }
-  return { roleId, membersMoved: holders.length, invitationsMoved: invitations.rows.length };
+  return { roleId, membersMoved: holders.length, invitationsMoved };
 }

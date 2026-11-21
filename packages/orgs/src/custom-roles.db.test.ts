@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
+  acceptAs,
   asActor,
   asPerson,
   codeOf,
@@ -14,6 +15,7 @@ import {
   inviteAs,
   memberOf,
   ownerWithOrganization,
+  person,
   roleAs,
   type SignedIn,
   unique,
@@ -282,5 +284,118 @@ describe("deleting a custom role", () => {
       (tx, a) => listRoles(tx, a),
     );
     expect(list.ok && list.value.roles.map((r) => r.roleKey)).toEqual(["super_admin", "admin"]);
+  });
+
+  it("withdraws, never leaves unusable, the invitations whose inviter cannot give the new role", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "deleter_inviters");
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
+    const low = await memberOf(h, who, orgId, "low", inviters);
+    const fromLow = await inviteAs(h, low.who, orgId, unique("from_low"), readers);
+    const fromOwnerEmail = unique("from_owner");
+    const fromOwner = await inviteAs(h, who, orgId, fromOwnerEmail, readers);
+    const lowId = fromLow.ok ? fromLow.value.invitationId : "";
+    const ownerId = fromOwner.ok ? fromOwner.value.invitationId : "";
+    const done = await remove(who, orgId, readers, "admin");
+    expect(done.ok && done.value).toMatchObject({ membersMoved: 0, invitationsMoved: 1 });
+    const rows = await h.admin.query<{ id: string; status: string; cancel_reason: string | null }>(
+      "SELECT id, status, cancel_reason FROM identity.invitation WHERE id = ANY($1) ORDER BY id",
+      [[lowId, ownerId]],
+    );
+    expect(new Map(rows.rows.map((r) => [r.id, [r.status, r.cancel_reason]]))).toEqual(
+      new Map([
+        [lowId, ["cancelled", "role_deleted"]],
+        [ownerId, ["pending", null]],
+      ]),
+    );
+    const withdrawn = (
+      await h.events({ event: "member.invitation_cancelled", organizationId: orgId })
+    ).find((e) => e.target_id === lowId);
+    expect(withdrawn?.metadata).toEqual({ reason: "role_deleted" });
+    // The moved invitation stays usable: its inviter may give the new role.
+    const invitee = await person(h, "from_owner", { email: fromOwnerEmail });
+    const joined = await acceptAs(h, invitee, ownerId);
+    expect(joined.ok && joined.value.roleKey).toBe("admin");
+  });
+
+  it("withdraws the invitations of holders moved to a role that can no longer give them", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "deleter_holders");
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const leads = await roleAs(h, who, orgId, "Leads", ["member.read", "member.invite"]);
+    const lead = await memberOf(h, who, orgId, "lead", leads);
+    const sent = await inviteAs(h, lead.who, orgId, unique("lead_sent"), readers);
+    const sentId = sent.ok ? sent.value.invitationId : "";
+    expect((await remove(who, orgId, leads, readers)).ok).toBe(true);
+    const row = await h.admin.query<{ status: string; cancel_reason: string | null }>(
+      "SELECT status, cancel_reason FROM identity.invitation WHERE id = $1",
+      [sentId],
+    );
+    expect(row.rows[0]).toEqual({ status: "cancelled", cancel_reason: "role_deleted" });
+  });
+});
+
+describe("an edit that leaves an inviter unable to give an invitation", () => {
+  it("withdraws it, whether the inviter's role lost a permission or the offered role gained one", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "edit_inviters");
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const leads = await roleAs(h, who, orgId, "Leads", ["member.read", "member.invite"]);
+    const lead = await memberOf(h, who, orgId, "edit_lead", leads);
+    const first = await inviteAs(h, lead.who, orgId, unique("edit_first"), readers);
+    const firstId = first.ok ? first.value.invitationId : "";
+    const statusOf = async (id: string) =>
+      (
+        await h.admin.query<{ status: string; cancel_reason: string | null }>(
+          "SELECT status, cancel_reason FROM identity.invitation WHERE id = $1",
+          [id],
+        )
+      ).rows[0];
+    // The offered role gains a permission its inviter lacks.
+    expect(
+      (
+        await update(who, orgId, readers, {
+          name: "Readers",
+          description: "",
+          permissions: ["member.read", "auditLog.read"],
+          version: 1,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(await statusOf(firstId)).toEqual({
+      status: "cancelled",
+      cancel_reason: "inviter_demoted",
+    });
+    // The inviter's own role loses the permission to invite.
+    const viewers = await roleAs(h, who, orgId, "Viewers", ["member.read"]);
+    const second = await inviteAs(h, lead.who, orgId, unique("edit_second"), viewers);
+    const secondId = second.ok ? second.value.invitationId : "";
+    expect(await statusOf(secondId)).toEqual({ status: "pending", cancel_reason: null });
+    expect(
+      (
+        await update(who, orgId, leads, {
+          name: "Leads",
+          description: "",
+          permissions: ["member.read"],
+          version: 1,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(await statusOf(secondId)).toEqual({
+      status: "cancelled",
+      cancel_reason: "inviter_demoted",
+    });
+    // An edit that leaves the inviter able to give it keeps the invitation.
+    const owners = await inviteAs(h, who, orgId, unique("edit_owner"), viewers);
+    const ownersId = owners.ok ? owners.value.invitationId : "";
+    expect(
+      (
+        await update(who, orgId, viewers, {
+          name: "Viewers",
+          description: "",
+          permissions: ["member.read", "auditLog.read"],
+          version: 1,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(await statusOf(ownersId)).toEqual({ status: "pending", cancel_reason: null });
   });
 });

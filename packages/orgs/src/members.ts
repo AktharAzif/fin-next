@@ -3,19 +3,19 @@
 // last-holder rules, then the intent; in the same transaction they write their events, roll the
 // credentials the member made or saw, withdraw the invitations the member may no longer give, revoke
 // trusted browsers where the rules say, and queue the notices.
-import { givingProblem, isTopRole, outranks, type RoleLookup, roleKeyOf } from "@fin/access";
+import { isTopRole, outranks } from "@fin/access";
 import type { UnitTx } from "@fin/identity";
 import { revokeTrustedBrowsers } from "./browsers.ts";
 import type { ListedCredential, RollOutcome } from "./credentials.ts";
 import { displayValue, orgNameForEmail, roleLabelForEmail } from "./email.ts";
 import { notFound } from "./errors.ts";
 import type { OrgActor } from "./guard.ts";
+import { withdrawInvitations } from "./invitations.ts";
 import { notifyEach, type Orgs } from "./orgs.ts";
 import { checkActing, checkGiving, checkLastTopRole, type LockedActor, lockTeam } from "./rules.ts";
 import {
   addressesOfRoles,
   CATALOGUE,
-  type CustomRole,
   labelOf,
   lookupRole,
   type MemberRow,
@@ -169,59 +169,6 @@ export async function memberCredentials(
   };
 }
 
-/**
- * Pending invitations the member sent that their new role no longer lets them give (or every one,
- * when they leave), withdrawn with `member.invitation_cancelled` each.
- */
-async function withdrawInvitationsOf(
-  orgs: Orgs,
-  tx: UnitTx,
-  actor: OrgActor,
-  inviter: MemberRow,
-  reason: "inviter_demoted" | "inviter_removed",
-  newRole: RoleLookup | null,
-  roles: Map<string, CustomRole>,
-): Promise<number> {
-  const pending = await tx.query<{ id: string; role_key: string }>(
-    `SELECT id, role_key FROM identity.invitation
-      WHERE organization_id = $1 AND invited_by = $2 AND status = 'pending'
-      ORDER BY id FOR UPDATE`,
-    [actor.organization.id, inviter.userId],
-  );
-  let withdrawn = 0;
-  const now = orgs.clock.now();
-  for (const row of pending.rows) {
-    if (newRole !== null) {
-      const newPerms = permissionsFor(newRole);
-      const offered = lookupRole(roles, row.role_key);
-      const problem = givingProblem(CATALOGUE, {
-        actorRoleKey: typeof newRole === "string" ? "" : roleKeyOf(newRole),
-        actorPerms: newPerms,
-        targetIsSelf: false,
-        newRole: offered,
-      });
-      // Still theirs to give: it stays.
-      if (problem === null && newPerms.has("member.invite")) continue;
-    }
-    await tx.query(
-      `UPDATE identity.invitation SET status = 'cancelled', cancel_reason = $2, answered_at = $3
-        WHERE id = $1`,
-      [row.id, reason, now],
-    );
-    await orgs.audit(tx, {
-      event: "member.invitation_cancelled",
-      actor: actor.actor,
-      target: row.id,
-      refs: [actor.organization.id, inviter.id],
-      organizationId: actor.organization.id,
-      metadata: { reason },
-      context: actor.context,
-    });
-    withdrawn += 1;
-  }
-  return withdrawn;
-}
-
 async function rollFor(
   orgs: Orgs,
   tx: UnitTx,
@@ -291,7 +238,12 @@ export async function changeMemberRole(
   if (lowered) {
     // A demotion that takes away permissions behind credentials they made or saw (§9.4).
     await rollFor(orgs, tx, actor, me, target, body.rollCredentials);
-    await withdrawInvitationsOf(orgs, tx, actor, target, "inviter_demoted", next, me.roles);
+    // The invitations they sent that the new role no longer lets them give (read after the change).
+    await withdrawInvitations(orgs, tx, actor, {
+      reason: "inviter_demoted",
+      inviters: [target.userId],
+      refs: [target.id],
+    });
   }
   if (raised) {
     await revokeTrustedBrowsers(
@@ -358,7 +310,12 @@ export async function removeMember(
     organizationId: orgId,
   });
   const credentials = await rollFor(orgs, tx, actor, me, target, body.rollCredentials);
-  await withdrawInvitationsOf(orgs, tx, actor, target, "inviter_removed", null, me.roles);
+  await withdrawInvitations(orgs, tx, actor, {
+    reason: "inviter_removed",
+    inviters: [target.userId],
+    all: true,
+    refs: [target.id],
+  });
   await tx.query("DELETE FROM identity.member WHERE id = $1", [memberId]);
   await revokeTrustedBrowsers(orgs, tx, [target.userId], "removed", actor.actor, actor.context);
   await orgs.audit(tx, {

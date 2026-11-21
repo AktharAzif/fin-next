@@ -9,6 +9,7 @@ import {
   givingProblem,
   lastTopRoleProblem,
   type RoleLookup,
+  roleKeyOf,
   type TopRoleChange,
 } from "@fin/access";
 import type { UnitTx } from "@fin/identity";
@@ -91,6 +92,24 @@ export function checkGiving(
     newRole: input.next,
   });
   if (problem !== null) throw givingRefusal(problem);
+}
+
+/**
+ * Whether a member holding `role` may give `offered` by invitation: `member.invite` and §8.5's giving
+ * rule. Accepting re-checks it for the inviter (§9.3), and a change that leaves an invitation its
+ * inviter may no longer give withdraws it, so a pending invitation never waits on a check it fails.
+ */
+export function mayInvite(role: RoleLookup, offered: RoleLookup<DashboardRoleKey>): boolean {
+  const permissions = permissionsFor(role);
+  if (!permissions.has("member.invite")) return false;
+  return (
+    givingProblem(CATALOGUE, {
+      actorRoleKey: typeof role === "string" ? "" : roleKeyOf(role),
+      actorPerms: permissions,
+      targetIsSelf: false,
+      newRole: offered,
+    }) === null
+  );
 }
 
 /** Refuses acting on a target whose role holds something the actor lacks, or on oneself. */

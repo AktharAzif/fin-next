@@ -3,7 +3,10 @@
 // and is exchanged for a host-only cookie. Accepting needs the account's address to equal the
 // invitation's exactly, the invitation pending and unexpired, the inviter still allowed to give the
 // role (re-read inside the team-change lock), and an intent once the person has a factor. Changing
-// its role or resending it issues a new token, so the old link stops working.
+// its role or resending it issues a new token, so the old link stops working; a change makes the
+// changer its inviter. Replacing one (a new invitation for its address) follows the outrank rule as
+// cancelling it does, and a change to roles that leaves an inviter unable to give their invitation
+// withdraws it (`withdrawInvitations`), so no pending invitation fails the inviter's re-check.
 import type { RoleLookup } from "@fin/access";
 import type { UnitTx } from "@fin/identity";
 import { revokeTrustedBrowsers } from "./browsers.ts";
@@ -13,7 +16,7 @@ import type { Guarded, OrgActor } from "./guard.ts";
 import { isId, newId } from "./ids.ts";
 import { PENDING_INVITATIONS } from "./limits.ts";
 import { notifyEach, type Orgs } from "./orgs.ts";
-import { checkActing, checkGiving, type LockedActor, lockTeam } from "./rules.ts";
+import { checkActing, checkGiving, type LockedActor, lockTeam, mayInvite } from "./rules.ts";
 import {
   addressesOfRoles,
   CATALOGUE,
@@ -375,6 +378,16 @@ export async function inviteMember(
     [orgId, email],
   );
   if (existing.rowCount > 0) throw new OrgRefusal("already_member", "invitation.already_member");
+  // Replacing a pending invitation cancels it, so §8.5's outrank rule holds for it as it does for a
+  // cancellation: nobody replaces an invitation offering a role beyond their own permissions.
+  const replacing = await tx.query<{ id: string; role_key: string }>(
+    `SELECT id, role_key FROM identity.invitation
+      WHERE organization_id = $1 AND email = $2 AND status = 'pending' ORDER BY id FOR UPDATE`,
+    [orgId, email],
+  );
+  for (const old of replacing.rows) {
+    checkActing(me, { targetIsSelf: false, role: lookupRole(me.roles, old.role_key) });
+  }
   const now = orgs.clock.now();
   const pending = await tx.query<{ n: number }>(
     `SELECT count(*)::integer AS n FROM identity.invitation
@@ -393,9 +406,9 @@ export async function inviteMember(
   });
   await countInvitationSent(orgs, tx, actor, email);
   const replaced = await tx.query<{ id: string }>(
-    `UPDATE identity.invitation SET status = 'cancelled', cancel_reason = 'replaced', answered_at = $3
-      WHERE organization_id = $1 AND email = $2 AND status = 'pending' RETURNING id`,
-    [orgId, email, now],
+    `UPDATE identity.invitation SET status = 'cancelled', cancel_reason = 'replaced', answered_at = $2
+      WHERE id = ANY($1::text[]) AND status = 'pending' RETURNING id`,
+    [replacing.rows.map((r) => r.id), now],
   );
   for (const old of replaced.rows) {
     await orgs.audit(tx, {
@@ -471,15 +484,20 @@ export async function changeInvitation(
   const now = orgs.clock.now();
   const token = newInvitationToken();
   const expiresAt = new Date(now.getTime() + INVITATION_LIFETIME_MS);
+  // The change issues the invitation again under the actor's name (a new link, emailed from them),
+  // so the actor becomes its inviter: the person accepting re-checks (§9.3) and whose demotion or
+  // removal withdraws it (§9.2) is the one who gave the role it now offers.
   await tx.query(
-    `UPDATE identity.invitation SET role_key = $2, token_hash = $3, expires_at = $4 WHERE id = $1`,
-    [row.id, body.roleKey, tokenHash(token), expiresAt],
+    `UPDATE identity.invitation SET role_key = $2, token_hash = $3, expires_at = $4, invited_by = $5
+      WHERE id = $1`,
+    [row.id, body.roleKey, tokenHash(token), expiresAt, actor.person.id],
   );
   await orgs.audit(tx, {
     event: "member.invitation_changed",
     actor: actor.actor,
     target: row.id,
-    refs: [actor.organization.id],
+    // The inviter before the change, so the log keeps who sent it first.
+    refs: [actor.organization.id, row.invited_by],
     organizationId: actor.organization.id,
     metadata: {
       fromRole: row.role_key,
@@ -524,6 +542,71 @@ export async function resendInvitation(
   });
   await queueInvitation(orgs, tx, actor, { id: row.id, email: row.email, role }, token);
   return { invitationId: row.id, expiresAt: expiresAt.toISOString() };
+}
+
+export type WithdrawalReason = "inviter_demoted" | "inviter_removed" | "role_deleted";
+
+/**
+ * Withdraws pending invitations whose inviter may no longer give them (§9.2: "invitations the
+ * demoted person sent that they can no longer give are withdrawn"), each with
+ * `member.invitation_cancelled`. Runs inside the team-change lock, after the change has been written,
+ * and reads the inviters' roles and the organisation's custom roles again, so a role change, a role
+ * edit and a role deletion all leave only invitations their inviter could still send: accepting one
+ * re-checks exactly this (§9.3), and an invitation that would fail it is never left looking live.
+ * `inviters` limits it to the invitations those people sent, `invitationIds` to those invitations
+ * (either matches); `all` withdraws every one matched, as when the inviter leaves.
+ */
+export async function withdrawInvitations(
+  orgs: Orgs,
+  tx: UnitTx,
+  actor: OrgActor,
+  options: {
+    reason: WithdrawalReason;
+    inviters?: readonly string[];
+    invitationIds?: readonly string[];
+    all?: boolean;
+    refs?: readonly string[];
+  },
+): Promise<string[]> {
+  const orgId = actor.organization.id;
+  const inviters = options.inviters ?? [];
+  const ids = options.invitationIds ?? [];
+  if (inviters.length === 0 && ids.length === 0) return [];
+  const pending = await tx.query<{ id: string; role_key: string; inviter_role: string | null }>(
+    `SELECT i.id, i.role_key, m.role_key AS inviter_role
+       FROM identity.invitation i
+       LEFT JOIN identity.member m ON m.organization_id = i.organization_id AND m.user_id = i.invited_by
+      WHERE i.organization_id = $1 AND i.status = 'pending'
+        AND (i.invited_by = ANY($2::text[]) OR i.id = ANY($3::text[]))
+      ORDER BY i.id FOR UPDATE OF i`,
+    [orgId, [...inviters], [...ids]],
+  );
+  const roles = await customRolesOf(tx, orgId);
+  const withdrawn: string[] = [];
+  const now = orgs.clock.now();
+  for (const row of pending.rows) {
+    const keep =
+      options.all !== true &&
+      row.inviter_role !== null &&
+      mayInvite(lookupRole(roles, row.inviter_role), lookupRole(roles, row.role_key));
+    if (keep) continue;
+    await tx.query(
+      `UPDATE identity.invitation SET status = 'cancelled', cancel_reason = $2, answered_at = $3
+        WHERE id = $1`,
+      [row.id, options.reason, now],
+    );
+    await orgs.audit(tx, {
+      event: "member.invitation_cancelled",
+      actor: actor.actor,
+      target: row.id,
+      refs: [orgId, ...(options.refs ?? [])],
+      organizationId: orgId,
+      metadata: { reason: options.reason },
+      context: actor.context,
+    });
+    withdrawn.push(row.id);
+  }
+  return withdrawn;
 }
 
 /** `DELETE /api/team/invitations/:invitationId` (§9.3): the outrank rule, an intent; no email. */

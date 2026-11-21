@@ -437,7 +437,7 @@ export const ORGS_ROUTES = [
     }),
     query: "none",
     limits: ["step_up_intents", "role_edit"],
-    audit: ["role.updated", "browser.trust_revoked"],
+    audit: ["role.updated", "member.invitation_cancelled", "browser.trust_revoked"],
   }),
   route({
     id: "roleDelete",
@@ -459,6 +459,7 @@ export const ORGS_ROUTES = [
       "role.deleted",
       "member.role_changed",
       "member.invitation_changed",
+      "member.invitation_cancelled",
       "browser.trust_revoked",
     ],
   }),

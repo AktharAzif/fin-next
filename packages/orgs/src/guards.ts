@@ -58,9 +58,11 @@ export const ORGS_GUARDS: readonly GuardRegistration[] = [
     keyColumn: "id",
     events: [NEVER],
   },
+  // `invited_by` changes with the role a change of invitation gives (the changer becomes its
+  // inviter, invitations.ts), so it is guarded with the invitation's events, never left open.
   {
     table: "identity.invitation",
-    ops: ["INSERT", "UPDATE OF role_key, status, token_hash"],
+    ops: ["INSERT", "UPDATE OF role_key, status, token_hash, invited_by"],
     keyColumn: "id",
     events: [
       "member.invited",
@@ -73,7 +75,7 @@ export const ORGS_GUARDS: readonly GuardRegistration[] = [
   },
   {
     table: "identity.invitation",
-    ops: ["UPDATE OF organization_id, email, invited_by"],
+    ops: ["UPDATE OF organization_id, email"],
     keyColumn: "id",
     events: [NEVER],
   },
