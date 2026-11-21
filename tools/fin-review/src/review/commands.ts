@@ -25,6 +25,8 @@ import { compareVersions, parseVersionOutput } from "../runner/client.ts";
 import { engineHome, SESSION_PATH } from "../runner/env.ts";
 import { isWithin } from "../runner/settings.ts";
 import type { SessionRunner } from "../runner/types.ts";
+import { checkEngineCopy } from "./engine-copy.ts";
+import type { EngineCopy, EngineCopyInput } from "./engine-copy.ts";
 import { loadProcedure } from "./procedure.ts";
 import { githubSlug, isPrNumber, originUrl, RemoteError } from "./repo.ts";
 import { runReview } from "./run.ts";
@@ -40,6 +42,8 @@ export interface ReviewServices {
   readonly makeRunner?: (options: CliRunnerOptions) => SessionRunner;
   /** `claude --version`'s version; default: run the pinned Claude Code. */
   readonly clientVersion?: (claudePath: string) => Promise<string | null>;
+  /** Whether the running engine is the default branch's engine copy; default: compare its checkout with the mirror. */
+  readonly engineCopy?: (input: EngineCopyInput) => Promise<EngineCopy>;
 }
 
 const VERSION_TIMEOUT_MS = 30_000;
@@ -179,6 +183,7 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
         }),
       maxSessions: machine.maxSessions,
       engineRoot,
+      engineCopy: services?.engineCopy ?? ((input: EngineCopyInput) => checkEngineCopy(engineRoot, input)),
       clock,
       random,
       stdout: ctx.stdout,

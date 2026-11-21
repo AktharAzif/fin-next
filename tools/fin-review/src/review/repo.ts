@@ -10,7 +10,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { ProgramError } from "../errors.ts";
 import { runProgram } from "../exec.ts";
-import { diffRaw, gitEnv, isSha } from "../git.ts";
+import { diffRaw, gitEnv, isSha, parseLsTreeZ } from "../git.ts";
 import type { DiffEntry } from "../git.ts";
 
 export const PR_NUMBER_RE = /^[1-9][0-9]{0,6}$/;
@@ -233,6 +233,58 @@ export async function unifiedDiff(
   const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "-M50", "--no-relative", ...range, "--", ...paths.map((path) => `:(literal)${path}`)], env })).stdout;
   if (out.length <= maxBytes) return { text: out.toString("utf8"), truncated: false };
   return { text: out.subarray(0, maxBytes).toString("utf8"), truncated: true };
+}
+
+const ENGINE_PATH_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+function assertEnginePaths(paths: readonly string[]): void {
+  for (const path of paths) if (!ENGINE_PATH_RE.test(path) || path.split("/").some((part) => part === "." || part === "..")) throw new TypeError("refusing an engine path");
+}
+
+/** A git checkout's top folder, its HEAD commit, and the entries of `paths` that differ from HEAD (untracked and ignored ones too). */
+export async function checkoutState(
+  dir: string,
+  paths: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<{ top: string; head: string; changed: string[] } | null> {
+  assertDir(dir, "the engine checkout");
+  assertEnginePaths(paths);
+  let top: string;
+  let head: string;
+  try {
+    top = (await git({ cwd: dir, args: ["rev-parse", "--show-toplevel"], env })).stdout.toString("utf8").replace(/\n$/, "");
+    head = (await git({ cwd: dir, args: ["rev-parse", "--verify", "HEAD^{commit}"], env })).stdout.toString("utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!isSha(head)) return null;
+  const status = (await git({ cwd: dir, args: ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames", "--", ...paths], env })).stdout;
+  const changed = status
+    .toString("utf8")
+    .split("\0")
+    .filter((record) => record.length > 3)
+    .map((record) => record.slice(3));
+  return { top, head, changed };
+}
+
+/** The object ID `rev:path` names in the repository at `repo`, or null when there is none. */
+export async function objectAt(repo: string, rev: string, path: string, env: Readonly<Record<string, string | undefined>>): Promise<string | null> {
+  if (!isSha(rev)) throw new TypeError("an object lookup needs a SHA");
+  assertEnginePaths([path]);
+  const result = await git({ cwd: repo, args: ["rev-parse", "--verify", "--quiet", `${rev}:${path}`], env, okCodes: [1, 128] });
+  const oid = result.stdout.toString("utf8").trim();
+  return result.code === 0 && isSha(oid) ? oid : null;
+}
+
+/** Every file under `paths` at `rev` in the repository at `repo`, as `[path, blob id]`, sorted by path. */
+export async function filesUnder(repo: string, rev: string, paths: readonly string[], env: Readonly<Record<string, string | undefined>>): Promise<Array<[string, string]>> {
+  if (!isSha(rev)) throw new TypeError("a tree listing needs a SHA");
+  assertEnginePaths(paths);
+  const out = (await git({ cwd: repo, args: ["ls-tree", "-r", "-z", "--full-tree", rev, "--", ...paths], env })).stdout;
+  return parseLsTreeZ(out)
+    .filter((entry) => entry.type === "blob")
+    .map((entry): [string, string] => [entry.path, entry.oid])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
 const HUNK_RE = /^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@/;

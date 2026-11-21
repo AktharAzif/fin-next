@@ -30,6 +30,15 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
 `tools/fin-review/config/env-refusals.json` is in its environment, which includes
 `ANTHROPIC_BASE_URL` (other than `https://api.anthropic.com`) and `ANTHROPIC_AUTH_TOKEN`.
 
+Run it from a clean checkout of the default branch: a pull request is never judged by its own
+procedure (spec 07 §0.3). A gating `pr` or `commit` is refused (exit 78, `engine_not_default`)
+unless the checkout the engine runs from has no change, untracked or ignored file under
+`tools/fin-review`, `docs/review`, `AGENTS.md` and `CONTRIBUTING.md`, and holds there exactly what
+the default branch holds; `--advisory` runs anyway and is recorded as advisory. Until fin-review is on
+the default branch, every run is advisory. Every record holds `engine`: the engine's commit, the
+procedure hash of §4.8 (the SHA-256 of the sorted `<path> <blob id>` lines of every file under
+`docs/review/` and `tools/fin-review/config/`) and whether it was the default branch's engine copy.
+
 - **`pr`** reads the pull request's head SHA, its base branch and the repository's default branch
   with `gh api` (nothing else: never a title, body, comment or head branch name), fetches the head,
   the base and the default branch into a bare mirror under `$FIN_REVIEW_HOME/repos/` (default
@@ -65,8 +74,9 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
 - **`commit`** reviews the delta since `--since` (the last reviewed head), and the files that import
   the changed ones. It stays a delta only when spec 07 §2.3.2's conditions hold against the newest
   local, non-advisory `pr` or `commit` run of the same pull request at `--since`; otherwise it runs
-  as `pr` and records `escalated`: `no_prior_run`, `not_ancestor`, `base_changed` (the prior run
-  was reviewed from another default branch, or from a merge base the current one does not contain),
+  as `pr` and records `escalated`: `no_prior_run`, `not_ancestor`, `procedure_changed` (another
+  procedure hash), `base_changed` (the prior run was reviewed from another default branch, or from
+  a merge base the current one does not contain),
   `delta_lines` (over 400), `tier_raised`, `new_lens`, `new_profile` or `prior_could_not_check`.
   The delta's own tier picks its lenses, but a tier only goes up along the chain: the floor, the
   budget and the recorded `tier` are the higher of the delta's and the prior run's (`deltaTier`

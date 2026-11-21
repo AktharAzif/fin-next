@@ -51,6 +51,7 @@ import type { AttackProfile, Procedure } from "./procedure.ts";
 import { buildContextPack, dataBlock, lensPrompt, numberedFile, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
 import { compileSchema } from "./schema.ts";
 import type { Refutation } from "./prompts.ts";
+import type { EngineCopy, EngineCopyInput } from "./engine-copy.ts";
 import { filterFreeText, filterText } from "./injection.ts";
 import { entryKind, pathTextProblem, TreeError, treeProblems, writeTree } from "./tree.ts";
 import type { EntryKind } from "./tree.ts";
@@ -99,6 +100,8 @@ export interface ReviewDeps {
   readonly maxSessions: number;
   /** The engine copy's repository root, where the rules lens reads AGENTS.md and CONTRIBUTING.md. */
   readonly engineRoot: string;
+  /** Whether the engine that runs is the default branch's engine copy (src/review/engine-copy.ts). */
+  readonly engineCopy: (input: EngineCopyInput) => Promise<EngineCopy>;
   readonly clock: Clock;
   readonly random: RandomSource;
   readonly stdout: (text: string) => void;
@@ -132,6 +135,8 @@ interface PriorRun {
   /** The default branch and the merge base the run reviewed from; null in a record that has none. */
   readonly defaultBranch: string | null;
   readonly mergeBase: string | null;
+  /** The procedure hash of the engine that ran (spec 07 §4.8); null in a record that has none. */
+  readonly procedureHash: string | null;
 }
 
 interface SessionPlan {
@@ -301,6 +306,8 @@ export function readRunRecords(home: string, pr: number): RunRecord[] {
     }
     const defaultBranch = doc["defaultBranch"];
     const recordedBase = doc["mergeBase"];
+    const engine = doc["engine"];
+    const hash = isJsonObject(engine) ? engine["procedureHash"] : undefined;
     out.push({
       runId: name,
       head,
@@ -312,6 +319,7 @@ export function readRunRecords(home: string, pr: number): RunRecord[] {
       openBlockers,
       defaultBranch: typeof defaultBranch === "string" && isRefName(defaultBranch) ? defaultBranch : null,
       mergeBase: isSha(recordedBase) ? recordedBase : null,
+      procedureHash: typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? hash : null,
     });
   }
   return out.sort((a, b) => (a.finishedAt !== b.finishedAt ? (a.finishedAt < b.finishedAt ? 1 : -1) : a.runId < b.runId ? 1 : -1));
@@ -512,6 +520,19 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       return EXIT.unavailable;
     }
     const defaultBranch = facts.defaultBranch;
+
+    // The engine copy (spec 07 §0.3): a gating run is judged by the default branch's engine and
+    // procedure, never by the copy a pull request carries. Anything else runs only as advisory.
+    const engine = await deps.engineCopy({ mirror, defaultBranch, defaultTip, env });
+    if (engine.problems.length > 0) {
+      if (!req.advisory) {
+        for (const problem of engine.problems) deps.stderr(`fin-review: refused: engine_not_default: ${problem}\n`);
+        deps.stderr(`fin-review: run the engine from a clean checkout of ${defaultBranch}, or pass --advisory\n`);
+        state.to("refused", { reason: "engine_copy" });
+        return EXIT.config;
+      }
+      deps.stderr(`advisory: the engine is not ${defaultBranch}'s engine copy\n`);
+    }
     try {
       lock = acquireLock(home, req.pr, { runId, head }, clock, (stale, why) => lines.write("review.lock_broken", { staleRunId: stale, why }));
     } catch (error) {
@@ -544,7 +565,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     let deltaFrom: string | null = null;
     if (req.mode === "commit") {
       const since = req.since ?? "";
-      const decision = await commitDecision(req, deps, mirror, since, head, layout, { defaultBranch, mergeBase: base });
+      const decision = await commitDecision(req, deps, mirror, since, head, layout, { defaultBranch, mergeBase: base }, engine.procedureHash);
       if (decision.escalate !== null) {
         mode = "pr";
         escalated = decision.escalate;
@@ -686,6 +707,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       since: req.since,
       tier: gateTier,
       deltaTier: tier,
+      engine: { commit: engine.commit, procedureHash: engine.procedureHash, defaultCopy: engine.problems.length === 0, problems: engine.problems },
       changed,
       units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier, kind: unit.kind })),
       excluded,
@@ -965,6 +987,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       mergeBase: base,
       tier: gateTier,
       deltaTier: tier,
+      engine: { commit: engine.commit, procedureHash: engine.procedureHash, defaultCopy: engine.problems.length === 0 },
       result,
       exitCode,
       advisory: req.advisory,
@@ -1021,12 +1044,15 @@ async function commitDecision(
   head: string,
   layout: Layout | null,
   scope: Scope,
+  procedureHash: string | null,
 ): Promise<CommitDecision> {
   const { env, config, procedure } = deps;
   const escalate = (reason: string): CommitDecision => ({ escalate: reason, prior: null, delta: [] });
   const prior = readPriorRun(deps.home, req.pr, since);
   if (prior === null) return escalate("no_prior_run");
   if (!isSha(since) || (await resolveCommit(mirror, since, env)) === null || !(await isAncestor(mirror, since, head, env))) return escalate("not_ancestor");
+  // A procedure change invalidates what the prior run covered (spec 07 §4.8, §5.9).
+  if (procedureHash === null || prior.procedureHash !== procedureHash) return escalate("procedure_changed");
   // The prior run must have reviewed from the same branch and from a merge base this one still
   // contains; otherwise what lies between the two bases was never reviewed with the head.
   if (prior.defaultBranch !== scope.defaultBranch || prior.mergeBase === null || (await resolveCommit(mirror, prior.mergeBase, env)) === null) return escalate("base_changed");

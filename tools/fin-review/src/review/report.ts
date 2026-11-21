@@ -98,6 +98,8 @@ export interface RunSummary {
   readonly tier: Tier | null;
   /** The tier of what this run reviewed (in `commit`, the delta's), which chose its lenses. */
   readonly deltaTier: Tier | null;
+  /** The engine that ran: its commit, the procedure hash (spec 07 §4.8), and whether it was the default branch's engine copy. */
+  readonly engine: { readonly commit: string | null; readonly procedureHash: string | null; readonly defaultCopy: boolean };
   readonly result: RunResultName;
   readonly exitCode: number;
   readonly advisory: boolean;
@@ -174,6 +176,7 @@ export function summaryMarkdown(summary: RunSummary, records: readonly FindingRe
     `- Head: \`${summary.head}\``,
     `- Base: ${summary.baseRef} at \`${summary.base}\`; reviewed from the merge base \`${summary.mergeBase}\` with ${summary.defaultBranch} (\`${summary.defaultTip}\`)`,
     `- Tier: ${summary.tier ?? "-"}${summary.deltaTier === summary.tier ? "" : ` (this run's change: ${summary.deltaTier ?? "-"})`}`,
+    `- Engine: \`${summary.engine.commit ?? "-"}\`, procedure \`${summary.engine.procedureHash ?? "-"}\`${summary.engine.defaultCopy ? "" : `, not ${summary.defaultBranch}'s engine copy`}`,
   );
   out.push(`- Result: **${summary.result}** (exit ${summary.exitCode})${summary.advisory ? ", advisory: not a gate receipt" : ""}`);
   if (summary.escalated !== null) out.push(`- Escalated from \`commit\` to \`pr\`: ${summary.escalated}`);

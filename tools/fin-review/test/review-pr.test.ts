@@ -11,6 +11,7 @@ import { FakeRunner } from "../src/runner/fake.ts";
 import type { FakeReply, FakeScript } from "../src/runner/fake.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
 import type { ReviewServices } from "../src/review/commands.ts";
+import type { EngineCopy } from "../src/review/engine-copy.ts";
 import {
   cleanOutput,
   countingRandom,
@@ -27,6 +28,8 @@ import { fixtureLayout } from "./helpers/monorepo.ts";
 
 const MODELS = loadCommittedModels();
 const CONFIRMED = { verdict: "CONFIRMED", guardQuotes: [], reason: "The comparison is plain ===." };
+/** The engine that runs the tests stands in for the default branch's engine copy. */
+const ENGINE_COPY: EngineCopy = { commit: "e".repeat(40), procedureHash: "a".repeat(64), problems: [] };
 
 type Handler = (spec: SessionSpec, attempt: number) => FakeReply | undefined;
 
@@ -60,6 +63,7 @@ function harness(fx: ReviewFixture, fake: FakeScript, random = countingRandom())
       random,
       facts: (n) => fx.facts(n),
       clientVersion: async () => "2.1.328",
+      engineCopy: async () => ENGINE_COPY,
       makeRunner: (options) => {
         assert.equal(options.models.opus, MODELS.opus);
         const runner = new FakeRunner(fake, clock);
@@ -390,6 +394,30 @@ describe("pr over the fixture repository with fake sessions", () => {
     assert.ok(!existsSync(join(fx.local.dir, ".fin-review")), "a refused home is never created");
   });
 
+  it("a gating run needs the default branch's engine copy (78); --advisory runs and records which engine ran", async () => {
+    fx.pr(16, { "docs/plan/README.md": "# plan\n\nEngine copy.\n" });
+    const other: EngineCopy = { commit: "f".repeat(40), procedureHash: "b".repeat(64), problems: ["docs/review at the engine's commit differs from main's"] };
+    const h = harness(fx, script(), random);
+    const refused = await runFixtureCli(fx, ["pr", "--pr", "16"], { ...h.services, engineCopy: async () => other });
+    assert.equal(refused.code, 78, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /^fin-review: refused: engine_not_default: docs\/review at the engine's commit differs from main's$/m);
+    assert.equal(calls(h).length, 0);
+    assert.equal(readJson(join(lastRun(fx), "state.json"))["reason"], "engine_copy");
+    const advisory = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "16", "--advisory"], { ...advisory.services, engineCopy: async () => other });
+    assert.match(run.stderr, /advisory: the engine is not main's engine copy/);
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["advisory"], true);
+    assert.deepEqual(result["engine"], { commit: "f".repeat(40), procedureHash: "b".repeat(64), defaultCopy: false });
+    // The real check: the fixture's main holds no engine at all.
+    const real = harness(fx, script(), random);
+    const { engineCopy: _injected, ...services } = real.services;
+    const unchecked = await runFixtureCli(fx, ["pr", "--pr", "16"], services);
+    assert.equal(unchecked.code, 78, unchecked.stdout + unchecked.stderr);
+    assert.match(unchecked.stderr, /engine_not_default: main has no tools\/fin-review, so there is no engine copy to run/);
+    assert.equal(calls(real).length, 0);
+  });
+
   it("refuses a Claude Code other than the pin (78)", async () => {
     const h = harness(fx, script(), random);
     const run = await runFixtureCli(fx, ["pr", "--pr", "1"], { ...h.services, clientVersion: async () => "2.1.300" }, fx.env);
@@ -635,6 +663,16 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     fx.pr(5, { "docs/plan/README.md": "# plan\n\nD.\n" });
     const notAncestor = await runFixtureCli(fx, ["commit", "--pr", "5", "--since", other], harness(fx, script(), random).services);
     assert.match(notAncestor.stdout, /escalated from commit: not_ancestor/);
+  });
+
+  it("escalates when the procedure changed since the prior run (procedure_changed)", async () => {
+    const h0 = fx.pr(10, { "docs/plan/README.md": "# plan\n\nG.\n" });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "10"], harness(fx, script(), random).services)).code, 0);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["engine"] as Record<string, unknown>)["procedureHash"], ENGINE_COPY.procedureHash);
+    fx.pr(10, { "docs/plan/README.md": "# plan\n\nH.\n" }, h0);
+    const changedProcedure = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["commit", "--pr", "10", "--since", h0], { ...changedProcedure.services, engineCopy: async () => ({ ...ENGINE_COPY, procedureHash: "c".repeat(64) }) });
+    assert.match(run.stdout, /escalated from commit: procedure_changed/);
   });
 
   it("a prior blocker is not closed by a quote of text that did not change since it was found", async () => {
