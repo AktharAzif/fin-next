@@ -7,7 +7,8 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
-    "./shell": "./src/shell/index.ts"
+    "./shell": "./src/shell/index.ts",
+    "./qr": "./src/lib/qr/qr-code.tsx"
   },
   "scripts": {
     "lint": "biome check .",

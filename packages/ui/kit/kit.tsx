@@ -68,6 +68,7 @@ import {
   toast,
 } from "../src/index.ts";
 import { PolicyProbes } from "../src/kit.tsx";
+import { QrSection } from "./qr.tsx";
 
 function Section(props: { name: string; title: string; children: ReactNode }) {
   return (
@@ -821,6 +822,10 @@ export function Kit(props: { onReady: () => void }) {
                 Your sign-in
               </Button>
             </Row>
+          </Section>
+
+          <Section name="qr" title="QrCode">
+            <QrSection />
           </Section>
 
           <Section name="probes" title="Page-policy probes">

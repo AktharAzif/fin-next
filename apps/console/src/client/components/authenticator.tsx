@@ -1,10 +1,12 @@
 // The authenticator set-up and the backup codes (Authenticator board; spec 02 §5.4), shared by
 // /welcome/authenticator and Account security's dialog. `/two-factor/enable` answers the
-// `otpauth://` URI once with the 10 backup codes; the key is shown in groups of four for manual
-// entry (a QR code joins it once @fin/ui has an encoder, UR-13); the first right code turns the app
-// on; then the codes are shown once, to copy or download, and never again.
+// `otpauth://` URI once with the 10 backup codes; the URI is drawn as a QR code in the browser
+// (@fin/ui/qr's QrCode, UR-13: SVG elements, never an image or a third-party service) beside the
+// key in groups of four for manual entry, which stays whatever the QR code does; the first right
+// code turns the app on; then the codes are shown once, to copy or download, and never again.
 import { CheckIcon, CopyIcon, DownloadSimpleIcon } from "@fin/icons";
 import { Button, Checkbox, InlineAlert, OTPInput, type OTPStatus, useCopy } from "@fin/ui";
+import { QrCode } from "@fin/ui/qr";
 import { type ReactNode, useState } from "react";
 import { TOTP_CODE_LENGTH } from "../api/contracts/auth.ts";
 import { commonAlert, failureOf } from "../api/failures.ts";
@@ -116,26 +118,30 @@ export function AuthenticatorScan(props: AuthenticatorScanProps) {
       )}
       <section aria-labelledby="authenticator-key" className="flex flex-col gap-3">
         <h2 id="authenticator-key" className="m-0 text-label text-text-primary">
-          1. Type this key into your authenticator app
+          1. Scan this with your authenticator app
         </h2>
         {secret === null ? (
           <InlineAlert tone="danger" title="Couldn’t read the key">
             Start again to get a new one.
           </InlineAlert>
         ) : (
-          <div className="flex flex-col gap-3 rounded-md bg-surface-subtle p-4">
-            {/* @pendingDesign UR-13: the QR code joins the key once @fin/ui has an encoder. */}
-            <p className="m-0 text-caption text-text-tertiary">
-              Choose “Enter a setup key” in the app, and use the time-based option.
-            </p>
-            <p
-              data-testid="authenticator-key"
-              className="m-0 font-mono text-mono break-all text-text-primary"
-            >
-              {groupKey(secret)}
-            </p>
-            <div>
-              <CopyButton value={secret} label="Copy key" />
+          // The key sits beside the QR code, and wraps under it where the well is narrow.
+          <div className="flex flex-wrap items-center gap-4 rounded-md bg-surface-subtle p-4">
+            <QrCode value={props.uri} label="QR code for your authenticator app" />
+            <div className="flex min-w-0 shrink grow basis-44 flex-col gap-2">
+              <p className="m-0 text-body text-text-secondary">
+                Can’t scan? Type this key instead.
+              </p>
+              {/* Wraps between the groups of four, never inside one, so each group reads whole. */}
+              <p
+                data-testid="authenticator-key"
+                className="m-0 font-mono text-mono text-text-primary"
+              >
+                {groupKey(secret)}
+              </p>
+              <div className="pt-1">
+                <CopyButton value={secret} label="Copy key" />
+              </div>
             </div>
           </div>
         )}
