@@ -1,5 +1,5 @@
 {
-  "$comment": "The watcher's public settings for staging (spec 01 §7.3 to §7.8, §7.11). Hosts are named by role; the deploy adds the private part at run time (the account ID, the zone and real hostnames, each tunnel's static egress addresses, the registered rule set and Access policy hashes) and uploads the whole as the Worker's FIN_WATCHER_SETTINGS. None of the private part is ever committed.",
+  "$comment": "The watcher's public settings for staging (spec 01 §7.3 to §7.8, §7.11). Hosts are named by role; the deploy adds the private part at run time (the account ID, the zone and real hostnames, each tunnel's static egress addresses, the registered rule set and Access policy hashes, each static deployment's registered version) and uploads the whole as the Worker's FIN_WATCHER_SETTINGS. None of the private part is ever committed. rulesetPhases lists every phase rules apply writes (spec 01 §7.6, EXECUTION §2.5 step 7: the response header rule of BD-12 and the Free Managed Ruleset among them); in each, only fin-next's own rules (ref fin_next_, BD-11) are hashed. Each sending subdomain's DMARC record, _dmarc.<label>.<staging-zone>, must hold at least dmarcPolicy (BD-17); the zone's apex _dmarc is the old product's and is never read.",
   "environment": "staging",
   "scriptName": "fin-next-staging-watcher",
   "cron": "* * * * *",
@@ -62,7 +62,9 @@
     "http_request_firewall_custom",
     "http_ratelimit",
     "http_config_settings",
-    "http_request_cache_settings"
+    "http_request_cache_settings",
+    "http_response_headers_transform",
+    "http_request_firewall_managed"
   ],
   "access": {
     "appName": "fin-next-staging-admin",
@@ -74,5 +76,5 @@
     "appLauncherVisible": false,
     "mfaRequired": true
   },
-  "email": { "subdomains": ["auth", "notify"] }
+  "email": { "subdomains": ["auth", "notify"], "dmarcPolicy": "reject" }
 }

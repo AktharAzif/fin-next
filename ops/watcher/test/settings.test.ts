@@ -1,15 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { accessPolicyHash, canonicalJson, rulesetHash, sha256Hex } from "../src/hash.ts";
-import { allowedOrigins, emailNames, parseSettings } from "../src/settings.ts";
-import { healthyWorld, settingsFor } from "./world.ts";
+import {
+  accessPolicyHash,
+  canonicalJson,
+  finRules,
+  finRulesetHash,
+  rulesetHash,
+  sha256Hex,
+} from "../src/hash.ts";
+import {
+  allowedOrigins,
+  emailNames,
+  hostPatternMatches,
+  parseSettings,
+  roleOwning,
+  rolesMatching,
+} from "../src/settings.ts";
+import { HOSTS, healthyWorld, settingsFor } from "./world.ts";
 
 describe("settings", () => {
   it("accepts the deployed shape", async () => {
     const settings = await settingsFor(healthyWorld());
     expect(settings.scriptName).toBe("fin-next-staging-watcher");
     expect(settings.cron).toBe("* * * * *");
-    expect(emailNames(settings).dmarc).toBe("_dmarc.example.net");
+    expect(emailNames(settings)).toEqual([
+      { label: "auth", domain: "auth.example.net", dmarc: "_dmarc.auth.example.net" },
+      { label: "notify", domain: "notify.example.net", dmarc: "_dmarc.notify.example.net" },
+    ]);
+    expect(settings.email.dmarcPolicy).toBe("reject");
     expect([...allowedOrigins(settings, "admin")]).toHaveLength(2);
+  });
+
+  it("refuses an unknown DMARC policy, a version that is not an ID, and a phase that is not one", async () => {
+    const good = await settingsFor(healthyWorld());
+    const cases: [string, unknown][] = [
+      ["dmarcPolicy", { ...good, email: { ...good.email, dmarcPolicy: "strict" } }],
+      ["not a version ID", { ...good, staticVersions: { "fin-next-x": "a b" } }],
+      ["staticVersions must be an object", { ...good, staticVersions: undefined }],
+      ["rulesetPhases", { ...good, rulesetPhases: ["../x"] }],
+      ["not a phase", { ...good, rulesetHashes: { "../x": "0".repeat(64) } }],
+    ];
+    for (const [message, value] of cases) {
+      expect(() => parseSettings(value), message).toThrow(new RegExp(message));
+    }
+  });
+
+  it("matches host patterns exactly or by a wildcard, and names under a host", async () => {
+    const settings = await settingsFor(healthyWorld());
+    expect(rolesMatching(settings, `${HOSTS.admin}/assets/*`)).toEqual(["admin"]);
+    expect(rolesMatching(settings, `https://*${HOSTS.docs}/*`)).toEqual(["docs"]);
+    expect(rolesMatching(settings, "*.example.net/*")).toHaveLength(6);
+    expect(rolesMatching(settings, "old.example.net/*")).toEqual([]);
+    expect(rolesMatching(settings, `x${HOSTS.admin}/*`)).toEqual([]);
+    expect(hostPatternMatches("*-host.example.net", HOSTS.api)).toBe(true);
+    expect(roleOwning(settings, `deep.${HOSTS.console}`)).toBe("console");
+    expect(roleOwning(settings, `x${HOSTS.console}`)).toBeUndefined();
   });
 
   it("refuses a hostname outside the zone, a missing egress, or a bad hash", async () => {
@@ -17,7 +61,7 @@ describe("settings", () => {
     const cases: [string, unknown][] = [
       ["outside the zone", { ...good, hosts: { ...good.hosts, admin: "admin.example.org" } }],
       ["no static egress", { ...good, egress: {} }],
-      ["not a hash", { ...good, rulesetHashes: { x: "nope" } }],
+      ["not a hash", { ...good, rulesetHashes: { http_ratelimit: "nope" } }],
       ["not an account ID", { ...good, accountId: "abc" }],
       [
         "replicas",
@@ -44,6 +88,18 @@ describe("hashes", () => {
     const one = { expression: "a", action: "block" };
     const two = { expression: "b", action: "skip" };
     expect(await rulesetHash([one, two])).not.toBe(await rulesetHash([two, one]));
+  });
+
+  it("cover fin-next's own rules only (ref fin_next_), in their order", async () => {
+    const mine = { ref: "fin_next_a", expression: "a", action: "block" };
+    const theirs = { ref: "legacy", expression: "b", action: "skip" };
+    const noRef = { expression: "c", action: "log" };
+    expect(finRules([theirs, mine, noRef])).toEqual([mine]);
+    expect(await finRulesetHash([theirs, mine, noRef])).toBe(await rulesetHash([mine]));
+    expect(await finRulesetHash([mine, { ...theirs, expression: "changed" }])).toBe(
+      await finRulesetHash([theirs, mine]),
+    );
+    expect(await finRulesetHash([])).toBe(await sha256Hex("[]"));
   });
 
   it("order Access policies by precedence", async () => {

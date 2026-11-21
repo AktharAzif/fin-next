@@ -48,9 +48,20 @@ export interface PublicSettings {
   readonly zoneSettings: Readonly<Record<string, unknown>>;
   readonly universalSsl: boolean;
   readonly botFightMode: boolean;
+  /** Every phase `rules apply` writes; each one's fin_next_ rules are hashed every minute. */
   readonly rulesetPhases: readonly string[];
   readonly access: AccessSettings;
-  readonly email: { readonly subdomains: readonly string[] };
+  readonly email: EmailSettings;
+}
+
+export const DMARC_POLICIES = ["none", "quarantine", "reject"] as const;
+export type DmarcPolicy = (typeof DMARC_POLICIES)[number];
+
+export interface EmailSettings {
+  /** The sending subdomains' labels (auth, notify); each has its own `_dmarc.<label>` record. */
+  readonly subdomains: readonly string[];
+  /** The weakest policy each sending subdomain's DMARC record may hold (BD-17: reject). */
+  readonly dmarcPolicy: DmarcPolicy;
 }
 
 /** The private part, added at deploy time and never committed. */
@@ -60,10 +71,16 @@ export interface PrivateSettings {
   readonly hosts: Readonly<Record<HostRole, string>>;
   /** Static egress addresses by Railway service (the overlay's staticEgress). */
   readonly egress: Readonly<Record<string, readonly string[]>>;
-  /** Each rule set phase's hash from the last registered `pnpm fin rules apply`. */
+  /** Each phase's hash of fin-next's own rules, from the last registered `pnpm fin rules apply`. */
   readonly rulesetHashes: Readonly<Record<string, string>>;
   /** The Access policy hash from the last registered `pnpm fin access apply`. */
   readonly accessPolicyHash: string | null;
+  /**
+   * Each static deployment's active version, as the last registered static deploy read it back.
+   * Every upload makes a new version, so any other version means an upload outside a registered
+   * run (AC-P0-15).
+   */
+  readonly staticVersions: Readonly<Record<string, string>>;
   readonly release: string;
 }
 
@@ -86,6 +103,10 @@ const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const ADDRESS = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{2,39})$/i;
 const HASH = /^[0-9a-f]{64}$/;
+const PHASE = /^[a-z][a-z_]{1,63}$/;
+const SCRIPT_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const VERSION_ID = /^[A-Za-z0-9-]{1,64}$/;
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** Validates a whole settings object (the Worker runs this every minute). */
 export function parseSettings(raw: unknown): WatcherSettings {
@@ -149,10 +170,12 @@ export function parseSettings(raw: unknown): WatcherSettings {
         (d) =>
           isRecord(d) &&
           isString(d.name) &&
+          SCRIPT_NAME.test(d.name) &&
           (HOST_ROLES as readonly string[]).includes(String(d.host)),
       ),
     "static must list { name, host }",
   );
+  need(SCRIPT_NAME.test(String(s.scriptName)), "scriptName is not a Worker name");
   need(
     Array.isArray(s.routes) &&
       s.routes.every(
@@ -167,9 +190,13 @@ export function parseSettings(raw: unknown): WatcherSettings {
   need(isRecord(s.zoneSettings), "zoneSettings must be an object");
   need(typeof s.universalSsl === "boolean", "universalSsl must be a boolean");
   need(typeof s.botFightMode === "boolean", "botFightMode must be a boolean");
-  need(isStringArray(s.rulesetPhases), "rulesetPhases must list phases");
+  need(
+    isStringArray(s.rulesetPhases) && s.rulesetPhases.every((p) => PHASE.test(p)),
+    "rulesetPhases must list phases",
+  );
   need(isRecord(s.rulesetHashes), "rulesetHashes must be an object");
-  for (const hash of Object.values(s.rulesetHashes as Record<string, unknown>)) {
+  for (const [phase, hash] of Object.entries(s.rulesetHashes as Record<string, unknown>)) {
+    need(PHASE.test(phase), "rulesetHashes names something that is not a phase");
     need(
       typeof hash === "string" && HASH.test(hash),
       "rulesetHashes holds a value that is not a hash",
@@ -180,6 +207,14 @@ export function parseSettings(raw: unknown): WatcherSettings {
       (typeof s.accessPolicyHash === "string" && HASH.test(s.accessPolicyHash)),
     "accessPolicyHash must be a hash or null",
   );
+  need(isRecord(s.staticVersions), "staticVersions must be an object");
+  for (const [name, version] of Object.entries(s.staticVersions as Record<string, unknown>)) {
+    need(SCRIPT_NAME.test(name), "staticVersions names something that is not a Worker name");
+    need(
+      typeof version === "string" && VERSION_ID.test(version),
+      "staticVersions holds a value that is not a version ID",
+    );
+  }
   need(isRecord(s.access), "access must be an object");
   const a = s.access as Record<string, unknown>;
   need(isString(a.appName) && isString(a.sessionDuration) && isString(a.sameSite), "access names");
@@ -187,9 +222,17 @@ export function parseSettings(raw: unknown): WatcherSettings {
   for (const key of ["bindingCookie", "httpOnly", "appLauncherVisible", "mfaRequired"]) {
     need(typeof a[key] === "boolean", `access.${key} must be a boolean`);
   }
+  need(isRecord(s.email), "email must be an object");
+  const e = s.email as Record<string, unknown>;
   need(
-    isRecord(s.email) && isStringArray((s.email as Record<string, unknown>).subdomains),
-    "email",
+    isStringArray(e.subdomains) &&
+      e.subdomains.length > 0 &&
+      e.subdomains.every((l) => LABEL.test(l)),
+    "email.subdomains must list labels",
+  );
+  need(
+    (DMARC_POLICIES as readonly string[]).includes(String(e.dmarcPolicy)),
+    "email.dmarcPolicy must be none, quarantine or reject",
   );
   return value as unknown as WatcherSettings;
 }
@@ -202,12 +245,54 @@ function safeJson(text: string): unknown {
   }
 }
 
-/** The fully qualified email sending domains and the DMARC record name. */
-export function emailNames(settings: WatcherSettings): { domains: string[]; dmarc: string } {
-  return {
-    domains: settings.email.subdomains.map((label) => `${label}.${settings.zone}`),
-    dmarc: `_dmarc.${settings.zone}`,
-  };
+export interface EmailName {
+  readonly label: string;
+  /** The sending domain, `<label>.<zone>`. */
+  readonly domain: string;
+  /** Its own DMARC record, `_dmarc.<label>.<zone>` (BD-17), never the zone's apex record. */
+  readonly dmarc: string;
+}
+
+/** Each sending subdomain with its DMARC record's name. The apex `_dmarc` is the old product's. */
+export function emailNames(settings: WatcherSettings): EmailName[] {
+  return settings.email.subdomains.map((label) => ({
+    label,
+    domain: `${label}.${settings.zone}`,
+    dmarc: `_dmarc.${label}.${settings.zone}`,
+  }));
+}
+
+/** A `[scheme://]host[/path]` pattern's host part, lowercased, wildcards kept. */
+export function patternHost(pattern: string): string {
+  return (pattern.replace(/^[a-z]+:\/\//i, "").split("/")[0] ?? "").toLowerCase();
+}
+
+/** Whether a host pattern (a hostname, or one with `*` wildcards) names `host`. */
+export function hostPatternMatches(pattern: string, host: string): boolean {
+  const name = patternHost(pattern);
+  if (name === host) return true;
+  if (!name.includes("*")) return false;
+  const re = new RegExp(
+    `^${name
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\-]/g, "\\$&"))
+      .join(".*")}$`,
+  );
+  return re.test(host);
+}
+
+/** The roles whose hostname a route or application pattern reaches, exactly or by a wildcard. */
+export function rolesMatching(settings: WatcherSettings, pattern: string): HostRole[] {
+  return HOST_ROLES.filter((role) => hostPatternMatches(pattern, settings.hosts[role]));
+}
+
+/** The role whose hostname is `host` or a parent of it (a name under a fin-next host is fin-next's). */
+export function roleOwning(settings: WatcherSettings, host: string): HostRole | undefined {
+  const name = host.toLowerCase();
+  return HOST_ROLES.find((role) => {
+    const own = settings.hosts[role];
+    return name === own || name.endsWith(`.${own}`);
+  });
 }
 
 /** The addresses a tunnel's connectors may come from. */

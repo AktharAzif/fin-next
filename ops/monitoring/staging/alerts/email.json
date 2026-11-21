@@ -70,7 +70,7 @@
       "recovery_period": 300,
       "on_missing_data": "dont_fire",
       "policy": "staging-quiet",
-      "incident_cause": "A sending domain turned preview or drop-suppressed on, a domain is gone, or _dmarc disappeared.",
+      "incident_cause": "A sending domain turned preview or drop-suppressed on, a domain is gone, or its own DMARC record (_dmarc.auth or _dmarc.notify) is missing, doubled or weaker than p=reject.",
       "metadata": {
         "check": "pnpm fin email verify staging; Cloudflare's audit log for Email Sending.",
         "flow": "F10",

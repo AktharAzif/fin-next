@@ -1,6 +1,6 @@
 // What every check shares: the failure shape, the run's context, and the tunnel lookup.
 import type { CloudflareReader } from "../cloudflare.ts";
-import type { HostRole, TunnelRole, WatcherSettings } from "../settings.ts";
+import type { TunnelRole, WatcherSettings } from "../settings.ts";
 
 export const CHECK_NAMES = [
   "connectors",
@@ -15,7 +15,11 @@ export const CHECK_NAMES = [
 ] as const;
 export type CheckName = (typeof CHECK_NAMES)[number];
 
-/** One failure: which check, what it was about (a role or a name, never an ID), and a code. */
+/**
+ * One failure: which check, what it was about (a role or a fin-next name, never an ID or a
+ * hostname), and a code. Alerts open one incident per target, so a failure that can stand for a
+ * while has a target of its own and never hides a later, different one.
+ */
 export interface Failure {
   readonly check: CheckName;
   readonly target: string;
@@ -54,22 +58,22 @@ export function tunnelNameMatches(expected: string, actual: unknown): boolean {
   );
 }
 
-/** The role a hostname belongs to, or "other" (never the hostname itself in a line). */
-export function roleOf(settings: WatcherSettings, host: string): HostRole | "other" {
-  for (const [role, name] of Object.entries(settings.hosts)) {
-    if (name === host) return role as HostRole;
-  }
-  return "other";
-}
-
 /** Builds the shared context: the zone ID and each role's tunnel, read once per run. */
 export function makeContext(settings: WatcherSettings, cf: CloudflareReader): CheckContext {
   let zone: Promise<string> | undefined;
   const zoneId = () => {
+    // The zone of this name in this account, and only one: a second zone of the same name (one
+    // pending in another account, say) must never be the one the checks read.
     zone ??= cf.list("/zones", { name: settings.zone }).then((zones) => {
-      const match = records(zones).find((z) => z.name === settings.zone);
-      if (match === undefined || typeof match.id !== "string") throw new Error("zone not found");
-      return match.id;
+      const matches = records(zones).filter(
+        (z) =>
+          z.name === settings.zone && (!isRecord(z.account) || z.account.id === settings.accountId),
+      );
+      const [only] = matches;
+      if (matches.length !== 1 || only === undefined || typeof only.id !== "string") {
+        throw new Error(matches.length > 1 ? "zone ambiguous" : "zone not found");
+      }
+      return only.id;
     });
     return zone;
   };

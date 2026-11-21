@@ -2,6 +2,11 @@
 // same functions run in `pnpm fin rules apply` and `pnpm fin access apply` (which record the
 // hashes) and in the watcher (which recomputes them every minute), so both sides agree by
 // construction. Web Crypto only, so they run in the Worker and in Node alike.
+//
+// A phase's hash covers fin-next's own rules only: those whose `ref` starts `fin_next_` (BD-11),
+// in their order. The shared staging zone also holds the old product's rules (FD-09), whose
+// changes must neither raise fin-next's alert nor hide a change to fin-next's. `rules apply`
+// records `finRulesetHash(entrypoint.rules)` for each phase, exactly what the watcher recomputes.
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -35,13 +40,31 @@ const RULE_FIELDS = [
   "ratelimit",
 ] as const;
 
-/** The hash of a phase entrypoint's rules, in order. An absent entrypoint hashes as []. */
+/** The hash of the given rules, in order, whoever owns them. An absent entrypoint hashes as []. */
 export async function rulesetHash(rules: readonly unknown[]): Promise<string> {
   const picked = rules.map((rule) => {
     const r = isRecord(rule) ? rule : {};
     return Object.fromEntries(RULE_FIELDS.filter((f) => r[f] !== undefined).map((f) => [f, r[f]]));
   });
   return sha256Hex(canonicalJson(picked));
+}
+
+/** Every rule fin-next writes carries a ref with this prefix (BD-11). */
+export const FIN_RULE_PREFIX = "fin_next_";
+
+/** Whether a rule is one of fin-next's own (its ref starts `fin_next_`). */
+export function isFinRule(rule: unknown): boolean {
+  return isRecord(rule) && typeof rule.ref === "string" && rule.ref.startsWith(FIN_RULE_PREFIX);
+}
+
+/** fin-next's own rules of a phase, in their order; every other product's rule left out. */
+export function finRules(rules: readonly unknown[]): unknown[] {
+  return rules.filter(isFinRule);
+}
+
+/** The hash `rules apply` records and the watcher compares: fin-next's own rules of a phase. */
+export async function finRulesetHash(rules: readonly unknown[]): Promise<string> {
+  return rulesetHash(finRules(rules));
 }
 
 const POLICY_FIELDS = [
