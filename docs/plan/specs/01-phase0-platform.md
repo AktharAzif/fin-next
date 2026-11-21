@@ -155,7 +155,7 @@ This table names what each changes here. Times are on the build clock.
 | Fin Admin's first staff admin on staging is the owner's staff address, never written in this repository; its two TOTP secrets, Fin Admin's and Access's own factor, are kept only on the build machine | The owner, about 08:49. Keeping its TOTP secrets on the build machine is the steward's | §6.6, §7.7, §9.1, §12 |
 | Staging's Access lets the staff addresses in with a One-time PIN ([FD-05]) | The steward | §7.7 |
 | CR-25 was not given as a token of its own: the operator token (CR-05) covers CR-25's part until the owner is back, and renewing CR-05 before Thu 26 Nov makes §7.10's narrow tokens, CR-05 and CR-25 | The steward | §7.9, §7.10, §9.4, §9.6 |
-| The build's decisions, [BD-01] to [BD-17] (BD-15 is withdrawn) | The build, under the owner's away-time authority | where each is cited |
+| The build's decisions, [BD-01] to [BD-29] (BD-15 and BD-25 are withdrawn) | The build, under the owner's away-time authority | where each is cited |
 
 ---
 
@@ -174,8 +174,9 @@ At the Phase 0 exit (13:30), staging is a walking skeleton:
   policy proven (SP-01).
 - Railway staging runs 15 services (three at 0 replicas) and Postgres 18 with PITR, with no public
   domain and no TCP proxy anywhere.
-- Cloudflare serves five static hosts with no code, routes `/api/*` and `gateway.<staging-zone>`
-  through two tunnels, puts Access in front of Fin Admin, and has the email sending domains onboarded.
+- Cloudflare serves five static hosts with no code, four on staging for now (the fifth, `selfie.`,
+  waits for Sunday, [BD-28]), routes `/api/*` and `gateway.<staging-zone>` through two tunnels, puts
+  Access in front of Fin Admin, and has the email sending domains onboarded.
 - Better Stack receives every service's lines and errors; monitors, heartbeats and alerts exist and
   email the quiet staging policy.
 - The watcher checks the front door every minute from outside Railway.
@@ -259,8 +260,11 @@ pull requests are handled by approval, no secrets and no AI review ([CI-08]).
 ### 3.3 The ruleset on `main` (on from 21 Nov; `gate` added at P0-3, after the CI pull request merges)
 
 The ruleset is on from 21 Nov ([BD-02], [BD-07]). It is made with `POST /repos/{o}/{r}/rulesets` and
-this body less its `required_status_checks` rule; P0-3 adds that rule with
-`PUT /repos/{o}/{r}/rulesets/{ruleset id}` after the CI pull request merges ([CI-01], [BD-02]).
+this body less its `required_status_checks` rule. Since 21 Nov the ruleset also requires the status
+`commit-dates-utc` ([BD-18]), which the body below does not show. `gate` joins as the CI pull
+request's step, as planned: P0-3 adds it with `PUT /repos/{o}/{r}/rulesets/{ruleset id}` after the
+CI pull request merges ([CI-01], [BD-02]), and the same call drops the separate `commit-dates-utc`
+requirement, since `gate` needs CI's job of that name ([BD-18]); the body below is then exact.
 `15368` is the GitHub Actions app's ID; the implementer confirms it with `GET /apps/github-actions`
 before the call.
 
@@ -808,7 +812,11 @@ on 21 Nov (§11.2).
 
 Every Fin Node image runs `CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw",
 "--enable-source-maps", "dist/main.js"]` with Node as PID 1 (ARCHITECTURE §3.5); `worker`, `migrate` and
-tasks add their flag through Railway's start command on the same image (§6.2). The static builds are not images: they are artefacts uploaded to Cloudflare (§5.5, §7.4).
+tasks run the same image with a Railway start command that gives the whole command line, because a
+start command replaces the image's `ENTRYPOINT` and `CMD` (SP-03's run, `docs/plan/spikes.md`
+run 2): the image's Node binary (`/nodejs/bin/node` in the distroless image), the image's Node
+flags, then `dist/main.js` and the mode flag (§6.2). The static builds are not images: they are
+artefacts uploaded to Cloudflare (§5.5, §7.4).
 
 ---
 
@@ -849,13 +857,15 @@ Images are built with the runner's own `docker buildx`, with no `docker/*` actio
 
 ### 5.2 The CI pull request (P0-2, 08:30 to 09:00)
 
-The CI pull request, after pull request 2 (the scaffold and rules files, `CODEOWNERS` among them), adds `.github/workflows/ci.yml` and `.github/scripts/control-paths.mjs`,
-and nothing else. Its `ci.yml` has two jobs:
+The CI pull request, after pull request 2 (the scaffold and rules files, `CODEOWNERS` among them),
+adds `.github/workflows/ci.yml`, `.github/scripts/control-paths.mjs` and
+`.github/scripts/commit-dates-utc.mjs` ([BD-18]), and nothing else. Its `ci.yml` has three jobs:
 
 | Job | Steps |
 |---|---|
 | `check` | Checkout; setup-node; `node scripts/public-safety.mjs` once it exists (skipped with a notice before it does) |
-| `gate` | `needs: [check]`, `if: always()`; passes only if `check` passed; then runs `main`'s `.github/scripts/control-paths.mjs` (fetched with `git show origin/main:<path>`, never the pull request's copy). Until hardening it lists the control paths the pull request touches and does not fail for want of the owner's review, because GitHub cannot record the owner's approval while the owner's account authors every pull request ([BD-02]). From hardening it fails when the pull request touches a control path and the owner's latest review on the head SHA is not `APPROVED` |
+| `commit-dates-utc` | Checkout with history; setup-node; reads the raw commit objects of every commit in the pull request (on a push to `main`, every pushed commit except GitHub's own merge commits) and fails on any author or committer offset other than `+0000`, with no exception for pull requests ([G-09], [BD-18]) |
+| `gate` | `needs: [check, commit-dates-utc]`, `if: always()`; passes only if `check` and `commit-dates-utc` passed; then runs `main`'s `.github/scripts/control-paths.mjs` (fetched with `git show origin/main:<path>`, never the pull request's copy). Until hardening it lists the control paths the pull request touches and does not fail for want of the owner's review, because GitHub cannot record the owner's approval while the owner's account authors every pull request ([BD-02]). From hardening it fails when the pull request touches a control path and the owner's latest review on the head SHA is not `APPROVED` |
 
 From hardening ([BD-02]; until then no approval is read): an approval does not re-trigger a
 `pull_request` run, so after approving a control-path pull request the owner re-runs the `gate` job
@@ -877,8 +887,9 @@ head SHA without the other jobs having run there.
 | `e2e-report` | e2e | whenever `e2e` ran (`if: ${{ !cancelled() }}`) | Merges the shards' blob reports; the HTML report kept 3 days; `e2e-summary.json` for `ci-report` (spec 07 §10.4) | |
 | `static` | plan | always | zizmor (offline audits), actionlint, gitleaks with `.gitleaks.toml` (redacted), hadolint | |
 | `bun` | plan | `packages/**` changed | The Bun canary ([CI-10], R15), non-blocking (`continue-on-error: true`; not in `gate`'s `needs`): Bun 1.4.5 from its release archive, checked against the SHA-256 in `.github/scripts/install-tools.sh`, with no setup action ([BD-03]); the shared packages' unit tests. The SSRF refusal and known-answer tests join on Sunday | |
+| `commit-dates-utc` | none | always | Blobless checkout with history, and `main`'s copy of `.github/scripts/commit-dates-utc.mjs` in `engine/` once `main` holds it; reads the raw commit objects (`git cat-file commit`) of every commit in the pull request (on a push to `main`, every pushed commit except GitHub's own merge commits) and fails on any author or committer offset other than `+0000`, with no exception for pull requests ([G-09], [BD-18]). `gate` needs it, so the ruleset's separate requirement of this status is dropped when `gate` joins (§3.3) | |
 | `merge` | none | on `push` to `main` only | Spec 07 §2.3.4: the pushed commit is a merge and its tree equals the reviewed head's, unless `docs/review/bootstrap.json` lists the merge; from hardening the reviewed head's receipt must also pass the checker from the engine copy (D6). `pnpm fin deploy staging` deploys a commit only after this job succeeded for it (§6.9; spec 07 S7-12); it runs from the operator machine until the owner is back ([BD-05]), then in `deploy-staging` | 1 min / 3 min |
-| `gate` | every job but `bun` | always (`if: always()`) | §5.4 | |
+| `gate` | every job but `bun`, `commit-dates-utc` among them | always (`if: always()`) | §5.4; from P0-6, any job but `bun`, `commit-dates-utc` among them, missing from `gate`'s `needs` fails `workflow-rules.mjs` (spec 07 §10.8, T-RV-40) | |
 
 Global inputs that force every job: `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `turbo.json`,
 `tsconfig.base.json`, `biome.json`, `.node-version`, `tools/layout.json`, anything under `.github/`.
@@ -948,7 +959,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
   gate:
-    needs: [plan, check, db, build, seams, e2e, e2e-report, static, merge]
+    needs: [plan, check, db, build, seams, e2e, e2e-report, static, commit-dates-utc, merge]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -976,14 +987,15 @@ jobs:
         run: node engine/.github/scripts/gate.mjs
 ```
 
-(The pnpm store cache and the `db`, `build`, `seams`, `e2e`, `e2e-report`, `static`, `bun` and `merge`
-jobs follow the same pattern.) `plan` and `gate` run `main`'s engine copy, never the pull request's
-(spec 07 §11.2, S7-04): `gate.mjs` recomputes the plan and, from hardening (D6), also imports the
-receipt checker `engine/tools/fin-review/src/receipt/check.ts`, so a pull request cannot weaken its
-own gate or skip a job by editing its planner. A pull request that changes either is a control path,
-and needs the owner's approval, which GitHub enforces from hardening ([BD-02]). Until spec 07's
-RP-06 merges (§13.4 there), the engine files are not yet on `main`: `plan` runs the pull request's
-own planner, and `gate` fetches `main`'s `gate.mjs` alone and has no rule 0.
+(The pnpm store cache and the `db`, `build`, `seams`, `e2e`, `e2e-report`, `static`, `bun`,
+`commit-dates-utc` and `merge` jobs follow the same pattern.) `plan` and `gate` run `main`'s engine
+copy, never the pull request's (spec 07 §11.2, S7-04): `gate.mjs` recomputes the plan and, from
+hardening (D6), also imports the receipt checker `engine/tools/fin-review/src/receipt/check.ts`, so
+a pull request cannot weaken its own gate or skip a job by editing its planner. A pull request that
+changes either is a control path, and needs the owner's approval, which GitHub enforces from
+hardening ([BD-02]). Until spec 07's RP-06 merges (§13.4 there), the engine files are not yet on
+`main`: `plan` runs the pull request's own planner, and `gate` fetches `main`'s `gate.mjs` alone and
+has no rule 0.
 
 ### 5.4 The gate
 
@@ -1074,19 +1086,19 @@ SP-03 records which calls a project token may make.
 Settings per ARCHITECTURE §4.2 and §4.3, with OD-2's changes (no `docs` service; `console`, `admin` and
 `verify` serve only `/api/*`). Fifteen services; three at 0 replicas.
 
-| Service | Image | Start command (SP-03 confirms how Railway applies it to an image) | Replicas | Health check | Overlap / draining | Restart | Memory | Static egress | Database login |
+| Service | Image | Start command (it replaces the image's `ENTRYPOINT` and `CMD`: SP-03's run, `docs/plan/spikes.md` run 2) | Replicas | Health check | Overlap / draining | Restart | Memory | Static egress | Database login |
 |---|---|---|---|---|---|---|---|---|---|
-| `cloudflared-public` | `fin-next-connector` | image default | 1 | `/readyz`, 60 s | 15 s / 35 s | Always | 256 MB | on | none |
-| `cloudflared-admin` | `fin-next-connector` | image default | 1 | `/readyz`, 60 s | 15 s / 35 s | Always | 256 MB | on | none |
+| `cloudflared-public` | `fin-next-connector` (staging: the stock `cloudflared` image by digest, [BD-23]) | image default; on staging, the whole command line naming the `cloudflared` binary, since the stock image runs there ([BD-23]; `docs/plan/spikes.md` runs 2 and 4) | 1 | `/readyz`, 60 s | 15 s / 35 s | Always | 256 MB | on | none |
+| `cloudflared-admin` | `fin-next-connector` (staging: the stock `cloudflared` image by digest, [BD-23]) | image default; on staging, the whole command line naming the `cloudflared` binary, since the stock image runs there ([BD-23]; `docs/plan/spikes.md` runs 2 and 4) | 1 | `/readyz`, 60 s | 15 s / 35 s | Always | 256 MB | on | none |
 | `cloudflared-public-b`, `cloudflared-admin-b` | `fin-next-connector`, no token | image default | 0 | `/readyz`, 60 s | 15 s / 35 s | Always | 256 MB | on | none |
 | `edge` | `fin-next-edge` | image default | 1 | `/readyz`, 60 s | 15 s / 40 s | Always | 512 MB | off | `fin_edge_a` |
 | `api` | `fin-next-api` | image default | 1 | `/readyz`, 60 s | 15 s / 40 s | Always | 1 GB | on | `fin_api_a` |
-| `worker` | `fin-next-api` | `dist/main.js --worker` with the image's flags | 1 | `/readyz`, 60 s | 15 s / 60 s | Always | 1 GB | on | `fin_worker_a` |
+| `worker` | `fin-next-api` | the whole command line (SP-03's run, `docs/plan/spikes.md` run 2): `/nodejs/bin/node`, the image's Node flags, `dist/main.js --worker` | 1 | `/readyz`, 60 s | 15 s / 60 s | Always | 1 GB | on | `fin_worker_a` |
 | `payments` | `fin-next-payments` | image default | 1 | `/readyz`, 60 s | 15 s / 60 s | Always | 1 GB | on | `fin_payments_a` |
 | `console` | `fin-next-console` | image default | 1 | `/readyz`, 60 s | 15 s / 40 s | Always | 1 GB | off | `fin_console_a` |
 | `admin` | `fin-next-admin` | image default | 1 | `/readyz`, 60 s | 15 s / 40 s | Always | 1 GB | off | `fin_admin_a` |
 | `verify` | `fin-next-verify` | image default | 1 | `/readyz`, 60 s | 15 s / 40 s | Always | 512 MB | off | none |
-| `migrate` | `fin-next-api` | `dist/main.js --migrate` (or `--task <name>`, §6.6) | one run per release | exit code | 0 / 0 | Never | 1 GB | off | `fin_owner`, per run ([AU-08]) |
+| `migrate` | `fin-next-api` | the whole command line, as for `worker`: `/nodejs/bin/node`, the image's Node flags, `dist/main.js --migrate` (or `--task <name>`, §6.6) | one run per release | exit code | 0 / 0 | Never | 1 GB | off | `fin_owner`, per run ([AU-08]) |
 | `backup` | `fin-next-backup` | image default; Railway cron `17 3 * * *` (nightly) and `5 * * * *` (hourly, high-value schemas), set on staging only once the owner gives CR-10 and the drill recipient ([BD-14]) | cron | exit code | 0 / 0 | Never | 1 GB | off | `fin_backup` |
 | `cloudflared-db` | `fin-next-connector`, no token in Phase 0 | image default | 0 | `/readyz` | 0 / 35 s | Never | 256 MB | off | none |
 | `postgres` | Railway's Postgres 18 template, standalone `postgres-ssl:18` | template | 1 | template | template | template | template | off | the template's superuser (§6.6) |
@@ -1350,10 +1362,10 @@ Names stay one level below the zone, so Universal SSL covers them (ARCHITECTURE 
 |---|---|---|---|---|---|---|
 | `gateway.<staging-zone>` | proxied CNAME to the public tunnel | none | (every path) | public tunnel to `edge` | no | R16 |
 | `console.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-console-static` | no-Worker route | public tunnel to `console` | no | R6 |
-| `onboard.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-verify-static` | no-Worker route | public tunnel to `verify` | no | R7 |
-| `selfie.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-selfie-static` | no-Worker route | public tunnel to `verify` | no | R7, [SA-26] |
+| `onboard.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-verify-static` (on staging, until `pnpm fin` lands, the build's scripts named it after the host, `fin-next-staging-onboard-static`: [BD-28]) | no-Worker route | public tunnel to `verify` | no | R7 |
+| `selfie.<staging-zone>` (on Sunday, with the hosted verify pages: [BD-28]) | proxied CNAME to the public tunnel | `fin-next-staging-selfie-static` | no-Worker route | public tunnel to `verify` | no | R7, [SA-26] |
 | `docs.<staging-zone>` | proxied CNAME to the public tunnel (the catch-all answers 404 if the static route ever vanished) | `fin-next-staging-docs-static` | none | none | no | R16 |
-| `staff.<staging-zone>` | proxied CNAME to the admin tunnel | `fin-next-staging-admin-static` | no-Worker route | admin tunnel to `admin` | whole host | R6 |
+| `staff.<staging-zone>` | proxied CNAME to the admin tunnel | `fin-next-staging-admin-static` (on staging, until `pnpm fin` lands, the build's scripts named it after the host, `fin-next-staging-staff-static`: [BD-28]) | no-Worker route | admin tunnel to `admin` | whole host (on staging, until `pnpm fin` lands, the application is named `fin-next-staging-staff` after the host, and its independent MFA is not set yet: [BD-28]) | R6 |
 | `auth.<staging-zone>`, `notify.<staging-zone>` | written and locked by Email Sending when it onboarded them on 21 Nov; it also wrote their DMARC records, `_dmarc.auth.<staging-zone>` and `_dmarc.notify.<staging-zone>`, at `p=reject` ([BD-17]) | none | none | none | no | R3 |
 
 Every CNAME targets `<tunnel id>.cfargotunnel.com`, written by `pnpm fin routes apply staging` from the
@@ -1375,7 +1387,8 @@ the zone, old and new, is same-site with every other; fin-next's cookies are hos
 **fin-next's objects in the shared account** ([FD-09]). In the account, fin-next creates, changes
 or deletes only its own objects: tunnels, Workers scripts and R2 buckets whose names start
 `fin-next-staging-` (a spike's throwaways, `fin-next-spike-`), the API tokens `pnpm fin` minted, and
-its own Access application, `fin-next-staging-admin` (§7.7). `pnpm fin` and `tools/static-deploy`
+its own Access application, `fin-next-staging-admin` (§7.7; on staging, until `pnpm fin` lands,
+`fin-next-staging-staff`, named after the host: [BD-28]). `pnpm fin` and `tools/static-deploy`
 check each such write in code before the call and refuse anything else (AC-P0-41, EX-27), so the old
 product's Workers scripts, buckets, tunnels and tokens are never touched.
 
@@ -1456,9 +1469,9 @@ Five assets-only deployments, one per static app, each a Worker **with no script
 | Deployment | Built from | Host route | `_headers` profile |
 |---|---|---|---|
 | `fin-next-staging-console-static` | `apps/console` `dist/static` | `console.<staging-zone>/*` | `app` (console) |
-| `fin-next-staging-admin-static` | `apps/admin` `dist/static` | `staff.<staging-zone>/*` | `app` (admin) |
-| `fin-next-staging-verify-static` | `apps/verify` `dist/static/verify` | `onboard.<staging-zone>/*` | `hosted` |
-| `fin-next-staging-selfie-static` | `apps/verify` `dist/static/selfie` | `selfie.<staging-zone>/*` | `selfie` (strict until SP-11 lists Sumsub's hosts on Sunday) |
+| `fin-next-staging-admin-static` (on staging, until `pnpm fin` lands, the build's scripts named it after the host, `fin-next-staging-staff-static`: [BD-28]) | `apps/admin` `dist/static` | `staff.<staging-zone>/*` | `app` (admin) |
+| `fin-next-staging-verify-static` (on staging, until `pnpm fin` lands, the build's scripts named it after the host, `fin-next-staging-onboard-static`: [BD-28]) | `apps/verify` `dist/static/verify` | `onboard.<staging-zone>/*` | `hosted` |
+| `fin-next-staging-selfie-static` (on Sunday: [BD-28]) | `apps/verify` `dist/static/selfie` | `selfie.<staging-zone>/*` | `selfie` (strict until SP-11 lists Sumsub's hosts on Sunday) |
 | `fin-next-staging-docs-static` | `apps/docs` `dist/static` | `docs.<staging-zone>/*` | `docs` |
 
 **The invariant.** Each deployment's configuration is exactly: `compatibility_date: "2026-11-20"`;
@@ -1583,12 +1596,12 @@ note C1 §2).
 |---|---|
 | `console.<staging-zone>/*` | `fin-next-staging-console-static` |
 | `console.<staging-zone>/api/*` | none |
-| `staff.<staging-zone>/*` | `fin-next-staging-admin-static` |
+| `staff.<staging-zone>/*` | `fin-next-staging-admin-static` (on staging, until `pnpm fin` lands, `fin-next-staging-staff-static`, named after the host: [BD-28]) |
 | `staff.<staging-zone>/api/*` | none |
-| `onboard.<staging-zone>/*` | `fin-next-staging-verify-static` |
+| `onboard.<staging-zone>/*` | `fin-next-staging-verify-static` (on staging, until `pnpm fin` lands, `fin-next-staging-onboard-static`, named after the host: [BD-28]) |
 | `onboard.<staging-zone>/api/*` | none |
-| `selfie.<staging-zone>/*` | `fin-next-staging-selfie-static` |
-| `selfie.<staging-zone>/api/*` | none |
+| `selfie.<staging-zone>/*` | `fin-next-staging-selfie-static` (on Sunday: [BD-28]) |
+| `selfie.<staging-zone>/api/*` | none (on Sunday: [BD-28]) |
 | `docs.<staging-zone>/*` | `fin-next-staging-docs-static` |
 
 `gateway.<staging-zone>` has no route. A request for `/api` with no slash reaches the SPA, which draws
@@ -1664,10 +1677,10 @@ catch-all (safe, but the two disagree); `/api%2Fping` goes to static, with a 307
 
 | Field | Value |
 |---|---|
-| Application | self-hosted, name `fin-next-staging-admin`, destination `staff.<staging-zone>` (the whole host: static and `/api/` alike) |
+| Application | self-hosted, name `fin-next-staging-admin`, destination `staff.<staging-zone>` (the whole host: static and `/api/` alike). On staging, until `pnpm fin` lands, the build's scripts made it, named `fin-next-staging-staff` after the host ([BD-28]) |
 | Session | 8 hours; binding cookie on; HTTP-only cookie; `SameSite=Lax`; not shown in the App Launcher |
 | Policy | one Allow policy whose include is the **exact list of staff addresses** from the overlay; never a domain, never "Everyone", never a bare one-time-PIN include |
-| Independent MFA | required on the application, and set on this application only, never in the Zero Trust organisation's settings, which the old product's staging shares ([FD-09]); a needed setting that SP-09 shows exists only there waits for the owner, and Fin Admin's sign-in on staging waits with it (CR-07); staging allows TOTP as well as security keys and biometrics; MFA session no longer than the Access session (SP-09 confirms availability on Zero Trust Free, the API field names, and whether each setting is per application); on staging the first staff admin's Access factor is a TOTP that an agent enrols at that address's first Access sign-in, its secret held only in a local secret file on the build machine, never printed, logged or in CI (spec 02 §10.6; the steward's decision, for the owner's review) |
+| Independent MFA | required on the application, and set on this application only, never in the Zero Trust organisation's settings, which the old product's staging shares ([FD-09]); a needed setting that SP-09 shows exists only there waits for the owner, and Fin Admin's sign-in on staging waits with it (CR-07); staging allows TOTP as well as security keys and biometrics; MFA session no longer than the Access session (SP-09 confirms availability on Zero Trust Free, the API field names, and whether each setting is per application); on staging the first staff admin's Access factor is a TOTP that an agent enrols at that address's first Access sign-in, its secret held only in a local secret file on the build machine, never printed, logged or in CI (spec 02 §10.6; the steward's decision, for the owner's review). On staging it is not set yet: the requirement waits for SP-09's field names and `pnpm fin access apply staging`, and the agent's TOTP enrolment follows at the first staff admin's first Access sign-in ([BD-28]) |
 | Identity provider | a One-time PIN for the staff addresses on the policy's exact list, as the old product's staging did ([FD-05]: the steward's decision, for the owner's review); Google Workspace with 2-Step Verification is production's |
 | At the connector | `access.required` with the team name and audience tag (§7.3) |
 | In the app | the admin API half validates `Cf-Access-Jwt-Assertion` on every `/api` request before any handler (RS256 by `kid`, `iss`, `aud`, `exp`, `nbf`) |
@@ -1685,7 +1698,7 @@ assets-only route as well as the `/api/` route: unauthenticated requests for `/`
 | Settings | `preview_enabled: false` and `drop_suppressed_recipients: false` on both, by `PATCH .../subdomains/{id}`; set and read back on 21 Nov, and the watcher reads them back every minute ([EM-06]) |
 | DMARC | `_dmarc.auth.<staging-zone>` and `_dmarc.notify.<staging-zone>` at `p=reject`, as Cloudflare wrote them when it onboarded the sending subdomains, and kept at `p=reject` ([BD-17]). That is stronger than [EM-05]'s `p=none` first step, and fin-next's mail is DKIM- and SPF-aligned. No aggregate reports on staging for now: Cloudflare's DMARC Management would edit the zone's apex `_dmarc`, and an outside report mailbox has to be authorised in its own domain's DNS. The zone's apex `_dmarc` and the old product's DKIM records are never touched ([FD-09]). Production's zones ([FD-10]) keep [EM-05]'s design. `pnpm fin` never removes a sending domain without restoring its DMARC record |
 | Sender | `account-security@auth.<staging-zone>` |
-| Token (CR-08) | Email Sending: Edit only, account-owned, client IP filter to `worker`'s static egress addresses if SP-07 shows it is honoured, expiry 180 days or less, minted by `pnpm fin email token staging` with the operator token and set as `worker`'s sealed `FIN_EMAIL_TOKEN` |
+| Token (CR-08) | Email Sending: Edit only (Cloudflare's token page names this group Email Sending Write: [BD-28]; `docs/plan/spikes.md`, run 5), account-owned, client IP filter to `worker`'s static egress addresses if SP-07 shows it is honoured, expiry 180 days or less, minted by `pnpm fin email token staging` with the operator token and set as `worker`'s sealed `FIN_EMAIL_TOKEN` |
 | Path | REST `POST /client/v4/accounts/{account_id}/email/sending/send`, from `worker` only ([EM-01], [EM-04]) |
 
 ### 7.9 The R2 vault (staging)
@@ -1716,7 +1729,7 @@ Railway's PITR and volume backups cover staging ([BD-14]):
 |---|---|---|---|
 | Operator token (CR-05) | ARCHITECTURE §5.12's list, plus Workers Routes Edit on the zone, with Zone Settings Read only: on the shared zone `pnpm fin` never changes a zone-wide setting (§7.6, AC-P0-41); short expiry. On the shared zone these permissions also reach the old product's resources, so `pnpm fin` checks every write against §7.2's allow-list ([FD-09]) | secure prompt, per run; until the owner is back, an owner-only file on the build machine (§9.1) | `pnpm fin` provisioning commands; until the owner is back, also CR-25's part (below) |
 | Static deploy token (CR-20) | Workers Scripts Edit on the staging account only; nothing else. On the shared account it also reaches the old product's Workers scripts, so `tools/static-deploy` writes only the `fin-next-staging-<app>-static` scripts it names and refuses any other name before the call ([FD-09], AC-P0-41, EX-27) | the `staging-static` environment only, once it exists, when the owner is back ([BD-05]); until then each upload from the operator machine uses a one-run static token minted with CR-05 (§6.9) | `tools/static-deploy`'s API upload ([FD-19], [BD-16]) |
-| Email token (CR-08) | Email Sending: Edit | `worker` only | the sender |
+| Email token (CR-08) | Email Sending: Edit (Cloudflare's token page names this group Email Sending Write: [BD-28]; `docs/plan/spikes.md`, run 5) | `worker` only | the sender |
 | Watcher tokens (CR-18) | read-only: Zone, DNS, Rulesets, Tunnel, Access, Workers Scripts and Routes, Analytics, Account Settings | the watcher's own secrets | the watcher |
 | R2 bucket-administration token (CR-25) | Workers R2 Storage Edit on the staging account only; on the shared account it also reaches the old product's buckets, so `pnpm fin vault create` makes only `fin-next-staging-` buckets, checked before the call ([FD-09]) | not given as a token of its own: until the owner is back, CR-05 covers its part (below); once the owner makes it, the secure prompt, per run ([SA-22]) | `pnpm fin vault create` and the R2 rotation runbook |
 | R2 writer tokens (CR-15) | one bucket each | the one writer (the operator's: the secure prompt, per run, and until the owner is back owner-only files on the build machine, §9.1, EXECUTION NB-08, [SA-22]; the worker's and the backup's: a sealed variable on that one writer) | worker, backup, operator |
@@ -1789,8 +1802,8 @@ time and never committed.
 
 | Item | Value |
 |---|---|
-| Organisation | one, with teams `fin-staging` (exists, data region `europe`; CR-09 met 21 Nov) and `fin-production` (before production) ([OB-02]) |
-| Data region | `europe` for every source and Errors application, set at creation |
+| Organisation | one, with teams `fin-staging` (exists; CR-09 met 21 Nov; its objects in `us_west`, the only region the organisation offers: [BD-24]) and `fin-production` (before production) ([OB-02]) |
+| Data region | `europe` for every source and Errors application, set at creation; staging: `us_west` until the owner decides ([BD-24]; `docs/plan/spikes.md`, run 6) |
 | Members | two-factor sign-in enforced; "members can upgrade to Responder" off |
 | AI | every AI feature off; AI SRE never an escalation member; no MCP connection; no standing token for agents ([OB-10]) |
 | Tokens | team tokens per product (Telemetry, Uptime) from the secure prompt per run, and until the owner is back from an owner-only file on the build machine (§9.1); no global token kept |
@@ -2115,7 +2128,7 @@ printed, and any token a spike needs comes through the secure prompt.
 | SP-05 Postgres, SP-08's private-network part | 09:45 to 10:15 | Ops agent | CR-04 |
 | SP-04a, c, d, e Tunnels with the stock `cloudflared` image | 10:00 to 11:00 | Ops agent | CR-04, CR-05 |
 | FW-S2 Better Auth on Hono, same origin | 10:00 to 12:00 | P0-E with L-SAT-02 | layer 4 installed |
-| S-03 (SP-07) Email Sending | 10:15 to 10:45 | Ops agent; the owner's read of the delivered message's headers waits for the owner (EXECUTION §2.6) | CR-06, CR-08, the seed inbox |
+| S-03 (SP-07) Email Sending | 10:15 to 10:45 | Ops agent; the owner's read of the delivered message's headers waits for the owner (EXECUTION §2.6; DECISIONS, "For the owner to decide": the email header check; `docs/plan/spikes.md`, run 5) | CR-06, CR-08, the seed inbox |
 | SP-24 Receipt refs | moves to hardening (D6), with signed receipts | P0-C | SP-23 |
 | SP-26 Static deploys | data points from S-01's run (09:10 to 09:25); the rest 10:45 to 11:45, before the first staging deploy | P0-F | CR-05; `tools/static-deploy`'s API upload ([BD-16]) |
 | SP-21 Railway read-only credential | waits for the owner, who adds a Viewer-only member to the workspace (a new member, EXECUTION §2.9 CR-18); `not-run` until then, with its fallback in force (EXECUTION §2.6) | Ops agent, once the owner has added the member | CR-04, the owner's Viewer-only member |
@@ -2149,10 +2162,12 @@ printed, and any token a spike needs comes through the secure prompt.
 `docs/plan/spikes.md` is the spike log. It exists from the plan's follow-up pull request, with
 S-01's run as its first row. A short opening says what it records; then one row per spike run, with
 the columns Run, Spike, When (build clock), Result, What it showed and Follow-ups.
-The result is `pass`, `fail`, `pass-with-fallback` or `not-run`; a fallback taken is among the
-follow-ups. `pass-with-fallback` means the spike as a whole took its fallback (for S-01, §7.12's
-per-app API hosts). A run that passes while one check takes that check's own fallback, as S-01 (g)
-took [BD-13]'s rule, is `pass`, with the fallback among its follow-ups. Data points a run gathers for another spike, as SP-26's from S-01's run, go in a note
+The result is `pass`, `pass (part)`, `fail`, `pass-with-fallback` or `not-run`; a fallback taken is
+among the follow-ups. `pass (part)` means the checks that ran passed and some of the spike's pass
+rule is still to run, listed among the follow-ups. `pass-with-fallback` means the spike as a whole
+took its fallback (for S-01, §7.12's per-app API hosts). A run that passes while one check takes
+that check's own fallback, as S-01 (g) took [BD-13]'s rule, is `pass`, with the fallback among its
+follow-ups. Data points a run gathers for another spike, as SP-26's from S-01's run, go in a note
 under the table. Every row is public-safe: never a zone name, an ID, an address, a token, a local
 path or a time zone. The build adds rows through its pull requests ([BD-06]). A spike that has not
 run by the Phase 0 exit is `not-run` with its new slot.
@@ -2219,7 +2234,7 @@ exit.
 | AC-P0-07 [STG] | No Railway service has a public domain or a TCP proxy; `/api/health` answers through `console.` and `onboard.` (and through `staff.` after Access), `/health` through `gateway.`, and no path of `docs.` reaches Railway; `/readyz` answers from the private network and is 404 through every public host; a request from a non-connector peer, or without the host's ingress proof, gets 403 with `ingress.untrusted_peer` |
 | AC-P0-08 [STG] | The watcher lists each tunnel's connectors with the expected count, version and origin addresses; a connector run with a staging token from outside Railway emails the staging policy within 2 minutes (staging alerts are email only, ARCHITECTURE §4.7) |
 | AC-P0-09 [STG] | One request line per request reaches Better Stack with `release` equal to the deployed SHA; a forced error appears in Better Stack Errors with `release` and `environment` |
-| AC-P0-10 [STG] | One email sent through the outbox and Cloudflare Email Sending, by `worker`, reaches the seed inbox, as Email Sending's own delivery record shows (recorded); DKIM, SPF and DMARC passing on it (checked by the owner and recorded): waiting for the owner, not met, because [G-10] does not let agents read its headers |
+| AC-P0-10 [STG] | One email sent through the outbox and Cloudflare Email Sending, by `worker`, reaches the seed inbox, as Email Sending's own delivery record shows (recorded); DKIM, SPF and DMARC passing on it (checked by the owner and recorded): waiting for the owner, not met, because [G-10] does not let agents read its headers (DECISIONS, "For the owner to decide": the email header check; `docs/plan/spikes.md`, run 5) |
 | AC-P0-11 [I] | Each service's database login is refused (42501) on every statement its grant fragment does not allow; no role can update or delete audit rows; a critical-table insert with no audit row in its transaction is refused at commit; a failing `login` trigger body does not block a login |
 | AC-P0-12 [U] | Each scrubber removes every shape it knows (codes, tokens, cookies, email addresses, IP addresses, query strings, ID-bearing paths) |
 | AC-P0-13 [CI] | The builder account's token cannot push a change to `.github/workflows/` (SP-23; this half moves to hardening, D6), and every `release` image exits 78 with any seam variable set |
@@ -2236,7 +2251,7 @@ exit.
 | AC-P0-24 [STG] | On `console.` and `onboard.`, `/api/health` is answered by the API half through the tunnel; a JSON POST from the page reaches the API half with no OPTIONS and no 3xx; `/api` without a slash is the SPA; on `docs.` no path reaches Railway |
 | AC-P0-25 [STG] | Every static deployment has assets only (no module, no binding, no `workers.dev` address, no preview URL), and the Workers routes on fin-next's names equal §7.5, and no other route on the zone matches one of them; a change made in a drill to a throwaway deployment raises `static-deployment-changed` within 2 minutes |
 | AC-P0-26 [STG] | Unauthenticated requests to `staff.<staging-zone>` for `/`, a hashed asset and `/api/health` all receive Access's redirect; a request to the admin API half from a non-connector peer with a forged `Cf-Access-Jwt-Assertion` gets 403 |
-| AC-P0-27 [CI] (end of Saturday) | Over the day's pull-request runs, `plan` p50 is at most 15 s and warm `check` p50 at most 4 minutes; a docs-only pull request runs only `plan`, `check`, `static` and `gate` (numbers recorded by the steward at C2 and C4) |
+| AC-P0-27 [CI] (end of Saturday) | Over the day's pull-request runs, `plan` p50 is at most 15 s and warm `check` p50 at most 4 minutes; a docs-only pull request runs only `plan`, `check`, `static`, `commit-dates-utc` and `gate` (numbers recorded by the steward at C2 and C4) |
 | AC-P0-28 [STG] | `pnpm fin verify staging` exits 0: every row of §6.2, Serverless off, outbound IPv6 off, static egress on exactly the listed services with the overlay's addresses, PITR on, the deployment webhook present, no staged change |
 | AC-P0-29 [STG] | Postgres reports its version (recorded); every service connects with `verify-full` against `FIN_DB_CA_PEM`; `fin_owner` has no valid password outside a registered run; a privileged login outside a registered run raises `privileged-login` |
 | AC-P0-30 [STG] | Every Phase 0 secret has an escrow object written before its Railway variable was set (the run registration's timestamps): waiting for CR-10 ([BD-14]), not met. A secret set before CR-10 cannot be escrowed afterwards, because a sealed variable cannot be read back (ARCHITECTURE §4.9); it meets this check only once it is rotated by its runbook, escrow first, after CR-10 is given. Checked at the exit: gitleaks with Fin's shapes finds nothing in the repository, in the CI runs' downloaded logs and the operator machine's deploy output ([BD-05]), or in the release images' layers |
