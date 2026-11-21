@@ -1,8 +1,9 @@
 // The audit area's lines (spec 08 §3.3, §3.5 and §7.2's own lines), written wherever an action
-// records its event: packages/audit's recordAudit (the api tasks, run by migrate), identity's
-// recorder for the sign-in, organisation and staff events, and the unit of work that meets the
-// guard's FA010. The group D alerts that watch them are in alerts/audit.json; the chain, anchor,
-// check and journal lines of §3.14 come with the duties that write them.
+// records its event: packages/audit's recordAudit (the api tasks, run by migrate), each area's own
+// recorder (packages/<area>/src/audit/record.ts, such as identity's for the sign-in, session,
+// factor and staff enrolment events), and the unit of work that meets the guard's FA010. The group
+// D alerts that watch them are in alerts/audit.json; the chain, anchor, check and journal lines of
+// §3.14 come with the duties that write them.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -11,11 +12,11 @@ export const entries: readonly CatalogEntry[] = [
     kind: "failure",
     level: "error",
     writtenBy:
-      "recordAudit (packages/audit) when the database refuses the event with an FA SQLSTATE, with `auditEvent` and `sqlstate` (its input refusals and other database errors write no line); identity's recorder when its input check refuses the event (`sqlstate` `input`) or the database refuses it with any code (the SQLSTATE as it is, `unknown` when there is none), but it passes the event's name as `event`, which the envelope keeps as the line's own name, so its lines carry `sqlstate` only until identity renames the field. The action rolls back and answers 500 with the request ID only",
+      "recordAudit (packages/audit) when the database refuses the event with an FA SQLSTATE, with `auditEvent` and `sqlstate` (its input refusals and other database errors write no line); each area's recorder (packages/<area>/src/audit/record.ts) when its input check refuses the event (`sqlstate` `input`) or the database refuses it with any code (the SQLSTATE as it is, `unknown` when there is none). A recorder that passes the event's name as `event` loses it to the envelope, which keeps `event` as the line's own name, so its lines carry `sqlstate` only until it renames the field. The action rolls back and answers 500 with the request ID only",
     // Spec 08 §7.2 names the audit event's field `event`; the envelope owns `event` (the line's own
-    // name, MC-03), so packages/audit calls it `auditEvent`. Identity's recorder still passes
-    // `event`, which an envelope-wins sink drops; test/audit-alerts.test.ts holds `writtenBy` and
-    // the runbook to the fields each writer passes.
+    // name, MC-03), so the writers call it `auditEvent`. A recorder that still passes `event` has
+    // it dropped by an envelope-wins sink; test/audit-alerts.test.ts reads every writer and holds
+    // `writtenBy`, the runbook and the alert's check text to the fields they pass.
     fields: { auditEvent: "string", sqlstate: "string" },
     alerts: ["audit-not-written"],
   },

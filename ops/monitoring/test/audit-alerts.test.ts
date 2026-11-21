@@ -1,9 +1,11 @@
 // The alerts identity's line list (packages/identity/src/monitoring.ts) names for audit.write_failed
 // are staging rules over that event, as spec 08 §3.14 defines them, each with a runbook that exists
-// and names it back, and the catalogue's entry names the same alerts. The fields each writer passes
-// are the ones the catalogue declares, and the catalogue and runbook say which writer leaves which
-// out. The list and the writers are read as text: ops/monitoring imports no other package.
-import { existsSync, readFileSync } from "node:fs";
+// and names it back, and the catalogue's entry names the same alerts. The fields every writer
+// passes are the ones the catalogue declares, and the catalogue, runbook and alert say when a
+// writer leaves the audit event's name out. The list and the writers are read as text:
+// ops/monitoring imports no other package, which is why this package's tests are never cached
+// (ops/monitoring/turbo.json, test/turbo.test.ts).
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
@@ -16,8 +18,19 @@ const EVENT = "audit.write_failed";
 const AUDIT_WRITER = join(ROOT, "packages", "audit", "src", "record.ts");
 const IDENTITY_WRITER = join(ROOT, "packages", "identity", "src", "audit", "record.ts");
 const RUNBOOK = join(ROOT, "docs", "runbooks", "audit-not-written.md");
-/** What the catalogue and runbook say while identity passes the audit event as the envelope's key. */
-const IDENTITY_GAP = "passes the event's name as `event`";
+/** What the catalogue, runbook and alert say while a recorder passes the audit event as `event`. */
+const RECORDER_GAP = "passes the event's name as `event`";
+/** The services whose logins record audit events (spec 08 §3.4), and migrate for the tasks. */
+const RECORDING_SOURCES = ["admin", "api", "console", "migrate", "payments", "worker"];
+
+/** Every area's own recorder in the tree: packages/<area>/src/audit/record.ts. */
+function areaRecorders(): string[] {
+  const packages = join(ROOT, "packages");
+  return readdirSync(packages)
+    .sort()
+    .map((name) => join(packages, name, "src", "audit", "record.ts"))
+    .filter((file) => existsSync(file));
+}
 
 /**
  * The field names each write of the event in a file passes, one list per write: the first object
@@ -63,9 +76,10 @@ function identityAlerts(event: string): string[] {
   return [...(list?.[1] ?? "").matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1] ?? "");
 }
 
+const { config, findings } = loadEnv(ROOT, "staging");
+
 describe(`the alerts identity names for ${EVENT}`, () => {
   const names = identityAlerts(EVENT);
-  const { config, findings } = loadEnv(ROOT, "staging");
 
   it("are read from identity's list, audit-not-written among them", () => {
     expect(names).toContain("audit-not-written");
@@ -89,7 +103,7 @@ describe(`the alerts identity names for ${EVENT}`, () => {
     expect(catalogueEntry().alerts).toEqual(names);
   });
 
-  it("page on any refusal, as spec 08 §3.14's audit-not-written does", () => {
+  it("page on any refusal from every service that records audit events, as spec 08 §3.14's audit-not-written does", () => {
     const rule = config?.alerts.find((a) => a.name === "audit-not-written");
     expect(rule).toMatchObject({
       group: "D",
@@ -100,12 +114,14 @@ describe(`the alerts identity names for ${EVENT}`, () => {
       metadata: { runbook: "docs/runbooks/audit-not-written.md" },
     });
     expect(rule?.query).toEqual({ count: { events: [EVENT] } });
+    expect([...(rule?.sources ?? [])].sort()).toEqual(RECORDING_SOURCES);
   });
 });
 
 describe(`the fields the writers of ${EVENT} pass`, () => {
   const entry = catalogueEntry();
   const declared = Object.keys(entry.fields).sort();
+  const recorders = areaRecorders();
 
   it("are, from packages/audit's recordAudit, exactly the catalogue's", () => {
     const writes = writtenFields(AUDIT_WRITER);
@@ -113,18 +129,32 @@ describe(`the fields the writers of ${EVENT} pass`, () => {
     for (const fields of writes) expect([...fields].sort()).toEqual(declared);
   });
 
-  it("are, from identity's recorder, the catalogue's or the envelope's `event`, which the catalogue and runbook name", () => {
-    const writes = writtenFields(IDENTITY_WRITER);
-    expect(writes.length).toBeGreaterThan(0);
-    for (const fields of writes) {
-      for (const field of fields) expect(["event", ...declared], field).toContain(field);
+  it("are read from every area's recorder in the tree, identity's among them", () => {
+    expect(recorders).toContain(IDENTITY_WRITER);
+  });
+
+  it("are, from each area's recorder, the catalogue's, the audit event as `auditEvent` or the envelope's `event`", () => {
+    for (const file of recorders) {
+      const writes = writtenFields(file);
+      expect(writes.length, file).toBeGreaterThan(0);
+      for (const fields of writes) {
+        const named = fields.map((field) => (field === "event" ? "auditEvent" : field));
+        expect(named.sort(), `${file}: ${fields.join(", ")}`).toEqual(declared);
+      }
     }
-    // While identity passes `event`, its lines arrive without the audit event's name, and the
-    // catalogue and runbook must say so; once it passes `auditEvent`, they must stop saying it.
-    const passesEvent = writes.some((fields) => fields.includes("event"));
-    const says = (text: string) => text.replace(/\s+/g, " ").includes(IDENTITY_GAP);
+  });
+
+  it("leave the audit event's name out exactly while the catalogue, runbook and alert say so", () => {
+    // While a recorder passes `event`, its lines arrive without the audit event's name, and the
+    // catalogue, the runbook and the alert's check must say so; once none does, they must stop.
+    const passesEvent = recorders.some((file) =>
+      writtenFields(file).some((fields) => fields.includes("event")),
+    );
+    const says = (text: string) => text.replace(/\s+/g, " ").includes(RECORDER_GAP);
+    const check = config?.alerts.find((a) => a.name === "audit-not-written")?.metadata?.check;
     expect(says(entry.writtenBy), "the catalogue's writtenBy").toBe(passesEvent);
     expect(says(readFileSync(RUNBOOK, "utf8")), "the runbook").toBe(passesEvent);
+    expect(says(check ?? ""), "the alert's metadata.check").toBe(passesEvent);
   });
 
   it("are read as keys, never as the values' names, shorthand keys included", () => {

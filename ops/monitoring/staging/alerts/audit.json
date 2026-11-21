@@ -17,7 +17,7 @@
       "policy": "staging-quiet",
       "incident_cause": "An action was refused because its audit event could not be written. Refusals: {{value}}.",
       "metadata": {
-        "check": "The sqlstate on audit.write_failed: FA002 is a fragment's roles missing a login, FA004 a metadata shape, FA011 a head changed outside the code (wake the owner); the auditEvent (identity's lines carry none: the request line's route) and the release.",
+        "check": "The sqlstate on audit.write_failed: FA002 is a fragment's roles missing a login, FA004 a metadata shape, FA011 a head changed outside the code (wake the owner); the auditEvent and the release. A line without auditEvent came from a recorder that passes the event's name as `event`: the request line with its requestId names the action by its route, or for a library path (route /api/auth/* or none) the auth.unhandled_error line with that requestId names it by its authPath.",
         "flow": "F15",
         "runbook": "docs/runbooks/audit-not-written.md"
       }

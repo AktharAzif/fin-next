@@ -8,12 +8,13 @@ Every important action writes its audit event in its own transaction (spec 08 §
 event was refused, so the transaction rolled back and the action failed with a 500 that carries
 only the request ID: nothing changed, and nothing is missing from the trail, but the person, key,
 job or operator that tried it was refused, and every later try fails the same way until the cause
-is fixed. The line names the reason (`sqlstate`), never the action's values. A line from
-packages/audit's `recordAudit` (the api tasks) also names the refused event (`auditEvent`). A line
-from identity's recorder (the sign-in, organisation and staff events, all that console and admin
-record) does not: the recorder passes the event's name as `event`, which the line's own name
-overwrites, so the line carries `sqlstate` only, and the refused event is found from the `request`
-line's `route` (First check, step 2). Most often a release broke an event:
+is fixed. The line names the reason (`sqlstate`), never the action's values. Two kinds of writer
+write it: packages/audit's `recordAudit` (the api tasks), and each area's own recorder
+(`packages/<area>/src/audit/record.ts`, such as identity's for the sign-in, session, factor and
+staff enrolment events). A line with `auditEvent` names the refused event. A line without one came from a
+recorder that passes the event's name as `event`, which the line's own name overwrites, so the
+line carries `sqlstate` only, and the refused action is found from the request (First check, step
+2). Most often a release broke an event:
 
 - `FA001`: the event is unknown or retired in `audit.event_type` (the registry was not synced
   after the release, or a retired name is still written).
@@ -27,11 +28,11 @@ line's `route` (First check, step 2). Most often a release broke an event:
   same transaction. Only a `fin_owner` or superuser change to `audit.head` outside the audit
   functions leaves none, so it is a possible tamper with the chain's head (Containment, step 3),
   never a missed deploy step.
-- `input`, `unknown` or a code outside the `FA` class (such as `42501`): only identity's recorder
-  writes these. `input` is its own check refusing the event before any SQL; any other database
-  refusal comes as its SQLSTATE, and `unknown` is an error that carried none (a lost connection,
-  no ID returned). packages/audit writes `FA` codes only; its input refusals and other database
-  errors write no `audit.write_failed`.
+- `input`, `unknown` or a code outside the `FA` class (such as `42501`): only the area recorders
+  write these. `input` is a recorder's own check refusing the event before any SQL; any other
+  database refusal comes as its SQLSTATE, and `unknown` is an error that carried none (a lost
+  connection, no ID returned). The area recorders write `FA` codes too. packages/audit writes `FA`
+  codes only; its input refusals and other database errors write no `audit.write_failed`.
 
 A commit the guard refused (`FA010`) is `database.audit_guard`, not this alert.
 
@@ -39,17 +40,19 @@ A commit the guard refused (`FA010`) is `database.audit_guard`, not this alert.
 
 Find the refused action by IDs only, never by a name, an address or the action's values.
 
-1. The `service`, `release` and `sqlstate` on the line, its `auditEvent` when packages/audit
-   wrote it, and its `requestId` (an API action) or `runId` (a `migrate --task` run).
+1. The `service`, `release` and `sqlstate` on the line, its `auditEvent` when it has one, and its
+   `requestId` (an API action) or `runId` (a `migrate --task` run).
 2. The `request` line with the same `requestId`: its `route`, `actor` and the `orgId`, `userId`,
-   `staffId` or `keyId` it names. For an identity line, which names no event, the `route` is
-   what tells the refused action. For a task, the run registration with that `runId` and the
+   `staffId` or `keyId` it names. On a line without `auditEvent`, the action is what tells the
+   refused event: for Fin's own routes the `route` names it; for a library path (`route` is
+   `/api/auth/*`, or the line has no `route`) it is the `authPath` on the `auth.unhandled_error`
+   line with the same `requestId`. For a task, the run registration with that `runId` and the
    `task.failed` line beside it.
 3. Whether `release` is new: did it change the event's fragment, its `roles` or its metadata
    schema, and did migrate sync the registry after it (`migrate.done` for the release)?
-4. Whether one service and one event (its `auditEvent`, or for identity its `route`) refuse, or
-   many: one is a bug in that caller; many at once is the registry. `FA011` is never routine:
-   go to Containment, step 3.
+4. Whether one service and one event (its `auditEvent`; without one, the `route`, or the
+   `authPath` for a library path) refuse, or many: one is a bug in that caller; many at once is
+   the registry. `FA011` is never routine: go to Containment, step 3.
 
 ## Containment
 
@@ -71,10 +74,10 @@ The refused action changed nothing, so there is nothing to undo: the work is to 
 4. `FA002` for an event no fragment ever gives that service (a console login recording a money
    event): not a bug. Treat the service's process or its database login as compromised, review
    `privileged-login` history, and rotate the login (`privileged-login.md`).
-5. Close it when the same `route` or task, tried again on the fixed release, writes its event and
-   no new `audit.write_failed` comes from that `release` (for `FA011`, only once the owner has
-   said how the head is restored); the alert recovers 15 minutes after the last line. Tell
-   whoever was refused (by the IDs found above) to try again.
+5. Close it when the same action (its `route` or `authPath`) or task, tried again on the fixed
+   release, writes its event and no new `audit.write_failed` comes from that `release` (for
+   `FA011`, only once the owner has said how the head is restored); the alert recovers 15 minutes
+   after the last line. Tell whoever was refused (by the IDs found above) to try again.
 
 ## When to wake the owner
 
