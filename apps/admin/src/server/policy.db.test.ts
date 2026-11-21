@@ -76,6 +76,18 @@ function sample(id: PolicyId): { path: string; body?: unknown } {
       return { path: "/api/staff-roles" };
     case "staff_roles.get":
       return { path: "/api/staff-roles/operator" };
+    case "staff_roles.create":
+      return {
+        path: "/api/staff-roles",
+        body: { name: "Sample role", description: "", permissions: ["customers.read"] },
+      };
+    case "staff_roles.update":
+      return {
+        path: "/api/staff-roles/srl_01jd0000000000000000000000",
+        body: { name: "Sample role", description: "", permissions: ["customers.read"], version: 1 },
+      };
+    case "staff_roles.delete":
+      return { path: "/api/staff-roles/srl_01jd0000000000000000000000/delete", body: {} };
     case "switches.list":
       return { path: "/api/switches" };
     case "switches.set":

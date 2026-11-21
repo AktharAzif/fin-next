@@ -1,5 +1,6 @@
 // The refusals Fin Admin's staff routes answer beyond the auth codes @fin/identity's AuthRefusal
-// carries (spec 02 §14.1, §8.5, §10). Each is a problem document; the API half renders it.
+// carries (spec 02 §14.1, §8.4, §8.5, §10): `limit_reached` (with `limit`) is the 31st custom staff
+// role. Each is a problem document; the API half renders it.
 export type StaffProblemCode =
   | "forbidden"
   | "outranked"
@@ -8,6 +9,7 @@ export type StaffProblemCode =
   | "last_top_role"
   | "not_found"
   | "conflict"
+  | "limit_reached"
   | "invalid";
 
 const STATUS: Readonly<Record<StaffProblemCode, number>> = {
@@ -18,6 +20,7 @@ const STATUS: Readonly<Record<StaffProblemCode, number>> = {
   last_top_role: 409,
   not_found: 404,
   conflict: 409,
+  limit_reached: 409,
   invalid: 400,
 };
 

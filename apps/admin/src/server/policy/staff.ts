@@ -1,5 +1,5 @@
 // Staff management (spec 02 §10.2, §14.3) and the staff roles read routes (§10.7; creating, editing
-// and deleting custom staff roles is stretch 3 and not routed).
+// and deleting custom staff roles, stretch 3, is staff-roles.ts).
 import {
   addStaffBody,
   changeRoleBody,

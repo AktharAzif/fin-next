@@ -4,6 +4,7 @@
 // member's session, or for other parameters; passes once with a fresh proved one; and two
 // concurrent re-sends with one intent make exactly one change.
 
+import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
@@ -50,6 +51,25 @@ async function signedInSession(member: HostMember): Promise<string> {
   return (sessions.find((s) => s.current) as { id: string }).id;
 }
 
+/** A custom staff role's name no other role in the file has (letters only, §8.6). */
+function roleName(): string {
+  const letters = randomBytes(6)
+    .toString("hex")
+    .replace(/[0-9]/g, (d) => "ghijklmnop"[Number(d)] ?? "q");
+  return `Step ${letters}`;
+}
+
+/** A custom staff role made through the API half, stepped up as the client does. */
+async function madeRole(): Promise<string> {
+  const reply = await admin.client.stepped(admin.authenticator, "POST", "/api/staff-roles", {
+    name: roleName(),
+    description: "",
+    permissions: ["customers.read"],
+  });
+  expect(reply.status, JSON.stringify(reply.json)).toBe(201);
+  return String(reply.json?.roleId);
+}
+
 async function switchState(): Promise<"on" | "off"> {
   const row = await h.admin.query<{ state: "on" | "off" }>(
     "SELECT state FROM ops.kill_switch WHERE name = 'outbound_webhooks'",
@@ -58,6 +78,9 @@ async function switchState(): Promise<"on" | "off"> {
 }
 
 async function scenario(id: PolicyId): Promise<Scenario> {
+  // One client proves every route's intents from one address, more passkey ceremonies than a
+  // person makes in a minute: each route starts with that address's passkey allowance (§5.6) anew.
+  await h.fixture("DELETE FROM ops.rate_window WHERE key LIKE 'passkey_options:%'");
   const fresh = async (roleKey = "viewer") =>
     (await enrolThroughHost(h, host, unique(`step.${id}`), roleKey)).staffId;
   switch (id) {
@@ -118,6 +141,39 @@ async function scenario(id: PolicyId): Promise<Scenario> {
         },
       };
     }
+    case "staff_roles.create": {
+      const body = { name: roleName(), description: "", permissions: ["customers.read"] };
+      return {
+        path: "/api/staff-roles",
+        body,
+        tampered: { path: "/api/staff-roles", body: { ...body, permissions: ["money.read"] } },
+      };
+    }
+    case "staff_roles.update": {
+      const roleId = await madeRole();
+      const body = {
+        name: roleName(),
+        description: "",
+        permissions: ["customers.read", "rfis.read"],
+        version: 1,
+      };
+      return {
+        path: `/api/staff-roles/${roleId}`,
+        body,
+        tampered: {
+          path: `/api/staff-roles/${roleId}`,
+          body: { ...body, permissions: ["customers.read"] },
+        },
+      };
+    }
+    case "staff_roles.delete": {
+      const [a, b] = [await madeRole(), await madeRole()];
+      return {
+        path: `/api/staff-roles/${a}/delete`,
+        body: {},
+        tampered: { path: `/api/staff-roles/${b}/delete`, body: {} },
+      };
+    }
     default:
       throw new Error(`no scenario for ${id}`);
   }
@@ -130,6 +186,10 @@ const intentRoutes = ADMIN_POLICIES.filter((p) => p.stepUp === "intent");
 const IDENTITY_REASON_KEYS: Readonly<Record<string, string>> = {
   "staff.session_revoke": "sign_out_session",
   "staff.sessions_revoke_others": "sign_out_everywhere",
+  // The custom staff role actions' keys in the lower case the intent table's column takes.
+  "staffRole.create": "staff_role.create",
+  "staffRole.update": "staff_role.update",
+  "staffRole.delete": "staff_role.delete",
 };
 
 describe("every intent route of Fin Admin (§7.5)", () => {
@@ -143,6 +203,9 @@ describe("every intent route of Fin Admin (§7.5)", () => {
         "staff.remove",
         "staff.reset_factors",
         "staff.role",
+        "staff_roles.create",
+        "staff_roles.delete",
+        "staff_roles.update",
         "switches.set",
       ].sort(),
     );

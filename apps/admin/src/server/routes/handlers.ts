@@ -10,6 +10,8 @@ import type { Realm, RequestContext } from "@fin/identity";
 import {
   addStaff,
   changeStaffRole,
+  createStaffRole,
+  deleteStaffRole,
   getStaffRole,
   type IssuedCode,
   listStaff,
@@ -29,6 +31,7 @@ import {
   staffAccount,
   staffViewer,
   type UnitTx,
+  updateStaffRole,
 } from "@fin/staff";
 import type { AdminPolicy, PolicyId } from "../policy/index.ts";
 import { ADMIN_POLICIES } from "../policy/index.ts";
@@ -71,6 +74,15 @@ function guarded<T>(
 const ok = (body: unknown): RouteAnswer => ({ status: 200, body });
 const created = (body: unknown): RouteAnswer => ({ status: 201, body });
 const str = (value: unknown): string => String(value);
+
+/** A custom staff role's draft as the route's strict schema read it (§8.4). */
+function roleDraft(body: Record<string, unknown>) {
+  return {
+    name: str(body.name),
+    description: typeof body.description === "string" ? body.description : "",
+    permissions: Array.isArray(body.permissions) ? body.permissions.map(str) : [],
+  };
+}
 
 export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteHandler>> {
   const { realm } = deps;
@@ -177,6 +189,32 @@ export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteH
       ok(
         await guarded(realm, "staff_roles.get", (tx, _who, { input }) =>
           getStaffRole(tx, str(input.params.roleKey)),
+        )(args),
+      ),
+
+    "staff_roles.create": async (args) =>
+      created(
+        await guarded(realm, "staff_roles.create", (tx, who, { input }) =>
+          createStaffRole(deps, tx, who, roleDraft(input.body)),
+        )(args),
+      ),
+
+    "staff_roles.update": async (args) => {
+      const saved = await guarded(realm, "staff_roles.update", (tx, who, { input }) =>
+        updateStaffRole(deps, tx, who, str(input.params.roleId), {
+          ...roleDraft(input.body),
+          version: Number(input.body.version),
+        }),
+      )(args);
+      return ok({ roleId: saved.roleId, version: saved.version });
+    },
+
+    "staff_roles.delete": async (args) =>
+      ok(
+        await guarded(realm, "staff_roles.delete", (tx, who, { input }) =>
+          deleteStaffRole(deps, tx, who, str(input.params.roleId), {
+            ...(typeof input.body.moveTo === "string" ? { moveTo: input.body.moveTo } : {}),
+          }),
         )(args),
       ),
 

@@ -148,6 +148,9 @@ describe("Fin Admin's route policy", () => {
       "staff.enrolment_code": "staff.add",
       "staff_roles.list": "staff.read",
       "staff_roles.get": "staff.read",
+      "staff_roles.create": "staffRoles.manage",
+      "staff_roles.update": "staffRoles.manage",
+      "staff_roles.delete": "staffRoles.manage",
       "switches.list": "switches.manage",
       "switches.set": "switches.manage",
     };
