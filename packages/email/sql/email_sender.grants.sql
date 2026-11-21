@@ -11,5 +11,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON email.recipient_window TO {{fin_worker}}
 GRANT SELECT, INSERT, UPDATE, DELETE ON email.daily_budget TO {{fin_worker}};
 -- INSERT only so the sender can put back the bucket's row after a restore (it holds no secret).
 GRANT SELECT, INSERT, UPDATE ON email.send_bucket TO {{fin_worker}};
--- UPDATE is also what lets the worker, and no other service, lock the table for the delivery check.
 GRANT SELECT, INSERT, UPDATE ON email.delivery_check TO {{fin_worker}};
+-- UPDATE is what lets the worker, and no other service, take the delivery check's turn (a row lock);
+-- INSERT only so the worker can put back the turn's row after a restore.
+GRANT SELECT, INSERT, UPDATE ON email.delivery_check_turn TO {{fin_worker}};

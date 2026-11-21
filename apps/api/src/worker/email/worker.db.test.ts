@@ -92,14 +92,28 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     expect(results.filter((r) => r.result === "queued")).toHaveLength(1);
   });
 
-  it("cannot be held up by another login: no advisory lock, and only the worker may lock its table", async () => {
+  it("puts back the turn's row after a restore emptied the table, and still agrees", async () => {
+    await db.admin.query("TRUNCATE email.delivery_check_turn");
+    const results = await Promise.all([check(RELEASE_A), check(RELEASE_A), check(RELEASE_A)]);
+    expect(results.filter((r) => r.result === "queued")).toHaveLength(1);
+    expect(results.filter((r) => r.result === "failed")).toEqual([]);
+    const turn = await db.admin.query("SELECT name FROM email.delivery_check_turn");
+    expect(turn.rows).toEqual([{ name: "delivery-check" }]);
+  });
+
+  it("cannot be held up by another login: no advisory lock, and only the worker may take the turn", async () => {
     const other = await db.as.fin_console.connect();
     try {
-      // What any login could do to an advisory lock, and what it may not do to the worker's table.
+      // What any login could do to an advisory lock, and what it may not do to the worker's tables.
       await other.query("SELECT pg_advisory_lock(hashtext('fin:email-delivery-check'))");
       await other.query("BEGIN");
       await expect(
         other.query("LOCK TABLE email.delivery_check IN ACCESS SHARE MODE"),
+      ).rejects.toMatchObject({ code: "42501" });
+      await other.query("ROLLBACK");
+      await other.query("BEGIN");
+      await expect(
+        other.query("SELECT 1 FROM email.delivery_check_turn FOR UPDATE"),
       ).rejects.toMatchObject({ code: "42501" });
       await other.query("ROLLBACK");
       const outcome = await Promise.race([
@@ -112,6 +126,49 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
       other.release();
     }
   });
+
+  it("cannot be held up by the table locks another login takes when it only prepares a statement", async () => {
+    // Postgres locks a statement's tables when it parses it and checks privileges only when it runs,
+    // so any login with USAGE on the schema can hold ROW EXCLUSIVE (and lesser) locks on every email
+    // table by preparing an INSERT, a DELETE or a SELECT ... FOR UPDATE in a transaction it keeps open.
+    const tables = await db.admin.query<{ name: string }>(
+      "SELECT tablename AS name FROM pg_tables WHERE schemaname = 'email' ORDER BY tablename",
+    );
+    const holders = await Promise.all(
+      (["fin_console", "fin_admin", "fin_api", "fin_payments"] as const).map((role) =>
+        db.as[role].connect(),
+      ),
+    );
+    try {
+      for (const holder of holders) {
+        await holder.query("BEGIN");
+        let i = 0;
+        for (const { name } of tables.rows) {
+          await holder.query(`PREPARE p${i++} AS INSERT INTO email.${name} DEFAULT VALUES`);
+          await holder.query(`PREPARE p${i++} AS DELETE FROM email.${name}`);
+          await holder.query(`PREPARE p${i++} AS SELECT 1 FROM email.${name} FOR UPDATE`);
+        }
+      }
+      const held = await db.admin.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+          WHERE c.relname = 'delivery_check' AND l.mode = 'RowExclusiveLock' AND l.granted`,
+      );
+      expect(held.rows[0]?.n).toBe(holders.length);
+      const outcome = await Promise.race([
+        check(RELEASE_A),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 3000)),
+      ]);
+      expect(outcome).toMatchObject({ result: "queued", trigger: "release" });
+      // And a second replica still agrees with the first while those locks are held.
+      expect(await check(RELEASE_A)).toMatchObject({ result: "skipped" });
+    } finally {
+      for (const holder of holders) {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        await holder.query("DEALLOCATE ALL").catch(() => undefined);
+        holder.release();
+      }
+    }
+  }, 15_000);
 
   it("records each run in ops.duty_state: the last success, and failures in a row", async () => {
     await check(RELEASE_A);

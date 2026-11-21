@@ -8,7 +8,8 @@
 -- Every table here is logged ([DA-16]): a restart or failover never resets an allowance, a budget or
 -- the token bucket. The outbox stays out of dumps ([DA-15]); so do these tables, which hold only
 -- keyed hashes, counts and release SHAs. After a restore they are empty: the sender puts back the
--- token bucket's row itself, and the delivery check runs again for the release.
+-- token bucket's row itself, and the delivery check puts back its turn's row and runs again for the
+-- release.
 
 -- 1. Five classes (spec 08 §4.2), each grant carrying its priority and whether its rows bear a secret.
 DO $$
@@ -89,15 +90,25 @@ CREATE TABLE email.send_bucket (
 );
 INSERT INTO email.send_bucket (name, tokens, refilled_at) VALUES ('cloudflare', 0, '-infinity');
 
--- 6. The delivery check's record (spec 01 §8.5, S0-09): once per release and once a day. Replicas
---    agree by locking this table, which only the worker may write, so no other login can hold the
---    check up (ARCHITECTURE §4.6: not an advisory lock, which any login can take).
+-- 6. The delivery check's record (spec 01 §8.5, S0-09): once per release and once a day.
 CREATE TABLE email.delivery_check (
   release     text PRIMARY KEY CHECK (release ~ '^[0-9a-f]{7,40}$'),
   check_id    text NOT NULL CHECK (check_id ~ '^job_[0-9a-hjkmnp-tv-z]{26}$'),
   trigger     text NOT NULL CHECK (trigger IN ('release', 'daily')),
   enqueued_at timestamptz NOT NULL
 );
+--    Replicas take turns through the row lock on this table's one row (ARCHITECTURE §4.6). Not an
+--    advisory lock, which any login can take, and not a table lock: Postgres takes a statement's
+--    table locks when it parses it and checks privileges only when it runs, so any login with USAGE
+--    on the schema can hold ROW EXCLUSIVE on any email table by preparing a statement it never runs.
+--    A row lock needs UPDATE, checked when the statement runs, which only the worker holds; the
+--    table lock it comes with (ROW SHARE) conflicts only with EXCLUSIVE and ACCESS EXCLUSIVE, which
+--    no other login can take here. So no other login can hold the check up. After a restore the
+--    worker puts the row back.
+CREATE TABLE email.delivery_check_turn (
+  name text PRIMARY KEY CHECK (name = 'delivery-check')
+);
+INSERT INTO email.delivery_check_turn (name) VALUES ('delivery-check');
 
 -- 7. email.enqueue(), replacing P0-E's: the template must be granted to a group the caller's login
 --    belongs to (else FE001); the input is checked (else FE002, with a fixed message that never
