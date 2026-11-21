@@ -97,16 +97,24 @@ export const SERVER_MARKERS = [
 const SETTING_NAME = /\bFIN_[A-Z0-9]+(?:_[A-Z0-9]+)*\b/g;
 
 /**
- * Origins a static build may name: XML namespaces (never fetched), React's error-decoder links
- * in its messages, TanStack Router's documentation links in its warnings, and the placeholder
- * origin TanStack Router parses relative URLs against. Each new one is a reviewed change here.
+ * Origins a static build may name, none of them fetched: XML namespaces; JSON Schema's dialect
+ * identifiers (the `$schema` of the JSON Schema zod writes); React's error-decoder links in its
+ * messages, TanStack Router's and SimpleWebAuthn's documentation links in their warnings, and
+ * Tailwind's in the licence banner of the built stylesheet; and the placeholder origins TanStack
+ * Router and Fin's own router parse relative URLs against (`.invalid` never resolves). Each new
+ * one is a reviewed change here, made when a real build names it (the real-build test).
  */
 export const ALLOWED_ORIGINS = new Set([
   "http://www.w3.org",
   "https://www.w3.org",
+  "http://json-schema.org",
+  "https://json-schema.org",
   "https://react.dev",
   "https://tanstack.com",
+  "https://simplewebauthn.dev",
+  "https://tailwindcss.com",
   "http://localhost",
+  "https://fin.invalid",
 ]);
 
 const SERVER_FILES = new Set([".js", ".mjs", ".cjs", ".map"]);
