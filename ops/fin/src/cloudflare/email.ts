@@ -2,7 +2,8 @@
 //
 // `pnpm fin email domains <env>`: the `auth.` and `notify.` sending subdomains, each with preview
 // and drop-suppressed off, and their own DMARC records (`_dmarc.auth`, `_dmarc.notify`) at the
-// overlay's policy (p=none) with aggregate reports to the overlay's `dmarc.rua`. The zone's own
+// environment's policy (p=reject on staging, [BD-17]) with aggregate reports to the overlay's
+// `dmarc.rua` (none for now, so the records are held as they are). The zone's own
 // `_dmarc` is never written (the guard refuses it), and a sending domain is never removed.
 //
 // `pnpm fin email token <env>`: mints the account-owned Email Sending token (one permission group,

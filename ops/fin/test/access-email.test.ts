@@ -193,7 +193,7 @@ describe("email domains", () => {
     assert.equal(h.cf.dns.length, 0);
   });
 
-  it("writes p=none with aggregate reports on the subdomains' own records, never the zone's", async () => {
+  it("writes the environment's policy with aggregate reports on the subdomains' own records, never the zone's", async () => {
     const h = harness((o) => {
       (o.dmarc as Record<string, unknown>).rua = "mailto:reports@example.net";
     });
@@ -211,10 +211,14 @@ describe("email domains", () => {
     });
     assert.equal(await h.run(["email", "domains", "staging"]), EXIT.ok);
     const dmarc = Object.fromEntries(h.cf.dns.map((r) => [r.name, r.content]));
-    assert.equal(dmarc[`_dmarc.auth.${ZONE}`], "v=DMARC1; p=none; rua=mailto:reports@example.net");
+    // Staging's policy is p=reject ([BD-17]), which the overlay's dmarc.policy must equal.
+    assert.equal(
+      dmarc[`_dmarc.auth.${ZONE}`],
+      "v=DMARC1; p=reject; rua=mailto:reports@example.net",
+    );
     assert.equal(
       dmarc[`_dmarc.notify.${ZONE}`],
-      "v=DMARC1; p=none; rua=mailto:reports@example.net",
+      "v=DMARC1; p=reject; rua=mailto:reports@example.net",
     );
     assert.equal(
       dmarc[`_dmarc.${ZONE}`],
