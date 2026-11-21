@@ -265,6 +265,12 @@ importers:
       '@fin/app-contracts':
         specifier: workspace:*
         version: link:../app-contracts
+      '@fin/icons':
+        specifier: workspace:*
+        version: link:../icons
+      '@fin/motion':
+        specifier: workspace:*
+        version: link:../motion
       '@fin/ui':
         specifier: workspace:*
         version: link:../ui

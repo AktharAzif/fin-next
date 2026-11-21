@@ -6,19 +6,17 @@ import {
   type ConsoleViewerSignedIn,
   setCurrentOrganization,
 } from "@fin/app-contracts";
+import { NavigationBar } from "@fin/motion";
+import { InlineAlert } from "@fin/ui";
 import {
   AccountMenu,
   AppShell,
   AppShellContent,
   EnvironmentSwitch,
   OrganisationSwitcher,
-  PageNotice,
-  PageSkeleton,
 } from "@fin/ui/shell";
-
 import { type ReactNode, useState } from "react";
 import { signOut } from "../api/sign-out.ts";
-import { NavigationBar } from "../motion/NavigationBar.tsx";
 import { consoleNav } from "../nav/console/index.ts";
 import { filterNav } from "../nav/filter.ts";
 import { useSidebar } from "../prefs/sidebar.ts";
@@ -33,8 +31,9 @@ import {
 import { RouterLink } from "../router/RouterLink.tsx";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
+import { RoutePending } from "../states/RouteStates.tsx";
 import { FrameContent } from "./FrameContent.tsx";
-import { ReleaseNotice } from "./ReleaseNotice.tsx";
+import { NAVIGATION_BAR } from "./navigation-bar.ts";
 
 export const PRODUCTION_LOCKED = "Production unlocks when Fin approves your organisation.";
 
@@ -92,16 +91,12 @@ export function AppFrame({ children }: { children: ReactNode }) {
     if (!ok) setLogOutFailed(true);
   };
 
-  const notice = (
-    <>
-      {logOutFailed ? (
-        <PageNotice tone="danger" title="Couldn’t log you out" live="assertive">
-          You’re still signed in. Try again.
-        </PageNotice>
-      ) : null}
-      <ReleaseNotice />
-    </>
-  );
+  // AppFrame `logOutFailed`: the session is still there, so the frame stays and says so.
+  const notice = logOutFailed ? (
+    <InlineAlert tone="danger" title="Couldn’t log you out" live="assertive">
+      You’re still signed in. Try again.
+    </InlineAlert>
+  ) : null;
 
   return (
     <AppShell
@@ -151,11 +146,11 @@ export function AppFrame({ children }: { children: ReactNode }) {
           />
         )
       }
-      progress={<NavigationBar pending={pending} />}
+      progress={<NavigationBar pending={pending} className={NAVIGATION_BAR} />}
     >
       <AppShellContent notice={notice}>
         {viewer === null ? (
-          <PageSkeleton label="Loading" />
+          <RoutePending />
         ) : (
           <FrameContent
             pathname={pathname}

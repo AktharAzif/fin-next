@@ -165,7 +165,7 @@ describe("the console's root and AppFrame", () => {
     const { router, html } = await renderConsole("/audit-log", null);
     expect(router.state.location.pathname).toBe("/sign-in");
     expect(router.state.location.searchStr).toBe("?next=%2Faudit-log");
-    expect(html).toContain("data-auth-layout");
+    expect(html).toContain('data-slot="auth-layout"');
     expect(html).toContain(">Sign in to Fin</h1>");
   });
 

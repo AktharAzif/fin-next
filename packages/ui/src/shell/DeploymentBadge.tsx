@@ -1,6 +1,7 @@
 // Fin Admin's header left (spec 06 §4.3; AdminFrame `staging`, `development`, `unknownDeployment`):
-// the deployment Fin Admin runs in, from the viewer's `environment`, as an outline badge, a fact about
-// the whole view. Never a status colour.
+// the deployment Fin Admin runs in, from the viewer's `environment`, as an outline Badge, a fact
+// about the whole view. Never a status colour.
+import { Badge } from "../foundation/badge.tsx";
 
 const LABELS: Readonly<Record<string, string>> = {
   production: "Production",
@@ -15,11 +16,8 @@ export function deploymentLabel(environment: string): string {
 export function DeploymentBadge({ environment }: { environment: string }) {
   const known = Object.hasOwn(LABELS, environment);
   return (
-    <span
-      data-deployment={known ? environment : "unknown"}
-      className="inline-flex h-5 shrink-0 items-center rounded-badge border border-border-strong px-1.5 text-caption font-medium text-text-secondary"
-    >
-      {deploymentLabel(environment)}
+    <span data-deployment={known ? environment : "unknown"} className="inline-flex shrink-0">
+      <Badge variant="outline">{deploymentLabel(environment)}</Badge>
     </span>
   );
 }

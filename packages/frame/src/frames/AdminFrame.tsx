@@ -3,17 +3,11 @@
 // switcher and no EnvironmentSwitch. The header shows the deployment as a badge and the staff menu
 // (email, role and how they signed in; Your sign-in; Log out). Fin Admin follows the system theme.
 import type { StaffViewer, StaffViewerSignedIn } from "@fin/app-contracts";
-import {
-  AppShell,
-  AppShellContent,
-  DeploymentBadge,
-  PageNotice,
-  PageSkeleton,
-  StaffMenu,
-} from "@fin/ui/shell";
+import { NavigationBar } from "@fin/motion";
+import { InlineAlert } from "@fin/ui";
+import { AppShell, AppShellContent, DeploymentBadge, StaffMenu } from "@fin/ui/shell";
 import { type ReactNode, useState } from "react";
 import { signOut } from "../api/sign-out.ts";
-import { NavigationBar } from "../motion/NavigationBar.tsx";
 import { adminNav } from "../nav/admin/index.ts";
 import { filterNav } from "../nav/filter.ts";
 import { useSidebar } from "../prefs/sidebar.ts";
@@ -26,8 +20,9 @@ import {
 import { RouterLink } from "../router/RouterLink.tsx";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
+import { RoutePending } from "../states/RouteStates.tsx";
 import { FrameContent } from "./FrameContent.tsx";
-import { ReleaseNotice } from "./ReleaseNotice.tsx";
+import { NAVIGATION_BAR } from "./navigation-bar.ts";
 
 function signedIn(viewer: StaffViewer | null): StaffViewerSignedIn | null {
   return viewer !== null && viewer.state === "ok" ? viewer : null;
@@ -78,22 +73,19 @@ export function AdminFrame({ children }: { children: ReactNode }) {
           />
         )
       }
-      progress={<NavigationBar pending={pending} />}
+      progress={<NavigationBar pending={pending} className={NAVIGATION_BAR} />}
     >
       <AppShellContent
         notice={
-          <>
-            {logOutFailed ? (
-              <PageNotice tone="danger" title="Couldn’t log you out" live="assertive">
-                You’re still signed in. Try again.
-              </PageNotice>
-            ) : null}
-            <ReleaseNotice />
-          </>
+          logOutFailed ? (
+            <InlineAlert tone="danger" title="Couldn’t log you out" live="assertive">
+              You’re still signed in. Try again.
+            </InlineAlert>
+          ) : null
         }
       >
         {viewer === null ? (
-          <PageSkeleton label="Loading" />
+          <RoutePending />
         ) : (
           <FrameContent
             pathname={pathname}

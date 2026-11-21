@@ -2,13 +2,13 @@
 // after it, the navigation groups, then the pinned footer. Three modes: `expanded` (224px, labels),
 // `rail` (64px, icons named by tooltips on the right) and `touch` (the phone sheet: full width, 40px
 // items). The current item carries aria-current="page", the selected fill and its icon's fill
-// weight; the label's weight never changes. Router-free: links come in through `linkAs`.
+// weight (the duo glyph cross-fades); the label's weight never changes. Router-free: links come in
+// through `linkAs`.
+import { ArrowUpRightIcon, type GlyphName, Icon } from "@fin/icons";
 import type { AnchorHTMLAttributes, ComponentType, ReactNode, Ref } from "react";
-import { FinLockup, FinMark } from "./brand.tsx";
-import { classes } from "./classes.ts";
-import { Glyph, NavGlyph } from "./Glyph.tsx";
-import type { ShellNavGlyphName } from "./glyph-data.ts";
-import { NamingTooltip } from "./parts.tsx";
+import { Logo } from "../foundation/logo.tsx";
+import { Tooltip } from "../foundation/tooltip.tsx";
+import { cn } from "../lib/cn.ts";
 
 export type ShellLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   href: string;
@@ -26,7 +26,8 @@ export interface SidebarItem {
   /** The page title, word for word. */
   readonly label: string;
   readonly href: string;
-  readonly glyph: ShellNavGlyphName;
+  /** A glyph with a fill weight: the current item shows it. */
+  readonly glyph: GlyphName;
   /** Opens in a new tab and says so (API docs). */
   readonly external: boolean;
 }
@@ -45,7 +46,7 @@ export interface SidebarNav {
 }
 
 export interface SidebarBrand {
-  /** Home: `/` in the console, `/go-live` in Fin Admin. */
+  /** Home: `/` in the console and in Fin Admin. */
   readonly href: string;
   /** The link's name: "Fin home", or "Fin Admin". */
   readonly label: string;
@@ -70,24 +71,26 @@ export interface SidebarProps {
   onNavigate?: () => void;
 }
 
+type Navigate = (() => void) | undefined;
+
 function Brand({
   brand,
   mode,
   linkAs: Link,
   onNavigate,
-}: Pick<SidebarProps, "brand" | "mode" | "linkAs"> & { onNavigate: (() => void) | undefined }) {
+}: Pick<SidebarProps, "brand" | "mode" | "linkAs"> & { onNavigate: Navigate }) {
   const rail = mode === "rail";
   return (
     <Link
       href={brand.href}
       aria-label={brand.label}
       onClick={onNavigate}
-      className={classes(
+      className={cn(
         "flex rounded-control focus-visible:outline-focus",
         rail ? "items-center" : "flex-col items-start gap-1",
       )}
     >
-      {rail ? <FinMark height={24} /> : <FinLockup height={18} />}
+      {rail ? <Logo variant="mark" height={24} /> : <Logo variant="full" height={18} />}
       {!rail && brand.caption !== undefined ? (
         <span className="text-caption font-medium text-text-secondary">{brand.caption}</span>
       ) : null}
@@ -106,20 +109,28 @@ function Item({
   current: boolean;
   mode: SidebarMode;
   linkAs: ShellLink;
-  onNavigate: (() => void) | undefined;
+  onNavigate: Navigate;
 }) {
   const external = item.external ? { target: "_blank", rel: "noopener noreferrer" } : {};
   const tone = current
     ? "bg-fill-selected text-text-primary"
     : "text-text-secondary hover:bg-fill-hover hover:text-text-primary";
-  const icon = current
-    ? "text-text-primary"
-    : "text-text-tertiary group-hover/item:text-text-primary";
+  const icon = (
+    <Icon
+      name={item.glyph}
+      duo
+      current={current}
+      className={
+        current ? "text-text-primary" : "text-text-tertiary group-hover/item:text-text-primary"
+      }
+    />
+  );
 
   if (mode === "rail") {
     return (
-      <NamingTooltip
-        label={item.external ? `${item.label} (opens in a new tab)` : item.label}
+      <Tooltip
+        content={item.external ? `${item.label} (opens in a new tab)` : item.label}
+        type="label"
         side="right"
       >
         <Link
@@ -128,14 +139,14 @@ function Item({
           {...(current ? { "aria-current": "page" as const } : {})}
           data-nav-item={item.id}
           onClick={onNavigate}
-          className={classes(
+          className={cn(
             "group/item mx-auto flex size-10 items-center justify-center rounded-control transition-colors duration-fast focus-visible:outline-focus",
             tone,
           )}
         >
-          <NavGlyph name={item.glyph} current={current} className={icon} />
+          {icon}
         </Link>
-      </NamingTooltip>
+      </Tooltip>
     );
   }
 
@@ -146,17 +157,17 @@ function Item({
       {...(current ? { "aria-current": "page" as const } : {})}
       data-nav-item={item.id}
       onClick={onNavigate}
-      className={classes(
+      className={cn(
         "group/item flex items-center gap-2 rounded-control px-2 text-body transition-colors duration-fast focus-visible:outline-focus",
         mode === "touch" ? "h-10" : "h-8",
         tone,
       )}
     >
-      <NavGlyph name={item.glyph} current={current} className={icon} />
+      {icon}
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
       {item.external ? (
         <>
-          <Glyph name="ArrowUpRight" className="text-text-tertiary" />
+          <ArrowUpRightIcon className="text-text-tertiary" />
           <span className="sr-only">(opens in a new tab)</span>
         </>
       ) : null}
@@ -176,12 +187,12 @@ function ItemList({
   currentId: string | null;
   mode: SidebarMode;
   linkAs: ShellLink;
-  onNavigate: (() => void) | undefined;
+  onNavigate: Navigate;
   labelledBy?: string;
 }) {
   return (
     <ul
-      className="flex flex-col gap-0.5"
+      className="m-0 flex list-none flex-col gap-0.5 p-0"
       {...(labelledBy === undefined ? {} : { "aria-labelledby": labelledBy })}
     >
       {items.map((item) => (
@@ -213,7 +224,7 @@ export function Sidebar({
   return (
     <div
       data-sidebar-mode={mode}
-      className={classes(
+      className={cn(
         "flex h-full flex-col bg-surface",
         // The right border is inside the sidebar's width, so its edge is where the toggle sits.
         mode === "expanded" && "w-sidebar border-r border-border",
@@ -222,7 +233,7 @@ export function Sidebar({
       )}
     >
       <div
-        className={classes(
+        className={cn(
           "flex h-header shrink-0 items-center",
           rail ? "justify-center" : "justify-between gap-2 px-4",
         )}
@@ -234,7 +245,7 @@ export function Sidebar({
       <nav
         id={navElementId}
         aria-label="Main"
-        className={classes("min-h-0 flex-1 overflow-y-auto", rail ? "px-3" : "px-2")}
+        className={cn("min-h-0 flex-1 overflow-y-auto", rail ? "px-3" : "px-2")}
       >
         {nav.groups.map((group, index) => {
           const headingId = group.label === undefined ? undefined : `${navElementId}-${group.id}`;
@@ -243,16 +254,17 @@ export function Sidebar({
               {index > 0 && rail ? (
                 <div aria-hidden="true" className="mx-auto mb-2 h-px w-6 bg-border" />
               ) : null}
-              {headingId !== undefined ? (
+              {headingId === undefined ? null : (
                 <p
                   id={headingId}
-                  className={classes(
+                  className={cn(
+                    "m-0",
                     rail ? "sr-only" : "px-2 pb-1 text-caption font-medium text-text-tertiary",
                   )}
                 >
                   {group.label}
                 </p>
-              ) : null}
+              )}
               <ItemList
                 items={group.items}
                 currentId={nav.currentId}
@@ -265,7 +277,7 @@ export function Sidebar({
           );
         })}
       </nav>
-      <div className={classes("shrink-0 border-t border-border py-3", rail ? "px-3" : "px-2")}>
+      <div className={cn("shrink-0 border-t border-border py-3", rail ? "px-3" : "px-2")}>
         {nav.footer.length > 0 ? (
           <ItemList
             items={nav.footer}

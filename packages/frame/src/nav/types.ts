@@ -2,7 +2,7 @@
 // `src/nav/{console,admin}/<area>.ts`; `index.ts` assembles them in the order the canvases draw.
 // Labels equal the page titles, word for word. An item the viewer's permissions cannot open is
 // left out, an empty group goes with it ([SA-16]), and an item appears only once its route exists.
-import type { ShellNavGlyphName } from "@fin/ui/shell";
+import type { GlyphName } from "@fin/icons";
 
 export interface NavItemDef {
   /** The `staticData.navId` of the routes under this item. */
@@ -11,7 +11,7 @@ export interface NavItemDef {
   readonly label: string;
   /** The item's route; for `external: "docs"`, the path on the docs site. */
   readonly path: string;
-  readonly glyph: ShellNavGlyphName;
+  readonly glyph: GlyphName;
   /** Every permission listed is needed (the server refuses regardless, [SA-16]). */
   readonly needs?: readonly string[];
   /** Shown in Sandbox only (the Simulator). */
@@ -38,7 +38,7 @@ export interface NavItem {
   readonly id: string;
   readonly label: string;
   readonly href: string;
-  readonly glyph: ShellNavGlyphName;
+  readonly glyph: GlyphName;
   readonly external: boolean;
 }
 

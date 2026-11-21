@@ -2,6 +2,7 @@
 // opens the sidebar as a 288px sheet from the left, on the UI SDK's Dialog: touch-size items, focus
 // trapped and returned to the menu button, the page behind dimmed and inert. Choosing a page closes
 // it. There is no edge toggle here.
+import { ListIcon, XIcon } from "@fin/icons";
 import {
   Dialog,
   DialogBackdrop,
@@ -11,8 +12,7 @@ import {
   DialogTrigger,
 } from "@ui-sdk/react/dialog";
 import { useState } from "react";
-import { Glyph } from "./Glyph.tsx";
-import { NamingTooltip } from "./parts.tsx";
+import { IconButton } from "../foundation/button.tsx";
 import { type ShellLink, Sidebar, type SidebarBrand, type SidebarNav } from "./Sidebar.tsx";
 
 export interface PhoneNavSheetProps {
@@ -24,9 +24,6 @@ export interface PhoneNavSheetProps {
   defaultOpen?: boolean;
 }
 
-const ICON_BUTTON =
-  "inline-flex size-8 items-center justify-center rounded-control text-text-secondary outline-none transition-colors duration-fast hover:bg-fill-hover hover:text-text-primary focus-visible:outline-focus";
-
 export function PhoneNavSheet({
   nav,
   brand,
@@ -37,11 +34,12 @@ export function PhoneNavSheet({
   const [open, setOpen] = useState(defaultOpen);
   return (
     <Dialog open={open} onOpenChange={(next) => setOpen(next)}>
-      <NamingTooltip label="Open navigation">
-        <DialogTrigger data-phone-nav-trigger="" className={ICON_BUTTON}>
-          <Glyph name="List" />
-        </DialogTrigger>
-      </NamingTooltip>
+      <DialogTrigger
+        data-phone-nav-trigger=""
+        render={
+          <IconButton label="Open navigation" icon={<ListIcon />} variant="ghost" size="sm" />
+        }
+      />
       <DialogBackdrop className="fixed inset-0 z-scrim bg-overlay transition-opacity duration-slow state-starting:opacity-0 state-ending:opacity-0" />
       <DialogContent
         data-phone-nav=""
@@ -56,11 +54,11 @@ export function PhoneNavSheet({
           navElementId={navElementId}
           onNavigate={() => setOpen(false)}
           close={
-            <NamingTooltip label="Close navigation">
-              <DialogClose className={ICON_BUTTON}>
-                <Glyph name="X" />
-              </DialogClose>
-            </NamingTooltip>
+            <DialogClose
+              render={
+                <IconButton label="Close navigation" icon={<XIcon />} variant="ghost" size="sm" />
+              }
+            />
           }
         />
       </DialogContent>

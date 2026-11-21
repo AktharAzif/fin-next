@@ -1,13 +1,19 @@
 // The header's organisation switcher (spec 06 §4.3; UR-03, UR-05): a ghost button with the
 // organisation's name and CaretUpDown, named "Switch organisation, current: {name}". Its menu, 240px
 // wide, has a radio row per organisation with the person's role as a caption, then "Create
-// organisation" and "Organisation settings". Choosing another runs `onSwitch` with the row pending;
-// a failure is said inside the menu, which stays open ("The organisation didn't change." "Try
-// again."). The server is the check; this only asks.
-import { Menu, MenuRadioGroup, MenuTrigger } from "@ui-sdk/react/menu";
+// organisation" and "Organisation settings". Choosing another runs `onSwitch` with the menu marked
+// pending; a failure is said inside the menu, which stays open ("The organisation didn't change."
+// "Try again."). The server is the check; this only asks.
+import { BuildingsIcon, CaretUpDownIcon, GearSixIcon, PlusIcon } from "@fin/icons";
 import { useState } from "react";
-import { Glyph } from "./Glyph.tsx";
-import { MenuPopup, MenuRadioRow, MenuRow, MenuRule } from "./parts.tsx";
+import {
+  DropdownMenu,
+  MenuItem,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+} from "../data/dropdown-menu.tsx";
+import { Button } from "../foundation/button.tsx";
 import type { ShellLink } from "./Sidebar.tsx";
 
 export interface OrganisationOption {
@@ -61,58 +67,61 @@ export function OrganisationSwitcher({
   };
 
   return (
-    <Menu
+    <DropdownMenu
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
         if (!next) setFailed(false);
       }}
+      className="w-60"
+      trigger={
+        <Button
+          variant="ghost"
+          size="sm"
+          trailingIcon={<CaretUpDownIcon className="text-text-tertiary" />}
+          aria-label={`Switch organisation, current: ${name}`}
+          data-organisation-switcher=""
+          className="min-w-0 max-w-60 shrink"
+        >
+          <span className="truncate">{name}</span>
+        </Button>
+      }
     >
-      <MenuTrigger
-        aria-label={`Switch organisation, current: ${name}`}
-        data-organisation-switcher=""
-        className="inline-flex h-8 min-w-0 max-w-60 shrink items-center gap-1.5 rounded-control px-3 text-label text-text-primary outline-none transition-colors duration-fast hover:bg-fill-hover focus-visible:outline-focus state-open:bg-fill-hover"
-      >
-        <span className="truncate">{name}</span>
-        <Glyph name="CaretUpDown" className="text-text-tertiary" />
-      </MenuTrigger>
-      <MenuPopup className="w-60">
-        {organisations.length > 0 ? (
-          <MenuRadioGroup
-            value={currentId}
-            onValueChange={(value, details) => {
-              details.cancel();
-              choose(value);
-            }}
-          >
-            {organisations.map((organisation) => (
-              <MenuRadioRow
-                key={organisation.id}
-                value={organisation.id}
-                glyph="Buildings"
-                caption={organisation.roleLabel}
-                {...(pendingId === organisation.id
-                  ? { "data-pending": "", "aria-busy": true }
-                  : {})}
-              >
-                {organisation.name}
-              </MenuRadioRow>
-            ))}
-          </MenuRadioGroup>
-        ) : null}
-        {failed ? (
-          <p role="alert" className="px-2 py-1.5 text-caption text-status-danger-fg">
-            The organisation didn’t change. Try again.
-          </p>
-        ) : null}
-        {organisations.length > 0 ? <MenuRule /> : null}
-        <MenuRow glyph="Plus" render={<Link href={createHref} />}>
-          Create organisation
-        </MenuRow>
-        <MenuRow glyph="GearSix" render={<Link href={settingsHref} />}>
-          Organisation settings
-        </MenuRow>
-      </MenuPopup>
-    </Menu>
+      {organisations.length > 0 ? (
+        <MenuRadioGroup
+          value={currentId}
+          onValueChange={(value, details) => {
+            // The row is checked only once the switch has worked: the viewer says so.
+            details.cancel();
+            choose(value);
+          }}
+          {...(pendingId === null ? {} : { "data-pending": "", "aria-busy": true })}
+        >
+          {organisations.map((organisation) => (
+            <MenuRadioItem
+              key={organisation.id}
+              value={organisation.id}
+              icon={<BuildingsIcon />}
+              caption={pendingId === organisation.id ? "Switching…" : organisation.roleLabel}
+              closeOnSelect={false}
+            >
+              {organisation.name}
+            </MenuRadioItem>
+          ))}
+        </MenuRadioGroup>
+      ) : null}
+      {failed ? (
+        <p role="alert" className="m-0 px-2 py-1.5 text-caption text-status-danger-fg">
+          The organisation didn’t change. Try again.
+        </p>
+      ) : null}
+      {organisations.length > 0 ? <MenuSeparator /> : null}
+      <MenuItem icon={<PlusIcon />} render={<Link href={createHref} />}>
+        Create organisation
+      </MenuItem>
+      <MenuItem icon={<GearSixIcon />} render={<Link href={settingsHref} />}>
+        Organisation settings
+      </MenuItem>
+    </DropdownMenu>
   );
 }

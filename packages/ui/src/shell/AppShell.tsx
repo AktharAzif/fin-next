@@ -8,7 +8,7 @@
 // edge toggle, navigation, pinned footer), the header (the `environment` slot, then the account),
 // then `<main id="main">`.
 import { type ReactNode, useId } from "react";
-import { FinMark } from "./brand.tsx";
+import { Logo } from "../foundation/logo.tsx";
 import { EdgeToggle } from "./EdgeToggle.tsx";
 import { PhoneNavSheet } from "./PhoneNavSheet.tsx";
 import {
@@ -110,7 +110,7 @@ export function AppShell({
                 aria-label={brand.label}
                 className="flex rounded-control focus-visible:outline-focus"
               >
-                <FinMark height={18} />
+                <Logo variant="mark" height={18} />
               </Link>
               <div className="ml-auto flex items-center pr-2">{account}</div>
             </div>

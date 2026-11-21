@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@fin/app-contracts": "workspace:*",
+    "@fin/icons": "workspace:*",
+    "@fin/motion": "workspace:*",
     "@fin/ui": "workspace:*",
     "@tanstack/react-router": "catalog:"
   },

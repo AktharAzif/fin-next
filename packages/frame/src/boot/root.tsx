@@ -4,6 +4,7 @@
 // once the first route has resolved (FW-C16), and a check of the session when the page comes back
 // from the back-forward cache (FW-C14). The guards run in the root route's `beforeLoad`.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
+import { Toaster, TooltipProvider } from "@fin/ui";
 import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
 import { type ComponentType, type ReactNode, useEffect, useRef } from "react";
 import { consoleEnvironment } from "../frames/AppFrame.tsx";
@@ -153,7 +154,7 @@ export function FinRoot({ appFrame, fallbackFrame, stepUpContent }: FinRootProps
   const fin = useFin();
   useRootEffects(fallbackFrame);
   return (
-    <>
+    <TooltipProvider>
       <FrameSwitch
         frames={{ ...(appFrame === undefined ? {} : { app: appFrame }), auth: AuthFrame }}
         fallback={fallbackFrame}
@@ -161,6 +162,7 @@ export function FinRoot({ appFrame, fallbackFrame, stepUpContent }: FinRootProps
         <Outlet />
       </FrameSwitch>
       <StepUpHost controller={fin.stepUp} content={stepUpContent} />
-    </>
+      <Toaster />
+    </TooltipProvider>
   );
 }

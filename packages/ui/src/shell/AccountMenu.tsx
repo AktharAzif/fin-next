@@ -4,48 +4,59 @@
 // the role caption; Account security; Theme (Light, Dark, System), applied at once; Log out, which
 // never asks. Fin Admin's staff menu: the email (staff have no names), "{role} · Cloudflare Access",
 // Your sign-in, Log out, and no theme choice (Fin Admin follows the system).
-import { Menu, MenuGroup, MenuGroupLabel, MenuRadioGroup, MenuTrigger } from "@ui-sdk/react/menu";
-import { Glyph } from "./Glyph.tsx";
-import { MenuIdentity, MenuPopup, MenuRadioRow, MenuRow, MenuRule } from "./parts.tsx";
+import {
+  CaretDownIcon,
+  DesktopIcon,
+  MoonIcon,
+  ShieldCheckIcon,
+  SignOutIcon,
+  SunIcon,
+  UserCircleIcon,
+} from "@fin/icons";
+import {
+  DropdownMenu,
+  MenuItem,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+} from "../data/dropdown-menu.tsx";
+import { Avatar } from "../foundation/avatar.tsx";
 import type { ShellLink } from "./Sidebar.tsx";
 
 export type ShellThemeChoice = "light" | "dark" | "system";
 
-function firstLetters(words: string[]): string {
-  return words
-    .filter((word) => word !== "")
-    .slice(0, 2)
-    .map((word) => (word[0] ?? "").toLocaleUpperCase("en-GB"))
-    .join("");
-}
-
 /**
- * Up to two initials from the name; with no name, from the email's local part split at dots,
- * dashes and underscores ("maya@…" gives "M", the canvases' `noName`; "nadia.brooks@…" gives "NB",
- * as Fin Admin draws staff, who have no names).
+ * The name the staff menu's initials come from: staff have no names, so the email's local part,
+ * split at dots, dashes and underscores ("nadia.brooks@…" draws NB, as Fin Admin's boards do).
  */
-export function initials(name: string, email: string): string {
-  const fromName = firstLetters(name.trim().split(/\s+/));
-  if (fromName !== "") return fromName;
-  const local = email.trim().split("@")[0] ?? "";
-  return firstLetters(local.split(/[._-]+/)) || "?";
+export function nameFromEmail(email: string): string {
+  return (email.split("@")[0] ?? "")
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .join(" ");
 }
 
-function Trigger({ label, initialsText }: { label: string; initialsText: string }) {
+function Trigger({ label, name, email }: { label: string; name: string; email: string }) {
   return (
-    <MenuTrigger
+    <button
+      type="button"
       aria-label={label}
       data-account-menu=""
-      className="inline-flex h-8 shrink-0 items-center gap-1 rounded-control pr-1 pl-1 text-text-tertiary outline-none transition-colors duration-fast hover:bg-fill-hover hover:text-text-secondary focus-visible:outline-focus state-open:bg-fill-hover"
+      className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-control border-0 bg-transparent px-1 text-text-tertiary outline-none transition-colors duration-fast hover:bg-fill-hover hover:text-text-secondary focus-visible:outline-focus state-open:bg-fill-hover"
     >
-      <span
-        aria-hidden="true"
-        className="inline-flex size-6 items-center justify-center rounded-full bg-surface-subtle text-caption font-medium text-text-primary"
-      >
-        {initialsText}
-      </span>
-      <Glyph name="CaretDown" className="hidden lg:block" />
-    </MenuTrigger>
+      <Avatar name={name} email={email} size={24} />
+      <CaretDownIcon className="hidden lg:block" />
+    </button>
+  );
+}
+
+/** Who is signed in, at the top of the menu: a static line, never an item. */
+function Identity({ title, caption }: { title: string; caption: string }) {
+  return (
+    <div role="none" className="flex flex-col px-2 py-1.5">
+      <span className="truncate text-label text-text-primary">{title}</span>
+      <span className="truncate text-caption text-text-tertiary">{caption}</span>
+    </div>
   );
 }
 
@@ -76,46 +87,46 @@ export function AccountMenu({
   onLogOut,
   defaultOpen = false,
 }: AccountMenuProps) {
-  const who = name.trim() === "" ? email : name;
+  const named = name.trim() !== "";
   return (
-    <Menu defaultOpen={defaultOpen}>
-      <Trigger label={`Account menu, ${who}`} initialsText={initials(name, email)} />
-      <MenuPopup className="w-72" align="end">
-        <MenuIdentity
-          title={name.trim() === "" ? "Your account" : name}
-          caption={roleLabel === null ? email : `${email} · ${roleLabel}`}
-        />
-        <MenuRule />
-        <MenuRow glyph="ShieldCheck" render={<Link href={securityHref} />}>
-          Account security
-        </MenuRow>
-        <MenuGroup>
-          <MenuGroupLabel className="px-2 pt-2 pb-1 text-caption text-text-tertiary">
-            Theme
-          </MenuGroupLabel>
-          <MenuRadioGroup
-            value={theme}
-            onValueChange={(value) => {
-              if (value === "light" || value === "dark" || value === "system") onThemeChange(value);
-            }}
-          >
-            <MenuRadioRow value="light" glyph="Sun">
-              Light
-            </MenuRadioRow>
-            <MenuRadioRow value="dark" glyph="Moon">
-              Dark
-            </MenuRadioRow>
-            <MenuRadioRow value="system" glyph="Desktop">
-              System
-            </MenuRadioRow>
-          </MenuRadioGroup>
-        </MenuGroup>
-        <MenuRule />
-        <MenuRow glyph="SignOut" onSelect={() => onLogOut()}>
-          Log out
-        </MenuRow>
-      </MenuPopup>
-    </Menu>
+    <DropdownMenu
+      align="end"
+      defaultOpen={defaultOpen}
+      className="w-72"
+      trigger={
+        <Trigger label={`Account menu, ${named ? name : email}`} name={name} email={email} />
+      }
+    >
+      <Identity
+        title={named ? name : "Your account"}
+        caption={roleLabel === null ? email : `${email} · ${roleLabel}`}
+      />
+      <MenuSeparator />
+      <MenuItem icon={<ShieldCheckIcon />} render={<Link href={securityHref} />}>
+        Account security
+      </MenuItem>
+      <MenuRadioGroup
+        label="Theme"
+        value={theme}
+        onValueChange={(value) => {
+          if (value === "light" || value === "dark" || value === "system") onThemeChange(value);
+        }}
+      >
+        <MenuRadioItem value="light" icon={<SunIcon />}>
+          Light
+        </MenuRadioItem>
+        <MenuRadioItem value="dark" icon={<MoonIcon />}>
+          Dark
+        </MenuRadioItem>
+        <MenuRadioItem value="system" icon={<DesktopIcon />}>
+          System
+        </MenuRadioItem>
+      </MenuRadioGroup>
+      <MenuSeparator />
+      <MenuItem icon={<SignOutIcon />} onSelect={() => onLogOut()}>
+        Log out
+      </MenuItem>
+    </DropdownMenu>
   );
 }
 
@@ -141,26 +152,30 @@ export function StaffMenu({
   defaultOpen = false,
 }: StaffMenuProps) {
   return (
-    <Menu defaultOpen={defaultOpen}>
-      <Trigger label={`Account menu, ${email}`} initialsText={initials("", email)} />
-      <MenuPopup className="w-72" align="end">
-        <MenuIdentity
-          title={email}
-          caption={
-            signIn === "access"
-              ? `${roleLabel} · Cloudflare Access`
-              : `${roleLabel} · Development sign-in`
-          }
-        />
-        <MenuRule />
-        <MenuRow glyph="UserCircle" render={<Link href={accountHref} />}>
-          Your sign-in
-        </MenuRow>
-        <MenuRule />
-        <MenuRow glyph="SignOut" onSelect={() => onLogOut()}>
-          Log out
-        </MenuRow>
-      </MenuPopup>
-    </Menu>
+    <DropdownMenu
+      align="end"
+      defaultOpen={defaultOpen}
+      className="w-72"
+      trigger={
+        <Trigger label={`Account menu, ${email}`} name={nameFromEmail(email)} email={email} />
+      }
+    >
+      <Identity
+        title={email}
+        caption={
+          signIn === "access"
+            ? `${roleLabel} · Cloudflare Access`
+            : `${roleLabel} · Development sign-in`
+        }
+      />
+      <MenuSeparator />
+      <MenuItem icon={<UserCircleIcon />} render={<Link href={accountHref} />}>
+        Your sign-in
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem icon={<SignOutIcon />} onSelect={() => onLogOut()}>
+        Log out
+      </MenuItem>
+    </DropdownMenu>
   );
 }

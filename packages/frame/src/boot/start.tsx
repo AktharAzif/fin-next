@@ -10,7 +10,7 @@
 //   7. after the first paint: one reload on a failed chunk, and errors to the report seam.
 // Until the first render, the static skeleton from index.html stays on screen.
 import type { AppContract, AppName, ContractOutput } from "@fin/app-contracts";
-import { PageProblem, PlainLink } from "@fin/ui/shell";
+import { CONNECTION_SENTENCE, ErrorState, toast } from "@fin/ui";
 import { type AnyRouter, RouterProvider } from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "../api/client.ts";
@@ -37,25 +37,39 @@ export interface StartOptions<C extends AppContract> {
   container?: HTMLElement;
 }
 
+/** The frame's `error` state at boot: "Couldn't load Fin" with Try again, and nothing else. */
 function BootFailure() {
   return (
     <main
       id="main"
       tabIndex={-1}
-      className="min-h-dvh bg-bg text-body text-text-primary outline-none"
+      className="flex min-h-dvh items-start justify-center bg-bg px-4 pt-24 text-body text-text-primary outline-none"
     >
-      <PageProblem
-        glyph="WarningCircle"
-        tone="danger"
+      <ErrorState
+        size="page"
         title="Couldn’t load Fin"
-        description="Check your connection and try again."
-        actions={[
-          { label: "Try again", glyph: "ArrowClockwise", onPress: () => window.location.reload() },
-        ]}
-        linkAs={PlainLink}
+        description={CONNECTION_SENTENCE}
+        onRetry={() => window.location.reload()}
       />
     </main>
   );
+}
+
+/**
+ * A newer release is live (a response's `Fin-Release` differs from env.json's): say so once, with
+ * Reload as the one action. The page keeps working; the next navigation to a missing chunk reloads
+ * by itself (installPreloadErrorReload).
+ */
+export function showReleaseToast(): void {
+  toast.info({
+    title: "Fin was updated",
+    description: "Reload to get the latest version.",
+    action: {
+      label: "Reload",
+      altText: "Reload the page to get the latest version.",
+      onAction: () => window.location.reload(),
+    },
+  });
 }
 
 export async function startApp<C extends AppContract>(options: StartOptions<C>): Promise<void> {
@@ -132,9 +146,10 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
     },
     factorStepRequired: () =>
       go(options.app === "admin" ? "/sign-in/factor" : "/sign-in/two-factor"),
-    release: createReleaseWatch(envResult.env.release, (release) =>
-      runtime.newRelease.set(release),
-    ),
+    release: createReleaseWatch(envResult.env.release, (release) => {
+      runtime.newRelease.set(release);
+      showReleaseToast();
+    }),
     opaqueRedirect: () => window.location.reload(),
     report: reportBrowserError,
   });

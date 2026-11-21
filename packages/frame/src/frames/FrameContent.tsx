@@ -2,8 +2,9 @@
 // state its static data calls for. A route whose `needs` the viewer lacks renders RouteNotAllowed;
 // a Sandbox-only route renders RouteNotFound in Production ([SA-16], spec 06 §2.5). The server
 // refuses regardless: this only mirrors it.
+
+import { Enter } from "@fin/motion";
 import type { ReactNode } from "react";
-import { Enter } from "../motion/Enter.tsx";
 import type { FinStaticData } from "../router/static-data.ts";
 import { RouteNotAllowed, RouteNotFound } from "../states/RouteStates.tsx";
 

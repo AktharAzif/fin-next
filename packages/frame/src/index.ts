@@ -38,12 +38,7 @@ export { AdminFrame } from "./frames/AdminFrame.tsx";
 export { AppFrame, consoleEnvironment, PRODUCTION_LOCKED } from "./frames/AppFrame.tsx";
 export { AuthFrame } from "./frames/AuthFrame.tsx";
 export { FrameContent, routeAllowed } from "./frames/FrameContent.tsx";
-export { Enter, type EnterProps } from "./motion/Enter.tsx";
-export {
-  NAVIGATION_BAR_FADE_MS,
-  NavigationBar,
-  type NavigationBarProps,
-} from "./motion/NavigationBar.tsx";
+export { NAVIGATION_BAR } from "./frames/navigation-bar.ts";
 export { adminNav } from "./nav/admin/index.ts";
 export { consoleNav } from "./nav/console/index.ts";
 export { allNavItems, filterNav } from "./nav/filter.ts";

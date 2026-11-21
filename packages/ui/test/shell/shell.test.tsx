@@ -3,15 +3,12 @@
 // shell specs'.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AccountMenu, initials, StaffMenu } from "../../src/shell/AccountMenu.tsx";
+import { AccountMenu, nameFromEmail, StaffMenu } from "../../src/shell/AccountMenu.tsx";
 import { AppShell, AppShellContent } from "../../src/shell/AppShell.tsx";
-import { AuthLayout } from "../../src/shell/AuthLayout.tsx";
 import { DeploymentBadge, deploymentLabel } from "../../src/shell/DeploymentBadge.tsx";
 import { EdgeToggle } from "../../src/shell/EdgeToggle.tsx";
 import { EnvironmentSwitch } from "../../src/shell/EnvironmentSwitch.tsx";
-import { shellGlyphs } from "../../src/shell/glyph-data.ts";
 import { OrganisationSwitcher } from "../../src/shell/OrganisationSwitcher.tsx";
-import { PageHeading, PageProblem } from "../../src/shell/PageState.tsx";
 import { PlainLink, Sidebar, type SidebarNav } from "../../src/shell/Sidebar.tsx";
 
 const nav: SidebarNav = {
@@ -70,7 +67,9 @@ describe("Sidebar", () => {
     expect(html).toContain("Money movement");
     expect(count(html, 'aria-current="page"')).toBe(1);
     expect(html).toMatch(/aria-current="page"[^>]*data-nav-item="home"/);
+    // The current item's icon is the duo glyph showing its fill weight.
     expect(html).toContain('data-weight="fill"');
+    expect(html).toContain("fin-ico--duo");
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
     expect(html).toContain("(opens in a new tab)");
@@ -81,10 +80,10 @@ describe("Sidebar", () => {
       <Sidebar nav={nav} brand={brand} mode="rail" linkAs={PlainLink} navElementId="nav" />,
     );
     expect(html).toContain("w-sidebar-collapsed");
-    expect(html).toContain('viewBox="0 0 168 200" height="24"');
+    expect(html).toMatch(/<svg[^>]*height="24"/);
     expect(html).toContain('role="tooltip"');
     expect(html).toContain(">Customers<");
-    expect(html).toContain('class="sr-only"');
+    expect(html).toContain('class="m-0 sr-only"');
   });
 
   it("puts the toggle right after the brand link, before the navigation", () => {
@@ -106,7 +105,7 @@ describe("Sidebar", () => {
     expect(navAt).toBeGreaterThan(toggleAt);
   });
 
-  it("captions Fin Admin's lockup", () => {
+  it("captions Fin Admin’s lockup", () => {
     const html = renderToStaticMarkup(
       <Sidebar
         nav={{ ...nav, footer: [] }}
@@ -122,7 +121,7 @@ describe("Sidebar", () => {
 });
 
 describe("EdgeToggle", () => {
-  it("collapses from the 224px sidebar's border, 40px down in the console", () => {
+  it("collapses from the 224px sidebar’s border, 40px down in the console", () => {
     const html = renderToStaticMarkup(
       <EdgeToggle collapsed={false} onToggle={() => {}} controls="nav" offset="console" />,
     );
@@ -138,14 +137,15 @@ describe("EdgeToggle", () => {
       "hidden",
       "xl:inline-flex",
       "z-header",
-      "size-6",
+      "size-target-min",
       "rounded-full",
+      "shadow-button",
     ]) {
       expect(html).toContain(token);
     }
   });
 
-  it("expands from the rail's border, 16px down in Fin Admin", () => {
+  it("expands from the rail’s border, 16px down in Fin Admin", () => {
     const html = renderToStaticMarkup(
       <EdgeToggle collapsed onToggle={() => {}} controls="nav" offset="admin" />,
     );
@@ -214,9 +214,20 @@ describe("AppShell", () => {
     expect(html).not.toContain("data-edge-toggle");
   });
 
-  it("follows the person's choice from 1280px", () => {
+  it("follows the person’s choice from 1280px", () => {
     expect(shell({ collapsed: true })).toContain('data-layout="rail"');
     expect(shell({ collapsed: false })).toContain('data-layout="expanded"');
+  });
+
+  it("draws an empty notice slot as nothing", () => {
+    // A notice whose content decides, when it renders, that there is nothing to say.
+    const Nothing = () => null;
+    const html = renderToStaticMarkup(
+      <AppShellContent notice={<Nothing />}>
+        <p>Page</p>
+      </AppShellContent>,
+    );
+    expect(html).toContain("empty:hidden");
   });
 });
 
@@ -230,11 +241,11 @@ describe("EnvironmentSwitch", () => {
       />,
     );
     expect(html).toContain('aria-label="Environment"');
-    expect(html).toMatch(/data-env="production"[^>]*>/);
+    const production = html.slice(html.indexOf('data-env="production"'));
+    expect(production).toMatch(/^data-env="production"[^>]*>/);
     expect(html).toMatch(
       /aria-disabled="true"[^>]*tabindex="0"|tabindex="0"[^>]*aria-disabled="true"/,
     );
-    const production = html.slice(html.indexOf('data-env="production"'));
     expect(production.indexOf("<svg")).toBeLessThan(production.indexOf("Production<"));
     expect(production).toContain("fin-ico--LockSimple");
     expect(html).toContain("Production unlocks when Fin approves your organisation.");
@@ -267,15 +278,26 @@ describe("menus", () => {
     expect(html).toContain(">MR<");
   });
 
-  it("makes initials from the name, else the email", () => {
-    expect(initials("Maya Rivera", "maya@example.com")).toBe("MR");
-    expect(initials("  ", "maya@example.com")).toBe("M");
-    expect(initials("", "nadia.brooks@example.org")).toBe("NB");
-    expect(initials("Ines", "")).toBe("I");
-    expect(initials("", "")).toBe("?");
+  it("names the trigger by email when there is no name, with the first letter", () => {
+    const html = renderToStaticMarkup(
+      <AccountMenu
+        name=""
+        email="maya@example.com"
+        roleLabel={null}
+        theme="system"
+        onThemeChange={() => {}}
+        securityHref="/account/security"
+        linkAs={PlainLink}
+        onLogOut={async () => {}}
+      />,
+    );
+    expect(html).toContain('aria-label="Account menu, maya@example.com"');
+    expect(html).toContain(">M<");
   });
 
-  it("names the staff menu by email", () => {
+  it("draws staff initials from the email’s local part", () => {
+    expect(nameFromEmail("nadia.brooks@example.org")).toBe("nadia brooks");
+    expect(nameFromEmail("ines@example.org")).toBe("ines");
     const html = renderToStaticMarkup(
       <StaffMenu
         email="nadia.brooks@example.org"
@@ -317,72 +339,12 @@ describe("menus", () => {
   });
 });
 
-describe("Fin Admin's header and the page states", () => {
+describe("Fin Admin’s header", () => {
   it("names the deployment, and Unknown for anything else", () => {
     expect(deploymentLabel("staging")).toBe("Staging");
     expect(deploymentLabel("constructor")).toBe("Unknown");
-    expect(renderToStaticMarkup(<DeploymentBadge environment="qa" />)).toContain(
-      'data-deployment="unknown"',
-    );
-  });
-
-  it("gives the page one focusable <h1>", () => {
-    const html = renderToStaticMarkup(
-      <PageHeading
-        title="Page not found"
-        primary={{ label: "Go to Home", href: "/", glyph: "House" }}
-        linkAs={PlainLink}
-      />,
-    );
-    expect(count(html, "<h1")).toBe(1);
-    expect(html).toContain('tabindex="-1"');
-    expect(html).toContain('href="/"');
-  });
-
-  it("shows a request ID with a problem when there is one", () => {
-    const html = renderToStaticMarkup(
-      <PageProblem
-        glyph="WarningCircle"
-        title="Couldn’t load this page"
-        description="x"
-        requestId="req_1"
-        linkAs={PlainLink}
-      />,
-    );
-    expect(html).toContain("Request ID req_1");
-  });
-
-  it("puts the signed-out card in <main> with the entrance class", () => {
-    const html = renderToStaticMarkup(<AuthLayout>Card</AuthLayout>);
-    expect(html).toContain('<main id="main"');
-    expect(html).toContain("fin-enter");
-  });
-});
-
-describe("glyph data", () => {
-  it("has both weights for every glyph a sidebar item uses", () => {
-    for (const name of [
-      "House",
-      "Users",
-      "Bank",
-      "ArrowsLeftRight",
-      "Key",
-      "WebhooksLogo",
-      "ListBullets",
-      "Flask",
-      "ClockCounterClockwise",
-      "GearSix",
-      "BookOpen",
-      "Rocket",
-      "ListChecks",
-      "Buildings",
-      "ChatCircleText",
-      "FileText",
-      "UsersThree",
-      "Power",
-    ] as const) {
-      expect(shellGlyphs[name].fill.length).toBeGreaterThan(0);
-      expect(shellGlyphs[name].bold.length).toBeGreaterThan(0);
-    }
+    const html = renderToStaticMarkup(<DeploymentBadge environment="qa" />);
+    expect(html).toContain('data-deployment="unknown"');
+    expect(html).toContain(">Unknown<");
   });
 });
