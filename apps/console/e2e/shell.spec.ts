@@ -333,7 +333,10 @@ async function leaveAndRestore(page: Page) {
   });
 }
 
-async function serveViewerOnDemand(page: Page) {
+async function serveViewerOnDemand(
+  page: Page,
+  api: Record<string, (route: Route) => Promise<void>> = {},
+) {
   const answers: Array<(route: Route) => Promise<void>> = [];
   const held: Array<() => void> = [];
   await serveStatic(page.context(), {
@@ -341,6 +344,7 @@ async function serveViewerOnDemand(page: Page) {
     profile: "app",
     origin: ORIGIN,
     api: {
+      ...api,
       "/api/viewer": async (route) => {
         // Each request waits for the test to release it, then takes the next queued answer.
         await new Promise<void>((release) => held.push(release));
@@ -418,6 +422,41 @@ test("@journey a restored page with the same session shows again", async ({ page
   viewer.release();
   await expect(heading).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
+  await expect(page).toHaveURL(`${ORIGIN}/`);
+});
+
+test("@journey after Log out, a restored page with the same session shows again", async ({
+  page,
+}) => {
+  const viewer = await serveViewerOnDemand(page, {
+    "/api/auth/sign-out": (route) => route.fulfill(viewerAnswer({ success: true })),
+  });
+  // The full load of /sign-in answers 204, so the document Log out leaves stays where it is, as the
+  // back-forward cache would keep it.
+  await page.route(
+    (url) => url.pathname === "/sign-in",
+    (route) => route.fulfill({ status: 204 }),
+  );
+  const loading = page.goto("/");
+  await expect.poll(viewer.held).toBe(1);
+  viewer.release();
+  await loading;
+  await ready(page);
+  const heading = page.getByRole("heading", { level: 1, name: "Welcome, Maya" });
+  await page.getByRole("button", { name: "Account menu, Maya Rivera" }).click();
+  await page.getByRole("menuitem", { name: "Log out" }).click();
+  // Log out hides the page with the guard's own lock before it leaves.
+  await expect(page.locator("html")).toHaveAttribute("data-locked", "");
+  await expect(heading).toBeHidden();
+
+  // Signed in again as the same person, then Back: the check passes and the page shows again.
+  await leaveAndRestore(page);
+  await expect.poll(viewer.held).toBe(1);
+  await expect(heading).toBeHidden();
+  viewer.release();
+  await expect(heading).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
+  await expect(page.locator("#root")).not.toHaveAttribute("hidden", /.*/);
   await expect(page).toHaveURL(`${ORIGIN}/`);
 });
 
