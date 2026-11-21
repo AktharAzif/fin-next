@@ -44,8 +44,7 @@ export async function ensureOrganisation(
   next: string | null,
 ): Promise<string> {
   try {
-    await fin.api(waitingInvitation, {});
-    return "/invite";
+    if ((await fin.api(waitingInvitation, {})) !== null) return "/invite";
   } catch (error) {
     // 404 invitation_unusable (or none in the cookie): no invitation is waiting.
     if (!isApiError(error) || error.status !== 404) throw error;

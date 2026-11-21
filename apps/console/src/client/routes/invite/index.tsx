@@ -67,7 +67,7 @@ function InvitePage() {
           : await fin.api(openInvitation, { token: link });
       // The cookie holds it now: the token is not needed again.
       token.current = null;
-      setPage({ kind: "invitation", invitation });
+      setPage(invitation === null ? { kind: "cantUse" } : { kind: "invitation", invitation });
     } catch (error) {
       const failure = failureOf(error);
       setPage(failure === "notFound" ? { kind: "cantUse" } : { kind: "failed", error });

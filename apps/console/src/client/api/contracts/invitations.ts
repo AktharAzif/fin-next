@@ -31,12 +31,13 @@ export const openInvitation = defineContract({
   output: invitationView,
 });
 
+/** The invitation in the cookie; none waiting is `404 invitation_unusable`, or an empty answer. */
 export const waitingInvitation = defineContract({
   name: "invitations.waiting",
   method: "GET",
   path: "/invitation",
   input: noInput,
-  output: invitationView,
+  output: invitationView.nullable(),
 });
 
 export const acceptInvitation = defineContract({

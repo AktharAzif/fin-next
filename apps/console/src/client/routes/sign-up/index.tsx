@@ -34,7 +34,7 @@ function SignUpPage() {
     let live = true;
     fin.api(waitingInvitation, {}).then(
       (invitation) => {
-        if (live) setInvitedFor(invitation.emailMasked);
+        if (live && invitation !== null) setInvitedFor(invitation.emailMasked);
       },
       () => {
         // No invitation waiting in this browser: the plain form.
