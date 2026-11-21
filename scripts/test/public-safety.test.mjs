@@ -475,6 +475,30 @@ describe("public-safety over a repository", () => {
       `b.md (commit ${merge}):1 token`,
     ]);
   });
+
+  test("a refused value typed while resolving a merge is found, though no other commit has it", () => {
+    const dir = makeRepo({ "a.txt": "base\n" }, { commit: "base" });
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "a.txt": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "a.txt": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"]));
+    addFiles(dir, { "a.txt": `resolved for console.${ZONE}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const commits = git(dir, ["rev-list", `${base}..HEAD`])
+      .split("\n")
+      .filter(Boolean);
+    const merge = commits[0]?.slice(0, 12);
+    assert.deepEqual(
+      scanCommits(dir, commits, [ZONE]).map((f) => `${f.file}:${f.line} ${f.rule}`),
+      [`a.txt (commit ${merge}):1 refuse-list`],
+    );
+    // The same commits without the merge hold nothing refused.
+    assert.deepEqual(scanCommits(dir, commits.slice(1), [ZONE]), []);
+  });
 });
 
 describe("the pre-push hook refuses the same", () => {
@@ -555,6 +579,24 @@ describe("the pre-push hook refuses the same", () => {
     assert.equal(code, 1);
     assert.match(output, /^README\.md \(commit [0-9a-f]{12}\):2 email-address: /m);
     assert.match(output, /scanned 3 commit\(s\)/);
+  });
+
+  test("a merge whose resolution adds a refused value is refused, and the value not printed", () => {
+    const dir = pushable();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "README.md": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "README.md": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"]));
+    addFiles(dir, { "README.md": `resolved for console.${ZONE}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const overlay = overlayFile({ refuseList: [ZONE] });
+    const { code, output } = push(dir, "refs/heads/feature", { overlay });
+    assert.equal(code, 1);
+    assert.match(output, /^README\.md \(commit [0-9a-f]{12}\):1 refuse-list: /m);
+    assert.ok(!output.toLowerCase().includes(ZONE.toLowerCase()), "the hook repeats a value");
   });
 
   test("an annotated tag's message and a pushed ref's name are scanned", () => {
