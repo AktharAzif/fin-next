@@ -1,0 +1,8 @@
+{
+  "$comment": "The deploy command and the tests run on Node (built-ins only).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["deploy/**/*.ts", "test/**/*.ts", "src/**/*.ts"]
+}
