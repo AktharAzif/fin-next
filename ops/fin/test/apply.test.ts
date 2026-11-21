@@ -411,6 +411,23 @@ describe("a mutating run", () => {
     assert.equal(await h.run(s, ["--dry-run"]), 1);
     assert.equal(s.reads, 1);
   });
+
+  it("does not start, before it reads anything, on a log whose whole last record lost its newline", async () => {
+    const h = harness();
+    assert.equal(await h.run(stub({ changes: [CREATE, UPDATE] })), EXIT.ok);
+    const before = readFileSync(h.log.logPath, "utf8").slice(0, -1);
+    writeFileSync(h.log.logPath, before);
+    const s = stub({ changes: [CREATE] });
+    assert.equal(await h.run(s), EXIT.drift);
+    assert.equal(s.reads, 0, "it stops before it reads provider state");
+    assert.deepEqual(s.applied, []);
+    assert.equal(h.log.holder(), undefined);
+    assert.match(
+      h.runtime.err(),
+      /the run log does not verify \(the last line does not end with a newline \(line 4 is incomplete\)\), so no run starts/,
+    );
+    assert.equal(readFileSync(h.log.logPath, "utf8"), before, "nothing was appended");
+  });
 });
 
 describe("shipping the lines", () => {

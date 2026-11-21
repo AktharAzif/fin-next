@@ -149,6 +149,50 @@ describe("the CLI", () => {
       assert.equal(readable(stateDir, r).includes(value), false, value);
   });
 
+  it("reports a whole last record that lost its newline (exit 1), refuses a lock break, and restarts the log", async () => {
+    const { env } = commandEnv();
+    const stateDir = join(env.FIN_STATE_DIR ?? "", "staging");
+    const log = new RunLog(stateDir, new Masker());
+    for (const event of ["run.registered", "run.step", "lock.broken"]) {
+      log.append(new Date(), "run_1", event, {});
+    }
+    writeFileSync(log.logPath, readFileSync(log.logPath, "utf8").slice(0, -1));
+    log.lock({ runId: "run_stale", command: "routes apply", startedAt: "t" });
+    const unended = /the last line does not end with a newline \(line 3 is incomplete\)/;
+
+    const verify = fakeRuntime({ env });
+    assert.equal(await runCli(["log", "verify", "staging"], verify), EXIT.drift);
+    assert.match(verify.err(), unended);
+    assert.doesNotMatch(verify.out(), /chain intact/);
+
+    const refused = fakeRuntime({ env });
+    const reason = "the run's machine crashed";
+    assert.equal(
+      await runCli(["lock", "break", "staging", "--reason", reason], refused),
+      EXIT.drift,
+    );
+    assert.match(refused.err(), /the run log does not verify \(.*\), so the lock is not broken/);
+    assert.match(refused.err(), unended);
+    assert.equal(log.holder()?.runId, "run_stale");
+
+    const restart = fakeRuntime({ env });
+    assert.equal(
+      await runCli(
+        ["log", "restart", "staging", "--reason", "the disk filled up mid-write"],
+        restart,
+      ),
+      EXIT.ok,
+    );
+    assert.match(restart.err(), unended);
+    assert.match(restart.out(), /run log: restarted; the old one is kept beside it/);
+    assert.equal(await runCli(["log", "verify", "staging"], fakeRuntime({ env })), EXIT.ok);
+    assert.equal(
+      await runCli(["lock", "break", "staging", "--reason", reason], fakeRuntime({ env })),
+      EXIT.ok,
+    );
+    assert.equal(log.holder(), undefined);
+  });
+
   it("refuses a lock break (exit 1) on a log with a torn last line or a changed middle line, and appends nothing", async () => {
     for (const damage of ["torn", "middle"] as const) {
       const { env } = commandEnv();

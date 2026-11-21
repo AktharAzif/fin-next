@@ -131,7 +131,8 @@ The first form checks the chain and the head file and prints the head. The secon
 log against a head taken from a line that left the machine: the last `run.done` or `lock.broken`
 line in Better Stack's `fin-next-staging-ops` source, or in the job's log.
 
-What exit 1 catches: a line that is not a record; an edited or removed line anywhere but the end;
+What exit 1 catches: a line that is not a record; a last line without its newline (a write that
+did not finish, even when it left a whole record); an edited or removed line anywhere but the end;
 records removed from the end, or the whole log removed, while the head file is intact; and, with
 `--head`, any change up to that record, even a rewrite of both the log and the head file. What it
 cannot catch on its own: a consistent rewrite of the records after the last head that left the
@@ -142,9 +143,11 @@ The signal stays until someone acts on it. A mutating run does not start while t
 verify (exit 1, before it reads anything; a `--dry-run` still works), and a `lock break` refuses
 too (exit 1, the lock left as it is): a stale lock and a damaged log often come together, after a
 crash during an append, so the log is restarted first (below). Nothing is appended while the log's
-end does not match the head file, or while its last line is not a whole record (a torn line a crash
-left). Otherwise the next record would chain past the gap and the log would verify again, or it
-would be joined onto the torn line and lost.
+end does not match the head file, or while its last line is not a whole record ending with its
+newline (a torn line a crash or a full disk left). Otherwise the next record would chain past the
+gap and the log would verify again, or it would be joined onto the torn line and lost. `log verify`
+reports every state that stops an append, so whenever a run or a lock break refuses, `log restart`
+is the way on.
 
 ### The run log does not verify
 

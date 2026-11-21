@@ -25,11 +25,13 @@
 // the head file (records removed, the log or the head file deleted), since appending would chain
 // past the gap and rewrite the head file to match, and the log would verify again; it also refuses
 // while the last line is not the record before the one it would write (a torn line left by a crash
-// or a short write, a line that is not a record, the wrong seq, a broken link), so a record is
-// never joined onto a torn line and lost. A run refuses to start, and a lock break refuses, while
-// the log does not verify at all (run.ts, breakLock()). The way on is `pnpm fin log restart <env>
-// --reason "..."` (restart()): it keeps the broken files beside the log under new names and starts a
-// new log whose first record, `log.restarted`, names the problems and the heads it found.
+// or a short write, a last line without its newline even when it is a whole record, a line that is
+// not a record, the wrong seq, a broken link), so a record is never joined onto a torn line and
+// lost. verify() reports every one of these, so it never passes a log that append() refuses. A run
+// refuses to start, and a lock break refuses, while the log does not verify at all (run.ts,
+// breakLock()). The way on is `pnpm fin log restart <env> --reason "..."` (restart()): it keeps the
+// broken files beside the log under new names and starts a new log whose first record,
+// `log.restarted`, names the problems and the heads it found.
 //
 // Every record's fields pass through the masker before they are written (value by value, so the
 // JSON stays valid whatever is registered): the log holds roles and placeholders, never a zone, a
@@ -208,11 +210,21 @@ export function endsLine(path: string): boolean {
   }
 }
 
+/**
+ * The problem with a log whose last line does not end with a newline, if it is one: a write that
+ * did not finish (a crash, a short write, a full disk), even when what it left is a whole record.
+ * verify() and append() both report it, so a log that refuses an append never verifies, and
+ * `log restart` is always the way on. `count` is the number of lines the log holds.
+ */
+function unendedProblem(text: string, count: number): string | undefined {
+  if (text === "" || text.endsWith("\n")) return undefined;
+  return `the last line does not end with a newline (line ${count} is incomplete)`;
+}
+
 /** What is wrong with the last line as the record before a new one, if anything. */
 function tailProblem(text: string, lines: readonly string[]): string | undefined {
-  if (text !== "" && !text.endsWith("\n")) {
-    return `its last line does not end with a newline (line ${lines.length} is incomplete)`;
-  }
+  const unended = unendedProblem(text, lines.length);
+  if (unended !== undefined) return unended;
   const last = lines.at(-1);
   if (last === undefined) return undefined;
   const n = lines.length;
@@ -327,9 +339,10 @@ export class RunLog {
    * file to it. Every field but the chain's own (seq, prev, at, runId, event) is masked first.
    * Refuses (LogIntegrityError, exit 1) while the log's end does not match the head file, so an
    * append never hides records removed from the end, or a log or head file that was deleted; and
-   * while the last line is not a whole record that the new one can follow (a torn line, a line
-   * that is not a record, the wrong seq, a broken link), so a record is never joined onto a torn
-   * line. It checks the end only: a run and a lock break check the whole log first (verify()).
+   * while the last line is not a whole record that the new one can follow (a torn line, a last
+   * line without its newline, a line that is not a record, the wrong seq, a broken link), so a
+   * record is never joined onto a torn line. It checks the end only: a run and a lock break check
+   * the whole log first (verify(), which reports all of these too).
    */
   append(at: Date, runId: string, event: string, fields: Record<string, unknown>): Appended {
     this.#ensureDir();
@@ -399,11 +412,13 @@ export class RunLog {
   }
 
   /**
-   * Checks the chain, the head file and, when given, a head taken from a line that left the
-   * machine. A line that is not JSON is reported, never thrown.
+   * Checks the chain, the end of the log, the head file and, when given, a head taken from a line
+   * that left the machine. A line that is not JSON is reported, never thrown. It reports
+   * everything append() refuses on (a last line without its newline included), so a log that
+   * verifies always takes the next record, and one that does not can always be restarted.
    */
   verify(expected?: Head): Verification {
-    const lines = this.#lines();
+    const { text, lines } = this.#read();
     const problems: string[] = [];
     const notes: string[] = [];
     const hashes: string[] = [];
@@ -426,6 +441,8 @@ export class RunLog {
       prev = sha256(line);
       hashes.push(prev);
     });
+    const unended = unendedProblem(text, lines.length);
+    if (unended !== undefined) problems.push(unended);
     const count = lines.length;
     const last = hashes.at(-1);
     const head = last === undefined ? undefined : { seq: count, hash: last };

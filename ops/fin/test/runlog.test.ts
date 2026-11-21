@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { parseArgs } from "../src/core/args.ts";
@@ -230,7 +231,10 @@ describe("the run log", () => {
     );
     assert.equal(readFileSync(log.logPath, "utf8"), before, "nothing was written");
     assert.deepEqual(log.readHead(), head, "the head file did not move");
-    assert.deepEqual(log.verify().problems, ["line 3 is not a JSON record"]);
+    assert.deepEqual(log.verify().problems, [
+      "line 3 is not a JSON record",
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
 
     // A complete last line that is not the next record (not JSON, the wrong seq, or not chained).
     for (const last of [
@@ -250,6 +254,131 @@ describe("the run log", () => {
     }
   });
 
+  it("reports a whole last record that lost only its newline, so append, verify, a lock break and restart agree", () => {
+    const UNENDED = "the last line does not end with a newline (line 3 is incomplete)";
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "lock.broken"]);
+    // A write cut short by one byte, a crash between the bytes, or an editor that drops the end.
+    const whole = readFileSync(log.logPath, "utf8");
+    writeFileSync(log.logPath, whole.slice(0, -1));
+    const before = readFileSync(log.logPath, "utf8");
+    const head = log.readHead();
+    const result = log.verify();
+    assert.deepEqual(result.problems, [UNENDED]);
+    assert.equal(result.count, 3);
+    assert.deepEqual(result.head, head, "the last record itself is whole and chained");
+
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        e.message.includes(UNENDED) &&
+        /nothing is appended/.test(e.message),
+    );
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.message.includes(`does not verify (${UNENDED}), so the lock is not broken`),
+    );
+    assert.equal(log.holder()?.runId, "run_a");
+    assert.equal(readFileSync(log.logPath, "utf8"), before, "nothing was written");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+
+    const restarted = log.restart(new Date(), "run_r", "the disk filled up mid-write", "op");
+    assert.ok(restarted !== undefined, "restart is the way on");
+    assert.deepEqual(restarted.problems, [UNENDED]);
+    assert.deepEqual(restarted.previousHead, head);
+    assert.equal(readFileSync(join(log.dir, "runs.broken-run_r.jsonl"), "utf8"), before);
+    assert.deepEqual(log.verify().problems, []);
+    assert.equal(log.records()[0]?.event, "log.restarted");
+    assert.doesNotThrow(() => log.breakLock(new Date(), "run_b", "the machine crashed", "op"));
+    assert.equal(log.holder(), undefined);
+    assert.deepEqual(log.verify().problems, []);
+  });
+
+  it("never verifies a log that refuses an append, wherever the last write was cut, so restart is always the way on", () => {
+    const source = newLog();
+    fill(source, ["run.registered", "run.step"]);
+    const headBefore = readFileSync(source.headPath, "utf8");
+    fill(source, ["lock.broken"]);
+    const headAfter = readFileSync(source.headPath, "utf8");
+    const whole = readFileSync(source.logPath, "utf8");
+    const secondEnds = whole.indexOf("\n", whole.indexOf("\n") + 1) + 1;
+    function cutAndCheck(log: RunLog, length: number): void {
+      const problems = log.verify().problems;
+      let refused: unknown;
+      try {
+        log.append(new Date(), "run_2", "run.registered", {});
+      } catch (error) {
+        refused = error;
+      }
+      if (refused === undefined) {
+        assert.deepEqual(problems, [], `length ${length}: appended, so it verified`);
+        assert.deepEqual(log.verify().problems, [], `length ${length}: still verifies`);
+      } else {
+        assert.ok(refused instanceof LogIntegrityError, `length ${length}`);
+        assert.ok(problems.length > 0, `length ${length}: refused, so it does not verify`);
+        assert.ok(log.restart(new Date(), "run_r", "a write was cut", "op") !== undefined);
+        assert.deepEqual(log.verify().problems, [], `length ${length}: restarted`);
+      }
+    }
+
+    // Every length from the end of record 2 to the whole log: the third write cut at every byte,
+    // with the head file as it was before that write (the usual case) and after it.
+    for (let length = secondEnds; length <= whole.length; length++) {
+      for (const headFile of [headBefore, headAfter]) {
+        const log = newLog();
+        mkdirSync(log.dir, { recursive: true });
+        writeFileSync(log.logPath, whole.slice(0, length));
+        writeFileSync(log.headPath, headFile);
+        cutAndCheck(log, length);
+      }
+    }
+  });
+
+  it("leaves a log that verify reports when its own append is cut short before the newline", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step"]);
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    const head = log.readHead();
+    // The disk fills up: the first write stores all but the last byte, the retry fails.
+    const original = fs.writeSync;
+    let calls = 0;
+    const cut = (fd: number, buffer: Buffer, offset: number, length: number): number => {
+      calls++;
+      if (calls === 1) return original(fd, buffer, offset, length - 1);
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+    (fs as { writeSync: unknown }).writeSync = cut;
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+        (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOSPC",
+      );
+    } finally {
+      fs.writeSync = original;
+      syncBuiltinESMExports();
+    }
+    assert.equal(calls, 2);
+    assert.equal(log.holder()?.runId, "run_a", "the lock is still held");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+    assert.equal(log.records().at(-1)?.event, "lock.broken", "a whole record without its newline");
+    assert.deepEqual(log.verify().problems, [
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
+    assert.throws(
+      () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) => e instanceof LogIntegrityError && /so the lock is not broken/.test(e.message),
+    );
+    assert.ok(log.restart(new Date(), "run_r", "the disk filled up mid-write", "op") !== undefined);
+    assert.doesNotThrow(() => log.breakLock(new Date(), "run_b", "the machine crashed", "op"));
+    assert.equal(log.holder(), undefined);
+  });
+
   it("refuses to break a lock while the log does not verify anywhere, and leaves the lock and the log as they were", () => {
     const torn = newLog();
     fill(torn, ["run.registered", "run.step"]);
@@ -260,13 +389,16 @@ describe("the run log", () => {
       () => torn.breakLock(new Date(), "run_b", "the machine crashed", "op"),
       (e: unknown) =>
         e instanceof LogIntegrityError &&
-        /does not verify \(line 3 is not a JSON record\), so the lock is not broken/.test(
+        /does not verify \(line 3 is not a JSON record; the last line does not end with a newline \(line 3 is incomplete\)\), so the lock is not broken/.test(
           e.message,
         ),
     );
     assert.equal(torn.holder()?.runId, "run_a");
     assert.equal(readFileSync(torn.logPath, "utf8"), tornBefore);
-    assert.deepEqual(torn.verify().problems, ["line 3 is not a JSON record"]);
+    assert.deepEqual(torn.verify().problems, [
+      "line 3 is not a JSON record",
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
 
     // A middle line changed while the head file still matches the last record.
     const edited = newLog();
@@ -406,6 +538,23 @@ describe("a registered run", () => {
     assert.equal(run.locked, false);
     assert.equal(log.holder(), undefined);
     assert.throws(() => run.register(), LogIntegrityError);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("does not start on a run log whose whole last record lost its newline, and frees the lock it took", () => {
+    const { run, log } = newRun();
+    fill(log, ["a", "b", "c"]);
+    writeFileSync(log.logPath, readFileSync(log.logPath, "utf8").slice(0, -1));
+    assert.throws(
+      () => run.acquire(),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not verify \(the last line does not end with a newline \(line 3 is incomplete\)\), so no run starts/.test(
+          e.message,
+        ),
+    );
+    assert.equal(run.locked, false);
     assert.equal(log.holder(), undefined);
   });
 
