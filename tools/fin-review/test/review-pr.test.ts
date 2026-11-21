@@ -355,7 +355,7 @@ describe("pr over the fixture repository with fake sessions", () => {
       const h = harness(fx, script(), random);
       const run = await runFixtureCli(fx, ["pr", "--pr", "13"], h.services, { ...fx.env, [name]: "x" });
       assert.equal(run.code, 78, name);
-      assert.ok(run.stderr.includes(`environment_refused: ${name} (`), run.stderr);
+      assert.ok(run.stderr.includes(`environment_refused: ${name} is set (`), run.stderr);
       assert.ok(!run.stderr.includes("=x"), "values are never printed");
       assert.equal(calls(h).length, 0);
     }

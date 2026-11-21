@@ -2,11 +2,14 @@
 // settings of config/ci.json.
 //
 // A path belongs to every class whose `paths` match it and whose `exclude` does not; a path no
-// class takes is `unmapped`, which, like the `global` class, runs everything.
+// class takes is `unmapped`, which, like the `global` class, runs everything. A path with a
+// character outside printable ASCII is unmapped whatever it resembles: a disk that folds more than
+// ASCII may read it as a global input or a control path (glob.ts).
 
 import { isJsonObject } from "../json.ts";
-import { compileGlob, globError, matchesAny } from "./glob.ts";
+import { compileGlob, globError, isPlainPath, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
+import { isPackageName } from "./workspace.ts";
 
 export const JOB_NAMES = ["check", "db", "build", "seams", "e2e", "static", "bun", "containers"] as const;
 export type JobName = (typeof JOB_NAMES)[number];
@@ -44,6 +47,11 @@ export interface CiConfig {
   readonly e2eShards: number;
   /** The web apps with e2e projects, as package folders (apps/console). */
   readonly e2eApps: readonly string[];
+  /**
+   * The per-pull-request Playwright project of each app is `<app>-<variant>` for each of these
+   * variants (spec 06 §10.2); they make the plan's e2e.projects (spec 07 §10.1, §10.4).
+   */
+  readonly e2eProjects: readonly string[];
   /** Globs of workspace package folders; a folder is a package when it holds package.json. */
   readonly workspaces: readonly Glob[];
   readonly workspacePatterns: readonly string[];
@@ -178,9 +186,9 @@ export function parseCiMap(value: unknown): { ok: true; value: CiMap } | { ok: f
   return { ok: true, value: Object.freeze({ classes: Object.freeze(classes), always }) };
 }
 
-const CI_KEYS = new Set(["version", "note", "e2eShards", "e2eApps", "workspaces", "packageRoots", "dbPackage", "bun"]);
-const PACKAGE_NAME_RE = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$|^[a-z0-9][a-z0-9._-]*$/;
+const CI_KEYS = new Set(["version", "note", "e2eShards", "e2eApps", "e2eProjects", "workspaces", "packageRoots", "dbPackage", "bun"]);
 const ROOT_RE = /^[a-z0-9][a-z0-9-]*$/;
+const PROJECT_VARIANT_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 /** Validates config/ci.json. */
 export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | { ok: false; errors: string[] } {
@@ -202,6 +210,14 @@ export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | {
     else if (e2eApps.includes(app)) errors.push(`e2eApps lists ${app} twice`);
     else e2eApps.push(app);
   }
+  const e2eProjects: string[] = [];
+  const rawProjects = value["e2eProjects"];
+  if (!Array.isArray(rawProjects) || rawProjects.length === 0) errors.push("e2eProjects must be a non-empty array of project variants");
+  else for (const variant of rawProjects) {
+    if (typeof variant !== "string" || !PROJECT_VARIANT_RE.test(variant)) errors.push(`e2eProjects holds ${JSON.stringify(variant)}, which is not a project variant`);
+    else if (e2eProjects.includes(variant)) errors.push(`e2eProjects lists ${variant} twice`);
+    else e2eProjects.push(variant);
+  }
   const rawWorkspaces = value["workspaces"];
   const workspaces = globList(rawWorkspaces, "workspaces", errors, false);
   for (const glob of workspaces) {
@@ -215,7 +231,7 @@ export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | {
     else packageRoots.push(root);
   }
   const dbPackage = value["dbPackage"];
-  if (typeof dbPackage !== "string" || !PACKAGE_NAME_RE.test(dbPackage)) errors.push("dbPackage must be a package name");
+  if (!isPackageName(dbPackage)) errors.push("dbPackage must be a package name");
   const bun = globList(value["bun"], "bun", errors, false);
   if (errors.length > 0 || typeof shards !== "number" || typeof dbPackage !== "string") return { ok: false, errors };
   return {
@@ -223,6 +239,7 @@ export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | {
     value: Object.freeze({
       e2eShards: shards,
       e2eApps: Object.freeze(e2eApps),
+      e2eProjects: Object.freeze(e2eProjects),
       workspaces: Object.freeze(workspaces),
       workspacePatterns: Object.freeze(workspaces.map((glob) => glob.pattern)),
       packageRoots: Object.freeze(packageRoots),
@@ -232,8 +249,9 @@ export function parseCiConfig(value: unknown): { ok: true; value: CiConfig } | {
   };
 }
 
-/** The classes of one path, in config order; empty means unmapped. */
+/** The classes of one path, in config order; empty means unmapped (as is every path that is not plain). */
 export function classesOf(map: CiMap, path: string): CiClass[] {
+  if (!isPlainPath(path)) return [];
   const out: CiClass[] = [];
   for (const cls of map.classes) {
     if (matchesAny(cls.paths, path) && !matchesAny(cls.exclude, path)) out.push(cls);

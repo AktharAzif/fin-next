@@ -29,6 +29,22 @@ validation, `verdicts.ts` the verdict table, `prompts.ts`, `procedure.ts`, `lens
 Every option takes `--name value` or `--name=value`. A refused option prints
 `fin-review: refused: <code>: <message>` on stderr and exits 64 before anything else happens; an
 invalid file under `config/` makes every command exit 78 (spec 07 §2.1 lists every exit code).
+Every command but `plan` and `help` also exits 78 (`environment_refused`) when its environment holds
+a variable `config/env-refusals.json` refuses (spec 07 §3.5, §4.3). The client's own families are
+refused by default, because each Claude Code release reads new names: every `CLAUDE*`, `CCR_*` and
+`ANTHROPIC_*` name and every name holding `OAUTH`, except the few the engine needs (the CI
+federation inputs, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and the local credential
+`CLAUDE_CODE_OAUTH_TOKEN`). Exact entries give the known names their kind (§4.3's table, and others
+such as `CLAUDE_CODE_EXTRA_BODY`, which rewrites the request body, model and effort included), and
+patterns refuse the families outside those prefixes (`*_BASE_URL`, `*_PROXY`, `*_API_KEY`,
+`*_AUTH_TOKEN`, `*_MODEL`, effort, thinking, fallback, extra-body and output-token names, and
+`NODE_*`, `BUN_*`, `SSL_CERT_*`, `AWS_ENDPOINT_URL*`). So run it from a clean environment, not from
+inside a Claude Code session. `checkSettings` refuses any settings key not listed as harmless, any
+`env` entry, and any `permissions` entry that would widen spec 07 §4.2's grant.
+
+Every line printed from data the engine read (a path, a package name, a JSON key, a program's
+message) is escaped to printable ASCII, so it can start neither a terminal control sequence nor a
+line that a CI log reads as a workflow command.
 
 ## Options (R11, spec 07 §3)
 
@@ -52,28 +68,67 @@ advisory run would do.
 
 ## plan (spec 07 §2.3.1, §10.1)
 
-`plan` reads `git diff --name-status -z -M50 <base>...<head>`, counts a rename or copy at both its
-paths, takes each path's tier from `tools/layout.json` as it is at the base (so a pull request
-cannot lower its own tier), maps each path to its CI classes (`config/ci-map.json`) and prints one
-line of JSON:
+`plan` finds the merge base of `<base>` and `<head>` and reads `git diff --raw -z -M50` from it to
+the head (the merge-base diff, with each side's mode), counts a rename or copy at both its paths,
+takes each path's tier from `tools/layout.json` as it is at the base (so a pull request cannot
+lower its own tier), maps each path to its CI classes (`config/ci-map.json`) and prints one line of
+JSON:
 
 ```json
 {"v":1,"event":"pull_request","base":"<sha>","head":"<sha>","tier":"S","changed":3,
  "classes":["server"],"everything":false,"reason":"classes",
  "jobs":{"check":true,"db":false,"build":true,"seams":true,"e2e":true,"e2e_shards":4,
-         "static":true,"bun":true,"containers":false},
- "e2e":{"apps":["console","admin"],"shards":4},"packages":["@fin/console","@fin/core"],
- "images":["fin-next-console"],"static":["console"],"layout":"ok"}
+         "static":true,"bun":true,"review":false,"selfTest":false,"containers":false},
+ "e2e":{"apps":["console","admin"],"projects":["console-desktop","console-phone","...","admin-webkit"],
+        "shards":4},
+ "packages":["@fin/console","@fin/core"],"images":["fin-next-console"],"static":["console"],"layout":"ok"}
 ```
 
-`everything` is true, with `reason`, for any global input (`global`), a path no class maps
-(`unmapped`), a folder under `apps/` or `packages/` that is no package or an unreadable manifest
-(`workspace`), a missing or invalid `tools/layout.json` (`layout`), and every event but
-`pull_request` (`event`: a push to `main`, `workflow_dispatch`, `schedule`). `check` and `static`
-always run. `e2e.apps` names the web apps under `apps/` whose e2e projects run. The affected
-packages come from each `package.json`'s `workspace:` dependencies at the base and at the head.
+`everything` is true, with `reason`, for every event but `pull_request` (`event`: a push to `main`,
+`workflow_dispatch`, `schedule`); a base and head with no single merge base (`history`: criss-cross
+merges or unrelated histories, planned against every merge base, or the two trees, at tier S); a
+missing or invalid `tools/layout.json` (`layout`); a changed symbolic link or submodule, or links
+whose reach cannot be bounded (`link`, at tier S, below); any global input (`global`); a path no
+class maps (`unmapped`), which includes every path with a character outside printable ASCII; and a
+folder under `apps/` or `packages/` that is no package (one that stopped being a package but still
+holds files counts too), or a package graph that cannot be read (`workspace`). `check` and `static`
+always run.
+
+- `e2e.apps` names the web apps under `apps/` whose e2e runs, and `e2e.projects` their Playwright
+  projects, `<app>-<variant>` for each variant in `config/ci.json`'s `e2eProjects` (spec 06 §10.2).
+  Only apps whose folder is live at the head are named (a package there, or a package of the base
+  that still holds files, whose e2e then fails rather than vanishes); with `everything`, all of them.
+- `packages` lists the affected packages, from each `package.json`'s workspace dependencies at the
+  base and at the head (`workspace:*`, pnpm's `workspace:<name>@<range>` alias, or a path into the
+  workspace). A package is a `package.json` in a folder the workspace globs name in their own case.
+  Any other manifest pnpm or a case-insensitive disk could read (`package.yaml`, `package.json5`,
+  `Package.json`, a folder spelled in another case) makes the graph unreadable. It is `null` when the
+  graph cannot be read: everything runs and every package counts.
+- `images` and `static` come from the head's layout (on a pull request, from the base's as well), and
+  only for folders live at the head, so a `planned` entry lists nothing until its package exists.
+- `jobs.review` is false until H-03's CI review job exists; `jobs.selfTest` is true when
+  `tools/fin-review/**` or `docs/review/**` changed, when a changed path is not plain ASCII, when the
+  links' reach is unbounded, or when there is no diff to tell.
+- A path a symbolic link in either tree reaches also counts at the link's path, through chains of
+  links up to 40 in a row (Linux's limit). A link that may reach any path (absolute, out of the
+  tree, unreadable, not plain ASCII, or with a `..` after a folder it names, which may itself be a
+  link), a longer chain, or more than 64 link paths for one path (2,000 for the change) runs
+  everything at tier S. Tier D is documentation: a path the layout calls D that is not a
+  documentation file (the `docs` class) is S.
+- Matching ignores ASCII case only, with the same fold everywhere. A path with a character outside
+  printable ASCII (a tab, a newline, any letter outside ASCII) is tier S and unmapped: the build
+  machine's disk folds some such letters onto ASCII ones (U+017F to `s`, U+212A to `k`), so no fold
+  here could promise to see the paths it sees.
 
 ## Tests
 
-`node --test "test/**/*.test.ts"` (or `pnpm test` here) runs the whole suite in a few seconds. It
-needs `git` on `PATH`; the fixtures are built with `git fast-import` in temporary directories.
+`node --test "test/**/*.test.ts"` (or `pnpm test` here) runs the whole suite in about ten seconds
+(T-RV-45 allows 30). It needs `git` on `PATH`; the fixtures are built with `git fast-import` in
+temporary directories.
+
+Programs start through `src/exec.ts` only: found on `PATH` in absolute directories outside the
+working directory (decided on the disk, by canonical path and by device and inode, so another case
+or another path to the tree does not hide it), never by a shell, with a timeout and an output cap.
+On POSIX systems each runs in its own process group, which a timeout or the cap kills whole, so the
+call settles on time whatever the program's own children do. In a blobless checkout (CI's), the
+blobs `plan` lacks are fetched in one request.

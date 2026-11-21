@@ -12,8 +12,8 @@ import { CONFIG_DIR, TOOL_ROOT } from "./helpers/cli.ts";
 const rawMap = JSON.parse(readFileSync(join(CONFIG_DIR, "ci-map.json"), "utf8")) as Record<string, unknown>;
 const rawCi = JSON.parse(readFileSync(join(CONFIG_DIR, "ci.json"), "utf8")) as Record<string, unknown>;
 
-function committedMap(): CiMap {
-  const parsed = parseCiMap(rawMap);
+function committedMap(value: unknown = rawMap): CiMap {
+  const parsed = parseCiMap(value);
   assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.errors.join("; "));
   return (parsed as { ok: true; value: CiMap }).value;
 }
@@ -40,6 +40,123 @@ function trackedFiles(): string[] | null {
   return result.stdout.toString("utf8").split("\0").filter((path) => path !== "");
 }
 
+/**
+ * Example paths and their classes: spec 07 §10.1's table and this file's additions. A pattern
+ * marked planned must map one of these, so a mistyped pattern (which maps none) is found even
+ * before any file it was meant for exists.
+ */
+const EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["pnpm-lock.yaml", ["global"]],
+  ["pnpm-workspace.yaml", ["global"]],
+  ["turbo.json", ["global"]],
+  ["tsconfig.base.json", ["global"]],
+  ["tsconfig.json", ["global"]],
+  ["biome.json", ["global"]],
+  [".node-version", ["global"]],
+  [".npmrc", ["global"]],
+  [".gitattributes", ["global"]],
+  ["tools/layout.json", ["global"]],
+  ["package.json", ["global"]],
+  ["vitest.config.ts", ["global"]],
+  ["playwright.config.ts", ["global"]],
+  ["compose.yaml", ["global"]],
+  [".github", ["global"]],
+  [".github/workflows/ci.yml", ["global"]],
+  ["tools/fin-review", ["global"]],
+  ["tools/fin-review/src/plan/plan.ts", ["global"]],
+  ["docs/review", ["global"]],
+  ["docs/review/README.md", ["global"]],
+  ["apps/console/turbo.json", ["global", "server"]],
+  ["packages/core/turbo.json", ["global", "server"]],
+  ["docs/plan/README.md", ["docs"]],
+  ["docs/runbooks/review-x.md", ["docs"]],
+  ["README.md", ["docs"]],
+  ["LICENSE", ["docs"]],
+  ["docs/plan/evil.ts", []],
+  ["docs/flows/diagram.svg", []],
+  ["packages/db/src/schema.ts", ["db", "server"]],
+  ["packages/audit/src/chain.ts", ["db", "server"]],
+  ["packages/kyc/src/flow.db.test.ts", ["db", "server"]],
+  ["apps/api/src/main.ts", ["server"]],
+  ["apps/edge/src/main.ts", ["server"]],
+  ["apps/payments/src/hooks/x.ts", ["server"]],
+  ["apps/connector/src/main.ts", ["server"]],
+  ["apps/console/src/server/main.ts", ["server"]],
+  ["apps/console/package.json", ["server"]],
+  ["apps/console/README.md", ["server"]],
+  ["packages/core/src/index.ts", ["server"]],
+  ["packages/web-host/src/static/app.ts", ["server"]],
+  ["packages/testing/src/seed.ts", ["server"]],
+  ["apps/api/src/client/provider.ts", ["server", "client"]],
+  ["apps/edge/public/robots.txt", ["server", "client"]],
+  ["apps/payments/index.html", ["server", "client"]],
+  ["apps/connector/_headers", ["server", "client"]],
+  ["apps/console/src/client/main.tsx", ["client"]],
+  ["apps/console/index.html", ["client"]],
+  ["apps/admin/public/logo.svg", ["client"]],
+  ["apps/verify/_headers", ["client"]],
+  ["apps/docs/src/try-it/run.ts", ["client"]],
+  ["apps/docs/package.json", ["client"]],
+  ["packages/tokens/src/tokens.css", ["client"]],
+  ["packages/ui/src/button.tsx", ["client"]],
+  ["packages/frame/src/app-frame.tsx", ["client"]],
+  ["packages/app-contracts/src/index.ts", ["client"]],
+  ["packages/icons/src/index.ts", ["client"]],
+  ["packages/motion/fin-motion.css", ["client"]],
+  ["ops/docker/app.Dockerfile", ["docker"]],
+  [".dockerignore", ["docker"]],
+  ["ops/fin/src/main.ts", ["ops"]],
+  ["ops/fin/README.md", ["docs", "ops"]],
+  ["ops/monitoring/catalog/review.ts", ["ops"]],
+  ["ops/watcher/src/index.ts", ["ops"]],
+  ["ops/backup/src/main.ts", ["ops"]],
+  ["ops/environments/staging.json", ["ops"]],
+  ["ops/credentials.json", ["ops"]],
+  ["tools/static-deploy/src/main.ts", ["ops"]],
+  ["packages/contract/openapi/keys.json", ["server", "contract"]],
+  ["scripts/public-safety.mjs", ["scripts"]],
+  [".githooks/pre-commit", ["scripts"]],
+  [".gitleaks.toml", ["scripts"]],
+  ["CODEOWNERS", ["scripts"]],
+  ["AGENTS.md", ["docs", "scripts"]],
+  ["CLAUDE.md", ["docs", "scripts"]],
+  ["CONTRIBUTING.md", ["docs", "scripts"]],
+  ["SECURITY.md", ["docs", "scripts"]],
+  [".claude/settings.json", ["scripts"]],
+  [".gitignore", ["scripts"]],
+  [".editorconfig", ["scripts"]],
+  ["nowhere/x.ts", []],
+  ["ops/unknown/x.json", []],
+  ["tools/other/x.ts", []],
+];
+
+/**
+ * T-RV-21's pattern rule. A pattern that matches a tracked file passes; one that does not must be
+ * marked planned and must map one of the examples. A planned mark on a pattern that matches
+ * tracked files is reported, not failed: other lanes add those files without editing this
+ * control path, and the mark is dropped in fin-review's next pull request (as BD-08 does for
+ * tools/layout.json's planned entries).
+ */
+function patternProblems(map: CiMap, files: readonly string[]): { failures: string[]; stale: string[] } {
+  const failures: string[] = [];
+  const stale: string[] = [];
+  for (const cls of map.classes) {
+    for (const glob of cls.paths) {
+      const tracked = files.some((path) => glob.test(path) && classesOf(map, path).includes(cls));
+      const planned = cls.planned.has(glob.pattern);
+      if (tracked) {
+        if (planned) stale.push(`${cls.name}: ${glob.pattern}`);
+        continue;
+      }
+      if (!planned) failures.push(`${cls.name}: ${glob.pattern} maps no tracked file; mark it planned`);
+      else if (!EXAMPLES.some(([path, expected]) => glob.test(path) && expected.includes(cls.name))) {
+        failures.push(`${cls.name}: ${glob.pattern} is planned but maps none of the examples; is it mistyped?`);
+      }
+    }
+  }
+  return { failures, stale };
+}
+
 describe("config/ci-map.json", () => {
   const map = committedMap();
 
@@ -61,7 +178,7 @@ describe("config/ci-map.json", () => {
     }
   });
 
-  it("T-RV-21: every tracked file maps to a class, and every pattern matches a tracked file or is planned", (t) => {
+  it("T-RV-21: every tracked file maps to a class, and every pattern matches a tracked file or is planned and exemplified", (t) => {
     const files = trackedFiles();
     if (files === null) {
       t.skip("not in a git checkout");
@@ -70,12 +187,26 @@ describe("config/ci-map.json", () => {
     assert.ok(files.length > 0);
     const unmapped = files.filter((path) => classesOf(map, path).length === 0);
     assert.deepEqual(unmapped, [], "tracked files no class maps (add them to config/ci-map.json)");
-    for (const cls of map.classes) {
-      for (const glob of cls.paths) {
-        if (cls.planned.has(glob.pattern)) continue;
-        assert.ok(files.some((path) => glob.test(path)), `${cls.name}: ${glob.pattern} matches no tracked file; mark it planned`);
-      }
-    }
+    const { failures, stale } = patternProblems(map, files);
+    assert.deepEqual(failures, []);
+    if (stale.length > 0) t.diagnostic(`planned patterns that now match tracked files (drop the mark): ${stale.join("; ")}`);
+  });
+
+  it("T-RV-21's pattern rule finds a mistyped pattern, planned or not", () => {
+    const classes = rawMap["classes"] as Array<Record<string, unknown>>;
+    const typo = (planned: boolean): CiMap =>
+      committedMap({
+        ...rawMap,
+        classes: classes.map((cls) =>
+          cls["name"] === "server"
+            ? { ...cls, paths: [...(cls["paths"] as string[]), "apps/*/src/sever/**"], planned: [...(cls["planned"] as string[]), ...(planned ? ["apps/*/src/sever/**"] : [])] }
+            : cls,
+        ),
+      });
+    const files = ["README.md", "tools/fin-review/src/main.ts"];
+    assert.deepEqual(patternProblems(typo(true), files).failures, ["server: apps/*/src/sever/** is planned but maps none of the examples; is it mistyped?"]);
+    assert.deepEqual(patternProblems(typo(false), files).failures, ["server: apps/*/src/sever/** maps no tracked file; mark it planned"]);
+    assert.deepEqual(patternProblems(map, [...files, "package.json"]).stale, ["global: package.json"]);
   });
 
   it("T-RV-22: each global input is in the global class", () => {
@@ -94,8 +225,11 @@ describe("config/ci-map.json", () => {
       ".github/workflows/ci.yml",
       ".github/dependabot.yml",
       ".github/scripts/gate.mjs",
+      ".github",
+      "tools/fin-review",
       "tools/fin-review/src/plan/plan.ts",
       "tools/fin-review/config/ci-map.json",
+      "docs/review",
       "docs/review/prompts/system.md",
     ]) {
       assert.ok(names(map, path).includes("global"), path);
@@ -103,61 +237,14 @@ describe("config/ci-map.json", () => {
     assert.deepEqual(names(map, "planted/unmapped.ts"), []);
   });
 
-  it("maps the paths of spec 07 §10.1's table to their classes", () => {
-    const cases: Array<[string, string[]]> = [
-      ["docs/plan/README.md", ["docs"]],
-      ["docs/runbooks/review-x.md", ["docs"]],
-      ["README.md", ["docs"]],
-      ["LICENSE", ["docs"]],
-      ["docs/review/README.md", ["global"]],
-      ["packages/db/src/schema.ts", ["db", "server"]],
-      ["packages/audit/src/chain.ts", ["db", "server"]],
-      ["packages/kyc/src/flow.db.test.ts", ["db", "server"]],
-      ["apps/api/src/main.ts", ["server"]],
-      ["apps/edge/src/main.ts", ["server"]],
-      ["apps/payments/src/hooks/x.ts", ["server"]],
-      ["apps/connector/src/main.ts", ["server"]],
-      ["apps/console/src/server/main.ts", ["server"]],
-      ["apps/console/package.json", ["server"]],
-      ["apps/console/README.md", ["server"]],
-      ["packages/core/src/index.ts", ["server"]],
-      ["packages/web-host/src/static/app.ts", ["server"]],
-      ["packages/testing/src/seed.ts", ["server"]],
-      ["apps/console/src/client/main.tsx", ["client"]],
-      ["apps/console/index.html", ["client"]],
-      ["apps/admin/public/logo.svg", ["client"]],
-      ["apps/verify/_headers", ["client"]],
-      ["apps/docs/src/try-it/run.ts", ["client"]],
-      ["apps/docs/package.json", ["client"]],
-      ["packages/tokens/src/tokens.css", ["client"]],
-      ["packages/ui/src/button.tsx", ["client"]],
-      ["packages/frame/src/app-frame.tsx", ["client"]],
-      ["packages/app-contracts/src/index.ts", ["client"]],
-      ["packages/icons/src/index.ts", ["client"]],
-      ["packages/motion/fin-motion.css", ["client"]],
-      ["ops/docker/app.Dockerfile", ["docker"]],
-      [".dockerignore", ["docker"]],
-      ["ops/fin/src/main.ts", ["ops"]],
-      ["ops/fin/README.md", ["docs", "ops"]],
-      ["ops/monitoring/catalog/review.ts", ["ops"]],
-      ["ops/watcher/src/index.ts", ["ops"]],
-      ["ops/backup/src/main.ts", ["ops"]],
-      ["ops/environments/staging.json", ["ops"]],
-      ["ops/credentials.json", ["ops"]],
-      ["tools/static-deploy/src/main.ts", ["ops"]],
-      ["packages/contract/openapi/keys.json", ["server", "contract"]],
-      ["scripts/public-safety.mjs", ["scripts"]],
-      [".githooks/pre-commit", ["scripts"]],
-      [".gitleaks.toml", ["scripts"]],
-      ["CODEOWNERS", ["scripts"]],
-      ["AGENTS.md", ["docs", "scripts"]],
-      [".claude/settings.json", ["scripts"]],
-      [".gitignore", ["scripts"]],
-      ["nowhere/x.ts", []],
-      ["ops/unknown/x.json", []],
-      ["tools/other/x.ts", []],
-    ];
-    for (const [path, expected] of cases) assert.deepEqual(names(map, path), expected, path);
+  it("a path outside printable ASCII is unmapped, even one a folding disk reads as a global input or a document", () => {
+    for (const path of ["docſ/review/prompts/system.md", "packages/core/turbo.jſon", ".github/worKflows/ci.yml", "docs/plan/über.md", "apps/console/src/client/é.tsx"]) {
+      assert.deepEqual(names(map, path), [], JSON.stringify(path));
+    }
+  });
+
+  it("maps the example paths (spec 07 §10.1's table and its additions) to their classes", () => {
+    for (const [path, expected] of EXAMPLES) assert.deepEqual(names(map, path), expected, path);
   });
 
   it("refuses a malformed ci-map.json", () => {
@@ -197,12 +284,13 @@ describe("config/ci-map.json", () => {
 });
 
 describe("config/ci.json", () => {
-  it("is valid, with 4 e2e shards and the four web apps", () => {
+  it("is valid, with 4 e2e shards, the four web apps and the per-pull-request projects", () => {
     const parsed = parseCiConfig(rawCi);
     assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.errors.join("; "));
     if (!parsed.ok) return;
     assert.equal(parsed.value.e2eShards, 4);
     assert.deepEqual(parsed.value.e2eApps, ["apps/console", "apps/admin", "apps/verify", "apps/docs"]);
+    assert.deepEqual(parsed.value.e2eProjects, ["desktop", "phone", "dark", "reduced", "firefox", "webkit"]);
     assert.equal(parsed.value.dbPackage, "@fin/db");
   });
 
@@ -216,10 +304,14 @@ describe("config/ci.json", () => {
       { ...rawCi, e2eShards: "4" },
       { ...rawCi, e2eApps: ["console"] },
       { ...rawCi, e2eApps: ["apps/console", "apps/console"] },
+      { ...rawCi, e2eProjects: [] },
+      { ...rawCi, e2eProjects: ["Desktop"] },
+      { ...rawCi, e2eProjects: ["desktop", "desktop"] },
       { ...rawCi, workspaces: [] },
       { ...rawCi, workspaces: ["apps/**"] },
       { ...rawCi, packageRoots: ["Apps"] },
       { ...rawCi, dbPackage: "" },
+      { ...rawCi, dbPackage: "@Fin/db" },
       { ...rawCi, bun: [] },
     ]) {
       assert.equal(parseCiConfig(bad).ok, false, JSON.stringify(bad));

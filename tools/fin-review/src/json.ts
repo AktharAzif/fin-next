@@ -7,6 +7,7 @@
 // Object.prototype), caps nesting, and refuses a byte order mark and any trailing text.
 
 import { readFileSync, statSync } from "node:fs";
+import { escapeText, shownText } from "./display.ts";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject {
@@ -257,7 +258,9 @@ class Parser {
       if (this.text[this.pos] !== '"') this.fail("expected a string key in an object");
       const key = this.parseString();
       if (seen.has(key)) {
-        throw new JsonSyntaxError(`duplicate key ${JSON.stringify(key)} in ${path}`, { path, key });
+        // The message escapes the key and the path, which come from the file being read; the
+        // structured field keeps them as they are.
+        throw new JsonSyntaxError(`duplicate key ${shownText(key, 120)} in ${escapeText(path, 240)}`, { path, key });
       }
       seen.add(key);
       this.skipWhitespace();

@@ -1,11 +1,26 @@
-// The workspace package graph, read from each package.json's workspace: dependencies at the
-// base and the head (spec 07 §2.3.1 step 5, §10.2). No pnpm call: the manifests are read from
-// git, so the same base and head always give the same graph. An edge present on either side
-// counts, so a pull request cannot drop a dependent's e2e by deleting the dependency it changes.
+// The workspace package graph, read from each package.json's workspace dependencies at the base
+// and the head (spec 07 §2.3.1 step 5, §10.2). No pnpm call: the manifests are read from git, so
+// the same base and head always give the same graph. An edge present on either side counts, so a
+// pull request cannot drop a dependent's e2e by deleting the dependency it changes.
+//
+// A dependency is a workspace edge when its spec is `workspace:*` (or any `workspace:` range) on
+// the package's own name, `workspace:<name>@<range>` (pnpm's alias form, an edge to <name>), or a
+// path into the workspace (`workspace:../x`, `link:`, `file:`, `portal:`). A path that names no
+// package folder, a package name outside npm's grammar, and two package folders whose names differ
+// only by case (one folder on a case-insensitive disk) make the graph unusable, which runs
+// everything.
+//
+// A package is a package.json in a folder the workspace globs name in their own case: what pnpm
+// reads on a case-sensitive disk (CI's). Any other file pnpm, or a disk that ignores case, could
+// read as a workspace package's manifest (package.yaml, package.json5, Package.json, a package.json
+// in a folder spelled in another case, or in a folder whose name is not plain ASCII) makes the
+// graph unusable too: the machines would not agree on it, and the plan cannot read YAML or JSON5.
 
+import { posix } from "node:path";
+import { shownText } from "../display.ts";
 import type { TreeEntry } from "../git.ts";
 import { isJsonObject, parseJsonBytes } from "../json.ts";
-import { matchesAny } from "./glob.ts";
+import { foldAscii, isPlainPath, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
 
 export interface Workspace {
@@ -24,22 +39,79 @@ export interface Workspace {
 export type WorkspaceResult = { ok: true; value: Workspace } | { ok: false; error: string };
 
 const MANIFEST = "package.json";
+/** The file names, ASCII case folded, that pnpm reads as a project's manifest. */
+const MANIFEST_NAMES: ReadonlySet<string> = new Set([MANIFEST, "package.json5", "package.yaml"]);
+const DB_TEST_SUFFIX = ".db.test.ts";
 const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
 const MAX_MANIFEST_BYTES = 1 << 20;
+const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+const MAX_PACKAGE_NAME_LENGTH = 214;
+const PATH_PROTOCOLS = ["link:", "file:", "portal:"] as const;
+/** `workspace:<name>@<range>`: the name, scoped or not, then `@` and the range. */
+const WORKSPACE_ALIAS_RE = /^((?:@[^@/]+\/)?[^@/]+)@(.*)$/;
 
-/** The package.json entries of a tree that sit directly in a workspace folder. */
+/** True for an npm package name (lower case, at most 214 characters, optionally scoped). */
+export function isPackageName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_PACKAGE_NAME_LENGTH && PACKAGE_NAME_RE.test(value);
+}
+
+/** True when `dir` is a workspace folder as pnpm reads the globs on a case-sensitive disk. */
+function isPackageFolder(dir: string, workspaces: readonly Glob[]): boolean {
+  return isPlainPath(dir) && workspaces.some((glob) => glob.exact(dir));
+}
+
+/** The package.json entries of a tree that sit directly in a workspace folder (named in the globs' own case). */
 export function manifestEntries(tree: readonly TreeEntry[], workspaces: readonly Glob[]): TreeEntry[] {
   const out: TreeEntry[] = [];
   for (const entry of tree) {
     if (entry.type !== "blob" || !entry.path.endsWith(`/${MANIFEST}`)) continue;
     const dir = entry.path.slice(0, -(MANIFEST.length + 1));
-    if (matchesAny(workspaces, dir)) out.push(entry);
+    if (isPackageFolder(dir, workspaces)) out.push(entry);
   }
   return out;
 }
 
-/** Parses one manifest: its name and its workspace: dependency names. */
-export function parseManifest(bytes: Uint8Array): { ok: true; name: string; deps: string[] } | { ok: false; error: string } {
+/**
+ * The first entry of `tree` that pnpm, or a disk that ignores case, could read as a workspace
+ * package's manifest but that manifestEntries does not take; null when there is none.
+ */
+export function unreadManifest(tree: readonly TreeEntry[], workspaces: readonly Glob[]): string | null {
+  for (const entry of tree) {
+    if (entry.type !== "blob") continue;
+    const slash = entry.path.lastIndexOf("/");
+    const name = entry.path.slice(slash + 1);
+    if (slash < 0 || name.length < MANIFEST.length || name.length > MANIFEST.length + 1 || !MANIFEST_NAMES.has(foldAscii(name))) continue;
+    const dir = entry.path.slice(0, slash);
+    if (!matchesAny(workspaces, dir)) continue;
+    if (name === MANIFEST && isPackageFolder(dir, workspaces)) continue;
+    return entry.path;
+  }
+  return null;
+}
+
+/** The folder of a package.json entry. */
+export function manifestDir(entry: TreeEntry): string {
+  return entry.path.slice(0, -(MANIFEST.length + 1));
+}
+
+export interface Manifest {
+  readonly name: string;
+  /** Workspace dependencies named by package. */
+  readonly deps: readonly string[];
+  /** Workspace dependencies named by folder (repository paths), resolved against the folders. */
+  readonly pathDeps: readonly string[];
+}
+
+/** A path spec resolved against the manifest's folder: a repository path, or null outside it. */
+function repositoryPath(dir: string, target: string): string | null {
+  if (target === "" || target.includes("\0") || target.includes("\\") || posix.isAbsolute(target)) return null;
+  const joined = posix.normalize(posix.join(dir, target)).replace(/\/+$/, "");
+  if (joined === "" || joined === "." || joined === ".." || joined.startsWith("../")) return null;
+  return joined;
+}
+
+/** Parses one manifest of the folder `dir`: its name and its workspace dependencies. */
+export function parseManifest(bytes: Uint8Array, dir: string): { ok: true; value: Manifest } | { ok: false; error: string } {
   if (bytes.byteLength > MAX_MANIFEST_BYTES) return { ok: false, error: "is larger than 1 MiB" };
   const parsed = parseJsonBytes(bytes);
   if (!parsed.ok) return { ok: false, error: `is ${parsed.error}` };
@@ -47,16 +119,37 @@ export function parseManifest(bytes: Uint8Array): { ok: true; name: string; deps
   if (!isJsonObject(value)) return { ok: false, error: "is not a JSON object" };
   const name = value["name"];
   if (typeof name !== "string" || name === "") return { ok: false, error: "has no name" };
+  if (!isPackageName(name)) return { ok: false, error: `has the name ${shownText(name, 120)}, which is not an npm package name` };
   const deps = new Set<string>();
+  const pathDeps = new Set<string>();
   for (const field of DEPENDENCY_FIELDS) {
     if (!Object.hasOwn(value, field)) continue;
     const block = value[field];
     if (!isJsonObject(block)) return { ok: false, error: `has a ${field} that is not an object` };
     for (const [dep, spec] of Object.entries(block)) {
-      if (typeof spec === "string" && spec.startsWith("workspace:")) deps.add(dep);
+      if (typeof spec !== "string") continue;
+      const protocol = PATH_PROTOCOLS.find((prefix) => spec.startsWith(prefix));
+      let target: string | null = null;
+      if (protocol !== undefined) target = spec.slice(protocol.length);
+      else if (spec.startsWith("workspace:")) {
+        const rest = spec.slice("workspace:".length);
+        if (rest.startsWith(".") || rest.startsWith("/")) target = rest;
+        else {
+          const alias = WORKSPACE_ALIAS_RE.exec(rest);
+          const named = alias === null ? dep : (alias[1] ?? "");
+          if (!isPackageName(named)) {
+            return { ok: false, error: `has the workspace dependency ${shownText(named, 120)} in ${field}, which is not an npm package name` };
+          }
+          deps.add(named);
+          continue;
+        }
+      } else continue; // a registry, catalog or alias spec: not a workspace edge
+      const path = repositoryPath(dir, target);
+      if (path === null) return { ok: false, error: `has the ${field} entry ${shownText(dep, 120)} with a path outside the repository` };
+      pathDeps.add(path);
     }
   }
-  return { ok: true, name, deps: [...deps].sort() };
+  return { ok: true, value: { name, deps: [...deps].sort(), pathDeps: [...pathDeps].sort() } };
 }
 
 export interface WorkspaceSide {
@@ -73,28 +166,54 @@ export function buildWorkspace(sides: readonly WorkspaceSide[], workspaces: read
   const deps = new Map<string, Set<string>>();
   const withDbTests = new Set<string>();
   const depths = [...new Set(workspaces.map((glob) => glob.pattern.split("/").length))].sort((a, b) => b - a);
+  const dirsByFolded = new Map<string, string>();
 
   for (const side of sides) {
+    const unread = unreadManifest(side.tree, workspaces);
+    if (unread !== null) {
+      return { ok: false, error: `${shownText(unread)} is a manifest pnpm or a case-insensitive disk may read, and the plan reads only package.json in a folder the workspace globs name in their own case` };
+    }
     const sideDirs = new Map<string, string>();
     const sideNames = new Map<string, string>();
+    const manifests: Array<{ dir: string; manifest: Manifest }> = [];
     for (const entry of manifestEntries(side.tree, workspaces)) {
-      const dir = entry.path.slice(0, -(MANIFEST.length + 1));
+      const dir = manifestDir(entry);
       const bytes = side.blobs.get(entry.oid);
-      if (bytes === undefined) return { ok: false, error: `${entry.path} could not be read` };
-      const manifest = parseManifest(bytes);
-      if (!manifest.ok) return { ok: false, error: `${entry.path} ${manifest.error}` };
+      if (bytes === undefined) return { ok: false, error: `${shownText(entry.path)} could not be read` };
+      const parsed = parseManifest(bytes, dir);
+      if (!parsed.ok) return { ok: false, error: `${shownText(entry.path)} ${parsed.error}` };
+      const manifest = parsed.value;
       const other = sideNames.get(manifest.name);
-      if (other !== undefined) return { ok: false, error: `${manifest.name} is the name of both ${other} and ${dir}` };
+      if (other !== undefined) {
+        return { ok: false, error: `${shownText(manifest.name)} is the name of both ${shownText(other)} and ${shownText(dir)}` };
+      }
+      const folded = foldAscii(dir);
+      const twin = dirsByFolded.get(folded);
+      if (twin !== undefined && twin !== dir) {
+        return { ok: false, error: `the package folders ${shownText(twin)} and ${shownText(dir)} differ only by case` };
+      }
+      dirsByFolded.set(folded, dir);
       sideNames.set(manifest.name, dir);
       sideDirs.set(dir, manifest.name);
+      manifests.push({ dir, manifest });
+    }
+    for (const { dir, manifest } of manifests) {
       setAdd(namesByDir, dir, manifest.name);
       setAdd(dirsByName, manifest.name, dir);
       const set = deps.get(manifest.name) ?? new Set<string>();
       for (const dep of manifest.deps) set.add(dep);
+      for (const path of manifest.pathDeps) {
+        const target = sideDirs.get(path);
+        if (target === undefined) {
+          return { ok: false, error: `${shownText(`${dir}/${MANIFEST}`)} depends on the path ${shownText(path)}, which is not a package folder` };
+        }
+        set.add(target);
+      }
       deps.set(manifest.name, set);
     }
     for (const entry of side.tree) {
-      if (entry.type !== "blob" || !entry.path.endsWith(".db.test.ts")) continue;
+      // A case-insensitive disk runs x.DB.test.ts as a db test too.
+      if (entry.type !== "blob" || foldAscii(entry.path.slice(-DB_TEST_SUFFIX.length)) !== DB_TEST_SUFFIX) continue;
       const dir = ownerDirIn(entry.path, depths, (candidate) => sideDirs.has(candidate));
       const name = dir === null ? undefined : sideDirs.get(dir);
       if (name !== undefined) withDbTests.add(name);

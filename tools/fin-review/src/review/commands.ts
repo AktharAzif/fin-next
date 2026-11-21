@@ -1,7 +1,8 @@
 // `pr --pr <n>` and `commit --pr <n> --since <sha>`: argument checks (exit 64), the lock-down checks
-// (exit 78), then the run (src/review/run.ts). Order: every refusal the arguments alone cause is
-// printed before anything else is read; then the engine's environment is checked against
-// config/env-refusals.json; then $FIN_REVIEW_HOME, the procedure and the pinned Claude Code.
+// (exit 78), then the run (src/review/run.ts). The dispatch has already refused an environment that
+// holds a variable of config/env-refusals.json (exit 78, [RV-19]). Order here: every refusal the
+// arguments alone cause is printed before anything else is read; then $FIN_REVIEW_HOME, the
+// procedure and the pinned Claude Code.
 
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
@@ -21,7 +22,7 @@ import { parseReviewOptions } from "../options.ts";
 import { CliRunner } from "../runner/cli.ts";
 import type { CliRunnerOptions } from "../runner/cli.ts";
 import { compareVersions, parseVersionOutput } from "../runner/client.ts";
-import { engineHome, environmentRefusals, refusalLines, SESSION_PATH } from "../runner/env.ts";
+import { engineHome, SESSION_PATH } from "../runner/env.ts";
 import { isWithin } from "../runner/settings.ts";
 import type { SessionRunner } from "../runner/types.ts";
 import { loadProcedure } from "./procedure.ts";
@@ -114,12 +115,6 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
   const parsed = parseReviewOptions(args.review, "cli", machineDefaults(ctx, config), context);
   if (!parsed.ok) return printRefusals(ctx, optionRefusals(parsed.errors));
 
-  // [RV-19]: refuse to start with a refused variable in the engine's own environment.
-  const found = environmentRefusals(ctx.env, config.envRefusals);
-  if (found.length > 0) {
-    for (const line of refusalLines(found)) ctx.stderr(`${line}\n`);
-    return EXIT.config;
-  }
   const realHome = realpathSync(engineHome(ctx.env));
   const homePath = finReviewHome(ctx.env);
   const engineRoot = resolve(ctx.configDir, "..", "..", "..");

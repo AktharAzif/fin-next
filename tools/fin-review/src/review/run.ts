@@ -17,7 +17,7 @@ import type { Clock, RandomSource } from "../clock.ts";
 import { compactUtc } from "../clock.ts";
 import type { EngineConfig } from "../config.ts";
 import { EXIT } from "../errors.ts";
-import { diffNameStatus, isSha, lsTree, readBlobs } from "../git.ts";
+import { diffRaw, isSha, lsTree, readBlobs } from "../git.ts";
 import type { DiffEntry, TreeEntry } from "../git.ts";
 import type { PullFacts } from "../gh.ts";
 import { isJsonObject, parseJsonBytes, readJsonFile } from "../json.ts";
@@ -276,7 +276,7 @@ async function layoutAt(mirror: string, sha: string, env: Readonly<Record<string
   const tree = await lsTree(mirror, sha, env);
   const entry = tree.find((item) => item.path === "tools/layout.json" && item.type === "blob");
   if (entry === undefined) return null;
-  const bytes = (await readBlobs(mirror, [entry.oid], env)).get(entry.oid);
+  const bytes = (await readBlobs(mirror, [entry.oid], env)).blobs.get(entry.oid);
   if (bytes === undefined) return null;
   const parsed = parseJsonBytes(bytes);
   if (!parsed.ok) return null;
@@ -430,7 +430,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       return EXIT.data;
     }
     const layout = await layoutAt(mirror, baseTip, env);
-    const prDiff = await diffNameStatus(mirror, baseTip, head, env);
+    const prDiff = await diffRaw(mirror, base, head, env);
 
     // `commit`: stay a delta, or escalate to `pr` (§2.3.2).
     let mode: Mode = req.mode;
@@ -476,7 +476,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     if (deletedPaths.length > 0) {
       const baseTree = await lsTree(mirror, deltaFrom ?? base, env);
       const wanted = baseTree.filter((entry) => entry.type === "blob" && deletedPaths.includes(entry.path));
-      const blobs = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
+      const { blobs } = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
       for (const entry of wanted) {
         const bytes = blobs.get(entry.oid);
         if (bytes !== undefined) deleted.set(entry.path, bytes.toString("utf8"));

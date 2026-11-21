@@ -51,11 +51,43 @@ describe("T-RV-23: tiers", () => {
     }
   });
 
+  it("a control path written as a folder covers the folder's own path too", () => {
+    for (const path of ["docs/review", ".github", ".claude", "tools/fin-review", "ops/docker", "ops/fin", "tools/static-deploy", "Docs/Review"]) {
+      const result = tierOf(fixture, path);
+      assert.deepEqual([result.tier, result.source], ["S", "control"], path);
+    }
+    assert.equal(tierOf(fixture, "docs/reviewed.md").source, "unmapped", "a longer name is not the folder");
+  });
+
+  it("refuses image and static output names outside their grammar, and shows a refused value escaped", () => {
+    for (const entry of [
+      { path: "apps/x", image: "Fin-Next" },
+      { path: "apps/x", image: "fin next" },
+      { path: "apps/x", image: "a\n::error::b" },
+      { path: "apps/x", static: "Kiosk" },
+      { path: "apps/x", static: ["ok", "not ok"] },
+    ]) {
+      const parsed = parseLayout({ version: 1, controlPaths: [], entries: [entry] });
+      assert.equal(parsed.ok, false, JSON.stringify(entry));
+      if (!parsed.ok) for (const error of parsed.errors) assert.match(error, /^[\x20-\x7e]*$/, error);
+    }
+    const duplicate = parseLayout({ version: 1, controlPaths: [], entries: [{ path: "a\nb" }, { path: "a\nb" }] });
+    assert.equal(duplicate.ok, false);
+    if (!duplicate.ok) assert.deepEqual(duplicate.errors, ['entries[1].path "a\\u000ab" appears twice']);
+    assert.equal(parseLayout({ version: 1, controlPaths: [], entries: [{ path: "apps/x", image: "fin-next-x", static: ["x", "x-2"] }] }).ok, true);
+  });
+
   it("matching ignores case, in prefixes, globs and control paths", () => {
     assert.equal(tierOf(fixture, "APPS/Console/src/client/main.tsx").tier, "N");
     assert.equal(tierOf(fixture, "Apps/Console/SRC/Server/main.ts").tier, "S");
     assert.equal(tierOf(fixture, "DOCS/PLAN/x.md").tier, "D");
     assert.equal(tierOf(fixture, "Docs/Review/x.md").source, "control");
+  });
+
+  it("a path outside printable ASCII is S, whatever entry or glob it resembles", () => {
+    for (const path of ["apps/console/src/ſerver/main.ts", "apps/console/src/client/é.tsx", "pacKages/ui/src/x.ts", "docs/plan/Kelvin.md", "docs/plan/tab\there.md"]) {
+      assert.deepEqual(tierOf(fixture, path), { tier: "S", source: "not-plain", entry: null }, JSON.stringify(path));
+    }
   });
 
   it("a prefix matches whole segments only", () => {

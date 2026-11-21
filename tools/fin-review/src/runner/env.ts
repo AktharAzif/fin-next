@@ -67,8 +67,3 @@ export function sessionEnv(engineEnv: Readonly<Record<string, string | undefined
 export function environmentRefusals(env: Readonly<Record<string, string | undefined>>, refusals: EnvRefusals): EnvironmentRefusal[] {
   return checkEnvironment(env, refusals);
 }
-
-/** The refusal lines printed on stderr: names and kinds only, never values. */
-export function refusalLines(found: readonly EnvironmentRefusal[]): string[] {
-  return found.map((item) => `fin-review: environment_refused: ${item.name} (${item.kind}) is set; unset it to run sessions ([RV-19])`);
-}

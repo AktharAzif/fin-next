@@ -12,7 +12,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { ProgramError } from "../errors.ts";
 import { runProgram } from "../exec.ts";
-import { gitEnv, isSha, parseNameStatusZ } from "../git.ts";
+import { diffRaw, gitEnv, isSha } from "../git.ts";
 import type { DiffEntry } from "../git.ts";
 
 export const PR_NUMBER_RE = /^[1-9][0-9]{0,6}$/;
@@ -185,8 +185,7 @@ export async function isAncestor(mirror: string, a: string, b: string, env: Read
 /** The two-dot diff `a b` (the delta of a commit run), with renames counted as in plan. */
 export async function diffTwoDot(mirror: string, a: string, b: string, env: Readonly<Record<string, string | undefined>>): Promise<DiffEntry[]> {
   if (!isSha(a) || !isSha(b)) throw new TypeError("a diff needs two SHAs");
-  const out = await git({ cwd: mirror, args: ["diff", "--name-status", "-z", "-M50", "--no-color", "--no-ext-diff", "--no-relative", a, b, "--"], env });
-  return parseNameStatusZ(out.stdout);
+  return diffRaw(mirror, a, b, env);
 }
 
 /** Lines added plus deleted in `a b` (binary files count 0). */
