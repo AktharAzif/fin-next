@@ -339,7 +339,7 @@ describe("pr over the fixture repository with fake sessions", () => {
     assert.deepEqual(h.clock.sleeps, [15_000, 60_000]);
   });
 
-  it("--effort high on a tier S change is refused (64, floor_tier_s) before any session; --advisory runs", async () => {
+  it("--effort high on a tier S change is refused (64, floor_tier_s) before any session; --advisory runs and is never a pass", async () => {
     fx.pr(12, { "packages/crypto/src/index.ts": "export const VERSION = 2;\n" });
     const h = harness(fx, script(), random);
     const run = await runFixtureCli(fx, ["pr", "--pr", "12", "--effort", "high"], h.services);
@@ -349,10 +349,24 @@ describe("pr over the fixture repository with fake sessions", () => {
     assert.equal(readJson(join(lastRun(fx), "state.json"))["state"], "refused");
     const advisory = harness(fx, script(), random);
     const second = await runFixtureCli(fx, ["pr", "--pr", "12", "--effort", "high", "--advisory"], advisory.services);
-    assert.equal(second.code, 0, second.stderr);
-    assert.match(second.stderr, /advisory: not a gate receipt/);
-    assert.match(second.stdout, /\(advisory: not a gate receipt\)/);
+    assert.equal(second.code, 3, second.stderr);
+    assert.match(second.stderr, /advisory: not a gate result \(exit 3\)/);
+    assert.match(second.stdout, /^fin-review pr #12 at [0-9a-f]{12}: advisory \(pass; not a gate result\)$/m);
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["result"], "advisory");
+    assert.equal(result["outcome"], "pass");
+    assert.equal(result["exitCode"], 3);
     assert.ok(calls(advisory).every((call) => call.spec.role === "attack" || call.spec.effort === "high"));
+    // An advisory run with blockers is no "blocked" result either.
+    const blocked = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { quotes: [{ path: "packages/crypto/src/index.ts", text: "VERSION = 2" }], where: [{ path: "packages/crypto/src/index.ts", startLine: 1, endLine: 1 }] })]) } : undefined)), random);
+    const third = await runFixtureCli(fx, ["pr", "--pr", "12", "--effort", "high", "--advisory"], blocked.services);
+    assert.equal(third.code, 3, third.stdout + third.stderr);
+    assert.match(third.stdout, /: advisory \(blocked; not a gate result\)$/m);
+    // And a later commit never takes an advisory run as its last reviewed head.
+    const next = fx.pr(12, { "packages/crypto/src/index.ts": "export const VERSION = 3;\n" }, readJson(join(lastRun(fx), "result.json"))["head"] as string);
+    assert.ok(next.length === 40);
+    const commit = await runFixtureCli(fx, ["commit", "--pr", "12", "--since", readJson(join(lastRun(fx), "result.json"))["head"] as string], harness(fx, script(), random).services);
+    assert.match(commit.stdout, /escalated from commit: no_prior_run/);
   });
 
   it("a refused environment variable stops the run with 78 before any session", async () => {
@@ -520,6 +534,20 @@ describe("pr over the fixture repository with fake sessions", () => {
     assert.equal(run.code, 78);
     assert.match(run.stderr, /not the pinned 2\.1\.328/);
     assert.equal(calls(h).length, 0);
+  });
+
+  it("a session whose prompt is over the runner's cap is never started: the lens is incomplete, the run records could not check (exit 2)", async () => {
+    // A JSON file is never cut into chunks, so a large one is one unit, and its prompt passes the 4 MB cap.
+    const row = `${JSON.stringify({ id: "x".repeat(40), value: "y".repeat(60) })},\n`;
+    fx.pr(29, { "docs/plan/big.json": `[\n${row.repeat(Math.ceil((4.2 * 1024 * 1024) / row.length))}{}\n]\n` });
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "29"], h.services);
+    assert.equal(run.code, 2, run.stdout + run.stderr);
+    assert.match(run.stderr, /session correctness-s0 not started: its prompt is [0-9]+ bytes, over the 4194304-byte cap/);
+    assert.equal(calls(h).length, 0, "no session started");
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["result"], "could_not_check");
+    assert.deepEqual(result["lenses"], { correctness: "incomplete", rules: "incomplete" });
   });
 
   it("a session over the run budget is never started: budget_reached, could not check (exit 2)", async () => {
@@ -759,6 +787,18 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     fx.pr(5, { "docs/plan/README.md": "# plan\n\nD.\n" });
     const notAncestor = await runFixtureCli(fx, ["commit", "--pr", "5", "--since", other], harness(fx, script(), random).services);
     assert.match(notAncestor.stdout, /escalated from commit: not_ancestor/);
+  });
+
+  it("a changed path that starts with a dash is reviewed in a delta like any other", async () => {
+    // A tier S chain, so the new root file (unmapped, so tier S) stays a delta.
+    const h0 = fx.pr(11, { "packages/crypto/src/index.ts": "export const VERSION = 7;\n" });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "11"], harness(fx, script(), random).services)).code, 0);
+    fx.pr(11, { "-root-dash.md": "# dash\n" }, h0);
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["commit", "--pr", "11", "--since", h0], h.services);
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /^fin-review commit #11 /);
+    assert.match(calls(h).find((call) => call.spec.lens === "correctness")?.spec.prompt ?? "", /# Diff -root-dash\.md \(since the last reviewed head\)\ndiff --git/);
   });
 
   it("escalates when the procedure changed since the prior run (procedure_changed)", async () => {

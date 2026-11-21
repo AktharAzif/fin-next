@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { compileGlob } from "../src/plan/glob.ts";
 import type { Tier } from "../src/roles.ts";
-import { buildGraph, exportHeads, exportedNames } from "../src/plan/graph.ts";
+import { buildGraph, exportHeads, exportedNames, scanImports } from "../src/plan/graph.ts";
 import { packShards } from "../src/shard.ts";
 import { MAX_UNIT_LINES, chunkFile, splitLines } from "../src/units/chunk.ts";
 import { blocksCoverage, estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
@@ -191,6 +191,33 @@ describe("one hop (the import scanner)", () => {
     assert.deepEqual(graph.importersOf("packages/a/src/util.ts"), ["packages/a/src/index.ts", "packages/b/src/other.ts", "packages/b/src/re.ts"]);
     assert.deepEqual(graph.importersOf("packages/a/src/index.ts"), ["packages/b/src/other.ts", "packages/b/src/use.ts"]);
     assert.deepEqual(graph.importersOf("packages/a/src/lazy.ts"), ["packages/a/src/index.ts"]);
+  });
+
+  it("reads each kind of import with its statement, and nothing inside a quote or a comment", () => {
+    const text = [
+      'import { a, b } from "./a.ts";',
+      "export * from './b.ts';",
+      'import "./c.ts";',
+      'import"./c2.ts";',
+      'const lazy = () => import("./d.ts");',
+      'import type {\n  T,\n} from "./t.ts";',
+      'const s = "import x from ./not";',
+      '/* import { z } from "./commented.ts"; */',
+    ].join("\n");
+    const specs = scanImports(text).map((item) => item.spec).sort();
+    assert.deepEqual(specs, ["./a.ts", "./b.ts", "./c.ts", "./c2.ts", "./commented.ts", "./d.ts", "./t.ts"], "scanImports sees raw text; buildGraph strips comments first");
+    assert.equal(scanImports(text).find((item) => item.spec === "./a.ts")?.statement, 'import { a, b } from "./a.ts"');
+    const graphed = buildGraph(new Set(["x.ts", "a.ts", "commented.ts"]), new Map([["x.ts", text]]), new Map());
+    assert.deepEqual(graphed.importsOf("x.ts"), ["a.ts"]);
+  });
+
+  it("scans a crafted file in time linear in its length", () => {
+    for (const text of ["import a ".repeat(64 * 1024), "/* ".repeat(170 * 1024), "export x from y ".repeat(32 * 1024)]) {
+      const started = performance.now();
+      buildGraph(new Set(["x.ts"]), new Map([["x.ts", text]]), new Map());
+      const elapsed = performance.now() - started;
+      assert.ok(elapsed < 1500, `${text.slice(0, 12)}...: ${Math.round(elapsed)} ms`);
+    }
   });
 
   it("export names and heads", () => {

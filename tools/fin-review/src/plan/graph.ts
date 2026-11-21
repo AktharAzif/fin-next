@@ -11,8 +11,16 @@ import { isJsonObject, parseJsonBytes } from "../json.ts";
 
 export const CODE_FILE_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
 const MAX_SCAN_BYTES = 1 << 20;
-const STATIC_RE = /(?:^|[\s;}])(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\sfrom\s+)?["']([^"'\n]{1,300})["']/g;
+// Every pattern below matches in time linear in the text: no unbounded lazy part follows a keyword.
+/** An `import` or `export` keyword where a statement can start. */
+const KEYWORD_RE = /(?:^|[\s;}])(import|export)(?=\s)/g;
+/** A `from "<specifier>"` clause. */
+const FROM_RE = /\sfrom\s+["']([^"'\n]{1,300})["']/g;
+/** A side-effect import: `import "<specifier>"`. */
+const SIDE_EFFECT_RE = /(?:^|[\s;}])import\s*["']([^"'\n]{1,300})["']/g;
 const DYNAMIC_RE = /\bimport\(\s*["']([^"'\n]{1,300})["']\s*\)/g;
+/** Characters a statement's head never holds between its keyword and `from`: ' " ` ; */
+const BREAK_CODES: ReadonlySet<number> = new Set([0x27, 0x22, 0x60, 0x3b]);
 const EXPORT_NAME_RE =
   /^export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)/gm;
 const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
@@ -60,10 +68,58 @@ export function exportHeads(text: string): string[] {
   return out;
 }
 
+/**
+ * `text` without its comments, in time linear in the text. Block comments and line comments outside
+ * strings are removed well enough for import scanning; a `//` inside a string literal can cut a
+ * line, which loses at most that line's import. An unterminated block comment is left as it is.
+ */
 function stripComments(text: string): string {
-  // Block comments and line comments outside strings are removed well enough for import scanning;
-  // a `//` inside a string literal can cut a line, which loses at most that line's import.
-  return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1");
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const open = text.indexOf("/*", pos);
+    if (open < 0) break;
+    const close = text.indexOf("*/", open + 2);
+    if (close < 0) break;
+    out += `${text.slice(pos, open)} `;
+    pos = close + 2;
+  }
+  return `${out}${text.slice(pos)}`.replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1");
+}
+
+/**
+ * The specifiers a file imports, each with its statement's text (for matching named imports), in
+ * time linear in the file: a `from` clause belongs to the nearest `import` or `export` keyword before
+ * it with no quote, backtick or `;` in between; side-effect and dynamic imports stand alone.
+ */
+export function scanImports(text: string): Array<{ spec: string; statement: string }> {
+  const out: Array<{ spec: string; statement: string }> = [];
+  const keywords: number[] = [];
+  for (const match of text.matchAll(KEYWORD_RE)) keywords.push((match.index ?? 0) + match[0].length - (match[1]?.length ?? 0));
+  // breaks[i] counts the break characters before position i, so a range holds none when two counts agree.
+  const breaks = new Uint32Array(text.length + 1);
+  for (let i = 0; i < text.length; i++) breaks[i + 1] = (breaks[i] ?? 0) + (BREAK_CODES.has(text.charCodeAt(i)) ? 1 : 0);
+  for (const match of text.matchAll(FROM_RE)) {
+    const at = match.index ?? 0;
+    const spec = match[1];
+    if (spec === undefined) continue;
+    let lo = 0;
+    let hi = keywords.length - 1;
+    let start = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const position = keywords[mid] ?? 0;
+      if (position < at) {
+        start = position;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    if (start < 0 || breaks[at] !== breaks[start]) continue;
+    out.push({ spec, statement: text.slice(start, at + match[0].length) });
+  }
+  for (const match of text.matchAll(SIDE_EFFECT_RE)) if (match[1] !== undefined) out.push({ spec: match[1], statement: match[0] });
+  for (const match of text.matchAll(DYNAMIC_RE)) if (match[1] !== undefined) out.push({ spec: match[1], statement: match[0] });
+  return out;
 }
 
 function resolveRelative(files: ReadonlySet<string>, from: string, spec: string): string | null {
@@ -144,8 +200,7 @@ export function buildGraph(files: ReadonlySet<string>, texts: ReadonlyMap<string
         records.push({ target: resolved.target, statement, packageName: resolved.name, packageEntry: resolved.entry });
       }
     };
-    for (const match of text.matchAll(STATIC_RE)) if (match[1] !== undefined) add(match[1], match[0]);
-    for (const match of text.matchAll(DYNAMIC_RE)) if (match[1] !== undefined) add(match[1], match[0]);
+    for (const { spec, statement } of scanImports(text)) add(spec, statement);
     out.set(path, records);
   }
   const importers = new Map<string, Set<string>>();

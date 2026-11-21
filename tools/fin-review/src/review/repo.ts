@@ -242,7 +242,8 @@ export async function unifiedDiff(
   paths: readonly string[] = [],
 ): Promise<{ text: string; truncated: boolean }> {
   if (!isSha(a) || !isSha(b)) throw new TypeError("a diff needs two SHAs");
-  for (const path of paths) if (path.startsWith("-") || path.includes("\0")) throw new TypeError("refusing a diff path");
+  // Each path goes after `--` as a `:(literal)` pathspec, so a leading dash is only a name.
+  for (const path of paths) if (path.includes("\0")) throw new TypeError("refusing a diff path");
   const range = threeDot ? [`${a}...${b}`] : [a, b];
   const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "-M50", "--no-relative", ...range, "--", ...paths.map((path) => `:(literal)${path}`)], env })).stdout;
   if (out.length <= maxBytes) return { text: out.toString("utf8"), truncated: false };

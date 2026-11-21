@@ -95,10 +95,17 @@ procedure hash of §4.8 (the SHA-256 of the sorted `<path> <blob id>` lines of e
   `review.lock_broken`).
 - **Exit codes**: 0 no blockers; 1 blockers; 2 could not check (a required lens or profile
   `refused`, `incomplete`, `budget_reached` or `cancelled`, or a sceptic hit a model mismatch or the
-  budget); 64 refused options; 65 bad data (a head whose paths cannot be shown as they are); 69
-  GitHub or the remote unavailable; 70 internal; 75 the
-  pull request's lock is held; 78 the lock-down (environment, configuration, procedure or the pinned
-  Claude Code).
+  budget); 3 advisory (below); 64 refused options; 65 bad data (a head whose paths cannot be shown
+  as they are); 69 GitHub or the remote unavailable; 70 internal; 75 the pull request's lock is
+  held; 78 the lock-down (environment, settings files, configuration, procedure, the engine copy or
+  the pinned Claude Code). A session whose prompt would pass the runner's 4 MB cap (one unit that is
+  never cut, such as a large JSON file) is not started; its lens is `incomplete`, so the run records
+  that it could not check.
+- **Advisory runs** (`--advisory`: below the effort floor, or without the default branch's engine
+  copy) are never a gate result: they exit 3 whatever they find, `result.json` says
+  `result: "advisory"` with what they found in `outcome`, stdout says `advisory (<outcome>; not a
+  gate result)`, and no later `commit` takes one as its last reviewed head. Exit 3 is this slice's
+  addition to spec 07 §2.1's table, which defines 0 and 1 by a receipt an advisory run never writes.
 
 ## Severities
 

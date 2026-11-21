@@ -187,9 +187,11 @@ commit --pr <n> --since <sha> [--repo <dir>] [R11 options] [--advisory]:
   --pr <n>                    The pull request; its head is fetched into $FIN_REVIEW_HOME
   --since <sha>               commit: the last reviewed head (a local run of pr or commit at it)
   --repo <dir>                The repository whose origin holds the pull request (default: .)
-  --advisory                  Run below the tier S effort floor; not a gate result
+  --advisory                  Run below the tier S effort floor or without the default branch's
+                              engine copy; never a gate result (exit 3, whatever it finds)
   Prints counts only; findings go to $FIN_REVIEW_HOME/runs/<run-id>/ (default ~/.fin-review).
-  Exit 0 no blockers, 1 blockers, 2 could not check, 64 refused, 69 unavailable, 75 busy, 78 lock-down.
+  Exit 0 no blockers, 1 blockers, 2 could not check, 3 advisory, 64 refused, 65 bad data,
+  69 unavailable, 75 busy, 78 lock-down.
 
 doctor [--live]:
   --live                      Also start one locked session per model (D5; costs a little)
@@ -211,7 +213,8 @@ options (R11: only opus or fable, each effort high or above):
 
 Fable overall with an Opus attack is refused; Opus overall with a Fable attack is allowed.
 Every option takes "--name value" or "--name=value". Exit codes: 0 pass, 1 blocked, 2 could not
-check, 64 refused, 65 bad data, 69 unavailable, 70 internal error, 75 busy, 78 configuration.
+check, 3 advisory (pr, commit), 64 refused, 65 bad data, 69 unavailable, 70 internal error, 75 busy,
+78 configuration.
 `;
 
 const DOCTOR_FLAGS: readonly FlagSpec[] = [{ flag: "--live", key: "live", takesValue: false, review: false }];

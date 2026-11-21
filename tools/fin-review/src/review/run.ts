@@ -37,6 +37,7 @@ import { packShards } from "../shard.ts";
 import type { Shard } from "../shard.ts";
 import { blocksCoverage, decodeText, inventory } from "../units/inventory.ts";
 import type { Excluded, Unit } from "../units/inventory.ts";
+import { MAX_PROMPT_BYTES } from "../runner/cli.ts";
 import type { SessionResult, SessionRunner, SessionSpec } from "../runner/types.ts";
 import { profilesFor } from "./attack.ts";
 import { outputProblem, SEVERITIES, validateOutput } from "./findings.ts";
@@ -72,7 +73,7 @@ import {
   unifiedDiff,
 } from "./repo.ts";
 import { countFindings, countLines, Lines, summaryMarkdown, writeJson } from "./report.ts";
-import type { Blocker, FindingRecord, LensState, OpenBlocker, RunResultName, RunSummary, VerdictRecord } from "./report.ts";
+import type { Blocker, FindingRecord, LensState, OpenBlocker, RunOutcomeName, RunResultName, RunSummary, VerdictRecord } from "./report.ts";
 import { combine, severityRank } from "./verdicts.ts";
 import type { Verdict } from "./verdicts.ts";
 
@@ -163,6 +164,8 @@ interface SessionRecord {
   readonly lensKey: string;
   state: LensState;
   result: Omit<SessionResult, "output"> | null;
+  /** Why a session was never started, when it was not. */
+  detail?: string;
   readonly unitIds: readonly string[];
 }
 
@@ -591,7 +594,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         return EXIT.usage;
       }
     }
-    if (req.advisory) deps.stderr("advisory: not a gate receipt\n");
+    if (req.advisory) deps.stderr("advisory: not a gate result (exit 3)\n");
     if (req.options.fast) deps.stderr("fast: applies to Opus sessions only\n");
 
     // The head's paths: refused before anything is read or written when one cannot be shown to a
@@ -761,6 +764,16 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         }
         if (budget.reached()) {
           record.state = "budget_reached";
+          return null;
+        }
+        // A prompt over the runner's cap (a unit that is never cut, such as a large JSON file) is not
+        // started: its lens is incomplete, so the run records that it could not check (exit 2).
+        const promptBytes = Buffer.byteLength(spec.prompt, "utf8");
+        if (promptBytes > MAX_PROMPT_BYTES) {
+          record.state = "incomplete";
+          record.detail = `its prompt is ${promptBytes} bytes, over the ${MAX_PROMPT_BYTES}-byte cap`;
+          deps.stderr(`fin-review: session ${spec.id} not started: ${record.detail}\n`);
+          writeJson(join(runDir, "sessions", `${spec.id}.result.json`), { id: spec.id, role: spec.role, lensKey: record.lensKey, state: record.state, notStarted: record.detail });
           return null;
         }
         record.state = "running";
@@ -959,8 +972,10 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     for (const blocker of stillOpen) blockers.push({ rule: "prior", finding: blocker.id, lens: blocker.lensKey, detail: "a blocker open at the last reviewed head is not shown fixed" });
 
     const couldNotCheck = lensKeys.some((key) => lensStates[key] !== "done") || verifyCouldNotCheck;
-    const result: RunResultName = couldNotCheck ? "could_not_check" : blockers.length > 0 ? "blocked" : "pass";
-    const exitCode = result === "pass" ? EXIT.pass : result === "blocked" ? EXIT.blocked : EXIT.couldNotCheck;
+    const outcome: RunOutcomeName = couldNotCheck ? "could_not_check" : blockers.length > 0 ? "blocked" : "pass";
+    // An advisory run is never a gate result: its own name and exit code, whatever it found.
+    const result: RunResultName = req.advisory ? "advisory" : outcome;
+    const exitCode = req.advisory ? EXIT.advisory : outcome === "pass" ? EXIT.pass : outcome === "blocked" ? EXIT.blocked : EXIT.couldNotCheck;
     const openBlockers: OpenBlocker[] = [
       ...findings
         .filter((rec) => rec.blocking)
@@ -989,6 +1004,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       deltaTier: tier,
       engine: { commit: engine.commit, procedureHash: engine.procedureHash, defaultCopy: engine.problems.length === 0 },
       result,
+      outcome,
       exitCode,
       advisory: req.advisory,
       options: req.options,

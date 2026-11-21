@@ -7,6 +7,11 @@ export const EXIT = {
   blocked: 1,
   /** A required lens is refused, incomplete or budget_reached. */
   couldNotCheck: 2,
+  /**
+   * An advisory run finished (below the floor, or not on the default branch's engine copy): it is
+   * never a gate result, whatever it found, so it never exits 0 or 1. result.json holds what it found.
+   */
+  advisory: 3,
   /** An option was refused (R11, the effort floor, an unknown option). */
   usage: 64,
   /** An invalid receipt, schema, request or finding. */

@@ -10,7 +10,10 @@ import type { Finding, Severity } from "./findings.ts";
 import { SEVERITIES } from "./findings.ts";
 
 export type LensState = "pending" | "running" | "done" | "incomplete" | "refused" | "budget_reached" | "cancelled";
-export type RunResultName = "pass" | "blocked" | "could_not_check";
+/** A gating run's result, or `advisory` for a run that can never be a gate result. */
+export type RunResultName = "pass" | "blocked" | "could_not_check" | "advisory";
+/** What a run found, advisory or not. */
+export type RunOutcomeName = "pass" | "blocked" | "could_not_check";
 export type FindingState = "invalid" | "kept" | "confirmed" | "plausible" | "refuted" | "unverified";
 
 export interface VerdictRecord {
@@ -100,7 +103,10 @@ export interface RunSummary {
   readonly deltaTier: Tier | null;
   /** The engine that ran: its commit, the procedure hash (spec 07 §4.8), and whether it was the default branch's engine copy. */
   readonly engine: { readonly commit: string | null; readonly procedureHash: string | null; readonly defaultCopy: boolean };
+  /** `advisory` for an advisory run; otherwise what `outcome` says. */
   readonly result: RunResultName;
+  /** What the run found: for an advisory run, what it would have been. */
+  readonly outcome: RunOutcomeName;
   readonly exitCode: number;
   readonly advisory: boolean;
   readonly options: unknown;
@@ -149,8 +155,9 @@ export function countLines(summary: RunSummary): string {
   const s = c.bySeverity;
   const l = c.lenses;
   const mode = summary.escalated === null ? summary.mode : `${summary.mode} (escalated from commit: ${summary.escalated})`;
+  const result = summary.result === "advisory" ? `advisory (${summary.outcome}; not a gate result)` : summary.result;
   return [
-    `fin-review ${mode} #${summary.pr} at ${summary.head.slice(0, 12)}: ${summary.result}${summary.advisory ? " (advisory: not a gate receipt)" : ""}`,
+    `fin-review ${mode} #${summary.pr} at ${summary.head.slice(0, 12)}: ${result}`,
     `  tier ${summary.tier ?? "-"}; ${c.units} units; ${summary.lensNames.length} lenses; ${summary.profiles.length} attack profiles; ${c.sessions} sessions`,
     `  findings: ${f.confirmed} confirmed, ${f.plausible} plausible, ${f.unverified} unverified, ${f.refuted} refuted, ${f.invalid} invalid`,
     `  by severity (not refuted): ${s.critical} critical, ${s.high} high, ${s.medium} medium, ${s.low} low`,
@@ -178,7 +185,11 @@ export function summaryMarkdown(summary: RunSummary, records: readonly FindingRe
     `- Tier: ${summary.tier ?? "-"}${summary.deltaTier === summary.tier ? "" : ` (this run's change: ${summary.deltaTier ?? "-"})`}`,
     `- Engine: \`${summary.engine.commit ?? "-"}\`, procedure \`${summary.engine.procedureHash ?? "-"}\`${summary.engine.defaultCopy ? "" : `, not ${summary.defaultBranch}'s engine copy`}`,
   );
-  out.push(`- Result: **${summary.result}** (exit ${summary.exitCode})${summary.advisory ? ", advisory: not a gate receipt" : ""}`);
+  out.push(
+    summary.result === "advisory"
+      ? `- Result: **advisory**, not a gate result (exit ${summary.exitCode}); it found: ${summary.outcome}`
+      : `- Result: **${summary.result}** (exit ${summary.exitCode})`,
+  );
   if (summary.escalated !== null) out.push(`- Escalated from \`commit\` to \`pr\`: ${summary.escalated}`);
   out.push(`- Run: \`${summary.runId}\`; ${summary.counts.sessions} sessions; estimated cost ${(summary.costMicroUsd / 1_000_000).toFixed(2)} USD`, "");
   out.push("## Lenses", "", "| Lens | State |", "|---|---|");
