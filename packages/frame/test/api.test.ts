@@ -98,6 +98,26 @@ describe("buildRequest", () => {
     });
   });
 
+  it("refuses a path parameter the URL parser would read as a dot segment", () => {
+    // `.` and `..` survive encodeURIComponent, and fetch resolves them: `/team/members/../remove`
+    // would be sent to `/team/remove`, another route, with the same body and headers.
+    for (const memberId of [".", ".."]) {
+      expect(() => buildRequest(removeMember, { memberId })).toThrow(TypeError);
+      expect(() => buildRequest(removeMember, { memberId })).toThrow(/:memberId/);
+    }
+    // Encoded dots are not dot segments once encodeURIComponent has escaped the `%`.
+    for (const memberId of ["%2e%2e", "...", ".mem", "mem.1", "%2E"]) {
+      const { path } = buildRequest(removeMember, { memberId });
+      expect(new URL(path, "https://console.example.com").pathname).toBe(path);
+    }
+  });
+
+  it("never lets api() send a dot-segment parameter to another route", async () => {
+    const { api, calls } = client([new Response(null, { status: 204 })]);
+    await expect(api(removeMember, { memberId: ".." })).rejects.toThrow(TypeError);
+    expect(calls).toHaveLength(0);
+  });
+
   it("puts a GET's fields in the query, arrays repeated, absent fields dropped", () => {
     expect(buildRequest(auditLog, { page: 2, type: ["team", "keys"] })).toEqual({
       path: "/audit-log?type=team&type=keys&page=2",

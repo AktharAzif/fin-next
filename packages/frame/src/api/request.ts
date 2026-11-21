@@ -1,7 +1,7 @@
 // Turns a contract and its input into the URL and body `api()` sends (spec 06 §2.4). Path
-// parameters are filled from the input and encoded; on a GET the other fields become the query
-// string; on any other method they become the JSON body. A body-less request carries no body and
-// no content type, as the origin gate expects (spec 01 §4.4, check 4).
+// parameters are filled from the input, one encoded segment each; on a GET the other fields become
+// the query string; on any other method they become the JSON body. A body-less request carries no
+// body and no content type, as the origin gate expects (spec 01 §4.4, check 4).
 import { type AppContract, pathParams } from "@fin/app-contracts";
 
 export interface BuiltRequest {
@@ -25,6 +25,21 @@ function scalar(contract: string, field: string, value: unknown): string {
 }
 
 /**
+ * One path parameter as one path segment. encodeURIComponent escapes `/`, `\`, `?`, `#` and `%`,
+ * so the value cannot add a segment or a query; it leaves `.` alone, and the URL parser resolves a
+ * `.` or `..` segment, which would send the request to another route. Those, and an empty value,
+ * are refused (a programming error in the screen, or a crafted link; never sent).
+ */
+function pathSegment(contract: string, param: string, value: unknown): string {
+  const raw = scalar(contract, param, value);
+  if (raw === "") throw new TypeError(`${contract}: :${param} is empty`);
+  if (raw === "." || raw === "..") {
+    throw new TypeError(`${contract}: :${param} is not a path segment`);
+  }
+  return encodeURIComponent(raw);
+}
+
+/**
  * Validates the input against the contract and builds the request. An input the contract refuses
  * is a programming error in the screen, so this throws (with the field paths only, never values).
  */
@@ -42,13 +57,19 @@ export function buildRequest(contract: AppContract, input: unknown): BuiltReques
   let rest: Record<string, unknown> | undefined;
 
   if (isPlainObject(value)) {
-    rest = { ...value };
-    for (const param of params) {
-      const raw = scalar(contract.name, param, rest[param]);
-      if (raw === "") throw new TypeError(`${contract.name}: :${param} is empty`);
-      path = path.replace(`:${param}`, encodeURIComponent(raw));
-      delete rest[param];
-    }
+    const fields: Record<string, unknown> = { ...value };
+    // Segment by segment, so a filled value is never searched for another `:param`.
+    path = contract.path
+      .split("/")
+      .map((segment) => {
+        const param = segment.slice(1);
+        return segment.startsWith(":") && params.includes(param)
+          ? pathSegment(contract.name, param, fields[param])
+          : segment;
+      })
+      .join("/");
+    for (const param of params) delete fields[param];
+    rest = fields;
   } else if (params.length > 0) {
     throw new TypeError(`${contract.name}: a path with parameters needs an object input`);
   }

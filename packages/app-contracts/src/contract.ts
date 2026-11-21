@@ -64,6 +64,10 @@ export function defineContract<I extends z.ZodType, O extends z.ZodType>(
   if (path.includes("?") || path.includes("#") || path.includes("//")) {
     throw new Error(`contract ${name}: the path holds no query, fragment or empty segment`);
   }
+  // The URL parser resolves `.` and `..`, so such a path would reach another route.
+  if (path.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`contract ${name}: the path holds no dot segment`);
+  }
   const params = pathParams(path);
   if (params.length > 0) {
     if (!(input instanceof z.ZodObject)) {

@@ -37,6 +37,14 @@ describe("defineContract", () => {
     }
   });
 
+  it("refuses a dot segment, which the URL parser would resolve to another route", () => {
+    for (const path of ["/team/../viewer", "/team/./members", "/team/..", "/."] as const) {
+      expect(() =>
+        defineContract({ name: "a.b", method: "GET", path, input: noInput, output: z.unknown() }),
+      ).toThrow(/dot segment/);
+    }
+  });
+
   it("refuses a :param the input does not carry", () => {
     expect(() =>
       defineContract({
