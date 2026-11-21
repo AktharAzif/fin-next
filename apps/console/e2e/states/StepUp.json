@@ -16,50 +16,70 @@
       "test": "@journey @security an invitation asks for the factor and is sent again once with the intent"
     },
     "wrongCode": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a wrong code is said, then the right one proves the intent once"
     },
     "backup": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a backup code, after a wrong one"
     },
     "wrongBackup": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a backup code, after a wrong one"
     },
     "passkeyWaiting": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a passkey: waiting, none used, refused, then proved"
     },
     "passkeyFailed": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a passkey: waiting, none used, refused, then proved"
     },
     "noPasskeyUsed": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security a passkey: waiting, none used, refused, then proved"
     },
     "paused": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey @security paused codes are said and can't be tried again"
     },
     "noPasskeySupport": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey a browser that can't use passkeys is told so"
     },
     "setupFirst": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey the gates: a second factor first, then a sign-in by email"
     },
     "byEmail": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey the gates: a second factor first, then a sign-in by email"
     },
     "byEmailFailed": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/step-up.spec.ts",
+      "test": "@journey the gates: a second factor first, then a sign-in by email"
     }
   }
 }

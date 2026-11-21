@@ -62,16 +62,22 @@
       "day": "sat"
     },
     "linkOpened": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a sign-in link in the browser that asked signs in only on the press"
     },
     "linkSigningIn": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a sign-in link in the browser that asked signs in only on the press"
     },
     "linkElsewhere": {
-      "status": "pending",
+      "status": "covered",
       "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a sign-in link opened in another browser drops its address and code",
       "note": "drawn as the empty form with an address field (spec 02 §15.4, S2-39)"
     },
     "loading": {

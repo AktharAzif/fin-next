@@ -42,8 +42,8 @@
     "changeRole": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a member's role changes with the factor"
     },
     "changeRoleFailed": {
       "status": "pending",
@@ -52,8 +52,8 @@
     "roleChanged": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a member's role changes with the factor"
     },
     "remove": {
       "status": "pending",

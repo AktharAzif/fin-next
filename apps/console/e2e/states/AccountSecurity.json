@@ -46,8 +46,8 @@
     "setupScan": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security the authenticator is set up from Account security with the factor"
     },
     "setupScanWrong": {
       "status": "pending",
@@ -56,8 +56,8 @@
     "setupCodes": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security the authenticator is set up from Account security with the factor"
     },
     "turnOff": {
       "status": "pending",

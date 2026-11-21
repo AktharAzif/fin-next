@@ -10,8 +10,10 @@
       "test": "@journey a built-in role is read-only and the list links each role"
     },
     "rowMenu": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
     },
     "readOnly": {
       "status": "pending",
@@ -22,8 +24,10 @@
       "day": "sat"
     },
     "deletePeople": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
     },
     "deleteInvitations": {
       "status": "pending",
@@ -42,8 +46,10 @@
       "day": "sat"
     },
     "deleted": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
     },
     "loading": {
       "status": "pending",

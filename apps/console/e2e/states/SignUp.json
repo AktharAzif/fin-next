@@ -6,20 +6,19 @@
     "form": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "invited": {
-      "status": "covered",
+      "status": "pending",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
     },
     "typing": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "nameRefused": {
       "status": "pending",
@@ -42,8 +41,8 @@
     "creating": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "didntWork": {
       "status": "pending",

@@ -198,7 +198,7 @@ test.describe("organisations, the team and roles", () => {
     await invite.getByRole("radio", { name: /^Admin/ }).check();
     await invite.getByRole("button", { name: "Send invite" }).click();
     await confirmWithPasskey(page, `Use your second factor to invite ${priya.email}.`);
-    await expect(page.getByText(`Invitation sent to ${priya.email}`)).toBeVisible();
+    await expect(page.getByText(`Invitation sent to ${priya.email}`).first()).toBeVisible();
 
     // The teammate opens the link in their own browser, signs up and accepts.
     const message = await emailSink.waitFor(
@@ -248,7 +248,7 @@ test.describe("organisations, the team and roles", () => {
       page,
       `Use your second factor to change ${priya.name}’s role to Support.`,
     );
-    await expect(page.getByText(`${priya.name}’s role is now Support`)).toBeVisible();
+    await expect(page.getByText(`${priya.name}’s role is now Support`).first()).toBeVisible();
 
     // Changed again in the editor: one more permission, saved with its step-up.
     await page.getByRole("link", { name: "Roles" }).click();
@@ -256,8 +256,11 @@ test.describe("organisations, the team and roles", () => {
     await page.getByRole("checkbox", { name: /^See keys/ }).click();
     await page.getByRole("button", { name: "Save" }).click();
     await confirmWithPasskey(page, "Use your second factor to save the role Support.");
+    // On the page itself, not only in the live region's copy of it.
     await expect(
-      page.getByText("Saved. Changes apply on each person’s next request."),
+      page
+        .getByRole("complementary", { name: "Summary" })
+        .getByText("Saved. Changes apply on each person’s next request."),
     ).toBeVisible();
 
     // The audit log, from the member's row menu, names what happened to them.

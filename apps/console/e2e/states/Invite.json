@@ -4,16 +4,14 @@
   "route": "/invite",
   "states": {
     "forYou": {
-      "status": "covered",
+      "status": "pending",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
     },
     "accepting": {
-      "status": "covered",
+      "status": "pending",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
     },
     "confirmItsYou": {
       "status": "pending",
@@ -36,10 +34,9 @@
       "day": "sat"
     },
     "signedOut": {
-      "status": "covered",
+      "status": "pending",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
     },
     "declined": {
       "status": "pending",

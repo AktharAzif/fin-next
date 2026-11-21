@@ -6,8 +6,8 @@
     "waiting": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "noAddress": {
       "status": "pending",
@@ -16,14 +16,14 @@
     "typing": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "verifying": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
     },
     "wrongCode": {
       "status": "pending",
@@ -50,16 +50,22 @@
       "day": "sat"
     },
     "fromLink": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a confirm link: one press in the browser that signed up"
     },
     "confirming": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a confirm link: one press in the browser that signed up"
     },
     "linkElsewhere": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a confirm link opened in another browser drops its address and code"
     },
     "loading": {
       "status": "pending",

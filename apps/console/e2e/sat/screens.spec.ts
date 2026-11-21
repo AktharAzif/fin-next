@@ -13,6 +13,7 @@ import {
   developerViewer,
   FACTOR_STEP,
   libraryError,
+  noContent,
   ok,
   problem,
   stepUpRequired,
@@ -81,6 +82,55 @@ const AUDIT_ROW = {
   device: "Chrome on Mac",
 };
 
+/** The 8-digit code in a sign-in or confirm link's fragment (`#e=…&c=…`). */
+const LINK_CODE = "12345678";
+
+const SECURITY_DATA = {
+  name: "Maya Rivera",
+  email: "maya@example.com",
+  passkeys: [{ id: "pky_1", name: "Chrome on Mac", createdAt: "2026-11-02T10:05:00Z" }],
+  authenticator: true,
+  backupCodesLeft: 8,
+  trustedBrowsers: [],
+  noSecondFactor: false,
+};
+
+const SESSIONS = [
+  {
+    id: "ses_1",
+    device: "Chrome on Mac",
+    ipAddress: "198.51.100.24",
+    createdAt: "2026-11-20T09:14:00Z",
+    lastSeenAt: "2026-11-20T09:14:00Z",
+    current: true,
+  },
+  {
+    id: "ses_2",
+    device: "Safari on iPhone",
+    ipAddress: "198.51.100.61",
+    createdAt: "2026-11-18T09:14:00Z",
+    lastSeenAt: "2026-11-18T09:14:00Z",
+    current: false,
+  },
+];
+
+const ORG_PROFILE = {
+  orgId: "org_acme",
+  name: "Acme Remit",
+  createdAt: "2026-11-02T10:00:00Z",
+  liveStatus: "sandbox",
+  roleKey: "super_admin",
+  roleLabel: "Super admin",
+};
+
+const ORG_ROW = {
+  orgId: "org_acme",
+  name: "Acme Remit",
+  roleKey: "super_admin",
+  roleLabel: "Super admin",
+  liveStatus: "sandbox",
+};
+
 /** The double every signed-in board starts from: the viewer and the lists the frame reads. */
 function signedIn(who: Record<string, unknown> = viewer()): ApiDouble {
   return new ApiDouble()
@@ -130,7 +180,7 @@ test.describe("signing in", () => {
 
     await email.fill("maya@acme");
     await page.getByRole("button", { name: "Continue" }).click();
-    await expect(page.getByText("That email address doesn’t look right.")).toBeVisible();
+    await expect(page.getByText("That email address doesn’t look right.").first()).toBeVisible();
 
     await email.fill("maya@example.com");
     await page.getByRole("button", { name: "Continue" }).click();
@@ -142,7 +192,7 @@ test.describe("signing in", () => {
     expect(sent[0]?.headers["x-fin-app"]).toBe("console");
 
     await enterCode(page, "Or enter the 8-digit code from the email", "11111111");
-    await expect(page.getByText("That code didn’t work.")).toBeVisible();
+    await expect(page.getByText("That code didn’t work.").first()).toBeVisible();
     await enterCode(page, "Or enter the 8-digit code from the email", "12345678");
     await expect(page).toHaveURL(/\/settings\/organisation$/);
     await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
@@ -161,7 +211,9 @@ test.describe("signing in", () => {
       );
     await api.install(page);
     await gotoReady(page, "/sign-in?error=too_many_tries");
-    await expect(page.getByText("You were signed out after too many wrong tries.")).toBeVisible();
+    await expect(
+      page.getByText("You were signed out after too many wrong tries.").first(),
+    ).toBeVisible();
     await page.getByRole("textbox", { name: "Work email" }).fill("maya@example.com");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(
@@ -193,7 +245,7 @@ test.describe("signing in", () => {
       page.getByRole("checkbox", { name: "Trust this browser for 30 days" }),
     ).toHaveCount(0);
     await enterCode(page, "Authenticator code", "000000");
-    await expect(page.getByText("That code isn’t right.", { exact: true })).toBeVisible();
+    await expect(page.getByText("That code isn’t right.", { exact: true }).first()).toBeVisible();
     await enterCode(page, "Authenticator code", "123456");
     await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
     expect(api.calls("POST /api/auth/two-factor/verify-totp")[1]?.body).toEqual({ code: "123456" });
@@ -203,8 +255,166 @@ test.describe("signing in", () => {
     const api = new ApiDouble().on("GET /api/viewer", ok({ ...FACTOR_STEP, methods: ["passkey"] }));
     await api.install(page);
     await gotoReady(page, "/sign-in/backup-code");
-    await expect(page.getByText("This account has no backup codes.")).toBeVisible();
+    await expect(page.getByText("This account has no backup codes.").first()).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Backup code" })).toBeDisabled();
+  });
+
+  test("@journey @security a sign-in link in the browser that asked signs in only on the press", async ({
+    page,
+  }) => {
+    let signedInNow = false;
+    const api = new ApiDouble()
+      .on("GET /api/viewer", () => (signedInNow ? ok(viewer()) : problem(401, "unauthenticated")))
+      .on("GET /api/auth/passkey/generate-authenticate-options", ok(OPTIONS))
+      .on("POST /api/sign-in/code-link", ok({ asking: true }))
+      .on("POST /api/auth/sign-in/email-otp", () => {
+        signedInNow = true;
+        return ok({ token: "x" });
+      });
+    await api.install(page);
+    await gotoReady(page, `/sign-in/code#e=maya%40example.com&c=${LINK_CODE}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin" })).toBeVisible();
+    await expect(page.getByText("As maya@example.com.").first()).toBeVisible();
+    // The fragment is read once and taken out of the address bar and the history.
+    expect(await page.evaluate(() => window.location.hash)).toBe("");
+    expect(page.url()).not.toContain(LINK_CODE);
+    expect(api.calls("POST /api/sign-in/code-link").map((c) => c.body)).toEqual([
+      { email: "maya@example.com" },
+    ]);
+    // Never a sign-in by itself, so a mail scanner that opens the link uses nothing.
+    await page.waitForTimeout(500);
+    expect(api.calls("POST /api/auth/sign-in/email-otp")).toHaveLength(0);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
+    expect(api.calls("POST /api/auth/sign-in/email-otp").map((c) => c.body)).toEqual([
+      { email: "maya@example.com", otp: LINK_CODE },
+    ]);
+  });
+
+  test("@journey @security a sign-in link opened in another browser drops its address and code", async ({
+    page,
+  }) => {
+    let signedInNow = false;
+    const api = new ApiDouble()
+      .on("GET /api/viewer", () => (signedInNow ? ok(viewer()) : problem(401, "unauthenticated")))
+      .on("GET /api/auth/passkey/generate-authenticate-options", ok(OPTIONS))
+      .on("POST /api/sign-in/code-link", ok({ asking: false }))
+      .on("POST /api/auth/sign-in/email-otp", () => {
+        signedInNow = true;
+        return ok({ token: "x" });
+      });
+    await api.install(page);
+    await gotoReady(page, `/sign-in/code#e=maya%40example.com&c=${LINK_CODE}`);
+    await expect(
+      page.getByText("This link was opened in a different browser from the one that asked for it."),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Open it there, or enter your email and its code here."),
+    ).toBeVisible();
+    expect(await page.evaluate(() => window.location.hash)).toBe("");
+    // The empty form: the link's address and code are nowhere on the page (S2-39).
+    const email = page.getByRole("textbox", { name: "Work email" });
+    await expect(email).toHaveValue("");
+    const code = page.getByRole("textbox", { name: "Or enter the 8-digit code from the email" });
+    await expect(code).toHaveValue("");
+    await expect(page.getByText("maya@example.com")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(api.calls("POST /api/auth/sign-in/email-otp")).toHaveLength(0);
+    // What the person types is what is sent.
+    await email.fill("priya@example.com");
+    await enterCode(page, "Or enter the 8-digit code from the email", "87654321");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
+    expect(api.calls("POST /api/auth/sign-in/email-otp").map((c) => c.body)).toEqual([
+      { email: "priya@example.com", otp: "87654321" },
+    ]);
+  });
+
+  test("@journey @security a confirm link: one press in the browser that signed up", async ({
+    page,
+  }) => {
+    let signedInNow = false;
+    const api = new ApiDouble()
+      .on("GET /api/viewer", () => (signedInNow ? ok(viewer()) : problem(401, "unauthenticated")))
+      .on("GET /api/auth/passkey/generate-authenticate-options", ok(OPTIONS))
+      .on("POST /api/sign-in/code-link", ok({ asking: true }))
+      .on("POST /api/auth/sign-in/email-otp", () => {
+        signedInNow = true;
+        return { status: 200, body: { token: "x" }, delayMs: 500 };
+      });
+    await api.install(page);
+    await gotoReady(page, `/verify-email#e=maya%40example.com&c=${LINK_CODE}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Confirm your email" })).toBeVisible();
+    expect(await page.evaluate(() => window.location.hash)).toBe("");
+    await page.waitForTimeout(500);
+    expect(api.calls("POST /api/auth/sign-in/email-otp")).toHaveLength(0);
+    const confirm = page.getByRole("button", { name: "Confirm email" });
+    await confirm.click();
+    await expect(confirm).toHaveAttribute("aria-busy", "true");
+    await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
+    expect(api.calls("POST /api/auth/sign-in/email-otp").map((c) => c.body)).toEqual([
+      { email: "maya@example.com", otp: LINK_CODE },
+    ]);
+  });
+
+  test("@journey @security a confirm link opened in another browser drops its address and code", async ({
+    page,
+  }) => {
+    const api = new ApiDouble()
+      .on("GET /api/viewer", problem(401, "unauthenticated"))
+      .on("GET /api/auth/passkey/generate-authenticate-options", ok(OPTIONS))
+      .on("POST /api/sign-in/code-link", ok({ asking: false }))
+      .on("POST /api/auth/sign-in/email-otp", ok({ token: "x" }));
+    await api.install(page);
+    await gotoReady(page, `/verify-email#e=maya%40example.com&c=${LINK_CODE}`);
+    await expect(
+      page.getByText("Open it in the browser you signed up in, or type its code there."),
+    ).toBeVisible();
+    expect(await page.evaluate(() => window.location.hash)).toBe("");
+    await expect(page.getByRole("textbox", { name: "Work email" })).toHaveValue("");
+    await expect(page.getByRole("textbox", { name: "Confirmation code" })).toHaveValue("");
+    await expect(page.getByText("maya@example.com")).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(api.calls("POST /api/auth/sign-in/email-otp")).toHaveLength(0);
+  });
+
+  test("@journey sign-up: the form, then the emailed code in the same browser", async ({
+    page,
+  }) => {
+    let signedInNow = false;
+    const api = new ApiDouble()
+      .on("GET /api/viewer", () => (signedInNow ? ok(viewer()) : problem(401, "unauthenticated")))
+      .on("GET /api/auth/passkey/generate-authenticate-options", ok(OPTIONS))
+      .on("GET /api/invitation", noContent())
+      .on("POST /api/sign-up", { status: 200, body: { status: "code_sent" }, delayMs: 500 })
+      .on("POST /api/auth/sign-in/email-otp", () => {
+        signedInNow = true;
+        return { status: 200, body: { token: "x" }, delayMs: 500 };
+      });
+    await api.install(page);
+    await gotoReady(page, "/sign-up");
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Create your Fin account" }),
+    ).toBeVisible();
+    await page.getByRole("textbox", { name: "Full name" }).fill("Maya Rivera");
+    await page.getByRole("textbox", { name: "Work email" }).fill("maya@example.com");
+    const create = page.getByRole("button", { name: "Create account" });
+    await create.click();
+    await expect(create).toHaveAttribute("aria-busy", "true");
+    await expect(page).toHaveURL(/\/verify-email$/);
+    await expect(page.getByText("is waiting to be confirmed")).toContainText("maya@example.com");
+    expect(api.calls("POST /api/sign-up").map((c) => c.body)).toEqual([
+      { name: "Maya Rivera", email: "maya@example.com" },
+    ]);
+    await enterCode(page, "Confirmation code", "12345678");
+    await expect(page.getByRole("button", { name: "Confirm email" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
+    expect(api.calls("POST /api/auth/sign-in/email-otp").map((c) => c.body)).toEqual([
+      { email: "maya@example.com", otp: "12345678" },
+    ]);
   });
 });
 
@@ -308,7 +518,7 @@ test.describe("protecting the account", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "Protect your account" }),
     ).toBeVisible();
-    await expect(page.getByText("Your role needs a second factor.")).toBeVisible();
+    await expect(page.getByText("Your role needs a second factor.").first()).toBeVisible();
     await expect(page.getByRole("button", { name: /Add a passkey/ })).toBeVisible();
     await expect(page.getByRole("link", { name: /Use an authenticator app/ })).toBeVisible();
     await expect(page.getByRole("link", { name: "Skip for now" })).toHaveCount(0);
@@ -383,7 +593,7 @@ test.describe("the team", () => {
     const stepUp = page.getByRole("dialog", { name: "Confirm it’s you" });
     await expect(stepUp).toContainText("Use your second factor to invite kai@example.com.");
     await enterCode(page, "Authenticator code", "123456");
-    await expect(page.getByText("Invitation sent to kai@example.com")).toBeVisible();
+    await expect(page.getByText("Invitation sent to kai@example.com").first()).toBeVisible();
 
     const sends = api.calls("POST /api/team/invitations");
     expect(sends).toHaveLength(2);
@@ -432,6 +642,122 @@ test.describe("the team", () => {
     await page.getByRole("button", { name: "Try again" }).click();
     await expect(page.getByRole("row", { name: /^Priya Shah,/ })).toBeVisible();
   });
+
+  test("@journey @security the invite dialog starts with no role chosen, and Send waits for one", async ({
+    page,
+  }) => {
+    const api = signedIn()
+      .on("GET /api/team", ok(MEMBERS))
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("POST /api/team/invitations", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/team?view=invite");
+    const invite = page.getByRole("dialog", { name: "Invite a teammate" });
+    // A Super admin may give every role, Super admin first; none is chosen for them.
+    await expect(invite.getByRole("radio", { name: /^Super admin/ })).toBeEnabled();
+    await expect(invite.getByRole("radio", { checked: true })).toHaveCount(0);
+    const send = invite.getByRole("button", { name: "Send invite" });
+    await expect(send).toHaveAttribute("aria-disabled", "true");
+    const email = invite.getByRole("textbox", { name: "Work email" });
+    await email.fill("kai@example.com");
+    await email.press("Enter");
+    await expect(invite.getByText("The invitation wasn’t sent")).toBeVisible();
+    expect(api.calls("POST /api/team/invitations")).toHaveLength(0);
+    await invite.getByRole("radio", { name: /^Developer/ }).check();
+    await expect(send).not.toHaveAttribute("aria-disabled", "true");
+    await send.click();
+    await expect(page.getByText("Invitation sent to kai@example.com").first()).toBeVisible();
+    expect(api.calls("POST /api/team/invitations").map((c) => c.body)).toEqual([
+      { email: "kai@example.com", roleKey: "rol_dev" },
+    ]);
+  });
+
+  test("@journey @security one invitation change at a time, and the factor names its invitation", async ({
+    page,
+  }) => {
+    const bob = {
+      invitationId: "inv_bob",
+      email: "bob@example.com",
+      roleKey: "rol_dev",
+      roleLabel: "Developer",
+      status: "pending",
+      expiresAt: "2026-11-24T10:00:00Z",
+    };
+    const api = signedIn()
+      .on("GET /api/team", ok({ ...MEMBERS, invitations: [...MEMBERS.invitations, bob] }))
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("POST /api/team/invitations/:invitationId/resend", (_r, nth) =>
+        nth === 0
+          ? { ...stepUpRequired("invitation.resend", { intentId: "sti_resend" }), delayMs: 1500 }
+          : ok({}),
+      )
+      .on("DELETE /api/team/invitations/:invitationId", ok({}))
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/team");
+    await page
+      .getByRole("button", { name: "Actions for the invitation to ana@example.com" })
+      .click();
+    await page.getByRole("menuitem", { name: "Resend" }).click();
+    // While Ana's resend runs, every other row's actions wait for it.
+    await expect(
+      page.getByRole("button", {
+        name: "Actions for the invitation to bob@example.com",
+        includeHidden: true,
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await expect(
+      page.getByRole("button", { name: "Actions for Priya Shah", includeHidden: true }),
+    ).toHaveAttribute("aria-disabled", "true");
+    const stepUp = page.getByRole("dialog", { name: "Confirm it’s you" });
+    await expect(stepUp).toContainText(
+      "Use your second factor to send the invitation to ana@example.com again.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(page.getByText("Invitation sent again to ana@example.com").first()).toBeVisible();
+    const resends = api.calls("POST /api/team/invitations/:invitationId/resend");
+    expect(resends.map((r) => r.path)).toEqual([
+      "/api/team/invitations/inv_ana/resend",
+      "/api/team/invitations/inv_ana/resend",
+    ]);
+    expect(resends[1]?.headers["fin-step-up-intent"]).toBe("sti_resend");
+    expect(api.calls("DELETE /api/team/invitations/:invitationId")).toHaveLength(0);
+    await expect(
+      page.getByRole("button", { name: "Actions for the invitation to bob@example.com" }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("@journey @security a member's role changes with the factor", async ({ page }) => {
+    const api = signedIn()
+      .on("GET /api/team", ok(MEMBERS))
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("GET /api/team/members/:memberId/credentials", ok({ items: [] }))
+      .on("PATCH /api/team/members/:memberId", (_r, nth) =>
+        nth === 0 ? stepUpRequired("member.role", { intentId: "sti_role_change" }) : ok({}),
+      )
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/team");
+    await page.getByRole("button", { name: "Actions for Priya Shah" }).click();
+    await page.getByRole("menuitem", { name: "Change role" }).click();
+    const change = page.getByRole("dialog", { name: "Change Priya Shah’s role" });
+    // The member's own role is where the picker starts: Save waits for a change.
+    await expect(change.getByRole("radio", { name: /^Developer/ })).toBeChecked();
+    await expect(change.getByRole("button", { name: "Save" })).toBeDisabled();
+    await change.getByRole("radio", { name: /^Admin/ }).check();
+    await change.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
+      "Use your second factor to change Priya Shah’s role to Admin.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(page.getByText("Priya Shah’s role is now Admin").first()).toBeVisible();
+    const sends = api.calls("PATCH /api/team/members/:memberId");
+    expect(sends.map((s) => s.body)).toEqual([
+      { roleKey: "admin", rollCredentials: true },
+      { roleKey: "admin", rollCredentials: true },
+    ]);
+    expect(sends[1]?.headers["fin-step-up-intent"]).toBe("sti_role_change");
+  });
 });
 
 test.describe("roles", () => {
@@ -469,7 +795,7 @@ test.describe("roles", () => {
     await page.getByRole("checkbox", { name: /^Send money/ }).click();
     await expect(page.getByRole("checkbox", { name: /^See customers/ })).toBeChecked();
     await expect(page.getByRole("checkbox", { name: /^See money movement/ })).toBeChecked();
-    await expect(page.getByText("Support can do 3 things.")).toBeVisible();
+    await expect(page.getByText("Support can do 3 things.").first()).toBeVisible();
 
     await page.getByRole("button", { name: "Save" }).click();
     await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
@@ -510,12 +836,148 @@ test.describe("roles", () => {
       "/audit-log?type=team&targetKind=role",
     );
     await page.getByRole("link", { name: "Admin", exact: true }).click();
-    await expect(page.getByText("Built-in roles can’t be changed.")).toBeVisible();
+    await expect(page.getByText("Built-in roles can’t be changed.").first()).toBeVisible();
     await expect(page.getByRole("checkbox", { name: /^See customers/ })).toBeDisabled();
     await expect(page.getByRole("link", { name: "Duplicate" })).toHaveAttribute(
       "href",
       "/settings/roles/new?from=admin",
     );
+  });
+
+  test("@journey @security deleting a role with holders waits for the role they move to", async ({
+    page,
+  }) => {
+    const api = signedIn()
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("POST /api/roles/:roleId/delete", (_r, nth) =>
+        nth === 0 ? stepUpRequired("role.delete", { intentId: "sti_delete" }) : ok({}),
+      )
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/roles");
+    await page.getByRole("button", { name: "More for Developer" }).click();
+    await page.getByRole("menuitem", { name: "Delete role" }).click();
+    const remove = page.getByRole("dialog", { name: "Delete Developer?" });
+    // Super admin may be given, and is first in the list; nothing is chosen for the holders.
+    await expect(remove.getByRole("radio", { name: /^Super admin/ })).toBeEnabled();
+    await expect(remove.getByRole("radio", { checked: true })).toHaveCount(0);
+    const confirm = remove.getByRole("button", { name: "Delete role" });
+    await expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(api.calls("POST /api/roles/:roleId/delete")).toHaveLength(0);
+    await remove.getByRole("radio", { name: /^Admin/ }).check();
+    await expect(confirm).not.toHaveAttribute("aria-disabled", "true");
+    await confirm.click();
+    await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
+      "Use your second factor to delete the role Developer.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(page.getByText("Developer was deleted").first()).toBeVisible();
+    const deletes = api.calls("POST /api/roles/:roleId/delete");
+    expect(deletes.map((d) => [d.path, d.body])).toEqual([
+      ["/api/roles/rol_dev/delete", { moveTo: "admin" }],
+      ["/api/roles/rol_dev/delete", { moveTo: "admin" }],
+    ]);
+    expect(deletes[1]?.headers["fin-step-up-intent"]).toBe("sti_delete");
+  });
+
+  test("@journey a copy of Super admin leaves out what can't be given, and saves", async ({
+    page,
+  }) => {
+    const all = BUILT_IN_ROLES[0]?.permissions ?? [];
+    const api: ApiDouble = signedIn()
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("GET /api/roles/:roleKey", (request) =>
+        request.path.endsWith("/super_admin")
+          ? ok({
+              roleKey: "super_admin",
+              roleId: null,
+              label: "Super admin",
+              builtIn: true,
+              permissions: all,
+              version: null,
+              holders: 1,
+            })
+          : ok({
+              roleKey: "rol_copy",
+              roleId: "rol_copy",
+              label: "Super admin copy",
+              description: "",
+              builtIn: false,
+              permissions:
+                (api.calls("POST /api/roles")[0]?.body as { permissions?: string[] } | undefined)
+                  ?.permissions ?? [],
+              version: 1,
+              holders: 0,
+            }),
+      )
+      .on("POST /api/roles", ok({ roleId: "rol_copy" }));
+    await api.install(page);
+    await gotoReady(page, "/settings/roles/new?from=super_admin");
+    await expect(page.getByRole("textbox", { name: "Name" })).toHaveValue("Super admin copy");
+    const restricted = page.getByRole("checkbox", { name: /^Delete the organisation/ });
+    await expect(restricted).not.toBeChecked();
+    await expect(restricted).toBeDisabled();
+    await expect(page.getByText("Some permissions aren’t in the copy.").first()).toBeVisible();
+    const save = page.getByRole("button", { name: "Save" });
+    await expect(save).not.toHaveAttribute("aria-disabled", "true");
+    await save.click();
+    await expect(page).toHaveURL(/\/settings\/roles\/rol_copy$/);
+    const created = api.calls("POST /api/roles");
+    expect(created).toHaveLength(1);
+    const sent = (created[0]?.body as { permissions?: string[] } | undefined)?.permissions ?? [];
+    expect(sent).not.toContain("organization.delete");
+    expect(sent).not.toContain("golive.submit");
+    expect(sent.length).toBe(all.length - 2);
+  });
+
+  test("@journey an edited role saves with its intent and says it is saved", async ({ page }) => {
+    let version = 1;
+    let description: string = DEVELOPER_ROLE.description;
+    const api = signedIn()
+      .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
+      .on("GET /api/roles/:roleKey", () =>
+        ok({
+          roleKey: "rol_dev",
+          roleId: "rol_dev",
+          label: "Developer",
+          description,
+          builtIn: false,
+          permissions: DEVELOPER_ROLE.permissions,
+          version,
+          holders: 2,
+        }),
+      )
+      .on("PUT /api/roles/:roleId", (request, nth) => {
+        if (nth === 0) return stepUpRequired("role.update", { intentId: "sti_save" });
+        description = (request.body as { description: string }).description;
+        version += 1;
+        return ok({});
+      })
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/roles/rol_dev");
+    await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
+    const field = page.getByRole("textbox", { name: /^Description/ });
+    await field.fill("Builds the integration.");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
+      "Use your second factor to save the role Developer.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    // The save's own reload brings version 2; the editor keeps saying it is saved.
+    const summary = page.getByRole("complementary", { name: "Summary" });
+    await expect(
+      summary.getByText("Saved. Changes apply on each person’s next request."),
+    ).toBeVisible();
+    await expect.poll(() => api.calls("GET /api/roles/:roleKey").length).toBe(2);
+    await expect(
+      summary.getByText("Saved. Changes apply on each person’s next request."),
+    ).toBeVisible();
+    await expect(field).toHaveValue("Builds the integration.");
+    const saves = api.calls("PUT /api/roles/:roleId");
+    expect(saves).toHaveLength(2);
+    expect(saves[1]?.body).toMatchObject({ description: "Builds the integration.", version: 1 });
+    expect(saves[1]?.headers["fin-step-up-intent"]).toBe("sti_save");
   });
 });
 
@@ -559,7 +1021,7 @@ test.describe("the audit log", () => {
     });
     await api.install(page);
     await gotoReady(page, "/audit-log");
-    await expect(page.getByText("Couldn’t load the audit log")).toBeVisible();
+    await expect(page.getByText("Couldn’t load the audit log").first()).toBeVisible();
     await page.getByRole("button", { name: "Try again" }).click();
     await expect(
       page.getByRole("heading", { name: "No events in the last 30 days" }),
@@ -639,7 +1101,7 @@ test.describe("account security", () => {
       "Use your second factor to sign out your other devices.",
     );
     await enterCode(page, "Authenticator code", "123456");
-    await expect(page.getByText("Signed out everywhere else")).toBeVisible();
+    await expect(page.getByText("Signed out everywhere else").first()).toBeVisible();
     expect(
       api.calls("POST /api/account/sessions/revoke-others")[1]?.headers["fin-step-up-intent"],
     ).toBe("sti_others");
@@ -667,12 +1129,166 @@ test.describe("account security", () => {
       page.getByRole("heading", { name: "Couldn’t load your sign-in methods" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Try again" }).click();
-    await expect(page.getByText("You have no second factor yet.")).toBeVisible();
+    await expect(page.getByText("You have no second factor yet.").first()).toBeVisible();
     await expect(
-      page.getByText(
-        "Your account has no name yet. It is shown to your team and in the audit log.",
-      ),
+      page
+        .getByText("Your account has no name yet. It is shown to your team and in the audit log.")
+        .first(),
     ).toBeVisible();
+  });
+
+  test("@journey @security one sign-out at a time, and the factor names the device", async ({
+    page,
+  }) => {
+    const api = signedIn()
+      .on("GET /api/account/security", ok(SECURITY_DATA))
+      .on(
+        "GET /api/account/sessions",
+        ok({
+          items: [
+            ...SESSIONS,
+            {
+              id: "ses_3",
+              device: "Firefox on Windows",
+              ipAddress: "198.51.100.77",
+              createdAt: "2026-11-17T09:14:00Z",
+              lastSeenAt: "2026-11-17T09:14:00Z",
+              current: false,
+            },
+          ],
+          total: 3,
+        }),
+      )
+      .on("GET /api/account/activity", ok({ items: [], total: 0 }))
+      .on("POST /api/account/sessions/:sessionId/revoke", (_r, nth) =>
+        nth === 0
+          ? {
+              ...stepUpRequired("account.session_revoke", { intentId: "sti_session" }),
+              delayMs: 1500,
+            }
+          : ok({}),
+      )
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/account/security");
+    const sessions = page.getByRole("table", { name: "Where you’re signed in" });
+    await sessions
+      .getByRole("row", { name: "Safari on iPhone" })
+      .getByRole("button", { name: "Sign out" })
+      .click();
+    // While it runs, the other sign-outs wait for it.
+    await expect(
+      sessions
+        .getByRole("row", { name: "Firefox on Windows" })
+        .getByRole("button", { name: "Sign out" }),
+    ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Sign out everywhere else" })).toBeDisabled();
+    await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
+      "Use your second factor to sign out Safari on iPhone.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(page.getByText("Signed out Safari on iPhone").first()).toBeVisible();
+    expect(api.calls("POST /api/account/sessions/:sessionId/revoke").map((c) => c.path)).toEqual([
+      "/api/account/sessions/ses_2/revoke",
+      "/api/account/sessions/ses_2/revoke",
+    ]);
+  });
+
+  test("@journey @security the authenticator is set up from Account security with the factor", async ({
+    page,
+  }) => {
+    const codes = Array.from({ length: 10 }, (_, i) => `code-${String(i).padStart(4, "0")}`);
+    const api = signedIn(
+      viewer({ factors: { passkeys: 1, authenticator: false, backupCodesLeft: null } }),
+    )
+      .on(
+        "GET /api/account/security",
+        ok({ ...SECURITY_DATA, authenticator: false, backupCodesLeft: null }),
+      )
+      .on("GET /api/account/sessions", ok({ items: SESSIONS, total: 2 }))
+      .on("GET /api/account/activity", ok({ items: [], total: 0 }))
+      .on("POST /api/auth/two-factor/enable", (_r, nth) =>
+        nth === 0
+          ? stepUpRequired("account.totp_enable", {
+              intentId: "sti_totp",
+              methods: ["passkey"],
+            })
+          : ok({
+              totpURI: "otpauth://totp/Fin:maya?secret=JBSWY3DPEHPK3PXP&issuer=Fin",
+              backupCodes: codes,
+            }),
+      )
+      .on("POST /api/auth/passkey/verify-authentication", ok({ session: {} }))
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/account/security");
+    await page
+      .getByRole("table", { name: "Your sign-in methods" })
+      .getByRole("button", { name: "Set up" })
+      .click();
+    const stepUp = page.getByRole("dialog", { name: "Confirm it’s you" });
+    await expect(stepUp).toContainText("Use your second factor to set up an authenticator app.");
+    await expect(stepUp.getByRole("button", { name: "Use your passkey" })).toBeVisible();
+    await stepUp.getByRole("button", { name: "Cancel" }).click();
+    await expect(stepUp).toHaveCount(0);
+    expect(api.calls("POST /api/auth/two-factor/enable")).toHaveLength(1);
+    // Asked again, the dialog is proved by a code from the ceremony double.
+    api.on("POST /api/auth/two-factor/enable", (_r, nth) =>
+      nth === 0
+        ? stepUpRequired("account.totp_enable", { intentId: "sti_totp2" })
+        : ok({
+            totpURI: "otpauth://totp/Fin:maya?secret=JBSWY3DPEHPK3PXP&issuer=Fin",
+            backupCodes: codes,
+          }),
+    );
+    await page
+      .getByRole("table", { name: "Your sign-in methods" })
+      .getByRole("button", { name: "Set up" })
+      .click();
+    await enterCode(page, "Authenticator code", "123456");
+    const setup = page.getByRole("dialog", { name: "Set up your authenticator" });
+    await expect(setup.getByTestId("authenticator-key")).toHaveText("JBSW Y3DP EHPK 3PXP");
+    expect(
+      api.calls("POST /api/auth/two-factor/enable").at(-1)?.headers["fin-step-up-intent"],
+    ).toBe("sti_totp2");
+    await enterCode(page, "2. Enter the 6-digit code it shows", "654321");
+    const saved = page.getByRole("dialog", { name: "Save your backup codes" });
+    await expect(
+      saved.getByRole("list", { name: "Backup codes" }).getByRole("listitem"),
+    ).toHaveCount(10);
+  });
+});
+
+test.describe("the organisation", () => {
+  test("@journey @security an organisation is created with the factor", async ({ page }) => {
+    const api = signedIn()
+      .on("GET /api/org", ok(ORG_PROFILE))
+      .on("GET /api/orgs", ok({ items: [ORG_ROW], total: 1 }))
+      .on("POST /api/orgs", (_r, nth) =>
+        nth === 0
+          ? stepUpRequired("org.create", { intentId: "sti_org" })
+          : { status: 200, body: { orgId: "org_labs" }, delayMs: 600 },
+      )
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/organisation");
+    await page.getByRole("button", { name: "Create organisation" }).click();
+    const create = page.getByRole("dialog", { name: "Create an organisation" });
+    await create.getByRole("textbox", { name: "Organisation name" }).fill("Acme Labs");
+    await create.getByRole("button", { name: "Create organisation" }).click();
+    await expect(page.getByRole("dialog", { name: "Confirm it’s you" })).toContainText(
+      "Use your second factor to create an organisation.",
+    );
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(create.getByRole("button", { name: "Create organisation" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    await expect(page.getByText("Organisation created").first()).toBeVisible();
+    const sends = api.calls("POST /api/orgs");
+    expect(sends.map((s) => s.body)).toEqual([{ name: "Acme Labs" }, { name: "Acme Labs" }]);
+    expect(sends[1]?.headers["idempotency-key"]).toBe(sends[0]?.headers["idempotency-key"]);
+    expect(sends[1]?.headers["fin-step-up-intent"]).toBe("sti_org");
   });
 });
 

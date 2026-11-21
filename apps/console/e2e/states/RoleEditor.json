@@ -6,8 +6,8 @@
     "edit": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey an edited role saves with its intent and says it is saved"
     },
     "new": {
       "status": "covered",
@@ -16,8 +16,10 @@
       "test": "@journey a new role ticks what it needs and is created with its intent"
     },
     "duplicate": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a copy of Super admin leaves out what can't be given, and saves"
     },
     "builtIn": {
       "status": "covered",
@@ -38,8 +40,8 @@
     "saved": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey an edited role saves with its intent and says it is saved"
     },
     "saveFailed": {
       "status": "pending",

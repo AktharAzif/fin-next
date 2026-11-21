@@ -53,14 +53,14 @@
     "create": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an organisation is created with the factor"
     },
     "createBusy": {
       "status": "covered",
       "day": "sat",
-      "spec": "apps/console/e2e/sat/journeys.spec.ts",
-      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an organisation is created with the factor"
     },
     "createFailed": {
       "status": "pending",
