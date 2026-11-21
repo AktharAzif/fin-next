@@ -30,6 +30,8 @@ export function cloudflare(ctx: Context, settingIds: Iterable<string> = []): Cli
   const writer = new CloudflareWriter(api, ctx.guard, ctx.run, ctx.overlay, {
     settings: settingIds,
     now: () => ctx.runtime.now(),
+    tokenServices: { [ctx.settings.email.token.name]: ctx.settings.email.token.service },
+    identityProvider: ctx.settings.access.identityProvider,
   });
   return {
     api,

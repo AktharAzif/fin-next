@@ -13,8 +13,9 @@ either by hand.
   host: the static files and `/api/` alike); session 8 hours; binding cookie on; HTTP-only cookie;
   `SameSite=Lax`; not in the App Launcher; only the account's One-time PIN login method; the policy
   above. The writer refuses an application body that holds any other policy, or more than one, or
-  a login method not read from the account: the policy's ID must be the one read (or just created)
-  under the policy's name.
+  a login method not read from the account as the settings' type (`access.identityProvider`, One-time
+  PIN; the shared account also holds another product's login methods): the policy's ID must be the
+  one read (or just created) under the policy's name.
 
 The application also keeps the three settings that would open it in their closed state, and puts
 them back if they drift: OPTIONS is not let past Access (`options_preflight_bypass` off), a WARP

@@ -342,6 +342,25 @@ describe("email token", () => {
     assert.deepEqual(body.condition.request_ip.in, ["198.51.100.7/32"]);
   });
 
+  it("reads worker's egress from Railway when the overlay lists only other services' addresses", async () => {
+    const h = harness((o) => {
+      o.staticEgress = { api: ["198.51.100.5"], "cloudflared-public": ["198.51.100.6"] };
+    });
+    h.rw.egress.set("worker", ["198.51.100.7"]);
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    const body = h.cf.writes().find((c) => c.path.endsWith("/tokens"))?.body as TokenBody;
+    assert.deepEqual(body.condition.request_ip.in, ["198.51.100.7/32"]);
+  });
+
+  it("filters the token to worker's own addresses when the overlay lists other services' too", async () => {
+    const h = harness((o) => {
+      o.staticEgress = { worker: ["203.0.113.10"], api: ["198.51.100.5"] };
+    });
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    const body = h.cf.writes().find((c) => c.path.endsWith("/tokens"))?.body as TokenBody;
+    assert.deepEqual(body.condition.request_ip.in, ["203.0.113.10/32"]);
+  });
+
   it("builds the token body with whole-second times", () => {
     const body = tokenBody(
       "fin-next-staging-email",

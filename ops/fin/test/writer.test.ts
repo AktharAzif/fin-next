@@ -11,7 +11,7 @@ import { RefusedError } from "../src/core/errors.ts";
 import { Guard } from "../src/core/guard.ts";
 import { Masker } from "../src/core/mask.ts";
 import { Output } from "../src/core/output.ts";
-import { parseOverlay } from "../src/core/overlay.ts";
+import { type Overlay, parseOverlay } from "../src/core/overlay.ts";
 import { Run } from "../src/core/run.ts";
 import { RunLog } from "../src/core/runlog.ts";
 import { Secret } from "../src/core/secret.ts";
@@ -37,7 +37,12 @@ function ruleBody(ref: string, expression: string): Record<string, unknown> {
   return { ref, description: "d", expression, action: "block", enabled: true };
 }
 
-function setup(dryRun = false) {
+/** The fixture overlay with its static egress replaced. */
+function withEgress(staticEgress: Record<string, string[]>): Overlay {
+  return parseOverlay({ ...overlayFixture(), staticEgress }, "staging");
+}
+
+function setup(dryRun = false, ov: Overlay = overlay) {
   const token = fakeToken("w");
   const cf = new FakeCloudflare(token);
   const runtime = fakeRuntime({ fetch: cf.fetch });
@@ -53,9 +58,11 @@ function setup(dryRun = false) {
     },
   );
   const api = new CloudflareApi(new Secret(token), runtime, masker);
-  const writer = new CloudflareWriter(api, new Guard(overlay), run, overlay, {
+  const writer = new CloudflareWriter(api, new Guard(ov), run, ov, {
     settings: ["0rtt"],
     now: () => runtime.now(),
+    tokenServices: { "fin-next-staging-email": "worker" },
+    identityProvider: "onetimepin",
   });
   return { api, cf, run, runtime, writer };
 }
@@ -754,6 +761,95 @@ describe("the IDs a write carries", () => {
         /within 180 days/,
       );
     }
+  });
+
+  describe("a token's client IP filter is its own service's static egress", () => {
+    const own = { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" };
+    const email = hex(32, "6");
+    const mint = (name: string, entries: string[]) => ({
+      name,
+      policies: [{ effect: "allow", resources: own, permission_groups: [{ id: email }] }],
+      condition: { request_ip: { in: entries } },
+      not_before: "2026-11-21T06:00:00Z",
+      expires_on: "2027-05-20T06:00:00Z",
+    });
+    const target = (name = "fin-next-staging-email"): WriteTarget => ({
+      kind: "token",
+      name,
+      permissionGroups: [{ name: "Email Sending Write", id: email }],
+    });
+    const check = async (ov: Overlay, entries: string[], name?: string) => {
+      const s = setup(false, ov);
+      await s.api.list(`${A}/tokens/permission_groups`);
+      s.writer.check(
+        target(name),
+        "POST",
+        `${A}/tokens`,
+        mint(name ?? "fin-next-staging-email", entries),
+      );
+    };
+
+    it("refuses another service's address when the overlay lists the token's service", async () => {
+      const ov = withEgress({ worker: ["203.0.113.10", "203.0.113.11"], api: ["198.51.100.5"] });
+      await check(ov, ["203.0.113.10/32", "203.0.113.11/32"]);
+      for (const entries of [["198.51.100.5/32"], ["203.0.113.10/32", "198.51.100.5/32"]]) {
+        await assert.rejects(
+          check(ov, entries),
+          (e: unknown) =>
+            e instanceof RefusedError && /worker's static egress addresses/.test(e.message),
+        );
+      }
+    });
+
+    it("takes single /32 addresses when the overlay lists only other services (read back from Railway)", async () => {
+      const ov = withEgress({ api: ["198.51.100.5"], "cloudflared-public": ["198.51.100.6"] });
+      await check(ov, ["198.51.100.7/32"]);
+      for (const entry of ["0.0.0.0/0", "198.51.100.0/24", "198.51.100.7", "2001:db8::1/128"]) {
+        await assert.rejects(
+          check(ov, [entry]),
+          (e: unknown) => e instanceof RefusedError && /one IPv4 address \(\/32\)/.test(e.message),
+        );
+      }
+      await check(withEgress({}), ["198.51.100.7/32"]);
+    });
+
+    it("refuses a filter on a token the public settings tie to no service", async () => {
+      await assert.rejects(
+        check(overlay, ["203.0.113.10/32"], "fin-next-staging-other"),
+        (e: unknown) => e instanceof RefusedError && /no service/.test(e.message),
+      );
+    });
+  });
+
+  it("attaches to Fin's application only the login method of the configured type, as read", async () => {
+    const s = setup();
+    const { writer } = s;
+    const ours = uuid("8");
+    s.cf.policies.push({ id: ours, name: "fin-next-staging-staff", decision: "allow" });
+    // Another product's login method on the shared account.
+    const other = uuid("7");
+    s.cf.idps.push({ id: other, type: "github", name: "other product" });
+    await s.api.list(`${A}/access/policies`);
+    await s.api.list(`${A}/access/identity_providers`);
+    const body = (idps: string[]) => ({
+      name: "fin-next-staging-admin",
+      type: "self_hosted",
+      domain: `staff.${ZONE}`,
+      allowed_idps: idps,
+      policies: [{ id: ours, precedence: 1 }],
+    });
+    writer.check(APP, "POST", `${A}/access/apps`, body([uuid("1")]));
+    for (const idps of [[other], [uuid("1"), other]]) {
+      refused(() => writer.check(APP, "POST", `${A}/access/apps`, body(idps)), /login methods/);
+    }
+    // A writer told no login method type allows none.
+    const untold = new CloudflareWriter(s.api, new Guard(overlay), s.run, overlay, {
+      now: () => s.runtime.now(),
+    });
+    refused(
+      () => untold.check(APP, "POST", `${A}/access/apps`, body([uuid("1")])),
+      /login methods/,
+    );
   });
 
   it("attaches to Fin's application exactly the policy read under its name, and only login methods read", async () => {

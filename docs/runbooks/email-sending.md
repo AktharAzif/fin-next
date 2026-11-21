@@ -26,9 +26,13 @@ Mints the account-owned token `fin-next-<env>-email` (CR-08) and sets it on `wor
 
 - one permission group (Email Sending Write), on this account only;
 - a client IP filter to `worker`'s static egress addresses (the overlay's `staticEgress.worker`, or
-  read back from Railway); it is never minted without the filter, and the writer refuses an entry
-  that is not one IPv4 address (`/32`) or, when the overlay lists static egress addresses, one that
-  is not among them;
+  read back from Railway when the overlay does not list `worker`); it is never minted without the
+  filter. The writer ties the filter to the token's own service (the settings' `email.token.service`)
+  and refuses an entry that is not one IPv4 address (`/32`) or, when the overlay lists
+  `staticEgress.worker`, one that is not among `worker`'s addresses: another service's address (an
+  `api` or connector address the overlay also lists) never passes. When the addresses are read back
+  from Railway, single addresses pass the writer, and the command sends exactly the ones Railway
+  answered;
 - the permission group's ID is the one read from the account under that name;
 - an expiry of 180 days (the settings refuse more, and the writer refuses a mint that would outlive
   180 days);

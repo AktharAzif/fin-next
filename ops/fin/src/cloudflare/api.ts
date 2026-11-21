@@ -16,11 +16,13 @@
 //   - the body names what the target names: a record's name, a route's pattern, a rule's ref and
 //     the hostnames in its expression, every domain of an Access application;
 //   - every ID the body carries was read: a CNAME's tunnel (one of Fin's own), an Access
-//     application's one policy (read or created under the policy's name) and its login methods, a
-//     token's permission groups (read under the names they are declared with);
+//     application's one policy (read or created under the policy's name) and its login methods
+//     (read as the type the public settings name), a token's permission groups (read under the
+//     names they are declared with);
 //   - a token is for this account only, its client IP filter (required for the groups that need
-//     it) holds single IPv4 addresses, the overlay's static egress addresses when it lists any, and
-//     it expires within MAX_TOKEN_DAYS;
+//     it) holds single IPv4 addresses of the token's own service (the one the public settings tie
+//     it to): that service's static egress addresses when the overlay lists them, and otherwise
+//     (read back from Railway) single addresses alone; and it expires within MAX_TOKEN_DAYS;
 //   - no PUT replaces a rule set (a whole-phase replace would remove another product's rules).
 //
 // The body checks read the request the writer is about to send, not a label beside it. They are a
@@ -442,6 +444,13 @@ export interface WriterOptions {
   settings?: Iterable<string>;
   /** The run's clock (a token's expiry is bounded from it). */
   now: () => Date;
+  /**
+   * The Railway service each token's client IP filter belongs to, by token name (from the public
+   * settings). A token without one is never minted with a filter.
+   */
+  tokenServices?: Readonly<Record<string, string>>;
+  /** The type of the one login method Fin's Access application allows (from the public settings). */
+  identityProvider?: string;
 }
 
 type Seen = Readonly<Record<string, unknown>>;
@@ -454,8 +463,12 @@ export class CloudflareWriter {
   readonly #zone: string;
   readonly #settings: ReadonlySet<string>;
   readonly #now: () => Date;
-  /** Every static egress address the overlay lists (for any service). */
-  readonly #egress: ReadonlySet<string>;
+  /** The static egress addresses the overlay lists, by service. */
+  readonly #egress: ReadonlyMap<string, readonly string[]>;
+  /** The service each token's client IP filter belongs to, by token name. */
+  readonly #tokenServices: ReadonlyMap<string, string>;
+  /** The login method type Fin's Access application allows. */
+  readonly #identityProvider: string | undefined;
   /** Objects a checked (not yet sent) POST will create, as `<kind>:<name>`, for check() alone. */
   readonly #planned = new Set<string>();
 
@@ -473,7 +486,9 @@ export class CloudflareWriter {
     this.#zone = overlay.cloudflare.zoneId;
     this.#settings = new Set(options.settings ?? []);
     this.#now = options.now;
-    this.#egress = new Set(Object.values(overlay.staticEgress).flat());
+    this.#egress = new Map(Object.entries(overlay.staticEgress));
+    this.#tokenServices = new Map(Object.entries(options.tokenServices ?? {}));
+    this.#identityProvider = options.identityProvider;
   }
 
   /** The object a read (or a write's answer) showed in `collection` under `id`. */
@@ -715,13 +730,20 @@ export class CloudflareWriter {
         if (!planned && (policy === undefined || policy.name !== target.policy)) {
           refuse(`the application holds exactly one policy, ${target.policy}, as read`);
         }
-        // Only login methods read from this account (an empty list would allow every method).
+        // Only login methods read from this account as the type the public settings name (an empty
+        // list would allow every method; the shared account also holds another product's).
         const idps = Array.isArray(b.allowed_idps) ? b.allowed_idps : [];
+        const loginType = this.#identityProvider;
         if (
+          loginType === undefined ||
           idps.length === 0 ||
-          idps.some((idp) => this.#seen(`${account}/access/identity_providers`, idp) === undefined)
+          idps.some(
+            (idp) => this.#seen(`${account}/access/identity_providers`, idp)?.type !== loginType,
+          )
         ) {
-          refuse("the application allows only login methods read from this account");
+          refuse(
+            `the application allows only login methods read from this account as ${loginType ?? "the configured type"}`,
+          );
         }
         return;
       }
@@ -864,9 +886,12 @@ export class CloudflareWriter {
   /**
    * A token mint: this account only; exactly the declared groups, each read from the account's
    * permission groups under the name it is declared with (so a group's name, which decides whether
-   * the IP filter is required, is Cloudflare's, not a label); a client IP filter of single IPv4
-   * addresses (the overlay's static egress addresses, when it lists any), required where the
-   * group needs it; and an expiry within MAX_TOKEN_DAYS of now.
+   * the IP filter is required, is Cloudflare's, not a label); a client IP filter, required where
+   * the group needs it, of single IPv4 addresses of the token's own service (the public settings
+   * tie each token to one): the overlay's `staticEgress.<service>` when it lists that service, and
+   * otherwise single addresses alone, as the command reads them back from Railway (another
+   * service's addresses never stand in for the token's own); and an expiry within MAX_TOKEN_DAYS
+   * of now.
    */
   #checkToken(
     b: Record<string, unknown>,
@@ -913,13 +938,24 @@ export class CloudflareWriter {
       }
       const entries = Array.isArray(ip.in) ? ip.in : [];
       if (entries.length === 0) refuse("a client IP filter lists at least one address");
+      const service = this.#tokenServices.get(target.name);
+      if (service === undefined) {
+        refuse(
+          "a client IP filter is the static egress of the token's own service, and the public settings tie this token to no service",
+        );
+      }
+      // Only the token's own service's addresses; none listed means they were read back from
+      // Railway, so single addresses alone are checked here.
+      const listed = this.#egress.get(service) ?? [];
       for (const entry of entries) {
         const address = /^(.+)\/32$/.exec(String(entry))?.[1] ?? "";
         if (!IPV4.test(address)) {
           refuse("each client IP filter entry is one IPv4 address (/32), never a range");
         }
-        if (this.#egress.size > 0 && !this.#egress.has(address)) {
-          refuse("each client IP filter entry is one of the overlay's static egress addresses");
+        if (listed.length > 0 && !listed.includes(address)) {
+          refuse(
+            `each client IP filter entry is one of ${service}'s static egress addresses (the overlay's staticEgress.${service})`,
+          );
         }
       }
     } else if (target.permissionGroups.some((g) => IP_FILTERED_GROUPS.has(g.name))) {
