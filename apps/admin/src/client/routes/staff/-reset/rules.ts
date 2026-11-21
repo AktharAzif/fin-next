@@ -22,8 +22,11 @@ function holds(actor: Actor, role: StaffRole | undefined): boolean {
 }
 
 /**
- * The row's reset control: `undefined` when the row has none (a pending member has no second factor
- * yet, and "New code" is theirs), `null` when it is enabled, else the reason it is disabled.
+ * The row's reset control: `undefined` when the row has none, `null` when it is enabled, else the
+ * reason it is disabled. An active member's row has it. A pending member has no second factor yet
+ * and "New code" is theirs, so their row has none; but a pending member who still lists a factor
+ * cannot enrol with a code (their emailed-code sign-in stops at the factor step, §6.4), so their row
+ * has it too, as the server allows (§10.2).
  */
 export function resetControl(
   actor: Actor,
@@ -31,7 +34,7 @@ export function resetControl(
   staff: readonly StaffMember[],
   roles: readonly StaffRole[],
 ): string | null | undefined {
-  if (member.status !== "active") return undefined;
+  if (member.status === "pending" && member.factors.length === 0) return undefined;
   if (!actor.permissions.has(RESET_PERMISSION)) return NO_PERMISSION;
   if (member.id === actor.id) return OWN_RESET;
   if (isLastActiveAdmin(member, staff)) return LAST_ADMIN;

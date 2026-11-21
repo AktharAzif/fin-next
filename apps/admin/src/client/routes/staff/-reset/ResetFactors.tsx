@@ -32,7 +32,7 @@ export interface ResetIssued {
 export const RESET_CONFIRM =
   "They’re signed out of Fin Admin at once, and their passkeys and authenticator app stop working. You get a new enrolment code to hand them.";
 
-/** The row's control: "Reset factors", or nothing for a member with no second factor yet. */
+/** The row's control: "Reset factors", or nothing for a pending member with no second factor yet. */
 export function ResetFactorsButton(props: {
   member: StaffMember;
   /** From resetControl: undefined draws nothing, null is enabled, a string is why not. */

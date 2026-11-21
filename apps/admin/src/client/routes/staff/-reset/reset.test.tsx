@@ -1,7 +1,8 @@
 // The factor reset's screen pieces (spec 02 §10.2, §8.5, §8.7, §10.8, §15.5): the contract reads the
-// API half's answer and refuses one without the code; the row offers the reset only for an active
-// member and mirrors the server's refusals with their reasons; a refusal says the right thing and
-// marks the list stale when it is; the row's control carries the member's address in its name.
+// API half's answer and refuses one without the code; the row offers the reset for an active member,
+// and for a pending one only while they still list a factor, and mirrors the server's refusals with
+// their reasons; a refusal says the right thing and marks the list stale when it is; the row's
+// control carries the member's address in its name.
 import { ApiError } from "@fin/frame";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -100,6 +101,16 @@ describe("resetControl", () => {
 
   it("draws nothing for a pending member, who has no second factor yet", () => {
     expect(resetControl(nadia, mei, staff, ROLES)).toBeUndefined();
+  });
+
+  it("offers it for a pending member who still lists a factor, whom a new code cannot help", () => {
+    const stuck: StaffMember = { ...member("ana", "viewer", "pending"), factors: ["passkey"] };
+    expect(resetControl(nadia, stuck, [...staff, stuck], ROLES)).toBeNull();
+    const narrow = actor("x", "custom", [...READS, RESET_PERMISSION]);
+    const outranking: StaffMember = { ...stuck, roleKey: "operator" };
+    expect(resetControl(narrow, outranking, [...staff, outranking], ROLES)).toBe(OUTRANKED);
+    const operator = actor("owen", "operator", OPERATOR);
+    expect(resetControl(operator, stuck, [...staff, stuck], ROLES)).toBe(NO_PERMISSION);
   });
 
   it("refuses one's own row, with the reason, even as the last Admin", () => {

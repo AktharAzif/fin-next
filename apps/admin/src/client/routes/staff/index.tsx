@@ -1,6 +1,7 @@
 // `/staff` (AdminStaff; spec 06 §7.2): `staff.read`; `?view=add` opens Add staff. The loader reads
 // the list and the roles together; its own skeleton draws while they load (FW-C11). Each row of an
-// active member also offers "Reset second factors" (spec 02 §10.4, stretch 4), from ./-reset.
+// active member, or of a pending one who still lists a factor, also offers "Reset second factors"
+// (spec 02 §10.4, stretch 4), from ./-reset.
 import { createFileRoute } from "@tanstack/react-router";
 import { loadStaff } from "../../staff/load.ts";
 import { StaffPage, StaffSkeleton } from "../../staff/StaffPage.tsx";
