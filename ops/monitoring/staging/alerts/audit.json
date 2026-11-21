@@ -1,0 +1,26 @@
+{
+  "$comment": "Phase 0's audit alerts (spec 08 §3.14, §7.8 group D). The sources are the services whose logins record audit events (spec 08 §3.4), and migrate for the operator tasks. The rest of group D comes with the guard alert and the chain, anchor and journal duties that write their lines.",
+  "alerts": [
+    {
+      "name": "audit-not-written",
+      "group": "D",
+      "severity": "P",
+      "sources": ["api", "worker", "payments", "console", "admin", "migrate"],
+      "query": { "count": { "events": ["audit.write_failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "An action was refused because its audit event could not be written. Refusals: {{value}}.",
+      "metadata": {
+        "check": "The sqlstate on audit.write_failed: FA002 is a fragment's roles missing a login, FA004 a metadata shape; the auditEvent and the release.",
+        "flow": "F15",
+        "runbook": "docs/runbooks/audit-not-written.md"
+      }
+    }
+  ]
+}
