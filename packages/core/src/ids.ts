@@ -59,6 +59,14 @@ export const ID_PREFIXES = {
   enc: "staff enrolment code",
   sft: "selfie ticket",
   run: "pnpm fin run",
+  // The identity realms' own (spec 02 §13.1).
+  ver: "verification",
+  brw: "known browser",
+  emr: "emailed-code request",
+  sur: "sign-up request",
+  // The audit trail's (spec 08 D08-17).
+  aud: "audit event",
+  jrn: "journal entry",
 } as const;
 
 export type IdPrefix = keyof typeof ID_PREFIXES;
