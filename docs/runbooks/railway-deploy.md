@@ -96,7 +96,9 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
    deployment. Then it removes the reference, whether migrate passed or failed, and reads migrate's
    variables back: if the reference is still there, nothing rolls (exit 77). A signal (Ctrl-C,
-   SIGTERM, a closed terminal) cuts the wait short, and the reference is removed before `run.done`.
+   SIGTERM, a closed terminal) cuts the wait short, and the reference is removed before `run.done`;
+   a signal that comes while the write setting the reference is still in flight (slow, or waiting
+   out a 429) starts no `migrate`, and the removal waits for that write to settle first.
    If the removal fails, the reference stays, or the run is closed at once before it could (Ctrl-\,
    a later second Ctrl-C, the five-second deadline; the output says so), remove the variable from
    `migrate` by hand at once.

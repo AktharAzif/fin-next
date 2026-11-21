@@ -23,7 +23,9 @@
 //      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
 //      the run), poll its log until `migrate.done` for this release, then remove the reference and
 //      read migrate's variables back to confirm it is gone (on every way the run ends: a failure,
-//      and a stop, which cuts the wait short; a run closed at once first says to remove it by hand);
+//      and a stop, which cuts the wait short, or, while the write that sets the reference is in
+//      flight, waits for that write and starts no migrate; a run closed at once first says to
+//      remove it by hand);
 //   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
 //      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
@@ -446,10 +448,18 @@ export const railwayDeploy: Command = {
     /**
      * migrate's superuser reference, from just before it is set until its removal settles. The
      * removal runs once, whoever asks first: migrate's own change once migrate ends, or the plan's
-     * cleanup on any other way out (an error, a stop), while the run may still write.
+     * cleanup on any other way out (an error, a stop), while the run may still write. It waits for
+     * the write that sets the reference (`setting`) to settle first, so a stop while that write is
+     * in flight (slow, or waiting out a 429) cannot delete before it lands; until the removal
+     * settles, a run closed at once says to remove the reference by hand.
      */
     let migrateReference:
-      | { serviceId: string; removal: Promise<void> | undefined; settled: boolean }
+      | {
+          serviceId: string;
+          setting: Promise<void>;
+          removal: Promise<void> | undefined;
+          settled: boolean;
+        }
       | undefined;
     const byHand = "remove it by hand now (spec 01 §6.3, §6.6)";
     const removeReference = (): Promise<void> => {
@@ -457,6 +467,11 @@ export const railwayDeploy: Command = {
       if (set === undefined) return Promise.resolve();
       set.removal ??= (async () => {
         try {
+          try {
+            await set.setting;
+          } catch {
+            // A write that failed may still have been applied: the reference is removed anyway.
+          }
           await rw.mutate(ctx.run, VARIABLE_DELETE, {
             input: {
               projectId: rw.projectId,
@@ -478,6 +493,9 @@ export const railwayDeploy: Command = {
     const runMigrate = async (serviceId: string) => {
       let failure: unknown;
       try {
+        // A stop that came while the reference was being set does not start migrate: its removal
+        // waits for that write, and the run stays open meanwhile.
+        ctx.run.assertNotStopped();
         const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
           serviceId,
           environmentId: rw.environmentId,
@@ -523,9 +541,9 @@ export const railwayDeploy: Command = {
               ...(want?.startCommand === undefined ? {} : { startCommand: want.startCommand }),
             },
           });
-          // From here the reference may be on migrate, whatever this write answers.
-          if (roll.task) migrateReference = { serviceId, removal: undefined, settled: false };
-          await rw.setVariables(
+          // No superuser reference is sent after a stop.
+          if (roll.task) ctx.run.assertNotStopped();
+          const setting = rw.setVariables(
             ctx.run,
             ctx.settings,
             roll.service,
@@ -541,6 +559,13 @@ export const railwayDeploy: Command = {
             },
             `pnpm fin railway deploy ${release.slice(0, 12)} (${ctx.run.id})`,
           );
+          // From here the reference may be on migrate, whatever this write answers (nothing runs
+          // between the call and this line, so no answer or stop comes first); its removal waits
+          // for the write to settle.
+          if (roll.task) {
+            migrateReference = { serviceId, setting, removal: undefined, settled: false };
+          }
+          await setting;
           if (roll.task) await runMigrate(serviceId);
           else {
             const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
