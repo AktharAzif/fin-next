@@ -56,6 +56,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const PATH_WORDS = new Set([
+  "api",
+  "v1",
+  "v2",
+  "v3",
+  "sources",
+  "metrics",
+  "explorations",
+  "alerts",
+  "applications",
+  "urgencies",
+  "policies",
+  "monitors",
+  "heartbeats",
+]);
+
+/** A path with every object ID replaced by `<id>`, so an error never prints an identifier. */
+export function redactPath(path: string): string {
+  return (
+    path
+      .split("?")[0]
+      ?.split("/")
+      .map((part) => (part === "" || PATH_WORDS.has(part) ? part : "<id>"))
+      .join("/") ?? ""
+  );
+}
+
 /** Better Stack's error strings from a failed response, without echoing any submitted value. */
 function errorText(body: unknown): string {
   if (!isRecord(body)) return "";
@@ -104,7 +131,7 @@ export class BetterStackClient {
     if (parsed.origin !== this.#base) {
       // Never send the token to another origin, whatever a pagination link says.
       throw new BetterStackError(
-        `refused to call another origin (${method} ${parsed.pathname})`,
+        `refused to call another origin (${method} ${redactPath(parsed.pathname)})`,
         0,
       );
     }
@@ -134,7 +161,7 @@ export class BetterStackClient {
     if (!response.ok) {
       const detail = errorText(json);
       throw new BetterStackError(
-        `${method} ${parsed.pathname} answered ${response.status}${detail === "" ? "" : `: ${detail}`}`,
+        `${method} ${redactPath(parsed.pathname)} answered ${response.status}${detail === "" ? "" : `: ${detail}`}`,
         response.status,
       );
     }
@@ -146,10 +173,12 @@ export class BetterStackClient {
     const out: Resource[] = [];
     let url: string | null = `${this.#base}${path}${path.includes("?") ? "&" : "?"}per_page=250`;
     for (let page = 0; url !== null; page += 1) {
-      if (page >= MAX_PAGES) throw new BetterStackError(`GET ${path}: too many pages`, 0);
+      if (page >= MAX_PAGES) {
+        throw new BetterStackError(`GET ${redactPath(path)}: too many pages`, 0);
+      }
       const body = await this.#send("GET", url);
       if (!isRecord(body) || !Array.isArray(body.data)) {
-        throw new BetterStackError(`GET ${path}: not a list`, 0);
+        throw new BetterStackError(`GET ${redactPath(path)}: not a list`, 0);
       }
       for (const item of body.data) out.push(toResource(item));
       const pagination = isRecord(body.pagination) ? body.pagination : {};

@@ -31,12 +31,23 @@ function num(value: number): string {
 }
 
 const str = (name: string) => `JSONExtractString(raw, '${field(name)}')`;
+const wrap = (expression: string) =>
+  expression.startsWith("(") && expression.endsWith(")") ? expression : `(${expression})`;
 const float = (name: string) => `JSONExtract(raw, '${field(name)}', 'Nullable(Float64)')`;
 
 /** One condition as a SQL boolean expression. */
 export function condition(c: Condition): string {
-  const set = [c.eq, c.in, c.notIn, c.gt, c.contains].filter((v) => v !== undefined).length;
+  const set = [c.eq, c.notEq, c.in, c.notIn, c.gt, c.contains].filter(
+    (v) => v !== undefined,
+  ).length;
   if (set !== 1) throw new QueryError(`condition on ${c.field} must set exactly one comparison`);
+  if (c.notEq !== undefined) {
+    // The negation of `eq`, so a line without the field matches (fails closed).
+    if (typeof c.notEq !== "boolean" && typeof c.notEq !== "string") {
+      throw new QueryError(`notEq on ${c.field} takes a boolean or a string`);
+    }
+    return `NOT ${wrap(condition({ field: c.field, eq: c.notEq }))}`;
+  }
   if (c.in !== undefined) return `${str(c.field)} IN (${c.in.map(literal).join(", ")})`;
   if (c.notIn !== undefined) return `${str(c.field)} NOT IN (${c.notIn.map(literal).join(", ")})`;
   if (c.gt !== undefined) return `${float(c.field)} > ${num(c.gt)}`;
@@ -63,6 +74,14 @@ export function queryEvents(query: AlertQuery): string[] {
   if ("count" in query) return [...query.count.events];
   if ("max" in query) return [query.max.event];
   if ("ratio" in query) return [query.ratio.event];
+  return [];
+}
+
+/** Every condition a query filters by. */
+export function queryConditions(query: AlertQuery): Condition[] {
+  if ("count" in query) return [...(query.count.where ?? []), ...(query.count.whereAny ?? [])];
+  if ("max" in query) return [...(query.max.where ?? [])];
+  if ("ratio" in query) return [...query.ratio.match];
   return [];
 }
 

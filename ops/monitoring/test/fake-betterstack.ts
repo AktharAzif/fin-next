@@ -36,6 +36,12 @@ const COLLECTIONS = [
 export class FakeBetterStack {
   readonly requests: Request[] = [];
   readonly store = new Map<string, Item[]>();
+  /** Answers a request with this status and body instead, when it returns one (a refusal). */
+  failWith?: (
+    method: string,
+    path: string,
+    body: unknown,
+  ) => { status: number; body: unknown } | undefined;
   #next = 100;
   readonly #options: FakeOptions;
 
@@ -87,6 +93,8 @@ export class FakeBetterStack {
         ? this.#options.uptimeToken
         : this.#options.telemetryToken;
     if (token !== `Bearer ${want}`) return json({ errors: "Invalid authentication" }, 401);
+    const failure = this.failWith?.(method, url.pathname, body);
+    if (failure !== undefined) return json(failure.body, failure.status);
     const parts = url.pathname.split("/").filter(Boolean); // api, vN, collection, ...
     let collection = parts[2] ?? "";
     let id = parts[3];

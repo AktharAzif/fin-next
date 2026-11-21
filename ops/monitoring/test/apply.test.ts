@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   type SecretDelivery,
   UsageError,
 } from "../src/apply.ts";
+import { RAILWAY_SERVICES } from "../src/check.ts";
 import { loadEnv } from "../src/config.ts";
 import { buildDesired } from "../src/desired.ts";
 import { FakeBetterStack } from "./fake-betterstack.ts";
@@ -50,7 +51,13 @@ function overlay(): { thresholds: Record<string, number>; grace: Record<string, 
   return { thresholds, grace };
 }
 
-function setup(args: string[], options: { team?: string; deliver?: boolean } = {}) {
+interface SetupOptions {
+  team?: string;
+  deliver?: false | ((s: SecretDelivery) => Promise<void>);
+  root?: string;
+}
+
+function setup(args: string[], options: SetupOptions = {}) {
   const bs = new FakeBetterStack({
     telemetryToken: TELEMETRY,
     uptimeToken: UPTIME,
@@ -58,25 +65,36 @@ function setup(args: string[], options: { team?: string; deliver?: boolean } = {
   });
   const output: string[] = [];
   const delivered: SecretDelivery[] = [];
+  const deliver =
+    typeof options.deliver === "function"
+      ? options.deliver
+      : async (s: SecretDelivery) => {
+          delivered.push(s);
+        };
   const ctx: MonitoringContext = {
     env: "staging",
     args,
-    root: ROOT,
+    root: options.root ?? ROOT,
     hosts: HOSTS,
+    zones: [ZONE],
     ...overlay(),
     environ,
     stdout: { write: (t) => output.push(t) },
     fetch: bs.fetch,
     now: () => new Date(Date.UTC(2026, 10, 21)),
-    ...(options.deliver === false
-      ? {}
-      : {
-          deliver: async (s: SecretDelivery) => {
-            delivered.push(s);
-          },
-        }),
+    ...(options.deliver === false ? {} : { deliver }),
   };
   return { bs, ctx, output, delivered, text: () => output.join("") };
+}
+
+/** A first apply on an empty team, then a fresh run of `args` against what it made. */
+async function applied(args: string[], options: SetupOptions = {}) {
+  const first = setup(["--assert-empty-team", "fin-staging"]);
+  const result = await monitoringApply(first.ctx);
+  expect(result.exitCode).toBe(0);
+  const next = setup(args, options);
+  for (const [k, v] of first.bs.store) next.bs.store.set(k, v);
+  return { first, next };
 }
 
 const writes = (bs: FakeBetterStack) => bs.requests.filter((r) => r.method !== "GET");
@@ -88,6 +106,26 @@ function expectNothingPrivate(text: string) {
   expect(text).not.toContain(ZONE);
   expect(text).not.toContain("tok-");
   expect(text).not.toContain("heartbeat.example.com");
+}
+
+/** A scratch copy of the monitoring files, the watcher's settings and the runbooks. */
+function scratchRoot(): string {
+  const root = mkdtempSync(join(tmp, "root-"));
+  for (const dir of [
+    ["ops", "monitoring", "staging"],
+    ["ops", "watcher", "settings"],
+    ["docs", "runbooks"],
+  ]) {
+    cpSync(join(ROOT, ...dir), join(root, ...dir), { recursive: true });
+  }
+  return root;
+}
+
+function editJson(root: string, name: string, change: (json: Record<string, unknown>) => void) {
+  const path = join(root, "ops", "monitoring", "staging", name);
+  const json = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  change(json);
+  writeFileSync(path, JSON.stringify(json));
 }
 
 describe("monitoring apply: the guards", () => {
@@ -104,6 +142,7 @@ describe("monitoring apply: the guards", () => {
     const result = await monitoringApply(ctx);
     expect(result.exitCode).toBe(0);
     expect(result.drift).toBe(true);
+    expect(text()).toContain("monitoring apply staging (dry run), team fin-staging");
     expect(text()).toContain("+ urgency quiet");
     expect(text()).toContain("+ policy staging-quiet");
     expect(text()).toContain("+ source fin-next-staging-watcher");
@@ -126,6 +165,20 @@ describe("monitoring apply: the guards", () => {
     expect(text()).toContain(
       "MA-02 the uptime token reads another team's objects, not fin-staging",
     );
+  });
+
+  it("honours --assert-empty-team only for a team that holds nothing at all (MA-02)", async () => {
+    const { bs, ctx, text } = setup(["--assert-empty-team", "fin-staging"]);
+    for (const name of ["prod-api", "prod-console", "prod-admin"]) {
+      bs.seed("monitors", { pronounceable_name: name, team_name: undefined });
+    }
+    const result = await monitoringApply(ctx);
+    expect(result.exitCode).toBe(1);
+    expect(text()).toContain(
+      "refused: MA-02 the uptime token reads 3 object(s) but none carries a team name, so its team cannot be checked",
+    );
+    expect(text()).not.toContain("the uptime token shows no object");
+    expect(writes(bs)).toEqual([]);
   });
 
   it("refuses a missing overlay value (MA-10)", async () => {
@@ -152,6 +205,18 @@ describe("monitoring apply: the guards", () => {
     expect(text()).toContain("refused: MA-06 policy Default (not in the files) notifies by call");
   });
 
+  it("refuses a second policy that shares a name the files use, and checks it for ai_sre (MA-08)", async () => {
+    const { next } = await applied(["--dry-run"]);
+    next.bs.seed("policies", {
+      name: "staging-quiet",
+      steps: [{ type: "escalation", step_members: [{ type: "ai_sre" }] }],
+    });
+    const result = await monitoringApply(next.ctx);
+    expect(result.exitCode).toBe(1);
+    expect(next.text()).toContain("refused: MA-08 policy staging-quiet has an ai_sre member");
+    expect(next.text()).toContain("refused: Better Stack holds 2 policies named staging-quiet");
+  });
+
   it("requires the monitor header for a real apply", async () => {
     const { ctx } = setup(["--assert-empty-team", "fin-staging"]);
     const { FIN_MONITOR_HEADER_FILE: _h, ...noHeader } = environ;
@@ -165,6 +230,21 @@ describe("monitoring apply: the guards", () => {
     });
     expect(() => parseFlags(["--confirm-delete", "all"])).toThrow(UsageError);
     expect(() => parseFlags(["--yes"])).toThrow(UsageError);
+  });
+
+  it("takes the team from the environment, and refuses files that name another (MA-02, MC-13)", async () => {
+    const root = scratchRoot();
+    for (const name of ["sources.json", "policies.json"]) {
+      editJson(root, name, (j) => {
+        j.team = "fin-production";
+      });
+    }
+    const { bs, ctx, text } = setup([], { team: "fin-production", root });
+    bs.seed("sources", { name: "fin-next-production-api" });
+    const result = await monitoringApply(ctx);
+    expect(result.exitCode).toBe(1);
+    expect(text()).toContain("MC-13 names the team fin-production");
+    expect(writes(bs)).toEqual([]);
   });
 });
 
@@ -200,6 +280,9 @@ describe("monitoring apply: applying", () => {
       push: false,
       critical_alert: false,
       email: true,
+      maintenance_from: null,
+      maintenance_to: null,
+      team_wait: null,
       request_headers: [{ name: "Fin-Monitor", value: HEADER }],
     });
     const alert = first.bs.items("alerts").find((a) => a.attributes.name === "tunnel-connectors");
@@ -219,10 +302,15 @@ describe("monitoring apply: applying", () => {
       "check",
     );
 
-    // Secrets go to their services and never to the output.
+    // Secrets go to Railway services only, and never to the output. The watcher's own source
+    // token and heartbeat URL are read by `watcher deploy`, so nothing is delivered for them.
+    expect(first.delivered.length).toBeGreaterThan(0);
+    for (const d of first.delivered) expect(RAILWAY_SERVICES).toContain(d.service);
+    expect(first.delivered.some((d) => d.variable === "FIN_HEARTBEAT_WATCHER_URL")).toBe(false);
+    expect(first.delivered.some((d) => d.service === "ops" || d.service === "watcher")).toBe(false);
     expect(first.delivered).toContainEqual({
-      service: "watcher",
-      variable: "FIN_HEARTBEAT_WATCHER_URL",
+      service: "worker",
+      variable: "FIN_HEARTBEAT_SCHEDULER_WORKER_URL",
       value: expect.stringMatching(/^https:\/\/heartbeat\.example\.com\//),
     });
     expect(
@@ -232,7 +320,7 @@ describe("monitoring apply: applying", () => {
       first.delivered.find((d) => d.service === "edge" && d.variable === "FIN_DOCS_ERRORS_DSN")
         ?.value,
     ).toMatch(/^https:\/\/tok-applications-\d+@s\d+\.eu-nbg-2\.example\.com\/1$/);
-    expect(first.delivered.some((d) => d.service === "ops")).toBe(true); // verify-daily's URL
+    expect(result.undelivered).toEqual([]);
     expectNothingPrivate(first.text());
 
     // A second dry run against what was applied finds nothing to do.
@@ -247,27 +335,146 @@ describe("monitoring apply: applying", () => {
     expect(writes(second.bs)).toEqual([]);
   });
 
-  it("caps deletions without --confirm-delete equal to their number (MA-03)", async () => {
+  it("sends each metric with the type the files give it, and reports a type that differs", async () => {
+    const { first, next } = await applied(["--dry-run"]);
+    const { config } = loadEnv(ROOT, "staging");
+    const types = new Map(
+      Object.values(config?.metrics.sets ?? {})
+        .flat()
+        .map((m) => [m.name, m.type]),
+    );
+    const metricPosts = writes(first.bs).filter((r) => /\/metrics$/.test(r.path));
+    expect(metricPosts.length).toBeGreaterThan(0);
+    for (const post of metricPosts) {
+      const body = post.body as { name: string; type?: string };
+      expect(body.type, body.name).toBe(types.get(body.name));
+    }
+    const api = next.bs.items("sources").find((s) => s.attributes.name === "fin-next-staging-api");
+    const metric = next.bs
+      .items(`metrics:${api?.id}`)
+      .find((m) => m.attributes.name === "duration_ms");
+    Object.assign(metric?.attributes ?? {}, { type: "int64_delta" });
+    const result = await monitoringApply(next.ctx);
+    expect(result.drift).toBe(true);
+    expect(next.text()).toContain(
+      "! metric fin-next-staging-api/duration_ms: type is int64_delta, the files say float64_delta",
+    );
+  });
+
+  it("sends every alert email only, and puts back an alert someone made loud (MA-06)", async () => {
+    const { first, next } = await applied(["--dry-run"]);
+    const alertPosts = writes(first.bs).filter((r) =>
+      /\/explorations\/[^/]+\/alerts$/.test(r.path),
+    );
+    expect(alertPosts.length).toBeGreaterThan(0);
+    for (const post of alertPosts) {
+      expect(post.body).toMatchObject({
+        email: true,
+        call: false,
+        sms: false,
+        push: false,
+        critical_alert: false,
+      });
+    }
+    const alert = next.bs.items("alerts").find((a) => a.attributes.name === "tunnel-connectors");
+    Object.assign(alert?.attributes ?? {}, {
+      call: true,
+      sms: true,
+      push: true,
+      critical_alert: true,
+    });
+    const dry = await monitoringApply(next.ctx);
+    expect(dry.drift).toBe(true);
+    expect(next.text()).toMatch(/~ alert tunnel-connectors: .*call true -> false/);
+    expect(next.text()).toContain(
+      "note: alert tunnel-connectors notifies by call, sms, push, critical_alert; the apply quiets it (MA-06)",
+    );
+    const fix = setup([]);
+    for (const [k, v] of next.bs.store) fix.bs.store.set(k, v);
+    expect((await monitoringApply(fix.ctx)).exitCode).toBe(0);
+    expect(alert?.attributes).toMatchObject({
+      call: false,
+      sms: false,
+      push: false,
+      critical_alert: false,
+    });
+  });
+
+  it("does not count a field Better Stack leaves out of its answer as drift", async () => {
+    const { next } = await applied(["--dry-run"]);
+    const alert = next.bs.items("alerts").find((a) => a.attributes.name === "process-crash");
+    delete alert?.attributes.alert_type;
+    delete alert?.attributes.email;
+    const api = next.bs.items("sources").find((s) => s.attributes.name === "fin-next-staging-api");
+    for (const metric of next.bs.items(`metrics:${api?.id}`)) delete metric.attributes.type;
+    const result = await monitoringApply(next.ctx);
+    expect(result.drift).toBe(false);
+    // A loud flag it leaves out reads as off, which is what the files say.
+    delete alert?.attributes.call;
+    expect((await monitoringApply(next.ctx)).drift).toBe(false);
+  });
+
+  it("finds an alert whose kind was changed (threshold to another)", async () => {
+    const { next } = await applied(["--dry-run"]);
+    const alert = next.bs.items("alerts").find((a) => a.attributes.name === "process-crash");
+    Object.assign(alert?.attributes ?? {}, { alert_type: "anomaly_rrcf" });
+    const result = await monitoringApply(next.ctx);
+    expect(result.drift).toBe(true);
+    expect(next.text()).toContain("~ alert process-crash: alert_type anomaly_rrcf -> threshold");
+  });
+
+  it("finds and clears a maintenance window or a team wait on a monitor or a heartbeat", async () => {
+    const { next } = await applied(["--dry-run"]);
+    const heartbeat = next.bs.items("heartbeats").find((h) => h.attributes.name === "watcher");
+    Object.assign(heartbeat?.attributes ?? {}, {
+      maintenance_from: "00:00:00",
+      maintenance_to: "23:59:00",
+    });
+    const monitor = next.bs
+      .items("monitors")
+      .find((m) => m.attributes.pronounceable_name === "api-health");
+    Object.assign(monitor?.attributes ?? {}, { team_wait: 86400 });
+    const result = await monitoringApply(next.ctx);
+    expect(result.drift).toBe(true);
+    expect(next.text()).toContain(
+      "~ heartbeat watcher: maintenance_from 00:00:00 -> (none); maintenance_to 23:59:00 -> (none)",
+    );
+    expect(next.text()).toContain("~ monitor api-health: team_wait 86400 -> (none)");
+  });
+
+  it("caps deletions and pauses together without --confirm-delete equal to their number (MA-03)", async () => {
     const { bs, ctx, text } = setup(["--assert-empty-team", "fin-staging"]);
     for (const n of [1, 2, 3, 4])
       bs.seed("monitors", { pronounceable_name: `old-${n}`, url: "https://x.example.com" });
     const refused = await monitoringApply(ctx);
     expect(refused.exitCode).toBe(1);
     expect(text()).toContain(
-      "refused: MA-03 this run would delete 4 objects; pass --confirm-delete 4",
+      "refused: MA-03 this run would delete or pause 4 objects; pass --confirm-delete 4",
     );
     expect(writes(bs)).toEqual([]);
 
     const wrong = setup(["--assert-empty-team", "fin-staging", "--confirm-delete", "3"]);
     for (const n of [1, 2, 3, 4]) wrong.bs.seed("monitors", { pronounceable_name: `old-${n}` });
     expect((await monitoringApply(wrong.ctx)).exitCode).toBe(1);
-    expect(wrong.text()).toContain("MA-03 --confirm-delete 3 does not match the 4 deletion(s)");
+    expect(wrong.text()).toContain(
+      "MA-03 --confirm-delete 3 does not match the 4 deletion(s) and pause(s)",
+    );
 
     const confirmed = setup(["--assert-empty-team", "fin-staging", "--confirm-delete", "4"]);
     for (const n of [1, 2, 3, 4]) confirmed.bs.seed("monitors", { pronounceable_name: `old-${n}` });
     const result = await monitoringApply(confirmed.ctx);
     expect(result.exitCode).toBe(0);
     expect(result.deleted).toBe(4);
+  });
+
+  it("counts paused heartbeats against the cap: four dropped heartbeats need --confirm-delete 4", async () => {
+    const { next } = await applied([]);
+    for (const n of [1, 2, 3, 4]) next.bs.seed("heartbeats", { name: `old-duty-${n}`, period: 60 });
+    const refused = await monitoringApply(next.ctx);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.paused).toBe(0);
+    expect(next.text()).toContain("MA-03 this run would delete or pause 4 objects");
+    expect(writes(next.bs)).toEqual([]);
   });
 
   it("pauses a heartbeat the files dropped, never deletes it (MA-04)", async () => {
@@ -282,6 +489,21 @@ describe("monitoring apply: applying", () => {
     expect(bs.items("heartbeats").find((h) => h.id === old.id)?.attributes.paused).toBe(true);
     expect(text()).toContain(
       "paused heartbeat old-duty: not in ops/monitoring; paused by pnpm fin monitoring apply on 2026-11-21",
+    );
+  });
+
+  it("refuses two remote objects with one name, naming the kind and the name", async () => {
+    const { next } = await applied(["--dry-run"]);
+    next.bs.seed("monitors", {
+      pronounceable_name: "api-health",
+      call: true,
+      sms: true,
+      push: true,
+    });
+    const result = await monitoringApply(next.ctx);
+    expect(result.exitCode).toBe(1);
+    expect(next.text()).toContain(
+      "refused: Better Stack holds 2 monitors named api-health; the apply works by name, so remove the extra one by hand",
     );
   });
 
@@ -318,11 +540,104 @@ describe("monitoring apply: applying", () => {
     expect(patches.some((p) => p.path.includes("/sources/"))).toBe(false);
   });
 
+  it("prints names for the IDs a difference holds, never the IDs", async () => {
+    const { next } = await applied(["--dry-run"]);
+    const monitor = next.bs
+      .items("monitors")
+      .find((m) => m.attributes.pronounceable_name === "api-health");
+    Object.assign(monitor?.attributes ?? {}, { policy_id: 987654 });
+    const exploration = next.bs
+      .items("explorations")
+      .find((e) => e.attributes.name === "fin/tunnel-connectors");
+    Object.assign(exploration?.attributes ?? {}, {
+      variables: [{ name: "source", variable_type: "source", values: ["555111"] }],
+    });
+    const policy = next.bs.items("policies")[0];
+    Object.assign(policy?.attributes ?? {}, {
+      steps: [
+        {
+          type: "escalation",
+          wait_before: 0,
+          urgency_id: 424242,
+          step_members: [{ type: "user", id: 313131 }],
+        },
+      ],
+    });
+    const result = await monitoringApply(next.ctx);
+    expect(result.drift).toBe(true);
+    const text = next.text();
+    expect(text).toContain("~ monitor api-health: policy_id (another policy) -> staging-quiet");
+    expect(text).toContain(
+      '~ exploration fin/tunnel-connectors: sources ["(another source)"] -> ["fin-next-staging-watcher"]',
+    );
+    expect(text).toContain("(another urgency)");
+    for (const id of ["987654", "555111", "424242", "313131"]) expect(text).not.toContain(id);
+    expectNothingPrivate(text);
+  });
+
+  it("masks the zone in every name it prints, and in Better Stack's own error text", async () => {
+    const { next } = await applied(["--dry-run"]);
+    next.bs.seed("monitors", { pronounceable_name: `legacy.${ZONE}` });
+    next.bs.seed("heartbeats", { name: `cron on db1.${ZONE}` });
+    next.bs.seed("policies", { name: `${ZONE} on-call`, steps: [] });
+    next.bs.seed("sources", { name: `${ZONE} nginx` });
+    await monitoringApply(next.ctx);
+    expect(next.text()).toContain("- monitor legacy.<zone>");
+    expectNothingPrivate(next.text());
+
+    const failing = setup([]);
+    for (const [k, v] of next.bs.store) failing.bs.store.set(k, v);
+    const monitor = failing.bs
+      .items("monitors")
+      .find((m) => m.attributes.pronounceable_name === "api-health");
+    Object.assign(monitor?.attributes ?? {}, { check_frequency: 30 });
+    failing.bs.failWith = (method, path, body) =>
+      method === "PATCH" && path.includes("/monitors/")
+        ? {
+            status: 422,
+            body: {
+              errors: { url: `${String((body as { url?: string }).url)} is invalid` },
+              invalid_attributes: [
+                JSON.stringify((body as { request_headers?: unknown }).request_headers),
+              ],
+            },
+          }
+        : undefined;
+    const result = await monitoringApply(failing.ctx);
+    expect(result.exitCode).toBe(1);
+    expect(failing.text()).toContain(
+      "monitoring apply: Better Stack refused PATCH /api/v2/monitors/<id> answered 422",
+    );
+    expect(failing.text()).toContain("(the monitor header)");
+    expectNothingPrivate(failing.text());
+  });
+
+  it("delivers what it created even when a later write fails, and lists each delivery that failed", async () => {
+    const failing = setup(["--assert-empty-team", "fin-staging"], {
+      deliver: async (s) => {
+        if (s.service === "payments") throw new Error(`refused ${s.value}`);
+      },
+    });
+    failing.bs.failWith = (method, path) =>
+      method === "POST" && path.endsWith("/heartbeats") ? { status: 500, body: {} } : undefined;
+    const result = await monitoringApply(failing.ctx);
+    expect(result.exitCode).toBe(1);
+    expect(result.created).toBeGreaterThan(0);
+    expect(result.delivered).toBeGreaterThan(0);
+    expect(result.undelivered).toContain("payments FIN_TELEMETRY_TOKEN (delivery failed)");
+    expect(failing.text()).toContain(
+      "monitoring apply: Better Stack refused POST /api/v2/heartbeats answered 500",
+    );
+    expect(failing.text()).not.toContain("refused tok-");
+    expectNothingPrivate(failing.text());
+  });
+
   it("lists what it could not deliver when no delivery hook is given, by name only", async () => {
     const { ctx, text } = setup(["--assert-empty-team", "fin-staging"], { deliver: false });
     const result = await monitoringApply(ctx);
     expect(result.exitCode).toBe(0);
-    expect(result.undelivered).toContain("watcher FIN_HEARTBEAT_WATCHER_URL");
+    expect(result.undelivered).toContain("worker FIN_HEARTBEAT_SCHEDULER_WORKER_URL");
+    expect(result.undelivered.some((u) => u.includes("FIN_HEARTBEAT_WATCHER_URL"))).toBe(false);
     expect(text()).toContain("not delivered");
     expectNothingPrivate(text());
   });

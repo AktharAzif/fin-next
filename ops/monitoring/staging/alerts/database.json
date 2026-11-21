@@ -87,7 +87,7 @@
       "query": {
         "count": {
           "events": ["database.privileged_login"],
-          "where": [{ "field": "registered", "eq": false }]
+          "where": [{ "field": "registered", "notEq": true }]
         }
       },
       "operator": "higher_than",
@@ -98,7 +98,7 @@
       "recovery_period": 3600,
       "on_missing_data": "dont_fire",
       "policy": "staging-quiet",
-      "incident_cause": "A superuser or owner login happened outside a registered run.",
+      "incident_cause": "A superuser or owner login happened outside a registered run, or the matcher could not say it was registered.",
       "metadata": {
         "check": "Who: the role on the line; Railway's audit log; the registered runs.",
         "flow": "F18",

@@ -1,5 +1,6 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { AlertDef } from "../src/config.ts";
+import { type AlertDef, loadEnv } from "../src/config.ts";
 import { condition, QueryError, renderSql } from "../src/sql.ts";
 
 const base: AlertDef = {
@@ -94,6 +95,26 @@ describe("conditions", () => {
   it("requires the key for a boolean, so a line without it never matches false", () => {
     expect(condition({ field: "dbOk", eq: false })).toBe(
       "(JSONHas(raw, 'dbOk') AND JSONExtractBool(raw, 'dbOk') = 0)",
+    );
+  });
+
+  it("matches a line without the field for notEq, so a security alert fails closed", () => {
+    expect(condition({ field: "registered", notEq: true })).toBe(
+      "NOT (JSONHas(raw, 'registered') AND JSONExtractBool(raw, 'registered') = 1)",
+    );
+    expect(condition({ field: "check", notEq: "dns" })).toBe(
+      "NOT (JSONExtractString(raw, 'check') = 'dns')",
+    );
+    expect(() => condition({ field: "n", notEq: 3 as unknown as boolean })).toThrow(QueryError);
+    expect(() => condition({ field: "registered", notEq: true, eq: false })).toThrow(QueryError);
+  });
+
+  it("renders privileged-login so a login whose registration is unknown alerts", () => {
+    const { config } = loadEnv(join(import.meta.dirname, "..", "..", ".."), "staging");
+    const login = config?.alerts.find((a) => a.name === "privileged-login");
+    expect(login).toBeDefined();
+    expect(renderSql(login as AlertDef)).toContain(
+      "JSONExtractString(raw, 'event') = 'database.privileged_login' AND NOT (JSONHas(raw, 'registered') AND JSONExtractBool(raw, 'registered') = 1)",
     );
   });
 

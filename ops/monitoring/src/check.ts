@@ -1,23 +1,29 @@
 // monitoring:check (spec 08 §7.11; ARCHITECTURE §10.11): the rules over ops/monitoring/<env>/ and
 // the catalogue, with no network, in well under a second. It fails when:
-//   MC-00 a file is missing or malformed, or an alert has an unexpanded placeholder;
+//   MC-00 a file is missing or malformed, an alert has an unexpanded placeholder, or a metric's
+//         type is not one of Better Stack's;
 //   MC-01 an event written in code (`log("<name>", ...)`) is missing from the catalogue, a
 //         catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0 events is missing;
 //   MC-02 a failure, security or money entry has no alert and no noAlert reason;
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
 //         an alert no fragment defines (or an alert watches an event whose entry does not name
-//         it), or an alert's query cannot be rendered;
+//         it), an alert's query cannot be rendered, or a security event is filtered with
+//         `eq: false` (a line without the field would never alert; `notEq: true` fails closed);
+//   MC-05 one of spec 01 §8.5's heartbeats, or the one the watcher's settings ping, is missing;
 //   MC-06 a metric label is ID-shaped or free text;
-//   MC-07 a source has no Errors application and no written reason, or a file names a source
-//         that does not exist;
+//   MC-07 a source has no Errors application and no written reason, a file names a source
+//         that does not exist, or a secret is delivered to anything but a Railway service of
+//         spec 01 §6.2;
 //   MC-08 an alert lacks incident_cause, metadata.check, metadata.flow or metadata.runbook, or a
 //         runbook (an alert's, a monitor's or a heartbeat's) does not exist;
 //   MC-10 a runbook lacks one of Phase 0's headings, or does not name an alert that points at it;
 //   MC-11 a threshold, window, minimum count or grace is a literal number instead of an overlay
 //         key;
-//   MC-12 a file holds a Better Stack identifier, ingest host, DSN or heartbeat URL;
-//   MC-13 a staging object names a production policy;
+//   MC-12 any file of the environment, the catalogue, the runbooks or the watcher's settings holds
+//         a Better Stack identifier, ingest host, DSN or heartbeat URL;
+//   MC-13 a staging object names a production policy, or the files name another environment's
+//         team (`fin-<env>`), environment or name prefix (`fin-next-<env>-`);
 //   MC-14 an alert name is used twice;
 //   RT-01 an alert, monitor or heartbeat has no policy, or a staging one names anything but
 //         staging-quiet, or names a policy the files do not define;
@@ -36,7 +42,14 @@ import {
   type Notify,
   overlayKeys,
 } from "./config.ts";
-import { QueryError, queryEvents, queryFields, renderSql, seriesField } from "./sql.ts";
+import {
+  QueryError,
+  queryConditions,
+  queryEvents,
+  queryFields,
+  renderSql,
+  seriesField,
+} from "./sql.ts";
 
 /** Spec 01 §8.9: every event Phase 0 writes. platform.ts must hold each one. */
 export const PHASE0_EVENTS: readonly string[] = [
@@ -78,6 +91,44 @@ export const PHASE0_EVENTS: readonly string[] = [
   "deploy.failed",
   "run.registered",
   "run.done",
+];
+
+/** Spec 01 §8.5: every heartbeat Phase 0 has. heartbeats.json must hold each one (MC-05). */
+export const PHASE0_HEARTBEATS: readonly string[] = [
+  "watcher",
+  "scheduler-worker",
+  "scheduler-payments",
+  "email-delivery-check",
+  "backup-nightly",
+  "backup-hourly",
+  "verify-daily",
+];
+
+/** Spec 01 §6.2: the Railway services, the only places a secret is delivered to (MC-07). */
+export const RAILWAY_SERVICES: readonly string[] = [
+  "cloudflared-public",
+  "cloudflared-admin",
+  "cloudflared-public-b",
+  "cloudflared-admin-b",
+  "edge",
+  "api",
+  "worker",
+  "payments",
+  "console",
+  "admin",
+  "verify",
+  "migrate",
+  "backup",
+  "cloudflared-db",
+];
+
+/** Better Stack's logs-to-metrics types. */
+export const METRIC_TYPES: readonly string[] = [
+  "string_low_cardinality",
+  "int64_delta",
+  "float64_delta",
+  "datetime64_delta",
+  "boolean",
 ];
 
 /** The headings every Phase 0 runbook has (spec 01 §8.7: short runbooks). */
@@ -331,6 +382,19 @@ function checkAlert(
       add("MC-04", `reads the field ${name}, which no watched event declares`);
     }
   }
+  // A security alert must fail closed: `eq: false` needs the field on the line, so a line
+  // without it (a matcher that could not decide, a writer that regressed) would never alert.
+  const security = events.filter((e) => {
+    const entry = byEvent.get(e);
+    return entry !== undefined && kindsOf(entry).includes("security");
+  });
+  for (const c of queryConditions(alert.query)) {
+    if (c.eq !== false || security.length === 0) continue;
+    add(
+      "MC-04",
+      `filters the security event ${security.join(", ")} with ${c.field} eq false, so a line without ${c.field} never alerts; use notEq true`,
+    );
+  }
   try {
     const numbers: Record<string, number> = {};
     if ("ratio" in alert.query) numbers[alert.query.ratio.minCount] = 1;
@@ -387,6 +451,113 @@ function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: s
   const base = `ops/monitoring/${config.env}`;
   const { sources, errors, metrics, monitors, heartbeats, policies } = config;
   const sourceNames = new Set(sources.sources.map((s) => s.service));
+
+  // MC-13: the files are the environment's own. The apply checks the tokens' team against
+  // `fin-<env>`, never against a string in the files it is applying.
+  const team = `fin-${config.env}`;
+  const prefix = `fin-next-${config.env}-`;
+  for (const [file, value] of [
+    ["sources.json", sources.team],
+    ["policies.json", policies.team],
+  ] as const) {
+    if (value !== team) {
+      findings.push({
+        file: `${base}/${file}`,
+        rule: "MC-13",
+        message: `names the team ${String(value)}; the ${config.env} files belong to ${team}`,
+      });
+    }
+  }
+  if (sources.environment !== config.env) {
+    findings.push({
+      file: `${base}/sources.json`,
+      rule: "MC-13",
+      message: `names the environment ${String(sources.environment)}, not ${config.env}`,
+    });
+  }
+  for (const [file, value] of [
+    ["sources.json", sources.namePrefix],
+    ["errors.json", errors.namePrefix],
+  ] as const) {
+    if (value !== prefix) {
+      findings.push({
+        file: `${base}/${file}`,
+        rule: "MC-13",
+        message: `names the prefix ${String(value)}; the ${config.env} files use ${prefix}`,
+      });
+    }
+  }
+
+  // MC-07: a secret goes only to a Railway service, as a sealed variable (spec 08 §7.11).
+  const holders: { file: string; what: string; services: unknown }[] = [
+    ...sources.sources.map((s) => ({
+      file: "sources.json",
+      what: `source ${s.service}`,
+      services: s.holders ?? [s.service],
+    })),
+    ...errors.applications.map((a) => ({
+      file: "errors.json",
+      what: `application ${a.name}`,
+      services: a.holders,
+    })),
+    ...heartbeats.heartbeats.map((h) => ({
+      file: "heartbeats.json",
+      what: `heartbeat ${h.name}`,
+      services: h.holders,
+    })),
+  ];
+  for (const holder of holders) {
+    if (!Array.isArray(holder.services)) {
+      // errors.json's own shape rule below reports an application's.
+      if (holder.file !== "errors.json") {
+        findings.push({
+          file: `${base}/${holder.file}`,
+          rule: "MC-00",
+          message: `${holder.what}: holders must list the Railway services that receive its secret`,
+        });
+      }
+      continue;
+    }
+    for (const service of holder.services) {
+      if (!RAILWAY_SERVICES.includes(String(service))) {
+        findings.push({
+          file: `${base}/${holder.file}`,
+          rule: "MC-07",
+          message: `${holder.what} delivers its secret to ${String(service)}, which is not a Railway service`,
+        });
+      }
+    }
+  }
+
+  // MC-05: every heartbeat of spec 01 §8.5, and the one the watcher pings, is defined. A dropped
+  // heartbeat is paused by the apply, so a missing one silences a dead-man switch.
+  const heartbeatNames = new Set(heartbeats.heartbeats.map((h) => h.name));
+  for (const name of PHASE0_HEARTBEATS) {
+    if (!heartbeatNames.has(name)) {
+      findings.push({
+        file: `${base}/heartbeats.json`,
+        rule: "MC-05",
+        message: `spec 01 §8.5's heartbeat ${name} is missing`,
+      });
+    }
+  }
+  const watcherSettings = join(root, "ops", "watcher", "settings", `${config.env}.json`);
+  if (existsSync(watcherSettings)) {
+    let pinged: unknown;
+    try {
+      pinged = (JSON.parse(readFileSync(watcherSettings, "utf8")) as { heartbeat?: unknown })
+        .heartbeat;
+    } catch {
+      pinged = undefined;
+    }
+    if (typeof pinged !== "string" || !heartbeatNames.has(pinged)) {
+      findings.push({
+        file: `ops/watcher/settings/${config.env}.json`,
+        rule: "MC-05",
+        message: `the watcher's settings ping the heartbeat ${String(pinged)}, which heartbeats.json does not define`,
+      });
+    }
+  }
 
   // MC-07: every source has an Errors application or a written reason.
   const covered = new Set<string>();
@@ -451,6 +622,13 @@ function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: s
   for (const entry of byEvent.values()) for (const f of Object.keys(entry.fields)) allFields.add(f);
   for (const [set, defs] of Object.entries(metrics.sets)) {
     for (const metric of defs) {
+      if (!METRIC_TYPES.includes(metric.type)) {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-00",
+          message: `${set}.${metric.name}: type ${String(metric.type)} is not a Better Stack metric type`,
+        });
+      }
       const label = metric.aggregations.length === 0;
       if (label && ID_SHAPED_FIELD.test(metric.field)) {
         findings.push({
@@ -650,9 +828,25 @@ function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: s
   for (const [runbook, names] of runbookUsers) {
     findings.push(...checkRunbook(root, runbook, [...new Set(names)]));
   }
+  return findings;
+}
 
-  // MC-12 over every file of the environment.
-  for (const [file, text] of config.files) findings.push(...checkIdentifiers(file, text));
+/** MC-12 over every file under the given paths (files or directories), each file once. */
+function scanIdentifiers(root: string, paths: readonly string[]): Finding[] {
+  const files = new Set<string>();
+  for (const path of paths) {
+    const full = join(root, path);
+    if (!existsSync(full)) continue;
+    if (statSync(full).isDirectory()) {
+      const found: string[] = [];
+      walk(root, path, found);
+      for (const file of found) files.add(file);
+    } else files.add(path);
+  }
+  const findings: Finding[] = [];
+  for (const file of [...files].sort()) {
+    findings.push(...checkIdentifiers(file, readFileSync(join(root, file), "utf8")));
+  }
   return findings;
 }
 
@@ -669,16 +863,17 @@ export function checkMonitoring(root: string, options: CheckOptions = {}): Findi
     findings.push(...loaded.findings);
     if (loaded.config !== undefined) findings.push(...checkEnv(loaded.config, byEvent, root));
   }
-  for (const path of options.scan ?? ["ops/watcher/settings"]) {
-    const files: string[] = [];
-    const full = join(root, path);
-    if (!existsSync(full)) continue;
-    if (statSync(full).isDirectory()) walk(root, path, files);
-    else files.push(path);
-    for (const file of files) {
-      findings.push(...checkIdentifiers(file, readFileSync(join(root, file), "utf8")));
-    }
-  }
+  // MC-12 over every file, not only those the loader parses: each environment's whole directory
+  // (dashboards, webhooks and the status page included), the catalogue, the README and the
+  // runbooks, and the watcher's settings.
+  findings.push(
+    ...scanIdentifiers(root, [
+      ...envs.map((env) => `ops/monitoring/${env}`),
+      "ops/monitoring/catalog",
+      "ops/monitoring/README.md",
+      ...(options.scan ?? ["ops/watcher/settings", "docs/runbooks"]),
+    ]),
+  );
   return findings;
 }
 

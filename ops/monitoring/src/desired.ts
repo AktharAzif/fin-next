@@ -94,6 +94,13 @@ function channels(notify: Notify): Record<string, boolean> {
   return Object.fromEntries(CHANNELS.map((c) => [c, notify[c] === true]));
 }
 
+/**
+ * What a monitor or heartbeat sends besides its channels, so nothing silences or widens it: no
+ * maintenance window (no incident is opened inside one) and no team wait (which escalates to the
+ * whole team's own channels).
+ */
+const QUIET_FIELDS = { maintenance_from: null, maintenance_to: null, team_wait: null } as const;
+
 export const EXPLORATION_PREFIX = "fin/";
 
 /** Resolves `@thresholds.x` or `@grace.x` against the settings, recording a missing key. */
@@ -189,6 +196,14 @@ function alertObjects(
         incident_cause: alert.incident_cause ?? "",
         incident_per_series: seriesField(instance) !== undefined,
         escalation_target: { policy_id: ref("policy", alert.policy ?? "", "number") },
+        // Sent and compared on every alert, so none takes Better Stack's defaults (MA-06).
+        ...channels({
+          email: true,
+          ...(alert.call === undefined ? {} : { call: alert.call }),
+          ...(alert.sms === undefined ? {} : { sms: alert.sms }),
+          ...(alert.push === undefined ? {} : { push: alert.push }),
+          ...(alert.critical_alert === undefined ? {} : { critical_alert: alert.critical_alert }),
+        }),
         metadata,
         paused: false,
       },
@@ -247,8 +262,11 @@ export function buildDesired(config: EnvConfig, settings: RunSettings): Desired 
         body: {
           name: metric.name,
           sql_expression: metricExpression(metric),
+          type: metric.type,
           aggregations: [...metric.aggregations],
         },
+        // A metric's type decides its column; Better Stack fixes it when the metric is made.
+        immutable: ["type"],
       });
     }
   }
@@ -300,6 +318,7 @@ export function buildDesired(config: EnvConfig, settings: RunSettings): Desired 
         request_headers: [{ name: md.secretHeader, value: settings.monitorHeader ?? null }],
         policy_id: ref("policy", monitor.policy ?? md.policy),
         ...channels({ ...md.notify, ...monitor.notify }),
+        ...QUIET_FIELDS,
         paused: false,
       },
     });
@@ -316,10 +335,11 @@ export function buildDesired(config: EnvConfig, settings: RunSettings): Desired 
         grace: grace ?? Number.NaN,
         policy_id: ref("policy", heartbeat.policy ?? hd.policy),
         ...channels({ ...hd.notify, ...heartbeat.notify }),
+        ...QUIET_FIELDS,
         paused: false,
       },
       delivery: {
-        services: [heartbeat.holder],
+        services: [...heartbeat.holders],
         variables: {
           [`FIN_HEARTBEAT_${heartbeat.name.toUpperCase().replace(/-/g, "_")}_URL`]: "url",
         },

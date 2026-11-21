@@ -1,11 +1,13 @@
 # A privileged database login outside a registered run
 
-Alert: `privileged-login` (`database.privileged_login` with `registered` false).
+Alert: `privileged-login` (`database.privileged_login` unless `registered` is true).
 
 ## What it means
 
 A superuser or `fin_owner` login happened with no registered `pnpm fin` run to explain it. Only
-registered migrate and task runs use those roles; anything else may be a leaked credential.
+registered migrate and task runs use those roles; anything else may be a leaked credential. A line
+without `registered` (the matcher could not decide, or its writer regressed) alerts too: an
+unknown registration is treated as none.
 
 ## First check
 

@@ -23,6 +23,10 @@ export interface Remote {
   readonly objects: ReadonlyMap<string, RemoteObject>;
   /** Team names seen on each product's objects (MA-02). */
   readonly teams: { readonly telemetry: ReadonlySet<string>; readonly uptime: ReadonlySet<string> };
+  /** How many objects each product's token read, whether or not they carry a team name. */
+  readonly counts: { readonly telemetry: number; readonly uptime: number };
+  /** Every policy read, duplicates included (MA-08 checks each one). */
+  readonly policies: readonly RemoteObject[];
   /** Policies and severities the files do not name: left in place, but checked (MA-06, MA-08). */
   readonly extraPolicies: readonly RemoteObject[];
   readonly urgenciesById: ReadonlyMap<string, RemoteObject>;
@@ -30,6 +34,12 @@ export interface Remote {
   readonly unmanagedAlerts: readonly RemoteObject[];
   /** Sources and Errors applications the files do not name: never deleted, only reported. */
   readonly strays: readonly RemoteObject[];
+  /** Names more than one object of a kind holds, with how many: the apply works by name. */
+  readonly duplicates: readonly {
+    readonly kind: Kind;
+    readonly key: string;
+    readonly count: number;
+  }[];
 }
 
 export interface Clients {
@@ -83,13 +93,17 @@ export async function readRemote(
   const telemetryTeams = new Set<string>();
   const uptimeTeams = new Set<string>();
   const strays: RemoteObject[] = [];
+  const allPolicies: RemoteObject[] = [];
+  const seen = new Map<string, number>();
   const desiredKeys = new Set(desired.objects.map((o) => objectKey(o.kind, o.key)));
   const team = (set: Set<string>, r: Resource) => {
     const name = r.attributes.team_name;
     if (typeof name === "string" && name !== "") set.add(name);
   };
   const put = (kind: Kind, key: string, r: Resource, parentId?: string) => {
-    objects.set(objectKey(kind, key), {
+    const k = objectKey(kind, key);
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+    objects.set(k, {
       kind,
       key,
       id: r.id,
@@ -122,6 +136,7 @@ export async function readRemote(
     team(uptimeTeams, r);
     const key = str(r.attributes.name);
     put("policy", key, r);
+    allPolicies.push({ kind: "policy", key, id: r.id, attributes: r.attributes });
     if (!desiredKeys.has(objectKey("policy", key))) {
       extraPolicies.push({ kind: "policy", key, id: r.id, attributes: r.attributes });
     }
@@ -187,13 +202,28 @@ export async function readRemote(
     if (explorationIds.has(exploration)) put("alert", key, r, exploration);
     else unmanagedAlerts.push({ kind: "alert", key, id: r.id, attributes: r.attributes });
   }
+  for (const r of explorations) team(telemetryTeams, r);
+  const metricCount = metricLists.reduce((n, m) => n + m.list.length, 0);
+  const duplicates = [...seen]
+    .filter(([, count]) => count > 1)
+    .map(([k, count]) => {
+      const at = k.indexOf(":");
+      return { kind: k.slice(0, at) as Kind, key: k.slice(at + 1), count };
+    });
   return {
     objects,
     teams: { telemetry: telemetryTeams, uptime: uptimeTeams },
+    counts: {
+      telemetry:
+        sources.length + applications.length + explorations.length + alerts.length + metricCount,
+      uptime: urgencies.length + policies.length + monitors.length + heartbeats.length,
+    },
+    policies: allPolicies,
     extraPolicies,
     urgenciesById,
     unmanagedAlerts,
     strays,
+    duplicates,
   };
 }
 
@@ -262,6 +292,13 @@ export function view(
     push: bool(attrs.push),
     critical_alert: bool(attrs.critical_alert),
   };
+  // What can silence or widen a monitor or heartbeat besides its channels: a maintenance window
+  // and a team wait. Unset is the only accepted value.
+  const quiet = {
+    maintenance_from: attrs.maintenance_from == null ? "" : str(attrs.maintenance_from),
+    maintenance_to: attrs.maintenance_to == null ? "" : str(attrs.maintenance_to),
+    team_wait: attrs.team_wait == null ? "" : str(attrs.team_wait),
+  };
   switch (kind) {
     case "urgency":
       return channels;
@@ -283,6 +320,7 @@ export function view(
     case "metric":
       return {
         sql_expression: str(attrs.sql_expression),
+        type: str(attrs.type),
         aggregations: sortedStrings(attrs.aggregations),
       };
     case "application":
@@ -299,6 +337,7 @@ export function view(
     case "alert": {
       const target = isRecord(attrs.escalation_target) ? attrs.escalation_target : {};
       return {
+        alert_type: str(attrs.alert_type),
         operator: str(attrs.operator),
         value: Number(attrs.value),
         check_period: Number(attrs.check_period),
@@ -310,6 +349,7 @@ export function view(
         incident_per_series: bool(attrs.incident_per_series),
         policy: str(target.policy_id),
         metadata: metadataView(attrs.metadata),
+        ...channels,
         paused: bool(attrs.paused),
       };
     }
@@ -332,6 +372,7 @@ export function view(
         request_headers: headersView(attrs.request_headers, options.headerValues),
         policy_id: str(attrs.policy_id),
         ...channels,
+        ...quiet,
         paused: bool(attrs.paused) || (attrs.paused_at != null && attrs.paused_at !== ""),
       };
     case "heartbeat":
@@ -340,6 +381,7 @@ export function view(
         grace: Number(attrs.grace),
         policy_id: str(attrs.policy_id),
         ...channels,
+        ...quiet,
         paused: bool(attrs.paused) || (attrs.paused_at != null && attrs.paused_at !== ""),
       };
   }
@@ -347,18 +389,51 @@ export function view(
 
 const SECRET_FIELDS = new Set(["request_headers"]);
 
-function show(field: string, value: unknown): string {
+/** Names an object by its ID: `(another <kind>)` for an ID the run did not read. */
+export type NameOf = (kind: Kind, id: string) => string;
+
+/**
+ * A compared value as it may be printed: the IDs a view holds (policies, sources, severities,
+ * step members) replaced by names, so no Better Stack identifier reaches a log. The views are
+ * still compared on the IDs themselves.
+ */
+function displayed(field: string, value: unknown, nameOf: NameOf): unknown {
+  const id = (kind: Kind, v: unknown) => (v === "" || v == null ? "(none)" : nameOf(kind, str(v)));
+  if (field === "policy" || field === "policy_id") return id("policy", value);
+  if (field === "sources" && Array.isArray(value)) return value.map((v) => id("source", v));
+  if (field === "steps" && Array.isArray(value)) {
+    return value.filter(isRecord).map((step) => ({
+      ...step,
+      urgency_id: id("urgency", step.urgency_id),
+      step_members: (Array.isArray(step.step_members) ? step.step_members : [])
+        .filter(isRecord)
+        .map((m) => (m.id === undefined ? m : { ...m, id: "(member)" })),
+    }));
+  }
+  return value;
+}
+
+function show(field: string, value: unknown, nameOf: NameOf): string {
   if (SECRET_FIELDS.has(field)) return "(not shown)";
   if (field === "query") return "(query)";
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const shown = displayed(field, value, nameOf);
+  const text = typeof shown === "string" ? shown || "(none)" : JSON.stringify(shown);
   return text.length > 80 ? `${text.slice(0, 77)}...` : text;
 }
 
-function diffViews(a: Record<string, unknown>, b: Record<string, unknown>): Change[] {
+function diffViews(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+  nameOf: NameOf,
+): Change[] {
   const changes: Change[] = [];
   for (const field of Object.keys(b)) {
     if (JSON.stringify(a[field]) !== JSON.stringify(b[field])) {
-      changes.push({ field, from: show(field, a[field]), to: show(field, b[field]) });
+      changes.push({
+        field,
+        from: show(field, a[field], nameOf),
+        to: show(field, b[field], nameOf),
+      });
     }
   }
   return changes;
@@ -374,6 +449,12 @@ export interface PlanOptions {
 
 const LOUD = ["call", "sms", "push", "critical_alert"] as const;
 
+/** See makePlan: compared only when the remote object carries them. */
+const COMPARED_WHEN_READ: Partial<Record<Kind, readonly string[]>> = {
+  metric: ["type"],
+  alert: ["alert_type", "email"],
+};
+
 /** Compares desired and remote, and decides what the run may do. */
 export function makePlan(desired: Desired, remote: Remote, options: PlanOptions): Plan {
   const refusals: string[] = [];
@@ -385,19 +466,36 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
   for (const key of desired.missing) {
     refusals.push(`MA-10 the run's settings have no value for ${key}`);
   }
-  // MA-02: the tokens belong to the environment's team.
-  for (const [product, teams] of Object.entries(remote.teams)) {
+  // MA-02: the tokens belong to the environment's team. A token whose objects carry no team name
+  // proves nothing, and --assert-empty-team speaks only for a product that holds nothing at all.
+  for (const product of ["telemetry", "uptime"] as const) {
+    const teams = remote.teams[product];
+    const count = remote.counts[product];
     const others = [...teams].filter((t) => t !== options.team);
     if (others.length > 0) {
       refusals.push(`MA-02 the ${product} token reads another team's objects, not ${options.team}`);
+    } else if (teams.size === 0 && count > 0) {
+      refusals.push(
+        `MA-02 the ${product} token reads ${count} object(s) but none carries a team name, so its team cannot be checked`,
+      );
     } else if (teams.size === 0 && options.assertEmptyTeam !== options.team) {
       refusals.push(
         `MA-02 the ${product} token shows no object, so its team cannot be checked; if this is ${options.team}'s first apply, pass --assert-empty-team ${options.team}`,
       );
     }
   }
-  // MA-08: no AI responder anywhere.
-  for (const policy of [...remote.objects.values()].filter((o) => o.kind === "policy")) {
+  // The apply matches objects by name, so a name two objects share leaves one unseen. Strays,
+  // extra policies and severities are only read, so their duplicates do not matter here.
+  const desiredKeySet = new Set(desired.objects.map((o) => objectKey(o.kind, o.key)));
+  const acted: readonly Kind[] = ["monitor", "heartbeat", "metric", "exploration", "alert"];
+  for (const dup of remote.duplicates) {
+    if (!desiredKeySet.has(objectKey(dup.kind, dup.key)) && !acted.includes(dup.kind)) continue;
+    refusals.push(
+      `Better Stack holds ${dup.count} ${PLURAL[dup.kind]} named ${dup.key}; the apply works by name, so remove the extra one by hand`,
+    );
+  }
+  // MA-08: no AI responder anywhere, on every policy read (duplicates included).
+  for (const policy of remote.policies) {
     const steps = Array.isArray(policy.attributes.steps) ? policy.attributes.steps : [];
     for (const step of steps.filter(isRecord)) {
       const members = Array.isArray(step.step_members) ? step.step_members : [];
@@ -431,9 +529,14 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
       refusals.push(`MA-06 ${object.kind} ${object.key} asks for ${loud.join(", ")}`);
   }
 
-  // IDs known now: everything that exists remotely.
+  // IDs known now: everything that exists remotely; and back from an ID to its name, for output.
   const ids = new Map<string, string>();
-  for (const [key, object] of remote.objects) ids.set(key, object.id);
+  const names = new Map<string, string>();
+  for (const [key, object] of remote.objects) {
+    ids.set(key, object.id);
+    names.set(objectKey(object.kind, object.id), object.key);
+  }
+  const nameOf: NameOf = (kind, id) => names.get(objectKey(kind, id)) ?? `(another ${kind})`;
 
   const desiredKeys = new Set<string>();
   for (const kind of KIND_ORDER) {
@@ -464,7 +567,22 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
         delete want.request_headers;
         delete have.request_headers;
       }
-      const changes = diffViews(have, want);
+      // Fields sent on every write whose read-back the API reference does not promise: compared
+      // when Better Stack reports them, so a response without one is not drift every day.
+      for (const field of COMPARED_WHEN_READ[kind] ?? []) {
+        if (existing.attributes[field] === undefined) {
+          delete want[field];
+          delete have[field];
+        }
+      }
+      const changes = diffViews(have, want, nameOf);
+      // MA-06: a managed object someone made loud is put back by this update; say so.
+      const loud = LOUD.filter((c) => existing.attributes[c] === true && want[c] === false);
+      if (loud.length > 0) {
+        notes.push(
+          `${kind} ${object.key} notifies by ${loud.join(", ")}; the apply quiets it (MA-06)`,
+        );
+      }
       const fixed = changes.filter((c) => object.immutable?.includes(c.field));
       for (const change of fixed) {
         actions.push({
@@ -524,19 +642,32 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
     notes.push(`policy ${policy.key} is not in the files; left in place`);
   }
 
-  // MA-03: deletions are capped.
-  const deletes = actions.filter((a) => a.op === "delete").length;
-  if (options.confirmDelete !== undefined && options.confirmDelete !== deletes) {
+  // MA-03: deletions are capped, and so are pauses: a paused heartbeat watches nothing, so a
+  // wrong file must not silence every duty in one unconfirmed run.
+  const removals = actions.filter((a) => a.op === "delete" || a.op === "pause").length;
+  if (options.confirmDelete !== undefined && options.confirmDelete !== removals) {
     refusals.push(
-      `MA-03 --confirm-delete ${options.confirmDelete} does not match the ${deletes} deletion(s) this run would make`,
+      `MA-03 --confirm-delete ${options.confirmDelete} does not match the ${removals} deletion(s) and pause(s) this run would make`,
     );
-  } else if (deletes > 3 && options.confirmDelete !== deletes) {
+  } else if (removals > 3 && options.confirmDelete !== removals) {
     refusals.push(
-      `MA-03 this run would delete ${deletes} objects; pass --confirm-delete ${deletes}`,
+      `MA-03 this run would delete or pause ${removals} objects; pass --confirm-delete ${removals}`,
     );
   }
   return { actions, unchanged, refusals, notes };
 }
+
+const PLURAL: Readonly<Record<Kind, string>> = {
+  urgency: "urgencies",
+  policy: "policies",
+  source: "sources",
+  metric: "metrics",
+  application: "applications",
+  exploration: "explorations",
+  alert: "alerts",
+  monitor: "monitors",
+  heartbeat: "heartbeats",
+};
 
 /** The plan as text, one line per action. `mask` hides hostnames before anything is printed. */
 export function formatPlan(plan: Plan, mask: (text: string) => string): string {

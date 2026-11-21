@@ -14,9 +14,12 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 ## monitoring:check
 
 `pnpm --filter @fin/ops-monitoring monitoring:check`. It also runs inside this package's tests, so
-`pnpm check` fails on any finding. Rules MC-00 to MC-14 and RT-01 to RT-03 are listed at the top
-of `src/check.ts`. Every alert names a runbook in `docs/runbooks/` with the four Phase 0 headings
-(What it means, First check, Containment, When to wake the owner) that names the alert back.
+`pnpm check` fails on any finding. Rules MC-00 to MC-14 (MC-05 covers spec 01 §8.5's heartbeats
+and the watcher's own until the duty registry exists; MC-09 comes with the credential inventory)
+and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a runbook in
+`docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
+wake the owner) that names the alert back. MC-12 scans every file under `staging/`, the
+catalogue, this README, the runbooks and the watcher's settings.
 
 ## Applying
 
@@ -30,8 +33,16 @@ Credentials are files, read only inside the command: `FIN_BETTERSTACK_TELEMETRY_
 monitor header; optional for a dry run). Hostnames come from the deploy configuration by host role,
 thresholds and grace periods from the overlay (`thresholds.<key>`, `grace.<key>`).
 
-The run checks the files first, prints the difference before changing anything, refuses another
-team's tokens, caps deletions at 3 without `--confirm-delete`, pauses (never deletes) a heartbeat
-the files drop, never deletes a source or an Errors application, and refuses anything in staging
-that calls, texts or pushes. New tokens, DSNs and heartbeat URLs go to `ctx.deliver` (the services'
-sealed variables) and are never printed.
+The run checks the files first, prints the difference before changing anything, and refuses
+tokens of any team but `fin-<env>` (the environment's, never a string in the files; MC-13 holds
+the files to it). `--assert-empty-team` is accepted only for a product whose token reads no object
+at all. It caps deletions and pauses together at 3 without `--confirm-delete <count>`, pauses
+(never deletes) a heartbeat the files drop, never deletes a source or an Errors application,
+refuses two Better Stack objects with one name, and refuses anything in staging that calls, texts
+or pushes; a managed alert, monitor or heartbeat someone made loud, or gave a maintenance window
+or a team wait, is put back and shown as drift. New tokens, DSNs and heartbeat URLs go to
+`ctx.deliver` (Railway services' sealed variables only, MC-07) and are never printed; the
+watcher's and `pnpm fin verify`'s own are read from Better Stack by those commands. The output
+names objects, never their IDs, and masks the hostnames, the zones (`ctx.zones`) and the monitor
+header, Better Stack's own error text included; a refusal from Better Stack stops the writes, and
+what was created before it still has its secrets delivered.

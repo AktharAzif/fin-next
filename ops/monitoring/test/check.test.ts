@@ -12,11 +12,14 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
-/** A copy of the staging files and the runbooks in a scratch root, to plant one fault in. */
+/** A copy of the staging files, the watcher's settings and the runbooks, to plant one fault in. */
 function scratch(): string {
   const root = mkdtempSync(join(tmpdir(), "fin-monitoring-check-"));
   roots.push(root);
   cpSync(join(ROOT, "ops", "monitoring", "staging"), join(root, "ops", "monitoring", "staging"), {
+    recursive: true,
+  });
+  cpSync(join(ROOT, "ops", "watcher", "settings"), join(root, "ops", "watcher", "settings"), {
     recursive: true,
   });
   cpSync(join(ROOT, "docs", "runbooks"), join(root, "docs", "runbooks"), { recursive: true });
@@ -250,6 +253,8 @@ describe("monitoring:check refuses", () => {
     const found = rules(root);
     expect(found).toContainEqual("MC-12 holds what looks like a Better Stack ingest host");
     expect(found).toContainEqual("MC-12 holds what looks like a Better Stack heartbeat URL");
+    // Each file is scanned once.
+    expect(found.filter((f) => f.endsWith("ingest host"))).toHaveLength(1);
   });
 
   it("a runbook without a heading, or that does not name its alert (MC-10)", () => {
@@ -289,6 +294,134 @@ describe("monitoring:check refuses", () => {
     expect(rules(root)).toContainEqual(
       "MC-00 monitor api-health: host must be a host role, never a hostname",
     );
+  });
+
+  it("files that name another environment's team, name prefix or environment (MC-13)", () => {
+    const root = scratch();
+    edit(root, "sources.json", (j) => {
+      j.team = "fin-production";
+      j.namePrefix = "fin-next-production-";
+    });
+    edit(root, "policies.json", (j) => {
+      j.team = "fin-production";
+    });
+    edit(root, "errors.json", (j) => {
+      j.namePrefix = "fin-next-production-";
+    });
+    const found = rules(root);
+    expect(found).toContainEqual(
+      "MC-13 names the team fin-production; the staging files belong to fin-staging",
+    );
+    expect(found).toContainEqual(
+      "MC-13 names the prefix fin-next-production-; the staging files use fin-next-staging-",
+    );
+    expect(found.filter((f) => f.startsWith("MC-13"))).toHaveLength(4);
+  });
+
+  it("a Phase 0 heartbeat, or the watcher's own, missing from heartbeats.json (MC-05)", () => {
+    const root = scratch();
+    edit(root, "heartbeats.json", (j) => {
+      j.heartbeats = (j.heartbeats as Json[]).filter((h) => h.name === "verify-daily");
+    });
+    const found = rules(root);
+    for (const name of [
+      "watcher",
+      "scheduler-worker",
+      "scheduler-payments",
+      "email-delivery-check",
+      "backup-nightly",
+      "backup-hourly",
+    ]) {
+      expect(found).toContainEqual(`MC-05 spec 01 §8.5's heartbeat ${name} is missing`);
+    }
+    const renamed = scratch();
+    const settings = join(renamed, "ops", "watcher", "settings", "staging.json");
+    const watcher = JSON.parse(readFileSync(settings, "utf8")) as Json;
+    writeFileSync(settings, JSON.stringify({ ...watcher, heartbeat: "watcher-2" }));
+    expect(rules(renamed)).toContainEqual(
+      "MC-05 the watcher's settings ping the heartbeat watcher-2, which heartbeats.json does not define",
+    );
+  });
+
+  it("a secret delivered to something that is not a Railway service (MC-07)", () => {
+    const root = scratch();
+    edit(root, "heartbeats.json", (j) => {
+      ((j.heartbeats as Json[])[0] as Json).holders = ["watcher"];
+    });
+    edit(root, "sources.json", (j) => {
+      ((j.sources as Json[]).find((s) => s.service === "ops") as Json).holders = ["ops"];
+    });
+    edit(root, "errors.json", (j) => {
+      ((j.applications as Json[])[0] as Json).holders = ["edge", "edge-2"];
+    });
+    const found = rules(root);
+    expect(found).toContainEqual(
+      "MC-07 heartbeat watcher delivers its secret to watcher, which is not a Railway service",
+    );
+    expect(found).toContainEqual(
+      "MC-07 source ops delivers its secret to ops, which is not a Railway service",
+    );
+    expect(found).toContainEqual(
+      "MC-07 application edge delivers its secret to edge-2, which is not a Railway service",
+    );
+  });
+
+  it("a security event filtered with eq false, which lets a line without the field through (MC-04)", () => {
+    const root = scratch();
+    edit(root, "alerts/database.json", (j) => {
+      alert(j, "privileged-login").query = {
+        count: {
+          events: ["database.privileged_login"],
+          where: [{ field: "registered", eq: false }],
+        },
+      };
+    });
+    expect(rules(root)).toContainEqual(
+      "MC-04 privileged-login: filters the security event database.privileged_login with registered eq false, so a line without registered never alerts; use notEq true",
+    );
+  });
+
+  it("a metric whose type is not one of Better Stack's (MC-00)", () => {
+    const root = scratch();
+    edit(root, "metrics.json", (j) => {
+      ((j.sets as Json).request as Json[]).push({
+        name: "bytes",
+        field: "durationMs",
+        type: "float",
+        aggregations: ["max"],
+      });
+    });
+    expect(rules(root)).toContainEqual(
+      "MC-00 request.bytes: type float is not a Better Stack metric type",
+    );
+  });
+
+  it("an identifier in any file of the environment, not only the files it parses (MC-12)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "ops", "monitoring", "staging", "dashboards"), { recursive: true });
+    const host = ["s1234", "eu-nbg-2", "betterstackdata", "com"].join(".");
+    writeFileSync(
+      join(root, "ops", "monitoring", "staging", "dashboards", "fin-services.json"),
+      JSON.stringify({ panels: [{ query: `FROM t123456_fin_logs`, from: host }] }, null, 2),
+    );
+    writeFileSync(
+      join(root, "ops", "monitoring", "staging", "webhooks.json"),
+      `{\n  "token": "x",\n  "dsn": "https://${"a".repeat(12)}@${host}/1"\n}\n`,
+    );
+    const found = checkMonitoring(root, { scanCode: false, scan: [] }).filter(
+      (f) => f.rule === "MC-12",
+    );
+    const files = new Set(found.map((f) => f.file.split(":")[0]));
+    expect(files).toEqual(
+      new Set([
+        "ops/monitoring/staging/dashboards/fin-services.json",
+        "ops/monitoring/staging/webhooks.json",
+      ]),
+    );
+    const messages = found.map((f) => f.message);
+    for (const shape of ["ingest host", "team ID", "token field", "DSN"]) {
+      expect(messages).toContainEqual(`holds what looks like a Better Stack ${shape}`);
+    }
   });
 
   it("a templated alert whose forEach does not provide a placeholder (MC-00)", () => {

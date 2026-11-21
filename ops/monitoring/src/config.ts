@@ -98,8 +98,12 @@ export interface HeartbeatDef {
   readonly name: string;
   readonly period: number;
   readonly grace: string;
-  /** The one service that pings it, which receives FIN_HEARTBEAT_<NAME>_URL. */
-  readonly holder: string;
+  /**
+   * The Railway service that pings it, which receives FIN_HEARTBEAT_<NAME>_URL as a sealed
+   * variable; empty when the pinger reads its URL from Better Stack itself (`watcher deploy`,
+   * `pnpm fin verify`).
+   */
+  readonly holders: readonly string[];
   readonly policy?: string;
   readonly notify?: Notify;
   readonly runbook?: string;
@@ -136,10 +140,15 @@ export interface PoliciesFile {
   readonly policies: readonly PolicyDef[];
 }
 
-/** A condition on one field of a line. Exactly one comparison is set. */
+/**
+ * A condition on one field of a line. Exactly one comparison is set. `eq: false` needs the field
+ * on the line; `notEq` also matches a line without it, which is what a security alert wants (a
+ * line whose field is missing must alert, never pass).
+ */
 export interface Condition {
   readonly field: string;
   readonly eq?: string | number | boolean;
+  readonly notEq?: string | boolean;
   readonly in?: readonly string[];
   readonly notIn?: readonly string[];
   readonly gt?: number;
@@ -210,7 +219,7 @@ export interface EnvConfig {
   readonly heartbeats: HeartbeatsFile;
   readonly policies: PoliciesFile;
   readonly alerts: readonly AlertDef[];
-  /** Every file read, by repository path, with its raw text (MC-12 scans them). */
+  /** Every file read, by repository path, with its raw text (MC-12 scans the whole directory). */
   readonly files: ReadonlyMap<string, string>;
 }
 
