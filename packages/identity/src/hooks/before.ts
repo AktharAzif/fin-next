@@ -1,7 +1,8 @@
-// `hooks.before` (spec 02 §3.5): in this order, the realm's gate for the path, the step-up rule
-// for `step_up_self` paths, Fin's limits, the body allowlist (stripping `trustDevice` and
-// `rememberMe`), and each path's own rules: emailed codes bound to the asking browser, the staff
-// Access binding, the sign-ups switch, TOTP replay and lockout, and the last-factor rule.
+// `hooks.before` (spec 02 §3.5): in this order, a ceremony's hold on its person's row, the realm's
+// gate for the path, the step-up rule for `step_up_self` paths, Fin's limits, the body allowlist
+// (stripping `trustDevice` and `rememberMe`), and each path's own rules: emailed codes bound to the
+// asking browser, the staff Access binding, the sign-ups switch, TOTP replay and lockout, and the
+// last-factor rule.
 import { symmetricDecrypt } from "better-auth/crypto";
 import { trustedBrowserOf } from "../browsers.ts";
 import { attemptCode, requestCode } from "../codes.ts";
@@ -84,6 +85,7 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   state.rule = rule;
   state.line.authPath = rule.path;
 
+  await holdPerson(rt, ctx, tx);
   await loadPrior(rt, ctx, state, tx);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
   await stepUpRule(rt, ctx, state, tx);
@@ -111,6 +113,58 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
     await notePasskeyCounter(rt, ctx, state, tx);
   }
   return undefined;
+}
+
+/**
+ * The library paths whose ceremony reads a person's credentials and then writes a session, a proof
+ * or a factor for them (§5.3, §5.4, §6.5, §7.4).
+ */
+export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
+  "/passkey/verify-authentication",
+  "/passkey/verify-registration",
+  "/two-factor/verify-totp",
+  "/two-factor/verify-backup-code",
+  "/two-factor/enable",
+]);
+
+/**
+ * A ceremony holds its person's row (`FOR NO KEY UPDATE`) before anything reads their session or
+ * credentials. Every change that removes a person's factors locks the same row first, `FOR
+ * UPDATE`: a staff reset or removal inside the staff-change lock (§10.8, which a role change, ending
+ * the sessions, takes too), the operator's bootstrap reset (§10.6), and the last-factor rule's
+ * removals (§6.7). So the two never overlap: either the change waits for the ceremony to commit
+ * and then ends what it made, or the ceremony waits for the change and then reads the person as
+ * the change left them, the credential gone and the session ended (§11.4). Taken first, it also
+ * keeps either from waiting on a row the other holds (a passkey's counter, a session). A passkey
+ * assertion names its person by its credential; every other ceremony by the session it runs in.
+ * A person's own ceremonies queue on it; each is short. (Signing out everywhere else removes no
+ * credential, so a ceremony that commits after it is a new sign-in like any other.)
+ */
+async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
+  if (!CEREMONY_PATHS.has(ctx.path)) return;
+  const tables = TABLES[rt.settings.realm];
+  if (ctx.path === "/passkey/verify-authentication") {
+    const response = bodyOf(ctx).response as { id?: unknown } | undefined;
+    if (typeof response?.id !== "string") return;
+    await tx.query(
+      `SELECT 1 FROM ${tables.user}
+        WHERE id = (SELECT user_id FROM ${tables.passkey} WHERE credential_id = $1)
+          FOR NO KEY UPDATE`,
+      [response.id],
+    );
+    return;
+  }
+  const token = await ctx.getSignedCookie(
+    ctx.context.authCookies.sessionToken.name,
+    ctx.context.secret,
+  );
+  if (typeof token !== "string" || token === "") return;
+  await tx.query(
+    `SELECT 1 FROM ${tables.user}
+      WHERE id = (SELECT user_id FROM ${tables.session} WHERE token = $1)
+        FOR NO KEY UPDATE`,
+    [token],
+  );
 }
 
 async function loadPrior(

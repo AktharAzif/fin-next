@@ -1,7 +1,8 @@
 // T-SAT-01 ([SA-09], AC-SAT-02): per realm, the installed router's path set equals the policy;
 // unlisted, double-slash and encoded paths, and blocked ones, answer 404 before any unit of work
 // or limit; `/change-email` and the staff backup-code paths answer 404; `step_up_org` and
-// `session` are empty.
+// `session` are empty. Every path that proves or adds a factor holds its person's row first (the
+// before-hook's ceremony list), and the list names no path a realm cannot reach.
 import { describe, expect, it } from "vitest";
 import { untouchableDatabase } from "../test/fake-db.ts";
 import { DOCS_ORIGIN, testEnv } from "../test/harness.ts";
@@ -12,6 +13,7 @@ import {
   type EndpointRule,
   indexRules,
 } from "./endpoint-policy.ts";
+import { CEREMONY_PATHS } from "./hooks/before.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 import { createRealm } from "./realm.ts";
@@ -171,6 +173,35 @@ describe.each(["developer", "staff"] as const)("the %s realm's allowlist", (real
       expect(blocked?.realm).toBe(realmName);
       expect(["unlisted", "blocked"]).toContain(blocked?.class);
       expect(JSON.stringify(lines.lines.at(-1))).not.toContain(path.slice(10));
+    },
+  );
+});
+
+describe("the ceremonies that hold their person's row first (§6.7, §10.8, §11.4)", () => {
+  const ALL = { passwords: true, google: true };
+  /** Factor paths that are no ceremony, and why each needs no hold of its own. */
+  const NOT_CEREMONIES: Readonly<Record<string, string>> = {
+    "/passkey/delete-passkey": "the last-factor rule locks the person's row FOR UPDATE (§6.7)",
+    "/two-factor/disable": "the last-factor rule locks the person's row FOR UPDATE (§6.7)",
+    "/two-factor/generate-backup-codes": "rewrites the authenticator's own row, nothing else",
+  };
+  const reachablePosts = (realm: RealmName) =>
+    createEndpointPolicy(realm, ALL)
+      .rules.filter((r) => r.class !== "blocked" && r.methods.includes("POST"))
+      .map((r) => r.path);
+
+  it("are each a POST path one of the realms can reach", () => {
+    const reachable = new Set([...reachablePosts("developer"), ...reachablePosts("staff")]);
+    for (const path of CEREMONY_PATHS) expect(reachable.has(path), path).toBe(true);
+  });
+
+  it.each(["developer", "staff"] as const)(
+    "cover every %s path that proves or adds a passkey or an authenticator",
+    (realm) => {
+      for (const path of reachablePosts(realm)) {
+        if (!/^\/(passkey|two-factor)\//.test(path)) continue;
+        expect(CEREMONY_PATHS.has(path) || path in NOT_CEREMONIES, path).toBe(true);
+      }
     },
   );
 });

@@ -16,7 +16,7 @@ import {
   toast,
 } from "@fin/ui";
 import { useRouter } from "@tanstack/react-router";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { StaffMember, StaffRole } from "../api/contracts.ts";
 import { formatUtc } from "../format.ts";
 import {
@@ -81,6 +81,7 @@ function columns(
     remove: (member: StaffMember) => void;
     newCode: (member: StaffMember) => void;
   },
+  rowAction?: (member: StaffMember) => ReactNode,
 ): TableColumn<StaffMember>[] {
   return [
     {
@@ -132,6 +133,7 @@ function columns(
                 New code
               </Button>
             )}
+            {rowAction?.(member)}
             <Button
               size="sm"
               aria-label={`Change role of ${member.email}`}
@@ -186,11 +188,14 @@ export function StaffPage({
   data,
   openAdd,
   onAddClosed,
+  rowAction,
 }: {
   data: StaffData;
   /** `?view=add`: the Add staff dialog open on arrival. */
   openAdd: boolean;
   onAddClosed: () => void;
+  /** A further control for each row, before Change role (the factor reset, stretch 4). */
+  rowAction?: (member: StaffMember) => ReactNode;
 }) {
   const fin = useFin<StaffViewer>();
   const router = useRouter();
@@ -268,11 +273,13 @@ export function StaffPage({
         <Table
           caption="Staff list"
           noun={STAFF_NOUN}
-          columns={columns(actor, data.staff, data.roles, {
-            changeRole: setChanging,
-            remove: setRemoving,
-            newCode: setReissuing,
-          })}
+          columns={columns(
+            actor,
+            data.staff,
+            data.roles,
+            { changeRole: setChanging, remove: setRemoving, newCode: setReissuing },
+            rowAction,
+          )}
           rows={data.staff}
           getRowId={(member) => member.id}
           getRowLabel={(member) =>
