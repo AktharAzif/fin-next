@@ -8,12 +8,16 @@
 //   - @fin/testing (or a subpath, with or without a query or fragment, or a workspace package's
 //     test/ or e2e/ by that package's name, or a file of test support by a relative path) only in
 //     tests and test support; in a manifest only under devDependencies; and no manifest outside
-//     test support has an entry point (exports, imports, main, module, browser, bin) that names
-//     test support, a test file, a node_modules path or a path out of the repository, so the
-//     harness never reaches deployable code (the steward's decision of 21 Nov; see TEST_SUPPORT
-//     below);
+//     test support has an entry point (exports, imports, main, module, browser, bin, jsnext:main,
+//     jsnext) that names test support (as a file, a directory or a name a resolver completes), a
+//     test file, a node_modules path, a path out of the repository or, in a browser or imports
+//     map, a package path that reaches one, so the harness never reaches deployable code (the
+//     steward's decision of 21 Nov; see TEST_SUPPORT below);
 //   - outside tests and test support, a relative import stays inside the repository and out of
-//     node_modules, so it cannot reach a file the rules on names and paths do not see;
+//     node_modules, and a package's subpath has no empty, `.`, `..` or node_modules segment, so
+//     neither can reach a file the rules on names and paths do not see; and every pattern of an
+//     `import.meta.glob` call (Vite's static loader) is a literal relative path that stays in the
+//     repository, out of node_modules and test support, and cannot match a test file;
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
 //     packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
@@ -24,7 +28,8 @@
 //     any file of the repository, since a test does not change what the code does when it runs),
 //     so an owner-approved file imports only owner-approved files (CI-14);
 //   - code that runs imports no test file (a target is matched in any case, as a case-insensitive
-//     file system reads it), since a test's own imports are not held to these rules;
+//     file system reads it, and by a name to which a resolver adds the extension, `./x.test`),
+//     since a test's own imports are not held to these rules;
 //   - a module specifier names its module plainly: no surrounding white space, control character,
 //     backslash or percent-encoding (in a relative URL Node reads `%2e` as a dot and `\` as a
 //     slash, and drops a tab), and no subpath import, `#name`, which stands for a module the rules
@@ -125,6 +130,25 @@ const TESTING_NAME = /^@fin\/testing$/iu;
 const WORKSPACE_TEST_SUPPORT = /^@fin\/[^/]+\/(?:test|e2e)(?:\/|$)/iu;
 // A path segment naming an installed package's directory, in any case.
 const NODE_MODULES_SEGMENT = /(?:^|\/)node_modules(?:\/|$)/iu;
+// A segment of a bare specifier that does not name a file inside its package: an empty one, `.` or
+// `..` (a resolver follows them out of the package: Node reads a subpath with no `exports` map as a
+// URL relative to the package, and a bundler joins it to the package's directory), or node_modules
+// (another package's files), in any case. Node refuses the same segments in an `exports` target,
+// so no honest import spells one.
+const UNPLAIN_SEGMENT = /(?:^|\/)(?:\.{0,2}|node_modules)(?:\/|$)/iu;
+// A name that a resolver completes into a test file by adding the extension (a bundler tries
+// `.ts`, `.tsx`, `.js` and the rest after `./x.test` or `pkg/x.spec`), in any case.
+const TEST_STEM = /\.(?:test|spec)$/iu;
+// The shortest endings a test file's name has (TEST_FILE: `.db.test.ts` ends with `.test.ts`).
+const TEST_ENDINGS = ["test", "spec"].flatMap((kind) =>
+  ["", "c", "m"].flatMap((prefix) =>
+    ["js", "ts", "jsx", "tsx"].map((ext) => `.${kind}.${prefix}${ext}`),
+  ),
+);
+// The characters that make a glob pattern match more than one name (picomatch's wildcards,
+// classes, braces and extglobs), cut at conservatively: a pattern's fixed part ends before the
+// first of them and its fixed tail starts after the last.
+const GLOB_MAGIC = /[*?[\]{}()!+@]/gu;
 // Test support: the files besides tests (TEST_FILE: `*.test.*`, `*.db.test.*` and `*.spec.*`) that
 // may import @fin/testing, by a package name or a relative path, and the only files a relative
 // import of such a file may come from. Exactly these, matched on the repository path:
@@ -150,8 +174,19 @@ const TEST_SUPPORT_TARGET = TEST_SUPPORT.map((pattern) => new RegExp(pattern.sou
 // e2e/). A manifest's pattern target whose fixed part stops at one of these can expand into test
 // support.
 const HOLDS_TEST_SUPPORT = /^(?:(?:apps|packages|tools|ops)\/(?:[^/]+\/)?)?$/iu;
-// A manifest's fields that name the files its package's name loads.
-const ENTRY_FIELDS = ["exports", "imports", "main", "module", "browser", "bin"];
+// A manifest's fields that name the files its package's name loads: Node's, and every field in
+// Vite's default main fields for the client and the server (browser, module, jsnext:main and
+// jsnext), which the tests compare with the installed Vite.
+const ENTRY_FIELDS = [
+  "exports",
+  "imports",
+  "main",
+  "module",
+  "browser",
+  "bin",
+  "jsnext:main",
+  "jsnext",
+];
 // A manifest's fields that install a package with it: @fin/testing is listed only under
 // devDependencies, which a production install leaves out.
 const RUNTIME_DEPENDENCY_FIELDS = [
@@ -324,6 +359,162 @@ function namesTestSupport(specifier) {
   return [specifier, plain, posix.normalize(plain)].some(
     (form) => TESTING_NAME.test(packageName(form)) || WORKSPACE_TEST_SUPPORT.test(form),
   );
+}
+
+/**
+ * Whether a bare specifier's path leaves the file it seems to name (see UNPLAIN_SEGMENT), read as
+ * written (require() takes `?` and `#` as part of the path) and without its query or fragment.
+ * @param {string} specifier
+ * @returns {boolean}
+ */
+function leavesItsPackage(specifier) {
+  return [specifier, specifier.replace(/[?#].*$/, "")].some((form) => UNPLAIN_SEGMENT.test(form));
+}
+
+/**
+ * Whether a path, or a name a resolver completes, names a test file: by its whole name, or by a
+ * name to which a resolver adds the extension (`x.test`).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function namesTestFile(path) {
+  const plain = path.replace(/\/+$/, "");
+  return TEST_TARGET.test(plain) || TEST_STEM.test(plain);
+}
+
+/**
+ * Whether the fixed text that ends a pattern (after its last wildcard) can end a test file's name:
+ * a wildcard can supply the rest (`*.ts` reaches `x.test.ts`, and so does `*est.ts`). Compared in
+ * any case, with Unicode case folding, as a case-insensitive file system compares names.
+ * @param {string} tail
+ * @returns {boolean}
+ */
+function canEndTestName(tail) {
+  const ending = new RegExp(`${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "iu");
+  return TEST_ENDINGS.some((name) => ending.test(name));
+}
+
+/**
+ * Whether a bare specifier a manifest maps a module to (a browser map's or an imports map's value)
+ * loads the harness, test support, a test file or a file outside the package it names.
+ * @param {string} specifier
+ * @returns {boolean}
+ */
+function bareTargetReachesTests(specifier) {
+  return (
+    namesTestSupport(specifier) ||
+    leavesItsPackage(specifier) ||
+    [specifier, specifier.replace(/[?#].*$/, "")].some(namesTestFile)
+  );
+}
+
+/**
+ * Whether one pattern of an `import.meta.glob` call, in `file`, can reach code these rules keep out
+ * of deployable code. A pattern is read as every path it can expand to: refused when it is not
+ * relative (a root path or an alias, which these rules cannot resolve), when it is not spelled
+ * plainly, when its fixed part leaves the repository, enters node_modules or lies in test support,
+ * when its fixed directory holds test support below it, when a wildcard is followed by a `.` or
+ * `..` segment, or when its fixed end can end a test file's name. A negative pattern (`!...`) only
+ * narrows what the others match.
+ * @param {string} file the repository path of the importer
+ * @param {string} pattern
+ * @returns {boolean}
+ */
+function globReachesTests(file, pattern) {
+  if (pattern.startsWith("!")) return false;
+  if (!/^\.\.?\//.test(pattern) || /^\s|\s$|[\\%\p{Cc}]/u.test(pattern)) return true;
+  if (NODE_MODULES_SEGMENT.test(pattern)) return true;
+  const wildcards = [...pattern.matchAll(GLOB_MAGIC)].map((match) => match.index);
+  const first = wildcards[0];
+  const dir = posix.dirname(file);
+  if (first === undefined) {
+    const path = posix.normalize(posix.join(dir, pattern));
+    return (
+      path === ".." ||
+      path.startsWith("../") ||
+      namesTestFile(path) ||
+      TEST_SUPPORT_TARGET.some((target) => target.test(path))
+    );
+  }
+  const fixed = pattern.slice(0, first);
+  const fixedDir = fixed.slice(0, fixed.lastIndexOf("/") + 1);
+  if (/(?:^|\/)\.{1,2}(?:\/|$)/.test(pattern.slice(fixedDir.length))) return true;
+  const joined = posix.normalize(posix.join(dir, fixedDir)).replace(/^\.\/?$/, "");
+  const base = joined === "" || joined.endsWith("/") ? joined : `${joined}/`;
+  const tail = pattern.slice((wildcards[wildcards.length - 1] ?? 0) + 1);
+  return (
+    base === "../" ||
+    base.startsWith("../") ||
+    TEST_SUPPORT_TARGET.some((target) => target.test(base)) ||
+    HOLDS_TEST_SUPPORT.test(base) ||
+    canEndTestName(tail)
+  );
+}
+
+/**
+ * The `import.meta.glob(...)` calls in code, as Vite reads them (`import.meta.glob`, optionally
+ * with one type argument, then the call), with what each may load: its patterns, when its first
+ * argument is one string literal or an array of them and its options neither move nor widen the
+ * search (no `base` or `exhaustive` option, no spread and no computed key); otherwise none.
+ * @param {Token[]} tokens
+ * @returns {{ start: number, patterns: string[] | undefined }[]}
+ */
+function findGlobCalls(tokens) {
+  const punct = (/** @type {Token | undefined} */ t, /** @type {string} */ value) =>
+    t?.type === "punct" && t.value === value;
+  const literal = (/** @type {Token | undefined} */ t) =>
+    t?.type === "string" || t?.type === "template";
+  /** @type {{ start: number, patterns: string[] | undefined }[]} */
+  const calls = [];
+  for (const [k, token] of tokens.entries()) {
+    if (token.type !== "name" || token.value !== "import" || token.afterDot) continue;
+    if (!punct(tokens[k + 1], ".") || tokens[k + 2]?.value !== "meta") continue;
+    if (!punct(tokens[k + 3], ".") || tokens[k + 4]?.value !== "glob") continue;
+    let i = k + 5;
+    if (punct(tokens[i], "<") && tokens[i + 1]?.type === "name" && punct(tokens[i + 2], ">")) {
+      i += 3;
+    }
+    if (!punct(tokens[i], "(")) continue;
+    i++;
+    /** @type {string[]} */
+    const patterns = [];
+    if (punct(tokens[i], "[")) {
+      i++;
+      while (literal(tokens[i])) {
+        patterns.push(tokens[i]?.value ?? "");
+        i++;
+        if (!punct(tokens[i], ",")) break;
+        i++;
+      }
+      i = punct(tokens[i], "]") ? i + 1 : -1;
+    } else if (literal(tokens[i])) {
+      patterns.push(tokens[i]?.value ?? "");
+      i++;
+    } else {
+      i = -1;
+    }
+    let readable = i > 0 && patterns.length > 0 && (punct(tokens[i], ",") || punct(tokens[i], ")"));
+    // The options, up to the call's closing parenthesis.
+    for (let depth = 0; readable && i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t === undefined) break;
+      if (t.type === "punct" && ["(", "[", "{"].includes(t.value)) depth++;
+      else if (t.type === "punct" && [")", "]", "}"].includes(t.value)) {
+        depth--;
+        if (depth < 0) break;
+      }
+      const option = t.type === "name" || literal(t) ? t.value : undefined;
+      if (
+        (t.type === "punct" && ["...", "[", "${"].includes(t.value)) ||
+        option === "base" ||
+        option === "exhaustive"
+      ) {
+        readable = false;
+      }
+    }
+    calls.push({ start: token.start, patterns: readable ? patterns : undefined });
+  }
+  return calls;
 }
 
 /**
@@ -1116,6 +1307,17 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     }
   }
   if (!isTest) checkCodeNames(lexed.tokens, statements, loadsChecked, lineAt, add);
+  // Vite's static loader: outside tests and test support, every pattern it may load is read.
+  if (!isTest && !isTestSupport(file)) {
+    for (const { start, patterns } of findGlobCalls(lexed.tokens)) {
+      if (patterns !== undefined && !patterns.some((p) => globReachesTests(file, p))) continue;
+      add(
+        lineAt(start),
+        "glob-import",
+        "import.meta.glob takes literal relative patterns, with no base or exhaustive option, that stay in the repository and out of node_modules and test support and cannot match a test file",
+      );
+    }
+  }
 
   for (const ref of imports) {
     const { specifier, line, names, typeOnly, imported, dynamic } = ref;
@@ -1247,6 +1449,16 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
         "only tests and test support (e2e/, a package's test/, packages/testing, playwright.config.ts) import @fin/testing or a file of test support, so the harness never reaches deployable code",
       );
     }
+    // A package's subpath names a file inside that package: a resolver follows `.`, `..` and empty
+    // segments out of it (`@types/node/../../../packages/testing/src/index.ts`) and node_modules
+    // into another package's files, to code the rules on package names never see.
+    if (!mayLoadTestSupport && bare && builtin === undefined && leavesItsPackage(specifier)) {
+      add(
+        line,
+        "package-subpath",
+        "a package's subpath names a file inside it: no empty, `.`, `..` or node_modules segment, which a resolver follows out of the package",
+      );
+    }
     // A relative path stays inside the repository and out of node_modules: one that leaves the
     // checkout and comes back by its directory's name, or walks into an installed package, reaches
     // code (the harness included) that the rules on package names and repository paths never see.
@@ -1265,9 +1477,7 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     }
     if (
       !isTest &&
-      (relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some((t) =>
-        TEST_TARGET.test(t.replace(/\/+$/, "")),
-      )
+      (relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some(namesTestFile)
     ) {
       add(
         line,
@@ -1481,9 +1691,12 @@ function fieldPaths(value) {
 
 /**
  * Whether an entry-point target of the manifest in `dir` lets the package's name load test
- * support, a test file, an installed package's file or a file outside the repository. A pattern
- * target (with `*`) is read as every path it can expand to: refused when its fixed part lies in
- * test support or stops at a directory that holds test support.
+ * support, a test file, an installed package's file or a file outside the repository. A target is
+ * read as the file it names, as a directory (whose index file a resolver loads: `"main": "test"`)
+ * and as a name a resolver completes with an extension (`./x.test`, `playwright.config`). A
+ * pattern target (with `*`) is read as every path it can expand to: refused when its fixed part
+ * lies in test support or stops at a directory that holds test support, or when its fixed end can
+ * end a test file's name (`./src/*.ts` reaches `./src/x.test.ts`).
  * @param {string} dir the manifest's directory ("." at the root)
  * @param {string} target
  * @returns {boolean}
@@ -1491,13 +1704,20 @@ function fieldPaths(value) {
 function exposesTestSupport(dir, target) {
   const path = posix.join(dir, target.replace(/[?#].*$/, "")).replace(/^\.(?:\/|$)/, "");
   if (path === ".." || path.startsWith("../") || NODE_MODULES_SEGMENT.test(path)) return true;
-  if (TEST_TARGET.test(path) || TEST_SUPPORT_TARGET.some((pattern) => pattern.test(path))) {
+  const readings = [path, `${path.replace(/\/+$/, "")}/`, `${path}.ts`];
+  if (
+    namesTestFile(path) ||
+    readings.some((reading) => TEST_SUPPORT_TARGET.some((pattern) => pattern.test(reading)))
+  ) {
     return true;
   }
   const star = path.indexOf("*");
   if (star < 0) return false;
   const fixed = path.slice(0, star);
-  return HOLDS_TEST_SUPPORT.test(fixed.slice(0, fixed.lastIndexOf("/") + 1));
+  return (
+    HOLDS_TEST_SUPPORT.test(fixed.slice(0, fixed.lastIndexOf("/") + 1)) ||
+    canEndTestName(path.slice(path.lastIndexOf("*") + 1))
+  );
 }
 
 /**
@@ -1539,15 +1759,21 @@ export function checkManifest(file, text) {
   if (isTestSupport(file)) return findings;
   const dir = posix.dirname(file);
   for (const field of ENTRY_FIELDS) {
-    const fieldAt = text.indexOf(`"${field}"`);
+    const fieldAt = text.search(new RegExp(`"${field}"\\s*:`));
+    // A browser map's and an imports map's values may name another module by its package name
+    // (`"./src/clock.ts": "@fin/testing"`), which is read as a bare specifier as well as a path.
+    const mapsModules = field === "imports" || (field === "browser" && isRecord(manifest[field]));
     for (const target of new Set(fieldPaths(manifest[field]))) {
-      if (!exposesTestSupport(dir, target)) continue;
+      const byName = mapsModules && !/^(?:\.\.?(?:\/|$)|\/)/.test(target);
+      if (!exposesTestSupport(dir, target) && !(byName && bareTargetReachesTests(target))) {
+        continue;
+      }
       const targetAt = text.indexOf(JSON.stringify(target), Math.max(fieldAt, 0));
       findings.push({
         file,
         line: lineAt(targetAt >= 0 ? targetAt : Math.max(fieldAt, 0)),
         rule: "testing-export",
-        message: `a package's ${field} names no test support, test file, node_modules path or path out of the repository, so its name never loads the harness into deployable code`,
+        message: `a package's ${field} names no test support, test file, node_modules path, path out of the repository or package that loads one, so its name never loads the harness into deployable code`,
       });
     }
   }
