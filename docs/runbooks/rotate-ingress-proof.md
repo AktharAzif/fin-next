@@ -13,8 +13,11 @@ a `--rotate-ingress-proofs` step exists, rotate one host by hand-off to the comm
    `ingress.untrusted_peer`: do this in a quiet window.
 2. Delete that one rule, then run `node ops/fin/src/main.ts zone apply staging --only rules`. It
    generates a new proof for the role, sets it sealed in `FIN_INGRESS_PROOFS` on the service that
-   checks it (Railway redeploys it), and only then writes the rule again.
-3. Check: `/api/health` answers through the host; no `ingress.untrusted_peer` lines after the
+   checks it, and only then writes the rule again. The variable commit starts no deployment
+   (`skipDeploys`): the service still holds the old proof.
+3. Redeploy it: run `railway deploy` again for the release staging runs (`railway-deploy.md`); every
+   Fin service rolls and takes its variables.
+4. Check: `/api/health` answers through the host; no `ingress.untrusted_peer` lines after the
    redeploy.
 
 The two-value overlap (add the new value to the service, deploy, switch the rule, remove the old

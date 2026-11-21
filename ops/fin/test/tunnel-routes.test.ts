@@ -18,6 +18,8 @@ describe("tunnel create", () => {
     const patch = h.rw.patches[0];
     assert.equal(h.rw.nameOf(patch?.serviceId ?? ""), "cloudflared-public");
     assert.equal(patch?.variables.TUNNEL_TOKEN?.isSealed, true);
+    assert.equal(patch?.skipDeploys, true, "the commit starts no deployment of the connector");
+    assert.deepEqual(h.rw.writeDeployments, []);
     assert.equal(patch?.variables.FIN_TUNNEL_ROLE?.value, "public");
     assert.equal(patch?.variables.FIN_TUNNEL_ROLE?.isSealed, undefined);
     const hosts = JSON.parse(patch?.variables.FIN_TUNNEL_HOSTS?.value ?? "{}");

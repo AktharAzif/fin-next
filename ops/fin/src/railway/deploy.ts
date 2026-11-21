@@ -22,13 +22,15 @@
 //   7. when the release lists migrations, run `migrate` with the new api image and the superuser
 //      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
 //      the run), poll its log until `migrate.done` for this release, then remove the reference and
-//      read migrate's variables back to confirm it is gone (on every way the run ends: a failure,
+//      read migrate's variables back to confirm it is gone, sealed or not (again, for up to 10 s,
+//      while a lagging read still shows it; on every way the run ends: a failure,
 //      and a stop, which cuts the wait short, or, while the write that sets the reference is in
 //      flight, waits for that write and starts no migrate; a run closed at once first says to
 //      remove it by hand);
 //   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
-//      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
-//      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
+//      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT (a
+//      commit that starts no deployment of its own, like migrate's), then the one deploy that
+//      takes them, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
 //      release's minimum schema version, recorded with every step) and the running digest;
 //   9. roll cloudflared-admin and cloudflared-public unless they run the release's image now (set
 //      to it, with a newest deployment that ended SUCCESS on it);
@@ -59,7 +61,8 @@ import {
   isRefusal,
   REFUSED_CHECKS,
   ROLL_CHECKS,
-  readVariables,
+  readVariablesBack,
+  type Variables,
 } from "./inspect.ts";
 import { imageRef, readRunning } from "./running.ts";
 
@@ -72,12 +75,10 @@ const INSTANCE_UPDATE =
   "mutation finInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }";
 const DEPLOY =
   "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }";
-// UNVERIFIED field names (SP-03): a deployment's status and its log lines, and removing a variable.
+// UNVERIFIED field names (SP-03): a deployment's status and its log lines.
 const DEPLOYMENT = "query finDeployment($id: String!) { deployment(id: $id) { id status } }";
 const LOGS =
   "query finLogs($deploymentId: String!) { deploymentLogs(deploymentId: $deploymentId, limit: 500) { message } }";
-const VARIABLE_DELETE =
-  "mutation finVariableDelete($input: VariableDeleteInput!) { variableDelete(input: $input) }";
 
 async function deploymentStatus(rw: RailwayApi, id: string): Promise<string> {
   const data = await rw.query<{ deployment: { status: string } }>(DEPLOYMENT, { id });
@@ -421,17 +422,33 @@ export const railwayDeploy: Command = {
 
     let started = false;
     const reference = s.bootstrapReference;
-    /** Confirms migrate's variables no longer hold the superuser reference (spec 01 §6.3, §6.6). */
+    /** What of the superuser reference a read of migrate's variables still shows, sealed or not. */
+    const standing = (v: Variables): string[] => [
+      ...new Set([
+        ...v.templateReferences,
+        ...[...v.readable, ...v.sealed].filter(
+          (n) => n === reference.variable || n === BOOTSTRAP_REFERENCE,
+        ),
+      ]),
+    ];
+    /**
+     * Confirms migrate's variables no longer hold the superuser reference (spec 01 §6.3, §6.6),
+     * reading again for a short, bounded time while a read still shows it (the read may lag the
+     * delete). The waits are not cut short by a stop: this is the clean-up a stop runs, and the
+     * stop's own deadline bounds it.
+     */
     const confirmRemoved = async (serviceId: string): Promise<void> => {
       let left: string[];
       try {
-        const v = await readVariables(rw, ctx.settings, "migrate", serviceId);
-        left = [
-          ...new Set([
-            ...v.templateReferences,
-            ...v.names.filter((n) => n === reference.variable || n === BOOTSTRAP_REFERENCE),
-          ]),
-        ];
+        const v = await readVariablesBack(
+          rw,
+          ctx.settings,
+          "migrate",
+          serviceId,
+          ctx.runtime.sleep,
+          (read) => standing(read).length === 0,
+        );
+        left = standing(v);
       } catch (error) {
         if (!isRefusal(error) || !accepted.variables) throw error;
         ctx.out.warn(
@@ -472,14 +489,11 @@ export const railwayDeploy: Command = {
           } catch {
             // A write that failed may still have been applied: the reference is removed anyway.
           }
-          await rw.mutate(ctx.run, VARIABLE_DELETE, {
-            input: {
-              projectId: rw.projectId,
-              environmentId: rw.environmentId,
-              serviceId: set.serviceId,
-              name: reference.variable,
-            },
-          });
+          if (!(await rw.deleteVariable(ctx.run, set.serviceId, reference.variable))) {
+            ctx.out.warn(
+              `Railway took no skipDeploys on the removal of ${reference.variable}: a migrate deployment it starts runs without the reference and stops at its configuration check`,
+            );
+          }
           await confirmRemoved(set.serviceId);
         } catch (error) {
           ctx.out.error(`${reference.variable} could not be removed from migrate: ${byHand}`);

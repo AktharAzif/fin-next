@@ -14,7 +14,13 @@ import { Secret } from "../src/core/secret.ts";
 import { loadSettings } from "../src/core/settings.ts";
 import { RailwayApi } from "../src/railway/api.ts";
 import { migrateOutcome } from "../src/railway/deploy.ts";
-import { isRefusal, NO_READ_ROWS } from "../src/railway/inspect.ts";
+import {
+  isRefusal,
+  NO_READ_ROWS,
+  READ_BACK_PAUSE_MS,
+  READ_BACK_READS,
+  readVariables,
+} from "../src/railway/inspect.ts";
 import {
   fakeRuntime,
   fakeToken,
@@ -122,7 +128,7 @@ function migrateWaits(holdLog = false) {
   return { h, file: manifest(h, { migrations: ["x.sql"] }), log, reached: reached.wait };
 }
 
-const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL" }];
+const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL", skipDeploys: true }];
 
 /** Lets the work in progress run for a while (no real I/O happens in these tests). */
 async function settle(): Promise<void> {
@@ -203,6 +209,26 @@ describe("railway verify", () => {
     }
     assert.equal(out.includes("readable-password-value"), false);
     assert.equal(out.includes("api-production.up.railway.app"), false);
+  });
+
+  it("takes a variable Railway answers with a null value as sealed and present: no readable-secret drift, and a sealed superuser reference still found", async () => {
+    const h = provisioned((x) => {
+      for (const [service, name] of [
+        ["api", "FIN_DB_PASSWORD"],
+        ["edge", "FIN_INGRESS_PROOFS"],
+        ["cloudflared-public", "TUNNEL_TOKEN"],
+        ["worker", "FIN_BOOTSTRAP_DATABASE_URL"],
+      ] as const) {
+        x.rw.instances.get(service)?.sealed.add(name);
+      }
+    });
+    assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.drift);
+    const out = h.runtime.out();
+    assert.doesNotMatch(out, /! \S+ sealed:/, "a sealed variable is not a readable one");
+    assert.doesNotMatch(out, /! \S+ port:/);
+    assert.match(out, /! worker superuser-reference: FIN_BOOTSTRAP_DATABASE_URL/);
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /worker \(superuser-reference\)/);
   });
 
   it("names the domain and TCP proxy of a service the settings do not list, and a prototype-named one", async () => {
@@ -516,9 +542,7 @@ describe("railway deploy", () => {
     const started = h.rw.migrateEnvironments[0];
     assert.match(started?.FIN_BOOTSTRAP_DATABASE_URL ?? "", /^\$\{\{postgres\.DATABASE_URL\}\}$/);
     assert.match(started?.FIN_RUN_ID ?? "", /^run_/);
-    assert.deepEqual(h.rw.variableDeletes, [
-      { service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL" },
-    ]);
+    assert.deepEqual(h.rw.variableDeletes, REMOVED);
     assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
   });
 
@@ -950,6 +974,100 @@ describe("railway deploy", () => {
     assert.equal(h.records().at(-1)?.result, "refused");
   });
 
+  it("commits every variable with skipDeploys, so no write starts a deployment and migrate runs once", async () => {
+    const h = provisioned();
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    assert.ok(h.rw.patches.length > 1);
+    for (const p of h.rw.patches) assert.equal(p.skipDeploys, true, p.serviceId);
+    assert.deepEqual(h.rw.variableDeletes, REMOVED, "the removal passes skipDeploys too");
+    assert.deepEqual(h.rw.writeDeployments, [], "no variable write started a deployment");
+    assert.equal(h.rw.migrateEnvironments.length, 1, "one migrate run, the one the deploy started");
+    assert.equal(
+      h.rw.operations.filter((op) => op === "finDeploy").length,
+      h.rw.updates.length,
+      "one deployment per rolled service",
+    );
+  });
+
+  it("removes the superuser reference without skipDeploys when Railway's variable delete takes none, and says so", async () => {
+    const h = provisioned((x) => {
+      x.rw.variableDeleteRefusesSkipDeploys = true;
+    });
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    assert.deepEqual(h.rw.variableDeletes, [{ ...REMOVED[0], skipDeploys: false }]);
+    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.match(
+      h.runtime.err(),
+      /took no skipDeploys on the removal of FIN_BOOTSTRAP_DATABASE_URL/,
+    );
+    // The deployment that removal started runs without the reference.
+    assert.deepEqual(h.rw.writeDeployments, ["migrate"]);
+    assert.equal(h.rw.migrateEnvironments.length, 2);
+    assert.equal(h.rw.migrateEnvironments[1]?.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+  });
+
+  it("reads migrate's variables again while a lagging read still shows the removed reference, and stops only once the bounded wait is out", async () => {
+    const waits: number[] = [];
+    const lagging = (reads: number) =>
+      provisioned((x) => {
+        x.rw.staleVariableReads = reads;
+        Object.assign(x.runtime, {
+          sleep: async (ms: number) => {
+            waits.push(ms);
+          },
+        });
+      });
+    const h = lagging(2);
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    assert.deepEqual(
+      waits.filter((ms) => ms === READ_BACK_PAUSE_MS),
+      [READ_BACK_PAUSE_MS, READ_BACK_PAUSE_MS],
+      "two lagging reads, two short waits",
+    );
+    assert.ok(
+      h.rw.updates.some((u) => u.service === "console"),
+      "the roll goes on",
+    );
+    assert.equal(h.records().at(-1)?.result, "ok");
+
+    waits.length = 0;
+    const h2 = lagging(100);
+    assert.equal(await deploy(h2, manifest(h2, { migrations: ["x.sql"] })), EXIT.refused);
+    assert.match(h2.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
+    const afterDelete = h2.sequence.slice(h2.sequence.indexOf("rw finVariableDelete"));
+    assert.equal(
+      afterDelete.filter((call) => call === "rw finVariables").length,
+      READ_BACK_READS,
+      "a bounded number of reads",
+    );
+    assert.equal(waits.filter((ms) => ms === READ_BACK_PAUSE_MS).length, READ_BACK_READS - 1);
+    assert.deepEqual(
+      h2.rw.updates.map((u) => u.service),
+      ["migrate"],
+      "nothing rolls while the reference may stand",
+    );
+  });
+
+  it("finds the superuser reference on migrate after its removal when Railway answers it sealed", async () => {
+    const h = provisioned((x) => {
+      x.rw.variableDeleteNoop = true;
+      const fetch = x.rw.fetch;
+      Object.assign(x.rw, {
+        fetch: async (url: string, init: RequestInit) => {
+          const answer = await fetch(url, init);
+          const migrate = x.rw.instances.get("migrate");
+          if (String(init.body).includes("finVariableDelete") && migrate !== undefined) {
+            delete migrate.variables.FIN_BOOTSTRAP_DATABASE_URL;
+            migrate.sealed.add("FIN_BOOTSTRAP_DATABASE_URL");
+          }
+          return answer;
+        },
+      });
+    });
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.refused);
+    assert.match(h.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
+  });
+
   it("refuses unless ci.yml's merge job succeeded for the commit, before reading Railway", async () => {
     for (const conclusion of ["failure", "cancelled", undefined]) {
       const h = provisioned((x) => {
@@ -1024,7 +1142,7 @@ function deleteInput(serviceId: string, name = "FIN_BOOTSTRAP_DATABASE_URL") {
 }
 
 const PATCH =
-  "mutation finPatch($environmentId: String!, $patch: EnvironmentConfig, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }";
+  "mutation finPatch($environmentId: String!, $patch: EnvironmentConfig, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage, skipDeploys: true) }";
 
 describe("the Railway client's writes", () => {
   it("sends only the mutations pnpm fin makes, to this environment and the project's services", async () => {
@@ -1042,6 +1160,16 @@ describe("the Railway client's writes", () => {
       ],
       [PATCH, { environmentId: uuid("e"), patch: patch(worker) }],
       [PATCH, { environmentId: env, patch: patch(uuid("f")) }],
+      // An environment patch passes skipDeploys: true in the call itself, so it starts no deployment.
+      [PATCH.replace(", skipDeploys: true", ""), { environmentId: env, patch: patch(worker) }],
+      [
+        PATCH.replace("skipDeploys: true", "skipDeploys: false"),
+        { environmentId: env, patch: patch(worker) },
+      ],
+      [
+        PATCH.replace("skipDeploys: true", "skipDeploys: $skip"),
+        { environmentId: env, patch: patch(worker), skip: false },
+      ],
       [
         "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }",
         { serviceId: uuid("f"), environmentId: env },
@@ -1060,5 +1188,58 @@ describe("the Railway client's writes", () => {
       rw.operations.filter((op) => op !== "finServices"),
       ["finPatch"],
     );
+  });
+
+  it("sets variables with skipDeploys, sealed where they must be", async () => {
+    const { rw, run, api } = setup();
+    await api.setVariables(
+      run,
+      settings,
+      "worker",
+      { FIN_RELEASE: RELEASE, FIN_DB_PASSWORD: new Secret("x".repeat(32)) },
+      "test",
+    );
+    assert.equal(rw.patches.length, 1);
+    assert.equal(rw.patches[0]?.skipDeploys, true);
+    assert.equal(rw.patches[0]?.variables.FIN_DB_PASSWORD?.isSealed, true);
+    assert.deepEqual(rw.writeDeployments, []);
+  });
+
+  it("removes a variable with skipDeploys, and without it only when Railway's schema refuses the field", async () => {
+    const { rw, run, api } = setup();
+    const worker = await api.serviceId("worker");
+    assert.equal(await api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"), true);
+    assert.deepEqual(rw.variableDeletes, [
+      { service: "worker", name: "FIN_BOOTSTRAP_DATABASE_URL", skipDeploys: true },
+    ]);
+    rw.variableDeleteRefusesSkipDeploys = true;
+    assert.equal(await api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"), false);
+    assert.deepEqual(rw.variableDeletes.at(-1), {
+      service: "worker",
+      name: "FIN_BOOTSTRAP_DATABASE_URL",
+      skipDeploys: false,
+    });
+    // Any other failure is no reason to drop skipDeploys: nothing is sent again.
+    rw.variableDeleteRefusesSkipDeploys = false;
+    rw.transient.add("finVariableDelete");
+    const before = rw.operations.filter((op) => op === "finVariableDelete").length;
+    await assert.rejects(
+      api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"),
+      ProviderError,
+    );
+    assert.equal(rw.operations.filter((op) => op === "finVariableDelete").length, before + 1);
+    await assert.rejects(api.deleteVariable(run, worker, "FIN_RELEASE"), RefusedError);
+  });
+
+  it("reads a sealed variable, which Railway answers with a null value, as sealed and present", async () => {
+    const { rw, api } = setup();
+    rw.addService("api", {
+      variables: { PORT: "8080", FIN_SERVICE: "api" },
+      sealed: new Set(["FIN_DB_PASSWORD"]),
+    });
+    const v = await readVariables(api, settings, "api", await api.serviceId("api"));
+    assert.deepEqual(v.readable.sort(), ["FIN_SERVICE", "PORT"]);
+    assert.deepEqual(v.sealed, ["FIN_DB_PASSWORD"]);
+    assert.equal(v.port, "8080");
   });
 });

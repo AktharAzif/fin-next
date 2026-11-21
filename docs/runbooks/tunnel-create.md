@@ -14,8 +14,9 @@ its own connector service.
    `FIN_TUNNEL_HOSTS` (host role to hostname, for the ingress map; the docs host is not in it). The
    standby services (`-b`) get no token. The token is never printed or logged.
 
-Re-running is safe: the tunnel is kept and the same token is set again (Railway redeploys the
-connector).
+The variable commit starts no deployment (`skipDeploys`): the connector takes the token at its next
+deployment, its first roll by `railway deploy` included. Re-running is safe: the tunnel is kept and
+the same token is set again, and the running connector is left alone.
 
 ## Run it
 

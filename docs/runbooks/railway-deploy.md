@@ -15,9 +15,10 @@ read (`?`), which never counts as passing:
 - no public domain and no TCP proxy on any service (NB-07); no instance in another environment of
   the project (spec 01 §6.1: only the default environment, no PR environments); outside a
   registered run, no `FIN_BOOTSTRAP_DATABASE_URL` and no variable under any name that refers to the
-  database template's variables (`${{postgres.…}}`, spec 01 §6.3). Variables are read unrendered,
-  so a reference is never rendered into a value that carries the superuser password; only the
-  names, and PORT's value, are kept;
+  database template's variables (`${{postgres.…}}`, spec 01 §6.3), sealed or not. Variables are
+  read unrendered, so a reference is never rendered into a value that carries the superuser
+  password; only the names, and PORT's value, are kept. Railway answers a sealed variable with its
+  name and a null value: such a name counts as sealed, and as present;
 - region, replicas, restart policy; app sleeping off; outbound IPv6 off; `PORT=8080`;
 - the health check (`/readyz`, 60 s), overlap and draining, start command and cron;
 - the image is set by digest from `ghcr.io/aktharazif/`, is the service's own image, and is the
@@ -26,19 +27,19 @@ read (`?`), which never counts as passing:
   job), its newest deployment ended `SUCCESS` (`deployment`) and runs that digest (`digest`): the
   image a service is set to is only what its next deployment takes, so a deploy that crashed or a
   rollback in Railway's dashboard shows here;
-- no secret-named variable (spec 01 §6.7) is readable: every one is sealed;
+- no secret-named variable (spec 01 §6.7) is readable (answered with a value): every one is sealed;
 - static egress on exactly the services §6.5 lists, with the overlay's `staticEgress` addresses.
 
 Listed as not checked, every time: memory limits, PITR and the deployment webhook; staged but
 undeployed changes; image auto-updates, Railway's CDN and Edge Rules, hard usage limits; shared
 variables holding a secret; each service's database login; that the no-token services hold no
-`TUNNEL_TOKEN` and that no database template reference is set as a sealed variable (Railway never
-returns a sealed variable); Config as Code and a repository source. Check those by hand. Also
-listed: any read Railway refused (SP-03, SP-08), naming what it leaves unchecked (a refused
-variables read leaves the superuser-reference check unchecked), any field Railway answered with no
-value, the digest of a service no registered deploy in this machine's run log recorded, and the
-image a newest deployment runs when Railway does not say (SP-03). Only a schema or authorisation
-error counts as Railway refusing a read. Any other failure (no answer, a
+`TUNNEL_TOKEN` and that no database template reference is set as a sealed variable (Railway
+answers a sealed variable with its name only); Config as Code and a repository source. Check those
+by hand. Also listed: any read Railway refused (SP-03, SP-08), naming what it leaves unchecked (a
+refused variables read leaves the superuser-reference check unchecked), any field Railway answered
+with no value, the digest of a service no registered deploy in this machine's run log recorded, and
+the image a newest deployment runs when Railway does not say (SP-03). Only a schema or
+authorisation error counts as Railway refusing a read. Any other failure (no answer, a
 429 or a 5xx after the retries, or a GraphQL error that is Railway's own) stops the command with
 exit 69 instead: run it again.
 
@@ -98,7 +99,9 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
    `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
    deployment. Then it removes the reference, whether migrate passed or failed, and reads migrate's
-   variables back: if the reference is still there, nothing rolls (exit 77). A signal (Ctrl-C,
+   variables back, sealed names included. Railway's read can lag a write, so while a read still
+   shows the reference it reads again, every 2 seconds, six reads at most: if the reference is still
+   there after that, nothing rolls (exit 77). A signal (Ctrl-C,
    SIGTERM, a closed terminal) cuts the wait short, and the reference is removed before `run.done`;
    a signal that comes while the write setting the reference is still in flight (slow, or waiting
    out a 429) starts no `migrate`, and the removal waits for that write to settle first.
@@ -117,6 +120,13 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
     `SUCCESS`; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console
     and verify hosts. `deploy.done` is written and `run.done` records the digest of every service on
     the release, kept connectors included, which `railway verify` then checks.
+
+Every variable write commits with `skipDeploys: true`, so it starts no deployment of its own: the
+one deployment of each service is the deploy that steps 8 and 9 start, and `migrate` runs once per
+run (a second run would race the password it gives `fin_owner`). Whether Railway's variable delete
+takes `skipDeploys` is not yet confirmed (SP-03): if it does not, the reference is removed without
+it and the output says so; a `migrate` deployment that removal starts stops at its configuration
+check, since the reference is gone.
 
 Not done here yet: reading the schema version through `api`'s private health (the operator machine
 has no route into Railway's private network; `/readyz` enforces it per service, steps 5 and 9).

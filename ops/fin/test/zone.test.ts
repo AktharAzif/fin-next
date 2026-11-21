@@ -79,7 +79,11 @@ describe("zone apply", () => {
       lastPatch >= 0 && firstRuleWrite > lastPatch,
       "every proof is set before the first rule write",
     );
-    for (const p of h.rw.patches) assert.equal(p.variables.FIN_INGRESS_PROOFS?.isSealed, true);
+    for (const p of h.rw.patches) {
+      assert.equal(p.variables.FIN_INGRESS_PROOFS?.isSealed, true);
+      assert.equal(p.skipDeploys, true, "the commit starts no deployment");
+    }
+    assert.deepEqual(h.rw.writeDeployments, []);
     const verify = JSON.parse(
       h.rw.patches.find((p) => h.rw.nameOf(p.serviceId) === "verify")?.variables.FIN_INGRESS_PROOFS
         ?.value ?? "{}",

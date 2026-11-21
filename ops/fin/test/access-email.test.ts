@@ -262,6 +262,8 @@ describe("email token", () => {
     const patch = h.rw.patches[0];
     assert.equal(h.rw.nameOf(patch?.serviceId ?? ""), "worker");
     assert.equal(patch?.variables.FIN_EMAIL_TOKEN?.isSealed, true);
+    assert.equal(patch?.skipDeploys, true, "the commit starts no deployment of worker");
+    assert.deepEqual(h.rw.writeDeployments, []);
     assert.equal(patch?.variables.FIN_EMAIL_FROM?.value, `account-security@auth.${ZONE}`);
     h.assertNoLeak([patch?.variables.FIN_EMAIL_TOKEN?.value ?? "", "203.0.113.10"]);
   });

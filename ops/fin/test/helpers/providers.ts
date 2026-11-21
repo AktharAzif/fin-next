@@ -377,6 +377,8 @@ export interface RailwayPatch {
   environmentId: string;
   serviceId: string;
   variables: Record<string, { value: string; isSealed?: boolean }>;
+  /** Whether the commit passed `skipDeploys: true` (without it, it starts a deployment). */
+  skipDeploys: boolean;
 }
 
 export interface FakeInstance {
@@ -447,7 +449,25 @@ export class FakeRailway {
   migrateLogReadsBehind = 0;
   /** The variables migrate's container started with, per migrate deployment. */
   readonly migrateEnvironments: Array<Record<string, string>> = [];
-  readonly variableDeletes: Array<{ service: string; name: string }> = [];
+  readonly variableDeletes: Array<{ service: string; name: string; skipDeploys: boolean }> = [];
+  /**
+   * The services a variable write started a deployment of, in order: as Railway does for an
+   * environment patch or a variable delete sent without `skipDeploys: true`.
+   */
+  readonly writeDeployments: string[] = [];
+  /** Whether variableDelete's input refuses skipDeploys (a schema with no such input field). */
+  variableDeleteRefusesSkipDeploys = false;
+  /**
+   * How many variable reads of a service, after each write to its variables, still answer what
+   * stood before that write (Railway's read is eventually consistent).
+   */
+  staleVariableReads = 0;
+  readonly #stale = new Map<
+    string,
+    { left: number; variables: Record<string, string>; sealed: Set<string> }
+  >();
+  /** The service of every variables read, in order. */
+  readonly variableReads: string[] = [];
   extendedRefused = false;
   variablesRefused = false;
   /**
@@ -522,6 +542,49 @@ export class FakeRailway {
     return [...this.services.entries()].find(([, v]) => v === id)?.[0];
   }
 
+  /** Starts a deployment of a service with its instance as it stands; returns its ID. */
+  #startDeployment(service: string): string {
+    const id = `dep-${this.deployments.size + 1}`;
+    const instance = this.instances.get(service);
+    const release = instance?.variables.FIN_RELEASE ?? "";
+    if (service === "migrate") this.migrateEnvironments.push({ ...(instance?.variables ?? {}) });
+    this.deployments.set(id, {
+      service,
+      statuses: [...this.deployStatuses],
+      logs: service === "migrate" ? this.migrateLogs(release) : [],
+      reads: 0,
+      image: instance?.image ?? null,
+    });
+    if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
+    return id;
+  }
+
+  /** Before a write to a service's variables: the next reads may still answer what stands now. */
+  #beforeVariableWrite(service: string, instance: FakeInstance): void {
+    if (this.staleVariableReads <= 0) return;
+    this.#stale.set(service, {
+      left: this.staleVariableReads,
+      variables: { ...instance.variables },
+      sealed: new Set(instance.sealed),
+    });
+  }
+
+  /** What a variables read of a service answers: a sealed variable by its name, with null. */
+  #variablesRead(service: string): Record<string, string | null> {
+    const stale = this.#stale.get(service);
+    if (stale !== undefined) {
+      stale.left--;
+      if (stale.left <= 0) this.#stale.delete(service);
+    }
+    const instance = this.instances.get(service);
+    const variables = stale?.variables ?? instance?.variables ?? {};
+    const sealed = stale?.sealed ?? instance?.sealed ?? new Set<string>();
+    return {
+      ...variables,
+      ...Object.fromEntries([...sealed].map((name) => [name, null])),
+    };
+  }
+
   /** Provisions every service exactly as the settings say (spec 01 §6.2), with no image yet. */
   provision(
     settings: ProvisionSettings,
@@ -585,19 +648,31 @@ export class FakeRailway {
       const patch = variables.patch as {
         services: Record<string, { variables: RailwayPatch["variables"] }>;
       };
+      // The field call's own arguments, as Railway reads them.
+      const skipDeploys = /\bskipDeploys\s*:\s*true\b/.test(
+        /environmentPatchCommit\s*\(([^)]*)\)/.exec(query)?.[1] ?? "",
+      );
       for (const [serviceId, s] of Object.entries(patch.services)) {
         this.patches.push({
           environmentId: String(variables.environmentId),
           serviceId,
           variables: s.variables,
+          skipDeploys,
         });
-        const instance = this.instances.get(this.nameOf(serviceId) ?? "");
-        for (const [name, v] of Object.entries(s.variables)) {
-          if (instance === undefined) continue;
-          if (v.isSealed === true) {
-            instance.sealed.add(name);
-            delete instance.variables[name];
-          } else instance.variables[name] = v.value;
+        const name = this.nameOf(serviceId) ?? "";
+        const instance = this.instances.get(name);
+        if (instance !== undefined) {
+          this.#beforeVariableWrite(name, instance);
+          for (const [variable, v] of Object.entries(s.variables)) {
+            if (v.isSealed === true) {
+              instance.sealed.add(variable);
+              delete instance.variables[variable];
+            } else instance.variables[variable] = v.value;
+          }
+        }
+        if (!skipDeploys) {
+          this.writeDeployments.push(name);
+          this.#startDeployment(name);
         }
       }
       return ok({ environmentPatchCommit: "commit" });
@@ -690,7 +765,8 @@ export class FakeRailway {
     }
     if (op === "finVariables") {
       if (this.variablesRefused) return refused("variables");
-      const raw = this.instances.get(service)?.variables ?? {};
+      this.variableReads.push(service);
+      const raw = this.#variablesRead(service);
       // Railway renders a reference (`${{service.VAR}}`) into its value unless asked for the
       // unrendered form; a rendered database reference carries the template's password.
       const unrendered = /\bunrendered:\s*true\b/.test(query);
@@ -698,7 +774,9 @@ export class FakeRailway {
         variables: Object.fromEntries(
           Object.entries(raw).map(([name, value]) => [
             name,
-            unrendered ? value : value.replace(/\$\{\{[^}]*\}\}/g, RENDERED_SECRET),
+            unrendered || value === null
+              ? value
+              : value.replace(/\$\{\{[^}]*\}\}/g, RENDERED_SECRET),
           ]),
         ),
       });
@@ -715,29 +793,38 @@ export class FakeRailway {
       return ok({ serviceInstanceUpdate: true });
     }
     if (op === "finVariableDelete") {
-      const input = variables.input as { serviceId?: string; name?: string };
+      const input = variables.input as { serviceId?: string; name?: string; skipDeploys?: unknown };
+      const skipDeploys = input.skipDeploys === true;
+      if (Object.hasOwn(input, "skipDeploys") && this.variableDeleteRefusesSkipDeploys) {
+        return new Response(
+          JSON.stringify({
+            errors: [
+              {
+                message:
+                  'Variable "$input" got invalid value; Field "skipDeploys" is not defined by type "VariableDeleteInput".',
+              },
+            ],
+          }),
+          { status: 400 },
+        );
+      }
       const target = this.nameOf(String(input.serviceId ?? "")) ?? "";
-      this.variableDeletes.push({ service: target, name: String(input.name) });
+      const name = String(input.name);
+      this.variableDeletes.push({ service: target, name, skipDeploys });
       const instance = this.instances.get(target);
-      if (instance !== undefined && !this.variableDeleteNoop)
-        delete instance.variables[String(input.name)];
+      if (instance !== undefined && !this.variableDeleteNoop) {
+        this.#beforeVariableWrite(target, instance);
+        delete instance.variables[name];
+        instance.sealed.delete(name);
+      }
+      if (!skipDeploys) {
+        this.writeDeployments.push(target);
+        this.#startDeployment(target);
+      }
       return ok({ variableDelete: true });
     }
     if (op === "finDeploy") {
-      const id = `dep-${this.deployments.size + 1}`;
-      const release = this.instances.get(service)?.variables.FIN_RELEASE ?? "";
-      if (service === "migrate")
-        this.migrateEnvironments.push({ ...(this.instances.get(service)?.variables ?? {}) });
-      this.deployments.set(id, {
-        service,
-        statuses: [...this.deployStatuses],
-        logs: service === "migrate" ? this.migrateLogs(release) : [],
-        reads: 0,
-        image: this.instances.get(service)?.image ?? null,
-      });
-      const instance = this.instances.get(service);
-      if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
-      return ok({ serviceInstanceDeployV2: id });
+      return ok({ serviceInstanceDeployV2: this.#startDeployment(service) });
     }
     if (op === "finDeployment") {
       const d = this.deployments.get(String(variables.id));

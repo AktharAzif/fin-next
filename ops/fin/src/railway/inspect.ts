@@ -12,7 +12,10 @@
 // Variables are read unrendered, so a reference (`${{postgres.DATABASE_URL}}`) is seen as a
 // reference and never rendered into a value that carries the template's password. Of the values,
 // only PORT's is kept; for every other variable only the name is kept, and whether it refers to a
-// template's variables (spec 01 §6.3). Nothing else of a value is kept, printed or logged.
+// template's variables (spec 01 §6.3). Nothing else of a value is kept, printed or logged. Railway
+// answers a sealed variable with its name and a null value: such a name is sealed, and present.
+// The read is eventually consistent: straight after a write it may still answer what stood before,
+// so a read-back of a write is tried again for a short, bounded time (readVariablesBack).
 //
 // Names come from Railway, so every lookup by one goes through Object.hasOwn: a service named
 // `constructor` is an unknown service like any other.
@@ -44,6 +47,8 @@ export interface InstanceState {
   tcpProxies?: number;
   /** The names of the readable (unsealed) variables; undefined when the read was refused. */
   readableVariables?: string[];
+  /** The names of the sealed variables (answered with a null value); undefined when refused. */
+  sealedVariables?: string[];
   /** The readable variables whose value refers to a template service's variables (§6.3). */
   templateReferences?: string[];
   /** PORT's value, or null when it is not readable (§6.2: PORT=8080 on every service). */
@@ -91,8 +96,8 @@ const STATUS = `query finStatus($projectId: String!) { project(id: $projectId) {
 const EXTENDED = `query finStatusExtended($projectId: String!) { project(id: $projectId) { services { edges { node { name serviceInstances { edges { node { environmentId healthcheckPath healthcheckTimeout overlapSeconds drainingSeconds startCommand cronSchedule } } } } } } } }`;
 const TCP =
   "query finTcp($environmentId: String!, $serviceId: String!) { tcpProxies(environmentId: $environmentId, serviceId: $serviceId) { id } }";
-// UNVERIFIED (SP-03): the readable variables of a service, unrendered (a reference stays a
-// reference); a sealed one is absent from the answer.
+// UNVERIFIED (SP-03): the variables of a service, unrendered (a reference stays a reference); a
+// sealed one is answered by its name with a null value, as staging answers it.
 const VARIABLES =
   "query finVariables($projectId: String!, $environmentId: String!, $serviceId: String!) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, unrendered: true) }";
 
@@ -106,7 +111,7 @@ export const NO_READ_ROWS = [
   "image auto-updates off, Railway's CDN and Edge Rules, hard usage limits (no read in Phase 0)",
   "shared variables holding a secret (no read in Phase 0)",
   "each service's database login (spec 01 §6.2: the Postgres role behind FIN_DB_USER; no read in Phase 0)",
-  "no TUNNEL_TOKEN on the services that hold no token, and no database template reference set as a sealed variable (Railway returns no sealed variable)",
+  "no TUNNEL_TOKEN on the services that hold no token, and no database template reference set as a sealed variable (no read in Phase 0; Railway answers a sealed variable with its name only)",
   "Config as Code (a railway.json or railway.toml path) and a repository source on a service (no read in Phase 0 beyond the image-by-digest check)",
 ];
 
@@ -171,16 +176,29 @@ export function templateReferences(
     .sort();
 }
 
+/** What the checks keep of one service's variables. */
+export interface Variables {
+  /** The names of the readable variables (any value but null). */
+  readable: string[];
+  /** The names Railway answered with a null value: sealed variables, present all the same. */
+  sealed: string[];
+  /** The readable variables whose value refers to a template service's variables. */
+  templateReferences: string[];
+  /** PORT's value, or null when it is not readable. */
+  port: string | null;
+}
+
 /**
- * Reads one service's variables, unrendered, and keeps only what the checks need: the names, the
- * names that refer to a template, and PORT's value. Throws on a refusal like any read.
+ * Reads one service's variables, unrendered, and keeps only what the checks need: the readable
+ * names, the sealed names, the names that refer to a template, and PORT's value. Throws on a
+ * refusal like any read.
  */
 export async function readVariables(
   rw: RailwayApi,
   settings: Settings,
   service: string,
   serviceId: string,
-): Promise<{ names: string[]; templateReferences: string[]; port: string | null }> {
+): Promise<Variables> {
   const v = await rw.query<{ variables: Record<string, unknown> | null }>(VARIABLES, {
     projectId: rw.projectId,
     environmentId: rw.environmentId,
@@ -188,11 +206,38 @@ export async function readVariables(
   });
   const variables = v.variables ?? {};
   const port = Object.hasOwn(variables, "PORT") ? variables.PORT : undefined;
+  const names = Object.keys(variables);
   return {
-    names: Object.keys(variables),
+    readable: names.filter((name) => variables[name] !== null),
+    sealed: names.filter((name) => variables[name] === null),
     templateReferences: templateReferences(service, variables, templateServices(settings)),
     port: typeof port === "string" ? port : null,
   };
+}
+
+/** Reads of a read-back in all, at most, and the wait between two of them (10 s in all). */
+export const READ_BACK_READS = 6;
+export const READ_BACK_PAUSE_MS = 2_000;
+
+/**
+ * Reads back one service's variables after a write, until `settled` says the write shows, or
+ * READ_BACK_READS reads were made: Railway's read is eventually consistent, so a read straight
+ * after a write may still answer what stood before it. Returns the last read, which alone may
+ * report a mismatch. A refusal or a failed read throws at once, like any read.
+ */
+export async function readVariablesBack(
+  rw: RailwayApi,
+  settings: Settings,
+  service: string,
+  serviceId: string,
+  sleep: (ms: number) => Promise<void>,
+  settled: (variables: Variables) => boolean,
+): Promise<Variables> {
+  for (let read = 1; ; read++) {
+    const variables = await readVariables(rw, settings, service, serviceId);
+    if (settled(variables) || read >= READ_BACK_READS) return variables;
+    await sleep(READ_BACK_PAUSE_MS);
+  }
 }
 
 /**
@@ -292,7 +337,8 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
     state.tcpProxies = tcp.tcpProxies.length;
     try {
       const v = await readVariables(rw, ctx.settings, name, state.id);
-      state.readableVariables = v.names;
+      state.readableVariables = v.readable;
+      state.sealedVariables = v.sealed;
       state.templateReferences = v.templateReferences;
       state.port = v.port;
     } catch (error) {
@@ -373,7 +419,11 @@ function exposureFindings(
     );
   }
   const references = new Set(got.templateReferences ?? []);
-  if ((got.readableVariables ?? []).includes(BOOTSTRAP_REFERENCE))
+  // Present, sealed or not: a sealed superuser reference stands all the same.
+  if (
+    (got.readableVariables ?? []).includes(BOOTSTRAP_REFERENCE) ||
+    (got.sealedVariables ?? []).includes(BOOTSTRAP_REFERENCE)
+  )
     references.add(BOOTSTRAP_REFERENCE);
   if (references.size > 0) {
     add(
