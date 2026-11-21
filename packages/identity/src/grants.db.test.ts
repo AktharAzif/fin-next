@@ -82,11 +82,11 @@ describe("the address lock (codes.ts) is the console's alone", () => {
   // request, codeless request and code try for an address by holding it open.
   const others = ["fin_admin", "fin_api", "fin_worker", "fin_readonly"] as const;
   const statements = [
-    "SELECT 1 FROM identity.email_code_lock FOR UPDATE",
-    "SELECT 1 FROM identity.email_code_lock FOR KEY SHARE",
-    "SELECT email_hash, locked_at FROM identity.email_code_lock",
-    "UPDATE identity.email_code_lock SET locked_at = now()",
-    "INSERT INTO identity.email_code_lock (email_hash, locked_at) VALUES (decode(repeat('00', 32), 'hex'), now())",
+    "SELECT 1 FROM identity.email_code_lock WHERE slot = 1 FOR UPDATE",
+    "SELECT 1 FROM identity.email_code_lock WHERE slot = 1 FOR KEY SHARE",
+    "SELECT slot FROM identity.email_code_lock",
+    "UPDATE identity.email_code_lock SET slot = slot WHERE slot = 1",
+    "INSERT INTO identity.email_code_lock (slot) VALUES (70000)",
     "DELETE FROM identity.email_code_lock",
     "TRUNCATE identity.email_code_lock",
     // In one simple query, which runs as one implicit transaction: LOCK TABLE needs a block.
@@ -103,14 +103,19 @@ describe("the address lock (codes.ts) is the console's alone", () => {
     expect(
       await sqlstate(
         "fin_console",
-        `INSERT INTO identity.email_code_lock (email_hash, locked_at)
-         VALUES (decode(repeat('01', 32), 'hex'), now())
-         ON CONFLICT (email_hash) DO UPDATE SET locked_at = EXCLUDED.locked_at`,
+        "SELECT slot FROM identity.email_code_lock WHERE slot = 1 FOR UPDATE",
       ),
     ).toBeNull();
-    expect(
-      await sqlstate("fin_console", "SELECT 1 FROM identity.email_code_lock FOR UPDATE"),
-    ).toBeNull();
+  });
+
+  // The table is the fixed set of slots its migration makes: the console only locks them, and can
+  // neither add a row (so it never grows with the addresses callers send) nor take one away.
+  it.each([
+    "INSERT INTO identity.email_code_lock (slot) VALUES (1)",
+    "DELETE FROM identity.email_code_lock WHERE slot = 1",
+    "TRUNCATE identity.email_code_lock",
+  ])("fin_console may not: %s", async (text) => {
+    expect(await sqlstate("fin_console", text)).toBe("42501");
   });
 });
 

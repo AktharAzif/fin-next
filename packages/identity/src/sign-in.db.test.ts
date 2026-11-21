@@ -15,7 +15,7 @@ import {
   passkeyCeremony,
   registerPasskey,
 } from "../test/harness.ts";
-import { codeLinkAsking, lockAddress } from "./codes.ts";
+import { ADDRESS_LOCK_SLOTS, addressLockSlot, codeLinkAsking, lockAddress } from "./codes.ts";
 import { signUp } from "./sign-up.ts";
 
 let database: TestDatabase;
@@ -229,8 +229,9 @@ describe("one live code per address (§5.2, S2-38)", () => {
 
   it("holds the address's lock as a row only the console's role may lock, never an advisory lock", async () => {
     // Any login may take an advisory lock, and its key shows in pg_locks: one held open would
-    // stall every request for the address. The row is in a table only fin_console may write (the
-    // grant tests refuse every other role), and while it is held nothing advisory is.
+    // stall every request for the address. The row is the address's slot in a table only
+    // fin_console may lock (the grant tests refuse every other role), and while it is held nothing
+    // advisory is.
     const email = unique("lock.row");
     let release = () => {};
     const released = new Promise<void>((resolve) => {
@@ -276,11 +277,45 @@ describe("one live code per address (§5.2, S2-38)", () => {
       await second;
     }
     expect(secondHeld).toBe(true);
-    const row = await h.admin.query(
-      "SELECT 1 FROM identity.email_code_lock WHERE email_hash = $1",
-      [h.realm.runtime.hasher.hash("email", email)],
-    );
-    expect(row.rowCount).toBe(1);
+  });
+
+  // Every code request, codeless request and try takes the lock for whatever address the caller
+  // sent, before any per-address check. Each used to leave a row for that address that nothing
+  // deleted: a table that grew with every address anyone typed and kept when each last asked.
+  it("keeps the address lock's table to its fixed slots, whatever addresses callers send", async () => {
+    const slots = async () => {
+      const result = await h.admin.query<{ n: string; columns: string }>(
+        `SELECT (SELECT count(*) FROM identity.email_code_lock) AS n,
+                (SELECT string_agg(column_name, ',' ORDER BY column_name)
+                   FROM information_schema.columns
+                  WHERE table_schema = 'identity' AND table_name = 'email_code_lock') AS columns`,
+      );
+      return result.rows[0];
+    };
+    expect(await slots()).toEqual({ n: String(ADDRESS_LOCK_SLOTS), columns: "slot" });
+    for (let i = 0; i < 6; i += 1) {
+      const browser = h.browser();
+      const email = unique(`lock.bounded.${i}`);
+      // A wrong try for an address with no account and no code, then a code request for another.
+      const tried = await post(browser, "/api/auth/sign-in/email-otp", { email, otp: "00000000" });
+      expect(tried.status).toBe(400);
+      expect((await sendCode(browser, unique(`lock.bounded.send.${i}`))).status).toBe(200);
+    }
+    expect(await slots()).toEqual({ n: String(ADDRESS_LOCK_SLOTS), columns: "slot" });
+  });
+
+  it("puts each address in one slot, and spreads addresses over the slots", () => {
+    const hasher = h.realm.runtime.hasher;
+    const email = unique("lock.slot");
+    expect(addressLockSlot(hasher, email)).toBe(addressLockSlot(hasher, email.toUpperCase()));
+    const seen = new Set<number>();
+    for (let i = 0; i < 2_000; i += 1) {
+      const slot = addressLockSlot(hasher, `slot.${i}@example.com`);
+      expect(Number.isInteger(slot) && slot >= 0 && slot < ADDRESS_LOCK_SLOTS).toBe(true);
+      seen.add(slot);
+    }
+    // 2,000 addresses over 65,536 slots: about 30 share one; far more would mean a skewed slot.
+    expect(seen.size).toBeGreaterThan(1_900);
   });
 
   it("never lets a browser that is not known supersede a known browser's code", async () => {

@@ -76,16 +76,19 @@ CREATE TABLE identity.email_code_request (
 CREATE INDEX email_code_request_live ON identity.email_code_request (email_hash, purpose, created_at DESC);
 
 -- The per-address lock that serialises an address's code requests, codeless requests and code
--- tries (codes.ts, lockAddress()): each takes a row lock here, held until its unit ends. A row
--- lock needs UPDATE (or DELETE) on the table, which only fin_console holds, and no function another
--- login may run touches it, so no other login can take or hold it (an advisory lock is one any
--- login could take), and nothing here is readable by another role. `email_hash` is the address's
--- keyed hash under the newest key. No sweep deletes a row, since a delete is a lock too: the table
--- keeps one 32-byte row per address that has asked.
+-- tries (codes.ts, lockAddress()): each takes a row lock on its address's slot here, held until
+-- its unit ends. The table is a fixed set of 65,536 slots, numbered by the first two bytes of the
+-- address's keyed hash under the newest key, made here and never written again: it holds nothing
+-- about any address, never grows whatever addresses callers send, and so needs no sweep (a delete
+-- is a lock too). Addresses that share a slot only wait on each other for the length of a unit;
+-- every unit takes one address's lock at most, so sharing makes no circle. A row lock needs UPDATE
+-- on the table, which only fin_console holds, and no function another login may run touches it,
+-- so no other login can take or hold one (an advisory lock is one any login could take), and
+-- nothing here is readable by another role.
 CREATE TABLE identity.email_code_lock (
-  email_hash bytea PRIMARY KEY CHECK (length(email_hash) = 32),
-  locked_at timestamptz NOT NULL
+  slot integer PRIMARY KEY CHECK (slot BETWEEN 0 AND 65535)
 );
+INSERT INTO identity.email_code_lock (slot) SELECT generate_series(0, 65535);
 
 -- A sign-up waiting for its mailbox to be proved (§5.1, S2-05): no user row exists before.
 CREATE TABLE identity.sign_up_request (

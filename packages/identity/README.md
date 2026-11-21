@@ -46,12 +46,18 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
   known for the account records none and leaves the live code as it was.
 - Every code request, codeless request and code try for one address takes the address's lock
   (`lockAddress()`) before it reads the live requests, so overlapping requests leave one live code
-  and one asking browser. The lock is a row lock on the address's row in
-  `identity.email_code_lock`, which only `fin_console` may write or lock and which no function
-  another login may run touches (the hourly sweep never deletes its rows), never an advisory lock
-  (any login may take one). Every path takes its locks in one order: sign-up's own limits
-  (`sign_up_network`, then `sign_up_address`, which only sign-up takes), then the network's code
-  limit, then the address's lock, then the address's code limits.
+  and one asking browser. The lock is a row lock on the address's slot in
+  `identity.email_code_lock`: a fixed set of 65,536 rows, numbered by the first two bytes of the
+  address's keyed hash, that holds nothing about any address and never grows. Only `fin_console`
+  may lock it and no function another login may run touches it (the hourly sweep has nothing to
+  delete there), never an advisory lock (any login may take one). Every path takes its locks in
+  one order: sign-up's own limits (`sign_up_network`, then `sign_up_address`, which only sign-up
+  takes), then the network's code limit, then the address's lock, then the address's code limits.
+- Known gap: the hourly sweep deletes expired sessions and verification rows, which the library
+  also deletes when a browser presents one, so a `fin_worker` transaction left open after a sweep
+  delays those requests until it ends or the console's `lock_timeout` refuses them. Closing it
+  means the console never waits on a row the sweep may hold; it is listed for the pre-production
+  review.
 - The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
   Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
 

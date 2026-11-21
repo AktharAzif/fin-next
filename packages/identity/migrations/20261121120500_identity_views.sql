@@ -147,8 +147,9 @@ BEGIN
   GET DIAGNOSTICS n = ROW_COUNT; table_name := 'identity.sign_up_request'; deleted := n; RETURN NEXT;
   DELETE FROM identity.email_code_request WHERE expires_at < now() - interval '2 hours';
   GET DIAGNOSTICS n = ROW_COUNT; table_name := 'identity.email_code_request'; deleted := n; RETURN NEXT;
-  -- Never identity.email_code_lock: a delete is a row lock held to the end of the caller's
-  -- transaction, which would let fin_worker hold every old address's lock open (codes.ts).
+  -- Never identity.email_code_lock: its slots are fixed (no row to sweep), and a delete is a row
+  -- lock held to the end of the caller's transaction, which would let fin_worker hold an
+  -- address's lock open (codes.ts).
   DELETE FROM identity.known_browser WHERE last_seen_at < now() - interval '400 days';
   GET DIAGNOSTICS n = ROW_COUNT; table_name := 'identity.known_browser'; deleted := n; RETURN NEXT;
   DELETE FROM identity.trusted_browser WHERE expires_at < now();

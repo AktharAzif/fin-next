@@ -46,31 +46,43 @@ export interface LiveCodeRequest {
  * and the second sees what the first recorded. Without it, two code requests for one address could
  * each find no live code and both record one.
  *
- * The lock is the address's row in `identity.email_code_lock`, written here so the row lock lasts
- * until commit (an address's first request inserts it; one that overlaps waits on the insert, then
- * locks the row). Only fin_console may write or lock that table, and no function another login
- * may run touches it (identity.sweep() never deletes a row: a delete is a lock held to the end of
- * the sweeper's transaction), so no other login can take the lock and hold it open to stall the
- * address's sign-ins, nor watch it. Never an advisory lock: any login may take one, and its key
- * shows in pg_locks.
+ * The lock is a row lock (`FOR UPDATE`) on the address's slot in `identity.email_code_lock`, held
+ * until commit. The table is a fixed set of `ADDRESS_LOCK_SLOTS` rows its migration makes, and a
+ * slot is the first two bytes of the address's keyed hash, so taking a lock writes nothing about
+ * the address and the table never grows, whatever addresses callers send. Two addresses that share
+ * a slot only wait on each other for the length of a unit. Only fin_console may lock that table,
+ * and no function another login may run touches it (identity.sweep() never does: its slots need
+ * no sweep, and a delete is a lock held to the end of the sweeper's transaction), so no other
+ * login can take the lock and hold it open to stall the address's sign-ins, nor watch it. Never an
+ * advisory lock: any login may take one, and its key shows in pg_locks. A missing slot fails the
+ * unit rather than going unlocked.
  *
  * Every path takes its locks in one order, so that two units never wait on each other in a circle:
  * sign-up's own limits first (`sign_up_network`, then `sign_up_address`, which only sign-up takes);
  * then the network's code limit (`code_send`, or `code_sign_in` for a try); then this lock; then
  * the address's code limits (`code_send` for the address, the strangers' share and the allowance of
  * code emails, and their pause) and its requests. Nothing per address comes before this lock but
- * `sign_up_address`, which no unit takes after it.
+ * `sign_up_address`, which no unit takes after it, and no unit takes two addresses' locks, so a
+ * shared slot adds no circle either.
  */
 export async function lockAddress(
   db: Queryable,
-  deps: { clock: Clock; hasher: KeyedHasher },
+  deps: { hasher: KeyedHasher },
   email: string,
 ): Promise<void> {
-  await db.query(
-    `INSERT INTO identity.email_code_lock (email_hash, locked_at) VALUES ($1, $2)
-     ON CONFLICT (email_hash) DO UPDATE SET locked_at = EXCLUDED.locked_at`,
-    [deps.hasher.hash("email", email.toLowerCase()), deps.clock.now()],
+  const locked = await db.query(
+    "SELECT slot FROM identity.email_code_lock WHERE slot = $1 FOR UPDATE",
+    [addressLockSlot(deps.hasher, email)],
   );
+  if (locked.rowCount !== 1) throw new Error("identity.email_code_lock is missing an address slot");
+}
+
+/** The number of slots in `identity.email_code_lock` (its migration makes exactly these). */
+export const ADDRESS_LOCK_SLOTS = 65_536;
+
+/** The address's slot: the first two bytes of its keyed hash under the newest key. */
+export function addressLockSlot(hasher: KeyedHasher, email: string): number {
+  return hasher.hash("email", email.toLowerCase()).readUInt16BE(0);
 }
 
 /**
