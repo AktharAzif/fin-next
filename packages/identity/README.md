@@ -1,0 +1,52 @@
+# @fin/identity
+
+The developer and staff realms: Better Auth 1.7.25 with the passkey, two-factor and email-OTP
+plugins, built by one factory with the same hardening (spec 02 §3 to §7 and §11, [SA-01]). Better
+Auth proves who someone is; everything else here is Fin's own: the endpoint allowlist, the
+mandatory-second-factor gate, step-up intents and windows, emailed codes bound to the asking
+browser, known and trusted browsers, limits in Postgres, names, staff enrolment codes, audit events
+and security notices.
+
+## Using a realm
+
+`createRealm()` is called once per process inside `main()`:
+
+```ts
+const settings = readRealmSettings("developer", process.env); // refuses a bad start
+const db = createPgDatabase({ pool, clock, release, lines });
+const realm = createRealm({ settings, db, clock, lines, docsOrigin });
+// in the API half, after ingress and the origin gate:
+app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
+```
+
+- `realm.handler(request, context)` answers `/api/auth/*`: the exact allowlist first (404 with an
+  empty body for anything unlisted or blocked, before any limit), then one unit of work around the
+  library, read in full and committed before a byte is sent.
+- `realm.run(context, fn)` runs a Fin route's work as part of a realm request (one unit of work,
+  the request state bound); `requirePerson()` is the guard for person-scope routes, `signUp()` the
+  core of `POST /api/sign-up`, `revokeSession()` and `revokeOtherSessions()` the cores of Account
+  security's session routes, `issueEnrolmentCode()` and `redeemEnrolmentCode()` the staff routes'.
+- The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
+  Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `src/realm.ts` | `createRealm()` and the library options per realm (§3.3, §3.4) |
+| `src/endpoint-policy.ts` | the allowlist per realm (§4); its set test is T-SAT-01 |
+| `src/hooks/` | `hooks.before`, `hooks.after` and `databaseHooks` (§3.5) |
+| `src/gate.ts`, `src/step-up/` | the gate (§6) and intents, windows and the digest (§7) |
+| `src/codes.ts`, `src/browsers.ts`, `src/limits.ts` | emailed codes, known and trusted browsers, limits |
+| `src/audit/`, `src/email/`, `src/monitoring.ts` | the event, template and line catalogues of this area |
+| `src/ports/` | the adapters to packages/db, packages/audit and the outbox until they land |
+| `migrations/` | the SQL the runner applies, in name order |
+| `grants/` | the grant fragments the runner renders |
+| `test/` | the Postgres 18 harness, the platform fixture and a software authenticator |
+
+## Tests
+
+`pnpm --filter @fin/identity test` runs the unit tests. `pnpm test:db` runs the integration tests
+against `FIN_TEST_DATABASE_URL` (a Postgres 18 server whose role may create databases and roles):
+the harness builds one template database from the fixture, the migrations and the grants, clones it
+per file, and connects as each service's own login.
