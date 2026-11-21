@@ -1,0 +1,33 @@
+{
+  "name": "@fin/keys",
+  "private": true,
+  "type": "module",
+  "description": "API keys: the format and per-deployment checksum salts, scopes bounded by the maker's role, allowlists, the pepper chain, the lifecycle the console calls and the edge's check (spec 05 §4; spec 02 §12).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./format": "./src/format.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@fin/access": "workspace:*",
+    "@fin/core": "workspace:*",
+    "@fin/crypto": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/db": "workspace:*",
+    "@fin/email": "workspace:*",
+    "@fin/identity": "workspace:*",
+    "@fin/orgs": "workspace:*",
+    "@types/node": "catalog:",
+    "pg": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
