@@ -273,11 +273,37 @@ function OtpDemo() {
   );
 }
 
+/** A secret shown in place, and another key made in the same place: each needs its own tick. */
+function SecretRevealDemo() {
+  const [round, setRound] = useState(1);
+  return (
+    <div className="flex flex-col gap-3">
+      <SecretReveal
+        status="ready"
+        environment="Sandbox"
+        clientId="cli_7f3a9c21d4e8"
+        secret={round === 1 ? SAMPLE_CLIENT_SECRET : `${SAMPLE_CLIENT_SECRET}_${round}`}
+      />
+      <Button
+        variant="secondary"
+        size="sm"
+        data-kit="another-key"
+        onClick={() => setRound((r) => r + 1)}
+      >
+        Make another sample key
+      </Button>
+    </div>
+  );
+}
+
 function OverlayDemo() {
   const [modal, setModal] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deleted, setDeleted] = useState(0);
+  const [typedConfirm, setTypedConfirm] = useState(false);
+  const [typedBusy, setTypedBusy] = useState(false);
+  const [typedDeleted, setTypedDeleted] = useState<string[]>([]);
   return (
     <Row>
       <Button variant="secondary" onClick={() => setModal(true)}>
@@ -290,6 +316,31 @@ function OverlayDemo() {
         data-kit="deleted"
         className="text-caption text-text-tertiary"
       >{`Deleted ${deleted}`}</span>
+      <Button variant="danger" onClick={() => setTypedConfirm(true)}>
+        Delete Production webhook
+      </Button>
+      <span data-kit="deleted-typed" className="text-caption text-text-tertiary">
+        {typedDeleted.join(",")}
+      </span>
+      {/* A typed confirmation, closed by the page after its request, as screens do. */}
+      <ConfirmDialog
+        open={typedConfirm}
+        onOpenChange={setTypedConfirm}
+        title="Delete this Production webhook?"
+        description="Events stop going to https://example.com/hooks. This can’t be undone."
+        confirmLabel="Delete webhook"
+        tone="danger"
+        confirmText="acme-hooks"
+        cue="This changes Production."
+        busy={typedBusy}
+        onConfirm={async () => {
+          setTypedBusy(true);
+          await wait(100);
+          setTypedBusy(false);
+          setTypedDeleted((d) => [...d, "acme-hooks"]);
+          setTypedConfirm(false);
+        }}
+      />
       <Modal
         open={modal}
         onOpenChange={setModal}
@@ -731,12 +782,7 @@ export function Kit(props: { onReady: () => void }) {
               value="https://example.com/hooks/payments"
             />
             <CopyField label="Signing secret" variant="secret" value={SAMPLE_SIGNING_SECRET} />
-            <SecretReveal
-              status="ready"
-              environment="Sandbox"
-              clientId="cli_7f3a9c21d4e8"
-              secret={SAMPLE_CLIENT_SECRET}
-            />
+            <SecretRevealDemo />
             <SecretReveal
               status="masked"
               environment="Production"

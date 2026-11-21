@@ -21,6 +21,9 @@ test.afterEach(async ({ page }) => {
 
 const section = (page: Page, name: string) => page.locator(`section[data-kit="${name}"]`);
 
+/** The one toast region (its text is also spoken through the SDK's live region). */
+const toasts = (page: Page) => page.getByRole("region", { name: "Notifications" });
+
 /**
  * Focus as the keyboard gives it: tooltips and focus rings answer keyboard focus, not a click.
  * A key press first sets the keyboard modality; then focus moves (Tab does not reach buttons in
@@ -52,6 +55,18 @@ async function tabTo(page: Page, target: Locator) {
 /** Layout width, unaffected by an entry transition's scale. */
 const layoutWidth = (target: ReturnType<Page["locator"]>) =>
   target.evaluate((el) => (el as HTMLElement).offsetWidth);
+
+/**
+ * Puts the page on Playwright's clock (spec 06 §10.2: countdowns and busy windows use it). The
+ * clock goes in before the page loads, so no timer the page started is a real one; the load's own
+ * timers run, then time stands still until the test moves it with runFor.
+ */
+async function onTestClock(page: Page) {
+  await page.clock.install();
+  await page.reload();
+  await page.locator("body[data-ready]").waitFor();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 500));
+}
 
 test.describe("the page policy @csp", () => {
   test("the policy is enforced: a style attribute set from script is refused and reported", async ({
@@ -266,13 +281,13 @@ test.describe("the components @kit", () => {
     await expect(pending).not.toHaveAttribute("data-pending", "", { timeout: 3000 });
     await page.locator('[data-kit="throwing-button"]').click();
     await expect(page.locator("body")).toHaveAttribute("data-reported", "");
-    await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+    await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
   test("a text button's failure is reported and said, as a button's is", async ({ page }) => {
     await page.locator('[data-kit="throwing-text-button"]').click();
     await expect(page.locator("body")).toHaveAttribute("data-reported", "");
-    await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+    await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
   test("a toast action's failure is reported and said", async ({ page }) => {
@@ -418,15 +433,73 @@ test.describe("the components @kit", () => {
     await expect(opener).toBeFocused();
   });
 
-  test("confirm dialog: no X, busy confirm, then closes", async ({ page }) => {
+  test("confirm dialog: no X; while busy it says so and nothing dismisses it; then it closes", async ({
+    page,
+  }) => {
+    await onTestClock(page);
     await page.getByRole("button", { name: "Delete webhook" }).first().click();
     const dialog = page.getByRole("alertdialog", { name: "Delete this webhook?" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Close" })).toHaveCount(0);
-    await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
-    await dialog.getByRole("button", { name: "Delete webhook" }).click();
+    const cancel = dialog.getByRole("button", { name: "Cancel" });
+    await expect(cancel).toBeFocused();
+    const confirm = dialog.getByRole("button", { name: "Delete webhook" });
+    await confirm.click();
+    // Busy: the dialog and its confirm say so, Cancel is unavailable, and Escape does nothing.
+    await expect(dialog).toHaveAttribute("aria-busy", "true");
+    await expect(confirm).toHaveAttribute("aria-busy", "true");
+    await expect(confirm.locator('[data-slot="spinner"]')).toHaveCount(1);
+    await expect(cancel).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-busy", "true");
+    await expect(page.locator('[data-kit="deleted"]')).toHaveText("Deleted 0");
+    await page.clock.runFor(300);
     await expect(dialog).toBeHidden();
     await expect(page.locator('[data-kit="deleted"]')).toHaveText("Deleted 1");
+  });
+
+  test("secret reveal: a new secret needs its own “I’ve saved it” before Done", async ({
+    page,
+  }) => {
+    const copy = section(page, "copy");
+    const saved = copy.getByRole("checkbox", { name: "I’ve saved the secret somewhere safe" });
+    const done = copy.getByRole("button", { name: "Done" }).first();
+    await expect(done).toHaveAttribute("aria-disabled", "true");
+    await copy.getByText("I’ve saved the secret somewhere safe").click();
+    await expect(saved).toHaveAttribute("aria-checked", "true");
+    await expect(done).not.toHaveAttribute("aria-disabled", "true");
+    await copy.locator('[data-kit="another-key"]').click();
+    await expect(saved).toHaveAttribute("aria-checked", "false");
+    await expect(done).toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("confirm dialog: a typed confirmation starts empty each time it opens", async ({ page }) => {
+    const opener = page.getByRole("button", { name: "Delete Production webhook" });
+    const dialog = page.getByRole("alertdialog", { name: "Delete this Production webhook?" });
+    const field = dialog.getByRole("textbox", { name: "Type acme-hooks to confirm" });
+    const confirm = dialog.getByRole("button", { name: "Delete webhook" });
+    await opener.click();
+    await expect(dialog).toBeVisible();
+    await expect(confirm).toHaveAttribute("aria-disabled", "true");
+    await field.fill("acme-hooks");
+    await expect(confirm).not.toHaveAttribute("aria-disabled", "true");
+    await confirm.click();
+    // The page closes the dialog after its request, not the dialog's own Cancel or Escape.
+    await expect(dialog).toBeHidden();
+    await expect(page.locator('[data-kit="deleted-typed"]')).toHaveText("acme-hooks");
+    await opener.click();
+    await expect(dialog).toBeVisible();
+    await expect(field).toHaveValue("");
+    await expect(confirm).toHaveAttribute("aria-disabled", "true");
+    // And after Escape, too.
+    await field.fill("acme-hooks");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await opener.click();
+    await expect(field).toHaveValue("");
+    await expect(confirm).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Escape");
   });
 
   test("OTP input: a pasted code fills every box and is handed on once", async ({ page }) => {
@@ -473,10 +546,7 @@ test.describe("the components @kit", () => {
   test("OTP resend: focus stays on it while it sends and counts down; start and end are said", async ({
     page,
   }) => {
-    // The clock goes in before the page loads, so no timer the page started is a real one.
-    await page.clock.install();
-    await page.reload();
-    await page.locator("body[data-ready]").waitFor();
+    await onTestClock(page);
     const otp = section(page, "otp").locator('[data-slot="fin-otp"]').first();
     const resend = otp.getByRole("button", { name: "Send a new code" });
     await keyboardFocus(page, resend);
@@ -512,7 +582,7 @@ test.describe("the components @kit", () => {
     const resend = otp.getByRole("button", { name: "Send a new code" });
     await keyboardFocus(page, resend);
     await page.keyboard.press("Enter");
-    await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+    await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
     await expect(page.locator("body")).toHaveAttribute("data-reported", "");
     await expect(resend).toBeFocused();
     await expect(resend).not.toHaveAttribute("aria-disabled", "true");

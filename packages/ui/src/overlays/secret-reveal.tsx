@@ -33,6 +33,13 @@ export type SecretRevealProps = {
 
 export function SecretReveal(props: SecretRevealProps) {
   const [saved, setSaved] = useState(false);
+  // "I've saved it" is about one secret: a new secret (another key made in the same place) needs
+  // its own tick. Reset while rendering, so Done is never live for a secret nobody ticked.
+  const [ticking, setTicking] = useState(props.secret);
+  if (ticking !== props.secret) {
+    setTicking(props.secret);
+    setSaved(false);
+  }
   return (
     <div
       data-slot="secret-reveal"

@@ -125,15 +125,21 @@ export type ConfirmDialogProps = {
 export function ConfirmDialog(props: ConfirmDialogProps) {
   const busy = props.busy === true;
   const [typed, setTyped] = useState("");
+  // A typed confirmation belongs to one opening of the dialog: it starts empty every time the
+  // dialog opens, however it was last closed (by the page after its request, by Cancel or by
+  // Escape), and whenever it names something else. Reset while rendering, so a stale value is
+  // never drawn, not even for a frame.
+  const [opening, setOpening] = useState({ open: props.open, text: props.confirmText });
+  if (opening.open !== props.open || opening.text !== props.confirmText) {
+    setOpening({ open: props.open, text: props.confirmText });
+    if (props.open || opening.text !== props.confirmText) setTyped("");
+  }
   const inputId = `confirm${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
   const matches = props.confirmText === undefined || typed === props.confirmText;
   return (
     <AlertDialog
       open={props.open}
-      onOpenChange={(open) => {
-        if (!open) setTyped("");
-        props.onOpenChange(open);
-      }}
+      onOpenChange={(open) => props.onOpenChange(open)}
       dismissible={!busy}
     >
       <AlertDialogBackdrop className={BACKDROP} />
