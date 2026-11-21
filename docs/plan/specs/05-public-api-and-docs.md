@@ -15,8 +15,10 @@
 **Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
 specifications, and between two specifications the one that owns the area, as README §8.3 lists
-the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
-OD-6. Among the specifications, this file owns the public API's conventions, API keys, webhooks and
+the owners. The owner's decisions are those DECISIONS.md records as the owner's: the overnight
+ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning, which spec 01
+§1.2 lists. The decisions taken while the owner was away are register entries, for the owner's
+review. Among the specifications, this file owns the public API's conventions, API keys, webhooks and
 events, the OpenAPI document, the docs site and Try it; the sibling owns any other area (spec 01 for
 the platform and the static hosts, spec 02 for sign-in and roles, spec 03 for onboarding, spec 04
 for money); and spec 08 owns the cross-cutting rules of audit, security email, personal data,
@@ -34,21 +36,21 @@ EXECUTION, the change is named, and the higher file holds until it is amended to
 | `[AP-04]` | A decision in DECISIONS.md, the only register |
 | `§3.4`, `ARCH §13.3` | A bare `§` is a section of this file; `ARCH §` is a section of ARCHITECTURE.md |
 | `spec 01 §7.4`, `spec 04 §25` | A section of a sibling spec in `docs/plan/specs/`. Spec 02 is Saturday's auth and roles spec (R6) and spec 03 Sunday's onboarding spec (R7) |
-| `OD-n`, `S0-nn` | Spec 01's record of the owner's 21 Nov decisions, and spec 01's own decisions |
+| `OD-n`, `S0-nn` | Spec 01's record of the owner's overnight decisions of 21 Nov, and spec 01's own decisions |
 | `MS-nn` | A decision of spec 04 |
-| `D05-nn` | A decision this file takes where the plan is silent (§16). D05-01, D05-03 and D05-32 are already settled in DECISIONS appendix C (SF-01, SF-08, SF-06); the steward enters the rest in DECISIONS.md as AP-21 onwards, in the plan's first follow-up pull request |
+| `D05-nn` | A decision this file takes where the plan is silent (§16). D05-01, D05-03 and D05-32 are already settled in DECISIONS appendix C (SF-01, SF-08, SF-06); the steward enters the rest in DECISIONS.md as AP-21 onwards, in a later pull request of the plan |
 | `SF-nn` | A spec decision settled in the register before the first commit, folded or not adopted (DECISIONS appendix C) |
 | `T05-nn` | A test this file requires (§13) |
 | `A05-nn` | An acceptance criterion of this file (§14), each naming the EXECUTION criterion it implements |
 | `PG-nn` | A production gate (EXECUTION §7.3). Production gates use `PG-` only; `G-` belongs to governance |
-| `SP-nn` | A spike (ARCH §11.11, spec 01 §11) |
+| `SP-nn`, `S-01`, `NF-1` | A spike (ARCH §11.11, spec 01 §11). S-01 is the run of SP-25 (EXECUTION §2.6), logged in `docs/plan/spikes.md` with its findings, NF-1 among them |
 | UNVERIFIED | Not confirmed from a primary source; the named spike or test confirms it before work that depends on it merges |
 
 | Placeholder | Stands for |
 |---|---|
 | `<zone>` | A Fin zone. In production [FD-10] may put the docs host on its own registrable domain; `<zone>` in `developer.<zone>` then means that domain. Nothing in this file depends on the docs and the API being same-site |
-| `<staging-zone>` | The staging zone ([FD-09]) |
-| `<app>.<zone>` | A host, for example `api.<staging-zone>` |
+| `<staging-zone>` | The staging zone, shared with the old product's staging ([FD-09]) |
+| `<app>.<zone>` | A host, for example `api.<zone>`, which is `gateway.<staging-zone>` on staging ([FD-09]) |
 | `<docs origin>`, `<api origin>`, `<console origin>` | `https://developer.<zone>`, `https://api.<zone>`, `https://console.<zone>`, read from configuration at run time, never written in the repository ([G-09]) |
 
 **Public by design (R12).** This file names no credential, token, account or tunnel ID, zone name,
@@ -152,8 +154,9 @@ old draft finds the change; none of the left column's texts is in ARCHITECTURE a
 | `api.<zone>/*` | Proxied CNAME to the public tunnel | Tunnel ingress role `api` to `http://edge.railway.internal:8080` | Every path: `/health`, `/v4/*`, `/hooks/*`, `/reports/docs`; anything else 404 |
 | `developer.<zone>/*` | Proxied CNAME to the public tunnel | Workers route to the assets-only deployment `fin-next-<env>-docs-static` | No code runs. There is no ingress rule for `developer`, so if the route ever vanished the tunnel's `http_status:404` answers and the watcher alerts (§10) |
 
-Staging uses `<staging-zone>` for both. The flows are F1 (a public API call) and F2 (Try it) of
-ARCH §2.3; F9 delivers webhooks; F19 takes GitHub's leak reports.
+On staging they are `gateway.<staging-zone>` and `docs.<staging-zone>` ([FD-09]). The flows are F1
+(a public API call) and F2 (Try it) of ARCH §2.3; F9 delivers webhooks; F19 takes GitHub's leak
+reports.
 
 ### 2.1 The edge's pipeline, in this order
 
@@ -222,7 +225,7 @@ ARCH §13.1 is the normative list. This section adds what a builder needs to imp
 | `Deprecation`, `Sunset`, `Link` | answer | §3.6, on deprecated operations only |
 | `Cache-Control: no-store` | answer | Every answer |
 | `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` | answer | Every answer (ARCH §7.12) |
-| `Strict-Transport-Security: max-age=63072000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` | answer | Every https answer. `api.` is on the main zone in production and on the staging zone in staging, so it takes that zone class's value, with no `preload` (ARCH §5.8, [SA-45]); the header-matrix test asserts the exact value |
+| `Strict-Transport-Security: max-age=63072000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` | answer | Every https answer. The API host (`api.`, which is `gateway.` on staging) is on the main zone in production and on the staging zone in staging, so it takes that zone class's value, with no `preload` (ARCH §5.8, [SA-45]); the header-matrix test asserts the exact value |
 | `Vary: Origin` | answer | Every `/v4` answer, preflights included |
 | CORS headers | answer | §3.8, for the docs origin only |
 | `Fin-Release` | never | The public API does not say which release answered (D05-29) |
@@ -732,8 +735,9 @@ shape and checksum, the edge calls `api`'s door operation `keys.exposed` with `{
 The edge's one statement (§2.1 step 15) reads the view row, the address's `refused_keys` window from
 `ops.rate_window` and the `live_keys` switch from `ops.kill_switch` together; its SQL lives in
 `packages/keys/src/lookup.ts` with an `EXPLAIN` test. There is no database switch for the whole
-public API ([OP-01], ARCHITECTURE §15.1): all of `api.` is stopped by the prepared Cloudflare rule
-`killswitch-api` (spec 08 §8.6), unless the owner first adds such a switch to [OP-01].
+public API ([OP-01], ARCHITECTURE §15.1): all of `api.` but `/hooks/` is stopped by the
+prepared Cloudflare rule `killswitch-api` (spec 08 §8.6), unless the owner first adds such a
+switch to [OP-01].
 
 ### 4.10 Audit events and emails (`packages/audit/src/events/api-keys.ts`; category `api_keys`, scope `organisation`)
 
@@ -1252,12 +1256,13 @@ values are unique and camelCase.
 
 ### 8.1 Hosting (OD-2, OD-3; spec 01 §7)
 
-- **Static only.** `apps/docs` builds to `apps/docs/dist/static/`, uploaded by the pinned `wrangler`
-  from `tools/static-deploy` in `deploy-static-staging` ([FD-19]) as the assets-only deployment
-  `fin-next-<env>-docs-static` (spec 01 §6.9 and §7.4; no
-  `main`, no bindings, no `run_worker_first`, `workers_dev: false`, `preview_urls: false`; spec 01
-  SP-26). No code runs at Cloudflare, and nothing on Railway serves the docs pages; the edge only
-  takes their failure reports (§8.13).
+- **Static only.** `apps/docs` builds to `apps/docs/dist/static/`, uploaded through Cloudflare's API
+  by `tools/static-deploy`, with Node built-ins only ([FD-19], [BD-16]), as the assets-only deployment
+  `fin-next-<env>-docs-static` (spec 01 §6.9 and §7.4; no `main`, no bindings, no
+  `run_worker_first`, `workers_dev: false`, `preview_urls: false`; spec 01 SP-26). On staging the
+  upload runs from the operator machine until the owner is back, and in `deploy-static-staging` after
+  that ([BD-05]). No code runs at Cloudflare, and nothing on Railway serves the docs pages; the edge
+  only takes their failure reports (§8.13).
 - **The same invariant as every static deployment.** The docs deployment carries spec 01 §7.4's
   invariant unchanged, as the owner's 03:50 decision says for each app's static build, the docs
   included ([FD-17], OD-2): `not_found_handling: "single-page-application"` and `html_handling:
@@ -1269,7 +1274,9 @@ values are unique and camelCase.
   route and no ingress rule.
 - **Unknown paths** (D05-32). The single-page fallback answers any path that matches no file with the
   root `index.html` (the home page) and status 200; that includes `developer.<zone>/api/*`, which has
-  no route of its own. Every built page's `<html>` carries `data-page`
+  no route of its own. The exception is a path that [BD-13]'s edge rule refuses (a raw path holding
+  `..`, `//`, `%2E`, `%2F`, `\` or `;`, or ending `.map`; spec 01 §7.6, AC-P0-23): it never reaches
+  the static deployment. Every built page's `<html>` carries `data-page`
   (`home`, `guide:<slug>`, `reference`, `errors`, `changelog`) and a `<link rel="canonical">` to its
   own path. When `data-page` is `home` and `location.pathname` is not `/`, the page is the fallback:
   the shell (`src/shell/main.ts`) hides the home content, shows the home page's built "Page not
@@ -1310,8 +1317,8 @@ values (from spec 03's `packages/kyc` export used by the console's Simulator too
 `env.json`:
 
 ```json
-{ "environment": "staging", "release": "<sha>", "apiOrigin": "https://api.<staging-zone>",
-  "docsOrigin": "https://developer.<staging-zone>", "consoleOrigin": "https://console.<staging-zone>",
+{ "environment": "staging", "release": "<sha>", "apiOrigin": "https://gateway.<staging-zone>",
+  "docsOrigin": "https://docs.<staging-zone>", "consoleOrigin": "https://console.<staging-zone>",
   "statusOrigin": null, "keySalt": "fin-stg-1", "indexable": false }
 ```
 
@@ -1506,7 +1513,7 @@ Rendered for staging, once the owner's yes on the exception is recorded:
 ```
 /*
   Cache-Control: no-cache
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.<staging-zone>; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://gateway.<staging-zone>; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Strict-Transport-Security: max-age=63072000; includeSubDomains
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
@@ -1525,6 +1532,11 @@ Rendered for staging, once the owner's yes on the exception is recorded:
   The header-matrix test asserts the exact value for each.
 - `X-Robots-Tag` appears outside production only, as in every profile. `/env.json`, `/openapi.json`
   and `/search-index.json` take `no-cache` from `/*`, so they need no rule of their own.
+- **A missing asset** (NF-1). The single-page fallback answers a missing `/assets/*` path with the
+  home page and status 200, and the `/assets/*` rule gives that answer `immutable`, so a deploy-skew
+  race could cache HTML under a chunk URL for a year. On the app hosts, the docs host among them, a
+  Response Header Transform Rule sets `Cache-Control: no-store` on a `text/html` answer under
+  `/assets/` ([BD-12], spec 01 §7.6). Real assets keep `immutable`, and pages keep `no-cache`.
 - **The docs exception** ([SA-45], FW-C05, [AP-11]). `style-src 'unsafe-inline'` and `img-src data:`
   are allowed in the `docs` profile alone, in those two directives alone. They are not FW-X7's
   fallback (which applies to every profile only if FW-S1 fails) and they are not covered by the
@@ -1543,14 +1555,14 @@ Rendered for staging, once the owner's yes on the exception is recorded:
   request. Both are re-checked at every Scalar bump.
 - **One policy for the whole site** (D05-03): every docs document carries the same policy, because a
   second matching `Content-Security-Policy` rule would be joined to the first with a comma and the
-  browser would enforce both. Narrowing the exception to `/reference` alone (a `/reference` rule with
-  `! Content-Security-Policy`, guide pages kept strict) waits until spec 01's SP-25 (a) has proven `!`
-  detach on an assets-only deployment and T05-59 shows `/reference` carrying exactly one policy; it is
-  then a change to spec 01's `docs` profile, in a reviewed pull request. Scripts stay `'self'` with no
-  inline script anywhere, before and after.
-- **If `!` detach is not honoured** (SP-25 (a)), the docs profile takes spec 01's fallback: `/*`
-  carries no `Cache-Control` and each emitted path class gets its own rule. Unknown paths, answered
-  by the single-page fallback (§8.1), then go without `Cache-Control`, recorded as an accepted gap.
+  browser would enforce both. `!` detach holds on an assets-only deployment for `Cache-Control`
+  (SP-26's data points from S-01's run, 21 Nov). Narrowing the exception to `/reference` alone (a
+  `/reference` rule with `! Content-Security-Policy`, guide pages kept strict) waits for T05-59 to
+  show `/reference` carrying exactly one policy; it is then a change to spec 01's `docs` profile, in a
+  reviewed pull request. Scripts stay `'self'` with no inline script anywhere, before and after.
+- **`!` detach is honoured** (S-01's run, 21 Nov; spec 01 §7.4), so spec 01's fallback for it (no
+  `Cache-Control` on `/*`, and a rule for each emitted path class) is not needed. Unknown paths
+  outside `/assets/`, answered by the single-page fallback (§8.1), keep `no-cache` from `/*`.
 - **The policy test.** FW-C05's header-matrix test, which renders every profile, allows the docs
   exception exactly: `'unsafe-inline'` only in the `docs` profile's `style-src`, `data:` only in its
   `img-src`, and `connect-src` naming only `'self'` and the environment's API origin. It fails if any
@@ -1622,7 +1634,8 @@ There is no `/api/` on the docs host, so the pages report to the edge:
   pages at most 60 KB gzip before search opens, the palette and `fuse.js` loaded on first use. CI
   fails over budget (T05-56).
 - Deploy skew: the static artefact carries the previous release's `assets/` (spec 01 §5.5). A
-  `vite:preloadError` reloads the page once.
+  `vite:preloadError` reloads the page once. A chunk that is missing even so gets the fallback page
+  with `Cache-Control: no-store`, never `immutable` ([BD-12], §8.11).
 
 ---
 
@@ -1804,7 +1817,7 @@ live (EXECUTION §1.3). A lane that needs another lane's file asks through the l
 | L-SUN-05 Onboarding API routes | Sunday 11:00 | `apps/api/src/routes/{customers,people,documents,links,rfis,sandbox,events,webhook-endpoints}/**`; contract fragments for `customers`, `documents`, `people`, `rfis`, `events`, `webhook-endpoints`, `sandbox` (routes, policy, schemas, errors, openapi) | §6.3 to §6.7 |
 | L-MON-05 Money API | Monday 12:00 | `apps/api/src/routes/{virtual-accounts,balances,beneficiaries,transfers,quotes,sandbox/money}/**`; contract fragments `money`, `sandbox-money` | §6.8, §6.9 with spec 04 §25 |
 | L-SUN-09 Docs site (stretch), then L-MON-08 | Sunday 14:00; Monday 08:00 | `apps/docs/**`; `apps/edge/src/reports/**`; `packages/contract/src/docs-links.ts`; `docs/api-changelog/**`; `ops/monitoring/catalog/docs.ts` and its alerts | §8, §9; T05-40 to T05-58 and T05-61. Sunday: Scalar bundled with no CDN, the policy, the guard and its five layers, getting started. Monday: the reference for onboarding and money with Try it, the getting-started guide; stretch: error pages, money movement, idempotency, pagination and webhooks guides |
-| L-SUN-10, L-MON-09 Ops | Sunday and Monday 08:00 | `ops/fin/**`, `ops/monitoring/**` index files | The docs site's builds deployed through `deploy-static-staging` onto the static deployment and route that Phase 0 already made for its placeholder (EXECUTION §2.5 step 8, AC-P0-14, spec 01 §7.4 and §7.5): these lanes replace the placeholder's content, not the deployment or the route. The docs host's monitors (the `docs-web` Errors application already exists from Phase 0, spec 01 §8.2), the GitHub app registration for secret scanning (before production), the worker's static addresses for the webhooks guide |
+| L-SUN-10, L-MON-09 Ops | Sunday and Monday 08:00 | `ops/fin/**`, `ops/monitoring/**` index files | The docs site's builds deployed through the staging static deploy (`tools/static-deploy`, [BD-16]), from the operator machine until the owner is back ([BD-05]) and through `deploy-static-staging` after that, onto the static deployment and route that Phase 0 already made for its placeholder (EXECUTION §2.5 step 8, AC-P0-14, spec 01 §7.4 and §7.5): these lanes replace the placeholder's content, not the deployment or the route. The docs host's monitors (the `docs-web` Errors application already exists from Phase 0, spec 01 §8.2), the GitHub app registration for secret scanning (before production), the worker's static addresses for the webhooks guide |
 | H-08 Docs | From Tuesday | `apps/docs/content/**`, `docs/api-changelog/**` | Every guide, the changelog and its first entry, search, the error pages, response examples on every operation |
 
 **Requests to other lanes** (through the lane board): `apps/connector` keeps no `developer` ingress
@@ -1898,7 +1911,7 @@ fails when the rule it names breaks.
 | T05-56 | B | Bundle budgets of §8.14 | L-SUN-09 |
 | T05-57 | I | `/reports/docs`: wrong origin 403; over 8 KB 413; a planted address, key or email in any field never reaches the shipped line; caps drop and count | L-MON-08 |
 | T05-58 | E2E | Phone widths 390px and 360px, light and dark, for home, a guide, the reference, an error page | L-MON-08 |
-| T05-59 | STG | The header matrix on staging: `/`, a guide, `/reference`, `/assets/<file>`, `/env.json` and an unknown path each carry the `docs` profile's headers once; an unknown path and `developer.<staging-zone>/api/x` each answer the home page with status 200 from the static host (never the tunnel), and in a browser show "Page not found" with `noindex`; `fin-next-staging-docs-static` reads back with spec 01 §7.4's invariant and is not reachable on `workers.dev` | L-MON-09 |
+| T05-59 | STG | The header matrix on staging: `/`, a guide, `/reference`, `/assets/<file>`, `/env.json` and an unknown path each carry the `docs` profile's headers once; an unknown path and `docs.<staging-zone>/api/x` each answer the home page with status 200 from the static host (never the tunnel), and in a browser show "Page not found" with `noindex`; `fin-next-staging-docs-static` reads back with spec 01 §7.4's invariant and is not reachable on `workers.dev` | L-MON-09 |
 | T05-60 | STG | The release smoke calls `GET /v4/whoami` with the smoke organisation's Sandbox key and opens the reference | L-MON-09 |
 | T05-61 | E2E | On the static host with the single-page fallback, `/no-such-page` and `/guides/no-such-guide` answer 200 with the home page; the shell shows "Page not found" with its links, sets that title and adds `noindex`; the legacy-anchor redirect does not run; `/` itself still shows the home content | L-MON-08 |
 
@@ -1947,7 +1960,7 @@ fails when the rule it names breaks.
 | A05-37 | I | `resetSandbox` deletes only the calling organisation's Sandbox data and needs a full-access Sandbox key | |
 | A05-38 | I | `searchCustomers` finds by email, phone and name, and no personal data reaches a URL, a line or a cursor | |
 | A05-39 | I | `listEvents` filters by type or group, customer, RFI and creation time | |
-| A05-40 | STG | The getting-started guide and the reference for every Sunday and Monday operation are live on `developer.<staging-zone>` (R16 at staging-complete per EXECUTION §0.2) | |
+| A05-40 | STG | The getting-started guide and the reference for every Sunday and Monday operation are live on `docs.<staging-zone>` (R16 at staging-complete per EXECUTION §0.2) | |
 
 By day: Saturday A05-01 to A05-06 (stretch); Sunday A05-07, A05-09 to A05-22, A05-27, A05-37 to
 A05-39; Monday A05-08, A05-23 to A05-26, A05-28, A05-29, A05-32 to A05-35, A05-40; H-08 A05-30,
@@ -1961,15 +1974,18 @@ A05-31, A05-36.
 |---|---|---|---|
 | Scalar 1.78.1's option names and shapes (§8.6), the request headers it sends (for CORS), the anchor format it renders, how to catch a render failure, and that a Try-it session leaves every store empty | SPIKE | SP-14, rescoped to the assets-only deployment: Monday 08:00, before L-MON-08's first ready pull request | a reviewed bump to the first version that passes, or the storage test fails the lane |
 | That Scalar 1.78.1 needs `style-src 'unsafe-inline'` and `img-src data:` (found by the old product's docs build), and where its `data:` images come from | UNVERIFIED for fin-next | SP-14: the reference mounted under the strict `style-src 'self'` and `img-src 'self'`, every violation recorded | a value no violation needs is dropped from the `docs` profile (§8.11) |
-| `_headers` `!` detach on an assets-only deployment, for `Content-Security-Policy` as well as `Cache-Control`, and that the `/*` rules apply to a single-page fallback answer | UNVERIFIED | spec 01 SP-25 (a) and SP-26 on Saturday, then T05-59 | §8.11's fallbacks; the docs exception stays site-wide |
+| `_headers` `!` detach on an assets-only deployment, for `Content-Security-Policy` as well as `Cache-Control`, and that the `/*` rules apply to a single-page fallback answer | `Cache-Control`: confirmed on 21 Nov (SP-26's data points from S-01's run). The rules apply to a single-page fallback answer by its request path (S-01 (b) with the test `_headers`, and NF-1). `Content-Security-Policy`: UNVERIFIED | S-01's run, 21 Nov; T05-59 for `Content-Security-Policy` | For `Content-Security-Policy`: the docs exception stays site-wide (§8.11) |
 | `html_handling: auto-trailing-slash` serving `guides/<slug>.html` at `/guides/<slug>` | UNVERIFIED | T05-59 | generate `guides/<slug>/index.html` |
 | `@hono/zod-openapi` 1.6.3 emitting a `3.1.1` document from `getOpenAPI31Document` with the components named | UNVERIFIED | L-SUN-01's first fragment | post-process the version field in `fragments.ts` |
 | oasdiff v1.39.0 and vacuum v0.42.1 flag names | UNVERIFIED | when CI wires them | adjust flags, not rules |
 | Whether Cloudflare Logpush includes assets-only requests in `http_requests` | UNVERIFIED | the ops lane, with [FD-08] | docs request visibility from zone analytics only |
 | A cross-origin `no-cors` POST with `keepalive` from the docs page reaching the edge with `Origin` set | UNVERIFIED (spec-read) | T05-57 in Chromium, Firefox and WebKit | send with `mode: "cors"` and a simple content type |
 
-The routing checks of spec 01's SP-25, (b) to (d), do not apply to the docs host, which has no
-`/api/` path. Its check (a), `!` detach on an assets-only deployment, does (§8.11).
+The routing checks of spec 01's SP-25 for `/api/`, (c) to (g), do not apply to the docs host, which
+has no `/api/` path. Its checks (a) and (b), the static answer with the test `_headers` for `/` and
+for a deep link, passed on 21 Nov on S-01's throwaway host (`c1-spike.<staging-zone>`), not on the
+docs host, which T05-59 checks on staging; and SP-26's data point from the same run shows
+`! Cache-Control` detaching on an assets-only deployment (§8.11).
 
 ---
 
@@ -1979,7 +1995,7 @@ The routing checks of spec 01's SP-25, (b) to (d), do not apply to the docs host
 |---|---|---|
 | D05-01 | Docs failure reports go to the edge at `POST /reports/docs`, outside `/v4` and the document | `POST /failed/<stage>` on a docs server that OD-2 removed |
 | D05-02 | One docs build for every environment; `env.json` gives the API origin, docs origin, console origin and salt at run time; the document's server is a variable that the reference replaces; samples use `$FIN_API_URL` | per-environment builds |
-| D05-03 | One page policy for the whole docs site: spec 01 §7.4's `docs` profile, the only header source, with the docs exception (`style-src 'unsafe-inline'`, `img-src data:`) while Scalar needs it and only with the owner's yes under [AP-11]; narrowed to `/reference` once `!` detach is proven | a split policy before detach is proven; a docs-owned headers template that differs from spec 01's profile |
+| D05-03 | One page policy for the whole docs site: spec 01 §7.4's `docs` profile, the only header source, with the docs exception (`style-src 'unsafe-inline'`, `img-src data:`) while Scalar needs it and only with the owner's yes under [AP-11]; narrowed to `/reference` once `!` detach is proven for `Content-Security-Policy` (T05-59; it holds for `Cache-Control`, §8.11) | a split policy before that is proven; a docs-owned headers template that differs from spec 01's profile |
 | D05-04 | The docs follow the system colour scheme with no theme switch, so nothing is stored | `localStorage` theme ([UI-13] for the apps) |
 | D05-05 | No `@sentry/*` on the docs site | the apps' browser error client |
 | D05-06 | Fin's own build-time sample generator | a direct `@scalar/snippetz` dependency |
@@ -2018,13 +2034,15 @@ The routing checks of spec 01's SP-25, (b) to (d), do not apply to the docs host
 
 ## 17. Owner decisions this spec depends on
 
-Each applies its default if not answered (DECISIONS "How to read it"):
+The owner decided [AP-01], [SA-18] and [SA-20] at their defaults at the Saturday sitting (21 Nov,
+about 08:25: "defaults"). Each of the others applies its default if not answered
+(DECISIONS "How to read it"):
 
 | Decision | Default used here | Needed by |
 |---|---|---|
-| [AP-01] the path major | `/v4` | Saturday 08:00 |
-| [SA-18] keep `sk` and `rk` | kept | Saturday 08:00 |
-| [SA-20] roll overlap | now, 1 hour, 24 hours | Saturday 08:00 |
+| [AP-01] the path major | `/v4` | decided 21 Nov (the default) |
+| [SA-18] keep `sk` and `rk` | kept | decided 21 Nov (the default) |
+| [SA-20] roll overlap | now, 1 hour, 24 hours | decided 21 Nov (the default) |
 | [BC-05] last used | kept, rounded to the minute | Saturday 18:00 |
 | [AP-04] idempotency | as §3.4 | Sunday 08:00 |
 | [AP-07], [BC-04] webhook changes, 15 tries | yes | Sunday 08:00 |

@@ -15,13 +15,18 @@ copy is made under another path.
   reviewed pull request.
 - `SD3-nn` is a decision this spec makes where the plan is silent. Each is listed in this spec's
   Appendix C. SD3-02 and SD3-03, which change [SA-37] and [SA-26], are already folded into the
-  register (DECISIONS.md appendix C, SF-07); the steward copies the rest into the register in the
-  plan's first follow-up pull request. `SF-nn` is a row of DECISIONS.md appendix C.
+  register (DECISIONS.md appendix C, SF-07); the steward copies the rest into the register in a later
+  pull request of the plan. `SF-nn` is a row of DECISIONS.md appendix C.
 - `AC-SUN-nn`, `L-SUN-nn`, `CUT-nn`, `RK-nn`, `NB-nn`, `EX-nn`, `CR-nn` and `H-nn` are EXECUTION.md's.
   `PG-nn` is a production gate (EXECUTION §7.3). `SP-nn` is a spike (ARCHITECTURE §11.11).
   `FW-Cnn` and `FW-Snn` are the framework conditions and spikes (ARCHITECTURE §3.4).
 - "§n" alone means a section of this spec. "ARCHITECTURE §n" and "EXECUTION §n" name a section of
   those files. A flow such as F7 is one of ARCHITECTURE §2.3's.
+- D6, as in "signed receipts from hardening, D6", marks work that the owner's trim of Phase 0 on
+  21 Nov (about 08:25, spec 01 §1.2) moved to hardening, before production: the builder account,
+  the agents' own OS users, signed review receipts and the private overlay's ceremony. What stands
+  in until then carries the same mark. It is not the 19 Nov decision D6, and not a research note
+  such as "D3 §7.3".
 - UNVERIFIED marks a fact not confirmed from a primary source, with what would confirm it.
 
 **What wins where they disagree.** The plan's one order of precedence, highest first: (1) the
@@ -29,10 +34,16 @@ owner's decisions of 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARC
 (4) EXECUTION.md; (5) the specifications, and between two specifications the one that owns the area,
 as README §8.3 lists the owners.
 
-1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records and spec 01 §1 lists as OD-1 to
-   OD-6: tunnels for every host; the assets-only static deployments with a no-Worker route sending
-   `<app>.<zone>/api/*` to the tunnel, one host per app with no CORS; host-only `__Host-` cookies,
-   the session cookie `Strict` and the others `Lax`; the UI SDK; the sidebar edge toggle.
+1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records. The overnight ones are OD-1
+   to OD-6 in spec 01 §1: tunnels for every host; the assets-only static deployments with a
+   no-Worker route sending `<app>.<zone>/api/*` to the tunnel, one host per app with no CORS;
+   host-only `__Host-` cookies, the session cookie `Strict` and the others `Lax`; the UI SDK; the
+   sidebar edge toggle. The answers of Saturday morning are recorded in the Status of each entry
+   they decide, and spec 01 §1.2 lists those that change spec 01. Those in this spec's area are
+   [KY-05], [KY-06] and [KY-13], decided at their defaults, and [KY-02]'s staging timing: the owner
+   registers Sumsub's webhook by Mon 23 Nov, and onboarding polls until then (both in §22). The
+   decisions taken while the owner was away, [FD-09]'s staging names and [G-10]'s interim merge
+   rule among them, are register entries (item 2), for the owner's review.
 2. DECISIONS.md, appendix C included.
 3. ARCHITECTURE.md.
 4. EXECUTION.md.
@@ -56,8 +67,10 @@ where it needs a change in a sibling's file, §1.5 and §20.2 say so.
 **Public repository.** This file holds no credential, token, account, workspace or tunnel ID, internal
 address, staff address or real person's data. Hosts are written `<app>.<zone>`, where `<zone>` is the
 zone that holds that host: under [FD-10]'s default the verify and selfie hosts sit on the hosted zone
-and Fin Admin on the admin zone; staging puts every host on `<staging-zone>` ([FD-09]). Sample people
-and companies come from the canon seed with `example.*` addresses.
+and Fin Admin on the admin zone; staging puts every host on `<staging-zone>` under [FD-09]'s staging
+names, so `verify.<zone>` is `onboard.<staging-zone>`, `admin.<zone>` is `staff.<staging-zone>` and
+`api.<zone>` is `gateway.<staging-zone>`, while the console and selfie hosts keep their names. Sample
+people and companies come from the canon seed with `example.*` addresses.
 
 ## 0. Requirements this spec answers
 
@@ -73,7 +86,7 @@ and companies come from the canon seed with `example.*` addresses.
 | R8 | The `KycProvider` port follows the same pattern as the money adapters, so a second KYC provider is an implementation, not a rewrite; approval tells `payments` that a holder is owed | §6, §3.9 |
 | R9 | Every action by every actor (developer, API key, customer link, person link, staff, the system, Sumsub) writes its audit event in its transaction | §16 |
 | R10 | Every Sunday pull request passes fin-review's gate, with Sunday's attack profiles | §20.4 |
-| R11 | The gate's receipts must show sessions within R11's model and effort rules | §20.4 |
+| R11 | The gate's record (the recorded local run until hardening, then signed receipts; D6) must show sessions within R11's model and effort rules | §20.4 |
 | R12 | Nothing private is named; secrets are typed at the secure prompt | throughout |
 | R13 | This file is part of the plan saved in the repository | this file |
 | R14 | The console and Fin Admin screens follow the two canvases; the verify pages follow the boards [KY-09] adds | §13 |
@@ -92,7 +105,7 @@ specified elsewhere; this spec uses them.
 |---|---|---|
 | 3 | KYC domain: customers, people (at most 20 per business, in the API too), documents (one upload rule and the Sandbox quota), hosted links, RFIs on the forms model only, go-live requests; one table-driven state machine per entity; coupling rules in the machines | §3, §4, §5 |
 | 4 | `KycProvider` with the Sumsub adapter and the sandbox provider, one conformance suite | §6 |
-| 5 | Inbound Sumsub events stored, answered within a second, processed by the worker; the poll as the backstop | §7 |
+| 5 | Inbound Sumsub events stored, answered within a second, processed by the worker; the poll as the backstop. On staging the hook door is built and tested on Sunday with signed fixtures and goes live when the owner registers the webhook (by Mon 23 Nov); until then the poll is how reviews arrive ([KY-02]) | §7 |
 | 6 | Personal data: Sumsub as the record for live data; sealed name; keyed hashes; masks; the blind index; only `api` and `worker` hold the keys and Sumsub's tokens | §8 |
 | 7 | The hosted verify pages and the selfie host | §2, §12.3, §13.4 |
 | 8 | Developer events and webhooks | §9.4, §10 |
@@ -115,7 +128,7 @@ specified elsewhere; this spec uses them.
 5. The docs site skeleton (L-SUN-09).
 6. The customer emailed when an RFI opens ([KY-08]).
 
-### 1.3 Left out of R7, by [KY-13]'s default
+### 1.3 Left out of R7, by [KY-13]
 
 Sumsub's monitoring queues, AML re-screening schedules and any KYB level beyond the ten business types
 are not built. EXECUTION §0.2 marks R7 partial with this list. Sanctions and PEP queues are worked in
@@ -187,8 +200,10 @@ says only what verify and the selfie host add.
 | `console.<zone>`, `admin.<zone>` | spec 01 §7.4 | their API halves (spec 02) | `app` | spec 02's realm cookies |
 | `api.<zone>` | none | the whole host to the public tunnel, service `edge` (Spec 05 §2) | none | none |
 
-Sumsub's webhook is `POST https://api.<zone>/hooks/kyc/sumsub`. If SP-25 fails, verify takes
-spec 01 §7.12's split-host shape (`verify-api.<zone>`), and every route here keeps its path under `/api`.
+Sumsub's webhook is `POST https://api.<zone>/hooks/kyc/sumsub`; on staging it is
+`https://gateway.<staging-zone>/hooks/kyc/sumsub`, which the owner registers by Mon 23 Nov (§7.1,
+§22). SP-25 passed on 21 Nov, so verify keeps the same-host shape; spec 01 §7.12's split-host shape
+(`verify-api.<zone>`) is not needed. Every route here keeps its path under `/api`.
 
 ### 2.2 What verify adds to the static shape
 
@@ -994,12 +1009,16 @@ of `ts + METHOD + path with query + body`, with `node:crypto`. Level names are e
 | `SUMSUB_APP_TOKEN_READ`, `SUMSUB_SECRET_KEY_READ` | `api` | the read places of §8.1 |
 | `SUMSUB_APP_TOKEN_DOCUMENTS`, `SUMSUB_SECRET_KEY_DOCUMENTS` | `api` | Fin Admin's document viewer |
 | `SUMSUB_APP_TOKEN_WORKER`, `SUMSUB_SECRET_KEY_WORKER` | `worker` | inbound re-reads, polling, queued writes, go-live pushes, deactivation |
-| `SUMSUB_WEBHOOK_SECRETS` | `api` | newest first, comma-separated; both accepted during a rotation |
+| `SUMSUB_WEBHOOK_SECRETS` | `api` | a JSON array of the active secrets, newest first, as spec 08 §6.2 gives it; both accepted during a rotation |
 | `SUMSUB_LEVEL_SET` | `api`, `worker` | `staging` or `production` |
 
-All are sealed variables set by `pnpm fin` from the secure prompt (CR-13). In staging the four pairs
-may hold the one sandbox token until the split exists ([KY-04]). The process refuses to start in
-production with a token that begins `sbx:` and in staging with one that begins `prd:`.
+All are sealed variables set by `pnpm fin` from the secure prompt (CR-13); on staging, until the
+owner is back, from the local secret file that holds the sandbox credentials the owner gave on
+21 Nov ([SA-22]). In staging the four pairs may hold the one sandbox token until the split exists
+([KY-04]). In staging `SUMSUB_WEBHOOK_SECRETS` comes later: the owner gives it at the secure prompt
+after registering the webhook in Sumsub's dashboard, by Mon 23 Nov. Until then it is unset, which
+`main()` accepts, and the door answers 503 (§7.1). The process refuses to start in production with
+a token that begins `sbx:` and in staging with one that begins `prd:`.
 
 **Calls:**
 
@@ -1071,9 +1090,10 @@ an upload (accepted, refused with errors, warnings); link and unlink a beneficia
 token; read an action; stream a document; deactivate; verify a webhook (right digest, wrong digest,
 SHA-1 refused by default, unknown algorithm, too big); and the transport rules: a timeout on a read
 is `retry`, on an upload is `unknown`; a 429 carries `afterMs` from `Retry-After`; a 4xx is never
-retried; a redirect is not followed; a host outside the allowlist is `host_refused`. The real sandbox app is exercised by
-the operator's `pnpm --filter @fin/kyc sumsub:smoke staging` (token at the secure prompt), never in CI,
-and by AC-SUN-17 on staging.
+retried; a redirect is not followed; a host outside the allowlist is `host_refused`. The real
+sandbox app is exercised by the operator's `pnpm --filter @fin/kyc sumsub:smoke staging` (token at
+the secure prompt; on staging, until the owner is back, read from its local secret file, [SA-22]),
+never in CI, and by AC-SUN-17 on staging.
 
 ## 7. Inbound events, polling and the transit queue
 
@@ -1092,6 +1112,10 @@ and by AC-SUN-17 on staging.
    `ON CONFLICT (payload_digest) DO NOTHING`, sends `NOTIFY kyc_inbound`, and answers 200 within one
    second. A failure to store answers 500 so Sumsub resends (it resends five times, then may disable
    the webhook, which `sumsub-webhook-refused` and the poll cover).
+
+On staging the door is built on Sunday and tested with signed fixtures (§19.1). It stays unconfigured
+(503, `sumsub.webhook_unconfigured`) until the owner registers the webhook in Sumsub's dashboard and
+gives its secret through the secure prompt, by Mon 23 Nov, and goes live then ([KY-02]).
 
 ### 7.2 Applying an event
 
@@ -1124,6 +1148,9 @@ reads the review, applies it, and sets the next `poll_at` by backoff: 1, 5, 15 a
 submit, then hourly, until a final answer. A received webhook pushes `poll_at` to an hour later.
 Production requests in `in_review` are read every 15 minutes. A review pending at Sumsub for more than
 72 hours writes `kyc.review_stale` (alert `kyc-review-stale`).
+
+Until the owner registers the webhook on staging (by Mon 23 Nov), the poll is how onboarding learns
+every applicant's review result, so Sunday is not blocked ([KY-02]). Its schedule is unchanged.
 
 ### 7.4 The transit queue
 
@@ -1845,7 +1872,7 @@ Labels as EXECUTION: `[U]`, `[I]` (real Postgres 18), `[C]`, `[E2E]`, `[STG]`.
 | `packages/kyc/src/providers/sumsub/levels-coverage.test.ts` [U] | Fin collects every required input of every level |
 | `packages/kyc/src/providers/sumsub/signing.test.ts` [U] | the request signature on fixed vectors; level-name encoding; the strict `externalUserId` parser |
 | `packages/kyc/src/conformance/*.test.ts` [C] | both providers pass the suite (AC-SUN-05) |
-| `apps/api/test/hooks/sumsub.test.ts` [I] | a wrong digest, SHA-1 (by default), an unknown algorithm and a 65 KB body are refused and logged; a valid event is stored and answered within a second; a replay is stored once (AC-SUN-06) |
+| `apps/api/test/hooks/sumsub.test.ts` [I] | a wrong digest, SHA-1 (by default), an unknown algorithm and a 65 KB body are refused and logged; a valid event is stored and answered within a second; a replay is stored once (AC-SUN-06). It uses signed fixtures: synthetic events signed at test time with a secret the test makes, never a real delivery or secret, so the door and its signature check are proven on Sunday, before the owner registers the webhook |
 | `apps/api/test/worker/kyc-inbound.test.ts` [I] | every type of §7.2; a review is re-read, never taken from the payload; applying twice gives one status change, one audit row and one developer event |
 | `apps/api/test/worker/kyc-poll.test.ts` [I] | the poll applies a review that no webhook announced, on the backoff schedule |
 | `apps/api/test/worker/applicant-writes.test.ts` [I] | order per applicant; retry on 5xx; purge and flag on 4xx; submit's flush and its 503; the `sumsub_writes` switch |
@@ -1892,7 +1919,9 @@ WebSDK and email. Every page has the `securitypolicyviolation` listener. Failure
 ### 19.3 On staging
 
 AC-SUN-17 to AC-SUN-19, and the release smoke adds: a Sandbox customer by API reaches `approved`; the
-verify landing loads under its policy with no violation.
+verify landing loads under its policy with no violation. Until the owner registers the webhook (by
+Mon 23 Nov), AC-SUN-17's webhook clause and AC-SUN-19's signature drill wait; live-mode reviews on
+staging arrive by the poll (§7.3).
 
 ## 20. Build lanes
 
@@ -1906,14 +1935,14 @@ owns its fragments wherever they live (EXECUTION §1.3).
 | L-SUN-00 Spill | A and B | the paths of the Saturday lanes it finishes | 08:00 | Saturday's must-haves; API keys and the live-status check on key creation if they did not land |
 | L-SUN-01 Edge and API platform | A | as Spec 05 §12 | 08:00 | the public API foundation; `POST /hooks/kyc/sumsub` forwarding the raw body with its 64 KB cap and per-address limit |
 | L-SUN-02 KYC domain | B | `packages/kyc/**` except `src/providers/**`, `src/conformance/**`, `src/signals/**` and `scripts/**`; `packages/contract/src/fields/**`; `packages/db/migrations/*_kyc_*.sql`; `packages/db/src/schema/kyc/**`; `packages/db/roles/grants/{kyc,identity_kyc}.json`; `packages/audit/src/events/{customers,going-live,staff-kyc}.ts`; `packages/email/src/templates/{kyc,golive}/**`; `ops/monitoring/catalog/{kyc,golive}.ts`; `ops/monitoring/*/alerts/{kyc,golive}.json`; `packages/testing/src/canon/kyc.ts` (moved at 08:00) | 08:00 | §3, §4, §5, §8, §15's rules, §16's fragments, §17's templates; `packages/kyc/src/contracts/**` (statuses, door payload schemas) merged by 09:30 |
-| L-SUN-03 Providers | A | `packages/kyc/src/{providers,conformance}/**`, `packages/kyc/scripts/**`, `apps/api/src/worker/kyc/**`, `apps/api/src/hooks/sumsub/**`, `packages/testing/src/stand-ins/sumsub/**` (moved at 08:00), `ops/monitoring/catalog/sumsub.ts`, `ops/monitoring/*/alerts/sumsub.json` | 08:00 | §6, §7; SP-11 with the owner; `levels.json` by 10:30 |
+| L-SUN-03 Providers | A | `packages/kyc/src/{providers,conformance}/**`, `packages/kyc/scripts/**`, `apps/api/src/worker/kyc/**`, `apps/api/src/hooks/sumsub/**`, `packages/testing/src/stand-ins/sumsub/**` (moved at 08:00), `ops/monitoring/catalog/sumsub.ts`, `ops/monitoring/*/alerts/sumsub.json` | 08:00 | §6, §7; SP-11 (its dashboard parts wait for the owner, §22); `levels.json` by 10:30; the hook door built and tested with signed fixtures on Sunday; SP-11's webhook parts once the owner has registered the webhook (by Mon 23 Nov) |
 | L-SUN-04 Webhooks | B | as Spec 05 §12 | 08:00 | Spec 05 §5; the `webhooks.*` door operations the console calls |
 | L-SUN-05 Onboarding API routes and doors | A | Spec 05 §12's L-SUN-05 paths (`apps/api/src/routes/{customers,people,documents,links,rfis,sandbox,events,webhook-endpoints}/**` and the contract fragments for `customers`, `documents`, `people`, `rfis`, `events`, `webhook-endpoints` and `sandbox`), plus `apps/api/src/doors/{kyc,golive,verify,admin_kyc}/**`, `packages/server/src/doors/{kyc,golive,verify,admin_kyc}.ts` and `apps/api/test/kyc/**` | 11:00 (door stubs from 09:30) | §9, §11 |
 | L-SUN-06 Verify | B | `apps/verify/**` (both entries, the API half, `e2e/sun/`), `packages/app-contracts/src/verify/**`, `ops/monitoring/catalog/verify.ts`, `ops/monitoring/*/alerts/verify.json` | 10:00 (after FW-S3, on KY-09's boards or pending compositions) | §2, §12.3, §13.4 |
 | L-SUN-07 Console onboarding | A | `apps/console/src/client/routes/{customers,developers/simulator,developers/webhooks,developers/events,settings/go-live}/**`, `apps/console/src/server/routes/{customers,sandbox,golive,webhooks,events}/**`, `apps/console/src/server/policy/{customers,sandbox,golive,webhooks,events}.ts`, `packages/frame/src/nav/console/{customers,developers}.ts` (EXECUTION §1.3), `apps/console/e2e/sun/**`, `packages/app-contracts/src/console/{customers,sandbox,golive,webhooks,events}.ts` | 11:00 | §12.1, §13.2 |
 | L-SUN-08 Fin Admin onboarding | B | `apps/admin/src/client/routes/{go-live,approvals,customers,documents,organisations,rfis,forms,reasons}/**`, `apps/admin/src/server/routes/{golive,approvals,customers,documents,organisations,rfis,forms,reasons,templates,history,flags}/**`, their `apps/admin/src/server/policy/` fragments and `packages/frame/src/nav/admin/` fragments (EXECUTION §1.3), `apps/admin/e2e/sun/**`, `packages/app-contracts/src/admin/{golive,approvals,customers,documents,organisations,rfis,forms,reasons}.ts`, `packages/db/migrations/*_admin_settings_*.sql`, `packages/db/src/schema/admin-settings.ts`, `packages/db/roles/grants/admin_settings.json`, `packages/audit/src/events/staff-settings.ts`, `packages/email/src/templates/staff-kyc/**`, `ops/monitoring/catalog/admin_kyc.ts`, `ops/monitoring/*/alerts/admin_kyc.json` | 11:00 | §12.2, §13.3, §15's screens; SP-27 |
 | L-SUN-09 Docs site (stretch) | A | `apps/docs/**` | 14:00 | the reference with Try it; guides for customers, people, requests for information, going to Production, and Sandbox test values generated from §3.8's constants |
-| L-SUN-10 Ops | B | `ops/fin/**`, the `ops/monitoring/**` index files, dashboards and monitors, the runbooks of §18.2 under `docs/runbooks/` | 08:00 | CR-13 set by `pnpm fin` once the watcher and the staging identity provider are live; the verify and selfie static deployments and their routes as spec 01 §7.4 and §7.5 build them; the `verify` monitor on `/api/health`; the alerts applied |
+| L-SUN-10 Ops | B | `ops/fin/**`, the `ops/monitoring/**` index files, dashboards and monitors, the runbooks of §18.2 under `docs/runbooks/` | 08:00 | CR-13's app tokens set by `pnpm fin` once the watcher is live; the webhook secret set when the owner gives it at the secure prompt after registering the webhook, by Mon 23 Nov ([KY-02]); the verify and selfie static deployments and their routes as spec 01 §7.4 and §7.5 build them; the `verify` monitor on `/api/health`; the alerts applied |
 | L-SUN-11 Design | canvas | the canvases | 08:00 | unlocked Production; the verify boards if not done; the second-approver, restart and flag states |
 | L-SUN-12 Ongoing signals (stretch) | B | `packages/kyc/src/signals/**`, `apps/admin/src/{client,server}/routes/signals/**` | 14:00 | the Signals list (stretch 2) |
 
@@ -1944,8 +1973,9 @@ routes, screens.
 
 ### 20.4 Review gates (R10, R11)
 
-Everything but client-only screen code is tier S. Each pull request needs a signed fin-review receipt
-whose sessions ran a model and effort R11 and the floor allow ([RV-03], [RV-06]), with the attack pass
+Everything but client-only screen code is tier S. Each pull request needs fin-review's local run on
+its exact head, recorded in the pull request ([G-10]; signed receipts from hardening, D6), whose
+sessions ran a model and effort R11 and the floor allow ([RV-03], [RV-06]), with the attack pass
 on every tier S file and Sunday's attack profiles (EXECUTION §1.7): cross-organisation and cross-mode
 reads, a forged or replayed Sumsub webhook, link-token theft and reuse, personal data in logs, errors
 or events, upload abuse, SSRF through webhook endpoints, Sandbox mail abuse, a staff decision without
@@ -1956,7 +1986,9 @@ operation is in the matrix).
 
 ## 21. Acceptance criteria
 
-EXECUTION's AC-SUN-01 to AC-SUN-21 apply as written; this spec's tests that prove them are in §19.
+EXECUTION's AC-SUN-01 to AC-SUN-21 apply as written, with AC-SUN-17's webhook clause and AC-SUN-19's
+signature drill waiting for the owner's staging webhook (§19.3); this spec's tests that prove them
+are in §19.
 These add to them, numbered after EXECUTION's last (AC-SUN-22 onwards; to be copied into EXECUTION
 §4.6 under the same numbers):
 
@@ -1983,13 +2015,20 @@ These add to them, numbered after EXECUTION's last (AC-SUN-22 onwards; to be cop
 
 **Spikes:**
 
-- **SP-11 Sumsub** (Sunday from 08:00, L-SUN-03 with the owner, CR-13): per-service tokens with IP
-  allowlists; digests over the raw bytes; the WebSDK's allowed origin (`https://selfie.<zone>`), its
-  script path and every host it frames or calls; Developer Verification's 409; webhook-secret
+- **SP-11 Sumsub** (Sunday from 08:00, L-SUN-03, CR-13; its parts set in Sumsub's dashboard, the
+  app token's IP allowlist and the WebSDK's allowed origin, are the owner's and wait for the owner,
+  as its webhook parts below do): per-service tokens with IP allowlists; digests over the raw
+  bytes; the WebSDK's allowed origin (`https://selfie.<staging-zone>`), its script path and every
+  host it frames or calls; Developer Verification's 409; webhook-secret
   rotation; and, for this spec: the deactivation path; whether `/one` returns questionnaire answers;
   whether HEIC is accepted; the company document sets per type and the questionnaire item IDs (written
   to `levels.json`); whether the WebSDK builder injects `<style>` elements (if so, the selfie host
-  alone takes FW-X7's style fallback).
+  alone takes FW-X7's style fallback). Its webhook parts (digests over the raw bytes of a real
+  delivery, webhook-secret rotation) run once the owner has registered the webhook and given its
+  secret, by Mon 23 Nov. Until then the door is proven with signed fixtures (§19.1). Until the
+  owner sets the dashboard parts, SP-11 records the app token's allowlist as it stands and whether
+  the WebSDK loads on `selfie.<staging-zone>` before its origin is listed; if it does not, the
+  selfie step on staging waits for the owner too.
 - **FW-S3** (Sunday 08:00): verify's first load from the static deployment.
 - **SP-27 (new here) Document viewing under Fin Admin's policy** (Sunday 11:00, L-SUN-08), on
   Chromium, Firefox and WebKit: a view minted by `POST /api/documents/:id/view` and shown in an `img`
@@ -2000,10 +2039,13 @@ These add to them, numbered after EXECUTION's last (AC-SUN-22 onwards; to be cop
   `delivery: "download"` (recorded in the audit metadata), for the owner to accept. A new tab is a
   new document, so Fin Admin's own page policy stays as it is (research note D3 §7.4).
 
+**Decided at their defaults at the Saturday sitting** (by the owner, 21 Nov 2026, about 08:25):
+[KY-05], [KY-06] and [KY-13].
+
 **Owner decisions this spec builds on their defaults** (entries whose status in DECISIONS.md is
-OWNER MUST DECIDE; deadline Sunday unless noted): [KY-05], [KY-06] and [KY-13] (08:00 Saturday),
-[KY-07], [KY-11], [SA-39] (the budgets and the second approver), [AP-04], [AP-07], [AP-08] (keeping
-Fin's own engine, a confirmation), [AP-16], [UI-08], [BC-04], [BC-07], [FW-02].
+OWNER MUST DECIDE; deadline Sunday): [KY-07], [KY-11], [SA-39] (the budgets and the second approver),
+[AP-04], [AP-07], [AP-08] (keeping Fin's own engine, a confirmation), [AP-16], [UI-08], [BC-04],
+[BC-07], [FW-02].
 
 **Register entries this spec follows that are not for the owner** (Recommended, or already decided,
 in DECISIONS.md): [KY-08], [KY-10], [KY-12], [SA-17], [SA-26], [SA-37], [SA-40], [DA-13], [AP-18].
@@ -2011,8 +2053,14 @@ in DECISIONS.md): [KY-08], [KY-10], [KY-12], [SA-17], [SA-26], [SA-37], [SA-40],
 **Content the owner provides** (none of it blocks the build; placeholders are marked draft and never
 shipped to production): the end-customer consent and privacy notice text and
 `END_CUSTOMER_CONSENT_VERSION`; the "Fin Developer Terms" and "Developer No-Nesting Terms" pages for
-`DEVELOPER_TERMS_VERSION` `2026-11`; in Sumsub's dashboard, the webhook URL on `api.<zone>`, the
-WebSDK's allowed origin, and the same levels as the staging set (CR-13).
+`DEVELOPER_TERMS_VERSION` `2026-11`; in Sumsub's dashboard, the WebSDK's allowed origin and the
+same levels as the staging set (CR-13).
+
+**The owner's Sumsub webhook step, by Mon 23 Nov** (it does not block the build either): register the
+webhook in Sumsub's dashboard, on staging `https://gateway.<staging-zone>/hooks/kyc/sumsub`
+([FD-09]), and give its secret through the secure prompt. Until then onboarding polls Sumsub
+([KY-02], §7.3), and the hook door answers 503 (§7.1). Production's webhook stays on `api.<zone>`
+(PG-11).
 
 **Before production** (EXECUTION §7.3): the production Sumsub app with the same levels and
 questionnaires, its webhook, the WebSDK's allowed origin on the production selfie host and the

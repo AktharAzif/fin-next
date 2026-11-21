@@ -8,25 +8,31 @@ section instead of repeating it; where it was silent, this file decides, and eac
 
 **Public by design (R12).** This file names no credential, token, provider catalogue token, wallet
 reference, account or workspace ID, internal address or real person. Hosts are written
-`<app>.<zone>`; staging is `<staging-zone>`. MassPay's published sandbox host and its published
-sandbox test bank numbers are vendor documentation and appear where tests need them. The MassPay
-method table (its `dest_`, `orgn_` and `attr_` tokens) lives only in `payments`' sealed variables
-([G-09], MS-09).
+`<app>.<zone>`: the generic names stand for the roles and for production. Staging is on the shared
+staging zone, `<staging-zone>`, where each role has the name [FD-09] gives it: `console.` keeps its
+name, the public API is `gateway.<staging-zone>` and Fin Admin is `staff.<staging-zone>`. MassPay's
+published sandbox host and its published sandbox test bank numbers are vendor documentation and
+appear where tests need them. The MassPay method table (its `dest_`, `orgn_` and `attr_` tokens)
+lives only in `payments`' sealed variables ([G-09], MS-09).
 
 ## How to read it
 
 **Precedence.** The plan's one order of precedence, highest first: (1) the owner's decisions of
 21 Nov 2026; (2) DECISIONS.md, appendix C included; (3) ARCHITECTURE.md; (4) EXECUTION.md; (5) the
 specifications, and between two specifications the one that owns the area, as README §8.3 lists
-the owners. The owner's decisions are those DECISIONS.md records and spec 01 §1 lists as OD-1 to
-OD-6. Among the specifications, this file owns providers, money, the ledger and reconciliation; the
+the owners. The owner's decisions are those DECISIONS.md records as the owner's: the overnight
+ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning, which spec 01
+§1.2 lists. The decisions taken while the owner was away, such as the build's [BD-08] and [BD-11],
+are register entries, for the owner's review. Among the specifications, this file owns providers,
+money, the ledger and reconciliation; the
 sibling owns any other area (spec 02 for permissions and step-up, spec 03 for onboarding, spec 05 for
 the public API's conventions, webhooks and events, spec 06 for components, frames and states); and
 spec 08 owns the cross-cutting rules of audit, security email, personal data, scrubbing, secrets and
 observability. A spec decision (MS-nn, §38) binds where everything above it is silent; one that
 differs from ARCHITECTURE.md or EXECUTION.md binds only once that file is changed to match. The
-steward copies each into DECISIONS.md in the plan's first follow-up pull request. DECISIONS appendix C found none that
-changes a register entry; if one is found later, the register holds until appendix C settles it.
+steward copies each into DECISIONS.md in a later pull request of the plan. DECISIONS appendix C
+found none that changes a register entry; if one is found later, the register holds until appendix
+C settles it.
 
 | Mark | Meaning |
 |---|---|
@@ -42,7 +48,7 @@ changes a register entry; if one is found later, the register holds until append
 | `T-MON-nn` | A test this file requires (§33) |
 | `MQ-nn` | A rule from the private MassPay provider note, each with a test; §21.6 lists the neutral rules the public plan keeps |
 | `CS-nn` | A conformance scenario (§23) |
-| "the owner's decisions of 21 Nov" | The front door on cloudflared tunnels for every host; each web app an assets-only static deployment with `<app>.<zone>/api/*` falling through to the tunnel; host-only `__Host-` cookies; single-page apps on the UI SDK (`@ui-sdk/react`); the sidebar edge toggle. They override any older text in ARCH §3.4 about Hono serving static files or vendoring the design system's private source |
+| "the owner's decisions of 21 Nov" | The overnight ones (spec 01 §1, OD-1 to OD-6): the front door on cloudflared tunnels for every host; each web app an assets-only static deployment with `<app>.<zone>/api/*` falling through to the tunnel; host-only `__Host-` cookies; single-page apps on the UI SDK (`@ui-sdk/react`); the sidebar edge toggle. They override any older text in ARCH §3.4 about Hono serving static files or vendoring the design system's private source. The answers of Saturday morning (spec 01 §1.2) are cited by their entries, such as [FD-09], [G-06] and [SA-05] |
 
 ## Requirement map
 
@@ -1626,7 +1632,8 @@ the caller, failing closed (ARCH §13.6).
 
 1. The provider posts to `https://api.<zone>/hooks/money/<provider>/<instance>` (no API key). The
    Cloudflare rate rule excludes `/hooks/` (ARCH §5.7); an optional custom rule may allow only MassPay's
-   published source addresses on `/hooks/money/masspay/*`, but the signature is the control.
+   published source addresses on `/hooks/money/masspay/*` in production only (staging's five custom
+   rules are all in use, spec 01 §7.6), but the signature is the control.
 2. `edge` (`apps/edge`, a route owned by L-MON-04 as `apps/edge/src/hooks/money.ts`, XC-07):
    `<provider>` and `<instance>` must name an enabled instance in the door matrix's hook list, else
    404 without forwarding; body at most 256 KB (413); a per-address limit from the overlay; forwards
@@ -1662,10 +1669,11 @@ itself is the record of receipt.
 ### 18.3 Webhook secrets and registration
 
 The MassPay webhook (URL and event types) is created by `pnpm fin money webhook create <env>`, which
-asks for the MassPay key at the secure prompt, calls MassPay, and writes the returned secret straight
-into `payments`' sealed `MASSPAY_WEBHOOK_SECRETS` without printing it (MS-10, L-MON-09). Rotation:
-`pnpm fin money webhook rotate <env>` creates a second webhook, adds its secret, waits for an event
-verified by it, then deletes the old webhook and secret. The event types subscribed:
+asks for the MassPay key at the secure prompt (on staging, until the owner is back, it reads the
+sandbox key from its local secret file, [SA-22]), calls MassPay, and writes the returned secret
+straight into `payments`' sealed `MASSPAY_WEBHOOK_SECRETS` without printing it (MS-10, L-MON-09).
+Rotation: `pnpm fin money webhook rotate <env>` creates a second webhook, adds its secret, waits for
+an event verified by it, then deletes the old webhook and secret. The event types subscribed:
 `payout.created`, `payout.status`, `payin.created`, `payin.status`, `payin_deposit.returned`,
 `payin_deposit.return_completed`, `load.created`, `load.status`, `load.reversed`, `user.status`.
 
@@ -2331,9 +2339,11 @@ reports it.
 - Every non-GET money route passes the origin gate: `Origin` equals `https://console.<zone>` exactly,
   `Sec-Fetch-Site` (when present) is `same-origin`, `X-Fin-App: console` is present, and the body is
   `application/json`. GETs stay simple. Every answer is `Cache-Control: no-store`.
-- If the Saturday spike fails and the fallback (`console-api.<zone>`, cross-origin and same-site)
-  applies, these routes move host unchanged; only the client's API base URL and the CORS settings change, as
-  the routing research of 21 Nov sets out.
+- SP-25, the routing spike (EX §2.6's S-01), passed on 21 Nov (recorded in `docs/plan/spikes.md`), so
+  the shape above holds and these routes stay same-origin. The fallback (`console-api.<zone>`,
+  cross-origin and same-site) is not needed. It stays documented (ARCH §5.17): under it, these routes
+  would move host unchanged, and only the client's API base URL and the CORS settings would change,
+  as the routing research of 21 Nov sets out.
 - Screens are single-page routes on TanStack Router, built only from `@fin/ui` (Fin's components on
   `@ui-sdk/react` 0.1.0-beta.13, pinned exactly); no screen imports the UI SDK, Phosphor or a colour directly.
   Drawers open with `?view=` and never refetch the list behind them (FW-C11).
@@ -2762,8 +2772,12 @@ A stopped request answers 503 `temporarily_unavailable` with `Retry-After: 60` a
 `switch.refused`. Jobs skip writes on a stopped instance and keep reading, so pending transfers reach
 their deadline and are stopped and read safely. A prepared Cloudflare WAF rule on `api.<zone>`'s money
 routes (`/v4/transfers*`, `/v4/customers/*/beneficiaries*`, `/v4/customers/*/virtual_account*`) is
-created disabled by L-MON-09 for `pnpm fin killswitch` (ARCH §15.1). Tests: each switch stops what it names
-and nothing else (T-MON-29).
+created disabled, as `killswitch-money` (spec 08 §8.6), in hardening with `pnpm fin killswitch`
+(H-04, [OP-01]; it moves there from L-MON-09; ARCH §15.1). On the shared staging zone it is
+written and toggled like every fin-next zone rule: one rule at a time through the per-rule
+endpoint, with the `fin_next_` ref prefix, never by replacing a whole phase, and with each write
+checked against [FD-09]'s allow-list ([BD-11]). Tests: each switch stops what it names and nothing
+else (T-MON-29).
 
 ---
 
@@ -2871,7 +2885,7 @@ EX §5.2 holds; the files are made exact here.
 | L-MON-06 Console money | B | 12:00 | `apps/console/src/client/routes/{customers/$id/-money,virtual-accounts,transfers}/**`; `packages/frame/src/nav/console/money.ts`; `apps/console/src/server/routes/money/**`; `apps/console/src/server/policy/money.ts`; `packages/app-contracts/src/money/**`; `apps/console/e2e/mon/**` | §26 |
 | L-MON-07 Fin Admin money | B | 14:00 | `apps/admin/src/client/routes/money/**`; `packages/frame/src/nav/admin/money.ts`; `apps/admin/src/server/routes/money/**`; `apps/admin/src/server/policy/money.ts`; `packages/app-contracts/src/admin/money/**`; `apps/admin/e2e/mon/**` | §27 |
 | L-MON-08 Docs | A | 08:00 | `apps/docs/**` | §25.8 |
-| L-MON-09 Ops | B | 08:00 | `ops/fin/**` (money commands: `money fund`, `money webhook create|rotate|delete`); `ops/environments/*.json` (money settings); `ops/credentials.json` (money entries); `ops/monitoring/{staging,production}/heartbeats.json`; `ops/monitoring/dashboards/**`; `docs/runbooks/money-*.md`; `docs/flows/**` money flows (F11, F12, F13) | CR-14 set on `payments` only; `payments`' static IPs; SP-13; the MassPay webhook; heartbeats; runbooks; the prepared WAF rule; AC-MON-13 to AC-MON-15 |
+| L-MON-09 Ops | B | 08:00 | `ops/fin/**` (money commands: `money fund`, `money webhook create|rotate|delete`); `ops/environments/*.json` (money settings); `ops/credentials.json` (money entries); `ops/monitoring/{staging,production}/heartbeats.json`; `ops/monitoring/dashboards/**`; `docs/runbooks/money-*.md`; `docs/flows/**` money flows (F11, F12, F13) | CR-14 set on `payments` only; `payments`' static IPs; SP-13; the MassPay webhook; heartbeats; runbooks; AC-MON-13 to AC-MON-15 (the prepared WAF rule moves to hardening, H-04, [OP-01]) |
 | L-MON-10 Design | canvas | 08:00 | the canvases (outside the repository) | §26.10's copy changes in light, dark and phone; a Fin Admin money board (stretch) |
 | L-MON-11 UI kit, money | B | 08:00 | `packages/{tokens,icons,motion,ui,frame}/**` (EX §5.2; spec 06 §11), except the area lanes' `packages/frame/src/nav/{console,admin}/money.ts` | The money components L-MON-06 and L-MON-07 build on (AmountInput, AmountPair, QuoteLine, MoneyRoute, the asset, network and rail icons, TableAmount, the identifier helpers, the businesses' "coming" state, the L-drawer wizards), before 13:00 |
 
@@ -2901,7 +2915,7 @@ carries everything merged, and AC-MON-13 is attempted with CR-14.
 | `packages/access` catalogues | Unchanged: the dashboard's `money.*` and staff `money.read`, `money.operate` exist from Saturday |
 | Monitoring catalogue and alerts | Split by lane (`money-domain`, `money-provider`, `money-jobs`), so no two lanes edit one file |
 | `pnpm-lock.yaml` and dependencies | No new dependency is needed for money. Scalar is in [G-06]'s set |
-| `tools/layout.json` | `packages/money` and `apps/payments` are listed from Phase 0; the paths above must match it |
+| `tools/layout.json` | `packages/money` and `apps/payments` are listed from Phase 0; the paths above must match it. `packages/money` is a `planned` entry, so creating it makes `layout:check` warn, not fail, and no money lane edits this control path ([BD-08]) |
 
 ### 34.3 Definition of done for a money pull request
 
@@ -2995,7 +3009,7 @@ Defaults apply from 09:00 Monday (DECISIONS "Monday").
 | MS-07 | The console masks the virtual account number and shows it after a window step-up, audited | AC-MON-08 and ARCH §7.4's window for a full number; the canvas showed it in full |
 | MS-08 | The similar-transfer warning is a review-step InlineAlert for the same beneficiary and amount within 24 hours, from the quote call | [MO-07] asks for a warning; the board has no state for it |
 | MS-09 | The MassPay method table (catalogue tokens) lives in a sealed variable, validated at start and mirrored to `money.provider_method` | Tokens may not be published (R12); no hard-coded tokens in the domain |
-| MS-10 | `pnpm fin money webhook create|rotate|delete` asks for the MassPay key at the secure prompt and writes the secret straight into `payments`' variables | The key lives only on `payments`; nothing prints a secret |
+| MS-10 | `pnpm fin money webhook create|rotate|delete` asks for the MassPay key at the secure prompt (on staging, until the owner is back, it reads the sandbox key from its local secret file, [SA-22]) and writes the secret straight into `payments`' variables | The key lives only on `payments`; nothing prints a secret |
 | MS-11 | MassPay test fixtures in the repository are synthetic, never real sandbox answers | Sandbox tokens of Fin's account may not be published |
 | MS-12 | Durability: `synchronous_commit = remote_apply` plus a non-empty `synchronous_standby_names` check in production; `single_node` recorded in staging; payouts wait when unconfirmed | [MO-18] needs a buildable check; services reach the primary only through HAProxy |
 | MS-13 | The beneficiary email may carry `rail` and `account_last4` as non-ID parameters from a closed allowlist | The worker cannot read money tables; the notice must say which account |
