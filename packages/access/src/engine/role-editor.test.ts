@@ -152,6 +152,13 @@ describe("names already taken in the realm", () => {
     ["a variation selector added", "Support desk\u{fe0f}", ["Support desk"]],
     ["a grapheme joiner added", "Support desk\u{34f}", ["Support desk"]],
     ["a Hangul filler added", "Support\u{3164}", ["Support"]],
+    ["a Lisu S for the Latin one", "\u{a4e2}upport", ["Support"]],
+    ["Lisu capitals", "\u{a4e2}\u{a4f4}\u{a4d1}\u{a4d1}\u{a4f3}\u{a4e3}\u{a4d4}", ["Support"]],
+    ["a Coptic O", "Supp\u{2c9f}rt", ["Support"]],
+    ["a Canadian syllabics P", "Su\u{146d}\u{146d}ort", ["Support"]],
+    ["a letter drawn as a middle dot", "Support\u{a78f}", ["Support\u{b7}"]],
+    // U+03F9 GREEK CAPITAL LUNATE SIGMA SYMBOL is drawn as C, though it folds to a sigma.
+    ["a Greek lunate sigma for the C", "\u{3f9}ash desk", ["Cash desk"]],
     ["one of several", "Billing", ["Support", "Billing"]],
   ])("is taken: %s", (_what, name, takenNames) => {
     expect(taken(name, takenNames)).toEqual(["name_taken"]);
@@ -296,6 +303,76 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     expect(readsAsBuiltIn(staff, name)).toBe(false);
   });
 
+  // Letters of scripts drawn as Latin capitals (Lisu, Canadian syllabics, Coptic), letters drawn
+  // as punctuation, and symbols drawn as letters: Unicode's confusables data reads each as Latin.
+  it.each([
+    "\u{a4ee}\u{a4d3}\u{a4df}\u{a4f2}\u{a4e0}", // Lisu letters drawn as "ADMIN"
+    "\u{a4ee}\u{a4d3}min",
+    "\u{a4ee}\u{a4d3}MIN",
+    "\u{a4ee}dmi\u{a4e0}",
+    "\u{15c5}\u{15ea}\u{15f0}I\u{144e}", // Canadian syllabics drawn as "ADMIN"
+    "\u{2c80}\u{2c86}\u{2c98}\u{2c92}\u{2c9a}", // Coptic capitals drawn as "ADMIN"
+    "\u{2c80}D\u{2c98}\u{2c92}\u{2c9a}",
+    "Admin\u{a78f}", // U+A78F LATIN LETTER SINOLOGICAL DOT, drawn as "·"
+    "Admin\u{1427}", // U+1427 CANADIAN SYLLABICS FINAL MIDDLE DOT
+    "Admin\u{1428}", // U+1428 CANADIAN SYLLABICS FINAL SHORT HORIZONTAL STROKE
+    "Admin\u{294}", // U+0294 LATIN LETTER GLOTTAL STOP, drawn as "?"
+    "Admin\u{1c1}", // U+01C1 LATIN LETTER LATERAL CLICK, drawn as "‖"
+    "Admin\u{1c2}", // U+01C2 LATIN LETTER ALVEOLAR CLICK, drawn as "‡"
+    "Admin\u{4e00}", // a CJK letter drawn as a dash
+    "\u{237a}dmin", // U+237A APL FUNCTIONAL SYMBOL ALPHA
+    "Admi\u{2229}", // U+2229 INTERSECTION, drawn as an n
+    "Adm\u{627}n", // an Arabic alef, drawn as an l
+  ])("%j reads as built-in in both realms", (name) => {
+    for (const cat of [dash, staff] as Catalogue[]) {
+      expect(readsAsBuiltIn(cat, name), cat.realm).toBe(true);
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  it.each([
+    "\u{a4e2}uper \u{a4ee}\u{a4d3}min",
+    "Super \u{a4ee}\u{a4d3}\u{a4df}\u{a4f2}\u{a4e0}",
+    "\u{a4e2}\u{a4f4}\u{a4d1}\u{a4f0}\u{a4e3} \u{a4ee}\u{a4d3}\u{a4df}\u{a4f2}\u{a4e0}", // "SUPER ADMIN"
+    "Super\u{a78f}admin",
+  ])("%j reads as built-in in the dashboard", (name) => {
+    expect(readsAsBuiltIn(dash, name)).toBe(true);
+  });
+
+  it.each([
+    "\u{a4da}\u{a4f3}\u{a4df}\u{a4d1}\u{a4e1}\u{a4f2}\u{a4ee}\u{a4e0}\u{a4da}\u{a4f0}", // "COMPLIANCE"
+    "\u{a4f3}\u{a4d1}\u{a4f0}\u{a4e3}\u{a4ee}\u{a4d4}\u{a4f3}\u{a4e3}", // "OPERATOR"
+    "\u{a4e6}\u{a4f2}\u{a4f0}\u{a4ea}\u{a4f0}\u{a4e3}", // "VIEWER"
+    "VI\u{a4f0}\u{a4ea}ER",
+    "OPE\u{a4e3}A\u{a4d4}O\u{a4e3}",
+    "\u{a4da}\u{a4f3}\u{a4df}PLIANCE",
+    "\u{3f9}ompliance", // U+03F9 GREEK CAPITAL LUNATE SIGMA SYMBOL, drawn as C
+  ])("%j reads as built-in in Fin Admin", (name) => {
+    expect(readsAsBuiltIn(staff, name)).toBe(true);
+  });
+
+  // The built-in names in other scripts' words, which are not drawn as the Latin ones.
+  it.each([
+    "\u{ad00}\u{b9ac}\u{c790}", // Korean "admin"
+    "\u{c6b4}\u{c601}\u{c790}", // Korean "operator"
+    "\u{bdf0}\u{c5b4}", // Korean "viewer"
+    "\u{cef4}\u{d50c}\u{b77c}\u{c774}\u{c5b8}\u{c2a4}", // Korean "compliance"
+    "\u{645}\u{62f}\u{64a}\u{631}", // Arabic "manager"
+    "\u{645}\u{634}\u{631}\u{641}", // Arabic "supervisor"
+    "\u{5de}\u{5e0}\u{5d4}\u{5dc}", // Hebrew "manager"
+    "\u{394}\u{3b9}\u{3b1}\u{3c7}\u{3b5}\u{3b9}\u{3c1}\u{3b9}\u{3c3}\u{3c4}\u{3ae}\u{3c2}", // Greek "administrator"
+    "\u{3a7}\u{3b5}\u{3b9}\u{3c1}\u{3b9}\u{3c3}\u{3c4}\u{3ae}\u{3c2}", // Greek "operator"
+    "\u{10d0}\u{10d3}\u{10db}\u{10d8}\u{10dc}\u{10d8}", // Georgian "admin"
+    "\u{531}\u{564}\u{574}\u{56b}\u{576}", // Armenian "admin"
+    "\u{935}\u{94d}\u{92f}\u{935}\u{938}\u{94d}\u{925}\u{93e}\u{92a}\u{915}", // Hindi "administrator"
+    "\u{7ba1}\u{7406}\u{5458}", // Chinese "administrator"
+    "\u{30aa}\u{30da}\u{30ec}\u{30fc}\u{30bf}\u{30fc}", // Japanese "operator"
+  ])("%j does not read as built-in in either realm", (name) => {
+    for (const cat of [dash, staff] as Catalogue[]) {
+      expect(readsAsBuiltIn(cat, name), cat.realm).toBe(false);
+    }
+  });
+
   it("is refused in the draft, with the name's other problems", () => {
     for (const cat of [dash, staff] as Catalogue[]) {
       expect(nameProblems("Admin\u{3164}", cat)).toEqual(["name", "reads_as_built_in"]);
@@ -368,13 +445,14 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     expect(readingOf("\u{4bb}\u{4cf}\u{475}")).toBe("hlv");
   });
 
-  it("holds each look-alike once, as one character and its reading", () => {
+  it("holds each hand-made look-alike once, as one character and its reading", () => {
     const seen = new Set<string>();
     for (const row of LOOK_ALIKE_ROWS) {
       for (const entry of row.split(" ")) {
         const [char = "", reads = "", ...rest] = [...entry];
         expect(rest, `${row}: ${entry}`).toEqual([]);
-        expect(reads, `${row}: ${entry}`).toMatch(/^[A-Za-z|!']$/);
+        // A Latin letter, or the punctuation a letter is drawn as.
+        expect(reads, `${row}: ${entry}`).toMatch(/^(?:[A-Za-z]|[\p{P}\p{S}])$/u);
         expect(char, `${row}: ${entry}`).not.toMatch(/^[A-Za-z]$/);
         expect(seen.has(char), `${entry} appears twice`).toBe(false);
         seen.add(char);

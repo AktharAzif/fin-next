@@ -6,6 +6,7 @@
 import { isPermission, missingNeed } from "./permissions.ts";
 import { hasInvisible, withoutInvisible } from "./text.ts";
 import type { Catalogue, RoleProblem } from "./types.ts";
+import { UNICODE_LOOK_ALIKES } from "./unicode-look-alikes.ts";
 
 /** At most 30 custom roles per organisation, and 30 custom staff roles. */
 export const CUSTOM_ROLE_LIMIT = 30;
@@ -47,20 +48,24 @@ function descriptionFloor(text: string): boolean {
   return lengthOf(text) <= ROLE_DESCRIPTION_MAX_LENGTH;
 }
 
-/** Reads a table of two-character entries: the character, then what it reads as. */
+/**
+ * Reads a table of entries: one character, then what it reads as (one character or more). An
+ * entry later in the rows replaces an earlier one for the same character.
+ */
 const table = (...rows: readonly string[]): ReadonlyMap<string, string> =>
   new Map(
     rows
       .join(" ")
       .split(" ")
       .map((entry) => {
-        const [char = "", reads = ""] = [...entry];
-        return [char, reads];
+        const [char = "", ...reads] = [...entry];
+        return [char, reads.join("")];
       }),
   );
 
-// The look-alike tables' rows, each entry one character and its reading. Exported apart from the
-// declaration (below), for the test that checks each entry's shape.
+// The hand-made look-alike rows, each entry one character and its reading. They take precedence
+// over the rows derived from Unicode's confusables data (src/engine/unicode-look-alikes.ts), which
+// cover every other script. Exported apart from the declaration (below), for the tests.
 const LOOK_ALIKE_ROWS: readonly string[] = [
   // Capitals whose lower-case forms read otherwise, made Latin capitals before lower-casing.
   "ΗH ΜM ΝN ΥY ΖZ",
@@ -71,25 +76,35 @@ const LOOK_ALIKE_ROWS: readonly string[] = [
   // Latin small capitals:
   "ᴀa ʙb ᴄc ᴅd ᴇe ɢg ʜh ɪi ᴊj ᴋk ʟl ᴍm ɴn ᴏo ᴘp ʀr ꜱs ᴛt ᴜu ᴠv ᴡw ʏy ᴢz",
   // Latin letters drawn as others: alpha, script g, dotless i and j, and letters with a stroke or
-  // a hook, which compatibility folding leaves as they are:
+  // a hook, which compatibility folding leaves as they are (v with a hook is drawn as u):
   "ɑa ɡg ıi ȷj ɩi ɛe łl ƚl ɫl ɭl đd ðd ɖd ɗd øo ɵo ŧt ƭt ʈt ƀb ɓb ɨi ʉu ɇe ƶz ȥz ǥg ɠg ɍr ɽr ɾr",
-  "ȼc ƈc ɉj ħh ɦh ɱm ɲn ɳn ƞn ʂs ʋv ƙk ƥp ƴy",
+  "ȼc ƈc ɉj ħh ɦh ɱm ɲn ɳn ƞn ʂs ʋu ƙk ƥp ƴy",
   // Cherokee, whose capitals lower-case to these small forms:
   "ꭺa ᏼb ꮯc ꭰd ꭼe ꮐg ꮋh ꭵi ꭻj ꮶk ꮮl ꮇm ꮲp ꭱr ꮪs ꭲt ꮩv ꮃw ꮓz",
   // Armenian:
   "ոn սu օo լl ցg հh զq",
-  // Letters drawn as punctuation: two clicks and the saltillo.
-  "ǀ| ǃ! ꞌ'",
+  // Coptic alfa, drawn as A as Greek alpha is (Unicode's data does not list it):
+  "ⲁa",
+  // Letters drawn as punctuation: four clicks (one as a double bar, one as a double dagger) and
+  // the saltillo.
+  "ǀ| ǃ! ꞌ' ǁ‖ ǂ‡",
 ];
 
 export { LOOK_ALIKE_ROWS };
 
-const CAPITALS = table(LOOK_ALIKE_ROWS[0] ?? "");
-const LOOK_ALIKES = table(...LOOK_ALIKE_ROWS.slice(1));
+// Each table holds Unicode's rows, then the hand-made ones, which replace them where both list a
+// character.
+const CAPITALS = table(...UNICODE_LOOK_ALIKES.capitals, LOOK_ALIKE_ROWS[0] ?? "");
+const LOOK_ALIKES = table(...UNICODE_LOOK_ALIKES.letters, ...LOOK_ALIKE_ROWS.slice(1));
+const BEFORE_FOLDING = table(...UNICODE_LOOK_ALIKES.beforeFolding);
 
 // Digits and signs that may stand for a letter in a name, or be just what they are: "Adm1n",
-// "0perator", "@dmin", "Adm!n".
-const SIGNS = table("0o 1l 2z 3e 4a 5s 6b 7t 8b 9g @a !l |l ¡i $s €e +t");
+// "0perator", "@dmin", "Adm!n"; and the digits, punctuation and symbols of other scripts drawn as
+// Latin letters ("⍺dmin", "Admi∩").
+const SIGNS = table(
+  ...UNICODE_LOOK_ALIKES.signs,
+  "0o 1l 2z 3e 4a 5s 6b 7t 8b 9g @a !l |l ¡i $s €e +t",
+);
 
 // Two letters drawn as one: "rn" as m, "vv" as w, "cl" as d.
 const DRAWN_AS_ONE: ReadonlyMap<string, readonly [string, string]> = new Map([
@@ -101,30 +116,58 @@ const DRAWN_AS_ONE: ReadonlyMap<string, readonly [string, string]> = new Map([
 /**
  * One character of a name as it reads: a Latin letter (`reads`), a letter of no Latin reading
  * (`reads` null, which may stand for any one letter), and `optional` for a digit or sign, which
- * may stand for a letter or be passed over.
+ * may stand for a letter or be passed over. A character drawn as several letters ("æ", "‖") is
+ * a glyph for each.
  */
-interface Glyph {
+export interface Glyph {
   readonly char: string;
   readonly reads: string | null;
   readonly optional: boolean;
 }
 
 /**
- * The glyphs of a text: invisible characters removed, compatibility-folded, look-alike capitals
- * and letters made Latin, lower-cased; white space, punctuation, symbols, marks (accents) and
- * modifier letters (a raised apostrophe) left out.
+ * A text's characters folded as they are read: a letter that compatibility folding would turn
+ * into one drawn otherwise read first (`BEFORE_FOLDING`), then compatibility-folded (NFKD).
  */
-function glyphsOf(text: string): Glyph[] {
+function folded(text: string): string {
+  let out = "";
+  for (const char of text) out += BEFORE_FOLDING.get(char) ?? char;
+  return out.normalize("NFKD");
+}
+
+/**
+ * What one folded character is drawn as: a look-alike capital's reading, or else the character
+ * lower-cased and each look-alike letter made what it is drawn as (Latin letters, a sign, a dot).
+ */
+function drawnAs(char: string): string {
+  let out = "";
+  for (const lower of (CAPITALS.get(char) ?? char).toLowerCase()) {
+    out += LOOK_ALIKES.get(lower) ?? lower;
+  }
+  return out;
+}
+
+/**
+ * The glyphs of a text: invisible characters removed, folded (`folded`), look-alike capitals and
+ * letters made what they are drawn as, lower-cased; digits and signs drawn as letters made
+ * optional glyphs; white space, punctuation, symbols, marks (accents) and modifier letters (a
+ * raised apostrophe) left out, and so is a letter drawn as one ("Adminꞏ" reads as "Admin·").
+ * Exported for the tests, not from the package.
+ */
+export function glyphsOf(text: string): Glyph[] {
   const glyphs: Glyph[] = [];
-  for (const folded of withoutInvisible(text).normalize("NFKD")) {
-    for (const lower of (CAPITALS.get(folded) ?? folded).toLowerCase()) {
-      const char = LOOK_ALIKES.get(lower) ?? lower;
-      const sign = SIGNS.get(char);
-      if (/^[a-z]$/.test(char)) glyphs.push({ char, reads: char, optional: false });
-      else if (sign !== undefined) glyphs.push({ char, reads: sign, optional: true });
-      else if (/^\p{Lm}$/u.test(char)) continue;
-      else if (/^\p{L}$/u.test(char)) glyphs.push({ char, reads: null, optional: false });
-      else if (/^\p{N}$/u.test(char)) glyphs.push({ char, reads: null, optional: true });
+  for (const char of folded(withoutInvisible(text))) {
+    for (const drawn of drawnAs(char)) {
+      const sign = SIGNS.get(drawn);
+      if (/^[a-z]$/.test(drawn)) {
+        glyphs.push({ char: drawn, reads: drawn, optional: false });
+      } else if (sign !== undefined) {
+        for (const reads of sign) glyphs.push({ char: drawn, reads, optional: true });
+      } else if (/^\p{L}$/u.test(drawn) && !/^\p{Lm}$/u.test(drawn)) {
+        glyphs.push({ char: drawn, reads: null, optional: false });
+      } else if (/^\p{N}$/u.test(drawn)) {
+        glyphs.push({ char: drawn, reads: null, optional: true });
+      }
     }
   }
   return glyphs;
@@ -133,8 +176,9 @@ function glyphsOf(text: string): Glyph[] {
 /**
  * What a name reads as, letter by letter: invisible characters removed, compatibility-folded,
  * lower-cased, look-alike letters made Latin, and everything but letters dropped (spaces,
- * punctuation, digits, accents and modifier letters); a letter of no Latin reading stays as it is,
- * and a final plural "s" is dropped. "Super-Admins 2!" reads as "superadmin".
+ * punctuation, digits and signs, accents, modifier letters, and letters drawn as punctuation); a
+ * letter of no Latin reading stays as it is, and a final plural "s" is dropped. "Super-Admins 2!"
+ * reads as "superadmin", and so does "ꓢuper ꓮdmin" in Lisu letters.
  */
 export function readingOf(text: string): string {
   let out = "";
@@ -206,12 +250,14 @@ function builtInReadings(cat: Catalogue): Set<string> {
 /**
  * Whether a name is, or reads as, one of the realm's built-in role names or keys (spec 02 §8.4:
  * "never a built-in's name or one that reads as one"). Case, accents, spaces, punctuation,
- * invisible characters and a plural "s" are ignored; look-alike letters of other scripts and of
- * Latin read as their Latin letters; digits and signs may read as the letters they are drawn as
- * ("Adm1n", "0perator", "@dmin"); "rn", "vv" and "cl" may read as "m", "w" and "d"; I and l read
- * alike; and a letter of no Latin reading may stand for one letter in four. So "Super Admin",
- * "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha and "Adrnin" are all
- * refused. Text longer than any name may be is not read (the length rule refuses it).
+ * invisible characters and a plural "s" are ignored; look-alike letters of every script Unicode's
+ * confusables data lists, and of Latin, read as the Latin letters they are drawn as, and a letter
+ * drawn as punctuation as that punctuation; digits, signs and symbols may read as the letters they
+ * are drawn as ("Adm1n", "0perator", "@dmin", "⍺dmin"); "rn", "vv" and "cl" may read as "m", "w"
+ * and "d"; I and l read alike; and a letter of no Latin reading may stand for one letter in four.
+ * So "Super Admin", "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha,
+ * "ꓮꓓꓟꓲꓠ" in Lisu letters, "Adminꞏ" and "Adrnin" are all refused. Text longer than any name may
+ * be is not read (the length rule refuses it).
  */
 export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
   if (name.length > READ_LIMIT) return false;
@@ -223,18 +269,15 @@ export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
 
 /**
  * The form two custom roles' names may not share (spec 02 §8.4: unique per organisation, ignoring
- * case): invisible characters removed, normalised, compatibility-folded, lower-cased, and
- * look-alike letters made Latin. Digits, spaces, punctuation and accents are kept, so "Tier 1" and
- * "Tier 2", or "Café" and "Cafe", are different names, while "Support" with a Cyrillic о is the
- * same name as "Support".
+ * case): invisible characters removed, normalised, folded (`folded`), lower-cased, and look-alike
+ * letters made what they are drawn as. Digits, spaces, punctuation and accents are kept, so
+ * "Tier 1" and "Tier 2", or "Café" and "Cafe", are different names, while "Support" with a
+ * Cyrillic о or a Lisu ꓢ is the same name as "Support", and "Supportꞏ" (a letter drawn as a
+ * middle dot) the same as "Support·".
  */
 export function roleNameKey(name: string): string {
   let key = "";
-  for (const folded of normaliseRoleText(withoutInvisible(name)).normalize("NFKD")) {
-    for (const lower of (CAPITALS.get(folded) ?? folded).toLowerCase()) {
-      key += LOOK_ALIKES.get(lower) ?? lower;
-    }
-  }
+  for (const char of folded(normaliseRoleText(withoutInvisible(name)))) key += drawnAs(char);
   return key;
 }
 

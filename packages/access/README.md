@@ -42,9 +42,30 @@ The server passes `packages/identity/src/names.ts`'s `roleName` and `roleDescrip
 characters that draw as nothing (`\p{C}`, the default-ignorable characters such as the Hangul
 fillers and variation selectors, and the blank symbols; `src/engine/text.ts`). Comparing a name
 with the built-in roles' (`readsAsBuiltIn`) and with the realm's other custom roles
-(`roleNameKey`, for `name_taken`) is the engine's alone: look-alike letters of Latin and other
-scripts, digits and signs drawn as letters ("Adm1n", "0perator"), letter pairs drawn as one
-("rn"), I and l, and invisible characters do not make a name different.
+(`roleNameKey`, for `name_taken`) is the engine's alone: look-alike letters of every script
+Unicode's confusables data lists (Lisu "ꓮꓓꓟꓲꓠ" is "ADMIN"), letters drawn as punctuation
+("Adminꞏ" is "Admin·"), digits, signs and symbols drawn as letters ("Adm1n", "0perator", "⍺dmin"),
+letter pairs drawn as one ("rn", "cl"), I and l, and invisible characters do not make
+a name different.
+
+## Look-alike data
+
+`src/engine/unicode-look-alikes.ts` holds rows derived from Unicode's confusables data (UTS #39,
+`confusables.txt` 18.0.0) for the characters Node 26's Unicode (17.0) assigns, and
+`src/engine/role-editor.ts` holds the hand-made rows, which take precedence (small capitals, the
+case-insensitive readings of Cyrillic and Greek, Coptic alfa, the clicks). The reading folds case,
+so a small letter drawn as no Latin letter reads as its capital does, and a capital has a row of
+its own only when its small letter is drawn as another letter.
+
+`src/test-support/confusables.ts` commits the subset of Unicode's file the reading must agree
+with: every entry whose source is a visible, non-ASCII letter, digit, sign or symbol (not a mark or
+a modifier letter) and whose prototype holds a Latin letter, a digit or a sign, or, for a letter or
+digit, only punctuation; less the characters compatibility folding turns into ASCII, and digits,
+signs and symbols whose prototype is not all Latin. `src/engine/look-alikes.test.ts` fails when an
+entry does not read as its prototype is drawn, when a derived row is not one an entry asks for, or
+when the runtime's Unicode is newer than the data. To refresh for a newer file, select its entries
+the same way, replace the subset, and add or change the rows each failing entry names. Both files
+carry Unicode's data under the Unicode License v3, whose notice the rows file holds.
 
 ## On a screen
 
@@ -73,7 +94,8 @@ the top role holding everything. A need that names an unknown permission is also
 
 ## Tests
 
-`pnpm --filter @fin/access test` runs the unit, table and property tests. The property tests
+`pnpm --filter @fin/access test` runs the unit, table and property tests, and holds the look-alike
+rows to Unicode's data (`src/engine/look-alikes.test.ts`). The property tests
 (T-SAT-08 in `src/engine/giving.test.ts`, and others) use the seeded generator in
 `src/test-support/seeded.ts`. Set `FIN_PROPERTY_SEED` to replay a seed and `FIN_PROPERTY_RUNS` to
 widen a run. Every failure message names its seed.
