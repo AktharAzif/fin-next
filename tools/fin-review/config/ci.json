@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "note": "CI settings for plan (spec 07 §10.1, §10.2, §10.4). e2eShards is raised in a reviewed pull request when the slowest shard's p50 passes 8 minutes for a week. e2eProjects are the per-pull-request Playwright project variants of spec 06 §10.2; the plan names each selected app's project <app>-<variant>.",
+  "e2eShards": 4,
+  "e2eApps": ["apps/console", "apps/admin", "apps/verify", "apps/docs"],
+  "e2eProjects": ["desktop", "phone", "dark", "reduced", "firefox", "webkit"],
+  "workspaces": ["apps/*", "packages/*", "tools/*", "ops/*"],
+  "packageRoots": ["apps", "packages"],
+  "dbPackage": "@fin/db",
+  "bun": ["packages/**"]
+}

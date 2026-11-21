@@ -1,0 +1,228 @@
+{
+  "version": 1,
+  "note": "CI path classes (spec 07 §10.1). A path belongs to every class whose paths match and whose exclude does not; a path no class takes is unmapped and runs everything. planned lists patterns that may match no tracked file yet; each must then match one of the documented example paths in test/ci-map.test.ts (T-RV-21).",
+  "always": ["check", "static"],
+  "classes": [
+    {
+      "name": "global",
+      "note": "Global inputs: any change runs every job. Root tsconfig.json, .npmrc, .gitattributes and a package's own turbo.json are added to spec 07's list because each changes every build or install. .github, docs/review and tools/fin-review are also listed as bare paths, so a file or link put in a folder's place is global too.",
+      "everything": true,
+      "paths": [
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "tsconfig.base.json",
+        "tsconfig.json",
+        "biome.json",
+        ".node-version",
+        ".npmrc",
+        ".gitattributes",
+        "tools/layout.json",
+        "package.json",
+        "vitest.config.ts",
+        "playwright.config.ts",
+        "compose.yaml",
+        ".github",
+        ".github/**",
+        "tools/fin-review",
+        "tools/fin-review/**",
+        "docs/review",
+        "docs/review/**",
+        "apps/*/turbo.json",
+        "packages/*/turbo.json"
+      ],
+      "planned": [
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "tsconfig.base.json",
+        "tsconfig.json",
+        "biome.json",
+        ".node-version",
+        ".npmrc",
+        ".gitattributes",
+        "tools/layout.json",
+        "package.json",
+        "vitest.config.ts",
+        "playwright.config.ts",
+        "compose.yaml",
+        ".github",
+        ".github/**",
+        "tools/fin-review",
+        "docs/review",
+        "docs/review/**",
+        "apps/*/turbo.json",
+        "packages/*/turbo.json"
+      ]
+    },
+    {
+      "name": "docs",
+      "note": "Documentation files: Markdown outside apps/, packages/ and docs/review/, and LICENSE. Any other file under docs/ is not documentation, so it is unmapped and runs everything (and plan does not give it tier D).",
+      "jobs": ["check", "static"],
+      "paths": ["**/*.md", "LICENSE"],
+      "exclude": ["docs/review/**", "apps/**", "packages/**"],
+      "planned": ["LICENSE"]
+    },
+    {
+      "name": "db",
+      "jobs": ["check", "db", "build", "seams", "e2e"],
+      "e2e": "every",
+      "paths": ["packages/db/**", "packages/audit/**", "**/*.db.test.ts"],
+      "planned": ["packages/db/**", "packages/audit/**", "**/*.db.test.ts"]
+    },
+    {
+      "name": "server",
+      "note": "The service apps whole, each web app's server and root files (a web app's tree less its client paths), any other app whole, and every package but the client ones. e2e runs for the web apps that depend on a changed package; packages/testing is the e2e harness, so its change runs every app. The client paths are excluded for the web apps only: a service app's src/client, public, index.html or _headers is server code.",
+      "jobs": ["check", "build", "seams", "e2e"],
+      "e2e": "affected",
+      "e2eEvery": ["packages/testing/**"],
+      "dbWhen": "package-needs-db",
+      "paths": [
+        "apps/edge/**",
+        "apps/api/**",
+        "apps/payments/**",
+        "apps/connector/**",
+        "apps/*/src/server/**",
+        "apps/*/**",
+        "packages/**"
+      ],
+      "exclude": [
+        "apps/console/src/client/**",
+        "apps/console/index.html",
+        "apps/console/public/**",
+        "apps/console/_headers",
+        "apps/admin/src/client/**",
+        "apps/admin/index.html",
+        "apps/admin/public/**",
+        "apps/admin/_headers",
+        "apps/verify/src/client/**",
+        "apps/verify/index.html",
+        "apps/verify/public/**",
+        "apps/verify/_headers",
+        "apps/docs/**",
+        "packages/tokens/**",
+        "packages/icons/**",
+        "packages/motion/**",
+        "packages/ui/**",
+        "packages/frame/**",
+        "packages/app-contracts/**"
+      ],
+      "planned": [
+        "apps/edge/**",
+        "apps/api/**",
+        "apps/payments/**",
+        "apps/connector/**",
+        "apps/*/src/server/**",
+        "apps/*/**",
+        "packages/**"
+      ]
+    },
+    {
+      "name": "client",
+      "note": "Browser code and the design system. A design-system package runs every app's kit and journeys (spec 06 §10.6); the app contracts run the apps that depend on them.",
+      "jobs": ["check", "build", "e2e"],
+      "e2e": "affected",
+      "e2eEvery": [
+        "packages/tokens/**",
+        "packages/icons/**",
+        "packages/motion/**",
+        "packages/ui/**",
+        "packages/frame/**"
+      ],
+      "paths": [
+        "apps/*/src/client/**",
+        "apps/*/index.html",
+        "apps/*/public/**",
+        "apps/*/_headers",
+        "apps/docs/**",
+        "packages/tokens/**",
+        "packages/ui/**",
+        "packages/frame/**",
+        "packages/app-contracts/**",
+        "packages/icons/**",
+        "packages/motion/**"
+      ],
+      "planned": [
+        "apps/*/src/client/**",
+        "apps/*/index.html",
+        "apps/*/public/**",
+        "apps/*/_headers",
+        "apps/docs/**",
+        "packages/tokens/**",
+        "packages/ui/**",
+        "packages/frame/**",
+        "packages/app-contracts/**",
+        "packages/icons/**",
+        "packages/motion/**"
+      ]
+    },
+    {
+      "name": "docker",
+      "jobs": ["check", "build", "seams", "containers"],
+      "paths": ["ops/docker/**", ".dockerignore"],
+      "planned": ["ops/docker/**", ".dockerignore"]
+    },
+    {
+      "name": "ops",
+      "note": "tools/static-deploy is added here: the static uploader, which no CI build uses.",
+      "jobs": ["check", "static"],
+      "paths": [
+        "ops/fin/**",
+        "ops/monitoring/**",
+        "ops/watcher/**",
+        "ops/backup/**",
+        "ops/environments/**",
+        "ops/credentials.json",
+        "tools/static-deploy/**"
+      ],
+      "planned": [
+        "ops/fin/**",
+        "ops/monitoring/**",
+        "ops/watcher/**",
+        "ops/backup/**",
+        "ops/environments/**",
+        "ops/credentials.json",
+        "tools/static-deploy/**"
+      ]
+    },
+    {
+      "name": "contract",
+      "note": "The public API contract: the OpenAPI checks in static, and e2e for the docs site and the console.",
+      "jobs": ["check", "build", "static", "e2e"],
+      "e2e": ["apps/docs", "apps/console"],
+      "paths": ["packages/contract/**"],
+      "planned": ["packages/contract/**"]
+    },
+    {
+      "name": "scripts",
+      "note": "Repository scripts, hooks and the rules files.",
+      "jobs": ["check", "static"],
+      "paths": [
+        "scripts/**",
+        ".githooks/**",
+        ".gitleaks.toml",
+        "CODEOWNERS",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        ".claude/**",
+        ".gitignore",
+        ".editorconfig"
+      ],
+      "planned": [
+        "scripts/**",
+        ".githooks/**",
+        ".gitleaks.toml",
+        "CODEOWNERS",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        ".claude/**",
+        ".gitignore",
+        ".editorconfig"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@fin/fin-review",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "fin-review: the review engine's options, roles, effort floor and CI planner (spec 07)",
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}
