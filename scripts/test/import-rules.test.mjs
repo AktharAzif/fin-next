@@ -105,6 +105,14 @@ describe("imports:check", () => {
       src(`const t = await ${IMP}("@fin/testing");`),
       src(`const t = ${REQ}("@fin/testing");`),
     ];
+    // The forms that name a file under a package's e2e/ or test/ by the package's name, which the
+    // test-code rule (test-file-import) refuses as well, except in a file under such a directory.
+    const testCodeForms = new Set([
+      imp("@fin/console/e2e/fixtures.ts"),
+      imp("@fin/identity/test/canon.ts"),
+      imp("@fin/identity/TEST/canon.ts?raw"),
+      imp("@fin/console/src/../e2e/fixtures.ts"),
+    ]);
     // Deployable code, and test-only code inside a deployable package.
     for (const file of [
       "apps/api/src/main.ts",
@@ -118,20 +126,30 @@ describe("imports:check", () => {
       "packages/identity/e2e.ts",
       "vitest.config.ts",
     ]) {
-      for (const text of forms) assert.deepEqual(check(file, text), ["testing-import"], file);
+      const inTestCode = /(?:^|\/)(?:test|e2e)\//.test(file);
+      for (const text of forms) {
+        assert.deepEqual(
+          check(file, text),
+          testCodeForms.has(text) && !inTestCode
+            ? ["test-file-import", "testing-import"]
+            : ["testing-import"],
+          file,
+        );
+      }
     }
-    // A file of test support by a relative path reaches the same code, in any case.
-    for (const specifier of [
-      "../../../packages/testing/src/index.ts",
-      "../../../packages/Testing/src/index.ts",
-      "../../console/e2e/fixtures.ts",
-      "../test/helpers.ts",
-      "../../../e2e/fixtures/csp.ts",
-      "../../../playwright.config.ts",
-    ]) {
+    // A file of test support by a relative path reaches the same code, in any case; one under an
+    // e2e/, test/ or fixtures/ directory is refused by the test-code rule too.
+    for (const [specifier, testCode] of /** @type {[string, boolean][]} */ ([
+      ["../../../packages/testing/src/index.ts", false],
+      ["../../../packages/Testing/src/index.ts", false],
+      ["../../console/e2e/fixtures.ts", true],
+      ["../test/helpers.ts", true],
+      ["../../../e2e/fixtures/csp.ts", true],
+      ["../../../playwright.config.ts", false],
+    ])) {
       assert.deepEqual(
         check("apps/api/src/main.ts", imp(specifier)),
-        ["testing-import"],
+        testCode ? ["test-file-import", "testing-import"] : ["testing-import"],
         specifier,
       );
     }
@@ -159,7 +177,10 @@ describe("imports:check", () => {
     // directory below a package's src/.
     assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/testing-kit")), []);
     assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/server/testing/http")), []);
-    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/identity/src/test/helper.ts")), []);
+    // (Code that runs still imports nothing under a test/ directory: the test-code rule.)
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/identity/src/test/helper.ts")), [
+      "test-file-import",
+    ]);
   });
 
   test("outside tests and test support, a relative import stays in the repository and out of node_modules", () => {
@@ -930,9 +951,12 @@ describe("imports:check", () => {
         ["test-file-import"],
         specifier,
       );
+      // apps/api/test/ is that package's test support, which testing-import refuses as well.
       assert.deepEqual(
         rules(checkSource("apps/api/src/a.ts", imp(specifier))),
-        ["test-file-import"],
+        specifier === "../test/helpers.ts"
+          ? ["test-file-import", "testing-import"]
+          : ["test-file-import"],
         specifier,
       );
     }
@@ -1151,7 +1175,8 @@ describe("imports:check", () => {
         [`new Worker(new URL(\`./w/\${name}.ts\`, ${META}.url));`, ["dynamic-import"]],
         [`const u = ${META}.resolve(name);`, ["dynamic-import"]],
         [`new URL("./te${BS}x73t/w.ts", ${META}.url);`, ["dynamic-import", "test-file-import"]],
-        [`${IMP} { put } from "@fin/ui/test/sink.ts";`, ["test-file-import"]],
+        // A package's test/ by its name is its test support, which testing-import refuses too.
+        [`${IMP} { put } from "@fin/ui/test/sink.ts";`, ["test-file-import", "testing-import"]],
         [`const m = await ${IMP}("@fin/ui/fixtures/sink.ts");`, ["test-file-import"]],
       ])) {
         assert.deepEqual(rules(checkSource(file, src(line))), expected, `${file}: ${line}`);
@@ -1216,13 +1241,31 @@ describe("imports:check", () => {
       }),
     });
     const findings = checkImports(dir);
-    assert.deepEqual(rules(findings), ["test-file-import"]);
-    assert.deepEqual([...new Set(findings.map((f) => f.file))].sort(), [
-      "apps/api/src/a.ts",
-      "packages/frame/src/checks.ts",
-      "packages/frame/src/kit.ts",
-      "packages/frame/src/render.ts",
-    ]);
+    assert.deepEqual(
+      findings
+        .filter((f) => f.rule === "test-file-import")
+        .map((f) => f.file)
+        .sort(),
+      [
+        "apps/api/src/a.ts",
+        "packages/frame/src/checks.ts",
+        "packages/frame/src/kit.ts",
+        "packages/frame/src/render.ts",
+      ],
+    );
+    // The harness rules see the same plants: the exports map's test/ and test-file targets
+    // (testing-export) and a package's test/ named by the package (testing-import).
+    assert.deepEqual(
+      findings
+        .filter((f) => f.rule !== "test-file-import")
+        .map((f) => `${f.file}:${f.line} ${f.rule}`)
+        .sort(),
+      [
+        "apps/api/src/a.ts:1 testing-import",
+        "packages/ui/package.json:1 testing-export",
+        "packages/ui/package.json:1 testing-export",
+      ],
+    );
     const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
     assert.equal(run.status, 1);
     assert.match(run.output, /^packages\/frame\/src\/render\.ts:1 test-file-import: /m);
@@ -1267,6 +1310,8 @@ describe("imports:check", () => {
         [
           "packages/ui/package.json package-manifest",
           "apps/console/src/client/main.ts test-file-import",
+          // The browser map names test support, which the harness's manifest rule refuses too.
+          "packages/ui/package.json testing-export",
         ],
         JSON.stringify(browser),
       );
@@ -1313,9 +1358,14 @@ describe("imports:check", () => {
         "apps/admin/src/client/main.ts test-file-import",
         "apps/console/src/client/package.json package-manifest",
         "packages/frame/package.json package-manifest",
+        // The harness's manifest rule refuses every entry point (exports included) that names a
+        // package's test/ or a test file, so the export for a package's tests is refused there.
+        "packages/frame/package.json testing-export",
         "packages/icons/package.json package-manifest",
         "packages/motion/package.json package-manifest",
         "packages/tokens/package.json package-manifest",
+        "packages/tokens/package.json testing-export",
+        "packages/ui/package.json testing-export",
       ],
     );
   });
@@ -1876,7 +1926,10 @@ describe("imports:check", () => {
     assert.deepEqual(findings.map((f) => `${f.file}:${f.line} ${f.rule}`).sort(), [
       "apps/api/package.json:6 testing-dependency",
       "apps/api/src/by-checkout.ts:1 relative-escape",
+      // The test-code rule reads the same plants through the exports map and the package's path.
+      "apps/api/src/by-exports.ts:1 test-file-import",
       "apps/api/src/by-link.ts:1 relative-escape",
+      "apps/api/src/by-name.ts:1 test-file-import",
       "apps/api/src/by-name.ts:1 testing-import",
       "apps/api/src/by-query.ts:1 testing-import",
       "apps/api/src/main.ts:2 testing-import",

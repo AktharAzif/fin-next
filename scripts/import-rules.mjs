@@ -1547,7 +1547,9 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
         "code that runs imports no test file: a test's own imports are not held to these rules",
       );
     } else if (
-      !isTest &&
+      // Test support (packages/testing, playwright.config.ts) is test code too: the harness rules
+      // above keep it out of code that runs, and it may load other test support.
+      !mayLoadTestSupport &&
       !TEST_CODE.test(file) &&
       [...targets, ...packagePaths].some((t) => TEST_CODE_TARGET.test(`${t}/`))
     ) {
