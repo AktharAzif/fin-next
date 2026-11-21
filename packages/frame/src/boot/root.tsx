@@ -2,8 +2,9 @@
 // outlet, the root StepUp host, and the root's effects: the document title from the route's
 // `pageName` (S6-07), focus to the page's <h1> and its title announced after a navigation (S6-17),
 // and `data-ready` on <body> once the first route has resolved (FW-C16). The guards run in the root
-// route's `beforeLoad`; the back-forward cache's check (FW-C14) is installed by startApp, which
-// holds the element the app renders into.
+// route's `beforeLoad`; the back-forward cache's check (FW-C14: the page hidden while it is in the
+// cache and until the session is checked again) is installed by startApp, which holds the viewer
+// and the router before the first render.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
 import { ReportFailures, Toaster, TooltipProvider } from "@fin/ui";
 import { Outlet, redirect } from "@tanstack/react-router";

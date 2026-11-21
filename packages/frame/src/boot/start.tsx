@@ -33,7 +33,7 @@ import { createStore } from "../runtime/store.ts";
 import { createViewerStore, fetchViewer } from "../runtime/viewer.ts";
 import { createStepUpController } from "../step-up/step-up.tsx";
 import { frameApiHooks } from "./api-hooks.ts";
-import { installBackForwardGuard } from "./page-effects.ts";
+import { guardBackForwardCache, sameViewer } from "./bfcache.ts";
 
 export interface StartOptions<C extends AppContract> {
   app: AppName;
@@ -155,14 +155,20 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
     }),
   );
 
-  // A page restored from the back-forward cache stays hidden until the session has been checked
-  // again (FW-C14): a 401 there sends an `app` route to sign-in before anything is revealed.
-  installBackForwardGuard({
+  // A page in the back-forward cache is hidden as it leaves (everything in <body>, dialogs and
+  // toasts included: boot.css holds the lock's rule) and stays hidden when it comes back until the
+  // session has been checked again (FW-C14, FW-S4): the same viewer shows the page again with fresh
+  // route data; a different one (signed out, or someone else) or a failed check reloads the
+  // document first, still hidden.
+  guardBackForwardCache({
     target: window,
-    container,
+    root: document.documentElement,
     recheck: async () => {
-      await viewer.reload();
+      const before = viewer.get();
+      const after = await viewer.reload();
+      if (!sameViewer(before, after)) return false;
       await router.invalidate();
+      return true;
     },
     reload: () => window.location.reload(),
   });

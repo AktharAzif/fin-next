@@ -45,6 +45,25 @@ describe("defineContract", () => {
     }
   });
 
+  it("refuses a dot segment in the path, plain or percent-encoded", () => {
+    for (const path of ["/a/../b", "/a/./b", "/..", "/a/%2e%2E/b", "/a/.%2e", "/a/%2E"] as const) {
+      expect(
+        () =>
+          defineContract({ name: "a.b", method: "GET", path, input: noInput, output: z.unknown() }),
+        path,
+      ).toThrow(/dot segment/);
+    }
+    expect(
+      defineContract({
+        name: "a.b",
+        method: "GET",
+        path: "/a/v1.2/b...c",
+        input: noInput,
+        output: z.unknown(),
+      }).path,
+    ).toBe("/a/v1.2/b...c");
+  });
+
   it("refuses a :param the input does not carry", () => {
     expect(() =>
       defineContract({

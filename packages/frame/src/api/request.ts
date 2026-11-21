@@ -17,6 +17,22 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Whether a path parameter's value is, or decodes to, a "." or ".." segment. The URL parser reads
+ * `%2e` as a dot, and a server or proxy may decode a segment again before resolving it; a dot
+ * segment is resolved away, so the request would reach another route under /api. Each pass only
+ * shortens the value, so the loop ends.
+ */
+function isDotSegment(value: string): boolean {
+  let current = value;
+  for (;;) {
+    const next = current.replace(/%25/gi, "%").replace(/%2e/gi, ".");
+    if (next === current) break;
+    current = next;
+  }
+  return current === "." || current === "..";
+}
+
 function scalar(contract: string, field: string, value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -27,14 +43,16 @@ function scalar(contract: string, field: string, value: unknown): string {
 /**
  * One path parameter as one path segment. encodeURIComponent escapes `/`, `\`, `?`, `#` and `%`,
  * so the value cannot add a segment or a query; it leaves `.` alone, and the URL parser resolves a
- * `.` or `..` segment, which would send the request to another route. Those, and an empty value,
- * are refused (a programming error in the screen, or a crafted link; never sent).
+ * `.` or `..` segment, which would send the request to another route. Those (and their
+ * percent-encoded spellings, see isDotSegment), and an empty value, are refused (a programming
+ * error in the screen, or a crafted link; never sent). The error names the parameter, never the
+ * value.
  */
 function pathSegment(contract: string, param: string, value: unknown): string {
   const raw = scalar(contract, param, value);
   if (raw === "") throw new TypeError(`${contract}: :${param} is empty`);
-  if (raw === "." || raw === "..") {
-    throw new TypeError(`${contract}: :${param} is not a path segment`);
+  if (isDotSegment(raw)) {
+    throw new TypeError(`${contract}: :${param} may not be a dot segment`);
   }
   return encodeURIComponent(raw);
 }

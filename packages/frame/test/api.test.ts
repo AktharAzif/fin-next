@@ -105,8 +105,9 @@ describe("buildRequest", () => {
       expect(() => buildRequest(removeMember, { memberId })).toThrow(TypeError);
       expect(() => buildRequest(removeMember, { memberId })).toThrow(/:memberId/);
     }
-    // Encoded dots are not dot segments once encodeURIComponent has escaped the `%`.
-    for (const memberId of ["%2e%2e", "...", ".mem", "mem.1", "%2E"]) {
+    // Dots that are not a whole segment stay one segment the URL parser leaves alone. (A
+    // percent-encoded dot segment is refused as well, fail-closed: see the next test.)
+    for (const memberId of ["...", ".mem", "mem.1"]) {
       const { path } = buildRequest(removeMember, { memberId });
       expect(new URL(path, "https://console.example.com").pathname).toBe(path);
     }
@@ -116,6 +117,27 @@ describe("buildRequest", () => {
     const { api, calls } = client([new Response(null, { status: 204 })]);
     await expect(api(removeMember, { memberId: ".." })).rejects.toThrow(TypeError);
     expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a path parameter that would be a dot segment, naming the parameter only", () => {
+    // A "." or ".." segment, plain or percent-encoded in any case, would be resolved away by the
+    // URL parser and the request would reach another route under /api.
+    for (const memberId of ["..", ".", "%2e%2e", ".%2E", "%2E.", "%2e", "%2E%2E"]) {
+      let error: unknown;
+      try {
+        buildRequest(removeMember, { memberId });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, memberId).toBeInstanceOf(TypeError);
+      expect(String(error), memberId).toContain(":memberId");
+      if (memberId.includes("%")) expect(String(error), memberId).not.toContain(memberId);
+    }
+    // Dots inside a value are an ordinary part of one segment.
+    expect(buildRequest(removeMember, { memberId: "mem.1..2" }).path).toBe(
+      "/team/members/mem.1..2/remove",
+    );
+    expect(buildRequest(removeMember, { memberId: "..." }).path).toBe("/team/members/.../remove");
   });
 
   it("puts a GET's fields in the query, arrays repeated, absent fields dropped", () => {
@@ -192,6 +214,14 @@ describe("api()", () => {
     expect(calls[0]?.headers["Content-Type"]).toBeUndefined();
     expect(calls[0]?.headers["X-Fin-App"]).toBe("console");
     expect(calls[0]?.init.body).toBeUndefined();
+  });
+
+  it("sends nothing when a path parameter would be a dot segment", async () => {
+    const { api, calls } = client([new Response(null, { status: 204 })]);
+    for (const memberId of ["..", ".", "%2e%2e", ".%2E"]) {
+      await expect(api(removeMember, { memberId })).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(calls).toEqual([]);
   });
 
   it("maps a rejected fetch to a network error", async () => {
