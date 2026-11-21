@@ -28,12 +28,15 @@ await rollKey(keys, tx, actor, keyId, { overlap: "1h" });
 await revokeKey(keys, tx, actor, keyId);
 ```
 
-Each checks the permission of the key's mode, the maker's role bounding the key, its own rules (scopes
-only narrow, expiry only shortens, at most 50 working keys), then calls `actor.confirm()` (the step-up
-intent bound to the action, the key and its fields), then writes the change, its `api_key.*` event
-(the fragment `packages/audit/src/events/api-keys.ts`) and the `api-keys/key-changed` notice to every
-member, in the caller's unit of work. `rollForMember` and `keysOfMember` are the credential source a
-removal or demotion rolls (spec 02 §9.4).
+Each checks the permission of the key's mode, the actor's role bounding a key they make, roll or
+re-point with an allowlist change, its own rules (scopes only narrow, expiry only shortens, at most
+50 working keys), then calls `actor.confirm()` (the step-up intent bound to the action, the key and
+its fields), then writes the change, its `api_key.*` event (the fragment
+`packages/audit/src/events/api-keys.ts`) and the `api-keys/key-changed` notice to every member, in
+the caller's unit of work. A rolled key's maker is whoever rolled it. `rollForMember` and
+`keysOfMember` are the credential source a removal or demotion rolls (spec 02 §9.4): every key the
+member made or was shown that the edge still accepts, an old key inside a roll's overlap included,
+whose overlap the removal cuts. `listKeys` pages a mode's keys, those the edge still accepts first.
 
 The edge (`apps/edge`) runs `precheck` (shape and checksum, no I/O), `keyStore(db).lookup` (the one
 statement on `keys.key_lookup`, the refused-key window and the `live_keys` switch), `judgeKey` (the

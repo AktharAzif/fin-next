@@ -1,11 +1,18 @@
 // The key lifecycle (spec 05 §4.6; spec 02 §12.2, §12.3; ARCHITECTURE §7.7), called by the console's
 // API half inside one unit of work per request, after `requireActor` has read the session, the
 // membership and the role's permissions now. Each action checks the permission for the key's mode,
-// then its own rules (the maker's role bounds the key, scopes only narrow, expiry only shortens, at
-// most 50 working keys), and only then calls `confirm`, which asks for or consumes the step-up intent
-// bound to the action and its fields (spec 02 §7.1: nobody proves a factor for something they cannot
-// do). Then the change, its audit event and the `api-keys/key-changed` notice to every member, in the
-// same transaction: a notice that cannot be queued refuses the change ([SA-41]).
+// then its own rules (the actor's role bounds a key they make, roll or re-point with an allowlist
+// change; scopes only narrow, expiry only shortens, at most 50 working keys), and only then calls
+// `confirm`, which asks for or consumes the step-up intent bound to the action and its fields (spec
+// 02 §7.1: nobody proves a factor for something they cannot do). Then the change, its audit event and
+// the `api-keys/key-changed` notice to every member, in the same transaction: a notice that cannot be
+// queued refuses the change ([SA-41]).
+//
+// A key's maker (`created_by`) is whoever made it: the creator, the member who rolled it (rolling
+// makes a key, within the roller's role, and only the roller is shown the secret), or the person
+// whose removal or demotion of a member rolled it (nobody is shown that secret). So the "maker lacks
+// permissions" flag clears once someone whose role holds the key rolls it, and a leaving member's
+// keys are the ones they made or were shown, never a successor someone else rolled.
 //
 // Times are the database's (`now()`), so replicas never disagree about an expiry or an overlap. The
 // secret is returned once, to the create or roll answer, and never stored, logged or audited.
@@ -166,6 +173,17 @@ const KEY_COLUMNS = `k.id, k.organization_id, k.mode, k.kind, k.name, k.scopes,
 /** A working key: not revoked, not expired, and not an old key in (or past) a roll's overlap. */
 const WORKING_SQL = `k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())
   AND k.rolling_until IS NULL`;
+
+/**
+ * A key the edge still accepts: a working key, or an old key still inside a roll's overlap (the edge
+ * refuses it only once `rolling_until` passes, verify.ts). What a leaving member knows is listed by
+ * this, not by WORKING_SQL, so a key in a 24-hour overlap is never left out.
+ */
+const ACCEPTED_SQL = `k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())
+  AND (k.rolling_until IS NULL OR k.rolling_until > now())`;
+
+/** A person's user ID, as `created_by` holds it. */
+const USER_ID = /^usr_[0-9a-hjkmnp-tv-z]{26}$/;
 
 const iso = (d: Date | null): string | null => (d === null ? null : d.toISOString());
 
@@ -395,9 +413,13 @@ export interface KeyList {
 }
 
 /**
- * The API keys page's list for one mode, newest first (spec 02 §12.3): name, prefix and key ID,
- * kind and scopes, expiry, last used (to the minute), maker and the flags. `makerPermissions` gives
- * each maker's permissions in the organisation now, or null for one who left.
+ * The API keys page's list for one mode, a page at a time (spec 02 §12.3): name, prefix and key ID,
+ * kind and scopes, expiry, last used (to the minute), maker and the flags. Keys the edge still
+ * accepts (active, and rolling until the overlap ends) come first, then the ones that ended
+ * (revoked, expired, rolled away), each group newest first: ended rows are never deleted and every
+ * roll adds one, so a long-lived key never sinks behind them. `total` counts every row, for paging.
+ * `makerPermissions` gives each maker's permissions in the organisation now, or null for one who
+ * left.
  */
 export async function listKeys(
   tx: KeysTx,
@@ -409,7 +431,7 @@ export async function listKeys(
     `SELECT ${KEY_COLUMNS}, count(*) OVER () AS total
        FROM keys.api_key k LEFT JOIN identity."user" u ON u.id = k.created_by
       WHERE k.organization_id = $1 AND k.mode = $2
-      ORDER BY k.created_at DESC, k.id DESC
+      ORDER BY CASE WHEN ${ACCEPTED_SQL} THEN 0 ELSE 1 END, k.created_at DESC, k.id DESC
       LIMIT $3 OFFSET $4`,
     [actor.organizationId, query.mode, query.size, (query.page - 1) * query.size],
   );
@@ -523,6 +545,9 @@ const sameList = (a: readonly string[], b: readonly string[]) =>
 /**
  * An edit (spec 05 §4.6): the name; scopes only narrowed; expiry only shortened; the allowlist
  * changed. Every edit, a name alone included, takes the `key.update` intent, is audited and emailed.
+ * Narrowing, shortening and renaming need only the mode's permission, which may revoke the key
+ * outright anyway; an allowlist change can widen where the key works, so it also needs a role that
+ * holds everything the key, as edited, can do, as a roll does.
  */
 export async function updateKey(
   keys: Keys,
@@ -569,6 +594,9 @@ export async function updateKey(
     ranges = checkAllowlist(input.ipAllowlist);
     if (!sameList([...ranges].sort(), [...row.ip_allowlist].sort())) changed.push("ip_allowlist");
   }
+  // For a live money key the allowlist is [MO-20]'s control: nobody re-points it who could not
+  // make the key.
+  if (changed.includes("ip_allowlist")) requireWithinRole(actor, row.mode, row.kind, scopes);
   checkLiveMoney(row.mode, row.kind, scopes, ranges);
   if (changed.length === 0) throw invalidField("body", "no_change");
   await actor.confirm({ body: { ...input }, target: keyId });
@@ -605,12 +633,16 @@ export async function updateKey(
   return viewOf(after, false);
 }
 
-/** Replaces a key: the new one copies its access and life; the old one works until the overlap ends. */
+/**
+ * Replaces a key: the new one copies its access and life, and is made by `maker`; the old one works
+ * until the overlap ends.
+ */
 async function replace(
   keys: Keys,
   tx: KeysTx,
   row: KeyRow,
   overlap: Overlap,
+  maker: string,
   shownTo: string | null,
 ): Promise<{ id: string; secret: string }> {
   const made = await insertKey(keys, tx, {
@@ -620,7 +652,7 @@ async function replace(
     name: row.name,
     scopes: row.scopes.filter(isScope),
     ipAllowlist: row.ip_allowlist,
-    createdBy: row.created_by,
+    createdBy: maker,
     expires: { at: row.expires_at },
     seenBy: shownTo === null ? [] : [shownTo],
   });
@@ -643,7 +675,8 @@ export interface RolledKey extends MadeKey {
 /**
  * A roll (spec 05 §4.6, [SA-20]): a new key with the same scopes, allowlist and expiry, shown once;
  * the old key keeps working for `overlap` (now, 1 hour or 24 hours), never past its own expiry.
- * Rolling makes a key, so the roller's role must hold everything the key can do.
+ * Rolling makes a key, so the roller's role must hold everything the key can do, and the roller is
+ * the new key's maker.
  */
 export async function rollKey(
   keys: Keys,
@@ -663,7 +696,7 @@ export async function rollKey(
   }
   await actor.confirm({ body: { ...input }, target: keyId });
 
-  const made = await replace(keys, tx, row, input.overlap, actor.userId);
+  const made = await replace(keys, tx, row, input.overlap, actor.userId, actor.userId);
   await keys.audit(tx, {
     event: "api_key.rolled",
     actor: actor.audit,
@@ -729,7 +762,10 @@ export async function revokeKey(
   return viewOf(after, false);
 }
 
-/** A working key a member made or was shown, for the Remove and Change role dialogs ([SA-33]). */
+/**
+ * A key a member made or was shown that the edge still accepts, an old key inside a roll's overlap
+ * included, for the Remove and Change role dialogs ([SA-33]).
+ */
 export interface MemberKey {
   id: string;
   mode: KeyMode;
@@ -753,7 +789,7 @@ export async function keysOfMember(
   }>(
     `SELECT k.id, k.mode, k.kind, k.name, k.created_by = $2 AS made, $2 = ANY (k.seen_by) AS seen
        FROM keys.api_key k
-      WHERE k.organization_id = $1 AND (k.created_by = $2 OR $2 = ANY (k.seen_by)) AND ${WORKING_SQL}
+      WHERE k.organization_id = $1 AND (k.created_by = $2 OR $2 = ANY (k.seen_by)) AND ${ACCEPTED_SQL}
       ORDER BY k.created_at, k.id`,
     [organizationId, userId],
   );
@@ -768,8 +804,14 @@ export async function keysOfMember(
 
 /**
  * Rolls the keys a leaving or demoted member made or saw, in the removal's transaction (spec 02
- * §9.4, S2-42): at once, or with a 1-hour overlap when the actor may not roll them. Nobody is shown
- * the new secrets, so each new key carries the "secret unseen" flag until someone rolls it.
+ * §9.4, S2-42): at once, or with a 1-hour overlap when the actor may not roll them. A working key is
+ * replaced; nobody is shown the new secret, so the new key carries the "secret unseen" flag until
+ * someone rolls it, and its maker is the person whose act rolled it. An old key still inside a
+ * roll's overlap (which the member may hold: they made it, or rolled it themselves just before)
+ * already has its replacement, so its overlap is cut to end at once or within the hour, never
+ * later than it would have; it is audited and emailed as a roll to that same replacement. Keys that
+ * ended, or whose overlap already ends within the hour, are left as they are. Answers how many keys
+ * it changed.
  */
 export async function rollForMember(
   keys: Keys,
@@ -782,16 +824,35 @@ export async function rollForMember(
   let rolled = 0;
   for (const id of ids) {
     const row = await keyRow(tx, organization.id, id, true);
-    if (row === null || row.status !== "active" || row.replaced_by !== null) continue;
-    const made = await replace(keys, tx, row, overlap, null);
+    if (row === null) continue;
+    let replacement: string;
+    if (row.status === "active" && row.replaced_by === null) {
+      const maker =
+        actor.kind === "user" && actor.id !== null && USER_ID.test(actor.id)
+          ? actor.id
+          : row.created_by;
+      replacement = (await replace(keys, tx, row, overlap, maker, null)).id;
+    } else if (row.status === "rolling" && row.replaced_by !== null) {
+      const cut = await tx.query<{ id: string }>(
+        `UPDATE keys.api_key
+            SET rolling_until = now() + $3::interval, updated_at = now()
+          WHERE id = $1 AND organization_id = $2 AND rolling_until > now() + $3::interval
+          RETURNING id`,
+        [id, organization.id, OVERLAP_INTERVAL[overlap]],
+      );
+      if (cut.rows.length === 0) continue;
+      replacement = row.replaced_by;
+    } else {
+      continue;
+    }
     await keys.audit(tx, {
       event: "api_key.rolled",
       actor,
       target: id,
-      refs: [made.id],
+      refs: [replacement],
       organizationId: organization.id,
       mode: row.mode,
-      metadata: { key_id: id, new_key_id: made.id, overlap, shown_to: null },
+      metadata: { key_id: id, new_key_id: replacement, overlap, shown_to: null },
     });
     await notifyMembers(
       keys,
@@ -799,7 +860,7 @@ export async function rollForMember(
       organization,
       { id, name: row.name, mode: row.mode },
       "rolled",
-      made.id,
+      replacement,
     );
     rolled += 1;
   }

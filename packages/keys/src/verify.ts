@@ -34,10 +34,13 @@ export type KeyReason =
   | "ip_not_allowed"
   | "pepper_missing";
 
-/** The `Authorization` header's bearer: `Bearer <key>`, exactly one space, nothing else. */
+/**
+ * The `Authorization` header's bearer: `Bearer <key>`, exactly one space, nothing else. The scheme's
+ * name is matched without regard to case (RFC 9110 §11.1), so `bearer <key>` reads the same.
+ */
 export function bearerOf(header: string | undefined | null): string | null {
   if (header === undefined || header === null || header === "") return null;
-  const match = /^Bearer ([^\s]{1,200})$/.exec(header);
+  const match = /^bearer ([^\s]{1,200})$/i.exec(header);
   return match?.[1] ?? "";
 }
 
@@ -120,13 +123,20 @@ interface CleanRecord {
   ipAllowlist: string[];
   hash: Uint8Array;
   pepperVersions: number[];
-  expiresAt: Date | null;
+  /** As read: null never expires; anything but a valid date counts as expired (see `expired`). */
+  expiresAt: unknown;
+  /** As read: anything but null is revoked. */
   revokedAt: unknown;
   rollingUntil: Date | null;
   orgLiveStatus: OrgLiveStatus;
 }
 
-/** The record with every field read, or null when any field is missing or of the wrong shape. */
+/**
+ * The record with every field read, or null (read as unknown) when any field is missing or of the
+ * wrong shape. A field that is absent, or `undefined`, is missing: never "not revoked" or "never
+ * expires", so a view or statement that drops or renames a column refuses every key rather than
+ * passing revoked or expired ones.
+ */
 function clean(record: KeyRecord): CleanRecord | null {
   const scopes = stringArray(record.scopes);
   const ipAllowlist = cidrArray(record.ip_allowlist);
@@ -142,6 +152,8 @@ function clean(record: KeyRecord): CleanRecord | null {
     !(record.hash instanceof Uint8Array) ||
     pepperVersions === null ||
     pepperVersions.length === 0 ||
+    record.expires_at === undefined ||
+    record.revoked_at === undefined ||
     !isDateOrNull(record.rolling_until) ||
     (record.org_live_status !== "not_enabled" &&
       record.org_live_status !== "enabled" &&
@@ -159,7 +171,7 @@ function clean(record: KeyRecord): CleanRecord | null {
     hash: record.hash,
     pepperVersions,
     // Read below: an unreadable expiry counts as expired, not as unknown.
-    expiresAt: record.expires_at instanceof Date ? record.expires_at : null,
+    expiresAt: record.expires_at,
     revokedAt: record.revoked_at,
     rollingUntil: record.rolling_until,
     orgLiveStatus: record.org_live_status,
@@ -202,10 +214,8 @@ export function judgeKey(input: {
   if (!matches || record.mode !== key.mode || record.kind !== key.kind) {
     return { ok: false, reason: "unknown" };
   }
-  if (record.revokedAt !== null && record.revokedAt !== undefined) {
-    return { ok: false, reason: "revoked" };
-  }
-  if (expired(input.record?.expires_at ?? null, now)) return { ok: false, reason: "expired" };
+  if (record.revokedAt !== null) return { ok: false, reason: "revoked" };
+  if (expired(record.expiresAt, now)) return { ok: false, reason: "expired" };
   if (record.rollingUntil !== null && record.rollingUntil.getTime() <= now) {
     return { ok: false, reason: "expired" };
   }

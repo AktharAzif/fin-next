@@ -64,7 +64,13 @@ export function keyWindowKey(keyId: string): string {
   return `edge:key:${keyId}`;
 }
 
-type LookupRow = KeyRecord & { refused_count: number | string; live_keys_on: boolean };
+type LookupRow = KeyRecord & { refused_count: unknown; live_keys_on: unknown };
+
+/** A count as node-postgres reads it (an int, or a bigint as text), or null when it is not one. */
+function countOf(value: unknown): number | null {
+  const n = typeof value === "string" && /^[0-9]{1,15}$/.test(value) ? Number(value) : value;
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
 
 export interface KeyStore {
   lookup(keyId: string, refusedWindow: string): Promise<Lookup>;
@@ -74,7 +80,12 @@ export interface KeyStore {
   touch(keyId: string): Promise<boolean>;
 }
 
-/** The store over a pool: each method is one statement on a client taken and returned at once. */
+/**
+ * The store over a pool: each method is one statement on a client taken and returned at once. A
+ * switch or a window that does not read as one is an error the edge answers 503 for, never "off"
+ * or "zero": the check never fails open (the key record itself is judged by verify.ts, where a
+ * missing field reads as unknown).
+ */
 export function keyStore(db: Queryable): KeyStore {
   return {
     async lookup(keyId, refusedWindow) {
@@ -82,19 +93,28 @@ export function keyStore(db: Queryable): KeyStore {
       const row = result.rows[0];
       if (row === undefined) throw new Error("keys: the lookup answered no row");
       const { refused_count, live_keys_on, ...record } = row;
+      const refusedCount = countOf(refused_count);
+      if (typeof live_keys_on !== "boolean" || refusedCount === null) {
+        throw new Error("keys: the lookup's switch or window did not read");
+      }
       return {
         record: record.id === null ? null : record,
-        refusedCount: Number(refused_count),
-        liveKeysOn: live_keys_on === true,
+        refusedCount,
+        liveKeysOn: live_keys_on,
       };
     },
     async count(windowKey) {
-      const result = await db.query<{ count: number; seconds_left: number }>(COUNT_SQL, [
+      const result = await db.query<{ count: unknown; seconds_left: unknown }>(COUNT_SQL, [
         windowKey,
       ]);
       const row = result.rows[0];
       if (row === undefined) throw new Error("keys: the window answered no row");
-      return { count: Number(row.count), secondsLeft: Math.max(1, Number(row.seconds_left)) };
+      const count = countOf(row.count);
+      const secondsLeft = countOf(row.seconds_left);
+      if (count === null || count < 1 || secondsLeft === null) {
+        throw new Error("keys: the window's count did not read");
+      }
+      return { count, secondsLeft: Math.max(1, secondsLeft) };
     },
     async touch(keyId) {
       const result = await db.query<{ touched: boolean }>(TOUCH_SQL, [keyId]);

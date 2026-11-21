@@ -1,9 +1,11 @@
 // The key lifecycle on Postgres 18 as the console's own login (T05-15: each `api_keys` event written by
 // its action, in the action's transaction; spec 02 §12.2, §12.3; spec 05 §4.6): create with the secret
 // shown once and only the hash stored, an edit (a name alone included), a roll with its overlap, a
-// revocation, the 50-key limit, the maker's role bounding every key, and the refusals that come before
-// any step-up. The step-up itself is the console's (apps/console/src/server/keys.db.test.ts); here
-// `confirm` records that it was asked, and when.
+// revocation, the 50-key limit, the actor's role bounding every key they make, roll or re-point, the
+// key's own mode's permission on every change, and the refusals that come before any step-up. A
+// leaving member's keys include an old key still inside a roll's overlap, whose overlap the removal
+// cuts so the edge (its own login, its own statement and check) refuses it. The step-up itself is the
+// console's (apps/console/src/server/keys.db.test.ts); here `confirm` records that it was asked.
 import { randomBytes } from "node:crypto";
 import { createKeyring } from "@fin/crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -28,7 +30,9 @@ import {
   updateKey,
   WORKING_KEY_LIMIT,
 } from "./lifecycle.ts";
+import { keyStore } from "./lookup.ts";
 import { saltFor } from "./salts.ts";
+import { judgeKey, precheck } from "./verify.ts";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
@@ -68,6 +72,18 @@ const DEVELOPER = ALL.filter(
 const ORG = fixtureId("org", 1);
 const OWNER = { userId: fixtureId("usr", 1), memberId: fixtureId("mem", 1) };
 const DEV = { userId: fixtureId("usr", 2), memberId: fixtureId("mem", 2) };
+// A second organisation, away from the first one's 50-key limit, for the leaving member's keys and
+// the per-mode checks.
+const ORG2 = fixtureId("org", 2);
+const OWNER2 = { userId: fixtureId("usr", 3), memberId: fixtureId("mem", 3) };
+const DEV2 = { userId: fixtureId("usr", 4), memberId: fixtureId("mem", 4) };
+const LEAVER = { userId: fixtureId("usr", 5), memberId: fixtureId("mem", 5) };
+const SELF_ROLLER = { userId: fixtureId("usr", 6), memberId: fixtureId("mem", 6) };
+// A third, for the list's paging past 100 rows.
+const ORG3 = fixtureId("org", 3);
+const OWNER3 = { userId: OWNER2.userId, memberId: fixtureId("mem", 7) };
+const LIVE_ONLY = ALL.filter((p) => p !== "apiKey.sandbox");
+const SANDBOX_ONLY = ALL.filter((p) => p !== "apiKey.live");
 const peppers = createKeyring("API_KEY_PEPPER", new Map([[1, new Uint8Array(randomBytes(32))]]), 1);
 const lines: { event: string; fields: Record<string, unknown> }[] = [];
 const keys = createKeys({
@@ -80,11 +96,13 @@ const keys = createKeys({
 let platform: KeysPlatform;
 let su: PlatformClient;
 let console_: PlatformClient;
+let edge: PlatformClient;
 
 beforeAll(async () => {
   platform = await createKeysPlatform("keyslife");
   su = await platform.superuser();
   console_ = await platform.login("fin_console_a");
+  edge = await platform.login("fin_edge_a");
   await seedOrganization(su, {
     orgId: ORG,
     name: "Example Payments",
@@ -93,20 +111,63 @@ beforeAll(async () => {
       { ...DEV, name: "Dev One", email: "dev.one@example.com", roleKey: "admin" },
     ],
   });
+  await seedOrganization(su, {
+    orgId: ORG2,
+    name: "Example Remit",
+    liveStatus: "approved",
+    people: [
+      { ...OWNER2, name: "Bo Owner", email: "bo.owner@example.org", roleKey: "super_admin" },
+      { ...DEV2, name: "Dev Two", email: "dev.two@example.org", roleKey: "admin" },
+      { ...LEAVER, name: "Lee Leaver", email: "lee.leaver@example.org", roleKey: "admin" },
+      { ...SELF_ROLLER, name: "Sam Roller", email: "sam.roller@example.org", roleKey: "admin" },
+    ],
+  });
+  await seedOrganization(su, {
+    orgId: ORG3,
+    name: "Example Ledger",
+    people: [
+      { ...OWNER3, name: "Bo Owner", email: "bo.owner@example.org", roleKey: "super_admin" },
+    ],
+  });
 });
 
 afterAll(async () => {
+  await edge?.end();
   await console_?.end();
   await su?.end();
   await platform?.drop();
 });
 
-function actorOf(who: { userId: string }, permissions: readonly string[], liveStatus = "sandbox") {
+/** What the edge answers for this key now: its own statement as fin_edge, then its check. */
+async function atTheEdge(secret: string) {
+  const pre = precheck(`Bearer ${secret}`, saltFor("ci"));
+  if (!pre.ok) throw new Error(pre.reason);
+  const lookup = await keyStore(edge).lookup(pre.key.id, "edge:refused_keys:lifecycle-test");
+  return judgeKey({
+    key: pre.key,
+    record: lookup.record,
+    peppers,
+    now: Date.now(),
+    clientIp: "8.8.8.8",
+  });
+}
+
+function actorOf(
+  who: { userId: string },
+  permissions: readonly string[],
+  liveStatus = "sandbox",
+  organizationId = ORG,
+) {
   const asked: { body: Record<string, unknown>; target: string | null }[] = [];
   const actor: KeyActor & { asked: typeof asked } = {
     userId: who.userId,
-    organizationId: ORG,
-    organizationName: "Example Payments",
+    organizationId,
+    organizationName:
+      organizationId === ORG
+        ? "Example Payments"
+        : organizationId === ORG2
+          ? "Example Remit"
+          : "Example Ledger",
     organizationLiveStatus: liveStatus,
     permissions: new Set(permissions),
     audit: { kind: "user", id: who.userId, via: "console" },
@@ -429,7 +490,7 @@ describe("edit, roll and revoke", () => {
 });
 
 describe("the list, the limit and a leaving member's keys", () => {
-  it("lists a mode's keys newest first with their statuses and the role's abilities", async () => {
+  it("lists a mode's keys the edge accepts first, each group newest first, with the role's abilities", async () => {
     const actor = actorOf(OWNER, ALL);
     const list = await inUnit(console_, (tx) =>
       listKeys(
@@ -441,8 +502,14 @@ describe("the list, the limit and a leaving member's keys", () => {
     );
     expect(list.keys.length).toBeGreaterThan(3);
     expect(list.total).toBe(list.keys.length);
-    const created = list.keys.map((k) => k.createdAt);
-    expect([...created].sort().reverse()).toEqual(created);
+    const accepted = (status: string) => status === "active" || status === "rolling";
+    const firstEnded = list.keys.findIndex((k) => !accepted(k.status));
+    expect(firstEnded).toBeGreaterThan(0);
+    expect(list.keys.slice(firstEnded).every((k) => !accepted(k.status))).toBe(true);
+    for (const group of [list.keys.slice(0, firstEnded), list.keys.slice(firstEnded)]) {
+      const created = group.map((k) => k.createdAt);
+      expect([...created].sort().reverse()).toEqual(created);
+    }
     expect(new Set(list.keys.map((k) => k.status))).toEqual(
       new Set(["active", "rolling", "expired", "revoked"]),
     );
@@ -515,5 +582,318 @@ describe("the list, the limit and a leaving member's keys", () => {
       )
     ).rows[0];
     expect(replacement?.seen_by).toEqual([]);
+  });
+});
+
+describe("a leaving member's key in a roll's overlap (SA-33, S2-42)", () => {
+  const remover = { kind: "user" as const, id: OWNER2.userId, via: "console" as const };
+  const org2 = { id: ORG2, name: "Example Remit" };
+
+  it("lists a key the member made that someone rolled with 24 hours of overlap, and the removal cuts it at once", async () => {
+    const made = await inUnit(console_, (tx) =>
+      createKey(keys, tx, actorOf(LEAVER, DEVELOPER, "approved", ORG2), restricted),
+    );
+    const rolled = await inUnit(console_, (tx) =>
+      rollKey(keys, tx, actorOf(OWNER2, ALL, "approved", ORG2), made.key.keyId, {
+        overlap: "24h",
+      }),
+    );
+    expect(await atTheEdge(made.secret)).toMatchObject({ ok: true });
+
+    // The old key still works for a day, so it is listed; its replacement was made and seen by the
+    // owner who rolled it, so it is not.
+    const listed = await inUnit(console_, (tx) => keysOfMember(tx, ORG2, LEAVER.userId));
+    expect(listed).toEqual([
+      expect.objectContaining({ id: made.key.keyId, made: true, seen: true }),
+    ]);
+    const changed = await inUnit(console_, (tx) =>
+      rollForMember(
+        keys,
+        tx,
+        org2,
+        listed.map((k) => k.id),
+        "now",
+        remover,
+      ),
+    );
+    expect(changed).toBe(1);
+    expect(await atTheEdge(made.secret)).toEqual({ ok: false, reason: "expired" });
+    expect(await atTheEdge(rolled.secret)).toMatchObject({ ok: true });
+    expect((await events(made.key.keyId)).at(-1)).toMatchObject({
+      event: "api_key.rolled",
+      ref_ids: [rolled.key.keyId],
+      metadata: {
+        key_id: made.key.keyId,
+        new_key_id: rolled.key.keyId,
+        overlap: "now",
+        shown_to: null,
+      },
+    });
+    const journal = await su.query<{ kind: string }>(
+      "SELECT kind FROM audit.journal_entry je JOIN audit.event e ON e.id = je.audit_event_id WHERE e.target_id = $1 ORDER BY je.recorded_at",
+      [made.key.keyId],
+    );
+    expect(journal.rows.map((r) => r.kind)).toEqual(["key_rolled", "key_rolled"]);
+    // Every member is told of both rolls.
+    expect((await outbox(made.key.keyId)).filter((m) => m.params.change === "rolled")).toHaveLength(
+      8,
+    );
+    // Nothing is left for the member.
+    expect(await inUnit(console_, (tx) => keysOfMember(tx, ORG2, LEAVER.userId))).toEqual([]);
+  });
+
+  it("cuts the 24 hours a member gave their own old key to the hour when the actor may not roll it", async () => {
+    const self = actorOf(SELF_ROLLER, DEVELOPER, "approved", ORG2);
+    const made = await inUnit(console_, (tx) => createKey(keys, tx, self, restricted));
+    const rolled = await inUnit(console_, (tx) =>
+      rollKey(keys, tx, self, made.key.keyId, { overlap: "24h" }),
+    );
+    const listed = await inUnit(console_, (tx) => keysOfMember(tx, ORG2, SELF_ROLLER.userId));
+    expect(listed.map((k) => k.id)).toEqual([made.key.keyId, rolled.key.keyId]);
+    const changed = await inUnit(console_, (tx) =>
+      rollForMember(
+        keys,
+        tx,
+        org2,
+        listed.map((k) => k.id),
+        "1h",
+        remover,
+      ),
+    );
+    expect(changed).toBe(2);
+    const rows = await su.query<{ id: string; left: number }>(
+      "SELECT id, extract(epoch FROM rolling_until - now())::float8 AS left FROM keys.api_key WHERE id = ANY ($1::text[]) ORDER BY created_at",
+      [[made.key.keyId, rolled.key.keyId]],
+    );
+    expect(rows.rows).toHaveLength(2);
+    for (const row of rows.rows) {
+      expect(row.left, row.id).toBeGreaterThan(55 * 60);
+      expect(row.left, row.id).toBeLessThanOrEqual(3600);
+    }
+    // Both still work within the hour (S2-42: no outage in one act), then stop.
+    expect(await atTheEdge(made.secret)).toMatchObject({ ok: true });
+    expect(await atTheEdge(rolled.secret)).toMatchObject({ ok: true });
+    expect((await events(made.key.keyId)).at(-1)).toMatchObject({
+      event: "api_key.rolled",
+      metadata: { new_key_id: rolled.key.keyId, overlap: "1h", shown_to: null },
+    });
+  });
+
+  it("leaves an overlap that already ends within the hour as it is", async () => {
+    const self = actorOf(SELF_ROLLER, DEVELOPER, "approved", ORG2);
+    const made = await inUnit(console_, (tx) => createKey(keys, tx, self, restricted));
+    await inUnit(console_, (tx) => rollKey(keys, tx, self, made.key.keyId, { overlap: "1h" }));
+    const before = await su.query<{ rolling_until: Date }>(
+      "SELECT rolling_until FROM keys.api_key WHERE id = $1",
+      [made.key.keyId],
+    );
+    const eventsBefore = (await events(made.key.keyId)).length;
+    const changed = await inUnit(console_, (tx) =>
+      rollForMember(keys, tx, org2, [made.key.keyId], "1h", remover),
+    );
+    expect(changed).toBe(0);
+    const after = await su.query<{ rolling_until: Date }>(
+      "SELECT rolling_until FROM keys.api_key WHERE id = $1",
+      [made.key.keyId],
+    );
+    expect(after.rows[0]?.rolling_until).toEqual(before.rows[0]?.rolling_until);
+    expect(await events(made.key.keyId)).toHaveLength(eventsBefore);
+  });
+});
+
+describe("a roll's maker", () => {
+  it("is the member who rolled the key: a Super admin's roll clears the 'maker lacks permissions' flag", async () => {
+    const made = await inUnit(console_, (tx) =>
+      createKey(keys, tx, actorOf(DEV2, DEVELOPER, "approved", ORG2), {
+        ...restricted,
+        name: "Maker check",
+      }),
+    );
+    const rolled = await inUnit(console_, (tx) =>
+      rollKey(keys, tx, actorOf(OWNER2, ALL, "approved", ORG2), made.key.keyId, {
+        overlap: "1h",
+      }),
+    );
+    expect(rolled.key.createdBy).toEqual({ userId: OWNER2.userId, name: "Bo Owner" });
+    // With the first maker gone, only the key they made is flagged.
+    const list = await inUnit(console_, (tx) =>
+      listKeys(
+        tx,
+        actorOf(OWNER2, ALL, "approved", ORG2),
+        { mode: "test", page: 1, size: 100 },
+        async (ids) => new Map(ids.map((id) => [id, id === OWNER2.userId ? new Set(ALL) : null])),
+      ),
+    );
+    const byId = new Map(list.keys.map((k) => [k.keyId, k]));
+    expect(byId.get(rolled.key.keyId)?.flags).toEqual({
+      makerLacksPermissions: false,
+      secretUnseen: false,
+    });
+    expect(byId.get(made.key.keyId)?.flags.makerLacksPermissions).toBe(true);
+    // The first maker's departure lists the key they made (still in its overlap), never the
+    // successor someone else rolled and holds.
+    const theirs = await inUnit(console_, (tx) => keysOfMember(tx, ORG2, DEV2.userId));
+    expect(theirs.map((k) => k.id)).toContain(made.key.keyId);
+    expect(theirs.map((k) => k.id)).not.toContain(rolled.key.keyId);
+  });
+
+  it("is whoever removed the member when the removal rolled it, and nobody is shown its secret", async () => {
+    const made = await inUnit(console_, (tx) =>
+      createKey(keys, tx, actorOf(DEV2, DEVELOPER, "approved", ORG2), {
+        ...restricted,
+        name: "Removal maker",
+      }),
+    );
+    await inUnit(console_, (tx) =>
+      rollForMember(keys, tx, { id: ORG2, name: "Example Remit" }, [made.key.keyId], "now", {
+        kind: "user",
+        id: OWNER2.userId,
+        via: "console",
+      }),
+    );
+    const replacement = await su.query<{ created_by: string; seen_by: string[] }>(
+      "SELECT n.created_by, n.seen_by FROM keys.api_key o JOIN keys.api_key n ON n.id = o.replaced_by WHERE o.id = $1",
+      [made.key.keyId],
+    );
+    expect(replacement.rows[0]).toEqual({ created_by: OWNER2.userId, seen_by: [] });
+  });
+});
+
+describe("the key's own mode, and the role behind an allowlist change", () => {
+  it("refuses an edit, a roll and a revocation of a key whose mode the role cannot manage, before any step-up", async () => {
+    const owner = actorOf(OWNER2, ALL, "approved", ORG2);
+    const live = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, mode: "live", name: "Live mode check" }),
+    );
+    const sandbox = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Sandbox mode check" }),
+    );
+    const sandboxOnly = actorOf(DEV2, SANDBOX_ONLY, "approved", ORG2);
+    const liveOnly = actorOf(DEV2, LIVE_ONLY, "approved", ORG2);
+    const cases = [
+      [sandboxOnly, live.key.keyId, "apiKey.live"],
+      [liveOnly, sandbox.key.keyId, "apiKey.sandbox"],
+    ] as const;
+    for (const [actor, keyId, permission] of cases) {
+      const refused = {
+        code: "forbidden",
+        lineReason: "policy.permission",
+        extensions: { permission },
+      };
+      await expect(
+        inUnit(console_, (tx) => updateKey(keys, tx, actor, keyId, { name: "Renamed" })),
+      ).rejects.toMatchObject(refused);
+      await expect(
+        inUnit(console_, (tx) => rollKey(keys, tx, actor, keyId, { overlap: "now" })),
+      ).rejects.toMatchObject(refused);
+      await expect(
+        inUnit(console_, (tx) => revokeKey(keys, tx, actor, keyId)),
+      ).rejects.toMatchObject(refused);
+      expect(actor.asked).toEqual([]);
+    }
+    // Each may change a key of the mode it manages.
+    const renamed = await inUnit(console_, (tx) =>
+      updateKey(keys, tx, sandboxOnly, sandbox.key.keyId, { name: "Renamed sandbox" }),
+    );
+    expect(renamed.name).toBe("Renamed sandbox");
+    const revoked = await inUnit(console_, (tx) => revokeKey(keys, tx, liveOnly, live.key.keyId));
+    expect(revoked.status).toBe("revoked");
+  });
+
+  it("refuses an allowlist change on a key beyond the editor's role, before any step-up; a rename stays open", async () => {
+    const owner = actorOf(OWNER2, ALL, "approved", ORG2);
+    const money = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, {
+        ...restricted,
+        mode: "live",
+        name: "Payouts live",
+        scopes: ["customers:read", "money:write"],
+        ipAllowlist: ["8.8.8.0/24"],
+      }),
+    );
+    const id = money.key.keyId;
+    const noTransfers = actorOf(
+      DEV2,
+      ALL.filter((p) => p !== "money.transfer"),
+      "approved",
+      ORG2,
+    );
+    await expect(
+      inUnit(console_, (tx) =>
+        updateKey(keys, tx, noTransfers, id, { ipAllowlist: ["8.8.4.0/24"] }),
+      ),
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      lineReason: "keys.beyond_role",
+      extensions: { permission: "money.transfer", reason: "beyond_role" },
+    });
+    expect(noTransfers.asked).toEqual([]);
+    // A rename, and an allowlist change on the key as narrowed to what the role holds, are theirs.
+    const renamed = await inUnit(console_, (tx) =>
+      updateKey(keys, tx, noTransfers, id, { name: "Payouts live two" }),
+    );
+    expect(renamed.ipAllowlist).toEqual(["8.8.8.0/24"]);
+    const narrowed = await inUnit(console_, (tx) =>
+      updateKey(keys, tx, noTransfers, id, {
+        scopes: ["customers:read"],
+        ipAllowlist: ["8.8.4.0/24"],
+      }),
+    );
+    expect(narrowed).toMatchObject({ scopes: ["customers:read"], ipAllowlist: ["8.8.4.0/24"] });
+    // A role that holds the key may re-point it.
+    const other = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, {
+        ...restricted,
+        mode: "live",
+        name: "Payouts live three",
+        scopes: ["money:write"],
+        ipAllowlist: ["8.8.8.0/24"],
+      }),
+    );
+    const moved = await inUnit(console_, (tx) =>
+      updateKey(keys, tx, owner, other.key.keyId, { ipAllowlist: ["8.8.4.0/24"] }),
+    );
+    expect(moved.ipAllowlist).toEqual(["8.8.4.0/24"]);
+  });
+});
+
+describe("the list past one page", () => {
+  it("keeps an old working key on the first page whatever ended keys came after it, and pages the rest", async () => {
+    const owner = actorOf(OWNER3, ALL, "sandbox", ORG3);
+    const old = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Long lived", expiresIn: "never" }),
+    );
+    // 120 newer keys that ended (revoked), written directly: the list's order is under test here.
+    await su.query("BEGIN");
+    await su.query("SET LOCAL session_replication_role = replica");
+    await su.query(
+      `INSERT INTO keys.api_key (id, organization_id, mode, kind, name, scopes, ip_allowlist, hash,
+         pepper_versions, created_by, created_at, updated_at, expires_at, revoked_at, revoked_reason,
+         seen_by)
+       SELECT 'RV' || lpad(i::text, 8, '0'), $1, 'test', 'rk', 'Ended ' || i, ARRAY['customers:read'],
+              '{}', decode(repeat('00', 32), 'hex'), ARRAY[1]::smallint[], $2,
+              now() + i * interval '1 second', now(), NULL, now(), 'member', ARRAY[$2]
+         FROM generate_series(1, 120) AS i`,
+      [ORG3, OWNER3.userId],
+    );
+    await su.query("COMMIT");
+    const page = (n: number) =>
+      inUnit(console_, (tx) =>
+        listKeys(
+          tx,
+          owner,
+          { mode: "test", page: n, size: 100 },
+          async (ids) => new Map(ids.map((id) => [id, new Set(ALL)])),
+        ),
+      );
+    const first = await page(1);
+    expect(first.total).toBe(121);
+    expect(first.keys).toHaveLength(100);
+    expect(first.keys[0]).toMatchObject({ keyId: old.key.keyId, status: "active" });
+    const second = await page(2);
+    expect(second.keys).toHaveLength(21);
+    expect(second.keys.every((k) => k.status === "revoked")).toBe(true);
+    const seen = new Set([...first.keys, ...second.keys].map((k) => k.keyId));
+    expect(seen.size).toBe(121);
   });
 });
