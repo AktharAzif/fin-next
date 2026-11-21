@@ -14,8 +14,10 @@
 // removal with a chosen display name, and a session's user agent could block the session's end. So
 // those fields never refuse a string: one that is not a clean label, or that holds a secret shape,
 // is replaced by `HIDDEN_VALUE` when it is parsed, so neither the outbox nor any email carries it.
-// Names are checked only against the shapes that are always secrets (`NAME_SECRET_SHAPES`), so an
-// ordinary name with digits ("Tier1-Admin", "ACME2025PAYMENTS") is mailed as it is.
+// Names are checked against `NAME_SECRET_SHAPES`, which hold the codes in the forms Fin and the
+// library print them, so a code passed into a name by mistake is hidden, never mailed (T08-23); an
+// ordinary name in a code's shape ("Tier1-Admin", "ACME2025PAYMENTS") is hidden too, which costs
+// only that name's showing in the notice.
 import { z } from "zod";
 
 export interface SecretShape {
@@ -55,13 +57,18 @@ export const SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   { name: "digits", pattern: /\d{7,}/u },
 ]);
 
+const CROCKFORD = "0-9A-HJKMNP-TV-Za-hjkmnp-tv-z";
+const CROCKFORD_UPPER = "0-9A-HJKMNP-TV-Z";
+const CROCKFORD_LOWER = "0-9a-hjkmnp-tv-z";
+
 /**
- * The secret shapes a name is checked against: only those no name holds by accident. The prefixed
- * keys and tokens, a whole JWT and a private key, and the address, web address and run of 7 or more
- * digits that spec 02 §8.6's name rule refuses too. The code shapes of `SECRET_SHAPES` are left out
- * on purpose: an enrolment or backup code is letters and digits, which the name rule allows, so a
- * code shape cannot be told from an ordinary name ("Tier1-Admin", "ACME2025PAYMENTS",
- * "Web3Infrastructure"), and a name field only ever carries a name the rule stored.
+ * The secret shapes a name is checked against, and hidden on: the prefixed keys and tokens, a whole
+ * JWT, a private key, an address, a web address, a run of 7 or more digits (spec 02 §8.6 refuses
+ * the last three too), and the enrolment and backup codes in the forms Fin and the library print
+ * them, which always mix letters and digits (T08-23: no template carries a code, spec 08 §4.1).
+ * Left out, as names of their own: a long letters-and-digits run that mixes cases or is not a
+ * code's length, a 5-5 pair without a digit, and four words of four letters with no group mixing a
+ * letter and a digit ("Web3Infrastructure", "McKay-Jones", "Acme Bank Card 2025").
  */
 export const NAME_SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   { name: "fin-api-key", pattern: /fin_(?:test|live)_[A-Za-z0-9_]{8,}/u },
@@ -70,6 +77,29 @@ export const NAME_SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   // A JWT's header and the start of its payload ("eyJ...eyJ"), so "MoneyJarCompany" is a name.
   { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]*/u },
   { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
+  // An enrolment code run together: 16 Crockford characters of one case holding a letter and a
+  // digit, as Fin prints it ("Acme2025Payments", which mixes cases, is a name).
+  {
+    name: "enrolment-code",
+    pattern: new RegExp(
+      `\\b(?=[0-9A-Za-z]{16}\\b)(?=[A-Za-z]{0,15}\\d)(?=\\d{0,15}[A-Za-z])(?:[${CROCKFORD_UPPER}]{16}|[${CROCKFORD_LOWER}]{16})\\b`,
+      "u",
+    ),
+  },
+  // Four groups of four, one of which mixes a letter and a digit (a code's groups almost always do;
+  // "Acme Bank Card 2025" has no such group).
+  {
+    name: "enrolment-code",
+    pattern: new RegExp(
+      `\\b(?=[0-9A-Za-z -]{19}\\b)(?=(?:[0-9A-Za-z]{4}[- ]){0,3}[0-9A-Za-z]{0,2}(?:[A-Za-z]\\d|\\d[A-Za-z]))[${CROCKFORD}]{4}([- ])[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\b`,
+      "u",
+    ),
+  },
+  // A backup code holding a digit; a 5-5 pair of letters is a double-barrelled name.
+  {
+    name: "backup-code",
+    pattern: /\b(?=[A-Za-z0-9-]{11}\b)(?=[A-Za-z-]{0,10}\d)[A-Za-z0-9]{5}-[A-Za-z0-9]{5}\b/u,
+  },
   { name: "email", pattern: /[^\s@]+@[^\s@]+\.[^\s@]+/u },
   { name: "url", pattern: /\b(?:https?:\/\/|www\.)/iu },
   { name: "digits", pattern: /\d{7,}/u },

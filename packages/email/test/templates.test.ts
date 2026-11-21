@@ -136,15 +136,16 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))("%s", (_id, template) =>
     const planted = [
       ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdefghijklmnopqrstuvwxyz01"].join("_"),
       ["whsec", "abcdefghijklmnopqrstuvwxyz012345"].join("_"),
+      ["ABCD", "EFGH", "JK3M", "NPQR"].join("-"),
+      ["a1B2c", "D3e4F"].join("-"),
       ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2lnbmF0dXJl"].join("."),
     ];
-    // A code is letters and digits, which spec 02 §8.6's name rule allows, so a name field cannot
-    // tell one from a name and carries whatever the rule stored; every other string refuses them.
-    const codes = [["ABCD", "EFGH", "JK3M", "NPQR"].join("-"), ["a1B2c", "D3e4F"].join("-")];
+    // A name field hides a secret, a code included, and never refuses the notice (and so the
+    // action); every other string refuses it.
     const names = new Set(["personName", "orgName", "roleLabel", "previousRoleLabel", "changedBy"]);
     for (const key of Object.keys(sample)) {
       if (typeof sample[key] !== "string") continue;
-      for (const secret of names.has(key) ? planted : [...planted, ...codes]) {
+      for (const secret of planted) {
         const params = { ...sample, [key]: secret };
         let text = "";
         try {
@@ -152,6 +153,7 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))("%s", (_id, template) =>
           text = `${r.subject}\n${r.text}\n${r.html}`;
         } catch (error) {
           expect(error).toBeInstanceOf(RenderError);
+          expect(names.has(key), `${template.id}.${key} refused`).toBe(false);
           continue;
         }
         expect(text, `${template.id}.${key}`).not.toContain(secret);

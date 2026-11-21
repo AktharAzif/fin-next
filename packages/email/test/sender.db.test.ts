@@ -12,6 +12,7 @@ import {
 } from "../src/catalogue.ts";
 import { newId } from "../src/ids.ts";
 import { enqueue, outboxAge, type RecipientKind } from "../src/outbox/store.ts";
+import { HIDDEN_VALUE, nameSecretShapeIn } from "../src/params.ts";
 import { recipientHasher } from "../src/recipient-key.ts";
 import type { SenderLimits } from "../src/sender/limits.ts";
 import { Sender } from "../src/sender/sender.ts";
@@ -344,9 +345,11 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       expect(log.named("email.security_unsent")).toEqual([]);
     });
 
-    it("never lets a name spec 02 §8.6 allows refuse the action: each queues in the caller's transaction and is sent as it is", async () => {
+    it("never lets a name spec 02 §8.6 allows refuse the action: each queues in the caller's transaction and is sent, hidden only in a code's shape", async () => {
       const sample = (id: string) => findTemplate(id)?.sample as Record<string, unknown>;
       const cases: readonly [SenderRole, string, Record<string, string>][] = [
+        ["fin_console", "orgs/member-removed", { personName: "Ann McKay-Jones" }],
+        ["fin_console", "orgs/member-joined", { orgName: "Acme Bank Card 2025" }],
         ["fin_console", "orgs/member-removed", { personName: "Tier2-Agent" }],
         ["fin_console", "orgs/member-removed", { orgName: "Cloud-Ops42" }],
         ["fin_console", "orgs/member-removed", { orgName: "acme2025payments" }],
@@ -383,7 +386,13 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       for (const [i, [, template, names]] of cases.entries()) {
         const message = port.sent.find((m) => m.to === `member${i}@example.com`);
         expect(message?.template).toBe(template);
-        for (const name of Object.values(names)) expect(message?.text, template).toContain(name);
+        for (const name of Object.values(names)) {
+          // A name in an enrolment or backup code's shape is hidden (T08-23); any other is mailed
+          // as it is.
+          const shown = nameSecretShapeIn(name) === undefined ? name : HIDDEN_VALUE;
+          expect(message?.text, `${template} ${name}`).toContain(shown);
+          if (shown !== name) expect(message?.text, `${template} ${name}`).not.toContain(name);
+        }
       }
     });
 

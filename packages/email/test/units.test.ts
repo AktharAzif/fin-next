@@ -80,15 +80,13 @@ describe("display values", () => {
     expect(param.device.parse(value)).toBe(HIDDEN_VALUE);
   });
 
-  // Spec 02 §8.6 lets a name hold letters, numbers and simple punctuation: every name it allows must
-  // be mailed as it is, or the notice about that person, team or role (and so the action) would fail.
+  // Spec 02 §8.6 lets a name hold letters, numbers and simple punctuation: a name it allows never
+  // refuses the notice about that person, team or role (and so the action), and one in no code's
+  // shape is mailed as it is.
   it.each([
     ["personName", "Ann McKay-Jones"],
     ["personName", "Anna McKay-Smith"],
     ["personName", "Leonard McCoy-Smith"],
-    ["personName", "Tier2-Agent"],
-    ["personName", "Abcd1-Efgh2"],
-    ["personName", "Agent-007ab"],
     ["orgName", "DeVos-Group"],
     ["orgName", "DeWit-Jones"],
     ["orgName", "Acme-Payments-2025"],
@@ -97,6 +95,17 @@ describe("display values", () => {
     ["orgName", "Acme Bank Card 2025"],
     ["orgName", "MoneyJarCompany"],
     ["orgName", "Acme2025Payments"],
+    ["roleLabel", "Level2-Support-Admins"],
+  ] as const)("mails the ordinary %s %s as it is", (field, value) => {
+    expect(param[field].parse(value)).toBe(value);
+  });
+
+  // A name in the shape of an enrolment or backup code is hidden, as a code passed into a name by
+  // mistake must be (T08-23); the notice still goes, without the name.
+  it.each([
+    ["personName", "Tier2-Agent"],
+    ["personName", "Abcd1-Efgh2"],
+    ["personName", "Agent-007ab"],
     ["orgName", "Team1-Alpha"],
     ["orgName", "Team7-Alpha"],
     ["orgName", "Cloud-Ops42"],
@@ -106,14 +115,13 @@ describe("display values", () => {
     ["orgName", "Web3 Data Team Peak"],
     ["orgName", "Acme Bank Web3 Team"],
     ["orgName", "Bank 4ACH Team Desk"],
-    ["roleLabel", "Level2-Support-Admins"],
     ["roleLabel", "Tier1-Admin"],
     ["roleLabel", "Admin-Tier2"],
     ["roleLabel", "Team1-Leads"],
     ["roleLabel", "Team4-Alpha"],
     ["roleLabel", "Level-2Team"],
-  ] as const)("mails the ordinary %s %s as it is", (field, value) => {
-    expect(param[field].parse(value)).toBe(value);
+  ] as const)("hides the %s %s, which has a code's shape, and never refuses", (field, value) => {
+    expect(param[field].parse(value)).toBe(HIDDEN_VALUE);
   });
 
   it.each([
@@ -125,6 +133,10 @@ describe("display values", () => {
     ["an address", "someone@example.com"],
     ["a web address", "www.example.com"],
     ["a phone number", "Call 5551234567"],
+    ["an enrolment code", ["ABCD", "EFGH", "JK3M", "NPQR"].join("-")],
+    ["an enrolment code run together", "7KQ2M9XA4RTBZ8HC"],
+    ["an enrolment code run together, in lower case", "7kq2m9xa4rtbz8hc"],
+    ["a backup code", ["a1B2c", "D3e4F"].join("-")],
     ["an untrimmed name", " Acme"],
     ["an over-long name", "A".repeat(61)],
     ["an invisible character", `Acme${String.fromCodePoint(0x200b)}`],
