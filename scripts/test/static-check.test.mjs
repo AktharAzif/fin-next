@@ -195,6 +195,28 @@ describe("static:check", () => {
       ["<noscript><style>p{}</style></noscript>", /no <style> element/],
       // With scripting on, the noscript ends at its end tag, and what follows is markup.
       ["<noscript><xmp></noscript><img src=x onerror=y></xmp>", /no inline event handler/],
+      // With scripting off, an end tag inside an attribute's value does not end the noscript, so
+      // what scripting on reads as a comment is markup: the whole document is read both ways.
+      [
+        '<noscript><p title="</noscript><!--"><img style="color:red" onload="x"><p title="-->"></noscript>',
+        /no style attribute/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><img style="color:red" onload="x"><p title="-->"></noscript>',
+        /no inline event handler/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><meta property="csp-nonce" nonce="x"><p title="-->"></noscript>',
+        /exactly one <meta property="csp-nonce">/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><meta property="csp-nonce" nonce="x"><p title="-->"></noscript>',
+        /no nonce attribute/,
+      ],
+      [
+        '<noscript><a title="</noscript><!--"><script>alert(1)</script><a title="-->"></noscript>',
+        /no inline script/,
+      ],
     ])) {
       const page = INDEX.replace("<body>", `<body>${html}`);
       const findings = checkIndexHtml("index.html", page);
@@ -210,6 +232,25 @@ describe("static:check", () => {
       const page = INDEX.replace("<body>", `<body>${html}`);
       assert.deepEqual(checkIndexHtml("index.html", page), [], html);
     }
+    // A tag both readings find is reported once.
+    const both = checkIndexHtml(
+      "index.html",
+      INDEX.replace("<body>", '<body><noscript>x</noscript><img src=x onerror="y">'),
+    );
+    assert.deepEqual(
+      both.map((f) => f.message),
+      ["no inline event handler (script-src 'self')"],
+    );
+    // The two readings, tag by tag.
+    const split = '<noscript><p title="</noscript><!--"><img onload="x"><p title="-->"></noscript>';
+    assert.deepEqual(
+      htmlStartTags(split).map((t) => t.name),
+      ["noscript"],
+    );
+    assert.deepEqual(
+      htmlStartTags(split, { scripting: false }).map((t) => t.name),
+      ["noscript", "p", "img", "p"],
+    );
   });
 
   test("SVG and MathML, inside which a browser reads raw-text elements as markup, fail", () => {
