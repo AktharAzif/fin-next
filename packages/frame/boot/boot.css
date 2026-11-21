@@ -1,0 +1,23 @@
+/*
+ * The static boot skeletons in each app's index.html (spec 06 §2.2, §5.2). They draw before any
+ * JavaScript, so CSS alone picks the block boot/theme.js named on <html> (data-boot) and the sidebar
+ * width the person chose (data-sidebar): the 224px sidebar from 1280px, the 64px rail when they
+ * collapsed it or from 1024px to 1279px, and no sidebar below 1024px. React's first render replaces
+ * the whole block. Unlayered, so it wins over the utilities on the same elements.
+ */
+html:not([data-boot="auth"]) [data-boot-block="auth"],
+html[data-boot="auth"] [data-boot-block="app"] {
+  display: none;
+}
+
+@media (min-width: 64rem) and (max-width: 79.98rem) {
+  [data-boot-sidebar] {
+    width: var(--fin-layout-sidebar-collapsed);
+  }
+}
+
+@media (min-width: 80rem) {
+  html[data-sidebar="collapsed"] [data-boot-sidebar] {
+    width: var(--fin-layout-sidebar-collapsed);
+  }
+}

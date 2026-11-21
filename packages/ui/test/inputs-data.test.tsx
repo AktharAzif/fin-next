@@ -149,6 +149,13 @@ describe("ErrorState", () => {
     );
     expect(render(<ErrorState size="page" title="Couldn’t load Fin" />)).toContain("<h1");
   });
+
+  it("lets its page h1 take focus after a navigation, as PageHeader's does (S6-17)", () => {
+    const page = render(<ErrorState size="page" title="Couldn’t load this page" />);
+    expect(page).toMatch(/<h1 tabindex="-1" class="[^"]*\boutline-none\b/);
+    const section = render(<ErrorState size="page" headingLevel={2} title="Couldn’t load Fin" />);
+    expect(section).not.toContain("tabindex");
+  });
 });
 
 type Row = { id: string; name: string; amount: number };
