@@ -3,8 +3,7 @@
 // a slow navigation, focus and the spoken title, the report seam behind a throwing button, a 401 on
 // the route being loaded and the back-forward cache's check. The Playwright spec answers /env.json
 // and /api/* itself (e2e/serve.ts); `window.__harness` lets it read what the page did. Like each
-// app's stylesheet, it loads boot.css first, which holds the back-forward cache's lock.
-import "../boot/boot.css";
+// app, it loads boot.css (index.html links it), which holds the back-forward cache's lock.
 import "../src/report/index.ts";
 import { type ConsoleViewer, consoleViewer, defineContract, noInput, z } from "@fin/app-contracts";
 import { AuthCard, Button, PageHeader } from "@fin/ui";
