@@ -1,6 +1,5 @@
-import { defineContract, health, noContent, noInput } from "@fin/app-contracts";
+import { defineContract, health, noContent, noInput, z } from "@fin/app-contracts";
 import { describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import { type ApiHooks, createApiClient, type StepUpProof } from "../src/api/client.ts";
 import { ApiError, isUnreachable } from "../src/api/errors.ts";
 import { buildRequest, parseRetryAfter } from "../src/api/request.ts";

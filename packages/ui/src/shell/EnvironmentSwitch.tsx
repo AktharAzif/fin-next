@@ -77,7 +77,7 @@ export function EnvironmentSwitch({
               />
             }
           >
-            <Glyph name="LockSimple" />
+            <Glyph name="LockSimple" className="size-3" />
             Production
           </TooltipTrigger>
           <TooltipContent side="bottom" sideOffset={8} className={TOOLTIP_CHROME}>

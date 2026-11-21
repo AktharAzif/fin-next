@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import { defineContract, isUnsafeMethod, noContent, noInput, pathParams } from "./contract.ts";
 import * as contracts from "./index.ts";
+import { z } from "./zod.ts";
 
 describe("defineContract", () => {
   it("accepts a well-formed contract and returns it unchanged", () => {

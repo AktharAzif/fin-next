@@ -103,7 +103,7 @@ export function AppShell({
       {phone ? (
         <>
           <header className="shrink-0 border-b border-border bg-bg">
-            <div className="flex h-14 items-center gap-3 px-2">
+            <div className="flex h-12 items-center gap-3 px-2">
               <PhoneNavSheet nav={nav} brand={brand} linkAs={Link} navElementId={navElementId} />
               <Link
                 href={brand.href}
@@ -114,13 +114,13 @@ export function AppShell({
               </Link>
               <div className="ml-auto flex items-center pr-2">{account}</div>
             </div>
-            <div className="flex min-w-0 items-center gap-3 px-4 pb-2">{environment}</div>
+            <div className="flex min-w-0 items-center gap-3 px-3 pb-2">{environment}</div>
           </header>
           {main}
         </>
       ) : (
         <div className="flex min-h-0 flex-1">
-          <div className="h-full shrink-0 border-r border-border">
+          <div className="h-full shrink-0">
             <Sidebar
               nav={nav}
               brand={brand}
@@ -157,7 +157,10 @@ export function AppShellContent({ notice, children }: { notice?: ReactNode; chil
   return (
     <div className="w-full px-4 pt-6 pb-16 md:px-6 lg:px-8 lg:pt-8">
       {notice === undefined || notice === null ? null : (
-        <div className="mb-6 flex flex-col gap-3">{notice}</div>
+        // Empty (every notice rendered nothing): no box and no gap above the page.
+        <div data-notices="" className="mb-6 flex flex-col gap-3 empty:hidden">
+          {notice}
+        </div>
       )}
       {children}
     </div>

@@ -5,9 +5,10 @@
 //
 // P0-G's stub of the contract: spec 02's identity lane owns this file once it merges (spec 06
 // §11.3) and adds the contract test against the route.
-import { z } from "zod";
+
 import { defineContract, noContent, noInput } from "../contract.ts";
 import { STEP_UP_METHODS } from "../problem.ts";
+import { z } from "../zod.ts";
 
 export const consoleMembership = z.object({
   orgId: z.string().min(1),

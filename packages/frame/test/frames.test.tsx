@@ -44,7 +44,11 @@ const env = {
   consoleOrigin: "https://console.example.com",
 };
 
-function runtime<V>(app: "console" | "admin", viewer: V | null): FinRuntime<V> {
+function runtime<V>(
+  app: "console" | "admin",
+  viewer: V | null,
+  routes: readonly string[] = [],
+): FinRuntime<V> {
   const client = createApiClient({ app, fetch: async () => new Response(null, { status: 204 }) });
   return {
     app,
@@ -54,6 +58,7 @@ function runtime<V>(app: "console" | "admin", viewer: V | null): FinRuntime<V> {
     viewer: createViewerStore<V>(viewer, async () => viewer),
     stepUp: createStepUpController(),
     newRelease: createStore<string | null>(null),
+    routeExists: (pathname) => routes.includes(pathname),
   };
 }
 
@@ -80,10 +85,14 @@ const maya: ConsoleViewer = {
 };
 
 async function renderConsole(path: string, viewer: ConsoleViewer | null) {
-  const fin = runtime<ConsoleViewer>("console", viewer);
+  const fin = runtime<ConsoleViewer>("console", viewer, [
+    "/",
+    "/audit-log",
+    "/sign-in",
+    "/settings/team",
+  ]);
   const rootRoute = createRootRouteWithContext<FinRouterContext<ConsoleViewer>>()({
-    beforeLoad: (input) =>
-      guardConsole(input, (p) => ["/", "/audit-log", "/sign-in", "/settings/team"].includes(p)),
+    beforeLoad: (input) => guardConsole(input),
     component: () => <FinRoot appFrame={AppFrame} fallbackFrame="app" />,
     notFoundComponent: RouteNotFound,
   });

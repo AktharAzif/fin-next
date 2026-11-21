@@ -96,6 +96,7 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
       return typeof value?.currentOrgId === "string" ? value.currentOrgId : null;
     };
   }
+  let matches: (pathname: string) => boolean = () => false;
   const runtime: FinRuntime<Viewer> = {
     app: options.app,
     env: envResult.env,
@@ -104,9 +105,10 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
     viewer,
     stepUp: createStepUpController(),
     newRelease: createStore<string | null>(null),
+    routeExists: (pathname) => matches(pathname),
   };
   const router = options.createRouter({ fin: runtime });
-  const matches = routeMatcher(router);
+  matches = routeMatcher(router);
   const frameNow = () => deepestStaticData(router.state.matches)?.frame ?? options.fallbackFrame;
   const go = (href: string) => {
     void router.navigate({ href, replace: true });

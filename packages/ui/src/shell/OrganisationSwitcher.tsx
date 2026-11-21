@@ -71,7 +71,7 @@ export function OrganisationSwitcher({
       <MenuTrigger
         aria-label={`Switch organisation, current: ${name}`}
         data-organisation-switcher=""
-        className="inline-flex h-8 min-w-0 max-w-60 shrink items-center gap-1.5 rounded-control px-2.5 text-label text-text-primary outline-none transition-colors duration-fast hover:bg-fill-hover focus-visible:outline-focus state-open:bg-fill-hover"
+        className="inline-flex h-8 min-w-0 max-w-60 shrink items-center gap-1.5 rounded-control px-3 text-label text-text-primary outline-none transition-colors duration-fast hover:bg-fill-hover focus-visible:outline-focus state-open:bg-fill-hover"
       >
         <span className="truncate">{name}</span>
         <Glyph name="CaretUpDown" className="text-text-tertiary" />

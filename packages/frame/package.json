@@ -19,8 +19,7 @@
   "dependencies": {
     "@fin/app-contracts": "workspace:*",
     "@fin/ui": "workspace:*",
-    "@tanstack/react-router": "catalog:",
-    "zod": "catalog:"
+    "@tanstack/react-router": "catalog:"
   },
   "peerDependencies": {
     "react": "catalog:",

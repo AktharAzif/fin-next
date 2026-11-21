@@ -1,6 +1,8 @@
 // @fin/app-contracts: the web apps' own JSON routes (FW-C08). Browser-safe: Zod only, no server
 // package and no node:* module (FW-C12). Each area's lane adds its contracts in `src/<area>/**`
-// (spec 06 §11.3) and exports them here.
+// (spec 06 §11.3) and exports them here. `z` is Zod configured for the page policy (./zod.ts):
+// browser code builds its schemas with it, never with "zod" directly.
+
 export {
   APP_NAMES,
   type AppContract,
@@ -41,3 +43,4 @@ export {
   staffViewer,
   staffViewerAnswer,
 } from "./staff/viewer.ts";
+export { z } from "./zod.ts";

@@ -4,18 +4,20 @@
 // once the first route has resolved (FW-C16), and a check of the session when the page comes back
 // from the back-forward cache (FW-C14). The guards run in the root route's `beforeLoad`.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
-import {
-  type AnyRouter,
-  Outlet,
-  redirect,
-  useRouter,
-  useRouterState,
-} from "@tanstack/react-router";
+import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
 import { type ComponentType, type ReactNode, useEffect, useRef } from "react";
 import { consoleEnvironment } from "../frames/AppFrame.tsx";
 import { AuthFrame } from "../frames/AuthFrame.tsx";
+import { adminNav } from "../nav/admin/index.ts";
+import { filterNav } from "../nav/filter.ts";
 import { FrameSwitch } from "../router/FrameSwitch.tsx";
-import { deepestStaticData, useRouteStaticData } from "../router/matches.ts";
+import {
+  deepestStaticData,
+  useAnyRouter,
+  useRouterValue,
+  useRouteStaticData,
+  useSearch,
+} from "../router/matches.ts";
 import type { FrameKind } from "../router/static-data.ts";
 import { documentTitle } from "../router/titles.ts";
 import { type FinRouterContext, useFin } from "../runtime/runtime.tsx";
@@ -43,17 +45,15 @@ function throwRedirect(href: string | null): void {
 }
 
 /** The console root's `beforeLoad`. */
-export function guardConsole(
-  input: GuardInput<ConsoleViewer>,
-  matches: (pathname: string) => boolean,
-): void {
+export function guardConsole(input: GuardInput<ConsoleViewer>): void {
   const frame = deepestStaticData(input.matches)?.frame ?? "app";
+  const { fin } = input.context;
   throwRedirect(
     consoleGate(
-      input.context.fin.viewer.get(),
+      fin.viewer.get(),
       frame,
       { pathname: input.location.pathname, search: input.location.searchStr },
-      matches,
+      (pathname) => fin.routeExists(pathname),
     ),
   );
 }
@@ -64,13 +64,34 @@ export function guardAdmin(input: GuardInput<StaffViewer>): void {
   throwRedirect(adminGate(input.context.fin.viewer.get(), frame));
 }
 
+/**
+ * Fin Admin's home, `/` (spec 06 §7.2; S6-25): the first list the staff role can open whose screen
+ * exists (Staff on Saturday, Production access once Sunday's screens land). Null when there is none.
+ */
+export function adminHome(fin: FinRouterContext<StaffViewer>["fin"]): string | null {
+  const viewer = fin.viewer.get();
+  if (viewer === null || viewer.state !== "ok") return null;
+  const permissions = new Set(viewer.permissions);
+  const tree = filterNav(adminNav, {
+    can: (permission) => permissions.has(permission),
+    hasRoute: (path) => fin.routeExists(path),
+    environment: "production",
+  });
+  return [...tree.groups.flatMap((group) => group.items), ...tree.footer][0]?.href ?? null;
+}
+
+/** Fin Admin's `/` route `beforeLoad`: on to its home, when the role has one. */
+export function guardAdminHome(input: { context: FinRouterContext<StaffViewer> }): void {
+  throwRedirect(adminHome(input.context.fin));
+}
+
 function useRootEffects(fallbackFrame: FrameKind): void {
   const fin = useFin();
-  const router = useRouter();
+  const router = useAnyRouter();
   const staticData = useRouteStaticData();
-  const search = useRouterState({ select: (state) => state.location.search });
-  const status = useRouterState({ select: (state) => state.status });
-  const resolved = useRouterState({ select: (state) => state.resolvedLocation?.pathname ?? null });
+  const search = useSearch();
+  const status = useRouterValue((state) => state.status);
+  const resolved = useRouterValue((state) => state.resolvedLocation?.pathname ?? null);
   const viewer = useStore(fin.viewer);
   const firstPath = useRef<string | null>(null);
 

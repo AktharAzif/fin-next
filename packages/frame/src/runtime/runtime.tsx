@@ -19,6 +19,8 @@ export interface FinRuntime<V = unknown> {
   readonly stepUp: StepUpController;
   /** The release a newer API answer named, once (FW-C13); null until then. */
   readonly newRelease: Store<string | null>;
+  /** Whether the app has a route for a pathname: the check a sign-in `next` must pass (FW-C09). */
+  routeExists(pathname: string): boolean;
 }
 
 /** The router context every app's root route declares. */

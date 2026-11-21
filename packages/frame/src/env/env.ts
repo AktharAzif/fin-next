@@ -2,7 +2,7 @@
 // build is environment-neutral: the deploy renders this file into each artefact from the
 // environment's public settings, and the entry module fetches it in parallel with the viewer
 // request. One schema for every app; unknown fields are ignored, so the docs site can add its own.
-import { z } from "zod";
+import { z } from "@fin/app-contracts";
 
 export const ENVIRONMENTS = ["development", "ci", "staging", "production"] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];

@@ -3,9 +3,10 @@
 //
 // P0-G's stub of the contract: spec 02's staff lane owns this file once it merges (spec 06 §11.3)
 // and adds the contract test against the route.
-import { z } from "zod";
+
 import { defineContract, noInput } from "../contract.ts";
 import { STEP_UP_METHODS } from "../problem.ts";
+import { z } from "../zod.ts";
 
 /** The deployment Fin Admin runs in, shown as the header's Badge (the AdminFrame states). */
 export const STAFF_ENVIRONMENTS = ["production", "staging", "development"] as const;

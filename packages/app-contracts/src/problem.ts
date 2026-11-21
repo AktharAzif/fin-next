@@ -2,7 +2,7 @@
 // §14.1, spec 01 §4.4). Unknown extensions are kept, so a newer server never breaks an older
 // client. The per-area code lists are fragments owned by their lanes (`src/errors/<area>.ts`);
 // this file holds only the shape every app reads and the extensions `api()` acts on.
-import { z } from "zod";
+import { z } from "./zod.ts";
 
 export const PROBLEM_CONTENT_TYPE = "application/problem+json";
 

@@ -3,8 +3,9 @@
 // and preloads on intent (FW-C10). Another origin, a new tab, a download, a modified click or a
 // path under /api stays a browser navigation. Props, handlers and the ref pass through, as the
 // SDK's `render` expects.
-import { useRouter } from "@tanstack/react-router";
+
 import type { AnchorHTMLAttributes, MouseEvent, Ref } from "react";
+import { useAnyRouter } from "./matches.ts";
 
 export interface RouterLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
   href: string;
@@ -29,7 +30,7 @@ export function RouterLink({
   ref,
   ...rest
 }: RouterLinkProps) {
-  const router = useRouter();
+  const router = useAnyRouter();
   const routed =
     isRouterHref(href) &&
     (rest.target === undefined || rest.target === "_self") &&

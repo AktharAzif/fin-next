@@ -3,8 +3,9 @@
 // the default pending state. A lane's route gives its own `-skeleton.tsx` as its pendingComponent;
 // RoutePending is only the router's default.
 import { PageHeading, PageProblem, PageSkeleton } from "@fin/ui/shell";
-import { type ErrorComponentProps, useRouter } from "@tanstack/react-router";
+import type { ErrorComponentProps } from "@tanstack/react-router";
 import { isApiError } from "../api/errors.ts";
+import { useAnyRouter } from "../router/matches.ts";
 import { RouterLink } from "../router/RouterLink.tsx";
 
 const HOME = { label: "Go to Home", glyph: "House", href: "/" } as const;
@@ -41,7 +42,7 @@ export function isOffline(): boolean {
 }
 
 export function RouteError({ error, reset }: ErrorComponentProps) {
-  const router = useRouter();
+  const router = useAnyRouter();
   const offline = isOffline();
   return (
     <PageProblem

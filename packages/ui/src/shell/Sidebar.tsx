@@ -215,8 +215,9 @@ export function Sidebar({
       data-sidebar-mode={mode}
       className={classes(
         "flex h-full flex-col bg-surface",
-        mode === "expanded" && "w-sidebar",
-        rail && "w-sidebar-collapsed",
+        // The right border is inside the sidebar's width, so its edge is where the toggle sits.
+        mode === "expanded" && "w-sidebar border-r border-border",
+        rail && "w-sidebar-collapsed border-r border-border",
         mode === "touch" && "w-full",
       )}
     >
@@ -264,7 +265,7 @@ export function Sidebar({
           );
         })}
       </nav>
-      <div className={classes("shrink-0 border-t border-border py-2", rail ? "px-3" : "px-2")}>
+      <div className={classes("shrink-0 border-t border-border py-3", rail ? "px-3" : "px-2")}>
         {nav.footer.length > 0 ? (
           <ItemList
             items={nav.footer}

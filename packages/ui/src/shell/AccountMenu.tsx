@@ -44,7 +44,7 @@ function Trigger({ label, initialsText }: { label: string; initialsText: string 
       >
         {initialsText}
       </span>
-      <Glyph name="CaretDown" />
+      <Glyph name="CaretDown" className="hidden lg:block" />
     </MenuTrigger>
   );
 }

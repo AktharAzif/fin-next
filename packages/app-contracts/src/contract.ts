@@ -1,7 +1,7 @@
 // One of a web app's own JSON routes under `<app host>/api/*` (FW-C08, spec 06 §2.4). A contract
 // names the method, the path under /api, the input and the output as Zod schemas, and what
 // `api()` in @fin/frame must add to the request. The server half validates the same schemas.
-import { z } from "zod";
+import { z } from "./zod.ts";
 
 /** The three web apps that have an API half. The docs site has none. */
 export const APP_NAMES = ["console", "admin", "verify"] as const;

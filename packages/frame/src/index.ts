@@ -16,9 +16,11 @@ export { buildRequest, parseRetryAfter } from "./api/request.ts";
 export { signOut } from "./api/sign-out.ts";
 export { adminGate, consoleGate } from "./boot/gates.ts";
 export {
+  adminHome,
   FinRoot,
   type FinRootProps,
   guardAdmin,
+  guardAdminHome,
   guardConsole,
   routeMatcher,
 } from "./boot/root.tsx";

@@ -15,7 +15,7 @@ import {
   PageNotice,
   PageSkeleton,
 } from "@fin/ui/shell";
-import { useRouter, useRouterState } from "@tanstack/react-router";
+
 import { type ReactNode, useState } from "react";
 import { signOut } from "../api/sign-out.ts";
 import { NavigationBar } from "../motion/NavigationBar.tsx";
@@ -23,7 +23,13 @@ import { consoleNav } from "../nav/console/index.ts";
 import { filterNav } from "../nav/filter.ts";
 import { useSidebar } from "../prefs/sidebar.ts";
 import { useTheme } from "../prefs/theme.ts";
-import { useNavigationPending, usePathname, useRouteStaticData } from "../router/matches.ts";
+import {
+  useAnyRouter,
+  useNavigationPending,
+  usePathname,
+  useRouteStaticData,
+  useSearch,
+} from "../router/matches.ts";
 import { RouterLink } from "../router/RouterLink.tsx";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
@@ -51,9 +57,9 @@ function signedIn(viewer: ConsoleViewer | null): ConsoleViewerSignedIn | null {
 export function AppFrame({ children }: { children: ReactNode }) {
   const fin = useFin<ConsoleViewer>();
   const viewer = signedIn(useStore(fin.viewer));
-  const router = useRouter();
+  const router = useAnyRouter();
   const pathname = usePathname();
-  const search = useRouterState({ select: (state) => state.location.search });
+  const search = useSearch();
   const pending = useNavigationPending();
   const staticData = useRouteStaticData();
   const { collapsed, setCollapsed } = useSidebar();

@@ -11,14 +11,18 @@ import {
   PageSkeleton,
   StaffMenu,
 } from "@fin/ui/shell";
-import { useRouter } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { signOut } from "../api/sign-out.ts";
 import { NavigationBar } from "../motion/NavigationBar.tsx";
 import { adminNav } from "../nav/admin/index.ts";
 import { filterNav } from "../nav/filter.ts";
 import { useSidebar } from "../prefs/sidebar.ts";
-import { useNavigationPending, usePathname, useRouteStaticData } from "../router/matches.ts";
+import {
+  useAnyRouter,
+  useNavigationPending,
+  usePathname,
+  useRouteStaticData,
+} from "../router/matches.ts";
 import { RouterLink } from "../router/RouterLink.tsx";
 import { useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
@@ -32,7 +36,7 @@ function signedIn(viewer: StaffViewer | null): StaffViewerSignedIn | null {
 export function AdminFrame({ children }: { children: ReactNode }) {
   const fin = useFin<StaffViewer>();
   const viewer = signedIn(useStore(fin.viewer));
-  const router = useRouter();
+  const router = useAnyRouter();
   const pathname = usePathname();
   const pending = useNavigationPending();
   const staticData = useRouteStaticData();
