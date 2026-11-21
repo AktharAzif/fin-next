@@ -168,6 +168,100 @@ describe("the reader's lists", () => {
     expect(loops).toBe(2);
   });
 
+  it("fails the read when a list without totals caps its page and ignores the page number", async () => {
+    for (const cap of [20, 49]) {
+      const list = server(items(120), { page: "ignore", cap });
+      await expect(list.reader.list(RULESETS), String(cap)).rejects.toThrow(/answered 0/);
+    }
+  });
+
+  it("accepts a short whole list that ignores paging altogether, a single item included", async () => {
+    for (const count of [1, 2, 5, 11]) {
+      const list = server(items(count), { page: "ignore", perPage: "ignore" });
+      expect((await list.reader.list(RULESETS)).length, String(count)).toBe(count);
+    }
+    // A single item that honours per_page but not the page number proves nothing.
+    const single = server(items(1), { page: "ignore" });
+    await expect(single.reader.list(RULESETS)).rejects.toThrow(/answered 0/);
+  });
+
+  it("fails the read when a cursor runs out before the list's totals are reached", async () => {
+    for (const last of [{ total_count: 120 }, { total_count: 120, cursor: "" }]) {
+      const answers = [
+        { result: items(50), info: { cursor: "c1", total_count: 120 } },
+        { result: items(50, "late"), info: last },
+      ];
+      let call = 0;
+      const reader = new CloudflareReader("t", async () => {
+        const answer = answers[Math.min(call, answers.length - 1)];
+        call += 1;
+        return envelope(answer?.result ?? [], answer?.info);
+      });
+      await expect(reader.list(RULESETS), JSON.stringify(last)).rejects.toThrow(/answered 0/);
+    }
+  });
+
+  it("fails a read whose answer is not Cloudflare's envelope or holds no list", async () => {
+    const bodyThatFails = () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"success":true,"result":['));
+          controller.error(new DOMException("The operation timed out", "TimeoutError"));
+        },
+      });
+    const answers: [string, () => Response][] = [
+      ["not JSON", () => new Response("<html>", { status: 200 })],
+      ["no success", () => new Response(JSON.stringify({ result: [] }), { status: 200 })],
+      ["result null", () => new Response(JSON.stringify({ success: true, result: null }))],
+      ["no result", () => new Response(JSON.stringify({ success: true, errors: [] }))],
+      ["result an object", () => new Response(JSON.stringify({ success: true, result: {} }))],
+      ["a body cut off", () => new Response(bodyThatFails(), { status: 200 })],
+    ];
+    for (const [what, answer] of answers) {
+      const reader = new CloudflareReader("t", async () => answer());
+      await expect(reader.list(RULESETS), what).rejects.toThrow(/answered/);
+    }
+  });
+
+  it("reads a 404 as not found only when Cloudflare itself says so", async () => {
+    const cloudflare404 = new CloudflareReader(
+      "t",
+      async () =>
+        new Response(JSON.stringify({ success: false, errors: [{ code: 10007 }], result: null }), {
+          status: 404,
+        }),
+    );
+    expect(await cloudflare404.get(`${RULESETS}/missing`)).toBeUndefined();
+    const other404 = new CloudflareReader("t", async () => new Response("<html>", { status: 404 }));
+    await expect(other404.get(`${RULESETS}/missing`)).rejects.toThrow(/answered 0/);
+    const unreadable = new CloudflareReader("t", async () => new Response("<html>"));
+    await expect(unreadable.get(`${RULESETS}/missing`)).rejects.toThrow(/answered 0/);
+  });
+
+  it("fails a read of one object whose answer holds no result", async () => {
+    for (const body of [
+      { success: true, errors: [] },
+      { success: true, result: null },
+    ]) {
+      const reader = new CloudflareReader("t", async () => new Response(JSON.stringify(body)));
+      await expect(reader.get(`${RULESETS}/rs-late`), JSON.stringify(body)).rejects.toThrow(
+        /answered 0/,
+      );
+    }
+    // The rules check then fails instead of reading the rule set as one with no rules.
+    const world = crowded("total_pages");
+    const serve = cloudflareFetch(world);
+    const ctx = makeContext(
+      await settingsFor(healthyWorld()),
+      new CloudflareReader("t", async (input, init) =>
+        new URL(input).pathname.endsWith("/rulesets/rs-late")
+          ? new Response(JSON.stringify({ success: true, errors: [] }))
+          : serve(input, init),
+      ),
+    );
+    await expect(rules.run(ctx)).rejects.toThrow(/answered 0/);
+  });
+
   it("fails the read when the page limit is reached", async () => {
     let page = 0;
     const fetch = async () => {

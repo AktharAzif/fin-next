@@ -7,39 +7,68 @@ import { type Check, type Failure, records } from "./common.ts";
 
 const STRENGTH: Readonly<Record<string, number>> = { none: 0, quarantine: 1, reject: 2 };
 
-/** A TXT record's text: the quoted strings joined (Cloudflare returns them quoted). */
+// DMARC's grammar (RFC 7489 §6.4, kept by RFC 9989) knows only space and tab as white space
+// (WSP). JavaScript's trim() and `\s` also take a no-break space, a byte-order mark, an
+// ideographic space, a vertical tab and more, which receivers read as part of a tag or as a
+// record that is not DMARC at all; so the parse below never uses them (`[\s\S]` below is only
+// "any character").
+const trimWsp = (text: string) => text.replace(/^[ \t]+|[ \t]+$/g, "");
+
+/** The quoted strings of a zone file's TXT record, white space between them and nothing else. */
+const QUOTED = /^[ \t]*(?:"(?:[^"\\]|\\[\s\S])*"[ \t]*)+$/;
+
+/** A zone file's escapes: `\DDD` is one byte (as one character), `\X` is X. */
+const readEscapes = (text: string) =>
+  text.replace(/\\(\d{3}|[\s\S])/g, (_, e: string) =>
+    e.length === 3 ? String.fromCharCode(Number(e)) : e,
+  );
+
+/**
+ * A TXT record's text: the quoted strings joined, their escapes read (Cloudflare returns them
+ * quoted), or the content as it is when it is not quoted. Content that starts quoted but holds
+ * anything besides quoted strings is returned as it is, so it reads as no DMARC record.
+ */
 export function txtText(content: unknown): string {
-  const raw = String(content ?? "").trim();
-  if (!raw.startsWith('"')) return raw;
-  return [...raw.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1] ?? "").join("");
+  const raw = String(content ?? "");
+  if (!/^[ \t]*"/.test(raw) || !QUOTED.test(raw)) return raw;
+  return [...raw.matchAll(/"((?:[^"\\]|\\[\s\S])*)"/g)]
+    .map((m) => readEscapes(m[1] ?? ""))
+    .join("");
 }
 
-/** Whether a TXT record's text is a DMARC record: it starts `v=DMARC1`, exactly (RFC 7489 §6.4). */
+/**
+ * Whether a TXT record's text is a DMARC record: it starts with `v`, optional WSP, `=`, optional
+ * WSP and `DMARC1`, exactly (RFC 7489 §6.4); a record that does not is discarded by receivers.
+ */
 export function isDmarc(text: string): boolean {
-  return /^[vV]\s*=\s*DMARC1\s*(?:;|$)/.test(text.trim());
+  return /^[vV][ \t]*=[ \t]*DMARC1[ \t]*(?:;|$)/.test(text);
 }
 
 const TAG_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/** Anything but printable ASCII, space and tab: no DMARC tag or value holds it. */
+const OUTSIDE_GRAMMAR = /[^\x20-\x7e\t]/;
 
 /**
  * A DMARC record's tags (RFC 7489 §6.3, §6.4), names lowercased, or undefined when it is not a
  * DMARC record or not a valid tag list. Receivers differ on a malformed record (one discards it,
  * another reads its first `p`, another its last), so the check never judges one: `v=DMARC1` is
- * the first tag, `p` (when present) the tag right after it, every tag is `name=value`, and no tag
- * occurs twice (RFC 6376 §3.2, whose tag lists DMARC uses: a repeated tag invalidates the list).
+ * the first tag, `p` (when present) the tag right after it, every tag is `name=value`, no tag
+ * occurs twice (RFC 6376 §3.2, whose tag lists DMARC uses: a repeated tag invalidates the list),
+ * and the record holds only printable ASCII, space and tab.
  */
 export function dmarcTags(text: string): Map<string, string> | undefined {
-  if (!isDmarc(text)) return undefined;
-  const parts = text.trim().split(";");
+  if (!isDmarc(text) || OUTSIDE_GRAMMAR.test(text)) return undefined;
+  const parts = text.split(";");
   // One trailing separator is allowed; an empty tag anywhere else is not.
-  if (parts.length > 1 && (parts.at(-1) ?? "").trim() === "") parts.pop();
+  if (parts.length > 1 && trimWsp(parts.at(-1) ?? "") === "") parts.pop();
   const tags = new Map<string, string>();
   for (const part of parts) {
     const at = part.indexOf("=");
     if (at < 0) return undefined;
-    const name = part.slice(0, at).trim();
+    const name = trimWsp(part.slice(0, at));
     if (!TAG_NAME.test(name) || tags.has(name.toLowerCase())) return undefined;
-    tags.set(name.toLowerCase(), part.slice(at + 1).trim());
+    tags.set(name.toLowerCase(), trimWsp(part.slice(at + 1)));
   }
   const names = [...tags.keys()];
   if (names[0] !== "v" || tags.get("v") !== "DMARC1") return undefined;
@@ -47,7 +76,12 @@ export function dmarcTags(text: string): Map<string, string> | undefined {
   return tags;
 }
 
-/** Why a DMARC record is weaker than `required`, or undefined when it is not. */
+/**
+ * Why a DMARC record is weaker than `required`, or undefined when it is not: a lower or missing
+ * `p`, a lower `sp` or `np` (RFC 9989's policy for subdomains that do not exist), a `pct` under
+ * 100 (RFC 7489, which receivers still read), or a `t` other than `n` (RFC 9989's test mode, under
+ * which a receiver applies `p=reject` as quarantine).
+ */
 export function dmarcWeakness(
   tags: Map<string, string>,
   required: DmarcPolicy,
@@ -55,10 +89,14 @@ export function dmarcWeakness(
   const floor = STRENGTH[required] ?? 2;
   const policy = STRENGTH[(tags.get("p") ?? "").toLowerCase()];
   if (policy === undefined || policy < floor) return "p";
-  const sp = tags.get("sp");
-  if (sp !== undefined && (STRENGTH[sp.toLowerCase()] ?? -1) < floor) return "sp";
+  for (const tag of ["sp", "np"]) {
+    const value = tags.get(tag);
+    if (value !== undefined && (STRENGTH[value.toLowerCase()] ?? -1) < floor) return tag;
+  }
   const pct = tags.get("pct");
   if (pct !== undefined && pct !== "100") return "pct";
+  const test = tags.get("t");
+  if (test !== undefined && test.toLowerCase() !== "n") return "t";
   return undefined;
 }
 

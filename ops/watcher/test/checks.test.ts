@@ -627,6 +627,68 @@ describe("email", () => {
     }
   });
 
+  it("fails on a record with white space or a character DMARC's grammar does not allow", async () => {
+    // RFC 7489 allows only space and tab as white space; receivers read anything else as part of
+    // a tag (` p` is unknown, `reject ` is no policy) or discard the record.
+    const nbsp = " ";
+    const bom = "﻿";
+    for (const content of [
+      `"v=DMARC1;${nbsp}p=reject"`,
+      `"v=DMARC1; p=reject${nbsp}"`,
+      `"${bom}v=DMARC1; p=reject"`,
+      `"v=DMARC1;　p=reject"`,
+      `"v=DMARC1;\u000bp=reject"`,
+      `"v=DMARC1;\u000cp=reject"`,
+      `"v=DMARC1; p=reject"`,
+      `"v${nbsp}=DMARC1; p=reject"`,
+      `"v=DMARC1; p=reject; rua=mailto:dmarc@example.org${nbsp}"`,
+      // The same characters as the zone file writes them, and in a record that is not quoted.
+      '"v=DMARC1;\\194\\160p=reject"',
+      `${bom}v=DMARC1; p=reject`,
+      `v=DMARC1;${nbsp}p=reject`,
+      // Text outside the quoted strings, which the record also holds.
+      '"v=DMARC1; p=reject" ;p=none',
+      '" v=DMARC1; p=reject"',
+    ]) {
+      const world = healthyWorld();
+      dmarc(world, "auth").content = content;
+      expect(details(await run(email, world)), JSON.stringify(content)).toEqual([
+        "email/_dmarc.auth/dmarc_invalid",
+      ]);
+    }
+  });
+
+  it("accepts space and tab around the separators, and escapes that spell them", async () => {
+    for (const content of [
+      '"v=DMARC1;\tp=reject"',
+      '"v = DMARC1 ;  p = reject ; adkim=s"',
+      '"v=DMARC1;\\032p=reject"',
+      "v=DMARC1; p=reject",
+    ]) {
+      const world = healthyWorld();
+      dmarc(world, "auth").content = content;
+      expect(await run(email, world), JSON.stringify(content)).toEqual([]);
+    }
+  });
+
+  it("fails on RFC 9989's test mode or a weaker policy for subdomains that do not exist", async () => {
+    for (const content of [
+      "v=DMARC1; p=reject; t=y",
+      "v=DMARC1; p=reject; t=Y",
+      "v=DMARC1; p=reject; t=",
+      "v=DMARC1; p=reject; np=none",
+      "v=DMARC1; p=reject; np=quarantine",
+      "v=DMARC1; p=reject; sp=reject; np=none; t=y",
+    ]) {
+      const world = healthyWorld();
+      dmarc(world, "auth").content = `"${content}"`;
+      expect(details(await run(email, world)), content).toEqual(["email/_dmarc.auth/dmarc_weak"]);
+    }
+    const world = healthyWorld();
+    dmarc(world, "auth").content = '"v=DMARC1; p=reject; sp=reject; np=Reject; t=n"';
+    expect(await run(email, world)).toEqual([]);
+  });
+
   it("accepts a trailing separator, and reports a record with no p as weak", async () => {
     const world = healthyWorld();
     dmarc(world, "auth").content = '"v=DMARC1; p=reject; adkim=s;"';

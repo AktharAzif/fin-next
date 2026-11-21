@@ -13,9 +13,11 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`.
   `_dmarc.auth.<zone>` or `_dmarc.notify.<zone>` (target `_dmarc.auth` or `_dmarc.notify`),
   missing (`dmarc_missing`), doubled (`dmarc_duplicate`, which receivers treat as no record),
   not a valid DMARC record (`dmarc_invalid`: not DMARC at all, a tag repeated, `p` not the tag
-  right after `v=DMARC1`, or a tag that is not `name=value`; receivers may then discard it or
-  read a weaker `p` than the watcher would), or weaker than `p=reject` (`dmarc_weak`: a lower or
-  missing `p`, a lower `sp`, or a `pct` under 100). The zone's apex `_dmarc` is the old product's
+  right after `v=DMARC1`, a tag that is not `name=value`, or a character other than printable
+  ASCII, space or tab, such as a no-break space or a byte-order mark; receivers may then discard
+  it or read a weaker `p` than the watcher would), or weaker than `p=reject` (`dmarc_weak`: a
+  lower or missing `p`, a lower `sp` or `np`, a `pct` under 100, or a `t` other than `n`, under
+  which receivers apply `p=reject` as quarantine). The zone's apex `_dmarc` is the old product's
   and is never read.
 
 ## First check

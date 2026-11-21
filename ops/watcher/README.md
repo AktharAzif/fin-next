@@ -19,7 +19,7 @@ its settings are broken). A check that cannot read its API fails.
 | `rules` | in each phase `rules apply` writes, the hash of fin-next's own rules (ref `fin_next_`) equals the last registered run's; no `fin_next_` rule elsewhere; no other product's rule names a fin-next host | `cloudflare-config-changed` |
 | `zone` | spec 01 §7.6's settings, Universal SSL on, Bot Fight Mode off | `cloudflare-config-changed` |
 | `access` | Fin Admin's application (whole host, session, cookies, MFA) and its policy hash; no other application covers the admin host or a path under it | `cloudflare-config-changed` |
-| `email` | both sending domains with preview and drop-suppressed off; `_dmarc.auth.<zone>` and `_dmarc.notify.<zone>` each one valid DMARC record (`v=DMARC1` first, `p` right after it, no tag twice) at `p=reject` (BD-17), with no weaker `sp` and no partial `pct` | `email-setting-changed` |
+| `email` | both sending domains with preview and drop-suppressed off; `_dmarc.auth.<zone>` and `_dmarc.notify.<zone>` each one valid DMARC record (`v=DMARC1` first, `p` right after it, no tag twice, only printable ASCII with space and tab as its white space) at `p=reject` (BD-17), with no weaker `sp` or `np`, no partial `pct` and no `t` but `n` | `email-setting-changed` |
 
 The account and the zone are shared with the old product's staging (FD-09). Its own Workers,
 routes, custom domains, Access applications, DNS records (the zone's apex `_dmarc` among them) and
@@ -31,8 +31,11 @@ settings, another product's object waiting for its owner) never hides a later, d
 same failure again on the same target joins its open incident.
 
 Every list is read to its proven end (`src/cloudflare.ts`): every total a list gives must be
-reached, a cursor must run out, and a list with neither is read until a page adds nothing new. A
-read that cannot prove it reached the end fails the check (`api_error`).
+reached, a cursor must run out (and reach its totals too), and a list with neither is read until a
+page adds nothing new; a page that repeats counts as the whole list only once a smaller page size
+still gets all of it back. Every answer must be Cloudflare's envelope with `success: true` and,
+for a list, a `result` that is a list: a body cut off or not JSON, or a missing or `null` result,
+is never read as empty. A read that cannot prove it reached the end fails the check (`api_error`).
 
 ## Settings and secrets
 
