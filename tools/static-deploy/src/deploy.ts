@@ -12,7 +12,9 @@
 //   5. the re-read of verify.ts.
 //
 // Before step 1 the artefact's built files are hashed and compared with the release manifest's
-// `assetManifestHash`, so only the attested build is uploaded. Every write first calls `beforeWrite`
+// `assetManifestHash`. That ties the upload to release.yml's build only because every caller first
+// verified the manifest's own attestation (release.ts) and checked the two rendered files, which the
+// hash leaves out (run.ts's prepareStaticDeploy). Every write first calls `beforeWrite`
 // (in `pnpm fin`, the registered run's check), and the function never takes a body from outside:
 // what is sent is built here, so no caller can add a module or a binding.
 

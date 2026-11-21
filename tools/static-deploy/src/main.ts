@@ -3,23 +3,30 @@
 //
 //   node tools/static-deploy/src/main.ts --env staging --release <sha> --manifest <file> --dir <rendered>
 //
+// Before the token is read, the release manifest's attestation is verified with `gh attestation
+// verify` (release.yml, a push to main, this commit) and every deployment is checked: its
+// static.json, its build's hash against that manifest, and its rendered `_headers` and `env.json`.
 // The token is read from the file FIN_CF_STATIC_TOKEN_FILE names. The account is the one account
 // the token can see (CR-20 is scoped to one), so the job needs no overlay; its ID is masked in
 // Actions before anything prints. The operator machine runs the same code through
-// `pnpm fin static deploy`, inside a registered run.
+// `pnpm fin static deploy`, inside a registered run, with a one-run token instead of CR-20.
 
+import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { cloudflareClient, type FetchFn } from "./cloudflare.ts";
 import { StaticConfigError } from "./config.ts";
-import { loadReleaseManifest } from "./release.ts";
-import { loadEnvironmentStatic, runStaticDeploy } from "./run.ts";
+import type { ExecFn } from "./provenance.ts";
+import { loadVerifiedReleaseManifest } from "./release.ts";
+import { loadEnvironmentStatic, prepareStaticDeploy, uploadAll } from "./run.ts";
 
 export interface MainIo {
   argv: readonly string[];
   env: Readonly<Record<string, string | undefined>>;
   repoRoot: string;
   fetch: FetchFn;
+  /** Runs a program with arguments and no shell (`gh attestation verify`). */
+  exec: ExecFn;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
 }
@@ -79,6 +86,23 @@ export async function main(io: MainIo): Promise<number> {
   const log = (line: string) => io.stdout(`${mask(line)}\n`);
   try {
     const flags = parse(io.argv);
+    const release = flags.get("release") ?? "";
+    const environment = loadEnvironmentStatic(io.repoRoot, flags.get("env") ?? "");
+    const manifest = loadVerifiedReleaseManifest(
+      io.exec,
+      flags.get("manifest") ?? "",
+      environment.identity,
+      release,
+    );
+    log("release manifest: attestation verified (release.yml, a push to main, this commit)");
+    const prepared = prepareStaticDeploy({
+      repoRoot: io.repoRoot,
+      environment,
+      manifest,
+      dir: flags.get("dir") ?? "",
+      ...(flags.has("only") ? { only: flags.get("only") ?? "" } : {}),
+    });
+    log(`static: ${prepared.length} deployment(s) checked against the release manifest`);
     token = readToken(io.env);
     if (io.env.GITHUB_ACTIONS === "true") io.stdout(`::add-mask::${token}\n`);
     const client = cloudflareClient(token, io.fetch);
@@ -90,15 +114,9 @@ export async function main(io: MainIo): Promise<number> {
     }
     accountId = accounts[0].id;
     if (io.env.GITHUB_ACTIONS === "true") io.stdout(`::add-mask::${accountId}\n`);
-    const release = flags.get("release") ?? "";
-    const results = await runStaticDeploy({
+    const results = await uploadAll(prepared, {
       client,
       accountId,
-      repoRoot: io.repoRoot,
-      environment: loadEnvironmentStatic(io.repoRoot, flags.get("env") ?? ""),
-      manifest: loadReleaseManifest(flags.get("manifest") ?? "", release),
-      dir: flags.get("dir") ?? "",
-      ...(flags.has("only") ? { only: flags.get("only") ?? "" } : {}),
       beforeWrite: () => {},
       log,
     });
@@ -128,6 +146,19 @@ if (import.meta.main) {
     env: process.env,
     repoRoot: fileURLToPath(new URL("../../../", import.meta.url)),
     fetch: (url, init) => fetch(url, init),
+    exec: (program, args) => {
+      try {
+        const stdout = execFileSync(program, [...args], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        return { status: 0, stdout, stderr: "" };
+      } catch (error) {
+        const e = error as { status?: number | null; stdout?: string; stderr?: string };
+        return { status: e.status ?? null, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+      }
+    },
     stdout: (t) => {
       process.stdout.write(t);
     },

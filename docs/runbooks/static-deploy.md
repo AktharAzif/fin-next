@@ -3,55 +3,88 @@
 The browser apps are served by assets-only Workers static assets deployments with no script
 ([FD-17]; spec 01 §7.4). Builds are environment-neutral; the deploy renders each build's `_headers`
 and `env.json`, then uploads it through Cloudflare's API with Node built-ins only (BD-16: no
-`wrangler`, so no install script), always after the Railway services have rolled (§6.9).
+`wrangler`, so no install script), always after the Railway services have rolled (§6.9). Both
+commands need `gh`, signed in to GitHub with read access to this repository's attestations.
+
+## 0. Download the release
+
+From the release.yml run for the commit, download, without unpacking:
+
+- the release manifest (artefact `release-<sha>`, unpacked to `release-manifest.json`);
+- each static artefact's zip as GitHub keeps it, into one directory, named
+  `static-<key>-<sha>.zip` for `verify`, `selfie`, `admin`, `console` and `docs`
+  (`gh api repos/AktharAzif/fin-next/actions/artifacts/<id>/zip > <archives>/static-<key>-<sha>.zip`,
+  the `<id>` from `gh api repos/AktharAzif/fin-next/actions/runs/<run>/artifacts`). `gh run download`
+  unpacks, which loses the bytes the attestation covers, so it is not used for these.
 
 ## 1. Render
 
 ```sh
-node ops/fin/src/main.ts static render staging --release <sha> --artefacts <builds> --out <rendered>
+node ops/fin/src/main.ts static render staging --release <sha> --manifest release-manifest.json --archives <archives> --out <rendered>
 ```
 
-- `<builds>/<key>/` is each deployment's attested build: `verify`, `selfie`, `admin`, `console`,
-  `docs` (verify's app builds both `verify` and `selfie`).
-- A build that already holds `_headers`, `env.json` or a source map is refused (exit 65).
-- The renderer is packages/web-host's (`packages/web-host/src/static/render.ts`, P0-D); until it
-  exists the command refuses (exit 78): there is no fallback renderer.
-- The result is checked before anything is written: it names only this environment's hosts, no
-  public output names Fin Admin's host, and `env.json` carries this release and environment.
-- `<rendered>` must be new or empty; each `<rendered>/<key>/` is a copy of the build with the two
-  rendered files.
+Before anything is written (spec 01 §6.9, static steps 1 and 2):
+
+- the release manifest's attestation verifies: release.yml at main of this repository, a `push`, for
+  this commit;
+- each archive's SHA-256 is the manifest's `static.<key>.sha256`, and its own attestation verifies
+  with the same identity;
+- each archive is unpacked in memory from the verified bytes (plain files only: no link, no unsafe
+  path, sizes and CRC-32s as recorded), and its files hash to the manifest's `assetManifestHash`;
+- an archive that holds `_headers`, `env.json` or a source map is refused (exit 65);
+- the renderer is packages/web-host's (`packages/web-host/src/static/render.ts`, P0-D); until it
+  exists the command refuses (exit 78): there is no fallback renderer;
+- the rendered files name only this environment's hosts, no public output names Fin Admin's host,
+  and `env.json` carries this release and environment.
+
+`<rendered>` must be new or empty; each `<rendered>/<key>/` gets the archive's files and the two
+rendered files.
 
 ## 2. Upload
 
-On the operator machine (BD-05), inside a registered run:
+On the operator machine (BD-05), inside a registered run, with the operator token
+(`FIN_CF_TOKEN_FILE`, CR-05). CR-20 never reaches the operator machine:
 
 ```sh
-export FIN_CF_STATIC_TOKEN_FILE=<static deploy token file>
 node ops/fin/src/main.ts static deploy staging --release <sha> --manifest release-manifest.json --dir <rendered> --dry-run
 node ops/fin/src/main.ts static deploy staging --release <sha> --manifest release-manifest.json --dir <rendered>
 ```
 
-From a CI job that holds the static deploy token alone (`staging-static`, CR-20):
+Before any write, and so in the dry run too: the manifest's attestation verifies; every selected
+deployment's `apps/<app>/static.json` holds only the allowlisted keys; every rendered build hashes
+to the manifest's `assetManifestHash`; every `env.json` carries this release and environment and
+every `_headers` holds a Content-Security-Policy for `/*` and no CORS header; and both files equal,
+byte for byte, a fresh render of this release. Any problem refuses the whole run (exit 65), so no
+host moves. The dry run proves the inputs and that CR-05 can read the token permission groups; it
+does not prove the deployed state (that is the watcher's `static` check).
+
+Then, in order:
+
+1. `pnpm fin` mints a one-run token with CR-05: `fin-next-staging-static-run`, Workers Scripts Write
+   on the staging account only, expiring within 60 minutes;
+2. for each deployment, in the order verify, selfie, admin, console, docs: an upload session with
+   every file's path, size and hash (only the files Cloudflare lacks are sent, with the session's own
+   upload token); one script upload whose only part is `metadata` (`compatibility_date` and
+   `assets: {jwt, config: {not_found_handling, html_handling, _headers}}`); `workers.dev` and previews
+   off; the re-read (no module, no handler, no binding, assets present, `workers.dev` and previews
+   off);
+3. the one-run token is revoked when the run ends, whether the uploads passed or failed. If the
+   revocation fails, the output says so: revoke `fin-next-staging-static-run` in Cloudflare by hand
+   (it expires within the hour anyway).
+
+A failure stops the run; the output says which host serves which release
+(`static deploy stopped at <key> (it may serve either release); new release on: ...; previous
+release still on: ...`). `deploy.static_step` per deployment and `deploy.static_done` are written as
+lines.
+
+From a CI job that holds the static deploy token alone (`staging-static`, CR-20, once it exists):
 
 ```sh
 node tools/static-deploy/src/main.ts --env staging --release <sha> --manifest release-manifest.json --dir <rendered>
 ```
 
-For each deployment, in the order verify, selfie, admin, console, docs:
-
-1. its `apps/<app>/static.json` must hold only the allowlisted keys (no `main`, module, binding,
-   `run_worker_first`, route, cron or domain);
-2. the build's files (the rendered `_headers` and `env.json` left out) must hash to the release
-   manifest's `assetManifestHash`;
-3. an upload session with every file's path, size and hash; only the files Cloudflare lacks are sent,
-   with the session's own upload token;
-4. one script upload whose only part is `metadata` (`compatibility_date` and
-   `assets: {jwt, config: {not_found_handling, html_handling, _headers}}`);
-5. `workers.dev` and previews off;
-6. the re-read: no module, no handler, no binding, assets present, `workers.dev` and previews off.
-
-A failure stops the run; the hosts not yet uploaded keep the previous release, and the output says
-which. `deploy.static_step` per deployment and `deploy.static_done` are written as lines.
+It verifies the manifest's attestation and checks every deployment the same way (all but the fresh
+render, which `pnpm fin static render` in the same job did) before it reads the token.
 
 The first upload comes before `pnpm fin routes apply` (the routes need the deployments to exist).
 
@@ -63,5 +96,6 @@ The first upload comes before `pnpm fin routes apply` (the routes need the deplo
 
 ## Roll back
 
-Render and upload the previous release's attested builds the same way; the previous release's
-`/assets/` are carried in every build (FW-C13), so open tabs keep working.
+Render and upload the previous release's attested artefacts the same way, with the previous
+release's manifest and `--release`; the previous release's `/assets/` are carried in every build
+(FW-C13), so open tabs keep working.

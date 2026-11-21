@@ -388,7 +388,10 @@ export class FakeRailway {
   readonly operations: string[] = [];
   egress = new Map<string, string[]>();
   readonly instances = new Map<string, FakeInstance>();
-  readonly deployments = new Map<string, { service: string; statuses: string[]; logs: string[] }>();
+  readonly deployments = new Map<
+    string,
+    { service: string; statuses: string[]; logs: string[]; reads: number }
+  >();
   readonly updates: Array<{ service: string; input: Json }> = [];
   environmentId = "";
   /** The statuses each new deployment reports, in turn; the last one repeats. */
@@ -398,17 +401,55 @@ export class FakeRailway {
     JSON.stringify({ event: "migrate.started" }),
     JSON.stringify({ event: "migrate.done", release }),
   ];
+  /**
+   * How many log reads of a migrate deployment see only its first line, as when Railway's log
+   * ingestion lags the container (the rest of the lines arrive after that many reads).
+   */
+  migrateLogReadsBehind = 0;
+  /** The variables migrate's container started with, per migrate deployment. */
+  readonly migrateEnvironments: Array<Record<string, string>> = [];
+  readonly variableDeletes: Array<{ service: string; name: string }> = [];
   extendedRefused = false;
   variablesRefused = false;
+  /** How the egress read answers: normally, a GraphQL refusal, or a 503 every time. */
+  egressAnswer: "ok" | "refused" | "unavailable" = "ok";
+  /** Instances of a service in another environment of the project, with their domains. */
+  readonly otherEnvironment = new Map<string, string[]>();
 
   constructor(token: string, names: readonly string[]) {
     this.token = token;
-    names.forEach((name, i) => {
-      this.services.set(
-        name,
-        uuid(String.fromCharCode(97 + (i % 6))).replace(/^.{2}/, String(i).padStart(2, "0")),
-      );
-    });
+    for (const name of names) this.addService(name);
+  }
+
+  /** Adds a service to the project (with no instance until one is set or provisioned). */
+  addService(name: string, instance?: Partial<FakeInstance>): void {
+    const i = this.services.size;
+    this.services.set(
+      name,
+      uuid(String.fromCharCode(97 + (i % 6))).replace(/^.{2}/, String(i).padStart(2, "0")),
+    );
+    if (instance !== undefined) {
+      this.instances.set(name, {
+        region: "us-east4-eqdc4a",
+        numReplicas: 1,
+        restartPolicyType: "ALWAYS",
+        sleepApplication: false,
+        ipv6EgressEnabled: false,
+        image: null,
+        domains: [],
+        tcpProxies: 0,
+        healthcheckPath: null,
+        healthcheckTimeout: null,
+        overlapSeconds: 0,
+        drainingSeconds: 0,
+        startCommand: null,
+        cronSchedule: null,
+        variables: {},
+        sealed: new Set(),
+        latestDeployment: null,
+        ...instance,
+      });
+    }
   }
 
   nameOf(id: string): string | undefined {
@@ -528,11 +569,32 @@ export class FakeRailway {
                         startCommand: i.startCommand,
                         cronSchedule: i.cronSchedule,
                       };
+              const other = this.otherEnvironment.get(name);
+              const otherEdge =
+                other === undefined
+                  ? []
+                  : [
+                      {
+                        node:
+                          op === "finStatus"
+                            ? {
+                                environmentId: "other-environment",
+                                source: { image: null },
+                                domains: {
+                                  serviceDomains: other.map((domain) => ({ domain })),
+                                  customDomains: [],
+                                },
+                              }
+                            : { environmentId: "other-environment" },
+                      },
+                    ];
               return {
                 node: {
                   id,
                   name,
-                  serviceInstances: { edges: node === undefined ? [] : [{ node }] },
+                  serviceInstances: {
+                    edges: [...(node === undefined ? [] : [{ node }]), ...otherEdge],
+                  },
                 },
               };
             }),
@@ -562,13 +624,24 @@ export class FakeRailway {
         instance.startCommand = input.startCommand;
       return ok({ serviceInstanceUpdate: true });
     }
+    if (op === "finVariableDelete") {
+      const input = variables.input as { serviceId?: string; name?: string };
+      const target = this.nameOf(String(input.serviceId ?? "")) ?? "";
+      this.variableDeletes.push({ service: target, name: String(input.name) });
+      const instance = this.instances.get(target);
+      if (instance !== undefined) delete instance.variables[String(input.name)];
+      return ok({ variableDelete: true });
+    }
     if (op === "finDeploy") {
       const id = `dep-${this.deployments.size + 1}`;
       const release = this.instances.get(service)?.variables.FIN_RELEASE ?? "";
+      if (service === "migrate")
+        this.migrateEnvironments.push({ ...(this.instances.get(service)?.variables ?? {}) });
       this.deployments.set(id, {
         service,
         statuses: [...this.deployStatuses],
         logs: service === "migrate" ? this.migrateLogs(release) : [],
+        reads: 0,
       });
       const instance = this.instances.get(service);
       if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
@@ -587,9 +660,17 @@ export class FakeRailway {
     }
     if (op === "finLogs") {
       const d = this.deployments.get(String(variables.deploymentId));
-      return ok({ deploymentLogs: (d?.logs ?? []).map((message) => ({ message })) });
+      if (d === undefined) return ok({ deploymentLogs: [] });
+      d.reads++;
+      const lines = d.reads <= this.migrateLogReadsBehind ? d.logs.slice(0, 1) : d.logs;
+      return ok({ deploymentLogs: lines.map((message) => ({ message })) });
     }
     if (op === "finEgress") {
+      if (this.egressAnswer === "refused") return refused("egressGateways");
+      if (this.egressAnswer === "unavailable")
+        return new Response(JSON.stringify({ errors: [{ message: "unavailable" }] }), {
+          status: 503,
+        });
       const name = this.nameOf(String(variables.serviceId)) ?? "";
       return ok({ egressGateways: (this.egress.get(name) ?? []).map((ipv4) => ({ ipv4 })) });
     }

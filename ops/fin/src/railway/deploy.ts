@@ -1,27 +1,33 @@
 // `pnpm fin railway deploy <env> --release <sha> --manifest <file> [--smoke]` (spec 01 §6.9's
 // `deploy-staging`, adapted for the operator machine (BD-05); ARCHITECTURE §11.8's order):
 //
-//   1. refuse while any service has a public domain or a TCP proxy, or static egress differs from
-//      §6.5 (staging is provisioned by hand, [P-13]: fix it there, then deploy);
-//   2. verify every image's attestation (`gh attestation verify`: built by release.yml from main);
-//   3. register the run (the lock, `deploy.started`);
-//   4. when the release lists migrations, run `migrate` with the new api image and wait for its
-//      `migrate.done` for this release;
-//   5. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
+//   1. check that ci.yml's `merge` job succeeded for the commit, and verify the release manifest's
+//      own attestation (release.yml, a push to main, this commit): its digests are trusted only then;
+//   2. refuse while any service, listed in the settings or not, has a public domain or a TCP proxy,
+//      while the project has a service the settings do not list or an instance in another
+//      environment, while a superuser reference stands outside a run, or while static egress
+//      differs from §6.5 or could not be read (staging is provisioned by hand, [P-13]: fix it there,
+//      then deploy; `--accept-unchecked-egress` takes an unread egress on the operator's word);
+//   3. refuse a partial release: migrations with no api image, or a service the release builds no
+//      image for while it runs an earlier release's image;
+//   4. verify every image's attestation with the same pinned identity, bound to this commit;
+//   5. register the run (the lock, `deploy.started`);
+//   6. when the release lists migrations, run `migrate` with the new api image and the superuser
+//      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
+//      the run), poll its log until `migrate.done` for this release, then remove the reference;
+//   7. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
-//      deploy, waiting for SUCCESS (Railway's health check is /readyz) and the running digest;
-//   6. roll cloudflared-admin and cloudflared-public only when their image changed;
-//   7. check again that no service has a domain or a TCP proxy; with --smoke, fetch the public
-//      health paths; write `deploy.done` with the running digests.
+//      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
+//      release's minimum schema version) and the running digest;
+//   8. roll cloudflared-admin and cloudflared-public only when their image changed;
+//   9. check again that nothing is exposed and every service runs the digest recorded for it; with
+//      --smoke, fetch the public health paths; write `deploy.done`, and record in `run.done` the
+//      digest of every service on the release, rolled or kept, which `railway verify` checks.
 //
 // A failed step stops the deploy: the services already rolled stay on the new release, the rest keep
 // the previous one, `deploy.failed` names the step and the output prints which service runs what.
 
-import { StaticConfigError } from "../../../../tools/static-deploy/src/config.ts";
-import {
-  loadReleaseManifest,
-  type ReleaseManifest,
-} from "../../../../tools/static-deploy/src/release.ts";
+import { own, type ReleaseManifest } from "../../../../tools/static-deploy/src/release.ts";
 import { railway } from "../cloudflare/common.ts";
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
@@ -29,46 +35,34 @@ import type { Context } from "../core/context.ts";
 import { DataError, ProviderError, RefusedError, UsageError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
+import { checkMergeJob, verifiedManifest, verifyImage } from "../release/provenance.ts";
 import type { RailwayApi } from "./api.ts";
-import { findings, type Inspection, inspectRailway } from "./inspect.ts";
+import { findings, type Inspection, inspectRailway, REFUSED_CHECKS } from "./inspect.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
 const POLL_MS = 5_000;
 const SERVICE_TIMEOUT_MS = 15 * 60_000;
+const FAILED = new Set(["FAILED", "CRASHED", "REMOVED", "SKIPPED"]);
 
 const INSTANCE_UPDATE =
   "mutation finInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }";
 const DEPLOY =
   "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }";
-// UNVERIFIED field names (SP-03): a deployment's status and its log lines.
+// UNVERIFIED field names (SP-03): a deployment's status and its log lines, and removing a variable.
 const DEPLOYMENT = "query finDeployment($id: String!) { deployment(id: $id) { id status } }";
 const LOGS =
   "query finLogs($deploymentId: String!) { deploymentLogs(deploymentId: $deploymentId, limit: 500) { message } }";
+const VARIABLE_DELETE =
+  "mutation finVariableDelete($input: VariableDeleteInput!) { variableDelete(input: $input) }";
 
 /** The image reference a service runs for a release. */
 export function imageRef(repository: string, image: string, digest: string): string {
   return `${repository}${image}@${digest}`;
 }
 
-/** Verifies an image's attestation: built by release.yml, from main, in this repository. */
-export function verifyAttestation(ctx: Context, ref: string): void {
-  const a = ctx.settings.railway.attestation;
-  const result = ctx.runtime.exec("gh", [
-    "attestation",
-    "verify",
-    `oci://${ref}`,
-    "--repo",
-    a.repository,
-    "--signer-workflow",
-    a.workflow,
-    "--source-ref",
-    a.ref,
-  ]);
-  if (result.status !== 0) {
-    throw new DataError(
-      `the attestation of ${ref.split("@")[0]} does not verify (built by ${a.workflow} from ${a.ref}?)`,
-    );
-  }
+async function deploymentStatus(rw: RailwayApi, id: string): Promise<string> {
+  const data = await rw.query<{ deployment: { status: string } }>(DEPLOYMENT, { id });
+  return data.deployment.status;
 }
 
 async function waitForDeployment(
@@ -79,10 +73,9 @@ async function waitForDeployment(
 ): Promise<void> {
   const attempts = Math.ceil(SERVICE_TIMEOUT_MS / POLL_MS);
   for (let i = 0; i < attempts; i++) {
-    const data = await rw.query<{ deployment: { status: string } }>(DEPLOYMENT, { id });
-    const status = data.deployment.status;
+    const status = await deploymentStatus(rw, id);
     if (status === "SUCCESS") return;
-    if (["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(status)) {
+    if (FAILED.has(status)) {
       throw new ProviderError("railway", `${what}: the deployment ended ${status}`, 0);
     }
     await ctx.runtime.sleep(POLL_MS);
@@ -94,28 +87,78 @@ async function waitForDeployment(
   );
 }
 
-/** Waits for `migrate.done` for this release in the migrate deployment's log (spec 01 §6.9 step 3). */
-async function waitForMigrate(rw: RailwayApi, id: string, release: string): Promise<void> {
-  const data = await rw.query<{ deploymentLogs: Array<{ message?: string }> }>(LOGS, {
-    deploymentId: id,
-  });
-  for (const { message } of data.deploymentLogs) {
-    let line: Record<string, unknown>;
+/**
+ * What the migrate deployment's log says so far: "done" once `migrate.done` for this release is
+ * there, "failed" on any `migrate.failed`, undefined otherwise. A line that is not a JSON object
+ * (plain text, `null`, a number) is skipped.
+ */
+export function migrateOutcome(
+  lines: ReadonlyArray<{ message?: unknown }>,
+  release: string,
+): "done" | "failed" | undefined {
+  for (const { message } of lines) {
+    if (typeof message !== "string") continue;
+    let line: unknown;
     try {
-      line = JSON.parse(message ?? "") as Record<string, unknown>;
+      line = JSON.parse(message);
     } catch {
       continue;
     }
-    if (line.event === "migrate.failed")
-      throw new ProviderError("railway", "migrate: migrate.failed", 0);
-    if (line.event === "migrate.done" && line.release === release) return;
+    if (typeof line !== "object" || line === null || Array.isArray(line)) continue;
+    const { event, release: lineRelease } = line as Record<string, unknown>;
+    if (event === "migrate.failed") return "failed";
+    if (event === "migrate.done" && lineRelease === release) return "done";
   }
-  throw new ProviderError("railway", "migrate: no migrate.done for this release in its log", 0);
+  return undefined;
 }
 
-function exposures(ctx: Context, inspection: Inspection): string[] {
+/**
+ * Waits for `migrate.done` for this release (spec 01 §6.9 step 3). `migrate` has no health check, so
+ * Railway's SUCCESS says only that the container started, and its log reaches the API late: each
+ * pass reads the log, then the deployment's status, until the line arrives, `migrate.failed` or a
+ * failed deployment stops it, or the time runs out. A failed status gets one last log read, in
+ * case the line was still on its way.
+ */
+async function waitForMigrate(
+  ctx: Context,
+  rw: RailwayApi,
+  id: string,
+  release: string,
+): Promise<void> {
+  const read = async () => {
+    const data = await rw.query<{ deploymentLogs: Array<{ message?: unknown }> | null }>(LOGS, {
+      deploymentId: id,
+    });
+    const outcome = migrateOutcome(data.deploymentLogs ?? [], release);
+    if (outcome === "failed") throw new ProviderError("railway", "migrate: migrate.failed", 0);
+    return outcome === "done";
+  };
+  const attempts = Math.ceil(SERVICE_TIMEOUT_MS / POLL_MS);
+  for (let i = 0; i < attempts; i++) {
+    if (await read()) return;
+    const status = await deploymentStatus(rw, id);
+    if (FAILED.has(status)) {
+      await ctx.runtime.sleep(POLL_MS);
+      if (await read()) return;
+      throw new ProviderError(
+        "railway",
+        `migrate: the deployment ended ${status} with no migrate.done for this release`,
+        0,
+      );
+    }
+    await ctx.runtime.sleep(POLL_MS);
+  }
+  throw new ProviderError(
+    "railway",
+    `migrate: no migrate.done for this release within ${SERVICE_TIMEOUT_MS / 60_000} minutes`,
+    0,
+  );
+}
+
+/** The findings a deploy refuses on (exposure, unknown services, other environments, references). */
+export function refusals(ctx: Context, inspection: Inspection): string[] {
   return findings(ctx, inspection)
-    .filter((f) => f.check === "domain" || f.check === "tcp-proxy")
+    .filter((f) => REFUSED_CHECKS.has(f.check))
     .map((f) => `${f.service} (${f.check})`);
 }
 
@@ -152,6 +195,11 @@ export const railwayDeploy: Command = {
       description: "the release manifest (release-manifest.json)",
     },
     { name: "smoke", kind: "boolean", description: "fetch the public health paths after the roll" },
+    {
+      name: "accept-unchecked-egress",
+      kind: "boolean",
+      description: "deploy although Railway refused the static egress read (checked by hand)",
+    },
   ],
   overlay: true,
   mutating: true,
@@ -162,19 +210,16 @@ export const railwayDeploy: Command = {
     if (!SHA.test(release))
       throw new UsageError("--release must be the full 40-character commit SHA");
     if (manifestFile === undefined) throw new UsageError("--manifest is required");
-    let manifest: ReleaseManifest;
-    try {
-      manifest = loadReleaseManifest(manifestFile, release);
-    } catch (error) {
-      throw error instanceof StaticConfigError ? new DataError(error.message) : error;
-    }
+    checkMergeJob(ctx, release);
+    const manifest: ReleaseManifest = verifiedManifest(ctx, manifestFile, release);
     const s = ctx.settings.railway;
     const rw = railway(ctx);
     const before = await inspectRailway(ctx, rw);
-    const exposed = exposures(ctx, before);
-    if (exposed.length > 0) {
+    for (const n of before.notChecked) ctx.out.info(`  ? not checked: ${n}`);
+    const refused = refusals(ctx, before);
+    if (refused.length > 0) {
       throw new RefusedError(
-        `refusing to deploy while a service is exposed: ${exposed.join(", ")} (spec 01 §6.3)`,
+        `refusing to deploy: ${refused.join(", ")} (spec 01 §6.1, §6.3; NB-07); run railway verify for the details`,
       );
     }
     const egress = findings(ctx, before).filter((f) => f.check === "static-egress");
@@ -183,26 +228,53 @@ export const railwayDeploy: Command = {
         `static egress differs from spec 01 §6.5 on ${egress.map((f) => f.service).join(", ")}; fix it by hand (P-13), then deploy`,
       );
     }
+    const egressUnchecked = before.egressUnread.length > 0;
+    if (egressUnchecked && !flagBool(ctx.args, "accept-unchecked-egress")) {
+      throw new RefusedError(
+        `Railway refused the static egress read for ${before.egressUnread.join(", ")}, so the egress check could not run; check spec 01 §6.5 by hand, then pass --accept-unchecked-egress`,
+      );
+    }
+    if (egressUnchecked)
+      ctx.out.warn(
+        "static egress was not read; deploying on the operator's word (--accept-unchecked-egress)",
+      );
 
     const rolls: Roll[] = [];
     const changes: Change[] = [];
+    /** Every service on the release after the run: rolled, or kept because its image is unchanged. */
+    const onRelease = new Map<string, string>();
+    const notBuilt: string[] = [];
     const plan = (service: string, task: boolean, connector: boolean) => {
-      const want = s.services[service];
+      const want = own(s.services, service);
       const image = want?.image;
-      if (want === undefined || image === undefined) return;
-      const digest = manifest.images[image];
+      if (want === undefined || image === undefined) {
+        throw new DataError(`${service} has no image in the settings`);
+      }
+      const digest = own(manifest.images, image);
+      const running = before.instances.get(service)?.image;
       if (digest === undefined) {
+        if (task) {
+          throw new DataError(
+            `the release lists migrations but its manifest names no ${image} for migrate; no service rolls onto a schema that was not migrated`,
+          );
+        }
+        if (running !== null && running !== undefined && running !== "") {
+          throw new DataError(
+            `the release manifest names no ${image}, and ${service} runs an earlier release's image; a partial release is refused`,
+          );
+        }
+        notBuilt.push(service);
         changes.push({
-          kind: task ? "task" : "service",
+          kind: "service",
           name: service,
           action: "keep",
-          detail: "the release manifest names no image for it",
+          detail: `the release builds no ${image}, and ${service} has never run an image`,
         });
         return;
       }
       const ref = imageRef(s.imageRepository, image, digest);
-      const running = before.instances.get(service)?.image;
       if (connector && running === ref) {
+        onRelease.set(service, ref);
         changes.push({ kind: "service", name: service, action: "keep", detail: "image unchanged" });
         return;
       }
@@ -225,11 +297,40 @@ export const railwayDeploy: Command = {
     for (const service of s.deployOrder) plan(service, false, false);
     for (const service of s.connectorOrder) plan(service, false, true);
 
-    for (const ref of new Set(rolls.map((r) => r.ref))) verifyAttestation(ctx, ref);
-    ctx.out.info(`attestations: ${new Set(rolls.map((r) => r.ref)).size} image(s) verified`);
+    const refs = new Set(rolls.map((r) => r.ref));
+    for (const ref of refs) verifyImage(ctx, ref, release);
+    ctx.out.info(`attestations: ${refs.size} image(s) verified for this commit`);
 
-    const running: Record<string, string> = {};
     let started = false;
+    const reference = s.bootstrapReference;
+    const runMigrate = async (serviceId: string, roll: Roll) => {
+      let failure: unknown;
+      try {
+        const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
+          serviceId,
+          environmentId: rw.environmentId,
+        });
+        await waitForMigrate(ctx, rw, deployed.serviceInstanceDeployV2, release);
+      } catch (error) {
+        failure = error;
+      }
+      try {
+        await rw.mutate(ctx.run, VARIABLE_DELETE, {
+          input: {
+            projectId: rw.projectId,
+            environmentId: rw.environmentId,
+            serviceId,
+            name: reference.variable,
+          },
+        });
+      } catch (error) {
+        ctx.out.error(
+          `${reference.variable} could not be removed from ${roll.service}: remove it by hand now (spec 01 §6.3, §6.6)`,
+        );
+        failure ??= error;
+      }
+      if (failure !== undefined) throw failure;
+    };
     return ctx.applyPlan(
       `railway deploy ${release.slice(0, 12)}`,
       changes,
@@ -240,7 +341,7 @@ export const railwayDeploy: Command = {
         }
         const roll = rolls.find((r) => r.service === change.name);
         if (roll === undefined) return;
-        const want = s.services[roll.service];
+        const want = own(s.services, roll.service);
         const serviceId = await rw.serviceId(roll.service);
         try {
           await rw.mutate(ctx.run, INSTANCE_UPDATE, {
@@ -261,16 +362,21 @@ export const railwayDeploy: Command = {
               FIN_RELEASE: release,
               FIN_DRAIN_SECONDS: String(want?.drainingSeconds ?? 0),
               PORT: "8080",
+              ...(roll.task
+                ? { FIN_RUN_ID: ctx.run.id, [reference.variable]: reference.value }
+                : {}),
             },
             `pnpm fin railway deploy ${release.slice(0, 12)} (${ctx.run.id})`,
           );
-          const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
-            serviceId,
-            environmentId: rw.environmentId,
-          });
-          await waitForDeployment(ctx, rw, deployed.serviceInstanceDeployV2, roll.service);
-          if (roll.task) await waitForMigrate(rw, deployed.serviceInstanceDeployV2, release);
-          running[roll.service] = roll.ref;
+          if (roll.task) await runMigrate(serviceId, roll);
+          else {
+            const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
+              serviceId,
+              environmentId: rw.environmentId,
+            });
+            await waitForDeployment(ctx, rw, deployed.serviceInstanceDeployV2, roll.service);
+          }
+          onRelease.set(roll.service, roll.ref);
           ctx.run.line("deploy.step", "info", {
             release,
             step: roll.task ? "migrate" : "roll",
@@ -278,32 +384,38 @@ export const railwayDeploy: Command = {
           });
         } catch (error) {
           ctx.run.line("deploy.failed", "error", { release, step: roll.service });
+          const rolled = rolls.filter((r) => onRelease.has(r.service)).map((r) => r.service);
           ctx.out.error(
-            `deploy stopped at ${roll.service}; on the new release: ${Object.keys(running).join(", ") || "none"}`,
+            `deploy stopped at ${roll.service}; on the new release: ${rolled.join(", ") || "none"}`,
           );
           throw error;
         }
       },
-      { release },
+      { release, ...(egressUnchecked ? { egressUnchecked: true } : {}) },
       async () => {
         if (!started) return {};
         const after = await inspectRailway(ctx, rw);
-        const exposedAfter = exposures(ctx, after);
+        const exposedAfter = refusals(ctx, after);
         if (exposedAfter.length > 0) {
           ctx.run.line("deploy.failed", "error", { release, step: "checks" });
-          throw new RefusedError(
-            `a service is exposed after the deploy: ${exposedAfter.join(", ")}`,
-          );
+          throw new RefusedError(`after the deploy: ${exposedAfter.join(", ")}`);
         }
-        for (const [service, state] of after.instances) {
-          if (running[service] !== undefined && state.image !== running[service]) {
+        for (const [service, ref] of onRelease) {
+          if (after.instances.get(service)?.image !== ref) {
             ctx.run.line("deploy.failed", "error", { release, step: "digest" });
             throw new ProviderError("railway", `${service} does not report the deployed digest`, 0);
           }
         }
         if (flagBool(ctx.args, "smoke")) await smoke(ctx);
-        ctx.run.line("deploy.done", "info", { release, services: Object.keys(running).length });
-        return { running };
+        ctx.run.line("deploy.done", "info", {
+          release,
+          services: onRelease.size,
+          ...(notBuilt.length > 0 ? { notBuilt } : {}),
+        });
+        return {
+          running: Object.fromEntries(onRelease),
+          ...(notBuilt.length > 0 ? { notBuilt } : {}),
+        };
       },
     );
   },

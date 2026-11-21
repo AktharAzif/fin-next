@@ -106,6 +106,19 @@
     }
   },
   "staticOrder": ["verify", "selfie", "admin", "console", "docs"],
+  "staticToken": {
+    "$comment": "The one-run token pnpm fin static deploy mints with the operator token on the operator machine and revokes after the run (spec 01 §6.9, BD-05); CR-20 itself never reaches the operator machine.",
+    "name": "fin-next-staging-static-run",
+    "permissionGroup": "Workers Scripts Write",
+    "expiryMinutes": 60
+  },
+  "release": {
+    "$comment": "Who builds and attests a release (CI-05; spec 01 §6.9 step 2): release.yml on a push to main of this repository, the owner written as GitHub writes it, because the certificate identity is compared exactly; and the ci.yml job whose success the deploy requires (spec 07 §2.3.4).",
+    "repository": "AktharAzif/fin-next",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/heads/main",
+    "mergeCheck": { "workflow": ".github/workflows/ci.yml", "job": "merge" }
+  },
   "access": {
     "application": "fin-next-staging-admin",
     "policy": "fin-next-staging-staff",
@@ -136,10 +149,10 @@
     "project": "fin-next-staging",
     "region": "us-east4-eqdc4a",
     "imageRepository": "ghcr.io/aktharazif/",
-    "attestation": {
-      "repository": "aktharazif/fin-next",
-      "workflow": "aktharazif/fin-next/.github/workflows/release.yml",
-      "ref": "refs/heads/main"
+    "bootstrapReference": {
+      "$comment": "spec 01 §6.6 steps 4 and 6: the superuser URL referenced into migrate for one registered run only, set when the run starts migrate and removed when migrate ends.",
+      "variable": "FIN_BOOTSTRAP_DATABASE_URL",
+      "value": "${{postgres.DATABASE_URL}}"
     },
     "smoke": [
       { "host": "api", "path": "/health" },

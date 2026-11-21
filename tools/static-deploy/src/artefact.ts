@@ -32,6 +32,8 @@ export interface Artefact {
   files: AssetFile[];
   /** The rendered `_headers`, sent as the deployment's headers configuration. */
   headers: string;
+  /** The rendered `env.json`, as text (it is also one of the files). */
+  env: string | undefined;
 }
 
 const TYPES: Record<string, string> = {
@@ -74,6 +76,15 @@ export function contentTypeOf(path: string): string {
 export function readArtefact(dir: string): Artefact {
   const files: AssetFile[] = [];
   let headers: string | undefined;
+  let env: string | undefined;
+  let root: ReturnType<typeof lstatSync> | undefined;
+  try {
+    root = lstatSync(dir);
+  } catch {
+    root = undefined;
+  }
+  if (root === undefined || !root.isDirectory())
+    throw new StaticConfigError("no rendered build (run pnpm fin static render)");
   const walk = (current: string): void => {
     for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) =>
       a.name.localeCompare(b.name),
@@ -101,6 +112,7 @@ export function readArtefact(dir: string): Artefact {
       if (stat.size > MAX_FILE_BYTES)
         throw new StaticConfigError(`${path} is over the 25 MiB asset limit`);
       const content = readFileSync(abs);
+      if (path === "/env.json") env = content.toString("utf8");
       files.push({
         path,
         abs,
@@ -119,7 +131,47 @@ export function readArtefact(dir: string): Artefact {
     );
   if (!files.some((f) => f.path === "/index.html"))
     throw new StaticConfigError("the artefact has no /index.html");
-  return { dir, files, headers };
+  return { dir, files, headers, env };
+}
+
+/**
+ * The checks the upload makes on the two rendered files, which the release's built-files hash leaves
+ * out, so a `_headers` or `env.json` changed after the render cannot ride along: `env.json` carries
+ * this release and environment, and `_headers` holds a Content-Security-Policy for `/*`, no
+ * cross-origin (CORS) header and no line over 2,000 characters. `pnpm fin static deploy` also
+ * renders both again and compares them byte for byte; this is the floor the CI entry point keeps.
+ */
+export function checkRenderedFiles(artefact: Artefact, release: string, environment: string): void {
+  if (artefact.env === undefined)
+    throw new StaticConfigError(
+      "the artefact has no rendered env.json (run pnpm fin static render)",
+    );
+  let env: unknown;
+  try {
+    env = JSON.parse(artefact.env);
+  } catch {
+    throw new StaticConfigError("the rendered env.json is not valid JSON");
+  }
+  if (typeof env !== "object" || env === null || Array.isArray(env))
+    throw new StaticConfigError("the rendered env.json is not an object");
+  const record = env as Record<string, unknown>;
+  if (record.release !== release)
+    throw new StaticConfigError("the rendered env.json does not carry this release");
+  if (record.environment !== environment)
+    throw new StaticConfigError("the rendered env.json does not carry this environment");
+  const lines = artefact.headers.split("\n");
+  if (lines.some((line) => line.length > 2000))
+    throw new StaticConfigError("a rendered _headers line is over 2,000 characters");
+  if (lines.some((line) => /^\s*access-control-/i.test(line)))
+    throw new StaticConfigError("the rendered _headers sets a cross-origin (CORS) header");
+  let inRoot = false;
+  let csp = false;
+  for (const line of lines) {
+    if (/^\S/.test(line)) inRoot = line.trim() === "/*";
+    else if (inRoot && /^\s+content-security-policy:\s*\S/i.test(line)) csp = true;
+  }
+  if (!csp)
+    throw new StaticConfigError("the rendered _headers has no Content-Security-Policy for /*");
 }
 
 /** The upload session's manifest: path to hash and size. */

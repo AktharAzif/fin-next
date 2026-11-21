@@ -2,22 +2,33 @@
 
 Railway staging is provisioned once by hand against spec 01 §6's checklist ([P-13]); these two
 commands check it and deploy releases to it (spec 01 §6.8, §6.9; ARCHITECTURE §11.8). Both need
-`FIN_OVERLAY_FILE` and `FIN_RAILWAY_TOKEN_FILE` (the staging project token, CR-04).
+`FIN_OVERLAY_FILE` and `FIN_RAILWAY_TOKEN_FILE` (the staging project token, CR-04). `railway deploy`
+also needs `gh`, signed in to GitHub with read access to this repository's Actions and attestations.
 
 ## `railway verify`
 
-Read-only, registers no run. For every service of `ops/environments/staging.json` it reports drift
-(`!`), and lists what it could not read (`?`), which never counts as passing:
+Read-only, registers no run. For every service it reports drift (`!`), and lists what it could not
+read (`?`), which never counts as passing:
 
-- exists in the environment; no public domain and no TCP proxy (NB-07);
+- every service of `ops/environments/staging.json` exists in the environment; a service the settings
+  do not list is drift (`unknown`), and its domains and TCP proxies are checked like any other's;
+- no public domain and no TCP proxy on any service (NB-07); no instance in another environment of
+  the project (spec 01 §6.1: only the default environment, no PR environments); no
+  `FIN_BOOTSTRAP_DATABASE_URL` outside a registered run;
 - region, replicas, restart policy; app sleeping off; outbound IPv6 off;
 - the health check (`/readyz`, 60 s), overlap and draining, start command and cron;
 - the image is set by digest from `ghcr.io/aktharazif/`, is the service's own image, and is the
-  digest the last registered `railway deploy` recorded;
+  digest the registered deploys recorded for that service (every deploy records every service it
+  rolled or kept, connectors included);
 - no secret-named variable (spec 01 §6.7) is readable: every one is sealed;
 - static egress on exactly the services §6.5 lists, with the overlay's `staticEgress` addresses.
 
-Memory limits, PITR and the deployment webhook have no read in Phase 0: check them by hand.
+Listed as not checked, every time: memory limits, PITR and the deployment webhook; staged but
+undeployed changes; image auto-updates, Railway's CDN and Edge Rules, hard usage limits; shared
+variables holding a secret. Check those by hand. Also listed: any read Railway refused (SP-03,
+SP-08), any field Railway answered with no value, and the digest of a service no registered deploy
+in this machine's run log recorded. A read that got no answer at all (a network error, a 429 or a
+5xx after the retries) stops the command with exit 69 instead: run it again.
 
 ```sh
 node ops/fin/src/main.ts railway verify staging     # exit 0 no drift, 1 drift
@@ -25,26 +36,53 @@ node ops/fin/src/main.ts railway verify staging     # exit 0 no drift, 1 drift
 
 ## `railway deploy`
 
+Download the release manifest first (the artefact `release-<sha>` of the release.yml run for the
+commit), then:
+
 ```sh
 node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest release-manifest.json --dry-run
 node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest release-manifest.json --smoke
 ```
 
-1. Refuses while any service has a public domain or a TCP proxy, or static egress differs from
-   §6.5. Fix that by hand first (P-13), then deploy.
-2. Verifies every image's attestation with `gh attestation verify` (built by `release.yml` from
-   `refs/heads/main` of this repository). Any failure refuses the deploy before a change.
-3. Registers the run (the lock), `deploy.started`.
-4. When the release manifest lists migrations: runs `migrate` with the new api image
-   (`dist/main.js --migrate`) and waits for its `migrate.done` line for this release.
-5. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
+1. Checks that `ci.yml`'s `merge` job succeeded for exactly this commit, on a push to main (spec 07
+   §2.3.4). No run, a run still going, no `merge` job, or any conclusion but `success` refuses the
+   deploy (exit 77). Until P0-B's `merge` job exists in `ci.yml`, every deploy refuses here.
+2. Verifies the release manifest's own attestation with `gh attestation verify`: the certificate
+   identity is exactly `https://github.com/AktharAzif/fin-next/.github/workflows/release.yml@refs/heads/main`
+   (the owner as GitHub writes it), the source commit is `--release`, the run was a `push`, and no
+   self-hosted runner signed it. Only then are its digests trusted.
+3. Refuses while any service, listed or not, has a public domain or a TCP proxy; while the project
+   has a service the settings do not list or an instance in another environment; while
+   `FIN_BOOTSTRAP_DATABASE_URL` is set outside a run; or while static egress differs from §6.5. Fix
+   that by hand first (P-13), then deploy. If Railway refuses the static egress read, the deploy
+   refuses too: check §6.5 by hand in Railway's dashboard, then pass `--accept-unchecked-egress`,
+   which the run records.
+4. Refuses a partial release: migrations with no `fin-next-api` image, or a service the release
+   builds no image for while it runs an earlier release's image. A service that has never run an
+   image (payments, until its image exists) is kept, and `run.done` lists it under `notBuilt`.
+5. Verifies every image's attestation with the same identity, bound to this commit. Any failure
+   refuses the deploy before a change.
+6. Registers the run (the lock), `deploy.started`.
+7. When the release manifest lists migrations: runs `migrate` with the new api image
+   (`dist/main.js --migrate`), with `FIN_BOOTSTRAP_DATABASE_URL` set to the reference
+   `${{postgres.DATABASE_URL}}` and `FIN_RUN_ID` for this run only (spec 01 §6.6 step 6; migrate gives
+   `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
+   `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
+   deployment. Then it removes the reference, whether migrate passed or failed. If the removal fails,
+   remove the variable from `migrate` by hand at once.
+8. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
-   then a deploy, waiting up to 15 minutes for `SUCCESS` (Railway's health check is `/readyz`).
-6. Rolls `cloudflared-admin` and `cloudflared-public` only when their image changed. The standby
+   then a deploy, waiting up to 15 minutes for `SUCCESS` (Railway's health check is `/readyz`, which
+   fails below the release's minimum schema version, so no service takes traffic ahead of its schema).
+9. Rolls `cloudflared-admin` and `cloudflared-public` only when their image changed. The standby
    `-b` services and `cloudflared-db` are never rolled here.
-7. Checks again that nothing is exposed and that each rolled service reports its new digest; with
-   `--smoke`, fetches `/health` on the API host and `/api/health` on the console and verify hosts.
-   `deploy.done` and `run.done` record the running digests (which `railway verify` then checks).
+10. Checks again everything step 3 refuses on, and that each service on the release reports its
+    digest; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console and
+    verify hosts. `deploy.done` is written and `run.done` records the digest of every service on the
+    release, kept connectors included, which `railway verify` then checks.
+
+Not done here yet: reading the schema version through `api`'s private health (the operator machine
+has no route into Railway's private network; `/readyz` enforces it per service, step 8).
 
 Then upload the static builds (`static-deploy.md`): a new page must never meet an old API.
 
@@ -57,4 +95,5 @@ same command again: every service is set to the release's digest, so a re-run co
 back, deploy the previous release's manifest the same way; `migrate` never runs backwards.
 
 Wake the owner if a service shows a domain or a TCP proxy that nobody added in a registered run
-(`railway-exposed.md`), or if an attestation fails for a digest that came from `release.yml`.
+(`railway-exposed.md`), if an attestation fails for a digest that came from `release.yml`, or if
+`FIN_BOOTSTRAP_DATABASE_URL` is found on a service outside a run.

@@ -1,9 +1,19 @@
 // The release manifest (`release-manifest.json`, ARCHITECTURE §11.7, written by release.yml): the
 // commit, each image's digest, each static artefact's SHA-256 and asset manifest hash. Only the
 // fields a deploy reads are validated here; anything malformed refuses the deploy.
+//
+// A deploy trusts the manifest only once its own attestation verifies (release.yml attests it as
+// `release-<sha>`): loadVerifiedReleaseManifest checks it with the release's identity and parses the
+// exact bytes it verified. There is no unverified loader. Lookups by a name that came from outside go
+// through own(), so a key such as `constructor` is never mistaken for an entry.
 
-import { readFileSync } from "node:fs";
 import { StaticConfigError } from "./config.ts";
+import {
+  type ExecFn,
+  ProvenanceError,
+  type ReleaseIdentity,
+  verifyFileAttestation,
+} from "./provenance.ts";
 
 export interface StaticEntry {
   artefact: string;
@@ -78,12 +88,33 @@ export function parseReleaseManifest(raw: unknown, release: string): ReleaseMani
   return { commit: release, images, static: statics, migrations: migrations as string[] };
 }
 
-export function loadReleaseManifest(file: string, release: string): ReleaseManifest {
+/** An own entry of a record, or undefined (never an inherited member such as `constructor`). */
+export function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/**
+ * Verifies the release manifest's attestation (release.yml, a push to main, this commit) and parses
+ * the bytes that were verified. Anything else refuses the deploy before a change.
+ */
+export function loadVerifiedReleaseManifest(
+  exec: ExecFn,
+  file: string,
+  identity: ReleaseIdentity,
+  release: string,
+): ReleaseManifest {
+  let bytes: Buffer;
+  try {
+    bytes = verifyFileAttestation(exec, file, identity, release, "the release manifest");
+  } catch (error) {
+    if (error instanceof ProvenanceError) throw new StaticConfigError(error.message);
+    throw error;
+  }
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(file, "utf8"));
+    raw = JSON.parse(bytes.toString("utf8"));
   } catch {
-    throw new StaticConfigError("the release manifest is missing or not valid JSON");
+    throw new StaticConfigError("the release manifest is not valid JSON");
   }
   return parseReleaseManifest(raw, release);
 }

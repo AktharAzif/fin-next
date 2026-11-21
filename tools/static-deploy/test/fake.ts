@@ -1,10 +1,130 @@
 // A fake of the Cloudflare endpoints an assets-only upload uses, shaped like SP-26's answers. It
 // records each call, keeps the uploaded assets by hash, and builds the script's state from the one
 // metadata part it is given, so a test sees exactly what a real upload would leave behind.
+//
+// FakeGh stands in for the `gh` CLI: `gh attestation verify` behaves as gh 2.102 does for the flags
+// the deploy passes (an exact, case-sensitive certificate identity; the source commit), and
+// `gh api` answers the two GitHub Actions reads the merge-job check makes.
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { FetchFn } from "../src/cloudflare.ts";
+import type { ExecResult } from "../src/provenance.ts";
 
 export const ACCOUNT = "1".repeat(32);
+
+/** The repository as GitHub writes it, and release.yml's certificate identity on main. */
+export const REPOSITORY = "AktharAzif/fin-next";
+export const RELEASE_SAN = `https://github.com/${REPOSITORY}/.github/workflows/release.yml@refs/heads/main`;
+
+export class FakeGh {
+  readonly calls: string[][] = [];
+  /** The SubjectAlternativeName release.yml's certificates carry. */
+  san = RELEASE_SAN;
+  /** The event of the run that signed (`push` for a real release). */
+  trigger = "push";
+  /** The commit the attestations were built from; undefined means whichever commit is asked. */
+  builtFrom: string | undefined;
+  /** SHA-256s of the files with an attestation (anything else does not verify). */
+  readonly attestedFiles = new Set<string>();
+  /** Image subjects (`oci://...`) with no attestation. */
+  readonly unattestedImages = new Set<string>();
+  /** The merge job's conclusion; undefined means ci.yml has no run for the commit. */
+  mergeConclusion: string | undefined = "success";
+
+  attest(bytes: Buffer | string): void {
+    this.attestedFiles.add(createHash("sha256").update(bytes).digest("hex"));
+  }
+
+  readonly exec = (program: string, args: readonly string[]): ExecResult => {
+    this.calls.push([program, ...args]);
+    const fail = (stderr: string): ExecResult => ({ status: 1, stdout: "", stderr });
+    if (program !== "gh") return { status: 127, stdout: "", stderr: "not found" };
+    const flag = (name: string) => {
+      const i = args.indexOf(name);
+      return i < 0 ? undefined : args[i + 1];
+    };
+    if (args[0] === "attestation" && args[1] === "verify") {
+      const subject = args[2] ?? "";
+      if (subject.startsWith("oci://")) {
+        if (this.unattestedImages.has(subject)) return fail("no attestations found");
+      } else {
+        let digest: string;
+        try {
+          digest = createHash("sha256").update(readFileSync(subject)).digest("hex");
+        } catch {
+          return fail("file not found");
+        }
+        if (!this.attestedFiles.has(digest)) return fail("no attestations found");
+      }
+      if (flag("--repo")?.toLowerCase() !== REPOSITORY.toLowerCase())
+        return fail("no attestations found");
+      // gh compares --cert-identity with the certificate's SAN exactly, case included.
+      if (flag("--cert-identity") !== this.san) return fail("verifying with issuer");
+      const asked = flag("--source-digest");
+      const built = this.builtFrom ?? asked;
+      if (asked !== undefined && asked !== built)
+        return fail(`expected SourceRepositoryDigest to be ${asked}, got ${built}`);
+      if (flag("--format") !== "json") return { status: 0, stdout: "", stderr: "" };
+      return {
+        status: 0,
+        stdout: JSON.stringify([
+          {
+            attestation: {},
+            verificationResult: {
+              signature: {
+                certificate: {
+                  subjectAlternativeName: this.san,
+                  buildTrigger: this.trigger,
+                  sourceRepositoryDigest: built,
+                  sourceRepositoryRef: "refs/heads/main",
+                },
+              },
+            },
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[0] === "api") {
+      const path = args.at(-1) ?? "";
+      const runs = new RegExp(
+        `^repos/${REPOSITORY}/actions/workflows/ci\\.yml/runs\\?head_sha=([0-9a-f]{40})&event=push&branch=main`,
+      ).exec(path);
+      if (runs !== null) {
+        const runList =
+          this.mergeConclusion === undefined
+            ? []
+            : [
+                {
+                  id: 101,
+                  head_sha: runs[1],
+                  head_branch: "main",
+                  event: "push",
+                  path: ".github/workflows/ci.yml",
+                  status: "completed",
+                  conclusion: this.mergeConclusion,
+                },
+              ];
+        return { status: 0, stdout: JSON.stringify({ workflow_runs: runList }), stderr: "" };
+      }
+      if (new RegExp(`^repos/${REPOSITORY}/actions/runs/101/jobs`).test(path)) {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            jobs: [
+              { name: "check", status: "completed", conclusion: "success" },
+              { name: "merge", status: "completed", conclusion: this.mergeConclusion },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return fail("HTTP 404: Not Found");
+    }
+    return fail("unknown command");
+  };
+}
 
 export interface FakeScript {
   id: string;

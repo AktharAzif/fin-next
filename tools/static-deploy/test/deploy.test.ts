@@ -5,14 +5,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { assetHash, assetManifestHash, readArtefact } from "../src/artefact.ts";
+import { assetHash, assetManifestHash, checkRenderedFiles, readArtefact } from "../src/artefact.ts";
 import { cloudflareClient } from "../src/cloudflare.ts";
 import { parseStaticConfig, type StaticConfig, StaticConfigError } from "../src/config.ts";
 import { assetsOnlyMetadata, deployStatic } from "../src/deploy.ts";
 import { main } from "../src/main.ts";
+import {
+  attestationArgs,
+  ProvenanceError,
+  type ReleaseIdentity,
+  verifyAttestation,
+} from "../src/provenance.ts";
 import { parseReleaseManifest } from "../src/release.ts";
 import { verifyDeployment } from "../src/verify.ts";
-import { ACCOUNT, FakeStatic } from "./fake.ts";
+import { ACCOUNT, FakeGh, FakeStatic, RELEASE_SAN, REPOSITORY } from "./fake.ts";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const RELEASE = "e".repeat(40);
@@ -23,7 +29,12 @@ const CONFIG: StaticConfig = {
   preview_urls: false,
 };
 const HEADERS =
-  "/*\n  Cache-Control: no-cache\n/assets/*\n  ! Cache-Control\n  Cache-Control: public, max-age=31536000, immutable\n";
+  "/*\n  Cache-Control: no-cache\n  Content-Security-Policy: default-src 'none'; script-src 'self'\n/assets/*\n  ! Cache-Control\n  Cache-Control: public, max-age=31536000, immutable\n";
+const IDENTITY: ReleaseIdentity = {
+  repository: REPOSITORY,
+  workflow: ".github/workflows/release.yml",
+  ref: "refs/heads/main",
+};
 
 function artefactDir(root: string, key: string): string {
   const dir = join(root, key);
@@ -298,8 +309,86 @@ describe("the release manifest", () => {
   });
 });
 
+describe("provenance (gh attestation verify)", () => {
+  const subject = `oci://ghcr.io/aktharazif/fin-next-api@sha256:${"a".repeat(64)}`;
+
+  it("pins the exact identity, binds the commit, and reads the JSON back", () => {
+    const args = attestationArgs(subject, IDENTITY, RELEASE);
+    const flag = (name: string) => args[args.indexOf(name) + 1];
+    assert.equal(flag("--cert-identity"), RELEASE_SAN);
+    assert.equal(flag("--source-digest"), RELEASE);
+    assert.equal(flag("--source-ref"), "refs/heads/main");
+    assert.equal(flag("--format"), "json");
+    assert.ok(args.includes("--deny-self-hosted-runners"));
+    const gh = new FakeGh();
+    verifyAttestation(gh.exec, subject, IDENTITY, RELEASE, "api");
+  });
+
+  it("refuses a lower-cased owner, another commit, another trigger and output that is not JSON", () => {
+    const gh = new FakeGh();
+    assert.throws(
+      () =>
+        verifyAttestation(
+          gh.exec,
+          subject,
+          { ...IDENTITY, repository: REPOSITORY.toLowerCase() },
+          RELEASE,
+          "api",
+        ),
+      ProvenanceError,
+      "the certificate identity is compared exactly",
+    );
+    gh.builtFrom = "f".repeat(40);
+    assert.throws(
+      () => verifyAttestation(gh.exec, subject, IDENTITY, RELEASE, "api"),
+      ProvenanceError,
+    );
+    gh.builtFrom = undefined;
+    gh.trigger = "workflow_dispatch";
+    assert.throws(
+      () => verifyAttestation(gh.exec, subject, IDENTITY, RELEASE, "api"),
+      /no verified attestation is from a push/,
+    );
+    const quiet = () => ({ status: 0, stdout: "", stderr: "" });
+    assert.throws(() => verifyAttestation(quiet, subject, IDENTITY, RELEASE, "api"), /no JSON/);
+    const empty = () => ({ status: 0, stdout: "[]", stderr: "" });
+    assert.throws(
+      () => verifyAttestation(empty, subject, IDENTITY, RELEASE, "api"),
+      /no attestation/,
+    );
+  });
+});
+
+describe("the rendered files", () => {
+  it("must carry this release and environment, a CSP for /*, and no CORS header", () => {
+    const dir = artefactDir(mkdtempSync(join(tmpdir(), "static-")), "console");
+    checkRenderedFiles(readArtefact(dir), RELEASE, "staging");
+    assert.throws(
+      () => checkRenderedFiles(readArtefact(dir), "f".repeat(40), "staging"),
+      /release/,
+    );
+    assert.throws(
+      () => checkRenderedFiles(readArtefact(dir), RELEASE, "production"),
+      /environment/,
+    );
+    for (const headers of [
+      "/*\n  Cache-Control: no-cache\n",
+      "/assets/*\n  Content-Security-Policy: default-src 'none'\n",
+      `${HEADERS}/*\n  Access-Control-Allow-Origin: *\n`,
+    ]) {
+      writeFileSync(join(dir, "_headers"), headers);
+      assert.throws(
+        () => checkRenderedFiles(readArtefact(dir), RELEASE, "staging"),
+        StaticConfigError,
+      );
+    }
+  });
+});
+
 describe("the CI entry point", () => {
-  function fixtureRepo() {
+  const KEYS = ["verify", "selfie", "admin", "console", "docs"];
+
+  function fixtureRepo(attestManifest = true) {
     const root = mkdtempSync(join(tmpdir(), "repo-"));
     mkdirSync(join(root, "ops", "environments"), { recursive: true });
     cpSync(
@@ -312,7 +401,7 @@ describe("the CI entry point", () => {
     }
     const rendered = join(root, "rendered");
     const statics: Record<string, unknown> = {};
-    for (const key of ["verify", "selfie", "admin", "console", "docs"]) {
+    for (const key of KEYS) {
       const a = readArtefact(artefactDir(rendered, key));
       statics[key] = {
         artefact: `static-${key}-${RELEASE}`,
@@ -321,19 +410,32 @@ describe("the CI entry point", () => {
       };
     }
     const manifest = join(root, "release-manifest.json");
-    writeFileSync(manifest, JSON.stringify({ commit: RELEASE, images: {}, static: statics }));
+    const text = JSON.stringify({ commit: RELEASE, images: {}, static: statics });
+    writeFileSync(manifest, text);
+    const gh = new FakeGh();
+    if (attestManifest) gh.attest(text);
     const tokenFile = join(root, "token");
     writeFileSync(tokenFile, token());
     chmodSync(tokenFile, 0o600);
-    return { root, rendered, manifest, tokenFile };
+    return { root, rendered, manifest, tokenFile, gh };
   }
 
-  it("deploys every static app in order with the one account the token sees, and prints no secret", async () => {
-    const f = fixtureRepo();
-    const fake = new FakeStatic(token());
-    let out = "";
-    let err = "";
-    const code = await main({
+  function io(f: ReturnType<typeof fixtureRepo>, fake: FakeStatic) {
+    const printed = { out: "", err: "" };
+    return {
+      printed,
+      io: {
+        env: { FIN_CF_STATIC_TOKEN_FILE: f.tokenFile, GITHUB_ACTIONS: "true" },
+        repoRoot: f.root,
+        fetch: fake.fetch,
+        exec: f.gh.exec,
+        stdout: (t: string) => {
+          printed.out += t;
+        },
+        stderr: (t: string) => {
+          printed.err += t;
+        },
+      },
       argv: [
         "--env",
         "staging",
@@ -344,85 +446,92 @@ describe("the CI entry point", () => {
         "--dir",
         f.rendered,
       ],
-      env: { FIN_CF_STATIC_TOKEN_FILE: f.tokenFile, GITHUB_ACTIONS: "true" },
-      repoRoot: f.root,
-      fetch: fake.fetch,
-      stdout: (t) => {
-        out += t;
-      },
-      stderr: (t) => {
-        err += t;
-      },
-    });
-    assert.equal(code, 0, err);
+    };
+  }
+
+  it("verifies the manifest, then deploys every static app in order with the one account the token sees, and prints no secret", async () => {
+    const f = fixtureRepo();
+    const fake = new FakeStatic(token());
+    const { io: base, argv, printed } = io(f, fake);
+    const code = await main({ ...base, argv });
+    assert.equal(code, 0, printed.err);
+    assert.equal(f.gh.calls.filter((c) => c[1] === "attestation").length, 1);
     assert.deepEqual(
       [...fake.scripts.keys()],
-      [
-        "fin-next-staging-verify-static",
-        "fin-next-staging-selfie-static",
-        "fin-next-staging-admin-static",
-        "fin-next-staging-console-static",
-        "fin-next-staging-docs-static",
-      ],
+      KEYS.map((k) => `fin-next-staging-${k}-static`),
     );
-    assert.match(out, /"event":"deploy.static_done"/);
-    const printed = out
+    assert.match(printed.out, /"event":"deploy.static_done"/);
+    const shown = printed.out
       .split("\n")
       .filter((l) => !l.startsWith("::add-mask::"))
       .join("\n");
-    assert.equal(printed.includes(token()), false);
-    assert.equal(printed.includes(ACCOUNT), false);
-    assert.match(out, /^::add-mask::/m);
+    assert.equal(shown.includes(token()), false);
+    assert.equal(shown.includes(ACCOUNT), false);
+    assert.match(printed.out, /^::add-mask::/m);
+  });
+
+  it("refuses a manifest whose attestation does not verify, before the token is read or any call", async () => {
+    const f = fixtureRepo(false);
+    const fake = new FakeStatic(token());
+    const { io: base, argv, printed } = io(f, fake);
+    assert.equal(await main({ ...base, argv }), 65);
+    assert.match(printed.err, /the release manifest: the attestation does not verify/);
+    assert.equal(fake.calls.length, 0);
+  });
+
+  it("checks every deployment before the first upload: a bad later one moves no host", async () => {
+    for (const tamper of [
+      (f: ReturnType<typeof fixtureRepo>) =>
+        writeFileSync(join(f.rendered, "console", "theme.js"), "/* not the release's */"),
+      (f: ReturnType<typeof fixtureRepo>) =>
+        writeFileSync(
+          join(f.rendered, "console", "_headers"),
+          "/*\n  Access-Control-Allow-Origin: *\n",
+        ),
+      (f: ReturnType<typeof fixtureRepo>) =>
+        writeFileSync(
+          join(f.rendered, "console", "env.json"),
+          JSON.stringify({ environment: "staging", release: "f".repeat(40) }),
+        ),
+    ]) {
+      const f = fixtureRepo();
+      tamper(f);
+      const fake = new FakeStatic(token());
+      const { io: base, argv, printed } = io(f, fake);
+      assert.equal(await main({ ...base, argv }), 65);
+      assert.match(printed.err, /static console: .*nothing was uploaded/);
+      assert.equal(fake.calls.length, 0, "not even the token's account read");
+    }
+  });
+
+  it("says which host serves which release when an upload fails", async () => {
+    const f = fixtureRepo();
+    const fake = new FakeStatic(token());
+    const { io: base, argv, printed } = io(f, fake);
+    const failing = async (url: string, init: RequestInit) =>
+      init.method === "PUT" && url.endsWith("/fin-next-staging-admin-static")
+        ? new Response(JSON.stringify({ success: false, errors: [], result: null }), {
+            status: 500,
+          })
+        : fake.fetch(url, init);
+    assert.equal(await main({ ...base, fetch: failing, argv }), 69);
+    assert.match(
+      printed.out,
+      /stopped at admin \(it may serve either release\); new release on: verify, selfie; previous release still on: console, docs/,
+    );
   });
 
   it("refuses a token that sees more than one account, and bad arguments", async () => {
     const f = fixtureRepo();
     const fake = new FakeStatic(token());
     fake.accounts.push({ id: "2".repeat(32) });
-    let err = "";
-    const io = {
-      env: { FIN_CF_STATIC_TOKEN_FILE: f.tokenFile },
-      repoRoot: f.root,
-      fetch: fake.fetch,
-      stdout: () => {},
-      stderr: (t: string) => {
-        err += t;
-      },
-    };
-    assert.equal(
-      await main({
-        ...io,
-        argv: [
-          "--env",
-          "staging",
-          "--release",
-          RELEASE,
-          "--manifest",
-          f.manifest,
-          "--dir",
-          f.rendered,
-        ],
-      }),
-      65,
-    );
-    assert.match(err, /sees 2 accounts/);
-    assert.equal(
-      await main({
-        ...io,
-        argv: [
-          "--env",
-          "production",
-          "--release",
-          RELEASE,
-          "--manifest",
-          f.manifest,
-          "--dir",
-          f.rendered,
-        ],
-      }),
-      65,
-    );
-    assert.equal(await main({ ...io, argv: ["--release", RELEASE] }), 65);
+    const { io: base, argv, printed } = io(f, fake);
+    assert.equal(await main({ ...base, argv }), 65);
+    assert.match(printed.err, /sees 2 accounts/);
+    const production = [...argv];
+    production[1] = "production";
+    assert.equal(await main({ ...base, argv: production }), 65);
+    assert.equal(await main({ ...base, argv: ["--release", RELEASE] }), 65);
     assert.equal(fake.scripts.size, 0);
   });
 });

@@ -1,27 +1,30 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { assetManifestHash, readArtefact } from "../../../tools/static-deploy/src/artefact.ts";
-import { ACCOUNT, FakeStatic } from "../../../tools/static-deploy/test/fake.ts";
+import { ACCOUNT, FakeGh, FakeStatic } from "../../../tools/static-deploy/test/fake.ts";
 import { runCli } from "../src/cli.ts";
 import { EXIT } from "../src/core/errors.ts";
-import { staticDeploy } from "../src/static/deploy.ts";
-import { staticRenderCommand } from "../src/static/render.ts";
+import { staticDeployCommand } from "../src/static/deploy.ts";
+import { buildHash, staticRenderCommand } from "../src/static/render.ts";
 import type { RenderInput, StaticRenderer } from "../src/static/renderer.ts";
+import { readZip, ZipError } from "../src/static/zip.ts";
 import {
   commandEnv,
   fakeRuntime,
   fakeToken,
   hex,
   REPO_ROOT,
-  tempDir,
   writePrivate,
   ZONE,
 } from "./helpers/fixtures.ts";
+import { FakeCloudflare } from "./helpers/providers.ts";
+import { type ZipInput, zipOf } from "./helpers/zip.ts";
 
 const RELEASE = hex(40, "c");
 const KEYS = ["verify", "selfie", "admin", "console", "docs"];
+const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 
 /** A renderer that behaves like packages/web-host's will: headers from the profile, env.json. */
 function fakeRenderer(
@@ -47,21 +50,90 @@ function fakeRenderer(
   };
 }
 
-function builds(dir: string): string {
-  const root = join(dir, "artefacts");
+function buildFiles(key: string): ZipInput[] {
+  return [
+    { path: "index.html", data: `<!doctype html><title>${key}</title>` },
+    { path: "assets/main-abc.js", data: `console.log("${key}")` },
+  ];
+}
+
+interface Release {
+  archives: string;
+  manifestFile: string;
+  gh: FakeGh;
+}
+
+/**
+ * What release.yml leaves for a release: one zip per static deployment and the manifest, each
+ * attested (unless a test changes it first).
+ */
+function release(
+  dir: string,
+  change: {
+    files?: (key: string) => ZipInput[];
+    manifest?: (statics: Record<string, Record<string, string>>) => void;
+    attestManifest?: boolean;
+    attestArchive?: (key: string) => boolean;
+  } = {},
+): Release {
+  const gh = new FakeGh();
+  const archives = join(dir, "archives");
+  mkdirSync(archives, { recursive: true });
+  const statics: Record<string, Record<string, string>> = {};
   for (const key of KEYS) {
-    mkdirSync(join(root, key, "assets"), { recursive: true });
-    writeFileSync(join(root, key, "index.html"), `<!doctype html><title>${key}</title>`);
-    writeFileSync(join(root, key, "assets", "main-abc.js"), `console.log("${key}")`);
+    const files = (change.files ?? buildFiles)(key);
+    const zip = zipOf(files);
+    const name = `static-${key}-${RELEASE}`;
+    writeFileSync(join(archives, `${name}.zip`), zip);
+    if (change.attestArchive?.(key) ?? true) gh.attest(zip);
+    statics[key] = {
+      artefact: name,
+      sha256: sha256(zip),
+      assetManifestHash: buildHash(files.map((f) => ({ path: f.path, data: Buffer.from(f.data) }))),
+    };
   }
-  return root;
+  change.manifest?.(statics);
+  const text = JSON.stringify({ commit: RELEASE, images: {}, static: statics, migrations: [] });
+  const manifestFile = join(dir, "release-manifest.json");
+  writeFileSync(manifestFile, text);
+  if (change.attestManifest ?? true) gh.attest(text);
+  return { archives, manifestFile, gh };
+}
+
+async function render(
+  r: Release,
+  env: Record<string, string>,
+  out: string,
+  renderer: StaticRenderer = fakeRenderer(),
+  extra: string[] = [],
+) {
+  const rt = fakeRuntime({ env, exec: r.gh.exec });
+  const code = await runCli(
+    [
+      "static",
+      "render",
+      "staging",
+      "--release",
+      RELEASE,
+      "--manifest",
+      r.manifestFile,
+      "--archives",
+      r.archives,
+      "--out",
+      out,
+      ...extra,
+    ],
+    rt,
+    [staticRenderCommand(async () => renderer)],
+  );
+  return { code, rt };
 }
 
 describe("static render", () => {
   it("refuses while packages/web-host's renderer does not exist (no fallback renderer)", async () => {
     const { env, dir } = commandEnv();
-    const r = fakeRuntime({ env });
-    const command = staticRenderCommand(async () => undefined);
+    const r = release(dir);
+    const rt = fakeRuntime({ env, exec: r.gh.exec });
     const code = await runCli(
       [
         "static",
@@ -69,39 +141,30 @@ describe("static render", () => {
         "staging",
         "--release",
         RELEASE,
-        "--artefacts",
-        builds(dir),
+        "--manifest",
+        r.manifestFile,
+        "--archives",
+        r.archives,
         "--out",
         join(dir, "out"),
       ],
-      r,
-      [command],
+      rt,
+      [staticRenderCommand(async () => undefined)],
     );
     assert.equal(code, EXIT.config);
-    assert.match(r.err(), /waits for packages\/web-host\/src\/static\/render.ts/);
+    assert.match(rt.err(), /waits for packages\/web-host\/src\/static\/render.ts/);
   });
 
-  it("renders _headers and env.json into a copy of each build, never naming Fin Admin's host in a public output", async () => {
+  it("verifies the manifest and every archive, then writes each attested build with its rendered files", async () => {
     const { env, dir } = commandEnv();
-    const r = fakeRuntime({ env });
+    const r = release(dir);
     const seen: RenderInput[] = [];
     const out = join(dir, "out");
-    const code = await runCli(
-      [
-        "static",
-        "render",
-        "staging",
-        "--release",
-        RELEASE,
-        "--artefacts",
-        builds(dir),
-        "--out",
-        out,
-      ],
-      r,
-      [staticRenderCommand(async () => fakeRenderer(seen))],
-    );
-    assert.equal(code, EXIT.ok, r.err());
+    const { code, rt } = await render(r, env, out, fakeRenderer(seen));
+    assert.equal(code, EXIT.ok, rt.err());
+    const verified = r.gh.calls.filter((c) => c[1] === "attestation");
+    assert.equal(verified.length, 1 + KEYS.length, "the manifest and each archive");
+    for (const c of verified) assert.equal(c[c.indexOf("--source-digest") + 1], RELEASE);
     assert.deepEqual(
       seen.map((s) => [s.output, s.app, s.profile]),
       [
@@ -123,89 +186,112 @@ describe("static render", () => {
     }
     const env0 = JSON.parse(readFileSync(join(out, "docs", "env.json"), "utf8"));
     assert.equal(env0.apiOrigin, `https://gateway.${ZONE}`);
-    assert.ok(existsSync(join(out, "console", "assets", "main-abc.js")));
+    assert.equal(
+      readFileSync(join(out, "console", "assets", "main-abc.js"), "utf8"),
+      'console.log("console")',
+    );
     assert.match(readFileSync(join(out, "console", "_headers"), "utf8"), /Cache-Control: no-cache/);
-    assert.equal(r.out().includes(ZONE), false);
+    assert.equal(rt.out().includes(ZONE), false);
   });
 
-  it("refuses a build that already holds _headers, env.json or a source map", async () => {
-    for (const file of ["_headers", "env.json", "assets/main.js.map"]) {
+  it("refuses an unattested manifest, an unattested archive, and an archive whose SHA-256 is not the manifest's", async () => {
+    for (const [name, change] of [
+      ["manifest", { attestManifest: false }],
+      ["archive", { attestArchive: (key: string) => key !== "admin" }],
+      [
+        "sha256",
+        {
+          manifest: (s: Record<string, Record<string, string>>) => {
+            if (s.console) s.console.sha256 = hex(64, "0");
+          },
+        },
+      ],
+    ] as const) {
       const { env, dir } = commandEnv();
-      const artefacts = builds(dir);
-      writeFileSync(join(artefacts, "console", file), "x");
-      const r = fakeRuntime({ env });
-      const code = await runCli(
-        [
-          "static",
-          "render",
-          "staging",
-          "--release",
-          RELEASE,
-          "--artefacts",
-          artefacts,
-          "--out",
-          join(dir, "out"),
-        ],
-        r,
-        [staticRenderCommand(async () => fakeRenderer())],
-      );
-      assert.equal(code, EXIT.data, file);
+      const r = release(dir, change);
+      const out = join(dir, "out");
+      const { code, rt } = await render(r, env, out);
+      assert.equal(code, EXIT.data, name);
+      assert.equal(existsSync(out), false, `${name}: nothing is written`);
+      if (name === "sha256") assert.match(rt.err(), /SHA-256 is not the release manifest's/);
     }
+  });
+
+  it("refuses an archive that holds _headers, env.json or a source map, or files that do not hash to the manifest's", async () => {
+    for (const extra of ["_headers", "env.json", "assets/main.js.map"]) {
+      const { env, dir } = commandEnv();
+      const r = release(dir, {
+        files: (key) => [
+          ...buildFiles(key),
+          ...(key === "console" ? [{ path: extra, data: "x" }] : []),
+        ],
+      });
+      const { code } = await render(r, env, join(dir, "out"));
+      assert.equal(code, EXIT.data, extra);
+    }
+    const { env, dir } = commandEnv();
+    const r = release(dir, {
+      manifest: (s) => {
+        if (s.docs) s.docs.assetManifestHash = hex(64, "f");
+      },
+    });
+    const { code, rt } = await render(r, env, join(dir, "out"));
+    assert.equal(code, EXIT.data);
+    assert.match(rt.err(), /do not hash to the release manifest's assetManifestHash/);
   });
 
   it("refuses a rendered output that names a host it may not, or another release", async () => {
     const { env, dir } = commandEnv();
-    const r = fakeRuntime({ env });
+    const r = release(dir);
     const leaky = fakeRenderer([], (input) => ({
       headers: `/*\n  Content-Security-Policy: connect-src 'self' https://staff.${ZONE}\n`,
       env: { environment: input.environment, release: input.release },
     }));
-    const code = await runCli(
-      [
-        "static",
-        "render",
-        "staging",
-        "--release",
-        RELEASE,
-        "--artefacts",
-        builds(dir),
-        "--out",
-        join(dir, "out"),
-        "--only",
-        "console",
-      ],
-      r,
-      [staticRenderCommand(async () => leaky)],
-    );
-    assert.equal(code, EXIT.refused);
+    const out = join(dir, "out");
+    assert.equal((await render(r, env, out, leaky, ["--only", "console"])).code, EXIT.refused);
     const stale = fakeRenderer([], () => ({
       headers: "/*\n  X: y\n",
       env: { environment: "staging", release: hex(40, "d") },
     }));
-    const r2 = fakeRuntime({ env });
-    assert.equal(
-      await runCli(
-        [
-          "static",
-          "render",
-          "staging",
-          "--release",
-          RELEASE,
-          "--artefacts",
-          builds(tempDir()),
-          "--out",
-          join(tempDir(), "o"),
-        ],
-        r2,
-        [staticRenderCommand(async () => stale)],
-      ),
-      EXIT.data,
+    assert.equal((await render(r, env, out, stale)).code, EXIT.data);
+    assert.equal(existsSync(join(out, "console")), false, "nothing is written when a check fails");
+  });
+});
+
+describe("the archive reader", () => {
+  it("reads the files of a deflated or stored archive", () => {
+    const files = readZip(
+      zipOf([
+        { path: "index.html", data: "<!doctype html>" },
+        { path: "assets/a.js", data: "a", method: 0 },
+      ]),
     );
-    assert.equal(
-      existsSync(join(dir, "out", "console")),
-      false,
-      "nothing is written when a check fails",
+    assert.deepEqual(
+      files.map((f) => [f.path, f.data.toString()]),
+      [
+        ["index.html", "<!doctype html>"],
+        ["assets/a.js", "a"],
+      ],
     );
+  });
+
+  it("refuses links, unsafe paths, duplicates and a corrupted entry", () => {
+    const bad: ZipInput[][] = [
+      [{ path: "assets/link", data: "/etc/hosts", mode: 0o120777 }],
+      [{ path: "../escape.html", data: "x" }],
+      [{ path: "/abs.html", data: "x" }],
+      [{ path: "a\\b.html", data: "x" }],
+      [
+        { path: "index.html", data: "x" },
+        { path: "index.html", data: "y" },
+      ],
+    ];
+    for (const entries of bad) assert.throws(() => readZip(zipOf(entries)), ZipError);
+    const zip = zipOf([{ path: "index.html", data: "hello world", method: 0 }]);
+    const at = 30 + "index.html".length;
+    zip.writeUInt8(zip.readUInt8(at) ^ 0xff, at);
+    assert.throws(() => readZip(zip), /CRC-32/);
+    assert.throws(() => readZip(Buffer.from("not a zip")), ZipError);
   });
 });
 
@@ -235,80 +321,37 @@ describe("static deploy (pnpm fin)", () => {
     return root;
   }
 
-  it("uploads every rendered build as an assets-only deployment inside a registered run", async () => {
-    const { env, dir } = commandEnv();
-    const rendered = join(dir, "rendered");
-    const statics: Record<string, unknown> = {};
-    for (const key of KEYS) {
-      mkdirSync(join(rendered, key, "assets"), { recursive: true });
-      writeFileSync(join(rendered, key, "index.html"), `<!doctype html>${key}`);
-      writeFileSync(join(rendered, key, "assets", "a.js"), key);
-      writeFileSync(join(rendered, key, "_headers"), "/*\n  Cache-Control: no-cache\n");
-      writeFileSync(join(rendered, key, "env.json"), "{}");
-      statics[key] = {
-        artefact: `static-${key}-${RELEASE}`,
-        sha256: hex(64, "e"),
-        assetManifestHash: assetManifestHash(readArtefact(join(rendered, key)).files),
-      };
-    }
-    const manifestFile = join(dir, "release-manifest.json");
-    writeFileSync(manifestFile, JSON.stringify({ commit: RELEASE, images: {}, static: statics }));
-    const token = fakeToken("static");
-    env.FIN_CF_STATIC_TOKEN_FILE = writePrivate(dir, "static-token", token);
-    const fake = new FakeStatic(token);
-    const r = fakeRuntime({ env, fetch: fake.fetch, repoRoot: repoWithStatic(dir) });
-    const code = await runCli(
-      [
-        "static",
-        "deploy",
-        "staging",
-        "--release",
-        RELEASE,
-        "--manifest",
-        manifestFile,
-        "--dir",
-        rendered,
-      ],
-      r,
-      [staticDeploy],
-    );
-    assert.equal(code, EXIT.ok, r.err());
-    assert.deepEqual(
-      [...fake.scripts.keys()],
-      KEYS.map((k) => `fin-next-staging-${k}-static`),
-    );
-    for (const s of fake.scripts.values()) {
-      assert.deepEqual(s.parts, ["metadata"]);
-      assert.deepEqual(s.subdomain, { enabled: false, previews_enabled: false });
-    }
-    assert.equal(r.out().includes(ACCOUNT), false);
-    assert.equal(r.out().includes(token), false);
-    const log = readFileSync(join(env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
-    assert.match(log, /"event":"run.registered"/);
-    assert.match(log, /"result":"ok"/);
-    const lines = readFileSync(join(env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8");
-    assert.equal((lines.match(/"event":"deploy.static_step"/g) ?? []).length, 5);
-    assert.match(lines, /"event":"deploy.static_done"/);
-  });
+  const MINTED = `mintedvalue${"Q".repeat(30)}1`;
 
-  it("dry run: plans and sends nothing", async () => {
+  /** A rendered release, and the fakes a deploy talks to (the token mint and the uploads). */
+  async function rendered(change: Parameters<typeof release>[1] = {}) {
     const { env, dir } = commandEnv();
-    const fake = new FakeStatic(fakeToken("s"));
-    const manifestFile = join(dir, "m.json");
-    const statics = Object.fromEntries(
-      KEYS.map((k) => [
-        k,
-        {
-          artefact: `static-${k}-${RELEASE}`,
-          sha256: hex(64, "e"),
-          assetManifestHash: hex(64, "f"),
-        },
-      ]),
-    );
-    writeFileSync(manifestFile, JSON.stringify({ commit: RELEASE, static: statics }));
-    const r = fakeRuntime({ env, fetch: fake.fetch, repoRoot: repoWithStatic(dir) });
-    assert.equal(
-      await runCli(
+    const r = release(dir, change);
+    const out = join(dir, "rendered");
+    const { code, rt } = await render(r, env, out);
+    assert.equal(code, EXIT.ok, rt.err());
+    const cfToken = fakeToken("cf");
+    env.FIN_CF_TOKEN_FILE = writePrivate(dir, "cf-token", cfToken);
+    // CR-20 never reaches the operator machine: a static token file named here is never read.
+    env.FIN_CF_STATIC_TOKEN_FILE = join(dir, "no-such-static-token");
+    const cf = new FakeCloudflare(cfToken);
+    cf.groups.push({ id: hex(32, "9"), name: "Workers Scripts Write" });
+    const statics = new FakeStatic(MINTED);
+    const sequence: string[] = [];
+    let failPut: string | undefined;
+    const fetch = async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname;
+      sequence.push(`${init.method ?? "GET"} ${path}`);
+      if (path.includes("/tokens")) return cf.fetch(url, init);
+      if (failPut !== undefined && init.method === "PUT" && path.endsWith(`/${failPut}`))
+        return new Response(JSON.stringify({ success: false, errors: [], result: null }), {
+          status: 500,
+        });
+      return statics.fetch(url, init);
+    };
+    const run = async (extra: string[] = [], dirArg = out) => {
+      const rt = fakeRuntime({ env, fetch, exec: r.gh.exec, repoRoot: repoWithStatic(dir) });
+      const code = await runCli(
         [
           "static",
           "deploy",
@@ -316,16 +359,139 @@ describe("static deploy (pnpm fin)", () => {
           "--release",
           RELEASE,
           "--manifest",
-          manifestFile,
+          r.manifestFile,
           "--dir",
-          dir,
-          "--dry-run",
+          dirArg,
+          ...extra,
         ],
-        r,
-        [staticDeploy],
-      ),
-      1,
+        rt,
+        [staticDeployCommand(async () => fakeRenderer())],
+      );
+      return { code, rt };
+    };
+    return {
+      env,
+      dir,
+      out,
+      r,
+      cf,
+      statics,
+      sequence,
+      run,
+      failAt: (script: string) => {
+        failPut = script;
+      },
+    };
+  }
+
+  it("uploads every rendered build with a one-run token it mints and revokes, inside a registered run", async () => {
+    const t = await rendered();
+    const { code, rt } = await t.run();
+    assert.equal(code, EXIT.ok, rt.err());
+    assert.deepEqual(
+      [...t.statics.scripts.keys()],
+      KEYS.map((k) => `fin-next-staging-${k}-static`),
     );
-    assert.equal(fake.calls.length, 0);
+    for (const s of t.statics.scripts.values()) {
+      assert.deepEqual(s.parts, ["metadata"]);
+      assert.deepEqual(s.subdomain, { enabled: false, previews_enabled: false });
+    }
+    const mint = t.cf.calls.find((c) => c.method === "POST" && c.path.endsWith("/tokens"));
+    const body = mint?.body as {
+      name: string;
+      policies: Array<{
+        resources: Record<string, string>;
+        permission_groups: Array<{ id: string }>;
+      }>;
+      expires_on: string;
+    };
+    assert.equal(body.name, "fin-next-staging-static-run");
+    assert.deepEqual(Object.keys(body.policies[0]?.resources ?? {}), [
+      `com.cloudflare.api.account.${ACCOUNT}`,
+    ]);
+    assert.deepEqual(body.policies[0]?.permission_groups, [{ id: hex(32, "9") }]);
+    const expires = Date.parse(body.expires_on) - Date.parse("2026-11-21T06:00:00Z");
+    assert.ok(expires > 0 && expires <= 60 * 60_000, "a one-run token expires within the hour");
+    assert.equal(t.cf.tokens.length, 0, "the one-run token is revoked when the run ends");
+    assert.equal(
+      t.sequence.at(-1)?.startsWith("DELETE"),
+      true,
+      "revoked after the last upload's re-read",
+    );
+    for (const value of [ACCOUNT, MINTED, fakeToken("cf")])
+      assert.equal(rt.out().includes(value), false);
+    const log = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
+    assert.match(log, /"event":"run.registered"/);
+    assert.match(log, /"result":"ok"/);
+    const lines = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8");
+    assert.equal((lines.match(/"event":"deploy.static_step"/g) ?? []).length, 5);
+    assert.match(lines, /"event":"deploy.static_done"/);
+  });
+
+  it("dry run: verifies and checks everything, mints nothing and uploads nothing", async () => {
+    const t = await rendered();
+    const { code, rt } = await t.run(["--dry-run"]);
+    assert.equal(code, 1, rt.err());
+    assert.match(rt.out(), /5 rendered _headers and env.json equal a fresh render/);
+    assert.equal(t.statics.calls.length, 0);
+    assert.equal(
+      t.cf.calls.some((c) => c.method !== "GET"),
+      false,
+    );
+    const missing = await t.run(["--dry-run"], join(t.dir, "no-such-dir"));
+    assert.equal(missing.code, EXIT.data, "a dry run reads every rendered build");
+  });
+
+  it("refuses before the first upload when a later deployment's build is not the release's", async () => {
+    const t = await rendered();
+    writeFileSync(join(t.out, "admin", "assets", "main-abc.js"), 'console.log("changed")');
+    for (const extra of [[], ["--dry-run"]]) {
+      const { code, rt } = await t.run(extra);
+      assert.equal(code, EXIT.data);
+      assert.match(rt.err(), /static admin: the build's asset manifest hash differs/);
+    }
+    assert.equal(t.statics.calls.length, 0, "no host moved to the new release");
+    assert.equal(t.cf.calls.filter((c) => c.method === "POST").length, 0, "no token minted");
+  });
+
+  it("refuses a rendered _headers or env.json that differs from a fresh render, before any upload", async () => {
+    for (const [file, text] of [
+      ["_headers", "/*\n  Access-Control-Allow-Origin: *\n"],
+      [
+        "env.json",
+        `${JSON.stringify({ environment: "staging", release: RELEASE, apiOrigin: "https://attacker.example.net" })}\n`,
+      ],
+    ] as const) {
+      const t = await rendered();
+      writeFileSync(join(t.out, "console", file), text);
+      const { code } = await t.run();
+      assert.equal(code, EXIT.data, file);
+      assert.equal(t.statics.calls.length, 0, file);
+    }
+  });
+
+  it("refuses a manifest whose attestation does not verify, before any Cloudflare call", async () => {
+    const t = await rendered();
+    writeFileSync(
+      t.r.manifestFile,
+      readFileSync(t.r.manifestFile, "utf8").replace(`"migrations":[]`, `"migrations":["x.sql"]`),
+    );
+    const { code, rt } = await t.run();
+    assert.equal(code, EXIT.data);
+    assert.match(rt.err(), /the release manifest: the attestation does not verify/);
+    assert.equal(t.sequence.length, 0);
+  });
+
+  it("stops at a failed upload, says which host serves which release, and still revokes the token", async () => {
+    const t = await rendered();
+    t.failAt("fin-next-staging-admin-static");
+    const { code, rt } = await t.run();
+    assert.equal(code, EXIT.unavailable);
+    assert.match(
+      rt.err(),
+      /static deploy stopped at admin \(it may serve either release\); new release on: verify, selfie; previous release still on: console, docs/,
+    );
+    assert.equal(t.cf.tokens.length, 0, "revoked after the failure");
+    assert.ok(t.sequence.some((s) => s.startsWith("DELETE")));
   });
 });
