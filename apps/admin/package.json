@@ -9,22 +9,25 @@
     "build": "vite build --mode production",
     "build:test": "vite build --mode test",
     "routes": "node scripts/generate-routes.mjs",
-    "typecheck": "pnpm run routes && tsc -p tsconfig.json",
+    "typecheck": "pnpm run routes && tsc -p tsconfig.json && tsc -p e2e/tsconfig.json",
     "lint": "biome check .",
-    "test": "pnpm run routes && vitest run",
-    "e2e": "pnpm run build && playwright test"
+    "test": "vitest run --config ../../vitest.config.ts",
+    "e2e": "pnpm run build:test && node e2e/support/run.ts"
   },
   "dependencies": {
     "@fin/app-contracts": "workspace:*",
     "@fin/frame": "workspace:*",
+    "@fin/icons": "workspace:*",
     "@fin/motion": "workspace:*",
     "@fin/tokens": "workspace:*",
     "@fin/ui": "workspace:*",
+    "@simplewebauthn/browser": "catalog:",
     "@tanstack/react-router": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@fin/testing": "workspace:*",
     "@playwright/test": "catalog:",
     "@tailwindcss/vite": "catalog:",
     "@tanstack/router-plugin": "catalog:",
