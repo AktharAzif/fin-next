@@ -7,8 +7,12 @@
 // refusal matrix of each key route (signed out, no organisation, another organisation, a role
 // without the permission, no intent, another action's intent) and the step-up matrix (unproved, each
 // bound field and the target changed, another session, expired, used, then passing once); a
-// Developer's full-access key refused before any step-up; a key ID of another shape not found.
+// Developer's full-access key refused before any step-up; a key ID of another shape not found. Then
+// the key's own mode on every change (a role that manages only the other mode refused before any
+// step-up), an allowlist change refused to a role the key goes beyond, and a member who rolled their
+// own key with 24 hours of overlap removed or demoted: the old key is listed and stops at once.
 import { randomBytes } from "node:crypto";
+import { judgeKey, keySettingsFromEnv, keyStore, precheck } from "@fin/keys";
 import { bootApi } from "@fin/web-host/testing";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -39,6 +43,12 @@ let api: Booted;
 const tag = randomBytes(3).toString("hex");
 const address = (label: string) => `${label}.${tag}@example.com`;
 const KEY_SHAPE = /^fin_test_(sk|rk)_[0-9A-HJKMNP-TV-Z]{10}[0-9A-Za-z]{38}$/;
+// The console's key settings, kept so a test can judge a key as the edge would.
+const KEY_ENV = {
+  FIN_KEY_SALT: "fin-ci-1",
+  API_KEY_PEPPER_1: randomBytes(32).toString("base64url"),
+  API_KEY_PEPPER_IN_USE: "1",
+};
 
 /** The superuser as the test client's helpers read it (they only call `query`). */
 const admin = () => su as never;
@@ -127,9 +137,7 @@ beforeAll(async () => {
       FIN_DOCS_ORIGIN: "https://developer.example.com",
       BETTER_AUTH_SECRETS: `1:${randomBytes(32).toString("base64url")}`,
       FIN_LIMIT_KEY_1: randomBytes(32).toString("hex"),
-      FIN_KEY_SALT: "fin-ci-1",
-      API_KEY_PEPPER_1: randomBytes(32).toString("base64url"),
-      API_KEY_PEPPER_IN_USE: "1",
+      ...KEY_ENV,
     },
   });
   const owner = await signIn(address("owner"), true);
@@ -389,5 +397,198 @@ describe("the step-up matrix of the key routes", () => {
       await su.query("COMMIT");
       expect(await refusal(send(idA, body), intent)).toBe("expired");
     }
+  });
+});
+
+const keyIdOf = (reply: Reply) => String((reply.json.key as { keyId: string }).keyId);
+
+async function stepUpIntents(): Promise<number> {
+  return Number(
+    (await su.query<{ n: string }>("SELECT count(*) AS n FROM ops.step_up_intent")).rows[0]?.n,
+  );
+}
+
+async function memberIdOf(label: string): Promise<string> {
+  const row = await su.query<{ id: string }>(
+    `SELECT m.id FROM identity.member m JOIN identity."user" u ON u.id = m.user_id
+      WHERE m.organization_id = $1 AND u.email = $2`,
+    [f.orgId, address(label)],
+  );
+  return String(row.rows[0]?.id);
+}
+
+/** What the edge answers for a key now: its own statement, then its check, with this pepper. */
+async function atTheEdge(secret: string) {
+  const pre = precheck(`Bearer ${secret}`, KEY_ENV.FIN_KEY_SALT);
+  if (!pre.ok) throw new Error(pre.reason);
+  const lookup = await keyStore(su).lookup(pre.key.id, "edge:refused_keys:console-test");
+  return judgeKey({
+    key: pre.key,
+    record: lookup.record,
+    peppers: keySettingsFromEnv(KEY_ENV, "ci").peppers,
+    now: Date.now(),
+    clientIp: "8.8.8.8",
+  });
+}
+
+describe("the key's own mode and the role behind an allowlist change", () => {
+  it("refuses an edit, a roll and a revocation to a role that manages only the other mode, before any step-up", async () => {
+    await su.query("DELETE FROM ops.rate_window");
+    // Production keys need an approved organisation: set as go-live sets it, past the guards.
+    await su.query("BEGIN");
+    await su.query("SET LOCAL session_replication_role = replica");
+    await su.query("UPDATE identity.organization SET live_status = 'approved' WHERE id = $1", [
+      f.orgId,
+    ]);
+    await su.query("COMMIT");
+    const live = await steppedUp(admin(), f.owner, (h) =>
+      create(f.owner, { ...restricted, mode: "live", name: "Live mode" }, h),
+    );
+    expect(live.done.status).toBe(201);
+    const sandbox = await steppedUp(admin(), f.owner, (h) =>
+      create(f.owner, { ...restricted, name: "Sandbox mode" }, h),
+    );
+    const liveOnly = await joinWithRole(f.owner, f.orgId, "liveonly", [
+      "apiKey.read",
+      "apiKey.live",
+      "customers.read",
+      "money.read",
+    ]);
+    await su.query("DELETE FROM ops.rate_window");
+    const intents = await stepUpIntents();
+    const cases: [Client, string, string][] = [
+      [f.developer, keyIdOf(live.done), "apiKey.live"],
+      [liveOnly, keyIdOf(sandbox.done), "apiKey.sandbox"],
+    ];
+    for (const [client, keyId, permission] of cases) {
+      for (const [method, suffix, body] of [
+        ["PATCH", "", { name: "Renamed" }],
+        ["POST", "/roll", { overlap: "now" }],
+        ["POST", "/revoke", undefined],
+      ] as const) {
+        const res = await client.org(f.orgId, method, `/api/keys/${keyId}${suffix}`, body);
+        expect([res.status, res.json.code, res.json.permission], `${method}${suffix}`).toEqual([
+          403,
+          "forbidden",
+          permission,
+        ]);
+      }
+    }
+    expect(await stepUpIntents()).toBe(intents);
+    // Each may change a key of the mode it manages (the first answer asks for the step-up).
+    const allowed = await f.developer.org(
+      f.orgId,
+      "POST",
+      `/api/keys/${keyIdOf(sandbox.done)}/revoke`,
+    );
+    expect(allowed.json).toMatchObject({ code: "step_up_required", reason_key: "key.revoke" });
+  });
+
+  it("refuses an allowlist change on a key that does more than the editor's role, before any step-up", async () => {
+    await su.query("DELETE FROM ops.rate_window");
+    const full = await steppedUp(admin(), f.owner, (h) =>
+      create(f.owner, { ...restricted, kind: "sk", scopes: [], name: "Full sandbox" }, h),
+    );
+    const keyId = keyIdOf(full.done);
+    const intents = await stepUpIntents();
+    const moved = await f.developer.org(f.orgId, "PATCH", `/api/keys/${keyId}`, {
+      ipAllowlist: ["8.8.8.0/24"],
+    });
+    expect(moved.status).toBe(403);
+    expect(moved.json).toMatchObject({ code: "forbidden", reason: "beyond_role" });
+    expect(String(moved.json.permission)).toContain("customers.delete");
+    expect(await stepUpIntents()).toBe(intents);
+    // A rename of the same key is theirs: it asks for the step-up.
+    const renamed = await f.developer.org(f.orgId, "PATCH", `/api/keys/${keyId}`, {
+      name: "Full sandbox two",
+    });
+    expect(renamed.json).toMatchObject({ code: "step_up_required", reason_key: "key.update" });
+  });
+});
+
+describe("a member who rolled their own key with a day of overlap, removed or demoted", () => {
+  async function selfRolled(label: string) {
+    const member = await joinWithRole(f.owner, f.orgId, label, [
+      "apiKey.read",
+      "apiKey.sandbox",
+      "customers.read",
+      "money.read",
+      "webhooks.read",
+    ]);
+    await su.query("DELETE FROM ops.rate_window");
+    const made = await steppedUp(admin(), member, (h) =>
+      create(member, { ...restricted, name: `${label} key` }, h),
+    );
+    const oldId = keyIdOf(made.done);
+    const rolled = await steppedUp(admin(), member, (h) =>
+      member.org(f.orgId, "POST", `/api/keys/${oldId}/roll`, { overlap: "24h" }, h),
+    );
+    expect(rolled.done.status).toBe(200);
+    const memberId = await memberIdOf(label);
+    const listed = await f.owner.org(f.orgId, "GET", `/api/team/members/${memberId}/credentials`);
+    expect(
+      (listed.json.credentials as { id: string; made: boolean; seen: boolean }[]).map((c) => [
+        c.id,
+        c.made,
+        c.seen,
+      ]),
+    ).toEqual([
+      [oldId, true, true],
+      [keyIdOf(rolled.done), true, true],
+    ]);
+    expect(await atTheEdge(String(made.done.json.secret))).toMatchObject({ ok: true });
+    return {
+      memberId,
+      oldSecret: String(made.done.json.secret),
+      newSecret: String(rolled.done.json.secret),
+    };
+  }
+
+  it("lists the old key still in its overlap and stops it at once on removal", async () => {
+    const leaver = await selfRolled("leaver");
+    await su.query("DELETE FROM ops.rate_window");
+    const removed = await steppedUp(admin(), f.owner, (h) =>
+      f.owner.org(
+        f.orgId,
+        "POST",
+        `/api/team/members/${leaver.memberId}/remove`,
+        { rollCredentials: true },
+        h,
+      ),
+    );
+    expect(removed.done.status).toBe(200);
+    expect(removed.done.json.credentials).toEqual({
+      listed: 2,
+      rolledNow: 2,
+      rollingWithinHour: 0,
+    });
+    expect(await atTheEdge(leaver.oldSecret)).toEqual({ ok: false, reason: "expired" });
+    expect(await atTheEdge(leaver.newSecret)).toEqual({ ok: false, reason: "expired" });
+  });
+
+  it("does the same on a demotion that takes the key permissions away", async () => {
+    const demoted = await selfRolled("demoted");
+    await su.query("DELETE FROM ops.rate_window");
+    const readers = await steppedUp(admin(), f.owner, (h) =>
+      f.owner.org(
+        f.orgId,
+        "POST",
+        "/api/roles",
+        { name: "Webhook readers", permissions: ["webhooks.read"] },
+        h,
+      ),
+    );
+    const changed = await steppedUp(admin(), f.owner, (h) =>
+      f.owner.org(
+        f.orgId,
+        "PATCH",
+        `/api/team/members/${demoted.memberId}`,
+        { roleKey: readers.done.json.roleId, rollCredentials: true },
+        h,
+      ),
+    );
+    expect(changed.done.status).toBe(200);
+    expect(await atTheEdge(demoted.oldSecret)).toEqual({ ok: false, reason: "expired" });
+    expect(await atTheEdge(demoted.newSecret)).toEqual({ ok: false, reason: "expired" });
   });
 });

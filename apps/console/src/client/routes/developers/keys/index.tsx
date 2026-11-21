@@ -4,6 +4,11 @@
 // StepUp dialog. The board's states: list, the key's drawer and its menu, created and rolled (the
 // toast is the outcome), empty, loading, failed, a role that may only read (actions disabled with
 // the reason) and no permission (the frame's page for a route whose `needs` the viewer lacks).
+//
+// Production keys stay listed, and revocable, while Fin has paused the organisation (or whenever
+// any exist): only making one waits for approval. Each list pages through every key of its mode;
+// the server lists the keys that still work first, so ended keys never push a working one off the
+// first page.
 import type { ConsoleViewer } from "@fin/app-contracts";
 import { RouterLink, useFin } from "@fin/frame";
 import { DotsThreeIcon, KeyIcon, LockSimpleIcon, PlusIcon } from "@fin/icons";
@@ -35,7 +40,14 @@ import {
   RollKeyDialog,
   SecretPanel,
 } from "./-dialogs.tsx";
-import { lastUsedLine, STATUS, statusLine } from "./-model.ts";
+import {
+  KEYS_PAGE_SIZE,
+  lastUsedLine,
+  pageCountOf,
+  STATUS,
+  statusLine,
+  withinRole,
+} from "./-model.ts";
 
 export const Route = createFileRoute("/developers/keys/")({
   staticData: { frame: "app", navId: "api-keys", pageName: "API keys", needs: ["apiKey.read"] },
@@ -60,9 +72,7 @@ type Surface =
 function rollReason(key: KeyRow, can: KeysAnswer["can"] | undefined): string | undefined {
   const mode = key.mode === "live" ? can?.live : can?.test;
   if (mode === undefined || !mode.manage) return ROLE_REASON;
-  if (key.kind === "sk" ? !mode.fullAccess : !key.scopes.every((s) => mode.scopes.includes(s))) {
-    return BEYOND_ROLE;
-  }
+  if (!withinRole(mode, key.kind, key.scopes)) return BEYOND_ROLE;
   return undefined;
 }
 
@@ -70,15 +80,18 @@ function ApiKeysPage() {
   const fin = useFin<ConsoleViewer>();
   const signedIn = useSignedIn();
   const orgId = signedIn?.viewer.currentOrgId ?? "";
-  const live = signedIn?.membership?.liveStatus === "approved";
-  const sandbox = useResource(`keys:${orgId}:test`, (signal) =>
-    fin.api(keysList, { mode: "test", size: 100 }, { signal }),
+  const liveStatus = signedIn?.membership?.liveStatus;
+  const paused = liveStatus === "paused";
+  const [pages, setPages] = useState<{ test: number; live: number }>({ test: 1, live: 1 });
+  const sandbox = useResource(`keys:${orgId}:test:${pages.test}`, (signal) =>
+    fin.api(keysList, { mode: "test", page: pages.test, size: KEYS_PAGE_SIZE }, { signal }),
   );
-  const production = useResource(
-    `keys:${orgId}:live`,
-    (signal) => fin.api(keysList, { mode: "live", size: 100 }, { signal }),
-    { enabled: live },
+  // Read whatever the organisation's status: a paused organisation's keys still exist, and a leaked
+  // one must stay revocable from here.
+  const production = useResource(`keys:${orgId}:live:${pages.live}`, (signal) =>
+    fin.api(keysList, { mode: "live", page: pages.live, size: KEYS_PAGE_SIZE }, { signal }),
   );
+  const live = liveStatus === "approved" || paused || (production.data?.total ?? 0) > 0;
   const [surface, setSurface] = useState<Surface>(null);
   const can = sandbox.data?.can;
   const canSandbox = signedIn?.can("apiKey.sandbox") === true;
@@ -87,7 +100,7 @@ function ApiKeysPage() {
   const canManage = (key: KeyRow) => (key.mode === "live" ? canLive : canSandbox);
   const reload = async () => {
     await sandbox.reload();
-    if (live) await production.reload();
+    await production.reload();
   };
 
   const menu = (key: KeyRow) => {
@@ -192,46 +205,60 @@ function ApiKeysPage() {
       Create key
     </Button>
   );
-  const firstUse = sandbox.status === "ready" && sandbox.data?.keys.length === 0 && !live;
+  const firstUse = sandbox.status === "ready" && sandbox.data?.total === 0 && !live;
 
-  const table = (title: string, data: typeof sandbox) => (
-    <Table
-      caption={title}
-      noun={{ singular: "key", plural: "keys" }}
-      columns={columns}
-      rows={data.data?.keys ?? []}
-      getRowId={(k) => k.keyId}
-      getRowLabel={(k) =>
-        `${k.name}, ${k.prefix}, ${STATUS[k.status].label}, created ${formatDay(k.createdAt)}`
-      }
-      onRowClick={(k) => setSurface({ kind: "detail", key: k })}
-      {...(surface?.kind === "detail" ? { activeRowId: surface.key.keyId } : {})}
-      status={
-        data.status === "error"
-          ? "error"
-          : data.status === "loading"
-            ? "loading"
-            : data.status === "refreshing"
-              ? "refreshing"
-              : "ready"
-      }
-      error={{
-        title: "Couldn’t load API keys",
-        description: "Check your connection and try again.",
-        onRetry: () => data.reload(),
-      }}
-      loadingRows={4}
-      empty={
-        <EmptyState
-          variant="first-use"
-          icon={<KeyIcon />}
-          title="No keys yet"
-          description="Create one to make your first sandbox call."
-          {...(canSandbox ? { action: createButton } : {})}
-        />
-      }
-    />
-  );
+  const table = (title: string, data: typeof sandbox, mode: "test" | "live") => {
+    const pageCount = pageCountOf(data.data?.total ?? 0);
+    return (
+      <Table
+        caption={title}
+        noun={{ singular: "key", plural: "keys" }}
+        columns={columns}
+        rows={data.data?.keys ?? []}
+        getRowId={(k) => k.keyId}
+        getRowLabel={(k) =>
+          `${k.name}, ${k.prefix}, ${STATUS[k.status].label}, created ${formatDay(k.createdAt)}`
+        }
+        onRowClick={(k) => setSurface({ kind: "detail", key: k })}
+        {...(surface?.kind === "detail" ? { activeRowId: surface.key.keyId } : {})}
+        status={
+          data.status === "error"
+            ? "error"
+            : data.status === "loading"
+              ? "loading"
+              : data.status === "refreshing"
+                ? "refreshing"
+                : "ready"
+        }
+        error={{
+          title: "Couldn’t load API keys",
+          description: "Check your connection and try again.",
+          onRetry: () => data.reload(),
+        }}
+        loadingRows={4}
+        empty={
+          <EmptyState
+            variant="first-use"
+            icon={<KeyIcon />}
+            title="No keys yet"
+            description="Create one to make your first sandbox call."
+            {...(canSandbox ? { action: createButton } : {})}
+          />
+        }
+        {...(pageCount > 1
+          ? {
+              pagination: {
+                page: pages[mode],
+                pageCount,
+                total: data.data?.total ?? 0,
+                pageSize: KEYS_PAGE_SIZE,
+                onPageChange: (page: number) => setPages((now) => ({ ...now, [mode]: page })),
+              },
+            }
+          : {})}
+      />
+    );
+  };
 
   return (
     <div className="flex flex-col gap-8">
@@ -261,17 +288,25 @@ function ApiKeysPage() {
                 Secrets are shown once. Fin stores only a hash.
               </p>
             </div>
-            {table("Sandbox keys", sandbox)}
+            {table("Sandbox keys", sandbox, "test")}
           </section>
           <section aria-labelledby="production-keys" className="flex flex-col gap-4">
-            <div className="flex items-baseline gap-3">
-              <h2 id="production-keys" className="m-0 text-heading text-text-primary">
-                Production keys
-              </h2>
-              <span className="font-mono text-mono text-text-secondary">fin_live_</span>
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <div className="flex items-baseline gap-3">
+                <h2 id="production-keys" className="m-0 text-heading text-text-primary">
+                  Production keys
+                </h2>
+                <span className="font-mono text-mono text-text-secondary">fin_live_</span>
+              </div>
+              {paused ? (
+                <p className="m-0 text-caption text-text-tertiary">
+                  Fin has paused Production: these keys are refused until it resumes. You can still
+                  roll or revoke them.
+                </p>
+              ) : null}
             </div>
             {live ? (
-              table("Production keys", production)
+              table("Production keys", production, "live")
             ) : (
               <div className="rounded-md bg-surface shadow-ring">
                 <EmptyState
@@ -318,6 +353,7 @@ function ApiKeysPage() {
       {surface?.kind === "edit" ? (
         <EditKeyDialog
           keyRow={surface.key}
+          abilities={surface.key.mode === "live" ? can?.live : can?.test}
           onClose={() => setSurface(null)}
           onSaved={(key) => {
             toast.success({ title: "Key saved", description: `${key.name} is up to date.` });

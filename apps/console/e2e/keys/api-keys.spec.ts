@@ -4,7 +4,8 @@
 // be drawn. The journeys: create a key through the StepUp dialog and see its secret once (Done waits
 // for the tick; closing asks first; nothing shows it again), roll it with an overlap and see the new
 // secret, revoke it, a role that may only read (every change disabled with the reason), a role
-// without the permission (the page refused), and the empty, loading and failed states. What the
+// without the permission (the page refused), the empty, loading and failed states, a paused
+// organisation's Production keys still listed and revocable, and a list past one page. What the
 // client sends is asserted: the intent on the one re-send, X-Fin-App, the organisation, the body.
 // The step-up and the route's own refusals are proved on the server (keys.db.test.ts).
 import { expect, gotoReady, test } from "@fin/testing/playwright";
@@ -12,6 +13,7 @@ import type { Page } from "@playwright/test";
 import {
   ApiDouble,
   developerViewer,
+  ORG,
   ok,
   problem,
   type Recorded,
@@ -67,6 +69,10 @@ function list(keys: Record<string, unknown>[], can = CAN_ALL) {
   return ok({ keys, total: keys.length, page: 1, size: 100, working: keys.length, limit: 50, can });
 }
 
+/** The page reads both modes: these journeys' keys are Sandbox keys, so the live list is empty. */
+const sandboxKeys = (request: Recorded, keys: Record<string, unknown>[]) =>
+  request.search.get("mode") === "live" ? [] : keys;
+
 const dialog = (page: Page, name: string | RegExp) => page.getByRole("dialog", { name });
 /** A confirmation: the design system draws it as an alert dialog. */
 const confirmation = (page: Page, name: string) => page.getByRole("alertdialog", { name });
@@ -93,7 +99,7 @@ test.describe("the API keys page", () => {
     let keys: Record<string, unknown>[] = [];
     const api = new ApiDouble()
       .on("GET /api/viewer", ok(viewer()))
-      .on("GET /api/keys", () => list(keys))
+      .on("GET /api/keys", (r) => list(sandboxKeys(r, keys)))
       .on("POST /api/keys", (_r, nth) => {
         if (nth === 0) return stepUpRequired("key.create", { intentId: "sti_create" });
         keys = [
@@ -171,7 +177,7 @@ test.describe("the API keys page", () => {
     let keys = [keyRow()];
     const api = new ApiDouble()
       .on("GET /api/viewer", ok(viewer()))
-      .on("GET /api/keys", () => list(keys))
+      .on("GET /api/keys", (r) => list(sandboxKeys(r, keys)))
       .on("POST /api/keys/:keyId/roll", (_r, nth) => {
         if (nth === 0) return stepUpRequired("key.roll", { intentId: "sti_roll" });
         const fresh = keyRow({ keyId: "W6N4R3T5V7", prefix: "fin_test_rk_W6N4R3T5V7" });
@@ -235,13 +241,14 @@ test.describe("the API keys page", () => {
   test("@journey a role that may only read sees the keys with every change disabled", async ({
     page,
   }) => {
-    const api = new ApiDouble().on("GET /api/viewer", ok(developerViewer())).on(
-      "GET /api/keys",
-      list([keyRow()], {
-        test: { manage: false, fullAccess: false, scopes: [] },
-        live: { manage: false, fullAccess: false, scopes: [], approved: false },
-      }),
-    );
+    const api = new ApiDouble()
+      .on("GET /api/viewer", ok(developerViewer()))
+      .on("GET /api/keys", (r) =>
+        list(sandboxKeys(r, [keyRow()]), {
+          test: { manage: false, fullAccess: false, scopes: [] },
+          live: { manage: false, fullAccess: false, scopes: [], approved: false },
+        }),
+      );
     await api.install(page);
     await gotoReady(page, "/developers/keys");
     await expect(page.getByRole("table", { name: "Sandbox keys" })).toContainText("Payout worker");
@@ -269,15 +276,80 @@ test.describe("the API keys page", () => {
   });
 
   test("@journey draws the loading state, then a failure with Try again", async ({ page }) => {
-    const api = new ApiDouble()
-      .on("GET /api/viewer", ok(viewer()))
-      .on("GET /api/keys", (_r, nth) =>
-        nth === 0 ? { ...problem(503, "unavailable"), delayMs: 600 } : list([keyRow()]),
-      );
+    let failed = false;
+    const api = new ApiDouble().on("GET /api/viewer", ok(viewer())).on("GET /api/keys", (r) => {
+      if (r.search.get("mode") === "test" && !failed) {
+        failed = true;
+        return { ...problem(503, "unavailable"), delayMs: 600 };
+      }
+      return list(sandboxKeys(r, [keyRow()]));
+    });
     await api.install(page);
     await gotoReady(page, "/developers/keys");
     await expect(page.getByText("Couldn’t load API keys").first()).toBeVisible();
     await page.getByRole("button", { name: "Try again" }).first().click();
     await expect(page.getByRole("table", { name: "Sandbox keys" })).toContainText("Payout worker");
+  });
+
+  test("@journey a paused organisation still lists its Production keys, and can revoke one", async ({
+    page,
+  }) => {
+    const liveKey = keyRow({
+      keyId: "L7M3N5P9Q2",
+      prefix: "fin_live_rk_L7M3N5P9Q2",
+      mode: "live",
+      name: "Payouts live",
+    });
+    const api = new ApiDouble()
+      .on("GET /api/viewer", ok(viewer({ memberships: [{ ...ORG, liveStatus: "paused" }] })))
+      .on("GET /api/keys", (r) => list(r.search.get("mode") === "live" ? [liveKey] : [keyRow()]));
+    await api.install(page);
+    await gotoReady(page, "/developers/keys");
+    const production = page.getByRole("table", { name: "Production keys" });
+    await expect(production).toContainText("Payouts live");
+    await expect(page.getByText(/Fin has paused Production/)).toBeVisible();
+    await expect(page.getByText("Production keys unlock when Fin approves you")).toHaveCount(0);
+    await production.getByRole("button", { name: "Actions for Payouts live" }).click();
+    await expect(page.getByRole("menuitem", { name: "Revoke key" })).toBeVisible();
+    expect(api.calls("GET /api/keys").map((r) => r.search.get("mode"))).toContain("live");
+  });
+
+  test("@journey pages past the first hundred keys", async ({ page }) => {
+    const first = Array.from({ length: 100 }, (_, i) =>
+      keyRow({
+        keyId: `K${String(i).padStart(9, "0")}`,
+        prefix: `fin_test_rk_K${String(i).padStart(9, "0")}`,
+        name: `Key ${i}`,
+      }),
+    );
+    const oldest = keyRow({
+      keyId: "Z9Y8X7W6V5",
+      prefix: "fin_test_rk_Z9Y8X7W6V5",
+      name: "Oldest key",
+      status: "revoked",
+      revokedAt: "2026-11-01T10:00:00.000Z",
+    });
+    const api = new ApiDouble().on("GET /api/viewer", ok(viewer())).on("GET /api/keys", (r) => {
+      if (r.search.get("mode") === "live") return list([]);
+      const n = Number(r.search.get("page") ?? "1");
+      return ok({
+        keys: n === 1 ? first : [oldest],
+        total: 101,
+        page: n,
+        size: 100,
+        working: 50,
+        limit: 50,
+        can: CAN_ALL,
+      });
+    });
+    await api.install(page);
+    await gotoReady(page, "/developers/keys");
+    const sandbox = page.getByRole("table", { name: "Sandbox keys" });
+    await expect(sandbox).toContainText("Key 0");
+    await expect(page.getByText("1–100 of 101 keys")).toBeVisible();
+    await page.getByRole("button", { name: "Next page" }).click();
+    await expect(sandbox).toContainText("Oldest key");
+    const asked = api.calls("GET /api/keys").filter((r) => r.search.get("mode") === "test");
+    expect(asked.map((r) => r.search.get("page"))).toEqual(["1", "2"]);
   });
 });
