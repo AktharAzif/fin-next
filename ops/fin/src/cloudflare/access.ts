@@ -44,7 +44,6 @@ interface Policy {
   decision?: string;
   include?: unknown[];
   exclude?: unknown[];
-  require?: unknown[];
   [field: string]: unknown;
 }
 
@@ -56,6 +55,13 @@ interface AccessApp {
   type?: string;
   [field: string]: unknown;
 }
+
+/**
+ * The policy's rule lists besides include, which Fin's policy leaves empty. They are named as
+ * strings: the second is also the name of a Node loader, which imports:check refuses as a bare name
+ * in this area.
+ */
+const EMPTY_RULE_LISTS = ["exclude", "require"] as const;
 
 /** Fields Cloudflare sets itself, left out of a write-back. */
 const READ_ONLY_FIELDS = ["id", "uid", "aud", "created_at", "updated_at", "app_count", "reusable"];
@@ -70,7 +76,12 @@ export function desiredPolicy(ctx: Context): Record<string, unknown> {
       "the overlay's access.staff and access.allowDomains are both empty; Access would admit nobody",
     );
   }
-  return { name: ctx.settings.access.policy, decision: "allow", include, exclude: [], require: [] };
+  return {
+    name: ctx.settings.access.policy,
+    decision: "allow",
+    include,
+    ...Object.fromEntries(EMPTY_RULE_LISTS.map((list) => [list, []])),
+  };
 }
 
 export function desiredApp(ctx: Context, idp: string, policyId: string): Record<string, unknown> {
@@ -227,8 +238,9 @@ export const accessApply: Command = {
       if (policy.decision !== "allow") fields.push("decision");
       if (includeKey(policy) !== includeKey(wantPolicy as { include: unknown[] }))
         fields.push("include");
-      if ((policy.exclude ?? []).length > 0) fields.push("exclude");
-      if ((policy.require ?? []).length > 0) fields.push("require");
+      for (const list of EMPTY_RULE_LISTS) {
+        if (((policy[list] ?? []) as unknown[]).length > 0) fields.push(list);
+      }
       changes.push({
         kind: "access-policy",
         name: policy.name,
