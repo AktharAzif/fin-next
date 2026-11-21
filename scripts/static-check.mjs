@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 // static:check (EXECUTION §1.5 item 1; spec 01 §7.4; SA-45, UI-10). For each app in
 // tools/layout.json with a static output:
-//   - its static.json holds only the allowlisted keys and values (compatibility_date,
-//     assets.not_found_handling "single-page-application", assets.html_handling
-//     "auto-trailing-slash", workers_dev false, preview_urls false): no main, no binding, no
-//     run_worker_first;
+//   - its static.json holds only the allowlisted keys and values (compatibility_date
+//     "2026-11-20", the one every deployment shares, assets.not_found_handling
+//     "single-page-application", assets.html_handling "auto-trailing-slash", workers_dev false,
+//     preview_urls false): no main, no binding, no run_worker_first;
 //   - once built (dist/static, or dist/static/<output> for an app with several outputs):
 //     index.html carries <meta property="csp-nonce"> with no nonce attribute and has no inline
-//     script, style attribute, event handler or nonce; the CSS starts with `@layer ui-sdk` and
-//     holds no data: URL; no *.map is left; the build wrote no _headers or env.json (they are
-//     rendered at deploy, SF-05);
-//   - with --rendered <dir> (the deploy's rendered copies, <dir>/<output>/_headers), no
-//     'unsafe-*' and no data: in any policy, except the docs profile's listed exception
-//     (style-src 'unsafe-inline' and img-src data:, SA-45).
+//     script, style attribute, event handler, javascript: URL, srcdoc or nonce, read with the
+//     browser's tokenizer rules (`/` between attributes, `>` inside quoted values, `</script >`,
+//     comments and raw text); it has no <svg> or <math> element, inside which a browser reads
+//     markup by other rules, and it is UTF-8 with no NUL or other control character, as are the
+//     CSS and JavaScript; the CSS's first statement is `@layer ui-sdk` and it holds no data: URL;
+//     no *.map is left; the build wrote no _headers or env.json (they are rendered at deploy,
+//     SF-05);
+//   - with --rendered <dir> (the deploy's rendered copies, <dir>/<output>/_headers), every output
+//     of an app that exists has its _headers, with no 'unsafe-*' and no data: in any policy,
+//     except the docs profile's listed exception (style-src 'unsafe-inline' and img-src data:,
+//     SA-45).
 // The import side of the rule (no @ui-sdk/* outside packages/ui, no refused SDK entry) is
 // imports:check's. While no app has a static build, the check passes with a notice.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -21,9 +26,10 @@ import { isRecord, readJson, report } from "./lib/repo.mjs";
 
 /** @typedef {import("./lib/repo.mjs").Finding} Finding */
 
+/** Every static deployment's compatibility date (spec 01 §7.4's invariant). */
+export const COMPATIBILITY_DATE = "2026-11-20";
 const ALLOWED_STATIC_JSON = {
-  compatibility_date: (/** @type {unknown} */ v) =>
-    typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v),
+  compatibility_date: (/** @type {unknown} */ v) => v === COMPATIBILITY_DATE,
   workers_dev: (/** @type {unknown} */ v) => v === false,
   preview_urls: (/** @type {unknown} */ v) => v === false,
 };
@@ -75,6 +81,200 @@ export function checkStaticJson(file, json) {
 }
 
 /**
+ * @typedef {{ name: string, attributes: Map<string, string>, index: number, text?: string }} StartTag
+ */
+
+const WHITESPACE = new Set(["\t", "\n", "\f", "\r", " "]);
+// Elements whose content is text up to their own end tag, as the HTML tokenizer reads them.
+const RAW_TEXT = new Set(["script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"]);
+const RCDATA = new Set(["title", "textarea"]);
+// The elements that start foreign content (SVG, MathML), inside which a browser reads the
+// elements above as markup, not text, by rules this check does not follow. index.html needs
+// neither (an icon is an <img>), so they are refused and the HTML rules above always hold.
+const FOREIGN = new Set(["svg", "math"]);
+// The end tag of each raw-text and RCDATA element, matched in the HTML as written with an ASCII
+// case-insensitive pattern, as the tokenizer matches it. Never in a lowercased copy: toLowerCase
+// changes the length of some text (U+0130 becomes two code units), so its offsets are not the
+// HTML's.
+const END_TAGS = new Map(
+  [...RAW_TEXT, ...RCDATA].map((name) => [
+    name,
+    new RegExp(
+      `</${[...name].map((c) => `[${c}${c.toUpperCase()}]`).join("")}[\\t\\n\\f\\r />]`,
+      "g",
+    ),
+  ]),
+);
+
+/**
+ * Lowercases the ASCII letters of a tag or attribute name and nothing else, as the HTML tokenizer
+ * does (toLowerCase also maps other letters, some to ASCII ones or to two code units).
+ * @param {string} name
+ * @returns {string}
+ */
+function asciiLower(name) {
+  return name.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x20));
+}
+
+/**
+ * An attribute value as a browser reads it for a URL: character references decoded (numeric
+ * ones, and the named ones that spell a colon, a tab or a line feed), the tabs and line breaks a
+ * URL parser removes dropped, in lower case.
+ * @param {string} value
+ * @returns {string}
+ */
+function urlText(value) {
+  return value
+    .replace(/&#(?:[xX]([0-9A-Fa-f]+)|([0-9]+));?/g, (_, hex, decimal) => {
+      const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "\u{FFFD}";
+    })
+    .replace(/&colon;/gi, ":")
+    .replace(/&tab;|&newline;/gi, "")
+    .replace(/[\t\n\r]/g, "")
+    .toLowerCase();
+}
+
+/**
+ * Checks that a built file is read by a browser as this check reads it: UTF-8, so no UTF-16 or
+ * UTF-32 byte-order mark and no NUL byte, and in HTML no other control character but white space
+ * (an escape sequence changes how a page in a legacy encoding reads the bytes after it).
+ * @param {string} file
+ * @param {Buffer} bytes
+ * @param {boolean} html
+ * @returns {Finding[]}
+ */
+export function checkEncoding(file, bytes, html) {
+  const [a, b, c, d] = bytes;
+  const wide =
+    (a === 0xff && b === 0xfe) ||
+    (a === 0xfe && b === 0xff) ||
+    (a === 0 && b === 0 && c === 0xfe && d === 0xff);
+  const control = html && /(?![\t\n\f\r])\p{Cc}/u.test(bytes.toString("utf8"));
+  if (!wide && !control && !bytes.includes(0)) return [];
+  return [
+    {
+      file,
+      rule: "static-encoding",
+      message: html
+        ? "index.html is UTF-8 text with no byte-order mark but UTF-8's, NUL or control character"
+        : "a built stylesheet or script is UTF-8 text, with no UTF-16 or UTF-32 byte-order mark or NUL byte",
+    },
+  ];
+}
+
+/**
+ * Reads the start tags of an HTML document the way a browser's tokenizer does, for what the page
+ * policy cares about: tag and attribute names (their ASCII letters lowercased), attribute values
+ * (quoted, unquoted or absent), `/` as a separator between attributes, `>` inside a quoted value,
+ * comments and bogus comments, end tags, and the text of raw-text elements (a script's own text
+ * is kept as `text`), every offset one in the HTML as written.
+ * A tag cut off by the end of the file is still returned, so the check fails closed.
+ * @param {string} html
+ * @returns {StartTag[]}
+ */
+export function htmlStartTags(html) {
+  /** @type {StartTag[]} */
+  const tags = [];
+  let i = 0;
+  const isLetter = (/** @type {string} */ c) => /^[A-Za-z]$/.test(c);
+  const atBoundary = () =>
+    i >= html.length || WHITESPACE.has(html.charAt(i)) || "/>".includes(html.charAt(i));
+  /**
+   * Reads a tag's attributes from `i`, up to and past its `>`.
+   * @returns {Map<string, string>}
+   */
+  const readAttributes = () => {
+    /** @type {Map<string, string>} */
+    const attributes = new Map();
+    while (i < html.length) {
+      const c = html.charAt(i);
+      if (WHITESPACE.has(c) || c === "/") {
+        i++;
+        continue;
+      }
+      if (c === ">") {
+        i++;
+        break;
+      }
+      let name = c; // the first character may be `=`
+      i++;
+      while (i < html.length && !atBoundary() && html.charAt(i) !== "=") name += html.charAt(i++);
+      while (WHITESPACE.has(html.charAt(i))) i++;
+      let value = "";
+      if (html.charAt(i) === "=") {
+        i++;
+        while (WHITESPACE.has(html.charAt(i))) i++;
+        const quote = html.charAt(i);
+        if (quote === '"' || quote === "'") {
+          const end = html.indexOf(quote, i + 1);
+          value = html.slice(i + 1, end < 0 ? html.length : end);
+          i = end < 0 ? html.length : end + 1;
+        } else {
+          const start = i;
+          while (i < html.length && !WHITESPACE.has(html.charAt(i)) && html.charAt(i) !== ">") i++;
+          value = html.slice(start, i);
+        }
+      }
+      const key = asciiLower(name);
+      if (!attributes.has(key)) attributes.set(key, value); // the first one wins, as in a browser
+    }
+    return attributes;
+  };
+  while (i < html.length) {
+    const open = html.indexOf("<", i);
+    if (open < 0) break;
+    i = open + 1;
+    if (html.startsWith("!--", i)) {
+      // A comment; `<!-->` and `<!--->` end at once, as browsers read them.
+      const body = i + 3;
+      if (html.startsWith(">", body) || html.startsWith("->", body)) {
+        i = html.indexOf(">", body) + 1;
+        continue;
+      }
+      const close = html.indexOf("-->", body);
+      const bang = html.indexOf("--!>", body);
+      if (close < 0 && bang < 0) i = html.length;
+      else if (bang < 0 || (close >= 0 && close < bang)) i = close + 3;
+      else i = bang + 4;
+      continue;
+    }
+    const next = html.charAt(i);
+    if (next === "!" || next === "?" || (next === "/" && !isLetter(html.charAt(i + 1)))) {
+      const end = html.indexOf(">", i); // a doctype or a bogus comment
+      i = end < 0 ? html.length : end + 1;
+      continue;
+    }
+    if (next === "/") {
+      i++;
+      while (!atBoundary()) i++;
+      readAttributes(); // an end tag's attributes are read and dropped
+      continue;
+    }
+    if (!isLetter(next)) continue; // a `<` that starts no tag is text
+    let name = "";
+    while (!atBoundary()) name += html.charAt(i++);
+    name = asciiLower(name);
+    /** @type {StartTag} */
+    const tag = { name, attributes: readAttributes(), index: open };
+    tags.push(tag);
+    const closing = END_TAGS.get(name);
+    if (closing !== undefined || name === "plaintext") {
+      // Plain text runs to the end of the file; the others to their own end tag, or the end.
+      let end = null;
+      if (closing !== undefined) {
+        closing.lastIndex = i;
+        end = closing.exec(html);
+      }
+      const stop = end === null ? html.length : end.index;
+      if (name === "script") tag.text = html.slice(i, stop);
+      i = stop;
+    }
+  }
+  return tags;
+}
+
+/**
  * Checks a built index.html.
  * @param {string} file
  * @param {string} html
@@ -94,22 +294,34 @@ export function checkIndexHtml(file, html) {
       rule: "static-html",
       message,
     });
-  const meta = [...html.matchAll(/<meta\b[^>]*\bproperty\s*=\s*["']?csp-nonce["']?[^>]*>/gi)];
+  const tags = htmlStartTags(html);
+  const meta = tags.filter(
+    (t) => t.name === "meta" && t.attributes.get("property")?.toLowerCase() === "csp-nonce",
+  );
   if (meta.length !== 1) add(0, 'index.html needs exactly one <meta property="csp-nonce">');
-  for (const tag of html.matchAll(/<[a-z][^>]*>/gi)) {
-    const text = tag[0];
-    if (/\snonce\s*=/i.test(text)) add(tag.index, "no nonce attribute anywhere (FW-C04)");
-    if (/\sstyle\s*=/i.test(text)) add(tag.index, "no style attribute (style-src 'self')");
-    if (/\son[a-z]+\s*=/i.test(text)) add(tag.index, "no inline event handler (script-src 'self')");
-  }
-  for (const script of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    const attrs = script[1] ?? "";
-    if (!/\ssrc\s*=/i.test(attrs) || (script[2] ?? "").trim() !== "") {
-      add(script.index, "no inline script; every script is an external file");
+  for (const tag of tags) {
+    const names = [...tag.attributes.keys()];
+    if (FOREIGN.has(tag.name)) {
+      add(
+        tag.index,
+        `no <${tag.name}> element: inside it a browser reads markup by rules this check does not follow (an icon is an <img>)`,
+      );
+    }
+    if (names.includes("nonce")) add(tag.index, "no nonce attribute anywhere (FW-C04)");
+    if (names.includes("style")) add(tag.index, "no style attribute (style-src 'self')");
+    if (names.some((n) => n.startsWith("on"))) {
+      add(tag.index, "no inline event handler (script-src 'self')");
+    }
+    if (names.includes("srcdoc"))
+      add(tag.index, "no srcdoc attribute: it holds an inline document");
+    if ([...tag.attributes.values()].some((v) => /(?:java|vb)script:/.test(urlText(v)))) {
+      add(tag.index, "no javascript: URL, which is an inline script (script-src 'self')");
+    }
+    if (tag.name === "style") add(tag.index, "no <style> element (style-src 'self')");
+    if (tag.name === "script" && (!tag.attributes.has("src") || (tag.text ?? "").trim() !== "")) {
+      add(tag.index, "no inline script; every script is an external file");
     }
   }
-  for (const style of html.matchAll(/<style\b/gi))
-    add(style.index, "no <style> element (style-src 'self')");
   return findings;
 }
 
@@ -122,12 +334,14 @@ export function checkIndexHtml(file, html) {
 export function checkCss(file, css) {
   /** @type {Finding[]} */
   const findings = [];
-  const body = css.replace(/^﻿/, "").replace(/^(?:\s|\/\*[\s\S]*?\*\/)*/, "");
-  if (!/^@layer\s+ui-sdk\b/.test(body)) {
+  const body = css.replace(/^\u{FEFF}/u, "").replace(/^(?:\s|\/\*[\s\S]*?\*\/)*/, "");
+  // The first statement declares the layer `ui-sdk` itself, alone or first in a list or block,
+  // never a longer name such as `ui-sdk-overrides`.
+  if (!/^@layer\s+ui-sdk\s*[;,{]/.test(body)) {
     findings.push({
       file,
       rule: "static-css",
-      message: "the stylesheet must start with @layer ui-sdk (FW-C06)",
+      message: "the stylesheet's first statement must be @layer ui-sdk (FW-C06)",
     });
   }
   if (/url\(\s*["']?data:/i.test(css)) {
@@ -233,43 +447,58 @@ export function checkStatic(root, options = {}) {
       built++;
       for (const file of walk(dir)) {
         const path = `${label}/${file}`;
-        if (file.endsWith(".map"))
+        // Names in any case: a case-insensitive file system, and a server that types files by
+        // extension, read `X.JS.MAP` as a source map and `APP.MJS` as a script.
+        const lower = file.toLowerCase();
+        if (lower.endsWith(".map"))
           findings.push({
             file: path,
             rule: "static-map",
             message: "source maps never stay in dist/static",
           });
-        if (file === "_headers" || file === "env.json") {
+        if (lower === "_headers" || lower === "env.json") {
           findings.push({
             file: path,
             rule: "static-rendered-in-build",
             message: "builds are environment-neutral; this file is rendered at deploy (SF-05)",
           });
         }
-        if (file.endsWith(".css"))
-          findings.push(...checkCss(path, readFileSync(join(dir, file), "utf8")));
-        if (
-          file.endsWith(".js") &&
-          /["'(]data:[a-z]+\/[a-z0-9.+-]+[;,]/i.test(readFileSync(join(dir, file), "utf8"))
-        ) {
-          findings.push({
-            file: path,
-            rule: "static-data-url",
-            message: "no data: URL in built JavaScript",
-          });
+        const css = lower.endsWith(".css");
+        if (css || /\.[cm]?js$/.test(lower)) {
+          const bytes = readFileSync(join(dir, file));
+          findings.push(...checkEncoding(path, bytes, false));
+          const text = bytes.toString("utf8");
+          if (css) findings.push(...checkCss(path, text));
+          else if (/["'(]data:[a-z]+\/[a-z0-9.+-]+[;,]/i.test(text)) {
+            findings.push({
+              file: path,
+              rule: "static-data-url",
+              message: "no data: URL in built JavaScript",
+            });
+          }
         }
       }
-      findings.push(
-        ...checkIndexHtml(`${label}/index.html`, readFileSync(join(dir, "index.html"), "utf8")),
-      );
+      const index = readFileSync(join(dir, "index.html"));
+      findings.push(...checkEncoding(`${label}/index.html`, index, true));
+      findings.push(...checkIndexHtml(`${label}/index.html`, index.toString("utf8")));
     }
     if (options.rendered !== undefined) {
+      // Every output of an app that exists is deployed, so each has its rendered _headers: a
+      // renderer that wrote elsewhere, or nothing, must not pass for one with no policy to check.
+      const appExists = existsSync(join(root, entry.path));
       for (const output of outputs) {
         const headers = join(options.rendered, output, "_headers");
-        if (existsSync(headers))
+        if (existsSync(headers)) {
           findings.push(
             ...checkHeaders(`${output}/_headers`, readFileSync(headers, "utf8"), output),
           );
+        } else if (appExists) {
+          findings.push({
+            file: `${output}/_headers`,
+            rule: "static-headers-missing",
+            message: `the rendered copy of ${entry.path}'s ${output} output has no _headers`,
+          });
+        }
       }
     }
   }
@@ -278,13 +507,36 @@ export function checkStatic(root, options = {}) {
   return { findings, notices };
 }
 
+/**
+ * Reads the command's arguments: `--root <dir>` and `--rendered <dir>`, each at most once.
+ * @param {string[]} argv
+ * @returns {{ root: string, rendered?: string }}
+ */
+export function parseArgs(argv) {
+  /** @type {{ root: string, rendered?: string }} */
+  const args = { root: process.cwd() };
+  for (let i = 0; i < argv.length; i += 2) {
+    const flag = argv[i] ?? "";
+    const value = argv[i + 1];
+    if (flag !== "--root" && flag !== "--rendered") throw new Error(`unknown argument ${flag}`);
+    if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+    if (!existsSync(value) || !statSync(value).isDirectory()) {
+      throw new Error(`${flag}: no such directory`);
+    }
+    if (flag === "--root") args.root = value;
+    else args.rendered = value;
+  }
+  return args;
+}
+
 if (import.meta.main) {
-  const argv = process.argv.slice(2);
-  const rootIndex = argv.indexOf("--root");
-  const renderedIndex = argv.indexOf("--rendered");
-  const root = rootIndex >= 0 ? (argv[rootIndex + 1] ?? ".") : process.cwd();
-  const rendered = renderedIndex >= 0 ? argv[renderedIndex + 1] : undefined;
-  const { findings, notices } = checkStatic(root, rendered === undefined ? {} : { rendered });
-  for (const notice of notices) console.log(`static:check: notice: ${notice}`);
-  process.exitCode = report("static:check", findings);
+  try {
+    const { root, rendered } = parseArgs(process.argv.slice(2));
+    const { findings, notices } = checkStatic(root, rendered === undefined ? {} : { rendered });
+    for (const notice of notices) console.log(`static:check: notice: ${notice}`);
+    process.exitCode = report("static:check", findings);
+  } catch (error) {
+    console.error(`static:check: ${error instanceof Error ? error.message : "failed"}`);
+    process.exitCode = 2;
+  }
 }
