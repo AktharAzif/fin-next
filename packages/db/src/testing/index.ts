@@ -77,7 +77,7 @@ export function testClusterSettings(
 
 const LOOPBACK_TLS: TlsSettings = { insecureLoopback: true };
 
-export const testClock: Clock = { now: () => new Date() };
+export const testClock: Clock = { now: () => Date.now() };
 
 /** A unit context for tests, with an optional line collector. */
 export function testContext(overrides: Partial<UnitContext> = {}): UnitContext {

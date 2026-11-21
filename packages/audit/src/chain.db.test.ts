@@ -176,7 +176,7 @@ describe("the sequencer loop on a real database", () => {
     await runSequencer(
       {
         db: worker,
-        clock: { now: () => new Date(now) },
+        clock: { now: () => now },
         log: lines,
         context: () => testContext(),
         holdsLease: () => true,
@@ -197,7 +197,7 @@ describe("the sequencer loop on a real database", () => {
     await runSequencer(
       {
         db: worker,
-        clock: { now: () => new Date(now) },
+        clock: { now: () => now },
         log: lines,
         context: () => testContext(),
         holdsLease: () => true,

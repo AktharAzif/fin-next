@@ -62,7 +62,7 @@ export function createIdSource(
   return {
     newId(prefix) {
       idPattern(prefix);
-      const body = encodeTime(clock.now().getTime()) + encodeRandom(random(10));
+      const body = encodeTime(clock.now()) + encodeRandom(random(10));
       if (body.length !== TIME_CHARS + RANDOM_CHARS) throw new Error("ID body length");
       return `${prefix}_${body}`;
     },

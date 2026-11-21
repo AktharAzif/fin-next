@@ -35,10 +35,10 @@ describe("runSequencer", () => {
     await runSequencer(
       {
         db: fakeDb([2, 0, 5, 1]),
-        clock: { now: () => new Date(now) },
+        clock: { now: () => now },
         log: { write: (line) => lines.push(line) },
         context: () => ({
-          clock: { now: () => new Date(now) },
+          clock: { now: () => now },
           release: "r",
           log: { write: () => {} },
         }),
@@ -77,10 +77,10 @@ describe("runSequencer", () => {
     await runSequencer(
       {
         db: fakeDb([1, 1], new Set([1])),
-        clock: { now: () => new Date(now) },
+        clock: { now: () => now },
         log: { write: (line) => lines.push(line) },
         context: () => ({
-          clock: { now: () => new Date(now) },
+          clock: { now: () => now },
           release: "r",
           log: { write: () => {} },
         }),

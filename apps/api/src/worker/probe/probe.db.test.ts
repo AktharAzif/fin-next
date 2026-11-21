@@ -55,7 +55,7 @@ describe("the database probe", () => {
     const clock = {
       now: () => {
         now += 5;
-        return new Date(now);
+        return now;
       },
     };
     await runDatabaseProbe(probe, testContext(), clock, lines);
@@ -73,7 +73,7 @@ describe("the database probe", () => {
   it("writes a failed run with the SQLSTATE when the probe cannot read (a login without its grants)", async () => {
     const lines = collectLines();
     const api = db.database("fin_api");
-    const reading = await runDatabaseProbe(api, testContext(), { now: () => new Date() }, lines);
+    const reading = await runDatabaseProbe(api, testContext(), { now: () => Date.now() }, lines);
     expect(reading).toBeNull();
     expect(lines.lines[0]?.fields).toMatchObject({
       job: "db-probe",

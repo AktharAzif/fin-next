@@ -83,7 +83,7 @@ export async function withOwnerSession<T>(
   minutes = 60,
 ): Promise<T> {
   const password = generateDatabasePassword();
-  const until = new Date(clock.now().getTime() + minutes * 60_000).toISOString();
+  const until = new Date(clock.now() + minutes * 60_000).toISOString();
   await superuser.query(
     `ALTER ROLE fin_owner WITH LOGIN PASSWORD ${escapeLiteral(scramSha256Verifier(password))} VALID UNTIL ${escapeLiteral(until)}`,
   );

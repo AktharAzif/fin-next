@@ -8,8 +8,8 @@ import { StartEpochRefused, startEpoch } from "./start-epoch.ts";
 function fakeTx(): { tx: UnitTx; queries: string[] } {
   const queries: string[] = [];
   const tx = {
-    context: { clock: { now: () => new Date() }, release: "r", log: { write: () => {} } },
-    ids: createIdSource({ now: () => new Date() }),
+    context: { clock: { now: () => Date.now() }, release: "r", log: { write: () => {} } },
+    ids: createIdSource({ now: () => Date.now() }),
     async query(text: string) {
       queries.push(text);
       return { rows: [{ epoch: 2 }], rowCount: 1, command: "SELECT", fields: [] };

@@ -17,12 +17,12 @@ function fakeTx(fail?: { code: string; on: string }): FakeTx {
   const lines: Line[] = [];
   const tx = {
     context: {
-      clock: { now: () => new Date(Date.UTC(2026, 10, 21, 12)) },
+      clock: { now: () => Date.UTC(2026, 10, 21, 12) },
       release: "rel-1",
       requestId: "req_0000000000000000000000000a",
       log: { write: (line: Line) => lines.push(line) },
     },
-    ids: createIdSource({ now: () => new Date(Date.UTC(2026, 10, 21, 12)) }),
+    ids: createIdSource({ now: () => Date.UTC(2026, 10, 21, 12) }),
     async query(text: string, values?: readonly unknown[]) {
       queries.push({ text, values });
       if (fail !== undefined && text.includes(fail.on)) {

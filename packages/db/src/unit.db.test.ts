@@ -101,7 +101,7 @@ describe("one transaction per unit", () => {
   });
 
   it("makes IDs from the unit's clock", async () => {
-    const fixed = testContext({ clock: { now: () => new Date(Date.UTC(2026, 10, 21)) } });
+    const fixed = testContext({ clock: { now: () => Date.UTC(2026, 10, 21) } });
     const id = await edge.unit(fixed, async (tx) => tx.ids.newId("req"));
     expect(id.slice(4, 14)).toBe(
       await edge.unit(fixed, async (tx) => tx.ids.newId("req").slice(4, 14)),

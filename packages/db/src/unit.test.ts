@@ -37,7 +37,7 @@ describe("refusesSessionState (no session-level SET on a pooled client)", () => 
 describe("IDs (DA-02)", () => {
   it("are <prefix>_<26 Crockford characters>, time-ordered by the unit's clock", () => {
     let now = Date.UTC(2026, 10, 21, 10, 0, 0);
-    const ids = createIdSource({ now: () => new Date(now) });
+    const ids = createIdSource({ now: () => now });
     const first = ids.newId("aud");
     now += 1;
     const second = ids.newId("aud");
@@ -48,17 +48,15 @@ describe("IDs (DA-02)", () => {
   });
 
   it("puts 80 random bits after the time, from the injected source", () => {
-    const fixed = createIdSource({ now: () => new Date(0) }, (size) =>
-      new Uint8Array(size).fill(0xff),
-    );
+    const fixed = createIdSource({ now: () => 0 }, (size) => new Uint8Array(size).fill(0xff));
     expect(fixed.newId("job")).toBe(`job_${"0".repeat(10)}${"z".repeat(16)}`);
-    const zero = createIdSource({ now: () => new Date(0) }, (size) => new Uint8Array(size));
+    const zero = createIdSource({ now: () => 0 }, (size) => new Uint8Array(size));
     expect(zero.newId("eml")).toBe(`eml_${"0".repeat(26)}`);
   });
 
   it("refuses a bad prefix and a time outside 48 bits", () => {
     expect(() => idPattern("AUD")).toThrow(TypeError);
-    expect(() => createIdSource({ now: () => new Date(-1) }).newId("aud")).toThrow(RangeError);
+    expect(() => createIdSource({ now: () => -1 }).newId("aud")).toThrow(RangeError);
   });
 });
 

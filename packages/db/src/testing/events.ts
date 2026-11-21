@@ -32,7 +32,7 @@ export async function registerEventTypes(
   }
 }
 
-const ids = createIdSource({ now: () => new Date() });
+const ids = createIdSource({ now: () => Date.now() });
 
 /** A well-formed `aud_` (or other prefix) ID for SQL-level tests. */
 export function testId(prefix: string): string {

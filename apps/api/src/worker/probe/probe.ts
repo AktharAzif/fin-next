@@ -85,7 +85,7 @@ export async function runDatabaseProbe(
   clock: Clock,
   log: LineSink,
 ): Promise<ProbeReading | null> {
-  const started = clock.now().getTime();
+  const started = clock.now();
   try {
     const reading = await db.read(context, readDatabaseProbe);
     log.write({
@@ -95,7 +95,7 @@ export async function runDatabaseProbe(
         job: "db-probe",
         trigger: "schedule",
         result: "ok",
-        durationMs: clock.now().getTime() - started,
+        durationMs: clock.now() - started,
         archiverLagS: reading.archiverLagS,
         archiverFailed: reading.archiverFailed,
         replicas: reading.replicas,
@@ -125,7 +125,7 @@ export async function runDatabaseProbe(
         job: "db-probe",
         trigger: "schedule",
         result: "failed",
-        durationMs: clock.now().getTime() - started,
+        durationMs: clock.now() - started,
         code,
       },
     });

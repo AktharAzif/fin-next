@@ -40,7 +40,7 @@ export interface SequencerOptions {
 export async function runSequencer(options: SequencerOptions, signal: AbortSignal): Promise<void> {
   const interval = options.intervalMs ?? 1_000;
   const reportEvery = options.reportEveryMs ?? 60_000;
-  let windowStart = options.clock.now().getTime();
+  let windowStart = options.clock.now();
   let processed = 0;
   let runs = 0;
   let failed = 0;
@@ -84,9 +84,9 @@ export async function runSequencer(options: SequencerOptions, signal: AbortSigna
     } else {
       skipped += 1;
     }
-    if (options.clock.now().getTime() - windowStart >= reportEvery) {
+    if (options.clock.now() - windowStart >= reportEvery) {
       await report();
-      windowStart = options.clock.now().getTime();
+      windowStart = options.clock.now();
     }
     await options.sleep(interval, signal);
   }

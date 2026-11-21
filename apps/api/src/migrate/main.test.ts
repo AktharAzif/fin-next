@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { stdoutLines } from "./lines.ts";
 import { EXIT_CONFIG, EXIT_USAGE, parseArgs, runMigrateCli, UsageError } from "./main.ts";
 
-const clock = { now: () => new Date(Date.UTC(2026, 10, 21, 12)) };
+const clock = { now: () => Date.UTC(2026, 10, 21, 12) };
 // Built at run time: the public-safety check refuses credential-shaped URLs in tracked files.
 const SECRET = ["not", "a", "real", "password"].join("-");
 const URL_WITH_SECRET = [

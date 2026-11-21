@@ -21,7 +21,7 @@ export function stdoutLines(
   return {
     write(line: Line) {
       const record: Record<string, unknown> = {
-        dt: clock.now().toISOString(),
+        dt: new Date(clock.now()).toISOString(),
         message: line.event,
         event: line.event,
         level: line.level,

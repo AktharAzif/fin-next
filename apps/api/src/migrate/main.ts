@@ -338,7 +338,7 @@ export async function runMigrateCli(
   } catch (error) {
     // No envelope yet: the configuration it would carry is what failed. The line names the variable.
     io.stdout(
-      `${JSON.stringify({ dt: io.clock.now().toISOString(), message: "migrate.failed", event: "migrate.failed", level: "error", service: "migrate", mode: mode.mode, code: "config", variable: error instanceof DatabaseConfigError ? error.variable : "unknown" })}\n`,
+      `${JSON.stringify({ dt: new Date(io.clock.now()).toISOString(), message: "migrate.failed", event: "migrate.failed", level: "error", service: "migrate", mode: mode.mode, code: "config", variable: error instanceof DatabaseConfigError ? error.variable : "unknown" })}\n`,
     );
     return EXIT_CONFIG;
   }

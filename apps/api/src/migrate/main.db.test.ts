@@ -14,7 +14,7 @@ import { EXIT_CONFIG, EXIT_FAILED, EXIT_OK, runMigrateCli } from "./main.ts";
 
 let db: TestDatabase;
 let su: PgClient;
-const clock = { now: () => new Date() };
+const clock = { now: () => Date.now() };
 const RUN_ID = "run_01jdtest0000000000000000";
 
 beforeAll(async () => {

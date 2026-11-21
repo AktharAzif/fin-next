@@ -2,8 +2,9 @@
 // service for runs): the clock, the release and IDs for stamping, and where its lines go. Nothing
 // here reads the clock or the environment at module scope (ARCHITECTURE principle 14).
 
+/** Milliseconds since the Unix epoch: the same shape as packages/core's injected Clock (P0-D). */
 export interface Clock {
-  now(): Date;
+  now(): number;
 }
 
 /** A line field: an ID, a name, a code, a count, or an object of counts (spec 08 §7.2). */
