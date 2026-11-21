@@ -12,9 +12,13 @@
 //      any limit is counted); no hook, no auth route;
 //   8. the app's JSON routes, under Hono's basePath("/api");
 //   9. anything else under /api/ is 404.
-// Every route of steps 7 and 8 is mounted through one wrapper that records the route's own pattern
-// for the request line and runs the gate's body check against the route's own registration, so the
-// upload exemption follows the route that runs (origin-gate.ts).
+// Before any step can refuse, the request is named by the route it is for (`matchedTemplate`): the
+// first matched route registered with a method, or the host's own /api/auth/* entry; the app's
+// `api.use` and `api.all` entries are middleware and name a request only when no route matches it.
+// So the request line and csrf.refused carry the route's pattern whichever layer refuses.
+// Every entry of steps 7 and 8 is mounted through one wrapper: a route (or the host's own entry)
+// records its own pattern as it runs, and every entry runs the gate's body check against its own
+// registration, so the upload exemption follows the route that runs (origin-gate.ts).
 // Every answer carries Cache-Control: no-store, Fin-Release and ARCHITECTURE §7.12's API headers;
 // errors are RFC 9457 problems; no CORS header is ever sent.
 import type { Clock } from "@fin/core";
@@ -25,6 +29,7 @@ import {
   errorHandler,
   type FinContext,
   type FinEnv,
+  matchedTemplate,
   notFoundHandler,
   type RequestOptions,
   rawTarget,
@@ -34,8 +39,9 @@ import {
 import { type ConnectorPeers, IngressProofs, ingressCheck } from "@fin/server/ingress";
 import type { Reporter } from "@fin/server/report";
 import type { Telemetry } from "@fin/server/telemetry";
-import { Hono } from "hono";
+import { Hono, type Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { METHOD_NAME_ALL } from "hono/router";
 import { AccessVerifier, accessCheck } from "./access-jwt.ts";
 import { originGate, routeBodyCheck } from "./origin-gate.ts";
 
@@ -83,7 +89,8 @@ export interface ApiHostOptions {
   /**
    * Registers the app's JSON routes on a Hono app whose basePath is /api. A route's whole chain is
    * its own registration (`api.post(path, ...handlers)`); an entry registered without a method
-   * (`api.use`, `api.all`) is held to JSON bodies. Errors answer through the host's error handler.
+   * (`api.use`, `api.all`) is middleware: it is held to JSON bodies, and a request it matches is
+   * named by the route behind it. Errors answer through the host's error handler.
    */
   routes?: (api: Hono<FinEnv>) => void;
   /**
@@ -146,6 +153,16 @@ export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
   app.notFound(notFound);
 
   app.use(requestUnit(requestOptions));
+  // The route the request is for, named before any step can refuse it; the host's own entries
+  // answer although they were registered without a method.
+  const hostEntries = new Set<unknown>();
+  app.use(async (c, next) => {
+    c.set(
+      "route",
+      matchedTemplate(c, (route) => hostEntries.has(route.handler)),
+    );
+    await next();
+  });
   app.use(
     apiHeaders({
       release: options.release,
@@ -241,19 +258,26 @@ export function createApiHost(options: ApiHostOptions): Hono<FinEnv> {
   });
   // 8. The app's JSON routes, under /api.
   api.on(["GET", "HEAD"], "/health", (c) => c.json({ status: "ok" }, 200));
+  const hostCount = api.routes.length;
   options.routes?.(api);
   checkUploads(options.uploads ?? [], api);
-  // Steps 7 and 8, mounted in registration order (which is the order Hono dispatches in), each
-  // entry recording its own pattern and holding the body check to its own registration.
+  // Steps 7 and 8, mounted in registration order (which is the order Hono dispatches in). A route,
+  // or the host's own entry, records its own pattern as it runs; the app's middleware leaves the
+  // request named by the route it stands in front of. Every entry holds the body check to its own
+  // registration.
   const bodyCheck = routeBodyCheck({ uploads, ...gateRefusal });
-  for (const route of api.routes) {
+  api.routes.forEach((route, index) => {
     const registration = { method: route.method, path: route.path };
     const handler = route.handler;
-    app.on(route.method, route.path, (c, next) => {
-      c.set("route", registration.path);
+    const own = index < hostCount;
+    const names = own || route.method !== METHOD_NAME_ALL;
+    const mounted = (c: FinContext, next: Next) => {
+      if (names) c.set("route", registration.path);
       return bodyCheck(c, registration) ?? handler(c, next);
-    });
-  }
+    };
+    if (own) hostEntries.add(mounted);
+    app.on(route.method, route.path, mounted);
+  });
   // 9. Everything else: app.notFound.
   return app;
 }

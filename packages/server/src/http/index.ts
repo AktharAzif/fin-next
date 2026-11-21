@@ -28,6 +28,7 @@ export {
 } from "./problem.ts";
 export {
   errorHandler,
+  matchedTemplate,
   notFoundHandler,
   type RequestOptions,
   refuse,

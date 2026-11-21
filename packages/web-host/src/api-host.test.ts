@@ -1,7 +1,9 @@
 // spec 02 §2.2's front door, step by step, on the shared API host.
 import { Readiness } from "@fin/server/health";
+import type { FinEnv } from "@fin/server/http";
 import { ConnectorPeers } from "@fin/server/ingress";
 import { capture, randomProof } from "@fin/server/testing";
+import type { MiddlewareHandler } from "hono";
 import { describe, expect, it } from "vitest";
 import { type AccessResult, AccessVerifier } from "./access-jwt.ts";
 import { type ApiHostOptions, type AppName, type AuthHook, createApiHost } from "./api-host.ts";
@@ -535,6 +537,170 @@ describe("createApiHost", () => {
       await expect(
         setup("console", { routes, uploads: ["POST /api/items/:id/document"] }),
       ).resolves.toBeDefined();
+    });
+  });
+
+  describe("the route label names the route, never the app's middleware in front of it", () => {
+    const crossSite = (good: () => Record<string, string>) => ({
+      ...good(),
+      origin: "https://evil.example.com",
+      "sec-fetch-site": "cross-site",
+    });
+    const passthrough: MiddlewareHandler<FinEnv> = async (_c, next) => {
+      await next();
+    };
+    const routeLines = (captured: { events(name: string): Record<string, unknown>[] }) =>
+      captured.events("request").map((l) => [l.status, l.route]);
+
+    it("a path-scoped middleware: the gate's refusal and the request lines name the route", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use("/items/*", passthrough);
+          api.post("/items/:id", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/items/itm_1", crossSite(good))).status).toBe(403);
+      expect((await post("/api/items/itm_1", good())).status).toBe(201);
+      expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual([
+        ["origin_mismatch", "/api/items/:id"],
+      ]);
+      expect(routeLines(captured)).toEqual([
+        [403, "/api/items/:id"],
+        [201, "/api/items/:id"],
+      ]);
+    });
+
+    it("an app-wide middleware: a 2xx, a gate refusal and every earlier refusal name the route", async () => {
+      const seen: string[] = [];
+      const { send, post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use(async (_c, next) => {
+            seen.push("session");
+            await next();
+          });
+          api.post("/files/:id", (c) => c.json({}, 201));
+          api.post("/items", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/items", good())).status).toBe(201);
+      expect((await post("/api/items", crossSite(good))).status).toBe(403);
+      expect((await post("/api/items", good(), "x".repeat(256 * 1024 + 1))).status).toBe(413);
+      expect(
+        (await send("/api/items", { method: "POST", headers: good(), body: "{}", peer: NEIGHBOUR }))
+          .status,
+      ).toBe(403);
+      expect(seen).toEqual(["session"]);
+      expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual([
+        ["origin_mismatch", "/api/items"],
+      ]);
+      expect(routeLines(captured)).toEqual([
+        [201, "/api/items"],
+        [403, "/api/items"],
+        [413, "/api/items"],
+        [403, "/api/items"],
+      ]);
+    });
+
+    it("a middleware that answers: the request line names the route it stands in front of", async () => {
+      const { send, post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use("/items/*", async (c) => c.json({ error: "unauthenticated" }, 401));
+          api.post("/items/:id/archive", (c) => c.json({}, 200));
+          api.get("/items/:id", (c) => c.json({}));
+        },
+      });
+      expect((await post("/api/items/itm_1/archive", good())).status).toBe(401);
+      expect((await send("/api/items/itm_1")).status).toBe(401);
+      expect(routeLines(captured)).toEqual([
+        [401, "/api/items/:id/archive"],
+        [401, "/api/items/:id"],
+      ]);
+    });
+
+    it("Fin Admin's Access refusal names the route behind the app's middleware", async () => {
+      const { post, good, verifier, captured } = await setup("admin", {
+        routes: (api) => {
+          api.use(passthrough);
+          api.post("/staff", (c) => c.json({}, 201));
+        },
+      });
+      verifier.result = { ok: false, reason: "aud" };
+      expect((await post("/api/staff", good())).status).toBe(401);
+      expect(routeLines(captured)).toEqual([[401, "/api/staff"]]);
+    });
+
+    it("/api/auth/* keeps its own label behind an app-wide middleware and over an overlapping route", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use(passthrough);
+          api.post("/:area/:id", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/auth/sign-in", crossSite(good))).status).toBe(403);
+      expect((await post("/api/auth/sign-in", good())).status).toBe(404);
+      expect((await post("/api/items/itm_1", crossSite(good))).status).toBe(403);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual([
+        "/api/auth/*",
+        "/api/:area/:id",
+      ]);
+      expect(routeLines(captured)).toEqual([
+        [403, "/api/auth/*"],
+        [404, "/api/auth/*"],
+        [403, "/api/:area/:id"],
+      ]);
+    });
+
+    it("a path only the app's middleware matches is named by the middleware's pattern, before and after the gate", async () => {
+      const { send, post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use("/items/*", passthrough);
+          api.post("/items", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/items/nothing", crossSite(good))).status).toBe(403);
+      expect((await post("/api/items/nothing", good())).status).toBe(404);
+      expect((await send("/api/items/nothing")).status).toBe(404);
+      expect((await send("/api/other")).status).toBe(404);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual(["/api/items/*"]);
+      expect(routeLines(captured)).toEqual([
+        [403, "/api/items/*"],
+        [404, "/api/items/*"],
+        [404, "/api/items/*"],
+        [404, "unmatched"],
+      ]);
+    });
+
+    it("a route that hands the request on: the request line names the route that answered", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.post("/files/new", passthrough);
+          api.use("/files/*", passthrough);
+          api.post("/files/:id", (c) => c.json({}, 201));
+        },
+      });
+      expect((await post("/api/files/new", good())).status).toBe(201);
+      expect((await post("/api/files/new", crossSite(good))).status).toBe(403);
+      expect(captured.events("csrf.refused").map((l) => l.route)).toEqual(["/api/files/new"]);
+      expect(routeLines(captured)).toEqual([
+        [201, "/api/files/:id"],
+        [403, "/api/files/new"],
+      ]);
+    });
+
+    it("a body refused at a middleware in front of an upload route names the upload route", async () => {
+      const { post, good, captured } = await setup("console", {
+        routes: (api) => {
+          api.use("/media/*", passthrough);
+          api.post("/media/:id", (c) => c.json({}, 201));
+        },
+        uploads: ["POST /api/media/:id"],
+      });
+      const multipart = { ...good(), "content-type": "multipart/form-data; boundary=x" };
+      expect((await post("/api/media/med_1", multipart, "--x--")).status).toBe(403);
+      expect(captured.events("csrf.refused").map((l) => [l.reason, l.route])).toEqual([
+        ["content_type", "/api/media/:id"],
+      ]);
+      expect(routeLines(captured)).toEqual([[403, "/api/media/:id"]]);
     });
   });
 

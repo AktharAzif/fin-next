@@ -153,9 +153,11 @@ export interface RouteRegistration {
 }
 
 /**
- * Check 4 on the route that runs, held to that route's own registration, so a multipart body passes
+ * Check 4 on the entry that runs, held to that entry's own registration, so a multipart body passes
  * only on a route the policy names as an upload; an entry registered without a method (`use`,
- * `all`) is never one. Returns the refusal, or undefined to run the route.
+ * `all`) is never one. A refusal is named like the gate's, by the request's route (`routeTemplate`),
+ * so a refusal at middleware names the route behind it. Returns the refusal, or undefined to run
+ * the entry.
  */
 export function routeBodyCheck(
   options: RouteBodyCheckOptions,
@@ -167,6 +169,6 @@ export function routeBodyCheck(
       hasBody: hasBody(c.req.raw.headers),
       upload: options.uploads.has(`${route.method} ${route.path}`),
     });
-    return code === undefined ? undefined : refuseGate(options, c, code, route.path);
+    return code === undefined ? undefined : refuseGate(options, c, code, routeTemplate(c));
   };
 }

@@ -5,6 +5,8 @@ import { type Clock, isFinError, newId } from "@fin/core";
 import type { ErrorHandler, MiddlewareHandler, NotFoundHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { matchedRoutes } from "hono/route";
+import { METHOD_NAME_ALL } from "hono/router";
+import type { RouterRoute } from "hono/types";
 import type { Reporter } from "../report.ts";
 import { type Fields, type RequestFields, statusClass } from "../telemetry/lines.ts";
 import type { Telemetry } from "../telemetry/telemetry.ts";
@@ -19,19 +21,30 @@ export interface RequestOptions {
 }
 
 /**
- * The route template, never the raw path: the pattern a layer recorded for this request, or else
- * the first matched route after the middleware, which is the one Hono dispatches to (it runs the
- * matches in registration order, and the first route answers). Where a static route and a parameter
- * route overlap, the later of the two never runs, so it is never the template.
+ * The route template the router's matches name for this request, never the raw path. Hono runs the
+ * matches in registration order, and the first route among them answers: so the template is the
+ * first match registered with a method (`get`, `post`, `on`), or that `answers` says answers
+ * requests itself although it was registered without one. An entry registered without a method
+ * (`use`, `all`) is taken for middleware in front of a route, and names the request only when no
+ * route matches; an entry registered on every path (`*`, `/*`) never does. Where a static route and
+ * a parameter route overlap, the later of the two never runs, so it is never the template.
  */
-export function routeTemplate(c: FinContext): string {
-  const set = c.get("route");
-  if (set !== undefined) return set;
+export function matchedTemplate(
+  c: FinContext,
+  answers: (route: RouterRoute) => boolean = () => false,
+): string {
+  let middleware: string | undefined;
   for (const route of matchedRoutes(c)) {
-    // Middleware is registered on every path (`*`); a route has a pattern of its own.
-    if (route.path !== "*" && route.path !== "/*") return route.path;
+    if (route.path === "*" || route.path === "/*") continue;
+    if (route.method !== METHOD_NAME_ALL || answers(route)) return route.path;
+    middleware ??= route.path;
   }
-  return "unmatched";
+  return middleware ?? "unmatched";
+}
+
+/** The route template: the pattern a layer recorded for this request, or else the matches'. */
+export function routeTemplate(c: FinContext): string {
+  return c.get("route") ?? matchedTemplate(c);
 }
 
 const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
