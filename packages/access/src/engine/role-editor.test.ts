@@ -215,6 +215,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "Admin\u{a78c}s", // U+A78C LATIN SMALL LETTER SALTILLO
     "Admin1",
     "Admin5",
+    "Admin \u{662}", // an Arabic-Indic digit two, passed over as "2" is
     // Letters of other scripts that read as Latin ones
     "\u{13aa}dmin", // U+13AA CHEROKEE LETTER GO
     "\u{ab7a}dmin", // its small form
@@ -277,6 +278,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "\u{30b7}\u{30b9}\u{30c6}\u{30e0}\u{7ba1}", // five letters of another script
     "\u{410}\u{434}\u{43c}\u{438}\u{43d}", // the Russian word, which does not draw as "Admin"
     "Tier 1 support",
+    "A\u{3b4}\u{3bc}in", // two of five letters with no Latin reading: more than one in four
     "Adminss",
     "\u{3164}",
   ])("%j does not read as built-in in the dashboard", (name) => {
@@ -303,9 +305,14 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     expect(nameProblems("Oper\u{251}tor", staff)).toEqual(["reads_as_built_in"]);
   });
 
-  it("reads no more than a name can hold", () => {
+  it("reads no more than a name can hold, and leaves longer text to the length rule", () => {
     expect(readsAsBuiltIn(dash, `Admin${"!".repeat(400)}`)).toBe(false);
     expect(nameProblems(`Admin${"!".repeat(400)}`)).toEqual(["name"]);
+    // Over the text limit, however little it reads as.
+    expect(readsAsBuiltIn(dash, `Admin${" ".repeat(400)}`)).toBe(false);
+    // Under the text limit, but folding to more glyphs than a name can hold.
+    expect(readsAsBuiltIn(dash, `Admin${"\u{2473}".repeat(200)}`)).toBe(false);
+    expect(readsAsBuiltIn(dash, `Admin${"\u{2473}".repeat(2)}`)).toBe(true);
   });
 
   it("compares each realm only with its own built-ins", () => {

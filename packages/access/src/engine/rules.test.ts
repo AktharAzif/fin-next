@@ -9,6 +9,7 @@ import {
   editingProblem,
   givingProblem,
   lastTopRoleProblem,
+  outranks,
   type TopRoleChange,
 } from "./giving.ts";
 import { withNeeds } from "./permissions.ts";
@@ -146,6 +147,13 @@ describe("§8.5 giving a role: invitations, new staff and role changes", () => {
       newRole: SUPER,
     });
     expect(problem).toBe("top_only");
+  });
+
+  it("outranks with permissions the catalogue knows only", () => {
+    const none = new Set<string>();
+    expect(outranks(looseDash, ["nope.x", "constructor", "__proto__"], none)).toBe(false);
+    expect(outranks(looseDash, ["nope.x", "customers.read"], none)).toBe(true);
+    expect(outranks(looseDash, ["customers.read"], new Set(["customers.read"]))).toBe(false);
   });
 
   it("gives nothing for an actor whose role Fin does not know", () => {
@@ -376,6 +384,14 @@ describe("§8.4 a custom role's draft", () => {
   ];
   it.each(rows)("%s", (_rule, cat, roleDraft, actorPerms, expected) => {
     expect(validateRole(cat, roleDraft, actorPerms)).toEqual(expected);
+  });
+
+  it("refuses a permission the catalogue does not know, even in the editor's own set", () => {
+    // A set that holds an unknown name (built by hand, not by permissionsOf) gives no licence.
+    const forged = new Set(["nope.read", "customers.read"]);
+    const cat: Catalogue = dash;
+    expect(validateRole(cat, d(["nope.read"]), forged)).toEqual(["beyond"]);
+    expect(validateRole(cat, d(["customers.read", "constructor"]), forged)).toEqual(["beyond"]);
   });
 
   it("is unique per organisation, ignoring case", () => {

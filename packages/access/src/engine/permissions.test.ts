@@ -161,6 +161,18 @@ describe("privilege", () => {
       permissionDiff(dash, ["member.read", "golive.edit"], ["customers.read", "member.read"]),
     ).toEqual({ added: ["customers.read"], removed: ["golive.edit"] });
   });
+
+  it("leaves names the catalogue does not know out of the diff, before and after", () => {
+    const loose: Catalogue = dash;
+    expect(permissionDiff(loose, ["nope.x", "customers.read"], [])).toEqual({
+      added: [],
+      removed: ["customers.read"],
+    });
+    expect(permissionDiff(loose, [], ["constructor", "money.read"])).toEqual({
+      added: ["money.read"],
+      removed: [],
+    });
+  });
 });
 
 describe.each([

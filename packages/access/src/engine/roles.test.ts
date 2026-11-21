@@ -88,6 +88,19 @@ describe("resolveRole", () => {
     expect(isCustomRoleId(dash, `ROL_${ID}`)).toBe(false);
   });
 
+  it("takes exactly 26 Crockford characters after the prefix (DA-02)", () => {
+    expect(isCustomRoleId(dash, `rol_${"0".repeat(26)}`)).toBe(true);
+    expect(isCustomRoleId(dash, `rol_${"0".repeat(25)}`)).toBe(false);
+    expect(isCustomRoleId(dash, `rol_${"0".repeat(27)}`)).toBe(false);
+    expect(isCustomRoleId(dash, `rol_${ID}x`)).toBe(false);
+    expect(isCustomRoleId(dash, `rol_${ID}\n`)).toBe(false);
+    // Crockford base32 leaves out I, L, O and U, in either case.
+    for (const letter of ["I", "L", "O", "U", "i", "l", "o", "u"]) {
+      expect(isCustomRoleId(dash, `rol_${ID.slice(0, 25)}${letter}`), letter).toBe(false);
+    }
+    expect(resolveRole(dash, `rol_${"0".repeat(27)}`, () => undefined)).toBe("unknown");
+  });
+
   it("knows a reference only as resolveRole answers one", () => {
     const record = { name: "Support", description: "", permissions: ["customers.read"] };
     expect(isKnownRole(dash, { kind: "built_in", key: "admin" })).toBe(true);
@@ -103,6 +116,7 @@ describe("resolveRole", () => {
       { kind: "custom", id: srlId, ...record },
       { kind: "custom", id: "rol_123", ...record },
       { kind: "role", key: "admin" },
+      { kind: "role", id: rolId, ...record },
       null,
     ] as unknown as RoleRef[]) {
       expect(isKnownRole(dash, role), JSON.stringify(role)).toBe(false);
