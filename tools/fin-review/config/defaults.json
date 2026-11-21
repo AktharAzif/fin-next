@@ -1,0 +1,7 @@
+{
+  "model": "opus",
+  "effort": "xhigh",
+  "attackModel": "fable",
+  "attackEffort": "high",
+  "fast": false
+}
