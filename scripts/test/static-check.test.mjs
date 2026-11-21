@@ -276,6 +276,37 @@ describe("static:check", () => {
     }
   });
 
+  test("an element after which a browser ignores a raw-text start tag fails", () => {
+    // In select, in frameset and in a template's column group, the tree builder ignores the start
+    // tag of a raw-text element, so the tokenizer reads on as markup what the two readings take
+    // for text: each of these puts an image with a handler in the DOM.
+    for (const [html, name] of /** @type {[string, string][]} */ ([
+      [
+        '<select><noscript><p title="</noscript><!--"></noscript></select><noscript><p title="</noscript><img src=x onerror=alert(1)>-->"></noscript>',
+        "select",
+      ],
+      ["<select><xmp></select><img src=x onerror=alert(1)></xmp>", "select"],
+      ["<select><title></select><img src=x onerror=alert(1)></title>", "select"],
+      ["<SELECT><style></SELECT><img src=x onerror=alert(1)></style>", "select"],
+      ["<template><col><xmp></template><img src=x onerror=alert(1)></xmp>", "template"],
+      ['<frameset><title><frame onload="alert(1)"></title></frameset>', "frameset"],
+      ["<frame>", "frame"],
+    ])) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      const findings = checkIndexHtml("index.html", page);
+      assert.deepEqual(rules(findings), ["static-html"], html);
+      assert.ok(
+        findings.some((f) => f.message.startsWith(`no <${name}> element: it can put the parser`)),
+        `${html}: ${JSON.stringify(findings)}`,
+      );
+    }
+    // A table's column group switches the tokenizer as the readings do.
+    assert.deepEqual(
+      checkIndexHtml("index.html", INDEX.replace("<body>", "<body><table><col></table>")),
+      [],
+    );
+  });
+
   test("a javascript: URL or a srcdoc, which hold inline script, fails in every spelling", () => {
     for (const html of [
       '<a href="javascript:alert(1)">x</a>',
