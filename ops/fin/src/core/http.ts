@@ -29,7 +29,11 @@ export interface HttpResponse {
 
 const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
 
-/** Sends a request. Network errors and retryable statuses are retried with a short backoff. */
+/**
+ * Sends a request. Network errors (while connecting or while the body is read) and retryable
+ * statuses are retried with a short backoff; the timeout covers the whole exchange, and its timer
+ * is cleared whatever happens.
+ */
 export async function send(
   provider: string,
   request: HttpRequest,
@@ -41,7 +45,7 @@ export async function send(
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
+    let answer: HttpResponse | undefined;
     try {
       const init: RequestInit = {
         method: request.method,
@@ -50,29 +54,34 @@ export async function send(
         redirect: "error",
       };
       if (request.body !== undefined) init.body = request.body;
-      response = await options.fetch(request.url, init);
+      const response = await options.fetch(request.url, init);
+      answer = { status: response.status, headers: response.headers, text: await response.text() };
     } catch (error) {
-      clearTimeout(timer);
       lastError =
-        error instanceof Error && error.name === "AbortError" ? "timed out" : "network error";
+        controller.signal.aborted || (error instanceof Error && error.name === "AbortError")
+          ? "timed out"
+          : "network error";
+    } finally {
+      clearTimeout(timer);
+    }
+    if (answer === undefined) {
+      // A write whose answer was lost may have been applied, so only a read is repeated.
       if (request.idempotent && attempt < attempts) {
         await options.sleep(500 * 2 ** (attempt - 1));
         continue;
       }
       throw new ProviderError(provider, `${provider} ${request.method}: ${lastError}`, 0);
     }
-    const text = await response.text();
-    clearTimeout(timer);
     const retryable =
-      RETRY_STATUS.has(response.status) && (request.idempotent || response.status === 429);
+      RETRY_STATUS.has(answer.status) && (request.idempotent || answer.status === 429);
     if (retryable && attempt < attempts) {
-      const after = Number(response.headers.get("retry-after"));
+      const after = Number(answer.headers.get("retry-after"));
       const wait =
         Number.isFinite(after) && after > 0 ? Math.min(after, 30) * 1000 : 500 * 2 ** (attempt - 1);
       await options.sleep(wait);
       continue;
     }
-    return { status: response.status, headers: response.headers, text };
+    return answer;
   }
   throw new ProviderError(provider, `${provider} ${request.method}: ${lastError}`, 0);
 }
