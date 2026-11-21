@@ -93,6 +93,10 @@ export interface Settings {
     project: string;
     region: string;
     imageRepository: string;
+    /** What `gh attestation verify` requires of every image (CI-05). */
+    attestation: { repository: string; workflow: string; ref: string };
+    /** The public health paths a deploy's --smoke fetches, by host role. */
+    smoke: Array<{ host: HostRole; path: string }>;
     deployOrder: string[];
     connectorOrder: string[];
     sealedVariables: string[];
@@ -216,6 +220,7 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
   const rules = c.obj(top.rules, "rules");
   const rate = c.obj(rules.rate, "rules.rate");
   const railway = c.obj(top.railway, "railway");
+  const attestation = c.obj(railway.attestation, "railway.attestation");
   const servicesRaw = c.obj(railway.services, "railway.services");
   const services: Record<string, ServiceSettings> = {};
   for (const [name, value] of Object.entries(servicesRaw)) {
@@ -301,6 +306,28 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
         railway.imageRepository,
         "railway.imageRepository",
         /^ghcr\.io\/[a-z0-9-]+\/$/,
+      ),
+      attestation: {
+        repository: c.str(
+          attestation.repository,
+          "railway.attestation.repository",
+          /^[a-z0-9-]+\/[a-z0-9-]+$/,
+        ),
+        workflow: c.str(
+          attestation.workflow,
+          "railway.attestation.workflow",
+          /^[a-z0-9-]+\/[a-z0-9-]+\/\.github\/workflows\/[a-z0-9-]+\.ya?ml$/,
+        ),
+        ref: c.str(attestation.ref, "railway.attestation.ref", /^refs\/heads\/main$/),
+      },
+      smoke: (Array.isArray(railway.smoke) ? railway.smoke : []).map(
+        (entry: unknown, i: number) => {
+          const e = c.obj(entry, `railway.smoke[${i}]`);
+          return {
+            host: c.role(e.host, `railway.smoke[${i}].host`),
+            path: c.str(e.path, `railway.smoke[${i}].path`, /^\/[a-z/]+$/),
+          };
+        },
       ),
       deployOrder: c.list(railway.deployOrder, "railway.deployOrder"),
       connectorOrder: c.list(railway.connectorOrder, "railway.connectorOrder"),

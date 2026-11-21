@@ -136,6 +136,16 @@
     "project": "fin-next-staging",
     "region": "us-east4-eqdc4a",
     "imageRepository": "ghcr.io/aktharazif/",
+    "attestation": {
+      "repository": "aktharazif/fin-next",
+      "workflow": "aktharazif/fin-next/.github/workflows/release.yml",
+      "ref": "refs/heads/main"
+    },
+    "smoke": [
+      { "host": "api", "path": "/health" },
+      { "host": "console", "path": "/api/health" },
+      { "host": "verify", "path": "/api/health" }
+    ],
     "deployOrder": ["payments", "api", "worker", "edge", "verify", "admin", "console"],
     "connectorOrder": ["cloudflared-admin", "cloudflared-public"],
     "sealedVariables": [

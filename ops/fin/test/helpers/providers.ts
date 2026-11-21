@@ -344,12 +344,62 @@ export interface RailwayPatch {
   variables: Record<string, { value: string; isSealed?: boolean }>;
 }
 
+export interface FakeInstance {
+  region: string;
+  numReplicas: number;
+  restartPolicyType: string;
+  sleepApplication: boolean;
+  ipv6EgressEnabled: boolean;
+  image: string | null;
+  domains: string[];
+  tcpProxies: number;
+  healthcheckPath: string | null;
+  healthcheckTimeout: number | null;
+  overlapSeconds: number;
+  drainingSeconds: number;
+  startCommand: string | null;
+  cronSchedule: string | null;
+  variables: Record<string, string>;
+  sealed: Set<string>;
+  latestDeployment: { id: string; status: string } | null;
+}
+
+interface ProvisionSettings {
+  region: string;
+  services: Record<
+    string,
+    {
+      replicas: number;
+      restart?: string;
+      healthcheck?: string | null;
+      overlapSeconds?: number;
+      drainingSeconds?: number;
+      startCommand?: string;
+      cron?: string;
+      staticEgress: boolean;
+    }
+  >;
+}
+
 export class FakeRailway {
   readonly token: string;
   readonly services = new Map<string, string>();
   readonly patches: RailwayPatch[] = [];
   readonly operations: string[] = [];
   egress = new Map<string, string[]>();
+  readonly instances = new Map<string, FakeInstance>();
+  readonly deployments = new Map<string, { service: string; statuses: string[]; logs: string[] }>();
+  readonly updates: Array<{ service: string; input: Json }> = [];
+  environmentId = "";
+  /** The statuses each new deployment reports, in turn; the last one repeats. */
+  deployStatuses = ["DEPLOYING", "SUCCESS"];
+  /** The log lines a migrate deployment writes, for a release. */
+  migrateLogs = (release: string) => [
+    JSON.stringify({ event: "migrate.started" }),
+    JSON.stringify({ event: "migrate.done", release }),
+  ];
+  extendedRefused = false;
+  variablesRefused = false;
 
   constructor(token: string, names: readonly string[]) {
     this.token = token;
@@ -363,6 +413,39 @@ export class FakeRailway {
 
   nameOf(id: string): string | undefined {
     return [...this.services.entries()].find(([, v]) => v === id)?.[0];
+  }
+
+  /** Provisions every service exactly as the settings say (spec 01 §6.2), with no image yet. */
+  provision(
+    settings: ProvisionSettings,
+    environmentId: string,
+    egress: Record<string, readonly string[]> = {},
+  ): void {
+    this.environmentId = environmentId;
+    let n = 0;
+    for (const [name, want] of Object.entries(settings.services)) {
+      n++;
+      this.instances.set(name, {
+        region: settings.region,
+        numReplicas: want.replicas,
+        restartPolicyType: want.restart ?? "ALWAYS",
+        sleepApplication: false,
+        ipv6EgressEnabled: false,
+        image: null,
+        domains: [],
+        tcpProxies: 0,
+        healthcheckPath: want.healthcheck ?? null,
+        healthcheckTimeout: want.healthcheck ? 60 : null,
+        overlapSeconds: want.overlapSeconds ?? 0,
+        drainingSeconds: want.drainingSeconds ?? 0,
+        startCommand: want.startCommand ?? null,
+        cronSchedule: want.cron ?? null,
+        variables: {},
+        sealed: new Set(),
+        latestDeployment: null,
+      });
+      if (want.staticEgress) this.egress.set(name, [...(egress[name] ?? [`198.51.100.${n}`])]);
+    }
   }
 
   readonly fetch: FetchFn = async (_url, init) => {
@@ -395,8 +478,116 @@ export class FakeRailway {
           serviceId,
           variables: s.variables,
         });
+        const instance = this.instances.get(this.nameOf(serviceId) ?? "");
+        for (const [name, v] of Object.entries(s.variables)) {
+          if (instance === undefined) continue;
+          if (v.isSealed === true) {
+            instance.sealed.add(name);
+            delete instance.variables[name];
+          } else instance.variables[name] = v.value;
+        }
       }
       return ok({ environmentPatchCommit: "commit" });
+    }
+    const service = this.nameOf(String(variables.serviceId ?? "")) ?? "";
+    const refused = (what: string) =>
+      new Response(JSON.stringify({ errors: [{ message: `Cannot query field ${what}` }] }), {
+        status: 200,
+      });
+    if (op === "finStatus" || op === "finStatusExtended") {
+      if (op === "finStatusExtended" && this.extendedRefused) return refused("healthcheckPath");
+      return ok({
+        project: {
+          services: {
+            edges: [...this.services].map(([name, id]) => {
+              const i = this.instances.get(name);
+              const node =
+                i === undefined
+                  ? undefined
+                  : op === "finStatus"
+                    ? {
+                        environmentId: this.environmentId,
+                        region: i.region,
+                        numReplicas: i.numReplicas,
+                        restartPolicyType: i.restartPolicyType,
+                        sleepApplication: i.sleepApplication,
+                        ipv6EgressEnabled: i.ipv6EgressEnabled,
+                        source: { image: i.image },
+                        domains: {
+                          serviceDomains: i.domains.map((domain) => ({ domain })),
+                          customDomains: [],
+                        },
+                        latestDeployment: i.latestDeployment,
+                      }
+                    : {
+                        environmentId: this.environmentId,
+                        healthcheckPath: i.healthcheckPath,
+                        healthcheckTimeout: i.healthcheckTimeout,
+                        overlapSeconds: i.overlapSeconds,
+                        drainingSeconds: i.drainingSeconds,
+                        startCommand: i.startCommand,
+                        cronSchedule: i.cronSchedule,
+                      };
+              return {
+                node: {
+                  id,
+                  name,
+                  serviceInstances: { edges: node === undefined ? [] : [{ node }] },
+                },
+              };
+            }),
+          },
+        },
+      });
+    }
+    if (op === "finTcp") {
+      return ok({
+        tcpProxies: Array.from(
+          { length: this.instances.get(service)?.tcpProxies ?? 0 },
+          (_, i) => ({ id: String(i) }),
+        ),
+      });
+    }
+    if (op === "finVariables") {
+      if (this.variablesRefused) return refused("variables");
+      return ok({ variables: this.instances.get(service)?.variables ?? {} });
+    }
+    if (op === "finInstanceUpdate") {
+      const input = variables.input as Json;
+      this.updates.push({ service, input });
+      const instance = this.instances.get(service);
+      const source = input.source as { image?: string } | undefined;
+      if (instance !== undefined && source?.image !== undefined) instance.image = source.image;
+      if (instance !== undefined && typeof input.startCommand === "string")
+        instance.startCommand = input.startCommand;
+      return ok({ serviceInstanceUpdate: true });
+    }
+    if (op === "finDeploy") {
+      const id = `dep-${this.deployments.size + 1}`;
+      const release = this.instances.get(service)?.variables.FIN_RELEASE ?? "";
+      this.deployments.set(id, {
+        service,
+        statuses: [...this.deployStatuses],
+        logs: service === "migrate" ? this.migrateLogs(release) : [],
+      });
+      const instance = this.instances.get(service);
+      if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
+      return ok({ serviceInstanceDeployV2: id });
+    }
+    if (op === "finDeployment") {
+      const d = this.deployments.get(String(variables.id));
+      if (d === undefined) return refused("deployment");
+      const status =
+        d.statuses.length > 1 ? (d.statuses.shift() ?? "SUCCESS") : (d.statuses[0] ?? "SUCCESS");
+      const instance = this.instances.get(d.service);
+      if (instance !== undefined && instance.latestDeployment?.id === variables.id) {
+        instance.latestDeployment = { id: String(variables.id), status };
+      }
+      return ok({ deployment: { id: variables.id, status } });
+    }
+    if (op === "finLogs") {
+      const d = this.deployments.get(String(variables.deploymentId));
+      return ok({ deploymentLogs: (d?.logs ?? []).map((message) => ({ message })) });
     }
     if (op === "finEgress") {
       const name = this.nameOf(String(variables.serviceId)) ?? "";
