@@ -306,6 +306,134 @@ describe("Tabs and TabLinks", () => {
     expect(classes(links[0])).toContain("h-10");
   });
 
+  it("follows a controlled value: the page's choice is the chosen tab, and null chooses none", () => {
+    const tree = (value: string | null) => (
+      <Tabs value={value} defaultValue="overview">
+        <TabsList aria-label="Customer">
+          <Tab value="overview">Overview</Tab>
+          <Tab value="money">Money</Tab>
+        </TabsList>
+        <TabPanel value="overview">Overview panel</TabPanel>
+        <TabPanel value="money">Money panel</TabPanel>
+      </Tabs>
+    );
+    const money = render(tree("money"));
+    const [overview, moneyTab] = tagsWith(money, "role", "tab");
+    expect(attr(moneyTab, "aria-selected")).toBe("true");
+    expect(attr(overview, "aria-selected")).toBe("false");
+    expect(text(money)).toContain("Money panel");
+    expect(text(money)).not.toContain("Overview panel");
+    const none = render(tree(null));
+    expect(tagsWith(none, "aria-selected", "true")).toHaveLength(0);
+    expect(tagsWith(none, "role", "tabpanel")).toHaveLength(0);
+  });
+
+  it("in a drawer a panel draws its focus ring inside, where the drawer's edge cannot cut it", () => {
+    const panel = (variant: "page" | "drawer") =>
+      classes(
+        tagsWith(
+          render(
+            <Tabs defaultValue="overview" variant={variant}>
+              <TabsList aria-label="Customer">
+                <Tab value="overview">Overview</Tab>
+              </TabsList>
+              <TabPanel value="overview">Overview panel</TabPanel>
+            </Tabs>,
+          ),
+          "role",
+          "tabpanel",
+        )[0],
+      );
+    expect(panel("drawer")).toContain("focus-visible:outline-focus-inset");
+    expect(panel("page")).not.toContain("focus-visible:outline-focus-inset");
+  });
+
+  it("hands nothing past its own props to the markup, even through a spread tsc cannot check", () => {
+    // Everything here is outside every part's prop list. A spread skips the excess-property
+    // check, so only the parts themselves can keep these out.
+    const smuggled: Record<string, unknown> = {
+      id: "smuggled-id",
+      title: "smuggled-title",
+      style: { color: "red" },
+      tabIndex: 5,
+      role: "presentation",
+      "data-smuggled": "",
+      "aria-hidden": "true",
+      "aria-describedby": "smuggled-description",
+      orientation: "vertical",
+      keepMounted: true,
+      hiddenUntilFound: true,
+      linkAs: ({ href }: { href: string }) => <b data-smuggled-link="">{href}</b>,
+      target: "_blank",
+      onClick: noop,
+      dangerouslySetInnerHTML: { __html: "<img data-raw-markup>" },
+      render: <section data-swapped="" />,
+    };
+    // A panel's children are content; a function of the SDK's state is refused at run time too.
+    const functionChild: Record<string, unknown> = { children: () => "function content" };
+    function SpreadLink(props: Record<string, unknown>) {
+      return <a data-link="" {...props} />;
+    }
+    const html = render(
+      <>
+        <Tabs defaultValue="overview" {...smuggled}>
+          <TabsList aria-label="Customer" {...smuggled}>
+            <Tab value="overview" {...smuggled}>
+              Overview
+            </Tab>
+            <Tab value="money" count={3} {...smuggled}>
+              Money
+            </Tab>
+          </TabsList>
+          <TabPanel value="overview" {...smuggled}>
+            Overview panel
+          </TabPanel>
+          <TabPanel value="money" {...smuggled}>
+            Money panel
+          </TabPanel>
+        </Tabs>
+        <Tabs defaultValue="a" {...functionChild} />
+        <Tabs defaultValue="a">
+          <TabsList aria-label="Other" {...functionChild} />
+          <TabPanel value="a" {...functionChild} />
+        </Tabs>
+        {/* TabLinks does take a link component, so the smuggled one comes first and is replaced. */}
+        <TabLinks {...smuggled} label="Settings" linkAs={SpreadLink}>
+          <TabLink href="/settings/team" current {...smuggled}>
+            Team
+          </TabLink>
+          <TabLink href="/settings/roles" {...smuggled}>
+            Roles
+          </TabLink>
+        </TabLinks>
+      </>,
+    );
+    for (const leak of [
+      "smuggled",
+      "style=",
+      'tabindex="5"',
+      'role="presentation"',
+      "aria-hidden",
+      'aria-orientation="vertical"',
+      'data-orientation="vertical"',
+      "target=",
+      "data-raw-markup",
+      "<section",
+      "data-swapped",
+      "function content",
+    ]) {
+      expect(html, leak).not.toContain(leak);
+    }
+    // The parts still drew themselves: two tablists, the chosen panel, both links.
+    expect(tagsWith(html, "role", "tablist")).toHaveLength(2);
+    expect(text(html)).toContain("Overview panel");
+    expect(text(html)).not.toContain("Money panel");
+    expect(tagsWith(html, "data-link").map((tag) => attr(tag, "href"))).toEqual([
+      "/settings/team",
+      "/settings/roles",
+    ]);
+  });
+
   it("takes only the props the screens need (tsc checks these lines)", () => {
     const link = (props: AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) => (
       <a {...props} />

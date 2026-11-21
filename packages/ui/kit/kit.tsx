@@ -650,6 +650,12 @@ export function Kit(props: { onReady: () => void }) {
               <TabPanel value="documents">The documents.</TabPanel>
               <TabPanel value="money">The money.</TabPanel>
             </Tabs>
+            {/* The page holds the choice (as `?tab=` does), so a control outside the tabs moves it. */}
+            <Row>
+              <Button variant="secondary" size="sm" onClick={() => setTab("money")}>
+                Open the Money tab
+              </Button>
+            </Row>
             <TabLinks label="Settings">
               <TabLink href="#organisation" current>
                 Organisation

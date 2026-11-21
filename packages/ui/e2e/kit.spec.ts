@@ -577,6 +577,57 @@ test.describe("the components @kit", () => {
     expect(fit).toEqual({ inset: 24, panel: [24, 20], scrolls: true, page: 0 });
   });
 
+  test("tabs in a drawer: the panel's focus ring is drawn inside, so the drawer never cuts it", async ({
+    page,
+  }) => {
+    const drawer = page.locator('[data-kit="tabs-drawer"]');
+    const panel = drawer.getByRole("tabpanel");
+    // The panel holds nothing focusable, so Tab from the chosen tab lands on the panel itself.
+    await keyboardFocus(page, drawer.getByRole("tab", { name: "Overview and tasks" }));
+    await page.keyboard.press("Tab");
+    await expect(panel).toBeFocused();
+    const ring = await panel.evaluate((el) => {
+      const s = getComputedStyle(el);
+      const box = el.getBoundingClientRect();
+      const clip = (el.closest('[data-kit="tabs-drawer"]') as HTMLElement).getBoundingClientRect();
+      return {
+        visible: el.matches(":focus-visible"),
+        width: s.outlineWidth,
+        offset: s.outlineOffset,
+        style: s.outlineStyle,
+        // The panel reaches the drawer's edges: an outside ring would fall in the clipped area.
+        edges: [box.left - clip.left, clip.right - box.right].map((n) => Math.round(n) + 0),
+      };
+    });
+    expect(ring).toEqual({
+      visible: true,
+      width: "2px",
+      offset: "-2px",
+      style: "solid",
+      edges: [0, 0],
+    });
+  });
+
+  test("tabs: a choice the page holds moves the selection from outside the tabs", async ({
+    page,
+  }) => {
+    const customer = customerTabs(page);
+    const money = customer.getByRole("tab", { name: /Money/ });
+    await expect(customer.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await section(page, "tabs").getByRole("button", { name: "Open the Money tab" }).click();
+    await expect(money).toHaveAttribute("aria-selected", "true");
+    await expect(customer.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    await expect(customer.getByRole("tabpanel")).toHaveText("The money.");
+    // A change from outside does not pull focus into the tabs (AC-UI-27: a tab change never moves it).
+    await expect(money).not.toBeFocused();
+  });
+
   test("toasts: three at most, the oldest non-error evicted, errors stay; F8 reaches them", async ({
     page,
   }) => {
