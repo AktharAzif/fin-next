@@ -1,8 +1,9 @@
 // What each app's `routes/__root.tsx` renders and runs (spec 06 §2.5): the frame switch around the
 // outlet, the root StepUp host, and the root's effects: the document title from the route's
 // `pageName` (S6-07), focus to the page's <h1> after a navigation (S6-17), `data-ready` on <body>
-// once the first route has resolved (FW-C16), and a check of the session when the page comes back
-// from the back-forward cache (FW-C14). The guards run in the root route's `beforeLoad`.
+// once the first route has resolved (FW-C16), and the page hidden while it is in the back-forward
+// cache and until the session is checked again (FW-C14). The guards run in the root route's
+// `beforeLoad`.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
 import { Toaster, TooltipProvider } from "@fin/ui";
 import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
@@ -24,6 +25,7 @@ import { documentTitle } from "../router/titles.ts";
 import { type FinRouterContext, useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
 import { type StepUpContentProps, StepUpHost } from "../step-up/step-up.tsx";
+import { guardBackForwardCache, sameViewer } from "./bfcache.ts";
 import { adminGate, consoleGate } from "./gates.ts";
 
 /** Whether the app has a route for a pathname (not counting the root's catch-all not-found). */
@@ -127,18 +129,25 @@ function useRootEffects(fallbackFrame: FrameKind): void {
     heading?.focus({ preventScroll: true });
   }, [status, resolved]);
 
-  // A page restored from the back-forward cache checks the session before anything is used.
-  useEffect(() => {
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted) return;
-      fin.viewer.reload().then(
-        () => router.invalidate(),
-        () => window.location.reload(),
-      );
-    };
-    window.addEventListener("pageshow", onPageShow);
-    return () => window.removeEventListener("pageshow", onPageShow);
-  }, [fin, router]);
+  // A page in the back-forward cache is hidden as it leaves and stays hidden when it comes back
+  // until the session has been checked: the same viewer shows the page again with fresh route data;
+  // a different one (signed out, or someone else) reloads the document first.
+  useEffect(
+    () =>
+      guardBackForwardCache({
+        target: window,
+        root: document.documentElement,
+        recheck: async () => {
+          const before = fin.viewer.get();
+          const after = await fin.viewer.reload();
+          if (!sameViewer(before, after)) return false;
+          await router.invalidate();
+          return true;
+        },
+        reload: () => window.location.reload(),
+      }),
+    [fin, router],
+  );
 }
 
 export interface FinRootProps {

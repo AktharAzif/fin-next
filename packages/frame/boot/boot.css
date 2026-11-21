@@ -21,3 +21,14 @@ html[data-boot="auth"] [data-boot-block="app"] {
     width: var(--fin-layout-sidebar-collapsed);
   }
 }
+
+/*
+ * A page going into or coming back from the back-forward cache shows nothing until the session has
+ * been checked again (FW-C14, FW-S4; src/boot/bfcache.ts sets data-locked on <html>). Every element
+ * in <body> is hidden, dialogs and toasts included, and the layout stays as it was.
+ */
+html[data-locked] body,
+html[data-locked] body * {
+  /* biome-ignore lint/complexity/noImportantStyles: the lock must beat any style, inline ones too */
+  visibility: hidden !important;
+}

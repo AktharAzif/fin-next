@@ -2,7 +2,7 @@
 // production page policy with no violation, the stored theme applies before the first paint, the
 // edge toggle collapses and expands the sidebar, the phone sheet opens, a signed-out visit goes to
 // sign-in, and /api/health answers through the stub. Against the built dist/static/.
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Route, test } from "@playwright/test";
 import { problem, ready, serveStatic, watchPolicy } from "./support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4401";
@@ -280,6 +280,103 @@ test("@journey the organisation switcher lists each organisation with the role",
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
   await expect(trigger).toBeFocused();
+});
+
+// The back-forward cache (FW-C14, FW-S4). A real restore cannot be triggered under automation, so
+// the page receives the same pagehide and pageshow events a restore fires, in the same order.
+async function leaveAndRestore(page: Page) {
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  });
+}
+
+async function serveViewerOnDemand(page: Page) {
+  const answers: Array<(route: Route) => Promise<void>> = [];
+  const held: Array<() => void> = [];
+  await serveStatic(page.context(), {
+    dir: "dist/static",
+    profile: "app",
+    origin: ORIGIN,
+    api: {
+      "/api/viewer": async (route) => {
+        // Each request waits for the test to release it, then takes the next queued answer.
+        await new Promise<void>((release) => held.push(release));
+        const answer = answers.shift() ?? ((r: Route) => r.fulfill(viewerAnswer(MAYA)));
+        await answer(route);
+      },
+    },
+  });
+  return {
+    /** Queues the next answer of /api/viewer. */
+    next(answer: (route: Route) => Promise<void>) {
+      answers.push(answer);
+    },
+    /** Lets the oldest held /api/viewer request answer. */
+    release() {
+      held.shift()?.();
+    },
+    held: () => held.length,
+  };
+}
+
+function viewerAnswer(body: unknown) {
+  return {
+    status: 200,
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+    body: JSON.stringify(body),
+  };
+}
+
+test("@security a page restored from the back-forward cache shows nothing until the session is checked", async ({
+  page,
+}) => {
+  const viewer = await serveViewerOnDemand(page);
+  const loading = page.goto("/");
+  await expect.poll(viewer.held).toBe(1);
+  viewer.release();
+  await loading;
+  await ready(page);
+  const heading = page.getByRole("heading", { level: 1, name: "Welcome, Maya" });
+  await expect(heading).toBeVisible();
+
+  // The session has ended elsewhere; the check is still on its way.
+  viewer.next((route) => route.fulfill(problem(401, "unauthenticated")));
+  await leaveAndRestore(page);
+  await expect.poll(viewer.held).toBe(1);
+  await expect(page.locator("html")).toHaveAttribute("data-locked", "");
+  await expect(heading).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "Switch organisation, current: Acme Remit" }),
+  ).toBeHidden();
+  await expect(page.getByRole("button", { name: "Account menu, Maya Rivera" })).toBeHidden();
+  await expect(page.locator("[data-strip=sandbox]")).toBeHidden();
+
+  // The answer says signed out: the document loads again and goes to sign-in.
+  viewer.next((route) => route.fulfill(problem(401, "unauthenticated")));
+  viewer.release();
+  await expect.poll(viewer.held).toBe(1);
+  viewer.release();
+  await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin" })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
+  await expect(page.getByText("Maya")).toHaveCount(0);
+});
+
+test("@journey a restored page with the same session shows again", async ({ page }) => {
+  const viewer = await serveViewerOnDemand(page);
+  const loading = page.goto("/");
+  await expect.poll(viewer.held).toBe(1);
+  viewer.release();
+  await loading;
+  await ready(page);
+  const heading = page.getByRole("heading", { level: 1, name: "Welcome, Maya" });
+  await leaveAndRestore(page);
+  await expect.poll(viewer.held).toBe(1);
+  await expect(heading).toBeHidden();
+  viewer.release();
+  await expect(heading).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
+  await expect(page).toHaveURL(`${ORIGIN}/`);
 });
 
 test("@csp /api/health answers through the stub, same origin", async ({ page }) => {
