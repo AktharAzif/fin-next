@@ -1384,7 +1384,8 @@ export function checkLockfile(text, catalog = new Map()) {
       if (depth === 2) {
         field = "";
         importer = entry.key;
-        if (entry.value !== "")
+        // pnpm writes a workspace project with no dependencies as `path: {}`: nothing to read.
+        if (entry.value !== "" && entry.value !== "{}")
           add(line, "lockfile-format", "an importer is a path with its fields below");
       } else if (depth === 4) {
         field = entry.key;

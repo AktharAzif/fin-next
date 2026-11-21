@@ -770,6 +770,20 @@ describe("supply-chain:check", () => {
     assert.deepEqual(rules(checkLockfile(meta, catalog)), ["lockfile-format"]);
   });
 
+  test("an importer with no dependencies, which pnpm writes as `path: {}`, passes; any other inline importer fails", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    const importer = (/** @type {string} */ line) =>
+      LOCK_OK.replace("packages:\n", `importers:\n\n  .: {}\n\n  ${line}\n\npackages:\n`);
+    assert.deepEqual(checkLockfile(importer("tools/fin-review: {}"), catalog), []);
+    for (const line of [
+      "tools/fin-review: {dependencies: {}}",
+      "tools/fin-review: x",
+      "tools/fin-review: []",
+    ]) {
+      assert.deepEqual(rules(checkLockfile(importer(line), catalog)), ["lockfile-format"], line);
+    }
+  });
+
   test("a workspace file or a lockfile below the root fails, so no directory has its own settings", () => {
     const relaxed = [
       "minimumReleaseAge: 0",
