@@ -47,13 +47,24 @@ function judge(key: ReturnType<typeof newKey>, rec: KeyRecord | null, clientIp =
 }
 
 describe("the bearer and its precheck", () => {
-  it("reads exactly `Bearer <key>`", () => {
+  it("reads exactly `Bearer <key>`, the scheme's name in any case (RFC 9110 §11.1)", () => {
     expect(bearerOf(undefined)).toBeNull();
     expect(bearerOf("")).toBeNull();
     expect(bearerOf("Bearer abc")).toBe("abc");
-    expect(bearerOf("bearer abc")).toBe("");
+    expect(bearerOf("bearer abc")).toBe("abc");
+    expect(bearerOf("BEARER abc")).toBe("abc");
+    expect(bearerOf("bEaReR abc")).toBe("abc");
     expect(bearerOf("Bearer  abc")).toBe("");
+    expect(bearerOf("Bearer\tabc")).toBe("");
+    expect(bearerOf(" Bearer abc")).toBe("");
+    expect(bearerOf("Bearerabc")).toBe("");
     expect(bearerOf("Basic abc")).toBe("");
+  });
+
+  it("passes a working key sent with the scheme in lower case", () => {
+    const key = newKey("test", "rk", salt);
+    const pre = precheck(`bearer ${key.key}`, salt);
+    expect(pre).toMatchObject({ ok: true, key: { id: key.id } });
   });
 
   it("refuses a missing, malformed, mistyped or other deployment's key before any lookup", () => {
@@ -101,6 +112,34 @@ describe("judgeKey", () => {
     const key = newKey("test", "rk", salt);
     const rec = over === null ? null : record(key, over as Partial<KeyRecord>);
     expect(judge(key, rec)).toEqual({ ok: false, reason });
+  });
+
+  // Spec 05 §4.7: a record missing any field reads as unknown, never as "not revoked" or "never
+  // expires" (a view or statement that lost a column).
+  it.each([
+    "revoked_at",
+    "expires_at",
+    "rolling_until",
+    "org_live_status",
+    "pepper_versions",
+    "ip_allowlist",
+  ] as const)("refuses a record with no %s as unknown, absent or undefined", (field) => {
+    const key = newKey("test", "rk", salt);
+    const { [field]: _dropped, ...absent } = record(key);
+    expect(field in absent).toBe(false);
+    expect(judge(key, absent as unknown as KeyRecord)).toEqual({ ok: false, reason: "unknown" });
+    const undefinedField = record(key, { [field]: undefined } as Partial<KeyRecord>);
+    expect(judge(key, undefinedField)).toEqual({ ok: false, reason: "unknown" });
+  });
+
+  it("reads any revoked_at but null as revoked", () => {
+    const key = newKey("test", "rk", salt);
+    for (const value of ["2026-11-22", 0, false, new Date(Number.NaN)]) {
+      expect(judge(key, record(key, { revoked_at: value }))).toEqual({
+        ok: false,
+        reason: "revoked",
+      });
+    }
   });
 
   it("keeps a rolling key working until its overlap ends, and an allowlisted address through", () => {
