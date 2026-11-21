@@ -286,5 +286,5 @@ export async function seedCanon<Id>(
   return { staff, people, organisations, roles };
 }
 
-export { type AddressBook, createAddressBook } from "./addresses.ts";
+export { type AddressBook, createAddressBook, testScope } from "./addresses.ts";
 export { type SeededRandom, seededRandom, seedFromEnv } from "./random.ts";

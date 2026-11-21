@@ -2,7 +2,7 @@
 // invariant every Fin deployment carries (spec 01 §7.4): `html_handling: "auto-trailing-slash"`
 // and `not_found_handling: "single-page-application"`.
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export interface Asset {
@@ -58,20 +58,41 @@ function makeAsset(path: string, body: Uint8Array): Asset {
 }
 
 /**
- * Reads every regular file under `root` (symbolic links are skipped, so nothing outside the
- * folder is ever served) and adds `overlay`, which wins over a file of the same path (the harness
- * uses it for the `env.json` the deploy would render).
+ * Every regular file under `root`, walked one folder at a time with `lstat`: a symbolic link is
+ * never followed, whether it names a file or a folder, and a file whose real path is not under the
+ * root's is dropped too, so nothing outside the folder is ever served. (`readdir`'s recursive mode
+ * descends into linked folders, so it is not used.)
+ */
+function regularFiles(root: string): string[] {
+  const realRoot = realpathSync(root);
+  const files: string[] = [];
+  const folders = [root];
+  for (let folder = folders.pop(); folder !== undefined; folder = folders.pop()) {
+    for (const name of readdirSync(folder)) {
+      const full = join(folder, name);
+      const stat = lstatSync(full);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        folders.push(full);
+      } else if (stat.isFile() && realpathSync(full).startsWith(`${realRoot}${sep}`)) {
+        files.push(full);
+      }
+    }
+  }
+  return files.sort();
+}
+
+/**
+ * Reads every regular file under `root` (symbolic links are skipped, files and folders alike, so
+ * nothing outside the folder is ever served) and adds `overlay`, which wins over a file of the
+ * same path (the harness uses it for the `env.json` the deploy would render).
  */
 export function readManifest(
   root: string,
   overlay: Readonly<Record<string, string | Uint8Array>> = {},
 ): Map<string, Asset> {
   const manifest = new Map<string, Asset>();
-  const entries = readdirSync(root, { recursive: true, withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const full = join(entry.parentPath, entry.name);
-    if (lstatSync(full).isSymbolicLink()) continue;
+  for (const full of regularFiles(root)) {
     const path = `/${relative(root, full).split(sep).join("/")}`;
     if (NOT_ASSETS.has(path)) continue;
     manifest.set(path, makeAsset(path, readFileSync(full)));

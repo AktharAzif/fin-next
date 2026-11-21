@@ -56,16 +56,37 @@ export class EmailSinkReader {
   }
 }
 
-/** Six digits standing alone, unless the caller's pattern (with one capture group) says otherwise. */
-const DEFAULT_CODE = /(?<![\w-])(\d{6})(?![\w-])/;
+/**
+ * An emailed sign-in or confirmation code: 8 digits standing alone (spec 02 §5.2, the
+ * `sign-in-code`, `confirm-email` and `staff-sign-in-code` templates). A run of 6, 7 or 9 digits,
+ * or 8 digits inside a longer word, is not one.
+ */
+export const AUTH_CODE = /(?<![\w-])(\d{8})(?![\w-])/;
+
+/** The go-live company email check's code: 6 digits standing alone (spec 03 §14). */
+export const COMPANY_EMAIL_CODE = /(?<![\w-])(\d{6})(?![\w-])/;
+
+/** Templates whose code is not an 8-digit emailed code, by the sink's `template` name. */
+const CODE_PATTERNS: Readonly<Record<string, RegExp>> = {
+  "golive/company-email-code": COMPANY_EMAIL_CODE,
+};
+
+/** The pattern `codeFrom` reads a message of this template with (AUTH_CODE unless listed). */
+export function codePatternFor(template: string | undefined): RegExp {
+  if (template !== undefined && Object.hasOwn(CODE_PATTERNS, template)) {
+    return CODE_PATTERNS[template] as RegExp;
+  }
+  return AUTH_CODE;
+}
 
 /**
- * The one code in a message's text. Throws when there is none, or when the text holds two
+ * The one code in a message's text, read with the caller's pattern (one capture group) or else
+ * the message template's (`codePatternFor`). Throws when there is none, or when the text holds two
  * different ones (a template that shows two codes is a bug a journey should catch).
  */
 export function codeFrom(
-  message: Pick<SinkMessage, "text">,
-  pattern: RegExp = DEFAULT_CODE,
+  message: Pick<SinkMessage, "text" | "template">,
+  pattern: RegExp = codePatternFor(message.template),
 ): string {
   const global = new RegExp(
     pattern.source,

@@ -50,6 +50,31 @@ describe("readManifest", () => {
     expect([...readManifest(root).keys()]).toEqual(["/index.html"]);
   });
 
+  it("never descends into a linked folder, inside or outside the root", () => {
+    const root = join(scratch, "linked-dirs");
+    const outside = join(scratch, "outside-dir");
+    mkdirSync(join(root, "assets"), { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "OUTSIDE");
+    writeFileSync(join(root, "index.html"), "<p>x</p>");
+    writeFileSync(join(root, "assets", "app.js"), "export {};");
+    symlinkSync(outside, join(root, "linked"), "dir");
+    symlinkSync(join(root, "assets"), join(root, "assets-again"), "dir");
+    expect([...readManifest(root).keys()].sort()).toEqual(["/assets/app.js", "/index.html"]);
+  });
+
+  it("serves a root that is itself reached through a link", () => {
+    const real = join(scratch, "real-root");
+    mkdirSync(join(real, "guide"), { recursive: true });
+    writeFileSync(join(real, "index.html"), "<p>x</p>");
+    writeFileSync(join(real, "guide", "index.html"), "<p>g</p>");
+    symlinkSync(real, join(scratch, "root-link"), "dir");
+    expect([...readManifest(join(scratch, "root-link")).keys()].sort()).toEqual([
+      "/guide/index.html",
+      "/index.html",
+    ]);
+  });
+
   it("adds overlay files, which win over the build's", () => {
     const withEnv = readManifest(FIXTURE, { "/env.json": '{"environment":"ci"}' });
     expect(new TextDecoder().decode(withEnv.get("/env.json")?.body)).toBe('{"environment":"ci"}');

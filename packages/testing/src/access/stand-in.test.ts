@@ -1,5 +1,6 @@
 import { createPublicKey, verify } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { forward } from "../http/node.ts";
 import { base64url, decodeToken, fromBase64url, unsignedToken } from "./jwt.ts";
 import {
   AccessStandIn,
@@ -154,16 +155,38 @@ describe("key rotation", () => {
 });
 
 describe("redirect guards", () => {
-  it("allows only loopback app origins and local paths", () => {
+  it("allows only loopback app origins", () => {
     expect(isLoopbackOrigin("http://127.0.0.1:4102")).toBe(true);
     expect(isLoopbackOrigin("http://localhost:4102")).toBe(true);
+    expect(isLoopbackOrigin("https://admin.localhost:4102")).toBe(true);
     expect(isLoopbackOrigin("https://staff.example.com")).toBe(false);
+    expect(isLoopbackOrigin("https://admin.localhost.example.com:4102")).toBe(false);
     expect(isLoopbackOrigin("http://127.0.0.1:4102/path")).toBe(false);
     expect(isLoopbackOrigin("javascript:alert(1)")).toBe(false);
-    expect(isLocalPath("/staff?x=1")).toBe(true);
-    expect(isLocalPath("//evil.example.org/")).toBe(false);
-    expect(isLocalPath("/\\evil.example.org")).toBe(false);
-    expect(isLocalPath("https://evil.example.org/")).toBe(false);
+  });
+
+  it("allows a local path, with one leading slash, that stays on the origin", () => {
+    for (const path of ["/", "/staff?x=1", "/staff/team#top", "/a/../b", "/%2F%2Fstays-a-path"]) {
+      expect(isLocalPath(path)).toBe(true);
+    }
+  });
+
+  it.each([
+    ["a second slash", "//evil.example.org/"],
+    ["a backslash", "/\\evil.example.org"],
+    ["a scheme", "https://evil.example.org/"],
+    ["no leading slash", "staff"],
+    ["a tab the URL parser strips", "/\t/evil.example.org/"],
+    ["a newline the URL parser strips", "/\n/evil.example.org/"],
+    ["a carriage return", "/\r/evil.example.org/"],
+    ["a space", "/ /evil.example.org/"],
+    ["a non-breaking space", "/ /evil.example.org/"],
+    ["an encoded tab", "/%09/evil.example.org/"],
+    ["an encoded newline", "/%0a/evil.example.org/"],
+    ["a NUL", "/\u0000/evil.example.org/"],
+    ["a DEL", "/\u007f/evil.example.org/"],
+  ])("refuses a path with %s", (_name, path) => {
+    expect(isLocalPath(path)).toBe(false);
   });
 });
 
@@ -214,7 +237,26 @@ describe("the stand-in's server", () => {
     expect(
       (await at("app=http://127.0.0.1:4102&redirect_url=//x&email=grace.hall@example.com")).status,
     ).toBe(400);
+    for (const redirect of ["%2F%09%2Fevil.example%2F", "%2F%0A%2Fevil.example%2F"]) {
+      const response = await at(
+        `app=http://127.0.0.1:4102&redirect_url=${redirect}&email=grace.hall@example.com`,
+      );
+      expect(response.status).toBe(400);
+      expect(response.headers.get("location")).toBeNull();
+    }
     expect((await fetch(`${running.origin}/elsewhere`)).status).toBe(404);
     expect((await fetch(running.certsUrl, { method: "POST" })).status).toBe(405);
+  });
+
+  it("answers only its own Host, so a page that rebinds its name to loopback gets no token", async () => {
+    const misdirected = await forward(running.loopbackOrigin, {
+      method: "GET",
+      target:
+        "/cdn-cgi/access/login?app=http://127.0.0.1:4102&redirect_url=/&email=grace.hall@example.com",
+      headers: [["Host", `attacker.example:${running.port}`]],
+      body: null,
+    });
+    expect(misdirected.status).toBe(421);
+    expect(misdirected.headers.get("location")).toBeNull();
   });
 });

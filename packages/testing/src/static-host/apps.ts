@@ -1,6 +1,12 @@
 // The static hosts a journey run serves, by host role (spec 01 §7.4), and the test values both the
 // static host and an app's test server derive the same way. Real hostnames are never here: a
 // journey's browser uses loopback origins, and the deploy reads the real names from configuration.
+//
+// Each app has its own host name under `.localhost` (console.localhost, admin.localhost, ...),
+// which every engine resolves to loopback, and answers over https with a throwaway certificate.
+// So, as on the zone, each app keeps its own host-only cookie jar (cookies ignore ports, so
+// apps on one loopback address would share theirs), and WebKit keeps Fin's `__Host-` cookies,
+// which it drops on plain http. The servers bind 127.0.0.1 only.
 import { createHash } from "node:crypto";
 
 export type HostRole = "console" | "admin" | "verify" | "selfie" | "docs";
@@ -92,7 +98,20 @@ export function testAccessAudience(): string {
   return createHash("sha256").update("fin-next test value/access-aud").digest("hex");
 }
 
-/** The loopback origin a host is served at in a journey run. */
+/** The host name a host is served under in a journey run (`<role>.localhost`). */
+export function appHostName(role: HostRole): string {
+  return `${role}.localhost`;
+}
+
+/** The origin a journey's browser opens a host at: https, under the host's own name. */
 export function appOrigin(role: HostRole): string {
-  return `http://127.0.0.1:${STATIC_APPS[role].port}`;
+  return `https://${appHostName(role)}:${STATIC_APPS[role].port}`;
+}
+
+/**
+ * The same host by its bound address, for a Node client that should not depend on name
+ * resolution (Playwright's readiness check): https://127.0.0.1:<port>.
+ */
+export function appLoopbackOrigin(role: HostRole): string {
+  return `https://127.0.0.1:${STATIC_APPS[role].port}`;
 }

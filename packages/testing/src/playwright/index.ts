@@ -13,6 +13,19 @@ export {
   isPolicyConsoleMessage,
   watchCsp,
 } from "./csp.ts";
-export { expect, type FinFixtures, type FinOptions, prepareContext, test } from "./fixtures.ts";
-export { isOffsite, type OffsiteRequest, type OffsiteWatcher, watchOffsite } from "./offsite.ts";
+export {
+  expect,
+  type FinFixtures,
+  type FinOptions,
+  prepareContext,
+  refuseBypassCsp,
+  test,
+} from "./fixtures.ts";
+export {
+  isOffsite,
+  type OffsiteOptions,
+  type OffsiteRequest,
+  type OffsiteWatcher,
+  watchOffsite,
+} from "./offsite.ts";
 export { gotoReady, READY_SELECTOR, waitForReady } from "./ready.ts";

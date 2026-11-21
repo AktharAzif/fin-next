@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type FakeApi, startFakeApi } from "../../test/fake-api.ts";
 import {
   AccessStandIn,
+  isLocalPath,
   type RunningAccessStandIn,
   startAccessStandIn,
 } from "../access/stand-in.ts";
@@ -97,6 +98,22 @@ describe("the static deployment", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
+  it("never redirects off the host, however the path is written", async () => {
+    const locations: string[] = [];
+    for (const target of [
+      "//elsewhere.example.org/guide/index.html",
+      "/%09/guide/index.html",
+      "/%2F%2Felsewhere.example.org/guide/index.html",
+      "/\\elsewhere.example.org/guide/index.html",
+      "/guide/index.html?next=//elsewhere.example.org",
+    ]) {
+      const location = (await host().handle(request(target))).headers.get("location");
+      if (location !== null) locations.push(location);
+    }
+    expect(locations).toContain("/guide/?next=//elsewhere.example.org");
+    for (const location of locations) expect(isLocalPath(location)).toBe(true);
+  });
+
   it("answers HEAD without a body and other methods with 405", async () => {
     const head = await host().handle(request("/", { method: "HEAD" }));
     expect(head.status).toBe(200);
@@ -180,6 +197,32 @@ describe("the tunnel to the app's test server", () => {
     expect(get("cookie")).toEqual(["a=1"]);
     expect(get("x-drop-me")).toEqual([]);
     expect(get("host")).toEqual(["console.example.test"]);
+  });
+
+  it("appends the peer to a client's X-Forwarded-For, as Cloudflare does, and keeps the forged part", async () => {
+    const echoOf = async (headers: RawHeaders) => {
+      const response = await host().handle(request("/api/ping", { headers }));
+      const echo = (await response.json()) as { headers: [string, string][] };
+      return (name: string) =>
+        echo.headers.filter(([n]) => n.toLowerCase() === name).map(([, v]) => v);
+    };
+    const forged = await echoOf([
+      ["Host", "127.0.0.1:4101"],
+      ["X-Forwarded-For", "203.0.113.66"],
+      ["CF-Connecting-IP", "203.0.113.67"],
+    ]);
+    expect(forged("x-forwarded-for")).toEqual(["203.0.113.66,127.0.0.1"]);
+    expect(forged("cf-connecting-ip")).toEqual(["127.0.0.1"]);
+    const twoLines = await echoOf([
+      ["Host", "127.0.0.1:4101"],
+      ["X-Forwarded-For", "203.0.113.66, 198.51.100.7"],
+      ["x-forwarded-for", "198.51.100.8"],
+    ]);
+    expect(twoLines("x-forwarded-for")).toEqual([
+      "203.0.113.66, 198.51.100.7,198.51.100.8,127.0.0.1",
+    ]);
+    const none = await echoOf([["Host", "127.0.0.1:4101"]]);
+    expect(none("x-forwarded-for")).toEqual(["127.0.0.1"]);
   });
 
   it("defaults the Host to the one the browser used", async () => {
@@ -291,6 +334,15 @@ describe("Access in front of the host", () => {
       request(`/cdn-cgi/access/authorized?token=${token}&redirect_url=//elsewhere.example.org/`),
     );
     expect(offsite.headers.get("location")).toBe("/");
+    for (const redirect of [
+      "%2F%09%2Felsewhere.example.org%2F",
+      "%2F%0A%2Felsewhere.example.org",
+    ]) {
+      const stripped = await gated().handle(
+        request(`/cdn-cgi/access/authorized?token=${token}&redirect_url=${redirect}`),
+      );
+      expect(stripped.headers.get("location")).toBe("/");
+    }
     const bad = await gated().handle(request("/cdn-cgi/access/authorized?token=x.y.z"));
     expect(bad.status).toBe(403);
   });

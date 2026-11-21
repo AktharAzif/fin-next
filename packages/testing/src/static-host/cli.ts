@@ -1,19 +1,26 @@
 // node packages/testing/src/static-host/cli.ts --app <role> [options]
 //
-// Serves one built app as its zone would, for Playwright's webServer and for local runs:
+// Serves one built app as its zone would, for Playwright's webServer and for local runs, over
+// https with a throwaway certificate, at https://<role>.localhost:<port> (bound to 127.0.0.1):
 //   --app <role>          console, admin, verify, selfie or docs (sets the defaults below)
 //   --root <dir>          the static output (default: the role's dist folder)
 //   --headers <file>      the rendered _headers (default: <root>/_headers; required to exist)
 //   --env-json <file>     served as /env.json, as the deploy would render it
 //   --port <n>            (default: the role's journey port)
+//   --name <host>         the host name browsers use (default: <role>.localhost)
+//   --cert-out <file>     writes the host's certificate (public, PEM) there, for a Node client
+//                         that wants to trust it; the private key never leaves the process
 //   --api <origin>        the API half's test server (default: http://127.0.0.1:<the role's API port>)
 //   --api-host <host>     the Host the tunnel sets (default: the host the browser used)
 //   --no-api              serve no /api/ route
 //   --access-port <n>     with Access in front (default for admin), the stand-in's port
+//   --clock <when>        the time the Access stand-in signs and checks tokens at: canon (the
+//                         default, CANON_TIME), wall, or an ISO 8601 time; FIN_E2E_CLOCK sets the
+//                         same, and the API halves' test servers must check tokens at that time
 //
 // The ingress proof comes from FIN_E2E_INGRESS_PROOF or the role's derived test value; it is
 // never printed. One JSON `request` line per request goes to stdout.
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -21,8 +28,10 @@ import {
   type RunningAccessStandIn,
   startAccessStandIn,
 } from "../access/stand-in.ts";
+import { e2eClock, type RunClock } from "../clock.ts";
 import {
   ACCESS_STAND_IN_PORT,
+  appHostName,
   type HostRole,
   STATIC_APPS,
   testAccessAudience,
@@ -45,10 +54,13 @@ async function main(): Promise<void> {
       headers: { type: "string" },
       "env-json": { type: "string" },
       port: { type: "string" },
+      name: { type: "string" },
+      "cert-out": { type: "string" },
       api: { type: "string" },
       "api-host": { type: "string" },
       "no-api": { type: "boolean", default: false },
       "access-port": { type: "string" },
+      clock: { type: "string" },
     },
     strict: true,
   });
@@ -56,14 +68,20 @@ async function main(): Promise<void> {
   if (role === undefined || !ROLES.has(role))
     fail("--app is one of console, admin, verify, selfie, docs");
   const app = STATIC_APPS[role as HostRole];
-  const root = resolve(values.root ?? app.dist);
-  const headers = readFileSync(resolve(values.headers ?? `${root}/_headers`), "utf8");
   const port = Number(values.port ?? app.port);
   if (!Number.isInteger(port) || port < 0) fail("--port is a port number");
+  let clock: RunClock;
+  try {
+    clock = e2eClock(values.clock ?? process.env.FIN_E2E_CLOCK);
+  } catch {
+    fail("--clock (or FIN_E2E_CLOCK) is canon, wall, or an ISO 8601 time");
+  }
+  const root = resolve(values.root ?? app.dist);
+  const headers = readFileSync(resolve(values.headers ?? `${root}/_headers`), "utf8");
 
   let access: RunningAccessStandIn | undefined;
   if (app.access || values["access-port"] !== undefined) {
-    const standIn = new AccessStandIn({ audience: testAccessAudience() });
+    const standIn = new AccessStandIn({ audience: testAccessAudience(), now: clock.now });
     access = await startAccessStandIn(standIn, {
       port: Number(values["access-port"] ?? ACCESS_STAND_IN_PORT),
     });
@@ -78,6 +96,7 @@ async function main(): Promise<void> {
     root,
     headers,
     port,
+    name: values.name ?? appHostName(role as HostRole),
     ...(envJson === undefined ? {} : { files: { "/env.json": readFileSync(resolve(envJson)) } }),
     ...(withApi
       ? {
@@ -92,8 +111,19 @@ async function main(): Promise<void> {
     log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
     onError: () => process.stderr.write("static-host: a request failed inside the host\n"),
   });
+  const certOut = values["cert-out"];
+  if (certOut !== undefined && host.certificate !== undefined) {
+    writeFileSync(resolve(certOut), host.certificate, { mode: 0o644 });
+  }
   process.stdout.write(
-    `${JSON.stringify({ event: "process.start", service: "static-host", app: role, origin: host.origin, access: access?.origin ?? null })}\n`,
+    `${JSON.stringify({
+      event: "process.start",
+      service: "static-host",
+      app: role,
+      origin: host.origin,
+      access: access?.origin ?? null,
+      clock: clock.setting,
+    })}\n`,
   );
   const stop = () => {
     void Promise.all([host.close(), access?.close()]).finally(() => process.exit(0));

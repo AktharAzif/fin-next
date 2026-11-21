@@ -56,7 +56,8 @@ export type Route =
   | "upstream-failed"
   | "access-login"
   | "access-authorized"
-  | "bad-target";
+  | "bad-target"
+  | "misdirected";
 
 export interface RequestLine {
   readonly dt: string;
@@ -105,12 +106,38 @@ export interface StaticHostOptions {
 }
 
 export interface StaticHost {
-  /** Answers one request. `origin` is the browser-facing origin, e.g. http://127.0.0.1:4101. */
+  /** Answers one request. `origin` is the browser-facing origin, e.g. https://console.localhost:4101. */
   handle(request: HostRequest, origin: string): Promise<Response>;
   readonly manifest: Manifest;
 }
 
-/** Headers Cloudflare and Access set on a request they forward; a client's own are replaced. */
+/** One `request` line, the route as a kind and never the path. */
+export function requestLine(
+  app: string,
+  method: string,
+  route: Route,
+  status: number,
+  startedMs: number,
+  endedMs: number,
+): RequestLine {
+  return {
+    dt: new Date(startedMs).toISOString(),
+    message: "request",
+    event: "request",
+    level: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
+    service: "static-host",
+    app,
+    method,
+    route,
+    status,
+    durationMs: Math.max(0, endedMs - startedMs),
+  };
+}
+
+/**
+ * Headers Cloudflare and Access set on a request they forward. A client's own are replaced, except
+ * `X-Forwarded-For`, which Cloudflare keeps and appends the connecting address to.
+ */
 const EDGE_SET = new Set([
   "host",
   "fin-ingress-proof",
@@ -257,13 +284,19 @@ export function createStaticHost(options: StaticHostOptions): StaticHost {
       if (options.access !== undefined && ACCESS_SET.has(lower)) continue;
       headers.push([name, value]);
     }
-    const forwardedFor = request.remoteAddress;
+    const peer = request.remoteAddress;
+    // Cloudflare keeps a client's X-Forwarded-For and appends the address that connected, so a
+    // forged first element reaches the API half; only CF-Connecting-IP names the client.
+    const sentForwardedFor = request.headers
+      .filter(([name]) => name.toLowerCase() === "x-forwarded-for")
+      .map(([, value]) => value.trim())
+      .filter((value) => value !== "");
     headers.push(
-      ["CF-Connecting-IP", forwardedFor],
+      ["CF-Connecting-IP", peer],
       ["CF-IPCountry", country],
       ["CF-Visitor", '{"scheme":"https"}'],
       ["CF-Ray", `${randomBytes(8).toString("hex")}-TST`],
-      ["X-Forwarded-For", forwardedFor],
+      ["X-Forwarded-For", [...sentForwardedFor, peer].join(",")],
       ["X-Forwarded-Proto", "https"],
       ["CDN-Loop", "cloudflare"],
       ["Fin-Ingress-Proof", api.ingressProof],
@@ -345,19 +378,9 @@ export function createStaticHost(options: StaticHostOptions): StaticHost {
     async handle(request, origin) {
       const started = now();
       const { route: kind, response } = await route(request, origin);
-      const level = response.status >= 500 ? "error" : response.status >= 400 ? "warn" : "info";
-      options.log?.({
-        dt: new Date(started).toISOString(),
-        message: "request",
-        event: "request",
-        level,
-        service: "static-host",
-        app: options.app,
-        method: request.method,
-        route: kind,
-        status: response.status,
-        durationMs: Math.max(0, now() - started),
-      });
+      options.log?.(
+        requestLine(options.app, request.method, kind, response.status, started, now()),
+      );
       return response;
     },
   };

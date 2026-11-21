@@ -1,8 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BrowserContext } from "@playwright/test";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  appHostName,
+  appLoopbackOrigin,
   appOrigin,
   STATIC_APPS,
   testAccessAudience,
@@ -12,7 +15,109 @@ import { accessLoginUrl } from "./access.ts";
 import { rpIdFor } from "./authenticator.ts";
 import { finPlaywrightConfig, selectedRoles } from "./config.ts";
 import { CSP_INIT_SCRIPT, isPolicyConsoleMessage } from "./csp.ts";
-import { isOffsite } from "./offsite.ts";
+import { refuseBypassCsp } from "./fixtures.ts";
+import { isOffsite, watchOffsite } from "./offsite.ts";
+
+type Listener = (value: never) => void;
+
+/** Just enough of a browser context and its pages to drive the recorder's listeners. */
+function fakeContext() {
+  const listeners = new Map<string, Listener[]>();
+  const on = (map: Map<string, Listener[]>) => (event: string, listener: Listener) => {
+    map.set(event, [...(map.get(event) ?? []), listener]);
+  };
+  const emit = (map: Map<string, Listener[]>, event: string, value: unknown) => {
+    for (const listener of map.get(event) ?? []) listener(value as never);
+  };
+  const context = { on: on(listeners), pages: () => [] };
+  const page = (url: string) => {
+    const own = new Map<string, Listener[]>();
+    return {
+      value: { on: on(own), url: () => url },
+      websocket: (socket: string) => emit(own, "websocket", { url: () => socket }),
+    };
+  };
+  const request = (
+    url: string,
+    { type = "fetch", navigation = false, topLevel = true } = {},
+  ): unknown => ({
+    url: () => url,
+    resourceType: () => type,
+    isNavigationRequest: () => navigation,
+    frame: () => ({
+      url: () => "https://console.localhost:4101/",
+      parentFrame: () => (topLevel ? null : {}),
+    }),
+  });
+  return {
+    context: context as unknown as BrowserContext,
+    request: (url: string, options?: Parameters<typeof request>[1]) =>
+      emit(listeners, "request", request(url, options)),
+    openPage(url: string) {
+      const made = page(url);
+      emit(listeners, "page", made.value);
+      return made;
+    },
+  };
+}
+
+describe("watchOffsite", () => {
+  const APP = "https://console.localhost:4101";
+  const STAND_IN = "http://127.0.0.1:4110";
+
+  it("records exactly the requests that leave the allowed origins", () => {
+    const fake = fakeContext();
+    const offsite = watchOffsite(fake.context, [APP]);
+    fake.request(`${APP}/assets/app.js`, { type: "script" });
+    fake.request("https://fonts.example.com/a.woff2", { type: "font" });
+    expect(offsite.requests).toEqual([
+      {
+        url: "https://fonts.example.com/a.woff2",
+        resourceType: "font",
+        pageUrl: "https://console.localhost:4101/",
+      },
+    ]);
+    expect(() => offsite.assertNone()).toThrow("another origin 1 time(s)");
+    offsite.clear();
+    expect(() => offsite.assertNone()).not.toThrow();
+  });
+
+  it("lets a top-level navigation reach a navigation origin, and nothing else load from it", () => {
+    const fake = fakeContext();
+    const offsite = watchOffsite(fake.context, [APP], { navigationOrigins: [STAND_IN] });
+    fake.request(`${STAND_IN}/cdn-cgi/access/login?app=x`, { type: "document", navigation: true });
+    expect(offsite.requests).toEqual([]);
+    fake.request(`${STAND_IN}/cdn-cgi/access/certs`, { type: "fetch" });
+    fake.request(`${STAND_IN}/framed`, { type: "document", navigation: true, topLevel: false });
+    expect(offsite.requests.map((r) => r.url)).toEqual([
+      `${STAND_IN}/cdn-cgi/access/certs`,
+      `${STAND_IN}/framed`,
+    ]);
+  });
+
+  it("records a page's WebSocket to another origin, which Playwright never reports as a request", () => {
+    const fake = fakeContext();
+    const offsite = watchOffsite(fake.context, [APP]);
+    const page = fake.openPage(`${APP}/`);
+    page.websocket("wss://console.localhost:4101/live");
+    page.websocket("wss://socket.example.com/live");
+    expect(offsite.requests).toEqual([
+      { url: "wss://socket.example.com/live", resourceType: "websocket", pageUrl: `${APP}/` },
+    ]);
+  });
+});
+
+describe("refuseBypassCsp", () => {
+  it("refuses bypassCSP from any route, naming it, and lets everything else through", () => {
+    expect(() => refuseBypassCsp("newContext()", { bypassCSP: true })).toThrow(
+      "newContext() turns it on",
+    );
+    expect(() => refuseBypassCsp("contextOptions", { bypassCSP: true })).toThrow("spec 06 §6.4");
+    for (const options of [undefined, {}, { bypassCSP: false }, { bypassCSP: undefined }]) {
+      expect(() => refuseBypassCsp("x", options)).not.toThrow();
+    }
+  });
+});
 
 describe("isOffsite", () => {
   const allowed = new Set(["http://127.0.0.1:4101"]);
@@ -56,7 +161,7 @@ describe("the policy console messages of the three engines", () => {
 
 describe("helpers", () => {
   it("uses the host name as the passkey relying party", () => {
-    expect(rpIdFor("http://127.0.0.1:4101")).toBe("127.0.0.1");
+    expect(rpIdFor(appOrigin("console"))).toBe("console.localhost");
     expect(rpIdFor("https://console.example.com")).toBe("console.example.com");
   });
 
@@ -82,7 +187,15 @@ describe("helpers", () => {
     expect(testIngressProof("console", {})).not.toBe(testIngressProof("admin", {}));
     expect(testIngressProof("console", { FIN_E2E_INGRESS_PROOF: "given" })).toBe("given");
     expect(testAccessAudience()).toMatch(/^[0-9a-f]{64}$/);
-    expect(appOrigin("admin")).toBe(`http://127.0.0.1:${STATIC_APPS.admin.port}`);
+  });
+
+  it("serves every host over https under its own name, so each keeps its own cookie jar", () => {
+    expect(appOrigin("admin")).toBe(`https://admin.localhost:${STATIC_APPS.admin.port}`);
+    expect(appLoopbackOrigin("admin")).toBe(`https://127.0.0.1:${STATIC_APPS.admin.port}`);
+    const roles = Object.keys(STATIC_APPS) as (keyof typeof STATIC_APPS)[];
+    const names = roles.map((role) => appHostName(role));
+    expect(new Set(names).size).toBe(roles.length);
+    for (const name of names) expect(name).toMatch(/^[a-z]+\.localhost$/);
   });
 
   it("gives every host its own port", () => {
@@ -104,6 +217,7 @@ describe("the Playwright configuration", () => {
     ]);
     expect(config.webServer).toBeUndefined();
     expect(config.use?.bypassCSP).toBe(false);
+    expect(config.use?.ignoreHTTPSErrors).toBe(true);
     expect(config.fullyParallel).toBe(true);
     expect(config.timeout).toBe(30_000);
   });
@@ -125,11 +239,12 @@ describe("the Playwright configuration", () => {
     expect(String(desktop?.grep)).toContain("@journey");
     const servers = Array.isArray(config.webServer) ? config.webServer : [];
     expect(servers.map((s) => s.url)).toEqual([
-      `${appOrigin("console")}/`,
-      `${appOrigin("verify")}/`,
-      `${appOrigin("selfie")}/`,
+      `${appLoopbackOrigin("console")}/`,
+      `${appLoopbackOrigin("verify")}/`,
+      `${appLoopbackOrigin("selfie")}/`,
       "http://127.0.0.1:4111/messages",
     ]);
+    expect(servers.slice(0, 3).every((s) => s.ignoreHTTPSErrors === true)).toBe(true);
   });
 
   it("follows FIN_E2E_APPS, the nightly flag, CI and the rendered folder", () => {

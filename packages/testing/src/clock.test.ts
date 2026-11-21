@@ -3,6 +3,7 @@ import {
   CANON_TIME,
   type ClockOwner,
   durationMs,
+  e2eClock,
   FrozenClock,
   freezeBrowserClock,
 } from "./clock.ts";
@@ -38,6 +39,37 @@ describe("FrozenClock", () => {
   it("adds durations", () => {
     expect(durationMs({ days: 1, hours: 1, minutes: 1, seconds: 1, ms: 1 })).toBe(90_061_001);
     expect(durationMs(5)).toBe(5);
+  });
+});
+
+describe("e2eClock (FIN_E2E_CLOCK)", () => {
+  it("stands at the canon's time unless told otherwise, where the servers' clock starts", () => {
+    for (const value of [undefined, "", "canon", "  canon "]) {
+      const clock = e2eClock(value);
+      expect(clock.setting).toBe(CANON_TIME);
+      expect(clock.now()).toBe(Date.parse(CANON_TIME));
+    }
+  });
+
+  it("stands at a given ISO time, or follows the system clock for 'wall'", () => {
+    const given = e2eClock("2026-11-18T09:30:00+05:30");
+    expect(given.setting).toBe("2026-11-18T04:00:00.000Z");
+    expect(given.now()).toBe(Date.parse("2026-11-18T04:00:00Z"));
+    const wall = e2eClock("wall");
+    expect(wall.setting).toBe("wall");
+    expect(Math.abs(wall.now() - Date.now())).toBeLessThan(1000);
+  });
+
+  it("refuses anything else, rather than signing at a time nobody chose", () => {
+    for (const value of [
+      "now",
+      "2026-11-16",
+      "1731751200000",
+      "2026-13-40T99:00:00Z",
+      "16 Nov 2026",
+    ]) {
+      expect(() => e2eClock(value)).toThrow("FIN_E2E_CLOCK");
+    }
   });
 });
 

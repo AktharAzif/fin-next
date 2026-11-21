@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { codeFrom, EmailSinkReader, linksFrom } from "./reader.ts";
+import { forward } from "../http/node.ts";
+import {
+  AUTH_CODE,
+  COMPANY_EMAIL_CODE,
+  codeFrom,
+  codePatternFor,
+  EmailSinkReader,
+  linksFrom,
+} from "./reader.ts";
 import {
   EmailSink,
   isFixtureAddress,
@@ -18,7 +26,7 @@ function message(overrides: Record<string, unknown> = {}) {
     from: "Fin <no-reply@auth.example.com>",
     to: ["asha.rao@example.com"],
     subject: "Your sign-in code",
-    text: "Your code is 123456. It works for 10 minutes.",
+    text: "Your code is 12345678. It works for 15 minutes.",
     template: "identity/sign-in-code",
     category: "security",
     ...overrides,
@@ -46,16 +54,21 @@ describe("validateMessage", () => {
     expect(validateMessage(message())).toMatchObject({ subject: "Your sign-in code" });
   });
 
-  it("refuses a recipient on a real domain", () => {
+  it("refuses a recipient on a real domain, without naming it", () => {
     expect(() =>
       validateMessage(message({ to: ["asha.rao@example.com", REAL("real", GMAIL)] })),
     ).toThrow(SinkRefusal);
-    try {
-      validateMessage(message({ to: [REAL("real", GMAIL)] }));
-    } catch (error) {
-      expect((error as SinkRefusal).code).toBe("recipient_not_fixture");
-      expect((error as Error).message).not.toContain("gmail");
-    }
+    const refusal = (() => {
+      try {
+        validateMessage(message({ to: [REAL("real", GMAIL)] }));
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    expect(refusal).toBeInstanceOf(SinkRefusal);
+    expect((refusal as SinkRefusal).code).toBe("recipient_not_fixture");
+    expect((refusal as Error).message).not.toContain("gmail");
   });
 
   it.each([
@@ -98,8 +111,8 @@ describe("EmailSink", () => {
     const sink = new EmailSink();
     const waiting = sink.waitFor({ to: "chen.wei@example.com" }, 1000);
     sink.add(message());
-    sink.add(message({ to: ["chen.wei@example.com"], text: "Code 654321" }));
-    expect((await waiting).text).toBe("Code 654321");
+    sink.add(message({ to: ["chen.wei@example.com"], text: "Code 65432109" }));
+    expect((await waiting).text).toBe("Code 65432109");
   });
 
   it("answers at once when a match is already there, and times out otherwise", async () => {
@@ -155,9 +168,37 @@ describe("the sink over HTTP, read by EmailSinkReader", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     await post(
-      JSON.stringify(message({ to: ["elif.demir@example.org"], text: "Use 987654 to sign in." })),
+      JSON.stringify(message({ to: ["elif.demir@example.org"], text: "Use 98765432 to sign in." })),
     );
-    expect(await code).toBe("987654");
+    expect(await code).toBe("98765432");
+  });
+
+  it("reads a waited-for code with its template's pattern", async () => {
+    const mark = await reader.mark();
+    await post(
+      JSON.stringify(
+        message({
+          to: ["femi.adeyemi@example.net"],
+          text: "Your company email code is 314159.",
+          template: "golive/company-email-code",
+        }),
+      ),
+    );
+    expect(
+      await reader.waitForCode({ to: "femi.adeyemi@example.net", after: mark }, { timeoutMs: 500 }),
+    ).toBe("314159");
+  });
+
+  it("answers only its own Host, so a page that rebinds its name to loopback reads nothing", async () => {
+    await post(JSON.stringify(message({ to: ["gita.menon@example.net"] })));
+    const misdirected = await forward(running.loopbackOrigin, {
+      method: "GET",
+      target: "/messages",
+      headers: [["Host", `attacker.example:${running.port}`]],
+      body: null,
+    });
+    expect(misdirected.status).toBe(421);
+    expect(await misdirected.text()).not.toContain("gita.menon");
   });
 
   it("reports a wait that times out", async () => {
@@ -168,19 +209,52 @@ describe("the sink over HTTP, read by EmailSinkReader", () => {
 });
 
 describe("codeFrom and linksFrom", () => {
-  it("finds the one six-digit code", () => {
-    expect(codeFrom({ text: "Your code is 042133." })).toBe("042133");
-    expect(codeFrom({ text: "Code 123456, again 123456" })).toBe("123456");
+  // How the sign-in-code template writes a code: in the text and in the sign-in link's fragment.
+  const signInText = (code: string) =>
+    `Your Fin sign-in code is ${code}. It works once, for 15 minutes.\n` +
+    `Sign in: https://console.example.com/sign-in/code#e=asha.rao%2Bs1%40example.com&c=${code}`;
+
+  it("finds the one 8-digit code of a sign-in email (spec 02 §5.2), text and link alike", () => {
+    expect(codeFrom({ text: signInText("12345678") })).toBe("12345678");
+    expect(codeFrom({ text: signInText("04213377"), template: "identity/sign-in-code" })).toBe(
+      "04213377",
+    );
+    for (const template of ["identity/confirm-email", "staff/staff-sign-in-code"]) {
+      expect(codeFrom({ text: "Use 90817263 to go on.", template })).toBe("90817263");
+    }
   });
 
-  it("refuses none, two, and digits that are part of something longer", () => {
+  it("refuses none, two, and digit runs of another length or inside something longer", () => {
     expect(() => codeFrom({ text: "no code" })).toThrow("no code");
-    expect(() => codeFrom({ text: "111111 or 222222" })).toThrow("more than one");
-    expect(() => codeFrom({ text: "ref 1234567 and id_123456" })).toThrow("no code");
+    expect(() => codeFrom({ text: "11111111 or 22222222" })).toThrow("more than one");
+    for (const text of [
+      "Your code is 123456.",
+      "Your code is 1234567.",
+      "Your code is 123456789.",
+      "ref-12345678 and id_12345678 and 12345678x",
+    ]) {
+      expect(() => codeFrom({ text })).toThrow("no code");
+    }
+  });
+
+  it("reads the go-live company email code with its own 6 digits (spec 03 §14)", () => {
+    const template = "golive/company-email-code";
+    expect(codeFrom({ text: "Your code is 042133.", template })).toBe("042133");
+    expect(() => codeFrom({ text: "Your code is 12345678.", template })).toThrow("no code");
+    expect(codePatternFor(template)).toBe(COMPANY_EMAIL_CODE);
+  });
+
+  it("reads any other template, even one named like a built-in property, as an emailed code", () => {
+    for (const template of ["identity/new-sign-in", "constructor", "__proto__", undefined]) {
+      expect(codePatternFor(template)).toBe(AUTH_CODE);
+    }
   });
 
   it("takes another pattern", () => {
     expect(codeFrom({ text: "Code: ABCD-EFGH" }, /([A-Z]{4}-[A-Z]{4})/)).toBe("ABCD-EFGH");
+    expect(
+      codeFrom({ text: "Your code is 042133.", template: "identity/sign-in-code" }, /(\d{6})/),
+    ).toBe("042133");
   });
 
   it("collects the links from text and HTML, once each", () => {

@@ -25,9 +25,25 @@ export {
   seedCanon,
   seededRandom,
   seedFromEnv,
+  testScope,
 } from "./canon/index.ts";
-export { CANON_TIME, type Clock, durationMs, FrozenClock, freezeBrowserClock } from "./clock.ts";
-export { codeFrom, EmailSinkReader, linksFrom } from "./email/reader.ts";
+export {
+  CANON_TIME,
+  type Clock,
+  durationMs,
+  e2eClock,
+  FrozenClock,
+  freezeBrowserClock,
+  type RunClock,
+} from "./clock.ts";
+export {
+  AUTH_CODE,
+  COMPANY_EMAIL_CODE,
+  codeFrom,
+  codePatternFor,
+  EmailSinkReader,
+  linksFrom,
+} from "./email/reader.ts";
 export {
   EmailSink,
   isFixtureAddress,
@@ -37,8 +53,11 @@ export {
   type SinkMessageInput,
   startEmailSink,
 } from "./email/sink.ts";
+export { selfSignedIdentity, type TlsIdentity } from "./http/certificate.ts";
 export {
   ACCESS_STAND_IN_PORT,
+  appHostName,
+  appLoopbackOrigin,
   appOrigin,
   EMAIL_SINK_PORT,
   type HostRole,

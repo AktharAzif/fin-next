@@ -1,6 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { isFixtureAddress } from "../email/sink.ts";
-import { createAddressBook } from "./addresses.ts";
+import { createAddressBook, testScope } from "./addresses.ts";
 import { CANON, type Canon, type CanonWriter, checkCanon, scopeCanon, seedCanon } from "./index.ts";
 import { seededRandom, seedFromEnv } from "./random.ts";
 
@@ -144,6 +145,48 @@ describe("addresses", () => {
     expect(book.address("dara", "example.org")).toBe("dara+run-7-test-abc@example.org");
     expect(book.fresh("x")).not.toBe(book.fresh("x"));
     expect(book.scoped("asha.rao+old@example.com")).toBe("asha.rao+run-7-test-abc@example.com");
+  });
+
+  it("keeps long scopes apart, so a retry or another test never shares an address", () => {
+    // CI's run IDs can be UUIDs (36 characters); built at run time.
+    const runId = randomUUID();
+    const sha8 = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 8);
+    const scopes = [
+      `${runId}-${sha8("test-a")}-r0`,
+      `${runId}-${sha8("test-a")}-r1`,
+      `${runId}-${sha8("test-b")}-r0`,
+    ];
+    const books = scopes.map((scope) => createAddressBook(scope));
+    expect(new Set(books.map((book) => book.scope)).size).toBe(3);
+    expect(new Set(books.map((book) => book.scoped("asha.rao@example.com"))).size).toBe(3);
+    for (const book of books) {
+      expect(book.scope.length).toBeLessThanOrEqual(32);
+      expect(book.scope.startsWith(runId.slice(0, 8))).toBe(true);
+      expect(isFixtureAddress(book.scoped("femi.adeyemi@example.net"))).toBe(true);
+    }
+  });
+
+  it("builds a test's scope from the run, the test and the try, readable when short", () => {
+    expect(testScope("lq2x9a", "test-a", 0)).toBe(
+      `lq2x9a-${createHash("sha256").update("test-a").digest("hex").slice(0, 8)}-r0`,
+    );
+    const runId = randomUUID();
+    const scopes = [
+      testScope(runId, "test-a", 0),
+      testScope(runId, "test-a", 1),
+      testScope(runId, "test-b", 0),
+      testScope(`${runId}x`, "test-a", 0),
+    ].map((scope) => createAddressBook(scope).scope);
+    expect(new Set(scopes).size).toBe(4);
+    expect(createAddressBook(testScope("lq2x9a", "test-a", 1)).scope).toMatch(
+      /^lq2x9a-[0-9a-f]{8}-r1$/,
+    );
+  });
+
+  it("keeps every local part within 64 characters", () => {
+    const book = createAddressBook(testScope(randomUUID(), "test-a", 0));
+    expect(book.address("a".repeat(31)).split("@")[0]?.length).toBeLessThanOrEqual(64);
+    expect(() => book.address("a".repeat(40))).toThrow("64 characters");
   });
 
   it("refuses what would not be a fixture address", () => {

@@ -65,6 +65,36 @@ export class FrozenClock implements Clock {
   }
 }
 
+/** How a journey run's stand-ins tell the time (`e2eClock`). */
+export interface RunClock {
+  /** "wall", or the ISO time the clock stands at. */
+  readonly setting: string;
+  /** Milliseconds since the epoch. */
+  now(): number;
+}
+
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * The clock a journey run's stand-ins sign and check with, from FIN_E2E_CLOCK, so the Access
+ * stand-in's `iat`, `nbf` and `exp` agree with the clock the API halves' test servers check them
+ * against (spec 01 §7.7). Unset, "" or "canon": stopped at CANON_TIME, where the servers'
+ * controllable clock starts; an ISO 8601 time with its offset: stopped there; "wall": the system
+ * clock, for servers that check against wall time. Anything else throws.
+ */
+export function e2eClock(value: string | undefined = process.env.FIN_E2E_CLOCK): RunClock {
+  const given = value?.trim() ?? "";
+  if (given === "wall") return { setting: "wall", now: () => Date.now() };
+  const iso = given === "" || given === "canon" ? CANON_TIME : given;
+  const ms = ISO_TIME.test(iso) ? Date.parse(iso) : Number.NaN;
+  if (!Number.isFinite(ms)) {
+    throw new Error(
+      "FIN_E2E_CLOCK is canon, wall, or an ISO 8601 time such as 2026-11-16T10:00:00Z",
+    );
+  }
+  return { setting: new Date(ms).toISOString(), now: () => ms };
+}
+
 /** The part of Playwright's BrowserContext (or Page) this needs. */
 export interface ClockOwner {
   readonly clock: {

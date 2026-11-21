@@ -8,10 +8,22 @@
 // else in the dist folder itself. The API halves' test servers are started by their own lanes on
 // the ports in STATIC_APPS; FIN_E2E_NIGHTLY=1 adds the Firefox and WebKit journey projects, and
 // FIN_CANVAS_RENDERS (the owner's machine only) adds the fidelity projects.
+//
+// Every app host answers over https at https://<role>.localhost:<port> with a certificate made
+// when it starts, so every project sets `ignoreHTTPSErrors`; nothing else about TLS is relaxed.
+// Browsers resolve names under .localhost to loopback by themselves. Node-side requests (the
+// `request` fixture, `page.request`) need this machine to resolve them too: macOS and
+// systemd-resolved do; a container needs them in /etc/hosts (docker's --add-host).
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig, devices, type PlaywrightTestConfig, type Project } from "@playwright/test";
-import { appOrigin, EMAIL_SINK_PORT, type HostRole, STATIC_APPS } from "../static-host/apps.ts";
+import {
+  appLoopbackOrigin,
+  appOrigin,
+  EMAIL_SINK_PORT,
+  type HostRole,
+  STATIC_APPS,
+} from "../static-host/apps.ts";
 
 type TestRole = "console" | "admin" | "verify" | "docs";
 const TEST_ROLES: readonly TestRole[] = ["console", "admin", "verify", "docs"];
@@ -124,7 +136,9 @@ function staticHostServer(root: string, role: HostRole, env: NodeJS.ProcessEnv, 
   return {
     command: args.join(" "),
     cwd: root,
-    url: `${appOrigin(role)}/`,
+    // By the bound address, so the readiness check does not depend on Node resolving the name.
+    url: `${appLoopbackOrigin(role)}/`,
+    ignoreHTTPSErrors: true,
     reuseExistingServer: !ci,
     stdout: "ignore" as const,
     stderr: "pipe" as const,
@@ -174,7 +188,9 @@ export function finPlaywrightConfig(
     webServer.push({
       command: "node packages/testing/src/email/cli.ts",
       cwd: root,
+      // Plain http: only Node reads and writes the sink, never a browser.
       url: `http://127.0.0.1:${EMAIL_SINK_PORT}/messages`,
+      ignoreHTTPSErrors: false,
       reuseExistingServer: !ci,
       stdout: "ignore",
       stderr: "pipe",
@@ -191,7 +207,7 @@ export function finPlaywrightConfig(
     reporter: ci ? [["blob"]] : [["list"]],
     timeout: 30 * 1000,
     outputDir: join(root, "test-results"),
-    use: { trace: "retain-on-failure", bypassCSP: false },
+    use: { trace: "retain-on-failure", bypassCSP: false, ignoreHTTPSErrors: true },
     ...(renders !== undefined && renders !== "" ? { updateSnapshots: "none" as const } : {}),
     projects,
     ...(webServer.length > 0 ? { webServer } : {}),

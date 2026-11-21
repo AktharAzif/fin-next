@@ -5,10 +5,11 @@
 // On every context, before its first page: the `securitypolicyviolation` recorder and the
 // off-origin request recorder (both fail the test at its end if they saw anything), and the
 // browser clock frozen at the canon's time ("fixed" pins Date; "paused" also stops timers; "off"
-// leaves the clock alone). A project that sets bypassCSP is refused.
-import { createHash } from "node:crypto";
+// leaves the clock alone). The Access stand-in's origin may be navigated to (its login page stands
+// in front of Fin Admin) but nothing may load from it. A test that turns bypassCSP on, in its
+// project, a `test.use`, `contextOptions` or `newContext`, is refused (spec 06 §6.4).
 import { type BrowserContext, type BrowserContextOptions, test as base } from "@playwright/test";
-import { type AddressBook, createAddressBook } from "../canon/addresses.ts";
+import { type AddressBook, createAddressBook, testScope } from "../canon/addresses.ts";
 import { CANON_TIME, FrozenClock, freezeBrowserClock } from "../clock.ts";
 import { EmailSinkReader } from "../email/reader.ts";
 import { ACCESS_STAND_IN_PORT, EMAIL_SINK_PORT } from "../static-host/apps.ts";
@@ -22,6 +23,7 @@ export interface FinOptions {
   readonly clockMode: "fixed" | "paused" | "off";
   readonly clockTime: string;
   readonly emailSinkOrigin: string;
+  /** The Access stand-in: a top-level navigation may reach it; nothing may load from it. */
   readonly accessStandInOrigin: string;
 }
 
@@ -53,9 +55,24 @@ function watchersOf(context: BrowserContext): Watchers {
   return found;
 }
 
+/**
+ * Spec 06 §6.4: no Fin test turns the page policy off. Throws, naming where it was turned on, when
+ * `options` sets bypassCSP.
+ */
+export function refuseBypassCsp(
+  where: string,
+  options: { readonly bypassCSP?: boolean | undefined } | undefined,
+): void {
+  if (options?.bypassCSP) {
+    throw new Error(`no Fin test runs with bypassCSP (spec 06 §6.4); ${where} turns it on`);
+  }
+}
+
 interface Preparation {
   readonly baseURL: string | undefined;
   readonly allowedOrigins: readonly string[];
+  /** Origins only a top-level navigation may reach (the Access stand-in's). */
+  readonly navigationOrigins?: readonly string[];
   readonly clockMode: FinOptions["clockMode"];
   readonly clockTime: string;
 }
@@ -63,11 +80,11 @@ interface Preparation {
 /** Puts the recorders and the frozen clock on a context before its first page. */
 export async function prepareContext(
   context: BrowserContext,
-  { baseURL, allowedOrigins, clockMode, clockTime }: Preparation,
+  { baseURL, allowedOrigins, navigationOrigins = [], clockMode, clockTime }: Preparation,
 ): Promise<Watchers> {
   const csp = await watchCsp(context);
   const origins = baseURL === undefined ? [...allowedOrigins] : [baseURL, ...allowedOrigins];
-  const offsite = watchOffsite(context, origins);
+  const offsite = watchOffsite(context, origins, { navigationOrigins });
   const prepared = { csp, offsite };
   watchers.set(context, prepared);
   if (clockMode !== "off") await freezeBrowserClock(context, clockTime, clockMode);
@@ -96,13 +113,26 @@ export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
     { scope: "worker" },
   ],
 
-  context: async ({ context, baseURL, allowedOrigins, clockMode, clockTime }, use, testInfo) => {
-    if (testInfo.project.use.bypassCSP === true) {
-      throw new Error("no Fin test runs with bypassCSP (spec 06 §6.4)");
-    }
+  context: async (
+    {
+      context,
+      baseURL,
+      allowedOrigins,
+      accessStandInOrigin,
+      clockMode,
+      clockTime,
+      bypassCSP,
+      contextOptions,
+    },
+    use,
+  ) => {
+    // The resolved option: the project's, the file's or a describe block's `test.use`.
+    refuseBypassCsp("the test's options", { bypassCSP });
+    refuseBypassCsp("contextOptions", contextOptions);
     const prepared = await prepareContext(context, {
       baseURL,
       allowedOrigins,
+      navigationOrigins: [accessStandInOrigin],
       clockMode,
       clockTime,
     });
@@ -111,14 +141,24 @@ export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
     prepared.offsite.assertNone();
   },
 
-  newContext: async ({ browser, baseURL, allowedOrigins, clockMode, clockTime }, use) => {
+  newContext: async (
+    { browser, baseURL, allowedOrigins, accessStandInOrigin, clockMode, clockTime },
+    use,
+  ) => {
     const made: Array<{ context: BrowserContext; watchers: Watchers }> = [];
     await use(async (options = {}) => {
+      refuseBypassCsp("newContext()", options);
       // Inside a test, browser.newContext() starts from the project's `use` options.
       const context = await browser.newContext(options);
       made.push({
         context,
-        watchers: await prepareContext(context, { baseURL, allowedOrigins, clockMode, clockTime }),
+        watchers: await prepareContext(context, {
+          baseURL,
+          allowedOrigins,
+          navigationOrigins: [accessStandInOrigin],
+          clockMode,
+          clockTime,
+        }),
       });
       return context;
     });
@@ -146,8 +186,7 @@ export const test = base.extend<FinOptions & FinFixtures, { runId: string }>({
   },
 
   addresses: async ({ runId }, use, testInfo) => {
-    const test = createHash("sha256").update(testInfo.testId).digest("hex").slice(0, 8);
-    await use(createAddressBook(`${runId}-${test}-r${testInfo.retry}`));
+    await use(createAddressBook(testScope(runId, testInfo.testId, testInfo.retry)));
   },
 
   clock: async ({ clockTime }, use) => {

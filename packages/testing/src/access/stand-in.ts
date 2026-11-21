@@ -10,7 +10,7 @@
 // Staging's Access policy allows the company domain with One-time PIN; here an allowed domain is
 // a fixture domain, and "signing in" is a test asking for a token for an address.
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { type Handler, type Listening, listen } from "../http/node.ts";
+import { type Handler, isLoopbackName, type Listening, listen } from "../http/node.ts";
 import { decodeToken, type JsonObject, signRs256, verifyRs256 } from "./jwt.ts";
 
 export interface AccessStandInOptions {
@@ -239,7 +239,10 @@ export class AccessStandIn {
   }
 }
 
-/** True for an http(s) origin on loopback: the only places the stand-in sends a browser. */
+/**
+ * True for an http(s) origin on loopback (a loopback address, localhost or a name under
+ * .localhost): the only places the stand-in sends a browser.
+ */
 export function isLoopbackOrigin(origin: string): boolean {
   let url: URL;
   try {
@@ -250,13 +253,32 @@ export function isLoopbackOrigin(origin: string): boolean {
   return (
     (url.protocol === "http:" || url.protocol === "https:") &&
     url.origin === origin &&
-    ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+    isLoopbackName(url.hostname)
   );
 }
 
-/** A path a redirect may carry: one leading slash, no backslash, no scheme. */
+const PROBE_ORIGIN = "http://path-check.invalid";
+
+/**
+ * A path a redirect may carry (spec 02 §2.3's rule): it starts with exactly one `/`, holds no
+ * backslash, no whitespace and no control character (raw or percent-encoded, since the URL parser
+ * strips a raw tab or newline and `/<TAB>/host` would become `//host`), and resolving it keeps the
+ * origin. It is checked by parsing, as the browser will read it, not by pattern alone.
+ */
 export function isLocalPath(path: string): boolean {
-  return path.startsWith("/") && !path.startsWith("//") && !path.includes("\\");
+  if (!path.startsWith("/") || path.startsWith("//")) return false;
+  for (const char of path) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 0x20 || code === 0x7f || char === "\\" || /\s/u.test(char)) return false;
+  }
+  if (/%(?:[01][0-9a-f]|7f)/i.test(path)) return false;
+  let url: URL;
+  try {
+    url = new URL(path, PROBE_ORIGIN);
+  } catch {
+    return false;
+  }
+  return url.origin === PROBE_ORIGIN && !url.pathname.startsWith("//");
 }
 
 export function accessStandInHandler(standIn: AccessStandIn): Handler {
