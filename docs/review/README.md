@@ -163,19 +163,29 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   where the defect may have moved or been copied), a test of such a file (by name, or a test that
   imports it), or a file one hop from one in the head's import graph (its imports and importers);
   where a file the blocker names was deleted since, any file changed since. Every other file of the
-  head, other than the quote's own, that holds the quoted code is listed too (`quotedStillIn`: files
-  that already held it, unchanged since or changed with no more of it, where the defect may now be
-  reached through code changed around a line that was there), though it ties no file. When
-  `quotedElsewhere` and `quotedStillIn` together hold more than 64 files, more than a check is
-  shown, no claim is accepted and the blocker stays open (`renamedSince` lists the renames to the
-  lens). Then the claim goes to a fix check (`prompts/fix-check.md`, the sceptic schema): a sceptic
-  on the overall model, and a second on the attack model for a high or critical blocker, one whose
-  quoted code occurs in another file (`quotedElsewhere` or `quotedStillIn`), or one naming a file
-  (in its places or its quotes) that git reads as renamed since (`renamed`, with the path git pairs
-  it with), each shown the finding, every entry of `renamed`, `quotedElsewhere` and `quotedStillIn`
-  (never part of a list) and the claimed fix, and asked whether the defect can still happen at this
-  head, there included; the blocker closes only when every one refutes it with a guard quoted from
-  the head. A moved defect, and the line a move leaves behind, are not a fix, but no text match can
+  head, other than the quote's own, that holds the quoted code is listed too, though it ties no file
+  (to the lens as `quotedCodeStillIn`): files changed since that already held it, with no more of it
+  (`quotedStillIn`, where the defect may now be reached through code changed around a line that was
+  there); files unchanged since that changed code now reaches (`quotedReachedIn`: a file of the head
+  imports one, re-exports from it or names another of its exports by a statement it did not have
+  then, a file added since among them, or a package manifest changed since now names it as an
+  entry, so callers may now be sent to a copy that was already there); and the other files
+  unchanged since (`quotedUntouchedIn`). When `quotedElsewhere`, `quotedStillIn` and
+  `quotedReachedIn` together hold more than 64 files, more than a check is shown, no claim is
+  accepted and the blocker stays open; `quotedUntouchedIn` never refuses a claim, since a common
+  line occurs in many files (`renamedSince` lists the renames to the lens). Then the claim goes to a
+  fix check (`prompts/fix-check.md`, the sceptic schema): a sceptic on the overall model, and a
+  second on the attack model for a high or critical blocker, one whose quoted code occurs in another
+  file, or one naming a file (in its places or its quotes) that git reads as renamed since
+  (`renamed`, with the path git pairs it with), each shown the finding, every entry of `renamed`,
+  `quotedElsewhere`, `quotedStillIn` and `quotedReachedIn` (never part of a list), the first 64 of
+  `quotedUntouchedIn` (those one hop from a file the blocker names or a file changed since first)
+  and how many more, a search pattern for each quote that allows white space anywhere (the engine
+  matches with it taken out), and the claimed fix, and asked whether the defect can still happen at
+  this head, there included. Its instruction says to read every file of the first three lists, to
+  find the rest with that pattern, and to answer UNSURE when a file changed code reaches holds the
+  code and could not be read. The blocker closes only when every one refutes it with a guard quoted
+  from the head. A moved defect, and the line a move leaves behind, are not a fix, but no text match can
   tell a move from a fix (a comment holding the old line hides a move; an unrelated line that
   matches the quote looks like one), so the engine never refuses a claim on that ground: it follows
   the quoted code, and the fix check judges it. A confirmation, an UNSURE, an unguarded refutation
@@ -186,8 +196,9 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   (its reasons are in `findings.json`); a claim whose place or quote is not in the tree is a wrong
   answer, which fails the output as any finding's would. A claim counts only in an output the engine
   accepted whole: a lens that ended `incomplete` claims nothing, though its valid findings still
-  count. `findings.json` records, for every carried blocker, its `quotedElsewhere`, `quotedStillIn`
-  and `renamed`, what the lens said, why a claim was not accepted, and each check's verdict.
+  count. `findings.json` records, for every carried blocker, its `quotedElsewhere`, `quotedStillIn`,
+  `quotedReachedIn`, `quotedUntouchedIn` and `renamed`, what the lens said, why a claim was not
+  accepted, and each check's verdict.
 - **Output.** stdout holds counts only. `$FIN_REVIEW_HOME/runs/<run-id>/` holds `state.json`,
   `plan.json`, each session's settings, MCP config and result, `findings.json` (every candidate,
   invalid ones included with their reasons), `summary.md` (the findings' text; invalid ones are never

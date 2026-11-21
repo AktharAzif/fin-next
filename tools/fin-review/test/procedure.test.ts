@@ -43,6 +43,10 @@ describe("docs/review", () => {
     assert.match(PROCEDURE.fixCheckPrompt, /^# The fix check\n/);
     assert.match(PROCEDURE.fixCheckPrompt, /anywhere the same code now lives \(moved, renamed or copied\)/);
     assert.match(PROCEDURE.fixCheckPrompt, /A\s+refutation without a quoted guard counts as UNSURE/);
+    // The rules for the files it is not shown by name live in the instruction, not in a DATA heading.
+    assert.match(PROCEDURE.fixCheckPrompt, /names at most 64 and then says how many more\s+there are/);
+    assert.match(PROCEDURE.fixCheckPrompt, /every white-space character taken out/);
+    assert.match(PROCEDURE.fixCheckPrompt, /could not read it, or\s+you could not tell whether code changed since reaches a file that holds it, your answer is UNSURE/);
     assert.equal(PROCEDURE.sources.has("docs/review/prompts/fix-check.md"), true, "its bytes are part of the engine-copy check");
   });
 

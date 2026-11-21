@@ -6,7 +6,24 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { cleanOutput, countingRandom, cryptoFinding, readJson, reviewFixture, runDirs, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
-import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script, shownElsewhere, shownMoreUntouched, shownQuoted, shownRenamed, shownStill, shownUntouched } from "./helpers/review-harness.ts";
+import {
+  ENGINE_COPY,
+  MODELS,
+  calls,
+  findingsOf,
+  harness,
+  isFixCheck,
+  lastRun,
+  script,
+  shownElsewhere,
+  shownMoreUntouched,
+  shownPatterns,
+  shownQuoted,
+  shownReached,
+  shownRenamed,
+  shownStill,
+  shownUntouched,
+} from "./helpers/review-harness.ts";
 import type { Handler, Harness } from "./helpers/review-harness.ts";
 
 describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
@@ -363,9 +380,103 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal(outcome(), "still_there");
     assert.deepEqual(prior()["quotedElsewhere"], []);
     assert.deepEqual(prior()["quotedStillIn"], []);
-    assert.deepEqual(prior()["quotedUntouchedIn"], [legacy]);
+    assert.deepEqual(prior()["quotedReachedIn"], [legacy]);
+    assert.deepEqual(prior()["quotedUntouchedIn"], []);
     assert.deepEqual(checks(copied), [["sceptic1", [legacy]]]);
-    assert.deepEqual(calls(copied).filter((call) => isFixCheck(call.spec)).map((call) => shownUntouched(call.spec)), [[legacy]], "shown as a file unchanged since");
+    assert.deepEqual(calls(copied).filter((call) => isFixCheck(call.spec)).map((call) => shownReached(call.spec)), [[legacy]], "shown as an unchanged file changed code now reaches");
+  });
+
+  it("an unchanged copy that changed code now reaches is shown by name however many other unchanged files hold the quoted line, and past the cap no claim is taken", async () => {
+    const finder = (line: number): Harness =>
+      harness(
+        fx,
+        script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { where: [{ path: "packages/crypto/src/index.ts", startLine: line, endLine: line + 2 }] })]) } : undefined)),
+        random,
+      );
+    const sees = (path: string): Handler => (spec) =>
+      isFixCheck(spec) && shownQuoted(spec).includes(path) ? { kind: "result", output: { verdict: "CONFIRMED", guardQuotes: [], reason: "The same comparison is still reachable there." } } : undefined;
+    const claiming = (line: number, text: string, handlers: Handler[]) =>
+      harness(
+        fx,
+        script(...handlers, (spec) =>
+          spec.lens === "security"
+            ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "packages/crypto/src/index.ts", startLine: line, endLine: line }, fixQuote: { path: "packages/crypto/src/index.ts", text } }] } }
+            : undefined,
+        ),
+        random,
+      );
+    const prior = (): Record<string, unknown> => (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
+    const outcome = (): unknown => (prior()["claim"] as Record<string, unknown>)["outcome"];
+    const defect = "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n";
+    const name = (i: number): string => `eq${String(i).padStart(2, "0")}`;
+    const eqFiles = (count: number): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (let i = 1; i <= count; i++) out[`packages/crypto/src/${name(i)}.ts`] = `export function ${name(i)}(a: number, b: number): boolean {\n  return a === b;\n}\n`;
+      return out;
+    };
+    const reexports = (count: number): string => Array.from({ length: count }, (_, i) => `export { ${name(i + 1)} } from "./${name(i + 1)}.ts";\n`).join("");
+
+    // A: the file the blocker names re-exports 64 files that hold the line; the defect goes to
+    // legacy.ts, which held it all along and sorts after them, by a re-export claimed as the fix.
+    const legacy = "packages/crypto/src/legacy.ts";
+    const h0 = fx.pr(32, { "packages/crypto/src/index.ts": `${reexports(64)}${defect}`, ...eqFiles(64), [legacy]: defect });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "32"], finder(65).services)).code, 1);
+    const stub = 'export { sameSecret } from "./legacy.ts";';
+    fx.pr(32, { "packages/crypto/src/index.ts": `${reexports(64)}${stub}\n` }, h0);
+    const hidden = claiming(65, stub, [sees(legacy)]);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "32"], hidden.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    assert.equal(outcome(), "still_there");
+    assert.deepEqual(prior()["quotedReachedIn"], [legacy]);
+    assert.equal((prior()["quotedUntouchedIn"] as unknown[]).length, 64);
+    const checksA = calls(hidden).filter((call) => isFixCheck(call.spec));
+    assert.deepEqual(
+      checksA.map((call) => shownReached(call.spec)),
+      [[legacy]],
+      "the copy is named, not left to the count of the rest",
+    );
+    for (const call of checksA) assert.equal(shownMoreUntouched(call.spec), 0);
+
+    // B: the file the blocker names fixed for real, while the package's manifest now names an
+    // unchanged file that holds the defect laid out otherwise, behind 64 unrelated files that hold the line.
+    const zz = "packages/crypto/src/zz-legacy.ts";
+    const docs: Record<string, string> = {};
+    for (let i = 1; i <= 64; i++) docs[`docs/plan/numbers-${String(i).padStart(2, "0")}.md`] = `# numbers ${i}\n\n    return a === b;\n`;
+    const h1 = fx.pr(33, { "packages/crypto/src/index.ts": defect, [zz]: "export function sameSecret(a: string, b: string): boolean {\n  return a===b;\n}\n", ...docs });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "33"], finder(1).services)).code, 1);
+    const fixed = 'import { timingSafeEqual } from "node:crypto";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n';
+    const manifest = `${JSON.stringify({ name: "@fin/crypto", private: true, type: "module", exports: "./src/zz-legacy.ts" }, null, 2)}\n`;
+    fx.pr(33, { "packages/crypto/src/index.ts": fixed, "packages/crypto/package.json": manifest }, h1);
+    const named = claiming(4, "timingSafeEqual(Buffer.from(a), Buffer.from(b))", [sees(zz)]);
+    const manifested = await runFixtureCli(fx, ["pr", "--pr", "33"], named.services);
+    assert.equal(manifested.code, 1, manifested.stdout + manifested.stderr);
+    assert.equal(outcome(), "still_there");
+    assert.deepEqual(prior()["quotedReachedIn"], [zz]);
+    assert.equal((prior()["quotedUntouchedIn"] as unknown[]).length, 64);
+    // The check (the first confirms, so it is the only one) is given a pattern that finds the copy however it is laid out.
+    const checksB = calls(named).filter((call) => isFixCheck(call.spec));
+    assert.deepEqual(
+      checksB.map((call) => [call.spec.role, shownReached(call.spec)]),
+      [["sceptic1", [zz]]],
+    );
+    for (const call of checksB) {
+      const pattern = new RegExp(shownPatterns(call.spec)[0]?.pattern ?? "^$");
+      assert.match("  return a===b;\n", pattern);
+      assert.match("  return a ===\n    b;\n", pattern);
+    }
+
+    // C: 65 unchanged files that hold the line, each newly re-exported by the file the blocker names:
+    // more than a check is shown, so no claim is taken.
+    const h2 = fx.pr(34, { "packages/crypto/src/index.ts": defect, ...eqFiles(65) });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "34"], finder(1).services)).code, 1);
+    fx.pr(34, { "packages/crypto/src/index.ts": reexports(65) }, h2);
+    const crowded = claiming(1, reexports(1).trim(), []);
+    const refused = await runFixtureCli(fx, ["pr", "--pr", "34"], crowded.services);
+    assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+    assert.equal(outcome(), "not_accepted");
+    assert.equal((prior()["quotedReachedIn"] as unknown[]).length, 65);
+    assert.match(String(((prior()["claim"] as Record<string, unknown>)["notAccepted"] as unknown[])[0]), /65 unchanged that changed code now reaches/);
+    assert.deepEqual(calls(crowded).filter((call) => isFixCheck(call.spec)), [], "no check is shown part of the list");
   });
 
   it("a fix check is never shown part of the changed files that hold the quoted code: past the cap no claim is taken", async () => {
@@ -414,7 +525,7 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
         assert.equal(run.code, 1, run.stdout + run.stderr);
         const claim = prior()["claim"] as Record<string, unknown>;
         assert.equal(claim["outcome"], "not_accepted");
-        assert.match(String((claim["notAccepted"] as unknown[])[0]), /in 65 other files changed since it was found, more than a fix check is shown \(64\)/);
+        assert.match(String((claim["notAccepted"] as unknown[])[0]), /in 65 other files changed since it was found or newly reached from changed code, more than a fix check is shown \(64\)/);
         assert.deepEqual(shown, []);
       }
     }
@@ -437,7 +548,7 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal(run.code, 0, run.stdout + run.stderr);
     const prior = (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
     assert.equal((prior["claim"] as Record<string, unknown>)["outcome"], "fixed");
-    assert.deepEqual([prior["quotedElsewhere"], prior["quotedStillIn"]], [[], []]);
+    assert.deepEqual([prior["quotedElsewhere"], prior["quotedStillIn"], prior["quotedReachedIn"]], [[], [], []]);
     const untouched = prior["quotedUntouchedIn"] as string[];
     assert.equal(untouched.length, 66);
     assert.equal(untouched[0], pad, "a file one hop from the file the blocker names comes first");

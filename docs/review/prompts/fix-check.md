@@ -13,11 +13,25 @@ is CONFIRMED, REFUTED or UNSURE, about the defect, at this head.
   another file. When the DATA block lists the paths git pairs files the finding names with (read as
   renamed since), read each and judge the defect there: git pairs two paths by how alike the files
   are, so the finding's code may be there, or may have gone elsewhere while another file took over
-  its name. The DATA block lists every other file that holds the code the finding quotes: where it
-  now occurs more often than it did, and where else it occurs (files that already held it). Read each
-  of those files and judge the defect there as well: a match may be unrelated code, but a defect
+  its name.
+- The DATA block lists the other files that hold the code the finding quotes: where it now occurs
+  more often than it did, files changed since that already held it, files unchanged since that
+  changed code now reaches (a file now imports or re-exports from them, or a changed package
+  manifest now names them), and the other files unchanged since. Read each file of the first three
+  lists, every one, and judge the defect there as well: a match may be unrelated code, but a defect
   moved or copied there, or reached there now through code changed around a line that was already
-  there, is not fixed.
+  there, or through callers sent to a copy that was already there, is not fixed.
+- The engine matches the quoted code with every white-space character taken out, so a listed file
+  may hold it laid out otherwise (`return a===b;`, or split over lines), where a search for the
+  quote as it is finds nothing. The DATA block gives a pattern for each quote that allows white
+  space anywhere: search with it, with multiline matching on.
+- Of the other files unchanged since, the DATA block names at most 64 and then says how many more
+  there are. When there are more, find them with that pattern, and judge the defect in each that
+  code changed since reaches by any way (an import, a re-export, a package manifest, a path or a
+  name built at run time, a configuration file).
+- When a file that code changed since reaches holds the quoted code and you could not read it, or
+  you could not tell whether code changed since reaches a file that holds it, your answer is UNSURE,
+  unless the claimed fix stops the defect for every one of them.
 - **CONFIRMED**: the defect the finding describes can still happen at this head, in the place it
   names or anywhere the same code now lives (moved, renamed or copied). A fix that leaves any path
   to the defect open leaves it CONFIRMED. Leave `severity` out.

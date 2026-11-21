@@ -103,13 +103,22 @@ export interface FixScope {
    */
   readonly quotedStillIn: readonly string[];
   /**
-   * Every file of the head unchanged since the blocker was found, other than a quote's own file, in
-   * which code the blocker quotes occurs: nothing can have moved into it, but changed code may now
-   * reach the defect there (callers sent to a copy that was already there). Not tied to the blocker,
-   * and never a reason to refuse a claim, however many there are (a common line occurs in many
-   * files). Its fix check takes two sceptics and is shown the first MAX_FIX_CHECK_PATHS of them and
-   * how many more, to find with Grep. Sorted; past MAX_FIX_CHECK_PATHS, those one hop in the import
-   * graph from a file the blocker names or a file changed since come first.
+   * The files of the head unchanged since the blocker was found, other than a quote's own file, in
+   * which code the blocker quotes occurs and which code changed since now reaches: a file of the head
+   * imports one, re-exports from it or names another of its exports by a statement it did not have
+   * then (a file added since among them), or a package manifest changed since now names it as an
+   * entry. Nothing moved into it, but callers may now be sent to a copy that was already there. Not
+   * tied to the blocker. Its fix check is shown every one of them and takes two sceptics. Sorted.
+   */
+  readonly quotedReachedIn: readonly string[];
+  /**
+   * Every other file of the head unchanged since the blocker was found, other than a quote's own
+   * file, in which code the blocker quotes occurs: changed code may still reach the defect there by a
+   * way no import shows. Not tied to the blocker, and never a reason to refuse a claim, however many
+   * there are (a common line occurs in many files). Its fix check takes two sceptics and is shown the
+   * first MAX_FIX_CHECK_PATHS of them, how many more, and a search pattern for each quote. Sorted;
+   * past MAX_FIX_CHECK_PATHS, those one hop in the import graph from a file the blocker names or a
+   * file changed since come first.
    */
   readonly quotedUntouchedIn: readonly string[];
   /**
@@ -122,10 +131,10 @@ export interface FixScope {
 }
 
 /**
- * Most files changed since a blocker was found that a fix check is shown as holding its quoted code,
- * `quotedElsewhere` and `quotedStillIn` together. A check is never shown part of those lists, where
- * the defect may have moved: past it, a fix claim for the blocker is not accepted, and it stays open.
- * It is also the most files of `quotedUntouchedIn` a check is shown by name.
+ * Most files a fix check is shown as holding a blocker's quoted code where the defect may have moved
+ * or may now be reached: `quotedElsewhere`, `quotedStillIn` and `quotedReachedIn` together. A check
+ * is never shown part of those lists: past it, a fix claim for the blocker is not accepted, and it
+ * stays open. It is also the most files of `quotedUntouchedIn` a check is shown by name.
  */
 export const MAX_FIX_CHECK_PATHS = 64;
 
@@ -195,16 +204,17 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
  * that changed since the blocker was found. Nothing that was already there when the blocker was
  * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
  * fix check's to judge (src/review/run.ts), so no claim is taken when the check could not be shown
- * every other changed file the blocker's quoted code occurs in. Files unchanged since that hold it
- * never refuse a claim: nothing moved into them, and a common line occurs in many.
+ * every other changed file the blocker's quoted code occurs in, and every unchanged one that changed
+ * code now reaches. The other files unchanged since that hold it never refuse a claim: nothing moved
+ * into them, no changed import or manifest now reaches them, and a common line occurs in many.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);
   if (scope === undefined) return [`${id} is not a prior blocker shown to this session`];
-  const holding = scope.quotedElsewhere.length + scope.quotedStillIn.length;
+  const holding = scope.quotedElsewhere.length + scope.quotedStillIn.length + scope.quotedReachedIn.length;
   if (holding > MAX_FIX_CHECK_PATHS) {
     return [
-      `${id}: the code the blocker quotes occurs in ${holding} other files changed since it was found, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken (${scope.quotedElsewhere.length} with more of it, ${scope.quotedStillIn.length} with no more of it)`,
+      `${id}: the code the blocker quotes occurs in ${holding} other files changed since it was found or newly reached from changed code, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken (${scope.quotedElsewhere.length} with more of it, ${scope.quotedStillIn.length} with no more of it, ${scope.quotedReachedIn.length} unchanged that changed code now reaches)`,
     ];
   }
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];

@@ -42,6 +42,12 @@ export interface ImportGraph {
   importsOf(path: string): string[];
   /** Files that import `path`, or import its package's entry and name one of its exports (one hop in). */
   importersOf(path: string): string[];
+  /**
+   * The statements by which `from` reaches `target` in one hop, as `importersOf(target)` counts it: an
+   * import or re-export that resolves to it, or an import of its package's entry that names one of
+   * its exports. Empty when `from` does not reach it.
+   */
+  importStatements(from: string, target: string): string[];
 }
 
 interface PackageInfo {
@@ -220,24 +226,77 @@ export function buildGraph(files: ReadonlySet<string>, texts: ReadonlyMap<string
     return best?.name ?? null;
   };
   const sorted = (set: Iterable<string>): string[] => [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  /** A record of another file reaches `path` through its package's entry when it names one of `path`'s exports. */
+  const entryReach = (path: string): ((record: ImportRecord) => boolean) | null => {
+    const pkg = packageOf(path);
+    const text = texts.get(path);
+    if (pkg === null || text === undefined) return null;
+    const names = exportedNames(text);
+    if (names.length === 0) return null;
+    const nameRe = new RegExp(`\\b(?:${names.map((name) => name.replace(/\$/g, "\\$")).join("|")})\\b`);
+    return (record) => record.packageName === pkg && record.packageEntry && nameRe.test(record.statement);
+  };
   return {
     importsOf: (path) => sorted(new Set((out.get(path) ?? []).map((record) => record.target))),
     importersOf: (path) => {
       const set = new Set(importers.get(path) ?? []);
-      const pkg = packageOf(path);
-      const text = texts.get(path);
-      if (pkg !== null && text !== undefined) {
-        const names = exportedNames(text);
-        if (names.length > 0) {
-          const nameRe = new RegExp(`\\b(?:${names.map((name) => name.replace(/\$/g, "\\$")).join("|")})\\b`);
-          for (const [from, records] of out) {
-            if (from === path) continue;
-            if (records.some((record) => record.packageName === pkg && record.packageEntry && nameRe.test(record.statement))) set.add(from);
-          }
+      const reaches = entryReach(path);
+      if (reaches !== null) {
+        for (const [from, records] of out) {
+          if (from === path) continue;
+          if (records.some(reaches)) set.add(from);
         }
       }
       set.delete(path);
       return sorted(set);
     },
+    importStatements: (from, target) => {
+      if (from === target) return [];
+      const reaches = entryReach(target);
+      return (out.get(from) ?? []).filter((record) => record.target === target || (reaches !== null && reaches(record))).map((record) => record.statement);
+    },
   };
+}
+
+const ENTRY_FIELDS = ["exports", "main", "module", "types", "typings", "browser", "bin"] as const;
+
+/** True for a package manifest's path. */
+export function isManifestPath(path: string): boolean {
+  return path === "package.json" || path.endsWith("/package.json");
+}
+
+/**
+ * Whether a path of `files` is one a package manifest at `manifestPath` names as an entry: a path in
+ * its `exports` (every subpath and condition), `main`, `module`, `types`, `typings`, `browser` or
+ * `bin`, resolved as an import of it resolves, or a path one of its `*` patterns matches (a `*`
+ * matches any text, `/` included, as Node's subpath patterns do). Nothing for a manifest that is not
+ * a JSON object.
+ */
+export function manifestTargets(files: ReadonlySet<string>, manifestPath: string, text: string): (path: string) => boolean {
+  const parsed = parseJsonBytes(Buffer.from(text, "utf8"));
+  if (!parsed.ok || !isJsonObject(parsed.value)) return () => false;
+  const strings: string[] = [];
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > 32) return;
+    if (typeof value === "string") strings.push(value);
+    else if (Array.isArray(value)) for (const item of value) collect(item, depth + 1);
+    else if (isJsonObject(value)) for (const item of Object.values(value)) collect(item, depth + 1);
+  };
+  for (const field of ENTRY_FIELDS) collect(parsed.value[field], 0);
+  const dir = posix.dirname(manifestPath);
+  const named = new Set<string>();
+  const patterns: RegExp[] = [];
+  for (const value of strings) {
+    if (value === "" || value.length > 300) continue;
+    const spec = value.startsWith(".") ? value : `./${value}`;
+    if (spec.includes("*")) {
+      const joined = posix.normalize(posix.join(dir, spec));
+      if (joined.startsWith("../") || joined.startsWith("/")) continue;
+      patterns.push(new RegExp(`^${joined.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s\\S]*")}$`));
+      continue;
+    }
+    const resolved = resolveRelative(files, manifestPath, spec);
+    if (resolved !== null) named.add(resolved);
+  }
+  return (path) => named.has(path) || patterns.some((pattern) => pattern.test(path));
 }

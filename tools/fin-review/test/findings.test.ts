@@ -115,7 +115,7 @@ describe("finding validation (T-RV-13)", () => {
     const ids = ["P1", "P2", "P3", "P4"];
     // Line 2 of src/a.ts changed since each blocker was found.
     const changed = new Map([["src/a.ts", new Set([2])]]);
-    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ids), fixScopes: new Map(ids.map((id) => [id, { files: changed, quotedElsewhere: [], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] }])) });
+    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ids), fixScopes: new Map(ids.map((id) => [id, { files: changed, quotedElsewhere: [], quotedStillIn: [], quotedReachedIn: [], quotedUntouchedIn: [], renamed: [] }])) });
     const validated = validateOutput(
       output([], {
         priorBlockers: [
@@ -139,37 +139,39 @@ describe("finding validation (T-RV-13)", () => {
   });
 
   it("where the quoted code now also appears refuses no claim: the fix check judges it, and a file it went to may hold the fix", () => {
-    const scope = { files: new Map([["src/a.ts", new Set([2])], ["src/other.ts", new Set([1])]]), quotedElsewhere: ["src/other.ts"], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] };
+    const scope = { files: new Map([["src/a.ts", new Set([2])], ["src/other.ts", new Set([1])]]), quotedElsewhere: ["src/other.ts"], quotedStillIn: [], quotedReachedIn: [], quotedUntouchedIn: [], renamed: [] };
     const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", scope]]) });
     const claim = (where: Record<string, unknown>, quote: Record<string, unknown>) => validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: where, fixQuote: quote }] }), c).prior[0];
     assert.equal(claim({ path: "src/a.ts", startLine: 2, endLine: 2 }, { path: "src/a.ts", text: "return x + 1;" })?.status, "fixed", "a fix in the file the blocker names");
     assert.equal(claim({ path: "src/other.ts", startLine: 1, endLine: 1 }, { path: "src/other.ts", text: "export const other = 1;" })?.status, "fixed", "a fix where the quoted code went");
   });
 
-  it("a claim is not taken when the quoted code occurs in more other changed files than a fix check is shown; unchanged files never refuse one", () => {
+  it("a claim is not taken when the quoted code occurs in more other changed or newly reached files than a fix check is shown; other unchanged files never refuse one", () => {
     const files = new Map<string, Set<number>>([["src/a.ts", new Set([2])]]);
     const cases = (count: number, prefix: string) => Array.from({ length: count }, (_, i) => `docs/${prefix}-${String(i).padStart(3, "0")}.md`);
-    const claim = (moved: number, still: number, untouched = 0) => {
-      const scope = { files, quotedElsewhere: cases(moved, "moved"), quotedStillIn: cases(still, "still"), quotedUntouchedIn: cases(untouched, "untouched"), renamed: [] };
+    const claim = (moved: number, still: number, untouched = 0, reached = 0) => {
+      const scope = { files, quotedElsewhere: cases(moved, "moved"), quotedStillIn: cases(still, "still"), quotedReachedIn: cases(reached, "reached"), quotedUntouchedIn: cases(untouched, "untouched"), renamed: [] };
       const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", scope]]) });
       return validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "src/a.ts", startLine: 2, endLine: 2 }, fixQuote: { path: "src/a.ts", text: "return x + 1;" } }] }), c).prior[0];
     };
-    for (const [moved, still] of [[MAX_FIX_CHECK_PATHS, 0], [0, MAX_FIX_CHECK_PATHS], [1, MAX_FIX_CHECK_PATHS - 1]]) {
-      assert.equal(claim(moved ?? 0, still ?? 0)?.status, "fixed", `every file can be shown (${moved} + ${still})`);
+    const fits = [[MAX_FIX_CHECK_PATHS, 0, 0], [0, MAX_FIX_CHECK_PATHS, 0], [1, MAX_FIX_CHECK_PATHS - 1, 0], [0, 0, MAX_FIX_CHECK_PATHS], [1, 1, MAX_FIX_CHECK_PATHS - 2]];
+    for (const [moved, still, reached] of fits) {
+      assert.equal(claim(moved ?? 0, still ?? 0, 0, reached ?? 0)?.status, "fixed", `every file can be shown (${moved} + ${still} + ${reached})`);
     }
-    for (const [moved, still] of [[MAX_FIX_CHECK_PATHS + 1, 0], [0, MAX_FIX_CHECK_PATHS + 1], [1, MAX_FIX_CHECK_PATHS]]) {
-      const crowded = claim(moved ?? 0, still ?? 0);
-      assert.equal(crowded?.status, "open", `${moved} + ${still}`);
-      assert.match(crowded?.notAccepted[0] ?? "", /occurs in 65 other files changed since it was found, more than a fix check is shown \(64\)/);
+    const crowds = [[MAX_FIX_CHECK_PATHS + 1, 0, 0], [0, MAX_FIX_CHECK_PATHS + 1, 0], [1, MAX_FIX_CHECK_PATHS, 0], [0, 0, MAX_FIX_CHECK_PATHS + 1], [1, 1, MAX_FIX_CHECK_PATHS - 1]];
+    for (const [moved, still, reached] of crowds) {
+      const crowded = claim(moved ?? 0, still ?? 0, 0, reached ?? 0);
+      assert.equal(crowded?.status, "open", `${moved} + ${still} + ${reached}`);
+      assert.match(crowded?.notAccepted[0] ?? "", /occurs in 65 other files changed since it was found or newly reached from changed code, more than a fix check is shown \(64\)/);
     }
-    // A common line in many files unchanged since refuses nothing: the fix check is told how many more to find.
+    // A common line in many other files unchanged since refuses nothing: the fix check is told how many more to find.
     assert.equal(claim(0, 0, 1000)?.status, "fixed");
     assert.equal(claim(MAX_FIX_CHECK_PATHS, 0, 1000)?.status, "fixed");
   });
 
   it("a quoted fix must come from its own file, within its lines, and touch a line changed since the blocker was found", () => {
     const fixed = (where: Record<string, unknown>, quote: Record<string, unknown>, changed: Map<string, Set<number>>) => {
-      const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", { files: changed, quotedElsewhere: [], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] }]]) });
+      const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", { files: changed, quotedElsewhere: [], quotedStillIn: [], quotedReachedIn: [], quotedUntouchedIn: [], renamed: [] }]]) });
       const check = validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: where, fixQuote: quote }] }), c).prior[0];
       return check === undefined ? undefined : { status: check.status, problems: [...check.problems, ...check.notAccepted] };
     };

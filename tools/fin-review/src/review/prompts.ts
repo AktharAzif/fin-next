@@ -161,7 +161,7 @@ export function lensPrompt(input: LensPromptInput): string {
       "",
       `The blocking findings open at the last reviewed head are in the DATA block headed "Prior blockers" (${input.priorIds.join(", ")}). For each, return an entry in \`priorBlockers\` with its \`id\`: \`fixed\` only when a change made since the blocker was found fixes it, with \`fixWhere\` giving the lines of that fix (they must include a line that changed since then) and \`fixQuote\` quoting the fix exactly, from those lines of the same file; otherwise \`open\`. Saying nothing keeps a blocker open.`,
       "",
-      "A fix is accepted only from a file tied to the blocker, which its entry lists as `fixMayBeIn`: a file the blocker names (or the path git pairs it with as renamed since, listed as `renamedSince`; git pairs two paths by how alike the files are, so the blocker's code may be there or may have gone elsewhere), a file changed since in which the code the blocker quotes now occurs more often than it did (listed as `quotedCodeAlsoIn`), a test of such a file, or a file one hop from one (a file it imports or a file that imports it); when a file the blocker names was deleted since, any file changed since. The other files that hold the quoted code, as they did when the blocker was found, are listed as `quotedCodeStillIn`. Moving, renaming or copying the defect is not a fix, nor is sending callers to a copy that was already there: wherever the quoted code occurs, the defect must be gone there too. A sceptic checks every fix you claim at this head, shown each path git pairs a file the blocker names with and every other file that holds the quoted code, and the blocker stays open unless the sceptic finds the defect gone, so claim `fixed` only for a defect that can no longer happen anywhere.",
+      "A fix is accepted only from a file tied to the blocker, which its entry lists as `fixMayBeIn`: a file the blocker names (or the path git pairs it with as renamed since, listed as `renamedSince`; git pairs two paths by how alike the files are, so the blocker's code may be there or may have gone elsewhere), a file changed since in which the code the blocker quotes now occurs more often than it did (listed as `quotedCodeAlsoIn`), a test of such a file, or a file one hop from one (a file it imports or a file that imports it); when a file the blocker names was deleted since, any file changed since. The other files that hold the quoted code, as they did when the blocker was found, are listed as `quotedCodeStillIn`. Moving, renaming or copying the defect is not a fix, nor is sending callers to a copy that was already there: wherever the quoted code occurs, the defect must be gone there too. A sceptic checks every fix you claim at this head, shown each path git pairs a file the blocker names with and the other files that hold the quoted code, and the blocker stays open unless the sceptic finds the defect gone, so claim `fixed` only for a defect that can no longer happen anywhere.",
       "",
     );
   }
@@ -192,14 +192,25 @@ export function scepticPrompt(finding: Finding, instruction: string): string {
 }
 
 /**
+ * A pattern for Grep that finds `text` laid out with any white space (none included) between any two
+ * of its characters, as the engine matches a quote: each character that is not white space, escaped,
+ * joined by `\s*`. Multiline matching lets it cross lines.
+ */
+export function quoteSearchPattern(text: string): string {
+  return [...text.replace(/\s+/g, "")].map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s*");
+}
+
+/**
  * The user message of a fix check: a sceptic shown a prior blocker's finding, the path git pairs each
  * file it names with when git reads that file as renamed since (chosen by how alike the two files
  * are, so its code may be there or may have gone elsewhere), every file changed since in which the
  * code it quotes now occurs more often than it did (where the defect may have moved or been copied),
  * every other changed file that holds that code as it did then (where the defect may now be reached),
- * the files unchanged since that hold it (the first `maxUntouched` by name, then how many more, to
- * find with Grep), and the fix a lens claims for it, asked whether the defect can still happen at
- * this head. No list of changed files is cut.
+ * every unchanged file that holds it and that changed code now reaches, the other unchanged files
+ * that hold it (the first `maxUntouched` by name, then how many more), a search pattern for each quote
+ * (the engine matches with white space taken out), and the fix a lens claims for it, asked whether
+ * the defect can still happen at this head. The fix check's instruction says what to do with each. No
+ * list but the last is cut.
  */
 export function fixCheckPrompt(
   finding: Finding,
@@ -207,6 +218,7 @@ export function fixCheckPrompt(
   moved: {
     readonly quotedElsewhere: readonly string[];
     readonly quotedStillIn: readonly string[];
+    readonly quotedReachedIn: readonly string[];
     readonly quotedUntouchedIn: readonly string[];
     readonly renamed: ReadonlyArray<{ readonly from: string; readonly to: string }>;
   },
@@ -223,13 +235,21 @@ export function fixCheckPrompt(
   if (moved.quotedStillIn.length > 0) {
     parts.push(`# Where else the code the finding quotes occurs (files changed since that already held it when it was reported)\n${JSON.stringify(moved.quotedStillIn, null, 2)}\n`);
   }
+  if (moved.quotedReachedIn.length > 0) {
+    parts.push(
+      `# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code now reaches: a file now imports or re-exports from it, or a changed package manifest now names it)\n${JSON.stringify(moved.quotedReachedIn, null, 2)}\n`,
+    );
+  }
   if (moved.quotedUntouchedIn.length > 0) {
     parts.push(`# Where else the code the finding quotes occurs (files unchanged since it was reported)\n${JSON.stringify(moved.quotedUntouchedIn.slice(0, maxUntouched), null, 2)}\n`);
   }
   if (moved.quotedUntouchedIn.length > maxUntouched) {
-    parts.push(
-      `# How many more files unchanged since it was reported hold the code the finding quotes (not listed: find them with Grep, and judge the defect in each a changed file now reaches)\n${moved.quotedUntouchedIn.length - maxUntouched}\n`,
-    );
+    parts.push(`# How many more files unchanged since it was reported hold the code the finding quotes (not listed above)\n${moved.quotedUntouchedIn.length - maxUntouched}\n`);
+  }
+  const quotes = (Array.isArray(finding.quotes) ? finding.quotes : []).filter((quote) => typeof quote?.text === "string" && quote.text.trim() !== "");
+  if (quotes.length > 0) {
+    const patterns = quotes.map((quote) => ({ path: quote.path, pattern: quoteSearchPattern(quote.text) }));
+    parts.push(`# A search pattern for each quote of the finding (white space allowed anywhere; for Grep with multiline on)\n${JSON.stringify(patterns, null, 2)}\n`);
   }
   parts.push(`# The fix a lens claims (at the head you are given)\n${JSON.stringify({ fixWhere: claim.fixWhere, fixQuote: claim.fixQuote }, null, 2)}\n`);
   return [dataBlock(parts.join("\n")), "# Your task", "", instruction.trim(), ""].join("\n");

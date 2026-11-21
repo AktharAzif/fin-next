@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { compileGlob } from "../src/plan/glob.ts";
 import type { Tier } from "../src/roles.ts";
-import { buildGraph, exportHeads, exportedNames, scanImports } from "../src/plan/graph.ts";
+import { buildGraph, exportHeads, exportedNames, isManifestPath, manifestTargets, scanImports } from "../src/plan/graph.ts";
 import { packShards } from "../src/shard.ts";
 import { MAX_UNIT_LINES, chunkFile, splitLines } from "../src/units/chunk.ts";
 import { blocksCoverage, estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
@@ -428,6 +428,36 @@ describe("one hop (the import scanner)", () => {
     assert.deepEqual(graph.importersOf("packages/a/src/util.ts"), ["packages/a/src/index.ts", "packages/b/src/other.ts", "packages/b/src/re.ts"]);
     assert.deepEqual(graph.importersOf("packages/a/src/index.ts"), ["packages/b/src/other.ts", "packages/b/src/use.ts"]);
     assert.deepEqual(graph.importersOf("packages/a/src/lazy.ts"), ["packages/a/src/index.ts"]);
+  });
+
+  it("gives the statements by which a file reaches another, as importersOf counts them", () => {
+    assert.deepEqual(graph.importStatements("packages/a/src/index.ts", "packages/a/src/util.ts"), ['export { helper } from "./util.js"']);
+    // Through the package's entry, by an import that names one of util.ts's exports.
+    assert.deepEqual(graph.importStatements("packages/b/src/other.ts", "packages/a/src/util.ts"), ['import { helper } from "@fin/a"']);
+    assert.deepEqual(graph.importStatements("packages/b/src/use.ts", "packages/a/src/util.ts"), []);
+    for (const target of ["packages/a/src/util.ts", "packages/a/src/index.ts", "packages/a/src/lazy.ts"]) {
+      for (const from of files) assert.equal(graph.importStatements(from, target).length > 0, graph.importersOf(target).includes(from), `${from} -> ${target}`);
+    }
+  });
+
+  it("names the files a package manifest's entries point at, patterns included", () => {
+    const tree = new Set(["pkg/package.json", "pkg/src/index.ts", "pkg/src/cli.ts", "pkg/src/sub/x.ts", "pkg/lib/main.js", "pkg/types.d.ts", "other/y.ts"]);
+    const manifest = JSON.stringify({
+      name: "@fin/pkg",
+      main: "lib/main.js",
+      types: "./types.d.ts",
+      bin: { pkg: "./src/cli.ts" },
+      exports: { ".": { import: "./src/index.ts", default: "./src/index.ts" }, "./sub/*": "./src/sub/*.ts", "./outside": "../other/y.ts" },
+    });
+    const names = manifestTargets(tree, "pkg/package.json", manifest);
+    // A target outside the package, which Node would refuse, is still named: counting too much as
+    // reached only shows a fix check more.
+    assert.deepEqual(
+      [...tree].filter((path) => names(path)),
+      ["pkg/src/index.ts", "pkg/src/cli.ts", "pkg/src/sub/x.ts", "pkg/lib/main.js", "pkg/types.d.ts", "other/y.ts"],
+    );
+    assert.equal(manifestTargets(tree, "pkg/package.json", "not json")("pkg/src/index.ts"), false);
+    assert.equal(isManifestPath("package.json") && isManifestPath("a/package.json") && !isManifestPath("a/package.json5"), true);
   });
 
   it("reads each kind of import with its statement, and nothing inside a quote or a comment", () => {

@@ -25,7 +25,7 @@ import type { DiffEntry, TreeEntry } from "../git.ts";
 import type { PullFacts } from "../gh.ts";
 import { isJsonObject, parseJsonBytes, readJsonFile } from "../json.ts";
 import type { ReviewOptions } from "../options.ts";
-import { buildGraph, CODE_FILE_RE, exportHeads } from "../plan/graph.ts";
+import { buildGraph, CODE_FILE_RE, exportHeads, isManifestPath, manifestTargets } from "../plan/graph.ts";
 import { changeTiers, linkTarget, pathTier, unionOfDiffs } from "../plan/plan.ts";
 import type { TreeLink } from "../plan/plan.ts";
 import type { CiMap } from "../plan/ci-map.ts";
@@ -467,6 +467,54 @@ type TreeAt = (sha: string) => Promise<Map<string, TreeEntry>>;
 /** A file of the head with its white space taken out, read once per run for every blocker. */
 type SqueezedAt = (path: string) => string;
 
+/** A commit's import graph, the paths of its tree and its package manifests' texts. */
+interface GraphSide {
+  readonly graph: ImportGraph;
+  readonly files: ReadonlySet<string>;
+  readonly manifests: ReadonlyMap<string, string>;
+}
+
+/** The import graph of commit `sha`'s tree, built once per run for every blocker found there. */
+type GraphAt = (sha: string) => Promise<GraphSide>;
+
+/**
+ * Of `holders` (files unchanged since `from`), those that code changed since now reaches: a file of
+ * the head reaches one in one hop (src/plan/graph.ts) by a statement it did not reach it by at `from`
+ * (a file added since, one that now imports or re-exports from it or names another of its exports, or
+ * one whose import now resolves to it), or a package manifest changed since now names one as an
+ * entry (exports, main and the like) and did not then. White space never counts as a change.
+ */
+function newlyReached(holders: readonly string[], delta: readonly DiffEntry[], head: GraphSide, before: GraphSide): Set<string> {
+  const changed = new Map(delta.filter((entry) => entry.status !== "D").map((entry) => [entry.path, entry]));
+  const fromPath = (path: string): string | null => {
+    const entry = changed.get(path);
+    if (entry === undefined) return path;
+    return entry.status === "A" ? null : (entry.oldPath ?? path);
+  };
+  const out = new Set<string>();
+  for (const holder of holders) {
+    for (const importer of head.graph.importersOf(holder)) {
+      const old = fromPath(importer);
+      const then = new Set(old === null ? [] : before.graph.importStatements(old, holder).map(squeezed));
+      if (head.graph.importStatements(importer, holder).some((statement) => !then.has(squeezed(statement)))) {
+        out.add(holder);
+        break;
+      }
+    }
+  }
+  for (const entry of changed.values()) {
+    if (!isManifestPath(entry.path)) continue;
+    const text = head.manifests.get(entry.path);
+    if (text === undefined) continue;
+    const now = manifestTargets(head.files, entry.path, text);
+    const old = entry.status === "A" ? null : (entry.oldPath ?? entry.path);
+    const oldText = old === null ? undefined : before.manifests.get(old);
+    const then = old === null || oldText === undefined ? () => false : manifestTargets(before.files, old, oldText);
+    for (const holder of holders) if (now(holder) && !then(holder)) out.add(holder);
+  }
+  return out;
+}
+
 /**
  * Where a fix of a blocker found at `from` may be quoted at `head` (FixScope, src/review/findings.ts):
  *
@@ -484,15 +532,17 @@ type SqueezedAt = (path: string) => string;
  * check decides. It is shown every file of the head, other than a quote's own, in which a text the
  * blocker quotes occurs at all: those in `quotedElsewhere`, the other changed files (`quotedStillIn`:
  * files that already held it and were changed around it, where the defect may now be reached through
- * code changed around a line that was there before), and the files unchanged since
- * (`quotedUntouchedIn`, where changed code may now reach a copy that was already there; by name up to
+ * code changed around a line that was there before), the files unchanged since that changed code now
+ * reaches (`quotedReachedIn`: a file now imports one or re-exports from it, or a changed manifest now
+ * names it; newlyReached), and the other files unchanged since (`quotedUntouchedIn`, where changed
+ * code may reach a copy that was already there by a way no import shows; by name up to
  * MAX_FIX_CHECK_PATHS, those one hop from a named or changed file first, then how many more); and,
  * for every file the blocker names (in `where` or a quote) that git reads as renamed since, the path
  * git pairs it with (`renamed`), which git chooses by how alike the two files are, so the code may be
  * there or may have gone elsewhere. Only `quotedElsewhere` ties a file as a place a fix may be
- * quoted. Past MAX_FIX_CHECK_PATHS changed files in `quotedElsewhere` and `quotedStillIn` together no
- * claim is taken (src/review/findings.ts); unchanged files never refuse one, since a common line
- * occurs in many.
+ * quoted. Past MAX_FIX_CHECK_PATHS files in `quotedElsewhere`, `quotedStillIn` and `quotedReachedIn`
+ * together no claim is taken (src/review/findings.ts), since a check is never shown part of them; the
+ * rest of the unchanged files never refuse one, since a common line occurs in many.
  */
 async function fixScopeFor(
   mirror: string,
@@ -500,20 +550,23 @@ async function fixScopeFor(
   head: string,
   blocker: OpenBlocker,
   files: TreeFiles,
-  graph: ImportGraph,
+  headSide: GraphSide,
+  graphAt: GraphAt,
   treeAt: TreeAt,
   squeezedAt: SqueezedAt,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<FixScope> {
+  const { graph } = headSide;
   const out = new Map<string, Set<number>>();
+  const none = { quotedElsewhere: [], quotedStillIn: [], quotedReachedIn: [], quotedUntouchedIn: [], renamed: [] };
   const where = Array.isArray(blocker.finding.where) ? blocker.finding.where : [];
   const paths = sortedUnique(where.map((item) => (isJsonObject(item) && typeof item.path === "string" ? item.path : "")).filter((path) => path !== ""));
   // No file is tied to the blocker in either case below, so no claim can be taken and no check runs.
-  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return { files: out, quotedElsewhere: [], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] };
+  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return { files: out, ...none };
   if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) {
     // Nothing changed since the blocker was found (or the change cannot be shown): no line can be a fix.
     for (const path of paths) if (files.kind(path) === "file") out.set(path, new Set());
-    return { files: out, quotedElsewhere: [], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] };
+    return { files: out, ...none };
   }
   const delta = await diffTwoDot(mirror, from, head, env);
   const atHead = (path: string): string | null => {
@@ -572,9 +625,13 @@ async function fixScopeFor(
   for (const { entry, part, now } of counted) if (now > occurrences(before.get(entry.path) ?? "", part)) elsewhere.add(entry.path);
   const quotedElsewhere = sortedUnique(elsewhere);
   const quotedStillIn = sortedUnique([...holding].filter((path) => changedAt.has(path) && !elsewhere.has(path)));
-  // Files unchanged since: past what a check is shown by name, those one hop from a file the blocker
-  // names or a file changed since (where changed code may now reach a copy) come first.
-  let quotedUntouchedIn = sortedUnique([...holding].filter((path) => !changedAt.has(path)));
+  // Files unchanged since: those changed code now reaches are each shown by name; of the rest, past
+  // what a check is shown by name, those one hop from a file the blocker names or a file changed since
+  // come first.
+  const untouched = sortedUnique([...holding].filter((path) => !changedAt.has(path)));
+  const reached = untouched.length === 0 ? new Set<string>() : newlyReached(untouched, delta, headSide, await graphAt(from));
+  const quotedReachedIn = untouched.filter((path) => reached.has(path));
+  let quotedUntouchedIn = untouched.filter((path) => !reached.has(path));
   if (quotedUntouchedIn.length > MAX_FIX_CHECK_PATHS) {
     const hops = new Set<string>();
     for (const path of new Set([...named, ...changedAt.keys()])) for (const hop of [...graph.importsOf(path), ...graph.importersOf(path)]) hops.add(hop);
@@ -598,7 +655,7 @@ async function fixScopeFor(
     else if (entry.status === "R" && entry.oldPath !== null) out.set(path, await changedLineNumbers(mirror, from, head, path, env, entry.oldPath));
     else out.set(path, await changedLineNumbers(mirror, from, head, path, env));
   }
-  return { files: out, quotedElsewhere, quotedStillIn, quotedUntouchedIn, renamed };
+  return { files: out, quotedElsewhere, quotedStillIn, quotedReachedIn, quotedUntouchedIn, renamed };
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
@@ -682,10 +739,11 @@ function listed(paths: readonly string[]): string[] {
 
 function priorBlockData(priors: ReadonlyMap<string, OpenBlocker>, scopes: ReadonlyMap<string, FixScope>): string {
   const list = [...priors].map(([promptId, blocker]) => {
-    const tied = sortedUnique(scopes.get(blocker.id)?.files.keys() ?? []);
-    const elsewhere = scopes.get(blocker.id)?.quotedElsewhere ?? [];
-    const still = [...(scopes.get(blocker.id)?.quotedStillIn ?? []), ...(scopes.get(blocker.id)?.quotedUntouchedIn ?? [])];
-    const renamed = scopes.get(blocker.id)?.renamed ?? [];
+    const scope = scopes.get(blocker.id);
+    const tied = sortedUnique(scope?.files.keys() ?? []);
+    const elsewhere = scope?.quotedElsewhere ?? [];
+    const still = [...(scope?.quotedStillIn ?? []), ...(scope?.quotedReachedIn ?? []), ...(scope?.quotedUntouchedIn ?? [])];
+    const renamed = scope?.renamed ?? [];
     return {
       id: promptId,
       lens: blocker.finding.lens,
@@ -919,7 +977,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     const manifests = new Map<string, string>();
     for (const entry of headTree) {
       if (entryKind(entry) !== "file" || entry.path.split("/").includes("node_modules")) continue;
-      const isManifest = entry.path === "package.json" || entry.path.endsWith("/package.json");
+      const isManifest = isManifestPath(entry.path);
       if (!isManifest && !CODE_FILE_RE.test(entry.path)) continue;
       const bytes = files.bytes(entry.path);
       if (bytes === null || bytes.length > MAX_SCAN_BYTES) continue;
@@ -968,9 +1026,45 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       if (text === undefined) squeezedTexts.set(path, (text = squeezed(decodeText(files.bytes(path) ?? Buffer.alloc(0)))));
       return text;
     };
+    // The import graph of the commit a blocker was found at, to tell which unchanged files changed
+    // code now reaches: each text is the head's where the blob is the same, else read from it.
+    const headSide: GraphSide = { graph, files: new Set(headMap.keys()), manifests };
+    const graphs = new Map<string, GraphSide>();
+    const graphAt: GraphAt = async (sha) => {
+      const known = graphs.get(sha);
+      if (known !== undefined) return known;
+      const tree = await treeAt(sha);
+      const texts = new Map<string, string>();
+      const shaManifests = new Map<string, string>();
+      const wanted: TreeEntry[] = [];
+      for (const entry of tree.values()) {
+        if (entryKind(entry) !== "file" || entry.path.split("/").includes("node_modules")) continue;
+        const isManifest = isManifestPath(entry.path);
+        if (!isManifest && !CODE_FILE_RE.test(entry.path)) continue;
+        const same = headMap.get(entry.path);
+        if (same === undefined || same.oid !== entry.oid || entryKind(same) !== "file") {
+          wanted.push(entry);
+          continue;
+        }
+        const text = (isManifest ? manifests : codeTexts).get(entry.path);
+        if (text !== undefined) (isManifest ? shaManifests : texts).set(entry.path, text);
+      }
+      const read = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
+      for (const entry of wanted) {
+        const bytes = read.blobs.get(entry.oid);
+        if (bytes === undefined || bytes.length > MAX_SCAN_BYTES) continue;
+        (isManifestPath(entry.path) ? shaManifests : texts).set(entry.path, decodeText(bytes));
+      }
+      const side: GraphSide = { graph: buildGraph(new Set(tree.keys()), texts, shaManifests), files: new Set(tree.keys()), manifests: shaManifests };
+      graphs.set(sha, side);
+      return side;
+    };
     const fixScopesByBlocker = new Map<string, FixScope>();
-    for (const blocker of priorBlockers) fixScopesByBlocker.set(blocker.id, await fixScopeFor(mirror, blocker.foundAt, head, blocker, files, graph, treeAt, squeezedAt, env));
+    for (const blocker of priorBlockers) {
+      fixScopesByBlocker.set(blocker.id, await fixScopeFor(mirror, blocker.foundAt, head, blocker, files, headSide, graphAt, treeAt, squeezedAt, env));
+    }
     squeezedTexts.clear();
+    graphs.clear();
 
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
     const lensSet = new Set<Lens>(tier === null ? [] : requiredLenses(config.lenses, tier, changed.map((path) => path.path)));
@@ -1203,9 +1297,10 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
      * blocker's finding and the claimed fix go to a sceptic (two, the second on the attack model,
      * for a high or critical blocker, when a file the blocker names was renamed since, or when the
      * code the blocker quotes occurs in any other file of the head; the check is shown each such
-     * changed file and each path git pairs a named file with, never part of a list, and the
-     * unchanged files that hold it by name up to MAX_FIX_CHECK_PATHS, then how many more to find
-     * with Grep), asked whether the defect can still happen at this head. It closes only when every
+     * changed file, each unchanged one that changed code now reaches and each path git pairs a named
+     * file with, never part of a list, and the other unchanged files that hold it by name up to
+     * MAX_FIX_CHECK_PATHS, then how many more to find with Grep and the search pattern each quote
+     * gives), asked whether the defect can still happen at this head. It closes only when every
      * one refutes it with a guard quoted from this head; a confirmation, an UNSURE, an unguarded
      * refutation or a session that could not answer leaves it open (and a model mismatch or a
      * budget stop makes the run could-not-check, as for any sceptic).
@@ -1220,13 +1315,20 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         claim.outcome = "unchecked";
         return;
       }
-      const { quotedElsewhere, quotedStillIn, quotedUntouchedIn, renamed } = scope;
-      // The claim was not accepted past the cap (findings.ts); never show a check part of a list of changed files.
-      if (quotedElsewhere.length + quotedStillIn.length > MAX_FIX_CHECK_PATHS) return;
+      const { quotedElsewhere, quotedStillIn, quotedReachedIn, quotedUntouchedIn, renamed } = scope;
+      // The claim was not accepted past the cap (findings.ts): a check is never shown part of the files
+      // changed since, or of those changed code now reaches, that hold the quoted code.
+      if (quotedElsewhere.length + quotedStillIn.length + quotedReachedIn.length > MAX_FIX_CHECK_PATHS) return;
       claim.outcome = "checking";
-      const moved = quotedElsewhere.length > 0 || quotedStillIn.length > 0 || quotedUntouchedIn.length > 0 || renamed.length > 0;
+      const moved = quotedElsewhere.length > 0 || quotedStillIn.length > 0 || quotedReachedIn.length > 0 || quotedUntouchedIn.length > 0 || renamed.length > 0;
       const roles: Role[] = severityRank(blocker.finding.severity) >= severityRank("high") || moved ? ["sceptic1", "sceptic2"] : ["sceptic1"];
-      const prompt = fixCheckPrompt(blocker.finding, { fixWhere, fixQuote }, { quotedElsewhere, quotedStillIn, quotedUntouchedIn, renamed }, procedure.fixCheckPrompt, MAX_FIX_CHECK_PATHS);
+      const prompt = fixCheckPrompt(
+        blocker.finding,
+        { fixWhere, fixQuote },
+        { quotedElsewhere, quotedStillIn, quotedReachedIn, quotedUntouchedIn, renamed },
+        procedure.fixCheckPrompt,
+        MAX_FIX_CHECK_PATHS,
+      );
       const schema = procedure.schemas.sceptic;
       for (const role of roles) {
         const id = `${role}-prior-${index}`;
@@ -1424,6 +1526,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         status: priorStatus.get(blocker.id) ?? "open",
         quotedElsewhere: fixScopesByBlocker.get(blocker.id)?.quotedElsewhere ?? [],
         quotedStillIn: fixScopesByBlocker.get(blocker.id)?.quotedStillIn ?? [],
+        quotedReachedIn: fixScopesByBlocker.get(blocker.id)?.quotedReachedIn ?? [],
         quotedUntouchedIn: fixScopesByBlocker.get(blocker.id)?.quotedUntouchedIn ?? [],
         renamed: fixScopesByBlocker.get(blocker.id)?.renamed ?? [],
         claim: priorClaims.get(blocker.id) ?? null,
@@ -1647,7 +1750,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
       checklist: items.map((item) => item.id),
       allowed: opts.allowed,
       priors,
-      fixScopes: new Map([...priors].map(([promptId, blocker]): [string, FixScope] => [promptId, input.fixScopesByBlocker.get(blocker.id) ?? { files: new Map(), quotedElsewhere: [], quotedStillIn: [], quotedUntouchedIn: [], renamed: [] }])),
+      fixScopes: new Map([...priors].map(([promptId, blocker]): [string, FixScope] => [promptId, input.fixScopesByBlocker.get(blocker.id) ?? { files: new Map(), quotedElsewhere: [], quotedStillIn: [], quotedReachedIn: [], quotedUntouchedIn: [], renamed: [] }])),
     };
   };
 

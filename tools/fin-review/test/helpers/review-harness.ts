@@ -55,6 +55,14 @@ export function shownStill(spec: SessionSpec): string[] {
   return shownList<string>(spec, STILL_HEADER);
 }
 
+const REACHED_HEADER =
+  "# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code now reaches: a file now imports or re-exports from it, or a changed package manifest now names it)\n";
+
+/** The unchanged files that changed code now reaches that a fix check was told hold the code the blocker quotes; [] when none. */
+export function shownReached(spec: SessionSpec): string[] {
+  return shownList<string>(spec, REACHED_HEADER);
+}
+
 const UNTOUCHED_HEADER = "# Where else the code the finding quotes occurs (files unchanged since it was reported)\n";
 
 /** The files unchanged since the blocker was found that a fix check was told hold its quoted code, by name; [] when none. */
@@ -72,9 +80,16 @@ export function shownMoreUntouched(spec: SessionSpec): number {
   return Number(rest.slice(0, rest.indexOf("\n")));
 }
 
-/** Every file a fix check was told by name holds the code the blocker quotes, all three lists. */
+/** Every file a fix check was told by name holds the code the blocker quotes, all four lists. */
 export function shownQuoted(spec: SessionSpec): string[] {
-  return [...shownElsewhere(spec), ...shownStill(spec), ...shownUntouched(spec)];
+  return [...shownElsewhere(spec), ...shownStill(spec), ...shownReached(spec), ...shownUntouched(spec)];
+}
+
+const PATTERN_HEADER = "# A search pattern for each quote of the finding (white space allowed anywhere; for Grep with multiline on)\n";
+
+/** The search pattern a fix check was given for each quote of the blocker. */
+export function shownPatterns(spec: SessionSpec): Array<{ path: string; pattern: string }> {
+  return shownList<{ path: string; pattern: string }>(spec, PATTERN_HEADER);
 }
 
 const RENAMED_HEADER = "# The paths git pairs files the finding names with (read as renamed since it was reported)\n";
