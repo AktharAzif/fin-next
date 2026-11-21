@@ -21,7 +21,7 @@ export function buildApiService(
   const access = app === "admin" ? loadAccessConfig(ctx.env) : undefined;
   const peers = new ConnectorPeers({
     services: ingress.connectorServices,
-    resolveAll: (hostname) => ctx.resolver.resolveAll(hostname),
+    resolver: ctx.resolver,
     clock: ctx.clock,
   });
   const host = createApiHost({

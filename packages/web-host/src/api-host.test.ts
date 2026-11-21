@@ -42,7 +42,7 @@ async function setup(
   const origins = Object.fromEntries(roles.map((role) => [role, ORIGINS[role]]));
   const peers = new ConnectorPeers({
     services: ["cloudflared-public"],
-    resolveAll: async () => [{ address: CONNECTOR, family: 6 }],
+    resolver: { resolveAll: async () => [{ address: CONNECTOR, family: 6 }] },
     clock: captured.clock,
   });
   await peers.start();
@@ -310,7 +310,6 @@ describe("createApiHost", () => {
     expect((await post("/api/auth/sign-in/email-otp", good())).status).toBe(200);
     for (const path of [
       "/api/auth/sign-up/email",
-      "/api/auth/sign-in/%65mail-otp",
       "/api/auth//sign-in/email-otp",
       "/api/auth/nothing",
     ]) {
@@ -318,11 +317,13 @@ describe("createApiHost", () => {
       expect(res.status, path).toBe(404);
       expect(await res.text()).toBe("");
     }
+    // An encoded alias of an allowed path never gets as far: the ingress check refuses a target
+    // that is not canonical (400) before the allowlist runs (@fin/server's ingress check).
+    expect((await post("/api/auth/sign-in/%65mail-otp", good())).status).toBe(400);
     expect((await send("/api/auth/sign-in/email-otp")).status).toBe(404);
     expect(seen).toEqual(["/api/auth/sign-in/email-otp"]);
     expect(captured.events("auth.endpoint_blocked").map((l) => l.class)).toEqual([
       "blocked",
-      "unlisted",
       "unlisted",
       "unlisted",
       "unlisted",

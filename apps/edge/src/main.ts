@@ -34,7 +34,7 @@ export function buildEdge(ctx: ServiceContext): BuiltService {
   const apiOrigin = ingress.origins.api as string;
   const peers = new ConnectorPeers({
     services: ingress.connectorServices,
-    resolveAll: (hostname) => ctx.resolver.resolveAll(hostname),
+    resolver: ctx.resolver,
     clock: ctx.clock,
   });
   const options: RequestOptions = {
