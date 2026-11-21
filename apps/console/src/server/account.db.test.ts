@@ -193,4 +193,18 @@ describe("Account security", () => {
     const list = await me.call("GET", "/api/orgs");
     expect((list.json.items as unknown[]).length).toBe(2);
   });
+
+  it("refuses a page of activity past the 10,000th row as invalid, never as an error", async () => {
+    const me = await signIn(`paging.${tag}@example.com`);
+    const far = await me.call("GET", "/api/account/activity?page=200&size=100");
+    expect(far.status, JSON.stringify(far.json)).toBe(400);
+    expect(far.json).toMatchObject({
+      code: "invalid",
+      fields: [{ path: "query.page", code: "too_big" }],
+    });
+    const first = await me.call("GET", "/api/account/activity?page=1&size=100");
+    expect(first.status).toBe(200);
+    const items = first.json.items as { event: string; verification: string | null }[];
+    expect(items.find((i) => i.event === "session.created")?.verification).toBe("email_otp");
+  });
 });

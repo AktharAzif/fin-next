@@ -60,7 +60,9 @@ $$;
 
 -- The organisation's audit log (§14.5, §16.3, §15.2.1) for a member whose role holds `auditLog.read`.
 -- `target` and `target_kind` are applied inside the organisation's own rows, so an ID from another
--- organisation matches nothing. Paging is bounded (`limit` 1 to 100, `offset` at most 10,000).
+-- organisation matches nothing. Paging is bounded (`limit` 1 to 100, `offset` at most 10,000). A row
+-- whose actor is not a person of the console (Fin staff, the operator, the system) returns no actor
+-- ID, client address or user agent: the organisation sees that Fin acted, never from where or who.
 CREATE FUNCTION identity.organization_audit_log(
   p_session_id text,
   p_organization_id text,
@@ -109,9 +111,12 @@ BEGIN
          || '%' END;
   RETURN QUERY
     SELECT e.id, e.event, e.category, e.recorded_at,
-           e.actor_kind, e.actor_id, e.actor_via, u.name, u.email,
+           e.actor_kind,
+           CASE WHEN e.actor_kind = 'user' THEN e.actor_id END,
+           e.actor_via, u.name, u.email,
            e.step_up_method, e.target_id, e.ref_ids, e.metadata,
-           host(c.client_ip), c.user_agent,
+           CASE WHEN e.actor_kind = 'user' THEN host(c.client_ip) END,
+           CASE WHEN e.actor_kind = 'user' THEN c.user_agent END,
            count(*) OVER ()
       FROM audit.event e
       LEFT JOIN audit.event_context c ON c.event_id = e.id
@@ -130,11 +135,14 @@ BEGIN
 END
 $$;
 
--- The person's own activity (§14.5, §16.2: Account security's "Recent activity").
+-- The person's own activity (§14.5, §16.2: Account security's "Recent activity"). Some rows about
+-- the person were made by someone else (a team admin's removal or role change revokes the person's
+-- trusted browsers; Fin staff revoke them at a go-live approval): such a row returns no actor ID,
+-- step-up method, client address or user agent, which are that other actor's, never the person's.
 CREATE FUNCTION identity.person_activity(p_session_id text, p_limit integer, p_offset integer)
 RETURNS TABLE (
   id text, event text, category text, recorded_at timestamptz,
-  actor_kind text, actor_id text, actor_via text,
+  actor_kind text, actor_id text, actor_via text, actor_is_reader boolean,
   step_up_method text, target_id text, ref_ids text[], metadata jsonb,
   client_ip text, user_agent text, total bigint
 )
@@ -149,12 +157,19 @@ BEGIN
   reader := identity.audit_reader(p_session_id);
   RETURN QUERY
     SELECT e.id, e.event, e.category, e.recorded_at,
-           e.actor_kind, e.actor_id, e.actor_via,
-           e.step_up_method, e.target_id, e.ref_ids, e.metadata,
-           host(c.client_ip), c.user_agent,
+           e.actor_kind,
+           CASE WHEN own.is_reader THEN e.actor_id END,
+           e.actor_via, own.is_reader,
+           CASE WHEN own.is_reader THEN e.step_up_method END,
+           e.target_id, e.ref_ids, e.metadata,
+           CASE WHEN own.is_reader THEN host(c.client_ip) END,
+           CASE WHEN own.is_reader THEN c.user_agent END,
            count(*) OVER ()
       FROM audit.event e
       LEFT JOIN audit.event_context c ON c.event_id = e.id
+      CROSS JOIN LATERAL (
+        SELECT e.actor_kind = 'user' AND e.actor_id IS NOT DISTINCT FROM reader AS is_reader
+      ) own
      WHERE e.scope = 'person' AND e.subject_user_id = reader
      ORDER BY e.recorded_at DESC, e.id DESC
      LIMIT p_limit OFFSET p_offset;

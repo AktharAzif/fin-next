@@ -3,16 +3,18 @@
 // from the session's own row; `target` and `targetKind` match only the organisation's own rows; an
 // ID from another organisation returns no rows and no label; the person's activity is theirs alone.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
   codeOf,
   createHarness,
+  extensionsOf,
   type Harness,
   memberOf,
   ownerWithOrganization,
   person,
+  removeAs,
   roleAs,
 } from "../test/harness.ts";
 import { type AuditLogQuery, organisationLog, personActivity } from "./audit-log.ts";
@@ -60,7 +62,9 @@ describe("the organisation's audit log", () => {
     const role = await log(who, orgId, { target: roleId });
     expect(role.ok && role.value).toMatchObject({ filterLabel: "Support", total: 1 });
     const kind = await log(who, orgId, { targetKind: "role" });
-    expect(kind.ok && kind.value.items.map((i) => i.target)).toEqual([roleId]);
+    expect(kind.ok && kind.value.items.map((i) => i.target)).toEqual([
+      { id: roleId, label: "Support" },
+    ]);
     // Another organisation's ID matches nothing here and is never named.
     const foreign = await log(who, orgId, { target: otherRole });
     expect(foreign.ok && foreign.value).toMatchObject({ items: [], total: 0, filterLabel: null });
@@ -129,7 +133,124 @@ describe("the organisation's audit log", () => {
   });
 });
 
+describe("an audit row", () => {
+  it("names its target and refs by their current labels, for a reader who cannot list the team", async () => {
+    const { who, orgId, name } = await ownerWithOrganization(h, "owner_labels");
+    const auditors = await roleAs(h, who, orgId, "Auditors", ["auditLog.read"]);
+    const auditor = await memberOf(h, who, orgId, "auditor", auditors);
+    const out = await log(auditor.who, orgId);
+    expect(out.ok).toBe(true);
+    const items = out.ok ? out.value.items : [];
+    const created = items.find((i) => i.event === "role.created");
+    expect(created?.target).toEqual({ id: auditors, label: "Auditors" });
+    expect(created?.refs).toEqual([{ id: orgId, label: name }]);
+    const joined = items.find((i) => i.event === "member.joined");
+    expect(joined?.target).toEqual({ id: auditor.memberId, label: auditor.who.email });
+    const refLabels = new Map(joined?.refs.map((r) => [r.id, r.label]));
+    expect(refLabels.get(auditor.who.userId)).toBe(auditor.who.email);
+    expect(refLabels.get(orgId)).toBe(name);
+    const invitation = [...refLabels.keys()].find((id) => id.startsWith("inv_")) as string;
+    expect(refLabels.get(invitation)).toBe(auditor.who.email);
+    // A stepped-up action shows its proof; one without shows the session.
+    expect(created?.verification).toBe("totp");
+    expect(items.find((i) => i.event === "organization.created")?.verification).toBe("session");
+  });
+
+  it("never shows a Fin staff or system actor's address, device or ID to the organisation", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "owner_staff");
+    await h.admin.query("SELECT audit.record($1::jsonb)", [
+      JSON.stringify({
+        id: "aud_01jd00000000000000000000s1",
+        event: "organization.updated",
+        actor_kind: "staff",
+        actor_id: "stf_01jd00000000000000000000s1",
+        actor_via: "admin",
+        target_id: orgId,
+        ref_ids: [],
+        organization_id: orgId,
+        metadata: { fields: ["name"] },
+        release: "test",
+        context: {
+          client_ip: "2001:db8:5:1::9",
+          user_agent: "Mozilla/5.0 (X11; Linux) Firefox/130.0",
+        },
+      }),
+    ]);
+    const out = await log(who, orgId);
+    const row = out.ok
+      ? out.value.items.find((i) => i.id === "aud_01jd00000000000000000000s1")
+      : null;
+    expect(row).toMatchObject({
+      actor: { kind: "staff", id: null, name: null, email: null },
+      address: null,
+      device: null,
+    });
+  });
+
+  it("is paged no further than the 10,000th row, refused as invalid rather than failing", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "owner_paging");
+    const far = await log(who, orgId, { page: 102, size: 100 });
+    expect([codeOf(far), extensionsOf(far).fields]).toEqual([
+      "invalid",
+      [{ path: "query.page", code: "too_big" }],
+    ]);
+    const mine = await asPerson(h, who, { method: "GET" }, { stepUp: { kind: "none" } }, (tx, g) =>
+      personActivity(tx, g, { page: 200, size: 100 }),
+    );
+    expect([codeOf(mine), extensionsOf(mine).fields]).toEqual([
+      "invalid",
+      [{ path: "query.page", code: "too_big" }],
+    ]);
+    const last = await asPerson(h, who, { method: "GET" }, { stepUp: { kind: "none" } }, (tx, g) =>
+      personActivity(tx, g, { page: 101, size: 100 }),
+    );
+    expect(last.ok).toBe(true);
+  });
+});
+
 describe("the person's activity", () => {
+  it("never shows another actor's address, device, ID or proof to the person it is about", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "owner_remover");
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const member = await memberOf(h, who, orgId, "removed", readers);
+    const browserId = "tbr_01jd00000000000000000000r1";
+    await seed(
+      h.admin,
+      `INSERT INTO identity.trusted_browser (id, user_id, token_hash, label, expires_at)
+       VALUES ($1, $2, decode(repeat('ab', 32), 'hex'), 'Firefox on Linux', now() + interval '30 days')`,
+      [browserId, member.who.userId],
+    );
+    expect((await removeAs(h, who, orgId, member.memberId)).ok).toBe(true);
+    const activity = await asPerson(
+      h,
+      member.who,
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      (tx, g) => personActivity(tx, g, { page: 1, size: 100 }),
+    );
+    expect(activity.ok).toBe(true);
+    const items = activity.ok ? activity.value.items : [];
+    const revoked = items.find((i) => i.event === "browser.trust_revoked");
+    expect(revoked).toMatchObject({
+      actor: { kind: "user", id: null },
+      address: null,
+      device: null,
+      verification: null,
+      metadata: { reason: "removed" },
+      target: { id: browserId, label: "Firefox on Linux" },
+    });
+    expect(JSON.stringify(items)).not.toContain(who.browser.ip);
+    expect(JSON.stringify(items)).not.toContain(who.userId);
+    // The person's own rows keep their own address, device and sign-in method.
+    const own = items.find((i) => i.event === "session.created");
+    expect(own).toMatchObject({
+      actor: { id: member.who.userId },
+      address: member.who.browser.ip,
+      device: "Chrome on Mac",
+      verification: "email_otp",
+    });
+  });
+
   it("shows the person's own rows only", async () => {
     const a = await person(h, "activity_a");
     const b = await person(h, "activity_b");
