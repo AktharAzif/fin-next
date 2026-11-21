@@ -24,8 +24,10 @@
 // same to every timestamp in the job log. So a number of fewer than LONG_NUMBER characters is never
 // registered: such a number is protected by its type instead (secret.ts's PrivateNumber prints its
 // role, `<threshold:api-v4>`, and only reveal() gives the number to the request that sends it). A
-// longer number (an ID) is masked only where it stands as a number of its own, and maskValue()
-// never changes a JSON number: the numbers in records and lines are the tool's own.
+// longer number (an ID) is masked only where it stands as a number of its own: in text, and in a
+// record or a telemetry line as a JSON number whose decimal text is registered (maskValue() then
+// puts the placeholder, a string, where the number was). Every other JSON number is kept as it is:
+// the short ones are the tool's own (seqs, counts, pids).
 
 /** Values shorter than this cannot carry private information on their own (`@`, `*`, `5`). */
 const MIN_LENGTH = 2;
@@ -117,9 +119,10 @@ export class Masker {
   /**
    * A masked copy of a JSON value, for a record or a telemetry line: every string in it, keys
    * included, passes through mask(); a value with a toJSON (a Secret, a PrivateNumber) becomes
-   * what it prints. Numbers, booleans, null and the structure are kept as they are (a record's
-   * numbers are the tool's own: seqs, counts, pids), so the copy always serialises to valid JSON
-   * with the same types: masking never touches JSON's own syntax.
+   * what it prints; a number of at least LONG_NUMBER characters whose decimal text is registered
+   * (an ID held as a number) becomes its placeholder. Every other number, booleans, null and the
+   * structure are kept as they are (a record's short numbers are the tool's own: seqs, counts,
+   * pids), so the copy always serialises to valid JSON: masking never touches JSON's own syntax.
    */
   maskValue(value: unknown): unknown {
     let plain: unknown;
@@ -133,6 +136,7 @@ export class Masker {
 
   #walk(value: unknown): unknown {
     if (typeof value === "string") return this.mask(value);
+    if (typeof value === "number") return this.#number(value);
     if (Array.isArray(value)) return value.map((item) => this.#walk(item));
     if (value !== null && typeof value === "object") {
       const out: Record<string, unknown> = {};
@@ -147,6 +151,14 @@ export class Masker {
       return out;
     }
     return value;
+  }
+
+  /** A long number's placeholder when its decimal text is registered; otherwise the number. */
+  #number(value: number): number | string {
+    if (!Number.isFinite(value)) return value;
+    const text = String(value);
+    if (text.length < LONG_NUMBER || !NUMBER.test(text)) return value;
+    return this.#entries.get(text.toLowerCase())?.placeholder ?? value;
   }
 
   /**

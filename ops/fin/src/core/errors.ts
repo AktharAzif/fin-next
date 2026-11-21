@@ -27,6 +27,8 @@ export const EXIT = {
   hangup: 129,
   /** A run stopped by SIGINT (Ctrl-C): 128 + 2. */
   interrupted: 130,
+  /** A run stopped by SIGQUIT (Ctrl-\): 128 + 3. */
+  quit: 131,
   /** A run stopped by SIGTERM (a polite kill, a CI cancel): 128 + 15. */
   terminated: 143,
 } as const;

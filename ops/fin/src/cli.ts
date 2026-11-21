@@ -2,11 +2,13 @@
 // arguments strictly, builds its context (the overlay is masked before anything prints), takes the
 // run lock for a mutating run before the command reads anything, and runs it. Every error leaves
 // through the masker with its exit code, and is printed before the run is closed, so closing the
-// run can never hide it. Telemetry never changes the exit code. While a run holds the lock, a stop
-// (SIGINT, SIGTERM, SIGHUP; with main.ts's guards, a closed standard output or error, or an uncaught
-// error) closes it as failed: no further change starts, the change in flight is given time to
-// settle and is recorded if it does, then run.done, the lock released and the lines kept and
-// shipped, before the process exits 130, 143, 129 or 70.
+// run can never hide it. Telemetry never changes the exit code. From just before a mutating run
+// takes the lock until it has released it, a stop (SIGINT, SIGTERM, SIGHUP; with main.ts's guards,
+// a closed standard output or error, or an uncaught error) closes it as failed: no further change
+// starts, the change in flight is given time to settle and is recorded if it does, then run.done,
+// the lock released and the lines kept and shipped, before the process exits 130, 143, 129 or 70.
+// SIGQUIT, a later second Ctrl-C or SIGTERM, and the clean-up's deadline close it at once instead
+// (run.done naming the change in flight, the lock released) and exit (core/runtime.ts).
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
@@ -16,7 +18,12 @@ import { Context, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
 import { Masker } from "./core/mask.ts";
 import { Output } from "./core/output.ts";
-import { INTERRUPT_SETTLE_MS, type Runtime, stopDescription } from "./core/runtime.ts";
+import {
+  type ForcedClose,
+  INTERRUPT_SETTLE_MS,
+  type Runtime,
+  stopDescription,
+} from "./core/runtime.ts";
 import { ENVIRONMENTS, isEnvironment, loadSettings } from "./core/settings.ts";
 
 export const COMMANDS: readonly Command[] = [...CORE_COMMANDS];
@@ -59,22 +66,46 @@ function report(out: Output, error: unknown): number {
 }
 
 /**
- * While the run holds the lock, a stop closes it before the process exits: the run is marked
+ * While the run may hold the lock, a stop closes it before the process exits: the run is marked
  * stopped so no further change starts; a change in flight gets up to INTERRUPT_SETTLE_MS to settle
  * (applyPlan then records it and closes the run); a run still open after that is closed here, its
- * run.done naming the change in flight. An uncaught error does not wait.
+ * run.done naming the change in flight. An uncaught error does not wait. A run that registered
+ * nothing has its lock released. When the stop insists (closeNow), the run is closed at once.
  */
 function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
-  return runtime.trap(async (cause) => {
-    out.error(`${stopDescription(cause)}: closing the run`);
-    ctx.run.stop(cause);
-    if (ctx.run.registered && !ctx.run.finished) {
-      if (ctx.run.inFlight !== undefined && cause !== "uncaught-error") {
-        await Promise.race([ctx.run.closed, runtime.sleep(INTERRUPT_SETTLE_MS)]);
+  return runtime.trap({
+    stop: async (cause) => {
+      out.error(`${stopDescription(cause)}: closing the run`);
+      ctx.run.stop(cause);
+      if (ctx.run.registered && !ctx.run.finished) {
+        if (ctx.run.inFlight !== undefined && cause !== "uncaught-error") {
+          await Promise.race([ctx.run.closed, runtime.sleep(INTERRUPT_SETTLE_MS)]);
+        }
+        if (!ctx.run.finished) ctx.run.finish("failed", { error: stopDescription(cause) });
+      } else ctx.run.close();
+      await ctx.run.flushLines();
+    },
+    closeNow: (why: ForcedClose) => {
+      if (why !== "deadline") ctx.run.stop(why);
+      if (ctx.run.finished) {
+        if (why === "deadline") {
+          out.warn("the clean-up did not finish in time; the lines not shipped stay local");
+        }
+        return;
       }
-      if (!ctx.run.finished) ctx.run.finish("failed", { error: stopDescription(cause) });
-    } else ctx.run.close();
-    await ctx.run.flushLines();
+      const what =
+        why === "deadline" ? "the clean-up did not finish in time" : stopDescription(why);
+      out.error(`${what}: closing the run at once`);
+      if (!ctx.run.registered) {
+        ctx.run.close();
+        return;
+      }
+      const stopped = ctx.run.stopped;
+      ctx.run.finish("failed", {
+        error: stopped === undefined ? what : stopDescription(stopped),
+        forced: why,
+      });
+    },
   });
 }
 
@@ -131,9 +162,11 @@ export async function runCli(
       needsOverlay: command.overlay,
     });
     if (command.mutating) {
+      // The trap comes first: a signal from the moment the lock exists closes the run and frees
+      // the lock, instead of killing the process with the lock held. A dry run takes no lock.
+      if (!ctx.dryRun) untrap = trapStops(ctx, runtime, out);
       // Before the command reads any provider state, so its plan cannot go stale under another run.
       ctx.run.acquire();
-      if (ctx.run.locked) untrap = trapStops(ctx, runtime, out);
     }
     return await command.run(ctx);
   } catch (error) {
@@ -149,13 +182,16 @@ export async function runCli(
     }
     return code;
   } finally {
-    untrap?.();
     if (ctx !== undefined) {
       try {
         ctx.run.close();
       } catch {
         out.warn("the run could not be closed");
       }
+    }
+    // Only once the lock is released: until then a signal closes the run, never kills it.
+    untrap?.();
+    if (ctx !== undefined) {
       try {
         await ctx.run.flushLines();
       } catch {

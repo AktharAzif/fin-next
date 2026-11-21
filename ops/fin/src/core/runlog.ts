@@ -23,8 +23,11 @@
 //
 // A signal is kept until someone acts on it. append() refuses while the log's end does not match
 // the head file (records removed, the log or the head file deleted), since appending would chain
-// past the gap and rewrite the head file to match, and the log would verify again; a run refuses
-// to start while the log does not verify at all (run.ts). The way on is `pnpm fin log restart <env>
+// past the gap and rewrite the head file to match, and the log would verify again; it also refuses
+// while the last line is not the record before the one it would write (a torn line left by a crash
+// or a short write, a line that is not a record, the wrong seq, a broken link), so a record is
+// never joined onto a torn line and lost. A run refuses to start, and a lock break refuses, while
+// the log does not verify at all (run.ts, breakLock()). The way on is `pnpm fin log restart <env>
 // --reason "..."` (restart()): it keeps the broken files beside the log under new names and starts a
 // new log whose first record, `log.restarted`, names the problems and the heads it found.
 //
@@ -36,10 +39,12 @@ import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -51,6 +56,8 @@ import type { Masker } from "./mask.ts";
 
 export const GENESIS = "genesis";
 const HASH = /^[0-9a-f]{64}$/;
+/** How many of the log's problems a refusal names (the rest are counted). */
+const PROBLEMS_SHOWN = 3;
 
 export interface RunRecord {
   seq: number;
@@ -147,14 +154,84 @@ function isHead(value: unknown): value is Head {
   );
 }
 
+/**
+ * The refusal for a run log that does not verify: names the first problems, counts the rest, and
+ * points at the runbook. `what` says what does not happen (`no run starts`).
+ */
+export function integrityError(problems: readonly string[], what: string): LogIntegrityError {
+  const shown = problems.slice(0, PROBLEMS_SHOWN).join("; ");
+  const more =
+    problems.length > PROBLEMS_SHOWN ? `; and ${problems.length - PROBLEMS_SHOWN} more` : "";
+  return new LogIntegrityError(
+    `the run log does not verify (${shown}${more}), so ${what}. This is an incident: ` +
+      `check it with pnpm fin log verify <env>, then see the runbook ` +
+      `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
+  );
+}
+
+/** Writes all of the text, however many calls it takes (a write may be short). */
+function writeAll(fd: number, text: string): void {
+  const bytes = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
+}
+
 function writeDurably(path: string, text: string): void {
   const fd = openSync(path, "w", 0o600);
   try {
-    writeSync(fd, text);
+    writeAll(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Whether a file is missing, empty or ends with a newline, so a line appended to it stands on its
+ * own (only its last byte is read).
+ */
+export function endsLine(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return true;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 0x0a;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** What is wrong with the last line as the record before a new one, if anything. */
+function tailProblem(text: string, lines: readonly string[]): string | undefined {
+  if (text !== "" && !text.endsWith("\n")) {
+    return `its last line does not end with a newline (line ${lines.length} is incomplete)`;
+  }
+  const last = lines.at(-1);
+  if (last === undefined) return undefined;
+  const n = lines.length;
+  let record: unknown;
+  try {
+    record = JSON.parse(last);
+  } catch {
+    record = undefined;
+  }
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    return `line ${n} is not a JSON record`;
+  }
+  const r = record as Record<string, unknown>;
+  if (r.seq !== n) return `line ${n} has the wrong seq`;
+  const before = lines.at(-2);
+  if (r.prev !== (before === undefined ? GENESIS : sha256(before))) {
+    return `line ${n} does not chain to the line before`;
+  }
+  return undefined;
 }
 
 export class RunLog {
@@ -186,11 +263,15 @@ export class RunLog {
     }
   }
 
+  /** The log's text and its lines (an empty log, or none, has neither). */
+  #read(): { text: string; lines: string[] } {
+    if (!existsSync(this.logPath)) return { text: "", lines: [] };
+    const text = readFileSync(this.logPath, "utf8");
+    return { text, lines: text.split("\n").filter((line) => line !== "") };
+  }
+
   #lines(): string[] {
-    if (!existsSync(this.logPath)) return [];
-    return readFileSync(this.logPath, "utf8")
-      .split("\n")
-      .filter((line) => line !== "");
+    return this.#read().lines;
   }
 
   /**
@@ -245,15 +326,26 @@ export class RunLog {
    * Appends one record, chained to the line before it and synced to disk, then moves the head
    * file to it. Every field but the chain's own (seq, prev, at, runId, event) is masked first.
    * Refuses (LogIntegrityError, exit 1) while the log's end does not match the head file, so an
-   * append never hides records removed from the end, or a log or head file that was deleted.
+   * append never hides records removed from the end, or a log or head file that was deleted; and
+   * while the last line is not a whole record that the new one can follow (a torn line, a line
+   * that is not a record, the wrong seq, a broken link), so a record is never joined onto a torn
+   * line. It checks the end only: a run and a lock break check the whole log first (verify()).
    */
   append(at: Date, runId: string, event: string, fields: Record<string, unknown>): Appended {
     this.#ensureDir();
-    const lines = this.#lines();
+    const { text, lines } = this.#read();
     const problem = this.#headProblem(lines);
     if (problem !== undefined) {
       throw new LogIntegrityError(
         `the run log does not match its head file (${problem}); nothing is appended. ` +
+          `This is an incident: check it with pnpm fin log verify <env>, then see the runbook ` +
+          `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
+      );
+    }
+    const tail = tailProblem(text, lines);
+    if (tail !== undefined) {
+      throw new LogIntegrityError(
+        `the run log's end is not intact (${tail}); nothing is appended. ` +
           `This is an incident: check it with pnpm fin log verify <env>, then see the runbook ` +
           `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
       );
@@ -281,7 +373,7 @@ export class RunLog {
     const line = JSON.stringify(record);
     const fd = openSync(this.logPath, "a", 0o600);
     try {
-      writeSync(fd, `${line}\n`);
+      writeAll(fd, `${line}\n`);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -434,7 +526,7 @@ export class RunLog {
         host: this.#masker.mask(hostname()),
         startedAt: holder.startedAt,
       };
-      writeSync(fd, JSON.stringify(full));
+      writeAll(fd, JSON.stringify(full));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -460,7 +552,12 @@ export class RunLog {
     }
   }
 
-  /** Breaks a stale lock, logging who held it and why it was broken (the record comes first). */
+  /**
+   * Breaks a stale lock, logging who held it and why it was broken (the record comes first).
+   * Refuses (LogIntegrityError, exit 1), leaving the lock and the log as they are, while the log
+   * does not verify anywhere: a stale lock and a damaged log can come together (a crash during an
+   * append), and the override must not write past the damage. `log restart` comes first then.
+   */
   breakLock(
     at: Date,
     runId: string,
@@ -469,6 +566,13 @@ export class RunLog {
   ): { holder: LockHolder; appended: Appended } | undefined {
     const current = this.holder();
     if (current === undefined) return undefined;
+    let problems: string[];
+    try {
+      problems = this.verify().problems;
+    } catch {
+      problems = ["the run log cannot be read"];
+    }
+    if (problems.length > 0) throw integrityError(problems, "the lock is not broken");
     const appended = this.append(at, runId, "lock.broken", { holder: current, reason, operator });
     try {
       unlinkSync(this.lockPath);

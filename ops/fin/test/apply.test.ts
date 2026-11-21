@@ -3,12 +3,9 @@
 // before the command reads anything), shipping, interrupts and GitHub Actions output.
 
 import assert from "node:assert/strict";
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { once } from "node:events";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.ts";
 import type { Command } from "../src/command.ts";
 import type { Context } from "../src/core/context.ts";
@@ -16,6 +13,7 @@ import { EXIT, ProviderError, RefusedError } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import type { Change } from "../src/core/plan.ts";
 import { RunLog } from "../src/core/runlog.ts";
+import { spawnChild } from "./helpers/child.ts";
 import {
   commandEnv,
   type FakeRuntime,
@@ -586,6 +584,99 @@ describe("an interrupted run", () => {
     assert.equal(await h.runtime.interrupt("SIGINT"), false, "the trap is gone with the run");
   });
 
+  it("traps stops before it takes the lock and until it has released it, and not in a dry run", async () => {
+    const h = harness();
+    const order: string[] = [];
+    const lock = () => (existsSync(h.log.lockPath) ? "locked" : "free");
+    const runtime: FakeRuntime = {
+      ...h.runtime,
+      trap: (handlers) => {
+        order.push(`trap:${lock()}`);
+        const untrap = h.runtime.trap(handlers);
+        return () => {
+          order.push(`untrap:${lock()}`);
+          untrap();
+        };
+      },
+    };
+    const s = stub({ changes: [CREATE], read: async () => void order.push(`read:${lock()}`) });
+    assert.equal(await runCli([...s.command.words, "staging"], runtime, [s.command]), EXIT.ok);
+    assert.deepEqual(order, ["trap:free", "read:locked", "untrap:free"]);
+    order.length = 0;
+    // A plan with nothing to change registers nothing: the lock is held until the run is closed.
+    const nothing = stub({ changes: [KEEP], read: async () => void order.push(`read:${lock()}`) });
+    assert.equal(
+      await runCli([...nothing.command.words, "staging"], runtime, [nothing.command]),
+      EXIT.ok,
+    );
+    assert.deepEqual(order, ["trap:free", "read:locked", "untrap:free"]);
+    assert.deepEqual(h.events(), ["run.registered", "run.step", "run.done"]);
+    order.length = 0;
+    assert.equal(
+      await runCli([...s.command.words, "staging", "--dry-run"], runtime, [s.command]),
+      EXIT.drift,
+    );
+    assert.deepEqual(order, ["read:free"], "a dry run takes no lock and traps nothing");
+  });
+
+  it("closes the run at once when a stop insists: run.done names the change in flight and why, and the lock is released", async () => {
+    // The settle wait never times out here: only the forced close ends it early.
+    const h = harness({ sleep: () => new Promise<void>(() => {}) });
+    const inside = gate();
+    const change = gate();
+    const s = stub({
+      changes: [CREATE, UPDATE],
+      apply: async (c) => {
+        if (c === CREATE) {
+          inside.open();
+          await change.wait;
+        }
+      },
+    });
+    const pending = h.run(s);
+    await inside.wait;
+    // The first Ctrl-C waits for the change in flight; a later one insists.
+    const stopping = h.runtime.interrupt("SIGINT");
+    await until(() => h.runtime.err().includes("closing the run"));
+    assert.equal(h.runtime.forceClose("SIGINT"), true);
+    assert.deepEqual(h.events(), ["run.registered", "run.done"]);
+    const done = h.log.records().at(-1);
+    assert.equal(done?.result, "failed");
+    assert.equal(done?.interrupted, "SIGINT");
+    assert.equal(done?.forced, "SIGINT");
+    assert.equal(done?.error, "interrupted by SIGINT");
+    assert.deepEqual(done?.inFlight, { kind: "dns", name: "<host:console>", action: "create" });
+    assert.equal(h.log.holder(), undefined);
+    assert.match(h.runtime.err(), /interrupted by SIGINT: closing the run at once/);
+    assert.equal(h.lines().at(-1)?.event, "run.done");
+    change.open();
+    await stopping;
+    assert.equal(await pending, EXIT.interrupted);
+    assert.deepEqual(h.events(), ["run.registered", "run.done"], "nothing is written after it");
+    assert.deepEqual(s.applied, [`console.${ZONE}`], "the later change never started");
+  });
+
+  it("frees the lock at once on SIGQUIT while the run reads, and warns at the deadline when only shipping is left", async () => {
+    const h = harness();
+    const reading = gate();
+    const s = stub({
+      changes: [CREATE],
+      read: async () => {
+        reading.open();
+        await new Promise(() => {});
+      },
+    });
+    void h.run(s);
+    await reading.wait;
+    assert.ok(h.log.holder() !== undefined);
+    assert.equal(h.runtime.forceClose("SIGQUIT"), true);
+    assert.equal(h.log.holder(), undefined);
+    assert.deepEqual(h.events(), []);
+    assert.match(h.runtime.err(), /interrupted by SIGQUIT: closing the run at once/);
+    assert.equal(h.runtime.forceClose("deadline"), true);
+    assert.match(h.runtime.err(), /the clean-up did not finish in time; the lines not shipped/);
+  });
+
   it("frees the lock of a run interrupted while it reads, with no record", async () => {
     const h = harness();
     let reading: () => void = () => {};
@@ -664,59 +755,6 @@ describe("an interrupted run", () => {
     }
   });
 });
-
-interface Child {
-  process: ChildProcessWithoutNullStreams;
-  /** Resolves once standard output has shown the text; rejects if the child exits first. */
-  waitFor(text: string): Promise<void>;
-  exit(): Promise<number | null>;
-  errors(): string;
-  /** The changes the child sent (the `stub steps` command's counter file). */
-  sent(): string[];
-  log(): RunLog;
-}
-
-/** Runs ops/fin's main() with the stub commands of helpers/interrupt-child.ts in a real process. */
-function spawnChild(argv: readonly string[]): Child {
-  const dir = tempDir();
-  const stateDir = join(dir, "state");
-  const counter = join(dir, "sent.txt");
-  const child = spawn(
-    process.execPath,
-    [fileURLToPath(new URL("./helpers/interrupt-child.ts", import.meta.url)), ...argv],
-    {
-      env: {
-        PATH: process.env.PATH ?? "",
-        FIN_STATE_DIR: stateDir,
-        FIN_TEST_COUNTER_FILE: counter,
-      },
-    },
-  );
-  let errors = "";
-  child.stderr.on("data", (chunk: Buffer) => {
-    errors += chunk.toString();
-  });
-  const exited = once(child, "exit").then(([code]) => code as number | null);
-  return {
-    process: child,
-    waitFor: (text) =>
-      new Promise<void>((resolve, reject) => {
-        let seen = "";
-        child.stdout.on("data", (chunk: Buffer) => {
-          seen += chunk.toString();
-          if (seen.includes(text)) resolve();
-        });
-        void exited.then((code) =>
-          reject(new Error(`the child exited early (${code}): ${errors}`)),
-        );
-      }),
-    exit: () => exited,
-    errors: () => errors,
-    sent: () =>
-      existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean) : [],
-    log: () => new RunLog(join(stateDir, "staging"), new Masker()),
-  };
-}
 
 describe("in GitHub Actions", () => {
   it("keeps standard output masked and free of add-mask commands; the commands go to standard error", async () => {

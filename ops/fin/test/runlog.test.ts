@@ -214,6 +214,78 @@ describe("the run log", () => {
     assert.deepEqual(behind.verify().problems, []);
   });
 
+  it("never appends onto a torn last line, so no record is glued onto it and lost", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step"]);
+    // A crash or a short write during the next append: part of a line, with no newline.
+    appendFileSync(log.logPath, '{"seq":3,"prev":"abc","at":"2026');
+    const before = readFileSync(log.logPath, "utf8");
+    const head = log.readHead();
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not end with a newline.*nothing is appended/.test(e.message),
+    );
+    assert.equal(readFileSync(log.logPath, "utf8"), before, "nothing was written");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+    assert.deepEqual(log.verify().problems, ["line 3 is not a JSON record"]);
+
+    // A complete last line that is not the next record (not JSON, the wrong seq, or not chained).
+    for (const last of [
+      "this line was tampered",
+      JSON.stringify({ seq: 9, prev: GENESIS, at: "t", runId: "r", event: "x" }),
+      JSON.stringify({ seq: 3, prev: GENESIS, at: "t", runId: "r", event: "x" }),
+    ]) {
+      const other = newLog();
+      fill(other, ["run.registered", "run.step"]);
+      appendFileSync(other.logPath, `${last}\n`);
+      assert.throws(
+        () => other.append(new Date(), "run_2", "run.done", {}),
+        (e: unknown) => e instanceof LogIntegrityError && /nothing is appended/.test(e.message),
+        last,
+      );
+      assert.equal(other.records().filter((r) => r.event === "run.done").length, 0, last);
+    }
+  });
+
+  it("refuses to break a lock while the log does not verify anywhere, and leaves the lock and the log as they were", () => {
+    const torn = newLog();
+    fill(torn, ["run.registered", "run.step"]);
+    appendFileSync(torn.logPath, '{"seq":3,"prev":"abc","at":"2026');
+    torn.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    const tornBefore = readFileSync(torn.logPath, "utf8");
+    assert.throws(
+      () => torn.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        /does not verify \(line 3 is not a JSON record\), so the lock is not broken/.test(
+          e.message,
+        ),
+    );
+    assert.equal(torn.holder()?.runId, "run_a");
+    assert.equal(readFileSync(torn.logPath, "utf8"), tornBefore);
+    assert.deepEqual(torn.verify().problems, ["line 3 is not a JSON record"]);
+
+    // A middle line changed while the head file still matches the last record.
+    const edited = newLog();
+    fill(edited, ["run.registered", "run.step", "run.done"]);
+    const lines = readFileSync(edited.logPath, "utf8").split("\n");
+    writeFileSync(
+      edited.logPath,
+      [lines[0]?.replace("run.registered", "run.registerex"), lines[1], lines[2], ""].join("\n"),
+    );
+    assert.deepEqual(edited.verify().problems, ["line 2 does not chain to the line before"]);
+    edited.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => edited.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) => e instanceof LogIntegrityError && /line 2 does not chain/.test(e.message),
+    );
+    assert.equal(edited.holder()?.runId, "run_a");
+    assert.equal(edited.records().length, 3, "nothing was appended");
+  });
+
   it("restarts a log that does not verify: keeps it, and starts a new one that records the gap", () => {
     const log = newLog();
     fill(log, ["run.registered", "run.step", "run.done", "lock.broken"]);
@@ -459,6 +531,37 @@ describe("a registered run", () => {
     assert.equal(done?.event, "run.done");
     assert.equal(done?.lockLost, true);
     assert.match(runtime.err(), /another run holds the run lock now/);
+  });
+
+  it("masks a registered ID held as a JSON number in its records and its lines", () => {
+    const { run, log, masker } = newRun();
+    masker.register(2_345_678, "<overlay:betterstack.teamId>");
+    run.register({ team: 2_345_678, teamText: "2345678", count: 3 });
+    run.line("probe", "info", { team: 2_345_678, nested: [{ id: 2_345_678 }], short: 12 });
+    run.finish("ok");
+    const registered = log.records()[0];
+    assert.equal(registered?.team, "<overlay:betterstack.teamId>");
+    assert.equal(registered?.teamText, "<overlay:betterstack.teamId>");
+    assert.equal(registered?.count, 3);
+    const probe = run.lines.find((l) => l.event === "probe");
+    assert.equal(probe?.team, "<overlay:betterstack.teamId>");
+    assert.deepEqual(probe?.nested, [{ id: "<overlay:betterstack.teamId>" }]);
+    assert.equal(probe?.short, 12);
+    for (const file of [log.logPath, join(log.dir, "lines.jsonl")]) {
+      assert.equal(readFileSync(file, "utf8").includes("2345678"), false, file);
+    }
+  });
+
+  it("starts a telemetry line on a line of its own after a torn one in lines.jsonl", () => {
+    const { run, log } = newRun();
+    run.register();
+    const file = join(log.dir, "lines.jsonl");
+    appendFileSync(file, '{"dt":"2026-11-21T06:00:00.000Z","mess');
+    run.finish("ok");
+    const lines = readFileSync(file, "utf8").split("\n");
+    assert.equal(lines.at(-1), "", "the file ends with a newline");
+    const done = JSON.parse(lines.at(-2) ?? "{}") as { event?: string };
+    assert.equal(done.event, "run.done", "the new line is whole and readable");
   });
 
   it("closes a run whose log cannot be written without throwing", () => {

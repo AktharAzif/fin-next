@@ -109,7 +109,7 @@ describe("the CLI", () => {
     );
     assert.match(
       r.err(),
-      /does not match its head file \(the head file names record 3, but the log holds 1/,
+      /does not verify \(the head file names record 3, but the log holds 1: records were removed\), so the lock is not broken/,
     );
     assert.equal(log.holder()?.runId, "run_stale");
     assert.equal(await runCli(["log", "restart", "staging"], r), EXIT.usage);
@@ -147,6 +147,41 @@ describe("the CLI", () => {
     assert.match(r3.out(), /it verifies; there is nothing to restart/);
     for (const value of privateValues())
       assert.equal(readable(stateDir, r).includes(value), false, value);
+  });
+
+  it("refuses a lock break (exit 1) on a log with a torn last line or a changed middle line, and appends nothing", async () => {
+    for (const damage of ["torn", "middle"] as const) {
+      const { env } = commandEnv();
+      const log = new RunLog(join(env.FIN_STATE_DIR ?? "", "staging"), new Masker());
+      for (const event of ["run.registered", "run.step", "run.done"]) {
+        log.append(new Date(), "run_1", event, {});
+      }
+      if (damage === "torn") {
+        // A stale lock and a damaged log together: the run crashed during an append.
+        appendFileSync(log.logPath, '{"seq":4,"prev":"abc","at":"2026');
+      } else {
+        const lines = readFileSync(log.logPath, "utf8").split("\n");
+        writeFileSync(
+          log.logPath,
+          [lines[0], lines[1]?.replace("run.step", "run.stap"), lines[2], ""].join("\n"),
+        );
+      }
+      log.lock({ runId: "run_stale", command: "routes apply", startedAt: "t" });
+      const before = readFileSync(log.logPath, "utf8");
+      const problems = log.verify().problems;
+      assert.ok(problems.length > 0, damage);
+      const r = fakeRuntime({ env });
+      assert.equal(
+        await runCli(["lock", "break", "staging", "--reason", "the run's machine crashed"], r),
+        EXIT.drift,
+        damage,
+      );
+      assert.match(r.err(), /the run log does not verify .*so the lock is not broken/, damage);
+      assert.equal(log.holder()?.runId, "run_stale", damage);
+      assert.equal(readFileSync(log.logPath, "utf8"), before, damage);
+      assert.deepEqual(log.verify().problems, problems, `${damage}: the same problems, no more`);
+      assert.equal(existsSync(join(env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl")), false);
+    }
   });
 
   it("keeps a crafted argument or lock file from turning the runner's command processing off", async () => {

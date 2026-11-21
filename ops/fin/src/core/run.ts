@@ -26,11 +26,11 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ParsedArgs } from "./args.ts";
 import { hasCredential, readCredential } from "./credentials.ts";
-import { BusyError, EXIT, FinError, LogIntegrityError, StoppedError } from "./errors.ts";
+import { BusyError, EXIT, FinError, StoppedError } from "./errors.ts";
 import { send } from "./http.ts";
 import type { Masker } from "./mask.ts";
 import type { Output } from "./output.ts";
-import type { Appended, RunLog } from "./runlog.ts";
+import { type Appended, endsLine, integrityError, type RunLog } from "./runlog.ts";
 import { newRunId, type Runtime, STOP_EXIT, type StopCause, stopDescription } from "./runtime.ts";
 import type { Secret } from "./secret.ts";
 
@@ -42,9 +42,6 @@ export interface InFlight {
   name: string;
   action: string;
 }
-
-/** How many of the log's problems a refusal names (the rest are counted). */
-const PROBLEMS_SHOWN = 3;
 
 export interface RunOptions {
   command: string;
@@ -81,6 +78,8 @@ export class Run {
   readonly #args: ParsedArgs | undefined;
   readonly #lines: Line[] = [];
   #unshipped: Line[] = [];
+  /** The shipping in progress, if any: a later flush waits for it, so no batch is cut short. */
+  #shipping: Promise<void> = Promise.resolve();
   #linesFileWarned = false;
   #locked = false;
   #registered = false;
@@ -155,14 +154,7 @@ export class Run {
     }
     if (problems.length > 0) {
       this.#release();
-      const shown = problems.slice(0, PROBLEMS_SHOWN).join("; ");
-      const more =
-        problems.length > PROBLEMS_SHOWN ? `; and ${problems.length - PROBLEMS_SHOWN} more` : "";
-      throw new LogIntegrityError(
-        `the run log does not verify (${shown}${more}), so no run starts. This is an incident: ` +
-          `check it with pnpm fin log verify <env>, then see the runbook ` +
-          `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
-      );
+      throw integrityError(problems, "no run starts");
     }
   }
 
@@ -331,13 +323,16 @@ export class Run {
     if (this.#runtime.env.GITHUB_ACTIONS === "true") this.#out.info(JSON.stringify(line));
   }
 
-  /** Appends a line to lines.jsonl beside the run log (a warning, once, if it cannot). */
+  /**
+   * Appends a line to lines.jsonl beside the run log (a warning, once, if it cannot). After a torn
+   * last line (a crash mid-write) it starts on a line of its own, so it is never joined onto it.
+   */
   #keep(line: Line): void {
     try {
       mkdirSync(this.#log.dir, { recursive: true, mode: 0o700 });
-      appendFileSync(join(this.#log.dir, "lines.jsonl"), `${JSON.stringify(line)}\n`, {
-        mode: 0o600,
-      });
+      const file = join(this.#log.dir, "lines.jsonl");
+      const start = endsLine(file) ? "" : "\n";
+      appendFileSync(file, `${start}${JSON.stringify(line)}\n`, { mode: 0o600 });
     } catch {
       if (!this.#linesFileWarned) {
         this.#linesFileWarned = true;
@@ -436,18 +431,23 @@ export class Run {
   }
 
   /**
-   * Ships the lines not shipped yet when an ingest is configured. Never throws: any failure is a
-   * warning, and the lines stay in lines.jsonl.
+   * Ships the lines not shipped yet when an ingest is configured, after any shipping already in
+   * progress (so a stop that flushes while the command's own flush is shipping waits for it, rather
+   * than exiting under it). Never throws: any failure is a warning, and the lines stay in
+   * lines.jsonl.
    */
-  async flushLines(): Promise<void> {
+  flushLines(): Promise<void> {
     const batch = this.#unshipped;
     this.#unshipped = [];
-    if (batch.length === 0) return;
-    try {
-      await this.#ship(batch);
-    } catch {
-      this.#out.warn("shipping the run's lines failed; they stay local");
-    }
+    this.#shipping = this.#shipping.then(async () => {
+      if (batch.length === 0) return;
+      try {
+        await this.#ship(batch);
+      } catch {
+        this.#out.warn("shipping the run's lines failed; they stay local");
+      }
+    });
+    return this.#shipping;
   }
 
   async #ship(batch: readonly Line[]): Promise<void> {

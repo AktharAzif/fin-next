@@ -11,12 +11,18 @@ import { EXIT, type ExitCode } from "./errors.ts";
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
- * The signals that stop a run: Ctrl-C (SIGINT), a polite kill such as a CI cancel (SIGTERM), and a
- * closed terminal, a dropped SSH session or a killed tmux pane (SIGHUP).
+ * The signals that stop a run: Ctrl-C (SIGINT), a polite kill such as a CI cancel (SIGTERM), a
+ * closed terminal, a dropped SSH session or a killed tmux pane (SIGHUP), and Ctrl-\ (SIGQUIT), which
+ * asks to quit at once.
  */
-export type InterruptSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+export type InterruptSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 
-export const INTERRUPT_SIGNALS: readonly InterruptSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+export const INTERRUPT_SIGNALS: readonly InterruptSignal[] = [
+  "SIGINT",
+  "SIGTERM",
+  "SIGHUP",
+  "SIGQUIT",
+];
 
 /**
  * What stops a run from outside: a signal, its standard output or error closing under it (a
@@ -28,6 +34,7 @@ export type StopCause = InterruptSignal | "output-closed" | "uncaught-error";
 export const STOP_EXIT: Readonly<Record<StopCause, ExitCode>> = {
   SIGHUP: EXIT.hangup,
   SIGINT: EXIT.interrupted,
+  SIGQUIT: EXIT.quit,
   SIGTERM: EXIT.terminated,
   "output-closed": EXIT.internal,
   "uncaught-error": EXIT.internal,
@@ -40,8 +47,37 @@ export function stopDescription(cause: StopCause): string {
   return `interrupted by ${cause}`;
 }
 
-/** How long the clean-up after a stop may take before the process exits anyway. */
+/**
+ * How long the clean-up after a stop may take; then the run is closed at once (closeNow) and the
+ * process exits.
+ */
 export const INTERRUPT_DEADLINE_MS = 5_000;
+
+/**
+ * A signal repeated within this time of the first stop is part of that stop, and is ignored: a
+ * closing terminal can deliver SIGHUP more than once, and Ctrl-C pressed twice is a reflex.
+ */
+export const REPEAT_GRACE_MS = 1_000;
+
+/**
+ * Why a run is closed at once, without waiting for the change in flight: a signal that insists (a
+ * SIGINT or SIGTERM after REPEAT_GRACE_MS, or SIGQUIT at any time), or the clean-up's deadline.
+ */
+export type ForcedClose = InterruptSignal | "deadline";
+
+/** What a trapped run does when something stops it. */
+export interface StopHandlers {
+  /**
+   * Closes the run after a stop (it may wait for the change in flight to settle); the process
+   * exits once it settles, or at INTERRUPT_DEADLINE_MS.
+   */
+  readonly stop: (cause: StopCause) => Promise<void>;
+  /**
+   * Closes the run at once, synchronously (run.done naming the change in flight, the lock
+   * released), just before the process exits without waiting. What it throws is ignored.
+   */
+  readonly closeNow: (why: ForcedClose) => void;
+}
 
 /**
  * How long a stop waits for the change in flight to settle before it closes the run without it
@@ -71,12 +107,15 @@ export interface Runtime {
   /** Runs a program with arguments (no shell) and returns its exit status and output. */
   readonly exec: (program: string, args: readonly string[]) => ExecResult;
   /**
-   * Calls the handler when something stops the run (SIGINT, SIGTERM or SIGHUP; with the process
-   * guards, a closed standard output or error, or an uncaught error), until the returned function
-   * is called. The real runtime then exits with STOP_EXIT once the handler has settled, or after
-   * INTERRUPT_DEADLINE_MS; a second signal exits at once.
+   * Calls the handlers when something stops the run (SIGINT, SIGTERM, SIGHUP or SIGQUIT; with the
+   * process guards, a closed standard output or error, or an uncaught error), until the returned
+   * function is called. The real runtime calls stop() and exits with STOP_EXIT once it has
+   * settled. It calls closeNow() and exits at once on SIGQUIT, on a SIGINT or SIGTERM that comes
+   * REPEAT_GRACE_MS or more after the first stop, and at INTERRUPT_DEADLINE_MS. It ignores a
+   * repeated SIGHUP, any signal repeated within REPEAT_GRACE_MS, and a second closed stream or
+   * uncaught error.
    */
-  readonly trap: (handler: (cause: StopCause) => Promise<void>) => () => void;
+  readonly trap: (handlers: StopHandlers) => () => void;
 }
 
 export interface ProcessRuntimeOptions {
@@ -199,24 +238,55 @@ export function processRuntime(repoRoot: string, options: ProcessRuntimeOptions 
         return { status: e.status ?? null, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
       }
     },
-    trap: (handler) => {
-      let stopping = false;
+    trap: (handlers) => {
+      // When the first stop came (a monotonic clock, for the repeat rule), once one did.
+      let firstAt: number | undefined;
+      let exiting = false;
+      const exit = (code: ExitCode): void => {
+        if (exiting) return;
+        exiting = true;
+        process.exit(code);
+      };
+      // Closes the run synchronously, then exits at once: the record and the lock come first.
+      const exitNow = (why: ForcedClose, code: ExitCode): void => {
+        if (exiting) return;
+        try {
+          handlers.closeNow(why);
+        } catch {
+          // The exit stays immediate.
+        }
+        exit(code);
+      };
       const stop = (cause: StopCause): void => {
         const code = STOP_EXIT[cause];
-        if (stopping) {
-          // A second signal while the run is being closed: the operator insists. A second error
-          // (a closed stream written to again) waits for the first stop to finish.
-          if (isSignal(cause)) process.exit(code);
+        if (firstAt !== undefined) {
+          // A repeat while the run is being closed. A hangup is often delivered more than once,
+          // and a signal within the grace is a reflex: both are part of the first stop. A second
+          // error (a closed stream written to again) waits for it too. A later Ctrl-C or SIGTERM,
+          // and SIGQUIT, insist.
+          if (cause === "SIGQUIT") exitNow(cause, code);
+          else if (
+            (cause === "SIGINT" || cause === "SIGTERM") &&
+            performance.now() - firstAt >= REPEAT_GRACE_MS
+          ) {
+            exitNow(cause, code);
+          }
           return;
         }
-        stopping = true;
-        const deadline = new Promise<void>((resolve) => {
-          setTimeout(resolve, INTERRUPT_DEADLINE_MS).unref();
-        });
-        const closing = Promise.resolve()
-          .then(() => handler(cause))
-          .catch(() => undefined);
-        Promise.race([closing, deadline]).finally(() => process.exit(code));
+        firstAt = performance.now();
+        if (cause === "SIGQUIT") {
+          exitNow(cause, code);
+          return;
+        }
+        // Not unref'd: the deadline holds the process open until it fires or the stop settles.
+        const deadline = setTimeout(() => exitNow("deadline", code), INTERRUPT_DEADLINE_MS);
+        Promise.resolve()
+          .then(() => handlers.stop(cause))
+          .catch(() => undefined)
+          .finally(() => {
+            clearTimeout(deadline);
+            exit(code);
+          });
       };
       const onSignal = (signal: NodeJS.Signals): void => {
         if (isSignal(signal)) stop(signal);

@@ -155,32 +155,40 @@ describe("Masker", () => {
     }
   });
 
-  it("masks a JSON value field by field, keeps its numbers and stays valid JSON whatever is registered", () => {
+  it("masks a JSON value field by field, keeps the tool's own numbers, masks a registered ID held as a number, and stays valid JSON", () => {
     const m = new Masker();
     m.register("12", "<overlay:oncall.escalateAfterMinutes>");
     m.register(1_234_567, "<overlay:betterstack.teamId>");
+    m.register("7654321", "<overlay:betterstack.sourceId>");
     m.register("console.zone.example", "<host:console>");
     const value = {
       seq: 12,
-      steps: 1_234_567,
+      team: 1_234_567,
+      source: 7_654_321,
+      other: 1_234_568,
+      fraction: 1_234_567.5,
       count: 3,
       threshold: new PrivateNumber(100, "<threshold:api-v4>"),
       host: "console.zone.example",
-      team: "1234567",
-      nested: [{ "console.zone.example": "12" }],
+      teamText: "1234567",
+      nested: [{ "console.zone.example": "12", ids: [1_234_567, 99] }],
       secret: new Secret("never-printed"),
     };
     const masked = m.maskValue(value);
     assert.deepEqual(masked, {
       seq: 12,
-      steps: 1_234_567,
+      team: "<overlay:betterstack.teamId>",
+      source: "<overlay:betterstack.sourceId>",
+      other: 1_234_568,
+      fraction: 1_234_567.5,
       count: 3,
       threshold: "<threshold:api-v4>",
       host: "<host:console>",
-      team: "<overlay:betterstack.teamId>",
-      nested: [{ "<host:console>": "12" }],
+      teamText: "<overlay:betterstack.teamId>",
+      nested: [{ "<host:console>": "12", ids: ["<overlay:betterstack.teamId>", 99] }],
       secret: "[redacted]",
     });
+    assert.equal(JSON.stringify(masked).includes("1234567,"), false);
     assert.doesNotThrow(() => JSON.parse(JSON.stringify(masked)));
   });
 

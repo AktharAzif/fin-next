@@ -6,7 +6,14 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecResult, FetchFn, Runtime, StopCause } from "../../src/core/runtime.ts";
+import type {
+  ExecResult,
+  FetchFn,
+  ForcedClose,
+  Runtime,
+  StopCause,
+  StopHandlers,
+} from "../../src/core/runtime.ts";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -99,8 +106,10 @@ export interface FakeRuntime extends Runtime {
   /** Both streams, in the order they were written (what a CI job log shows). */
   all(): string;
   advance(ms: number): void;
-  /** Delivers a stop to the trapped handler, as the real runtime would; false when none is. */
+  /** Delivers a stop to the trapped handlers, as the real runtime would; false when none is. */
   interrupt(cause: StopCause): Promise<boolean>;
+  /** Closes the trapped run at once, as the real runtime does before it exits; false when none is. */
+  forceClose(why: ForcedClose): boolean;
 }
 
 export interface FakeRuntimeOptions {
@@ -121,7 +130,7 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
   let all = "";
   let now = (options.start ?? new Date("2026-11-21T06:00:00.000Z")).getTime();
   let counter = 0;
-  let trapped: ((cause: StopCause) => Promise<void>) | undefined;
+  let trapped: StopHandlers | undefined;
   return {
     env: options.env ?? {},
     repoRoot: options.repoRoot ?? REPO_ROOT,
@@ -148,10 +157,10 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
     commit: () => hex(40, "e"),
     dirty: () => options.dirty ?? false,
     exec: options.exec ?? (() => ({ status: 127, stdout: "", stderr: "not available in tests" })),
-    trap: (handler) => {
-      trapped = handler;
+    trap: (handlers) => {
+      trapped = handlers;
       return () => {
-        if (trapped === handler) trapped = undefined;
+        if (trapped === handlers) trapped = undefined;
       };
     },
     out: () => stdout,
@@ -161,9 +170,15 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
       now += ms;
     },
     interrupt: async (cause) => {
-      const handler = trapped;
-      if (handler === undefined) return false;
-      await handler(cause);
+      const handlers = trapped;
+      if (handlers === undefined) return false;
+      await handlers.stop(cause);
+      return true;
+    },
+    forceClose: (why) => {
+      const handlers = trapped;
+      if (handlers === undefined) return false;
+      handlers.closeNow(why);
       return true;
     },
   };
