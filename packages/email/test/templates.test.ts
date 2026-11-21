@@ -1,6 +1,7 @@
 // T08-20, T08-23, T-SAT-15, T-SAT-41: every template renders; no typed value reaches a subject,
-// heading or preview; every class sends from its subdomain; at most one link and no image; no
-// params schema accepts a secret, and a planted secret never reaches a message.
+// heading or preview; every class sends from its subdomain; at most one link and no image; a value
+// Fin builds refuses a secret and a name or device label hides one, so a planted secret never
+// reaches a message.
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -12,7 +13,7 @@ import {
 } from "../src/catalogue.ts";
 import { CLASS_RULES, defineTemplate, TemplateDefinitionError } from "../src/classes.ts";
 import { checkHeaders, finHeaders } from "../src/headers.ts";
-import { param } from "../src/params.ts";
+import { HIDDEN_VALUE, param } from "../src/params.ts";
 import { RenderError, renderTemplate } from "../src/render.ts";
 
 const LINKS = {
@@ -131,17 +132,19 @@ describe.each(TEMPLATES.map((t) => [t.id, t] as const))("%s", (_id, template) =>
     expect(headers["X-Fin-Category"]).toBe(template.class);
   });
 
-  it("refuses a planted secret in every string parameter, so it never reaches a message", () => {
+  it("refuses or hides a planted secret in every string parameter, so it never reaches a message", () => {
     const planted = [
       ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdefghijklmnopqrstuvwxyz01"].join("_"),
       ["whsec", "abcdefghijklmnopqrstuvwxyz012345"].join("_"),
-      ["ABCD", "EFGH", "JK3M", "NPQR"].join("-"),
-      ["a1B2c", "D3e4F"].join("-"),
       ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2lnbmF0dXJl"].join("."),
     ];
+    // A code is letters and digits, which spec 02 §8.6's name rule allows, so a name field cannot
+    // tell one from a name and carries whatever the rule stored; every other string refuses them.
+    const codes = [["ABCD", "EFGH", "JK3M", "NPQR"].join("-"), ["a1B2c", "D3e4F"].join("-")];
+    const names = new Set(["personName", "orgName", "roleLabel", "previousRoleLabel", "changedBy"]);
     for (const key of Object.keys(sample)) {
       if (typeof sample[key] !== "string") continue;
-      for (const secret of planted) {
+      for (const secret of names.has(key) ? planted : [...planted, ...codes]) {
         const params = { ...sample, [key]: secret };
         let text = "";
         try {
@@ -200,16 +203,35 @@ describe("rendering", () => {
     expect(r.html).not.toContain("<b>");
   });
 
-  it("refuses typed text that holds control or bidirectional characters", () => {
+  it("hides typed text that holds control or bidirectional characters, never rendering it", () => {
     const t = findTemplate("orgs/member-joined");
     if (t === undefined) throw new Error("missing");
     const rlo = String.fromCodePoint(0x202e);
-    expect(() =>
-      renderTemplate(t, { ...(t.sample as object), orgName: `Acme${rlo}moc.live` }, CONTEXT, LINKS),
-    ).toThrow(RenderError);
-    expect(() =>
-      renderTemplate(t, { ...(t.sample as object), orgName: "Acme\nVisit us" }, CONTEXT, LINKS),
-    ).toThrow(RenderError);
+    for (const orgName of [`Acme${rlo}moc.live`, "Acme\nVisit us"]) {
+      const r = renderTemplate(t, { ...(t.sample as object), orgName }, CONTEXT, LINKS);
+      const all = `${r.subject}\n${r.text}\n${r.html}`;
+      expect(all).not.toContain(rlo);
+      expect(all).not.toContain("moc.live");
+      expect(all).not.toContain("Visit us");
+      expect(r.text).toContain(HIDDEN_VALUE);
+    }
+  });
+
+  it("hides a device label that holds a secret shape, and still renders the notice", () => {
+    for (const id of [
+      "identity/new-sign-in",
+      "identity/session-ended",
+      "identity/sign-in-methods-changed",
+      "staff/staff-new-sign-in",
+    ]) {
+      const t = findTemplate(id);
+      if (t === undefined) throw new Error("missing");
+      const run = ["Abcdefgh", "12345678", "Ijkl"].join("");
+      const device = `Browser ${run} on macOS`;
+      const r = renderTemplate(t, { ...(t.sample as object), device }, CONTEXT, LINKS);
+      expect(`${r.text}\n${r.html}`, id).not.toContain(run);
+      expect(r.text, id).toContain(HIDDEN_VALUE);
+    }
   });
 
   it("fails a link whose host has no configured origin, as configuration", () => {
@@ -227,10 +249,10 @@ describe("rendering", () => {
     const t = findTemplate("identity/new-sign-in");
     if (t === undefined) throw new Error("missing");
     try {
-      renderTemplate(t, { ...(t.sample as object), device: "secret@example.com" }, CONTEXT, LINKS);
+      renderTemplate(t, { ...(t.sample as object), time: "secret@example.com" }, CONTEXT, LINKS);
       expect.unreachable();
     } catch (error) {
-      expect((error as Error).message).toContain("device");
+      expect((error as Error).message).toContain("time");
       expect((error as Error).message).not.toContain("example.com");
     }
   });

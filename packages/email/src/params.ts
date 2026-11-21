@@ -3,15 +3,19 @@
 // `personName`, `device`, `time`, `count`, `mode`, `rail`, `accountLast4`).
 //
 // No display value may carry a secret (T08-23, T-SAT-41): an API key, a webhook secret, a
-// Cloudflare token, a JWT, an enrolment code, a backup code, a link token or an address. Each
-// string is refused when it holds one of those shapes, and `enqueue()` checks the params against
-// the template before the row is written, so a caller that passes one by mistake has its enqueue
-// (and so its action) refused rather than its secret mailed.
+// Cloudflare token, a JWT, an enrolment code, a backup code, a link token or an address. A value
+// Fin builds itself (`displayText`) is refused when it holds one of those shapes, and `enqueue()`
+// checks the params against the template before the row is written, so a caller that passes one by
+// mistake has its enqueue (and so its action) refused rather than its secret mailed.
 //
-// Names are different: a person's, a team's or a role's name is whatever spec 02 §8.6's name rule
-// stored (letters, numbers and simple punctuation), so a name field refuses only shapes that rule
-// cannot produce by accident (`NAME_SECRET_SHAPES`). A name the rule allows but the email refused
-// would make every notice about that person, team or role impossible to queue.
+// A value someone else chooses is different: a person's, a team's or a role's name (whatever spec
+// 02 §8.6's name rule stored), and a device label built from the browser's user agent. If such a
+// value could refuse the notice, it could refuse the action too: a member could block their own
+// removal with a chosen display name, and a session's user agent could block the session's end. So
+// those fields never refuse a string: one that is not a clean label, or that holds a secret shape,
+// is replaced by `HIDDEN_VALUE` when it is parsed, so neither the outbox nor any email carries it.
+// Names are checked only against the shapes that are always secrets (`NAME_SECRET_SHAPES`), so an
+// ordinary name with digits ("Tier1-Admin", "ACME2025PAYMENTS") is mailed as it is.
 import { z } from "zod";
 
 export interface SecretShape {
@@ -51,17 +55,13 @@ export const SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   { name: "digits", pattern: /\d{7,}/u },
 ]);
 
-const CROCKFORD = "0-9A-HJKMNP-TV-Za-hjkmnp-tv-z";
-const CROCKFORD_UPPER = "0-9A-HJKMNP-TV-Z";
-const CROCKFORD_LOWER = "0-9a-hjkmnp-tv-z";
-
 /**
- * The secret shapes a name may not hold: the prefixed keys and tokens, a whole JWT, a private key,
- * an address, a web address, a run of 7 or more digits (spec 02 §8.6 refuses the last three too),
- * and the codes in the forms Fin and the library print them, which always mix letters and digits.
- * Left out on purpose: a long letters-and-digits run, a 5-5 pair with a case change, and four words
- * of four letters, which are ordinary names ("Web3Infrastructure", "McKay-Jones", "Acme Bank Card
- * 2025"). A code made of letters only cannot be told from a name, and the name rule allows both.
+ * The secret shapes a name is checked against: only those no name holds by accident. The prefixed
+ * keys and tokens, a whole JWT and a private key, and the address, web address and run of 7 or more
+ * digits that spec 02 §8.6's name rule refuses too. The code shapes of `SECRET_SHAPES` are left out
+ * on purpose: an enrolment or backup code is letters and digits, which the name rule allows, so a
+ * code shape cannot be told from an ordinary name ("Tier1-Admin", "ACME2025PAYMENTS",
+ * "Web3Infrastructure"), and a name field only ever carries a name the rule stored.
  */
 export const NAME_SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   { name: "fin-api-key", pattern: /fin_(?:test|live)_[A-Za-z0-9_]{8,}/u },
@@ -70,33 +70,16 @@ export const NAME_SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
   // A JWT's header and the start of its payload ("eyJ...eyJ"), so "MoneyJarCompany" is a name.
   { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]*/u },
   { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
-  // An enrolment code run together: 16 Crockford characters of one case holding a letter and a
-  // digit, as Fin prints it ("Acme2025Payments", which mixes cases, is a name).
-  {
-    name: "enrolment-code",
-    pattern: new RegExp(
-      `\\b(?=[0-9A-Za-z]{16}\\b)(?=[A-Za-z]{0,15}\\d)(?=\\d{0,15}[A-Za-z])(?:[${CROCKFORD_UPPER}]{16}|[${CROCKFORD_LOWER}]{16})\\b`,
-      "u",
-    ),
-  },
-  // Four groups of four, one of which mixes a letter and a digit (a code's groups almost always do;
-  // "Acme Bank Card 2025" has no such group).
-  {
-    name: "enrolment-code",
-    pattern: new RegExp(
-      `\\b(?=[0-9A-Za-z -]{19}\\b)(?=(?:[0-9A-Za-z]{4}[- ]){0,3}[0-9A-Za-z]{0,2}(?:[A-Za-z]\\d|\\d[A-Za-z]))[${CROCKFORD}]{4}([- ])[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\b`,
-      "u",
-    ),
-  },
-  // A backup code holding a digit; a 5-5 pair of letters is a double-barrelled name.
-  {
-    name: "backup-code",
-    pattern: /\b(?=[A-Za-z0-9-]{11}\b)(?=[A-Za-z-]{0,10}\d)[A-Za-z0-9]{5}-[A-Za-z0-9]{5}\b/u,
-  },
   { name: "email", pattern: /[^\s@]+@[^\s@]+\.[^\s@]+/u },
   { name: "url", pattern: /\b(?:https?:\/\/|www\.)/iu },
   { name: "digits", pattern: /\d{7,}/u },
 ]);
+
+/**
+ * What a name or a device label's box shows in place of a value that is not a clean label or that
+ * holds a secret shape. It is itself a clean label for every such field.
+ */
+export const HIDDEN_VALUE = "(not shown)";
 
 function firstShape(shapes: readonly SecretShape[], value: string): string | undefined {
   for (const shape of shapes) if (shape.pattern.test(value)) return shape.name;
@@ -110,7 +93,8 @@ export function secretShapeIn(value: string): string | undefined {
 
 /**
  * The first secret shape a name holds, or undefined. `packages/identity`'s name rule (spec 02 §8.6)
- * should refuse these too, so that every stored name can be mailed (recorded in the pull request).
+ * may refuse these when a name is entered; the email does not depend on it, since a name field hides
+ * such a value rather than refusing the notice.
  */
 export function nameSecretShapeIn(value: string): string | undefined {
   return firstShape(NAME_SECRET_SHAPES, value);
@@ -136,24 +120,46 @@ function isControl(value: string): boolean {
   return false;
 }
 
-function boundedText(max: number, shapeIn: (value: string) => string | undefined) {
+/**
+ * Whether a value is a clean label: 1 to `max` characters, trimmed, well-formed (no lone surrogate,
+ * which Postgres's jsonb refuses) and with no control character.
+ */
+function isCleanLabel(value: string, max: number): boolean {
+  return (
+    value.length >= 1 &&
+    value.length <= max &&
+    value.trim() === value &&
+    value.isWellFormed() &&
+    !isControl(value)
+  );
+}
+
+/** A display value Fin builds itself: a clean label with no secret shape, or refused. */
+export function displayText(max: number) {
   return z
     .string()
-    .min(1)
-    .max(max)
-    .refine((v) => !isControl(v), { message: "control characters are refused" })
-    .refine((v) => v.trim() === v && v.trim().length > 0, { message: "untrimmed text is refused" })
-    .refine((v) => shapeIn(v) === undefined, { message: "a secret shape is refused" });
+    .refine((v) => isCleanLabel(v, max), { message: "a bounded, trimmed, single-line value" })
+    .refine((v) => secretShapeIn(v) === undefined, { message: "a secret shape is refused" });
 }
 
-/** A typed display value: bounded, single-line, no control characters, no secret shape. */
-export function displayText(max: number) {
-  return boundedText(max, secretShapeIn);
+/**
+ * A value someone else chooses: any string is accepted, and one that is not a clean label or that
+ * holds one of the shapes is replaced by `HIDDEN_VALUE`, so it never refuses the notice.
+ */
+function chosenText(max: number, shapeIn: (value: string) => string | undefined) {
+  return z
+    .string()
+    .transform((v) => (isCleanLabel(v, max) && shapeIn(v) === undefined ? v : HIDDEN_VALUE));
 }
 
-/** A stored name (spec 02 §8.6): as `displayText`, refusing only the shapes of `NAME_SECRET_SHAPES`. */
+/** A stored name (spec 02 §8.6): hidden, never refused, when it holds a `NAME_SECRET_SHAPES` shape. */
 export function nameText(max: number) {
-  return boundedText(max, nameSecretShapeIn);
+  return chosenText(max, nameSecretShapeIn);
+}
+
+/** A device label built from a user agent: hidden, never refused, when it holds any secret shape. */
+export function deviceText(max: number) {
+  return chosenText(max, secretShapeIn);
 }
 
 /** Fin's IDs: `<prefix>_<26 Crockford base32>` (ARCHITECTURE §6.2). */
@@ -168,7 +174,7 @@ export const param = Object.freeze({
   orgName: nameText(50),
   roleLabel: nameText(40),
   /** A device label such as "Safari on macOS", built by the caller from the user agent. */
-  device: displayText(80),
+  device: deviceText(80),
   /** An instant, rendered in UTC by the layout. */
   time: z.iso.datetime({ offset: false }),
   count: z.number().int().min(0).max(1_000_000),

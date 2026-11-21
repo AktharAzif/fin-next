@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { checkHeaders, HeaderRefused } from "../src/headers.ts";
 import { EMAIL_ID, newId } from "../src/ids.ts";
-import { formatTime, param, secretShapeIn } from "../src/params.ts";
+import { displayText, formatTime, HIDDEN_VALUE, param, secretShapeIn } from "../src/params.ts";
 import { normaliseAddress, recipientHasher } from "../src/recipient-key.ts";
 import { escapeHtml } from "../src/render.ts";
 import { backoffMs, DEFAULT_LIMITS } from "../src/sender/limits.ts";
@@ -46,11 +46,10 @@ describe("display values", () => {
     "Anne-Marie O'Neil",
     "Chrome 131 on Windows",
     "Example Payments Ltd",
-  ])("accepts %s", (value) => {
-    expect(
-      param.personName.safeParse(value.slice(0, 60)).success ||
-        param.device.safeParse(value).success,
-    ).toBe(true);
+  ])("accepts %s as it is", (value) => {
+    expect(param.personName.parse(value)).toBe(value);
+    expect(param.device.parse(value)).toBe(value);
+    expect(displayText(80).parse(value)).toBe(value);
     expect(secretShapeIn(value)).toBeUndefined();
   });
 
@@ -65,17 +64,23 @@ describe("display values", () => {
     ["a backup code", ["aB3dE", "f9GhK"].join("-")],
     ["a token", "abcdef0123456789abcdef"],
     ["a Cloudflare token", ["cfat", "abcdefghijklmnop"].join("_")],
-  ])("refuses %s", (_what, value) => {
+  ])("refuses %s in a display value Fin builds, and hides it in a device label", (_what, value) => {
     expect(secretShapeIn(value)).toBeTypeOf("string");
-    expect(param.personName.safeParse(value).success).toBe(false);
+    expect(displayText(80).safeParse(value).success).toBe(false);
+    // A device label comes from the browser's user agent, which whoever signs in chooses: it is
+    // never carried, but it never refuses the notice (and with it the action) either.
+    expect(param.device.parse(value)).toBe(HIDDEN_VALUE);
   });
 
   // Spec 02 §8.6 lets a name hold letters, numbers and simple punctuation: every name it allows must
-  // be mailable, or the notice about that person, team or role could never be queued.
+  // be mailed as it is, or the notice about that person, team or role (and so the action) would fail.
   it.each([
     ["personName", "Ann McKay-Jones"],
     ["personName", "Anna McKay-Smith"],
     ["personName", "Leonard McCoy-Smith"],
+    ["personName", "Tier2-Agent"],
+    ["personName", "Abcd1-Efgh2"],
+    ["personName", "Agent-007ab"],
     ["orgName", "DeVos-Group"],
     ["orgName", "DeWit-Jones"],
     ["orgName", "Acme-Payments-2025"],
@@ -84,29 +89,59 @@ describe("display values", () => {
     ["orgName", "Acme Bank Card 2025"],
     ["orgName", "MoneyJarCompany"],
     ["orgName", "Acme2025Payments"],
+    ["orgName", "Team1-Alpha"],
+    ["orgName", "Team7-Alpha"],
+    ["orgName", "Cloud-Ops42"],
+    ["orgName", "Alpha-12345"],
+    ["orgName", "ACME2025PAYMENTS"],
+    ["orgName", "acme2025payments"],
+    ["orgName", "Web3 Data Team Peak"],
+    ["orgName", "Acme Bank Web3 Team"],
+    ["orgName", "Bank 4ACH Team Desk"],
     ["roleLabel", "Level2-Support-Admins"],
-  ] as const)("accepts the ordinary %s %s", (field, value) => {
-    expect(param[field].safeParse(value).success).toBe(true);
+    ["roleLabel", "Tier1-Admin"],
+    ["roleLabel", "Admin-Tier2"],
+    ["roleLabel", "Team1-Leads"],
+    ["roleLabel", "Team4-Alpha"],
+    ["roleLabel", "Level-2Team"],
+  ] as const)("mails the ordinary %s %s as it is", (field, value) => {
+    expect(param[field].parse(value)).toBe(value);
   });
 
   it.each([
     ["a Fin key", ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdef"].join("_")],
     ["a webhook secret", ["whsec", "abcdefghijklmnop0123"].join("_")],
+    ["a Cloudflare token", ["cfut", "abcdefghijklmnop"].join("_")],
     ["a JWT", ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2lnbmF0dXJl"].join(".")],
-    ["an enrolment code", ["ABCD", "EFGH", "JK3M", "NPQR"].join("-")],
-    ["an enrolment code run together", "7KQ2M9XA4RTBZ8HC"],
-    ["an enrolment code run together, in lower case", "7kq2m9xa4rtbz8hc"],
-    ["a backup code", ["a1B2c", "D3e4F"].join("-")],
-  ])("still refuses %s in a name", (_what, value) => {
+    ["a private key", ["-----BEGIN", "RSA", "PRIVATE", "KEY-----"].join(" ")],
+    ["an address", "someone@example.com"],
+    ["a web address", "www.example.com"],
+    ["a phone number", "Call 5551234567"],
+    ["an untrimmed name", " Acme"],
+    ["an over-long name", "A".repeat(61)],
+    ["an invisible character", `Acme${String.fromCodePoint(0x200b)}`],
+    ["a bidirectional override", `Acme${String.fromCodePoint(0x202e)}moc.live`],
+    ["a line break", "Acme\nVisit us"],
+    ["a lone surrogate", `Acme${String.fromCharCode(0xd800)}`],
+    ["an empty name", ""],
+  ])("hides %s in a name, never carrying it and never refusing the notice", (_what, value) => {
     for (const field of ["personName", "orgName", "roleLabel"] as const) {
-      expect(param[field].safeParse(value).success, field).toBe(false);
+      expect(param[field].parse(value), field).toBe(HIDDEN_VALUE);
     }
   });
 
-  it("refuses untrimmed, over-long and invisible text", () => {
-    expect(param.orgName.safeParse(" Acme").success).toBe(false);
-    expect(param.orgName.safeParse("A".repeat(51)).success).toBe(false);
-    expect(param.orgName.safeParse(`Acme${String.fromCodePoint(0x200b)}`).success).toBe(false);
+  it("hides with a value every name field and the device label accept as they are", () => {
+    for (const field of ["personName", "orgName", "roleLabel", "device"] as const) {
+      expect(param[field].parse(HIDDEN_VALUE), field).toBe(HIDDEN_VALUE);
+    }
+    expect(secretShapeIn(HIDDEN_VALUE)).toBeUndefined();
+  });
+
+  it("still refuses a name or a device label that is not a string at all", () => {
+    for (const field of ["personName", "orgName", "roleLabel", "device"] as const) {
+      expect(param[field].safeParse(42).success, field).toBe(false);
+      expect(param[field].safeParse(null).success, field).toBe(false);
+    }
   });
 
   it("accepts only 8-digit codes and UTC times", () => {

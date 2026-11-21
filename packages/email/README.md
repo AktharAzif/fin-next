@@ -9,7 +9,7 @@ Only `worker` sends ([EM-04]); every other service calls `email.enqueue()` in it
 | Path | What |
 |---|---|
 | `src/classes.ts` | The five classes (`code`, `security`, `notice`, `customer`, `ops`), their subdomain, priority and allowance rule; `defineTemplate` |
-| `src/params.ts` | The parameter vocabulary: Fin IDs and the allowed display values, each refusing secret shapes (T08-23); names (`personName`, `orgName`, `roleLabel`) refuse only the shapes spec 02 §8.6's name rule cannot produce, so every stored name can be mailed |
+| `src/params.ts` | The parameter vocabulary: Fin IDs and the allowed display values (T08-23). A value Fin builds refuses secret shapes; a value someone else chooses (`personName`, `orgName`, `roleLabel`, and `device` from the user agent) never refuses a string, and shows "(not shown)" in place of one that is not a clean label or holds a secret shape, so no chosen name can refuse a notice and with it the action. Names are checked only against shapes that are always secrets, so every name spec 02 §8.6 allows is mailed as it is |
 | `src/render.ts` | The one lean layout: text and HTML, typed values only in labelled boxes, at most one link, no image |
 | `src/templates/<folder>/<name>.ts` | One file per template; each folder belongs to its area's lane (spec 08 §4.4) |
 | `src/catalogue.ts` | Every template, and `email.enqueue()`'s per-role allowlist generated from the folders |

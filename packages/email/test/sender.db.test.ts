@@ -287,12 +287,12 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
           template: "identity/new-sign-in",
           recipientKind: "address",
           recipient: "a@example.com",
-          params: { userId: USER, device: secret, time: TIME },
+          params: { userId: USER, device: "Safari on macOS", time: secret },
           dueAt: clock.now() + 365 * 24 * HOUR,
         });
         await expect(refused).rejects.toMatchObject({ code: "FE002", reason: "invalid_params" });
         const error = await failureOf(refused);
-        expect(error.message).toContain("device");
+        expect(error.message).toContain("time");
         expect(error.message).not.toContain(secret);
         await expect(
           enqueue(client, {
@@ -344,6 +344,82 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       expect(log.named("email.security_unsent")).toEqual([]);
     });
 
+    it("never lets a name spec 02 §8.6 allows refuse the action: each queues in the caller's transaction and is sent as it is", async () => {
+      const sample = (id: string) => findTemplate(id)?.sample as Record<string, unknown>;
+      const cases: readonly [SenderRole, string, Record<string, string>][] = [
+        ["fin_console", "orgs/member-removed", { personName: "Tier2-Agent" }],
+        ["fin_console", "orgs/member-removed", { orgName: "Cloud-Ops42" }],
+        ["fin_console", "orgs/member-removed", { orgName: "acme2025payments" }],
+        ["fin_console", "orgs/member-removed", { personName: "Agent-007ab" }],
+        ["fin_console", "orgs/member-role-changed", { roleLabel: "Team4-Alpha" }],
+        ["fin_console", "orgs/member-role-changed", { roleLabel: "Tier1-Admin" }],
+        ["fin_console", "orgs/role-permissions-changed", { roleLabel: "Tier1-Admin" }],
+        ["fin_console", "orgs/organization-deleted", { orgName: "ACME2025PAYMENTS" }],
+        ["fin_console", "orgs/organization-deleted", { orgName: "Team7-Alpha" }],
+        ["fin_console", "orgs/invitation", { orgName: "Team1-Alpha" }],
+        ["fin_console", "orgs/member-joined", { orgName: "Web3 Data Team Peak" }],
+        ["fin_admin", "staff/staff-access-changed", { personName: "Abcd1-Efgh2" }],
+      ];
+      for (const [i, [role, template, names]] of cases.entries()) {
+        const client = await db.as[role].connect();
+        try {
+          await client.query("BEGIN");
+          await enqueue(client, {
+            id: newId("eml", clock),
+            template,
+            recipientKind: "address",
+            recipient: `member${i}@example.com`,
+            params: { ...sample(template), ...names },
+          });
+          await client.query("COMMIT");
+        } finally {
+          client.release();
+        }
+      }
+      expect(await sender({ concurrency: 16, reservedUrgent: 1 }).runOnce()).toMatchObject({
+        sent: cases.length,
+        failed: 0,
+      });
+      for (const [i, [, template, names]] of cases.entries()) {
+        const message = port.sent.find((m) => m.to === `member${i}@example.com`);
+        expect(message?.template).toBe(template);
+        for (const name of Object.values(names)) expect(message?.text, template).toContain(name);
+      }
+    });
+
+    it("hides a secret-shaped name or device label at queue time: the outbox never holds it, and the notice still goes", async () => {
+      const sample = (id: string) => findTemplate(id)?.sample as Record<string, unknown>;
+      const key = ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdef"].join("_");
+      const label = ["Abcdefgh", "12345678", "Ijkl"].join("");
+      await queue(
+        "fin_console",
+        "orgs/member-removed",
+        { ...sample("orgs/member-removed"), personName: key },
+        "admin@example.com",
+      );
+      await queue(
+        "fin_console",
+        "identity/session-ended",
+        { ...sample("identity/session-ended"), device: `Browser ${label} on macOS` },
+        "person@example.com",
+      );
+      const stored = await db.admin.query<{ params: Record<string, unknown> }>(
+        "SELECT params FROM email.outbox ORDER BY template",
+      );
+      expect(stored.rows.map((r) => r.params.personName ?? r.params.device)).toEqual([
+        "(not shown)",
+        "(not shown)",
+      ]);
+      expect(JSON.stringify(stored.rows)).not.toContain(key);
+      expect(JSON.stringify(stored.rows)).not.toContain(label);
+      expect(await sender({ concurrency: 6, reservedUrgent: 1 }).runOnce()).toMatchObject({
+        sent: 2,
+      });
+      const all = port.sent.map((m) => `${m.subject}\n${m.text}\n${m.html}`).join("\n");
+      expect(all).not.toContain(key);
+      expect(all).not.toContain(label);
+    });
+
     it("refuses an unknown recipient kind with FE002, never echoing the row", async () => {
       const secretCode = "48151623";
       for (const kind of ["user", 5, "Address", "staff", []]) {
@@ -370,7 +446,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     it("refuses a NUL or a lone surrogate before the database can echo the input", async () => {
       const lone = String.fromCharCode(0xd800);
       const attempts = [
-        // In the address, before the code in the JSON text, and in a name after the address.
+        // In the address, before the code in the JSON text.
         { recipient: `victim${String.fromCharCode(0)}@example.com`, params: { code: "48151623" } },
         { recipient: `victim${lone}@example.com`, params: { code: "48151623" } },
       ].map(({ recipient, params }) =>
@@ -382,18 +458,6 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
           params,
         }),
       );
-      attempts.push(
-        enqueue(db.as.fin_console, {
-          id: newId("eml", clock),
-          template: "orgs/member-joined",
-          recipientKind: "address",
-          recipient: "victim@example.com",
-          params: {
-            ...(findTemplate("orgs/member-joined")?.sample as Record<string, unknown>),
-            personName: `Ann${lone} Lee`,
-          },
-        }),
-      );
       for (const attempt of attempts) {
         await expect(attempt).rejects.toMatchObject({ code: "FE002", reason: "bad_input" });
         const error = await failureOf(attempt);
@@ -401,6 +465,23 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         expect(error.message).not.toContain("48151623");
       }
       expect(await rows()).toEqual([]);
+      // In a name after the address, a NUL or a lone surrogate is hidden, never sent to the database.
+      for (const personName of [`Ann${lone} Lee`, `Ann${String.fromCharCode(0)} Lee`]) {
+        await enqueue(db.as.fin_console, {
+          id: newId("eml", clock),
+          template: "orgs/member-joined",
+          recipientKind: "address",
+          recipient: "victim@example.com",
+          params: {
+            ...(findTemplate("orgs/member-joined")?.sample as Record<string, unknown>),
+            personName,
+          },
+        });
+      }
+      const stored = await db.admin.query<{ name: string }>(
+        "SELECT params->>'personName' AS name FROM email.outbox",
+      );
+      expect(stored.rows).toEqual([{ name: "(not shown)" }, { name: "(not shown)" }]);
     });
   });
 

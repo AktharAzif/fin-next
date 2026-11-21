@@ -421,7 +421,8 @@ function holdsRefused(value: unknown): boolean {
  * Calls `email.enqueue()`: the only way any service, the worker included, adds a row. The params are
  * checked against the template first, so a notice that could never be rendered fails here, in the
  * caller's transaction, and the action rolls back with it (spec 08 §4.1, [SA-41], T08-24), rather
- * than being dropped by the worker after the action has committed.
+ * than being dropped by the worker after the action has committed. The row holds the params as the
+ * template parsed them, so a name or device label the template hides is never written.
  */
 export async function enqueue(db: Queryable, input: EnqueueInput): Promise<string> {
   const template = findTemplate(input.template);
@@ -445,7 +446,7 @@ export async function enqueue(db: Queryable, input: EnqueueInput): Promise<strin
     template: input.template,
     recipient_kind: input.recipientKind,
     recipient: input.recipient,
-    params: input.params,
+    params: parsed.data,
   };
   if (input.dueAt !== undefined) p.due_at = iso(input.dueAt);
   if (holdsRefused(p)) {

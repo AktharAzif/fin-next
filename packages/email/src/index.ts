@@ -40,6 +40,7 @@ export {
 } from "./outbox/store.ts";
 export {
   formatTime,
+  HIDDEN_VALUE,
   NAME_SECRET_SHAPES,
   nameSecretShapeIn,
   param,
