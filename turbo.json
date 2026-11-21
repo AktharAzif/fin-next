@@ -16,6 +16,21 @@
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "outputs": [] },
     "test": { "outputs": [] },
+    "@fin/db#test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/ops/docker/app.Dockerfile",
+        "$TURBO_ROOT$/ops/docker/app.Dockerfile.dockerignore",
+        "$TURBO_ROOT$/packages/*/bootstrap/**",
+        "$TURBO_ROOT$/packages/*/migrations/**",
+        "$TURBO_ROOT$/packages/*/grants/**"
+      ],
+      "outputs": []
+    },
+    "@fin/api#test": {
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/ops/docker/app.Dockerfile"],
+      "outputs": []
+    },
     "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
     "//#lint:root": { "cache": false },
     "//#typecheck:root": {
