@@ -1,4 +1,5 @@
 export {
+  type AccessIdentity,
   type FinContext,
   type FinEnv,
   type FinVariables,
@@ -27,6 +28,7 @@ export {
 } from "./problem.ts";
 export {
   errorHandler,
+  matchedTemplate,
   notFoundHandler,
   RETRY_AFTER_S,
   type RequestOptions,

@@ -20,7 +20,11 @@ import {
   type ServiceName,
 } from "./config/index.ts";
 import { buildTarget, checkSeams, refuseForbidden } from "./config/seams.ts";
-import { createPrivateResolver, type PrivateResolver } from "./dns/railway-lookup.ts";
+import {
+  createPrivateResolver,
+  type PrivateResolver,
+  type ResolveAll,
+} from "./dns/railway-lookup.ts";
 import { type ProcessHealth, startProcessHealth } from "./health/process-health.ts";
 import { Readiness } from "./health/readiness.ts";
 import { type FetchHandler, type HttpServerHandle, startHttpServer } from "./http/serve.ts";
@@ -41,6 +45,8 @@ export interface ServiceContext {
   reporter: Reporter;
   resolver: PrivateResolver;
   readiness: Readiness;
+  /** The fetch outbound calls use (Access's certs, provider calls); tests pass their own. */
+  fetch: typeof fetch;
   /** Registers work for shutdown, run in registration order after the server closes. */
   onStop(name: string, run: StopHook["run"]): void;
 }
@@ -71,6 +77,8 @@ export interface RunOptions {
   stdout?: StdoutWriter;
   transport?: Transport;
   fetch?: typeof fetch;
+  /** Overrides the private resolver's lookups (tests point the connector names at loopback). */
+  resolve?: ResolveAll;
 }
 
 export interface RunningService {
@@ -174,6 +182,7 @@ export async function runService(
   const resolver = createPrivateResolver({
     clock,
     onFailure: (fields) => telemetry.log("dns.lookup_failed", fields, "warn"),
+    ...(options.resolve !== undefined ? { resolve: options.resolve } : {}),
   });
   const readiness = new Readiness();
   const hooks: StopHook[] = [];
@@ -185,6 +194,7 @@ export async function runService(
     reporter,
     resolver,
     readiness,
+    fetch: options.fetch ?? fetch,
     onStop: (name, run) => hooks.push({ name, run }),
   };
 

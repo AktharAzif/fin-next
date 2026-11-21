@@ -3,8 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "lint": "biome check src/migrate src/tasks src/worker/probe",
-    "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p src/migrate/tsconfig.json",
+    "build": "pnpm run build:server",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
+    "lint": "biome check .",
+    "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p tsconfig.json",
     "pretest": "node ../../packages/audit/src/gen.ts",
     "test": "vitest run --config ../../vitest.config.ts",
     "pretest:db": "node ../../packages/audit/src/gen.ts",
@@ -12,8 +15,18 @@
   },
   "dependencies": {
     "@fin/audit": "workspace:*",
+    "@fin/core": "workspace:*",
     "@fin/crypto": "workspace:*",
     "@fin/db": "workspace:*",
+    "@fin/server": "workspace:*",
+    "hono": "catalog:",
     "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@fin/web-host": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
   }
 }
