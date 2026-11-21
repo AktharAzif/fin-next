@@ -143,15 +143,19 @@ describe.each(catalogues)(
           expect(actingProblem(cat, { actorPerms, targetIsSelf, targetRole }), at).toBe(expected);
           expect(outranks(cat, targetPerms, actorPerms), at).toBe(!within(targetPerms, actorPerms));
 
-          const topHolders = rng.int(4);
+          // Now and then a count that is not a whole number, as a slip reading it might give.
+          const otherTopHolders = rng.chance(0.1)
+            ? rng.pick([Number.NaN, -1, 0.5, Number.POSITIVE_INFINITY])
+            : rng.int(4);
           const change = rng.pick([
             "remove",
             "reset",
             { newRole: randomLookup(rng, cat) },
           ] as const);
           const leavesTop = typeof change === "string" || !isTop(cat, change.newRole);
-          const last = isTop(cat, targetRole) && leavesTop && topHolders <= 1;
-          expect(lastTopRoleProblem(cat, { targetRole, change, topHolders }), at).toBe(
+          const someoneElse = Number.isInteger(otherTopHolders) && otherTopHolders >= 1;
+          const last = isTop(cat, targetRole) && leavesTop && !someoneElse;
+          expect(lastTopRoleProblem(cat, { targetRole, change, otherTopHolders }), at).toBe(
             last ? "last_top_role" : null,
           );
         }
@@ -164,7 +168,7 @@ describe.each(catalogues)(
 interface Member {
   readonly id: number;
   roleKey: string;
-  /** Staff only: false after a reset, until the member enrols again. */
+  /** Staff only: false when just added or reset (pending, holding nothing), until they enrol. */
   active: boolean;
 }
 
@@ -200,8 +204,14 @@ function permsOf(world: World, member: Member): ReadonlySet<string> {
   return member.active ? permissionsOf(world.cat, lookup(world, member.roleKey)) : new Set();
 }
 
+/** The members counted as holding the top role: every Super admin, or every active staff Admin. */
 function topHolders(world: World): Member[] {
   return world.members.filter((m) => m.active && m.roleKey === world.cat.topRoleKey);
+}
+
+/** What the caller counts for lastTopRoleProblem: the counted holders other than the target. */
+function otherTopHolders(world: World, target: Member): number {
+  return topHolders(world).filter((m) => m.id !== target.id).length;
 }
 
 function newWorld(rng: Seeded, cat: Catalogue): World {
@@ -254,9 +264,13 @@ function step(rng: Seeded, world: World, applied: Map<string, number>, at: strin
 
   if (action === "change" || action === "remove" || action === "reset") {
     const target = rng.pick(world.members);
+    // The engine is called as its documentation says: the target's role as stored, pending or
+    // not, and the counted holders other than the target.
     const targetRole = lookup(world, target.roleKey);
     const targetPerms = permsOf(world, target);
     const targetIsSelf = target.id === actor.id;
+    const others = otherTopHolders(world, target);
+    const pendingTop = !target.active && target.roleKey === cat.topRoleKey;
     if (action === "change") {
       if (!actorPerms.has(rules.change)) return;
       const newKey = randomRoleKey(rng, world);
@@ -269,31 +283,35 @@ function step(rng: Seeded, world: World, applied: Map<string, number>, at: strin
         newRole,
       });
       const last = lastTopRoleProblem(cat, {
-        targetRole: target.active ? targetRole : "unknown",
+        targetRole,
         change: { newRole },
-        topHolders: topHolders(world).length,
+        otherTopHolders: others,
       });
       if (giving !== null || last !== null) return;
       expect(targetIsSelf, at).toBe(false);
       expect(within(permissionsOf(cat, newRole), actorPerms), at).toBe(true);
+      expect(within(permissionsOf(cat, targetRole), actorPerms), at).toBe(true);
       expect(within(targetPerms, actorPerms), at).toBe(true);
       target.roleKey = newKey;
       done("change");
+      if (pendingTop) done("act on a pending top holder");
     } else {
       const permission = action === "remove" ? rules.remove : rules.reset;
       if (permission === undefined || !actorPerms.has(permission)) return;
       const acting = actingProblem(cat, { actorPerms, targetIsSelf, targetRole });
       const last = lastTopRoleProblem(cat, {
-        targetRole: target.active ? targetRole : "unknown",
+        targetRole,
         change: action,
-        topHolders: topHolders(world).length,
+        otherTopHolders: others,
       });
       if (acting !== null || last !== null) return;
       expect(targetIsSelf, at).toBe(false);
+      expect(within(permissionsOf(cat, targetRole), actorPerms), at).toBe(true);
       expect(within(targetPerms, actorPerms), at).toBe(true);
       if (action === "remove") world.members = world.members.filter((m) => m.id !== target.id);
       else target.active = false;
       done(action);
+      if (pendingTop) done("act on a pending top holder");
     }
   } else if (action === "add") {
     if (!actorPerms.has(rules.add)) return;
@@ -307,7 +325,9 @@ function step(rng: Seeded, world: World, applied: Map<string, number>, at: strin
     });
     if (giving !== null) return;
     expect(within(permissionsOf(cat, newRole), actorPerms), at).toBe(true);
-    world.members.push({ id: world.nextId++, roleKey: newKey, active: true });
+    // A new staff member is pending until they enrol (spec 02 §10.2); an invitation accepted
+    // makes an active member.
+    world.members.push({ id: world.nextId++, roleKey: newKey, active: cat.realm !== "staff" });
     done("add");
   } else if (action === "enrol") {
     const pending = world.members.filter((m) => !m.active);
@@ -408,7 +428,7 @@ describe.each(catalogues)("a model team under the rules of [SA-32] (%s)", (_real
           step(rng, world, applied, `seed ${seed}, world ${w}, step ${s}`);
       }
       const kinds = ["change", "remove", "add", "edit", "create", "delete"];
-      if (cat.realm === "staff") kinds.push("reset", "enrol");
+      if (cat.realm === "staff") kinds.push("reset", "enrol", "act on a pending top holder");
       for (const kind of kinds) {
         expect(applied.get(kind) ?? 0, `no ${kind} was ever applied`).toBeGreaterThan(0);
       }

@@ -42,6 +42,17 @@ export function isCustomRoleId(cat: Catalogue, key: string): boolean {
 }
 
 /**
+ * Whether the lookup names a role this catalogue can hold, as `resolveRole` answers one: a
+ * built-in key the catalogue defines, or a custom role with the realm's ID shape. `gone`,
+ * `unknown`, and a reference built by hand with any other key or ID are not.
+ */
+export function isKnownRole(cat: Catalogue, role: RoleLookup): role is RoleRef {
+  if (typeof role !== "object" || role === null) return false;
+  if (role.kind === "built_in") return typeof role.key === "string" && isBuiltInKey(cat, role.key);
+  return role.kind === "custom" && typeof role.id === "string" && isCustomRoleId(cat, role.id);
+}
+
+/**
  * Resolves a stored role key (a member's or an invitation's): a built-in key, or a custom role ID
  * looked up with `findCustom`. A custom ID with no row is `gone`; anything else is `unknown`.
  */

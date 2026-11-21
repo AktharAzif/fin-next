@@ -13,9 +13,12 @@ export const ROLE_NAME_MAX_LENGTH = 40;
 export const ROLE_NAME_MAX_WORDS = 5;
 export const ROLE_DESCRIPTION_MAX_LENGTH = 120;
 
-/** Whether another custom role can be made when `count` exist (`409 limit_reached` otherwise). */
+/**
+ * Whether no other custom role may be made when `count` exist (`409 limit_reached`). A count that
+ * is not a whole number of at least zero, NaN and a count left as text included, is refused.
+ */
 export function customRoleLimitReached(count: number): boolean {
-  return !(count < CUSTOM_ROLE_LIMIT);
+  return !(Number.isSafeInteger(count) && count >= 0 && count < CUSTOM_ROLE_LIMIT);
 }
 
 /**

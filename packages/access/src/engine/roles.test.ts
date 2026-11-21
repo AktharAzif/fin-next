@@ -10,6 +10,7 @@ import {
   describePermissions,
   isBuiltInKey,
   isCustomRoleId,
+  isKnownRole,
   isTopRole,
   listInWords,
   NO_ACCESS_LABEL,
@@ -85,6 +86,27 @@ describe("resolveRole", () => {
     expect(isCustomRoleId(staff, srlId)).toBe(true);
     expect(isCustomRoleId(dash, `rol_${ID.toLowerCase()}`)).toBe(true);
     expect(isCustomRoleId(dash, `ROL_${ID}`)).toBe(false);
+  });
+
+  it("knows a reference only as resolveRole answers one", () => {
+    const record = { name: "Support", description: "", permissions: ["customers.read"] };
+    expect(isKnownRole(dash, { kind: "built_in", key: "admin" })).toBe(true);
+    expect(isKnownRole(staff, { kind: "built_in", key: "viewer" })).toBe(true);
+    expect(isKnownRole(dash, { kind: "custom", id: rolId, ...record })).toBe(true);
+    for (const role of [
+      "gone",
+      "unknown",
+      { kind: "built_in", key: "owner" },
+      { kind: "built_in", key: "viewer" },
+      { kind: "built_in", key: "SUPER_ADMIN" },
+      { kind: "built_in", key: "constructor" },
+      { kind: "custom", id: srlId, ...record },
+      { kind: "custom", id: "rol_123", ...record },
+      { kind: "role", key: "admin" },
+      null,
+    ] as unknown as RoleRef[]) {
+      expect(isKnownRole(dash, role), JSON.stringify(role)).toBe(false);
+    }
   });
 });
 

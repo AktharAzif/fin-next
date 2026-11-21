@@ -68,6 +68,7 @@ export {
   describePermissions,
   isBuiltInKey,
   isCustomRoleId,
+  isKnownRole,
   isTopRole,
   listInWords,
   NO_ACCESS_LABEL,

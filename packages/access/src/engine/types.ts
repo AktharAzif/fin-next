@@ -141,8 +141,18 @@ export type ActingProblem = "self" | "outranked";
 /** Why a custom role may not be edited or deleted (spec 02 §8.4). */
 export type EditingProblem = "gone" | "built_in" | "self" | "outranked";
 
-/** Why a custom role may not be deleted with the given move (spec 02 §8.4). */
-export type DeletionProblem = EditingProblem | GivingProblem | "move_required" | "move_forbidden";
+/**
+ * Why a custom role may not be deleted with the given move (spec 02 §8.4): an editing problem
+ * about the role itself (`gone` is the role), or one about the move: none given, the move
+ * permission missing, the role to move to gone meanwhile (`move_gone`), or another reason that
+ * role may not be given.
+ */
+export type DeletionProblem =
+  | EditingProblem
+  | Exclude<GivingProblem, "gone">
+  | "move_gone"
+  | "move_required"
+  | "move_forbidden";
 
 /** Why a role editor's draft is refused (spec 02 §8.1, §8.4). */
 export type RoleProblem =

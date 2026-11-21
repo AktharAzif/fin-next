@@ -10,9 +10,12 @@ import {
   type DashboardPermission,
   type DashboardRoleKey,
   dashboardCatalogue,
+  deletionProblem,
+  givingProblem,
   needsOf,
   type PermissionOf,
   permissionSet,
+  permissionsOf,
   type StaffPermission,
   type StaffRoleKey,
   staffCatalogue,
@@ -59,6 +62,41 @@ describe("the permission types", () => {
     // @ts-expect-error: Super admin is a dashboard role
     const superAdmin: StaffRoleKey = "super_admin";
     expect([viewer, superAdmin]).toHaveLength(2);
+  });
+
+  it("take only the catalogue's own built-in keys as the role to give", () => {
+    const actor = {
+      actorRoleKey: "admin",
+      actorPerms: permissionsOf(dashboardCatalogue, { kind: "built_in", key: "admin" }),
+      targetIsSelf: false,
+    };
+    const given = givingProblem(dashboardCatalogue, {
+      ...actor,
+      newRole: { kind: "built_in", key: "admin" },
+    });
+    expect(given).toBeNull();
+    const owner = givingProblem(dashboardCatalogue, {
+      ...actor,
+      // @ts-expect-error: a key the dashboard does not define is not a role to give
+      newRole: { kind: "built_in", key: "owner" },
+    });
+    const moved = deletionProblem(dashboardCatalogue, {
+      ...actor,
+      role: {
+        kind: "custom",
+        id: `rol_${"0".repeat(26)}`,
+        name: "A",
+        description: "",
+        permissions: [],
+      },
+      holders: 1,
+      invitations: 0,
+      // @ts-expect-error: nor a Fin Admin key, as the role to move people to
+      moveTo: { kind: "built_in", key: "viewer" },
+    });
+    // At run time a reference built by hand is refused all the same.
+    expect(owner).toBe("unknown_role");
+    expect(moved).toBe("unknown_role");
   });
 
   it("derive exactly the 26 keys of each catalogue", () => {

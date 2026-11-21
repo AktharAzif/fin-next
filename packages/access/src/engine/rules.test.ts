@@ -19,11 +19,15 @@ import {
   validateRole,
 } from "./role-editor.ts";
 import { permissionsOf, roleKeyOf } from "./roles.ts";
-import type { Catalogue, RoleLookup, RoleRef } from "./types.ts";
+import type { Catalogue, CustomRoleRecord, RoleLookup, RoleRef } from "./types.ts";
 
+// The catalogues typed loosely, as a route handler holds a role reference before resolveRole
+// narrows it; the typed catalogues take only their own built-in keys (src/types.test.ts).
+const looseDash: Catalogue = dash;
 const id = (prefix: string, n: number) => `${prefix}_${String(n).padStart(26, "0")}`;
 const builtIn = (key: string): RoleRef => ({ kind: "built_in", key });
-const customRole = (cat: Catalogue, n: number, permissions: readonly string[]): RoleRef => ({
+type CustomRef = { readonly kind: "custom" } & CustomRoleRecord;
+const customRole = (cat: Catalogue, n: number, permissions: readonly string[]): CustomRef => ({
   kind: "custom",
   id: id(cat.customRolePrefix, n),
   name: `Custom ${n}`,
@@ -107,6 +111,14 @@ const give: GiveRow[] = [
   ["gone: a deleted custom role", dash, SUPER, false, ADMIN, "gone", "gone"],
   ["unknown_role: a key Fin does not know", dash, SUPER, false, ADMIN, "unknown", "unknown_role"],
   ["unknown_role: in Fin Admin", staff, STAFF_ADMIN, false, VIEWER, "unknown", "unknown_role"],
+  // A reference built by hand, not by resolveRole, is refused the same way.
+  ["unknown_role: a built-in key the dashboard does not define", dash, ADMIN, false, READ_ONLY, builtIn("owner"), "unknown_role"],
+  ["unknown_role: the dashboard's top key in Fin Admin", staff, OPERATOR, false, undefined, builtIn("super_admin"), "unknown_role"],
+  ["unknown_role: a built-in key in another case", dash, SUPER, false, ADMIN, builtIn("SUPER_ADMIN"), "unknown_role"],
+  ["unknown_role: an empty built-in key", dash, ADMIN, false, undefined, builtIn(""), "unknown_role"],
+  ["unknown_role: a prototype key", dash, ADMIN, false, undefined, builtIn("constructor"), "unknown_role"],
+  ["unknown_role: a custom role with another realm's ID", dash, ADMIN, false, undefined, { ...SUPPORT, id: id("srl", 3) }, "unknown_role"],
+  ["unknown_role: a custom role with a malformed ID", dash, ADMIN, false, undefined, { ...SUPPORT, id: "rol_123" }, "unknown_role"],
   // The same role again (problem unchanged).
   ["unchanged: Admin to Admin", dash, SUPER, false, ADMIN, ADMIN, "unchanged"],
   ["unchanged: a custom role to itself", dash, ADMIN, false, SUPPORT, { ...SUPPORT }, "unchanged"],
@@ -127,7 +139,7 @@ describe("§8.5 giving a role: invitations, new staff and role changes", () => {
   });
 
   it("refuses the top role to an actor who holds every permission but not the top role", () => {
-    const problem = givingProblem(dash, {
+    const problem = givingProblem(looseDash, {
       actorRoleKey: id("rol", 9),
       actorPerms: new Set(dash.keys),
       targetIsSelf: false,
@@ -138,7 +150,7 @@ describe("§8.5 giving a role: invitations, new staff and role changes", () => {
 
   it("gives nothing for an actor whose role Fin does not know", () => {
     for (const newRole of [SUPPORT, READ_ONLY, ADMIN]) {
-      const problem = givingProblem(dash, {
+      const problem = givingProblem(looseDash, {
         actorRoleKey: "owner",
         actorPerms: permissionsOf(dash, "unknown"),
         targetIsSelf: false,
@@ -193,35 +205,48 @@ type TopRow = [
   cat: Catalogue,
   target: RoleLookup,
   change: TopRoleChange,
-  holders: number,
+  otherTopHolders: number,
   expected: string | null,
 ];
 
 // biome-ignore format: one rule per line
 const top: TopRow[] = [
   // The last holder of the top role cannot be removed or demoted (409 last_top_role).
-  ["the last Super admin removed", dash, SUPER, "remove", 1, "last_top_role"],
-  ["the last Super admin demoted", dash, SUPER, { newRole: ADMIN }, 1, "last_top_role"],
-  ["the last Super admin moved to a custom role", dash, SUPER, { newRole: SUPPORT }, 1, "last_top_role"],
-  ["the last Super admin given an unknown role", dash, SUPER, { newRole: "unknown" }, 1, "last_top_role"],
-  ["one of two Super admins removed", dash, SUPER, "remove", 2, null],
-  ["one of two Super admins demoted", dash, SUPER, { newRole: ADMIN }, 2, null],
-  ["the last Super admin kept a Super admin", dash, SUPER, { newRole: SUPER }, 1, null],
+  ["the last Super admin removed", dash, SUPER, "remove", 0, "last_top_role"],
+  ["the last Super admin demoted", dash, SUPER, { newRole: ADMIN }, 0, "last_top_role"],
+  ["the last Super admin moved to a custom role", dash, SUPER, { newRole: SUPPORT }, 0, "last_top_role"],
+  ["the last Super admin given an unknown role", dash, SUPER, { newRole: "unknown" }, 0, "last_top_role"],
+  ["the last Super admin given a role that is gone", dash, SUPER, { newRole: "gone" }, 0, "last_top_role"],
+  ["one of two Super admins removed", dash, SUPER, "remove", 1, null],
+  ["one of two Super admins demoted", dash, SUPER, { newRole: ADMIN }, 1, null],
+  ["the last Super admin kept a Super admin", dash, SUPER, { newRole: SUPER }, 0, null],
   ["an Admin removed with no Super admin counted", dash, ADMIN, "remove", 0, null],
-  ["a count below one is the last holder", dash, SUPER, "remove", 0, "last_top_role"],
   // Staff: the last active Admin cannot be removed, demoted or reset.
-  ["the last staff Admin removed", staff, STAFF_ADMIN, "remove", 1, "last_top_role"],
-  ["the last staff Admin demoted", staff, STAFF_ADMIN, { newRole: OPERATOR }, 1, "last_top_role"],
-  ["the last staff Admin reset", staff, STAFF_ADMIN, "reset", 1, "last_top_role"],
-  ["one of two staff Admins reset", staff, STAFF_ADMIN, "reset", 2, null],
-  ["one of three staff Admins demoted", staff, STAFF_ADMIN, { newRole: VIEWER }, 3, null],
-  ["a Viewer reset", staff, VIEWER, "reset", 1, null],
-  ["a custom staff role removed", staff, STAFF_ADDER, "remove", 1, null],
+  ["the last staff Admin removed", staff, STAFF_ADMIN, "remove", 0, "last_top_role"],
+  ["the last staff Admin demoted", staff, STAFF_ADMIN, { newRole: OPERATOR }, 0, "last_top_role"],
+  ["the last staff Admin reset", staff, STAFF_ADMIN, "reset", 0, "last_top_role"],
+  ["one of two staff Admins reset", staff, STAFF_ADMIN, "reset", 1, null],
+  ["one of three staff Admins demoted", staff, STAFF_ADMIN, { newRole: VIEWER }, 2, null],
+  ["a Viewer reset", staff, VIEWER, "reset", 0, null],
+  ["a custom staff role removed", staff, STAFF_ADDER, "remove", 0, null],
+  // A pending staff Admin (just added, reset, or the bootstrap Admin before enrolling) is never
+  // counted, so the one active Admin may remove, demote or reset them: one other Admin remains.
+  ["the one active Admin removes a pending Admin", staff, STAFF_ADMIN, "remove", 1, null],
+  ["the one active Admin demotes a pending Admin", staff, STAFF_ADMIN, { newRole: VIEWER }, 1, null],
+  ["the one active Admin resets a pending Admin", staff, STAFF_ADMIN, "reset", 1, null],
+  // A count that is not a whole number of at least one is no other holder (it fails closed).
+  ["a negative count", dash, SUPER, "remove", -1, "last_top_role"],
+  ["a fractional count", staff, STAFF_ADMIN, "reset", 1.5, "last_top_role"],
+  ["NaN", dash, SUPER, "remove", Number.NaN, "last_top_role"],
+  ["a count read as NaN from a missing column", staff, STAFF_ADMIN, { newRole: VIEWER }, Number(undefined), "last_top_role"],
+  ["an infinite count", dash, SUPER, { newRole: ADMIN }, Number.POSITIVE_INFINITY, "last_top_role"],
+  ["undefined", dash, SUPER, "remove", undefined as unknown as number, "last_top_role"],
+  ["a count left as text", staff, STAFF_ADMIN, "remove", "2" as unknown as number, "last_top_role"],
 ];
 
 describe("§8.5 the last holder of the top role", () => {
-  it.each(top)("%s", (_rule, cat, targetRole, change, topHolders, expected) => {
-    expect(lastTopRoleProblem(cat, { targetRole, change, topHolders })).toBe(expected);
+  it.each(top)("%s", (_rule, cat, targetRole, change, otherTopHolders, expected) => {
+    expect(lastTopRoleProblem(cat, { targetRole, change, otherTopHolders })).toBe(expected);
   });
 });
 
@@ -237,6 +262,8 @@ describe("§8.4 editing and deleting a custom role", () => {
     ["a staff role within the editor", staff, STAFF_ADMIN, STAFF_ADDER, null],
     ["a role that no longer exists", dash, ADMIN, "gone", "gone"],
     ["a key Fin does not know", dash, ADMIN, "unknown", "gone"],
+    ["a built-in key the catalogue does not define", dash, SUPER, builtIn("owner"), "gone"],
+    ["a custom role with another realm's ID", dash, ADMIN, { ...SUPPORT, id: id("srl", 3) }, "gone"],
   ];
   it.each(editRows)("editing: %s", (_rule, cat, actorRole, role, expected) => {
     const actor = actorOf(cat, actorRole);
@@ -277,10 +304,21 @@ describe("§8.4 editing and deleting a custom role", () => {
     ["the move must be a role the actor may give", dash, managerMover, SUPPORT, 1, 0, ADMIN, "beyond"],
     ["the move may not be the top role from below it", dash, ADMIN, SUPPORT, 1, 0, SUPER, "top_only"],
     ["the move may not be the role itself", dash, ADMIN, SUPPORT, 1, 0, SUPPORT, "unchanged"],
-    ["the move may not be a role that is gone", dash, ADMIN, SUPPORT, 1, 0, "gone", "gone"],
+    // The role itself gone is "gone" (404); the role to move to gone meanwhile is "move_gone".
+    ["the move may not be a role that is gone", dash, ADMIN, SUPPORT, 1, 0, "gone", "move_gone"],
+    ["the move may not be a role Fin does not know", dash, ADMIN, SUPPORT, 1, 0, "unknown", "unknown_role"],
+    ["the move may not be a built-in key the catalogue does not define", dash, ADMIN, SUPPORT, 2, 1, builtIn("owner"), "unknown_role"],
     ["a move within the actor", dash, managerMover, SUPPORT, 3, 2, customersOnly, null],
     ["the editing rules come first", dash, ADMIN, ADMIN, 1, 0, READ_ONLY, "built_in"],
     ["Fin Admin moves people with staff.role", staff, STAFF_ADMIN, STAFF_ADDER, 1, 0, VIEWER, null],
+    // A count that is not exactly zero counts as someone, so a bad count fails closed.
+    ["a NaN holder count needs a move", dash, ADMIN, SUPPORT, Number.NaN, 0, undefined, "move_required"],
+    ["a NaN holder count needs member.role", dash, managerOfSupport, SUPPORT, Number.NaN, 2, customersOnly, "move_forbidden"],
+    ["a missing holder count needs member.role", dash, managerOfSupport, SUPPORT, undefined as unknown as number, 0, customersOnly, "move_forbidden"],
+    ["a negative holder count needs member.role", dash, managerOfSupport, SUPPORT, -1, 0, customersOnly, "move_forbidden"],
+    ["a fractional holder count needs member.role", dash, managerOfSupport, SUPPORT, 0.5, 0, customersOnly, "move_forbidden"],
+    ["a NaN invitation count needs a move", dash, ADMIN, SUPPORT, 0, Number.NaN, undefined, "move_required"],
+    ["a negative invitation count needs a move", dash, ADMIN, SUPPORT, 0, -2, undefined, "move_required"],
   ];
   it.each(deleteRows)("deleting: %s", (...row) => {
     const [, cat, actorRole, role, holders, invitations, moveTo, expected] = row;
@@ -349,10 +387,16 @@ describe("§8.4 a custom role's draft", () => {
 
   it("holds at most 30 custom roles, and limits edits to 30 an hour and 100 a day", () => {
     expect(CUSTOM_ROLE_LIMIT).toBe(30);
+    expect(customRoleLimitReached(0)).toBe(false);
     expect(customRoleLimitReached(29)).toBe(false);
     expect(customRoleLimitReached(30)).toBe(true);
     expect(customRoleLimitReached(31)).toBe(true);
+    // A count that is not a whole number of at least zero is refused: it fails closed.
     expect(customRoleLimitReached(Number.NaN)).toBe(true);
+    expect(customRoleLimitReached(-1)).toBe(true);
+    expect(customRoleLimitReached(0.5)).toBe(true);
+    expect(customRoleLimitReached(undefined as unknown as number)).toBe(true);
+    expect(customRoleLimitReached("3" as unknown as number)).toBe(true);
     expect(ROLE_EDIT_LIMITS).toEqual({ perHour: 30, perDay: 100 });
     expect(Object.isFrozen(ROLE_EDIT_LIMITS)).toBe(true);
   });
