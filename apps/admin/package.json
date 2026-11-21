@@ -11,13 +11,13 @@
     "build:server": "vite build --config vite.server.config.ts",
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
     "routes": "node scripts/generate-routes.mjs",
-    "typecheck": "pnpm run routes && tsc -p tsconfig.json && pnpm run typecheck:server",
+    "typecheck": "pnpm run routes && tsc -p tsconfig.json && tsc -p e2e/tsconfig.json && pnpm run typecheck:server",
     "typecheck:server": "tsc -p src/server/tsconfig.json",
     "lint": "biome check .",
     "pretest": "pnpm run routes",
     "test": "vitest run --config ../../vitest.config.ts",
     "test:db": "vitest run --config ../../vitest.config.ts --mode db",
-    "e2e": "pnpm run build && playwright test"
+    "e2e": "pnpm run build:test && node e2e/support/run.ts"
   },
   "dependencies": {
     "@fin/access": "workspace:*",
@@ -25,6 +25,7 @@
     "@fin/core": "workspace:*",
     "@fin/db": "workspace:*",
     "@fin/frame": "workspace:*",
+    "@fin/icons": "workspace:*",
     "@fin/identity": "workspace:*",
     "@fin/motion": "workspace:*",
     "@fin/server": "workspace:*",
@@ -32,6 +33,7 @@
     "@fin/tokens": "workspace:*",
     "@fin/ui": "workspace:*",
     "@fin/web-host": "workspace:*",
+    "@simplewebauthn/browser": "catalog:",
     "@tanstack/react-router": "catalog:",
     "hono": "catalog:",
     "react": "catalog:",
