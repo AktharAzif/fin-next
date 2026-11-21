@@ -460,7 +460,6 @@ export class CloudflareWriter {
   readonly #guard: Guard;
   readonly #run: Run;
   readonly #account: string;
-  readonly #zone: string;
   readonly #settings: ReadonlySet<string>;
   readonly #now: () => Date;
   /** The static egress addresses the overlay lists, by service. */
@@ -483,7 +482,6 @@ export class CloudflareWriter {
     this.#guard = guard;
     this.#run = run;
     this.#account = overlay.cloudflare.accountId;
-    this.#zone = overlay.cloudflare.zoneId;
     this.#settings = new Set(options.settings ?? []);
     this.#now = options.now;
     this.#egress = new Map(Object.entries(overlay.staticEgress));
@@ -528,7 +526,8 @@ export class CloudflareWriter {
     body: unknown,
     sending: boolean,
   ): void {
-    const zone = `/zones/${this.#zone}`;
+    // A zone write goes only to the zone the guard checked (bindZone), never to an ID taken on trust.
+    const zone = (): string => `/zones/${this.#guard.checkZoneWrite(`${method} ${target.kind}`)}`;
     const account = `/accounts/${this.#account}`;
     const refuse = (why: string): never => {
       throw new RefusedError(`${method} ${target.kind}: ${why}`);
@@ -577,7 +576,7 @@ export class CloudflareWriter {
       case "dns": {
         this.#guard.checkName(target.name, "dns record");
         addressed(
-          `${zone}/dns_records`,
+          `${zone()}/dns_records`,
           target.id,
           "the zone's DNS records endpoint",
           (seen) => lowerName(seen.name) === lowerName(target.name),
@@ -615,7 +614,7 @@ export class CloudflareWriter {
           this.#guard.checkName(patternHost(target.pattern), `route ${target.pattern}`);
         } else this.#guard.checkRoutePattern(target.pattern);
         addressed(
-          `${zone}/workers/routes`,
+          `${zone()}/workers/routes`,
           target.id,
           "the zone's Workers routes endpoint",
           (seen) => seen.pattern === target.pattern,
@@ -643,11 +642,11 @@ export class CloudflareWriter {
         } else this.#guard.checkRuleRef(target.ref, "zone rule");
         for (const host of target.hosts) this.#guard.checkName(host, `zone rule ${target.ref}`);
         if (!OBJECT_ID.test(target.rulesetId)) refuse("not a per-rule endpoint");
-        if (this.#seen(entrypointsOf(zone), target.rulesetId) === undefined) {
+        if (this.#seen(entrypointsOf(zone()), target.rulesetId) === undefined) {
           refuse("the rule set was not read (or created) as one of this zone's phase entrypoints");
         }
         addressed(
-          `${zone}/rulesets/${target.rulesetId}/rules`,
+          `${zone()}/rulesets/${target.rulesetId}/rules`,
           target.id,
           "a per-rule endpoint",
           (seen) => seen.ref === target.ref,
@@ -660,7 +659,7 @@ export class CloudflareWriter {
         return;
       }
       case "ruleset": {
-        if (method !== "POST" || path !== `${zone}/rulesets`) {
+        if (method !== "POST" || path !== `${zone()}/rulesets`) {
           refuse("a phase entrypoint is only ever created");
         }
         for (const ref of target.refs) this.#guard.checkRuleRef(ref, `phase ${target.phase}`);
@@ -684,7 +683,7 @@ export class CloudflareWriter {
         if (!this.#settings.has(target.id)) {
           refuse(`${target.id} is not a setting the public settings list`);
         }
-        if (method !== "PATCH" || path !== `${zone}/settings/${target.id}`) {
+        if (method !== "PATCH" || path !== `${zone()}/settings/${target.id}`) {
           refuse("not the setting's endpoint");
         }
         const keys = Object.keys(object());
@@ -777,7 +776,7 @@ export class CloudflareWriter {
         if (method === "DELETE")
           refuse("a sending domain is never removed by pnpm fin (DMARC first)");
         addressed(
-          `${zone}/email/sending/subdomains`,
+          `${zone()}/email/sending/subdomains`,
           target.id,
           "the Email Sending endpoint",
           (seen) => lowerName(seen.name) === lowerName(target.name),

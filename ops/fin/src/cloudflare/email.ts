@@ -21,7 +21,7 @@ import { ConfigError, RefusedError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
 import type { WriteTarget } from "./api.ts";
-import { cloudflare, railway, registerId } from "./common.ts";
+import { bindZone, cloudflare, railway, registerId } from "./common.ts";
 
 interface SendingDomain {
   tag?: string;
@@ -72,7 +72,8 @@ export const emailDomains: Command = {
   mutating: true,
   runbook: "email-sending.md",
   async run(ctx) {
-    const { api, writer, zonePath } = cloudflare(ctx);
+    const { api, writer } = cloudflare(ctx);
+    const zonePath = await bindZone(ctx, api);
     const current = await api.list<SendingDomain>(`${zonePath}/email/sending/subdomains`);
     const ids = new Map<string, string>();
     const changes: Change[] = [];

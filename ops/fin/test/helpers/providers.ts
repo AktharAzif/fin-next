@@ -4,7 +4,7 @@
 // command calls an endpoint it should not.
 
 import type { FetchFn } from "../../src/core/runtime.ts";
-import { ACCOUNT_ID, hex, uuid, ZONE_ID } from "./fixtures.ts";
+import { ACCOUNT_ID, hex, uuid, ZONE, ZONE_ID } from "./fixtures.ts";
 
 export interface Call {
   method: string;
@@ -48,6 +48,8 @@ function failure(status: number, code: number, message: string): Response {
 export class FakeCloudflare {
   readonly token: string;
   readonly calls: Call[] = [];
+  /** The zone as Cloudflare answers for it (what bindZone checks). */
+  zone: Json = { id: ZONE_ID, name: ZONE, account: { id: ACCOUNT_ID, name: "fixture" } };
   settings = new Map<string, { id: string; value: unknown; editable: boolean }>();
   rulesets = new Map<string, { id: string; phase: string; rules: Rule[] }>();
   routes: Array<{ id: string; pattern: string; script?: string }> = [];
@@ -147,6 +149,13 @@ export class FakeCloudflare {
       hit.m = new RegExp(pattern).exec(path);
       return hit.m;
     };
+    // The zone itself, by its ID or by its name in the account.
+    if (method === "GET" && path === zone) return envelope(this.zone);
+    if (method === "GET" && path === "/zones") {
+      const account = this.zone.account as Json;
+      const match = query.get("name") === this.zone.name && query.get("account.id") === account.id;
+      return envelope(match ? [this.zone] : []);
+    }
     // Zone settings.
     if (method === "GET" && path === `${zone}/settings`)
       return envelope([...this.settings.values()]);

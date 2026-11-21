@@ -25,7 +25,7 @@ import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
 import type { Redaction, WriteTarget } from "./api.ts";
-import { cloudflare, railway, registerId } from "./common.ts";
+import { bindZone, cloudflare, railway, registerId } from "./common.ts";
 import { finRulesetHash, isFinRule } from "./hash.ts";
 import {
   comparable,
@@ -332,7 +332,8 @@ export const zoneApply: Command = {
   runbook: "zone-apply.md",
   async run(ctx) {
     const only = flagString(ctx.args, "only");
-    const { api, writer, zonePath } = cloudflare(ctx, Object.keys(ctx.settings.zone.settings));
+    const { api, writer } = cloudflare(ctx, Object.keys(ctx.settings.zone.settings));
+    const zonePath = await bindZone(ctx, api);
     const changes: Change[] = [];
     if (only !== "rules") changes.push(...(await settingChanges(ctx, api, zonePath)));
     let plan: RulePlan | undefined;

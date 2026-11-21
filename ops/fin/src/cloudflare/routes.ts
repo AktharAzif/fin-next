@@ -17,7 +17,7 @@ import { type HostRole, hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import type { TunnelRole } from "../core/settings.ts";
 import { patternHost, type WriteTarget } from "./api.ts";
-import { cloudflare, registerId, requireTunnel } from "./common.ts";
+import { bindZone, cloudflare, registerId, requireTunnel } from "./common.ts";
 
 interface Route {
   id: string;
@@ -89,7 +89,8 @@ export const routesApply: Command = {
   mutating: true,
   runbook: "routes-apply.md",
   async run(ctx) {
-    const { api, writer, zonePath } = cloudflare(ctx);
+    const { api, writer } = cloudflare(ctx);
+    const zonePath = await bindZone(ctx, api);
     const tunnels = {
       public: await requireTunnel(ctx, api, "public"),
       admin: await requireTunnel(ctx, api, "admin"),

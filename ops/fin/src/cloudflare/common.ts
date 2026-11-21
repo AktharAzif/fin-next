@@ -1,6 +1,6 @@
-// What the Cloudflare commands share: the clients built from a context, the tunnel lookup, and the
-// registration of every object ID a command reads (spec 01 §9.2: `pnpm fin` prints names, never
-// IDs), each under a placeholder that names its role and nothing private.
+// What the Cloudflare commands share: the clients built from a context, the zone check, the tunnel
+// lookup, and the registration of every object ID a command reads (spec 01 §9.2: `pnpm fin` prints
+// names, never IDs), each under a placeholder that names its role and nothing private.
 
 import type { Context } from "../core/context.ts";
 import { ConfigError, RefusedError } from "../core/errors.ts";
@@ -12,7 +12,6 @@ import { CloudflareApi, CloudflareWriter } from "./api.ts";
 export interface Clients {
   api: CloudflareApi;
   writer: CloudflareWriter;
-  zonePath: string;
   accountPath: string;
 }
 
@@ -33,12 +32,34 @@ export function cloudflare(ctx: Context, settingIds: Iterable<string> = []): Cli
     tokenServices: { [ctx.settings.email.token.name]: ctx.settings.email.token.service },
     identityProvider: ctx.settings.access.identityProvider,
   });
-  return {
-    api,
-    writer,
-    zonePath: `/zones/${ctx.overlay.cloudflare.zoneId}`,
-    accountPath: `/accounts/${ctx.overlay.cloudflare.accountId}`,
-  };
+  return { api, writer, accountPath: `/accounts/${ctx.overlay.cloudflare.accountId}` };
+}
+
+/**
+ * Reads the overlay's zone from Cloudflare (by the overlay's zone ID when it names one, otherwise
+ * by the zone's name in the overlay's account) and binds the guard to Cloudflare's answer, so every
+ * zone check and zone write uses the checked ID (core/guard.ts). Returns the zone's path. A command
+ * calls it before anything that concerns the zone.
+ */
+export async function bindZone(ctx: Context, api: CloudflareApi): Promise<string> {
+  const { accountId, zoneId } = ctx.overlay.cloudflare;
+  let answer: unknown;
+  if (zoneId !== undefined) answer = await api.get<unknown>(`/zones/${zoneId}`);
+  else {
+    const zones = await api.list<unknown>("/zones", {
+      name: ctx.overlay.zone,
+      "account.id": accountId,
+    });
+    if (zones.length !== 1) {
+      throw new RefusedError(
+        `Cloudflare holds ${zones.length} zones under the overlay's zone name in its account, not one; nothing is sent`,
+      );
+    }
+    answer = zones[0];
+  }
+  const id = ctx.guard.bindZone(answer);
+  registerId(ctx, id, "zone");
+  return `/zones/${id}`;
 }
 
 export function railway(ctx: Context): RailwayApi {

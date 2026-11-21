@@ -12,7 +12,7 @@ import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
 import type { TunnelRole } from "../core/settings.ts";
-import { cloudflare, findTunnel, railway, type Tunnel } from "./common.ts";
+import { bindZone, cloudflare, findTunnel, railway, type Tunnel } from "./common.ts";
 
 export const tunnelCreate: Command = {
   words: ["tunnel", "create"],
@@ -27,6 +27,7 @@ export const tunnelCreate: Command = {
     const t = ctx.settings.tunnels[role];
     ctx.guard.checkOwnName(t.name, "tunnel");
     const { api, writer, accountPath } = cloudflare(ctx);
+    await bindZone(ctx, api);
     const rw = railway(ctx);
     await rw.serviceId(t.connector);
     let tunnel: Tunnel | undefined = await findTunnel(ctx, api, role);

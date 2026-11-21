@@ -29,7 +29,7 @@ import { ConfigError, RefusedError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { accessDomain, appDomains, type WriteTarget } from "./api.ts";
-import { cloudflare, registerId } from "./common.ts";
+import { bindZone, cloudflare, registerId } from "./common.ts";
 import { accessPolicyHash } from "./hash.ts";
 
 interface IdentityProvider {
@@ -168,6 +168,7 @@ export const accessApply: Command = {
   runbook: "access-apply.md",
   async run(ctx) {
     const { api, writer, accountPath } = cloudflare(ctx);
+    await bindZone(ctx, api);
     const host = hostOf(ctx.overlay, ctx.settings.access.host);
     ctx.guard.checkName(host, "Access application");
     ctx.guard.checkOwnName(ctx.settings.access.application, "Access application");

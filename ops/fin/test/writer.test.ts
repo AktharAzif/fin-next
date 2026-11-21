@@ -42,6 +42,13 @@ function withEgress(staticEgress: Record<string, string[]>): Overlay {
   return parseOverlay({ ...overlayFixture(), staticEgress }, "staging");
 }
 
+/** A guard bound to the overlay's zone, as a command has it after reading the zone (bindZone). */
+function bound(ov: Overlay = overlay): Guard {
+  const guard = new Guard(ov);
+  guard.bindZone({ id: ZONE_ID, name: ZONE, account: { id: ACCOUNT_ID, name: "fixture" } });
+  return guard;
+}
+
 function setup(dryRun = false, ov: Overlay = overlay) {
   const token = fakeToken("w");
   const cf = new FakeCloudflare(token);
@@ -58,7 +65,7 @@ function setup(dryRun = false, ov: Overlay = overlay) {
     },
   );
   const api = new CloudflareApi(new Secret(token), runtime, masker);
-  const writer = new CloudflareWriter(api, new Guard(ov), run, ov, {
+  const writer = new CloudflareWriter(api, bound(ov), run, ov, {
     settings: ["0rtt"],
     now: () => runtime.now(),
     tokenServices: { "fin-next-staging-email": "worker" },
@@ -397,7 +404,7 @@ describe("the Cloudflare writer", () => {
       { command: "test", environment: "staging", dryRun: false },
     );
     const api = new CloudflareApi(new Secret(token), runtime, masker);
-    const writer = new CloudflareWriter(api, new Guard(overlay), run, overlay, {
+    const writer = new CloudflareWriter(api, bound(), run, overlay, {
       settings: ["0rtt", "x|.*"],
       now: () => runtime.now(),
     });
@@ -843,7 +850,7 @@ describe("the IDs a write carries", () => {
       refused(() => writer.check(APP, "POST", `${A}/access/apps`, body(idps)), /login methods/);
     }
     // A writer told no login method type allows none.
-    const untold = new CloudflareWriter(s.api, new Guard(overlay), s.run, overlay, {
+    const untold = new CloudflareWriter(s.api, bound(), s.run, overlay, {
       now: () => s.runtime.now(),
     });
     refused(
