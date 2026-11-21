@@ -15,7 +15,9 @@
 // | high, critical | both REFUTED with guards                          | second look                       |
 //
 // A REFUTED verdict without quoted guards counts as UNSURE. A confirmed finding takes the highest
-// severity any confirming sceptic gave (a confirming sceptic that gave none keeps the finding's).
+// severity any confirming sceptic gave (a confirming sceptic that gave none keeps the finding's),
+// but a finding reported at medium or above is never confirmed below medium: a confirmation keeps
+// a blocker in the gate, and only a refutation, with quoted guards and a second look, takes it out.
 
 import type { Severity } from "./findings.ts";
 
@@ -60,7 +62,9 @@ function confirmed(severity: Severity, verdicts: readonly Verdict[]): Step {
     const given = verdict.severity ?? severity;
     out = out === null ? given : maxSeverity(out, given);
   }
-  return { kind: "outcome", outcome: "confirmed", severity: out ?? severity };
+  let final = out ?? severity;
+  if (RANK[severity] >= RANK.medium && RANK[final] < RANK.medium) final = "medium";
+  return { kind: "outcome", outcome: "confirmed", severity: final };
 }
 
 /** The next step for a finding of `severity` after `verdicts` (in the order they were given). */

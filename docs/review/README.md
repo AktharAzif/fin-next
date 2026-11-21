@@ -16,6 +16,7 @@ tree under review, so a pull request cannot change the procedure that judges it.
 | `schema/sceptic-output.schema.json`, `schema/second-look-output.schema.json`, `schema/doctor-output.schema.json` | The other sessions' outputs |
 | `attack-profiles.json` | The Phase 0 and Saturday attack profiles and `generic` (§2.7); `prompts/attack.md` shows the same table and a test keeps them equal |
 | `exclusions.json` | Files that are never units (§2.5), each only when its bytes are what its name says |
+| `injection-patterns.json` | Rule 5's patterns (§2.8): free text in a finding that addresses a reviewer or a model |
 
 ## Running it
 
@@ -108,10 +109,16 @@ In code, before any other session or any person sees a finding: the output match
 (or of the base, for a deletion) inside what the session was given (its shard's units, their read
 tests and one hop; the whole tree for `joins` and `attack`), its lines within the file (rule 2);
 every quote is an exact substring of its file after CRLF becomes LF (rule 3); the length caps hold
-(rule 4); `checked` names every checklist item and `done` is true (rule 6). An output that breaks a
-rule is retried once in a fresh session; a second failure makes the lens `incomplete`, which blocks.
-An invalid finding is recorded as `invalid` and never shown or sent to a sceptic; the valid findings
-of the same output are kept.
+(rule 4); `checked` names every checklist item, `done` is true, and an item marked `finding` comes
+with at least one finding (rule 6). An output that breaks a rule is retried once in a fresh session;
+a second failure makes the lens `incomplete`, which blocks. An invalid finding is recorded as
+`invalid` and never shown or sent to a sceptic; the valid findings of the same output are kept.
+
+Rule 5: before a sceptic, a second look, a later lens or a person sees a finding, each of its
+free-text fields (`title`, `claim`, `scenario`, `testShouldFail`) that matches a pattern of
+`injection-patterns.json` is replaced with `[withheld: text addressed to a reviewer]` and the finding
+is marked `injectionSuspect`; the finding itself, with its paths, lines and quotes, stays. A sceptic's
+or second look's reason is filtered the same way before a second look or a person sees it.
 
 ## The verdict table
 
@@ -132,7 +139,9 @@ The first sceptic runs on the overall model; the second sceptic of a high or cri
 attack model at the attack effort ([RV-08]). A REFUTED verdict whose guard quotes do not validate
 counts as UNSURE. A second look that cannot break the refutation leaves the finding `refuted`; one
 that breaks it sends the finding through the table once more (broken twice, it is `plausible`). A
-confirmed finding takes the highest severity a confirming sceptic gave.
+confirmed finding takes the highest severity a confirming sceptic gave, but one reported at medium or
+above is never confirmed below medium: a confirmation keeps it in the gate, and only a refutation,
+with quoted guards and a second look, takes it out.
 
 **What blocks** (§2.11): a confirmed critical, high or medium finding; a plausible critical or high
 finding; a medium or higher finding no sceptic could judge (`unverified`, fail-closed); a
@@ -209,8 +218,7 @@ sessions on the build machine, as today's merge gate.
   the open blockers every run carries come from the same local records.
   Run records live in `$FIN_REVIEW_HOME`, which any process of the same user can write; with no
   separate OS user, that is the trust the trimmed phase has.
-- **Not yet in this slice**: the injection filter of free text (§2.8 rule 5) and de-duplication;
-  sceptics for low findings (lows are recorded `unverified` and never block); sibling sessions
+- **Not yet in this slice**: de-duplication (§2.8); sceptics for low findings (lows are recorded `unverified` and never block); sibling sessions
   (§2.10); the dependency approval of §2.11 rule 5; reading the effort back (`effortObserved` is
   always `null`, so the effort is as requested).
 

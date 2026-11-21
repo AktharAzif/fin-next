@@ -51,6 +51,7 @@ import type { AttackProfile, Procedure } from "./procedure.ts";
 import { buildContextPack, dataBlock, lensPrompt, numberedFile, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
 import { compileSchema } from "./schema.ts";
 import type { Refutation } from "./prompts.ts";
+import { filterFreeText, filterText } from "./injection.ts";
 import { entryKind, pathTextProblem, TreeError, treeProblems, writeTree } from "./tree.ts";
 import type { EntryKind } from "./tree.ts";
 import {
@@ -798,6 +799,8 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           return;
         }
         const out = result.output;
+        // Rule 5 for a verifier's own free text too: a second look and the summary see it filtered.
+        const reason = filterText(typeof out["reason"] === "string" ? out["reason"] : "", procedure.injectionPatterns);
         if (isSceptic) {
           const verdict = out["verdict"] as Verdict["verdict"];
           const guardQuotes = Array.isArray(out["guardQuotes"]) ? (out["guardQuotes"] as unknown as Quote[]) : [];
@@ -810,7 +813,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
             verdict,
             guarded,
             guardQuotes,
-            reason: typeof out["reason"] === "string" ? out["reason"] : "",
+            reason,
             ...(severity === undefined ? {} : { severity }),
           };
           rec.verdicts.push(entry);
@@ -822,7 +825,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           session: id,
           verdict: look,
           quotes: Array.isArray(out["quotes"]) ? (out["quotes"] as unknown as Quote[]) : [],
-          reason: typeof out["reason"] === "string" ? out["reason"] : "",
+          reason,
         });
         if (look === "STANDS") {
           rec.state = "refuted";
@@ -856,7 +859,8 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       for (const check of validated.findings) {
         findingCount++;
         const number = String(findingCount).padStart(3, "0");
-        const finding = check.finding as Finding;
+        // Rule 5 before anyone else sees it: free text addressed to a reviewer is withheld.
+        const finding = filterFreeText(check.finding, procedure.injectionPatterns).finding as Finding;
         const firstPath = check.ok ? finding.where[0]?.path : undefined;
         const rec: FindingRecord = {
           id: `F-${runId}-${number}`,
@@ -864,7 +868,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           lensKey: plan.lensKey,
           state: check.ok ? "kept" : "invalid",
           problems: check.problems,
-          finding: check.finding,
+          finding,
           reportedSeverity: check.ok ? finding.severity : null,
           severity: check.ok ? finding.severity : null,
           tier: firstPath === undefined ? null : tierOf(layout, firstPath).tier,

@@ -54,9 +54,17 @@ describe("the confirmed severity (T-RV-17)", () => {
     assert.equal(outcome(combine("high", [{ ...C, severity: "critical" }, { ...C, severity: "medium" }])), "confirmed:critical");
     assert.equal(outcome(combine("high", [{ ...C, severity: "medium" }, U])), "confirmed:medium");
     assert.equal(outcome(combine("high", [C, { ...C, severity: "medium" }])), "confirmed:high");
-    assert.equal(outcome(combine("medium", [{ ...C, severity: "low" }])), "confirmed:low");
     assert.equal(outcome(combine("low", [U, { ...C, severity: "high" }])), "confirmed:high");
+    assert.equal(outcome(combine("low", [{ ...C, severity: "low" }])), "confirmed:low");
     assert.equal(outcome(combine("high", [{ ...U, severity: "low" }, U])), "plausible:high", "an UNSURE sceptic's severity does not count");
     assert.equal(maxSeverity("low", "critical"), "critical");
+  });
+
+  it("never confirms a finding reported at medium or above below medium: only a refutation takes it out of the gate", () => {
+    assert.equal(outcome(combine("medium", [{ ...C, severity: "low" }])), "confirmed:medium");
+    assert.equal(outcome(combine("critical", [{ ...C, severity: "low" }, U])), "confirmed:medium");
+    assert.equal(outcome(combine("critical", [{ ...C, severity: "low" }, { ...C, severity: "low" }])), "confirmed:medium");
+    assert.equal(outcome(combine("high", [U, { ...C, severity: "low" }])), "confirmed:medium");
+    assert.equal(outcome(combine("critical", [{ ...C, severity: "high" }, U])), "confirmed:high", "a lower severity inside the gate is kept");
   });
 });

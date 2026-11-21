@@ -2,8 +2,9 @@
 // §2.8; [RV-21]): rule 1 the output matches its schema; rule 2 every `where.path` is a file of the
 // reviewed head (at the base for a deletion) inside what the session was given, its lines within
 // the file; rule 3 every quote is an exact substring of the named file after CRLF becomes LF; rule 4
-// the length caps (in the schema); rule 6 `checked` names every checklist item. Rule 5 (the
-// injection filter) lands with the procedure's pattern list (open item).
+// the length caps (in the schema); rule 6 `checked` names every checklist item, and an item marked
+// `finding` comes with at least one finding. Rule 5, the filter of free text addressed to a reviewer,
+// is src/review/injection.ts, applied by the run before anyone else sees a finding.
 //
 // A prior blocker is `fixed` only with a quote of the fix (spec 07 §2.3.2) that comes from the file
 // its `fixWhere` names, lies within those lines, and touches a line changed since the blocker was
@@ -45,6 +46,8 @@ export interface Finding {
   readonly ruleId?: string;
   readonly testShouldFail: string;
   readonly preExisting: boolean;
+  /** Set by the engine (rule 5): a free-text field addressed a reviewer and was withheld. */
+  readonly injectionSuspect?: boolean;
 }
 
 /** The reviewed files, as text with CRLF already turned to LF. */
@@ -87,6 +90,8 @@ export interface ValidatedOutput {
   readonly structureProblems: readonly string[];
   readonly done: boolean;
   readonly missingItems: readonly string[];
+  /** Checklist items the session marked `finding`. */
+  readonly flaggedItems: readonly string[];
   readonly findings: readonly FindingCheck[];
   readonly procedureGaps: readonly string[];
   readonly prior: readonly PriorCheck[];
@@ -170,13 +175,27 @@ export function validateOutput(output: unknown, ctx: ValidationContext): Validat
     } else structure.push(describe(error));
   }
   if (!isJsonObject(output)) {
-    return { structureProblems: structure.length > 0 ? structure : ["the output is not an object"], done: false, missingItems: [...ctx.checklist], findings: [], procedureGaps: [], prior: [] };
+    return {
+      structureProblems: structure.length > 0 ? structure : ["the output is not an object"],
+      done: false,
+      missingItems: [...ctx.checklist],
+      flaggedItems: [],
+      findings: [],
+      procedureGaps: [],
+      prior: [],
+    };
   }
   const done = output["done"] === true;
   const checked = Array.isArray(output["checked"]) ? output["checked"] : [];
   const named = new Set<string>();
-  for (const entry of checked) if (isJsonObject(entry) && typeof entry["item"] === "string") named.add(entry["item"]);
+  const flagged = new Set<string>();
+  for (const entry of checked) {
+    if (!isJsonObject(entry) || typeof entry["item"] !== "string") continue;
+    named.add(entry["item"]);
+    if (entry["verdict"] === "finding") flagged.add(entry["item"]);
+  }
   const missingItems = ctx.checklist.filter((id) => !named.has(id));
+  const flaggedItems = ctx.checklist.filter((id) => flagged.has(id));
 
   const findings: FindingCheck[] = [];
   const rawFindings = Array.isArray(output["findings"]) ? output["findings"] : [];
@@ -219,7 +238,7 @@ export function validateOutput(output: unknown, ctx: ValidationContext): Validat
   });
 
   const gaps = Array.isArray(output["procedureGaps"]) ? output["procedureGaps"].filter((gap): gap is string => typeof gap === "string") : [];
-  return { structureProblems: structure, done, missingItems, findings, procedureGaps: gaps, prior };
+  return { structureProblems: structure, done, missingItems, flaggedItems, findings, procedureGaps: gaps, prior };
 }
 
 /** The first reason an output breaks the rules, or null when it keeps them all. */
@@ -227,6 +246,8 @@ export function outputProblem(result: ValidatedOutput): string | null {
   if (result.structureProblems.length > 0) return `schema: ${result.structureProblems[0]}`;
   if (!result.done) return "the session reported done: false";
   if (result.missingItems.length > 0) return `checked omits ${result.missingItems.join(", ")}`;
+  // An item marked as a finding with no finding reported is an answer the gate cannot see.
+  if (result.flaggedItems.length > 0 && result.findings.length === 0) return `checked marks ${result.flaggedItems.join(", ")} as a finding but reports no finding`;
   const finding = result.findings.find((check) => !check.ok);
   if (finding !== undefined) return `finding ${finding.index}: ${finding.problems[0] ?? "invalid"}`;
   const prior = result.prior.find((check) => check.problems.length > 0);

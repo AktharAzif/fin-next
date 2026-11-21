@@ -9,6 +9,7 @@ import { ConfigError } from "../errors.ts";
 import { isJsonObject, readJsonFile } from "../json.ts";
 import { compileGlob, globError } from "../plan/glob.ts";
 import type { Glob } from "../plan/glob.ts";
+import { parseInjectionPatterns } from "./injection.ts";
 import { LENSES } from "./lenses.ts";
 import type { Lens } from "./lenses.ts";
 import { SchemaDefinitionError, compileSchema } from "./schema.ts";
@@ -49,6 +50,8 @@ export interface Procedure {
   readonly schemas: { readonly session: object; readonly sceptic: object; readonly secondLook: object; readonly doctor: object };
   readonly profiles: readonly AttackProfile[];
   readonly exclusions: readonly Glob[];
+  /** Rule 5's patterns (injection-patterns.json): free text that addresses a reviewer or a model. */
+  readonly injectionPatterns: readonly RegExp[];
   /** docs/review/rules-digest.md, when the procedure has one. */
   readonly rulesDigest: string | null;
 }
@@ -195,6 +198,7 @@ export function loadProcedure(dir: string): Procedure {
   };
   const profiles = parseProfiles(readJson(dir, "attack-profiles.json", problems), problems);
   const exclusions = parseExclusions(readJson(dir, "exclusions.json", problems), problems);
+  const injectionPatterns = parseInjectionPatterns(readJson(dir, "injection-patterns.json", problems), problems);
   const rulesDigest = readText(dir, "rules-digest.md", problems, true);
   if (problems.length > 0) throw new ConfigError("docs/review", problems);
   return Object.freeze({
@@ -208,6 +212,7 @@ export function loadProcedure(dir: string): Procedure {
     schemas: Object.freeze(schemas),
     profiles: Object.freeze(profiles),
     exclusions: Object.freeze(exclusions),
+    injectionPatterns: Object.freeze(injectionPatterns),
     rulesDigest,
   });
 }

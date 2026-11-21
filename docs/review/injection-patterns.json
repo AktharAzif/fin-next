@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "note": "Spec 07 §2.8 rule 5 (S7-17): phrases in a finding's free text (title, claim, scenario, testShouldFail) that address a reviewer or a model. Each pattern is a regular expression matched without regard to case. A match replaces that field with [withheld: text addressed to a reviewer] and marks the finding injectionSuspect; the finding itself stays. The reason of a refutation shown to a second look is filtered the same way. A false match only withholds text from the next session, which still has the finding's paths, lines and quotes.",
+  "patterns": [
+    "\\bignore\\b",
+    "\\bdisregard\\b",
+    "\\byou (?:must|should|need to|have to|are required to|are instructed to)\\b",
+    "\\bas (?:the|a|an) (?:reviewer|sceptic|skeptic|auditor|assistant|model|ai|second look)\\b",
+    "\\b(?:dear|hey|attention) (?:reviewer|sceptic|skeptic|model|assistant|claude)\\b",
+    "(?:^|\\s)(?:system|assistant|developer|human)\\s*:",
+    "<\\|?\\/?(?:system|im_start|im_end|endoftext)\\|?>",
+    "\\[\\/?INST\\]",
+    "<\\/?(?:system|instructions?|prompt)>",
+    "\\b(?:previous|prior|above|earlier|new|updated) instructions\\b",
+    "\\b(?:mark|treat|consider|record|report) (?:this|it|the finding|these|them) as (?:refuted|fixed|resolved|safe|invalid|a false positive|not a (?:bug|finding|defect))\\b",
+    "\\b(?:do not|don't|never) (?:report|flag|block|confirm|refute|mention|escalate)\\b",
+    "={3,}\\s*(?:END )?DATA\\b"
+  ]
+}
