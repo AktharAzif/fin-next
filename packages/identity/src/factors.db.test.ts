@@ -520,6 +520,62 @@ describe("a trusted-browser session (§6.6, S2-40)", () => {
   });
 });
 
+describe("a trusted-browser session that shows its factor (§6.1, §6.6)", () => {
+  it("is raised by its own step-up, so a factor change it makes leaves it signed in", async () => {
+    const email = `trust.raised.${Math.random().toString(36).slice(2, 8)}@example.com`;
+    const browser = h.browser();
+    await codeSignIn(h, browser, email);
+    const { secret } = await setUpAuthenticator(browser);
+    await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
+    await browser.post("/api/auth/sign-out");
+    await codeSignIn(h, browser, email);
+    const trusted = await browser.post("/api/auth/two-factor/verify-totp", {
+      code: hotp(secret, totpStep(new Date())),
+      trustDevice: true,
+    });
+    expect(trusted.status, JSON.stringify(trusted.json)).toBe(200);
+    await browser.post("/api/auth/sign-out");
+    await codeSignIn(h, browser, email);
+    const before = await sessionRow(browser);
+    expect(before).toMatchObject({ assurance: "aal1" });
+    expect(before?.trusted_browser_id).not.toBeNull();
+    // Long past the factor step's 10 minutes: a trusted-browser session is a working session.
+    await seed(
+      h.admin,
+      "UPDATE identity.session SET created_at = now() - interval '2 hours' WHERE id = $1",
+      [before?.id],
+    );
+
+    // Adding a passkey: the POST makes the intent, and the authenticator proves it.
+    const asked = await browser.post("/api/auth/passkey/verify-registration", {});
+    expect(asked.json).toMatchObject({ code: "step_up_required" });
+    const intent = String(asked.json?.intent_id);
+    await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
+    const proved = await browser.post(
+      "/api/auth/two-factor/verify-totp",
+      { code: hotp(secret, totpStep(new Date())) },
+      { "fin-step-up-intent": intent },
+    );
+    expect(proved.status, JSON.stringify(proved.json)).toBe(200);
+    // The signed-in check raises this same session (§6.1).
+    expect(await sessionRow(browser)).toMatchObject({ id: before?.id, assurance: "aal2" });
+    const { verify } = await registerPasskey(browser, h.authenticator(), {
+      "fin-step-up-intent": intent,
+    });
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+
+    // The factor change revoked the trusted browser (§6.6), and the session still works.
+    const revoked = await h.admin.query<{ revoked_reason: string | null }>(
+      "SELECT revoked_reason FROM identity.trusted_browser WHERE id = $1",
+      [before?.trusted_browser_id],
+    );
+    expect(revoked.rows[0]?.revoked_reason).toBe("factor_changed");
+    const next = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+    expect(next.json).toMatchObject({ code: "step_up_required" });
+    expect(await sessionRow(browser)).toMatchObject({ id: before?.id, assurance: "aal2" });
+  });
+});
+
 describe("a replaced session keeps the organisation it was in (§11.3)", () => {
   it("when finishing an authenticator replaces it", async () => {
     const browser = h.browser();

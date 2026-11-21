@@ -267,6 +267,7 @@ describe("a window (§7.3) through requirePerson", () => {
             actor: who.actor,
             context: { clientIp: null, userAgent: null },
             knownBrowserToken: null,
+            trustedBrowserToken: null,
           });
         }
         return who;

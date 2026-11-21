@@ -652,6 +652,12 @@ async function factorPassed(
   // A step-up: a proof in this session, and the named intent proved (§7.4).
   const intentId = intentIdFrom(headersOf(ctx));
   const proofId = await recordProof(tx, rt.clock, realm, { userId, sessionId, method, intentId });
+  if (prior.session.assurance !== "aal2") {
+    // A factor shown later in the same session raises it (§6.1): a trusted-browser session that
+    // has shown its factor no longer rests on its row, so an action it then takes that revokes the
+    // row (a factor change, "forget this browser") leaves it signed in. `step_up.passed` names it.
+    await raiseAssurance(tx, realm, sessionId, now);
+  }
   const action =
     intentId === null
       ? null

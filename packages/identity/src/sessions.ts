@@ -3,7 +3,7 @@
 // `account.sessions_revoke_others`); these are their cores, run in the route's unit of work after
 // requirePerson has checked and consumed the intent.
 import type { AuditActor } from "./audit/record.ts";
-import { forgetKnownBrowsersExcept, revokeTrustedBrowsers } from "./browsers.ts";
+import { forgetKnownBrowsersExcept, revokeTrustedBrowsers, thisBrowsersTrust } from "./browsers.ts";
 import type { UnitTx } from "./ports/db.ts";
 import type { RealmRuntime } from "./runtime.ts";
 import { TABLES } from "./store.ts";
@@ -16,6 +16,11 @@ export interface SessionActor {
   context: { clientIp: string | null; userAgent: string | null };
   /** The current browser's known-browser token, which "everywhere else" keeps. */
   knownBrowserToken: string | null;
+  /**
+   * The current browser's trusted-browser token (`__Host-fin.trusted_browser`), whose row
+   * "everywhere else" keeps, as it keeps the row the current session was made from (§11.4).
+   */
+  trustedBrowserToken: string | null;
 }
 
 /** Signs out one other session of the person; returns false when it is not theirs or is this one. */
@@ -45,8 +50,9 @@ export async function revokeSession(
 }
 
 /**
- * "Sign out everywhere else": every other session ends, every known browser but this one is
- * forgotten and every trusted browser revoked, with the events and the notice (§5.5, §6.6).
+ * "Sign out everywhere else": every other session ends, and every known and trusted browser but
+ * this one is forgotten or revoked, with the events and the notice (§11.4, §5.5, §6.6). This
+ * session and this browser's trust stay, so the person goes on working where they pressed it.
  */
 export async function revokeOtherSessions(
   rt: RealmRuntime,
@@ -62,7 +68,17 @@ export async function revokeOtherSessions(
   const count = deleted.rowCount;
   if (realm === "developer") {
     await forgetKnownBrowsersExcept(tx, rt.hasher, who.personId, who.knownBrowserToken);
-    const revoked = await revokeTrustedBrowsers(tx, who.personId, "signed_out_everywhere", now);
+    const keep = await thisBrowsersTrust(
+      tx,
+      rt.hasher,
+      who.personId,
+      who.currentSessionId,
+      who.trustedBrowserToken,
+      now,
+    );
+    const revoked = await revokeTrustedBrowsers(tx, who.personId, "signed_out_everywhere", now, {
+      except: keep,
+    });
     for (const id of revoked) {
       await rt.audit(tx, {
         event: "browser.trust_revoked",

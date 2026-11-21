@@ -33,6 +33,12 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
   the request state bound); `requirePerson()` is the guard for person-scope routes, `signUp()` the
   core of `POST /api/sign-up`, `revokeSession()` and `revokeOtherSessions()` the cores of Account
   security's session routes, `issueEnrolmentCode()` and `redeemEnrolmentCode()` the staff routes'.
+- "Sign out everywhere else" keeps this browser (§11.4): its route passes the browser's
+  `__Host-fin.known_browser` and `__Host-fin.trusted_browser` tokens as `knownBrowserToken` and
+  `trustedBrowserToken`, and `revokeOtherSessions()` keeps those rows and the trusted browser the
+  current session came from, ending every other session.
+- A factor shown at a step-up raises the session to `aal2` (§6.1), so a trusted-browser session
+  that has shown its factor keeps working when an action it takes revokes its row.
 - The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
   Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
 

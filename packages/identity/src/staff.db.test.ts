@@ -469,6 +469,7 @@ describe("a working staff member", () => {
       actor: { kind: "staff" as const, id: memberId, via: "admin" as const },
       context: { clientIp: null, userAgent: null },
       knownBrowserToken: null,
+      trustedBrowserToken: null,
     };
     const count = await h.realm.run(browser.context(), async (tx) => {
       expect(await revokeSession(h.realm.runtime, tx, who, target?.id as string)).toBe(true);

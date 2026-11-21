@@ -144,21 +144,45 @@ export async function markTrustedBrowserUsed(db: Queryable, id: string, now: Dat
 }
 
 /**
- * Revokes a person's live trusted browsers (all, or one) with a reason; returns the revoked IDs.
- * The caller records one `browser.trust_revoked` per ID in the same transaction (§6.6).
+ * Revokes a person's live trusted browsers with a reason: all of them, only one (`only`), or all
+ * but some (`except`, "sign out everywhere else" keeping this browser's, §11.4). Returns the
+ * revoked IDs; the caller records one `browser.trust_revoked` per ID in the same transaction
+ * (§6.6).
  */
 export async function revokeTrustedBrowsers(
   db: Queryable,
   userId: string,
   reason: TrustRevokedReason,
   now: Date,
-  onlyId: string | null = null,
+  scope: { only?: string; except?: readonly string[] } = {},
 ): Promise<string[]> {
   const result = await db.query<{ id: string }>(
     `UPDATE identity.trusted_browser SET revoked_at = $3, revoked_reason = $2
       WHERE user_id = $1 AND revoked_at IS NULL AND ($4::text IS NULL OR id = $4)
+        AND NOT (id = ANY($5::text[]))
       RETURNING id`,
-    [userId, reason, now, onlyId],
+    [userId, reason, now, scope.only ?? null, [...(scope.except ?? [])]],
   );
   return result.rows.map((r) => r.id);
+}
+
+/**
+ * The trusted-browser rows that are this browser's (§11.4): the one the session was made from
+ * (or inherited on replacement), and the live one the browser's own cookie names.
+ */
+export async function thisBrowsersTrust(
+  db: Queryable,
+  hasher: KeyedHasher,
+  userId: string,
+  sessionId: string,
+  token: string | null,
+  now: Date,
+): Promise<string[]> {
+  const session = await db.query<{ trusted_browser_id: string | null }>(
+    "SELECT trusted_browser_id FROM identity.session WHERE id = $1 AND user_id = $2",
+    [sessionId, userId],
+  );
+  const fromSession = session.rows[0]?.trusted_browser_id ?? null;
+  const fromCookie = (await trustedBrowserOf(db, hasher, userId, token, now))?.id ?? null;
+  return [...new Set([fromSession, fromCookie].filter((id): id is string => id !== null))];
 }
