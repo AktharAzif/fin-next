@@ -28,7 +28,10 @@ export interface TunnelSettings {
   name: string;
   connector: string;
   standby: string;
+  /** The hosts whose proxied CNAME points at this tunnel. */
   hosts: HostRole[];
+  /** The hosts its ingress map serves (the docs host has none, spec 01 §7.3). */
+  ingress: HostRole[];
 }
 
 export interface StaticSettings {
@@ -65,6 +68,8 @@ export interface Settings {
   };
   hostRoles: { browser: HostRole[]; apiPaths: HostRole[]; api: HostRole };
   tunnels: Record<TunnelRole, TunnelSettings>;
+  /** Railway service to the host roles whose ingress proofs it holds. */
+  ingressProofs: Record<string, HostRole[]>;
   static: Record<string, StaticSettings>;
   staticOrder: string[];
   access: {
@@ -192,7 +197,14 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
       connector: c.str(t.connector, `tunnels.${role}.connector`, SERVICE),
       standby: c.str(t.standby, `tunnels.${role}.standby`, SERVICE),
       hosts: c.roles(t.hosts, `tunnels.${role}.hosts`),
+      ingress: c.roles(t.ingress, `tunnels.${role}.ingress`),
     };
+  }
+  const proofsRaw = c.obj(top.ingressProofs, "ingressProofs");
+  const ingressProofs: Record<string, HostRole[]> = {};
+  for (const [service, roles] of Object.entries(proofsRaw)) {
+    if (service === "$comment") continue;
+    ingressProofs[service] = c.roles(roles, `ingressProofs.${service}`);
   }
   const staticRaw = c.obj(top.static, "static");
   const statics: Record<string, StaticSettings> = {};
@@ -262,6 +274,7 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
       api: c.role(hostRoles.api, "hostRoles.api"),
     },
     tunnels,
+    ingressProofs,
     static: statics,
     staticOrder: c.list(top.staticOrder, "staticOrder"),
     access: {
@@ -323,6 +336,16 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
       if (!Object.hasOwn(services, service))
         c.problems.push(`tunnel ${t.name} names ${service}, which has no service`);
     }
+  }
+  for (const t of Object.values(tunnels)) {
+    for (const role of t.ingress) {
+      if (!t.hosts.includes(role))
+        c.problems.push(`tunnel ${t.name} serves ${role} but has no CNAME for it`);
+    }
+  }
+  for (const service of Object.keys(ingressProofs)) {
+    if (services[service] === undefined)
+      c.problems.push(`ingressProofs names ${service}, which has no service`);
   }
   for (const name of settings.staticOrder) {
     if (!Object.hasOwn(statics, name))

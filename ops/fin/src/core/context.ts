@@ -1,5 +1,10 @@
 // The context one command runs in: the environment's settings, the overlay (loaded and masked
 // before anything is printed), the guard, credentials by file, the output and the run.
+//
+// A mutating run (without --dry-run) holds the run lock from before the command reads any provider
+// state until its run is done, so the plan it prints and applies cannot go stale under another run
+// (spec 01 §10). The CLI takes it (Run.acquire) before the command runs, and Run.register keeps the
+// lock the run already holds, so no other run can take it in between and nothing is sent.
 
 import { join } from "node:path";
 import { flagBool, flagInt, type ParsedArgs } from "./args.ts";
@@ -16,6 +21,22 @@ import { type Runtime, stateDir } from "./runtime.ts";
 import type { Secret } from "./secret.ts";
 import type { Environment, Settings } from "./settings.ts";
 
+/** The result a run.done records for an error: a safety rule's refusal, or a failure. */
+export function resultOf(error: unknown): RunResult {
+  return error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed";
+}
+
+export interface PlanHooks {
+  /**
+   * Checks one pending change without sending anything (the writer's check: the guard, the
+   * endpoint, the body). Every pending change is checked before the run registers, so a refusal
+   * sends nothing.
+   */
+  check?: (change: Change) => void;
+  /** Read back after a registered run's changes; its fields join `run.done` (never printed). */
+  after?: () => Promise<Record<string, unknown>>;
+}
+
 export interface ContextOptions {
   runtime: Runtime;
   environment: Environment;
@@ -26,11 +47,6 @@ export interface ContextOptions {
   command: string;
   mutating: boolean;
   needsOverlay: boolean;
-}
-
-/** The result a run.done records for an error: a safety rule's refusal, or a failure. */
-export function resultOf(error: unknown): RunResult {
-  return error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed";
 }
 
 export class Context {
@@ -113,9 +129,11 @@ export class Context {
   /**
    * Prints a plan, and unless this is a dry run applies its pending changes in order inside a
    * registered run: run.registered (shipped at once) before the first change, one run.step per
-   * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Returns the
-   * exit code: 0 when everything planned was applied (or, in a dry run, when nothing differs), 1
-   * when a dry run shows changes or some changes were held. A run applies one plan.
+   * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Every pending
+   * change is checked first (hooks.check), so a refusal sends nothing; what hooks.after reads back
+   * after the changes joins run.done. Returns the exit code: 0 when everything planned was applied
+   * (or, in a dry run, when nothing differs), 1 when a dry run shows changes or some changes were
+   * held. A run applies one plan.
    *
    * Before each change it checks that the run may still send (Run.assertCanStart: not stopped by a
    * signal or a closed output, still registered and open, still holding the lock), so no change
@@ -128,11 +146,13 @@ export class Context {
     changes: readonly Change[],
     apply: (change: Change) => Promise<void>,
     fields: Record<string, unknown> = {},
+    hooks: PlanHooks = {},
   ): Promise<number> {
     for (const line of formatPlan(title, changes)) this.out.info(line);
     const todo = pending(changes);
     const summary = summarize(changes);
     if (this.dryRun) {
+      for (const change of todo) hooks.check?.(change);
       this.out.info(todo.length === 0 ? "dry run: nothing to change" : "dry run: nothing was sent");
       return todo.length === 0 && summary.held === 0 ? 0 : 1;
     }
@@ -141,8 +161,10 @@ export class Context {
       return summary.held === 0 ? 0 : 1;
     }
     checkDeletes(changes, flagInt(this.args, "confirm-delete"));
+    for (const change of todo) hooks.check?.(change);
     this.run.register({ plan: summary, ...fields });
     await this.run.flushLines();
+    let readBack: Record<string, unknown> = {};
     try {
       for (const change of todo) {
         this.run.assertCanStart(`${change.action} ${change.kind}`);
@@ -159,6 +181,7 @@ export class Context {
           this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
         }
       }
+      readBack = hooks.after === undefined ? {} : await hooks.after();
       // A stop that came while the last change was in flight: that change is recorded above.
       this.run.assertNotStopped();
     } catch (error) {
@@ -168,7 +191,7 @@ export class Context {
       });
       throw error;
     }
-    this.run.finish("ok", { plan: summary, ...fields });
+    this.run.finish("ok", { plan: summary, ...fields, ...readBack });
     return summary.held === 0 ? 0 : 1;
   }
 }

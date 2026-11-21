@@ -11,7 +11,8 @@ import {
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { COMMANDS, runCli } from "../src/cli.ts";
-import { EXIT } from "../src/core/errors.ts";
+import type { Command } from "../src/command.ts";
+import { EXIT, RefusedError } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import { RunLog } from "../src/core/runlog.ts";
 import {
@@ -354,6 +355,68 @@ describe("the CLI", () => {
       EXIT.ok,
     );
     assert.match(r.err(), /the overlay is not loaded.*logged as typed/);
+  });
+
+  it("checks every pending change before the run registers, so a refusal sends nothing", async () => {
+    const { env } = commandEnv();
+    const r = fakeRuntime({ env });
+    const applied: string[] = [];
+    const command: Command = {
+      words: ["test", "apply"],
+      summary: "a test command",
+      positionals: [],
+      flags: [],
+      overlay: true,
+      mutating: true,
+      runbook: "pnpm-fin.md",
+      run: (ctx) =>
+        ctx.applyPlan(
+          "test",
+          [
+            { kind: "thing", name: "first", action: "create" },
+            { kind: "thing", name: "second", action: "create" },
+          ],
+          async (change) => {
+            applied.push(change.name);
+          },
+          {},
+          {
+            check: (change) => {
+              if (change.name === "second") throw new RefusedError("the second is refused");
+            },
+          },
+        ),
+    };
+    assert.equal(await runCli(["test", "apply", "staging"], r, [command]), EXIT.refused);
+    assert.deepEqual(applied, []);
+    assert.equal(existsSync(join(env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl")), false);
+    assert.equal(existsSync(join(env.FIN_STATE_DIR ?? "", "staging", "lock.json")), false);
+  });
+
+  it("records a refusal during a run as refused, not failed", async () => {
+    const { env } = commandEnv();
+    const r = fakeRuntime({ env });
+    const command: Command = {
+      words: ["test", "apply"],
+      summary: "a test command",
+      positionals: [],
+      flags: [],
+      overlay: true,
+      mutating: true,
+      runbook: "pnpm-fin.md",
+      run: (ctx) =>
+        ctx.applyPlan("test", [{ kind: "thing", name: "one", action: "create" }], async () => {
+          throw new RefusedError("a safety rule stopped it");
+        }),
+    };
+    assert.equal(await runCli(["test", "apply", "staging"], r, [command]), EXIT.refused);
+    const records = readFileSync(join(env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(records.at(-1)?.event, "run.done");
+    assert.equal(records.at(-1)?.result, "refused");
+    assert.equal(existsSync(join(env.FIN_STATE_DIR ?? "", "staging", "lock.json")), false);
   });
 
   it("names a runbook that exists for every command", () => {
