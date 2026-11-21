@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fin-review sceptic output (spec 07 §2.9)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "guardQuotes", "reason"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["CONFIRMED", "REFUTED", "UNSURE"] },
+    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+    "guardQuotes": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "text"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "text": { "type": "string", "minLength": 1, "maxLength": 300 }
+        }
+      }
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 600 }
+  }
+}

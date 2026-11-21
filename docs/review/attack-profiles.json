@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "note": "Attack profiles (spec 07 §2.7): the Phase 0 and Saturday profiles and generic. A tier S path that no other profile maps gets generic. prompts/attack.md shows the same list as a table; a test keeps them equal.",
+  "profiles": [
+    {
+      "id": "pipeline",
+      "day": "Phase 0",
+      "actor": "A builder or branch that edits workflows, caches, the receipt or the engine to pass itself; pull_request_target; unpinned actions; a forged receipt",
+      "paths": [
+        ".github/**", "tools/fin-review/**", "docs/review/**", "scripts/**", ".claude/**", ".githooks/**",
+        "ops/docker/**", "tools/layout.json", "CODEOWNERS"
+      ]
+    },
+    {
+      "id": "public-leak",
+      "day": "Phase 0",
+      "actor": "A stranger reading the public repository, its logs, artefacts, caches and refs",
+      "paths": [".github/**", "ops/**", "packages/core/**", "packages/server/**", "packages/testing/**", "tools/fin-review/**"]
+    },
+    {
+      "id": "railway-neighbour",
+      "day": "Phase 0",
+      "actor": "A process on Railway's private network calling a service directly",
+      "paths": ["apps/api/**", "apps/payments/**", "apps/edge/**", "apps/*/src/server/**", "packages/server/**"]
+    },
+    {
+      "id": "tunnel-token",
+      "day": "Phase 0",
+      "actor": "A holder of a tunnel token running a connector of their own",
+      "paths": ["apps/connector/**", "packages/server/**", "ops/fin/**", "ops/watcher/**", "ops/environments/**"]
+    },
+    {
+      "id": "bypass-connector",
+      "day": "Phase 0",
+      "actor": "A request that did not come through a connector",
+      "paths": ["packages/server/**", "packages/web-host/**"]
+    },
+    {
+      "id": "insider-role",
+      "day": "Saturday",
+      "actor": "A member or staff user exceeding a granular role, or acting on someone who outranks them",
+      "paths": ["packages/access/**", "packages/orgs/**", "packages/staff/**", "apps/console/src/server/**", "apps/admin/src/server/**"]
+    },
+    {
+      "id": "step-up-bypass",
+      "day": "Saturday",
+      "actor": "A used intent, an intent for another action, a proof from another session, a replayed ceremony",
+      "paths": ["packages/identity/**", "apps/*/src/server/**"]
+    },
+    {
+      "id": "staff-enrolment",
+      "day": "Saturday",
+      "actor": "A staff enrolment by someone who holds only the mailbox",
+      "paths": ["packages/staff/**", "packages/identity/**"]
+    },
+    {
+      "id": "enumeration",
+      "day": "Saturday",
+      "actor": "Learning whether an account exists from a public answer",
+      "paths": ["packages/identity/**", "apps/edge/**", "apps/*/src/server/**"]
+    },
+    {
+      "id": "session-cookie",
+      "day": "Saturday",
+      "actor": "Session fixation, cookie scope, CSRF and the origin gate",
+      "paths": ["packages/identity/**", "packages/web-host/**"]
+    },
+    {
+      "id": "unlisted-endpoint",
+      "day": "Saturday",
+      "actor": "Reaching a Better Auth endpoint the allowlist does not name",
+      "paths": ["packages/identity/**"]
+    },
+    {
+      "id": "invitation-hijack",
+      "day": "Saturday",
+      "actor": "An invitation taken by an unconfirmed address",
+      "paths": ["packages/orgs/**"]
+    },
+    {
+      "id": "privilege-gift",
+      "day": "Saturday",
+      "actor": "Giving more than one holds; removing the last admin",
+      "paths": ["packages/access/**", "packages/orgs/**", "packages/staff/**"]
+    },
+    {
+      "id": "forged-access",
+      "day": "Saturday",
+      "actor": "A forged Access identity at Fin Admin",
+      "paths": ["packages/staff/**", "apps/admin/src/server/**"]
+    },
+    {
+      "id": "leaked-login",
+      "day": "Saturday",
+      "actor": "A leaked service database login writing a critical table",
+      "paths": ["packages/db/**", "packages/audit/**"]
+    },
+    {
+      "id": "generic",
+      "day": "any",
+      "actor": "An anonymous stranger; a signed-in member of another organisation",
+      "paths": []
+    }
+  ]
+}

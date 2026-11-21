@@ -1,8 +1,9 @@
 # fin-review
 
-The review engine (spec 07). This first part holds the R11 options and their validator, the
-session roles, the effort floor and the CI planner. It imports only `node:` built-ins, so it runs
-from a sparse checkout with no install:
+The review engine (spec 07): the R11 options and their validator, the session roles, the effort
+floor and the CI planner; the locked local review sessions, the `pr` and `commit` review modes and
+the minimal doctor. It imports only `node:` built-ins, so it runs from a sparse checkout with no
+install:
 
 ```
 node tools/fin-review/src/main.ts help
@@ -10,7 +11,20 @@ node tools/fin-review/src/main.ts options [--model opus|fable] [--effort high|xh
     [--attack-model opus|fable] [--attack-effort high|xhigh|max] [--fast] [--tier S|N|D [--advisory]]
 node tools/fin-review/src/main.ts plan --base <sha> --head <sha> [--tree <dir>]
 node tools/fin-review/src/main.ts plan --ci [--tree <dir>] [--output "$GITHUB_OUTPUT"]
+node tools/fin-review/src/main.ts pr --pr <n> [--repo <dir>] [R11 options] [--advisory]
+node tools/fin-review/src/main.ts commit --pr <n> --since <sha> [--repo <dir>] [R11 options] [--advisory]
+node tools/fin-review/src/main.ts doctor [--live]
 ```
+
+`pr`, `commit` and `doctor` are described in `docs/review/README.md`, with the session lock-down,
+the flags of the pinned Claude Code, the trimmed Phase 0's deviations and the doctor's last result.
+The code: `src/runner/` (the session runner: `types.ts`, `cli.ts`, `settings.ts`, `env.ts`,
+`check.ts`, `client.ts`, and `fake.ts` for tests), `src/review/` (`run.ts` the modes, `findings.ts`
+validation, `verdicts.ts` the verdict table, `prompts.ts`, `procedure.ts`, `lenses.ts`, `attack.ts`,
+`schema.ts`, `repo.ts`, `lock.ts`, `pool.ts`, `report.ts`, `commands.ts`), `src/units/`,
+`src/plan/graph.ts` (one hop), `src/shard.ts`, `src/budget.ts`, `src/gh.ts`, `src/home.ts`,
+`src/clock.ts` and `src/doctor.ts`. The configuration adds `config/client.json` (the pin),
+`config/budgets.json` ([RV-13]'s provisional caps) and `config/lenses.json` (the lenses per tier).
 
 Every option takes `--name value` or `--name=value`. A refused option prints
 `fin-review: refused: <code>: <message>` on stderr and exits 64 before anything else happens; an
