@@ -158,6 +158,13 @@ export interface StaffHarness {
     roleKey: string,
     status: "pending" | "active" | "removed",
   ): Promise<string>;
+  /** Runs fixture SQL as the superuser with triggers (the audit guards) off. */
+  fixture(text: string, values?: readonly unknown[]): Promise<void>;
+  /**
+   * Seeds a custom staff role with the guards off (the routes that write them are stretch 3);
+   * returns its `srl_` ID.
+   */
+  seedCustomRole(name: string, permissions: readonly string[]): Promise<string>;
   /** Issues an enrolment code with the operator as actor; returns the code. */
   issueCode(memberId: string): Promise<string>;
   /** The newest sign-in code emailed to an address. */
@@ -257,6 +264,40 @@ export async function createStaffHarness(
                    CASE WHEN $4 = 'active' THEN now() END, CASE WHEN $4 = 'removed' THEN now() END)`,
           [id, email, roleKey, status],
         );
+        await admin.query("COMMIT");
+      } catch (error) {
+        await admin.query("ROLLBACK");
+        throw error;
+      }
+      return id;
+    },
+    async fixture(text, values = []) {
+      await admin.query("BEGIN");
+      try {
+        await admin.query("SET LOCAL session_replication_role = replica");
+        await admin.query(text, values);
+        await admin.query("COMMIT");
+      } catch (error) {
+        await admin.query("ROLLBACK");
+        throw error;
+      }
+    },
+    async seedCustomRole(name, permissions) {
+      const id = newId("stf", clock).replace(/^stf_/, "srl_");
+      const creator = newId("stf", clock);
+      await admin.query("BEGIN");
+      try {
+        await admin.query("SET LOCAL session_replication_role = replica");
+        await admin.query(
+          "INSERT INTO staff.role (id, name, description, created_by) VALUES ($1, $2, '', $3)",
+          [id, name, creator],
+        );
+        for (const permission of permissions) {
+          await admin.query(
+            "INSERT INTO staff.role_permission (role_id, permission) VALUES ($1, $2)",
+            [id, permission],
+          );
+        }
         await admin.query("COMMIT");
       } catch (error) {
         await admin.query("ROLLBACK");
@@ -370,6 +411,49 @@ export async function createStaffHarness(
     },
   };
   return h;
+}
+
+/**
+ * Runs a stepped-up staff route the way the client does (§7.1): the first try answers
+ * `step_up_required` with an intent, a passkey ceremony proves it, and the request is sent again
+ * once with the intent. Any other refusal of the first try is thrown as it came.
+ */
+export async function stepped<T>(
+  h: StaffHarness,
+  browser: Browser,
+  authenticator: SoftAuthenticator,
+  request: { method: string; path: string; body?: unknown },
+  fn: (tx: UnitTx, request: Request, context: RequestContext) => Promise<T>,
+): Promise<T> {
+  let intent: string;
+  try {
+    await h.route(browser, request, fn);
+    throw new Error("the route asked for no intent");
+  } catch (error) {
+    const extensions = error as { code?: string; extensions?: { intent_id?: string } };
+    if (extensions.code !== "step_up_required" || extensions.extensions?.intent_id === undefined) {
+      throw error;
+    }
+    intent = extensions.extensions.intent_id;
+  }
+  const proved = await h.prove(browser, authenticator, intent);
+  if (proved.status !== 200) throw new Error(`the ceremony answered ${proved.status}`);
+  return h.route(browser, { ...request, intent }, fn);
+}
+
+/** The refusal a route threw, as `{ code, extensions }`, or a marker when it did not refuse. */
+export async function refusalOf(run: Promise<unknown>): Promise<{
+  code: string;
+  extensions: Record<string, unknown>;
+}> {
+  try {
+    await run;
+  } catch (error) {
+    const e = error as { code?: unknown; extensions?: Record<string, unknown> };
+    if (typeof e.code === "string") return { code: e.code, extensions: e.extensions ?? {} };
+    throw error;
+  }
+  return { code: "none", extensions: {} };
 }
 
 /** Asks a sign-in code and signs in with it, from this browser (an aal1 staff session). */

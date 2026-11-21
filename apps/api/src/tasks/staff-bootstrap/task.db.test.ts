@@ -115,11 +115,12 @@ describe("staff-bootstrap", () => {
     expect(codes.rows).toHaveLength(1);
     expect(codes.rows[0]?.code_hash.toString("hex")).toBe(codeHash("ABCD-EFGH-JKMN-PQRS"));
     expect(codes.rows[0]).toMatchObject({ reason: "bootstrap", issued_by: "operator" });
+    // One statement records all three, so they share its time: compared as a set.
     const events = await eventsFor(staffId);
-    expect(events.map((e) => e.event)).toEqual([
-      "staff.member_added",
-      "staff.enrolment_code_issued",
+    expect(events.map((e) => e.event).sort()).toEqual([
       "staff.bootstrapped",
+      "staff.enrolment_code_issued",
+      "staff.member_added",
     ]);
     for (const event of events) {
       expect(event).toMatchObject({
@@ -129,8 +130,10 @@ describe("staff-bootstrap", () => {
         db_login: "fin_owner",
       });
     }
-    expect(events[0]?.metadata).toEqual({ roleKey: "admin", reactivated: false });
-    expect(events[2]?.metadata).toEqual({ reset: false, reasonCode: "first_admin" });
+    const metadata = (name: string) => events.find((e) => e.event === name)?.metadata;
+    expect(metadata("staff.member_added")).toEqual({ roleKey: "admin", reactivated: false });
+    expect(metadata("staff.bootstrapped")).toEqual({ reset: false, reasonCode: "first_admin" });
+    expect(metadata("staff.enrolment_code_issued")).toEqual({ reason: "bootstrap" });
     // Running it again for the same address while they are pending issues a new code, once.
     const again = await run({
       address: "first.admin@example.com",
@@ -226,12 +229,15 @@ describe("staff-bootstrap", () => {
     );
     expect(member.rows[0]).toEqual({ status: "pending", factor_enrolled_at: null });
     const events = (await eventsFor(staffId)).filter((e) => e.actor_id === "run_reset");
-    expect(events.map((e) => e.event)).toEqual([
-      "staff.factors_reset",
-      "staff.enrolment_code_issued",
+    expect(events.map((e) => e.event).sort()).toEqual([
       "staff.bootstrapped",
+      "staff.enrolment_code_issued",
+      "staff.factors_reset",
     ]);
-    expect(events[2]?.metadata).toEqual({ reset: true, reasonCode: "lost_factors" });
+    expect(events.find((e) => e.event === "staff.bootstrapped")?.metadata).toEqual({
+      reset: true,
+      reasonCode: "lost_factors",
+    });
     const journal = await su.query<{ kind: string }>(
       "SELECT j.kind FROM audit.journal_entry j JOIN audit.event e ON e.id = j.audit_event_id WHERE e.target_id = $1",
       [staffId],

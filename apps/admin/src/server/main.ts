@@ -45,11 +45,15 @@ export function realmClock(ctx: Pick<ServiceContext, "clock">): Clock {
 export function asConfigError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   if (error.name !== "RealmConfigError" && error.name !== "DatabaseConfigError") return error;
-  const named =
-    "variable" in error && typeof error.variable === "string"
-      ? error.variable
-      : /\b((?:FIN|BETTER_AUTH|AUTH)_[A-Z0-9_]*[A-Z0-9])/.exec(error.message)?.[1];
-  const variable = named?.replace(/_<n>$|_$/, "_1") ?? "FIN_ENVIRONMENT";
+  let named: string | undefined;
+  if ("variable" in error && typeof error.variable === "string") {
+    named = error.variable;
+  } else {
+    // A family of numbered variables (`FIN_LIMIT_KEY_<n>`) is named by its first member.
+    const match = /\b((?:FIN|BETTER_AUTH|AUTH)_[A-Z0-9_]*[A-Z0-9])(_<n>)?/.exec(error.message);
+    named = match === null ? undefined : `${match[1]}${match[2] === undefined ? "" : "_1"}`;
+  }
+  const variable = named ?? "FIN_ENVIRONMENT";
   return new ConfigError(
     /^[A-Z][A-Z0-9_]*$/.test(variable) ? variable : "FIN_ENVIRONMENT",
     "malformed",

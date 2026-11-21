@@ -194,7 +194,7 @@ export async function changeStaffRole(
     newRole: next,
   });
   if (giving !== null) throw givingRefusal(giving);
-  await refuseLastAdmin(tx, target, current, { newRole: next });
+  await refuseLastActiveAdmin(tx, target, current, { newRole: next });
   const stepUp = await who.stepUp(tx, {
     action: "staff.role",
     target: target.id,
@@ -228,7 +228,8 @@ export async function changeStaffRole(
   return { staffId: target.id, roleKey: input.roleKey, roleLabel, sessionsEnded: ended.rowCount };
 }
 
-async function refuseLastAdmin(
+/** The last active Admin stays (§10.8): `409 last_top_role` when the change would leave none. */
+export async function refuseLastActiveAdmin(
   tx: UnitTx,
   target: MemberRow,
   current: StaffRoleLookup,
@@ -261,7 +262,7 @@ async function actingOn(
     targetRole: current,
   });
   if (acting !== null) throw givingRefusal(acting);
-  if (lastAdmin !== null) await refuseLastAdmin(tx, target, current, lastAdmin);
+  if (lastAdmin !== null) await refuseLastActiveAdmin(tx, target, current, lastAdmin);
   return { target, current };
 }
 

@@ -7,8 +7,8 @@
 import { Readiness } from "@fin/server/health";
 import { ConnectorPeers } from "@fin/server/ingress";
 import { capture, randomProof } from "@fin/server/testing";
-import type { SoftAuthenticator, StaffHarness } from "@fin/staff/testing";
-import { ADMIN_ORIGIN, DOCS_ORIGIN } from "@fin/staff/testing";
+import type { StaffHarness } from "@fin/staff/testing";
+import { ADMIN_ORIGIN, DOCS_ORIGIN, SoftAuthenticator } from "@fin/staff/testing";
 import { AccessStandIn } from "@fin/testing";
 import { AccessVerifier, createApiHost } from "@fin/web-host";
 import { adminHooks } from "../app.ts";
@@ -153,6 +153,54 @@ export class AdminClient {
     if (proved.status !== 200) throw new Error(`step-up ceremony: ${proved.status}`);
     return this.send(method, path, body, { "fin-step-up-intent": intent });
   }
+}
+
+export interface HostMember {
+  staffId: string;
+  email: string;
+  client: AdminClient;
+  authenticator: SoftAuthenticator;
+}
+
+/**
+ * A member at aal2 through the API half: seeded pending with a code, signed in by an emailed
+ * code, the enrolment code redeemed, a passkey registered as the first factor.
+ */
+export async function enrolThroughHost(
+  h: StaffHarness,
+  host: AdminHost,
+  email: string,
+  roleKey: string,
+): Promise<HostMember> {
+  const staffId = await h.seedMember(email, roleKey, "pending");
+  const code = await h.issueCode(staffId);
+  const client = host.client(email);
+  const signedIn = await client.signInByCode((address) => h.latestCode(address));
+  if (signedIn.status !== 200) throw new Error(`sign-in: ${signedIn.status}`);
+  const redeemed = await client.post("/api/enrolment/redeem", { code });
+  if (redeemed.status !== 200) throw new Error(`redeem: ${redeemed.status}`);
+  const authenticator = new SoftAuthenticator(HOST, ADMIN_ORIGIN);
+  const options = await client.get("/api/auth/passkey/generate-register-options");
+  if (options.status !== 200) throw new Error(`register options: ${options.status}`);
+  const response = authenticator.register(
+    options.json as { challenge: string; user: { id: string } },
+  );
+  const verified = await client.post("/api/auth/passkey/verify-registration", { response });
+  if (verified.status !== 200) throw new Error(`registration: ${verified.status}`);
+  return { staffId, email, client, authenticator };
+}
+
+/** A pending member signed in by code: an aal1 session that reaches only enrolment. */
+export async function pendingThroughHost(
+  h: StaffHarness,
+  host: AdminHost,
+  email: string,
+): Promise<AdminClient> {
+  await h.seedMember(email, "viewer", "pending");
+  const client = host.client(email);
+  const signedIn = await client.signInByCode((address) => h.latestCode(address));
+  if (signedIn.status !== 200) throw new Error(`sign-in: ${signedIn.status}`);
+  return client;
 }
 
 export async function createAdminHost(h: StaffHarness): Promise<AdminHost> {

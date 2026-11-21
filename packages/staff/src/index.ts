@@ -77,6 +77,7 @@ export {
   newEnrolmentCode,
   normaliseAddress,
   redeemCode,
+  refuseLastActiveAdmin,
   removeStaff,
   resetStaffFactors,
   type StaffListRow,

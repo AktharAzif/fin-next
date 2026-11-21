@@ -141,6 +141,8 @@ export async function requireStaff(
     const reach = options.reach ?? ["ok"];
     if (gate === "signed_out" || !(reach as readonly string[]).includes(gate)) {
       realm.runtime.lines.write("auth.gate_refused", "warn", { realm: "staff", state: gate });
+      // A working session on the pending member's enrolment route has nothing to redeem.
+      if (gate === "ok") throw new AuthRefusal("forbidden", "gate.not_pending");
       throw new AuthRefusal("factor_step_required", `gate.${gate}`, {
         methods: gate === "factor_step" ? methods : [],
       });
