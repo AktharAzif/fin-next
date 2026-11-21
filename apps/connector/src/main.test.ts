@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SEAM_VARIABLES } from "@fin/server/seams";
 import { TEST_RELEASE } from "@fin/server/testing";
+import { spawnThenCloseStdout } from "@fin/server/testing/child";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { childEnvironment, cloudflaredArgs, main } from "./main.ts";
 
@@ -256,4 +257,70 @@ describe("main", () => {
     ]);
     expect(lines.at(-1)?.event).toBe("connector.exited");
   }, 20_000);
+});
+
+/**
+ * The supervisor run as its own process, as the image runs it (signal and crash handlers on), with
+ * the stand-in for cloudflared; a byte on stdin throws from an event handler, uncaught.
+ */
+async function connectorChild(): Promise<{ script: string; env: Record<string, string> }> {
+  const dir = mkdtempSync(join(tmpdir(), "fin-connector-stdout-"));
+  const fake = join(dir, "fake-cloudflared");
+  writeFileSync(
+    fake,
+    FAKE.replace(
+      'process.env.HOME + "/../fin-fake-env.json"',
+      JSON.stringify(join(dir, "env.json")),
+    ),
+  );
+  chmodSync(fake, 0o755);
+  const script = join(dir, "connector.mjs");
+  writeFileSync(
+    script,
+    `import { main } from ${JSON.stringify(new URL("./main.ts", import.meta.url).href)};
+await main({
+  host: "127.0.0.1",
+  configPath: ${JSON.stringify(join(dir, "cloudflared", "config.yml"))},
+  metrics: ${JSON.stringify(`127.0.0.1:${await freePort()}`)},
+});
+process.stdin.on("data", () => {
+  throw new Error("planted");
+});
+`,
+  );
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(validEnv(await freePort(), fake))) {
+    if (value !== undefined) env[name] = value;
+  }
+  return { script, env };
+}
+
+describe("main when stdout's reader goes away", () => {
+  it("keeps supervising and answering, then exits 0 on SIGTERM within FIN_DRAIN_SECONDS", async () => {
+    const { script, env } = await connectorChild();
+    const run = await spawnThenCloseStdout(script, env);
+    // The first line (process.start) comes just before the health server listens.
+    let status = 0;
+    for (let i = 0; i < 60 && status !== 200; i++) {
+      status = await fetch(`http://127.0.0.1:${env.PORT}/healthz`, {
+        signal: AbortSignal.timeout(1000),
+      }).then(
+        (response) => response.status,
+        () => 0,
+      );
+      if (status !== 200) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(status).toBe(200);
+    run.child.kill("SIGTERM");
+    expect(await run.exit(5000)).toBe(0);
+    expect(run.stderr()).toBe("");
+  }, 30_000);
+
+  it("still exits 1 within the crash flush on an uncaught exception", async () => {
+    const { script, env } = await connectorChild();
+    const run = await spawnThenCloseStdout(script, env);
+    run.child.stdin.write("x");
+    expect(await run.exit(4000)).toBe(1);
+    expect(run.stderr()).toBe("");
+  }, 30_000);
 });

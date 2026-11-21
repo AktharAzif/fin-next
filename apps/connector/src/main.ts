@@ -20,7 +20,13 @@ import {
 import { startProcessHealth } from "@fin/server/process-health";
 import { checkSeams, refuseForbidden } from "@fin/server/seams";
 import { onCrash } from "@fin/server/shutdown";
-import { betterStackTransport, installTelemetry, Telemetry } from "@fin/server/telemetry";
+import {
+  betterStackTransport,
+  installTelemetry,
+  onStdoutFailure,
+  Telemetry,
+  writeStdout,
+} from "@fin/server/telemetry";
 import { type ConnectorConfig, loadConnectorConfig } from "./config.ts";
 import { type HealthServer, startHealthServer } from "./health-server.ts";
 import { renderConfig } from "./render.ts";
@@ -106,7 +112,8 @@ function configInvalid(error: ConfigError, write: (line: string) => void): void 
 export async function main(options: MainOptions = {}): Promise<Supervisor | undefined> {
   const env = options.env ?? process.env;
   const exit = options.exit ?? ((code: number) => process.exit(code));
-  const write = options.stdout ?? ((line: string) => void process.stdout.write(`${line}\n`));
+  // The services' writer: a stdout whose reader has gone stops the writes, never the supervisor.
+  const write = options.stdout ?? writeStdout;
   const configPath = options.configPath ?? CONFIG_PATH;
   const metrics = options.metrics ?? METRICS_ADDRESS;
 
@@ -146,6 +153,11 @@ export async function main(options: MainOptions = {}): Promise<Supervisor | unde
   });
   installTelemetry(telemetry);
   telemetry.start();
+  if (options.stdout === undefined) {
+    onStdoutFailure((errorCode) =>
+      telemetry.logUnit("telemetry.stdout_failed", { errorCode }, "error"),
+    );
+  }
   // From here an unexpected error is `process.uncaught_exception` with safeError's fields, flushed,
   // then exit 1: never a raw stack on stderr (decision 12: no Errors client in the connector).
   if (options.signals !== false) onCrash({ telemetry, exit });

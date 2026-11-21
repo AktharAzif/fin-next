@@ -137,11 +137,22 @@ export type CrashReporter = Pick<Reporter, "reportError" | "flush">;
  * for at most 2 seconds, then the process exits 1; an unhandled rejection is logged and reported,
  * never silent. The line carries safeError's fields and first frames, so a process with no error
  * reporter (the connector supervisor, decision 12) still records where it failed.
+ *
+ * A second uncaught exception while the first is handled exits 1 at once: when recording a crash
+ * throws again and again (as writing to a stdout whose reader had gone once did), each throw would
+ * start one more flush, and the event loop would never reach the first flush's timer.
  */
 export function onCrash(
   options: { telemetry: Telemetry; reporter?: CrashReporter; exit: (code: number) => void },
   target: NodeJS.EventEmitter = process,
 ): void {
+  let crashing = false;
+  let exited = false;
+  const exit = (code: number): void => {
+    if (exited) return;
+    exited = true;
+    options.exit(code);
+  };
   const fields = (error: unknown) => {
     const safe = safeError(error);
     return {
@@ -151,12 +162,17 @@ export function onCrash(
     };
   };
   target.on("uncaughtException", (error: unknown) => {
+    if (crashing) {
+      exit(1);
+      return;
+    }
+    crashing = true;
     options.telemetry.logUnit("process.uncaught_exception", fields(error), "error");
     options.reporter?.reportError(error, { job: "process" });
     void Promise.allSettled([
       options.telemetry.flush(2000),
       options.reporter?.flush(2000) ?? Promise.resolve(true),
-    ]).finally(() => options.exit(1));
+    ]).finally(() => exit(1));
   });
   target.on("unhandledRejection", (reason: unknown) => {
     options.telemetry.logUnit("process.unhandled_rejection", fields(reason), "error");

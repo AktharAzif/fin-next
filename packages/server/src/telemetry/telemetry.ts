@@ -10,7 +10,8 @@
 //   - once a unit's batch is taken, lines its background work writes later (`shipAfter`) go to the
 //     process queue with the unit's IDs, never into the batch already sent;
 //   - a send claims the gap it reports before its first await, so concurrent sends after an outage
-//     report it once, and a failed send hands it back.
+//     report it once, and a failed send hands it back;
+//   - a line whose stdout write fails (Railway's copy) still ships.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type Clock, isBoundedCode, rfc3339, safeError, scrubLine } from "@fin/core";
 import type { Environment, ServiceName } from "../config/index.ts";
@@ -148,10 +149,19 @@ export class Telemetry {
     return capLine(scrubLine(line));
   }
 
+  /** Railway's copy: a writer that throws loses it, never the shipment that follows. */
+  private writeLocal(text: string): void {
+    try {
+      this.stdout(text);
+    } catch {
+      // The line still ships: Better Stack's copy is the record.
+    }
+  }
+
   /** Writes a scrubbed line to stdout only (Railway's copy), never shipped. */
   logLocal(event: string, fields: Fields = {}, level: Level = "info"): void {
     try {
-      this.stdout(this.format(event, fields, level, this.storage.getStore()));
+      this.writeLocal(this.format(event, fields, level, this.storage.getStore()));
     } catch {
       // Monitoring never breaks the work.
     }
@@ -162,7 +172,7 @@ export class Telemetry {
     try {
       const unit = this.storage.getStore();
       const text = this.format(event, fields, level, unit);
-      this.stdout(text);
+      this.writeLocal(text);
       if (this.transport === undefined) return;
       if (unit !== undefined && !unit.closed) {
         if (unit.lines.length < this.queueLimit) unit.lines.push(text);
@@ -195,7 +205,7 @@ export class Telemetry {
   logUnit(event: string, fields: Fields = {}, level: Level = "info", unit: UnitStart = {}): void {
     try {
       const text = this.format(event, fields, level, unit);
-      this.stdout(text);
+      this.writeLocal(text);
       if (this.transport !== undefined) this.shipLines([text], "telemetry.unit");
     } catch {
       // Monitoring never breaks the work.
@@ -287,7 +297,7 @@ export class Telemetry {
       this.gap.failedSends++;
       this.gap.linesLost += real;
       this.gap.statuses.add(result.status);
-      this.stdout(
+      this.writeLocal(
         this.format("telemetry.ship_failed", { status: result.status, linesLost: real }, "warn"),
       );
     }

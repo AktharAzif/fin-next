@@ -16,7 +16,8 @@
     "./dns": "./src/dns/railway-lookup.ts",
     "./fetch": "./src/fetch/delivery-fetch.ts",
     "./vite": "./src/build/vite-server.ts",
-    "./testing": "./src/testing/capture.ts"
+    "./testing": "./src/testing/capture.ts",
+    "./testing/child": "./src/testing/child.ts"
   },
   "scripts": {
     "lint": "biome check .",

@@ -166,6 +166,22 @@ describe("onCrash", () => {
     expect(exits).toEqual([1]);
   });
 
+  it("exits at once on a second uncaught exception while the first is handled, and only once", async () => {
+    // Recording a crash can itself throw (a stdout whose reader has gone): each throw would
+    // otherwise start another flush, and the event loop would never reach the first one's timer.
+    const { telemetry, reporter } = capture();
+    const target = new EventEmitter();
+    const exits: number[] = [];
+    onCrash({ telemetry, reporter, exit: (code) => exits.push(code) }, target);
+    target.emit("uncaughtException", new Error("first"));
+    expect(exits).toEqual([]);
+    target.emit("uncaughtException", new Error("second"));
+    expect(exits).toEqual([1]);
+    target.emit("uncaughtException", new Error("third"));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(exits).toEqual([1]);
+  });
+
   it("works with no error reporter, and the shipped line says where the process failed", async () => {
     const { telemetry, shipped } = capture({ ship: true });
     const target = new EventEmitter();

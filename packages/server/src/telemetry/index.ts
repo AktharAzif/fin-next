@@ -1,5 +1,13 @@
 // The telemetry module (spec 08 §7.3). It needs Node built-ins and @fin/core only, so the connector
-// supervisor, which has no third-party dependency, ships its lines through it too.
+// supervisor, which has no third-party dependency, ships its lines through it too, and writes
+// stdout through the same writer.
+export {
+  type LineStream,
+  onStdoutFailure,
+  type StdoutWriter,
+  streamWriter,
+  writeStdout,
+} from "../log/stdout.ts";
 export { byteLength, capLine, MAX_LINE_BYTES } from "./cap.ts";
 export {
   type Actor,

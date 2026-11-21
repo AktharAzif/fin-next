@@ -1,4 +1,7 @@
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { ConfigError } from "@fin/core";
 import { Hono } from "hono";
@@ -10,6 +13,7 @@ import { errorHandler, notFoundHandler, requestUnit } from "./http/request.ts";
 import { runService, type ServiceDefinition } from "./runtime.ts";
 import type { Transport } from "./telemetry/ship.ts";
 import { baseEnv, type Line } from "./testing/capture.ts";
+import { freePort, spawnThenCloseStdout } from "./testing/child.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -219,5 +223,91 @@ describe("runService", () => {
     await done;
     expect(exits).toEqual([0]);
     expect(stdout.some((l) => l.event === "shutdown.done")).toBe(true);
+  }, 30_000);
+});
+
+/**
+ * A service run as its own process, with the process handlers on. Every request writes a line;
+ * what it ships goes to a file; a byte on stdin throws from an event handler, uncaught.
+ */
+function serviceChild(): { script: string; shipped: string } {
+  const dir = mkdtempSync(join(tmpdir(), "fin-stdout-gone-"));
+  const script = join(dir, "service.mjs");
+  writeFileSync(
+    script,
+    `import { appendFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
+import { runService } from ${JSON.stringify(new URL("./runtime.ts", import.meta.url).href)};
+const shipped = ${JSON.stringify(join(dir, "shipped.jsonl"))};
+await runService(
+  {
+    services: ["api"],
+    build: (ctx) => ({
+      fetch: () => {
+        ctx.telemetry.log("thing.done", {});
+        return new Response("ok");
+      },
+    }),
+  },
+  {
+    host: "127.0.0.1",
+    transport: async (body) => {
+      for (const line of JSON.parse(gunzipSync(body).toString("utf8"))) {
+        appendFileSync(shipped, JSON.stringify(line) + "\\n");
+      }
+      return 202;
+    },
+  },
+);
+process.stdin.on("data", () => {
+  throw new Error("planted");
+});
+`,
+  );
+  return { script, shipped: join(dir, "shipped.jsonl") };
+}
+
+function shippedEvents(file: string): string[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => String((JSON.parse(line) as Line).event));
+}
+
+describe("runService when stdout's reader goes away", () => {
+  it("keeps answering and shipping, then drains and exits 0 within FIN_DRAIN_SECONDS", async () => {
+    const { script, shipped } = serviceChild();
+    const port = await freePort();
+    const run = await spawnThenCloseStdout(
+      script,
+      baseEnv("api", { FIN_DRAIN_SECONDS: "5", PORT: String(port) }),
+    );
+    for (let i = 0; i < 3; i++) {
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      expect(response.status).toBe(200);
+    }
+    run.child.kill("SIGTERM");
+    expect(await run.exit(5000)).toBe(0);
+    expect(run.stderr()).toBe("");
+    const events = shippedEvents(shipped);
+    expect(events.filter((event) => event === "thing.done")).toHaveLength(3);
+    expect(events).toEqual(
+      expect.arrayContaining(["telemetry.stdout_failed", "shutdown.started", "shutdown.done"]),
+    );
+  }, 30_000);
+
+  it("still exits 1 within the crash flush on an uncaught exception", async () => {
+    const { script, shipped } = serviceChild();
+    const run = await spawnThenCloseStdout(
+      script,
+      baseEnv("api", { PORT: String(await freePort()) }),
+    );
+    run.child.stdin.write("x");
+    expect(await run.exit(4000)).toBe(1);
+    expect(run.stderr()).toBe("");
+    expect(shippedEvents(shipped)).toContain("process.uncaught_exception");
   }, 30_000);
 });

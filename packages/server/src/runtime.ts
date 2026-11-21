@@ -25,7 +25,7 @@ import { type ProcessHealth, startProcessHealth } from "./health/process-health.
 import { Readiness } from "./health/readiness.ts";
 import { type FetchHandler, type HttpServerHandle, startHttpServer } from "./http/serve.ts";
 import type { ConnectorPeers } from "./ingress/peers.ts";
-import { type StdoutWriter, writeStdout } from "./log/stdout.ts";
+import { onStdoutFailure, type StdoutWriter, writeStdout } from "./log/stdout.ts";
 import { Reporter } from "./report.ts";
 import { isErrorsDsn } from "./report-dsn.ts";
 import { createShutdown, onCrash, onSignals, type Shutdown, type StopHook } from "./shutdown.ts";
@@ -153,6 +153,13 @@ export async function runService(
   });
   installTelemetry(telemetry);
   telemetry.start();
+  // A stdout whose reader has gone costs Railway's copy only: the process serves on, and the
+  // shipped line says so (log/stdout.ts).
+  if (options.stdout === undefined) {
+    onStdoutFailure((errorCode) =>
+      telemetry.logUnit("telemetry.stdout_failed", { errorCode }, "error"),
+    );
+  }
   const reporter = new Reporter({
     dsn: config.errorsDsn,
     release: config.release,

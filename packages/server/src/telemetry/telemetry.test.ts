@@ -1,10 +1,12 @@
 // T08-31 and T08-39: the transport, the cap, the queue, the retries, the gap report, and one
 // terminal line per unit even when the work throws.
 import { gunzipSync } from "node:zlib";
+import { createManualClock } from "@fin/core";
 import { describe, expect, it } from "vitest";
-import { capture, type Line } from "../testing/capture.ts";
+import { capture, type Line, TEST_RELEASE, TEST_START } from "../testing/capture.ts";
 import { capLine, MAX_LINE_BYTES } from "./cap.ts";
 import { batches, betterStackTransport, MAX_BATCH_BYTES, type Transport } from "./ship.ts";
+import { Telemetry } from "./telemetry.ts";
 
 const settle = async (telemetry: { flush(ms: number): Promise<void> }) => telemetry.flush(1000);
 
@@ -293,6 +295,31 @@ describe("the transport", () => {
       linesLost: 2,
       statuses: [500],
     });
+  });
+
+  it("still ships every line when stdout throws: only Railway's copy is lost", async () => {
+    const shipped: Line[] = [];
+    const telemetry = new Telemetry({
+      service: "api",
+      environment: "ci",
+      release: TEST_RELEASE,
+      replica: "test",
+      clock: createManualClock(TEST_START),
+      stdout: () => {
+        throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      },
+      transport: async (body) => {
+        shipped.push(...(JSON.parse(gunzipSync(body).toString("utf8")) as Line[]));
+        return 202;
+      },
+    });
+    await telemetry.withUnit({ requestId: "req_1" }, async () => telemetry.log("request", {}));
+    telemetry.log("process.health", {});
+    telemetry.logUnit("shutdown.done", {});
+    await settle(telemetry);
+    expect(shipped.map((l) => l.event).sort()).toEqual(
+      ["process.health", "request", "shutdown.done"].sort(),
+    );
   });
 
   it("never ships when no source is configured, and still writes stdout", async () => {
