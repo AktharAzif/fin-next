@@ -7,18 +7,34 @@
 //   - an "active" entry's path does not exist;
 //   - a document under docs/plan/ names an @fin/* package, an apps/* or a packages/* path that no
 //     entry lists;
-//   - CODEOWNERS and controlPaths differ;
-//   - an app with a static output has no static.json, or a static.json or a header profile in
-//     packages/web-host/src/static/ is outside controlPaths;
-//   - a package's name differs from its entry's.
+//   - CODEOWNERS and controlPaths differ, a CODEOWNERS line names anyone but the one owner of
+//     the control paths (spec 01 §3.6), a pattern appears twice, or the file holds a carriage
+//     return or another control character;
+//   - an app with a static output whose directory exists (planned or active) has no static.json,
+//     or a static.json or a header profile in packages/web-host/src/static/ is outside
+//     controlPaths;
+//   - a package's name differs from its entry's, or a manifest is not package.json (pnpm also
+//     reads package.yaml, package.yml and package.json5);
+//   - a package's test or test:db script runs Vitest other than through the root configuration,
+//     which alone keeps integration tests and Playwright journeys out of the unit run (spec 01
+//     §4.7), or a package holds a Vitest configuration of its own, which that run would ignore.
 // A "planned" entry whose path exists is a warning, not a failure (orchestrator decision BD-08):
 // parallel lanes create their packages without editing this control path, and a steward pull
-// request flips them to "active" at the Phase 0 exit.
+// request flips them to "active" at the Phase 0 exit. BD-08 relaxes that rule only.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { coveredBy, isRecord, listFiles, readJson, report } from "./lib/repo.mjs";
 
 /** @typedef {import("./lib/repo.mjs").Finding} Finding */
+
+/** The one owner of every control path (spec 01 §3.6; DECISIONS CI-14). */
+export const CONTROL_PATH_OWNER = "@aktharazif";
+/** How a package runs its tests: through the root vitest.config.ts (spec 01 §4.7). */
+export const VITEST_SCRIPTS = {
+  test: "vitest run --config ../../vitest.config.ts",
+  "test:db": "vitest run --config ../../vitest.config.ts --mode db",
+};
+const OTHER_MANIFESTS = new Set(["package.yaml", "package.yml", "package.json5"]);
 
 /**
  * @typedef {{
@@ -168,27 +184,52 @@ export function entryFor(layout, file) {
 }
 
 /**
- * Reads CODEOWNERS into its patterns (leading slash removed), with findings for bad lines.
+ * Reads CODEOWNERS into its patterns (leading slash removed), with findings for bad lines. GitHub
+ * applies the last line that matches a path, so every line names exactly the control paths'
+ * owner, and no pattern appears twice. Lines are split where any line break falls, and a carriage
+ * return or another control character is refused, so no line can hide inside another.
  * @param {string} text
+ * @param {string} [owner] the one owner every line names
  * @returns {{ patterns: { pattern: string, line: number }[], findings: Finding[] }}
  */
-export function parseCodeowners(text) {
+export function parseCodeowners(text, owner = CONTROL_PATH_OWNER) {
   /** @type {Finding[]} */
   const findings = [];
+  /**
+   * @param {number} line
+   * @param {string} rule
+   * @param {string} message
+   */
+  const add = (line, rule, message) => findings.push({ file: "CODEOWNERS", line, rule, message });
   const patterns = [];
-  for (const [index, raw] of text.split("\n").entries()) {
+  const seen = new Set();
+  let lineNumber = 0;
+  for (const lineBreak of text.matchAll(/\r\n|\r|\n/g)) {
+    lineNumber++;
+    if (lineBreak[0] !== "\n") {
+      add(lineNumber, "codeowners-format", "a carriage return: line endings must be LF");
+    }
+  }
+  for (const [index, raw] of text.split(/\r\n|\r|\n/).entries()) {
+    if (/(?!\t)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(raw)) {
+      add(index + 1, "codeowners-format", "a control or invisible character");
+    }
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
-    const [pattern = "", ...owners] = line.split(/\s+/);
-    if (owners.length === 0 || owners.some((o) => !o.startsWith("@"))) {
-      findings.push({
-        file: "CODEOWNERS",
-        line: index + 1,
-        rule: "codeowners-owner",
-        message: "each line names a path and at least one @owner",
-      });
+    const [pattern = "", ...owners] = line.split(/[ \t]+/);
+    if (owners.length !== 1 || owners[0]?.toLowerCase() !== owner.toLowerCase()) {
+      add(
+        index + 1,
+        "codeowners-owner",
+        `each line names one path and exactly the control paths' owner, ${owner}`,
+      );
     }
-    patterns.push({ pattern: pattern.replace(/^\//, ""), line: index + 1 });
+    const normalized = pattern.replace(/^\//, "");
+    if (seen.has(normalized)) {
+      add(index + 1, "codeowners-owner", `/${normalized} appears twice; GitHub applies the last`);
+    }
+    seen.add(normalized);
+    patterns.push({ pattern: normalized, line: index + 1 });
   }
   return { patterns, findings };
 }
@@ -324,12 +365,13 @@ export function checkLayout(root) {
     }
   }
 
-  // Static outputs: static.json exists and is a control path, as is every header profile.
+  // Static outputs: static.json exists as soon as the app does (planned or active: BD-08 relaxes
+  // only the planned-exists rule) and is a control path, as is every header profile.
   const isControl = (/** @type {string} */ file) =>
     layout.controlPaths.some((cp) => coveredBy(file, cp));
   for (const entry of layout.entries.filter((e) => e.static !== undefined)) {
     const staticJson = `${entry.path}/static.json`;
-    if (entry.status === "active" && !files.includes(staticJson)) {
+    if (exists(entry.path) && !files.includes(staticJson)) {
       findings.push({
         file: staticJson,
         rule: "static-json-missing",
@@ -357,28 +399,80 @@ export function checkLayout(root) {
     }
   }
 
-  // A package's name matches its entry.
+  // Manifests are package.json only: pnpm reads the other formats too, and nothing checks them.
+  // The root vitest.config.ts is the only Vitest configuration: the package scripts name it with
+  // --config, so a package's own would be passed by without a word. Names are compared in lower
+  // case, as a case-insensitive file system (macOS, Windows) matches them.
+  for (const file of files) {
+    const base = (file.split("/").pop() ?? "").toLowerCase();
+    if (OTHER_MANIFESTS.has(base)) {
+      findings.push({
+        file,
+        rule: "manifest-format",
+        message: "pnpm reads this file as a package manifest; manifests are package.json only",
+      });
+    }
+    if (file.includes("/") && /^vitest\.(?:config|workspace|projects)\.[cm]?[jt]s$/.test(base)) {
+      findings.push({
+        file,
+        rule: "vitest-config",
+        message:
+          "the root vitest.config.ts is the only Vitest configuration; a setting a package needs goes there",
+      });
+    }
+  }
+
+  // A package's name matches its entry, and its tests run through the root Vitest configuration.
   for (const entry of layout.entries.filter((e) => e.name !== undefined)) {
     const manifest = `${entry.path}/package.json`;
     if (!files.includes(manifest)) continue;
     /** @type {unknown} */
-    let name;
+    let parsed;
     try {
-      const parsed = readJson(join(root, manifest));
-      name = isRecord(parsed) ? parsed.name : undefined;
+      parsed = readJson(join(root, manifest));
     } catch {
       findings.push({ file: manifest, rule: "package-name", message: "not valid JSON" });
       continue;
     }
-    if (name !== entry.name) {
+    if (!isRecord(parsed) || parsed.name !== entry.name) {
       findings.push({
         file: manifest,
         rule: "package-name",
         message: `the package's name must be ${entry.name}, as tools/layout.json lists it`,
       });
     }
+    findings.push(...checkTestScripts(manifest, isRecord(parsed) ? parsed.scripts : undefined));
   }
   return { findings, warnings };
+}
+
+/**
+ * Checks that a package runs Vitest only through the root configuration: run from a package's
+ * own directory, Vitest would otherwise use its defaults, which collect integration tests and
+ * Playwright journeys into the unit run.
+ * @param {string} manifest
+ * @param {unknown} scripts
+ * @returns {Finding[]}
+ */
+export function checkTestScripts(manifest, scripts) {
+  /** @type {Finding[]} */
+  const findings = [];
+  if (!isRecord(scripts)) return findings;
+  for (const [name, script] of Object.entries(scripts)) {
+    if (typeof script !== "string" || !/\bvitest\b/.test(script)) continue;
+    const expected = VITEST_SCRIPTS[/** @type {keyof typeof VITEST_SCRIPTS} */ (name)];
+    if (script.trim() !== expected) {
+      findings.push({
+        file: manifest,
+        rule: "vitest-config",
+        message:
+          expected === undefined
+            ? `only the test and test:db scripts run Vitest (${name} does)`
+            : `the ${name} script must be exactly "${expected}", so the root vitest.config.ts applies`,
+      });
+    }
+  }
+  return findings;
 }
 
 if (import.meta.main) {
