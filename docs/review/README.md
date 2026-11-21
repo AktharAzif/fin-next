@@ -262,13 +262,15 @@ doctor's D2 re-checks on every run:
 | `--exclude-dynamic-system-prompt-sections` | yes | yes |
 | `--append-system-prompt-file <file>` | **no** | **replaced by `--append-system-prompt`** with the text of `prompts/system.md` (the parser accepts the file form, but it is not documented) |
 
-**The model check** (§4.5 rule 3), first after every attempt and never retried: the stream must be
-one JSON object a line with one `result`, last; the client's init line, the result's `modelUsage`
+**The model check** (§4.5 rule 3), first after every attempt and never retried, on a stream of one
+JSON object a line with one `result`, last (any other output fails the attempt as an exit): the client's init line, the result's `modelUsage`
 and every assistant message's `message.model` must name only the requested model ID, and a session
 that succeeded must hold at least one assistant message naming it. `modelUsage` alone cannot show
 which model served a session: 2.1.328 keys it by the model the client asked for, so it covers the
 client side (a setting, flag or fallback that changed the request). `message.model` is the model the
-endpoint's response names: on 21 Nov 2026, with 2.1.328 and a stand-in forwarder on loopback that
+endpoint's response names (the stream also carries each tool result, so a session prints more than
+the single result did; the runner's 64 MB output cap still bounds it, and the engine never writes it
+to the run directory): on 21 Nov 2026, with 2.1.328 and a stand-in forwarder on loopback that
 answered every request as another model, `modelUsage` named only the requested model while the
 assistant message named the other one. Messages the client writes itself (an API error, for one)
 carry the model `<synthetic>` and name no served model. Under the pool transport this catches a
