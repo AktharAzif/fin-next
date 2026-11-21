@@ -3,7 +3,7 @@
 // imported by release code.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { grantInsertSql, SENDER_ROLES, type SenderRole } from "../catalogue.ts";
+import { grantInsertSql, SENDER_ROLES } from "../catalogue.ts";
 import type { Queryable } from "../outbox/db.ts";
 import type { EmailPort, OutgoingEmail, SendOutcome } from "../port.ts";
 import type { EmailLog, Level } from "../sender/sender.ts";
@@ -88,6 +88,16 @@ export class LineRecorder implements EmailLog {
 
 const SQL_DIR = join(import.meta.dirname, "..", "..");
 
+/**
+ * email.enqueue()'s owner: a role that cannot log in and holds only INSERT on the outbox and SELECT on
+ * the template grants (P0-E's migration; `email_sender.grants.sql`).
+ */
+export const ENQUEUE_OWNER = "fin_email_enqueue";
+
+/** The roles the schema's SQL names by `{{placeholder}}`: the senders and enqueue's owner. */
+export const SCHEMA_ROLES = [...SENDER_ROLES, ENQUEUE_OWNER] as const;
+export type SchemaRole = (typeof SCHEMA_ROLES)[number];
+
 /** The fixture schema text: the spec 01 §6.10 stand-in, then this lane's extension. */
 export function outboxSchemaSql(): { base: string; extension: string; grants: string } {
   return {
@@ -98,22 +108,23 @@ export function outboxSchemaSql(): { base: string; extension: string; grants: st
 }
 
 /**
- * Drops and recreates the `email` (and stand-in `ops`) schema in the connected (lane-owned)
- * database: the base migration with its seeded grant, then the extension and its grants with each
- * group role mapped by `roleName`, then the generated template grants, exactly as the data lane's
+ * Drops and recreates the `email` and `email_private` (and stand-in `ops`) schemas in the connected
+ * (lane-owned) database: the base migration with its seeded grant, then the extension and its grants
+ * with each role mapped by `roleName`, then the generated template grants, exactly as the data lane's
  * runner would load them over the seeded row.
  */
 export async function installOutboxSchema(
   db: Queryable,
-  roleName: (role: SenderRole) => string,
+  roleName: (role: SchemaRole) => string,
 ): Promise<void> {
   const sql = outboxSchemaSql();
   const render = (text: string): string => {
     let out = text;
-    for (const role of SENDER_ROLES) out = out.replaceAll(`{{${role}}}`, roleName(role));
+    for (const role of SCHEMA_ROLES) out = out.replaceAll(`{{${role}}}`, roleName(role));
     return out;
   };
   await db.query("DROP SCHEMA IF EXISTS email CASCADE");
+  await db.query("DROP SCHEMA IF EXISTS email_private CASCADE");
   await db.query("DROP SCHEMA IF EXISTS ops CASCADE");
   await db.query(render(sql.base));
   await db.query(sql.extension);

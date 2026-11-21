@@ -17,7 +17,7 @@ import { recipientHasher } from "../src/recipient-key.ts";
 import type { SenderLimits } from "../src/sender/limits.ts";
 import { Sender } from "../src/sender/sender.ts";
 import { HAS_DATABASE, openTestDatabase, type TestDatabase } from "../src/testing/db.ts";
-import { FakeTransport, failure, LineRecorder } from "../src/testing/index.ts";
+import { ENQUEUE_OWNER, FakeTransport, failure, LineRecorder } from "../src/testing/index.ts";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -68,10 +68,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
   beforeEach(async () => {
     await db.admin.query(
-      "TRUNCATE email.outbox, email.recipient_window, email.daily_budget, email.delivery_check",
+      "TRUNCATE email_private.outbox, email_private.recipient_window, email_private.daily_budget, email_private.delivery_check",
     );
     await db.admin.query(
-      `INSERT INTO email.send_bucket (name, tokens, refilled_at) VALUES ('cloudflare', 0, '-infinity')
+      `INSERT INTO email_private.send_bucket (name, tokens, refilled_at) VALUES ('cloudflare', 0, '-infinity')
        ON CONFLICT (name) DO UPDATE SET tokens = 0, refilled_at = '-infinity'`,
     );
     clock = startClock();
@@ -148,7 +148,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       folded_into: string | null;
       security_unsent_at: Date | null;
       leased_by: string | null;
-    }>("SELECT * FROM email.outbox ORDER BY created_at, id");
+    }>("SELECT * FROM email_private.outbox ORDER BY created_at, id");
     return r.rows;
   }
 
@@ -180,7 +180,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         enqueued_by: string;
         category: string;
       }>(
-        "SELECT template, priority, carries_code, enqueued_by, category FROM email.outbox ORDER BY priority",
+        "SELECT template, priority, carries_code, enqueued_by, category FROM email_private.outbox ORDER BY priority",
       );
       expect(r.rows).toEqual([
         {
@@ -224,10 +224,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
     it("gives no service but the worker a direct write on the outbox", async () => {
       await expect(
-        db.as.fin_console.query("SELECT count(*) FROM email.outbox"),
+        db.as.fin_console.query("SELECT count(*) FROM email_private.outbox"),
       ).rejects.toMatchObject({ code: "42501" });
       await expect(
-        db.as.fin_worker.query("INSERT INTO email.outbox (id) VALUES ('x')"),
+        db.as.fin_worker.query("INSERT INTO email_private.outbox (id) VALUES ('x')"),
       ).rejects.toMatchObject({ code: "42501" });
     });
 
@@ -413,7 +413,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         "person@example.com",
       );
       const stored = await db.admin.query<{ params: Record<string, unknown> }>(
-        "SELECT params FROM email.outbox ORDER BY template",
+        "SELECT params FROM email_private.outbox ORDER BY template",
       );
       expect(stored.rows.map((r) => r.params.personName ?? r.params.device)).toEqual([
         "(not shown)",
@@ -488,7 +488,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         });
       }
       const stored = await db.admin.query<{ name: string }>(
-        "SELECT params->>'personName' AS name FROM email.outbox",
+        "SELECT params->>'personName' AS name FROM email_private.outbox",
       );
       expect(stored.rows).toEqual([{ name: "(not shown)" }, { name: "(not shown)" }]);
     });
@@ -544,7 +544,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       await code("87654321");
       // A replica claims and dies before sending: the row stays leased until the lease ends.
       await db.as.fin_worker.query(
-        "UPDATE email.outbox SET leased_by = 'dead:1', lease_until = $1::timestamptz + interval '60 seconds', attempts = 1",
+        "UPDATE email_private.outbox SET leased_by = 'dead:1', lease_until = $1::timestamptz + interval '60 seconds', attempts = 1",
         [new Date(clock.now()).toISOString()],
       );
       expect((await sender().runOnce()).claimed).toBe(0);
@@ -599,7 +599,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
     it("ends ordinary mail after its last attempt", async () => {
       await invite();
-      await db.admin.query("UPDATE email.outbox SET attempts = 9");
+      await db.admin.query("UPDATE email_private.outbox SET attempts = 9");
       port.answer(failure("unknown", "cf_10002"));
       await sender().runOnce();
       expect(await rows()).toEqual([]);
@@ -693,7 +693,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         browserKind: "a-param-from-a-newer-release",
       });
       await db.admin.query(
-        `INSERT INTO email.outbox (id, template, category, priority, recipient_kind, recipient, params, carries_code, due_at, first_due_at, enqueued_by, created_at)
+        `INSERT INTO email_private.outbox (id, template, category, priority, recipient_kind, recipient, params, carries_code, due_at, first_due_at, enqueued_by, created_at)
          VALUES ($1, 'ghost/none', 'notice', 3, 'address', 'a@example.com', '{}', false, now(), now(), 'x', now())`,
         [newId("eml", clock)],
       );
@@ -935,7 +935,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       const s = sender(limits);
       expect(await s.runOnce()).toMatchObject({ sent: 0, failed: 3 });
       const spent = await db.admin.query<{ count: number }>(
-        "SELECT coalesce(sum(count), 0)::int AS count FROM email.daily_budget",
+        "SELECT coalesce(sum(count), 0)::int AS count FROM email_private.daily_budget",
       );
       expect(spent.rows[0]?.count).toBe(0);
       // While Cloudflare refuses the token, this loop claims nothing and says so.
@@ -1032,7 +1032,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       };
       // Ordinary mail has used its part of the day first.
       await db.admin.query(
-        "INSERT INTO email.daily_budget (day, scope, count) VALUES ($1::date, 'environment', 10)",
+        "INSERT INTO email_private.daily_budget (day, scope, count) VALUES ($1::date, 'environment', 10)",
         [new Date(clock.now()).toISOString().slice(0, 10)],
       );
       const s = sender(limits);
@@ -1069,7 +1069,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       for (let i = 0; i < 4; i++) await orgNotice(orgA, `holder${i}@example.com`);
       expect(await sender(limits).runOnce()).toMatchObject({ sent: 1, deferred: 3 });
       const bucket = await db.admin.query<{ tokens: number }>(
-        "SELECT tokens FROM email.send_bucket WHERE name = 'cloudflare'",
+        "SELECT tokens FROM email_private.send_bucket WHERE name = 'cloudflare'",
       );
       expect(Number(bucket.rows[0]?.tokens)).toBeCloseTo(4, 1);
       const tomorrow = Math.floor(clock.now() / (24 * HOUR)) * 24 * HOUR + 24 * HOUR;
@@ -1129,10 +1129,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     });
 
     it("puts back a missing token bucket row instead of holding all mail", async () => {
-      await db.admin.query("DELETE FROM email.send_bucket");
+      await db.admin.query("DELETE FROM email_private.send_bucket");
       await notice();
       expect(await sender().runOnce()).toMatchObject({ sent: 1 });
-      const bucket = await db.admin.query("SELECT name FROM email.send_bucket");
+      const bucket = await db.admin.query("SELECT name FROM email_private.send_bucket");
       expect(bucket.rows).toEqual([{ name: "cloudflare" }]);
     });
 
@@ -1142,9 +1142,188 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       clock.advance(9 * 24 * HOUR);
       await sender().sweep();
       const left = await db.admin.query(
-        "SELECT 1 FROM email.recipient_window UNION ALL SELECT 1 FROM email.daily_budget",
+        "SELECT 1 FROM email_private.recipient_window UNION ALL SELECT 1 FROM email_private.daily_budget",
       );
       expect(left.rows).toEqual([]);
     });
+  });
+
+  describe("email_private: the worker's tables, out of every other login's reach", () => {
+    // Postgres takes a statement's table lock before it checks the statement's privileges (a PREPARE
+    // when it is parsed; CREATE RULE and CREATE TRIGGER queue theirs before the ownership check), so
+    // a login that can name a table can hold it up. One with no USAGE on the schema cannot name it.
+    const OTHERS = ["fin_console", "fin_admin", "fin_api", "fin_payments"] as const;
+    const PROBE = "test/enqueue-probe";
+
+    async function relations(kinds: string): Promise<string[]> {
+      const r = await db.admin.query<{ name: string }>(
+        `SELECT 'email_private.' || c.relname AS name FROM pg_class c
+         WHERE c.relnamespace = 'email_private'::regnamespace AND c.relkind = ANY ($1::"char"[])
+         ORDER BY 1`,
+        [kinds.split("")],
+      );
+      return r.rows.map((row) => row.name);
+    }
+
+    it("holds the outbox and the five sender and delivery-check tables, with nothing for PUBLIC", async () => {
+      expect(await relations("r")).toEqual([
+        "email_private.daily_budget",
+        "email_private.delivery_check",
+        "email_private.delivery_check_turn",
+        "email_private.outbox",
+        "email_private.recipient_window",
+        "email_private.send_bucket",
+      ]);
+      const left = await db.admin.query<{ name: string }>(
+        "SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = 'email'::regnamespace AND c.relkind = 'r'",
+      );
+      expect(left.rows).toEqual([{ name: "template_grant" }]);
+      const publicAcl = await db.admin.query(
+        `SELECT c.relname FROM pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+         WHERE c.relnamespace = 'email_private'::regnamespace AND a.grantee = 0
+         UNION ALL
+         SELECT n.nspname FROM pg_namespace n, aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
+         WHERE n.nspname = 'email_private' AND a.grantee = 0`,
+      );
+      expect(publicAcl.rows).toEqual([]);
+      // USAGE for the worker and enqueue's owner; CREATE for nobody but the schema's owner.
+      const acl = await db.admin.query<{ grantee: string; privilege: string }>(
+        `SELECT pg_get_userbyid(a.grantee) AS grantee, a.privilege_type AS privilege
+         FROM pg_namespace n, aclexplode(n.nspacl) a
+         WHERE n.nspname = 'email_private' AND a.grantee <> n.nspowner`,
+      );
+      expect(acl.rows.map((r) => `${r.privilege} ${r.grantee}`).sort()).toEqual(
+        [`USAGE ${db.roleName(ENQUEUE_OWNER)}`, `USAGE ${db.roleName("fin_worker")}`].sort(),
+      );
+    });
+
+    it("runs email.enqueue() as a role that cannot log in, holding only INSERT on the outbox and SELECT on the template grants", async () => {
+      const owner = db.roleName(ENQUEUE_OWNER);
+      const fn = await db.admin.query(
+        `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config,
+                r.rolcanlogin AS can_login
+         FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+         WHERE p.oid = 'email.enqueue(jsonb)'::regprocedure`,
+      );
+      expect(fn.rows).toEqual([
+        {
+          owner,
+          definer: true,
+          config: ["search_path=pg_catalog, pg_temp"],
+          can_login: false,
+        },
+      ]);
+      const tables = await db.admin.query<{ name: string; privilege: string }>(
+        `SELECT n.nspname || '.' || c.relname AS name, p.privilege
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+              unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(privilege)
+         WHERE n.nspname IN ('email', 'email_private', 'ops') AND c.relkind = 'r'
+           AND has_table_privilege($1, c.oid, p.privilege)
+         ORDER BY 1, 2`,
+        [owner],
+      );
+      expect(tables.rows).toEqual([
+        { name: "email.template_grant", privilege: "SELECT" },
+        { name: "email_private.outbox", privilege: "INSERT" },
+      ]);
+      const schemas = await db.admin.query(
+        `SELECT n.nspname AS name, has_schema_privilege($1, n.oid, 'USAGE') AS usage,
+                has_schema_privilege($1, n.oid, 'CREATE') AS create
+         FROM pg_namespace n WHERE n.nspname IN ('email', 'email_private', 'ops') ORDER BY 1`,
+        [owner],
+      );
+      expect(schemas.rows).toEqual([
+        { name: "email", usage: true, create: false },
+        { name: "email_private", usage: true, create: false },
+        { name: "ops", usage: false, create: false },
+      ]);
+      // EXECUTE for the five sending services and nobody else: not PUBLIC, not a login directly.
+      const grantees = await db.admin.query<{ grantee: string }>(
+        `SELECT CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee
+         FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+         WHERE p.oid = 'email.enqueue(jsonb)'::regprocedure AND a.grantee <> p.proowner`,
+      );
+      expect(grantees.rows.map((r) => r.grantee).sort()).toEqual(
+        SENDER_ROLES.map((role) => db.roleName(role)).sort(),
+      );
+    });
+
+    it("still lets each caller with EXECUTE queue a row, which only the worker may then read", async () => {
+      for (const role of SENDER_ROLES) {
+        await db.admin.query(
+          `INSERT INTO email.template_grant (template, role, category, priority, carries_secret)
+           VALUES ($1, $2, 'notice', 3, false)`,
+          [PROBE, db.roleName(role)],
+        );
+      }
+      try {
+        for (const role of SENDER_ROLES) {
+          const id = newId("eml", clock);
+          const queued = await db.as[role].query<{ id: string }>(
+            "SELECT email.enqueue($1::jsonb) AS id",
+            [JSON.stringify({ id, template: PROBE, recipient: "a@example.com", params: {} })],
+          );
+          expect(queued.rows).toEqual([{ id }]);
+          const row = await db.admin.query(
+            "SELECT template, enqueued_by FROM email_private.outbox WHERE id = $1",
+            [id],
+          );
+          expect(row.rows).toEqual([{ template: PROBE, enqueued_by: db.loginName(role) }]);
+          const read = db.as[role].query("SELECT id FROM email_private.outbox WHERE id = $1", [id]);
+          if (role === "fin_worker") await expect(read).resolves.toMatchObject({ rows: [{ id }] });
+          else await expect(read).rejects.toMatchObject({ code: "42501" });
+        }
+      } finally {
+        await db.admin.query("DELETE FROM email.template_grant WHERE template = $1", [PROBE]);
+      }
+    });
+
+    it("refuses every other login any name in it before any lock: a SELECT, a PREPARE, a rule or a trigger", async () => {
+      const names = await relations("ri");
+      expect(names.length).toBeGreaterThan(6);
+      // The test's superuser holds every table in the schema: a statement that locked before it
+      // checked would wait, and end with the lock timeout (55P03), not with 42501.
+      const holder = await db.admin.connect();
+      try {
+        await holder.query("BEGIN");
+        for (const name of await relations("r")) {
+          await holder.query(`LOCK TABLE ${name} IN ACCESS EXCLUSIVE MODE`);
+        }
+        for (const role of OTHERS) {
+          const client = await db.as[role].connect();
+          try {
+            await client.query("SET lock_timeout = '2s'");
+            for (const name of names) {
+              for (const sql of [
+                `SELECT 1 FROM ${name}`,
+                `PREPARE p AS SELECT 1 FROM ${name}`,
+                `CREATE RULE r AS ON INSERT TO ${name} DO NOTHING`,
+                `CREATE TRIGGER t BEFORE UPDATE ON ${name} FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()`,
+              ]) {
+                await client.query("BEGIN");
+                const error = await failureOf(client.query(sql));
+                expect({ role, sql, code: (error as { code?: string }).code }).toEqual({
+                  role,
+                  sql,
+                  code: "42501",
+                });
+                expect(error.message).toBe("permission denied for schema email_private");
+                await client.query("ROLLBACK");
+              }
+            }
+            // Nor through the search path, which skips a schema the login may not use.
+            await client.query("SET search_path = email_private");
+            await expect(client.query("SELECT 1 FROM outbox")).rejects.toMatchObject({
+              code: "42P01",
+            });
+          } finally {
+            client.release(true);
+          }
+        }
+      } finally {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        holder.release();
+      }
+    }, 30_000);
   });
 });
