@@ -775,7 +775,11 @@ describe("build, merge, record and manifest end to end", () => {
         "a static record replaced",
         (root) =>
           writeTree(root, {
-            "release/meta/static.json": JSON.stringify({ static: {}, sourceMaps: null, skipped: [] }),
+            "release/meta/static.json": JSON.stringify({
+              static: {},
+              sourceMaps: null,
+              skipped: [],
+            }),
           }),
         /the static record is not the one the static job wrote/,
       ],
