@@ -1,13 +1,14 @@
 // `pnpm fin <group> <command> <env> [arguments] [--flags]`: finds the command, parses its
-// arguments strictly, builds its context (the overlay is masked before anything prints) and runs
-// it. Every error leaves through the masker with its exit code.
+// arguments strictly, builds its context (the overlay is masked before anything prints), takes the
+// run lock for a mutating run before the command reads anything, and runs it. Every error leaves
+// through the masker with its exit code.
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
 import { CLOUDFLARE_COMMANDS } from "./commands/cloudflare.ts";
 import { CORE_COMMANDS } from "./commands/core.ts";
 import { parseArgs } from "./core/args.ts";
-import { Context } from "./core/context.ts";
+import { Context, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
 import { Masker } from "./core/mask.ts";
 import { Output } from "./core/output.ts";
@@ -93,16 +94,14 @@ export async function runCli(
       mutating: command.mutating,
       needsOverlay: command.overlay,
     });
+    // Before the command reads any provider state, so its plan cannot go stale under another run.
+    if (command.mutating) ctx.lockForPlanning();
     return await command.run(ctx);
   } catch (error) {
-    if (ctx?.run.registered) {
-      ctx.run.finish(
-        error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed",
-        {
-          error: error instanceof Error ? error.message : "failed",
-        },
-      );
-    }
+    if (ctx?.run.registered)
+      ctx.run.finish(resultOf(error), {
+        error: error instanceof Error ? error.message : "failed",
+      });
     if (error instanceof FinError) {
       out.error(error.message);
       return error.exitCode;
@@ -111,6 +110,9 @@ export async function runCli(
     out.error(`internal error: ${message}`);
     return EXIT.internal;
   } finally {
-    if (ctx !== undefined) await ctx.run.flushLines();
+    if (ctx !== undefined) {
+      ctx.releasePlanLock();
+      await ctx.run.flushLines();
+    }
   }
 }

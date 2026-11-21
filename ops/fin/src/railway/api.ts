@@ -1,7 +1,12 @@
 // Railway's GraphQL API (P-13: `pnpm fin` drives it with fetch; spec 01 §6). The project token
 // (CR-04) travels in the `Project-Access-Token` header. Reads go through query(); every write goes
-// through mutate(), which refuses outside a registered run, and every variable write through
-// setVariables(), which names a service the public settings list and sets each secret sealed.
+// through mutate(), and every variable write through setVariables(), which names a service the
+// public settings list and sets each secret sealed.
+//
+// mutate() checks the mutation it is about to send, not a label beside it: outside a registered run
+// it refuses; the mutation must call exactly one root field, one of WRITE_FIELDS, with no selection
+// set; its `environmentId` must be the overlay's environment; and every service it names (its
+// `serviceId`, or each service of an environment patch) must be one of the project's services.
 //
 // Operation shapes: the project's services, serviceInstanceUpdate and serviceInstanceDeployV2 are
 // the ones the hand provisioning used; environmentPatchCommit with
@@ -19,6 +24,22 @@ import { Secret } from "../core/secret.ts";
 import { mustBeSealed, type Settings } from "../core/settings.ts";
 
 export const RAILWAY_API = "https://backboard.railway.com/graphql/v2";
+
+/** The longest provider error detail kept, counted after masking. */
+const MAX_DETAIL = 400;
+
+/**
+ * The root fields a `pnpm fin` mutation may call: environmentPatchCommit (setVariables), and
+ * serviceInstanceUpdate and serviceInstanceDeployV2 (`railway deploy`). Nothing deletes or creates.
+ */
+const WRITE_FIELDS: ReadonlySet<string> = new Set([
+  "environmentPatchCommit",
+  "serviceInstanceUpdate",
+  "serviceInstanceDeployV2",
+]);
+
+/** `mutation <name>(<args>) { <field>(<args>) }`: one root field call and no selection set. */
+const ONE_FIELD = /^\s*mutation\s+\w+\s*(?:\([^)]*\))?\s*\{\s*(\w+)\s*\([^(){}]*\)\s*\}\s*$/;
 
 interface GraphQlAnswer<T> {
   data?: T;
@@ -94,10 +115,12 @@ export class RailwayApi {
       (answer.errors !== undefined && answer.errors.length > 0) ||
       answer.data === undefined
     ) {
-      const detail = (answer.errors ?? [])
-        .map((e) => e.message ?? "")
-        .join("; ")
-        .slice(0, 400);
+      // Masked before it is cut: Railway may echo the patch it refused, and a sealed value cut in
+      // two would no longer match the masker.
+      const masked = this.#masker.mask(
+        (answer.errors ?? []).map((e) => e.message ?? "").join("; "),
+      );
+      const detail = masked.length <= MAX_DETAIL ? masked : `${masked.slice(0, MAX_DETAIL)}...`;
       throw new ProviderError(
         "railway",
         `railway ${operation} answered ${response.status}${detail === "" ? "" : `: ${detail}`}`,
@@ -113,10 +136,34 @@ export class RailwayApi {
     return this.#post<T>(query, variables, true);
   }
 
-  /** A write, only inside a registered run. */
-  mutate<T>(run: Run, query: string, variables: Record<string, unknown>): Promise<T> {
+  /**
+   * A write, only inside a registered run, and only one of the mutations `pnpm fin` makes, to this
+   * environment and the project's own services (checked on the mutation and its variables).
+   */
+  async mutate<T>(run: Run, query: string, variables: Record<string, unknown>): Promise<T> {
     if (!/^\s*mutation\s/.test(query)) throw new RefusedError("railway: mutate() only writes");
     run.assertWritable("railway mutation");
+    const field = ONE_FIELD.exec(query)?.[1];
+    if (field === undefined || !WRITE_FIELDS.has(field)) {
+      throw new RefusedError(
+        "railway: a mutation calls one of the fields pnpm fin writes (environment patch, instance update, deploy)",
+      );
+    }
+    if (variables.environmentId !== this.#environmentId) {
+      throw new RefusedError("railway: a mutation names the overlay's environment");
+    }
+    const known = new Set((await this.services()).values());
+    const patch = variables.patch as { services?: Record<string, unknown> } | undefined;
+    const named = [
+      ...(variables.serviceId === undefined ? [] : [String(variables.serviceId)]),
+      ...Object.keys(patch?.services ?? {}),
+    ];
+    if (field !== "environmentPatchCommit" && variables.serviceId === undefined) {
+      throw new RefusedError(`railway: ${field} names its service`);
+    }
+    if (named.some((id) => !known.has(id))) {
+      throw new RefusedError("railway: a mutation names a service that is not the project's");
+    }
     return this.#post<T>(query, variables, false);
   }
 

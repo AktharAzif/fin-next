@@ -31,8 +31,17 @@ Mints the account-owned token `fin-next-<env>-email` (CR-08) and sets it on `wor
 - set as `worker`'s sealed `FIN_EMAIL_TOKEN`, with the plain `FIN_EMAIL_ACCOUNT_ID` and
   `FIN_EMAIL_FROM` (`account-security@<auth subdomain>`). The value is never printed.
 
-An existing token of that name is kept. `--rotate` mints a new one, sets it, and only then revokes
-the old one (see `rotate-email-token.md`).
+An existing token of that name is kept, unless it cannot be the one `worker` holds:
+
+- a token that is no longer active (expired or disabled);
+- a token that the last run of this command minted but never set on `worker` (the Railway write
+  failed after the mint). Cloudflare shows a token's value only when it mints it, so that value is
+  lost; the run log shows the run's `token create` step with no `variables` step after it.
+
+Then the plan says why (`replaces it: ...`) and does what `--rotate` does: mints a new token, sets
+it, and only then revokes the old ones. `--rotate` does the same on demand (see
+`rotate-email-token.md`). Revocations are named by ordinal (`fin-next-<env>-email #1`), never by any
+part of a token's ID.
 
 ```sh
 export FIN_OVERLAY_FILE=<overlay> FIN_CF_TOKEN_FILE=<operator token file> FIN_RAILWAY_TOKEN_FILE=<railway token file>

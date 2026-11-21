@@ -1,4 +1,6 @@
-// What the Cloudflare commands share: the clients built from a context, and the tunnel lookup.
+// What the Cloudflare commands share: the clients built from a context, the tunnel lookup, and the
+// registration of every object ID a command reads (spec 01 §9.2: `pnpm fin` prints names, never
+// IDs), each under a placeholder that names its role and nothing private.
 
 import type { Context } from "../core/context.ts";
 import { ConfigError, RefusedError } from "../core/errors.ts";
@@ -14,8 +16,17 @@ export interface Clients {
   accountPath: string;
 }
 
+/**
+ * Registers an object ID with the masker as `<kind>` or `<kind:label>`. The label must be public (a
+ * role, a `fin_next_` ref, an ordinal), never a hostname: a placeholder is printed as it is.
+ */
+export function registerId(ctx: Context, id: unknown, kind: string, label?: string): void {
+  if (typeof id !== "string" || id === "") return;
+  ctx.masker.register(id, label === undefined ? `<${kind}>` : `<${kind}:${label}>`);
+}
+
 export function cloudflare(ctx: Context, settingIds: Iterable<string> = []): Clients {
-  const api = new CloudflareApi(ctx.credential("FIN_CF_TOKEN_FILE"), ctx.runtime);
+  const api = new CloudflareApi(ctx.credential("FIN_CF_TOKEN_FILE"), ctx.runtime, ctx.masker);
   const writer = new CloudflareWriter(api, ctx.guard, ctx.run, ctx.overlay, settingIds);
   return {
     api,

@@ -6,7 +6,18 @@
 // email domains (the owner's staging decision of 21 Nov: the company domain with One-time PIN), and
 // nothing else: never "Everyone", never a bare login-method include. The application allows only the
 // account's One-time PIN login method, with an 8-hour session, the binding cookie, an HTTP-only,
-// SameSite=Lax cookie, and no App Launcher tile.
+// SameSite=Lax cookie, and no App Launcher tile. It also keeps the three settings that would open it
+// in their closed state: OPTIONS is not let past Access, a WARP session does not stand in for the
+// sign-in, and Access sends no CORS headers.
+//
+// An update reads the application or policy as it stands and writes it back with only the managed
+// fields changed (a PUT replaces the whole object), so what the owner sets by hand in Zero Trust,
+// Access's independent MFA (`mfa_config`, CR-07) above all, survives every run.
+//
+// Any other application whose domain, self-hosted domains or destinations reach the staff host (the
+// host itself, a path under it, or a wildcard over it) is refused: Access applies the most specific
+// application for a path, so a foreign one on `/assets` would open that path without Fin's policy.
+// Bookmarks only link, so they are left alone.
 //
 // `pnpm fin` never creates a login method: on an account another product shares, a new method would
 // also appear on that product's applications that allow every method. If the account has no
@@ -17,7 +28,8 @@ import type { Context } from "../core/context.ts";
 import { ConfigError, RefusedError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
-import { cloudflare } from "./common.ts";
+import { accessDomain, appDomains, type WriteTarget } from "./api.ts";
+import { cloudflare, registerId } from "./common.ts";
 import { accessPolicyHash } from "./hash.ts";
 
 interface IdentityProvider {
@@ -33,6 +45,7 @@ interface Policy {
   include?: unknown[];
   exclude?: unknown[];
   require?: unknown[];
+  [field: string]: unknown;
 }
 
 interface AccessApp {
@@ -43,6 +56,9 @@ interface AccessApp {
   type?: string;
   [field: string]: unknown;
 }
+
+/** Fields Cloudflare sets itself, left out of a write-back. */
+const READ_ONLY_FIELDS = ["id", "uid", "aud", "created_at", "updated_at", "app_count", "reusable"];
 
 export function desiredPolicy(ctx: Context): Record<string, unknown> {
   const include = [
@@ -71,8 +87,24 @@ export function desiredApp(ctx: Context, idp: string, policyId: string): Record<
     enable_binding_cookie: true,
     allowed_idps: [idp],
     auto_redirect_to_identity: true,
+    options_preflight_bypass: false,
+    allow_authenticate_via_warp: false,
     policies: [{ id: policyId, precedence: 1 }],
   };
+}
+
+/**
+ * The body of an update: the object as it stands, with the managed fields written over it and
+ * `drop` removed (fields that must be absent), so every setting the owner keeps by hand survives.
+ */
+export function writeBack(
+  current: Record<string, unknown>,
+  managed: Record<string, unknown>,
+  drop: readonly string[] = [],
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...current };
+  for (const field of [...READ_ONLY_FIELDS, ...drop]) delete body[field];
+  return { ...body, ...managed };
 }
 
 function includeKey(policy: { include?: unknown[] }): string {
@@ -102,8 +134,28 @@ function appFields(app: Record<string, unknown>): Record<string, unknown> {
     enable_binding_cookie: app.enable_binding_cookie,
     allowed_idps: app.allowed_idps,
     auto_redirect_to_identity: app.auto_redirect_to_identity,
+    options_preflight_bypass: app.options_preflight_bypass ?? false,
+    allow_authenticate_via_warp: app.allow_authenticate_via_warp ?? false,
+    cors_headers: app.cors_headers ?? null,
+    // Cloudflare mirrors the destinations here; absent, it is the domain alone.
+    self_hosted_domains: Array.isArray(app.self_hosted_domains)
+      ? (app.self_hosted_domains as unknown[]).map((d) => accessDomain(String(d)))
+      : [accessDomain(String(app.domain ?? ""))],
     policies,
   };
+}
+
+/** Whether an Access domain (a host, a path under it, or a wildcard) reaches `host`. */
+export function domainCovers(domain: string, host: string): boolean {
+  const name = (accessDomain(domain).split("/")[0] ?? "").replace(/:\d+$/, "");
+  const want = host.toLowerCase();
+  if (name === want) return true;
+  if (!name.includes("*")) return false;
+  const pattern = name
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\-]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${pattern}$`).test(want);
 }
 
 export const accessApply: Command = {
@@ -129,20 +181,26 @@ export const accessApply: Command = {
       );
     }
     const idp = otp[0]?.id ?? "";
+    registerId(ctx, idp, "access-idp");
 
     const policies = await api.list<Policy>(`${accountPath}/access/policies`);
     const named = policies.filter((p) => p.name === ctx.settings.access.policy);
     if (named.length > 1)
       throw new RefusedError(`two Access policies are named ${ctx.settings.access.policy}`);
     let policy = named[0];
+    registerId(ctx, policy?.id, "access-policy");
     const wantPolicy = desiredPolicy(ctx);
 
     const apps = await api.list<AccessApp>(`${accountPath}/access/apps`);
-    const onHost = apps.filter((a) => (a.domain ?? "").toLowerCase() === host.toLowerCase());
-    const foreign = onHost.find((a) => a.name !== ctx.settings.access.application);
+    const foreign = apps.find(
+      (a) =>
+        a.name !== ctx.settings.access.application &&
+        a.type !== "bookmark" &&
+        appDomains(a).some((domain) => domainCovers(domain, host)),
+    );
     if (foreign !== undefined) {
       throw new RefusedError(
-        `another Access application (${foreign.name}) already covers ${host}; resolve it by hand`,
+        `another Access application (${foreign.name}) already covers ${host} or a path under it; resolve it by hand`,
       );
     }
     const byName = apps.filter((a) => a.name === ctx.settings.access.application);
@@ -151,6 +209,7 @@ export const accessApply: Command = {
         `two Access applications are named ${ctx.settings.access.application}`,
       );
     let app = byName[0];
+    registerId(ctx, app?.id, "access-app");
     if (app?.aud !== undefined) ctx.masker.register(app.aud, "<access-aud>");
 
     const changes: Change[] = [];
@@ -199,52 +258,104 @@ export const accessApply: Command = {
       });
     }
 
+    const policyTarget = (): WriteTarget => ({
+      kind: "access-policy",
+      name: ctx.settings.access.policy,
+      ...(policy === undefined ? {} : { id: policy.id }),
+    });
+    const appTarget = (): WriteTarget => ({
+      kind: "access-app",
+      name: ctx.settings.access.application,
+      host,
+      ...(app === undefined ? {} : { id: app.id }),
+    });
+    // An application is only ever written back without CORS headers and with destinations alone.
+    const appDrop = ["cors_headers", "self_hosted_domains"];
+
     return ctx.applyPlan(
       "access",
       changes,
       async (change) => {
         if (change.kind === "access-policy") {
-          const target = { kind: "access-policy" as const, name: ctx.settings.access.policy };
-          policy =
-            change.action === "create"
-              ? await writer.write<Policy>(
-                  target,
-                  "POST",
-                  `${accountPath}/access/policies`,
-                  wantPolicy,
-                )
-              : await writer.write<Policy>(
-                  target,
-                  "PUT",
-                  `${accountPath}/access/policies/${policy?.id}`,
-                  wantPolicy,
-                );
+          if (change.action === "create") {
+            policy = await writer.write<Policy>(
+              policyTarget(),
+              "POST",
+              `${accountPath}/access/policies`,
+              wantPolicy,
+            );
+          } else {
+            const id = policy?.id ?? "";
+            const current = await api.get<Policy>(`${accountPath}/access/policies/${id}`);
+            policy = await writer.write<Policy>(
+              policyTarget(),
+              "PUT",
+              `${accountPath}/access/policies/${id}`,
+              writeBack(current, wantPolicy),
+            );
+          }
+          registerId(ctx, policy.id, "access-policy");
           return;
         }
         if (policy === undefined) throw new Error("the Access policy does not exist");
-        const body = desiredApp(ctx, idp, policy.id);
-        const target = { kind: "access-app" as const, name: ctx.settings.access.application, host };
-        app =
-          change.action === "create"
-            ? await writer.write<AccessApp>(target, "POST", `${accountPath}/access/apps`, body)
-            : await writer.write<AccessApp>(
-                target,
-                "PUT",
-                `${accountPath}/access/apps/${app?.id}`,
-                body,
-              );
+        const managed = desiredApp(ctx, idp, policy.id);
+        if (change.action === "create") {
+          app = await writer.write<AccessApp>(
+            appTarget(),
+            "POST",
+            `${accountPath}/access/apps`,
+            managed,
+          );
+        } else {
+          const id = app?.id ?? "";
+          const current = await api.get<AccessApp>(`${accountPath}/access/apps/${id}`);
+          app = await writer.write<AccessApp>(
+            appTarget(),
+            "PUT",
+            `${accountPath}/access/apps/${id}`,
+            writeBack(current, managed, appDrop),
+          );
+        }
+        registerId(ctx, app.id, "access-app");
         if (app.aud !== undefined) ctx.masker.register(app.aud, "<access-aud>");
       },
       {},
-      async () => {
-        // The policies as the application now holds them, hashed as the watcher hashes them.
-        if (app === undefined) return {};
-        const current = await api.get<AccessApp>(`${accountPath}/access/apps/${app.id}`);
-        const hash = accessPolicyHash(
-          Array.isArray(current.policies) ? (current.policies as unknown[]) : [],
-        );
-        ctx.out.info(`access policy hash: ${hash}`);
-        return { accessPolicyHash: hash };
+      {
+        // Checked with the objects as read at plan time; an update's write-back keeps the
+        // managed fields over them, so the checked fields are the ones that will be sent.
+        check: (change) => {
+          if (change.kind === "access-policy") {
+            const id = policy?.id ?? "";
+            writer.check(
+              policyTarget(),
+              change.action === "create" ? "POST" : "PUT",
+              change.action === "create"
+                ? `${accountPath}/access/policies`
+                : `${accountPath}/access/policies/${id}`,
+              change.action === "create" ? wantPolicy : writeBack(policy ?? {}, wantPolicy),
+            );
+            return;
+          }
+          const managed = desiredApp(ctx, idp, policy?.id ?? "");
+          writer.check(
+            appTarget(),
+            change.action === "create" ? "POST" : "PUT",
+            change.action === "create"
+              ? `${accountPath}/access/apps`
+              : `${accountPath}/access/apps/${app?.id ?? ""}`,
+            change.action === "create" ? managed : writeBack(app ?? {}, managed, appDrop),
+          );
+        },
+        // The policies as the application now holds them, hashed as the watcher hashes them,
+        // into run.done only: a printed hash would let a guessed staff address be confirmed.
+        after: async () => {
+          if (app === undefined) return {};
+          const current = await api.get<AccessApp>(`${accountPath}/access/apps/${app.id}`);
+          const hash = accessPolicyHash(
+            Array.isArray(current.policies) ? (current.policies as unknown[]) : [],
+          );
+          return { accessPolicyHash: hash };
+        },
       },
     );
   },

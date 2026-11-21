@@ -7,6 +7,7 @@
 // recreating the tunnel if it is ever lost (docs/runbooks/rotate-tunnel-token.md).
 
 import type { Command } from "../command.ts";
+import { RefusedError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
@@ -47,33 +48,52 @@ export const tunnelCreate: Command = {
           "TUNNEL_TOKEN (sealed, fetched from Cloudflare, never printed), FIN_TUNNEL_ROLE, FIN_TUNNEL_HOSTS",
       },
     ];
-    return ctx.applyPlan(`tunnel ${role}`, changes, async (change) => {
-      if (change.kind === "tunnel") {
-        tunnel = await writer.write<Tunnel>(
-          { kind: "tunnel", name: t.name },
-          "POST",
-          `${accountPath}/cfd_tunnel`,
-          {
-            name: t.name,
-            config_src: "local",
-          },
+    const create = { name: t.name, config_src: "local" };
+    return ctx.applyPlan(
+      `tunnel ${role}`,
+      changes,
+      async (change) => {
+        if (change.kind === "tunnel") {
+          tunnel = await writer.write<Tunnel>(
+            { kind: "tunnel", name: t.name },
+            "POST",
+            `${accountPath}/cfd_tunnel`,
+            create,
+          );
+          ctx.masker.register(tunnel.id, `<tunnel:${role}>`);
+          return;
+        }
+        if (tunnel === undefined) throw new Error("the tunnel was not created");
+        const raw = await api.get<string>(`${accountPath}/cfd_tunnel/${tunnel.id}/token`);
+        if (typeof raw !== "string" || raw.length < 20)
+          throw new Error("Cloudflare answered no tunnel token");
+        ctx.masker.register(raw, "<tunnel-token>");
+        const token = new Secret(raw);
+        await rw.setVariables(
+          ctx.run,
+          ctx.settings,
+          t.connector,
+          { TUNNEL_TOKEN: token, FIN_TUNNEL_ROLE: role, FIN_TUNNEL_HOSTS: JSON.stringify(hostMap) },
+          `pnpm fin tunnel create ${role} (${ctx.run.id})`,
         );
-        ctx.masker.register(tunnel.id, `<tunnel:${role}>`);
-        return;
-      }
-      if (tunnel === undefined) throw new Error("the tunnel was not created");
-      const raw = await api.get<string>(`${accountPath}/cfd_tunnel/${tunnel.id}/token`);
-      if (typeof raw !== "string" || raw.length < 20)
-        throw new Error("Cloudflare answered no tunnel token");
-      ctx.masker.register(raw, "<tunnel-token>");
-      const token = new Secret(raw);
-      await rw.setVariables(
-        ctx.run,
-        ctx.settings,
-        t.connector,
-        { TUNNEL_TOKEN: token, FIN_TUNNEL_ROLE: role, FIN_TUNNEL_HOSTS: JSON.stringify(hostMap) },
-        `pnpm fin tunnel create ${role} (${ctx.run.id})`,
-      );
-    });
+      },
+      {},
+      {
+        check: (change) => {
+          if (change.kind === "tunnel") {
+            writer.check(
+              { kind: "tunnel", name: t.name },
+              "POST",
+              `${accountPath}/cfd_tunnel`,
+              create,
+            );
+          } else if (ctx.settings.railway.services[t.connector] === undefined) {
+            throw new RefusedError(
+              `railway: ${t.connector} is not a service the public settings list`,
+            );
+          }
+        },
+      },
+    );
   },
 };

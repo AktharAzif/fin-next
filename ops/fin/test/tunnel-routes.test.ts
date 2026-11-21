@@ -68,6 +68,19 @@ describe("tunnel create", () => {
     assert.equal(h.rw.patches.length, 0);
   });
 
+  it("never prints a prefix of the tunnel token when a long Railway error echoes it", async () => {
+    const h = harness();
+    // The fake's token for the first tunnel: "eyJ" + 30 "T" + the start of the tunnel ID.
+    const token = `eyJ${"T".repeat(30)}3333`;
+    for (const cut of [5, 12, 20, 30]) {
+      h.rw.failPatch = `${"x".repeat(400 - cut)}${token} was rejected in ${token}`;
+      assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.unavailable);
+    }
+    const text = h.readable();
+    assert.equal(text.includes("eyJTTT"), false, "a prefix of the token survived the cut");
+    assert.equal(h.cf.tunnels.length, 1);
+  });
+
   it("refuses an unknown tunnel role", async () => {
     const h = harness();
     assert.equal(await h.run(["tunnel", "create", "staging", "db"]), EXIT.usage);
@@ -136,6 +149,54 @@ describe("routes apply", () => {
     );
     assert.match(h.runtime.out(), /! update dns <host:docs> .*held: a A record holds this name/);
     assert.equal(h.cf.dns.filter((r) => r.name === `docs.${ZONE}`).length, 1);
+  });
+
+  it("refuses, and leaves alone, another product's wildcard route that captures a Fin host", async () => {
+    for (const pattern of [`*.${ZONE}/*`, `*gateway.${ZONE}/*`, `*${ZONE}/api/*`]) {
+      const h = await withTunnels();
+      h.cf.routes.push({ id: "d".repeat(32), pattern, script: "other-product-worker" });
+      assert.equal(await h.run(["routes", "apply", "staging"]), EXIT.refused, pattern);
+      assert.match(h.runtime.err(), /another route .* matches .*; resolve it by hand/);
+      assert.equal(h.cf.writes().length, 0);
+      assert.deepEqual(
+        h.cf.routes.map((r) => r.pattern),
+        [pattern],
+      );
+      h.assertNoLeak();
+    }
+    // A wildcard that matches none of Fin's hosts is the other product's business.
+    const h = await withTunnels();
+    h.cf.routes.push({ id: "d".repeat(32), pattern: `*legacy.${ZONE}/*`, script: "other" });
+    assert.equal(await h.run(["routes", "apply", "staging"]), EXIT.ok);
+  });
+
+  it("deletes a stale route on a Fin host whatever its path, before any DNS write", async () => {
+    const h = await withTunnels();
+    h.cf.routes.push({ id: "e".repeat(32), pattern: `console.${ZONE}/api*`, script: "old" });
+    h.cf.routes.push({ id: "f".repeat(32), pattern: `console.${ZONE}/old/*` });
+    assert.equal(await h.run(["routes", "apply", "staging", "--confirm-delete", "2"]), EXIT.ok);
+    assert.equal(
+      h.cf.routes.some((r) => r.pattern.endsWith("/api*") || r.pattern.endsWith("/old/*")),
+      false,
+    );
+    assert.equal(h.cf.dns.length, 6);
+    assert.equal(h.records().at(-1)?.result, "ok");
+  });
+
+  it("names no DNS record ID when Cloudflare refuses a record write", async () => {
+    const h = await withTunnels();
+    const id = "9a8b7c6d".repeat(4); // built at run time: no ID-shaped literal in a tracked file
+    h.cf.dns.push({
+      id,
+      type: "CNAME",
+      name: `console.${ZONE}`,
+      content: "old.example.net",
+      meta: { read_only: true },
+    });
+    assert.equal(await h.run(["routes", "apply", "staging"]), EXIT.unavailable);
+    assert.match(h.runtime.err(), /answered 400/);
+    assert.equal(h.readable().includes(id), false);
+    h.assertNoLeak();
   });
 
   it("refuses to run before the tunnels exist", async () => {

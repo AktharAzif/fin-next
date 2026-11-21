@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 import { desiredRules, hostIn } from "../src/cloudflare/rules.ts";
 import { EXIT } from "../src/core/errors.ts";
 import { Secret } from "../src/core/secret.ts";
-import { ZONE } from "./helpers/fixtures.ts";
-import type { Rule } from "./helpers/providers.ts";
+import { hex, ZONE } from "./helpers/fixtures.ts";
+import { FakeCloudflare, type Rule } from "./helpers/providers.ts";
 import { harness } from "./helpers/setup.ts";
 
 const OTHER_PRODUCT_RULE: Rule = {
@@ -146,14 +146,145 @@ describe("zone apply", () => {
     assert.equal(h.cf.settings.get("always_use_https")?.value, "off");
   });
 
-  it("holds the rate rule while the overlay has no threshold", async () => {
-    const h = harness((o) => {
-      o.thresholds = {};
-    });
+  it("never writes the rate rule while the zone is shared ([FD-09])", async () => {
+    const h = harness();
     await h.run(["zone", "apply", "staging", "--only", "rules", "--dry-run"]);
-    assert.match(
-      h.runtime.out(),
-      /! create rule http_ratelimit\/fin_next_api_v4_rate .*held: the overlay has no thresholds.api-v4/,
+    assert.doesNotMatch(h.runtime.out(), /fin_next_api_v4_rate/);
+    assert.match(h.runtime.out(), /rate rule: not written while the zone is shared/);
+  });
+
+  it("writes every required rule even when Cloudflare refuses a rate rule", async () => {
+    const h = harness();
+    h.cf.onRequest = (call) => {
+      const body = call.body as { ratelimit?: unknown; rules?: Array<{ ratelimit?: unknown }> };
+      const rate = body?.ratelimit !== undefined || body?.rules?.some((r) => r.ratelimit);
+      return call.method === "POST" && rate
+        ? FakeCloudflare.failure(400, 20120, "rate limiting rules cannot match on host")
+        : undefined;
+    };
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.ok);
+    const refs = new Set(allRules(h).map((r) => r.ref));
+    for (const ref of [
+      "fin_next_api_no_challenge",
+      "fin_next_api_bypass_cache",
+      "fin_next_assets_html_no_store",
+      "fin_next_path_refuse",
+    ]) {
+      assert.ok(refs.has(ref), ref);
+    }
+  });
+
+  it("masks the private rate threshold wherever a provider echoes it", async () => {
+    const h = harness((o) => {
+      o.thresholds = { "api-v4": 4321 };
+    });
+    h.cf.onRequest = (call) =>
+      call.method === "POST"
+        ? FakeCloudflare.failure(400, 20120, "the plan allows no more than 4321 requests here")
+        : undefined;
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.unavailable);
+    assert.equal(h.readable().includes("4321"), false);
+    assert.match(h.runtime.err(), /<threshold:api-v4>/);
+  });
+
+  it("masks a long provider error before it cuts it, so no part of a private value survives", async () => {
+    const h = harness();
+    // Cloudflare's rules engine echoes the expression it could not parse; the cut at 400
+    // characters lands inside a hostname, after "onboard.zone.exa".
+    for (const cut of [3, 8, 14]) {
+      const echoed = `http.host in {"console.${ZONE}" "onboard.${ZONE}"}`;
+      const at = echoed.indexOf(`onboard.${ZONE}`) + "onboard.".length + cut;
+      const message = `${"y".repeat(400 - "20200 ".length - at)}${echoed}`;
+      h.cf.onRequest = (call) =>
+        call.method === "POST" ? FakeCloudflare.failure(400, 20200, message) : undefined;
+      assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.unavailable);
+    }
+    const text = h.readable();
+    for (let n = 6; n < ZONE.length; n++) {
+      assert.equal(text.includes(ZONE.slice(0, n)), false, `a prefix of the zone: ${n} chars`);
+    }
+    h.assertNoLeak();
+  });
+
+  it("refuses while a proxied wildcard record would carry a proof to another origin", async () => {
+    const h = harness();
+    h.cf.dns.push({
+      id: "a".repeat(32),
+      type: "CNAME",
+      name: `*.${ZONE}`,
+      content: "legacy-origin.example.net",
+      proxied: true,
+    });
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.refused);
+    assert.match(h.runtime.err(), /wildcard record \*\.<zone> answers for .*<host:api>/);
+    assert.equal(h.cf.writes().length, 0);
+    assert.equal(h.rw.patches.length, 0);
+    h.assertNoLeak();
+    // Once every proof host has a record of its own, the wildcard no longer answers for it.
+    for (const label of ["gateway", "console", "staff", "onboard", "selfie"]) {
+      h.cf.dns.push({
+        id: hex(32, String(label.length)),
+        type: "CNAME",
+        name: `${label}.${ZONE}`,
+        content: "t.cfargotunnel.com",
+        proxied: true,
+      });
+    }
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.ok);
+  });
+
+  it("names no rule or rule set ID when Cloudflare refuses a rule write", async () => {
+    const h = harness();
+    await h.run(["zone", "apply", "staging", "--only", "rules"]);
+    const waf = [...h.cf.rulesets.values()].find((r) => r.phase === "http_request_firewall_custom");
+    const rule = waf?.rules.find((r) => r.ref === "fin_next_path_refuse");
+    if (waf === undefined || rule === undefined) throw new Error("no WAF rule");
+    rule.expression = "(false)";
+    h.cf.onRequest = (call) =>
+      call.method === "PATCH"
+        ? FakeCloudflare.failure(400, 20021, `rule ${rule.id} cannot be changed`)
+        : undefined;
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.unavailable);
+    const text = h.readable();
+    assert.equal(text.includes(rule.id), false, "the rule ID");
+    assert.equal(text.includes(waf.id), false, "the rule set ID");
+    assert.match(h.runtime.err(), /fin_next_path_refuse/);
+  });
+
+  it("deletes a stale rule whose ref is Fin's but not in today's spelling", async () => {
+    const h = harness();
+    await h.run(["zone", "apply", "staging", "--only", "rules"]);
+    const waf = [...h.cf.rulesets.values()].find((r) => r.phase === "http_request_firewall_custom");
+    waf?.rules.push({ id: "e".repeat(32), ref: "fin_next_Old-Rule", expression: "(true)" });
+    assert.equal(
+      await h.run(["zone", "apply", "staging", "--only", "rules", "--confirm-delete", "1"]),
+      EXIT.ok,
+    );
+    assert.equal(
+      waf?.rules.some((r) => r.ref === "fin_next_Old-Rule"),
+      false,
+    );
+    assert.equal(h.records().at(-1)?.result, "ok");
+  });
+
+  it("holds the run lock while it plans, so an overlapping run cannot apply a stale plan", async () => {
+    const h = harness();
+    let overlapping: number | undefined;
+    h.cf.onRequest = async () => {
+      if (overlapping !== undefined) return undefined;
+      overlapping = -1;
+      overlapping = await h.run(["zone", "apply", "staging", "--only", "rules"]);
+      return undefined;
+    };
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.ok);
+    assert.equal(overlapping, EXIT.busy, "the second run finds the lock taken before it reads");
+    assert.equal(h.rw.patches.length, 4, "one set of proofs, from one plan");
+    const proof = allRules(h).find((r) => r.ref === "fin_next_ingress_proof_api");
+    const headers = proof?.action_parameters?.headers as Record<string, { value: string }>;
+    const edge = h.rw.patches.find((p) => h.rw.nameOf(p.serviceId) === "edge");
+    assert.equal(
+      JSON.parse(edge?.variables.FIN_INGRESS_PROOFS?.value ?? "{}").api[0],
+      headers["Fin-Ingress-Proof"]?.value,
     );
   });
 
@@ -232,7 +363,9 @@ describe("the zone rules", () => {
     for (const piece of [
       'contains ".."',
       'contains "//"',
+      'contains "%2e"',
       'contains "%2f"',
+      'contains "%5c"',
       'contains "\\\\"',
       'contains ";"',
       'ends_with(lower(raw.http.request.uri.path), ".map")',
@@ -243,6 +376,67 @@ describe("the zone rules", () => {
       e.startsWith(
         `(${hostIn([`console.${ZONE}`, `docs.${ZONE}`, `onboard.${ZONE}`, `selfie.${ZONE}`, `staff.${ZONE}`])}`,
       ),
+    );
+  });
+
+  it("refuses every raw path the edge would normalise differently from the tunnel (BD-13, AC-P0-23)", () => {
+    // Evaluates the rule's own path clauses: each `contains` on the raw path (lower-cased or not)
+    // and the `.map` ending, as Cloudflare would on the raw path.
+    const e = byRef("fin_next_path_refuse")?.expression ?? "";
+    const raw = "raw\\.http\\.request\\.uri\\.path";
+    const clauses = [
+      ...e.matchAll(new RegExp(`(lower\\()?${raw}\\)? contains "((?:[^"\\\\]|\\\\.)*)"`, "g")),
+    ].map((m) => ({
+      lower: m[1] !== undefined,
+      needle: (m[2] ?? "").replace(/\\(.)/g, "$1"),
+    }));
+    assert.ok(clauses.length >= 7);
+    const refused = (path: string) =>
+      clauses.some((c) => (c.lower ? path.toLowerCase() : path).includes(c.needle)) ||
+      path.toLowerCase().endsWith(".map");
+    for (const path of [
+      "/x/../api/ping",
+      "/x/%2e%2e/api/ping",
+      "/x/%2E%2E/api/ping",
+      "/x/.%2e/api/ping",
+      "/x/%2e./api/ping",
+      "/x//api/ping",
+      "/x/%2F/api/ping",
+      "/x\\api",
+      "/x/%5C/api/ping",
+      "/x;y",
+      "/assets/app.js.map",
+    ]) {
+      assert.equal(refused(path), true, path);
+    }
+    for (const path of ["/", "/settings/keys", "/assets/app-3f2a.js", "/api/health", "/a.b/c"]) {
+      assert.equal(refused(path), false, path);
+    }
+  });
+
+  it("orders an optional rate rule after every required rule, and holds it without a threshold", () => {
+    const withRate = desiredRules({
+      hosts: {
+        browser: [pair("console", "console")],
+        apiPaths: [pair("console", "console")],
+        api: `gateway.${ZONE}`,
+      },
+      proofs,
+      rate: { pathPrefix: "/v4/", periodSeconds: 10, mitigationTimeoutSeconds: 10 },
+    });
+    assert.equal(withRate.at(-1)?.ref, "fin_next_api_v4_rate");
+    assert.match(withRate.at(-1)?.held ?? "", /no thresholds.api-v4/);
+    const shared = desiredRules({
+      hosts: {
+        browser: [pair("console", "console")],
+        apiPaths: [pair("console", "console")],
+        api: `gateway.${ZONE}`,
+      },
+      proofs,
+    });
+    assert.equal(
+      shared.some((r) => r.phase === "http_ratelimit"),
+      false,
     );
   });
 

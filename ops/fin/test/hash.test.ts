@@ -59,7 +59,7 @@ describe("the watcher's hashes", () => {
     assert.equal(accessPolicyHash([a, b]), accessPolicyHash([b, a]));
   });
 
-  it("zone apply and access apply record them in run.done", async () => {
+  it("zone apply and access apply record them in run.done, and never print them", async () => {
     const h = harness();
     await h.run(["zone", "apply", "staging", "--only", "rules"]);
     await h.run(["access", "apply", "staging"]);
@@ -69,6 +69,33 @@ describe("the watcher's hashes", () => {
     const waf = [...h.cf.rulesets.values()].find((r) => r.phase === "http_request_firewall_custom");
     assert.equal(hashes.http_request_firewall_custom, rulesetHash(waf?.rules ?? []));
     assert.match(String(done[1]?.accessPolicyHash), /^[0-9a-f]{64}$/);
-    assert.match(h.runtime.out(), /access policy hash: [0-9a-f]{64}/);
+    // A hash whose only unknown is a private value (a threshold, a staff address) can be
+    // brute-forced offline, so stdout and stderr (a public job log in Actions) never carry one.
+    const printed = `${h.runtime.out()}\n${h.runtime.err()}`;
+    assert.doesNotMatch(printed, /[0-9a-f]{64}/);
+    for (const hash of [...Object.values(hashes), String(done[1]?.accessPolicyHash)]) {
+      assert.equal(printed.includes(hash), false);
+    }
+  });
+
+  it("records the hash of fin-next's own rules only, whatever else the phase holds", async () => {
+    const h = harness();
+    const legacy = {
+      id: "c".repeat(32),
+      ref: "legacy_redirect",
+      description: "the other product's redirect",
+      expression: '(http.host eq "legacy.zone.example")',
+      action: "redirect",
+      enabled: true,
+    };
+    const phase = { id: "d".repeat(32), phase: "http_request_dynamic_redirect", rules: [legacy] };
+    h.cf.rulesets.set(phase.id, phase);
+    await h.run(["zone", "apply", "staging", "--only", "rules"]);
+    const done = h.records().find((r) => r.event === "run.done");
+    const hashes = done?.rulesetHashes as Record<string, string>;
+    const own = phase.rules.filter((r) => r.ref?.startsWith("fin_next_"));
+    assert.equal(own.length, 1);
+    assert.equal(hashes.http_request_dynamic_redirect, rulesetHash(own));
+    assert.notEqual(hashes.http_request_dynamic_redirect, rulesetHash(phase.rules));
   });
 });

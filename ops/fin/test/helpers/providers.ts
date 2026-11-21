@@ -71,7 +71,7 @@ export class FakeCloudflare {
     preview_enabled: boolean;
     drop_suppressed_recipients: boolean;
   }> = [];
-  tokens: Array<{ id: string; name: string; status: string }> = [];
+  tokens: Array<{ id: string; name: string; status: string; expires_on?: string }> = [];
   groups = [
     { id: hex(32, "6"), name: "Email Sending Write" },
     { id: hex(32, "7"), name: "Email Sending Read" },
@@ -107,9 +107,20 @@ export class FakeCloudflare {
     }
   }
 
+  /**
+   * A test's hook, called before each request is answered: it may run something else first (a
+   * second run, say) or answer the request itself (a refusal) by returning a Response.
+   */
+  onRequest: ((call: Call) => Promise<Response | undefined> | Response | undefined) | undefined;
+
   /** Writes only: every call that is not a GET. */
   writes(): Call[] {
     return this.calls.filter((c) => c.method !== "GET");
+  }
+
+  /** A Cloudflare error answer, for a test's onRequest hook. */
+  static failure(status: number, code: number, message: string): Response {
+    return failure(status, code, message);
   }
 
   readonly fetch: FetchFn = async (url, init) => {
@@ -120,8 +131,11 @@ export class FakeCloudflare {
     if (typeof init.body === "string") body = JSON.parse(init.body);
     else if (init.body instanceof FormData) body = init.body;
     const path = u.pathname.replace(/^\/client\/v4/, "");
-    this.calls.push({ method, path: `${path}${u.search}`, body });
+    const call = { method, path: `${path}${u.search}`, body };
+    this.calls.push(call);
     if (auth !== `Bearer ${this.token}`) return failure(403, 10000, "Authentication error");
+    const hooked = await this.onRequest?.(call);
+    if (hooked !== undefined) return hooked;
     return this.route(method, path, u.searchParams, body as Json);
   };
 
@@ -278,6 +292,10 @@ export class FakeCloudflare {
         return envelope(p);
       }
     }
+    if (at(`^${account}/access/policies/([a-f0-9-]+)$`) && method === "GET") {
+      const p = this.policies.find((x) => x.id === hit.m?.[1]);
+      return p === undefined ? failure(404, 12130, "not found") : envelope(p);
+    }
     if (at(`^${account}/access/policies/([a-f0-9-]+)$`) && method === "PUT") {
       const i = this.policies.findIndex((p) => p.id === hit.m?.[1]);
       this.policies[i] = { ...body, id: hit.m?.[1] ?? "" } as unknown as Json & {
@@ -350,6 +368,8 @@ export class FakeRailway {
   readonly patches: RailwayPatch[] = [];
   readonly operations: string[] = [];
   egress = new Map<string, string[]>();
+  /** When set, the next environmentPatchCommit answers this GraphQL error instead. */
+  failPatch: string | undefined;
 
   constructor(token: string, names: readonly string[]) {
     this.token = token;
@@ -386,6 +406,11 @@ export class FakeRailway {
       });
     }
     if (op === "finPatch") {
+      if (this.failPatch !== undefined) {
+        const message = this.failPatch;
+        this.failPatch = undefined;
+        return new Response(JSON.stringify({ errors: [{ message }] }), { status: 200 });
+      }
       const patch = variables.patch as {
         services: Record<string, { variables: RailwayPatch["variables"] }>;
       };

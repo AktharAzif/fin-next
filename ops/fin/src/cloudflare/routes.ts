@@ -2,15 +2,22 @@
 // the Workers routes first (`<host>/*` to the host's assets-only deployment, `<host>/api/*` with no
 // Worker on every app host but the docs host), then the proxied CNAMEs to each host's tunnel, so no
 // host answers before its routes exist. Routes on Fin's hosts that the settings do not list are
-// deleted (with --confirm-delete); the API host has no route at all. Records and routes on any
-// other host are never read for change, let alone written.
+// deleted (with --confirm-delete), whatever their path; the API host has no route at all.
+//
+// A route of any other shape that still matches one of Fin's hosts (another product's
+// `*.<zone>/*`, say, which would send the API host's requests to that product's Worker) is refused
+// before anything is sent and left alone: §7.5 forbids touching another name, and §7.11 requires
+// that no other route on the zone matches Fin's names. Records and routes on any other host are
+// never written. Every pending write is checked before the run registers.
 
 import type { Command } from "../command.ts";
 import type { Context } from "../core/context.ts";
-import { hostOf } from "../core/overlay.ts";
+import { RefusedError } from "../core/errors.ts";
+import { type HostRole, hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import type { TunnelRole } from "../core/settings.ts";
-import { cloudflare, requireTunnel } from "./common.ts";
+import { patternHost, type WriteTarget } from "./api.ts";
+import { cloudflare, registerId, requireTunnel } from "./common.ts";
 
 interface Route {
   id: string;
@@ -35,8 +42,16 @@ interface DesiredRoute {
 
 interface DesiredRecord {
   name: string;
+  role: HostRole;
   tunnel: TunnelRole;
   content: string;
+}
+
+interface Write {
+  target: WriteTarget;
+  method: "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  body?: unknown;
 }
 
 export const DNS_COMMENT = "fin-next: pnpm fin routes apply";
@@ -54,8 +69,15 @@ export function desiredRoutes(ctx: Context): DesiredRoute[] {
   return routes;
 }
 
-function hostOfPattern(pattern: string): string {
-  return (pattern.split("/")[0] ?? "").toLowerCase();
+/** Whether a Workers route's host part (`*` matches any run of characters) matches `host`. */
+export function routeHostMatches(patternHostPart: string, host: string): boolean {
+  if (patternHostPart === host) return true;
+  if (!patternHostPart.includes("*")) return false;
+  const pattern = patternHostPart
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\-]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${pattern}$`).test(host);
 }
 
 export const routesApply: Command = {
@@ -78,15 +100,33 @@ export const routesApply: Command = {
       for (const hostRole of ctx.settings.tunnels[role].hosts) {
         const name = hostOf(ctx.overlay, hostRole);
         ctx.guard.checkName(name, "dns record");
-        records.push({ name, tunnel: role, content: `${tunnels[role].id}.cfargotunnel.com` });
+        records.push({
+          name,
+          role: hostRole,
+          tunnel: role,
+          content: `${tunnels[role].id}.cfargotunnel.com`,
+        });
       }
     }
     const ourHosts = new Set(records.map((r) => r.name.toLowerCase()));
 
     const changes: Change[] = [];
-    const existingRoutes = (await api.list<Route>(`${zonePath}/workers/routes`)).filter((r) =>
-      ourHosts.has(hostOfPattern(r.pattern)),
-    );
+    const zoneRoutes = await api.list<Route>(`${zonePath}/workers/routes`);
+    // Another shape of route that reaches a Fin host is someone else's to remove.
+    for (const route of zoneRoutes) {
+      const host = patternHost(route.pattern);
+      if (ourHosts.has(host)) continue;
+      const reached = [...ourHosts].filter((h) => routeHostMatches(host, h));
+      if (reached.length > 0) {
+        throw new RefusedError(
+          `another route (${route.pattern}) matches ${reached.join(", ")}; resolve it by hand (pnpm fin never touches another name's route)`,
+        );
+      }
+    }
+    const existingRoutes = zoneRoutes.filter((r) => ourHosts.has(patternHost(r.pattern)));
+    existingRoutes.forEach((r, i) => {
+      registerId(ctx, r.id, "route", String(i + 1));
+    });
     const routeIds = new Map<string, string>();
     for (const want of routes) {
       const found = existingRoutes.find((r) => r.pattern === want.pattern);
@@ -122,6 +162,7 @@ export const routesApply: Command = {
     for (const want of records) {
       const found = await api.list<DnsRecord>(`${zonePath}/dns_records`, { name: want.name });
       const exact = found.filter((r) => r.name.toLowerCase() === want.name.toLowerCase());
+      for (const r of exact) registerId(ctx, r.id, "dns", want.role);
       const detail = `CNAME -> ${want.content} (proxied)`;
       const other = exact.find((r) => r.type !== "CNAME");
       if (other !== undefined) {
@@ -152,39 +193,36 @@ export const routesApply: Command = {
       });
     }
 
-    return ctx.applyPlan("routes and DNS", changes, async (change) => {
+    /** The one write a change sends. */
+    const writeFor = (change: Change): Write | undefined => {
       if (change.kind === "route") {
         const want = routes.find((r) => r.pattern === change.name);
         const id = routeIds.get(change.name);
+        const target: WriteTarget = {
+          kind: "route",
+          pattern: change.name,
+          ...(id === undefined ? {} : { id }),
+        };
         const body =
           want === undefined
             ? undefined
             : { pattern: want.pattern, ...(want.script === null ? {} : { script: want.script }) };
-        if (change.action === "create") {
-          await writer.write(
-            { kind: "route", pattern: change.name },
-            "POST",
-            `${zonePath}/workers/routes`,
-            body,
-          );
-        } else if (change.action === "update") {
-          await writer.write(
-            { kind: "route", pattern: change.name },
-            "PUT",
-            `${zonePath}/workers/routes/${id}`,
-            body,
-          );
-        } else if (change.action === "delete") {
-          await writer.write(
-            { kind: "route", pattern: change.name },
-            "DELETE",
-            `${zonePath}/workers/routes/${id}`,
-          );
-        }
-        return;
+        if (change.action === "create")
+          return { target, method: "POST", path: `${zonePath}/workers/routes`, body };
+        if (change.action === "update")
+          return { target, method: "PUT", path: `${zonePath}/workers/routes/${id}`, body };
+        if (change.action === "delete")
+          return { target, method: "DELETE", path: `${zonePath}/workers/routes/${id}` };
+        return undefined;
       }
       const want = records.find((r) => r.name === change.name);
-      if (want === undefined) return;
+      if (want === undefined) return undefined;
+      const id = recordIds.get(want.name);
+      const target: WriteTarget = {
+        kind: "dns",
+        name: want.name,
+        ...(id === undefined ? {} : { id }),
+      };
       const body = {
         type: "CNAME",
         name: want.name,
@@ -193,21 +231,28 @@ export const routesApply: Command = {
         ttl: 1,
         comment: DNS_COMMENT,
       };
-      if (change.action === "create") {
-        await writer.write(
-          { kind: "dns", name: want.name },
-          "POST",
-          `${zonePath}/dns_records`,
-          body,
-        );
-      } else if (change.action === "update") {
-        await writer.write(
-          { kind: "dns", name: want.name },
-          "PATCH",
-          `${zonePath}/dns_records/${recordIds.get(want.name)}`,
-          body,
-        );
-      }
-    });
+      if (change.action === "create")
+        return { target, method: "POST", path: `${zonePath}/dns_records`, body };
+      if (change.action === "update")
+        return { target, method: "PATCH", path: `${zonePath}/dns_records/${id}`, body };
+      return undefined;
+    };
+
+    return ctx.applyPlan(
+      "routes and DNS",
+      changes,
+      async (change) => {
+        const write = writeFor(change);
+        if (write !== undefined)
+          await writer.write(write.target, write.method, write.path, write.body);
+      },
+      {},
+      {
+        check: (change) => {
+          const write = writeFor(change);
+          if (write !== undefined) writer.check(write.target, write.method, write.path, write.body);
+        },
+      },
+    );
   },
 };

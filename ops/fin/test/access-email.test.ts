@@ -69,6 +69,104 @@ describe("access apply", () => {
     assert.equal(h2.cf.writes().length, 0);
   });
 
+  it("refuses any other application that covers the staff host, by a path, a destination or a wildcard", async () => {
+    const covering: Array<Record<string, unknown>> = [
+      {
+        domain: `staff.${ZONE}/assets`,
+        destinations: [{ type: "public", uri: `staff.${ZONE}/assets` }],
+      },
+      { domain: `STAFF.${ZONE}/api/*` },
+      { domain: `https://staff.${ZONE}` },
+      {
+        domain: `legacy.${ZONE}`,
+        destinations: [
+          { type: "public", uri: `legacy.${ZONE}` },
+          { type: "public", uri: `staff.${ZONE}` },
+        ],
+      },
+      { domain: `legacy.${ZONE}`, self_hosted_domains: [`legacy.${ZONE}`, `staff.${ZONE}/x`] },
+      { domain: `*.${ZONE}` },
+      { domain: `*staff.${ZONE}` },
+    ];
+    for (const shape of covering) {
+      const h = harness();
+      h.cf.apps.push({ id: uuid("2"), name: "someone-else-bypass", type: "self_hosted", ...shape });
+      assert.equal(
+        await h.run(["access", "apply", "staging"]),
+        EXIT.refused,
+        JSON.stringify(shape),
+      );
+      assert.match(h.runtime.err(), /another Access application \(someone-else-bypass\)/);
+      assert.equal(h.cf.writes().length, 0);
+    }
+    // A bookmark only links, and an application on another host does not cover this one.
+    const h = harness();
+    h.cf.apps.push({ id: uuid("2"), name: "a-link", type: "bookmark", domain: `staff.${ZONE}` });
+    h.cf.apps.push({
+      id: uuid("3"),
+      name: "other",
+      type: "self_hosted",
+      domain: `staffing.${ZONE}`,
+    });
+    assert.equal(await h.run(["access", "apply", "staging"]), EXIT.ok);
+  });
+
+  it("keeps the owner's MFA and other settings when it updates the application or the policy", async () => {
+    const h = harness();
+    await h.run(["access", "apply", "staging"]);
+    const mfa = { allowed_authenticators: ["totp", "biometrics"], session_duration: "8h" };
+    const app = h.cf.apps[0] as Record<string, unknown>;
+    const policy = h.cf.policies[0] as Record<string, unknown>;
+    app.mfa_config = mfa;
+    app.session_duration = "24h";
+    app.tags = ["owner-tag"];
+    policy.mfa_config = mfa;
+    policy.approval_required = true;
+    const h2 = harness((o) => {
+      (o.access as { staff: string[] }).staff = ["staff.member@example.com", "second@example.com"];
+    });
+    h2.cf.policies.push(...h.cf.policies);
+    h2.cf.apps.push(...h.cf.apps);
+    assert.equal(await h2.run(["access", "apply", "staging"]), EXIT.ok);
+    const puts = h2.cf.writes().filter((c) => c.method === "PUT");
+    assert.equal(puts.length, 2);
+    const after = h2.cf.apps[0] as Record<string, unknown>;
+    assert.equal(after.session_duration, "8h");
+    assert.deepEqual(after.mfa_config, mfa);
+    assert.deepEqual(after.tags, ["owner-tag"]);
+    const afterPolicy = h2.cf.policies[0] as Record<string, unknown>;
+    assert.deepEqual(afterPolicy.mfa_config, mfa);
+    assert.equal(afterPolicy.approval_required, true);
+    assert.equal((afterPolicy.include as unknown[]).length, 3);
+    for (const put of puts) {
+      const body = put.body as Record<string, unknown>;
+      for (const key of ["id", "aud", "created_at", "updated_at"]) assert.equal(key in body, false);
+    }
+  });
+
+  it("puts back the settings that would open the application, which it reported as unchanged", async () => {
+    const h = harness();
+    await h.run(["access", "apply", "staging"]);
+    const app = h.cf.apps[0] as Record<string, unknown>;
+    app.options_preflight_bypass = true;
+    app.allow_authenticate_via_warp = true;
+    app.cors_headers = { allow_all_origins: true, allow_credentials: true };
+    app.self_hosted_domains = [`staff.${ZONE}`, `legacy.${ZONE}`];
+    assert.equal(await h.run(["access", "apply", "staging", "--dry-run"]), 1);
+    assert.match(
+      h.runtime.out(),
+      /~ update access-app fin-next-staging-admin \[allow_authenticate_via_warp, cors_headers, options_preflight_bypass, self_hosted_domains\]/,
+    );
+    assert.equal(await h.run(["access", "apply", "staging"]), EXIT.ok);
+    const after = h.cf.apps[0] as Record<string, unknown>;
+    assert.equal(after.options_preflight_bypass, false);
+    assert.equal(after.allow_authenticate_via_warp, false);
+    assert.equal("cors_headers" in after, false);
+    assert.equal("self_hosted_domains" in after, false, "re-derived from the destinations");
+    assert.equal(await h.run(["access", "apply", "staging"]), EXIT.ok);
+    assert.match(h.runtime.out(), /= keep access-app fin-next-staging-admin/);
+  });
+
   it("refuses an overlay that would admit nobody", async () => {
     const h = harness((o) => {
       o.access = { staff: [], allowDomains: [] };
@@ -181,6 +279,48 @@ describe("email token", () => {
       writes.map((c) => c.split(" ").slice(0, 2).join(" ")),
       ["cf POST", "rw finPatch", "cf DELETE"],
     );
+  });
+
+  it("names the revoked tokens by ordinal, never by any part of their ID", async () => {
+    const h = harness();
+    await h.run(["email", "token", "staging"]);
+    const old = h.cf.tokens[0]?.id ?? "";
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.ok);
+    assert.match(h.runtime.out(), /~ update token-revoke fin-next-staging-email #1/);
+    const text = h.readable();
+    assert.equal(text.includes(old), false);
+    assert.equal(text.includes(`(${old.slice(0, 6)})`), false);
+  });
+
+  it("replaces a token that was minted but never set on worker, without --rotate", async () => {
+    const h = harness();
+    h.rw.failPatch = "the environment is locked";
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.unavailable);
+    assert.equal(h.cf.tokens.length, 1);
+    assert.equal(h.rw.patches.length, 0);
+    const orphan = h.cf.tokens[0]?.id;
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok);
+    assert.match(h.runtime.out(), /never set on worker/);
+    assert.equal(h.rw.patches.length, 1, "the new token is set");
+    assert.equal(h.cf.tokens.length, 1, "the orphan is revoked");
+    assert.notEqual(h.cf.tokens[0]?.id, orphan);
+    // Once set, a plain run keeps it.
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok);
+    assert.equal(h.cf.tokens.length, 1);
+    assert.equal(h.rw.patches.length, 1);
+  });
+
+  it("replaces a token that is no longer active, without --rotate", async () => {
+    const h = harness();
+    await h.run(["email", "token", "staging"]);
+    const first = h.cf.tokens[0];
+    if (first === undefined) throw new Error("no token");
+    first.status = "expired";
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok);
+    assert.match(h.runtime.out(), /is expired/);
+    assert.equal(h.cf.tokens.length, 1);
+    assert.notEqual(h.cf.tokens[0]?.id, first.id);
+    assert.equal(h.rw.patches.length, 2);
   });
 
   it("never mints without an IP filter", async () => {

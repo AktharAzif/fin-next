@@ -39,6 +39,11 @@ export interface DesiredRule {
   proof?: { role: HostRole; value: Secret };
   /** When set, the rule is planned but held, and this says why. */
   held?: string;
+  /**
+   * An optional rule (the rate rule: Fin's own limits stand alone), applied after every required
+   * change and every deletion, so a refusal of it never stops a required rule.
+   */
+  optional?: boolean;
 }
 
 export interface RuleHosts {
@@ -54,7 +59,11 @@ export interface RuleInputs {
   hosts: RuleHosts;
   /** The current ingress proof of each host role (api and each apiPaths role). */
   proofs: ReadonlyMap<HostRole, Secret>;
-  rate: {
+  /**
+   * The optional rate rule; absent while the zone is shared ([FD-09]): the Free plan's one rate
+   * rule matches on path only, so it would also count and block the other product's requests.
+   */
+  rate?: {
     pathPrefix: string;
     periodSeconds: number;
     mitigationTimeoutSeconds: number;
@@ -136,41 +145,24 @@ export function desiredRules(inputs: RuleInputs): DesiredRule[] {
 
   // BD-13 (S-01 (g)): the edge and cloudflared do not agree on dot segments, doubled slashes and
   // encoded slashes, so the browser hosts refuse them outright, on the raw path, with backslashes,
-  // semicolons and source maps (AC-P0-23).
+  // semicolons and source maps (AC-P0-23). Encoded dots count too: the edge's URL normalisation
+  // decodes `%2e` (an unreserved character) before it removes dot segments, so `/x/%2e%2e/api/`
+  // is `/api/` at the edge and something else at the tunnel. An encoded backslash is refused for
+  // the same reason.
   const raw = "raw.http.request.uri.path";
   rules.push({
     phase: "http_request_firewall_custom",
     ref: "fin_next_path_refuse",
-    description: "fin-next: refuse .., //, %2F, \\, ; and *.map paths on the browser hosts (BD-13)",
+    description:
+      "fin-next: refuse .., //, %2E, %2F, \\, %5C, ; and *.map paths on the browser hosts (BD-13)",
     expression:
       `(${hostIn(browser)} and (${raw} contains ".." or ${raw} contains "//" or ` +
-      `lower(${raw}) contains "%2f" or ${raw} contains "\\\\" or ${raw} contains ";" or ` +
+      `lower(${raw}) contains "%2e" or lower(${raw}) contains "%2f" or ` +
+      `${raw} contains "\\\\" or lower(${raw}) contains "%5c" or ${raw} contains ";" or ` +
       `ends_with(lower(${raw}), ".map")))`,
     action: "block",
     hosts: browser,
   });
-
-  // One rate rule on the API's /v4/ prefix. On a shared zone it also matches the API host, so the
-  // other product's paths are never limited; its threshold is private ([OB-13]).
-  const threshold = inputs.rate.threshold;
-  const rate: DesiredRule = {
-    phase: "http_ratelimit",
-    ref: "fin_next_api_v4_rate",
-    description: `fin-next: per-address limit on ${inputs.rate.pathPrefix} of the API host`,
-    expression: `(http.host eq ${quote(api)} and starts_with(http.request.uri.path, "${inputs.rate.pathPrefix}"))`,
-    action: "block",
-    ratelimit: {
-      characteristics: ["cf.colo.id", "ip.src"],
-      period: inputs.rate.periodSeconds,
-      requests_per_period: threshold ?? 0,
-      mitigation_timeout: inputs.rate.mitigationTimeoutSeconds,
-    },
-    hosts: [api],
-  };
-  if (threshold === undefined) rate.held = "the overlay has no thresholds.api-v4";
-  rules.push(rate);
-
-  // No challenge and no cache on API traffic ([FD-07], §5.8).
   rules.push({
     phase: "http_config_settings",
     ref: "fin_next_api_no_challenge",
@@ -203,6 +195,30 @@ export function desiredRules(inputs: RuleInputs): DesiredRule[] {
     action_parameters: { headers: { "Cache-Control": { operation: "set", value: "no-store" } } },
     hosts: browser,
   });
+
+  // The optional rate rule on the API's /v4/ prefix, last: Fin's own limits stand alone, so a
+  // refusal of this rule (a plan limit, say) must never stop the required rules above. Its
+  // threshold is private ([OB-13]). Not written at all while the zone is shared ([FD-09]).
+  if (inputs.rate !== undefined) {
+    const threshold = inputs.rate.threshold;
+    const rate: DesiredRule = {
+      phase: "http_ratelimit",
+      ref: "fin_next_api_v4_rate",
+      description: `fin-next: per-address limit on ${inputs.rate.pathPrefix} of the API host`,
+      expression: `(http.host eq ${quote(api)} and starts_with(http.request.uri.path, "${inputs.rate.pathPrefix}"))`,
+      action: "block",
+      ratelimit: {
+        characteristics: ["cf.colo.id", "ip.src"],
+        period: inputs.rate.periodSeconds,
+        requests_per_period: threshold ?? 0,
+        mitigation_timeout: inputs.rate.mitigationTimeoutSeconds,
+      },
+      hosts: [api],
+      optional: true,
+    };
+    if (threshold === undefined) rate.held = "the overlay has no thresholds.api-v4";
+    rules.push(rate);
+  }
   return rules;
 }
 

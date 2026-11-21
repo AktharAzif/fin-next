@@ -7,19 +7,24 @@
 //
 // Rules: each phase's entrypoint is read; only rules whose ref starts with `fin_next_` are compared,
 // created, updated or deleted, each through the per-rule endpoints. A phase entrypoint is created
-// only when it does not exist (checked again just before). After the run, each phase entrypoint is
-// read back and hashed as the watcher hashes it, for `run.done`. Ingress proofs keep their values;
-// a host with no proof gets a new one (32 random bytes, base64url), which is set sealed on the
-// services that check it before the rule that sends it is written (spec 01 §7.6's order).
+// only when it does not exist (checked again just before). The optional rate rule is not written
+// while the zone is shared ([FD-09]), and otherwise comes last, after every deletion, so its
+// refusal never stops a required rule. Every pending write is checked before the run registers.
+// After the run, each phase's fin_next_ rules are read back and hashed as the watcher hashes them,
+// into `run.done` only (never printed). Ingress proofs keep their values; a host with no proof gets
+// a new one (32 random bytes, base64url), which is set sealed on the services that check it before
+// the rule that sends it is written (spec 01 §7.6's order).
 
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
 import type { Context } from "../core/context.ts";
+import { RefusedError } from "../core/errors.ts";
 import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
-import { cloudflare, railway } from "./common.ts";
-import { rulesetHash } from "./hash.ts";
+import type { WriteTarget } from "./api.ts";
+import { cloudflare, railway, registerId } from "./common.ts";
+import { finRulesetHash, isFinRule } from "./hash.ts";
 import {
   comparable,
   type DesiredRule,
@@ -52,6 +57,13 @@ interface Ruleset {
   rules?: Rule[];
 }
 
+interface Write {
+  target: WriteTarget;
+  method: "POST" | "PATCH" | "DELETE";
+  path: string;
+  body?: unknown;
+}
+
 const PROOF = /^[A-Za-z0-9_-]{43}$/;
 
 function existingProof(rule: Rule | undefined): string | undefined {
@@ -66,11 +78,26 @@ function newProof(ctx: Context): Secret {
   return new Secret(Buffer.from(ctx.runtime.random(32)).toString("base64url"));
 }
 
+/** A public label for a Fin rule's ID placeholder: its ref, when the ref is a plain name. */
+function ruleLabel(ref: string): string {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(ref) ? ref : "fin_next";
+}
+
+/** Registers a phase entrypoint's ID and its fin_next_ rules' IDs with the masker. */
+function registerRuleset(ctx: Context, phase: Phase, ruleset: Ruleset | undefined): void {
+  if (ruleset === undefined) return;
+  registerId(ctx, ruleset.id, "ruleset", phase);
+  for (const rule of ruleset.rules ?? []) {
+    if (isFinRule(rule)) registerId(ctx, rule.id, "rule", ruleLabel(rule.ref ?? ""));
+  }
+}
+
 /**
- * Each phase entrypoint's hash as it stands now (every rule in it, the other product's included),
- * computed as the watcher computes it, for `run.done`'s `rulesetHashes`.
+ * Each phase's hash of fin-next's own rules as it stands now (spec 01 §7.6: the other product's
+ * rules are left out), computed as the watcher computes it, for `run.done`'s `rulesetHashes`.
  */
 async function readRulesetHashes(
+  ctx: Context,
   api: ReturnType<typeof cloudflare>["api"],
   zonePath: string,
 ): Promise<Record<string, string>> {
@@ -79,9 +106,42 @@ async function readRulesetHashes(
     const ruleset = await api.getOptional<Ruleset>(
       `${zonePath}/rulesets/phases/${phase}/entrypoint`,
     );
-    hashes[phase] = rulesetHash(ruleset?.rules ?? []);
+    registerRuleset(ctx, phase, ruleset);
+    hashes[phase] = finRulesetHash(ruleset?.rules ?? []);
   }
   return hashes;
+}
+
+/**
+ * Refuses while a proxied wildcard record on the zone (another product's `*.<zone>`) answers for a
+ * host that gets an ingress proof and has no record of its own yet: the zone rules come before the
+ * hosts' records (EXECUTION §2.5 steps 7 and 8), so until then that host's requests, with Fin's
+ * proof attached at the edge, would go to the wildcard's origin. A host's own record, written by
+ * `routes apply`, takes precedence over the wildcard. Only reads; the wildcard is never touched.
+ */
+async function refuseWildcardOrigin(
+  ctx: Context,
+  api: ReturnType<typeof cloudflare>["api"],
+  zonePath: string,
+  roles: readonly HostRole[],
+): Promise<void> {
+  const wildcard = `*.${ctx.overlay.zone}`;
+  const records = await api.list<{ name: string; proxied?: boolean }>(`${zonePath}/dns_records`, {
+    name: wildcard,
+  });
+  if (!records.some((r) => r.name.toLowerCase() === wildcard.toLowerCase() && r.proxied === true))
+    return;
+  const uncovered: string[] = [];
+  for (const role of roles) {
+    const host = hostOf(ctx.overlay, role);
+    const own = await api.list<{ name: string }>(`${zonePath}/dns_records`, { name: host });
+    if (!own.some((r) => r.name.toLowerCase() === host.toLowerCase())) uncovered.push(host);
+  }
+  if (uncovered.length > 0) {
+    throw new RefusedError(
+      `the proxied wildcard record ${wildcard} answers for ${uncovered.join(", ")}, which have no record of their own yet, so their ingress proofs would reach that record's origin; run routes apply first (it writes their records) or resolve the wildcard by hand`,
+    );
+  }
 }
 
 async function settingChanges(
@@ -149,12 +209,14 @@ async function rulePlan(
       `${zonePath}/rulesets/phases/${phase}/entrypoint`,
     );
     entrypoints.set(phase, ruleset);
+    registerRuleset(ctx, phase, ruleset);
     for (const rule of ruleset?.rules ?? []) {
-      if (rule.ref?.startsWith("fin_next_")) existing.set(rule.ref, { phase, rule });
+      if (isFinRule(rule) && rule.ref !== undefined) existing.set(rule.ref, { phase, rule });
     }
   }
 
   const proofRoles: HostRole[] = [s.hostRoles.api, ...s.hostRoles.apiPaths];
+  await refuseWildcardOrigin(ctx, api, zonePath, proofRoles);
   const proofs = new Map<HostRole, Secret>();
   const newProofs = new Set<HostRole>();
   for (const role of proofRoles) {
@@ -165,7 +227,16 @@ async function rulePlan(
     if (current === undefined) newProofs.add(role);
   }
 
+  // The threshold is private ([OB-13]): masked wherever a provider might echo it.
   const threshold = ctx.overlay.thresholds[s.rules.rate.threshold];
+  if (threshold !== undefined) {
+    ctx.masker.register(String(threshold), `<threshold:${s.rules.rate.threshold}>`);
+  }
+  if (s.zone.shared) {
+    ctx.out.info(
+      "rate rule: not written while the zone is shared ([FD-09]); Fin's own limits stand alone",
+    );
+  }
   const pair = (role: HostRole) => ({ role, host: hostOf(ctx.overlay, role) });
   const rules = desiredRules({
     hosts: {
@@ -174,12 +245,16 @@ async function rulePlan(
       api: hostOf(ctx.overlay, s.hostRoles.api),
     },
     proofs,
-    rate: {
-      pathPrefix: s.rules.rate.pathPrefix,
-      periodSeconds: s.rules.rate.periodSeconds,
-      mitigationTimeoutSeconds: s.rules.rate.mitigationTimeoutSeconds,
-      ...(threshold === undefined ? {} : { threshold }),
-    },
+    ...(s.zone.shared
+      ? {}
+      : {
+          rate: {
+            pathPrefix: s.rules.rate.pathPrefix,
+            periodSeconds: s.rules.rate.periodSeconds,
+            mitigationTimeoutSeconds: s.rules.rate.mitigationTimeoutSeconds,
+            ...(threshold === undefined ? {} : { threshold }),
+          },
+        }),
   });
   for (const rule of rules) {
     ctx.guard.checkRuleRef(rule.ref, "zone rule");
@@ -198,35 +273,24 @@ async function rulePlan(
       detail: `sealed; new proof for ${fresh.join(", ")}`,
     });
   }
-  const wanted = new Set(rules.map((r) => r.ref));
-  for (const rule of rules) {
+  const ruleChange = (rule: DesiredRule): Change => {
     const found = existing.get(rule.ref);
     const name = `${rule.phase}/${rule.ref}`;
-    if (found === undefined) {
-      changes.push({
-        kind: "rule",
-        name,
-        action: "create",
-        ...(rule.held === undefined ? {} : { held: rule.held }),
-      });
-      continue;
-    }
+    const held = rule.held === undefined ? {} : { held: rule.held };
+    if (found === undefined) return { kind: "rule", name, action: "create", ...held };
     const fields = differingFields(comparable(found.rule), comparable({ ...ruleBody(rule) }));
     if (found.phase !== rule.phase) fields.push("phase");
-    if (fields.length === 0) changes.push({ kind: "rule", name, action: "keep" });
-    else
-      changes.push({
-        kind: "rule",
-        name,
-        action: "update",
-        fields,
-        ...(rule.held === undefined ? {} : { held: rule.held }),
-      });
-  }
+    if (fields.length === 0) return { kind: "rule", name, action: "keep" };
+    return { kind: "rule", name, action: "update", fields, ...held };
+  };
+  for (const rule of rules) if (rule.optional !== true) changes.push(ruleChange(rule));
+  const wanted = new Set(rules.map((r) => r.ref));
   for (const [ref, found] of existing) {
     if (!wanted.has(ref))
       changes.push({ kind: "rule", name: `${found.phase}/${ref}`, action: "delete" });
   }
+  // Last, after every deletion (the Free plan's one rate rule may need its slot freed first).
+  for (const rule of rules) if (rule.optional === true) changes.push(ruleChange(rule));
   return { changes, rules, entrypoints, existing, newProofs, proofs };
 }
 
@@ -266,30 +330,63 @@ export const zoneApply: Command = {
     }
     const rw =
       plan !== undefined && plan.newProofs.size > 0 && !ctx.dryRun ? railway(ctx) : undefined;
-    const readBack = async (): Promise<Record<string, unknown>> => {
-      if (plan === undefined) return {};
-      const rulesetHashes = await readRulesetHashes(api, zonePath);
-      for (const [phase, hash] of Object.entries(rulesetHashes)) {
-        ctx.out.info(`rule set ${phase}: ${hash}`);
+
+    /** The one write a setting or rule change sends, from the entrypoints as they stand. */
+    const writeFor = (change: Change): Write | undefined => {
+      if (change.kind === "setting") {
+        return {
+          target: { kind: "setting", id: change.name },
+          method: "PATCH",
+          path: `${zonePath}/settings/${change.name}`,
+          body: { value: ctx.settings.zone.settings[change.name] },
+        };
       }
-      return { rulesetHashes };
+      if (plan === undefined || change.kind !== "rule") return undefined;
+      const [phaseName, ref = ""] = change.name.split("/");
+      const phase = phaseName as Phase;
+      const desired = plan.rules.find((r) => r.ref === ref);
+      const found = plan.existing.get(ref);
+      if (change.action === "delete" && found !== undefined) {
+        const rulesetId = plan.entrypoints.get(found.phase)?.id ?? "";
+        return {
+          target: { kind: "rule", ref, hosts: [], rulesetId, id: found.rule.id },
+          method: "DELETE",
+          path: `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
+        };
+      }
+      if (desired === undefined) return undefined;
+      if (change.action === "update" && found !== undefined) {
+        const rulesetId = plan.entrypoints.get(found.phase)?.id ?? "";
+        return {
+          target: { kind: "rule", ref, hosts: desired.hosts, rulesetId, id: found.rule.id },
+          method: "PATCH",
+          path: `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
+          body: ruleBody(desired),
+        };
+      }
+      const ruleset = plan.entrypoints.get(phase);
+      if (ruleset === undefined) {
+        return {
+          target: { kind: "ruleset", phase, refs: [ref], hosts: desired.hosts },
+          method: "POST",
+          path: `${zonePath}/rulesets`,
+          body: { name: `fin-next ${phase}`, kind: "zone", phase, rules: [ruleBody(desired)] },
+        };
+      }
+      return {
+        target: { kind: "rule", ref, hosts: desired.hosts, rulesetId: ruleset.id },
+        method: "POST",
+        path: `${zonePath}/rulesets/${ruleset.id}/rules`,
+        body: ruleBody(desired),
+      };
     };
+
     return ctx.applyPlan(
       "zone",
       changes,
       async (change) => {
-        if (change.kind === "setting") {
-          const value = ctx.settings.zone.settings[change.name];
-          await writer.write(
-            { kind: "setting", id: change.name },
-            "PATCH",
-            `${zonePath}/settings/${change.name}`,
-            { value },
-          );
-          return;
-        }
-        if (plan === undefined) return;
         if (change.kind === "variable") {
+          if (plan === undefined) return;
           const service = change.name.split(".")[0] ?? "";
           const roles = ctx.settings.ingressProofs[service] ?? [];
           const value: Record<string, string[]> = {};
@@ -305,55 +402,49 @@ export const zoneApply: Command = {
           );
           return;
         }
-        const ref = change.name.split("/")[1] ?? "";
-        const phase = change.name.split("/")[0] as Phase;
-        const desired = plan.rules.find((r) => r.ref === ref);
-        const found = plan.existing.get(ref);
-        if (change.action === "delete" && found !== undefined) {
-          const rulesetId = plan.entrypoints.get(found.phase)?.id ?? "";
-          await writer.write(
-            { kind: "rule", ref, hosts: [] },
-            "DELETE",
-            `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
-          );
-          return;
+        if (plan !== undefined && change.kind === "rule" && change.action === "create") {
+          // A phase entrypoint is made only if it still does not exist, checked just before.
+          const phase = (change.name.split("/")[0] ?? "") as Phase;
+          if (plan.entrypoints.get(phase) === undefined) {
+            const now = await api.getOptional<Ruleset>(
+              `${zonePath}/rulesets/phases/${phase}/entrypoint`,
+            );
+            registerRuleset(ctx, phase, now);
+            plan.entrypoints.set(phase, now);
+          }
         }
-        if (desired === undefined) return;
-        if (change.action === "update" && found !== undefined) {
-          const rulesetId = plan.entrypoints.get(found.phase)?.id ?? "";
-          await writer.write(
-            { kind: "rule", ref, hosts: desired.hosts },
-            "PATCH",
-            `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
-            ruleBody(desired),
-          );
-          return;
-        }
-        // create: into the phase entrypoint, made only if it still does not exist.
-        let ruleset = plan.entrypoints.get(phase);
-        ruleset ??= await api.getOptional<Ruleset>(
-          `${zonePath}/rulesets/phases/${phase}/entrypoint`,
+        const write = writeFor(change);
+        if (write === undefined) return;
+        const result = await writer.write<Ruleset>(
+          write.target,
+          write.method,
+          write.path,
+          write.body,
         );
-        if (ruleset === undefined) {
-          const created = await writer.write<Ruleset>(
-            { kind: "ruleset", phase, refs: [ref], hosts: desired.hosts },
-            "POST",
-            `${zonePath}/rulesets`,
-            { name: `fin-next ${phase}`, kind: "zone", phase, rules: [ruleBody(desired)] },
-          );
-          plan.entrypoints.set(phase, created);
-          return;
+        if (plan !== undefined && change.kind === "rule" && write.method === "POST") {
+          const phase = (change.name.split("/")[0] ?? "") as Phase;
+          registerRuleset(ctx, phase, result);
+          plan.entrypoints.set(phase, result);
         }
-        const updated = await writer.write<Ruleset>(
-          { kind: "rule", ref, hosts: desired.hosts },
-          "POST",
-          `${zonePath}/rulesets/${ruleset.id}/rules`,
-          ruleBody(desired),
-        );
-        plan.entrypoints.set(phase, updated);
       },
       {},
-      readBack,
+      {
+        check: (change) => {
+          if (change.kind === "variable") {
+            const service = change.name.split(".")[0] ?? "";
+            if (ctx.settings.railway.services[service] === undefined) {
+              throw new RefusedError(
+                `railway: ${service} is not a service the public settings list`,
+              );
+            }
+            return;
+          }
+          const write = writeFor(change);
+          if (write !== undefined) writer.check(write.target, write.method, write.path, write.body);
+        },
+        after: async () =>
+          plan === undefined ? {} : { rulesetHashes: await readRulesetHashes(ctx, api, zonePath) },
+      },
     );
   },
 };
