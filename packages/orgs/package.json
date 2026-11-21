@@ -1,0 +1,30 @@
+{
+  "name": "@fin/orgs",
+  "private": true,
+  "type": "module",
+  "description": "Organisations, members, invitations, custom roles and requireActor (spec 02 §9, §13.2, §14.1; DECISIONS SA-10, SA-11, SA-32, SA-33, SA-34, BC-06).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./test/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@fin/access": "workspace:*",
+    "@fin/core": "workspace:*",
+    "@fin/email": "workspace:*",
+    "@fin/identity": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "pg": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
