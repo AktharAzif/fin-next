@@ -3,22 +3,101 @@
 // public, so this check refuses, in tracked files (and their paths):
 //   - email addresses outside example.com, example.org and example.net (and the names reserved
 //     never to resolve: .example, .invalid, .test, .localhost);
-//   - strings shaped like account IDs (32 hex), tunnel, project, service or environment IDs
-//     (UUIDs), tokens and private keys, and private IP addresses;
+//   - strings shaped like account IDs (32 hex, either case), tunnel, project, service or
+//     environment IDs (UUIDs), tokens and private keys, and private IP addresses;
+//   - a local home directory path (/Users/<name>, C:\Users\<name>);
 //   - claude.ai artifact identifiers;
 //   - when FIN_OVERLAY_FILE names a JSON file with a "refuseList" array, each listed string, case
 //     insensitively (a 40-character commit SHA also by any prefix of 7 or more characters).
+// Every file is read: UTF-8, or UTF-16 and UTF-32 by their byte-order mark; a file with a NUL
+// byte (binary content) is read as Latin-1 bytes and again with its NUL bytes removed, and both
+// are scanned with every rule, so a NUL byte never opts a file out. A symbolic link is read as
+// what git publishes for it: its target.
 // It prints file:line and the rule's name, never the matched value, so its output is safe in a
 // public log. With --commits or --range it scans what a push would publish instead: each commit's
-// message and the full content of every file it adds or changes.
+// message and the full content of every file it adds or changes (for a merge, every file that
+// differs from its first parent, so what the merge itself adds is read too).
+//
+// This file is self-contained (Node built-ins only, no import from another file of the
+// repository), so every line that decides its verdict is under the control path and the owner's
+// review (CI-14). For the same reason CI runs it directly, `node scripts/public-safety.mjs`, not
+// through a package.json script, which is not a control path.
 //
 // Exit codes: 0 clean, 1 findings, 2 a usage or overlay error (the check fails closed).
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
-import { git, gitBytes, isBinary, isRecord, listFiles, report } from "./lib/repo.mjs";
 
-/** @typedef {import("./lib/repo.mjs").Finding} Finding */
+/** @typedef {{ file: string, line?: number, rule: string, message: string }} Finding */
 /** @typedef {{ name: string, pattern: RegExp, allow?: (match: RegExpExecArray, line: string) => boolean, describe: string }} Rule */
+
+// --- Helpers (kept in this file: see the header) ---------------------------------------------
+
+/**
+ * Runs git in `root` and returns its standard output.
+ * @param {string} root
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function git(root, args) {
+  return execFileSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/**
+ * Runs git in `root` and returns its standard output as bytes.
+ * @param {string} root
+ * @param {string[]} args
+ * @returns {Buffer}
+ */
+function gitBytes(root, args) {
+  return execFileSync("git", ["-C", root, ...args], {
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/**
+ * Whether `value` is a plain object (not null, not an array).
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The tracked entries of the repository at `root` with their git modes, as [path, mode] pairs
+ * sorted by path. Entries deleted from the working tree are left out.
+ * @param {string} root
+ * @returns {[string, string][]}
+ */
+function trackedEntries(root) {
+  /** @type {Map<string, string>} */
+  const entries = new Map();
+  for (const record of git(root, ["ls-files", "-z", "--stage"]).split("\0")) {
+    const tab = record.indexOf("\t");
+    if (tab >= 0) entries.set(record.slice(tab + 1), record.slice(0, record.indexOf(" ")));
+  }
+  return [...entries]
+    .filter(([path]) => lstatSync(join(root, path), { throwIfNoEntry: false }) !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Formats a finding as `file:line rule: message`.
+ * @param {Finding} finding
+ * @returns {string}
+ */
+export function formatFinding(finding) {
+  const where = finding.line === undefined ? finding.file : `${finding.file}:${finding.line}`;
+  return `${where} ${finding.rule}: ${finding.message}`;
+}
+
+// --- The rules --------------------------------------------------------------------------------
 
 // example.com, example.org and example.net, and the names reserved never to resolve (RFC 2606 and
 // RFC 6761: .example, .invalid, .test, .localhost), so placeholders like a relay DSN stay usable.
@@ -42,7 +121,7 @@ export const RULES = [
   {
     name: "account-id",
     describe: "a 32-character hex string, the shape of an account or zone ID",
-    pattern: /(?<![0-9A-Za-z])[0-9a-f]{32}(?![0-9A-Za-z])/g,
+    pattern: /(?<![0-9A-Za-z])[0-9a-f]{32}(?![0-9A-Za-z])/gi,
   },
   {
     name: "tunnel-id",
@@ -94,11 +173,32 @@ export const RULES = [
     allow: (match, line) => CIDR_SUFFIX.test(line.slice(match.index + match[0].length)),
   },
   {
+    name: "local-path",
+    describe: "a local home directory path",
+    // Case-sensitive, as the systems spell them, so a route such as /users/me is not one.
+    pattern: /(?<![\w.~-])\/Users\/(?!Shared\b)[^\s/'"`<>:]+|\b[A-Za-z]:\\+Users\\+[^\s\\'"`<>:]+/g,
+  },
+  {
     name: "claude-artifact",
     describe: "a claude.ai artifact identifier",
     pattern: /claude\.ai\/(?:code\/)?artifacts?\/[A-Za-z0-9_-]{6,}/gi,
   },
 ];
+
+// Commit trailers carry two noreply addresses by design (a Co-Authored-By line names the
+// assistant's, and GitHub writes users' own as <id>+<login>@users.noreply.github.com); no other
+// noreply address, which could sit on any domain, is let through.
+const MESSAGE_RULES = RULES.map((rule) =>
+  rule.name === "email-address"
+    ? {
+        ...rule,
+        allow: (/** @type {RegExpExecArray} */ match) =>
+          ALLOWED_EMAIL_DOMAINS.test(match[1] ?? "") ||
+          /^noreply@anthropic\.com$/i.test(match[0]) ||
+          /^[A-Za-z0-9._%+-]+@users\.noreply\.github\.com$/i.test(match[0]),
+      }
+    : rule,
+);
 
 /**
  * Reads the overlay's refuse list from FIN_OVERLAY_FILE. Throws an Error whose message never
@@ -163,13 +263,13 @@ export function refuseMatcher(refuseList) {
  * @param {string} label where the text came from
  * @param {string} text
  * @param {(line: string) => number[]} refused
- * @param {{ binary?: boolean, rules?: Rule[] }} [options]
+ * @param {{ rules?: Rule[] }} [options]
  * @returns {Finding[]}
  */
 export function scanText(label, text, refused, options = {}) {
   /** @type {Finding[]} */
   const findings = [];
-  const rules = options.binary ? [] : (options.rules ?? RULES);
+  const rules = options.rules ?? RULES;
   for (const [index, line] of text.split("\n").entries()) {
     const at = { file: label, line: index + 1 };
     for (const rule of rules) {
@@ -191,17 +291,103 @@ export function scanText(label, text, refused, options = {}) {
   return findings;
 }
 
+// --- Reading content ----------------------------------------------------------------------------
+
 /**
- * Scans a path (as text with no line number).
- * @param {string} path
+ * Decodes UTF-16 code units.
+ * @param {Buffer} bytes
+ * @param {boolean} littleEndian
+ * @returns {string}
+ */
+function utf16(bytes, littleEndian) {
+  const even = Buffer.from(bytes.subarray(0, bytes.length - (bytes.length % 2)));
+  if (!littleEndian) even.swap16();
+  return even.toString("utf16le");
+}
+
+/**
+ * Decodes UTF-32 code units (an invalid one becomes U+FFFD).
+ * @param {Buffer} bytes
+ * @param {boolean} littleEndian
+ * @returns {string}
+ */
+function utf32(bytes, littleEndian) {
+  /** @type {string[]} */
+  const chars = [];
+  for (let i = 0; i + 4 <= bytes.length; i += 4) {
+    const code = littleEndian ? bytes.readUInt32LE(i) : bytes.readUInt32BE(i);
+    chars.push(code <= 0x10ffff ? String.fromCodePoint(code) : "\ufffd");
+  }
+  return chars.join("");
+}
+
+/**
+ * Decodes a file's bytes for scanning. Text is UTF-8, or UTF-16 or UTF-32 by its byte-order mark.
+ * Bytes with a NUL in their first 8 KiB (as git decides) are binary, read two ways: as Latin-1,
+ * and again with every NUL byte removed, which spells out UTF-16 or UTF-32 text held inside.
+ * @param {Buffer} bytes
+ * @returns {{ binary: boolean, views: string[] }}
+ */
+export function decodeContent(bytes) {
+  const [a, b, c, d] = bytes;
+  if (a === 0xef && b === 0xbb && c === 0xbf) {
+    return { binary: false, views: [bytes.subarray(3).toString("utf8")] };
+  }
+  if (a === 0xff && b === 0xfe && c === 0 && d === 0) {
+    return { binary: false, views: [utf32(bytes.subarray(4), true)] };
+  }
+  if (a === 0 && b === 0 && c === 0xfe && d === 0xff) {
+    return { binary: false, views: [utf32(bytes.subarray(4), false)] };
+  }
+  if (a === 0xff && b === 0xfe) return { binary: false, views: [utf16(bytes.subarray(2), true)] };
+  if (a === 0xfe && b === 0xff) return { binary: false, views: [utf16(bytes.subarray(2), false)] };
+  if (!bytes.subarray(0, 8192).includes(0)) {
+    return { binary: false, views: [bytes.toString("utf8")] };
+  }
+  return {
+    binary: true,
+    views: [bytes.toString("latin1"), Buffer.from(bytes.filter((x) => x !== 0)).toString("latin1")],
+  };
+}
+
+/**
+ * Scans a file's bytes with every rule, however they are encoded.
+ * @param {string} label
+ * @param {Buffer} bytes
  * @param {(line: string) => number[]} refused
  * @returns {Finding[]}
  */
-function scanPath(path, refused) {
-  return scanText(path, path, refused).map(({ file, rule, message }) => ({
-    file,
+export function scanContent(label, bytes, refused) {
+  const { binary, views } = decodeContent(bytes);
+  if (!binary) return scanText(label, views[0] ?? "", refused);
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {Finding[]} */
+  const findings = [];
+  for (const view of views) {
+    for (const finding of scanText(label, view, refused)) {
+      const key = `${finding.line}|${finding.rule}|${finding.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({ ...finding, message: `${finding.message} (in binary content)` });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Scans a path, or another name a push publishes (as text with no line number).
+ * @param {string} name
+ * @param {(line: string) => number[]} refused
+ * @param {string} [where] how the message names what was scanned
+ * @param {string} [label] where to report it, when that is not the name itself
+ * @returns {Finding[]}
+ */
+export function scanName(name, refused, where = "in the file's path", label = name) {
+  return scanText(label, name, refused).map(({ rule, message }) => ({
+    file: label,
     rule,
-    message: `${message} (in the file's path)`,
+    message: `${message} (${where})`,
   }));
 }
 
@@ -215,29 +401,60 @@ export function scanTree(root, refuseList) {
   const refused = refuseMatcher(refuseList);
   /** @type {Finding[]} */
   const findings = [];
-  for (const file of listFiles(root)) {
-    findings.push(...scanPath(file, refused));
-    const bytes = readFileSync(join(root, file));
-    const binary = isBinary(bytes);
-    findings.push(
-      ...scanText(file, bytes.toString(binary ? "latin1" : "utf8"), refused, { binary }),
-    );
+  for (const [file, mode] of trackedEntries(root)) {
+    findings.push(...scanName(file, refused));
+    if (mode === "160000") continue; // a submodule: its files are not in this repository
+    const full = join(root, file);
+    const stat = lstatSync(full);
+    if (stat.isSymbolicLink()) {
+      findings.push(...scanText(file, readlinkSync(full), refused)); // git publishes the target
+    } else if (stat.isFile()) {
+      findings.push(...scanContent(file, readFileSync(full), refused));
+    }
   }
   return findings;
 }
 
-// Commit trailers carry noreply addresses by design (for example a Co-Authored-By line).
-const MESSAGE_RULES = RULES.map((rule) =>
-  rule.name === "email-address"
-    ? {
-        ...rule,
-        allow: (/** @type {RegExpExecArray} */ match) =>
-          ALLOWED_EMAIL_DOMAINS.test(match[1] ?? "") ||
-          /^noreply@/i.test(match[0]) ||
-          /users\.noreply\.github\.com$/i.test(match[1] ?? ""),
-      }
-    : rule,
-);
+/**
+ * Scans a commit or tag message with the message rules (two noreply trailer addresses allowed).
+ * @param {string} label
+ * @param {string} message
+ * @param {(line: string) => number[]} refused
+ * @returns {Finding[]}
+ */
+export function scanMessage(label, message, refused) {
+  return scanText(label, message, refused, { rules: MESSAGE_RULES });
+}
+
+/**
+ * The files a commit adds or changes, from `git diff-tree`'s raw output: for a merge, those that
+ * differ from its first parent.
+ * @param {string} root
+ * @param {string} commit
+ * @returns {{ path: string, mode: string, blob: string }[]}
+ */
+function changedFiles(root, commit) {
+  const parents = git(root, ["rev-list", "--parents", "-n", "1", commit])
+    .trim()
+    .split(" ")
+    .slice(1);
+  const base = ["diff-tree", "-r", "-z", "--no-renames", "--diff-filter=ACMRT"];
+  const args =
+    parents[0] === undefined
+      ? [...base, "--root", "--no-commit-id", commit]
+      : [...base, parents[0], commit];
+  const fields = git(root, args).split("\0");
+  /** @type {{ path: string, mode: string, blob: string }[]} */
+  const changes = [];
+  for (let i = 0; i < fields.length; i++) {
+    const header = fields[i] ?? "";
+    if (!header.startsWith(":")) continue;
+    const [, mode = "", , blob = ""] = header.slice(1).split(" ");
+    const path = fields[++i];
+    if (path !== undefined) changes.push({ path, mode, blob });
+  }
+  return changes;
+}
 
 /**
  * Scans what pushing these commits would publish: each message and each added or changed file.
@@ -253,28 +470,16 @@ export function scanCommits(root, commits, refuseList) {
   for (const commit of commits) {
     const short = commit.slice(0, 12);
     const message = git(root, ["log", "-1", "--format=%B", commit]);
-    findings.push(
-      ...scanText(`commit ${short} (message)`, message, refused, { rules: MESSAGE_RULES }),
-    );
-    const changed = git(root, [
-      "diff-tree",
-      "--root",
-      "-r",
-      "-z",
-      "--no-commit-id",
-      "--name-only",
-      "--diff-filter=ACMRT",
-      commit,
-    ])
-      .split("\0")
-      .filter(Boolean);
-    for (const file of changed) {
-      const label = `${file} (commit ${short})`;
-      findings.push(...scanPath(label, refused));
-      const bytes = gitBytes(root, ["cat-file", "blob", `${commit}:${file}`]);
-      const binary = isBinary(bytes);
+    findings.push(...scanMessage(`commit ${short} (message)`, message, refused));
+    for (const { path, mode, blob } of changedFiles(root, commit)) {
+      const label = `${path} (commit ${short})`;
+      findings.push(...scanName(label, refused));
+      if (mode === "160000") continue; // a submodule: no content in this repository
+      const bytes = gitBytes(root, ["cat-file", "blob", blob]);
       findings.push(
-        ...scanText(label, bytes.toString(binary ? "latin1" : "utf8"), refused, { binary }),
+        ...(mode === "120000"
+          ? scanText(label, bytes.toString("utf8"), refused)
+          : scanContent(label, bytes, refused)),
       );
     }
   }
@@ -319,7 +524,10 @@ if (import.meta.main) {
     const overlay =
       refuseList.length > 0 ? `, with the overlay's ${refuseList.length} refuse list entries` : "";
     console.log(`public-safety: scanning ${scope}${overlay}`);
-    process.exitCode = report("public-safety", findings);
+    for (const finding of findings) console.error(formatFinding(finding));
+    if (findings.length > 0) console.error(`public-safety: ${findings.length} finding(s)`);
+    else console.log("public-safety: ok");
+    process.exitCode = findings.length > 0 ? 1 : 0;
   } catch (error) {
     console.error(`public-safety: ${error instanceof Error ? error.message : "failed"}`);
     process.exitCode = 2;

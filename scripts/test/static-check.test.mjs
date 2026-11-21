@@ -84,6 +84,9 @@ describe("static:check", () => {
       { ...STATIC_JSON, assets: { ...STATIC_JSON.assets, binding: "ASSETS" } },
       { ...STATIC_JSON, assets: { ...STATIC_JSON.assets, not_found_handling: "404-page" } },
       { compatibility_date: "2026-11-20", workers_dev: false, preview_urls: false },
+      // Spec 01 §7.4 fixes one compatibility date for every deployment.
+      { ...STATIC_JSON, compatibility_date: "2020-01-01" },
+      { ...STATIC_JSON, compatibility_date: "2026-11-21" },
     ]) {
       assert.deepEqual(
         rules(checkStaticJson("apps/console/static.json", bad)),
@@ -108,6 +111,51 @@ describe("static:check", () => {
     assert.deepEqual(checkIndexHtml("index.html", INDEX), []);
   });
 
+  test("index.html is read as a browser reads it: every spelling of a handler, style or script fails", () => {
+    for (const html of [
+      '<img/src="x"/onerror=alert(1)>',
+      "<svg/onload=alert(1)>",
+      '<img alt=">" onerror=alert(1)>',
+      "<img alt='>' onerror=alert(1)>",
+      '<div/style="color:red">',
+      "<IMG SRC=x ONERROR=alert(1)>",
+      "<img src=x\nonerror=alert(1)>",
+      "<script>alert(1)</script >",
+      "<script>alert(1)</script\t>",
+      "<SCRIPT>alert(1)</SCRIPT>",
+      '<script src="/a.js">alert(1)</script>',
+      "<script>alert(1)",
+      "<svg><style>x{}</style></svg>",
+      "<p nonce=abc>x</p>",
+    ]) {
+      const page = INDEX.replace("</head>", `${html}</head>`);
+      assert.deepEqual(rules(checkIndexHtml("index.html", page)), ["static-html"], html);
+    }
+  });
+
+  test("markup a browser reads as text or a comment is not a tag", () => {
+    for (const html of [
+      "<!-- <img src=x onerror=alert(1)> -->",
+      "<!--> <p>x</p>",
+      "<title>a <img onerror=x> b</title>",
+      "<textarea><div style=x></div></textarea>",
+      "<p>1 < 2 and a <= b</p>",
+      "</p onclick=x>",
+      // An unquoted value runs to whitespace or `>`, so this `/onerror=...` is part of src.
+      "<img/src=x/onerror=alert(1)>",
+    ]) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      assert.deepEqual(checkIndexHtml("index.html", page), [], html);
+    }
+    assert.deepEqual(
+      checkIndexHtml(
+        "index.html",
+        INDEX.replace('<meta property="csp-nonce">', "<meta property=csp-nonce>"),
+      ),
+      [],
+    );
+  });
+
   test("CSS must start with @layer ui-sdk and hold no data: URL", () => {
     assert.deepEqual(rules(checkCss("a.css", "body{margin:0}\n")), ["static-css"]);
     assert.deepEqual(
@@ -115,6 +163,12 @@ describe("static:check", () => {
       ["static-css"],
     );
     assert.deepEqual(checkCss("a.css", `/* banner */\n${CSS}`), []);
+    for (const first of ["@layer ui-sdk, base;", "@layer ui-sdk,theme,base;", "@layer ui-sdk{}"]) {
+      assert.deepEqual(checkCss("a.css", `${first}\nbody{margin:0}\n`), [], first);
+    }
+    for (const first of ["@layer ui-sdk-overrides;", "@layer ui-sdkx;", "@layer base, ui-sdk;"]) {
+      assert.deepEqual(rules(checkCss("a.css", `${first}\n`)), ["static-css"], first);
+    }
   });
 
   test("a source map, a built _headers or env.json fails", () => {
@@ -162,5 +216,38 @@ describe("static:check", () => {
     const rendered = mkdtempSync(join(tmpdir(), "fin-rendered-"));
     writeFiles(rendered, { "console/_headers": csp("script-src 'self' 'unsafe-inline'") });
     assert.equal(checkStatic(repo({}), { rendered }).findings.length, 1);
+  });
+
+  test("with --rendered, an existing app's output with no rendered _headers fails", () => {
+    const rendered = mkdtempSync(join(tmpdir(), "fin-rendered-"));
+    const apps = repo({
+      "apps/console/static.json": JSON.stringify(STATIC_JSON),
+      "apps/verify/static.json": JSON.stringify(STATIC_JSON),
+    });
+    writeFiles(rendered, {
+      "verify/_headers": "/*\n  Content-Security-Policy: default-src 'none'\n",
+    });
+    const { findings } = checkStatic(apps, { rendered });
+    assert.deepEqual(
+      findings.map((f) => `${f.file} ${f.rule}`),
+      ["console/_headers static-headers-missing", "selfie/_headers static-headers-missing"],
+    );
+    writeFiles(rendered, {
+      "console/_headers": "/*\n  Content-Security-Policy: default-src 'none'\n",
+      "selfie/_headers": "/*\n  Content-Security-Policy: default-src 'none'\n",
+    });
+    assert.deepEqual(checkStatic(apps, { rendered }).findings, []);
+  });
+
+  test("the command refuses an argument it cannot read instead of skipping a check", () => {
+    for (const args of [
+      ["--rendered"],
+      ["--rendered", "--root", REPO_ROOT],
+      ["--render", "x"],
+      ["--rendered", "/nonexistent/dir"],
+    ]) {
+      const run = runScript("scripts/static-check.mjs", ["--root", REPO_ROOT, ...args]);
+      assert.equal(run.status, 2, args.join(" "));
+    }
   });
 });

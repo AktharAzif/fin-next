@@ -1,20 +1,27 @@
-// imports:check, with the planted cases of AC-P0-22. Fixture sources are arrays of lines, so no
-// line of this file starts with an import a check could mistake for this file's own.
+// imports:check, with the planted cases of AC-P0-22. The check reads import-shaped text anywhere,
+// strings included, so every fixture builds its keywords at run time: no line of this file holds
+// an import, a re-export or a loading call that the check could take for this file's own.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { checkImports, checkSource, findImports } from "../import-rules.mjs";
+import { checkImports, checkSource, codeMask, findImports } from "../import-rules.mjs";
 import { cleanUp, makeRepo, REPO_ROOT, rules, runScript } from "./helpers.mjs";
 
 after(cleanUp);
 
+const IMP = ["imp", "ort"].join("");
+const EXP = ["exp", "ort"].join("");
+const REQ = ["req", "uire"].join("");
+const GBM = ["getBuiltin", "Module"].join("");
+const BUN_SERVE = ["Bun", "serve"].join(".");
+const CONSOLE_ERROR = ["console", "error"].join(".");
+
 /** @param {string[]} lines */
 const src = (...lines) => `${lines.join("\n")}\n`;
 /** @param {string} specifier */
-const imp = (specifier) => src(`import x from "${specifier}";`);
-const REQ = ["req", "uire"].join("");
-const DYN = ["imp", "ort"].join("");
-const BUN_SERVE = ["Bun", "serve"].join(".");
-const CONSOLE_ERROR = ["console", "error"].join(".");
+const imp = (specifier) => src(`${IMP} x from "${specifier}";`);
+const CONTROL = { controlPaths: ["ops/fin/", ".github/", "scripts/check-supply-chain.mjs"] };
 
 describe("imports:check", () => {
   test("node:http outside packages/server and apps/connector fails; inside passes", () => {
@@ -86,33 +93,32 @@ describe("imports:check", () => {
         entry,
       );
     }
-    assert.deepEqual(
-      rules(
-        checkSource(
-          "packages/ui/src/x.tsx",
-          src('import { createGridFocus, other } from "@ui-sdk/core";'),
-        ),
-      ),
-      ["ui-sdk-refused-entry"],
-    );
+    for (const clause of ["{ createGridFocus, other }", '{ "createGridFocus" as grid }']) {
+      assert.deepEqual(
+        rules(checkSource("packages/ui/src/x.tsx", src(`${IMP} ${clause} from "@ui-sdk/core";`))),
+        ["ui-sdk-refused-entry"],
+        clause,
+      );
+    }
     assert.deepEqual(rules(checkSource("packages/ui/src/x.tsx", imp("@ui-sdk/core/testing"))), [
       "ui-sdk-testing",
     ]);
     assert.deepEqual(checkSource("packages/ui/src/x.test.tsx", imp("@ui-sdk/core/testing")), []);
   });
 
-  test("a non-built-in import in ops/fin, tools/static-deploy/src or packages/web-host/src/static fails", () => {
+  test("a non-built-in import in ops/fin, tools/static-deploy/src, packages/web-host/src/static or scripts fails", () => {
     for (const file of [
       "ops/fin/src/main.ts",
       "tools/static-deploy/src/deploy.ts",
       "packages/web-host/src/static/render.ts",
       "tools/fin-review/src/plan/plan.ts",
+      "scripts/check.mjs",
     ]) {
       assert.deepEqual(rules(checkSource(file, imp("zod"))), ["builtins-only"], file);
       assert.deepEqual(
         checkSource(
           file,
-          src('import { readFileSync } from "node:fs";', 'import { a } from "./a.ts";'),
+          src(`${IMP} { readFileSync } from "node:fs";`, `${IMP} { a } from "./a.ts";`),
         ),
         [],
         file,
@@ -139,6 +145,9 @@ describe("imports:check", () => {
       "@remix-run/react",
       "@tanstack/react-start/server",
       "@tanstack/start-client-core",
+      "@fontsource/inter",
+      "@fontsource-variable/inter",
+      "@fontsource-variable/inter/wght.css",
     ]) {
       assert.deepEqual(
         rules(checkSource("packages/ui/src/x.ts", imp(name))),
@@ -146,6 +155,10 @@ describe("imports:check", () => {
         name,
       );
     }
+    assert.deepEqual(
+      rules(checkSource("packages/tokens/src/x.ts", src(`${IMP} "@fontsource-variable/inter";`))),
+      ["refused-package"],
+    );
   });
 
   test("Bun fails", () => {
@@ -160,16 +173,180 @@ describe("imports:check", () => {
 
   test("dynamic import() and require() are read too", () => {
     assert.deepEqual(
-      rules(checkSource("apps/api/src/a.ts", src(`const h = await ${DYN}("node:http");`))),
+      rules(checkSource("apps/api/src/a.ts", src(`const h = await ${IMP}("node:http");`))),
       ["node-network"],
     );
     assert.deepEqual(
       rules(checkSource("apps/api/src/a.cjs", src(`const h = ${REQ}("node:net");`))),
       ["node-network"],
     );
-    assert.deepEqual(rules(checkSource("ops/fin/src/a.ts", src(`const m = await ${DYN}(name);`))), [
+    assert.deepEqual(
+      rules(checkSource("apps/api/src/a.cts", src(`${IMP} h = ${REQ}("node:http");`))),
+      ["node-network"],
+    );
+    assert.deepEqual(rules(checkSource("ops/fin/src/a.ts", src(`const m = await ${IMP}(name);`))), [
       "dynamic-import",
     ]);
+    // A literal that is only the start of the argument is not what the call loads.
+    for (const call of [`${REQ}("node:" + "http")`, `${IMP}("node:" + kind)`]) {
+      assert.deepEqual(
+        rules(checkSource("packages/ui/src/a.ts", src(`const m = ${call};`))),
+        ["dynamic-import"],
+        call,
+      );
+    }
+    // In a comment, in a restricted area, it still fails closed.
+    assert.deepEqual(
+      rules(checkSource("ops/fin/src/a.ts", src(`// m = await ${IMP}(name)`, "export {};"))),
+      ["dynamic-import"],
+    );
+  });
+
+  test("getBuiltinModule loads a module like an import", () => {
+    assert.deepEqual(
+      rules(checkSource("packages/ui/src/x.ts", src(`const http = process.${GBM}("node:http");`))),
+      ["client-node", "node-network"],
+    );
+    assert.deepEqual(
+      rules(checkSource("apps/api/src/x.ts", src(`const m = process.${GBM}(kind);`))),
+      ["dynamic-import"],
+    );
+    assert.deepEqual(
+      rules(checkSource("packages/ui/src/x.ts", src(`const m = process["${GBM}"]("node:fs");`))),
+      ["dynamic-import"],
+    );
+  });
+
+  test("other ways to load code unseen fail where every import must be read", () => {
+    const [createRequire, binding, fn, evaluate] = [
+      ["create", "Require"],
+      ["process", "binding"],
+      ["new Func", "tion"],
+      ["ev", "al"],
+    ].map((parts) => parts.join(parts[0] === "process" ? "." : ""));
+    for (const line of [
+      `const r = ${createRequire}(${IMP}.meta.url);`,
+      `const b = ${binding}('fs');`,
+      `const f = ${fn}('return 1');`,
+      `const v = ${evaluate}('1');`,
+    ]) {
+      assert.deepEqual(rules(checkSource("ops/fin/src/a.ts", src(line))), ["dynamic-import"], line);
+      assert.deepEqual(checkSource("apps/api/src/a.ts", src(line)), [], line);
+    }
+  });
+
+  test("string names in an import's clause are read", () => {
+    assert.deepEqual(
+      rules(
+        checkSource(
+          "packages/ui/src/x.ts",
+          src(`${IMP} { "createServer" as cs } from "node:http";`),
+        ),
+      ),
+      ["client-node", "node-network"],
+    );
+    assert.deepEqual(
+      rules(checkSource("ops/fin/src/x.ts", src(`${IMP} { "Hono" as H } from "hono";`))),
+      ["builtins-only"],
+    );
+    assert.deepEqual(
+      rules(checkSource("packages/ui/src/x.ts", src(`${EXP} { "a b" as c } from "clsx";`))),
+      ["refused-package"],
+    );
+  });
+
+  test("an import anywhere in a line, or after a comment in its clause, is read", () => {
+    for (const [file, line, rule] of /** @type {[string, string, string][]} */ ([
+      ["ops/fin/src/a.ts", `const a = 1; ${IMP} x from "node-fetch";`, "builtins-only"],
+      ["tools/static-deploy/src/a.ts", `let a; ${IMP} x from "left-pad";`, "builtins-only"],
+      ["ops/watcher/src/a.ts", `const a = 1; ${IMP} x from "node:fs";`, "relative-only"],
+      ["packages/ui/src/a.ts", `;${IMP} cn from "clsx";`, "refused-package"],
+      ["packages/ui/src/a.ts", `/* x */ ${EXP} * from "clsx";`, "refused-package"],
+    ])) {
+      assert.deepEqual(rules(checkSource(file, src(line))), [rule], line);
+    }
+    const clause = src(`${IMP} {`, "  createServer, // the server's own", '} from "node:http";');
+    assert.deepEqual(rules(checkSource("packages/ui/src/a.ts", clause)), [
+      "client-node",
+      "node-network",
+    ]);
+  });
+
+  test("ordinary code that only mentions the keyword is not an import", () => {
+    for (const line of [
+      'for (const key of ["import", "default", "node", "types"]) {}',
+      'switch (kind) { case "import": return "x"; }',
+      "const conditions = { import: './x.js', require: './x.cjs' };",
+      'type Kind = Pick<Options, "from" | "to">;',
+    ]) {
+      assert.deepEqual(checkSource("tools/fin-review/src/plan/graph.ts", src(line)), [], line);
+    }
+  });
+
+  test("a URL import, which could hold imports of its own, fails anywhere", () => {
+    for (const specifier of [
+      "data:text/javascript,export default 1",
+      "file:///tmp/x.mjs",
+      "https://example.com/x.js",
+    ]) {
+      assert.deepEqual(
+        rules(checkSource("apps/api/src/a.ts", imp(specifier))),
+        ["absolute-import"],
+        specifier,
+      );
+    }
+  });
+
+  test("in code that runs, import-shaped text in a string fails closed", () => {
+    assert.deepEqual(
+      rules(checkSource("ops/fin/src/a.ts", src(`const s = '${IMP} x from "zod";';`))),
+      ["builtins-only"],
+    );
+    assert.deepEqual(
+      rules(checkSource("packages/ui/src/a.ts", src(`// ${IMP} cn from "clsx"`, "export {};"))),
+      ["refused-package"],
+    );
+  });
+
+  test("in a test file, fixtures in strings, comments and template text are skipped, and code is read", () => {
+    const fixture = src(
+      `expect(() => rewrite("x.ts", '${IMP} { a } from "./a";')).toThrow();`,
+      `// ${IMP} cn from "clsx"`,
+      `const t = \`${IMP} z from "zod"; \${await ${IMP}("node:fs")}\`;`,
+      "/* new Function('x') and eval('y') are refused in shipped code */",
+    );
+    assert.deepEqual(checkSource("ops/watcher/test/deploy.test.ts", fixture), []);
+    assert.deepEqual(
+      checkSource("packages/ui/test/rules.test.ts", fixture),
+      ["client-node"].map((rule) => ({
+        file: "packages/ui/test/rules.test.ts",
+        line: 3,
+        rule,
+        message: "client code imports no node:* module (FW-C12)",
+      })),
+    );
+    assert.deepEqual(
+      rules(checkSource("ops/fin/src/a.test.ts", src(`const a = 1; ${IMP} x from "zod";`))),
+      ["builtins-only"],
+    );
+    assert.deepEqual(
+      rules(
+        checkSource(
+          "ops/fin/src/a.test.ts",
+          imp("../../../packages/testing/src/x.ts"),
+          () => false,
+          CONTROL,
+        ),
+      ),
+      [],
+    );
+  });
+
+  test("the code mask skips comments, strings and template text, and keeps template expressions", () => {
+    const text = `a /* b */ 'c' "d" // e\n\`f \${g + \`h \${i}\`} j\` k`;
+    const mask = codeMask(text);
+    const code = [...text].filter((_, i) => mask[i] === 1).join("");
+    assert.equal(code.replace(/\s+/g, " "), ["a '' \"\" `", "{g + `", "{i}`}` k"].join("$"));
   });
 
   test("built-ins need their node: name", () => {
@@ -190,6 +367,47 @@ describe("imports:check", () => {
     assert.deepEqual(checkSource("apps/console/src/client/a.tsx", imp("./logo.svg?raw")), []);
   });
 
+  test("a control-path file imports only built-ins and control-path files", () => {
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text, () => false, CONTROL));
+    assert.deepEqual(check("ops/fin/src/main.ts", imp("../../../packages/core/src/x.ts")), [
+      "control-path-import",
+    ]);
+    assert.deepEqual(check("ops/fin/src/main.ts", imp("../../../../outside.ts")), [
+      "control-path-import",
+    ]);
+    assert.deepEqual(check("ops/fin/src/main.ts", imp("./commands/deploy.ts")), []);
+    assert.deepEqual(check(".github/scripts/gate.mjs", imp("../../ops/fin/src/x.ts")), []);
+    assert.deepEqual(check(".github/scripts/gate.mjs", imp("zod")), ["control-path-import"]);
+    assert.deepEqual(check(".github/scripts/gate.mjs", imp("../../scripts/lib/repo.mjs")), [
+      "control-path-import",
+    ]);
+    assert.deepEqual(check("scripts/check-supply-chain.mjs", imp("./lib/repo.mjs")), [
+      "control-path-import",
+    ]);
+    assert.deepEqual(
+      check(
+        "ops/fin/src/main.ts",
+        src(`${IMP} type { Row } from "../../../packages/db/src/x.ts";`),
+      ),
+      [],
+    );
+    assert.deepEqual(check("ops/fin/src/main.test.ts", imp("vitest")), []);
+    assert.deepEqual(check("packages/core/src/x.ts", imp("../../ops/fin/src/x.ts")), []);
+  });
+
+  test("the two control-path checks of this repository import Node built-ins only", () => {
+    for (const file of ["scripts/check-supply-chain.mjs", "scripts/public-safety.mjs"]) {
+      const { imports } = findImports(readFileSync(join(REPO_ROOT, file), "utf8"));
+      assert.ok(imports.length > 0, file);
+      assert.deepEqual(
+        imports.filter((i) => !i.specifier.startsWith("node:")).map((i) => i.specifier),
+        [],
+        file,
+      );
+    }
+  });
+
   test("logging an error object straight to the console fails", () => {
     assert.deepEqual(
       rules(
@@ -203,35 +421,45 @@ describe("imports:check", () => {
     assert.deepEqual(checkSource("apps/api/src/a.ts", src(`${CONSOLE_ERROR}("starting");`)), []);
   });
 
-  test("multi-line imports, re-exports and type imports are read", () => {
+  test("multi-line imports, re-exports, type imports and mid-line imports are read", () => {
     const { imports } = findImports(
       src(
-        "import {",
+        `${IMP} {`,
         "  a,",
         "  type B,",
         '} from "node:http";',
-        'export * from "clsx";',
-        'import type { C } from "@ui-sdk/react";',
+        `${EXP} * from "clsx";`,
+        `${IMP} type { C } from "@ui-sdk/react";`,
+        `const d = 1; ${IMP} e from "./e.ts";`,
+        `${IMP} { "f g" as f } from "node:fs";`,
       ),
     );
     assert.deepEqual(
-      imports.map((i) => [i.specifier, i.line]),
+      imports.map((i) => [i.specifier, i.line, i.typeOnly]),
       [
-        ["node:http", 1],
-        ["clsx", 5],
-        ["@ui-sdk/react", 6],
+        ["node:http", 1, false],
+        ["clsx", 5, false],
+        ["@ui-sdk/react", 6, true],
+        ["./e.ts", 7, false],
+        ["node:fs", 8, false],
       ],
     );
+    assert.deepEqual(imports[4]?.names, ["as", "f", "f g"]);
   });
 
   test("a repository with planted imports fails, and this repository passes", () => {
     const dir = makeRepo({
+      "tools/layout.json": JSON.stringify({ version: 1, controlPaths: ["ops/fin/"], entries: [] }),
       "apps/api/src/main.ts": imp("node:http"),
       "apps/console/src/client/home.tsx": imp("@ui-sdk/react"),
-      "ops/fin/src/main.ts": imp("zod"),
+      "ops/fin/src/main.ts": src(
+        `${IMP} z from "zod";`,
+        `${IMP} c from "../../../packages/c/x.ts";`,
+      ),
     });
     assert.deepEqual(rules(checkImports(dir)), [
       "builtins-only",
+      "control-path-import",
       "node-network",
       "ui-sdk-outside-ui",
     ]);
