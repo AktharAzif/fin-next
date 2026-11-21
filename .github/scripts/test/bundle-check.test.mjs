@@ -633,6 +633,11 @@ describe("static builds", () => {
         "i.setAttribute(`srcset`,`/a.png, //evil.example/b.png 2x`)",
       ],
       ["a JSON key", "assets/a.json", '{"srcSet":"/a.png, //evil.example/b.png 2x"}'],
+      [
+        "a JSON key whose quotes an escape spells",
+        "assets/a.js",
+        'x=JSON.parse("{\\"srcset\\":\\"/hero(1).png, //evil.example/b.png 2x\\"}")',
+      ],
       // A list no key opens: a later candidate after a descriptor.
       [
         "a condition's branch",
@@ -644,6 +649,76 @@ describe("static builds", () => {
         "assets/a.js",
         `const s=\`/a.png ${"$"}{d}x, //evil.example/b.png 2x\`;`,
       ],
+      // A list a string holds, no key opening it: read back to the quote that opens the string,
+      // whatever descriptors its candidates have, none (the usual 1x) or misspelled ones.
+      [
+        "a condition's first branch, as JSX's minifies",
+        "assets/a.js",
+        'jsx("img",{srcSet:d?"/a.png, //evil.example/b.png 2x":"/l.png"})',
+      ],
+      [
+        "a condition's other branch",
+        "assets/a.js",
+        'jsx("img",{srcSet:d?"/l.png":"/a.png, //evil.example/b.png 2x"})',
+      ],
+      [
+        "a condition's branch in backticks",
+        "assets/a.js",
+        "jsx(`img`,{srcSet:d?`/a.png, //evil.example/b.png 2x`:`/l.png`})",
+      ],
+      ["a guard", "assets/a.js", 'jsx("img",{srcSet:d&&"/a.png, //evil.example/b.png 2x"})'],
+      [
+        "a default",
+        "assets/a.js",
+        'jsx("img",{srcSet:p.srcSet??"/a.png, //evil.example/b.png 2x"})',
+      ],
+      [
+        "a property set from a condition",
+        "assets/a.js",
+        'i.srcset=d?"/a.png, //evil.example/b.png 2x":"/l.png"',
+      ],
+      [
+        "a hoisted constant",
+        "assets/a.js",
+        'const H="/hero.png, //evil.example/hero-2x.png 2x";function A(){return jsx("img",{srcSet:H})}',
+      ],
+      [
+        "a hoisted constant in backticks with a substitution",
+        "assets/a.js",
+        `const H=\`${"$"}{b}/hero.png, //evil.example/hero-2x.png 2x\`;`,
+      ],
+      [
+        "an object of images",
+        "assets/a.js",
+        'const I={hero:"/hero.png, //evil.example/hero-2x.png 2x"};',
+      ],
+      ["a bracketed key", "assets/a.js", 'i["srcset"]="/a.png, //evil.example/b.png 2x"'],
+      [
+        "a helper's argument",
+        "assets/a.js",
+        'jsx("img",{srcSet:pick("/a.png, //evil.example/b.png 2x")})',
+      ],
+      ["a returned list", "assets/a.js", 'function f(){return"/a.png, //evil.example/b.png 2x"}'],
+      [
+        "a middle candidate with no descriptor",
+        "assets/a.js",
+        'jsx("img",{srcSet:d?"/a.png 1x, /b.png, //evil.example/c.png 2x":"/l.png"})',
+      ],
+      [
+        "two candidates with no descriptor",
+        "assets/a.js",
+        'jsx("img",{srcSet:c?"/a.png, /b.png, //evil.example/c.png 3x":"/l.png"})',
+      ],
+      [
+        "a misspelled density in a condition",
+        "assets/a.js",
+        'jsx("img",{srcSet:c?"/a.png 2X, //evil.example/b.png 2x":"/l.png"})',
+      ],
+      [
+        "a misspelled width in a constant",
+        "assets/a.js",
+        'const S="/a.png 100px, //evil.example/b.png 200w";',
+      ],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -654,7 +729,8 @@ describe("static builds", () => {
     }
     // No list: code, a quote right before the comma (a string's end), prose, and a regular
     // expression after a comma and a string's end, as real libraries minify it (prettier 3.10.1's
-    // plugins, a pattern string) and in the backticks the minifier prints.
+    // plugins, a pattern string) and in the backticks the minifier prints, the string's text
+    // ending as an opening quote's code may (`(`, `?`) or the code after it starting with a word.
     for (const text of [
       'jsx("img",{srcSet:"/a.png 1x, /b.png 2x"})',
       "e.srcset=t.srcset,e.sizes=n;x=/\\/\\//.test(b);",
@@ -673,6 +749,12 @@ describe("static builds", () => {
       'x="a"+b,/\\n/.test(x)',
       // React's attribute table: a srcset key whose list names no URL.
       'r={srcSet:"srcset",imageSrcSet:"imagesrcset"};',
+      'e="("+t,/\\//.test(e)',
+      'e="?".length,/\\//.test(e)',
+      'e="("in t,/\\//.test(e)',
+      'f("(",a,b,/\\//)',
+      'x="a,b".split(","),/\\//.test(x)',
+      'x="Hello, world, and more, //evil.example/x";',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -904,6 +986,20 @@ describe("static builds", () => {
         "a value code writes, then a template literal",
         `e.innerHTML="<img width="+(w>0?w:100)+\` src=//cdn.evil.example/x.png alt="${"$"}{a}">\`;`,
       ],
+      // A substitution right after a tag's name writes white space and attributes, or the name.
+      [
+        "a link whose name a substitution ends",
+        `e.innerHTML=\`<a${"$"}{c?" hidden":""} href=//evil.example/x>go</a>\`;`,
+      ],
+      [
+        "a form whose name a substitution ends",
+        `e.innerHTML=\`<form${"$"}{attrs} action=//evil.example/submit method=post>\`;`,
+      ],
+      [
+        "a base whose name a substitution ends",
+        `e.innerHTML=\`<base${"$"}{t} href=//evil.example/>\`;`,
+      ],
+      ["a name a substitution writes", `e.innerHTML=\`<${"$"}{t} href=//evil.example/x>go\`;`],
     ];
     for (const [what, text] of cases) {
       const found = staticRules(t, { "assets/a.js": text });
@@ -927,6 +1023,9 @@ describe("static builds", () => {
       `const esc=(s)=>s.replace(/\\${"$"}\\{/g,"\\\\${"$"}{");\ne.innerHTML=\`<b ${"$"}{a?"{":""}>\`;if(c){d()}y=/\\/assets\\//;`,
       `e.innerHTML="<b "+a+">";f(${"z".repeat(1100)},"href=//evil.example/x");`,
       `e.innerHTML="<a "+(n>0?"x":"")+${"z".repeat(1100)}+" href=//evil.example/>";`,
+      // A comparison before a substitution in a template literal's text opens a tag that the
+      // next `>` ends.
+      `x=\`${"$"}{a}<b${"$"}{c} items>\`;y=/\\/assets\\//;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1144,6 +1243,38 @@ describe("static builds", () => {
         `m.content="0;${" ".repeat(300)}https://react.dev @evil.example/"`,
         "https://evil.example",
       ],
+      // A time a script writes at run time, before `url=`: a substitution, or the code before the
+      // string.
+      [
+        "a time a substitution writes",
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",content:\`${"$"}{n}; url=//evil.example/\`})`,
+        "https://evil.example",
+      ],
+      [
+        "a time a substitution computes",
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",content:\`${"$"}{Math.ceil(ms/1e3)}; url=//evil.example/\`})`,
+        "https://evil.example",
+      ],
+      [
+        "a time concatenated before the string",
+        "assets/a.js",
+        'jsx("meta",{httpEquiv:"refresh",content:n+"; url=//evil.example/"})',
+        "https://evil.example",
+      ],
+      [
+        "a time concatenated as a property is set",
+        "assets/a.js",
+        'm.httpEquiv="refresh",m.content=t+";url=//evil.example/next"',
+        "https://evil.example",
+      ],
+      [
+        "a time concatenated before backticks",
+        "assets/a.js",
+        "m.setAttribute(`content`,t+`; url=//evil.example/next`);",
+        "https://evil.example",
+      ],
     ];
     for (const [what, file, text, origin] of cases) {
       const found = staticOrigins(t, { [file]: text });
@@ -1155,6 +1286,8 @@ describe("static builds", () => {
       ["index.html", '<meta http-equiv="refresh" content="0;url=\'https://react.dev\'">'],
       ["assets/a.js", 'x="1, https://react.dev and more";y="2 https://react.dev, see";'],
       ["assets/a.js", "a.x='used'.length;// https://react.dev here\nb();"],
+      // With no `url=`, a time written at run time starts no refresh (prose's `; //host`).
+      ["assets/a.js", `x=n+"; //evil.example/x";y=\`${"$"}{n}; //evil.example/x\`;`],
     ];
     for (const [file, text] of passes) {
       assert.deepEqual(staticRules(t, { [file]: text }), [], text);
@@ -1371,7 +1504,7 @@ describe("static builds", () => {
     assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
   });
 
-  it("reads a large script's srcset lists in time linear in the text", { timeout: 10_000 }, () => {
+  it("reads a large script's srcset lists in time linear in the text", { timeout: 20_000 }, () => {
     // Keyed template lists, each walking through substitutions, and descriptors before commas.
     const d = "$";
     const lists = `i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(100);
@@ -1384,6 +1517,27 @@ describe("static builds", () => {
     ]);
     const took = performance.now() - started;
     assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
+    // Keyed template lists whose substitutions close far away, side by side or nested in each
+    // other, and a list no key opens over many commas: each list is read up to MAX_SRCSET, and
+    // one that closes past it is refused (url-unread).
+    for (const far of [
+      `${`i.srcset=\`${d}{`.repeat(10_000)}x${"}".repeat(10_000)}\``,
+      `${`srcset:\`${d}{`.repeat(6_000)}${"a".repeat(150_000)}${"}".repeat(6_000)}\``,
+      `${`i.srcset=\`${d}{`.repeat(10_000)}0${"}`".repeat(10_000)}`,
+    ]) {
+      const begun = performance.now();
+      assert.ok(
+        urlsIn(far, { kind: "script" }).some((u) => u.unread),
+        `${far.slice(0, 20)}: not refused`,
+      );
+      const spent = performance.now() - begun;
+      assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${far.length} characters`);
+    }
+    const list = `x="${"/a.png, ".repeat(200_000)}//evil.example/b.png 2x";`;
+    const begun = performance.now();
+    assert.deepEqual(originsIn(list, { kind: "script" }), ["https://evil.example"]);
+    const spent = performance.now() - begun;
+    assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${list.length} characters`);
   });
 
   it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {
@@ -1404,6 +1558,11 @@ describe("static builds", () => {
         "a srcset that does not close",
         "index.html",
         `<img srcset="${"/a.png 1x, ".repeat(500)}//evil.example/b.png 2x>`,
+      ],
+      [
+        "a srcset template literal whose substitution closes past the bound",
+        "assets/a.js",
+        `i.srcset=\`${"$"}{f(${"0,".repeat(2100)}0)}, //evil.example/b.png 2x\`;`,
       ],
     ];
     for (const [what, file, text] of cases) {
@@ -1518,6 +1677,24 @@ describe("static builds", () => {
       staticRules(t, { "assets/a.js": 'const k="__FIN_X";const f="fin_x";const n="NODE_ENV";' }),
       [],
     );
+    // The samples' shell variables the plan names (spec 05 §8.2, §8.8) are no setting's, in a
+    // guide's page or a script's copy; a setting whose name starts the same is still refused.
+    const sample = 'curl "$FIN_API_URL/v4/whoami" -H "Authorization: Bearer $FIN_KEY"';
+    assert.deepEqual(
+      staticRules(t, { "guides/start/index.html": `<pre><code>${sample}</code></pre>` }),
+      [],
+    );
+    assert.deepEqual(
+      staticRules(t, { "assets/a.js": `const s=${JSON.stringify(sample)},c="Copy as FIN_KEY=";` }),
+      [],
+    );
+    for (const name of ["FIN_KEY_SALT", "FIN_API_ORIGIN", "FIN_API", "FIN_KEYS"]) {
+      assert.deepEqual(
+        staticRules(t, { "assets/a.js": `const k="${name}";` }),
+        ["setting-name"],
+        name,
+      );
+    }
   });
 
   it("refuses a left source map, a sourceMappingURL, and what a deployment refuses", (t) => {
