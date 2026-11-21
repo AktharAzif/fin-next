@@ -5,10 +5,12 @@
 import appSkeleton from "@fin/frame/boot/app-skeleton.html?raw";
 import authSkeleton from "@fin/frame/boot/auth-skeleton.html?raw";
 import frameThemeJs from "@fin/frame/boot/theme.js?raw";
+import type { AnyRoute } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
 import indexHtml from "../../index.html?raw";
 import themeJs from "../../public/theme.js?raw";
 import staticJsonText from "../../static.json?raw";
+import { createAppRouter } from "./router.ts";
 
 const APP = "console";
 const BLOCKS: Record<string, string> = { app: appSkeleton, auth: authSkeleton };
@@ -73,25 +75,23 @@ describe("static.json", () => {
 });
 
 describe("routes", () => {
-  const files = import.meta.glob("./routes/**/*.tsx", { eager: true }) as Record<
-    string,
-    { Route?: { options?: { staticData?: Record<string, unknown> } } }
-  >;
-  const routes = Object.entries(files).filter(
-    ([path]) => !path.includes("/-") && !path.endsWith("__root.tsx"),
-  );
+  // The route tree as the app's router builds it, so every route counts however its file is named
+  // or grouped: a `(group)` folder or a pathless layout adds no segment, and a `.ts` file is a route
+  // as much as a `.tsx` one.
+  const router = createAppRouter({ fin: {} as never });
+  const routes = (Object.values(router.routesById) as AnyRoute[]).filter((route) => !route.isRoot);
 
   it("has no route under /api (AC-UI-20)", () => {
     expect(routes.length).toBeGreaterThan(0);
-    for (const path of Object.keys(files)) expect(path).not.toMatch(/^\.\/routes\/api(\/|\.|$)/);
+    for (const route of routes) expect(route.fullPath, route.id).not.toMatch(/^\/api(\/|$)/i);
   });
 
   it("declares a frame and a page name on every route (S6-01)", () => {
-    for (const [path, module] of routes) {
-      const data = module.Route?.options?.staticData;
-      expect(data?.frame, path).toMatch(/^(app|auth|bare)$/);
-      expect(typeof data?.pageName, path).toBe("string");
-      expect(data && "navId" in data, path).toBe(true);
+    for (const route of routes) {
+      const data = route.options.staticData as Record<string, unknown> | undefined;
+      expect(data?.frame, route.id).toMatch(/^(app|auth|bare)$/);
+      expect(typeof data?.pageName, route.id).toBe("string");
+      expect(data !== undefined && "navId" in data, route.id).toBe(true);
     }
   });
 });
