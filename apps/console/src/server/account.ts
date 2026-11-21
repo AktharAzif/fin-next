@@ -182,6 +182,11 @@ function sessionActor(who: Guarded, request: Request) {
       request.headers.get("cookie"),
       finCookieName("developer", "known_browser"),
     ),
+    // This browser's trust, which "everywhere else" keeps (§11.4).
+    trustedBrowserToken: readCookie(
+      request.headers.get("cookie"),
+      finCookieName("developer", "trusted_browser"),
+    ),
   };
 }
 

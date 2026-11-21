@@ -75,6 +75,8 @@ function sessionActor(who: StaffActor, stepUp: NonNullable<StaffActor["actor"]["
     actor: { kind: "staff" as const, id: who.staffId, via: "admin" as const, stepUp },
     context: { clientIp: who.request.clientIp, userAgent: who.request.userAgent },
     knownBrowserToken: null,
+    // The staff realm keeps no trusted browsers (only the developer realm does, §6.6).
+    trustedBrowserToken: null,
   };
 }
 
