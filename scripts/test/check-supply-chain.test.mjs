@@ -599,11 +599,12 @@ describe("supply-chain:check", () => {
 
   test("an importer locked to an exotic version, or to another version than the catalog's, fails", () => {
     const { catalog } = checkWorkspace(WORKSPACE);
+    // The document holds both versions, so only the catalog's rule decides.
     const importer = (/** @type {string} */ specifier, /** @type {string} */ version) =>
       LOCK_OK.replace(
         "packages:\n",
-        `importers:\n\n  .:\n    devDependencies:\n      zod:\n        specifier: ${specifier}\n        version: ${version}\n\npackages:\n`,
-      );
+        `importers:\n\n  .:\n    devDependencies:\n      zod:\n        specifier: ${specifier}\n        version: ${version}\n\npackages:\n\n  zod@4.6.6:\n    resolution: {integrity: sha512-ZZZY==}\n\n  zod@4.6.7:\n    resolution: {integrity: sha512-ZZZZ==}\n`,
+      ).replace("snapshots:\n", "snapshots:\n\n  zod@4.6.6: {}\n\n  zod@4.6.7: {}\n");
     assert.deepEqual(checkLockfile(importer("'catalog:'", "4.6.7"), catalog), []);
     assert.deepEqual(rules(checkLockfile(importer("'catalog:'", "4.6.6"), catalog)), [
       "lockfile-catalog",
@@ -631,6 +632,152 @@ describe("supply-chain:check", () => {
         link,
       );
     }
+  });
+
+  test("a snapshot's dependency is a registry version, never a link, a path, a tarball or a git URL", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    const lock = readRepoFile("pnpm-lock.yaml");
+    const line = "      '@jridgewell/resolve-uri': 3.1.3\n      '@jridgewell/sourcemap-codec'";
+    assert.ok(lock.includes(line), "fixture text not found");
+    for (const ref of [
+      "link:../evilpkg",
+      "link:scripts/test/fixture",
+      "'file:../x'",
+      "'https://example.com/x.tgz'",
+      "'git+https://example.com/x.git'",
+      "github:owner/repo",
+      '"3.1.3"',
+    ]) {
+      const bad = lock.replace(line, line.replace("3.1.3", ref));
+      assert.deepEqual(rules(checkLockfile(bad, catalog)), ["exotic-resolution"], ref);
+    }
+    // An optional dependency is installed the same way.
+    const optional = lock.replace(
+      "      '@biomejs/cli-darwin-arm64': 2.6.8\n",
+      "      '@biomejs/cli-darwin-arm64': link:../evil\n",
+    );
+    assert.notEqual(optional, lock);
+    assert.deepEqual(rules(checkLockfile(optional, catalog)), ["exotic-resolution"]);
+    // pnpm writes the list as a block; an inline map is not its form.
+    const inline = lock.replace(
+      `    dependencies:\n${line}: 1.6.0\n`,
+      "    dependencies: {'@jridgewell/resolve-uri': 'link:../evil', '@jridgewell/sourcemap-codec': 1.6.0}\n",
+    );
+    assert.notEqual(inline, lock);
+    assert.deepEqual(rules(checkLockfile(inline, catalog)), ["lockfile-format"]);
+  });
+
+  test("every dependency, and every snapshot, is a registry package the lockfile holds", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    const lock = readRepoFile("pnpm-lock.yaml");
+    const line = "      '@jridgewell/resolve-uri': 3.1.3\n";
+    for (const ref of ["3.1.4", "other@3.1.3", "'@other/name@3.1.3'"]) {
+      const bad = lock.replace(line, line.replace("3.1.3", ref));
+      assert.deepEqual(rules(checkLockfile(bad, catalog)), ["exotic-resolution"], ref);
+    }
+    // An alias that stands for a refused package is refused, whatever its name.
+    const alias = lock.replace(line, line.replace("3.1.3", "clsx@2.1.1"));
+    assert.ok(rules(checkLockfile(alias, catalog)).includes("refused-package"));
+    // A snapshot with no package entry has no resolution to install from.
+    const orphan = lock.replace(
+      "  why-is-node-running@3.2.1: {}",
+      "  why-is-node-running@3.2.1: {}\n\n  left-pad@1.3.0: {}",
+    );
+    assert.deepEqual(rules(checkLockfile(orphan, catalog)), ["exotic-resolution"]);
+    // A registry alias the document holds is how registry packages depend on one another.
+    const aliased = LOCK_OK.replace(
+      "packages:\n",
+      "packages:\n\n  string-width@4.2.3:\n    resolution: {integrity: sha512-SSSS==}\n",
+    ).replace(
+      "  '@biomejs/biome@2.6.8': {}",
+      "  '@biomejs/biome@2.6.8':\n    dependencies:\n      string-width-cjs: string-width@4.2.3\n\n  string-width@4.2.3: {}",
+    );
+    assert.deepEqual(checkLockfile(aliased), []);
+  });
+
+  test("a lockfile line pnpm never writes below a package, a snapshot or an importer fails", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    const lock = readRepoFile("pnpm-lock.yaml");
+    for (const [from, to] of /** @type {[string, string][]} */ ([
+      // A field's children where pnpm writes the field inline.
+      ["    engines: {node: '>=20.11'}\n", "    engines:\n      node: '>=20.11'\n"],
+      // Details below a snapshot's dependency.
+      ["      tslib: 2.9.1\n    optional: true\n", "      tslib: 2.9.1\n    optional: false\n"],
+      // A config dependency, which runs before the policy applies.
+      [
+        "    configDependencies: {}\n",
+        "    configDependencies:\n      evil:\n        specifier: 1.0.0\n",
+      ],
+      // A catalog entry that is not the workspace catalog's.
+      [
+        "    vitest:\n      specifier: 5.1.0\n      version: 5.1.0\n",
+        "    vitest:\n      specifier: 5.0.0\n      version: 5.0.0\n",
+      ],
+    ])) {
+      assert.ok(lock.includes(from), `fixture text not found: ${from}`);
+      assert.ok(checkLockfile(lock.replace(from, to), catalog).length > 0, to);
+    }
+    const meta = LOCK_OK.replace(
+      "packages:\n",
+      "importers:\n\n  .:\n    dependenciesMeta:\n      thing:\n        patch: ../evil.patch\n\npackages:\n",
+    );
+    assert.deepEqual(rules(checkLockfile(meta, catalog)), ["lockfile-format"]);
+  });
+
+  test("a workspace file or a lockfile below the root fails, so no directory has its own settings", () => {
+    const relaxed = [
+      "minimumReleaseAge: 0",
+      "strictDepBuilds: false",
+      "trustPolicy: off",
+      "dangerouslyAllowAllBuilds: true",
+      "pnpmfile: ./build-hooks.cjs",
+      "",
+    ].join("\n");
+    for (const file of [
+      "apps/console/pnpm-workspace.yaml",
+      "packages/ui/pnpm-workspace.yml",
+      "ops/fin/pnpm-workspaces.yaml",
+      "apps/console/pnpm-lock.yaml",
+      "apps/console/Pnpm-Workspace.yaml",
+    ]) {
+      assert.deepEqual(
+        rules(checkSupplyChain(fixture({ [file]: relaxed }))),
+        ["workspace-file"],
+        file,
+      );
+    }
+  });
+
+  test("the files pnpm reads are found by name in any case, as a case-insensitive file system finds them", () => {
+    for (const [file, rule] of /** @type {[string, string][]} */ ([
+      [".PNPMFILE.CJS", "pnpmfile"],
+      ["apps/console/.Pnpmfile.mjs", "pnpmfile"],
+      [".NPMRC", "npmrc"],
+      ["packages/ui/.Yarnrc.yml", "npmrc"],
+      ["packages/identity/Package.YAML", "manifest-format"],
+    ])) {
+      assert.deepEqual(rules(checkSupplyChain(fixture({ [file]: "x\n" }))), [rule], file);
+    }
+    // A mis-cased manifest is refused, and checked as the manifest pnpm would read.
+    const misCased = fixture({
+      "apps/console/Package.json": JSON.stringify({
+        name: "@fin/console",
+        private: true,
+        dependencies: { thing: "https://example.com/thing.tgz" },
+      }),
+    });
+    assert.deepEqual(rules(checkSupplyChain(misCased)), ["exotic-dependency", "manifest-format"]);
+    // A workflow under a mis-cased .github/ is checked too.
+    const workflow = fixture({
+      ".GitHub/workflows/ci.YML": "steps:\n  - uses: actions/checkout@v4\n",
+    });
+    assert.deepEqual(rules(checkSupplyChain(workflow)), ["action-unpinned"]);
+  });
+
+  test("the root package.json is required, since it pins pnpm", () => {
+    const dir = fixture();
+    git(dir, ["rm", "-q", "--cached", "package.json"]);
+    assert.deepEqual(rules(checkSupplyChain(dir)), ["manifest-missing"]);
   });
 
   test("this repository's lockfile reads cleanly, line by line", () => {

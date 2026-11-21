@@ -11,8 +11,11 @@
 //     accepted with one);
 //   - a catalog entry that is not one exact version;
 //   - a pnpmfile or a .npmrc; a manifest pnpm reads other than package.json (package.yaml,
-//     package.yml, package.json5); a symbolic link or a submodule, through which pnpm would read a
-//     manifest this check does not;
+//     package.yml, package.json5); a workspace file or a lockfile below the root, which makes its
+//     directory another workspace with its own settings; a symbolic link or a submodule, through
+//     which pnpm would read a manifest this check does not; each of these by its name in any case,
+//     since a case-insensitive file system gives pnpm `.NPMRC` as `.npmrc` (a manifest whose name
+//     is package.json in another case is checked as one, and refused);
 //   - a dependency spec that is a git URL, a tarball URL, a local path or an alias, an @fin/*
 //     dependency that is not workspace:*, any other dependency, peer dependencies included (pnpm
 //     installs peers itself), not taken from the catalog;
@@ -22,8 +25,11 @@
 //     catalog or the lockfile; wrangler outside tools/static-deploy/package.json; @ui-sdk/*
 //     outside packages/ui/package.json; seroval or seroval-plugins below 1.6.11;
 //   - a lockfile line outside the one canonical form pnpm writes, a lockfile package resolved
-//     from anything but the registry by integrity, or an importer whose version is not the
-//     registry version (or, for catalog:, not the catalog's);
+//     from anything but the registry by integrity, an importer whose version is not the registry
+//     version (or, for catalog:, not the catalog's), a dependency a snapshot lists by anything but
+//     a registry version or alias (a link, a path, a tarball, a git URL), a dependency or a
+//     snapshot with no registry package in its document, or a lockfile catalog entry that is not
+//     the workspace catalog's;
 //   - a root package.json whose pnpm pin is not exact, or lacks devEngines.packageManager with
 //     onFail "error" (without it pnpm 12 downloads whatever packageManager names; SP-01);
 //   - a `uses:` in .github/ (or in any action.yml) not pinned to a 40-character commit SHA with a
@@ -153,6 +159,18 @@ const BYPASS_FIELDS = {
 };
 /** Manifest names pnpm reads besides package.json. */
 const OTHER_MANIFESTS = new Set(["package.yaml", "package.yml", "package.json5"]);
+/** Settings files a package manager reads from a directory, refused anywhere. */
+const SETTINGS_FILES = new Set([".npmrc", ".pnpmrc", ".yarnrc", ".yarnrc.yml", ".yarnrc.yaml"]);
+/**
+ * The workspace file's name, and the misspellings pnpm looks for beside it (and stops on): below
+ * the root, any of them makes its directory another workspace, with its own settings.
+ */
+const WORKSPACE_FILES = new Set([
+  WORKSPACE,
+  "pnpm-workspace.yml",
+  "pnpm-workspaces.yaml",
+  "pnpm-workspaces.yml",
+]);
 
 // --- Helpers (kept in this file: see the header) ---------------------------------------------
 
@@ -894,6 +912,8 @@ const PACKAGE_FIELDS = new Set([
   "peerDependenciesMeta",
   "bundledDependencies",
 ]);
+/** The package fields pnpm writes as a block below their key. */
+const PACKAGE_BLOCK_FIELDS = new Set(["peerDependencies", "peerDependenciesMeta"]);
 const SNAPSHOT_FIELDS = new Set([
   "dependencies",
   "optionalDependencies",
@@ -1005,11 +1025,24 @@ function lockEntry(content) {
 }
 
 /**
+ * Reads a lockfile value pnpm writes as a plain or single-quoted scalar.
+ * @param {string} value
+ * @returns {string | undefined} undefined for any other form
+ */
+function lockScalar(value) {
+  if (/^'(?:[^']|'')*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
+  return /^[^'"\s{[]\S*$/.test(value) ? value : undefined;
+}
+
+/**
  * Checks the lockfile, every document in it. pnpm writes one canonical form: LF line endings,
  * two spaces per level, `name@version` keys, a `resolution: {integrity: ...}` for every package,
  * one complete value per line. This check reads only that form, and any line it cannot place is
  * a finding, so a hand edit (a quoted key, another indentation, a multi-line value, a field pnpm
- * never writes) cannot hide a package or its resolution from the rules.
+ * never writes) cannot hide a package or its resolution from the rules. Every dependency pnpm
+ * installs is read, an importer's or a snapshot's: a snapshot's is a registry version (`1.2.3`,
+ * with any peer suffix) or a registry alias (`name@1.2.3`), never a link, a path, a tarball or a
+ * git URL, and each one, like each snapshot, must be a registry package the same document holds.
  * @param {string} text
  * @param {Map<string, Item>} [catalog] the workspace catalog, to compare catalog: importers with
  * @returns {Finding[]}
@@ -1032,10 +1065,23 @@ export function checkLockfile(text, catalog = new Map()) {
   /** @type {{ key: string, line: number, resolutions: number, fields: Set<string> } | undefined} */
   let pkg;
   let field = ""; // the depth-4 field the current lines belong to
+  let child = ""; // the depth-6 key the current depth-8 lines belong to
   let importer = "."; // the importer (a workspace project's path) the current lines belong to
   /** @type {{ name: string, line: number, specifier?: string, version?: string, versionLine?: number } | undefined} */
   let dep;
+  /** @type {{ name: string, line: number, specifier?: string, version?: string } | undefined} */
+  let catalogEntry;
   const workspaceDirs = PACKAGE_GLOBS.map((glob) => globToRegExp(glob));
+  const plainRef = new RegExp(`^${SEMVER}${PEERS}$`);
+  const aliasRef = new RegExp(`^(${NAME})@${SEMVER}${PEERS}$`);
+  const plainName = new RegExp(`^${NAME}$`);
+  // Per document: its packages, its snapshots, and the snapshots its dependencies name.
+  /** @type {Set<string>} */
+  let packageKeys = new Set();
+  /** @type {Map<string, number>} */
+  let snapshotKeys = new Map();
+  /** @type {{ depPath: string, line: number, from: string }[]} */
+  let references = [];
 
   const closePackage = () => {
     if (pkg !== undefined && section === "packages" && pkg.resolutions === 0) {
@@ -1059,7 +1105,7 @@ export function checkLockfile(text, catalog = new Map()) {
     // A workspace link points at a workspace project, inside the repository.
     const target = link ? posix.normalize(posix.join(importer, version.slice(5))) : "";
     const linkOk = specifier === "workspace:*" && workspaceDirs.some((dir) => dir.test(target));
-    if (link ? !linkOk : !new RegExp(`^${SEMVER}${PEERS}$`).test(version)) {
+    if (link ? !linkOk : !plainRef.test(version)) {
       add(
         versionLine,
         "exotic-resolution",
@@ -1067,6 +1113,7 @@ export function checkLockfile(text, catalog = new Map()) {
       );
       return;
     }
+    if (!link) references.push({ depPath: `${name}@${version}`, line: versionLine, from: name });
     const pinned = catalog.get(name)?.value;
     const fromCatalog = specifier === "catalog:" || specifier === "catalog:default";
     if (fromCatalog && !link && version.replace(/\(.*$/, "") !== pinned) {
@@ -1077,6 +1124,69 @@ export function checkLockfile(text, catalog = new Map()) {
       );
     }
   };
+  const closeCatalogEntry = () => {
+    if (catalogEntry === undefined) return;
+    const { name, line, specifier, version } = catalogEntry;
+    catalogEntry = undefined;
+    const pinned = catalog.get(name)?.value;
+    if (specifier === undefined || version === undefined) {
+      add(line, "lockfile-format", `the catalog entry ${name} needs a specifier and a version`);
+    } else if (pinned === undefined || specifier !== pinned || version !== pinned) {
+      add(
+        line,
+        "lockfile-catalog",
+        `the lockfile's catalog entry ${name} is not the workspace catalog's exact version`,
+      );
+    }
+  };
+  const closeDocument = () => {
+    for (const [key, line] of snapshotKeys) {
+      if (!packageKeys.has(key.replace(/\(.*$/, ""))) {
+        add(line, "exotic-resolution", `the snapshot ${key} has no registry package entry`);
+      }
+    }
+    for (const { depPath, line, from } of references) {
+      if (!snapshotKeys.has(depPath)) {
+        add(
+          line,
+          "exotic-resolution",
+          `${from} depends on ${depPath}, which this lockfile document does not hold`,
+        );
+      }
+    }
+    packageKeys = new Set();
+    snapshotKeys = new Map();
+    references = [];
+  };
+  /**
+   * A dependency a snapshot lists: a registry version, with any peer suffix, or a registry alias.
+   * @param {{ key: string, value: string }} entry
+   * @param {number} line
+   * @param {string} owner
+   */
+  const snapshotDependency = (entry, line, owner) => {
+    const ref = lockScalar(entry.value);
+    const alias = ref === undefined ? null : aliasRef.exec(ref);
+    if (
+      !plainName.test(entry.key) ||
+      ref === undefined ||
+      (alias === null && !plainRef.test(ref))
+    ) {
+      add(
+        line,
+        "exotic-resolution",
+        `${owner} depends on ${entry.key} by something other than a registry version (a link, a path, a tarball or a git URL)`,
+      );
+      return;
+    }
+    for (const name of new Set([entry.key, alias?.[1] ?? entry.key])) {
+      const why = refusedReason(name, REFUSED_EVERYWHERE);
+      if (why !== undefined) {
+        add(line, "refused-package", `${name} is in the lockfile but refused (${why})`);
+      }
+    }
+    references.push({ depPath: alias === null ? `${entry.key}@${ref}` : ref, line, from: owner });
+  };
 
   for (const [index, raw] of lines.entries()) {
     const line = index + 1;
@@ -1085,7 +1195,9 @@ export function checkLockfile(text, catalog = new Map()) {
     const content = raw.slice(depth);
     if (depth === 0 && content === "---") {
       closeDep();
+      closeCatalogEntry();
       closePackage();
+      closeDocument();
       section = "";
       previousDepth = 0;
       previousOpen = true;
@@ -1113,6 +1225,7 @@ export function checkLockfile(text, catalog = new Map()) {
 
     if (depth === 0) {
       closeDep();
+      closeCatalogEntry();
       closePackage();
       if (!("key" in entry)) {
         add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
@@ -1151,6 +1264,8 @@ export function checkLockfile(text, catalog = new Map()) {
           add(line, "exotic-resolution", `${entry.key} is not a registry name@version`);
           continue;
         }
+        if (section === "packages") packageKeys.add(entry.key);
+        else snapshotKeys.set(entry.key, line);
         const [, name = "", version = ""] = key;
         const why = refusedReason(name, REFUSED_EVERYWHERE);
         if (why !== undefined) {
@@ -1164,8 +1279,13 @@ export function checkLockfile(text, catalog = new Map()) {
         }
         continue;
       }
+      if (pkg === undefined) {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+        continue;
+      }
       if (depth === 4) {
-        if (pkg === undefined || !("key" in entry)) {
+        field = "";
+        if (!("key" in entry)) {
           add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
           continue;
         }
@@ -1179,6 +1299,18 @@ export function checkLockfile(text, catalog = new Map()) {
           continue;
         }
         pkg.fields.add(entry.key);
+        field = entry.key;
+        // pnpm writes these as blocks below their key (a snapshot's `optional` as true).
+        if (section === "snapshots") {
+          if (entry.key === "optional") {
+            if (entry.value !== "true")
+              add(line, "lockfile-format", `${pkg.key}'s optional must be true`);
+          } else if (entry.value !== "") {
+            add(line, "lockfile-format", `pnpm writes ${pkg.key}'s ${entry.key} as a block`);
+          }
+        } else if (PACKAGE_BLOCK_FIELDS.has(entry.key) && entry.value !== "") {
+          add(line, "lockfile-format", `pnpm writes ${pkg.key}'s ${entry.key} as a block`);
+        }
         if (entry.key === "resolution") {
           pkg.resolutions++;
           if (!REGISTRY_RESOLUTION.test(entry.value)) {
@@ -1189,8 +1321,57 @@ export function checkLockfile(text, catalog = new Map()) {
             );
           }
         }
+        continue;
       }
-      continue; // depth 6 and 8: dependency lists and their details, read by pnpm from the keys above
+      if (depth === 6) {
+        child = "key" in entry ? entry.key : "";
+        const item = "item" in entry ? lockScalar(entry.item) : undefined;
+        if (
+          section === "snapshots" &&
+          (field === "dependencies" || field === "optionalDependencies")
+        ) {
+          if ("key" in entry && entry.value !== "") snapshotDependency(entry, line, pkg.key);
+          else add(line, "lockfile-format", `${pkg.key}'s ${field} lists name: version pairs`);
+        } else if (
+          (section === "snapshots" && field === "transitivePeerDependencies") ||
+          (section === "packages" && field === "bundledDependencies")
+        ) {
+          if (item === undefined || !plainName.test(item)) {
+            add(line, "lockfile-format", `${pkg.key}'s ${field} lists package names`);
+          }
+        } else if (section === "packages" && field === "peerDependencies") {
+          if (!("key" in entry) || entry.value === "") {
+            add(line, "lockfile-format", `${pkg.key}'s ${field} lists name: range pairs`);
+          }
+        } else if (section === "packages" && field === "peerDependenciesMeta") {
+          if (!("key" in entry) || entry.value !== "") {
+            add(
+              line,
+              "lockfile-format",
+              `${pkg.key}'s ${field} lists names, each with its details below`,
+            );
+          }
+        } else {
+          add(
+            line,
+            "lockfile-format",
+            `pnpm writes nothing below ${pkg.key}'s ${field || "field"}`,
+          );
+        }
+        continue;
+      }
+      // Depth 8: only a peer's `optional` flag, in a package's peerDependenciesMeta.
+      if (
+        section !== "packages" ||
+        field !== "peerDependenciesMeta" ||
+        child === "" ||
+        !("key" in entry) ||
+        entry.key !== "optional" ||
+        (entry.value !== "true" && entry.value !== "false")
+      ) {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+      }
+      continue;
     }
 
     if (section === "importers") {
@@ -1210,7 +1391,22 @@ export function checkLockfile(text, catalog = new Map()) {
         if (!IMPORTER_FIELDS.has(field) || !inline) {
           add(line, "lockfile-format", `${field} is not a field pnpm writes on an importer`);
         }
-      } else if (depth === 6 && field !== "dependenciesMeta") {
+      } else if (depth === 6 && field === "configDependencies") {
+        add(
+          line,
+          "lockfile-format",
+          "config dependencies are refused: they run before the policy applies",
+        );
+      } else if (depth === 6 && field === "dependenciesMeta") {
+        child = entry.key;
+        if (entry.value !== "") {
+          add(
+            line,
+            "lockfile-format",
+            "an importer's dependenciesMeta entry has its details below",
+          );
+        }
+      } else if (depth === 6) {
         // A dependency: its specifier and version follow, one level deeper.
         if (entry.value !== "")
           add(
@@ -1219,6 +1415,14 @@ export function checkLockfile(text, catalog = new Map()) {
             "an importer's dependency has its specifier and version below",
           );
         else dep = { name: entry.key, line };
+      } else if (depth === 8 && field === "dependenciesMeta") {
+        if (entry.key !== "injected" || (entry.value !== "true" && entry.value !== "false")) {
+          add(
+            line,
+            "lockfile-format",
+            `${entry.key} is not a dependenciesMeta field this check reads`,
+          );
+        }
       } else if (depth === 8 && dep !== undefined) {
         if (entry.key === "specifier") dep.specifier = entry.value.replace(/^'(.*)'$/, "$1");
         else if (entry.key === "version") {
@@ -1231,16 +1435,37 @@ export function checkLockfile(text, catalog = new Map()) {
             `${entry.key} is not a field pnpm writes on an importer's dependency`,
           );
         }
+      } else {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
       }
       continue;
     }
 
-    if (section === "catalogs" && depth === 2 && (!("key" in entry) || entry.key !== "default")) {
-      add(line, "lockfile-format", "the lockfile has one default catalog only");
+    if (section === "catalogs") {
+      if (depth <= 4) closeCatalogEntry();
+      if (!("key" in entry)) {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+      } else if (depth === 2) {
+        if (entry.key !== "default" || entry.value !== "") {
+          add(line, "lockfile-format", "the lockfile has one default catalog only");
+        }
+      } else if (depth === 4) {
+        if (entry.value === "") catalogEntry = { name: entry.key, line };
+        else add(line, "lockfile-format", "a catalog entry has its specifier and version below");
+      } else if (depth === 6 && catalogEntry !== undefined) {
+        const value = lockScalar(entry.value);
+        if (entry.key === "specifier" && value !== undefined) catalogEntry.specifier = value;
+        else if (entry.key === "version" && value !== undefined) catalogEntry.version = value;
+        else add(line, "lockfile-format", `${entry.key} is not a field of a catalog entry`);
+      } else {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+      }
     }
   }
   closeDep();
+  closeCatalogEntry();
   closePackage();
+  closeDocument();
   return findings;
 }
 
@@ -1348,7 +1573,10 @@ export function checkSupplyChain(root) {
   }
 
   for (const [file, mode] of entries) {
-    const base = file.split("/").pop() ?? "";
+    // pnpm finds these files by name, and a case-insensitive file system (macOS, Windows) gives it
+    // a file whose name differs only in case, so every name is compared in lower case.
+    const name = file.split("/").pop() ?? "";
+    const base = name.toLowerCase();
     if (mode === "120000") {
       findings.push({
         file,
@@ -1369,7 +1597,7 @@ export function checkSupplyChain(root) {
         message: "a pnpmfile can rewrite manifests at install time; refused",
       });
     }
-    if (base === ".npmrc" || base === ".pnpmrc" || base === ".yarnrc" || base === ".yarnrc.yml") {
+    if (SETTINGS_FILES.has(base)) {
       findings.push({
         file,
         rule: "npmrc",
@@ -1383,11 +1611,44 @@ export function checkSupplyChain(root) {
         message: "pnpm reads this file as a package manifest; manifests are package.json only",
       });
     }
+    if (base === "package.json" && name !== "package.json") {
+      findings.push({
+        file,
+        rule: "manifest-format",
+        message:
+          "a manifest is named package.json in lower case: a case-insensitive file system gives pnpm this file as package.json",
+      });
+    }
+    if (WORKSPACE_FILES.has(base) && file !== WORKSPACE) {
+      findings.push({
+        file,
+        rule: "workspace-file",
+        message:
+          "pnpm reads a workspace file below the root as another workspace's settings, outside this policy; the root's pnpm-workspace.yaml is the only one",
+      });
+    }
+    if (base === LOCKFILE && file !== LOCKFILE) {
+      findings.push({
+        file,
+        rule: "workspace-file",
+        message: "a lockfile other than the root's would install what this check never reads",
+      });
+    }
   }
 
-  // The root manifest and every workspace package's.
+  // The root manifest and every workspace package's, in any case (see above).
   const globs = PACKAGE_GLOBS.map((g) => globToRegExp(`${g}/package.json`));
-  const manifests = files.filter((f) => f === "package.json" || globs.some((g) => g.test(f)));
+  const manifests = files.filter((f) => {
+    const lower = f.toLowerCase();
+    return lower === "package.json" || globs.some((g) => g.test(lower));
+  });
+  if (!files.includes("package.json")) {
+    findings.push({
+      file: "package.json",
+      rule: "manifest-missing",
+      message: "the root package.json, which pins pnpm, is missing",
+    });
+  }
   for (const file of manifests) {
     /** @type {unknown} */
     let manifest;
@@ -1398,7 +1659,9 @@ export function checkSupplyChain(root) {
       continue;
     }
     findings.push(...checkManifest(file, manifest, catalog));
-    if (file === "package.json") findings.push(...checkPackageManager(file, manifest));
+    if (file.toLowerCase() === "package.json") {
+      findings.push(...checkPackageManager(file, manifest));
+    }
   }
 
   if (!files.includes(LOCKFILE)) {
@@ -1412,7 +1675,9 @@ export function checkSupplyChain(root) {
   }
 
   const actionFiles = files.filter(
-    (f) => (f.startsWith(".github/") && /\.ya?ml$/.test(f)) || /(?:^|\/)action\.ya?ml$/.test(f),
+    (f) =>
+      (f.toLowerCase().startsWith(".github/") && /\.ya?ml$/i.test(f)) ||
+      /(?:^|\/)action\.ya?ml$/i.test(f),
   );
   for (const file of actionFiles) {
     if (lstatSync(join(root, file)).isSymbolicLink()) continue; // refused above

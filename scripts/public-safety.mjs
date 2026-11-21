@@ -8,11 +8,14 @@
 //   - a local home directory path (/Users/<name>, C:\Users\<name>);
 //   - claude.ai artifact identifiers;
 //   - when FIN_OVERLAY_FILE names a JSON file with a "refuseList" array, each listed string, case
-//     insensitively (a 40-character commit SHA also by any prefix of 7 or more characters).
-// Every file is read: UTF-8, or UTF-16 and UTF-32 by their byte-order mark; a file with a NUL
-// byte (binary content) is read as Latin-1 bytes and again with its NUL bytes removed, and both
-// are scanned with every rule, so a NUL byte never opts a file out. A symbolic link is read as
-// what git publishes for it: its target.
+//     insensitively (a 40-character commit SHA also by any prefix of 7 or more characters), on a
+//     line or across lines, runs of white space and invisible or escaping characters (foldText).
+// Every file is read in each way its bytes could be read, since neither a byte-order mark nor a
+// clean first page says how the rest is encoded: always as UTF-8; with a NUL byte anywhere, as
+// Latin-1 and again with its NUL bytes removed, which spells out UTF-16 and UTF-32 text; as
+// UTF-16 in both byte orders and both alignments; and as UTF-32 by its byte-order mark. Every
+// rule runs on every reading, so no encoding and no NUL byte opts a file out. A symbolic link is
+// read as what git publishes for it: its target.
 // It prints file:line and the rule's name, never the matched value, so its output is safe in a
 // public log. With --commits or --range it scans what a push would publish instead: each commit's
 // message and the full content of every file it adds or changes (for a merge, every file that
@@ -228,15 +231,26 @@ export function loadRefuseList(path) {
 }
 
 /**
+ * The refuse list's matcher: called with a line, the entries found on it; its `across`, given a
+ * whole text, the entries found across its lines and separators (see foldText).
+ * @typedef {((line: string) => number[]) & { across?: (text: string) => { line: number, entry: number }[] }} RefuseMatcher
+ */
+
+/**
  * Builds the matcher for the refuse list: case-insensitive substrings, and for a 40-character
- * commit SHA any hex token of 7 or more characters that starts it.
+ * commit SHA any hex token of 7 or more characters that starts it, on each line; and each entry
+ * across the whole text too, folded as foldText folds it, so a line wrap, a run of spaces, a
+ * non-breaking or zero-width space, a soft hyphen, a backslash escape or a defanged dot cannot
+ * hide one.
  * @param {string[]} refuseList
- * @returns {(line: string) => number[]} the 1-based entry numbers found on the line
+ * @returns {RefuseMatcher}
  */
 export function refuseMatcher(refuseList) {
   const lowered = refuseList.map((entry) => entry.toLowerCase());
   const shas = lowered.map((entry) => (/^[0-9a-f]{40}$/.test(entry) ? entry : undefined));
-  return (line) => {
+  const folded = refuseList.map((entry) => foldText(entry, false).text.trim());
+  /** @type {RefuseMatcher} */
+  const matcher = (line) => {
     const text = line.toLowerCase();
     /** @type {number[]} */
     const hits = [];
@@ -256,19 +270,164 @@ export function refuseMatcher(refuseList) {
     }
     return hits;
   };
+  matcher.across = (text) => {
+    /** @type {{ line: number, entry: number }[]} */
+    const hits = [];
+    if (folded.every((entry) => entry === "")) return hits;
+    for (const join of [false, true]) {
+      const view = foldText(text, join);
+      for (const [index, entry] of folded.entries()) {
+        if (entry === "") continue;
+        for (let at = view.text.indexOf(entry); at >= 0; at = view.text.indexOf(entry, at + 1)) {
+          hits.push({ line: view.lineAt(at), entry: index + 1 });
+        }
+      }
+    }
+    return hits;
+  };
+  return matcher;
+}
+
+const DEFANG_CLOSE = /** @type {Record<string, string>} */ ({ "[": "]", "(": ")", "{": "}" });
+// What may start a wrapped line besides its indentation: a comment or quotation marker.
+const WRAP_MARKERS = ["//", "#", "*", ">", "--", ";", "%"];
+/** @type {Map<string, string>} */
+const FOLDED = new Map(); // a character outside ASCII, folded: " " for white space
+
+/**
+ * Folds one character outside ASCII: decomposed, without combining marks or format characters,
+ * in lower case; white space becomes one space.
+ * @param {string} char
+ * @returns {string}
+ */
+function foldChar(char) {
+  let folded = FOLDED.get(char);
+  if (folded === undefined) {
+    folded = /\p{Cf}/u.test(char)
+      ? ""
+      : char
+          .normalize("NFKD")
+          .replace(/\p{M}/gu, "")
+          .toLowerCase()
+          .replace(/[\s\p{Z}]+/gu, " ");
+    if (FOLDED.size < 65536) FOLDED.set(char, folded);
+  }
+  return folded;
 }
 
 /**
- * Scans text and returns findings. The finding names the rule, never the value.
+ * Folds text for the refuse list's matching across lines: each character decomposed (NFKD, so a
+ * full-width or ligature form reads as its plain letters), its combining marks and the invisible
+ * format characters (zero-width spaces, soft hyphens, direction marks) dropped, lower case,
+ * backslashes (an escape in Markdown or a string) dropped, a defanged dot (`[.]`, `(.)`, `{.}`)
+ * read as a dot, and every run of white space read as one space. A line break, with the next
+ * line's indentation and a comment or quotation marker that starts it, reads as one space, or,
+ * when `join` is set, as nothing (a word split by a wrap at a hyphen).
+ * @param {string} text
+ * @param {boolean} join
+ * @returns {{ text: string, lineAt: (index: number) => number }} lineAt: the 1-based line (as
+ *   the text's LF line breaks count them) that a folded character comes from
+ */
+export function foldText(text, join) {
+  let out = "";
+  let pendingSpace = false;
+  /** @type {number[]} */
+  const starts = [0]; // where each line after the first starts, in the folded text
+  /** @param {string} char */
+  const emit = (char) => {
+    if (pendingSpace && out !== "") out += " ";
+    pendingSpace = false;
+    out += char;
+  };
+  /**
+   * Skips the indentation, and one comment or quotation marker, that start a wrapped line.
+   * @param {number} from
+   * @returns {number}
+   */
+  const skipWrap = (from) => {
+    const space = /[\t\v\f\p{Zs}\p{Cf}]*/uy;
+    space.lastIndex = from;
+    let i = from + (space.exec(text)?.[0].length ?? 0);
+    const marker = WRAP_MARKERS.find((m) => text.startsWith(m, i));
+    if (marker !== undefined) {
+      space.lastIndex = i + marker.length;
+      i += marker.length + (space.exec(text)?.[0].length ?? 0);
+    }
+    return i;
+  };
+  let i = 0;
+  while (i < text.length) {
+    const code = text.charCodeAt(i);
+    if (code === 0x0a || code === 0x0d || code === 0x85 || code === 0x2028 || code === 0x2029) {
+      i += code === 0x0d && text.charAt(i + 1) === "\n" ? 2 : 1;
+      // Trailing white space is dropped when joining; otherwise one space stands for the break.
+      pendingSpace = !join && out !== "";
+      if (text.charAt(i - 1) === "\n") starts.push(out.length + (pendingSpace ? 1 : 0));
+      i = skipWrap(i);
+    } else if (code < 0x80) {
+      const char = text.charAt(i);
+      i++;
+      const close = DEFANG_CLOSE[char];
+      if (char === "\\") continue;
+      if (code === 0x09 || code === 0x0b || code === 0x0c || code === 0x20) {
+        pendingSpace = out !== "";
+      } else if (close !== undefined && text.charAt(i) === "." && text.charAt(i + 1) === close) {
+        emit(".");
+        i += 2;
+      } else {
+        emit(code >= 0x41 && code <= 0x5a ? String.fromCharCode(code + 32) : char);
+      }
+    } else {
+      const char = String.fromCodePoint(text.codePointAt(i) ?? 0);
+      i += char.length;
+      for (const part of foldChar(char)) {
+        if (part === " ") pendingSpace = out !== "";
+        else emit(part);
+      }
+    }
+  }
+  return {
+    text: out,
+    lineAt: (index) => {
+      let low = 0;
+      let high = starts.length - 1;
+      while (low < high) {
+        const mid = (low + high + 1) >> 1;
+        if ((starts[mid] ?? 0) <= index) low = mid;
+        else high = mid - 1;
+      }
+      return low + 1;
+    },
+  };
+}
+
+/**
+ * Scans text and returns findings, in line order. The finding names the rule, never the value.
  * @param {string} label where the text came from
  * @param {string} text
- * @param {(line: string) => number[]} refused
+ * @param {RefuseMatcher} refused
  * @param {{ rules?: Rule[] }} [options]
  * @returns {Finding[]}
  */
 export function scanText(label, text, refused, options = {}) {
   /** @type {Finding[]} */
   const findings = [];
+  /** @type {Set<string>} */
+  const refusedAt = new Set();
+  /**
+   * @param {number} line
+   * @param {number} entry
+   */
+  const refuse = (line, entry) => {
+    if (refusedAt.has(`${line}|${entry}`)) return;
+    refusedAt.add(`${line}|${entry}`);
+    findings.push({
+      file: label,
+      line,
+      rule: "refuse-list",
+      message: `matches the overlay's refuse list entry #${entry}`,
+    });
+  };
   const rules = options.rules ?? RULES;
   for (const [index, line] of text.split("\n").entries()) {
     const at = { file: label, line: index + 1 };
@@ -280,15 +439,12 @@ export function scanText(label, text, refused, options = {}) {
         break;
       }
     }
-    for (const entry of refused(line)) {
-      findings.push({
-        ...at,
-        rule: "refuse-list",
-        message: `matches the overlay's refuse list entry #${entry}`,
-      });
-    }
+    for (const entry of refused(line)) refuse(index + 1, entry);
   }
-  return findings;
+  const across = refused.across?.(text) ?? [];
+  for (const { line, entry } of across) refuse(line, entry);
+  // Sorting is stable, so each line keeps its rules first and its refuse list entries after.
+  return across.length === 0 ? findings : findings.sort((x, y) => (x.line ?? 0) - (y.line ?? 0));
 }
 
 // --- Reading content ----------------------------------------------------------------------------
@@ -322,54 +478,74 @@ function utf32(bytes, littleEndian) {
 }
 
 /**
- * Decodes a file's bytes for scanning. Text is UTF-8, or UTF-16 or UTF-32 by its byte-order mark.
- * Bytes with a NUL in their first 8 KiB (as git decides) are binary, read two ways: as Latin-1,
- * and again with every NUL byte removed, which spells out UTF-16 or UTF-32 text held inside.
+ * Every reading of a file's bytes the rules scan. The bytes do not say how a reader will decode
+ * them, and a byte-order mark or a clean first page proves nothing about the rest, so no single
+ * reading is trusted: the bytes are always read as UTF-8 (without its byte-order mark); with a
+ * NUL byte anywhere, also as Latin-1 and again with every NUL byte removed, which spells out the
+ * ASCII of UTF-16 or UTF-32 text; with a NUL byte or a UTF-16 or UTF-32 byte-order mark, also as
+ * UTF-16 in both byte orders from the first byte and from the second; and with a UTF-32
+ * byte-order mark, as UTF-32. `texts` names the readings a person would see as the file's text
+ * (UTF-8, or the NUL-stripped reading of binary content, and what a byte-order mark announces),
+ * where the refuse list is also matched across lines.
  * @param {Buffer} bytes
- * @returns {{ binary: boolean, views: string[] }}
+ * @returns {{ binary: boolean, views: string[], texts: string[] }} binary when a NUL byte stands
+ *   outside text that a UTF-16 or UTF-32 byte-order mark announces
  */
 export function decodeContent(bytes) {
   const [a, b, c, d] = bytes;
-  if (a === 0xef && b === 0xbb && c === 0xbf) {
-    return { binary: false, views: [bytes.subarray(3).toString("utf8")] };
+  const utf8Mark = a === 0xef && b === 0xbb && c === 0xbf;
+  const utf32le = a === 0xff && b === 0xfe && c === 0 && d === 0;
+  const utf32be = a === 0 && b === 0 && c === 0xfe && d === 0xff;
+  const utf16Mark = (a === 0xff && b === 0xfe) || (a === 0xfe && b === 0xff);
+  const nul = bytes.includes(0);
+  const binary = nul && !utf16Mark && !utf32be;
+  const utf8 = bytes.subarray(utf8Mark ? 3 : 0).toString("utf8");
+  const views = [utf8];
+  const texts = binary ? [] : [utf8];
+  if (nul) {
+    const stripped = Buffer.from(bytes.filter((x) => x !== 0)).toString("latin1");
+    views.push(bytes.toString("latin1"), stripped);
+    if (binary) texts.push(stripped);
   }
-  if (a === 0xff && b === 0xfe && c === 0 && d === 0) {
-    return { binary: false, views: [utf32(bytes.subarray(4), true)] };
+  if (nul || utf16Mark || utf32be) {
+    for (const offset of [0, 1]) {
+      const rest = bytes.subarray(offset);
+      views.push(utf16(rest, true), utf16(rest, false));
+    }
+    if (utf16Mark && !utf32le) texts.push(utf16(bytes.subarray(2), a === 0xff));
   }
-  if (a === 0 && b === 0 && c === 0xfe && d === 0xff) {
-    return { binary: false, views: [utf32(bytes.subarray(4), false)] };
+  if (utf32le || utf32be) {
+    const announced = utf32(bytes.subarray(4), utf32le);
+    views.push(announced);
+    texts.push(announced);
   }
-  if (a === 0xff && b === 0xfe) return { binary: false, views: [utf16(bytes.subarray(2), true)] };
-  if (a === 0xfe && b === 0xff) return { binary: false, views: [utf16(bytes.subarray(2), false)] };
-  if (!bytes.subarray(0, 8192).includes(0)) {
-    return { binary: false, views: [bytes.toString("utf8")] };
-  }
-  return {
-    binary: true,
-    views: [bytes.toString("latin1"), Buffer.from(bytes.filter((x) => x !== 0)).toString("latin1")],
-  };
+  return { binary, views: [...new Set(views)], texts };
 }
 
 /**
- * Scans a file's bytes with every rule, however they are encoded.
+ * Scans a file's bytes with every rule, in every reading of them (see decodeContent). A finding
+ * that several readings share is reported once.
  * @param {string} label
  * @param {Buffer} bytes
- * @param {(line: string) => number[]} refused
+ * @param {RefuseMatcher} refused
  * @returns {Finding[]}
  */
 export function scanContent(label, bytes, refused) {
-  const { binary, views } = decodeContent(bytes);
-  if (!binary) return scanText(label, views[0] ?? "", refused);
+  const { binary, views, texts } = decodeContent(bytes);
+  /** @type {RefuseMatcher} */
+  const lineByLine = (line) => refused(line);
   /** @type {Set<string>} */
   const seen = new Set();
   /** @type {Finding[]} */
   const findings = [];
-  for (const view of views) {
-    for (const finding of scanText(label, view, refused)) {
+  for (const view of [...new Set([...views, ...texts])]) {
+    for (const finding of scanText(label, view, texts.includes(view) ? refused : lineByLine)) {
       const key = `${finding.line}|${finding.rule}|${finding.message}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      findings.push({ ...finding, message: `${finding.message} (in binary content)` });
+      findings.push(
+        binary ? { ...finding, message: `${finding.message} (in binary content)` } : finding,
+      );
     }
   }
   return findings;
