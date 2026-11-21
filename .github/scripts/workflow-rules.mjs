@@ -128,36 +128,83 @@ const PUSH_ONLY = /^github\.event_name\s*==\s*'push'\s*(?:&&[^|]*)?$/;
  * Reads a line as YAML does for two things: where its comment starts (a `#` at the start or after
  * a space or tab, outside quotes), and whether a double-quoted scalar on it holds a backslash
  * escape (`\x75`, `\u{75}`, `\"` and the rest), which YAML decodes and the rules would compare
- * undecoded, so it is refused.
+ * undecoded, so it is refused. A quote opens a scalar only where YAML starts a node: at the
+ * line's start, after `- `, `? ` or `: ` (the indicator, then a space or tab), after `[`, `{` or
+ * `,` in a flow collection, after a node's anchor or tag, and after the `:` that follows a quoted
+ * scalar or a flow collection. Inside a plain scalar (`a-'b`, `x: a "b"`) a quote is a character.
  * @param {string} line
  * @returns {{ content: string, escape: boolean }}
  */
 function readLine(line) {
   let quote = "";
   let escaped = false;
+  /** "start": a node may start here; "plain": inside a plain scalar; "after": after a quoted
+   * scalar or a flow collection. */
+  let state = "start";
+  let depth = 0;
   for (let i = 0; i < line.length; i++) {
-    const c = line[i];
+    const c = line[i] ?? "";
     if (quote !== "") {
       if (c === quote) {
         if (quote === "'" && line[i + 1] === "'") i++;
-        else quote = "";
+        else {
+          quote = "";
+          state = "after";
+        }
       } else if (c === "\\" && quote === '"') {
         escaped = true;
         i++;
       }
       continue;
     }
-    if (c === '"' || c === "'") {
-      const before = line.slice(0, i).trimEnd();
-      // A quote opens a scalar only where one can start: after a key, an item, or a flow token.
-      if (before === "" || /[:\-[{,]$/.test(before)) quote = c;
-      continue;
-    }
+    if (c === " " || c === "\t") continue;
     if (c === "#" && (i === 0 || /[ \t]/.test(line[i - 1] ?? ""))) {
       return { content: line.slice(0, i), escape: escaped };
     }
+    const next = line[i + 1] ?? "";
+    const spaced = next === "" || next === " " || next === "\t";
+    const flowEnd = depth > 0 && (c === "]" || c === "}");
+    if (state === "plain") {
+      if (
+        (c === ":" && (spaced || (depth > 0 && ",[]{}".includes(next)))) ||
+        (depth > 0 && c === ",")
+      ) {
+        state = "start";
+      } else if (flowEnd) {
+        depth--;
+        state = "after";
+      }
+    } else if (state === "start") {
+      if (c === '"' || c === "'") quote = c;
+      else if ((c === "-" || c === "?" || c === ":") && spaced) {
+        // An indicator: a node may follow.
+      } else if (c === "&" || c === "!") {
+        // An anchor or a tag, then the node itself.
+        while (i + 1 < line.length && !/[ \t]/.test(line[i + 1] ?? "")) i++;
+      } else if (c === "[" || c === "{") depth++;
+      else if (depth > 0 && c === ",") {
+        // An empty entry.
+      } else if (flowEnd) {
+        depth--;
+        state = "after";
+      } else state = "plain";
+    } else if (c === ":" || (depth > 0 && c === ",")) {
+      state = "start";
+    } else if (flowEnd) {
+      depth--;
+    } else {
+      state = "plain";
+    }
   }
   return { content: line, escape: escaped };
+}
+
+/**
+ * Whether a scalar the reader read is double-quoted and holds a backslash escape.
+ * @param {string} scalar
+ */
+function escapedScalar(scalar) {
+  return scalar.trimStart().startsWith('"') && scalar.includes("\\");
 }
 
 /**
@@ -243,13 +290,15 @@ class FlowError extends Error {
  * stripped) into outline nodes, as YAML reads it: quoted and plain scalars, nested collections,
  * `key: value` pairs (a key alone has no value), and a single-pair mapping as a sequence entry. A
  * mapping's pairs become key nodes, a sequence's entries item nodes, as the block style's would.
+ * `escape` when a double-quoted scalar in it holds a backslash escape (refused, see readLine).
  * @param {string} text
  * @param {{ line: number, indent: number, raw: string }} at
- * @returns {{ ok: true, mapping: boolean, children: OutlineNode[] }
+ * @returns {{ ok: true, mapping: boolean, children: OutlineNode[], escape: boolean }
  *   | { ok: false, why: "unclosed" | "alias" | "syntax" }}
  */
 export function parseFlow(text, at) {
   let i = 0;
+  let escaped = false;
   /** @param {"unclosed" | "alias" | "syntax"} why @returns {never} */
   const fail = (why) => {
     throw new FlowError(why);
@@ -275,6 +324,7 @@ export function parseFlow(text, at) {
       const start = i++;
       while (i < text.length) {
         if (c === '"' && text[i] === "\\") {
+          escaped = true;
           i += 2;
           continue;
         }
@@ -383,7 +433,7 @@ export function parseFlow(text, at) {
     const children = collection();
     space();
     if (i < text.length) return { ok: false, why: "syntax" };
-    return { ok: true, mapping, children };
+    return { ok: true, mapping, children, escape: escaped };
   } catch (error) {
     if (error instanceof FlowError) return { ok: false, why: error.why };
     throw error;
@@ -420,6 +470,22 @@ export function parseOutline(file, text) {
   /** @type {{ node: OutlineNode, parentIndent: number } | null} */
   let block = null;
   let content = false;
+  /** @type {Set<number>} */
+  const escapeLines = new Set();
+  /**
+   * Refuses a backslash escape in a double-quoted scalar, once a line: found by the line's own
+   * reading (readLine) or in a scalar the reader read (a key, a value, an item, a flow entry).
+   * @param {number} line
+   */
+  const refuseEscape = (line) => {
+    if (escapeLines.has(line)) return;
+    escapeLines.add(line);
+    add(
+      line,
+      "yaml-escape",
+      "no backslash escape in a double-quoted scalar: YAML decodes it, the rules would not",
+    );
+  };
   /**
    * Reads a flow collection, or refuses it (null).
    * @param {string} flowText
@@ -427,7 +493,10 @@ export function parseOutline(file, text) {
    */
   const readFlow = (flowText, at) => {
     const parsed = parseFlow(flowText, at);
-    if (parsed.ok) return parsed;
+    if (parsed.ok) {
+      if (parsed.escape) refuseEscape(at.line);
+      return parsed;
+    }
     if (parsed.why === "alias") {
       add(at.line, "yaml-alias", "no anchor, alias or tag: the reader does not follow them");
     } else if (parsed.why === "unclosed") {
@@ -470,14 +539,8 @@ export function parseOutline(file, text) {
     if (lead.includes("\t")) {
       add(line, "indentation", "a tab in the indentation");
     }
-    const { content: stripped, escape: escapedScalar } = readLine(raw);
-    if (escapedScalar) {
-      add(
-        line,
-        "yaml-escape",
-        "no backslash escape in a double-quoted scalar: YAML decodes it, the rules would not",
-      );
-    }
+    const { content: stripped, escape: lineEscape } = readLine(raw);
+    if (lineEscape) refuseEscape(line);
     if (stripped.trim() === "") continue;
     let col = lead.length;
     let rest = stripped.slice(col).trimEnd();
@@ -506,6 +569,8 @@ export function parseOutline(file, text) {
       rest = after.trimStart();
     }
     if (rest === "") continue;
+    // A double-quoted key, item or scalar first on the line, as the reader reads it.
+    if (escapedScalar(rest)) refuseEscape(line);
     while (top().indent >= col) stack.pop();
     const parent = top();
     if (/^[?:](?:\s|$)/.test(rest)) {
@@ -518,6 +583,7 @@ export function parseOutline(file, text) {
     const match = KEY.exec(rest);
     if (match !== null) {
       const value = rest.slice(match[0].length).trim();
+      if (escapedScalar(value)) refuseEscape(line);
       const node = makeNode(unquote(match[1] ?? ""), value, raw, line, col, false);
       parent.children.push(node);
       stack.push(node);

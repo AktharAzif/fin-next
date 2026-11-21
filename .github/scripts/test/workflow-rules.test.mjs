@@ -79,6 +79,13 @@ describe("the outline reader", () => {
     assert.equal(stripComment("key: 'it''s # x' # y"), "key: 'it''s # x' ");
     assert.equal(stripComment("# whole line"), "");
     assert.equal(stripComment("url: a#b"), "url: a#b");
+    // A quote opens a scalar only where YAML starts a node; inside a plain scalar it is a
+    // character, so the comment after it is still one (as libyaml reads these lines).
+    assert.equal(stripComment("x: a-'b # c"), "x: a-'b ");
+    assert.equal(stripComment('x: a "b # c"'), 'x: a "b ');
+    assert.equal(stripComment('- a-"b # c'), '- a-"b ');
+    assert.equal(stripComment('x: {"a":"b # c"} # d'), 'x: {"a":"b # c"} ');
+    assert.equal(stripComment('x: [a-\'b, "c # d"] # e'), 'x: [a-\'b, "c # d"] ');
   });
 
   it("reads mappings, sequence items, flow values and block scalars", () => {
@@ -600,6 +607,43 @@ describe("line breaks, characters, escapes and block scalars YAML reads otherwis
       `      - uses: actions/cache/save@${SHA} # v6.1.0\n        if: "github.event_name == 'push' && true \\x7c\\x7c true"\n        with:\n          path: x\n          key: y\n      - name: Run\n`,
     ],
     ["an escaped quote", "name: sample", 'name: "sam\\"ple"'],
+    // A quote inside a plain scalar first on the line (`a-'b`) is a character, not a scalar's
+    // start: the escapes after it are still refused.
+    [
+      "an escaped cache save after a plain scalar holding a quote",
+      "      - name: Run\n",
+      `      - {name: save-'it, "u\\x73es": "actions/cache/save@${SHA}", with: {path: node_modules, key: deps}}\n      - name: Run\n`,
+    ],
+    [
+      "strangers' text in a flow mapping after a plain scalar holding a quote",
+      `        env:\n          VALUE: ${E} github.sha }}\n`,
+      `        env: {A: x-'y, TITLE: "${E} github.event.pull_request.t\\x69tle }}"}\n`,
+    ],
+    [
+      "strangers' text under a block key holding a quote",
+      `VALUE: ${E} github.sha }}`,
+      `X-'Y: "${E} github.event.pull_request.t\\x69tle }}"`,
+    ],
+    [
+      "an escaped trigger after a plain scalar holding a quote",
+      "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+      `on: {push: {branches: [release-'x]}, "pull_request_t\\x61rget": {}}\n`,
+    ],
+    [
+      "an escaped third-party action after a plain scalar holding a quote",
+      "      - name: Run\n",
+      `      - {name: a-'b, "u\\x73es": tj-actions/changed-files@${"a".repeat(40)}}\n      - name: Run\n`,
+    ],
+    [
+      "an escaped checkout after a plain scalar holding a quote",
+      "      - name: Run\n",
+      `      - {name: check-'out, "u\\x73es": "actions/checkout@${SHA}"}\n      - name: Run\n`,
+    ],
+    [
+      "an escaped action after a plain scalar holding a double quote",
+      "      - name: Run\n",
+      `      - {name: a-"b, "u\\x73es": tj-actions/changed-files@${"a".repeat(40)}}\n      - name: Run\n`,
+    ],
   ];
   for (const [what, from, to] of escaped) {
     it(`refuses ${what}`, () => {
