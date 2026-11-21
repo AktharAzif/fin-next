@@ -1,5 +1,6 @@
 // T-SAT-12 (spec 02 §6.5, [SA-29]): the enrolment code's format, its normalisation and its hash.
 import { createHash } from "node:crypto";
+import { HIDDEN_VALUE, param } from "@fin/email";
 import { describe, expect, it } from "vitest";
 import {
   CROCKFORD,
@@ -27,6 +28,27 @@ describe("enrolment codes", () => {
     }
     expect(codes.size).toBe(1000);
     expect(chars.size).toBe(32);
+  });
+
+  // A code with no group of four mixing a letter and a digit (about one plain draw in 340) is also
+  // an ordinary name's shape, which the email's name fields show; every code Fin Admin issues has
+  // such a group, so one passed into a name by mistake is hidden in every form (SA-29, T08-23).
+  it("always have a group mixing a letter and a digit, so every name field hides them", () => {
+    const codes = Array.from({ length: 20_000 }, generateEnrolmentCode);
+    const unmixed = codes.filter(
+      (code) => !code.split("-").some((group) => /\d/.test(group) && /[A-Z]/.test(group)),
+    );
+    expect(unmixed).toEqual([]);
+    const shown: string[] = [];
+    for (const code of codes) {
+      const groups = code.split("-");
+      for (const form of [code, groups.join(" "), groups.join(""), code.toLowerCase()]) {
+        for (const field of ["personName", "orgName", "roleLabel"] as const) {
+          if (param[field].parse(form) !== HIDDEN_VALUE) shown.push(`${field}: ${form}`);
+        }
+      }
+    }
+    expect(shown).toEqual([]);
   });
 
   it("read as typed: any case, spaces and hyphens, I and L as 1, O as 0", () => {

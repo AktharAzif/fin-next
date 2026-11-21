@@ -68,7 +68,8 @@ const CROCKFORD_LOWER = "0-9a-hjkmnp-tv-z";
  * them (T08-23: no template carries a code, spec 08 §4.1). Those shapes rely on the codes' own rule
  * that they mix letters and digits: Fin's generators redraw any code that would not (a backup code
  * holds a letter and a digit, an enrolment code has a group of four mixing both; packages/identity,
- * crypto/backup-codes.ts and staff/enrolment.ts), so every code Fin issues is hidden here.
+ * crypto/backup-codes.ts and staff/enrolment.ts, whose enrolment generator Fin Admin's issuer in
+ * packages/staff/src/enrolment-codes.ts uses too), so every code Fin issues is hidden here.
  * Left out, as names of their own: a long letters-and-digits run that mixes cases or is not a
  * code's length, a 5-5 pair without a digit, and four words of four letters with no group mixing a
  * letter and a digit ("Web3Infrastructure", "McKay-Jones", "Acme Bank Card 2025").
