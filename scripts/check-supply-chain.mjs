@@ -3,29 +3,49 @@
 // It refuses, in tracked files:
 //   - pnpm-workspace.yaml with a policy key missing or changed, an unknown key, or a key that
 //     loosens the policy (minimumReleaseAgeExclude, trustPolicyExclude, trustPolicyIgnoreAfter,
-//     dangerouslyAllowAllBuilds, pnpmfile, globalPnpmfile, configDependencies, ...);
-//   - an allowBuilds or overrides entry without a dated comment naming the owner's yes (an
-//     allowBuilds entry set to false, meaning "never run this script", is accepted with one);
+//     dangerouslyAllowAllBuilds, pnpmfile, globalPnpmfile, configDependencies, ...), or any line
+//     the strict reader below cannot read as pnpm reads it (a carriage return, a tab, a control
+//     character, a construct outside its YAML subset);
+//   - an allowBuilds or overrides entry without a dated comment recording the owner's yes in one
+//     of the fixed phrases (an allowBuilds entry set to false, meaning "never run this script", is
+//     accepted with one);
 //   - a catalog entry that is not one exact version;
-//   - a pnpmfile or a .npmrc;
+//   - a pnpmfile or a .npmrc; a manifest pnpm reads other than package.json (package.yaml,
+//     package.yml, package.json5); a symbolic link or a submodule, through which pnpm would read a
+//     manifest this check does not;
 //   - a dependency spec that is a git URL, a tarball URL, a local path or an alias, an @fin/*
-//     dependency that is not workspace:*, any other dependency not taken from the catalog;
+//     dependency that is not workspace:*, any other dependency, peer dependencies included (pnpm
+//     installs peers itself), not taken from the catalog;
 //   - a workspace package without "private": true, or a manifest field that bypasses the policy
 //     (pnpm, resolutions, overrides, bundledDependencies);
 //   - a refused package (FW-C01, OD-5, ARCHITECTURE §3.3's "not used" list) in a manifest, the
 //     catalog or the lockfile; wrangler outside tools/static-deploy/package.json; @ui-sdk/*
-//     outside packages/ui/package.json; seroval or seroval-plugins below 1.6.11; a lockfile
-//     package resolved from anything but the registry;
+//     outside packages/ui/package.json; seroval or seroval-plugins below 1.6.11;
+//   - a lockfile line outside the one canonical form pnpm writes, a lockfile package resolved
+//     from anything but the registry by integrity, or an importer whose version is not the
+//     registry version (or, for catalog:, not the catalog's);
 //   - a root package.json whose pnpm pin is not exact, or lacks devEngines.packageManager with
 //     onFail "error" (without it pnpm 12 downloads whatever packageManager names; SP-01);
-//   - a `uses:` in .github/ not pinned to a 40-character commit SHA with a version comment.
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { parsePolicy } from "./lib/policy-yaml.mjs";
-import { globToRegExp, isRecord, listFiles, readJson, report } from "./lib/repo.mjs";
+//   - a `uses:` in .github/ (or in any action.yml) not pinned to a 40-character commit SHA with a
+//     version comment, in any YAML spelling, or a local action outside .github/.
+//
+// This file is self-contained (Node built-ins only, no import from another file of the
+// repository), so every line that decides its verdict is under the control path and the owner's
+// review (CI-14). For the same reason CI runs it directly, `node scripts/check-supply-chain.mjs`,
+// not through a package.json script, which is not a control path.
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
 
-/** @typedef {import("./lib/repo.mjs").Finding} Finding */
-/** @typedef {import("./lib/policy-yaml.mjs").Item} Item */
+/** @typedef {{ file: string, line?: number, rule: string, message: string }} Finding */
+/**
+ * @typedef {string | number | boolean | null} Scalar
+ * @typedef {{ value: Scalar, line: number, comment?: string, above?: string[] }} Item
+ * @typedef {{ kind: "scalar", value: Scalar, line: number, comment?: string }
+ *   | { kind: "list", items: Item[], line: number, comment?: string }
+ *   | { kind: "map", entries: Map<string, Item>, line: number, comment?: string }} Node
+ * @typedef {{ keys: Map<string, Node>, errors: { line: number, message: string }[] }} Policy
+ */
 
 const WORKSPACE = "pnpm-workspace.yaml";
 const LOCKFILE = "pnpm-lock.yaml";
@@ -123,7 +143,6 @@ const REFUSED_DIRECT = [
 ];
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-const DATED_COMMENT = /^#\s*(\d{4})-(\d{2})-(\d{2}):\s*(.+)$/;
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 const BYPASS_FIELDS = {
   pnpm: "pnpm settings belong in pnpm-workspace.yaml, under this check",
@@ -132,6 +151,362 @@ const BYPASS_FIELDS = {
   bundledDependencies: "bundled packages skip the lockfile and the registry's checks",
   bundleDependencies: "bundled packages skip the lockfile and the registry's checks",
 };
+/** Manifest names pnpm reads besides package.json. */
+const OTHER_MANIFESTS = new Set(["package.yaml", "package.yml", "package.json5"]);
+
+// --- Helpers (kept in this file: see the header) ---------------------------------------------
+
+/**
+ * Whether `value` is a plain object (not null, not an array).
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Converts a simple glob to a regular expression for a whole path or name: `**` matches any
+ * number of path segments, `*` anything inside one segment, `?` one character inside a segment.
+ * @param {string} glob
+ * @returns {RegExp}
+ */
+export function globToRegExp(glob) {
+  let source = "";
+  for (let i = 0; i < glob.length; i++) {
+    const char = glob.charAt(i);
+    if (char === "*" && glob[i + 1] === "*") {
+      i++;
+      if (glob[i + 1] === "/") {
+        i++;
+        source += "(?:.*/)?";
+      } else {
+        source += ".*";
+      }
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += char.replace(/[\\^$+.()|[\]{}]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
+/**
+ * The tracked entries of the repository at `root`, with their git modes, as [path, mode] pairs
+ * sorted by path. Entries deleted from the working tree are left out; a symbolic link is kept
+ * whether or not its target exists, and a submodule whether or not it is checked out.
+ * @param {string} root
+ * @returns {[string, string][]}
+ */
+function trackedEntries(root) {
+  const output = execFileSync("git", ["-C", root, "ls-files", "-z", "--stage"], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  /** @type {Map<string, string>} */
+  const entries = new Map();
+  for (const record of output.split("\0")) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    entries.set(record.slice(tab + 1), record.slice(0, record.indexOf(" ")));
+  }
+  return [...entries]
+    .filter(
+      ([path, mode]) =>
+        mode === "160000" || lstatSync(join(root, path), { throwIfNoEntry: false }) !== undefined,
+    )
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Formats a finding as `file:line rule: message`.
+ * @param {Finding} finding
+ * @returns {string}
+ */
+function formatFinding(finding) {
+  const where = finding.line === undefined ? finding.file : `${finding.file}:${finding.line}`;
+  return `${where} ${finding.rule}: ${finding.message}`;
+}
+
+/**
+ * Prints findings and returns the exit code: 0 with no findings, 1 otherwise.
+ * @param {Finding[]} findings
+ * @returns {number}
+ */
+function report(findings) {
+  for (const finding of findings) console.error(formatFinding(finding));
+  if (findings.length > 0) {
+    console.error(`supply-chain:check: ${findings.length} finding(s)`);
+    return 1;
+  }
+  console.log("supply-chain:check: ok");
+  return 0;
+}
+
+/**
+ * Splits text into lines the way YAML does (a line ends at LF, CR or CRLF), with an error for
+ * every character the policy file and the lockfile may not hold: a carriage return (line endings
+ * are LF only), a tab, any other control character, a Unicode line or paragraph separator, a
+ * byte-order mark, or a replacement character (an invalid UTF-8 sequence). Line numbers count
+ * YAML's lines, so a line a carriage return starts is reported as its own.
+ * @param {string} text
+ * @returns {{ lines: string[], errors: { line: number, message: string }[] }}
+ */
+export function yamlLines(text) {
+  /** @type {string[]} */
+  const lines = [];
+  /** @type {{ line: number, message: string }[]} */
+  const errors = [];
+  let start = 0;
+  for (const match of text.matchAll(/\r\n|\r|\n/g)) {
+    lines.push(text.slice(start, match.index));
+    if (match[0] !== "\n") {
+      errors.push({
+        line: lines.length,
+        message: "a carriage return: line endings must be LF (YAML ends a line at a CR too)",
+      });
+    }
+    start = match.index + match[0].length;
+  }
+  lines.push(text.slice(start));
+  for (const [index, line] of lines.entries()) {
+    if (line.includes("\t")) errors.push({ line: index + 1, message: "tabs are not allowed" });
+    // Controls (C0 but the tab, DEL, C1), format characters (the byte-order mark, bidirectional
+    // controls, zero-width characters), the line and paragraph separators, and U+FFFD.
+    const bad = /(?!\t)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u{FFFD}]/u.exec(line);
+    if (bad) {
+      const code = (bad[0].codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0");
+      errors.push({
+        line: index + 1,
+        message: `the character U+${code} is not allowed (a control, separator or invisible character)`,
+      });
+    }
+  }
+  return { lines, errors };
+}
+
+// --- The policy file's reader -----------------------------------------------------------------
+// pnpm-workspace.yaml is kept to a small subset of YAML so that what this reader sees is exactly
+// what pnpm sees: top-level keys with a plain scalar, `{}` or `[]`, a block list of scalars, or a
+// block map of scalar values one level deep, each line with an optional trailing `# comment`,
+// LF line endings. Anything else (anchors, aliases, tags, flow collections with content,
+// multi-line scalars, several documents, deeper nesting, tabs, carriage returns and other
+// control characters) is refused, because a construct this reader skipped could change pnpm's
+// settings without the check noticing. Lines are split where YAML splits them, so even a
+// refused carriage return cannot hide a key from the checks that follow.
+
+/**
+ * Splits a line into its content and trailing comment. A `#` starts a comment only at the start
+ * of the content or after whitespace, and never inside quotes.
+ * @param {string} text
+ * @returns {{ content: string, comment?: string }}
+ */
+function splitComment(text) {
+  /** @type {string | null} */
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charAt(i);
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') quote = char;
+    else if (char === "#" && (i === 0 || /\s/.test(text.charAt(i - 1)))) {
+      return { content: text.slice(0, i).trimEnd(), comment: text.slice(i).trim() };
+    }
+  }
+  return { content: text.trimEnd() };
+}
+
+/**
+ * Parses a scalar the way YAML 1.2's core schema would for the forms the policy uses.
+ * @param {string} text
+ * @returns {Scalar | undefined} undefined when the form is outside the subset
+ */
+export function parseScalar(text) {
+  if (/^'([^']|'')*'$/.test(text)) return text.slice(1, -1).replaceAll("''", "'");
+  if (/^"[^"\\]*"$/.test(text)) return text.slice(1, -1);
+  if (text === "true") return true;
+  if (text === "false") return false;
+  if (text === "null" || text === "~") return null;
+  if (/^-?(0|[1-9][0-9]*)$/.test(text)) return Number(text);
+  // Plain scalars: refuse indicators that would mean something else to a full YAML parser.
+  if (
+    text === "" ||
+    /^[-?:,[\]{}#&*!|>'"%@`]/.test(text) ||
+    /: |\s#/.test(text) ||
+    text.endsWith(":")
+  ) {
+    return undefined;
+  }
+  return text;
+}
+
+/**
+ * Parses a key (a plain or quoted scalar used as a map key).
+ * @param {string} text
+ * @returns {string | undefined}
+ */
+function parseKey(text) {
+  if (text !== text.trim()) return undefined; // no space before the colon
+  const value = parseScalar(text);
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+/**
+ * Finds the `key: value` split outside quotes.
+ * @param {string} content
+ * @returns {{ key: string, rest: string } | undefined}
+ */
+function splitKey(content) {
+  /** @type {string | null} */
+  let quote = null;
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charAt(i);
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') quote = char;
+    else if (char === ":" && (i === content.length - 1 || content.charAt(i + 1) === " ")) {
+      return { key: content.slice(0, i), rest: content.slice(i + 1).trim() };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Parses the policy file.
+ * @param {string} text
+ * @returns {Policy}
+ */
+export function parsePolicy(text) {
+  /** @type {Map<string, Node>} */
+  const keys = new Map();
+  const { lines, errors } = yamlLines(text);
+  /** @type {Node | null} */
+  let open = null; // the top-level block list or map being filled
+  /** @type {string[]} */
+  let pendingComments = []; // whole-line comments just above the next item
+  /** @type {number | null} */
+  let childIndent = null;
+
+  for (const [index, raw] of lines.entries()) {
+    const line = index + 1;
+    if (raw.includes("\t")) continue; // reported by yamlLines
+    if (/^(---|\.\.\.)(\s|$)/.test(raw) || raw.startsWith("%")) {
+      errors.push({ line, message: "one document only, with no directives" });
+      continue;
+    }
+    const { content, comment } = splitComment(raw);
+    if (content.trim() === "") {
+      if (comment !== undefined && raw.trimStart().startsWith("#")) pendingComments.push(comment);
+      else pendingComments = [];
+      continue;
+    }
+    const indent = content.length - content.trimStart().length;
+    const body = content.trim();
+    if (/(^|[\s[{,])[&*!][^\s]/.test(body) || /[|>][-+]?$/.test(body)) {
+      errors.push({ line, message: "anchors, aliases, tags and block scalars are not allowed" });
+      continue;
+    }
+
+    if (indent === 0) {
+      open = null;
+      childIndent = null;
+      pendingComments = [];
+      const split = splitKey(body);
+      const key = split ? parseKey(split.key) : undefined;
+      if (split === undefined || key === undefined) {
+        errors.push({ line, message: "expected a top-level `key: value`" });
+        continue;
+      }
+      if (keys.has(key)) {
+        errors.push({ line, message: `the key ${key} appears twice` });
+        continue;
+      }
+      /** @type {Node} */
+      let node;
+      if (split.rest === "") {
+        node = { kind: "map", entries: new Map(), line }; // becomes a list if items follow
+        open = node;
+      } else if (split.rest === "{}") {
+        node = { kind: "map", entries: new Map(), line };
+      } else if (split.rest === "[]") {
+        node = { kind: "list", items: [], line };
+      } else {
+        const value = parseScalar(split.rest);
+        if (value === undefined) {
+          // Keep the key, so the checks still see that it is present.
+          errors.push({ line, message: `the value of ${key} is outside the supported subset` });
+        }
+        node = { kind: "scalar", value: value ?? null, line };
+      }
+      if (comment !== undefined) node.comment = comment;
+      keys.set(key, node);
+      continue;
+    }
+
+    if (open === null) {
+      errors.push({ line, message: "an indented line must belong to a top-level list or map" });
+      continue;
+    }
+    if (childIndent === null) childIndent = indent;
+    if (indent !== childIndent) {
+      errors.push({ line, message: "only one level of nesting, with one indentation, is allowed" });
+      continue;
+    }
+    /** @type {Item} */
+    const item = { value: null, line };
+    if (comment !== undefined) item.comment = comment;
+    if (pendingComments.length > 0) item.above = pendingComments;
+    pendingComments = [];
+
+    if (body.startsWith("- ") || body === "-") {
+      if (open.kind === "map" && open.entries.size === 0) {
+        const list = /** @type {Node} */ ({ kind: "list", items: [], line: open.line });
+        if (open.comment !== undefined) list.comment = open.comment;
+        for (const [k, v] of keys) if (v === open) keys.set(k, list);
+        open = list;
+      }
+      const value = parseScalar(body.slice(2).trim());
+      if (open.kind !== "list" || value === undefined) {
+        errors.push({ line, message: "a list item must be a scalar in a list" });
+        continue;
+      }
+      item.value = value;
+      open.items.push(item);
+      continue;
+    }
+    if (open.kind !== "map") {
+      errors.push({ line, message: "a list cannot also hold `key: value` lines" });
+      continue;
+    }
+    const split = splitKey(body);
+    const key = split ? parseKey(split.key) : undefined;
+    const value = split ? parseScalar(split.rest) : undefined;
+    if (split === undefined || key === undefined || value === undefined) {
+      errors.push({ line, message: "a map entry must be `key: scalar`" });
+      continue;
+    }
+    if (open.entries.has(key)) {
+      errors.push({ line, message: `the key ${key} appears twice` });
+      continue;
+    }
+    item.value = value;
+    open.entries.set(key, item);
+  }
+  errors.sort((a, b) => a.line - b.line);
+  return { keys, errors };
+}
+
+// --- The policy file --------------------------------------------------------------------------
 
 /**
  * @param {string} name
@@ -146,19 +521,41 @@ export function refusedReason(name, list) {
 }
 
 /**
- * Whether a comment is a dated comment naming the owner's yes: `# YYYY-MM-DD: ... owner ...`.
+ * The phrases a dated approval states the owner's yes with, after `# YYYY-MM-DD: `. Each may be
+ * followed by a note after a comma, semicolon, colon or parenthesis, but never by a word that
+ * takes the yes back.
+ */
+export const APPROVAL_PHRASES = [
+  "approved by the owner",
+  "the owner's yes",
+  "owner's yes",
+  "approved by the orchestrator under the owner's delegation",
+];
+const NEGATION =
+  /\b(?:no|not|never|nor|refused|refuses|refuse|declined|declines|denied|rejected|revoked|withdrawn|withheld|pending|awaiting|waiting|until|unless|without|maybe|tbd|todo|if)\b|n't\b/i;
+
+/**
+ * Whether a comment is a dated approval: `# YYYY-MM-DD: <one of APPROVAL_PHRASES>[, note]`, with
+ * a real calendar date and no negation anywhere in its text.
  * @param {string | undefined} comment
  * @returns {boolean}
  */
 export function isDatedApproval(comment) {
   if (comment === undefined) return false;
-  const match = DATED_COMMENT.exec(comment);
+  const match = /^#\s*(\d{4})-(\d{2})-(\d{2}):\s*(.+?)\s*$/.exec(comment);
   if (!match) return false;
-  const [, y, m, d, text = ""] = match;
+  const [, y, m, d, raw = ""] = match;
   const date = new Date(`${y}-${m}-${d}T00:00:00Z`);
   if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== `${y}-${m}-${d}`)
     return false;
-  return /\bowner\b|\bowner's\b/i.test(text);
+  const text = raw.replaceAll("\u2019", "'").toLowerCase();
+  if (NEGATION.test(text)) return false;
+  return APPROVAL_PHRASES.some(
+    (phrase) =>
+      text === phrase ||
+      (text.startsWith(phrase) &&
+        /^[-.,;:(\u{2013}\u{2014}]/u.test(text.slice(phrase.length).trimStart())),
+  );
 }
 
 /**
@@ -253,7 +650,7 @@ export function checkWorkspace(text) {
         add(
           item.line,
           "allow-builds-undated",
-          `allowBuilds ${name} needs a dated comment naming the owner's yes`,
+          `allowBuilds ${name} needs a dated comment recording the owner's yes (# YYYY-MM-DD: approved by the owner)`,
         );
       }
     }
@@ -271,7 +668,7 @@ export function checkWorkspace(text) {
           add(
             item.line,
             "overrides-undated",
-            `overrides ${name} needs a dated comment naming the owner's yes`,
+            `overrides ${name} needs a dated comment recording the owner's yes (# YYYY-MM-DD: approved by the owner)`,
           );
         }
       }
@@ -323,6 +720,8 @@ export function checkWorkspace(text) {
   }
   return { findings, catalog };
 }
+
+// --- Manifests --------------------------------------------------------------------------------
 
 /**
  * Checks one manifest.
@@ -397,21 +796,18 @@ export function checkManifest(file, manifest, catalog) {
         add("workspace-not-fin", `${at}: only @fin/* packages are workspace dependencies`);
         continue;
       }
-      if (field === "peerDependencies") {
-        if (
-          spec !== "catalog:" &&
-          !/^[\d\sxX*.^~<>=|-]+$|^[\d\sxX*.^~<>=|-]*\d+\.\d+\.\d+-[\w.]+$/.test(spec)
-        ) {
-          add("dependency-spec", `${at} must be catalog: or a version range`);
-        }
-      } else if (spec !== "catalog:" && spec !== "catalog:default") {
+      // Peers too: pnpm installs a missing peer itself (autoInstallPeers), so a peer range is a
+      // dependency the catalog never approved.
+      if (spec !== "catalog:" && spec !== "catalog:default") {
         add(
           "not-from-catalog",
-          `${at} must be catalog: (one exact version per package, in pnpm-workspace.yaml)`,
+          field === "peerDependencies"
+            ? `${at} must be catalog: (pnpm installs peers itself, so a peer comes from the catalog like any dependency)`
+            : `${at} must be catalog: (one exact version per package, in pnpm-workspace.yaml)`,
         );
         continue;
       }
-      if (spec.startsWith("catalog:") && !catalog.has(name)) {
+      if (!catalog.has(name)) {
         add("catalog-missing", `${at} uses catalog: but the catalog has no ${name}`);
       }
     }
@@ -452,6 +848,8 @@ export function checkPackageManager(file, manifest) {
   return findings;
 }
 
+// --- The lockfile -----------------------------------------------------------------------------
+
 /**
  * Compares two versions (major.minor.patch, prerelease below release).
  * @param {string} a
@@ -475,67 +873,393 @@ export function compareVersions(a, b) {
   return x.pre < y.pre ? -1 : 1;
 }
 
+const LOCK_SECTIONS = new Set([
+  "settings",
+  "catalogs",
+  "overrides",
+  "importers",
+  "packages",
+  "snapshots",
+]);
+/** The fields pnpm writes on a package (`packages:`) and a snapshot (`snapshots:`) in v9. */
+const PACKAGE_FIELDS = new Set([
+  "resolution",
+  "engines",
+  "cpu",
+  "os",
+  "libc",
+  "hasBin",
+  "deprecated",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "bundledDependencies",
+]);
+const SNAPSHOT_FIELDS = new Set([
+  "dependencies",
+  "optionalDependencies",
+  "transitivePeerDependencies",
+  "optional",
+]);
+const IMPORTER_FIELDS = new Set([
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "dependenciesMeta",
+  "publishDirectory",
+  "configDependencies",
+  "packageManagerDependencies",
+]);
+const SEMVER = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`;
+const PEERS = String.raw`(?:\([^\s'"]+\))*`;
+const NAME = String.raw`(?:@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+`;
+const REGISTRY_RESOLUTION = /^\{integrity: sha(?:1|256|384|512)-[A-Za-z0-9+/]+={0,2}\}$/;
+
 /**
- * Checks the lockfile's packages and snapshots (every document in the file).
- * @param {string} text
- * @returns {Finding[]}
+ * Whether a lockfile value is one complete single-line YAML scalar or flow collection of the
+ * kinds pnpm writes: balanced quotes and brackets, and no indicator that starts a block scalar,
+ * an anchor, an alias, a tag, a directive or a comment.
+ * @param {string} value
+ * @returns {boolean}
  */
-export function checkLockfile(text) {
-  /** @type {Finding[]} */
-  const findings = [];
-  let section = "";
-  /** @type {string | undefined} */
-  let current;
-  for (const [index, line] of text.split("\n").entries()) {
-    const top = /^([A-Za-z]+):/.exec(line);
-    if (top) {
-      section = top[1] ?? "";
-      current = undefined;
-      continue;
-    }
-    if (section !== "packages" && section !== "snapshots") continue;
-    const key = /^ {2}'?((?:@[^/@\s']+\/)?[^@\s'/]+)@([^('\s]+?)(?:\(.*\))?'?:\s*$/.exec(line);
-    if (key) {
-      const [, name = "", version = ""] = key;
-      current = `${name}@${version}`;
-      const why = refusedReason(name, REFUSED_EVERYWHERE);
-      if (why !== undefined) {
-        findings.push({
-          file: LOCKFILE,
-          line: index + 1,
-          rule: "refused-package",
-          message: `${name} is in the lockfile but refused (${why})`,
-        });
-      }
-      if (
-        (name === "seroval" || name === "seroval-plugins") &&
-        compareVersions(version, "1.6.11") < 0
-      ) {
-        findings.push({
-          file: LOCKFILE,
-          line: index + 1,
-          rule: "seroval-floor",
-          message: `${name} ${version} is below the 1.6.11 floor`,
-        });
+function simpleValue(value) {
+  if (value === "") return true;
+  if (/^[|>&*!%@`#]/.test(value) || /^[-?:](?:\s|$)/.test(value)) return false;
+  /** @type {string[]} */
+  const stack = [];
+  /** @type {string | null} */
+  let quote = null;
+  let tokenStart = true;
+  for (let i = 0; i < value.length; i++) {
+    const char = value.charAt(i);
+    if (quote === "'") {
+      if (char === "'") {
+        if (value.charAt(i + 1) === "'") i++;
+        else quote = null;
       }
       continue;
     }
-    if (section === "packages" && current !== undefined && /^ {4}resolution:/.test(line)) {
-      if (!/^ {4}resolution: \{integrity: [\w+/=-]+\}\s*$/.test(line)) {
-        findings.push({
-          file: LOCKFILE,
-          line: index + 1,
-          rule: "exotic-resolution",
-          message: `${current} is not resolved from the registry by integrity`,
-        });
+    if (quote === '"') {
+      if (char === "\\") i++;
+      else if (char === '"') quote = null;
+      continue;
+    }
+    if (char === " ") continue;
+    if (char === "#" && value.charAt(i - 1) === " ") return false; // a comment
+    const inFlow = stack.length > 0;
+    if (tokenStart) {
+      // Inside a flow collection a token may not start an anchor, alias, tag, explicit key or
+      // block scalar either.
+      if (inFlow && /[&*!|>%@`?]/.test(char)) return false;
+      if (char === "'" || char === '"') {
+        quote = char;
+        tokenStart = false;
+        continue;
       }
     }
+    if ((char === "{" || char === "[") && (inFlow || tokenStart)) {
+      stack.push(char === "{" ? "}" : "]");
+      tokenStart = true;
+      continue;
+    }
+    if (inFlow && (char === "}" || char === "]")) {
+      if (stack.pop() !== char) return false;
+      tokenStart = false;
+      continue;
+    }
+    if (inFlow && char === ",") {
+      tokenStart = true;
+      continue;
+    }
+    if (char === ":" && (value.charAt(i + 1) === " " || i === value.length - 1)) {
+      if (!inFlow) return false; // `a: b` or `a:` inside a plain scalar: another mapping
+      tokenStart = true;
+      continue;
+    }
+    tokenStart = false; // a quote inside a plain scalar is an ordinary character
   }
-  return findings;
+  return quote === null && stack.length === 0;
 }
 
 /**
- * Checks `uses:` lines in a workflow or action file.
+ * Reads one lockfile line's content (its indentation removed) in the forms pnpm writes: a key
+ * (plain, or single-quoted) with an optional inline value, or a sequence item.
+ * @param {string} content
+ * @returns {{ key: string, value: string } | { item: string } | undefined}
+ */
+function lockEntry(content) {
+  if (content.startsWith("- ")) {
+    const item = content.slice(2);
+    return simpleValue(item) && item !== "" ? { item } : undefined;
+  }
+  const quoted = /^'((?:[^']|'')+)':(?: (.*))?$/.exec(content);
+  const plain = quoted
+    ? null
+    : /^([A-Za-z0-9._~/()+-](?:[^\s:'"#]|:(?=\S))*):(?: (.*))?$/.exec(content);
+  const match = quoted ?? plain;
+  if (!match) return undefined;
+  const key = quoted ? (match[1] ?? "").replaceAll("''", "'") : (match[1] ?? "");
+  const value = match[2] ?? "";
+  if (match[2] !== undefined && value === "") return undefined; // `key: ` with a trailing space
+  if (!simpleValue(value)) return undefined;
+  return { key, value };
+}
+
+/**
+ * Checks the lockfile, every document in it. pnpm writes one canonical form: LF line endings,
+ * two spaces per level, `name@version` keys, a `resolution: {integrity: ...}` for every package,
+ * one complete value per line. This check reads only that form, and any line it cannot place is
+ * a finding, so a hand edit (a quoted key, another indentation, a multi-line value, a field pnpm
+ * never writes) cannot hide a package or its resolution from the rules.
+ * @param {string} text
+ * @param {Map<string, Item>} [catalog] the workspace catalog, to compare catalog: importers with
+ * @returns {Finding[]}
+ */
+export function checkLockfile(text, catalog = new Map()) {
+  /** @type {Finding[]} */
+  const findings = [];
+  /**
+   * @param {number} line
+   * @param {string} rule
+   * @param {string} message
+   */
+  const add = (line, rule, message) => findings.push({ file: LOCKFILE, line, rule, message });
+  const { lines, errors } = yamlLines(text);
+  for (const error of errors) add(error.line, "lockfile-format", error.message);
+
+  let section = "";
+  let previousDepth = 0;
+  let previousOpen = true; // whether the previous line can have children (a key with no value)
+  /** @type {{ key: string, line: number, resolutions: number, fields: Set<string> } | undefined} */
+  let pkg;
+  let field = ""; // the depth-4 field the current lines belong to
+  let importer = "."; // the importer (a workspace project's path) the current lines belong to
+  /** @type {{ name: string, line: number, specifier?: string, version?: string, versionLine?: number } | undefined} */
+  let dep;
+  const workspaceDirs = PACKAGE_GLOBS.map((glob) => globToRegExp(glob));
+
+  const closePackage = () => {
+    if (pkg !== undefined && section === "packages" && pkg.resolutions === 0) {
+      add(pkg.line, "exotic-resolution", `${pkg.key} has no registry resolution`);
+    }
+    pkg = undefined;
+  };
+  const closeDep = () => {
+    if (dep === undefined) return;
+    const { name, specifier, version, versionLine = dep.line } = dep;
+    dep = undefined;
+    if (version === undefined || specifier === undefined) {
+      add(
+        versionLine,
+        "lockfile-format",
+        `the importer entry ${name} needs a specifier and a version`,
+      );
+      return;
+    }
+    const link = version.startsWith("link:");
+    // A workspace link points at a workspace project, inside the repository.
+    const target = link ? posix.normalize(posix.join(importer, version.slice(5))) : "";
+    const linkOk = specifier === "workspace:*" && workspaceDirs.some((dir) => dir.test(target));
+    if (link ? !linkOk : !new RegExp(`^${SEMVER}${PEERS}$`).test(version)) {
+      add(
+        versionLine,
+        "exotic-resolution",
+        `the importer entry ${name} is not a registry version (or a workspace:* link to a workspace project)`,
+      );
+      return;
+    }
+    const pinned = catalog.get(name)?.value;
+    const fromCatalog = specifier === "catalog:" || specifier === "catalog:default";
+    if (fromCatalog && !link && version.replace(/\(.*$/, "") !== pinned) {
+      add(
+        versionLine,
+        "lockfile-catalog",
+        `${name} is locked at a version other than the catalog's`,
+      );
+    }
+  };
+
+  for (const [index, raw] of lines.entries()) {
+    const line = index + 1;
+    if (raw.trim() === "") continue;
+    const depth = raw.length - raw.trimStart().length;
+    const content = raw.slice(depth);
+    if (depth === 0 && content === "---") {
+      closeDep();
+      closePackage();
+      section = "";
+      previousDepth = 0;
+      previousOpen = true;
+      continue;
+    }
+    if (content.startsWith("#")) {
+      add(line, "lockfile-format", "pnpm writes no comments in the lockfile");
+      continue;
+    }
+    const entry = lockEntry(content);
+    if (
+      entry === undefined ||
+      depth % 2 !== 0 ||
+      depth > 8 ||
+      depth > previousDepth + 2 ||
+      (depth > previousDepth && !previousOpen)
+    ) {
+      add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+      previousDepth = depth;
+      previousOpen = false;
+      continue;
+    }
+    previousDepth = depth;
+    previousOpen = "key" in entry && entry.value === "";
+
+    if (depth === 0) {
+      closeDep();
+      closePackage();
+      if (!("key" in entry)) {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+        continue;
+      }
+      if (entry.key === "lockfileVersion") {
+        section = "";
+        if (entry.value !== "'9.0'") add(line, "lockfile-format", "lockfileVersion must be '9.0'");
+      } else if (LOCK_SECTIONS.has(entry.key) && (entry.value === "" || entry.value === "{}")) {
+        section = entry.key;
+      } else {
+        section = "";
+        add(line, "lockfile-format", `a top-level ${entry.key} this check does not read`);
+      }
+      continue;
+    }
+
+    if (section === "packages" || section === "snapshots") {
+      if (depth === 2) {
+        closePackage();
+        const key =
+          "key" in entry
+            ? new RegExp(`^(${NAME})@(${SEMVER})(${section === "snapshots" ? PEERS : ""})$`).exec(
+                entry.key,
+              )
+            : null;
+        const valueOk =
+          "key" in entry &&
+          (entry.value === "" || (section === "snapshots" && entry.value === "{}"));
+        if (!("key" in entry) || !valueOk) {
+          add(line, "lockfile-format", "a lockfile package key this check cannot read");
+          continue;
+        }
+        pkg = { key: entry.key, line, resolutions: 0, fields: new Set() };
+        if (key === null) {
+          add(line, "exotic-resolution", `${entry.key} is not a registry name@version`);
+          continue;
+        }
+        const [, name = "", version = ""] = key;
+        const why = refusedReason(name, REFUSED_EVERYWHERE);
+        if (why !== undefined) {
+          add(line, "refused-package", `${name} is in the lockfile but refused (${why})`);
+        }
+        if (
+          (name === "seroval" || name === "seroval-plugins") &&
+          compareVersions(version, "1.6.11") < 0
+        ) {
+          add(line, "seroval-floor", `${name} ${version} is below the 1.6.11 floor`);
+        }
+        continue;
+      }
+      if (depth === 4) {
+        if (pkg === undefined || !("key" in entry)) {
+          add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+          continue;
+        }
+        const allowed = section === "packages" ? PACKAGE_FIELDS : SNAPSHOT_FIELDS;
+        if (!allowed.has(entry.key)) {
+          add(line, "lockfile-format", `${entry.key} is not a field pnpm writes in ${section}`);
+          continue;
+        }
+        if (pkg.fields.has(entry.key)) {
+          add(line, "lockfile-format", `${pkg.key} has ${entry.key} twice`);
+          continue;
+        }
+        pkg.fields.add(entry.key);
+        if (entry.key === "resolution") {
+          pkg.resolutions++;
+          if (!REGISTRY_RESOLUTION.test(entry.value)) {
+            add(
+              line,
+              "exotic-resolution",
+              `${pkg.key} is not resolved from the registry by integrity`,
+            );
+          }
+        }
+      }
+      continue; // depth 6 and 8: dependency lists and their details, read by pnpm from the keys above
+    }
+
+    if (section === "importers") {
+      if (depth <= 6) closeDep();
+      if (!("key" in entry)) {
+        add(line, "lockfile-format", "a lockfile line this check cannot read (not pnpm's form)");
+        continue;
+      }
+      if (depth === 2) {
+        field = "";
+        importer = entry.key;
+        if (entry.value !== "")
+          add(line, "lockfile-format", "an importer is a path with its fields below");
+      } else if (depth === 4) {
+        field = entry.key;
+        const inline = field === "publishDirectory" || entry.value === "" || entry.value === "{}";
+        if (!IMPORTER_FIELDS.has(field) || !inline) {
+          add(line, "lockfile-format", `${field} is not a field pnpm writes on an importer`);
+        }
+      } else if (depth === 6 && field !== "dependenciesMeta") {
+        // A dependency: its specifier and version follow, one level deeper.
+        if (entry.value !== "")
+          add(
+            line,
+            "lockfile-format",
+            "an importer's dependency has its specifier and version below",
+          );
+        else dep = { name: entry.key, line };
+      } else if (depth === 8 && dep !== undefined) {
+        if (entry.key === "specifier") dep.specifier = entry.value.replace(/^'(.*)'$/, "$1");
+        else if (entry.key === "version") {
+          dep.version = entry.value;
+          dep.versionLine = line;
+        } else {
+          add(
+            line,
+            "lockfile-format",
+            `${entry.key} is not a field pnpm writes on an importer's dependency`,
+          );
+        }
+      }
+      continue;
+    }
+
+    if (section === "catalogs" && depth === 2 && (!("key" in entry) || entry.key !== "default")) {
+      add(line, "lockfile-format", "the lockfile has one default catalog only");
+    }
+  }
+  closeDep();
+  closePackage();
+  return findings;
+}
+
+// --- Workflow and action files ----------------------------------------------------------------
+
+const PINNED_USES = /^\s*(?:-\s+)?uses:\s*(['"]?)([^'"\s#]+)\1(?:\s+(#.*))?\s*$/;
+// Any other spelling of a `uses` key: quoted, in a flow mapping, with a space before the colon,
+// in another case. A line that holds one and is not the pinned form above is refused.
+const USES_KEY = /(?:^|[^\w-])["']?uses["']?\s*:/i;
+const EXPLICIT_KEY = /(?:^\s*(?:-\s+)*|[{,]\s*)\?(?:\s|$)/;
+const ESCAPED_KEY = /"[^"\n]*\\[^"\n]*"\s*:/;
+const ALIAS_KEY = /(?:^|[\s[{,?-])\*[^\s[\]{},]+\s*:(?:\s|$)/;
+
+/**
+ * Checks `uses:` in a workflow or action file. YAML has many spellings of one key, so any line
+ * that names `uses` in a form other than `uses: <owner>/<repo>@<sha> # vX.Y.Z` on its own line is
+ * refused, and so are the constructs that can spell a key without its letters (an explicit `?`
+ * key, a double-quoted key with an escape, an alias used as a key) and a carriage return without
+ * a line feed.
  * @param {string} file
  * @param {string} text
  * @returns {Finding[]}
@@ -543,50 +1267,60 @@ export function checkLockfile(text) {
 export function checkUses(file, text) {
   /** @type {Finding[]} */
   const findings = [];
-  for (const [index, line] of text.split("\n").entries()) {
-    const match = /^\s*(?:-\s+)?uses:\s*(['"]?)([^'"\s#]+)\1\s*(#.*)?$/.exec(line);
+  /**
+   * @param {number} line
+   * @param {string} message
+   */
+  const add = (line, message) => findings.push({ file, line, rule: "action-unpinned", message });
+  const lines = text.split(/\r\n|\r|\n/);
+  let lineNumber = 0;
+  for (const match of text.matchAll(/\r\n|\r|\n/g)) {
+    lineNumber++;
+    if (match[0] === "\r") add(lineNumber, "a carriage return without a line feed");
+  }
+  for (const [index, line] of lines.entries()) {
+    const at = index + 1;
+    if (/[\p{Zl}\p{Zp}\u{85}]/u.test(line)) add(at, "a Unicode line separator in a workflow file");
+    if (/^\s*#/.test(line)) continue;
+    const match = PINNED_USES.exec(line);
     if (!match) {
-      if (/^\s*(?:-\s+)?uses:/.test(line)) {
-        findings.push({
-          file,
-          line: index + 1,
-          rule: "action-unpinned",
-          message: "a uses: line this check cannot read",
-        });
+      if (USES_KEY.test(line)) {
+        add(
+          at,
+          "a uses: this check cannot read; write `uses: <owner>/<repo>@<sha> # vX.Y.Z` on its own line",
+        );
       }
+      if (EXPLICIT_KEY.test(line)) add(at, "an explicit `?` key is refused in workflow files");
+      if (ESCAPED_KEY.test(line))
+        add(at, "a double-quoted key with an escape is refused in workflow files");
+      if (ALIAS_KEY.test(line)) add(at, "an alias used as a key is refused in workflow files");
       continue;
     }
     const [, , ref = "", comment] = match;
-    if (ref.startsWith("./")) continue;
-    if (ref.startsWith("docker://")) {
-      if (!/@sha256:[0-9a-f]{64}$/.test(ref)) {
-        findings.push({
-          file,
-          line: index + 1,
-          rule: "action-unpinned",
-          message: "a docker:// action must be pinned by digest",
-        });
+    if (ref.startsWith("./")) {
+      if (!ref.startsWith("./.github/")) {
+        add(
+          at,
+          "a local action lives under .github/ (a control path), so its own uses: are checked",
+        );
       }
       continue;
     }
+    if (ref.startsWith("docker://")) {
+      if (!/@sha256:[0-9a-f]{64}$/.test(ref))
+        add(at, "a docker:// action must be pinned by digest");
+      continue;
+    }
     if (!/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(ref)) {
-      findings.push({
-        file,
-        line: index + 1,
-        rule: "action-unpinned",
-        message: "uses: must pin a full 40-character commit SHA",
-      });
+      add(at, "uses: must pin a full 40-character commit SHA");
     } else if (comment === undefined || !/^#\s*v?\d/.test(comment)) {
-      findings.push({
-        file,
-        line: index + 1,
-        rule: "action-unpinned",
-        message: "a pinned uses: needs its version as a comment (# vX.Y.Z)",
-      });
+      add(at, "a pinned uses: needs its version as a comment (# vX.Y.Z)");
     }
   }
   return findings;
 }
+
+// --- The repository ---------------------------------------------------------------------------
 
 /**
  * Runs every supply-chain rule over the repository at `root`.
@@ -596,7 +1330,8 @@ export function checkUses(file, text) {
 export function checkSupplyChain(root) {
   /** @type {Finding[]} */
   const findings = [];
-  const files = listFiles(root);
+  const entries = trackedEntries(root);
+  const files = entries.map(([path]) => path);
 
   /** @type {Map<string, Item>} */
   let catalog = new Map();
@@ -612,9 +1347,22 @@ export function checkSupplyChain(root) {
     catalog = result.catalog;
   }
 
-  for (const file of files) {
+  for (const [file, mode] of entries) {
     const base = file.split("/").pop() ?? "";
-    if (/^\.?pnpmfile\.(c|m)?js$/.test(base) || /^\.?pnpmfile\.(c|m)?ts$/.test(base)) {
+    if (mode === "120000") {
+      findings.push({
+        file,
+        rule: "symlink",
+        message: "a symbolic link can make pnpm read a manifest this check does not; refused",
+      });
+    } else if (mode === "160000") {
+      findings.push({
+        file,
+        rule: "submodule",
+        message: "a submodule brings in files and manifests this check does not read; refused",
+      });
+    }
+    if (/^\.?pnpmfile\.[cm]?[jt]s$/.test(base)) {
       findings.push({
         file,
         rule: "pnpmfile",
@@ -628,6 +1376,13 @@ export function checkSupplyChain(root) {
         message: "registry and install settings live only in pnpm-workspace.yaml; refused",
       });
     }
+    if (OTHER_MANIFESTS.has(base)) {
+      findings.push({
+        file,
+        rule: "manifest-format",
+        message: "pnpm reads this file as a package manifest; manifests are package.json only",
+      });
+    }
   }
 
   // The root manifest and every workspace package's.
@@ -637,7 +1392,7 @@ export function checkSupplyChain(root) {
     /** @type {unknown} */
     let manifest;
     try {
-      manifest = readJson(join(root, file));
+      manifest = JSON.parse(readFileSync(join(root, file), "utf8"));
     } catch {
       findings.push({ file, rule: "manifest-shape", message: "not valid JSON" });
       continue;
@@ -653,10 +1408,14 @@ export function checkSupplyChain(root) {
       message: "the lockfile must be committed",
     });
   } else {
-    findings.push(...checkLockfile(readFileSync(join(root, LOCKFILE), "utf8")));
+    findings.push(...checkLockfile(readFileSync(join(root, LOCKFILE), "utf8"), catalog));
   }
 
-  for (const file of files.filter((f) => f.startsWith(".github/") && /\.ya?ml$/.test(f))) {
+  const actionFiles = files.filter(
+    (f) => (f.startsWith(".github/") && /\.ya?ml$/.test(f)) || /(?:^|\/)action\.ya?ml$/.test(f),
+  );
+  for (const file of actionFiles) {
+    if (lstatSync(join(root, file)).isSymbolicLink()) continue; // refused above
     findings.push(...checkUses(file, readFileSync(join(root, file), "utf8")));
   }
   return findings;
@@ -669,6 +1428,6 @@ if (import.meta.main) {
     console.error(`supply-chain:check: no such directory: ${root}`);
     process.exitCode = 2;
   } else {
-    process.exitCode = report("supply-chain:check", checkSupplyChain(root));
+    process.exitCode = report(checkSupplyChain(root));
   }
 }
