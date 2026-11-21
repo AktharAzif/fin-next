@@ -1,0 +1,25 @@
+{
+  "name": "@fin/edge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:server",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fin/core": "workspace:*",
+    "@fin/server": "workspace:*",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@fin/web-host": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}
