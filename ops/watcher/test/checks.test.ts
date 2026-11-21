@@ -590,6 +590,54 @@ describe("email", () => {
     }
   });
 
+  it("fails on any second TXT record beside a valid one, one that receivers may read as DMARC above all", async () => {
+    // Receivers differ on what they read as a DMARC record (some trim white space or a byte-order
+    // mark, some ignore case, some read past the quoted strings), and one that reads two applies
+    // no policy at all (RFC 7489 §6.6.3). The name is fin-next's own, so any second record fails.
+    const nbsp = " ";
+    const bom = "﻿";
+    for (const content of [
+      '" v=DMARC1; p=none"',
+      '"\tv=DMARC1; p=none"',
+      `"${bom}v=DMARC1; p=none"`,
+      `"${nbsp}v=DMARC1; p=none"`,
+      `"v=DMARC1${nbsp}; p=none"`,
+      '"v=DMARC1\n; p=none"',
+      '"v=dmarc1; p=none"',
+      '"V = dmarc1"',
+      '"\\032v=DMARC1; p=none"',
+      '"v=DMARC1; p=none" x',
+      `${bom}v=DMARC1; p=none`,
+      " v=DMARC1; p=none",
+      '"v=spf1 -all"',
+      '"a verification token"',
+    ]) {
+      const world = healthyWorld();
+      world.dns.push({ ...dmarc(world, "auth"), id: "second", content });
+      expect(details(await run(email, world)), JSON.stringify(content)).toEqual([
+        "email/_dmarc.auth/dmarc_duplicate",
+      ]);
+    }
+  });
+
+  it("still judges the valid record beside a second one, so a doubled name never hides a weaker policy", async () => {
+    const world = healthyWorld();
+    dmarc(world, "auth").content = '"v=DMARC1; p=none"';
+    world.dns.push({ ...dmarc(world, "auth"), id: "second", content: '"v=spf1 -all"' });
+    expect(details(await run(email, world))).toEqual([
+      "email/_dmarc.auth/dmarc_duplicate",
+      "email/_dmarc.auth/dmarc_weak",
+    ]);
+    // Two records neither of which is valid: doubled, and no valid record to judge.
+    const twice = healthyWorld();
+    dmarc(twice, "auth").content = '" v=DMARC1; p=reject"';
+    twice.dns.push({ ...dmarc(twice, "auth"), id: "second", content: '"v=spf1 -all"' });
+    expect(details(await run(email, twice))).toEqual([
+      "email/_dmarc.auth/dmarc_duplicate",
+      "email/_dmarc.auth/dmarc_invalid",
+    ]);
+  });
+
   it("accepts a record split into quoted strings, and tags in any case", async () => {
     const world = healthyWorld();
     dmarc(world, "auth").content = '"v=DMARC1; " "P=Reject; rua=mailto:dmarc@example.com"';

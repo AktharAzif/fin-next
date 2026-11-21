@@ -84,7 +84,9 @@ export const rules: Check = {
     // Any other zone rule set: the old product's are its own, unless one holds a fin_next_ rule
     // (written where no registered run hashes it) or names a fin-next host.
     const checked = new Set(phases);
-    for (const ruleset of records(await ctx.cf.list(`/zones/${zoneId}/rulesets`))) {
+    // The rule sets list pages by cursor alone (Cloudflare's API reference).
+    const all = await ctx.cf.list(`/zones/${zoneId}/rulesets`, {}, "cursor");
+    for (const ruleset of records(all)) {
       if (ruleset.kind !== "zone" || typeof ruleset.phase !== "string") continue;
       if (checked.has(ruleset.phase) || typeof ruleset.id !== "string") continue;
       const add = (detail: string) =>

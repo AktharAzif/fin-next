@@ -19,6 +19,12 @@
 //     the list is read on until a page adds nothing new, and a page that repeats is accepted only
 //     once a smaller per_page, asking for fewer items than it holds, still gets all of them back,
 //     which shows the list ignores the page size and answered whole.
+// A list whose documentation pages it by cursor alone is read that way, declared by its caller
+// (`list(path, query, "cursor")`): no page number is sent, and a page without a next cursor is the
+// end, once every total it gives is reached. The rule sets list is one (Cloudflare's API reference:
+// `cursor` and `per_page` up to 50, `result_info.cursors.after` only while more remain); read by
+// the rules above, a list of it that fits on one page would answer a page number with page 1
+// again and honour a smaller page size, which proves nothing, so the read would always fail.
 
 export const API_BASE = "https://api.cloudflare.com/client/v4";
 const TIMEOUT_MS = 15_000;
@@ -28,6 +34,12 @@ const PER_PAGE = 50;
 const PROBE_PER_PAGE = 10;
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * How a list pages: `cursor` when its documentation pages it by cursor alone (no page number),
+ * `auto` (the default) to learn it from what the list answers.
+ */
+export type ListPaging = "auto" | "cursor";
 
 export class CloudflareError extends Error {
   override readonly name = "CloudflareError";
@@ -142,29 +154,40 @@ export class CloudflareReader {
   }
 
   /** Every item of a list, across pages. Fails when the end of the list cannot be proven. */
-  list(path: string, query: Readonly<Record<string, string>> = {}): Promise<unknown[]> {
-    const key = `list ${path} ${JSON.stringify(query)}`;
+  list(
+    path: string,
+    query: Readonly<Record<string, string>> = {},
+    paging: ListPaging = "auto",
+  ): Promise<unknown[]> {
+    const key = `list ${paging} ${path} ${JSON.stringify(query)}`;
     let pending = this.#memo.get(key) as Promise<unknown[]> | undefined;
     if (pending === undefined) {
-      pending = this.#readAll(path, query);
+      pending = this.#readAll(path, query, paging);
       this.#memo.set(key, pending);
     }
     return pending;
   }
 
-  async #readAll(path: string, query: Readonly<Record<string, string>>): Promise<unknown[]> {
+  async #readAll(
+    path: string,
+    query: Readonly<Record<string, string>>,
+    paging: ListPaging,
+  ): Promise<unknown[]> {
     const out: unknown[] = [];
     const seen = new Set<string>();
     const cursors = new Set<string>();
     const ended = () => new CloudflareError(path, 0, []);
     let cursor: string | undefined;
     for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const perPage = { per_page: String(PER_PAGE) };
       const { items, info } = await this.#page(
         path,
         query,
-        cursor === undefined
-          ? { per_page: String(PER_PAGE), page: String(page) }
-          : { per_page: String(PER_PAGE), cursor },
+        cursor !== undefined
+          ? { ...perPage, cursor }
+          : paging === "cursor"
+            ? perPage
+            : { ...perPage, page: String(page) },
       );
       let fresh = 0;
       for (const item of items) {
@@ -186,8 +209,9 @@ export class CloudflareReader {
         cursor = next;
         continue;
       }
-      // A cursor-paged list ends at an empty or missing cursor, once its totals are reached.
-      if (next === "" || cursor !== undefined) {
+      // A cursor-paged list (declared so, or one that gave a cursor) ends at an empty or missing
+      // cursor, once its totals are reached.
+      if (paging === "cursor" || next === "" || cursor !== undefined) {
         if (totalsReached) return out;
         throw ended();
       }

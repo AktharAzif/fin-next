@@ -37,8 +37,10 @@ export function txtText(content: unknown): string {
 }
 
 /**
- * Whether a TXT record's text is a DMARC record: it starts with `v`, optional WSP, `=`, optional
- * WSP and `DMARC1`, exactly (RFC 7489 §6.4); a record that does not is discarded by receivers.
+ * Whether a TXT record's text is a valid start of a DMARC record: `v`, optional WSP, `=`, optional
+ * WSP and `DMARC1`, exactly (RFC 7489 §6.4). It decides only which record to judge: receivers that
+ * read more loosely (trimming other white space, ignoring case) may still read a record that fails
+ * it as DMARC, so it never decides how many records a name holds.
  */
 export function isDmarc(text: string): boolean {
   return /^[vV][ \t]*=[ \t]*DMARC1[ \t]*(?:;|$)/.test(text);
@@ -126,13 +128,21 @@ export const email: Check = {
       )
         .filter((r) => r.name === dmarc && r.type === "TXT")
         .map((r) => txtText(r.content));
-      // Receivers ignore DMARC when a name holds more than one record (RFC 7489 §6.6.3).
-      const dmarcRecords = texts.filter(isDmarc);
-      if (texts.length === 0) add("dmarc_missing");
-      else if (dmarcRecords.length === 0) add("dmarc_invalid");
-      else if (dmarcRecords.length > 1) add("dmarc_duplicate");
-      else {
-        const tags = dmarcTags(dmarcRecords[0] ?? "");
+      if (texts.length === 0) {
+        add("dmarc_missing");
+        continue;
+      }
+      // A receiver that reads two DMARC records at a name applies no policy at all (RFC 7489
+      // §6.6.3), and receivers differ on which records they read as DMARC (some trim white space
+      // or a byte-order mark, some ignore case), so no test here can say which second record is
+      // harmless. The name is fin-next's own: any second TXT record at it fails.
+      if (texts.length > 1) add("dmarc_duplicate");
+      // The one valid record is still judged, so a standing second record never hides a weaker
+      // policy; two valid ones leave nothing to judge.
+      const valid = texts.filter(isDmarc);
+      if (valid.length === 0) add("dmarc_invalid");
+      else if (valid.length === 1) {
+        const tags = dmarcTags(valid[0] ?? "");
         if (tags === undefined) add("dmarc_invalid");
         else if (dmarcWeakness(tags, ctx.settings.email.dmarcPolicy) !== undefined) {
           add("dmarc_weak");

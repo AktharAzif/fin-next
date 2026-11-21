@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeContext } from "../src/checks/common.ts";
+import { makeContext, records } from "../src/checks/common.ts";
 import { rules } from "../src/checks/zone.ts";
 import { CloudflareReader } from "../src/cloudflare.ts";
 import {
@@ -7,11 +7,10 @@ import {
   healthyWorld,
   type Paging,
   type Recorded,
+  RULESETS_PATH as RULESETS,
   settingsFor,
-  ZONE_ID,
+  type World,
 } from "./world.ts";
-
-const RULESETS = `/zones/${ZONE_ID}/rulesets`;
 
 /** A world whose zone holds 57 rule sets, the last of them holding a fin_next_ rule. */
 function crowded(paging: Paging) {
@@ -63,16 +62,33 @@ function server(list: readonly unknown[], options: ServerOptions = {}) {
   return { reader };
 }
 
-async function lateRuleFound(paging: Paging) {
-  const world = crowded(paging);
+/** The query of every request made to the rule sets list. */
+const listRequests = (recorded: readonly Recorded[]) =>
+  recorded
+    .map((r) => new URL(r.url))
+    .filter((url) => url.pathname.endsWith("/rulesets"))
+    .map((url) => url.searchParams);
+
+/** The rules check on a world, with every request it made to the rule sets list. */
+async function rulesOn(world: World) {
   const recorded: Recorded[] = [];
   const ctx = makeContext(
     await settingsFor(healthyWorld()),
     new CloudflareReader("t", cloudflareFetch(world, recorded)),
   );
   const failures = await rules.run(ctx);
-  const pages = recorded.filter((r) => new URL(r.url).pathname.endsWith("/rulesets")).length;
-  return { failures: failures.map((f) => `${f.target}/${f.detail}`), pages };
+  return {
+    failures: failures.map((f) => `${f.target}/${f.detail}`),
+    requests: listRequests(recorded),
+  };
+}
+
+/** The crowded list read with no paging declared, and the number of pages that took. */
+async function readUndeclared(paging: Paging) {
+  const recorded: Recorded[] = [];
+  const reader = new CloudflareReader("t", cloudflareFetch(crowded(paging), recorded));
+  const ids = records(await reader.list(RULESETS)).map((r) => r.id);
+  return { ids, pages: listRequests(recorded).length };
 }
 
 describe("the reader's lists", () => {
@@ -82,14 +98,75 @@ describe("the reader's lists", () => {
 
   // Without totals the reader cannot take a short page as the end (a list may answer fewer items
   // than asked for), so it reads on to the empty page that proves it.
-  const expectedPages = { total_pages: 2, total_count: 2, cursor: 2, none: 3 } as const;
-  for (const paging of ["total_pages", "total_count", "none", "cursor"] as const) {
+  const expectedPages = {
+    total_pages: 2,
+    total_count: 2,
+    cursor: 2,
+    cursors: 2,
+    none: 3,
+  } as const;
+  for (const paging of ["total_pages", "total_count", "none", "cursor", "cursors"] as const) {
     it(`reads every page when the list pages by ${paging}`, async () => {
-      const { failures, pages } = await lateRuleFound(paging);
-      expect(failures).toEqual(["http_request_origin/ruleset_unexpected"]);
+      const { ids, pages } = await readUndeclared(paging);
+      expect(ids.length).toBe(57);
+      expect(ids).toContain("rs-late");
       expect(pages).toBe(expectedPages[paging]);
     });
   }
+
+  it("has the rules check read the rule sets list by its cursor to the last page", async () => {
+    for (const paging of ["cursors", "cursor"] as const) {
+      const { failures, requests } = await rulesOn(crowded(paging));
+      expect(failures, paging).toEqual(["http_request_origin/ruleset_unexpected"]);
+      expect(requests.length, paging).toBe(2);
+    }
+  });
+
+  it("reads a rule sets list paged as Cloudflare documents it whole, one page long or more", async () => {
+    // Cloudflare's API reference: `cursor` and `per_page` (1 to 50), no page number, and
+    // `result_info.cursors.after` only while more remain.
+    for (const count of [1, 2, 8, 10, 12, 49, 50, 51, 57, 120]) {
+      const world = healthyWorld();
+      world.rulesets = Array.from({ length: count }, (_, i) => ({
+        id: `rs-${i}`,
+        kind: "managed",
+        phase: `managed_${i}`,
+      }));
+      const recorded: Recorded[] = [];
+      const reader = new CloudflareReader("t", cloudflareFetch(world, recorded));
+      const ids = records(await reader.list(RULESETS, {}, "cursor")).map((r) => r.id);
+      expect(ids, String(count)).toEqual(world.rulesets.map((r) => r.id));
+      const requests = listRequests(recorded);
+      expect(requests.length, String(count)).toBe(Math.max(1, Math.ceil(count / 50)));
+      for (const params of requests) {
+        expect(params.has("page"), String(count)).toBe(false);
+        expect(params.get("per_page"), String(count)).toBe("50");
+      }
+    }
+    // The healthy world's ten rule sets, through the rules check itself.
+    const { failures, requests } = await rulesOn(healthyWorld());
+    expect(failures).toEqual([]);
+    expect(requests.map((q) => q.has("page"))).toEqual([false]);
+  });
+
+  it("fails a cursor-paged read that ends short of its totals or whose cursor comes back", async () => {
+    const answers: Record<string, unknown>[][] = [
+      [{ total_pages: 2 }],
+      [{ total_count: 120 }],
+      [{ cursors: { after: "x" } }, { cursors: { after: "x" } }],
+    ];
+    for (const infos of answers) {
+      let call = 0;
+      const reader = new CloudflareReader("t", async () => {
+        const info = infos[Math.min(call, infos.length - 1)];
+        call += 1;
+        return envelope(items(3, `p${call}`), info);
+      });
+      await expect(reader.list(RULESETS, {}, "cursor"), JSON.stringify(infos)).rejects.toThrow(
+        /answered 0/,
+      );
+    }
+  });
 
   it("stops after a list that ignores paging, without counting its items twice", async () => {
     const world = crowded("ignore");
@@ -249,7 +326,7 @@ describe("the reader's lists", () => {
       );
     }
     // The rules check then fails instead of reading the rule set as one with no rules.
-    const world = crowded("total_pages");
+    const world = crowded("cursors");
     const serve = cloudflareFetch(world);
     const ctx = makeContext(
       await settingsFor(healthyWorld()),

@@ -51,8 +51,16 @@ export const PUBLIC_SETTINGS = JSON.parse(
 
 type Json = Record<string, unknown>;
 
-/** How a list endpoint pages its results (Cloudflare's lists differ). */
-export type Paging = "total_pages" | "total_count" | "none" | "cursor" | "ignore";
+/**
+ * How a list endpoint pages its results (Cloudflare's lists differ). `cursors` is the rule sets
+ * list as Cloudflare's API reference documents it: `cursor` and `per_page` (1 to 50), no page
+ * number, and `result_info.cursors.after` only while more remain, so a list that fits on one page
+ * answers it whole with no cursor and answers a page number with page 1 again.
+ */
+export type Paging = "total_pages" | "total_count" | "none" | "cursor" | "cursors" | "ignore";
+
+/** The rule sets list, which pages by `cursors` (Cloudflare's API reference). */
+export const RULESETS_PATH = `/zones/${ZONE_ID}/rulesets`;
 
 export interface World {
   tunnels: Json[];
@@ -322,7 +330,7 @@ export function healthyWorld(): World {
       { name: `notify.${ZONE}`, preview_enabled: false, drop_suppressed_recipients: false },
     ],
     failures: {},
-    paging: {},
+    paging: { [RULESETS_PATH]: "cursors" },
     otherZones: [],
   };
 }
@@ -375,6 +383,15 @@ function envelope(result: unknown, status = 200, resultInfo?: unknown): Response
 
 /** A list answer, paged the way `paging` says (no paging parameter: the whole list). */
 function listEnvelope(items: readonly unknown[], q: URLSearchParams, paging: Paging): Response {
+  if (paging === "cursors") {
+    const perPage = Number(q.get("per_page") ?? "20");
+    if (!Number.isInteger(perPage) || perPage < 1 || perPage > 50) return envelope(null, 400);
+    const offset = q.has("cursor") ? Number((q.get("cursor") ?? "").slice(1)) : 0;
+    const slice = items.slice(offset, offset + perPage);
+    return offset + perPage < items.length
+      ? envelope(slice, 200, { cursors: { after: `a${offset + perPage}` } })
+      : envelope(slice);
+  }
   const paged = q.has("page") || q.has("per_page") || q.has("cursor");
   if (!paged) return envelope(items, 200, { page: 1, total_pages: 1 });
   const perPage = Number(q.get("per_page") ?? "20");
