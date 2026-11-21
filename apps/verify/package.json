@@ -6,8 +6,8 @@
   "description": "The hosted verify pages a developer's customers open from a link, and the selfie host. Its single-page app (src/client) and its API half (src/server)",
   "scripts": {
     "dev": "vite",
-    "build": "vite build --mode production",
-    "build:test": "vite build --mode test",
+    "build": "vite build --mode production && vite build --mode production --config vite.selfie.config.ts",
+    "build:test": "vite build --mode test && vite build --mode test --config vite.selfie.config.ts",
     "routes": "node scripts/generate-routes.mjs",
     "typecheck": "pnpm run routes && tsc -p tsconfig.json",
     "lint": "biome check .",

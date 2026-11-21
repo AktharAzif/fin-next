@@ -22,7 +22,8 @@ const APP_PERMISSIONS =
 const HOSTED_PERMISSIONS =
   "accelerometer=(), autoplay=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), publickey-credentials-get=(), publickey-credentials-create=()";
 
-export type Profile = "app" | "hosted";
+/** `selfie` is `hosted` until SP-11 lists Sumsub's hosts (spec 01 §7.4). */
+export type Profile = "app" | "hosted" | "selfie";
 
 /** The headers of spec 01 §7.4's profile for every path (`/*`). */
 export function profileHeaders(profile: Profile): Record<string, string> {
@@ -54,7 +55,7 @@ const TYPES: Readonly<Record<string, string>> = {
 export const RELEASE = "e2e-release";
 
 export interface StaticOptions {
-  /** The app's static output: apps/<app>/dist/static (verify: dist/static/verify). */
+  /** The app's static output: apps/<app>/dist/static (verify: dist/static/{verify,selfie}). */
   dir: string;
   profile: Profile;
   origin: string;
