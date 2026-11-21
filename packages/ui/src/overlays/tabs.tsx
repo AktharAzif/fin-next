@@ -29,12 +29,7 @@
 // Every part takes only the props listed on its type, and hands the SDK or the markup nothing
 // else. Each part's className is merged through cn: a class of the same utility family as one of
 // the part's defaults replaces that default.
-import {
-  Tabs as SdkTabs,
-  TabsList as SdkTabsList,
-  TabsPanel as SdkTabsPanel,
-  TabsTab as SdkTabsTab,
-} from "@ui-sdk/react/tabs";
+import { Tabs as SdkTabs, TabsList as SdkTabsList, TabsPanel, TabsTab } from "@ui-sdk/react/tabs";
 import {
   type ComponentProps,
   createContext,
@@ -189,7 +184,7 @@ export type TabProps = {
  */
 export function Tab({ value, disabled = false, count, className, children }: TabProps) {
   return (
-    <SdkTabsTab
+    <TabsTab
       value={value}
       disabled={disabled}
       className={(state) =>
@@ -203,7 +198,7 @@ export function Tab({ value, disabled = false, count, className, children }: Tab
     >
       {children}
       <Count value={count} />
-    </SdkTabsTab>
+    </TabsTab>
   );
 }
 
@@ -223,7 +218,7 @@ export type TabPanelProps = {
 export function TabPanel({ value, keepMounted = false, className, children }: TabPanelProps) {
   const layout = useContext(LayoutContext);
   return (
-    <SdkTabsPanel
+    <TabsPanel
       value={value}
       keepMounted={keepMounted}
       className={cn(
@@ -233,7 +228,7 @@ export function TabPanel({ value, keepMounted = false, className, children }: Ta
       )}
     >
       {content(children)}
-    </SdkTabsPanel>
+    </TabsPanel>
   );
 }
 
@@ -259,17 +254,11 @@ export type TabLinksProps = {
 };
 
 /** Tabs that are links: the same row, as a named navigation landmark holding a list. */
-export function TabLinks({
-  label,
-  variant = "page",
-  linkAs = "a",
-  className,
-  children,
-}: TabLinksProps) {
+export function TabLinks(props: TabLinksProps) {
   return (
-    <nav aria-label={label} data-slot="tab-links" className={cn(BAR, className)}>
-      <ul className={cn("m-0 list-none", ROW[variant])}>
-        <LinkContext.Provider value={linkAs}>{children}</LinkContext.Provider>
+    <nav aria-label={props.label} data-slot="tab-links" className={cn(BAR, props.className)}>
+      <ul className={cn("m-0 list-none", ROW[props.variant ?? "page"])}>
+        <LinkContext.Provider value={props.linkAs ?? "a"}>{props.children}</LinkContext.Provider>
       </ul>
     </nav>
   );
@@ -284,7 +273,7 @@ export type TabLinkProps = {
 };
 
 /** One link in TabLinks, as one item of its list. */
-export function TabLink({ href, current = false, className, children }: TabLinkProps) {
+export function TabLink({ href, current, className, children }: TabLinkProps) {
   const Link = useContext(LinkContext);
   const classes = cn(ITEM, MARK, "hover:text-text-primary", current && TAB_CHOSEN, className);
   const target: TabLinkTargetProps = current
