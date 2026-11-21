@@ -7,15 +7,17 @@
 -- refuses a reset when it says production, and any start whose task names another environment), a
 -- trigger refuses UPDATE, DELETE and TRUNCATE, and the guard in 020 refuses its DROP or ALTER by anyone
 -- but the superuser. Like the record, an existing table is adopted only if it is the bootstrap's own
--- (020's ops_guard.assert_bootstrap_table): one fin_owner made could hide the row behind a policy or a
--- child table. The bootstrap and audit.start_epoch() read the row with ONLY and require exactly one.
+-- (020's ops_guard.assert_bootstrap_table, checked after the create, on the table adopted): one
+-- fin_owner made could hide the row behind a policy or a child table, or run its trigger with the
+-- superuser's rights when the bootstrap writes the row. The bootstrap and audit.start_epoch() read the
+-- row with ONLY and require exactly one.
 
-SELECT ops_guard.assert_bootstrap_table('ops.environment');
 CREATE TABLE IF NOT EXISTS ops.environment (
   only_row    boolean PRIMARY KEY DEFAULT true CHECK (only_row),
   name        text NOT NULL CHECK (name IN ('development', 'ci', 'staging', 'production')),
   recorded_at timestamptz NOT NULL
 );
+SELECT ops_guard.assert_bootstrap_table('ops.environment');
 DO $owner$
 BEGIN
   EXECUTE format('ALTER TABLE ops.environment OWNER TO %I', current_user);

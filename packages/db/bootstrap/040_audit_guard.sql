@@ -7,10 +7,12 @@
 -- with DDL and then change rows, or change what the rows say without touching them: disable,
 -- re-target or drop an append-only or guard trigger, replace the function it calls, rename a column
 -- and add another under its name (or swap two), put a generated column, a rule, a policy or a child
--- table in front of the rows, drop the unique index that keeps one row per chain position, rewrite a
--- column with ALTER ... TYPE ... USING, drop a column or the table, or rename a guarded table's key
--- column so its guard checks a column of fin_owner's choosing. These event triggers refuse each of
--- those for anyone but a superuser.
+-- table in front of the rows, add a column whose earlier rows read a value fin_owner chose (through
+-- its default or its type's) or whose type fin_owner could change later, drop the unique index that
+-- keeps one row per chain position, rewrite a column with ALTER ... TYPE ... USING, drop a column or
+-- the table, or rename, drop, re-add or rewrite a guarded table's key column so its guard checks
+-- values of fin_owner's choosing. These event triggers refuse each of those for anyone but a
+-- superuser.
 --
 -- The record (ops_guard.protected_*), kept by name, never by OID or column number, so it still holds
 -- after a logical restore:
@@ -19,9 +21,10 @@
 --   - every trigger that calls one, with its definition and enabled state, when it is created (by a
 --     migration, as fin_owner);
 --   - the shape of every audit table (a table carrying an append-only trigger), when its first one is
---     created: each column's type, collation, not-null, default or generation expression and
---     identity; its constraints and unique indexes; whether it has row-level security, and its
---     policies, rules, inheritance parents and children (partitions included), and other triggers.
+--     created: each column's type (and whether a superuser owns it), collation, not-null, default or
+--     generation expression and identity; its constraints and unique indexes; whether it has
+--     row-level security, and its policies, rules, inheritance parents and children (partitions
+--     included), and other triggers.
 -- After any DDL command by anyone else:
 --   - every recorded function and trigger still exists exactly as recorded, enabled as recorded (so a
 --     drop, a rename, a disable, a replacement or a re-targeting is refused, and the table it sits on
@@ -29,10 +32,18 @@
 --   - every audit table still has every recorded column, constraint and live unique index exactly as
 --     recorded, and nothing else about it has changed. A rename always leaves a recorded name missing
 --     when its command ends, so no rename, swap or rename-and-add passes. The table may gain a plain
---     column (no default, not generated, not an identity), a constraint or a unique index, which then
---     joins the record, and any index that is not unique;
+--     column, a constraint or a unique index, which then joins the record, and any index that is not
+--     unique. A plain column has no default, generation expression or identity, reads null in every
+--     row written before it (no value stored for them, which a default of its type would put there)
+--     and is of a type a superuser owns (fin_owner could change what every row reads in a column of
+--     its own type: an enum's labels, a domain's default, a composite's fields);
 --   - the column each guard names as its key still exists and is not generated;
---   - an audit table is never rewritten and never loses a column.
+--   - an audit table is never rewritten and never loses a column;
+--   - a guard's key column is never dropped (even to be added again under its name in the same
+--     command), and a guarded table is never rewritten column by column (ALTER ... TYPE ... USING):
+--     the rewrite does not say which column it rewrites, so the key could be one of them. A rewrite
+--     that keeps every value (for a new column's default, the table's persistence or its access
+--     method) is the migrations' to make.
 -- A refusal rolls the command back, except the steps a CONCURRENTLY command has already committed: a
 -- refused DROP INDEX CONCURRENTLY leaves its index dead. So the uniqueness an audit table relies on is
 -- held by constraints (the migrations add their unique indexes as constraints), whose indexes DROP
@@ -42,10 +53,10 @@
 -- major-version upgrade, which may print definitions differently, the superuser runs
 -- `SELECT ops_guard.record_audit_protections()`.
 --
--- A guarded business table (identity, keys, money) stays fin_owner's to migrate: only its guards and
--- their key columns are held here. Its rows are changed by the migrations fin_owner runs, which are
--- reviewed, logged statement by statement and recorded by the privileged-login record (ARCHITECTURE
--- §6.3); the guard there is against a leaked service login.
+-- A guarded business table (identity, keys, money) stays fin_owner's to migrate: only its guards,
+-- their key columns and its column-by-column rewrites are held here. Its rows are changed by the
+-- migrations fin_owner runs, which are reviewed, logged statement by statement and recorded by the
+-- privileged-login record (ARCHITECTURE §6.3); the guard there is against a leaked service login.
 
 CREATE TABLE IF NOT EXISTS ops_guard.protected_function (
   identity   text PRIMARY KEY,   -- regprocedure text: audit.append_only()
@@ -81,6 +92,12 @@ AS $fn$
     'columns', coalesce((
       SELECT pg_catalog.jsonb_object_agg(a.attname, pg_catalog.jsonb_build_object(
         'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+        -- A type only a superuser can change (the built-ins). In a column of its own type fin_owner
+        -- could change what every row reads without touching one: rename an enum's label, change a
+        -- domain's default or a composite's fields.
+        'superuserType', EXISTS (
+          SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_roles r ON r.oid = t.typowner
+          WHERE t.oid = a.atttypid AND r.rolsuper),
         'collation', (
           SELECT pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname)
           FROM pg_catalog.pg_collation co
@@ -88,6 +105,11 @@ AS $fn$
           WHERE co.oid = a.attcollation),
         'notNull', a.attnotnull,
         'default', pg_catalog.pg_get_expr(d.adbin, d.adrelid),
+        -- Whether the rows written before the column was added read a value in it: the default it was
+        -- added with, its own or its type's (a domain's has no pg_attrdef row), stored once for them.
+        -- A rewrite (VACUUM FULL, a logical restore) clears it without changing what any row reads,
+        -- so it is held only for a column just added (ops_guard.compared_columns).
+        'missing', a.atthasmissing,
         'generated', a.attgenerated::text,
         'identity', a.attidentity::text))
       FROM pg_catalog.pg_attribute a
@@ -152,9 +174,20 @@ AS $fn$
 $fn$;
 REVOKE ALL ON FUNCTION ops_guard.audit_table_shape(oid) FROM PUBLIC;
 
+-- An audit table's columns as a recorded column is held to: all but 'missing', which a rewrite clears.
+CREATE OR REPLACE FUNCTION ops_guard.compared_columns(p_columns jsonb) RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+  SELECT coalesce(pg_catalog.jsonb_object_agg(c.name, c.descriptor - 'missing'), '{}'::jsonb)
+  FROM pg_catalog.jsonb_each(p_columns) AS c(name, descriptor)
+$fn$;
+REVOKE ALL ON FUNCTION ops_guard.compared_columns(jsonb) FROM PUBLIC;
+
 -- How an audit table's current shape differs from its record, or null when the change is allowed:
 -- every recorded column, constraint and unique index still there exactly as recorded, nothing else
--- changed, and every column added since a plain one.
+-- changed, and every column added since a plain one (an added column lacking a property is refused).
 CREATE OR REPLACE FUNCTION ops_guard.audit_table_change(p_recorded jsonb, p_current jsonb) RETURNS text
 LANGUAGE sql
 IMMUTABLE
@@ -165,7 +198,8 @@ AS $fn$
     WHEN (p_current - 'columns' - 'constraints' - 'uniqueIndexes')
          IS DISTINCT FROM (p_recorded - 'columns' - 'constraints' - 'uniqueIndexes')
       THEN 'its row-level security, policies, rules, inheritance or other triggers changed'
-    WHEN NOT (p_current -> 'columns') @> (p_recorded -> 'columns')
+    WHEN NOT ops_guard.compared_columns(p_current -> 'columns')
+             @> ops_guard.compared_columns(p_recorded -> 'columns')
       THEN 'a column was renamed, dropped or changed'
     WHEN NOT (p_current -> 'constraints') @> (p_recorded -> 'constraints')
       THEN 'a constraint was dropped or changed'
@@ -176,12 +210,28 @@ AS $fn$
       FROM pg_catalog.jsonb_each(p_current -> 'columns') AS added(name, descriptor)
       WHERE NOT (p_recorded -> 'columns') ? added.name
         AND (added.descriptor ->> 'default' IS NOT NULL
-             OR added.descriptor ->> 'generated' <> ''
-             OR added.descriptor ->> 'identity' <> ''))
-      THEN 'a column was added with a default, a generation expression or an identity'
+             OR coalesce((added.descriptor ->> 'missing')::boolean, true)
+             OR NOT coalesce((added.descriptor ->> 'superuserType')::boolean, false)
+             OR coalesce(added.descriptor ->> 'generated', 'absent') <> ''
+             OR coalesce(added.descriptor ->> 'identity', 'absent') <> ''))
+      THEN 'a column was added that is not plain: a default (its own or its type''s), a generation expression, an identity or a type fin_owner owns'
   END
 $fn$;
 REVOKE ALL ON FUNCTION ops_guard.audit_table_change(jsonb, jsonb) FROM PUBLIC;
+
+-- A guard trigger's key column: the first of its arguments (pg_trigger.tgargs, each ending in a zero
+-- byte).
+CREATE OR REPLACE FUNCTION ops_guard.guard_key(p_args bytea) RETURNS text
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+  SELECT pg_catalog.convert_from(
+    pg_catalog.substring(p_args, 1,
+      greatest(pg_catalog.position(p_args, pg_catalog.decode('00', 'hex')) - 1, 0)),
+    'UTF8')
+$fn$;
+REVOKE ALL ON FUNCTION ops_guard.guard_key(bytea) FROM PUBLIC;
 
 -- Makes the record what the database holds now: the two functions, every trigger calling one, and the
 -- shape of every table carrying an append-only trigger. A superuser's DDL calls it, the bootstrap
@@ -234,30 +284,57 @@ BEGIN
   );
 
   IF TG_EVENT = 'table_rewrite' THEN
-    IF NOT superuser AND EXISTS (
+    IF superuser THEN
+      RETURN;
+    END IF;
+    IF EXISTS (
       SELECT 1 FROM ops_guard.protected_table p
       WHERE pg_catalog.to_regclass(p.table_name) = pg_catalog.pg_event_trigger_table_rewrite_oid()
     ) THEN
       RAISE EXCEPTION 'an append-only audit table can be rewritten only by the superuser'
         USING ERRCODE = '42501';
     END IF;
+    -- A guarded table rewritten for any reason but its persistence (1), a new column's value (2) or
+    -- its access method (8), each of which keeps every value it holds: a column rewrite (4) does not
+    -- say which column, so the guard's key could be one, rewritten to values of fin_owner's choosing.
+    -- An unknown reason is refused as well.
+    IF (pg_catalog.pg_event_trigger_table_rewrite_reason() & ~(1 | 2 | 8)) <> 0 AND EXISTS (
+      SELECT 1 FROM pg_catalog.pg_trigger t
+      WHERE t.tgrelid = pg_catalog.pg_event_trigger_table_rewrite_oid() AND t.tgfoid = guard_fn
+    ) THEN
+      RAISE EXCEPTION 'a table with an audit guard can have a column rewritten only by the superuser'
+        USING ERRCODE = '42501';
+    END IF;
     RETURN;
   END IF;
 
   IF TG_EVENT = 'sql_drop' THEN
-    -- A dropped column of an audit table. Dropped triggers, functions, constraints and indexes, and
-    -- dropped tables with their triggers, are found missing at the command's end, below.
+    -- A dropped column of an audit table, or a guard's key column: dropped and added again under its
+    -- name in the same command, the key would hold whatever the new column's default says, and the
+    -- check at the command's end would find a column of that name. Dropped triggers, functions,
+    -- constraints and indexes, and dropped tables with their triggers, are found missing at the
+    -- command's end, below.
     IF superuser THEN
       RETURN;
     END IF;
     FOR dropped IN SELECT * FROM pg_catalog.pg_event_trigger_dropped_objects() LOOP
-      IF dropped.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dropped.objsubid > 0
-         AND EXISTS (
+      CONTINUE WHEN dropped.classid <> 'pg_catalog.pg_class'::pg_catalog.regclass
+                    OR dropped.objsubid <= 0;
+      IF EXISTS (
            SELECT 1 FROM ops_guard.protected_table p
            WHERE pg_catalog.to_regclass(p.table_name) = dropped.objid
          ) THEN
         RAISE EXCEPTION 'a column of an append-only audit table can be dropped only by the superuser'
           USING ERRCODE = '42501';
+      END IF;
+      -- The column's name is gone from pg_attribute by now; its address still has it.
+      IF EXISTS (
+           SELECT 1 FROM pg_catalog.pg_trigger t
+           WHERE t.tgrelid = dropped.objid AND t.tgfoid = guard_fn
+             AND ops_guard.guard_key(t.tgargs) = dropped.address_names[3]
+         ) THEN
+        RAISE EXCEPTION 'the key column of an audit guard on % can be renamed, dropped or replaced only by the superuser',
+          dropped.objid::pg_catalog.regclass USING ERRCODE = '42501';
       END IF;
     END LOOP;
     RETURN;
@@ -347,10 +424,7 @@ BEGIN
     AND NOT EXISTS (
       SELECT 1 FROM pg_catalog.pg_attribute a
       WHERE a.attrelid = t.tgrelid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
-        AND a.attname::text = pg_catalog.convert_from(
-          pg_catalog.substring(t.tgargs, 1,
-            greatest(pg_catalog.position(t.tgargs, pg_catalog.decode('00', 'hex')) - 1, 0)),
-          'UTF8'))
+        AND a.attname::text = ops_guard.guard_key(t.tgargs))
   LIMIT 1;
   IF unkeyed IS NOT NULL THEN
     RAISE EXCEPTION 'the key column of an audit guard on % can be renamed, dropped or replaced only by the superuser',

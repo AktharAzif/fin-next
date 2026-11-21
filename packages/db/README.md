@@ -29,14 +29,19 @@ order, in one transaction:
 - `020_privileged_login.sql`: the privileged-login record (ARCHITECTURE §6.3, P-19). A superuser's login
   is never refused; a fin_owner login whose record cannot be written (a read-only start, a lock held on
   the table past the function's one-second lock timeout) is refused, so no fin_owner login goes
-  unrecorded.
+  unrecorded. The login function runs as the superuser and writes only the bootstrap's own table,
+  checked under the insert's lock: a table of the record's name that fin_owner made while the record
+  was gone is never written (none of its triggers or rules runs with the superuser's rights), the
+  superuser's login goes ahead unrecorded and a fin_owner login is refused.
 - `030_environment.sql`: `ops.environment`, written once from `FIN_ENVIRONMENT`. `audit.start_epoch()`
   refuses a reset in production and any start whose task names another environment (FA012), reading
   the bootstrap's one row only (`ONLY`, exactly one row).
 - The bootstrap adopts an existing `ops.privileged_login` or `ops.environment` only if it is its own: a
   plain table owned by a superuser, with no inheritance, row-level security, policy, rule or trigger of
-  anyone else's. Otherwise it stops (42501, naming the table): a superuser inspects the table, drops it
-  and bootstraps again.
+  anyone else's, checked after its `CREATE TABLE IF NOT EXISTS` so the table checked is the table
+  adopted. Otherwise it stops (42501, naming the table): a superuser inspects the table through the
+  catalog (never by reading or writing it, which could run fin_owner's code with the superuser's
+  rights), drops it and bootstraps again.
 - `040_audit_guard.sql`: the guard on the audit trail's protections. Every trigger calling
   `audit.append_only()` or `audit.require_event()`, those two functions, and the shape of every audit
   table (each column's type, collation, not-null, default, generation and identity; its constraints
@@ -44,10 +49,16 @@ order, in one transaction:
   recorded when a migration creates them, by name. Afterwards anyone but the superuser is refused DDL
   that would drop, disable, rename, re-target or replace a protected trigger or function, change an
   audit table's shape (a rename, a swap, a column added under a renamed one's name, a policy, a rule, a
-  child table, a dropped unique index) or rewrite it or drop one of its columns, or rename, drop or
-  replace a guard's key column. An audit table may still gain a plain column (no default, not
-  generated, not an identity), a constraint or an index, which joins the record; any other table,
-  guarded business tables included apart from their guards' key columns, is the migrations' to change.
+  child table, a dropped unique index) or rewrite it or drop one of its columns, or rename, drop
+  (even to add it again under its name in the same command) or rewrite a guard's key column. As a
+  rewrite does not say which column it rewrites, a guarded table is never rewritten column by column
+  (`ALTER COLUMN … TYPE` with a rewrite); a rewrite that keeps every value (a new column's default,
+  persistence, access method) is allowed. An audit table may still gain a plain column (no default of
+  its own or of its type, so the rows already written read null in it; not generated, not an
+  identity; of a type a superuser owns, as fin_owner could change what rows read in a column of its
+  own enum, domain or composite type), a constraint or an index, which joins the record; any other
+  table, guarded business tables included apart from their guards, key columns and column rewrites,
+  is the migrations' to change.
   A later change to a protection is a registered superuser run, not a migration; after a major-version
   upgrade the superuser runs `SELECT ops_guard.record_audit_protections()`. A migration adds a unique
   index to an audit table as a constraint (`ADD CONSTRAINT … UNIQUE`, or `EXCLUDE` for a partial

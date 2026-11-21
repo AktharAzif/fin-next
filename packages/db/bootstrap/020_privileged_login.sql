@@ -14,6 +14,12 @@
 --     start (`default_transaction_read_only`) or a short lock timeout would make the insert fail, and a
 --     swallowed failure would let the login in unrecorded. The one exception is a record that is not
 --     installed (the table or its schema gone), which only the superuser can bring about;
+--   - the function writes only the bootstrap's own table (ops_guard.is_bootstrap_table), checked under
+--     the lock its insert takes, so the table checked is the table written. While the record is gone,
+--     fin_owner (which owns `ops`) can make a table of its name, and the function runs as the
+--     superuser: writing that table would run fin_owner's trigger or rule with the superuser's rights.
+--     Such a table is never written: a superuser's login goes ahead unrecorded, a fin_owner login is
+--     refused;
 --   - the function pins its own lock timeout, so a lock held on the table (a foreign key being created,
 --     a superuser's maintenance) delays a login by at most a second instead of blocking it;
 --   - every function here lives in ops_guard, a schema the superuser owns. fin_owner owns `ops`, and
@@ -26,8 +32,12 @@
 --     fin_owner owns `ops`, so a table of this name it created first (before the bootstrap, or after
 --     the superuser dropped the real one) could carry a child table, row-level security and a policy,
 --     a rule or a trigger of fin_owner's, all of which an ownership change would keep: a rule
---     `DO INSTEAD NOTHING` would send every login record nowhere.
+--     `DO INSTEAD NOTHING` would send every login record nowhere. The check is made after
+--     `CREATE TABLE IF NOT EXISTS`, on the table the bootstrap then adopts: checked first, a table
+--     fin_owner made between the check and the create would be adopted unchecked.
 -- The disable path (`event_triggers = off`, superuser only) is in the restore and incident runbooks.
+-- A superuser inspects a table fin_owner may have made through the catalog only, never by reading or
+-- writing it, which could run fin_owner's code with the superuser's rights.
 
 CREATE SCHEMA IF NOT EXISTS ops_guard;
 DO $owner$
@@ -37,10 +47,33 @@ END
 $owner$;
 REVOKE ALL ON SCHEMA ops_guard FROM PUBLIC;
 
--- Refuses an existing table the bootstrap did not make: it must be a plain table owned by a superuser
--- (only a superuser can make a table a superuser's), with no inheritance parent or child, no row-level
+-- Whether a relation is a table the bootstrap made: a plain table owned by a superuser (only a
+-- superuser can make a table a superuser's), with no inheritance parent or child, no row-level
 -- security, policy or rule, and no trigger but the bootstrap's own (functions in ops_guard, which only
--- the superuser can create). A missing table is fine: the bootstrap creates it next.
+-- the superuser can create). Writing such a table runs no code but the superuser's.
+CREATE OR REPLACE FUNCTION ops_guard.is_bootstrap_table(p_rel oid) RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+  SELECT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles r ON r.oid = c.relowner
+           WHERE c.oid = p_rel AND c.relkind = 'r' AND r.rolsuper
+             AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity)
+     AND NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = p_rel OR i.inhparent = p_rel)
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = p_rel)
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = p_rel)
+     AND NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc f ON f.oid = t.tgfoid
+           WHERE t.tgrelid = p_rel AND NOT t.tgisinternal
+             AND f.pronamespace IS DISTINCT FROM pg_catalog.to_regnamespace('ops_guard'))
+$fn$;
+REVOKE ALL ON FUNCTION ops_guard.is_bootstrap_table(oid) FROM PUBLIC;
+
+-- Refuses a table the bootstrap did not make, or a missing one. Run right after the bootstrap's
+-- `CREATE TABLE IF NOT EXISTS`, so the table checked is the table it adopts: fin_owner cannot drop,
+-- alter or replace a superuser's table in `ops` (the guard below), and a table of its own fails here.
 CREATE OR REPLACE FUNCTION ops_guard.assert_bootstrap_table(p_table text) RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -49,28 +82,17 @@ DECLARE
   rel oid := pg_catalog.to_regclass(p_table);
 BEGIN
   IF rel IS NULL THEN
-    RETURN;
+    RAISE EXCEPTION '% is missing after the bootstrap created it: bootstrap again', p_table
+      USING ERRCODE = '42501';
   END IF;
-  IF NOT EXISTS (
-       SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles r ON r.oid = c.relowner
-       WHERE c.oid = rel AND c.relkind = 'r' AND r.rolsuper
-         AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity)
-     OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = rel OR i.inhparent = rel)
-     OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = rel)
-     OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite w WHERE w.ev_class = rel)
-     OR EXISTS (
-       SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc f ON f.oid = t.tgfoid
-       WHERE t.tgrelid = rel AND NOT t.tgisinternal
-         AND f.pronamespace <> pg_catalog.to_regnamespace('ops_guard'))
-  THEN
-    RAISE EXCEPTION '% exists but is not the bootstrap''s own table: a superuser inspects and drops it, then bootstraps again',
+  IF NOT ops_guard.is_bootstrap_table(rel) THEN
+    RAISE EXCEPTION '% exists but is not the bootstrap''s own table: a superuser inspects it through the catalog and drops it, then bootstraps again',
       p_table USING ERRCODE = '42501';
   END IF;
 END
 $fn$;
 REVOKE ALL ON FUNCTION ops_guard.assert_bootstrap_table(text) FROM PUBLIC;
 
-SELECT ops_guard.assert_bootstrap_table('ops.privileged_login');
 CREATE TABLE IF NOT EXISTS ops.privileged_login (
   id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   login_role       text NOT NULL,
@@ -79,6 +101,7 @@ CREATE TABLE IF NOT EXISTS ops.privileged_login (
   backend_pid      integer NOT NULL,
   logged_in_at     timestamptz NOT NULL
 );
+SELECT ops_guard.assert_bootstrap_table('ops.privileged_login');
 DO $owner$
 BEGIN
   EXECUTE format('ALTER TABLE ops.privileged_login OWNER TO %I', current_user);
@@ -109,6 +132,10 @@ CREATE OR REPLACE TRIGGER privileged_login_no_truncate
 -- The guarded login trigger (P-19). Whether the login is fin_owner's is decided first, by a comparison
 -- that cannot fail, so no later error can turn a watched login into an unwatched one. Every other
 -- failure is caught: a superuser's login goes ahead (logged at LOG level), a fin_owner login is refused.
+-- It writes the record only once it holds the insert's lock on it and has found it the bootstrap's own:
+-- the table cannot be dropped or renamed while that lock is held, so the insert writes the table
+-- checked. A table of the name that is not the bootstrap's own is never written, and so none of its
+-- code runs with this function's (the superuser's) rights.
 CREATE OR REPLACE FUNCTION ops_guard.record_privileged_login() RETURNS event_trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -128,6 +155,11 @@ BEGIN
       SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = session_user AND r.rolsuper
     ) THEN
       RETURN;
+    END IF;
+    LOCK TABLE ONLY ops.privileged_login IN ROW EXCLUSIVE MODE;
+    IF NOT coalesce(
+         ops_guard.is_bootstrap_table(pg_catalog.to_regclass('ops.privileged_login')), false) THEN
+      RAISE EXCEPTION 'ops.privileged_login is not the bootstrap''s own table' USING ERRCODE = '42501';
     END IF;
     INSERT INTO ops.privileged_login (login_role, application_name, client_addr, backend_pid, logged_in_at)
     VALUES (

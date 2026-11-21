@@ -366,4 +366,52 @@ describe("the bootstrap adopts only the superuser's tables it made itself", () =
       await target.drop();
     }
   });
+
+  it("checks the table it adopts after creating it, so a missing one is refused rather than passed", async () => {
+    // Checked first and created after, a table fin_owner made in between would be adopted unchecked.
+    expect(
+      await codeOf(su, "SELECT ops_guard.assert_bootstrap_table('ops.no_such_bootstrap_table')"),
+    ).toBe("42501");
+    expect(await codeOf(su, "SELECT ops_guard.assert_bootstrap_table('ops.environment')")).toBe(
+      "ok",
+    );
+  });
+});
+
+describe("a table of the record's name that the bootstrap did not make is never written at login", () => {
+  // While the record is missing (dropped by the superuser, as the runbook may have it do), fin_owner can
+  // make a table of its name in `ops`, which it owns. The login function runs as the superuser, so
+  // writing that table would run fin_owner's trigger or rule with the superuser's rights.
+  it("runs none of its code as the superuser, lets the superuser in unrecorded and refuses fin_owner", async () => {
+    const target = await createTestDatabase({ prefix: "p0e", migrate: false });
+    const targetSu = await target.superuser();
+    try {
+      await targetSu.query("DROP TABLE ops.privileged_login");
+      const owner = await target.connect("fin_owner");
+      try {
+        for (const sql of [
+          "CREATE TABLE ops.planted_ran (who text)",
+          "CREATE TABLE ops.privileged_login (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, login_role text NOT NULL, application_name text, client_addr inet, backend_pid integer NOT NULL, logged_in_at timestamptz NOT NULL)",
+          "CREATE FUNCTION ops.planted() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO ops.planted_ran VALUES ('trigger:' || current_user); RETURN NEW; END $$",
+          "CREATE TRIGGER planted BEFORE INSERT ON ops.privileged_login FOR EACH ROW EXECUTE FUNCTION ops.planted()",
+          "CREATE RULE planted_also AS ON INSERT TO ops.privileged_login DO ALSO INSERT INTO ops.planted_ran VALUES ('rule:' || current_user)",
+        ]) {
+          expect(await codeOf(owner, sql), sql).toBe("ok");
+        }
+      } finally {
+        await owner.end();
+      }
+      expect(await loginOutcome(() => target.superuser())).toBe("ok");
+      expect(await loginOutcome(() => target.connect("fin_owner", "fin-test-planted"))).toBe(
+        "42501",
+      );
+      expect((await targetSu.query("SELECT who FROM ops.planted_ran")).rows).toEqual([]);
+      expect(
+        (await targetSu.query("SELECT count(*)::int AS n FROM ops.privileged_login")).rows,
+      ).toEqual([{ n: 0 }]);
+    } finally {
+      await targetSu.end();
+      await target.drop();
+    }
+  });
 });

@@ -439,6 +439,14 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
         "ALTER TABLE audit.event ADD COLUMN scratch_default text DEFAULT 'forged'",
         "ALTER TABLE audit.event ADD COLUMN scratch_generated text GENERATED ALWAYS AS ('forged') VIRTUAL",
         "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_identity bigint GENERATED ALWAYS AS IDENTITY",
+        // The same through the column's type: a domain's default (fin_owner's or a superuser's) is
+        // stored once for the rows already written, and a type fin_owner owns (a domain, an enum) could
+        // later change what any row reads in the column without touching it.
+        "CREATE DOMAIN audit.scratch_forged AS text DEFAULT 'forged'; ALTER TABLE audit.event ADD COLUMN scratch_domain audit.scratch_forged",
+        "CREATE DOMAIN audit.scratch_verdict AS text DEFAULT 'approved'; ALTER TABLE audit.head ADD COLUMN scratch_verdict audit.scratch_verdict",
+        "ALTER TABLE audit.event ADD COLUMN scratch_stamp information_schema.time_stamp",
+        "CREATE DOMAIN audit.scratch_plain AS text; ALTER TABLE audit.event ADD COLUMN scratch_plain audit.scratch_plain",
+        "CREATE TYPE audit.scratch_kind AS ENUM ('a', 'b'); ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_kind audit.scratch_kind",
         // A recorded column changed in place, with no rewrite.
         "ALTER TABLE audit.event ALTER COLUMN target_id SET DEFAULT 'forged'",
         "ALTER TABLE audit.event ALTER COLUMN request_id TYPE varchar",
@@ -460,9 +468,12 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
         "ALTER INDEX audit.head_current RENAME TO head_current_moved",
         "ALTER TABLE audit.event DROP CONSTRAINT event_check",
         "ALTER TABLE audit.journal_entry DROP CONSTRAINT journal_entry_kind_check",
-        // A guard's key column renamed (the guard would check whatever then holds the name) or dropped.
+        // A guard's key column renamed (the guard would check whatever then holds the name), dropped,
+        // dropped and added again under its name in one command, or rewritten in place.
         "ALTER TABLE ops.kill_switch RENAME COLUMN name TO name_orig",
         "ALTER TABLE ops.kill_switch DROP COLUMN name CASCADE",
+        "ALTER TABLE ops.kill_switch DROP COLUMN name CASCADE, ADD COLUMN name text NOT NULL DEFAULT 'const'",
+        "ALTER TABLE ops.kill_switch ALTER COLUMN name TYPE text USING lower(name)",
         // A grant or a comment passes unchecked, but only on its own.
         "COMMENT ON TABLE audit.event IS 'events'; ALTER TABLE audit.event RENAME COLUMN target_id TO t2",
       ]) {
@@ -478,9 +489,35 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
         expect(await codeOf(owner, `DROP INDEX ${index}`), index).toBe("2BP01");
         expect(await codeOf(owner, `DROP INDEX CONCURRENTLY ${index}`), index).toBe("2BP01");
       }
+      // The key column rewritten to one value for every row, its constraints dropped first in the
+      // same command (rolled back either way, so the switches stay as they are).
+      await owner.query("BEGIN");
+      try {
+        expect(
+          await codeOf(
+            owner,
+            "ALTER TABLE ops.kill_switch DROP CONSTRAINT kill_switch_pkey, DROP CONSTRAINT kill_switch_name_check, ALTER COLUMN name TYPE text USING 'const'",
+          ),
+        ).toBe("42501");
+      } finally {
+        await owner.query("ROLLBACK");
+      }
     } finally {
       await owner.end();
     }
+    // No column was added to an audit table, and the switches still carry their own names.
+    expect(
+      (
+        await su.query(
+          `SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'audit' AND a.attname LIKE 'scratch%' AND NOT a.attisdropped`,
+        )
+      ).rows,
+    ).toEqual([]);
+    expect(
+      (await su.query("SELECT name FROM ops.kill_switch WHERE name = 'live_money'")).rows,
+    ).toEqual([{ name: "live_money" }]);
     // Every row reads as it did, and the readers still see every row.
     expect(
       (
@@ -539,10 +576,16 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
         "COMMENT ON COLUMN audit.event.target_id IS 'the target'",
         "GRANT SELECT ON audit.event TO fin_owner",
         "SELECT audit.install_guard('ops.kill_switch'::regclass, ARRAY['INSERT', 'UPDATE OF state'], 'name', ARRAY['switch.set', 'switch.cleared', 'switch.tripped'])",
-        // A guarded business table stays fin_owner's to migrate, its key column apart.
+        // A guarded business table stays fin_owner's to migrate, its key column apart: a rewrite for a
+        // new column's value or for its persistence keeps every value it holds.
         "ALTER TABLE ops.kill_switch ADD COLUMN scratch_note text DEFAULT 'x'",
         "ALTER TABLE ops.kill_switch RENAME COLUMN scratch_note TO scratch_note_moved",
         "ALTER TABLE ops.kill_switch DROP COLUMN scratch_note_moved",
+        "ALTER TABLE ops.kill_switch ADD COLUMN scratch_id uuid DEFAULT gen_random_uuid()",
+        "ALTER TABLE ops.kill_switch ADD COLUMN scratch_copy text GENERATED ALWAYS AS (state) STORED",
+        "ALTER TABLE ops.kill_switch DROP COLUMN scratch_id, DROP COLUMN scratch_copy",
+        "ALTER TABLE ops.kill_switch SET UNLOGGED",
+        "ALTER TABLE ops.kill_switch SET LOGGED",
       ]) {
         expect(await codeOf(owner, sql), sql).toBe("ok");
       }
@@ -571,6 +614,9 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
     await su.query(
       "ALTER TABLE audit.anchor_conflict ADD COLUMN scratch_flag boolean NOT NULL DEFAULT false",
     );
+    // A rewrite clears the value stored once for the rows older than that column, without changing what
+    // any row reads, so a recorded column is not held to it (fin_owner's next DDL still passes).
+    await su.query("VACUUM FULL audit.anchor_conflict");
     const owner = await db.connect("fin_owner");
     try {
       expect(await codeOf(owner, "CREATE TABLE audit.ddl_scratch (id int)")).toBe("ok");
