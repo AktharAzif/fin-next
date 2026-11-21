@@ -5,6 +5,7 @@
   "description": "Fin's private API service and its worker. L-SAT-05 adds the worker's email loop and the delivery check (src/worker/email/).",
   "scripts": {
     "build": "pnpm run build:server",
+    "prebuild:server": "node ../../packages/audit/src/gen.ts",
     "build:server": "vite build --config vite.server.config.ts",
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
     "lint": "biome check .",
