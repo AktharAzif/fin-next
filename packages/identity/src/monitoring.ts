@@ -38,6 +38,17 @@ export const IDENTITY_LINES = {
       none: "the library's own warnings, level only; errors surface as auth.unhandled_error",
     },
   },
+  // Google sign-in (stretch 5, §5.8, §18.2's stretch alert). A failure on Fin's side or the
+  // provider's: the code exchange, the provider's keys, or an ID token that does not verify.
+  "auth.google_failed": { kind: "failure", alerts: ["google-sign-in-failing"] },
+  // A round trip that came back refused: the person cancelled, the address has an account not
+  // linked to Google, sign-ups are paused, or a link did not match the account.
+  "auth.google_refused": {
+    kind: "security",
+    alerts: {
+      none: "expected refusals, each answered on the page; panelled by reason (§18.3), and google-sign-in-failing watches the failures",
+    },
+  },
   "step_up.refused": { kind: "security", alerts: ["step-up-failing"] },
   "step_up.locked": { kind: "security", alerts: ["step-up-locked"] },
   "limits.refused": {
