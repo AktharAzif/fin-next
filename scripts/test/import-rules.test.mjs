@@ -5,7 +5,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { checkImports, checkSource, codeMask, findImports } from "../import-rules.mjs";
+import {
+  checkImports,
+  checkManifest,
+  checkSource,
+  codeMask,
+  findImports,
+} from "../import-rules.mjs";
 import { cleanUp, makeRepo, REPO_ROOT, rules, runScript } from "./helpers.mjs";
 
 after(cleanUp);
@@ -44,6 +50,138 @@ describe("imports:check", () => {
     }
     assert.deepEqual(checkSource("packages/server/src/http.ts", imp("node:http")), []);
     assert.deepEqual(checkSource("apps/connector/src/main.ts", imp("node:net")), []);
+  });
+
+  test("node:http and node:https are allowed in the harness's HTTP bridge, and in no other file of packages/testing", () => {
+    // The steward's decision of 21 Nov names exactly one file, by its full path.
+    const BRIDGE = "packages/testing/src/http/node.ts";
+    assert.deepEqual(checkSource(BRIDGE, imp("node:http")), []);
+    assert.deepEqual(checkSource(BRIDGE, imp("node:https")), []);
+    // Only those two modules: the rest stay in packages/server and apps/connector.
+    for (const module of ["node:net", "node:dns", "node:cluster", "node:worker_threads"]) {
+      assert.deepEqual(rules(checkSource(BRIDGE, imp(module))), ["node-network"], module);
+    }
+    for (const file of [
+      "packages/testing/src/http/certificate.ts",
+      "packages/testing/src/http/node.test.ts",
+      "packages/testing/src/http/node.tsx",
+      "packages/testing/src/http/Node.ts",
+      "packages/testing/src/http/node/index.ts",
+      "packages/testing/src/static-host/host.ts",
+      "packages/testing/test/fake-api.ts",
+      "packages/testing/e2e/harness.spec.ts",
+      "packages/testing/node.ts",
+      "apps/api/packages/testing/src/http/node.ts",
+    ]) {
+      for (const module of ["node:http", "node:https"]) {
+        assert.deepEqual(rules(checkSource(file, imp(module))), ["node-network"], file);
+      }
+    }
+  });
+
+  test("only tests and test support import @fin/testing, so the harness never reaches deployable code", () => {
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text));
+    const forms = [
+      imp("@fin/testing"),
+      imp("@fin/testing/playwright"),
+      imp("@fin/testing/playwright/config"),
+      imp("@FIN/Testing"),
+      src(`${IMP} type { Clock } from "@fin/testing";`),
+      src(`${EXP} * from "@fin/testing";`),
+      src(`const t = await ${IMP}("@fin/testing");`),
+      src(`const t = ${REQ}("@fin/testing");`),
+    ];
+    // Deployable code, and test-only code inside a deployable package.
+    for (const file of [
+      "apps/api/src/main.ts",
+      "apps/console/src/server/routes.ts",
+      "packages/identity/src/sign-in.ts",
+      "packages/server/src/testing/http.ts",
+      "packages/web-host/src/testing.ts",
+      // An e2e/ or test/ directory below a package's root is not test support.
+      "apps/console/src/e2e/helper.ts",
+      "packages/identity/src/test/helper.ts",
+      "packages/identity/e2e.ts",
+      "vitest.config.ts",
+    ]) {
+      for (const text of forms) assert.deepEqual(check(file, text), ["testing-import"], file);
+    }
+    // A file of test support by a relative path reaches the same code, in any case.
+    for (const specifier of [
+      "../../../packages/testing/src/index.ts",
+      "../../../packages/Testing/src/index.ts",
+      "../../console/e2e/fixtures.ts",
+      "../test/helpers.ts",
+      "../../../e2e/fixtures/csp.ts",
+      "../../../playwright.config.ts",
+    ]) {
+      assert.deepEqual(
+        check("apps/api/src/main.ts", imp(specifier)),
+        ["testing-import"],
+        specifier,
+      );
+    }
+    // Tests and test support may.
+    for (const file of [
+      "apps/api/src/main.test.ts",
+      "packages/identity/src/sign-in.db.test.ts",
+      "apps/console/e2e/sat/sign-in.spec.ts",
+      "apps/console/e2e/fixtures/helpers.ts",
+      "e2e/fixtures/csp.ts",
+      "packages/identity/test/canon.ts",
+      "tools/fin-review/test/helpers/monorepo.ts",
+      "packages/testing/src/static-host/host.ts",
+      "packages/testing/test/fake-api.ts",
+      "playwright.config.ts",
+    ]) {
+      for (const text of forms) assert.deepEqual(check(file, text), [], file);
+    }
+    assert.deepEqual(
+      check("playwright.config.ts", imp("./packages/testing/src/playwright/config.ts")),
+      [],
+    );
+    assert.deepEqual(check("apps/console/e2e/sat/a.spec.ts", imp("../fixtures/helpers.ts")), []);
+    // Other packages, and names that only start like it, are not the harness.
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/testing-kit")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/server/testing/http")), []);
+  });
+
+  test("a manifest lists @fin/testing only under devDependencies", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      `${JSON.stringify({ name: "@fin/api", private: true, ...fields }, null, 2)}\n`;
+    for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
+      const text = manifest({ [field]: { "@fin/testing": "workspace:*" } });
+      const findings = checkManifest("apps/api/package.json", text);
+      assert.deepEqual(rules(findings), ["testing-dependency"], field);
+      assert.equal(findings[0]?.line, 5, field);
+    }
+    assert.deepEqual(
+      rules(
+        checkManifest("apps/api/package.json", manifest({ bundleDependencies: ["@fin/testing"] })),
+      ),
+      ["testing-dependency"],
+    );
+    assert.deepEqual(
+      rules(
+        checkManifest(
+          "apps/api/package.json",
+          manifest({ dependencies: { "@FIN/Testing": "workspace:*" } }),
+        ),
+      ),
+      ["testing-dependency"],
+    );
+    assert.deepEqual(
+      checkManifest(
+        "apps/api/package.json",
+        manifest({
+          dependencies: { "@fin/server": "workspace:*" },
+          devDependencies: { "@fin/testing": "workspace:*" },
+        }),
+      ),
+      [],
+    );
+    assert.deepEqual(checkManifest("apps/api/package.json", "{ not json"), []);
   });
 
   test("a node:* import in client code fails", () => {
@@ -861,6 +999,46 @@ describe("imports:check", () => {
     assert.match(run.output, /^ops\/fin\/src\/commented\.ts:1 control-path-import: /m);
     assert.match(run.output, /^ops\/fin\/src\/escaped\.ts:1 control-path-import: /m);
     assert.match(run.output, /^tools\/fin-review\/src\/receipt\/check\.ts:1 test-file-import: /m);
+  });
+
+  test("a repository with the harness planted in deployable code fails", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      `${JSON.stringify({ private: true, type: "module", ...fields }, null, 2)}\n`;
+    const dir = makeRepo({
+      "tools/layout.json": JSON.stringify({ version: 1, controlPaths: [], entries: [] }),
+      // Allowed: the bridge's two imports, and the harness in a test and in test support.
+      "packages/testing/package.json": manifest({ name: "@fin/testing" }),
+      "packages/testing/src/http/node.ts": src(
+        `${IMP} * as http from "node:http";`,
+        `${IMP} * as https from "node:https";`,
+      ),
+      "apps/api/src/main.test.ts": imp("@fin/testing"),
+      "apps/api/e2e/sign-in.spec.ts": imp("@fin/testing/playwright"),
+      "apps/api/test/canon.ts": imp("@fin/testing"),
+      "apps/console/package.json": manifest({
+        name: "@fin/console",
+        devDependencies: { "@fin/testing": "workspace:*" },
+      }),
+      // Refused: the harness in production code and in a manifest's dependencies, and node:http
+      // in another file of packages/testing.
+      "apps/api/src/main.ts": src("// The API.", imp("@fin/testing")),
+      "apps/api/package.json": manifest({
+        name: "@fin/api",
+        dependencies: { "@fin/testing": "workspace:*" },
+      }),
+      "packages/testing/src/email/sink.ts": imp("node:http"),
+    });
+    const findings = checkImports(dir);
+    assert.deepEqual(findings.map((f) => `${f.file}:${f.line} ${f.rule}`).sort(), [
+      "apps/api/package.json:6 testing-dependency",
+      "apps/api/src/main.ts:2 testing-import",
+      "packages/testing/src/email/sink.ts:1 node-network",
+    ]);
+    const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^apps\/api\/src\/main\.ts:2 testing-import: /m);
+    assert.match(run.output, /^apps\/api\/package\.json:6 testing-dependency: /m);
+    assert.match(run.output, /^packages\/testing\/src\/email\/sink\.ts:1 node-network: /m);
   });
 
   test("a repository with planted imports fails, and this repository passes", () => {

@@ -3,7 +3,11 @@
 // Biome cannot express, and the ones it can, enforced again so a lint override cannot drop them:
 //   - no bun:*, Bun.* or drizzle-orm/bun-sql, anywhere;
 //   - node:http, node:https, node:net, node:dns, node:cluster and node:worker_threads only in
-//     packages/server and apps/connector;
+//     packages/server and apps/connector, and node:http and node:https in the test harness's one
+//     HTTP bridge, packages/testing/src/http/node.ts, by the steward's decision of 21 Nov (below);
+//   - @fin/testing (or a subpath, or a file of test support by a relative path) only in tests and
+//     test support, and in a manifest only under devDependencies, so the harness never reaches
+//     deployable code (the steward's decision of 21 Nov; see TEST_SUPPORT below);
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
 //     packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
@@ -95,6 +99,47 @@ const BUILTINS = new Set(
 );
 const NETWORK = new Set(["http", "https", "net", "dns", "cluster", "worker_threads"]);
 const NETWORK_ALLOWED = ["packages/server/", "apps/connector/"];
+// The steward's decision of 21 Nov (ruling (a) on PR #5's Decision 1): node:http and node:https
+// are allowed in exactly one more file, named by its full path (no glob, no directory). AGENTS.md
+// §6's rule keeps deployable code's networking in packages/server and apps/connector; this file is
+// test-only and never deployed. It is the harness's bridge to Node's HTTP stack: the static host
+// must proxy `/api/` with the configured Host and the browser's headers unchanged (spec 01 §4.7),
+// which fetch() cannot do, and serve the app hosts over https. The rule on @fin/testing below is
+// what keeps it out of deployable code.
+const NETWORK_ALLOWED_FILES = new Map([
+  ["packages/testing/src/http/node.ts", new Set(["http", "https"])],
+]);
+// The test harness's package, which only tests and test support may load, by the same decision.
+const TESTING_PACKAGE = "@fin/testing";
+// Test support: the files besides tests (TEST_FILE: `*.test.*`, `*.db.test.*` and `*.spec.*`) that
+// may import @fin/testing, by a package name or a relative path, and the only files a relative
+// import of such a file may come from. Exactly these, matched on the repository path:
+//   - packages/testing/** itself, the harness;
+//   - a file under an e2e/ directory at the root or at a workspace package's root
+//     (apps/<name>/e2e/, packages/<name>/e2e/, tools/<name>/e2e/, ops/<name>/e2e/);
+//   - a file under a workspace package's test/ directory (apps/<name>/test/, packages/<name>/test/,
+//     tools/<name>/test/, ops/<name>/test/);
+//   - the root playwright.config.ts.
+// An e2e/ or test/ directory anywhere else (under src/, say) is not test support, since a build
+// may take it in.
+const TEST_SUPPORT = [
+  /^packages\/testing\//,
+  /^(?:(?:apps|packages|tools|ops)\/[^/]+\/)?e2e\//,
+  /^(?:apps|packages|tools|ops)\/[^/]+\/test\//,
+  /^playwright\.config\.ts$/,
+];
+// An import's target names test support in any case, as a case-insensitive file system reads it
+// (a file counts as test support only when spelled as TEST_SUPPORT has it).
+const TEST_SUPPORT_TARGET = TEST_SUPPORT.map((pattern) => new RegExp(pattern.source, "iu"));
+// A manifest's fields that install a package with it: @fin/testing is listed only under
+// devDependencies, which a production install leaves out.
+const RUNTIME_DEPENDENCY_FIELDS = [
+  "dependencies",
+  "peerDependencies",
+  "optionalDependencies",
+  "bundleDependencies",
+  "bundledDependencies",
+];
 // Built-ins that run code they are handed, refused in the Node-side areas that must read every
 // import. node:module's loaders are refused there too; only these of its names may be imported.
 const CODE_RUNNERS = new Set(["vm", "repl", "inspector", "wasi"]);
@@ -234,6 +279,15 @@ const EXPORT_DECLARATIONS = new Set([
 export function packageName(specifier) {
   const parts = specifier.split("/");
   return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : (parts[0] ?? "");
+}
+
+/**
+ * Whether a repository path is test support (see TEST_SUPPORT).
+ * @param {string} path
+ * @returns {boolean}
+ */
+export function isTestSupport(path) {
+  return TEST_SUPPORT.some((pattern) => pattern.test(path));
 }
 
 /**
@@ -1077,7 +1131,8 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     if (
       builtin !== undefined &&
       NETWORK.has(builtin) &&
-      !NETWORK_ALLOWED.some((p) => file.startsWith(p))
+      !NETWORK_ALLOWED.some((p) => file.startsWith(p)) &&
+      NETWORK_ALLOWED_FILES.get(file)?.has(builtin) !== true
     ) {
       add(
         line,
@@ -1139,6 +1194,21 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
       }
     }
     const targets = relative ? relativeTargets(file, specifier) : [];
+    // The harness only in tests and test support: by its package name (in any case, as a
+    // case-insensitive file system finds it), or a file of test support by a relative path, which
+    // reaches the same code. A type-only import is refused too: deployable code needs no type of it.
+    if (
+      !isTest &&
+      !isTestSupport(file) &&
+      ((bare && builtin === undefined && name.toLowerCase() === TESTING_PACKAGE) ||
+        targets.some((target) => TEST_SUPPORT_TARGET.some((pattern) => pattern.test(target))))
+    ) {
+      add(
+        line,
+        "testing-import",
+        "only tests and test support (e2e/, a package's test/, packages/testing, playwright.config.ts) import @fin/testing or a file of test support, so the harness never reaches deployable code",
+      );
+    }
     if (
       !isTest &&
       (relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some((t) =>
@@ -1343,6 +1413,43 @@ function checkCodeNames(tokens, statements, loadsChecked, lineAt, add) {
 }
 
 /**
+ * Checks one package.json: @fin/testing is listed only under devDependencies, never in a field
+ * that installs it with the package (RUNTIME_DEPENDENCY_FIELDS), so a production install of
+ * deployable code never holds the harness. A manifest that does not parse is left to
+ * supply-chain:check.
+ * @param {string} file the repository path
+ * @param {string} text the manifest's content
+ * @returns {Finding[]}
+ */
+export function checkManifest(file, text) {
+  /** @type {unknown} */
+  let manifest;
+  try {
+    manifest = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!isRecord(manifest)) return [];
+  const lineAt = lineFinder(text);
+  /** @type {Finding[]} */
+  const findings = [];
+  for (const field of RUNTIME_DEPENDENCY_FIELDS) {
+    const deps = manifest[field];
+    const names = Array.isArray(deps) ? deps : isRecord(deps) ? Object.keys(deps) : [];
+    if (!names.some((n) => typeof n === "string" && n.toLowerCase() === TESTING_PACKAGE)) continue;
+    const fieldAt = text.indexOf(`"${field}"`);
+    const nameAt = text.toLowerCase().indexOf(`"${TESTING_PACKAGE}"`, Math.max(fieldAt, 0));
+    findings.push({
+      file,
+      line: lineAt(nameAt >= 0 ? nameAt : Math.max(fieldAt, 0)),
+      rule: "testing-dependency",
+      message: `${TESTING_PACKAGE} is listed only under devDependencies, never under ${field}, so a production install never holds the harness`,
+    });
+  }
+  return findings;
+}
+
+/**
  * The control paths tools/layout.json lists (none when it is missing or malformed; layout:check
  * reports that).
  * @param {string} root
@@ -1379,9 +1486,13 @@ export function checkImports(root) {
     }
   };
   const controlPaths = readControlPaths(root);
-  return files.flatMap((file) =>
-    checkSource(file, readFileSync(join(root, file), "utf8"), exists, { controlPaths, isFile }),
-  );
+  const manifests = [...listed].filter((f) => /(?:^|\/)package\.json$/.test(f) && isFile(f));
+  return [
+    ...files.flatMap((file) =>
+      checkSource(file, readFileSync(join(root, file), "utf8"), exists, { controlPaths, isFile }),
+    ),
+    ...manifests.flatMap((file) => checkManifest(file, readFileSync(join(root, file), "utf8"))),
+  ];
 }
 
 if (import.meta.main) {
