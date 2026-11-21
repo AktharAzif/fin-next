@@ -126,6 +126,15 @@ The bar that never moves (EXECUTION §1.6, NB-01 to NB-15) applies to every chan
   `apps/connector`; no `node:*` and no server package in client code; `ops/fin`, `tools/fin-review`,
   `tools/static-deploy` and `packages/web-host/src/static` use Node built-ins only, and the watcher
   Web APIs only (spec 01 §4.6).
+- **What `imports:check` guarantees** (BD-19). It refuses the imports these rules forbid and, in
+  the Node-side areas and the control paths, the plain spellings of loading or running code
+  (static and dynamic `import`, `require` and `require.resolve`, `createRequire`, `eval`,
+  `Function`, `process.binding` and `getBuiltinModule`, and the forms its tests list), so that
+  honest code there stays readable and portable. It is a lint against mistakes, not a sandbox:
+  deliberately obfuscated loading (a constructor reached by destructuring, `arguments`, `with`, a
+  computed key built at run time, a trick on the lexer) cannot be excluded by a lexer, and is a
+  review finding by definition, which fin-review's lenses treat as critical. The control-path
+  approval rule returns in hardening (BD-02).
 - The rules here are Fin's own API routes, never "server functions": for example, `stepUp` in
   `requireActor` for Fin's own API routes.
 - Tests come with the code: unit tests `*.test.ts` (Vitest), integration tests `*.db.test.ts`
