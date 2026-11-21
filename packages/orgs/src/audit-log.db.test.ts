@@ -33,6 +33,9 @@ afterAll(async () => {
 
 const QUERY: AuditLogQuery = { range: "all", tz: "UTC", page: 1, size: 100 };
 
+/** An address as Postgres writes it back (no leading zeros, the longest zero run compressed). */
+const canonical = (ip: string) => new URL(`http://[${ip}]`).hostname.slice(1, -1);
+
 function log(
   who: Parameters<typeof asActor>[1],
   orgId: string,
@@ -239,13 +242,13 @@ describe("the person's activity", () => {
       metadata: { reason: "removed" },
       target: { id: browserId, label: "Firefox on Linux" },
     });
-    expect(JSON.stringify(items)).not.toContain(who.browser.ip);
+    expect(JSON.stringify(items)).not.toContain(canonical(who.browser.ip));
     expect(JSON.stringify(items)).not.toContain(who.userId);
     // The person's own rows keep their own address, device and sign-in method.
     const own = items.find((i) => i.event === "session.created");
     expect(own).toMatchObject({
       actor: { id: member.who.userId },
-      address: member.who.browser.ip,
+      address: canonical(member.who.browser.ip),
       device: "Chrome on Mac",
       verification: "email_otp",
     });

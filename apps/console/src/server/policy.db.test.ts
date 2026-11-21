@@ -1,6 +1,6 @@
-// The refusal matrix, generated from the route policy (spec 02 §14.1; T-SAT-31, AC-SAT-04, AC-SAT-13,
-// and T-SAT-30's per-route half): for every route of the console's policy, over HTTP through the
-// real front door, as the policy declares it,
+// The refusal matrix, generated from the route policy (spec 02 §14.1; T-SAT-31, AC-SAT-04, AC-SAT-13;
+// T-SAT-30's full per-route step-up matrix is step-up.db.test.ts): for every route of the console's
+// policy, over HTTP through the real front door, as the policy declares it,
 //   - signed out: `401 unauthenticated` (every route but the public ones);
 //   - an organisation route without `Fin-Organization`: `400 organization_required`; with another
 //     organisation's: `404 not_found`, the same as an unknown one;
