@@ -9,7 +9,9 @@
 // - The sentence under the boxes says the status; resend has a cooldown that restarts after each
 //   send and reads "Sending" while it runs. The resend control stays in place throughout
 //   (disabled but focusable), so keyboard focus is never dropped; the cooldown is announced when
-//   it starts and when it ends (spec 06 §9); a resend that fails is reported and says so.
+//   it starts and when it ends (spec 06 §9), and only then: the control's name stays "Send a new
+//   code" while the clock beside it ticks for the eye only; a resend that fails is reported and
+//   says so.
 // - The boxes shrink to fit a narrow column: 8 of them fit 288px (a 320px phone, AC-UI-28).
 import { OTPInputGroup, OTPInputSlot, OTPInput as SdkOTPInput } from "@ui-sdk/react/otp-input";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
@@ -245,6 +247,10 @@ export function OTPInput(props: OTPInputProps) {
       {resendable ? (
         <p data-slot="fin-otp-resend" className="m-0 text-caption text-text-tertiary">
           {sending || waiting ? null : "Didn’t get it? "}
+          {/* The control's name comes from its text, and focus can sit on it for the whole
+              cooldown: a name that changed every second would have the countdown read out every
+              second. So its text stays "Send a new code", and the clock is beside it, hidden from
+              assistive technology (announce() says the start and the end). */}
           <TextButton
             disabled={sending || waiting}
             focusableWhenDisabled
@@ -252,12 +258,13 @@ export function OTPInput(props: OTPInputProps) {
             onClick={resend}
             className="data-disabled:cursor-default data-disabled:text-text-tertiary data-disabled:no-underline"
           >
-            {sending
-              ? "Sending"
-              : waiting
-                ? `Send a new code in ${clock(cooldown)}`
-                : "Send a new code"}
+            {sending ? "Sending" : "Send a new code"}
           </TextButton>
+          {waiting && !sending ? (
+            <span aria-hidden="true" data-slot="fin-otp-clock">
+              {` in ${clock(cooldown)}`}
+            </span>
+          ) : null}
         </p>
       ) : null}
     </div>

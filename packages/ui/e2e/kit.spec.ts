@@ -677,29 +677,34 @@ test.describe("the components @kit", () => {
   }) => {
     await onTestClock(page);
     const otp = section(page, "otp").locator('[data-slot="fin-otp"]').first();
+    const line = otp.locator('[data-slot="fin-otp-resend"]');
     const resend = otp.getByRole("button", { name: "Send a new code" });
     await keyboardFocus(page, resend);
     await page.keyboard.press("Enter");
-    const focused = () =>
-      page.evaluate(() => {
-        const el = document.activeElement;
-        return {
-          tag: el?.tagName,
-          text: el?.textContent,
-          disabled: el?.getAttribute("aria-disabled") ?? null,
-        };
-      });
-    await expect.poll(focused).toEqual({ tag: "BUTTON", text: "Sending", disabled: "true" });
+    // What assistive technology is given for the focused element: its role, name and state.
+    const focused = async () => ({
+      tag: await page.evaluate(() => document.activeElement?.tagName),
+      aria: await page.locator(":focus").ariaSnapshot(),
+    });
+    const waitingName = { tag: "BUTTON", aria: '- button "Send a new code" [disabled]' };
+    await expect.poll(focused).toEqual({ tag: "BUTTON", aria: '- button "Sending" [disabled]' });
     await page.clock.runFor(400);
-    await expect
-      .poll(focused)
-      .toEqual({ tag: "BUTTON", text: "Send a new code in 0:30", disabled: "true" });
+    await expect.poll(focused).toEqual(waitingName);
+    await expect(line).toHaveText("Send a new code in 0:30");
     await page.clock.runFor(200);
     await expect(page.locator('[data-ui-sdk-announcer=""]')).toHaveText(
       "Code sent. You can send a new code in 30 seconds.",
     );
-    for (let second = 0; second < 30; second += 1) await page.clock.runFor(1000);
-    await expect.poll(focused).toEqual({ tag: "BUTTON", text: "Send a new code", disabled: null });
+    // Each tick moves the clock the eye sees and never the focused control's name, so the
+    // countdown is said at its start and its end only (spec 06 §9), not every second.
+    for (let second = 29; second > 0; second -= 1) {
+      await page.clock.runFor(1000);
+      await expect(line).toHaveText(`Send a new code in 0:${String(second).padStart(2, "0")}`);
+      expect(await focused()).toEqual(waitingName);
+    }
+    await page.clock.runFor(1000);
+    await expect.poll(focused).toEqual({ tag: "BUTTON", aria: '- button "Send a new code"' });
+    await expect(line).toHaveText("Didn’t get it? Send a new code");
     await page.clock.runFor(200);
     await expect(page.locator('[data-ui-sdk-announcer=""]')).toHaveText(
       "You can send a new code now.",
