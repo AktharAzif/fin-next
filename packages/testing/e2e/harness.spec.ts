@@ -2,9 +2,9 @@
 // host serves the fixture app under the `app` profile's policy, over https under each host's own
 // name, and the shared fixtures do their jobs in a real browser: no violation on a clean page,
 // every violation caught on a broken one, the page's JSON POST through /api/ with no preflight,
-// `__Host-` cookies kept per host, the browser and Node clocks at the run's clock, the virtual
-// authenticator, Access in front of a host, the off-origin recorder, and the bypassCSP refusals
-// on every way a test can make a context.
+// `__Host-` cookies kept per host, the browser and Node clocks at the run's clock or the test's
+// own, the virtual authenticator, Access in front of a host, the off-origin recorder, and the
+// bypassCSP refusals on every way a test can make a context.
 import { join } from "node:path";
 import {
   AccessStandIn,
@@ -258,7 +258,7 @@ function runClockIs(value: string | undefined): void {
   });
 }
 
-test.describe("the run's clock sets the browser clock and the Node clock", () => {
+test.describe("the run's clock, or the test's own, sets the browser clock and the Node clock", () => {
   test.describe("with FIN_E2E_CLOCK unset", () => {
     runClockIs(undefined);
     test("both stand at the canon's time", async ({ page, servers, clock }) => {
@@ -310,6 +310,45 @@ test.describe("the run's clock sets the browser clock and the Node clock", () =>
       );
       expect(Math.abs(seen.at - before)).toBeLessThan(2_000);
       expect(seen.moved).toBeGreaterThanOrEqual(150);
+    });
+  });
+
+  test.describe("with FIN_E2E_CLOCK=wall and the test's own clockTime", () => {
+    runClockIs("wall");
+    const scene = "2026-12-01T00:00:00.000Z";
+    test.use({ clockTime: scene });
+    test("the browser, a second context and the Node clock all stand at the test's time", async ({
+      page,
+      servers,
+      clock,
+      newContext,
+    }) => {
+      const at = Date.parse(scene);
+      await gotoReady(page, `${servers.host.origin}/`);
+      expect(await page.evaluate(() => Date.now())).toBe(at);
+      const other = await (await newContext()).newPage();
+      await gotoReady(other, `${servers.host.origin}/`);
+      expect(await other.evaluate(() => Date.now())).toBe(at);
+      expect(clock.epochMs()).toBe(at);
+    });
+  });
+
+  test.describe("with FIN_E2E_CLOCK=wall and the test's own clockMode", () => {
+    runClockIs("wall");
+    test.use({ clockMode: "paused" });
+    let started = 0;
+    test.beforeEach(() => {
+      started = Date.now();
+    });
+    test("the browser stops where the run's clock stood as the test started, with the Node clock", async ({
+      page,
+      servers,
+      clock,
+    }) => {
+      expect(clock.epochMs()).toBeGreaterThanOrEqual(started);
+      expect(clock.epochMs()).toBeLessThanOrEqual(Date.now());
+      await gotoReady(page, `${servers.host.origin}/`);
+      expect(await page.evaluate(() => Date.now())).toBe(clock.epochMs());
     });
   });
 });

@@ -28,6 +28,7 @@ export {
   testScope,
 } from "./canon/index.ts";
 export {
+  type BrowserClockMode,
   CANON_TIME,
   type Clock,
   durationMs,
@@ -37,6 +38,9 @@ export {
   type JourneyClock,
   journeyClock,
   type RunClock,
+  resolveTestClock,
+  type TestClock,
+  type TestClockOptions,
 } from "./clock.ts";
 export {
   AUTH_CODE,

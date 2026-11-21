@@ -6,7 +6,9 @@ import {
   e2eClock,
   FrozenClock,
   freezeBrowserClock,
+  type JourneyClock,
   journeyClock,
+  resolveTestClock,
 } from "./clock.ts";
 
 describe("FrozenClock", () => {
@@ -104,6 +106,66 @@ describe("journeyClock (the fixtures' browser and Node clock)", () => {
     expect(journeyClock().mode).toBe("off");
     vi.stubEnv("FIN_E2E_CLOCK", "yesterday");
     expect(() => journeyClock()).toThrow("FIN_E2E_CLOCK");
+  });
+});
+
+describe("resolveTestClock (a test's clock options and the run's, together)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const SCENE = "2026-12-01T00:00:00.000Z";
+  const wallRun = (): JourneyClock => ({ mode: "off", time: "2026-11-21T08:00:00.000Z" });
+  const canonRun = (): JourneyClock => ({ mode: "fixed", time: CANON_TIME });
+
+  it("pins the browser at the test's own clockTime, in a wall run too, and the Node clock with it", () => {
+    for (const run of [wallRun, canonRun]) {
+      expect(resolveTestClock({ clockTime: SCENE }, run)).toEqual({ mode: "fixed", time: SCENE });
+    }
+    vi.stubEnv("FIN_E2E_CLOCK", "wall");
+    expect(resolveTestClock({ clockTime: SCENE })).toEqual({ mode: "fixed", time: SCENE });
+  });
+
+  it("keeps the test's own clockMode beside its clockTime", () => {
+    for (const clockMode of ["fixed", "paused", "off"] as const) {
+      expect(resolveTestClock({ clockMode, clockTime: SCENE }, wallRun)).toEqual({
+        mode: clockMode,
+        time: SCENE,
+      });
+    }
+  });
+
+  it("follows the run's clock when the test sets no clockTime, its clockMode over the run's", () => {
+    expect(resolveTestClock({}, wallRun)).toEqual(wallRun());
+    expect(resolveTestClock({ clockMode: undefined, clockTime: undefined }, canonRun)).toEqual(
+      canonRun(),
+    );
+    expect(resolveTestClock({ clockMode: "paused" }, wallRun)).toEqual({
+      mode: "paused",
+      time: wallRun().time,
+    });
+    vi.stubEnv("FIN_E2E_CLOCK", "2026-11-18T09:00:00+05:30");
+    expect(resolveTestClock({})).toEqual({ mode: "fixed", time: "2026-11-18T03:30:00.000Z" });
+  });
+
+  it("reads the run's clock only when the test leaves clockTime unset", () => {
+    let reads = 0;
+    const counted = () => {
+      reads += 1;
+      return wallRun();
+    };
+    resolveTestClock({ clockTime: SCENE }, counted);
+    resolveTestClock({ clockMode: "paused", clockTime: SCENE }, counted);
+    expect(reads).toBe(0);
+    resolveTestClock({ clockMode: "fixed" }, counted);
+    expect(reads).toBe(1);
+  });
+
+  it("gives the time in UTC, and refuses a clockTime that is not a time", () => {
+    expect(resolveTestClock({ clockTime: "2026-12-01T05:30:00+05:30" }, wallRun).time).toBe(SCENE);
+    expect(() => resolveTestClock({ clockTime: "soon" }, wallRun)).toThrow(
+      "clockTime is not a valid time",
+    );
   });
 });
 

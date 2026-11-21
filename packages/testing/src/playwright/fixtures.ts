@@ -4,10 +4,12 @@
 //
 // On every context, before its first page: the `securitypolicyviolation` recorder and the
 // off-origin request recorder (both fail the test at its end if they saw anything), and the
-// browser clock at the run's clock, FIN_E2E_CLOCK, which the stand-ins and the servers read too
-// ("fixed" pins Date, the default; "paused" also stops timers; "off" leaves the clock alone, the
-// default for a "wall" run). The Access stand-in's origin may be navigated to (its login page
-// stands in front of Fin Admin) but nothing may load from it.
+// browser clock at the test's clock (`testClock`): the test's own `clockTime` when it sets one,
+// else the run's clock, FIN_E2E_CLOCK, which the stand-ins and the servers read too ("fixed" pins
+// Date, the default; "paused" also stops timers; "off" leaves the clock alone, the default for a
+// "wall" run that sets no `clockTime`). The Node-side `clock` starts at the same time. The Access
+// stand-in's origin may be navigated to (its login page stands in front of Fin Admin) but nothing
+// may load from it.
 //
 // No test turns bypassCSP on (spec 06 §6.4). Every test, whichever fixtures it uses, is refused
 // when its resolved options turn it on (its project, a `test.use`, `contextOptions`), because
@@ -15,7 +17,13 @@
 // included. `newContext()` also refuses its own options and pins the page policy on.
 import { type BrowserContext, type BrowserContextOptions, test as base } from "@playwright/test";
 import { type AddressBook, createAddressBook, testScope } from "../canon/addresses.ts";
-import { FrozenClock, freezeBrowserClock, journeyClock } from "../clock.ts";
+import {
+  type BrowserClockMode,
+  FrozenClock,
+  freezeBrowserClock,
+  resolveTestClock,
+  type TestClock,
+} from "../clock.ts";
 import { EmailSinkReader } from "../email/reader.ts";
 import { ACCESS_STAND_IN_PORT, EMAIL_SINK_PORT } from "../static-host/apps.ts";
 import { installAuthenticator, type VirtualAuthenticator } from "./authenticator.ts";
@@ -25,10 +33,16 @@ import { type OffsiteWatcher, watchOffsite } from "./offsite.ts";
 export interface FinOptions {
   /** Origins a page may load from besides the project's baseURL (the selfie page's Sumsub hosts). */
   readonly allowedOrigins: readonly string[];
-  /** By default "fixed", or "off" when the run's clock is "wall" (`journeyClock`). */
-  readonly clockMode: "fixed" | "paused" | "off";
-  /** Where the browser clock starts: by default, where the run's clock stands as the test starts. */
-  readonly clockTime: string;
+  /**
+   * How the browser clock runs. Unset: "fixed" when the test sets `clockTime`, else the run's
+   * (`journeyClock`: "fixed", or "off" in a "wall" run).
+   */
+  readonly clockMode: BrowserClockMode | undefined;
+  /**
+   * Where the browser clock and the Node-side `clock` start, in every run ("wall" included). Unset:
+   * where the run's clock stands as the test starts.
+   */
+  readonly clockTime: string | undefined;
   readonly emailSinkOrigin: string;
   /** The Access stand-in: a top-level navigation may reach it; nothing may load from it. */
   readonly accessStandInOrigin: string;
@@ -41,8 +55,15 @@ export interface FinFixtures {
   readonly emailSink: EmailSinkReader;
   readonly addresses: AddressBook;
   /**
-   * The Node-side frozen clock, standing where the browser clock starts (`clockTime`). In a
-   * "wall" run the browser keeps the system clock, and this one stands at the test's start.
+   * The test's clock, from `clockMode`, `clockTime` and the run's clock together
+   * (`resolveTestClock`), worked out once as the test starts: what every context's browser clock
+   * and the Node-side `clock` start from.
+   */
+  readonly testClock: TestClock;
+  /**
+   * The Node-side frozen clock, standing where the browser clock starts (`testClock.time`). When
+   * the browser keeps the system clock ("off": a "wall" run that sets no `clockTime`), this one
+   * stands at the test's start.
    */
   readonly clock: FrozenClock;
   /**
@@ -119,21 +140,21 @@ interface Preparation {
   readonly allowedOrigins: readonly string[];
   /** Origins only a top-level navigation may reach (the Access stand-in's). */
   readonly navigationOrigins?: readonly string[];
-  readonly clockMode: FinOptions["clockMode"];
-  readonly clockTime: string;
+  /** The test's clock (`testClock`), the same for every context the test makes. */
+  readonly clock: TestClock;
 }
 
 /** Puts the recorders and the frozen clock on a context before its first page. */
 export async function prepareContext(
   context: BrowserContext,
-  { baseURL, allowedOrigins, navigationOrigins = [], clockMode, clockTime }: Preparation,
+  { baseURL, allowedOrigins, navigationOrigins = [], clock }: Preparation,
 ): Promise<Watchers> {
   const csp = await watchCsp(context);
   const origins = baseURL === undefined ? [...allowedOrigins] : [baseURL, ...allowedOrigins];
   const offsite = watchOffsite(context, origins, { navigationOrigins });
   const prepared = { csp, offsite };
   watchers.set(context, prepared);
-  if (clockMode !== "off") await freezeBrowserClock(context, clockTime, clockMode);
+  if (clock.mode !== "off") await freezeBrowserClock(context, clock.time, clock.mode);
   return prepared;
 }
 
@@ -141,21 +162,9 @@ type FinTestFixtures = FinOptions & FinFixtures & FinAutomaticFixtures;
 
 export const test = base.extend<FinTestFixtures, { runId: string }>({
   allowedOrigins: [[], { option: true }],
-  // From the run's clock, read as each test starts, unless the test sets them.
-  clockMode: [
-    // biome-ignore lint/correctness/noEmptyPattern: Playwright's fixture signature
-    async ({}, use) => {
-      await use(journeyClock().mode);
-    },
-    { option: true },
-  ],
-  clockTime: [
-    // biome-ignore lint/correctness/noEmptyPattern: Playwright's fixture signature
-    async ({}, use) => {
-      await use(journeyClock().time);
-    },
-    { option: true },
-  ],
+  // Unset unless the test sets them; `testClock` fills them in from the run's clock.
+  clockMode: [undefined, { option: true }],
+  clockTime: [undefined, { option: true }],
   emailSinkOrigin: [
     process.env.FIN_E2E_EMAIL_SINK ?? `http://127.0.0.1:${EMAIL_SINK_PORT}`,
     { option: true },
@@ -183,26 +192,25 @@ export const test = base.extend<FinTestFixtures, { runId: string }>({
     { auto: true, title: "the page policy stays on" },
   ],
 
-  context: async (
-    { context, baseURL, allowedOrigins, accessStandInOrigin, clockMode, clockTime },
-    use,
-  ) => {
+  // The mode and the time in one place, read as the test starts (after its hooks), so the browser
+  // clock of every context and the Node-side clock start together.
+  testClock: async ({ clockMode, clockTime }, use) => {
+    await use(resolveTestClock({ clockMode, clockTime }));
+  },
+
+  context: async ({ context, baseURL, allowedOrigins, accessStandInOrigin, testClock }, use) => {
     const prepared = await prepareContext(context, {
       baseURL,
       allowedOrigins,
       navigationOrigins: [accessStandInOrigin],
-      clockMode,
-      clockTime,
+      clock: testClock,
     });
     await use(context);
     prepared.csp.assertNone();
     prepared.offsite.assertNone();
   },
 
-  newContext: async (
-    { browser, baseURL, allowedOrigins, accessStandInOrigin, clockMode, clockTime },
-    use,
-  ) => {
+  newContext: async ({ browser, baseURL, allowedOrigins, accessStandInOrigin, testClock }, use) => {
     const made: Array<{ context: BrowserContext; watchers: Watchers }> = [];
     await use(async (options = {}) => {
       // Inside a test, browser.newContext() fills what `options` leaves out from the test's own
@@ -214,8 +222,7 @@ export const test = base.extend<FinTestFixtures, { runId: string }>({
           baseURL,
           allowedOrigins,
           navigationOrigins: [accessStandInOrigin],
-          clockMode,
-          clockTime,
+          clock: testClock,
         }),
       });
       return context;
@@ -247,8 +254,8 @@ export const test = base.extend<FinTestFixtures, { runId: string }>({
     await use(createAddressBook(testScope(runId, testInfo.testId, testInfo.retry)));
   },
 
-  clock: async ({ clockTime }, use) => {
-    await use(new FrozenClock(clockTime));
+  clock: async ({ testClock }, use) => {
+    await use(new FrozenClock(testClock.time));
   },
 });
 

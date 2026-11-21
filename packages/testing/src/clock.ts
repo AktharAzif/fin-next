@@ -97,7 +97,7 @@ export function e2eClock(value: string | undefined = process.env.FIN_E2E_CLOCK):
   return { setting: new Date(ms).toISOString(), now: () => ms };
 }
 
-/** Where a journey's browser clock starts, and how it runs (the fixtures' clock defaults). */
+/** Where a journey's browser clock starts, and how it runs, by the run's clock alone. */
 export interface JourneyClock {
   /** "fixed" pins Date at `time`; "off" leaves the browser on the system clock. */
   readonly mode: "fixed" | "off";
@@ -116,6 +116,45 @@ export function journeyClock(run: RunClock = e2eClock()): JourneyClock {
     mode: run.setting === "wall" ? "off" : "fixed",
     time: new Date(run.now()).toISOString(),
   };
+}
+
+/**
+ * How a test's browser clock runs: "fixed" pins Date, "paused" also stops timers, "off" leaves the
+ * browser on the system clock.
+ */
+export type BrowserClockMode = "fixed" | "paused" | "off";
+
+/** A test's clock as the fixtures start it, in the browser and on the Node side alike. */
+export interface TestClock {
+  readonly mode: BrowserClockMode;
+  /** ISO 8601 (UTC): where the browser clock (unless "off") and the Node-side clock start. */
+  readonly time: string;
+}
+
+/** A test's own clock options (`clockMode`, `clockTime`); undefined means "the run's". */
+export interface TestClockOptions {
+  readonly clockMode?: BrowserClockMode | undefined;
+  readonly clockTime?: string | undefined;
+}
+
+/**
+ * A test's clock from its own options and the run's clock, worked out together so the browser
+ * clock and the Node-side clock never disagree. A test that sets `clockTime` starts both there,
+ * whatever the run's clock is ("wall" included), with the browser "fixed" unless the test sets
+ * `clockMode` too. A test that leaves `clockTime` unset starts where the run's clock stands
+ * (`journeyClock`, read only then), in the run's mode unless the test sets `clockMode`.
+ */
+export function resolveTestClock(
+  { clockMode, clockTime }: TestClockOptions,
+  run: () => JourneyClock = journeyClock,
+): TestClock {
+  if (clockTime !== undefined) {
+    const ms = Date.parse(clockTime);
+    if (!Number.isFinite(ms)) throw new Error("clockTime is not a valid time");
+    return { mode: clockMode ?? "fixed", time: new Date(ms).toISOString() };
+  }
+  const started = run();
+  return { mode: clockMode ?? started.mode, time: started.time };
 }
 
 /** The part of Playwright's BrowserContext (or Page) this needs. */
