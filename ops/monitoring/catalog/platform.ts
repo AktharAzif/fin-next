@@ -357,6 +357,9 @@ export const entries: readonly CatalogEntry[] = [
     level: "error",
     writtenBy: "the watcher, one per failure (check, target and a detail code)",
     fields: { check: "string", target: "string", detail: "string" },
+    // A failure that stands (an unset hash, another product's object awaiting its owner) must
+    // never share an incident with a later, different failure on the same target.
+    seriesBy: ["check", "target", "detail"],
     alerts: [
       "tunnel-connectors",
       "tunnel-config-drift",

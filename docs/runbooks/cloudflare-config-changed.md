@@ -19,7 +19,9 @@ host role; the `detail` the difference (`ruleset_hash_mismatch`, `ruleset_unexpe
 `bot_fight_on`, `app_missing`, `app_duplicate`, `app_overlap`, `app_domain`, `app_type`,
 `session_duration`, `binding_cookie`, `http_only`, `same_site`, `launcher_visible`,
 `mfa_not_required`, `policy_missing`, `policy_hash_mismatch`, `policy_everyone`, `api_error`,
-`api_forbidden`).
+`api_forbidden`). Each check, target and detail is an incident of its own, so a `hash_unset` or
+`ruleset_hash_mismatch` that stands never hides a later `foreign_rule` or Access change: read
+every open incident of this alert, not only the first.
 
 ## First check
 

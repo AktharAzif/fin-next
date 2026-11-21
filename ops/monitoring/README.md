@@ -44,5 +44,14 @@ or a team wait, is put back and shown as drift. New tokens, DSNs and heartbeat U
 `ctx.deliver` (Railway services' sealed variables only, MC-07) and are never printed; the
 watcher's and `pnpm fin verify`'s own are read from Better Stack by those commands. The output
 names objects, never their IDs, and masks the hostnames, the zones (`ctx.zones`) and the monitor
-header, Better Stack's own error text included; a refusal from Better Stack stops the writes, and
-what was created before it still has its secrets delivered.
+header, Better Stack's own error text included. Each change is printed by the part that changed
+(`steps[0].step_members`, `metadata.runbook`), cut around its first difference, so no change
+prints the same on both sides. Anything that stops the writes (a refusal from Better Stack, a
+call that gets no answer, a fault in the run) still has what was created before it delivered; a
+read that gets no answer is tried once more, a write never is.
+
+A dry run deletes and pauses nothing, so MA-03's cap is a note there, not a refusal. Its `drift`
+(what the daily dry run reports) is true for any difference, for a source or an Errors
+application the files do not name, and for a refusal Better Stack's own objects cause (two
+objects with one name, a loud object outside the files, an `ai_sre` member): a refusal never
+hides the drift it found.

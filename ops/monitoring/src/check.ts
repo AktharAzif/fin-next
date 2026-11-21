@@ -8,8 +8,10 @@
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
 //         an alert no fragment defines (or an alert watches an event whose entry does not name
-//         it), an alert's query cannot be rendered, or a security event is filtered with
-//         `eq: false` (a line without the field would never alert; `notEq: true` fails closed);
+//         it), an alert's query cannot be rendered, a security event is filtered with
+//         `eq: false` (a line without the field would never alert; `notEq: true` fails closed),
+//         or an alert groups an event by other fields than the entry's seriesBy (the watcher's
+//         check, target and detail: a failure that stands must never hide a later one);
 //   MC-05 one of spec 01 §8.5's heartbeats, or the one the watcher's settings ping, is missing;
 //   MC-06 a metric label is ID-shaped or free text;
 //   MC-07 a source has no Errors application and no written reason, a file names a source
@@ -28,7 +30,8 @@
 //   RT-01 an alert, monitor or heartbeat has no policy, or a staging one names anything but
 //         staging-quiet, or names a policy the files do not define;
 //   RT-02 staging-quiet is not email only: a severity that calls, texts, pushes or sends critical
-//         alerts, an escalation (a repeat or a second step), or an ai_sre member;
+//         alerts, an escalation (a repeat or a second step), an ai_sre member, or a step that
+//         waits or reaches anyone but the entire staging team (spec 08 §7.9);
 //   RT-03 any staging object asks for a call, an SMS, a push or a critical alert itself.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -48,7 +51,7 @@ import {
   queryEvents,
   queryFields,
   renderSql,
-  seriesField,
+  seriesFields,
 } from "./sql.ts";
 
 /** Spec 01 §8.9: every event Phase 0 writes. platform.ts must hold each one. */
@@ -376,11 +379,21 @@ function checkAlert(
   }
   const events = queryEvents(alert.query);
   const declared = new Set(events.flatMap((e) => [...fieldsOf(byEvent.get(e))]));
-  const series = seriesField(alert);
-  for (const name of [...queryFields(alert.query), ...(series === undefined ? [] : [series])]) {
+  const series = seriesFields(alert) ?? [];
+  for (const name of [...queryFields(alert.query), ...series]) {
     if (events.length > 0 && !declared.has(name)) {
       add("MC-04", `reads the field ${name}, which no watched event declares`);
     }
+  }
+  // An event whose lines tell failures apart only by several fields together is grouped by all
+  // of them, or a failure that stands joins the incident a later, different one should open.
+  for (const event of events) {
+    const want = byEvent.get(event)?.seriesBy;
+    if (want === undefined || want.join("/") === series.join("/")) continue;
+    add(
+      "MC-04",
+      `groups ${event} by ${series.length === 0 ? "nothing" : series.join(", ")}, not by ${want.join(", ")}, so a failure that stands never hides a later, different one`,
+    );
   }
   // A security alert must fail closed: `eq: false` needs the field on the line, so a line
   // without it (a matcher that could not decide, a writer that regressed) would never alert.
@@ -684,6 +697,29 @@ function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: s
       findings.push({ file, rule: "RT-02", message: `${policy.name} escalates or repeats` });
     }
     for (const step of policy.steps) {
+      const members = Array.isArray(step.members) ? step.members : [];
+      // Spec 08 §7.9: one step, at once, to the entire staging team. Every staging alert,
+      // monitor and heartbeat routes here, so a wait or other members would quiet them all.
+      if (config.env === "staging") {
+        if (step.waitBefore !== 0) {
+          findings.push({
+            file,
+            rule: "RT-02",
+            message: `${policy.name}: its step must notify at once (waitBefore 0)`,
+          });
+        }
+        const onlyTeam =
+          members.length === 1 &&
+          members[0]?.type === "entire_team" &&
+          members[0]?.id === undefined;
+        if (!onlyTeam) {
+          findings.push({
+            file,
+            rule: "RT-02",
+            message: `${policy.name}: its step must reach the entire staging team and no one else`,
+          });
+        }
+      }
       const severity = severities.get(step.severity);
       if (severity === undefined) {
         findings.push({ file, rule: "RT-02", message: `${policy.name}: unknown severity` });
@@ -697,7 +733,7 @@ function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: s
           });
         }
       }
-      for (const member of step.members) {
+      for (const member of members) {
         if (member.type === "ai_sre") {
           findings.push({ file, rule: "RT-02", message: `${policy.name} has an ai_sre member` });
         }

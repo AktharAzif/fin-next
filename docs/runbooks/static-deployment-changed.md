@@ -19,7 +19,8 @@ on a fin-next host. Any of these can put code or other content in front of a sig
 `has_tail_consumers`, `workers_dev_on`, `previews_on`, `compatibility_date`,
 `deployment_missing`, `version_changed`, `version_split`, `version_unknown`, `version_unset`,
 `unexpected_script`, `custom_domain_on_host`, `api_error`, `api_forbidden`). The old product's
-own Workers and routes on its own hosts are not reported.
+own Workers and routes on its own hosts are not reported. Each check, target and detail is an
+incident of its own, so a `version_unset` or a route that stands never hides a later change.
 
 ## First check
 

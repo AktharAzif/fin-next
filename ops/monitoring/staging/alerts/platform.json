@@ -262,7 +262,7 @@
       "group": "B",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -289,7 +289,7 @@
       "group": "B",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -316,7 +316,7 @@
       "group": "B",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -343,7 +343,7 @@
       "group": "B",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -370,7 +370,7 @@
       "group": "J",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -539,7 +539,7 @@
       "group": "J",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],
@@ -569,7 +569,7 @@
       "group": "H",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],

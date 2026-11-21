@@ -189,7 +189,11 @@ export interface AlertDef {
   readonly group: string;
   readonly severity: "P" | "N";
   readonly sources: readonly string[];
-  readonly seriesBy?: string;
+  /**
+   * The field, or the fields joined, that make an alert's series: one incident per series. With
+   * none, an alert over several sources has one series per service.
+   */
+  readonly seriesBy?: string | readonly string[];
   readonly query: AlertQuery;
   readonly operator: string;
   readonly threshold: string;

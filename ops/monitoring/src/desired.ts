@@ -10,7 +10,7 @@ import {
   type Notify,
   overlayKeys,
 } from "./config.ts";
-import { renderSql, seriesField } from "./sql.ts";
+import { renderSql, seriesFields } from "./sql.ts";
 
 export type Kind =
   | "urgency"
@@ -194,7 +194,7 @@ function alertObjects(
         recovery_period: alert.recovery_period,
         on_missing_data: alert.on_missing_data,
         incident_cause: alert.incident_cause ?? "",
-        incident_per_series: seriesField(instance) !== undefined,
+        incident_per_series: seriesFields(instance) !== undefined,
         escalation_target: { policy_id: ref("policy", alert.policy ?? "", "number") },
         // Sent and compared on every alert, so none takes Better Stack's defaults (MA-06).
         ...channels({

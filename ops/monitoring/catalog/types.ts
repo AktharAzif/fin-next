@@ -19,6 +19,11 @@ export interface CatalogEntry {
   readonly alerts: readonly string[];
   /** Required when `alerts` is empty and a kind is failure, security or money. */
   readonly noAlert?: string;
+  /**
+   * The fields every alert on this event groups by, in order: one incident per combination, for an
+   * event whose lines tell different failures apart only by these fields together.
+   */
+  readonly seriesBy?: readonly string[];
   /** Who writes it, for the reader. */
   readonly writtenBy: string;
 }

@@ -55,7 +55,7 @@
       "group": "G",
       "severity": "P",
       "sources": ["watcher"],
-      "seriesBy": "target",
+      "seriesBy": ["check", "target", "detail"],
       "query": {
         "count": {
           "events": ["watcher.check_failed"],

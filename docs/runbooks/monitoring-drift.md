@@ -5,8 +5,11 @@ Alert: `monitoring-drift` (the daily dry run, `run.done` `result=drift`).
 ## What it means
 
 `pnpm fin monitoring apply staging --dry-run` found a difference between Better Stack and the
-files: someone changed an object by hand, an object was deleted, or Better Stack paused an alert
-itself (it does so when a query keeps failing). A silenced alert is as bad as a missing one.
+files: someone changed an object by hand, an object was deleted or added (a source or an Errors
+application the files do not name included), or Better Stack paused an alert itself (it does so
+when a query keeps failing). A dry run that is refused (two objects with one name, a loud object
+outside the files, an `ai_sre` member) reports drift too. A silenced alert is as bad as a missing
+one.
 
 ## First check
 

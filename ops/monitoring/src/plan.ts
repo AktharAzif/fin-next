@@ -61,7 +61,10 @@ export type Action =
   | { readonly op: "manual"; readonly key: string; readonly kind: Kind; readonly note: string };
 
 export interface Change {
+  /** The compared attribute (what `immutable` names). */
   readonly field: string;
+  /** The changed part of it, as printed: `steps[0].step_members`, `metadata.runbook`. */
+  readonly path: string;
   readonly from: string;
   readonly to: string;
 }
@@ -71,6 +74,13 @@ export interface Plan {
   readonly unchanged: number;
   readonly refusals: readonly string[];
   readonly notes: readonly string[];
+  /**
+   * Whether Better Stack differs from the files: an action to take, a source or Errors
+   * application the files do not name, or a refusal Better Stack's own objects cause (two
+   * objects with one name, a loud object outside the files, an ai_sre member). A refusal never
+   * hides what the run found.
+   */
+  readonly drift: boolean;
 }
 
 const objectKey = (kind: Kind, key: string) => `${kind}:${key}`;
@@ -413,12 +423,75 @@ function displayed(field: string, value: unknown, nameOf: NameOf): unknown {
   return value;
 }
 
-function show(field: string, value: unknown, nameOf: NameOf): string {
+/** A compared value as printed: a string bare, anything else as JSON, a query by its digest. */
+function text(field: string, shown: unknown): string {
   if (SECRET_FIELDS.has(field)) return "(not shown)";
-  if (field === "query") return "(query)";
-  const shown = displayed(field, value, nameOf);
-  const text = typeof shown === "string" ? shown || "(none)" : JSON.stringify(shown);
-  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  if (field === "query") return `(query ${digest(str(shown)).slice(0, 8)})`;
+  if (shown === undefined || shown === "") return "(none)";
+  return typeof shown === "string" ? shown : JSON.stringify(shown);
+}
+
+const WIDTH = 80;
+
+/**
+ * Both sides of a change cut to WIDTH around their first difference, so a long value whose
+ * change lies past the cut never prints as the same text on both sides.
+ */
+function clipPair(a: string, b: string): [string, string] {
+  if (a.length <= WIDTH && b.length <= WIDTH) return [a, b];
+  let at = 0;
+  while (at < a.length && at < b.length && a[at] === b[at]) at += 1;
+  const start = at > WIDTH / 2 ? at - 20 : 0;
+  const clip = (s: string) => {
+    const head = start > 0 ? "..." : "";
+    const body = s.slice(start);
+    return head.length + body.length > WIDTH
+      ? `${head}${body.slice(0, WIDTH - head.length - 3)}...`
+      : `${head}${body}`;
+  };
+  return [clip(a), clip(b)];
+}
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * One change per differing part: an object by key and a list of objects of one length by index,
+ * down to the value that differs, comparing the views themselves and printing what `displayed`
+ * shows for them. Two sides that still print alike (an identifier shown by a placeholder) say so.
+ */
+function partChanges(
+  field: string,
+  path: string,
+  [a, b]: readonly [unknown, unknown],
+  [shownA, shownB]: readonly [unknown, unknown],
+  out: Change[],
+): void {
+  if (sameValue(a, b)) return;
+  const hidden = SECRET_FIELDS.has(field) || field === "query";
+  if (!hidden && isRecord(a) && isRecord(b) && isRecord(shownA) && isRecord(shownB)) {
+    for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      partChanges(field, `${path}.${key}`, [a[key], b[key]], [shownA[key], shownB[key]], out);
+    }
+    return;
+  }
+  const objects = (v: unknown): v is Record<string, unknown>[] =>
+    Array.isArray(v) && v.every(isRecord);
+  if (
+    !hidden &&
+    objects(a) &&
+    objects(b) &&
+    a.length === b.length &&
+    Array.isArray(shownA) &&
+    Array.isArray(shownB)
+  ) {
+    for (const [i, item] of a.entries()) {
+      partChanges(field, `${path}[${i}]`, [item, b[i]], [shownA[i], shownB[i]], out);
+    }
+    return;
+  }
+  const [from, to] = clipPair(text(field, shownA), text(field, shownB));
+  const differs = to.endsWith(")") ? `${to.slice(0, -1)}, differs)` : `${to} (differs)`;
+  out.push({ field, path, from, to: from === to ? differs : to });
 }
 
 function diffViews(
@@ -428,13 +501,13 @@ function diffViews(
 ): Change[] {
   const changes: Change[] = [];
   for (const field of Object.keys(b)) {
-    if (JSON.stringify(a[field]) !== JSON.stringify(b[field])) {
-      changes.push({
-        field,
-        from: show(field, a[field], nameOf),
-        to: show(field, b[field], nameOf),
-      });
-    }
+    partChanges(
+      field,
+      field,
+      [a[field], b[field]],
+      [displayed(field, a[field], nameOf), displayed(field, b[field], nameOf)],
+      changes,
+    );
   }
   return changes;
 }
@@ -445,6 +518,8 @@ export interface PlanOptions {
   readonly confirmDelete?: number;
   readonly headerValues: boolean;
   readonly today: string;
+  /** A dry run deletes and pauses nothing, so MA-03's cap is a note for it, not a refusal. */
+  readonly dryRun?: boolean;
 }
 
 const LOUD = ["call", "sms", "push", "critical_alert"] as const;
@@ -461,6 +536,12 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
   const notes: string[] = [];
   const actions: Action[] = [];
   let unchanged = 0;
+  // Refusals Better Stack's own objects cause: they are differences from the files too.
+  let remoteRefusals = 0;
+  const refuseRemote = (text: string) => {
+    refusals.push(text);
+    remoteRefusals += 1;
+  };
 
   // MA-10: every overlay key the files name has a value.
   for (const key of desired.missing) {
@@ -490,7 +571,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
   const acted: readonly Kind[] = ["monitor", "heartbeat", "metric", "exploration", "alert"];
   for (const dup of remote.duplicates) {
     if (!desiredKeySet.has(objectKey(dup.kind, dup.key)) && !acted.includes(dup.kind)) continue;
-    refusals.push(
+    refuseRemote(
       `Better Stack holds ${dup.count} ${PLURAL[dup.kind]} named ${dup.key}; the apply works by name, so remove the extra one by hand`,
     );
   }
@@ -500,7 +581,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
     for (const step of steps.filter(isRecord)) {
       const members = Array.isArray(step.step_members) ? step.step_members : [];
       if (members.filter(isRecord).some((m) => m.type === "ai_sre")) {
-        refusals.push(`MA-08 policy ${policy.key} has an ai_sre member`);
+        refuseRemote(`MA-08 policy ${policy.key} has an ai_sre member`);
       }
     }
   }
@@ -511,7 +592,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
       const urgency = remote.urgenciesById.get(str(step.urgency_id));
       const loud = LOUD.filter((c) => urgency?.attributes[c] === true);
       if (loud.length > 0) {
-        refusals.push(
+        refuseRemote(
           `MA-06 policy ${policy.key} (not in the files) notifies by ${loud.join(", ")}; staging stays quiet: remove or quiet it`,
         );
       }
@@ -520,7 +601,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
   for (const alert of remote.unmanagedAlerts) {
     const loud = LOUD.filter((c) => alert.attributes[c] === true);
     if (loud.length > 0) {
-      refusals.push(`MA-06 alert ${alert.key} (not in the files) notifies by ${loud.join(", ")}`);
+      refuseRemote(`MA-06 alert ${alert.key} (not in the files) notifies by ${loud.join(", ")}`);
     }
   }
   for (const object of desired.objects) {
@@ -559,7 +640,14 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
           op: "update",
           object,
           remote: existing,
-          changes: [{ field: "references", from: "(current)", to: "(objects this run creates)" }],
+          changes: [
+            {
+              field: "references",
+              path: "references",
+              from: "(current)",
+              to: "(objects this run creates)",
+            },
+          ],
         });
         continue;
       }
@@ -589,7 +677,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
           op: "manual",
           kind,
           key: object.key,
-          note: `${change.field} is ${change.from}, the files say ${change.to}; Better Stack fixes it at creation, so recreate it by hand after review`,
+          note: `${change.path} is ${change.from}, the files say ${change.to}; Better Stack fixes it at creation, so recreate it by hand after review`,
         });
       }
       const sendable = changes.filter((c) => !object.immutable?.includes(c.field));
@@ -643,18 +731,26 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
   }
 
   // MA-03: deletions are capped, and so are pauses: a paused heartbeat watches nothing, so a
-  // wrong file must not silence every duty in one unconfirmed run.
+  // wrong file must not silence every duty in one unconfirmed run. A dry run deletes and pauses
+  // nothing, so it only says what a real run would need, and goes on to report the drift.
   const removals = actions.filter((a) => a.op === "delete" || a.op === "pause").length;
-  if (options.confirmDelete !== undefined && options.confirmDelete !== removals) {
+  const confirmed =
+    options.confirmDelete === removals || (options.confirmDelete === undefined && removals <= 3);
+  if (!confirmed && options.dryRun === true) {
+    notes.push(
+      `a real run would delete or pause ${removals} objects, so it needs --confirm-delete ${removals} (MA-03)`,
+    );
+  } else if (options.confirmDelete !== undefined && options.confirmDelete !== removals) {
     refusals.push(
       `MA-03 --confirm-delete ${options.confirmDelete} does not match the ${removals} deletion(s) and pause(s) this run would make`,
     );
-  } else if (removals > 3 && options.confirmDelete !== removals) {
+  } else if (!confirmed) {
     refusals.push(
       `MA-03 this run would delete or pause ${removals} objects; pass --confirm-delete ${removals}`,
     );
   }
-  return { actions, unchanged, refusals, notes };
+  const drift = actions.length > 0 || remote.strays.length > 0 || remoteRefusals > 0;
+  return { actions, unchanged, refusals, notes, drift };
 }
 
 const PLURAL: Readonly<Record<Kind, string>> = {
@@ -680,7 +776,7 @@ export function formatPlan(plan: Plan, mask: (text: string) => string): string {
       case "update":
         lines.push(
           `~ ${action.object.kind} ${action.object.key}: ${action.changes
-            .map((c) => `${c.field} ${c.from} -> ${c.to}`)
+            .map((c) => `${c.path} ${c.from} -> ${c.to}`)
             .join("; ")}`,
         );
         break;

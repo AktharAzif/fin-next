@@ -94,10 +94,20 @@ export function queryFields(query: AlertQuery): string[] {
   return [];
 }
 
-/** The series column, when the alert groups by a field (one incident per series). */
-export function seriesField(alert: AlertDef): string | undefined {
-  if (alert.seriesBy !== undefined) return alert.seriesBy;
-  return alert.sources.length > 1 ? "service" : undefined;
+/** The fields an alert's series is made of, when it groups (one incident per series). */
+export function seriesFields(alert: AlertDef): readonly string[] | undefined {
+  if (alert.seriesBy !== undefined) {
+    return typeof alert.seriesBy === "string" ? [alert.seriesBy] : alert.seriesBy;
+  }
+  return alert.sources.length > 1 ? ["service"] : undefined;
+}
+
+/** The series column: one field, or several joined with `/` so each combination is a series. */
+function seriesExpression(fields: readonly string[]): string {
+  const [only] = fields;
+  if (only === undefined) throw new QueryError("seriesBy names no field");
+  if (fields.length === 1) return str(only);
+  return `concat(${fields.map(str).join(", '/', ")})`;
 }
 
 /**
@@ -130,8 +140,8 @@ export function renderSql(alert: AlertDef, numbers: Readonly<Record<string, numb
   } else {
     throw new QueryError("unknown query kind");
   }
-  const series = seriesField(alert);
-  const select = series === undefined ? "" : `, ${str(series)} AS series`;
+  const series = seriesFields(alert);
+  const select = series === undefined ? "" : `, ${seriesExpression(series)} AS series`;
   const group = series === undefined ? "time" : "time, series";
   return `SELECT {{time}} AS time${select}, ${value} AS value FROM {{source}} WHERE ${where.join(" AND ")} GROUP BY ${group}`;
 }

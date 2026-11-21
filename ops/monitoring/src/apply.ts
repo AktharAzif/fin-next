@@ -8,7 +8,7 @@
 //   - the dry-run difference is always printed before anything changes (MA-01);
 //   - the tokens must belong to the environment's team, `fin-<env>` (MA-02);
 //   - more than 3 deletions and pauses together need --confirm-delete <count> equal to their
-//     number (MA-03);
+//     number (MA-03; a dry run, which deletes nothing, only notes it and still reports drift);
 //   - a heartbeat the files drop is paused with a reason, never deleted (MA-04);
 //   - no object without a policy, and nothing in staging that calls, texts or pushes (MA-05,
 //     MA-06); no ai_sre member (MA-08); every overlay key the files name has a value (MA-10);
@@ -84,7 +84,11 @@ export interface ApplyResult {
   readonly paused: number;
   readonly delivered: number;
   readonly undelivered: readonly string[];
-  /** Whether the files and Better Stack differed (the daily dry run reports this as drift). */
+  /**
+   * Whether Better Stack differs from the files, the daily dry run's drift: what a dry run or a
+   * refused run found (a refusal never hides it), and true after a real run that stopped partway.
+   * A real run that applied everything leaves no drift.
+   */
   readonly drift: boolean;
 }
 
@@ -350,10 +354,15 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     splitSources: flags.splitSources,
   };
   const desired = buildDesired(config, settings);
-  // Better Stack's refusals are printed through the mask, never thrown past it.
+  // Better Stack's refusals, and calls that got no answer, are printed through the mask, never
+  // thrown past it.
   const refusedBy = (error: unknown): boolean => {
     if (!(error instanceof BetterStackError)) return false;
-    out(`monitoring apply: Better Stack refused ${error.message}`);
+    out(
+      error.status === 0
+        ? `monitoring apply: a Better Stack call failed: ${error.message}`
+        : `monitoring apply: Better Stack refused ${error.message}`,
+    );
     return true;
   };
   let remote: Awaited<ReturnType<typeof readRemote>>;
@@ -370,6 +379,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     ...(flags.confirmDelete === undefined ? {} : { confirmDelete: flags.confirmDelete }),
     headerValues: monitorHeader !== undefined,
     today,
+    dryRun: flags.dryRun,
   });
 
   // MA-01: the difference is printed before anything changes.
@@ -379,20 +389,29 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     out("  note: the monitor header's value was not read, so it was not compared");
   if (plan.refusals.length > 0) {
     out(plan.refusals.map((r) => `refused: ${r}`).join("\n"));
-    return result;
+    return { ...result, drift: plan.drift };
   }
   if (flags.dryRun) {
-    const drift = plan.actions.length > 0;
-    out(`dry run: nothing changed${drift ? " (differences found)" : ""}`);
-    return { ...result, drift, exitCode: 0 };
+    out(`dry run: nothing changed${plan.drift ? " (differences found)" : ""}`);
+    return { ...result, drift: plan.drift, exitCode: 0 };
   }
 
-  // Apply, parents first. A refusal stops the writes; whatever was created before it still has
-  // its secrets delivered, since a second run would find those objects and deliver nothing.
+  // Apply, parents first. Anything that stops the writes (a refusal, a call with no answer, a
+  // fault in the run itself) still leaves whatever was created before it with its secrets
+  // delivered, since a second run would find those objects and deliver nothing.
   const ids = new Map<string, string>();
   for (const object of remote.objects.values()) ids.set(`${object.kind}:${object.key}`, object.id);
   const createdResources: Delivery[] = [];
   let failed = false;
+  // A fault that is not Better Stack's is rethrown once the secrets are delivered.
+  let fault: { readonly error: unknown } | undefined;
+  const stoppedBy = (error: unknown) => {
+    failed = true;
+    if (refusedBy(error)) return;
+    fault = { error };
+    const name = error instanceof Error ? error.name : typeof error;
+    out(`monitoring apply: stopped by an unexpected ${name}`);
+  };
   try {
     const byKind = (a: Action) =>
       KIND_ORDER.indexOf(a.op === "create" || a.op === "update" ? a.object.kind : "heartbeat");
@@ -434,8 +453,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       out(`paused ${action.remote.kind} ${action.remote.key}: ${action.reason}`);
     }
   } catch (error) {
-    if (!refusedBy(error)) throw error;
-    failed = true;
+    stoppedBy(error);
   }
 
   // Hand the new secrets to their services, never printing one.
@@ -453,8 +471,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
           resource: await client.get(`${pathFor(object, ids)}/${encodeURIComponent(id)}`),
         });
       } catch (error) {
-        if (!refusedBy(error)) throw error;
-        failed = true;
+        stoppedBy(error);
         break;
       }
     }
@@ -462,13 +479,14 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   await deliverAll(ctx, toDeliver, result);
   if (result.undelivered.length > 0) {
     out(
-      `not delivered (set these sealed variables by a registered run):\n  ${result.undelivered.join("\n  ")}`,
+      `not delivered (set these sealed variables with a registered pnpm fin monitoring apply ${ctx.env} --redeliver):\n  ${result.undelivered.join("\n  ")}`,
     );
   }
   out(
     `${failed ? "stopped after" : "applied"}: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted, ${result.paused} paused, ${result.delivered} secret(s) delivered`,
   );
-  return { ...result, exitCode: failed ? 1 : 0 };
+  if (fault !== undefined) throw fault.error;
+  return { ...result, drift: failed, exitCode: failed ? 1 : 0 };
 }
 
 /** The command ops/fin's dispatcher registers. */

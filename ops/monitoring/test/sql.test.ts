@@ -89,6 +89,20 @@ describe("renderSql", () => {
       "JSONExtractString(raw, 'target') AS series",
     );
   });
+
+  it("joins several series fields into one series, so each combination is its own incident", () => {
+    const sql = renderSql({
+      ...base,
+      sources: ["watcher"],
+      seriesBy: ["check", "target", "detail"],
+    });
+    expect(sql).toContain(
+      "concat(JSONExtractString(raw, 'check'), '/', JSONExtractString(raw, 'target'), '/', JSONExtractString(raw, 'detail')) AS series",
+    );
+    expect(sql).toContain("GROUP BY time, series");
+    expect(() => renderSql({ ...base, seriesBy: [] })).toThrow(QueryError);
+    expect(() => renderSql({ ...base, seriesBy: ["target", "it's"] })).toThrow(QueryError);
+  });
 });
 
 describe("conditions", () => {

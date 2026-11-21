@@ -8,7 +8,8 @@
 // also serves Errors.
 //
 // Nothing here prints. Errors carry the method, the path, the status and Better Stack's own error
-// strings, never a request body, a header or a token.
+// strings, never a request body, a header or a token. A call that gets no answer (a dropped
+// connection, the timeout) is a BetterStackError too, with status 0; a read is tried twice.
 
 export const HOSTS = {
   telemetry: "https://telemetry.betterstack.com",
@@ -128,30 +129,51 @@ export class BetterStackClient {
 
   async #send(method: string, url: string, body?: unknown): Promise<unknown> {
     const parsed = new URL(url);
+    const where = `${method} ${redactPath(parsed.pathname)}`;
     if (parsed.origin !== this.#base) {
       // Never send the token to another origin, whatever a pagination link says.
-      throw new BetterStackError(
-        `refused to call another origin (${method} ${redactPath(parsed.pathname)})`,
+      throw new BetterStackError(`refused to call another origin (${where})`, 0);
+    }
+    // A dropped connection or the timeout becomes a BetterStackError like any refusal, so the
+    // apply stops the same way (and delivers what it made). Its own text is never kept: it can
+    // name the URL, which holds IDs.
+    const noAnswer = (error: unknown) =>
+      new BetterStackError(
+        `${where} ${isRecord(error) && error.name === "TimeoutError" ? "timed out" : "got no answer"}`,
         0,
       );
-    }
-    const attempt = async (): Promise<Response> =>
-      this.#fetch(url, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.#token}`,
-          Accept: "application/json",
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-        redirect: "error",
-      });
+    const attempt = async (): Promise<Response | BetterStackError> => {
+      try {
+        return await this.#fetch(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.#token}`,
+            Accept: "application/json",
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+          redirect: "error",
+        });
+      } catch (error) {
+        return noAnswer(error);
+      }
+    };
+    // A read is tried twice; a write never is, since one that got no answer may have been made.
     let response = await attempt();
-    if (method === "GET" && (response.status === 429 || response.status >= 500)) {
+    if (
+      method === "GET" &&
+      (response instanceof BetterStackError || response.status === 429 || response.status >= 500)
+    ) {
       response = await attempt();
     }
-    const text = await response.text();
+    if (response instanceof BetterStackError) throw response;
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw noAnswer(error);
+    }
     let json: unknown;
     try {
       json = text === "" ? undefined : JSON.parse(text);
@@ -161,7 +183,7 @@ export class BetterStackClient {
     if (!response.ok) {
       const detail = errorText(json);
       throw new BetterStackError(
-        `${method} ${redactPath(parsed.pathname)} answered ${response.status}${detail === "" ? "" : `: ${detail}`}`,
+        `${where} answered ${response.status}${detail === "" ? "" : `: ${detail}`}`,
         response.status,
       );
     }

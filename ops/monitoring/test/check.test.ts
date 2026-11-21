@@ -132,6 +132,63 @@ describe("monitoring:check refuses", () => {
     expect(found).toContainEqual("RT-02 staging-quiet has an ai_sre member");
   });
 
+  it("a watcher alert that does not open one incident per check, target and detail (MC-04)", () => {
+    const root = scratch();
+    edit(root, "alerts/platform.json", (j) => {
+      alert(j, "cloudflare-config-changed").seriesBy = "target";
+      delete alert(j, "tunnel-connectors").seriesBy;
+    });
+    edit(root, "alerts/email.json", (j) => {
+      alert(j, "email-setting-changed").seriesBy = ["target", "detail"];
+    });
+    const found = rules(root).filter((f) => f.includes("groups watcher.check_failed"));
+    const why = "so a failure that stands never hides a later, different one";
+    // The fragments are read in name order: email.json before platform.json.
+    expect(found).toEqual([
+      `MC-04 email-setting-changed: groups watcher.check_failed by target, detail, not by check, target, detail, ${why}`,
+      `MC-04 tunnel-connectors: groups watcher.check_failed by nothing, not by check, target, detail, ${why}`,
+      `MC-04 cloudflare-config-changed: groups watcher.check_failed by target, not by check, target, detail, ${why}`,
+    ]);
+  });
+
+  it("a staging-quiet whose step waits, or reaches anyone but the entire staging team (RT-02)", () => {
+    const cases: [string, Json, string][] = [
+      [
+        "no member",
+        { members: [] },
+        "RT-02 staging-quiet: its step must reach the entire staging team and no one else",
+      ],
+      [
+        "a webhook",
+        { members: [{ type: "all_webhook_integrations" }, { type: "all_slack_integrations" }] },
+        "RT-02 staging-quiet: its step must reach the entire staging team and no one else",
+      ],
+      [
+        "the on-call",
+        { members: [{ type: "current_on_call" }] },
+        "RT-02 staging-quiet: its step must reach the entire staging team and no one else",
+      ],
+      [
+        "the team and one more",
+        { members: [{ type: "entire_team" }, { type: "all_webhook_integrations" }] },
+        "RT-02 staging-quiet: its step must reach the entire staging team and no one else",
+      ],
+      [
+        "a wait",
+        { waitBefore: 315360000 },
+        "RT-02 staging-quiet: its step must notify at once (waitBefore 0)",
+      ],
+    ];
+    for (const [what, change, expected] of cases) {
+      const root = scratch();
+      edit(root, "policies.json", (j) => {
+        const step = (((j.policies as Json[])[0] as Json).steps as Json[])[0] as Json;
+        Object.assign(step, change);
+      });
+      expect(rules(root), what).toEqual([expected]);
+    }
+  });
+
   it("a literal threshold, window or grace (MC-11)", () => {
     const root = scratch();
     edit(root, "alerts/platform.json", (j) => {
