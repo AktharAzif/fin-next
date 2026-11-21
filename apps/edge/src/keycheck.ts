@@ -4,7 +4,9 @@
 //       checksum verifies with this deployment's salt, or the answer is 403 sandbox_key_required,
 //       before any lookup (Try it never sends anything else, spec 05 §9).
 //   13. `Authorization: Bearer <key>`: shape and checksum with this deployment's salt.
-//   14. The negative filter: a key ID found not to exist in the last 60 seconds is refused at once.
+//   14. The negative filter: a key ID found not to exist in the last 60 seconds is refused at once,
+//       counted for the address's refused-key window in this replica's memory (shed.ts), so it
+//       turns into 429 after as many refusals as a key ID with a row does.
 //   15. One statement: the record, the address's refused-key window and the live_keys switch.
 //   16. The constant-time compare across the pepper chain; revoked; expired; the allowlist. Every
 //       refusal is the same 401 (only `request_id` differs), or 429 once the address's refused-key
@@ -31,6 +33,7 @@ import {
 } from "@fin/keys";
 import type { FinContext } from "@fin/server/http";
 import type { Telemetry } from "@fin/server/telemetry";
+import type { LastUsed } from "./last-used.ts";
 import { FROM_DOCS_DETAIL, problemAnswer, UNAUTHENTICATED_DETAIL } from "./problems.ts";
 import { factsOf, timed } from "./request-line.ts";
 import { addressKey, type Shedder } from "./shed.ts";
@@ -50,6 +53,8 @@ export interface KeyCheckDeps {
   peppers: Keyring;
   salt: string;
   shedder: Shedder;
+  /** Step 23's gate: "last used" at most once a minute per key. */
+  lastUsed: LastUsed;
   clock: Clock;
   docsOrigin: string;
   telemetry: Telemetry;
@@ -79,6 +84,26 @@ function unauthenticated(c: FinContext, deps: KeyCheckDeps, reason: KeyReason): 
       facts.fromDocs === true
         ? `${UNAUTHENTICATED_DETAIL}${FROM_DOCS_DETAIL}`
         : UNAUTHENTICATED_DETAIL,
+  });
+}
+
+/** 429 past the address's refused-key window (spec 05 §3.7), the refusal's reason in the line only. */
+function refusedKeysLimited(
+  c: FinContext,
+  deps: KeyCheckDeps,
+  reason: KeyReason,
+  secondsLeft: number,
+): Response {
+  const facts = factsOf(c);
+  facts.keyReason = reason;
+  facts.rateLimited = true;
+  facts.violatedPolicies = ["refused_keys"];
+  c.set("outcome", "refused");
+  c.set("reason", "rate_limited");
+  return problemAnswer(c, deps.docsOrigin, {
+    code: "rate_limited",
+    extensions: { violated_policies: ["refused_keys"] },
+    headers: { "retry-after": String(secondsLeft) },
   });
 }
 
@@ -131,12 +156,19 @@ export async function checkKey(
   const key = pre.key;
   facts.keyId = key.id;
 
-  // 14: the negative filter.
-  if (deps.shedder.knownUnknown(key.id)) return { refused: unauthenticated(c, deps, "unknown") };
+  // 14: the negative filter, counted for the address's refused-key window without a statement.
+  const clientIp = c.get("ingress")?.clientIp;
+  const address = addressKey(clientIp);
+  if (deps.shedder.knownUnknown(key.id)) {
+    const seen = deps.shedder.refuse(address);
+    if (seen.count > REFUSED_KEYS_LIMIT) {
+      return { refused: refusedKeysLimited(c, deps, "unknown", seen.secondsLeft) };
+    }
+    return { refused: unauthenticated(c, deps, "unknown") };
+  }
 
   // 15: the one statement.
-  const clientIp = c.get("ingress")?.clientIp;
-  const refusedWindow = refusedWindowKey(addressHash(deps.peppers, addressKey(clientIp)));
+  const refusedWindow = refusedWindowKey(addressHash(deps.peppers, address));
   let lookup: Awaited<ReturnType<KeyStore["lookup"]>>;
   try {
     lookup = await timed(c, () => deps.store.lookup(key.id, refusedWindow));
@@ -144,6 +176,7 @@ export async function checkKey(
     deps.telemetry.log("key.lookup_failed", { code: errorCode(error) }, "error");
     return { refused: unavailable(c, deps, "key.lookup_failed") };
   }
+  deps.shedder.seenRefused(address, lookup.refusedCount);
 
   // 16: the compare, revocation, expiry and the allowlist.
   const judged = judgeKey({
@@ -169,18 +202,16 @@ export async function checkKey(
       );
       return { refused: unavailable(c, deps, "rate_limiter.failed") };
     }
-    if (count.count > REFUSED_KEYS_LIMIT) {
-      facts.keyReason = judged.reason;
-      facts.rateLimited = true;
-      facts.violatedPolicies = ["refused_keys"];
-      c.set("outcome", "refused");
-      c.set("reason", "rate_limited");
+    // The larger of the window in Postgres and what this replica answered from its filter.
+    const seen = deps.shedder.refuse(address, count.count);
+    if (seen.count > REFUSED_KEYS_LIMIT) {
       return {
-        refused: problemAnswer(c, deps.docsOrigin, {
-          code: "rate_limited",
-          extensions: { violated_policies: ["refused_keys"] },
-          headers: { "retry-after": String(count.secondsLeft) },
-        }),
+        refused: refusedKeysLimited(
+          c,
+          deps,
+          judged.reason,
+          count.count > REFUSED_KEYS_LIMIT ? count.secondsLeft : seen.secondsLeft,
+        ),
       };
     }
     return { refused: unauthenticated(c, deps, judged.reason) };

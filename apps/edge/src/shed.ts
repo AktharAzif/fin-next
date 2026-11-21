@@ -5,6 +5,13 @@
 // nothing about a person: it lives in process memory (the one exception to ARCHITECTURE principle
 // 14) and every replica keeps its own. Rates and bursts are settings from the private overlay
 // ([OB-13]); the defaults below are for development and tests.
+//
+// A refusal the negative filter answers is still a refused key for the address's `refused_keys`
+// window (spec 05 §3.7): this replica counts it here, without a statement, beside the count the
+// window in Postgres answered for the refusals that reached it, and judges 429 on the larger. So an
+// ID with no row reaches the window's 429 after the same number of refusals as one with a row, and
+// the status sequence never tells the two apart (§4.7, T05-08). It only ever turns a refusal into a
+// 429; it never lets a key through.
 import type { Clock } from "@fin/core";
 import { ConfigError } from "@fin/core";
 import { parseAddress } from "@fin/keys";
@@ -65,12 +72,27 @@ interface Bucket {
   at: number;
 }
 
+/** An address's refused keys in one fixed minute, as this replica knows them. */
+interface RefusedWindow {
+  minute: number;
+  count: number;
+}
+
+/** The refused-key window's count to judge, and the seconds left in its minute (at least 1). */
+export interface RefusedCount {
+  count: number;
+  secondsLeft: number;
+}
+
+const MINUTE_MS = 60_000;
+
 export class Shedder {
   readonly #settings: ShedSettings;
   readonly #clock: Clock;
   readonly #buckets = new Map<string, Bucket>();
   readonly #total: Bucket;
   readonly #unknown = new Map<string, number>();
+  readonly #refused = new Map<string, RefusedWindow>();
   shed = 0;
 
   constructor(settings: ShedSettings, clock: Clock) {
@@ -123,5 +145,44 @@ export class Shedder {
     if (until > this.#clock.now()) return true;
     this.#unknown.delete(keyId);
     return false;
+  }
+
+  /** This minute's window for the address, made (or restarted) as needed and kept newest last. */
+  #window(address: string, minute: number): RefusedWindow {
+    let window = this.#refused.get(address);
+    if (window === undefined || window.minute !== minute) window = { minute, count: 0 };
+    this.#refused.delete(address);
+    if (this.#refused.size >= this.#settings.maxEntries) {
+      const oldest = this.#refused.keys().next().value;
+      if (oldest !== undefined) this.#refused.delete(oldest);
+    }
+    this.#refused.set(address, window);
+    return window;
+  }
+
+  /**
+   * The database window's count for the address, as a lookup read it: this replica's count is never
+   * below it.
+   */
+  seenRefused(address: string, counted: number): void {
+    if (!Number.isSafeInteger(counted) || counted <= 0) return;
+    const window = this.#window(address, Math.floor(this.#clock.now() / MINUTE_MS));
+    window.count = Math.max(window.count, counted);
+  }
+
+  /**
+   * One more refused key for the address: `counted` is the database window's count after it when
+   * the refusal reached the database, and absent when the negative filter answered it. Answers the
+   * count to judge (spec 05 §3.7: past 30, 429) and the seconds left in this replica's minute.
+   */
+  refuse(address: string, counted = 0): RefusedCount {
+    const now = this.#clock.now();
+    const minute = Math.floor(now / MINUTE_MS);
+    const window = this.#window(address, minute);
+    window.count = Math.max(window.count + 1, Number.isSafeInteger(counted) ? counted : 0);
+    return {
+      count: window.count,
+      secondsLeft: Math.max(1, Math.ceil(((minute + 1) * MINUTE_MS - now) / 1000)),
+    };
   }
 }
