@@ -4,13 +4,21 @@
 // longest path prefix (whole segments) maps it, and the first glob of that entry's `tiers` map
 // that matches the path below the entry decides; an entry with a single `tier` uses that, and an
 // entry whose globs all miss gives S. Matching ignores case. The root entry (path "" or ".")
-// maps files at the repository root, only those it lists in `files` when it has that list.
+// maps files at the repository root, only those it lists in `files` when it has that list. A
+// control path written as a folder (`docs/review/`) covers the folder's own path as well as
+// everything below it, so a file or link put in the folder's place is a control path too.
 
+import { shownText } from "../display.ts";
 import { isJsonObject } from "../json.ts";
 import { isTier } from "../roles.ts";
 import type { Tier } from "../roles.ts";
 import { compileGlob, globError, matchesAny } from "./glob.ts";
 import type { Glob } from "./glob.ts";
+
+/** An image name (one repository path component), as release.yml pushes it. */
+const IMAGE_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+/** A static output's name, as release.yml names its artefact. */
+const STATIC_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export interface LayoutEntry {
   /** The entry's path as written, without a trailing slash; "" for the root entry. */
@@ -33,7 +41,11 @@ export interface Layout {
   readonly controlPaths: readonly Glob[];
 }
 
-export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout";
+/**
+ * Where a path's tier came from. `not-documentation` is a path the layout calls D that is not a
+ * documentation file (plan.ts): tier D is documentation (EXECUTION §1.7), so it counts as S.
+ */
+export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout" | "not-documentation";
 
 export interface PathTier {
   readonly tier: Tier;
@@ -73,10 +85,16 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
         errors.push(`controlPaths[${index}] must be a non-empty string`);
         return;
       }
-      const pattern = item.endsWith("/") ? `${item}**` : item;
-      const problem = globError(pattern);
-      if (problem !== null) errors.push(`controlPaths[${index}]: ${problem}`);
-      else controlPaths.push(compileGlob(pattern));
+      // `dir/` is the folder's own path and everything below it.
+      const patterns = item.endsWith("/") ? [item.slice(0, -1), `${item}**`] : [item];
+      for (const pattern of patterns) {
+        const problem = globError(pattern);
+        if (problem !== null) {
+          errors.push(`controlPaths[${index}]: ${problem}`);
+          return;
+        }
+      }
+      for (const pattern of patterns) controlPaths.push(compileGlob(pattern));
     });
   }
   const entries: LayoutEntry[] = [];
@@ -111,11 +129,17 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
         }
       }
       const key = path.toLowerCase();
-      if (seenPaths.has(key)) errors.push(`${where}.path ${JSON.stringify(path)} appears twice`);
+      if (seenPaths.has(key)) errors.push(`${where}.path ${shownText(path)} appears twice`);
       seenPaths.add(key);
 
       for (const field of ["name", "kind", "image"] as const) {
         if (Object.hasOwn(raw, field) && typeof raw[field] !== "string") errors.push(`${where}.${field} must be a string`);
+      }
+      // Images and static outputs reach the plan document and release.yml's names, so they keep
+      // to a narrow grammar.
+      const rawImage = raw["image"];
+      if (typeof rawImage === "string" && !IMAGE_RE.test(rawImage)) {
+        errors.push(`${where}.image ${shownText(rawImage, 140)} is not an image name (lower-case letters, digits, . _ -)`);
       }
       let statics: string[] = [];
       const rawStatic = raw["static"];
@@ -123,6 +147,9 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
       else if (Array.isArray(rawStatic) && rawStatic.every((item) => typeof item === "string" && item !== "")) {
         statics = rawStatic as string[];
       } else if (Object.hasOwn(raw, "static")) errors.push(`${where}.static must be a string or an array of strings`);
+      for (const output of statics) {
+        if (!STATIC_RE.test(output)) errors.push(`${where}.static ${shownText(output, 80)} is not a static output name (lower-case letters, digits, -)`);
+      }
 
       const tiers: Array<{ glob: Glob; tier: Tier }> = [];
       let tier: Tier | null = null;
@@ -137,13 +164,13 @@ export function parseLayout(value: unknown): { ok: true; value: Layout } | { ok:
         for (const glob of Object.keys(rawTiers)) {
           // Integer-like keys would be reordered by JavaScript, losing "the first glob that matches".
           if (/^[0-9]+$/.test(glob)) {
-            errors.push(`${where}.tiers key ${JSON.stringify(glob)} is integer-like and would lose its order`);
+            errors.push(`${where}.tiers key ${shownText(glob)} is integer-like and would lose its order`);
             continue;
           }
           const problem = globError(glob);
           const value = rawTiers[glob];
           if (problem !== null) errors.push(`${where}.tiers: ${problem}`);
-          else if (!isTier(value)) errors.push(`${where}.tiers[${JSON.stringify(glob)}] must be S, N or D`);
+          else if (!isTier(value)) errors.push(`${where}.tiers[${shownText(glob)}] must be S, N or D`);
           else tiers.push({ glob: compileGlob(glob), tier: value });
         }
       } else if (Object.hasOwn(raw, "tiers")) errors.push(`${where}.tiers must be an object of glob to tier`);

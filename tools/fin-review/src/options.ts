@@ -6,6 +6,7 @@
 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { escapeText } from "./display.ts";
 import { ConfigError } from "./errors.ts";
 import { isJsonObject, readJsonFile } from "./json.ts";
 
@@ -146,20 +147,7 @@ export function displayValue(value: unknown): string {
   else if (typeof value === "object") text = "object";
   else if (typeof value === "function") text = "function";
   else text = String(value);
-  let out = "";
-  for (const ch of text) {
-    const code = ch.codePointAt(0) ?? 0;
-    let piece: string;
-    if (code >= 0x20 && code <= 0x7e) piece = ch;
-    else if (code <= 0xffff) piece = `\\u${code.toString(16).padStart(4, "0")}`;
-    else {
-      piece = "";
-      for (let i = 0; i < ch.length; i++) piece += `\\u${ch.charCodeAt(i).toString(16).padStart(4, "0")}`;
-    }
-    if (out.length + piece.length > MAX_VALUE_LENGTH) break;
-    out += piece;
-  }
-  return out;
+  return escapeText(text, MAX_VALUE_LENGTH);
 }
 
 function typeName(value: unknown): string {

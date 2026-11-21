@@ -41,6 +41,14 @@ describe("parseJsonStrict", () => {
     if (!result.ok) assert.deepEqual(result.duplicateKey, { path: "$.a", key: "model" });
   });
 
+  it("escapes a repeated key and its path in the message, keeping them whole in duplicateKey", () => {
+    const result = parseJsonStrict('{"x\\n::notice::y": {"k\\u001b]0;t\\u0007": 1, "k\\u001b]0;t\\u0007": 2}}');
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'duplicate key "k\\u001b]0;t\\u0007" in $.x\\u000a::notice::y');
+    assert.deepEqual(result.duplicateKey, { path: "$.x\n::notice::y", key: "k\u001b]0;t\u0007" });
+  });
+
   it("refuses what JSON refuses, and a byte order mark", () => {
     for (const text of [
       "",

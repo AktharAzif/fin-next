@@ -1,13 +1,20 @@
 // Command dispatch, argument parsing and exit codes (spec 07 §2.1, §2.2, §3.2, §3.5).
 //
 // Order of work for every command: load and validate the committed configuration (exit 78 on
-// any problem), parse the arguments, refuse (exit 64, one `fin-review: refused: <code>: <message>`
-// line per error) before anything else happens, then run.
+// any problem); for a command that resolves review options (every command but plan and help),
+// refuse an environment that holds a variable config/env-refusals.json names (exit 78,
+// `environment_refused`, §3.5 and §4.3); parse the arguments, refuse (exit 64, one
+// `fin-review: refused: <code>: <message>` line per error) before anything else happens, then run.
+// Every line printed from data the engine read (a path, a package name, a program's message) is
+// escaped first, so it can carry neither a terminal control sequence nor a new line that a CI log
+// would read as a workflow command.
 
 import { appendFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { loadEngineConfig } from "./config.ts";
 import type { EngineConfig } from "./config.ts";
+import { escapeText } from "./display.ts";
+import { checkEnvironment } from "./env-refusals.ts";
 import { ConfigError, DataError, EXIT, ProgramError } from "./errors.ts";
 import { ZERO_SHA, isSha } from "./git.ts";
 import { readJsonFile } from "./json.ts";
@@ -76,6 +83,17 @@ interface ParsedArgs {
 function refusal(code: RunErrorCode, message: string): Refusal {
   return { code, message };
 }
+
+/** The longest line printed from data the engine read. */
+const MAX_PRINTED_LINE = 4096;
+
+/** One printed line: escaped, so nothing it holds can start a new line or a control sequence. */
+function line(text: string): string {
+  return `${escapeText(text, MAX_PRINTED_LINE)}\n`;
+}
+
+/** Commands that do not resolve review options, so the environment check does not apply. */
+const ENVIRONMENT_UNCHECKED: ReadonlySet<string> = new Set(["plan", "help", "--help", "-h"]);
 
 function shown(value: string): string {
   return `"${displayValue(value)}"`;
@@ -176,18 +194,18 @@ export async function runCli(ctx: CliContext): Promise<number> {
     return await dispatch(ctx);
   } catch (error) {
     if (error instanceof ConfigError) {
-      for (const detail of error.details) ctx.stderr(`fin-review: config: ${error.file}: ${detail}\n`);
+      for (const detail of error.details) ctx.stderr(line(`fin-review: config: ${error.file}: ${detail}`));
       return EXIT.config;
     }
     if (error instanceof DataError) {
-      ctx.stderr(`fin-review: error: ${error.message}\n`);
+      ctx.stderr(line(`fin-review: error: ${error.message}`));
       return EXIT.data;
     }
     if (error instanceof ProgramError) {
-      ctx.stderr(`fin-review: error: ${error.message}\n`);
+      ctx.stderr(line(`fin-review: error: ${error.message}`));
       return EXIT.internal;
     }
-    ctx.stderr(`fin-review: internal error: ${error instanceof Error ? error.message : String(error)}\n`);
+    ctx.stderr(line(`fin-review: internal error: ${error instanceof Error ? error.message : String(error)}`));
     return EXIT.internal;
   }
 }
@@ -195,11 +213,20 @@ export async function runCli(ctx: CliContext): Promise<number> {
 async function dispatch(ctx: CliContext): Promise<number> {
   const loaded = loadEngineConfig(ctx.configDir);
   if (!loaded.ok) {
-    for (const problem of loaded.problems) ctx.stderr(`fin-review: config: ${problem.file}: ${problem.message}\n`);
+    for (const problem of loaded.problems) ctx.stderr(line(`fin-review: config: ${problem.file}: ${problem.message}`));
     return EXIT.config;
   }
   const config = loaded.value;
   const [command, ...rest] = ctx.argv;
+  if (command !== undefined && !ENVIRONMENT_UNCHECKED.has(command)) {
+    const refused = checkEnvironment(ctx.env, config.envRefusals);
+    if (refused.length > 0) {
+      for (const variable of refused) {
+        ctx.stderr(line(`fin-review: refused: environment_refused: ${variable.name} is set (${variable.kind}); unset it to run fin-review.`));
+      }
+      return EXIT.config;
+    }
+  }
   switch (command) {
     case "help":
     case "--help":
@@ -333,9 +360,9 @@ async function runPlan(ctx: CliContext, config: EngineConfig, tokens: readonly s
   if (refusals.length > 0 || head === null) return printRefusals(ctx, refusals);
 
   const result = await computePlan({ treeDir, event, base, head, config, env: ctx.env });
-  for (const note of result.notes) ctx.stderr(`fin-review: plan: ${note}\n`);
-  for (const problem of result.layoutProblems) ctx.stderr(`fin-review: plan: layout: ${problem}\n`);
-  if (result.workspaceProblem !== null) ctx.stderr(`fin-review: plan: workspace: ${result.workspaceProblem}\n`);
+  for (const note of result.notes) ctx.stderr(line(`fin-review: plan: ${note}`));
+  for (const problem of result.layoutProblems) ctx.stderr(line(`fin-review: plan: layout: ${problem}`));
+  if (result.workspaceProblem !== null) ctx.stderr(line(`fin-review: plan: workspace: ${result.workspaceProblem}`));
   if (ci && output !== undefined) {
     appendFileSync(resolve(ctx.cwd, output), planOutputLine(result.document));
   } else {

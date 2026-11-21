@@ -6,6 +6,8 @@
 // (spec 07 §2.4: one build machine's file system does) and treats a newline in a path as an
 // ordinary character.
 
+import { shownText } from "../display.ts";
+
 const GLOB_CHARS_RE = /^[A-Za-z0-9_.@+\-*?/]+$/;
 
 export interface Glob {
@@ -16,12 +18,12 @@ export interface Glob {
 /** Why `pattern` is not a glob this module accepts, or null when it is. */
 export function globError(pattern: unknown): string | null {
   if (typeof pattern !== "string" || pattern === "") return "a glob must be a non-empty string";
-  if (!GLOB_CHARS_RE.test(pattern)) return `glob ${JSON.stringify(pattern)} uses a character other than letters, digits, _ . @ + - * ? and /`;
+  if (!GLOB_CHARS_RE.test(pattern)) return `glob ${shownText(pattern, 200)} uses a character other than letters, digits, _ . @ + - * ? and /`;
   const segments = pattern.split("/");
   for (const segment of segments) {
-    if (segment === "") return `glob ${JSON.stringify(pattern)} has an empty segment`;
-    if (segment === "." || segment === "..") return `glob ${JSON.stringify(pattern)} has a . or .. segment`;
-    if (segment.includes("**") && segment !== "**") return `glob ${JSON.stringify(pattern)} uses ** inside a segment`;
+    if (segment === "") return `glob ${shownText(pattern, 200)} has an empty segment`;
+    if (segment === "." || segment === "..") return `glob ${shownText(pattern, 200)} has a . or .. segment`;
+    if (segment.includes("**") && segment !== "**") return `glob ${shownText(pattern, 200)} uses ** inside a segment`;
   }
   return null;
 }

@@ -1,31 +1,60 @@
-// The git output parsers and the program runner (spec 07 §2.1's process rules).
+// The git output parsers, the git calls and the program runner (spec 07 §2.1's process rules).
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
-import { runProgram } from "../src/exec.ts";
-import { gitEnv, isSha, parseCatFileBatch, parseLsTreeZ, parseNameStatusZ } from "../src/git.ts";
+import { resolveProgram, runProgram } from "../src/exec.ts";
+import { gitEnv, isSha, mergeBases, parseCatFileBatch, parseLsTreeZ, parseRawDiffZ, promisorRemote, readBlobs } from "../src/git.ts";
+import { FixtureRepo, fixtureEnv, runGit, tempDir } from "./helpers/git-fixture.ts";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
+const Z = "0".repeat(40);
+const POSIX = process.platform !== "win32";
 
-describe("parseNameStatusZ", () => {
-  it("reads every status, with renames and copies at both paths", () => {
-    const raw = ["M", "src/a.ts", "A", "new file.ts", "D", "gone\nwith newline.ts", "R087", "old/x.ts", "new/x.ts", "C100", "src/b.ts", "src/b copy.ts", "T", "link", ""].join("\0");
-    assert.deepEqual(parseNameStatusZ(Buffer.from(raw, "utf8")), [
-      { status: "M", score: null, path: "src/a.ts", oldPath: null },
-      { status: "A", score: null, path: "new file.ts", oldPath: null },
-      { status: "D", score: null, path: "gone\nwith newline.ts", oldPath: null },
-      { status: "R", score: 87, path: "new/x.ts", oldPath: "old/x.ts" },
-      { status: "C", score: 100, path: "src/b copy.ts", oldPath: "src/b.ts" },
-      { status: "T", score: null, path: "link", oldPath: null },
+describe("parseRawDiffZ", () => {
+  it("reads every status with both modes, renames and copies at both paths", () => {
+    const raw = [
+      `:100644 100644 ${A} ${B} M`, "src/a.ts",
+      `:000000 100644 ${Z} ${A} A`, "new file.ts",
+      `:100644 000000 ${A} ${Z} D`, "gone\nwith newline.ts",
+      `:100644 100644 ${A} ${B} R087`, "old/x.ts", "new/x.ts",
+      `:100644 100644 ${A} ${A} C100`, "src/b.ts", "src/b copy.ts",
+      `:100644 120000 ${A} ${B} T`, "link",
+      `:000000 160000 ${Z} ${B} A`, "vendor/sub",
+      "",
+    ].join("\0");
+    assert.deepEqual(parseRawDiffZ(Buffer.from(raw, "utf8")), [
+      { status: "M", score: null, path: "src/a.ts", oldPath: null, oldMode: "100644", newMode: "100644" },
+      { status: "A", score: null, path: "new file.ts", oldPath: null, oldMode: "000000", newMode: "100644" },
+      { status: "D", score: null, path: "gone\nwith newline.ts", oldPath: null, oldMode: "100644", newMode: "000000" },
+      { status: "R", score: 87, path: "new/x.ts", oldPath: "old/x.ts", oldMode: "100644", newMode: "100644" },
+      { status: "C", score: 100, path: "src/b copy.ts", oldPath: "src/b.ts", oldMode: "100644", newMode: "100644" },
+      { status: "T", score: null, path: "link", oldPath: null, oldMode: "100644", newMode: "120000" },
+      { status: "A", score: null, path: "vendor/sub", oldPath: null, oldMode: "000000", newMode: "160000" },
     ]);
-    assert.deepEqual(parseNameStatusZ(Buffer.alloc(0)), []);
+    assert.deepEqual(parseRawDiffZ(Buffer.alloc(0)), []);
   });
 
   it("refuses output it does not recognise", () => {
-    for (const raw of ["M\0a", "Z\0a\0", "R100\0only-one\0", "M\0", "MM\0a\0", "R1000\0a\0b\0"]) {
-      assert.throws(() => parseNameStatusZ(Buffer.from(raw, "utf8")), TypeError, JSON.stringify(raw));
+    for (const raw of [
+      `:100644 100644 ${A} ${B} M\0a`,
+      `:100644 100644 ${A} ${B} Z\0a\0`,
+      `:100644 100644 ${A} ${B} R100\0only-one\0`,
+      `:100644 100644 ${A} ${B} M\0`,
+      `:100644 100644 ${A} ${B} MM\0a\0`,
+      `:100644 100644 ${A} ${B} R1000\0a\0b\0`,
+      `:100644 100644 ${A} ${B} M90\0a\0`,
+      `:10064 100644 ${A} ${B} M\0a\0`,
+      `:100644 100644 ${A.slice(1)} ${B} M\0a\0`,
+      "M\0a\0",
+    ]) {
+      assert.throws(() => parseRawDiffZ(Buffer.from(raw, "utf8")), TypeError, JSON.stringify(raw));
     }
   });
 });
@@ -84,6 +113,92 @@ describe("gitEnv and isSha", () => {
   });
 });
 
+describe("mergeBases", () => {
+  let tmp: ReturnType<typeof tempDir>;
+  let repo: FixtureRepo;
+  before(() => {
+    tmp = tempDir("merge-bases");
+    repo = new FixtureRepo(tmp.dir);
+  });
+  after(() => tmp.cleanup());
+
+  it("finds one, several or no merge bases", async () => {
+    const env = fixtureEnv(tmp.dir);
+    const root = repo.commit(null, { "a.txt": "a\n" });
+    const left = repo.commit(root, { "l.txt": "l\n" });
+    const right = repo.commit(root, { "r.txt": "r\n" });
+    assert.deepEqual(await mergeBases(tmp.dir, left, right, env), [root]);
+    const one = repo.commit([left, right], {});
+    const two = repo.commit([right, left], {});
+    assert.deepEqual((await mergeBases(tmp.dir, one, two, env)).sort(), [left, right].sort());
+    const other = repo.commit(null, { "b.txt": "b\n" });
+    assert.deepEqual(await mergeBases(tmp.dir, left, other, env), []);
+    await assert.rejects(mergeBases(tmp.dir, "1".repeat(40), left, env), ProgramError);
+  });
+});
+
+describe("readBlobs in a blobless clone", () => {
+  let tmp: ReturnType<typeof tempDir>;
+  let source: FixtureRepo;
+  let clone: string;
+  let oids: string[];
+  const files = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`packages/p${i}/package.json`, `{"name":"@fin/p${i}","version":"1.0.${i}"}\n`]));
+
+  before(() => {
+    tmp = tempDir("partial");
+    const origin = join(tmp.dir, "origin");
+    mkdirSync(origin);
+    source = new FixtureRepo(origin);
+    const head = source.commit(null, files);
+    source.git(["update-ref", "refs/heads/main", head]);
+    source.git(["symbolic-ref", "HEAD", "refs/heads/main"]);
+    source.git(["config", "uploadpack.allowFilter", "true"]);
+    source.git(["config", "uploadpack.allowAnySHA1InWant", "true"]);
+    clone = join(tmp.dir, "clone");
+    runGit(tmp.dir, ["clone", "--quiet", "--filter=blob:none", "--no-checkout", `file://${origin}`, clone]);
+    oids = runGit(clone, ["ls-tree", "-r", "--format=%(objectname)", "origin/main"]).trim().split("\n");
+    assert.equal(oids.length, 20);
+  });
+  after(() => tmp.cleanup());
+
+  function promisorPacks(): number {
+    return readdirSync(join(clone, ".git", "objects", "pack")).filter((name) => name.endsWith(".promisor")).length;
+  }
+
+  it("fetches every missing blob in one request", async () => {
+    const env = fixtureEnv(tmp.dir);
+    assert.equal(await promisorRemote(clone, env), "origin");
+    const before = promisorPacks();
+    const read = await readBlobs(clone, oids, env);
+    assert.deepEqual(read.problems, []);
+    assert.equal(read.blobs.size, 20);
+    for (const [path, content] of Object.entries(files)) {
+      const oid = runGit(clone, ["rev-parse", `origin/main:${path}`]).trim();
+      assert.equal(read.blobs.get(oid)?.toString("utf8"), content, path);
+    }
+    assert.equal(promisorPacks() - before, 1, "one fetch, not one per object");
+  });
+
+  it("leaves out an object that is missing in a full repository, with no fetch", async () => {
+    const env = fixtureEnv(tmp.dir);
+    const origin = join(tmp.dir, "origin");
+    assert.equal(await promisorRemote(origin, env), null);
+    const read = await readBlobs(origin, [...oids.slice(0, 2), "9".repeat(40)], env);
+    assert.equal(read.blobs.size, 2);
+    assert.deepEqual(read.problems, []);
+  });
+
+  it("reports a failed fetch and returns what is present", async () => {
+    const env = fixtureEnv(tmp.dir);
+    const broken = join(tmp.dir, "broken");
+    runGit(tmp.dir, ["clone", "--quiet", "--filter=blob:none", "--no-checkout", `file://${join(tmp.dir, "origin")}`, broken]);
+    runGit(broken, ["remote", "set-url", "origin", `file://${join(tmp.dir, "nowhere")}`]);
+    const read = await readBlobs(broken, oids.slice(0, 3), env);
+    assert.equal(read.blobs.size, 0);
+    assert.match(read.problems[0] ?? "", /could not fetch 3 missing objects/);
+  });
+});
+
 describe("runProgram", () => {
   const node = process.execPath;
   const base = { cwd: process.cwd(), env: { PATH: process.env["PATH"] ?? "" }, timeoutMs: 10_000, maxOutputBytes: 1 << 20 };
@@ -120,5 +235,125 @@ describe("runProgram", () => {
     await assert.rejects(runProgram("git; rm", [], base), TypeError);
     await assert.rejects(runProgram("git", ["a\0b"], base), TypeError);
     await assert.rejects(runProgram("git", [], { ...base, timeoutMs: 0 }), TypeError);
+    await assert.rejects(runProgram("git", [], { ...base, maxOutputBytes: 0 }), TypeError);
+    await assert.rejects(runProgram("bin/git", [], base), ProgramError, "a relative path would resolve against the working directory");
+  });
+
+  describe("a grandchild that holds the output pipes", () => {
+    let tmp: ReturnType<typeof tempDir>;
+    before(() => {
+      tmp = tempDir("grandchild");
+    });
+    after(() => tmp.cleanup());
+
+    /** A node script that starts a grandchild sharing its stdio, records the grandchild's pid, then `then`. */
+    function parentScript(pidFile: string, grandchild: string, then: string): string[] {
+      const script = `
+        const { spawn } = require("node:child_process");
+        const { writeFileSync } = require("node:fs");
+        const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "inherit" });
+        writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+        ${then}
+      `;
+      return ["-e", script];
+    }
+
+    async function gone(pid: number): Promise<boolean> {
+      for (let i = 0; i < 100; i++) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    }
+
+    it("a timeout settles the call at once and kills the grandchild too", async () => {
+      const pidFile = join(tmp.dir, "hang.pid");
+      const started = performance.now();
+      await assert.rejects(
+        runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", "setInterval(() => {}, 1000);"), { ...base, timeoutMs: 400 }),
+        (error: unknown) => error instanceof ProgramError && /timed out after 400 ms/.test(error.message),
+      );
+      assert.ok(performance.now() - started < 3000, `settled after ${Math.round(performance.now() - started)} ms`);
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      if (POSIX) assert.equal(await gone(pid), true, "the grandchild was killed with the group");
+      else process.kill(pid);
+    });
+
+    it("a program that exits while its grandchild keeps the pipes open settles at the timeout", async () => {
+      const pidFile = join(tmp.dir, "exit.pid");
+      const started = performance.now();
+      await assert.rejects(
+        runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", "process.exit(0);"), { ...base, timeoutMs: 500 }),
+        (error: unknown) => error instanceof ProgramError && /timed out/.test(error.message),
+      );
+      assert.ok(performance.now() - started < 3000);
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      if (POSIX) assert.equal(await gone(pid), true);
+      else process.kill(pid);
+    });
+
+    it("the output cap settles the call too", async () => {
+      const pidFile = join(tmp.dir, "cap.pid");
+      await assert.rejects(
+        runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", "process.stdout.write('x'.repeat(5000)); setInterval(() => {}, 1000);"), { ...base, maxOutputBytes: 1000 }),
+        (error: unknown) => error instanceof ProgramError && /more than 1000 bytes/.test(error.message),
+      );
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      if (POSIX) assert.equal(await gone(pid), true);
+      else process.kill(pid);
+    });
+
+    it("an engine that is interrupted takes its running programs with it", { skip: !POSIX }, async () => {
+      const pidFile = join(tmp.dir, "engine.pid");
+      const exec = fileURLToPath(new URL("../src/exec.ts", import.meta.url));
+      const engine = `
+        import { runProgram } from ${JSON.stringify(exec)};
+        const script = ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)};
+        await runProgram(process.execPath, ["-e", script], { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, timeoutMs: 60000, maxOutputBytes: 1024 });
+      `;
+      const child = spawn(node, ["--input-type=module", "-e", engine], { stdio: "ignore" });
+      for (let i = 0; i < 200 && !existsSync(pidFile); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.ok(existsSync(pidFile), "the program started");
+      const exited = new Promise<NodeJS.Signals | null>((resolve) => child.on("exit", (_code, signal) => resolve(signal)));
+      child.kill("SIGTERM");
+      assert.equal(await exited, "SIGTERM", "the engine still ends by the signal");
+      assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true, "its program did not outlive it");
+    });
+  });
+
+  describe("finding the program", () => {
+    let tmp: ReturnType<typeof tempDir>;
+    before(() => {
+      tmp = tempDir("resolve");
+      for (const dir of ["tree", "tree/node_modules/.bin", "bin"]) mkdirSync(join(tmp.dir, dir), { recursive: true });
+      for (const path of ["tree/planted", "tree/node_modules/.bin/planted", "bin/planted"]) {
+        writeFileSync(join(tmp.dir, path), "#!/bin/sh\necho planted\n");
+        chmodSync(join(tmp.dir, path), 0o755);
+      }
+    });
+    after(() => tmp.cleanup());
+
+    it("never runs a program from the working directory or below it", { skip: !POSIX }, async () => {
+      const tree = join(tmp.dir, "tree");
+      for (const path of [".", "", tree, join(tree, "node_modules", ".bin"), "node_modules/.bin"]) {
+        const env = { PATH: `${path}:/usr/bin:/bin` };
+        assert.equal(resolveProgram("planted", env, tree), null, JSON.stringify(path));
+        await assert.rejects(runProgram("planted", [], { ...base, cwd: tree, env }), ProgramError, JSON.stringify(path));
+      }
+      const bin = join(tmp.dir, "bin");
+      assert.equal(resolveProgram("planted", { PATH: `.:${bin}` }, tree), join(bin, "planted"));
+      const run = await runProgram("planted", [], { ...base, cwd: tree, env: { PATH: `.:${bin}` } });
+      assert.equal(run.stdout.toString("utf8"), "planted\n");
+    });
+
+    it("looks git up on PATH like any other program", async () => {
+      const git = resolveProgram("git", { PATH: process.env["PATH"] ?? "" }, tmp.dir);
+      assert.ok(git !== null && git.endsWith("git"));
+      assert.equal(resolveProgram("git", { PATH: "" }, tmp.dir), null);
+    });
   });
 });
