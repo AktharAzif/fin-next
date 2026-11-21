@@ -1078,8 +1078,8 @@ describe("imports:check", () => {
     // Vite strips a leading U+FEFF before it parses a package.json, so the map applies.
     const bom = makeRepo({
       "tools/layout.json": layout,
-      "apps/console/src/client/package.json": `﻿${mapped}`,
-      "packages/icons/package.json": `﻿${JSON.stringify({ name: "@fin/icons", main: "./test/sink.ts" })}`,
+      "apps/console/src/client/package.json": `\uFEFF${mapped}`,
+      "packages/icons/package.json": `\uFEFF${JSON.stringify({ name: "@fin/icons", main: "./test/sink.ts" })}`,
     });
     assert.deepEqual(
       checkImports(bom)
@@ -1095,7 +1095,7 @@ describe("imports:check", () => {
       "tools/layout.json": layout,
       "apps/console/src/client/package.json": `${mapped.slice(0, -1)},}`,
       "packages/ui/package.json": "[]",
-      "packages/frame/package.json": `﻿﻿${mapped}`,
+      "packages/frame/package.json": `\uFEFF\uFEFF${mapped}`,
     });
     assert.deepEqual(
       checkImports(broken)

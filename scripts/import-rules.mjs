@@ -1817,7 +1817,7 @@ function readManifests(root, listed) {
     /** @type {unknown} */
     let manifest;
     try {
-      manifest = JSON.parse(readFileSync(join(root, path), "utf8").replace(/^﻿/, ""));
+      manifest = JSON.parse(readFileSync(join(root, path), "utf8").replace(/^\uFEFF/, ""));
     } catch {
       manifest = undefined;
     }
