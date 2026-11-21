@@ -4,7 +4,12 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { BundleError, bundle, rewriteImports } from "../deploy/bundle.ts";
-import { DeployError, type WatcherDeployContext, watcherDeploy } from "../deploy/deploy.ts";
+import {
+  DeployError,
+  NoAnswerError,
+  type WatcherDeployContext,
+  watcherDeploy,
+} from "../deploy/deploy.ts";
 import { ACCOUNT, EGRESS, HOSTS, healthyWorld, settingsFor, ZONE } from "./world.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -282,6 +287,27 @@ describe("watcher deploy", () => {
     await expect(
       watcherDeploy({ ...ctx, environ: { ...environ, FIN_WATCHER_CF_TOKEN_FILE: stranger } }),
     ).rejects.toThrow(/not a token of this account/);
+  });
+
+  it("reports a Cloudflare call that got no answer as such, never as a refused token", async () => {
+    for (const [failure, said] of [
+      [new TypeError("fetch failed"), "got no answer"],
+      [new DOMException("The operation was aborted due to timeout", "TimeoutError"), "timed out"],
+    ] as const) {
+      for (const endpoint of ["/tokens/verify", `/tokens/${TOKEN_ID}`]) {
+        const apis = fakeApis();
+        const fetch = async (input: string, init?: RequestInit) => {
+          if (new URL(input).pathname.endsWith(endpoint)) throw failure;
+          return apis.fetch(input, init);
+        };
+        const { ctx } = await context(fetch);
+        const run = watcherDeploy(ctx);
+        await expect(run).rejects.toThrow(NoAnswerError);
+        await expect(run).rejects.toThrow(
+          new RegExp(`^GET /accounts/<account>/tokens/(verify|<token>) ${said}$`),
+        );
+      }
+    }
   });
 
   it("refuses a Better Stack name that two sources share", async () => {

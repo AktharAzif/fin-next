@@ -17,8 +17,9 @@ export type CheckName = (typeof CHECK_NAMES)[number];
 
 /**
  * One failure: which check, what it was about (a role or a fin-next name, never an ID or a
- * hostname), and a code. Alerts open one incident per target, so a failure that can stand for a
- * while has a target of its own and never hides a later, different one.
+ * hostname), and a code. Alerts open one incident per check, target and detail together
+ * (ops/monitoring's catalogue holds them to it), so a failure that stands for a while never hides
+ * a later, different one.
  */
 export interface Failure {
   readonly check: CheckName;

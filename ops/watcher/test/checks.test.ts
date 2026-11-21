@@ -595,6 +595,45 @@ describe("email", () => {
     dmarc(world, "auth").content = '"v=DMARC1; " "P=Reject; rua=mailto:dmarc@example.com"';
     expect(await run(email, world)).toEqual([]);
   });
+
+  it("fails on a record that repeats a tag, whichever value comes last (RFC 6376 §3.2)", async () => {
+    for (const content of [
+      "v=DMARC1; p=none; p=reject",
+      "v=DMARC1; p=none; rua=mailto:dmarc@example.org; p=reject",
+      "v=DMARC1; p=reject; pct=0; pct=100",
+      "v=DMARC1; p=reject; sp=none; sp=reject",
+      "v=DMARC1; p=reject; P=reject",
+    ]) {
+      const world = healthyWorld();
+      dmarc(world, "auth").content = `"${content}"`;
+      expect(details(await run(email, world)), content).toEqual([
+        "email/_dmarc.auth/dmarc_invalid",
+      ]);
+    }
+  });
+
+  it("fails on a record whose p is not the tag right after v, or whose tags are malformed", async () => {
+    for (const content of [
+      "v=DMARC1; rua=mailto:dmarc@example.org; p=reject",
+      "v=DMARC1; p=reject; junk",
+      "v=DMARC1;; p=reject",
+      "v=DMARC1; p=reject; 1x=y",
+    ]) {
+      const world = healthyWorld();
+      dmarc(world, "auth").content = `"${content}"`;
+      expect(details(await run(email, world)), content).toEqual([
+        "email/_dmarc.auth/dmarc_invalid",
+      ]);
+    }
+  });
+
+  it("accepts a trailing separator, and reports a record with no p as weak", async () => {
+    const world = healthyWorld();
+    dmarc(world, "auth").content = '"v=DMARC1; p=reject; adkim=s;"';
+    expect(await run(email, world)).toEqual([]);
+    dmarc(world, "auth").content = '"v=DMARC1; rua=mailto:dmarc@example.org"';
+    expect(details(await run(email, world))).toEqual(["email/_dmarc.auth/dmarc_weak"]);
+  });
 });
 
 describe("the zone lookup", () => {

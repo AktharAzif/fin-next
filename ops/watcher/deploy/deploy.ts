@@ -176,6 +176,12 @@ export function uploadForm(
   return form;
 }
 
+/**
+ * A Cloudflare call that got no answer (a dropped connection, the timeout): never mistaken for
+ * Cloudflare's own refusal, and never carrying the underlying error's text, which can name the URL.
+ */
+export class NoAnswerError extends DeployError {}
+
 class CloudflareWriter {
   readonly #token: string;
   readonly #fetch: Fetch;
@@ -185,16 +191,25 @@ class CloudflareWriter {
   }
   async call(method: string, path: string, body?: FormData | unknown): Promise<unknown> {
     const isForm = body instanceof FormData;
-    const response = await this.#fetch(`${API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.#token}`,
-        ...(body === undefined || isForm ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: isForm ? body : JSON.stringify(body) }),
-      signal: AbortSignal.timeout(60_000),
-      redirect: "error",
-    });
+    const shown = path
+      .replace(/\/accounts\/[^/]+/, "/accounts/<account>")
+      .replace(/\/tokens\/(?!verify\b)[^/?]+/, "/tokens/<token>");
+    let response: Response;
+    try {
+      response = await this.#fetch(`${API}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.#token}`,
+          ...(body === undefined || isForm ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: isForm ? body : JSON.stringify(body) }),
+        signal: AbortSignal.timeout(60_000),
+        redirect: "error",
+      });
+    } catch (error) {
+      const timedOut = isRecord(error) && error.name === "TimeoutError";
+      throw new NoAnswerError(`${method} ${shown} ${timedOut ? "timed out" : "got no answer"}`);
+    }
     let json: { success?: boolean; result?: unknown; errors?: { code?: number }[] } = {};
     try {
       json = (await response.json()) as typeof json;
@@ -203,9 +218,6 @@ class CloudflareWriter {
     }
     if (!response.ok || json.success === false) {
       const codes = (json.errors ?? []).map((e) => e.code).filter((c) => c !== undefined);
-      const shown = path
-        .replace(/\/accounts\/[^/]+/, "/accounts/<account>")
-        .replace(/\/tokens\/(?!verify\b)[^/?]+/, "/tokens/<token>");
       throw new DeployError(
         `${method} ${shown} answered ${response.status}${codes.length > 0 ? ` (${codes.join(",")})` : ""}`,
       );
@@ -232,7 +244,8 @@ export async function checkWatcherToken(
   let verified: unknown;
   try {
     verified = await watcher.call("GET", `/accounts/${accountId}/tokens/verify`);
-  } catch {
+  } catch (error) {
+    if (error instanceof NoAnswerError) throw error;
     throw new DeployError(
       "the watcher's token (FIN_WATCHER_CF_TOKEN_FILE) is not a token of this account: mint it with pnpm fin (CR-18)",
     );
@@ -251,7 +264,8 @@ export async function checkWatcherToken(
       "GET",
       `/accounts/${accountId}/tokens/${encodeURIComponent(verified.id)}`,
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof NoAnswerError) throw error;
     throw new DeployError(
       "the operator token cannot read the watcher token's permissions (it needs Account API Tokens Read)",
     );

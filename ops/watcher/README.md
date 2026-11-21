@@ -19,13 +19,20 @@ its settings are broken). A check that cannot read its API fails.
 | `rules` | in each phase `rules apply` writes, the hash of fin-next's own rules (ref `fin_next_`) equals the last registered run's; no `fin_next_` rule elsewhere; no other product's rule names a fin-next host | `cloudflare-config-changed` |
 | `zone` | spec 01 §7.6's settings, Universal SSL on, Bot Fight Mode off | `cloudflare-config-changed` |
 | `access` | Fin Admin's application (whole host, session, cookies, MFA) and its policy hash; no other application covers the admin host or a path under it | `cloudflare-config-changed` |
-| `email` | both sending domains with preview and drop-suppressed off; `_dmarc.auth.<zone>` and `_dmarc.notify.<zone>` each one DMARC record at `p=reject` (BD-17), with no weaker `sp` and no partial `pct` | `email-setting-changed` |
+| `email` | both sending domains with preview and drop-suppressed off; `_dmarc.auth.<zone>` and `_dmarc.notify.<zone>` each one valid DMARC record (`v=DMARC1` first, `p` right after it, no tag twice) at `p=reject` (BD-17), with no weaker `sp` and no partial `pct` | `email-setting-changed` |
 
 The account and the zone are shared with the old product's staging (FD-09). Its own Workers,
 routes, custom domains, Access applications, DNS records (the zone's apex `_dmarc` among them) and
 zone rules are not fin-next's and never fail a check, unless they reach one of fin-next's hosts.
-Every alert opens one incident per `target`, so a failure that can stand for a while (an unset
-version, say) has a target of its own and never hides a later, different one.
+Every alert opens one incident per `check`, `target` and `detail` together (the catalogue's
+`seriesBy` for `watcher.check_failed`, which `monitoring:check` holds every alert to), so a
+failure that stands for a while (an unset hash or version, a connector upgraded ahead of the
+settings, another product's object waiting for its owner) never hides a later, different one. The
+same failure again on the same target joins its open incident.
+
+Every list is read to its proven end (`src/cloudflare.ts`): every total a list gives must be
+reached, a cursor must run out, and a list with neither is read until a page adds nothing new. A
+read that cannot prove it reached the end fails the check (`api_error`).
 
 ## Settings and secrets
 
