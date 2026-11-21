@@ -3,7 +3,9 @@
 //   every box.
 // - A complete code is handed on once (onComplete), however often the boxes report it.
 // - After a wrong or expired code the whole code is selected again, so typing replaces it. That
-//   happens on a change into those statuses only: one that mounts expired leaves focus alone.
+//   happens on a change into those statuses only, where the person is (after a code they handed
+//   on, or with focus in the input): one that mounts expired, or a code that expires while they
+//   are elsewhere on the page, leaves focus alone.
 // - The sentence under the boxes says the status; resend has a cooldown that restarts after each
 //   send and reads "Sending" while it runs. The resend control stays in place throughout
 //   (disabled but focusable), so keyboard focus is never dropped; the cooldown is announced when
@@ -102,15 +104,19 @@ export function OTPInput(props: OTPInputProps) {
   }, [cooldown, resendable]);
 
   // A change into a wrong or expired code: select all of it, so the next digits replace it; and
-  // let the same code be handed on again if the person retypes it. Only on a change: an input
-  // that mounts in one of those statuses must not take focus from the page (or scroll to itself).
+  // let the same code be handed on again if the person retypes it. Only on a change, and only
+  // where the person is (they handed on a code, or focus is already in the input): an input that
+  // mounts in one of those statuses, or a code that expires while they are elsewhere on the page,
+  // must not take focus from the page (or scroll to itself).
   useEffect(() => {
     const before = previousStatus.current;
     previousStatus.current = status;
     if (before === status || (status !== "invalid" && status !== "expired")) return;
+    const here =
+      handed.current !== null || (root.current?.contains(document.activeElement) ?? false);
     handed.current = null;
     const input = root.current?.querySelector("input");
-    if (input instanceof HTMLInputElement) {
+    if (here && input instanceof HTMLInputElement) {
       input.focus();
       input.select();
     }

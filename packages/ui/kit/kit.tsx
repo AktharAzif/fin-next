@@ -257,6 +257,15 @@ function OtpDemo() {
       <span data-kit="otp-handed" className="text-caption text-text-tertiary">
         {handed.join(",")}
       </span>
+      {/* The code runs out while the person is elsewhere on the page (here, on this button). */}
+      <Button
+        variant="secondary"
+        size="sm"
+        data-kit="otp-expire"
+        onClick={() => setStatus("expired")}
+      >
+        Let the code expire
+      </Button>
       {/* Mounts expired, and its resend is refused (as a rate limit would be). */}
       <OTPInput
         label="Emailed code"

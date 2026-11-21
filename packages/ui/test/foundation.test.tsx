@@ -347,6 +347,17 @@ describe("CopyField", () => {
     expect(html).toContain("trf_7f3a9c21d4e8b6a0c1d2");
   });
 
+  it("is a Tab stop for its full value only when the value is cut short", () => {
+    // The tabindex 0 is the focusable span's; the copy button is a native button.
+    const tabStops = (html: string) => (html.match(/tabindex="0"/g) ?? []).length;
+    expect(
+      tabStops(render(<CopyField label="Transaction ID" value="trf_7f3a9c21d4e8b6a0c1d2" />)),
+    ).toBe(1);
+    const whole = render(<CopyField label="Region" value="eu-west" />);
+    expect(text(whole)).toContain("eu-west");
+    expect(tabStops(whole)).toBe(0);
+  });
+
   it("masks a secret until it is shown", () => {
     const html = render(<CopyField label="Signing secret" variant="secret" value="whsec_abc123" />);
     expect(html).not.toContain(">whsec_abc123<");

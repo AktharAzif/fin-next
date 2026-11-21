@@ -99,15 +99,20 @@ export function CopyField(props: CopyFieldProps) {
   const [revealed, setRevealed] = useState(false);
   if (variant === "inline") {
     const shown = middleTruncate(props.value, props.head, props.tail);
+    const truncated = shown !== props.value;
     return (
       <span
         data-slot="copy-field"
         data-variant="inline"
         className={cn("inline-flex h-8 items-center gap-1", props.className)}
       >
-        <Tooltip content={shown === props.value ? null : props.value} mono type="description">
-          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the full value is its tooltip, reachable by keyboard */}
-          <span tabIndex={0} className="rounded-xs font-mono text-mono text-text-primary">
+        <Tooltip content={truncated ? props.value : null} mono type="description">
+          {/* The full value is its tooltip, reached by keyboard: a Tab stop only when there is a
+              full value to show (a value shown whole has no tooltip, so focusing it does nothing). */}
+          <span
+            {...(truncated ? { tabIndex: 0 } : {})}
+            className="rounded-xs font-mono text-mono text-text-primary"
+          >
             {shown}
           </span>
         </Tooltip>

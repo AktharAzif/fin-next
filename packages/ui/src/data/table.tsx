@@ -128,6 +128,7 @@ const ROW_CONTROLS = "a[href], button, input, select, textarea, [tabindex], [con
  * roving focus, so Tab from that row reaches its own controls and the next Tab leaves the table.
  * Each control taken out keeps what it had in data-row-tabindex, and gets it back in the current
  * row. Rows' content is the screens', so this works on the DOM rather than on known components.
+ * It is idempotent, and it takes out again a control that React or the SDK made tabbable since.
  */
 function rovingControls(rows: readonly (HTMLTableRowElement | null)[], current: number): void {
   rows.forEach((row, index) => {
@@ -136,10 +137,15 @@ function rovingControls(rows: readonly (HTMLTableRowElement | null)[], current: 
       const saved = el.getAttribute("data-row-tabindex");
       if (index === current) {
         if (saved === null) continue;
-        if (saved === "") el.removeAttribute("tabindex");
-        else el.setAttribute("tabindex", saved);
+        // Give back what it had, unless something set a new tabindex since it was taken out.
+        if (el.getAttribute("tabindex") === "-1") {
+          if (saved === "") el.removeAttribute("tabindex");
+          else el.setAttribute("tabindex", saved);
+        }
         el.removeAttribute("data-row-tabindex");
-      } else if (saved === null && el.tabIndex >= 0) {
+      } else if (el.tabIndex >= 0) {
+        // Not yet taken out, or made tabbable again (a re-render that set its tabindex): keep what
+        // it has now, and take it out.
         el.setAttribute("data-row-tabindex", el.getAttribute("tabindex") ?? "");
         el.setAttribute("tabindex", "-1");
       }
@@ -161,11 +167,31 @@ export function Table<Row>(props: TableProps<Row>) {
     if (focusIndex >= props.rows.length) setFocusIndex(Math.max(0, props.rows.length - 1));
   }, [focusIndex, props.rows.length]);
   const opens = props.onRowClick !== undefined || props.getRowHref !== undefined;
-  // After every render: rows, sorting or the current row may have changed. Only when rows take
-  // focus; otherwise the controls stay in the Tab order, the only way to reach them.
+  // Only when rows take focus; otherwise the controls stay in the Tab order, the only way to reach
+  // them. After every render (rows, sorting or the current row may have changed), and whenever the
+  // body's content changes without one (a cell that mounts a control from its own state, or sets a
+  // tabindex again), through the latest render's rows.
+  const bodyRef = useRef<HTMLTableSectionElement>(null);
+  const applyRoving = useRef<() => void>(() => {});
   useEffect(() => {
-    if (opens) rovingControls(rowRefs.current.slice(0, props.rows.length), focusIndex);
+    applyRoving.current = () => {
+      if (opens) rovingControls(rowRefs.current.slice(0, props.rows.length), focusIndex);
+    };
+    applyRoving.current();
   });
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!opens || body === null || typeof MutationObserver === "undefined") return;
+    // Its own changes call it once more, which changes nothing (rovingControls is idempotent).
+    const observer = new MutationObserver(() => applyRoving.current());
+    observer.observe(body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["tabindex"],
+    });
+    return () => observer.disconnect();
+  }, [opens]);
 
   const open = (row: Row, event?: MouseEvent | KeyboardEvent) => {
     if (props.onRowClick !== undefined) {
@@ -371,7 +397,7 @@ export function Table<Row>(props: TableProps<Row>) {
               })}
             </tr>
           </thead>
-          <tbody>{body}</tbody>
+          <tbody ref={bodyRef}>{body}</tbody>
         </table>
       </div>
       {status === "refreshing" ? (
