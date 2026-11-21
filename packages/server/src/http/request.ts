@@ -25,7 +25,8 @@ export function routeTemplate(c: FinContext): string {
   const routes = matchedRoutes(c);
   for (let i = routes.length - 1; i >= 0; i--) {
     const route = routes[i];
-    if (route !== undefined && route.method !== "ALL") return route.path;
+    // Middleware is registered on every path (`*`); a route has a pattern of its own.
+    if (route !== undefined && route.path !== "*" && route.path !== "/*") return route.path;
   }
   return "unmatched";
 }

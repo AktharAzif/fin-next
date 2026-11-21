@@ -17,6 +17,13 @@ export interface IngressFacts {
   cfRay: string | undefined;
 }
 
+/** The Cloudflare Access identity Fin Admin's API half verified on this request (spec 02 §10.5). */
+export interface AccessIdentity {
+  sub: string;
+  /** Personal data (PD-4): compared with the staff table, never logged (a withheld field name). */
+  email: string;
+}
+
 export interface FinVariables {
   requestId: string;
   outcome: Outcome | undefined;
@@ -24,6 +31,8 @@ export interface FinVariables {
   errorId: string | undefined;
   actor: Actor;
   ingress: IngressFacts | undefined;
+  /** Set on Fin Admin's API half once the Access token is valid. */
+  access: AccessIdentity | undefined;
   /** The route template for the request line, when a layer knows it better than the router. */
   route: string | undefined;
 }

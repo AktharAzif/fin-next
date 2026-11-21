@@ -1,0 +1,26 @@
+{
+  "name": "@fin/web-host",
+  "private": true,
+  "type": "module",
+  "description": "The API host the app services share (ingress, origin gate, Access, problems, API headers) and the static hosts' header profiles with their renderer.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./static": "./src/static/render.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fin/core": "workspace:*",
+    "@fin/server": "workspace:*",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
