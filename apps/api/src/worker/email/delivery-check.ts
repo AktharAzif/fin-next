@@ -19,11 +19,16 @@
 // - In the check's transaction, `email.enqueue()` reads `email.template_grant`, in `email`, where
 //   every sending service has USAGE. It also joins `pg_catalog.pg_roles`, a view on `pg_authid` and
 //   `pg_db_role_setting`, which any login can name. A hold on any of these fails the run with 55P03
-//   after LOCK_TIMEOUT. While the hold lasts, every other service's `email.enqueue()` waits as well.
+//   after LOCK_TIMEOUT. Every other service's `email.enqueue()` waits behind the hold as well, and
+//   fails with 55P03 when its own lock timeout (the bootstrap's 5 s role default) runs out.
 // - The run's second transaction writes `ops.duty_state`, in `ops`, where every service has USAGE.
 //   A hold there lets the check queue but stops its success being recorded, so the duty reads as
 //   failing.
-// worker.db.test.ts pins this list ("locks no relation outside email_private but ...").
+// worker.db.test.ts pins this list ("locks no relation outside email_private but ..."). Beyond it,
+// any login can hold a system catalog such as `pg_proc` the same way, and a run on a connection
+// whose catalog caches are cold (a new one, say) then waits on its first catalog lookup. The test
+// cannot see those locks, which a lookup lets go at once, and no schema closes this
+// (packages/email/README.md).
 // The wait is bounded all the same, so a stuck replica costs one failed run, never a pooled
 // connection held for long. The check is queued in the same transaction as its record. Each run then
 // records its result in `ops.duty_state` (spec 01 §6.10), the duty's last success that `fin_probe`

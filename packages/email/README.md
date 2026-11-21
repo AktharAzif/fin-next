@@ -27,17 +27,24 @@ schema-qualified. EXECUTE is revoked from PUBLIC and granted to the five sending
 sending service can name it.
 
 The schema keeps other logins off the worker's tables only. It does not stop them holding up the
-delivery check, the sender's digest flush, or any caller's `email.enqueue()`. Three ways remain, and
-`worker.db.test.ts` pins the list:
+delivery check, the sender's digest flush, or any caller's `email.enqueue()`. Three relations on the
+check's path stay where other logins can name them, and `worker.db.test.ts` pins the list:
 
 - `email.enqueue()` reads `email.template_grant`, which every sending service can name.
 - `email.enqueue()` joins `pg_catalog.pg_roles`, which any login can name.
 - The check records each run in `ops.duty_state`, and every service has USAGE on `ops`.
 
 Two sessions holding either relation that `email.enqueue()` reads make the check fail with `55P03`
-after its lock timeout. Every other enqueue, sign-in codes included, waits as long as the hold lasts.
-A hold on `ops.duty_state` lets the check queue but stops its success being recorded, so the duty
-reads as failing.
+after its lock timeout. Every other enqueue, sign-in codes included, waits behind the hold too, and
+fails with `55P03` when its own lock timeout runs out (5 s, the bootstrap's default for every
+service login). A hold on `ops.duty_state` lets the check queue but stops its success being
+recorded, so the duty reads as failing.
+
+No schema closes this. Any login, with no privilege at all, can hold a system catalog the same way
+(a PREPARE on `pg_catalog.pg_proc` in an open transaction, and a CREATE RULE on it queued behind
+that), and a connection whose catalog caches are still cold, such as a new one, then waits on its
+first catalog lookup. The test's list cannot show these: such a lookup lets its lock go at once.
+This is how Postgres works, not something particular to email.
 
 ## Layout
 
