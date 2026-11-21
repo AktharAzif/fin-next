@@ -1948,17 +1948,20 @@ then as the agents' user, with the owner's login, D6):
    `checkReceipt` from the engine copy for the head (D6). Either way it reads `gate`'s status for
    the head; both must pass.
 4. Runs the similarity check ([G-04]; its parameters and exceptions are [BD-29]'s, as the steward
-   ruled them): normalised lines (trimmed, internal whitespace collapsed; a line under 12
-   characters or without three letters in a row is trivial and ignored) of every file the pull
-   request adds or changes are compared with every text blob of the old product's whole history,
-   read from the location the environment variable `FIN_OLD_TREE` names on that machine (never
-   written into the repository, a log or a pull request). No file is skipped ([G-04] has no
-   exception). A run of 12 or more identical normalised lines (rule A); 30% or more of a file's
-   distinctive lines found in the old product, for a file of 10 or more non-trivial lines (rule B; a
-   line is distinctive when at most two distinct old file paths contain it); or, for a file of fewer
-   than 10 non-trivial lines, 3 or more matched distinctive lines making up 30% or more (rule C)
-   stops the ship. The following are reported by counts and do not stop the ship, by fin-next path
-   in the pull request's record (§7.4), each narrowly:
+   ruled them): normalised lines (as [BD-29] normalises them: Unicode-normalised, invisible
+   characters removed, look-alike letters folded, and what a formatter changes folded; a line under
+   12 characters or without three letters in a row is trivial and ignored, unless it carries data)
+   of every file the pull request adds or changes are compared with every text blob of the old
+   product's whole history, read from the location the environment variable `FIN_OLD_TREE` names on
+   that machine (never written into the repository, a log or a pull request). No file is skipped
+   ([G-04] has no exception). A run of 12 or more identical normalised lines (rule A); 30% or more
+   of a file's distinctive lines found in the old product, for a file of 10 or more non-trivial
+   lines (rule B; a line is distinctive when at most two old file lineages contain it, a rename
+   continuing its file); for a file of fewer than 10 non-trivial lines, 3 or more matched
+   distinctive lines making up 30% or more (rule C); or, in a `package.json`, 12 or more consecutive
+   non-dictated lines found in the old product (rule M) stops the ship. The following are reported
+   by counts and do not stop the ship, by fin-next path in the pull request's record (§7.4), each
+   narrowly:
    - a match wholly inside the assets [G-04] lets fin-next reuse as the canvases use them, as exact
      files: the token values (`packages/tokens/tokens.css` and
      `packages/tokens/export-pin/tokens.json`), the font files and their OFL notice
@@ -1968,10 +1971,15 @@ then as the agents' user, with the owner's login, D6):
      `apps/verify/public-selfie/favicon.svg` (spec 06 S6-27);
    - the root `pnpm-lock.yaml` only, as "generated" (pnpm's resolution of public registry
      metadata); no other generated file is exempt;
-   - lines inside the plan's fenced code blocks (plan-dictated): a run is exempt only when every
-     line in it is; for rules B and C they stay in the denominator and never count as matches;
-   - a file listed in a `THIRD_PARTY.json` manifest (package, version, upstream path, SHA-256)
-     whose content matches the pinned upstream release byte for byte, as "third-party";
+   - lines inside the plan's fenced code blocks (plan-dictated), and in a `package.json` the lines
+     [BD-29]'s manifest class dictates by position (the package's own name, `catalog:` and
+     `workspace:*` dependency entries, the test scripts `VITEST_SCRIPTS` requires and the standard
+     key lines): a run is exempt only when every line in it is; for rules B and C they stay in the
+     denominator and never count as matches;
+   - a file listed in a `THIRD_PARTY.json` manifest (package, version, upstream path, SHA-256) whose
+     content matches the pinned upstream release byte for byte, as "third-party"; a licence or
+     notice file whose npm release ships none may name instead the raw GitHub file at a pinned
+     commit, compared by SHA-256, as [BD-29] allows;
    - a file the steward accepts by path, pinned to its blob, recorded in [BD-29] with its blob,
      counts and reason; reported as "accepted"; any other version of the file is checked afresh.
    Any other match stops the ship, including one that runs past those assets into other lines of

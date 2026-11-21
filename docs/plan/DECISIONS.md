@@ -136,6 +136,7 @@ the blocks named.
 | about 03:25, partly superseded about 08:28 | The apps' UI is built on the UI SDK (vercel-labs/ui: `@ui-sdk/react` and `@ui-sdk/core`). fin-next's `packages/ui` implements the Fin design system on it; only the design system's token values and specifications are used; the old product's redesign branch is a reviewed starting point, ported through fin-review (superseded at about 08:28, when the owner answered [UI-12] no: nothing is ported, and the UI is built fresh from the canvases) | [UI-10], [UI-12], [G-04], [G-06] | [UI-01]'s vendoring of the design system's private, Radix-based source |
 | about 03:25 | The sidebar's collapse control is an edge toggle: a small round chevron on the sidebar's right edge near the top, always visible. The logo is a plain 24px mark linking Home, with no hover swap. Canvases now, code later | [UI-11] | Round 2's brand-cell hover swap ([UI-09]) |
 | about 03:50 | Each app's static build served by an assets-only Workers static assets deployment with no script. Per app host, a Workers route to it and a no-Worker route for `/api/*` that falls through to the tunnel, whose ingress matches the host and `^/api/`; Fin Admin the same on the admin tunnel, with Access over the whole host. No CORS between an app and its API. Host-only `__Host-` cookies, the session Strict and every other auth cookie Lax. CSRF by an exact Origin check, `Sec-Fetch-Site`, the `X-Fin-App` header and JSON-only bodies, under Better Auth's origin check with exact trusted origins. No code runs at Cloudflare. The spike first thing on Saturday, with per-app API hosts as the fallback. The docs assets-only too; `api.<zone>` straight to the tunnel; Try it cross-origin, without credentials, Sandbox keys only | [FD-17], [FD-18], [FD-13], [FD-05], [SA-43], [SA-44], [AP-10] | The 03:10 Origin Rules routing; the 03:00 Pages hosting; FW-C09's all-`Lax` cookies; [UI-05]'s cookies; the parts of FW-C02 to FW-C06, FW-C10, FW-C13 and FW-C16 that served files from Railway ([FW-01]) |
+| about 22:10 | Production uses the owner's existing production domain, with its already warmed sending reputation, its existing accounts and its vendor relationships ("we have all those items and email warmup, domain etc at" that domain, the owner's words to the plan's steward after the list of what production depends on) | [FD-10], [EM-08]; EXECUTION §0.3, §6 (H-11) | H-11's "production zones chosen early and the sending domains' two-week warm-up started" largely falls away. A short sending ramp may remain: fin-next sends through Cloudflare Email Sending, and the existing domain may send through another provider today. Still open with the owner: whether production takes over the existing product's production or starts fresh on that domain; which provider sends that domain's mail today; whether a Sumsub production app exists for it, and MassPay live's status |
 
 ## Decided while the owner was away (from 21 Nov 2026, about 08:41)
 
@@ -277,13 +278,24 @@ authority; for the owner's review:
   fenced code blocks, third-party files matching their pinned release, and a file the steward
   accepts by path, pinned to its blob, recorded in [BD-29] with its blob, counts and reason and
   reported as "accepted", any other version of the file being checked afresh), with rules A to C
-  ([G-04]; spec 07 §11.3, T-RV-35; EXECUTION §1.4; ARCHITECTURE §3.4).
+  and, for a `package.json`, rule M ([G-04]; spec 07 §11.3, T-RV-35; EXECUTION §1.4; ARCHITECTURE
+  §3.4).
 - The Cloudflare kill-switch rules take spec 08's names (`killswitch-api`, which spares `/hooks/`,
   `killswitch-money`, `killswitch-signups`, `killswitch-verify`) and come with `pnpm fin killswitch`
   in hardening, as [OP-01]'s default says. On the shared staging zone the Free plan's custom rules
   hold three of them, and `killswitch-verify` and the monitors' WAF skip rule are production's only
   ([OP-01]; ARCHITECTURE §5.7, §15.1; spec 01 §7.6; spec 04 §31 and L-MON-09; spec 05 §4.9; spec 08
   §6.2, §8.6, A08-32; EXECUTION L-MON-09).
+- One test-support file may import `node:http`: `packages/testing/src/http/node.ts`, the test
+  harness's HTTP server. `imports:check` names exactly that file, `@fin/testing` is imported only
+  from test files and test support and is listed only in `devDependencies`, and a planted test
+  covers each of the three (AGENTS.md §6; spec 01 §4.6, AC-P0-22). Pull request 27 carries it.
+- `supply-chain:check` accepts pnpm's lockfile entry for a workspace project with no dependencies,
+  written `path: {}`, and nothing wider: the value is exactly an empty object, the path is a
+  workspace project and that project has no dependencies, and tests plant each refusal. The control
+  path `scripts/check-supply-chain.mjs` changes in pull request 27, reviewed with it, and the merge
+  is listed in the away-time log ([BD-02]); pull request 28's own version of the change gives way to
+  it.
 
 **The build's decisions** (§18), each decided by the build, 21 Nov 2026, under the owner's away-time
 authority; for the owner's review:
@@ -440,6 +452,11 @@ authority; for the owner's review:
   §8.1) needs a Better Stack plan change, which is new spending and so outside the away-time
   authority. The owner either changes the plan, and staging's objects are made again in `europe`, or
   accepts `us_west`. Staging stays in `us_west` meanwhile.
+- Production on the owner's existing production domain (the owner, 21 Nov, about 22:10): three
+  questions remain. Does production take over the existing product's production, a cutover with its
+  users and data, or start fresh on that domain? Which provider sends that domain's production mail
+  today? Does a Sumsub production app exist for it, and what is MassPay live's status? Until the
+  owner answers, the plan assumes neither a cutover nor a fresh start (EXECUTION §0.3, §6 H-11).
 
 **Control-path pull requests merged while the owner is away** ([BD-02]), one line each: the pull
 request, its merged head and the control paths it touches.
@@ -1381,7 +1398,11 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   third-party script, the docs site's bundle and the host Better Stack serves are never same-site with
   the console or Fin Admin. Every cookie is host-only and
   `__Host-` prefixed ([SA-43]), and each app host's routes ([FD-18]) sit on its own zone. Chosen early
-  in hardening, because the sending domains need two weeks of warm-up ([EM-08]).
+  in hardening, because the sending domains need two weeks of warm-up ([EM-08]). The owner, 21 Nov
+  (about 22:10): production uses the owner's existing production domain as `<zone>`, with its
+  existing accounts and its already warm sending reputation, so the warm-up deadline largely falls
+  away (a short ramp may remain on Cloudflare Email Sending, [EM-08]); `<admin zone>` and `<hosted
+  zone>` stay with the owner.
 - **Alternatives:** one zone for everything (the origin gate is then the only barrier between them).
 - **Rationale:** passkey RP IDs and error `type` URLs are permanent once used, and same-site hosts share
   SameSite protection.
@@ -2969,14 +2990,18 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 - **Decision:** how Fin's mail streams are kept apart, and how production's reputation is built.
 - **Default:** two sending subdomains per zone, each its own Cloudflare sending domain with its own
   suppressions and analytics alerts: `auth.` for codes and security notices, `notify.` for invitations
-  and the white-labelled mail to developers' customers. Production's domains carry real low-volume mail
-  for at least two weeks before launch, with Postmaster Tools verified and the placement test passing
-  on production; the quota increase is asked for with the warm-up figures. On staging these are
-  `auth.<staging-zone>` and `notify.<staging-zone>`, onboarded on 21 Nov, each with its own DMARC
-  record ([FD-09], [BD-17]).
+  and the white-labelled mail to developers' customers. Production's domains carry real low-volume
+  mail for at least two weeks before launch (but see the owner's input of 21 Nov below), with
+  Postmaster Tools verified and the placement test passing on production; the quota increase is
+  asked for with the warm-up figures. On staging these are `auth.<staging-zone>` and
+  `notify.<staging-zone>`, onboarded on 21 Nov, each with its own DMARC record ([FD-09], [BD-17]).
 - **Alternatives:** one sending domain (the first draft), where customer complaints would hurt sign-in
   codes; the staging soak as the only warm-up.
-- **Rationale:** the staging soak proves templates, not production's reputation.
+- **Rationale:** the staging soak proves templates, not production's reputation. The owner, 21 Nov
+  (about 22:10): the owner's existing production domain already has a warm sending reputation, so
+  the two-week warm-up largely falls away. fin-next sends through Cloudflare Email Sending and that
+  domain may send through another provider today, so a short ramp on Cloudflare's sending subdomains
+  may remain; which provider sends today is a question for the owner.
 - **Status:** Recommended · **Deadline:** production (the warm-up starts once [FD-10] is chosen)
 
 ## 8. Observability
@@ -5523,53 +5548,121 @@ with its full review loop ([BD-20]).
   ship by [BD-18]'s rebuild and [BD-27]'s batches rather than through `fin-review ship` ([BD-22]),
   and with which parameters and exceptions.
 - **Default:** a local script on the build machine, outside every repository, compares the
-  normalised lines of every file a pull request adds or changes with every text blob reachable from
-  any ref of the old product's checkout: its whole history, the redesign branches included. The
+  normalised lines of every file a pull request adds or changes with every blob reachable from any
+  ref of the old product's checkout: its whole history, the redesign branches included. The
   checkout's location is never written anywhere ([G-09]). The build's ship tool runs it on the
   exact tree that merges, the rebuilt or batch head, before every merge, and refuses the merge on a
   blocking match. The result goes into the pull request by fin-next path and counts only, never the
-  old product's paths or text (spec 07 §11.3). No file is skipped. Its parameters, as the steward
-  ruled them on 21 Nov:
-  - a line is normalised by trimming it and collapsing its internal whitespace; a trivial line,
-    shorter than 12 characters or without three letters in a row, is ignored;
-  - a line is distinctive when at most two distinct old file paths contain it, across the whole
-    history (counted by path, not by blob, so a stable old line that lived through many versions of
-    one file still counts as distinctive);
+  old product's paths or text (spec 07 §11.3), and no error prints them either. Its rules, as the
+  steward ruled them on 21 Nov and as version v7.1 implements them after four adversarial rounds:
+  - **rule inputs from `main`:** the plan's fenced code, `tools/layout.json`,
+    `scripts/layout-check.mjs`'s `VITEST_SCRIPTS` and the steward's pins (the table below) are read
+    from the tip of the base, `main`'s reviewed tip, never from the head under review or from a
+    merge base inside a merged branch; the files checked are those that differ from the merge base.
+    A pull request that changes the plan's fenced code exempts nothing with those lines in that same
+    pull request. A full refname is read by exact match, and a short name only when no tag shares
+    it, so no tag can stand in for a ref; replace objects and grafts are ignored; a head at or
+    behind its base, unrelated histories and a shallow or partial old checkout are errors;
+  - **the old corpus:** every reachable blob, judged by its content (text, or valid UTF-8 once NUL
+    bytes are removed), whatever its path or size;
+  - **normalisation:** NFKD; default-ignorable, format (Cf) and combining (M) characters, DEL, the C1
+    controls and U+2800 removed; common Cyrillic, Greek and Armenian look-alikes, Latin small
+    capitals and IPA letters folded to plain Latin letters; NFKC; trimmed; internal white space
+    collapsed; every line terminator (CR LF, LF, CR, VT, FF, NEL, LS and PS) splits lines. The
+    matching key also folds what a formatter changes: the quote style, the spaces around brackets,
+    commas, semicolons and colons, and a trailing semicolon or comma, on the old side and the new
+    side alike;
+  - **trivial lines,** judged on the matching key and ignored: shorter than 12 characters or without
+    three letters in a row, unless 32 or more characters long with 8 or more digits (path data,
+    tables of numbers);
+  - **distinctive lines:** found in at most two distinct old file lineages across the whole history,
+    every path a blob was ever written at counted and a rename continuing its file;
   - rule A: a run of 12 or more consecutive non-trivial lines identical to a run in one old blob
-    blocks;
+    blocks, unless every line of the run is dictated;
   - rule B: a file of 10 or more non-trivial lines blocks when 30% or more of its distinctive lines
     are found in the old corpus;
   - rule C: a file of fewer than 10 non-trivial lines blocks when 3 or more of its distinctive lines
-    are found and they make up 30% or more.
+    are found and they make up 30% or more;
+  - rule M, for files named `package.json`: 12 or more consecutive non-dictated lines found in the
+    old corpus block, so a copied `exports` block blocks;
+  - an exact copy of an old blob with 64 or more non-blank bytes blocks;
+  - **no file is skipped silently:** a changed file that holds a NUL byte, is 2 MB or more, is a type
+    change, a submodule gitlink or a Git LFS pointer (in every form Git LFS itself reads) blocks and
+    is reported by path for the steward, unless it is pinned, a verified reused asset or a verified
+    third-party file; a malformed `THIRD_PARTY.json` blocks too.
+
+  Dictated lines never count as matches and stay in the denominator of rules B and C:
+  - plan-dictated: lines inside the plan's fenced code blocks (CommonMark fences; an HTML block opens
+    no fence; a fence still open at the end of its file dictates nothing), never its prose or tables;
+  - manifest-dictated, the class "manifest", in files named `package.json` only and by position: the
+    package's own top-level `"name"` as `tools/layout.json` gives it; an entry of a top-level
+    `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` block whose value
+    is `catalog:` or `workspace:*`; an entry of the top-level `scripts` block whose exact text
+    `VITEST_SCRIPTS` requires (`test` and `test:db`; turbo.json's tasks fix no script text); and the
+    standard key lines `"private": true`, `"type": "module"`, `"version": "0.0.0"`,
+    `"sideEffects": false`, `"scripts": {`, `"dependencies": {`, `"devDependencies": {`,
+    `"peerDependencies": {` and `"optionalDependencies": {`, each with or without a trailing comma
+    (`"exports": {` is not one).
 
   Reported by counts, never blocking, and each narrow ([G-04] has no exception otherwise):
-  - the reused assets [G-04] names, as exact files: `packages/tokens/tokens.css`,
-    `packages/tokens/export-pin/tokens.json`, `packages/tokens/fonts/**`,
-    `packages/icons/src/brand-art.ts` (the lockup and the 24px F mark), each app's
-    `apps/<app>/public/favicon.svg` and verify's selfie copy,
-    `apps/verify/public-selfie/favicon.svg` (spec 06 S6-27);
+  - the reused assets [G-04] names, at their exact paths, every matched line and every matched run
+    lying inside the design-system export's own copy of the asset: `packages/tokens/tokens.css` and
+    `packages/tokens/export-pin/tokens.json` (custom-property declarations whose name and value are
+    the export's, compared in one canonical CSS spelling so that a minified value equals its readable
+    form, a comment on such a line counting only when the export has it word for word; theme
+    selectors, at-rules, braces and `color-scheme` lines; comment lines the export's `tokens.css`
+    has; key lines its `tokens.json` has word for word, group keys among them);
+    `packages/tokens/fonts/*.woff2` (byte-identical to the export's fonts);
+    `packages/tokens/fonts/OFL.txt` (the export's licence text and the fonts' own copyright records,
+    nameID 0 of their name tables); `packages/icons/src/brand-art.ts` (the lockup and the 24px F
+    mark), each app's `apps/<app>/public/favicon.svg` and verify's selfie copy,
+    `apps/verify/public-selfie/favicon.svg` (spec 06 S6-27) (whole lines of the export's logos, or
+    path data and attribute values verbatim from them);
   - the root `pnpm-lock.yaml` only, as "generated": its text is pnpm's resolution of public
     registry metadata. No other generated file is exempt;
-  - plan-dictated lines: lines inside the plan's fenced code blocks (the code and configuration the
-    plan dictates, not its prose or tables). A matched run is exempt only when every line in it is
-    plan-dictated; for rules B and C plan-dictated lines stay in the denominator and never count as
-    matches; each file's exempted lines are reported by count;
-  - third-party files: a file listed in a `THIRD_PARTY.json` manifest (package, version, upstream
-    path, SHA-256) is reported as "third-party" only when its content matches the pinned upstream
-    npm release byte for byte; a listed file that does not match blocks;
-  - a file the steward accepts by path, pinned to its blob, recorded in [BD-29] with its blob,
-    counts and reason; reported as "accepted"; any other version of the file is checked afresh.
+  - third-party files: a file listed in a `THIRD_PARTY.json` manifest (package, exact version,
+    upstream path, SHA-256; paths relative to the manifest) is "third-party" only when its content
+    matches the pinned npm release byte for byte, the tarball verified against the registry's
+    `dist.integrity`; a listed file that does not match blocks, similar or not. The steward's narrow
+    extension of 21 Nov: a licence or notice file (named `LICENSE`, `LICENCE`, `NOTICE` or `COPYING`,
+    never a code file) whose npm release ships none may name a raw GitHub file at a 40-hex commit
+    (`https://raw.githubusercontent.com/<owner>/<repo>/<commit>/<path>`, never a branch or a tag,
+    the last segment itself a licence or notice name), compared by SHA-256; its entry records the
+    release tag, checked once when the entry is written;
+  - "accepted": a file the steward accepts by path, pinned to its blob (or a gitlink's commit), in
+    the table below with its counts and reason; any other version of the file is checked afresh.
 
-  Results under these parameters (21 Nov, recorded in each pull request): pull request 2, 33 files
-  added or changed, two matches: `pnpm-lock.yaml` (generated) and `.gitignore`, which rule C flags
-  after the merge, with 3 of its 9 distinctive lines (33%) matched: the standard tool-output
+  **Allowed sources** (the steward's wording, 21 Nov). The allowed sources are:
+  - the plan on `main`;
+  - the canvases;
+  - the design-system export's token values, fonts and logo ([UI-12]'s reused assets). The export's
+    other text is the design system's private source, which fin-next follows but does not copy;
+    names taken from it, such as component and prop names, are fine;
+  - the published types and docs of the packages a file uses;
+  - public specifications.
+
+  The design tool's reference folder and tools are not sources for fin-next code. A line shared with
+  the old product whose only allowed home is the export's README or prose text is not allowed: it
+  goes to the steward.
+
+  **The audit of the sources** (21 Nov, counts only): the canvases, 689 files, hold no file that
+  would block against the old product's whole history or its redesign branches alone (at most 4% of
+  a file, incidental lines). The design-system export holds 32 files that would block against the
+  redesign branches (30 component READMEs, `licences.md` and `tokens.css`), but the 40 redesign-only
+  old blobs that best match the READMEs (38 `.tsx`, 2 `.md`) first appeared on 20 Nov, after the
+  export's files were written on 19 Nov, and none earlier; only its two font files are byte-identical
+  in the old history, also from 20 Nov. The old redesign copied the export. The reference folder
+  holds one such file, third-party licence texts, and the design tool's folder only React's licence.
+
+  Results under the first parameters (21 Nov, recorded in each pull request): pull request 2, 33
+  files added or changed, two matches: `pnpm-lock.yaml` (generated) and `.gitignore`, which rule C
+  flags after the merge, with 3 of its 9 distinctive lines (33%) matched: the standard tool-output
   directories spec 01 §4.2 lists, in prose rather than a fenced block, so they are not
   plan-dictated. The steward accepted `.gitignore` on 21 Nov for that reason, by path and pinned to
-  its blob (`48b0b3b6ff497cee655091c7d08b1c6788d4dd2d`): the script reports it as accepted, by
-  counts, while the file keeps that blob, and checks any other version of it afresh. Plan-dictated
-  lines, kept in the denominator, were found in four files. Pull request 3, 42 files, no match;
-  plan-dictated lines, kept in the denominator, were found in six files. The plan's own fenced code,
-  checked once for information: ten plan files with code, no match against the old product.
+  its blob (the table below). Plan-dictated lines, kept in the denominator, were found in four
+  files. Pull request 3, 42 files, no match; plan-dictated lines, kept in the denominator, were
+  found in six files. The plan's own fenced code, checked once for information: ten plan files with
+  code, no match against the old product.
 
   A dry run over the open pull requests' own changes (21 Nov, before they land, on the steward's
   ruling) found 18 blocking files in 8 pull requests. Pull request 11's finding is for the owner's
@@ -5590,8 +5683,63 @@ with its full review loop ([BD-20]).
   one; 19, two) are cured the same way before they land, by an independent rewrite and never by
   reshuffling lines to pass the thresholds, or go to the steward for a ruling; each landing records
   its result by fin-next path and counts.
-- **The check's limit:** matching by line misses code that was renamed, reordered or reformatted;
-  fin-review's own check replaces this one once `fin-review ship` ships the pull requests.
+
+  **The steward's pins** (the script reads this table from `main`). Counts are the file's matched
+  distinctive lines under v7.1 and the rule that fires, then the matched lines as `--explain-sources`
+  classes them: from the plan or canvases (the whole line, or every string literal verbatim around
+  one identifier key) / names (a line of names, each found in the code of the plan, the canvases or
+  the export) / declarations (an import, an export-from, a declaration opener, or a type derived
+  from one by `keyof` or `typeof`) / not.
+
+| Path | Blob | Counts | Reason |
+  |---|---|---|---|
+| `.gitignore` | `48b0b3b6ff497cee655091c7d08b1c6788d4dd2d` | 3 of 9 (33%, rule C) | The standard tool-output directories spec 01 §4.2 lists, in prose |
+| `packages/access/src/catalogue/dashboard/api-keys.ts` | `1568f198a27354ad35b34fc901c8f342594ee0de` | 10 of 33 (30%, rule B): 6 from the plan or canvases, 4 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/audit-log.ts` | `059923d6ff19a835a04f854ba95016b503bd2c6c` | 5 of 15 (33%, rule B): 3 from the plan or canvases, 2 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/customers.ts` | `cb31757f29587c19ab5fc07cadb5e665f3651e62` | 15 of 42 (36%, rule B): 10 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/money.ts` | `a1b3e1974c62a82baec9fc9167d43e89e603fff5` | 13 of 43 (30%, rule B): 8 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/roles.ts` | `d2525d71ed7a23776230588207896cc625f1c2d2` | 13 of 24 (54%, rule B): 13 from the plan or canvases | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/team.ts` | `926b72178bdc08932a1ac27ac29c7ecd1fc1f664` | 13 of 43 (30%, rule B): 8 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/frame/src/nav/console/money.ts` | `332d039f796d421579fd355127e1062bf5081772` | 6 of 20 (30%, rule B): 6 from the plan or canvases | The console's nav ids, labels and paths as specs 03 and 06 and the canvases name them |
+| `packages/icons/src/glyphs.ts` | `4679008265f222bf07cffe4fb54f9a366cf7c4f1` | 86 of 210 (41%, rule B): 85 from the plan or canvases, 1 not | Phosphor 2.1.10 path data (MIT), checked against the published package; 85 of the 86 matched lines are verbatim in the canvases; the other is the CircleHalf (fill) glyph, checked the same way |
+| `packages/ui/src/index.ts` | `79ec2541f80e2c7f92e8b4c56530ff2bd13c6fcd` | 25 of 65 (38%, rule B): 25 names | The UI kit's export list: lines of names, each found in the code of the plan, the canvases or the export |
+
+  `packages/frame/src/nav/admin/review.ts`, which the steward also ruled on, no longer matches under
+  v6 and later, and needs no pin. Still to come, in the next plan pull request once their landings'
+  last steps finish: `packages/identity/src/ports/ids.ts` (after its encoder's independent rewrite),
+  `packages/tokens/theme.css` and `packages/tokens/fonts.css` (on the steward's three conditions),
+  and whatever of `packages/ui/src/overlays/tabs.tsx` still matches after its independent rewrite.
+
+  **Pull request 11's history.** Pull request 11's branch commits held the ported
+  `packages/tokens/theme.css` (224 of its 357 lines shared with the old product, a 68-line run) and
+  `packages/tokens/fonts.css` (22 of 29), and pull request 28 replayed them in its "Land PR #11"
+  commit before its rebuild commit replaced both. A pull request's commits stay readable on GitHub
+  through `refs/pull/11/head` and `refs/pull/28/head` after their branches are deleted. `main` never
+  holds them: each landing merges as one rebuilt commit ([BD-18]). The content is low in sensitivity
+  (a mapping of CSS variables and font metrics), but [UI-12]'s no covers it; the owner decides
+  whether to ask GitHub to purge those refs.
+
+  **The check's record.** Version v7.1 (sha256
+  `c3ef7696741c42077c2e2274bcd9cc1c0394f8246f5ddd14d30d1c9e2e851136`) runs from 21 Nov, about 17:20
+  UTC, in place of v6. Its planted-case suite, 252 cases kept by each round's tester on synthetic
+  repositories, passes 250; the two that fail check v6's frozen version string. Four adversarial
+  rounds, each with a tester, an attacker and a reviewer working only on synthetic repositories,
+  brought the check from the first parameters to v7.1. The fourth round's reviewer found four highs
+  (Latin small capitals, the other Git LFS pointer forms, comment-only lines inside a wrapped token
+  declaration, and a crash and a slow regular expression on malformed input) and its tester seven
+  failing cases; v7 and v7.1 fix all of them. What its false-negative hunter found is under the
+  check's limits.
+- **The check's limits:** matching by line misses code that was renamed or reordered, reformatted
+  past what the matching key folds, minified, joined into or split across lines, or encoded (base64
+  and the like), and the root `pnpm-lock.yaml` is exempt whole. The fourth round also found what
+  v7.1 does not see: lines a pull request's own commits held that its merged tree does not (its
+  history), constant decorations (diff markers, comment leaders, line numbers, every line written as
+  a string), a copy diluted in a much larger file or broken by a changed line every few lines, a
+  module the old product kept at three or more paths, old content reachable only from a reflog, an
+  index or a working tree, letter case, and escapes. A version v8 that covers them is in its fifth
+  round and goes live only on the steward's ruling. Until then each landing merges as one rebuilt
+  commit ([BD-18]), so no branch history reaches `main`. fin-review's own check replaces this one
+  once `fin-review ship` ships the pull requests.
 - **Alternatives:** no similarity check until `fin-review ship` ships the pull requests (what
   [BD-18], [BD-22] and [BD-27] first said); the old product's current tree only, as spec 07 §11.3
   said before [BD-29].
@@ -5599,7 +5747,8 @@ with its full review loop ([BD-20]).
   `fin-review ship`, which runs it. Every blob in the old product's history, the redesign branches
   included, covers the text [UI-12] keeps out of fin-next as well as the current tree. Rules A and
   B keep spec 07 §11.3's two thresholds, 12 lines and 30%; rule C stops a small file copied whole
-  from passing under both.
+  from passing under both, and rule M a copied block of a manifest from hiding among its dictated
+  lines.
 - **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority, with its
   parameters and exceptions as the steward ruled them; for the owner's review · **Deadline:**
   decided; `fin-review ship`'s own check takes over once it ships the pull requests
