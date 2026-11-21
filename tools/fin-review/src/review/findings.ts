@@ -15,8 +15,9 @@
 // run). What was already there cannot be a fix. A claim the engine cannot accept leaves the blocker
 // open and is recorded with its reasons; it does not fail the output (a fabricated quote or a path
 // outside the tree still does, as rules 2 and 3 say). An accepted claim is only a claim: the run
-// sends it to a sceptic, told every other file of the head the quoted code occurs in (changed since
-// or not) and the path git pairs each renamed file it names with, and the blocker closes only when
+// sends it to a sceptic, told every other changed file of the head the quoted code occurs in, the
+// unchanged files it occurs in (by name up to a cap, then how many more, to find with Grep) and the
+// path git pairs each renamed file it names with, and the blocker closes only when
 // every sceptic finds the defect gone, there too (src/review/run.ts). A moved defect is not a fixed
 // one, and that is the fix check's to judge: no text match can tell a move from a fix (a comment
 // holding the old line defeats it, and an unrelated line that matches it would refuse a real fix).
@@ -95,13 +96,22 @@ export interface FixScope {
    */
   readonly quotedElsewhere: readonly string[];
   /**
-   * Every other file of the head, other than a quote's own file and those in `quotedElsewhere`, in
-   * which code the blocker quotes occurs: files that already held it when the blocker was found
-   * (unchanged since, or changed with no more of it), where the defect may now be reached through
-   * code changed around it. Not tied to the blocker. Its fix check is shown every one of them and
-   * takes two sceptics. Sorted.
+   * The other files changed since the blocker was found, other than a quote's own file and those in
+   * `quotedElsewhere`, in which code the blocker quotes occurs: files that already held it and now
+   * hold no more of it, where the defect may now be reached through code changed around it. Not tied
+   * to the blocker. Its fix check is shown every one of them and takes two sceptics. Sorted.
    */
   readonly quotedStillIn: readonly string[];
+  /**
+   * Every file of the head unchanged since the blocker was found, other than a quote's own file, in
+   * which code the blocker quotes occurs: nothing can have moved into it, but changed code may now
+   * reach the defect there (callers sent to a copy that was already there). Not tied to the blocker,
+   * and never a reason to refuse a claim, however many there are (a common line occurs in many
+   * files). Its fix check takes two sceptics and is shown the first MAX_FIX_CHECK_PATHS of them and
+   * how many more, to find with Grep. Sorted; past MAX_FIX_CHECK_PATHS, those one hop in the import
+   * graph from a file the blocker names or a file changed since come first.
+   */
+  readonly quotedUntouchedIn: readonly string[];
   /**
    * Each path the blocker names (in `where` or a quote) that git reads as renamed since it was found,
    * with the path git pairs it with at the head (by how alike the two files are, so the code it names
@@ -112,9 +122,10 @@ export interface FixScope {
 }
 
 /**
- * Most files a fix check is shown as holding a blocker's quoted code, `quotedElsewhere` and
- * `quotedStillIn` together. A check is never shown part of either list: past it, a fix claim for the
- * blocker is not accepted, and it stays open.
+ * Most files changed since a blocker was found that a fix check is shown as holding its quoted code,
+ * `quotedElsewhere` and `quotedStillIn` together. A check is never shown part of those lists, where
+ * the defect may have moved: past it, a fix claim for the blocker is not accepted, and it stays open.
+ * It is also the most files of `quotedUntouchedIn` a check is shown by name.
  */
 export const MAX_FIX_CHECK_PATHS = 64;
 
@@ -184,7 +195,8 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
  * that changed since the blocker was found. Nothing that was already there when the blocker was
  * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
  * fix check's to judge (src/review/run.ts), so no claim is taken when the check could not be shown
- * every other file the blocker's quoted code occurs in.
+ * every other changed file the blocker's quoted code occurs in. Files unchanged since that hold it
+ * never refuse a claim: nothing moved into them, and a common line occurs in many.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);
@@ -192,7 +204,7 @@ function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationCont
   const holding = scope.quotedElsewhere.length + scope.quotedStillIn.length;
   if (holding > MAX_FIX_CHECK_PATHS) {
     return [
-      `${id}: the code the blocker quotes occurs in ${holding} other files, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken (${scope.quotedElsewhere.length} changed since with more of it, ${scope.quotedStillIn.length} that already held it)`,
+      `${id}: the code the blocker quotes occurs in ${holding} other files changed since it was found, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken (${scope.quotedElsewhere.length} with more of it, ${scope.quotedStillIn.length} with no more of it)`,
     ];
   }
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];

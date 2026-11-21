@@ -196,8 +196,10 @@ export function scepticPrompt(finding: Finding, instruction: string): string {
  * file it names with when git reads that file as renamed since (chosen by how alike the two files
  * are, so its code may be there or may have gone elsewhere), every file changed since in which the
  * code it quotes now occurs more often than it did (where the defect may have moved or been copied),
- * every other file that holds that code as it did then (where the defect may now be reached), and the
- * fix a lens claims for it, asked whether the defect can still happen at this head. No list is cut.
+ * every other changed file that holds that code as it did then (where the defect may now be reached),
+ * the files unchanged since that hold it (the first `maxUntouched` by name, then how many more, to
+ * find with Grep), and the fix a lens claims for it, asked whether the defect can still happen at
+ * this head. No list of changed files is cut.
  */
 export function fixCheckPrompt(
   finding: Finding,
@@ -205,9 +207,11 @@ export function fixCheckPrompt(
   moved: {
     readonly quotedElsewhere: readonly string[];
     readonly quotedStillIn: readonly string[];
+    readonly quotedUntouchedIn: readonly string[];
     readonly renamed: ReadonlyArray<{ readonly from: string; readonly to: string }>;
   },
   instruction: string,
+  maxUntouched: number,
 ): string {
   const parts = [`# The blocking finding (reported on an earlier head of this pull request)\n${JSON.stringify(findingEvidence(finding), null, 2)}\n`];
   if (moved.renamed.length > 0) {
@@ -217,7 +221,15 @@ export function fixCheckPrompt(
     parts.push(`# Where the code the finding quotes now occurs more often than it did (files changed since it was reported)\n${JSON.stringify(moved.quotedElsewhere, null, 2)}\n`);
   }
   if (moved.quotedStillIn.length > 0) {
-    parts.push(`# Where else the code the finding quotes occurs (files that already held it when it was reported)\n${JSON.stringify(moved.quotedStillIn, null, 2)}\n`);
+    parts.push(`# Where else the code the finding quotes occurs (files changed since that already held it when it was reported)\n${JSON.stringify(moved.quotedStillIn, null, 2)}\n`);
+  }
+  if (moved.quotedUntouchedIn.length > 0) {
+    parts.push(`# Where else the code the finding quotes occurs (files unchanged since it was reported)\n${JSON.stringify(moved.quotedUntouchedIn.slice(0, maxUntouched), null, 2)}\n`);
+  }
+  if (moved.quotedUntouchedIn.length > maxUntouched) {
+    parts.push(
+      `# How many more files unchanged since it was reported hold the code the finding quotes (not listed: find them with Grep, and judge the defect in each a changed file now reaches)\n${moved.quotedUntouchedIn.length - maxUntouched}\n`,
+    );
   }
   parts.push(`# The fix a lens claims (at the head you are given)\n${JSON.stringify({ fixWhere: claim.fixWhere, fixQuote: claim.fixQuote }, null, 2)}\n`);
   return [dataBlock(parts.join("\n")), "# Your task", "", instruction.trim(), ""].join("\n");

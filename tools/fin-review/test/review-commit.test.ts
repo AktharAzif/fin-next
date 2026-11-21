@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { cleanOutput, countingRandom, cryptoFinding, readJson, reviewFixture, runDirs, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
-import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script, shownElsewhere, shownQuoted, shownRenamed, shownStill } from "./helpers/review-harness.ts";
+import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script, shownElsewhere, shownMoreUntouched, shownQuoted, shownRenamed, shownStill, shownUntouched } from "./helpers/review-harness.ts";
 import type { Handler, Harness } from "./helpers/review-harness.ts";
 
 describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
@@ -313,7 +313,7 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
       harness(fx, script(...handlers, (spec) => (spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere, fixQuote }] } } : undefined)), random);
     const prior = (): Record<string, unknown> => (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
     const outcome = (): unknown => (prior()["claim"] as Record<string, unknown>)["outcome"];
-    const checks = (h: Harness): Array<[string, string[]]> => calls(h).filter((call) => isFixCheck(call.spec)).map((call) => [call.spec.role, shownStill(call.spec)]);
+    const checks = (h: Harness): Array<[string, string[]]> => calls(h).filter((call) => isFixCheck(call.spec)).map((call) => [call.spec.role, shownQuoted(call.spec)]);
     const numbers = "packages/crypto/src/numbers.ts";
     const sameNumber = "export function sameNumber(a: number, b: number): boolean { return a === b; }\n";
     const sameSecretThere = "export function sameSecret(a: string, b: string): boolean { return a === b; }\n";
@@ -362,11 +362,13 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal(copy.code, 1, copy.stdout + copy.stderr);
     assert.equal(outcome(), "still_there");
     assert.deepEqual(prior()["quotedElsewhere"], []);
-    assert.deepEqual(prior()["quotedStillIn"], [legacy]);
+    assert.deepEqual(prior()["quotedStillIn"], []);
+    assert.deepEqual(prior()["quotedUntouchedIn"], [legacy]);
     assert.deepEqual(checks(copied), [["sceptic1", [legacy]]]);
+    assert.deepEqual(calls(copied).filter((call) => isFixCheck(call.spec)).map((call) => shownUntouched(call.spec)), [[legacy]], "shown as a file unchanged since");
   });
 
-  it("a fix check is never shown part of the files that hold the quoted code: both lists count toward the cap", async () => {
+  it("a fix check is never shown part of the changed files that hold the quoted code: past the cap no claim is taken", async () => {
     const defect = "// Comparing secrets.\n// They come from the caller.\n// Keep this small.\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const VERSION = 1;\n";
     const stub = 'export { sameSecret } from "./compare.ts";';
     const finder = (): Harness => harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec)]) } : undefined)), random);
@@ -381,20 +383,22 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
         random,
       );
     const prior = (): Record<string, unknown> => (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
-    const crowd = (count: number): Record<string, string> => {
+    const crowd = (count: number, note: string): Record<string, string> => {
       const out: Record<string, string> = {};
-      for (let i = 1; i <= count; i++) out[`docs/plan/case-${String(i).padStart(2, "0")}.md`] = `# case ${i}\n\n    return a === b;\n`;
+      for (let i = 1; i <= count; i++) out[`docs/plan/case-${String(i).padStart(2, "0")}.md`] = `# case ${i}${note}\n\n    return a === b;\n`;
       return out;
     };
-    // Files that held the quoted line when the blocker was found, and the defect moved into a new file.
+    // Files that held the quoted line when the blocker was found, each changed since around it (no
+    // more of it), and the defect moved into a new file.
     for (const [pr, count] of [[29, 63], [30, 64]] as const) {
-      const h0 = fx.pr(pr, { "packages/crypto/src/index.ts": defect, ...crowd(count) });
+      const h0 = fx.pr(pr, { "packages/crypto/src/index.ts": defect, ...crowd(count, "") });
       assert.equal((await runFixtureCli(fx, ["pr", "--pr", String(pr)], finder().services)).code, 1);
-      fx.pr(pr, { "packages/crypto/src/index.ts": `${stub}\n`, "packages/crypto/src/compare.ts": defect }, h0);
+      fx.pr(pr, { "packages/crypto/src/index.ts": `${stub}\n`, "packages/crypto/src/compare.ts": defect, ...crowd(count, " (revised)") }, h0);
       const h = claiming();
       const run = await runFixtureCli(fx, ["pr", "--pr", String(pr)], h.services);
       assert.deepEqual(prior()["quotedElsewhere"], ["packages/crypto/src/compare.ts"]);
       assert.equal((prior()["quotedStillIn"] as unknown[]).length, count);
+      assert.deepEqual(prior()["quotedUntouchedIn"], []);
       const shown = calls(h).filter((call) => isFixCheck(call.spec));
       if (count === 63) {
         // 64 files in all: each check is shown every one.
@@ -410,10 +414,41 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
         assert.equal(run.code, 1, run.stdout + run.stderr);
         const claim = prior()["claim"] as Record<string, unknown>;
         assert.equal(claim["outcome"], "not_accepted");
-        assert.match(String((claim["notAccepted"] as unknown[])[0]), /in 65 other files, more than a fix check is shown \(64\)/);
+        assert.match(String((claim["notAccepted"] as unknown[])[0]), /in 65 other files changed since it was found, more than a fix check is shown \(64\)/);
         assert.deepEqual(shown, []);
       }
     }
+  });
+
+  it("a real fix closes a blocker whose quoted line is common in files unchanged since: they refuse no claim, and each check is told how many it is not shown by name", async () => {
+    const original = 'import { pad } from "./pad.ts";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const padded = pad;\n';
+    const fixed = 'import { timingSafeEqual } from "node:crypto";\nimport { pad } from "./pad.ts";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n\nexport const padded = pad;\n';
+    // 65 unrelated files hold the line, and so does pad.ts, which the file the blocker names imports.
+    const pad = "packages/crypto/src/pad.ts";
+    const common: Record<string, string> = { [pad]: "export function pad(a: number, b: number): boolean {\n  return a === b;\n}\n" };
+    for (let i = 1; i <= 65; i++) common[`docs/plan/numbers-${String(i).padStart(2, "0")}.md`] = `# numbers ${i}\n\n    return a === b;\n`;
+    const h0 = fx.pr(31, { "packages/crypto/src/index.ts": original, ...common });
+    const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { where: [{ path: "packages/crypto/src/index.ts", startLine: 3, endLine: 5 }] })]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "31"], finder.services)).code, 1);
+    fx.pr(31, { "packages/crypto/src/index.ts": fixed }, h0);
+    const claim = { id: "P1", status: "fixed", fixWhere: { path: "packages/crypto/src/index.ts", startLine: 5, endLine: 5 }, fixQuote: { path: "packages/crypto/src/index.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" } };
+    const h = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [claim] } } : undefined)), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "31"], h.services);
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    const prior = (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
+    assert.equal((prior["claim"] as Record<string, unknown>)["outcome"], "fixed");
+    assert.deepEqual([prior["quotedElsewhere"], prior["quotedStillIn"]], [[], []]);
+    const untouched = prior["quotedUntouchedIn"] as string[];
+    assert.equal(untouched.length, 66);
+    assert.equal(untouched[0], pad, "a file one hop from the file the blocker names comes first");
+    // Two checks (the quoted code is elsewhere), each shown 64 files by name and told of 2 more.
+    const checks = calls(h).filter((call) => isFixCheck(call.spec));
+    assert.deepEqual(checks.map((call) => call.spec.role), ["sceptic1", "sceptic2"]);
+    for (const check of checks) {
+      assert.deepEqual(shownUntouched(check.spec), untouched.slice(0, 64));
+      assert.equal(shownMoreUntouched(check.spec), 2);
+    }
+    assert.deepEqual(readJson(join(lastRun(fx), "result.json"))["openBlockers"], []);
   });
 
   it("a real fix is taken although the quoted code now also appears in another changed file: both fix checks decide, shown that file", async () => {

@@ -48,16 +48,33 @@ export function shownElsewhere(spec: SessionSpec): string[] {
   return shownList<string>(spec, ELSEWHERE_HEADER);
 }
 
-const STILL_HEADER = "# Where else the code the finding quotes occurs (files that already held it when it was reported)\n";
+const STILL_HEADER = "# Where else the code the finding quotes occurs (files changed since that already held it when it was reported)\n";
 
 /** The other files a fix check was told hold the code the blocker quotes, as they did then; [] when it was told of none. */
 export function shownStill(spec: SessionSpec): string[] {
   return shownList<string>(spec, STILL_HEADER);
 }
 
-/** Every file a fix check was told holds the code the blocker quotes, both lists. */
+const UNTOUCHED_HEADER = "# Where else the code the finding quotes occurs (files unchanged since it was reported)\n";
+
+/** The files unchanged since the blocker was found that a fix check was told hold its quoted code, by name; [] when none. */
+export function shownUntouched(spec: SessionSpec): string[] {
+  return shownList<string>(spec, UNTOUCHED_HEADER);
+}
+
+const MORE_HEADER = "# How many more files unchanged since it was reported hold the code the finding quotes";
+
+/** How many more unchanged files hold the quoted code than a fix check was shown by name; 0 when it was shown every one. */
+export function shownMoreUntouched(spec: SessionSpec): number {
+  const at = spec.prompt.indexOf(MORE_HEADER);
+  if (at < 0) return 0;
+  const rest = spec.prompt.slice(spec.prompt.indexOf("\n", at) + 1);
+  return Number(rest.slice(0, rest.indexOf("\n")));
+}
+
+/** Every file a fix check was told by name holds the code the blocker quotes, all three lists. */
 export function shownQuoted(spec: SessionSpec): string[] {
-  return [...shownElsewhere(spec), ...shownStill(spec)];
+  return [...shownElsewhere(spec), ...shownStill(spec), ...shownUntouched(spec)];
 }
 
 const RENAMED_HEADER = "# The paths git pairs files the finding names with (read as renamed since it was reported)\n";
