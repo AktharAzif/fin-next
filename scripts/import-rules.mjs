@@ -1761,7 +1761,7 @@ export function checkImports(root) {
     }
   };
   const controlPaths = readControlPaths(root);
-  const manifests = readManifests(root, listed);
+  const { manifests, findings: unread } = readManifests(root, listed);
   const packages = workspacePackages(manifests);
   /** @param {string} specifier */
   const packageTargets = (specifier) => {
@@ -1769,6 +1769,7 @@ export function checkImports(root) {
     return found?.flatMap((pkg) => resolvePackage(pkg, specifier));
   };
   return [
+    ...unread,
     ...manifests.flatMap(checkManifest),
     ...files.flatMap((file) =>
       checkSource(file, readFileSync(join(root, file), "utf8"), exists, {
@@ -1790,27 +1791,39 @@ const ENTRY_FIELDS = ["browser", "module", "jsnext:main", "jsnext", "main"];
 /**
  * Every package.json the repository lists, named or not, but those under node_modules or a test,
  * e2e or fixtures directory (a fixture may copy a real package's name, or plant a violation on
- * purpose), and those that are no JSON object.
+ * purpose). Each is read as Vite and Node read it, one leading byte-order mark stripped first; one
+ * that still does not parse, or is no JSON object, is a finding, so a manifest the rules cannot
+ * read never goes unchecked (Vite might still read it, a browser map included).
  * @param {string} root
  * @param {Set<string>} listed
- * @returns {Manifest[]}
+ * @returns {{ manifests: Manifest[], findings: Finding[] }}
  */
 function readManifests(root, listed) {
   /** @type {Manifest[]} */
   const manifests = [];
+  /** @type {Finding[]} */
+  const findings = [];
   for (const path of listed) {
     if (path !== "package.json" && !path.endsWith("/package.json")) continue;
     if (/(?:^|\/)node_modules\//.test(path) || TEST_CODE_TARGET.test(path)) continue;
     /** @type {unknown} */
     let manifest;
     try {
-      manifest = readJson(join(root, path));
+      manifest = JSON.parse(readFileSync(join(root, path), "utf8").replace(/^﻿/, ""));
     } catch {
-      continue;
+      manifest = undefined;
     }
     if (isRecord(manifest)) manifests.push({ path, dir: posix.dirname(path), manifest });
+    else {
+      findings.push({
+        file: path,
+        rule: "package-manifest",
+        message:
+          "a package.json the rules cannot read as a JSON object (after one byte-order mark) is refused, since Vite may still read it",
+      });
+    }
   }
-  return manifests;
+  return { manifests, findings };
 }
 
 /**

@@ -1065,6 +1065,46 @@ describe("imports:check", () => {
     );
   });
 
+  test("a package.json is read as Vite reads it, byte-order mark and all, and one that does not parse fails closed", () => {
+    const layout = JSON.stringify({ version: 1, controlPaths: [], entries: [] });
+    const mapped = JSON.stringify({ private: true, browser: { "./render.ts": "./e2e/sink.ts" } });
+    // Vite strips a leading U+FEFF before it parses a package.json, so the map applies.
+    const bom = makeRepo({
+      "tools/layout.json": layout,
+      "apps/console/src/client/package.json": `﻿${mapped}`,
+      "packages/icons/package.json": `﻿${JSON.stringify({ name: "@fin/icons", main: "./test/sink.ts" })}`,
+    });
+    assert.deepEqual(
+      checkImports(bom)
+        .map((f) => `${f.file} ${f.rule}`)
+        .sort(),
+      [
+        "apps/console/src/client/package.json package-manifest",
+        "packages/icons/package.json package-manifest",
+      ],
+    );
+    // A manifest the check cannot read, or that is no JSON object, is a finding, never skipped.
+    const broken = makeRepo({
+      "tools/layout.json": layout,
+      "apps/console/src/client/package.json": `${mapped.slice(0, -1)},}`,
+      "packages/ui/package.json": "[]",
+      "packages/frame/package.json": `﻿﻿${mapped}`,
+    });
+    assert.deepEqual(
+      checkImports(broken)
+        .map((f) => `${f.file} ${f.rule}`)
+        .sort(),
+      [
+        "apps/console/src/client/package.json package-manifest",
+        "packages/frame/package.json package-manifest",
+        "packages/ui/package.json package-manifest",
+      ],
+    );
+    const run = runScript("scripts/import-rules.mjs", ["--root", broken]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^packages\/ui\/package\.json package-manifest: /m);
+  });
+
   test("a long export with comments and no `from` is read in linear time", {
     timeout: 10_000,
   }, () => {
