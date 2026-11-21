@@ -8,7 +8,8 @@
     "tsconfig.base.json",
     "biome.json",
     "tools/layout.json",
-    "turbo.json"
+    "turbo.json",
+    "vitest.config.ts"
   ],
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },

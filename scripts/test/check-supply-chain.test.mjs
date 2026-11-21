@@ -1,8 +1,11 @@
 // supply-chain:check, with the planted cases of AC-P0-21 and spec 01 §4.2's refusals.
 import assert from "node:assert/strict";
+import { mkdirSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import {
   checkLockfile,
+  checkManifest,
   checkPackageManager,
   checkSupplyChain,
   checkUses,
@@ -10,9 +13,9 @@ import {
   compareVersions,
   exoticKind,
   isDatedApproval,
+  parsePolicy,
 } from "../check-supply-chain.mjs";
-import { parsePolicy } from "../lib/policy-yaml.mjs";
-import { cleanUp, makeRepo, REPO_ROOT, readRepoFile, rules, runScript } from "./helpers.mjs";
+import { cleanUp, git, makeRepo, REPO_ROOT, readRepoFile, rules, runScript } from "./helpers.mjs";
 
 after(cleanUp);
 
@@ -80,6 +83,10 @@ const workspaceWith = (from, to) => {
   return WORKSPACE.replace(from, to);
 };
 
+/** The lockfile with `text` added at the start of the packages section. */
+const lockWithPackage = (/** @type {string} */ text) =>
+  LOCK_OK.replace("packages:\n", `packages:\n\n${text}`);
+
 describe("supply-chain:check", () => {
   test("a valid repository passes", () => {
     assert.deepEqual(checkSupplyChain(fixture()), []);
@@ -144,6 +151,46 @@ describe("supply-chain:check", () => {
     assert.deepEqual(rules(checkSupplyChain(dir)), ["policy-unknown-key"]);
   });
 
+  test("a key after a carriage return is read as pnpm reads it, and the carriage return fails", () => {
+    // YAML ends a line at a lone CR, so these keys are real settings to pnpm.
+    for (const text of [
+      `${WORKSPACE}# reviewed 2026-11-21\rminimumReleaseAgeExclude:\r  - '@sentry/*'\n`,
+      workspaceWith(
+        "engineStrict: true\n",
+        "engineStrict: true # keep in step\rdangerouslyAllowAllBuilds: true\rtrustPolicyExclude: ['*']\n",
+      ),
+      workspaceWith(
+        /allowBuilds: \{\}.*\n/.exec(WORKSPACE)?.[0] ?? "",
+        "allowBuilds: {}   # none yet\rminimumReleaseAgeExclude: ['*']\n",
+      ),
+    ]) {
+      const { findings } = checkWorkspace(text);
+      assert.deepEqual(rules(findings), ["policy-loosened", "policy-syntax"]);
+      assert.ok(findings.some((f) => /carriage return/.test(f.message)));
+      const dir = fixture({ "pnpm-workspace.yaml": text });
+      assert.deepEqual(rules(checkSupplyChain(dir)), ["policy-loosened", "policy-syntax"]);
+    }
+    // CRLF line endings are refused too: the policy file is LF only.
+    assert.deepEqual(rules(checkWorkspace(WORKSPACE.replaceAll("\n", "\r\n")).findings), [
+      "policy-syntax",
+    ]);
+  });
+
+  test("control, separator and invisible characters in the policy file fail", () => {
+    for (const char of ["\u0000", "\u000b", "\u000c", "\u001e", "\u0085", "\u2028", "\u2029"]) {
+      const text = workspaceWith("engineStrict: true\n", `engineStrict: true # a${char}b\n`);
+      assert.deepEqual(rules(checkWorkspace(text).findings), ["policy-syntax"], escape(char));
+    }
+    assert.ok(rules(checkWorkspace(`\ufeff${WORKSPACE}`).findings).includes("policy-syntax"));
+  });
+
+  test("a space before a key's colon fails", () => {
+    const dir = fixture({
+      "pnpm-workspace.yaml": workspaceWith("engineStrict: true", "engineStrict : true"),
+    });
+    assert.ok(rules(checkSupplyChain(dir)).includes("policy-syntax"));
+  });
+
   test("a changed packages list fails", () => {
     const dir = fixture({
       "pnpm-workspace.yaml": workspaceWith("  - ops/backup\n", "  - ops/backup\n  - vendor/*\n"),
@@ -152,18 +199,54 @@ describe("supply-chain:check", () => {
   });
 
   test("a pnpmfile fails, and so does an .npmrc", () => {
-    assert.deepEqual(
-      rules(checkSupplyChain(fixture({ ".pnpmfile.cjs": "module.exports = {};\n" }))),
-      ["pnpmfile"],
-    );
-    assert.deepEqual(
-      rules(checkSupplyChain(fixture({ ".pnpmfile.mjs": "export default {};\n" }))),
-      ["pnpmfile"],
-    );
+    for (const name of [".pnpmfile.cjs", ".pnpmfile.mjs", "pnpmfile.js", ".pnpmfile.mts"]) {
+      assert.deepEqual(rules(checkSupplyChain(fixture({ [name]: "export default {};\n" }))), [
+        "pnpmfile",
+      ]);
+    }
     assert.deepEqual(
       rules(checkSupplyChain(fixture({ ".npmrc": "registry=https://registry.example.com/\n" }))),
       ["npmrc"],
     );
+  });
+
+  test("a manifest pnpm reads besides package.json fails, wherever it is", () => {
+    for (const file of [
+      "packages/identity/package.yaml",
+      "packages/identity/package.yml",
+      "packages/identity/package.json5",
+      "apps/console/package.yaml",
+      "package.yaml",
+      "docs/notes/package.json5",
+    ]) {
+      const dir = fixture({
+        [file]: 'name: "@fin/identity"\ndependencies:\n  is-number: "7.0.0"\n',
+      });
+      assert.deepEqual(rules(checkSupplyChain(dir)), ["manifest-format"], file);
+    }
+  });
+
+  test("a symbolic link fails, so pnpm cannot be pointed at a manifest this check skips", () => {
+    const dir = fixture({
+      "scripts/test/fixture-dir/package.json": JSON.stringify({
+        dependencies: { "left-pad": "1.3.0" },
+      }),
+    });
+    symlinkSync("../scripts/test/fixture-dir", join(dir, "packages/linked"));
+    git(dir, ["add", "-A"]);
+    assert.deepEqual(rules(checkSupplyChain(dir)), ["symlink"]);
+    const dangling = fixture();
+    symlinkSync("/nonexistent/target", join(dangling, "packages/gone"));
+    git(dangling, ["add", "-A"]);
+    assert.deepEqual(rules(checkSupplyChain(dangling)), ["symlink"]);
+  });
+
+  test("a submodule fails, checked out or not", () => {
+    const dir = fixture();
+    git(dir, ["update-index", "--add", "--cacheinfo", `160000,${SHA},packages/vendored`]);
+    assert.deepEqual(rules(checkSupplyChain(dir)), ["submodule"]);
+    mkdirSync(join(dir, "packages/vendored"));
+    assert.deepEqual(rules(checkSupplyChain(dir)), ["submodule"]);
   });
 
   test("a uses: not pinned to a SHA fails; a pinned one needs its version comment", () => {
@@ -180,10 +263,58 @@ describe("supply-chain:check", () => {
       checkSupplyChain(fixture(workflow(`uses: actions/checkout@${SHA} # v6.0.1`))),
       [],
     );
+    assert.deepEqual(
+      checkSupplyChain(fixture(workflow(`uses: actions/checkout@${SHA} # v6.0.1   `))),
+      [],
+    );
     assert.deepEqual(checkSupplyChain(fixture(workflow("uses: ./.github/actions/setup"))), []);
     assert.deepEqual(rules(checkUses("x.yml", "    uses: docker://alpine:3\n")), [
       "action-unpinned",
     ]);
+  });
+
+  test("every other YAML spelling of uses fails, pinned or not", () => {
+    const steps = (/** @type {string} */ body) => `jobs:\n  a:\n    steps:\n${body}\n`;
+    for (const body of [
+      "      - { name: co, uses: actions/checkout@v4 }",
+      `      - { name: co, uses: actions/checkout@${SHA} } # v4`,
+      '      - "uses": actions/checkout@v4',
+      "      - 'uses': actions/checkout@v4",
+      "      - uses : actions/checkout@v4",
+      "      - Uses: actions/checkout@v4",
+      '      - {"uses":actions/checkout@v4}',
+      "      - ? uses\n        : actions/checkout@v4",
+      '      - "u\\x73es": actions/checkout@v4',
+      "      - &k uses: actions/checkout@v4",
+      "      - *k : actions/checkout@v4",
+      "    steps: [{uses: actions/checkout@v4}]",
+    ]) {
+      assert.deepEqual(rules(checkUses("w.yml", steps(body))), ["action-unpinned"], body);
+    }
+  });
+
+  test("a lone carriage return or a line separator in a workflow fails, and the lines are read as YAML reads them", () => {
+    const text = `jobs:\n  a:\n    steps:\n      - run: true # x\r      - uses: actions/checkout@v4\n`;
+    const findings = checkUses("w.yml", text);
+    assert.deepEqual(rules(findings), ["action-unpinned"]);
+    assert.equal(findings.length, 2); // the carriage return, and the unpinned uses: it starts
+    assert.deepEqual(rules(checkUses("w.yml", "jobs: {}\u2028\n")), ["action-unpinned"]);
+    // CRLF files are read line by line as GitHub reads them.
+    assert.deepEqual(
+      checkUses("w.yml", `steps:\r\n  - uses: actions/checkout@${SHA} # v6.0.1\r\n`),
+      [],
+    );
+  });
+
+  test("a local action outside .github/ fails, and action.yml files anywhere are checked", () => {
+    assert.deepEqual(rules(checkUses("w.yml", "      - uses: ./tools/setup\n")), [
+      "action-unpinned",
+    ]);
+    const dir = fixture({
+      "tools/setup/action.yml":
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/cache@v4\n",
+    });
+    assert.deepEqual(rules(checkSupplyChain(dir)), ["action-unpinned"]);
   });
 
   test("a refused package in the lockfile fails", () => {
@@ -196,10 +327,10 @@ describe("supply-chain:check", () => {
       "@phosphor-icons/react",
       "react-server-dom-webpack",
       "@fontsource-variable/inter",
+      "@fontsource/inter",
     ]) {
-      const lock = LOCK_OK.replace(
-        "packages:\n",
-        `packages:\n\n  '${name}@1.0.0':\n    resolution: {integrity: sha512-BBBB==}\n`,
+      const lock = lockWithPackage(
+        `  '${name}@1.0.0':\n    resolution: {integrity: sha512-BBBB==}\n`,
       );
       assert.deepEqual(
         rules(checkSupplyChain(fixture({ "pnpm-lock.yaml": lock }))),
@@ -274,13 +405,17 @@ describe("supply-chain:check", () => {
       const dir = fixture({ "pnpm-workspace.yaml": workspaceWith(line, `allowBuilds:\n${entry}`) });
       assert.deepEqual(checkSupplyChain(dir), [], entry);
     }
-    const notOwner = fixture({
-      "pnpm-workspace.yaml": workspaceWith(
-        line,
-        "allowBuilds:\n  esbuild: false # 2026-11-21: looked fine\n",
-      ),
-    });
-    assert.deepEqual(rules(checkSupplyChain(notOwner)), ["allow-builds-undated"]);
+    for (const comment of [
+      "# 2026-11-21: looked fine",
+      "# 2026-11-21: the owner refused this",
+      "# 2026-11-21: waiting for the owner",
+      "# 2026-11-21: approved by the owner? not yet",
+    ]) {
+      const notApproved = fixture({
+        "pnpm-workspace.yaml": workspaceWith(line, `allowBuilds:\n  esbuild: false ${comment}\n`),
+      });
+      assert.deepEqual(rules(checkSupplyChain(notApproved)), ["allow-builds-undated"], comment);
+    }
     const badValue = fixture({
       "pnpm-workspace.yaml": workspaceWith(line, `allowBuilds:\n  esbuild: maybe ${APPROVAL}\n`),
     });
@@ -293,6 +428,10 @@ describe("supply-chain:check", () => {
       "pnpm-workspace.yaml": `${head}overrides:\n  '@better-auth/core': 1.7.25\n`,
     });
     assert.deepEqual(rules(checkSupplyChain(undated)), ["overrides-undated"]);
+    const refused = fixture({
+      "pnpm-workspace.yaml": `${head}overrides:\n  '@better-auth/core': 1.7.25   # 2026-11-21: the owner said no\n`,
+    });
+    assert.deepEqual(rules(checkSupplyChain(refused)), ["overrides-undated"]);
     const above = fixture({
       "pnpm-workspace.yaml": `${head}overrides:\n  ${APPROVAL}\n  '@better-auth/core': 1.7.25\n`,
     });
@@ -368,6 +507,25 @@ describe("supply-chain:check", () => {
     assert.deepEqual(rules(checkSupplyChain(missing)), ["catalog-missing"]);
   });
 
+  test("a peer dependency comes from the catalog too, since pnpm installs peers itself", () => {
+    for (const spec of ["^3.0.0", "3.0.1", "*", ">=1 <2"]) {
+      const dir = fixture({
+        "packages/evil/package.json": pkg("@fin/evil", { peerDependencies: { "is-odd": spec } }),
+      });
+      assert.deepEqual(rules(checkSupplyChain(dir)), ["not-from-catalog"], spec);
+    }
+    const unlisted = fixture({
+      "packages/ui/package.json": pkg("@fin/ui", { peerDependencies: { "is-odd": "catalog:" } }),
+    });
+    assert.deepEqual(rules(checkSupplyChain(unlisted)), ["catalog-missing"]);
+    const ui = fixture({
+      "packages/ui/package.json": pkg("@fin/ui", {
+        peerDependencies: { react: "catalog:", "@fin/tokens": "workspace:*" },
+      }),
+    });
+    assert.deepEqual(checkSupplyChain(ui), []);
+  });
+
   test("manifest fields that bypass the policy fail", () => {
     for (const field of ["pnpm", "resolutions", "overrides", "bundledDependencies"]) {
       const dir = fixture({ "packages/ui/package.json": pkg("@fin/ui", { [field]: {} }) });
@@ -377,21 +535,107 @@ describe("supply-chain:check", () => {
 
   test("seroval below 1.6.11 fails; at or above passes", () => {
     const lock = (/** @type {string} */ v) =>
-      LOCK_OK.replace(
-        "packages:\n",
-        `packages:\n\n  seroval@${v}:\n    resolution: {integrity: sha512-CCCC==}\n`,
-      );
+      lockWithPackage(`  seroval@${v}:\n    resolution: {integrity: sha512-CCCC==}\n`);
     assert.deepEqual(rules(checkLockfile(lock("1.6.10"))), ["seroval-floor"]);
     assert.deepEqual(checkLockfile(lock("1.6.11")), []);
     assert.deepEqual(checkLockfile(lock("1.7.0")), []);
   });
 
   test("a lockfile package not resolved from the registry fails", () => {
-    const lock = LOCK_OK.replace(
-      "packages:\n",
-      "packages:\n\n  thing@1.0.0:\n    resolution: {tarball: https://example.com/thing.tgz}\n",
+    const lock = lockWithPackage(
+      "  thing@1.0.0:\n    resolution: {tarball: https://example.com/thing.tgz}\n",
     );
     assert.deepEqual(rules(checkLockfile(lock)), ["exotic-resolution"]);
+    for (const text of [
+      "  thing@1.0.0:\n    engines: {node: '>=18'}\n", // no resolution at all
+      "  thing@file:thing-1.0.0.tgz:\n    resolution: {integrity: sha512-DDDD==}\n",
+      "  thing@1.0.0:\n    resolution: {integrity: sha512-DDDD==, tarball: https://example.com/t.tgz}\n",
+    ]) {
+      assert.ok(rules(checkLockfile(lockWithPackage(text))).includes("exotic-resolution"), text);
+    }
+  });
+
+  test("a lockfile line outside pnpm's own form fails, so nothing in it is skipped", () => {
+    const resolution = "    resolution: {tarball: https://example.com/x.tgz}\n";
+    for (const text of [
+      `  "clsx@2.1.1":\n    resolution: {integrity: sha512-AAAA==}\n`, // a double-quoted key
+      `  clsx@2.1.1:\r${resolution}`, // a lone carriage return
+      `  thing@1.0.0:\n    "resolution": {tarball: https://example.com/x.tgz}\n`, // a quoted field
+      `   clsx@2.1.1:\n      resolution: {integrity: sha512-AAAA==}\n`, // another indentation
+      `  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==,\n      tarball: https://example.com/x.tgz}\n`,
+      `  thing@1.0.0:\n    resolution: &r {integrity: sha512-AAAA==}\n`,
+      `  thing@1.0.0:\n    resolution: *r\n`,
+      `  thing@1.0.0:\n    resolution: !!map {integrity: sha512-AAAA==}\n`,
+      `  thing@1.0.0:\n    deprecated: |\n      text\n`,
+      `  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==}\n    name: clsx\n`, // a name override
+      `  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==}\n    version: 2.1.1\n`,
+      `  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==}\n    resolution: {integrity: sha512-BBBB==}\n`,
+      `  thing@1.0.0: {resolution: {integrity: sha512-AAAA==}}\n`,
+      `  ? thing@1.0.0\n  : resolution: {integrity: sha512-AAAA==}\n`,
+      `  # a comment\n  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==}\n`,
+      `  thing@1.0.0:\n    resolution: {integrity: sha512-AAAA==}\n    deprecated: use other\n      more text\n`,
+    ]) {
+      assert.ok(rules(checkLockfile(lockWithPackage(text))).length > 0, JSON.stringify(text));
+    }
+  });
+
+  test("a resolution in the snapshots section fails (pnpm would merge it into the package)", () => {
+    const lock = LOCK_OK.replace(
+      "  '@biomejs/biome@2.6.8': {}",
+      "  '@biomejs/biome@2.6.8':\n    resolution: {tarball: https://example.com/x.tgz}",
+    );
+    assert.deepEqual(rules(checkLockfile(lock)), ["lockfile-format"]);
+  });
+
+  test("an unknown lockfile section and a second catalog fail", () => {
+    assert.deepEqual(rules(checkLockfile(`${LOCK_OK}patchedDependencies:\n  x: abc\n`)), [
+      "lockfile-format",
+    ]);
+    assert.deepEqual(
+      rules(checkLockfile(`${LOCK_OK}catalogs:\n  other:\n    zod:\n      specifier: 4.6.7\n`)),
+      ["lockfile-format"],
+    );
+  });
+
+  test("an importer locked to an exotic version, or to another version than the catalog's, fails", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    const importer = (/** @type {string} */ specifier, /** @type {string} */ version) =>
+      LOCK_OK.replace(
+        "packages:\n",
+        `importers:\n\n  .:\n    devDependencies:\n      zod:\n        specifier: ${specifier}\n        version: ${version}\n\npackages:\n`,
+      );
+    assert.deepEqual(checkLockfile(importer("'catalog:'", "4.6.7"), catalog), []);
+    assert.deepEqual(rules(checkLockfile(importer("'catalog:'", "4.6.6"), catalog)), [
+      "lockfile-catalog",
+    ]);
+    for (const version of ["link:../../evil", "file:evil.tgz", "https://example.com/z.tgz"]) {
+      assert.deepEqual(
+        rules(checkLockfile(importer("'catalog:'", version), catalog)),
+        ["exotic-resolution"],
+        version,
+      );
+    }
+    assert.deepEqual(rules(checkLockfile(importer("'catalog:default'", "4.6.6"), catalog)), [
+      "lockfile-catalog",
+    ]);
+    const workspaceLink = (/** @type {string} */ link) =>
+      LOCK_OK.replace(
+        "packages:\n",
+        `importers:\n\n  packages/ui:\n    dependencies:\n      '@fin/core':\n        specifier: workspace:*\n        version: link:${link}\n\npackages:\n`,
+      );
+    assert.deepEqual(checkLockfile(workspaceLink("../core"), catalog), []);
+    for (const link of ["../../../outside", "../../scripts", "../core/../../tools/x"]) {
+      assert.deepEqual(
+        rules(checkLockfile(workspaceLink(link), catalog)),
+        ["exotic-resolution"],
+        link,
+      );
+    }
+  });
+
+  test("this repository's lockfile reads cleanly, line by line", () => {
+    const { catalog } = checkWorkspace(WORKSPACE);
+    assert.deepEqual(checkLockfile(readRepoFile("pnpm-lock.yaml"), catalog), []);
   });
 
   test("the packageManager pin must be exact and match engines.pnpm", () => {
@@ -452,14 +696,32 @@ describe("supply-chain:check", () => {
 });
 
 describe("supply-chain helpers", () => {
-  test("dated approvals", () => {
-    assert.ok(
-      isDatedApproval("# 2026-11-21: approved by the orchestrator under the owner's delegation"),
-    );
-    assert.ok(isDatedApproval("# 2026-11-21: the owner said yes"));
-    assert.ok(!isDatedApproval("# approved by the owner"));
-    assert.ok(!isDatedApproval("# 2026-02-30: the owner said yes"));
-    assert.ok(!isDatedApproval("# 2026-11-21: approved"));
+  test("dated approvals name the owner's yes in a fixed phrase, with no negation", () => {
+    for (const yes of [
+      "# 2026-11-21: approved by the owner",
+      "# 2026-11-21: approved by the owner (decision 1, DECISIONS short list)",
+      "# 2026-11-21: the owner's yes, at the 08:00 sitting",
+      "# 2026-11-21: owner's yes",
+      "# 2026-11-21: approved by the orchestrator under the owner's delegation",
+    ]) {
+      assert.ok(isDatedApproval(yes), yes);
+    }
+    for (const no of [
+      "# approved by the owner",
+      "# 2026-02-30: approved by the owner",
+      "# 2026-11-21: approved",
+      "# 2026-11-21: the owner said yes",
+      "# 2026-11-21: the owner refused this",
+      "# 2026-11-21: waiting for the owner",
+      "# 2026-11-21: the owner said no",
+      "# 2026-11-21: approved by the owner? no",
+      "# 2026-11-21: approved by the owner, if the tests pass",
+      "# 2026-11-21: not approved by the owner",
+      "# 2026-11-21: approved by the ownership",
+      "# 2026-11-21: approved by the owner, then revoked",
+    ]) {
+      assert.ok(!isDatedApproval(no), no);
+    }
   });
 
   test("exotic specs", () => {
@@ -473,5 +735,11 @@ describe("supply-chain helpers", () => {
     assert.ok(compareVersions("1.6.10", "1.6.11") < 0);
     assert.ok(compareVersions("1.6.11-beta.1", "1.6.11") < 0);
     assert.equal(compareVersions("1.6.11", "1.6.11"), 0);
+  });
+
+  test("checkManifest reads a manifest as an object", () => {
+    assert.deepEqual(rules(checkManifest("packages/x/package.json", [], new Map())), [
+      "manifest-shape",
+    ]);
   });
 });
