@@ -239,7 +239,10 @@ async function rulePlan(
   // (which would rewrite every equal number in the run's output and log). Only the writes to the
   // rate phase carry it (the overlay's value, or the value a rate rule of Fin's holds now), so only
   // their provider errors are redacted. On a shared zone nothing sends it.
-  const threshold = ctx.overlay.thresholds[s.rules.rate.threshold];
+  const thresholdName = s.rules.rate.threshold;
+  const threshold = Object.hasOwn(ctx.overlay.thresholds, thresholdName)
+    ? ctx.overlay.thresholds[thresholdName]?.reveal()
+    : undefined;
   const placeholder = `<threshold:${s.rules.rate.threshold}>`;
   const held = new Set<number>(threshold === undefined ? [] : [threshold]);
   for (const { phase, rule } of existing.values()) {
