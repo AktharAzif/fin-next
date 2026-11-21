@@ -39,6 +39,17 @@ function staticRules(t, files) {
   return checkStatic("x", dirWith(t, files)).map((f) => f.rule);
 }
 
+/**
+ * The third-party origins a static build with these files names.
+ * @param {import("node:test").TestContext} t
+ * @param {Record<string, string>} files
+ */
+function staticOrigins(t, files) {
+  return checkStatic("x", dirWith(t, files)).flatMap((f) =>
+    f.rule === "third-party-origin" ? [f.message.replace(/^names /, "")] : [],
+  );
+}
+
 describe("server bundles", () => {
   it("passes a release bundle", (t) => {
     const dir = dirWith(t, {
@@ -587,6 +598,81 @@ describe("static builds", () => {
         "a > in a substitution",
         `e.innerHTML=\`<img ${"$"}{a>b?"x":"y"} src=//evil.example/p.png>\`;`,
       ],
+      // What looks like a substitution is read as text too: a `${` in a plain string, or one whose
+      // braces pair with the wrong `}`, hides no attribute after it.
+      [
+        "a dollar-brace in a quoted value",
+        `function f(){e.innerHTML='<img alt="${"$"}{" src=//evil.example/p.png>'}`,
+      ],
+      [
+        "a dollar-brace as a name",
+        `function f(){e.innerHTML='<img ${"$"}{ src=//evil.example/p.png>'}`,
+      ],
+      [
+        "a brace in a string in a substitution",
+        `function f(){e.innerHTML=\`<img ${"$"}{a?"{":""} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "a dollar-brace before a user name",
+        `function f(){e.innerHTML='<img ${"$"}{ src=https://react.dev\\x22@evil.example/p.png>'}`,
+      ],
+      [
+        "a dollar-brace before a host then code",
+        `function f(){e.innerHTML='<img ${"$"}{ src=//evil.example'+t+'>'}`,
+      ],
+      [
+        "a dollar-brace with a later brace",
+        `e.innerHTML='<img ${"$"}{ src=//evil.example/p.png>';x='}';`,
+      ],
+      [
+        "an unbalanced brace in a substitution",
+        `function f(){e.innerHTML=\`<img ${"$"}{"{"} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "a brace in a regular expression in a substitution",
+        `function f(a){e.innerHTML=\`<img alt=${"$"}{a.replace(/{/g,'')} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "an escaped dollar-brace in a template",
+        `function f(){e.innerHTML=\`<img \\${"$"}{ src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "an unquoted srcset after a dollar-brace",
+        `function f(){e.innerHTML='<img ${"$"}{ srcset=//evil.example/p.png>'}`,
+      ],
+      [
+        "a substitution that may close the quote",
+        `e.innerHTML=\`<img alt="${"$"}{q} src=//evil.example/p.png>\`;`,
+      ],
+      [
+        "an unbalanced brace as a value",
+        `function f(e){e.innerHTML=\`<img alt=${"$"}{"{"} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "a dollar-brace as an unquoted value",
+        `function f(e){e.innerHTML='<img alt=${"$"}{ src=//evil.example/p.png>'}`,
+      ],
+      [
+        "a dollar-brace as a double-quoted string's value",
+        `function f(e){e.innerHTML="<img title=${"$"}{ src=//evil.example/p.png>"}`,
+      ],
+      [
+        "a dollar-brace with no closing brace",
+        `e.innerHTML='<img ${"$"}{ src=//evil.example/p.png>';`,
+      ],
+      ["a balanced substitution", `e.innerHTML=\`<img ${"$"}{a} src=//evil.example/p.png>\`;`],
+      // The script's own string delimiter is no attribute's quote: the tag goes on in the next
+      // string, after a value built at run time.
+      [
+        "a value built at run time, then a double-quoted string",
+        `e.innerHTML='<img alt='+x+" src=//evil.example/p.png>";`,
+      ],
+      [
+        "a value built at run time, then a single-quoted string",
+        `e.innerHTML="<img alt="+x+' src=//evil.example/p.png title="a">';`,
+      ],
+      ["a tag's name ending its string", `e.innerHTML="<img"+" src=//evil.example/p.png>";`],
+      ["the same delimiter twice", `e.innerHTML="<img alt="+x+" src=//evil.example/p.png>";`],
     ];
     for (const [what, text] of cases) {
       const found = staticRules(t, { "assets/a.js": text });
@@ -601,6 +687,292 @@ describe("static builds", () => {
       "if(a<b){x=1}y=/\\/assets\\//;",
       "e.innerHTML='<b>x</b>';y=/\\/assets\\//;",
       "e.innerHTML='<img src=//react.dev/a.png>';",
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("reads CSS a script holds, and a style attribute's references, through CSS's escapes", (t) => {
+    /** @type {[string, string, string, string][]} */
+    const cases = [
+      [
+        "an escaped @ in a style a script sets",
+        "assets/a.js",
+        'e.style.backgroundImage="url(https://react.dev\\\\40 evil.example/a.png)";',
+        "https://evil.example",
+      ],
+      [
+        "an escaped tab in a style a script sets",
+        "assets/a.js",
+        'e.style.background="url(https://react.dev\\\\9 .evil.example/a.png)";',
+        "https://react.dev.evil.example",
+      ],
+      [
+        "escaped slashes in a style a script sets",
+        "assets/a.js",
+        'e.style.backgroundImage="url(\\\\2f\\\\2f evil.example/a.png)";',
+        "https://evil.example",
+      ],
+      [
+        "a stylesheet a script holds",
+        "assets/a.js",
+        'const css=".a{background:url(https://react.dev\\\\40 evil.example/a.png)}";',
+        "https://evil.example",
+      ],
+      [
+        "a referenced backslash in a style attribute",
+        "index.html",
+        '<div style="background:url(https://react.dev&#92;40 evil.example/a.png)"></div>',
+        "https://evil.example",
+      ],
+      [
+        "a style attribute a script writes",
+        "assets/a.js",
+        "e.innerHTML='<div style=\"background:url(https://react.dev&#92;40 evil.example/a.png)\">';",
+        "https://evil.example",
+      ],
+    ];
+    for (const [what, file, text, origin] of cases) {
+      const found = staticOrigins(t, { [file]: text });
+      assert.ok(found.includes(origin), `${what}: ${found.join()}`);
+    }
+    assert.deepEqual(
+      staticRules(t, {
+        "assets/a.js": 'e.style.backgroundImage="url(https://react.dev/a\\\\40 b.png)";',
+      }),
+      [],
+    );
+  });
+
+  it("reads a host the host parser drops a character from, wherever the URL starts", (t) => {
+    const bom = "\u{feff}";
+    /** @type {[string, string, string][]} */
+    const cases = [
+      [
+        "a byte order mark in a srcset's absolute candidate",
+        "assets/a.js",
+        `jsx("img",{srcSet:"/a.png 1x, https://react.dev${bom}.evil.example/b.png 2x"})`,
+      ],
+      [
+        "a byte order mark in a srcset a script sets",
+        "assets/a.js",
+        `i.setAttribute("srcset","/a.png 1x, https://react.dev${bom}.evil.example/b.png 2x")`,
+      ],
+      [
+        "a soft hyphen in a srcset's absolute candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png 1x, https://react.dev\\xad.evil.example/b.png 2x"})',
+      ],
+      [
+        "a byte order mark in a refresh's URL",
+        "index.html",
+        `<meta http-equiv="refresh" content="0;https://react.dev${bom}.evil.example/">`,
+      ],
+      [
+        "a zero width space in a refresh's URL",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;https://react.dev&#x200B;.evil.example/">',
+      ],
+      [
+        "a byte order mark after a substitution",
+        "assets/a.js",
+        `fetch(\`${"$"}{""}https://react.dev${bom}.evil.example/x\`)`,
+      ],
+      [
+        "a byte order mark where nothing known starts the URL",
+        "assets/a.js",
+        `x="see https://react.dev${bom}.evil.example/x";`,
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticOrigins(t, { [file]: text });
+      assert.ok(found.includes("https://react.dev.evil.example"), `${what}: ${found.join()}`);
+    }
+  });
+
+  it("reads a refresh's URL to the end of its value, as a browser does", (t) => {
+    const nl = String.fromCharCode(10);
+    /** @type {[string, string, string, string][]} */
+    const cases = [
+      [
+        "a space",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;https://react.dev @evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "a quote",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;https://react.dev\'@evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "a raw new line",
+        "index.html",
+        `<meta http-equiv="refresh" content="0;https://react.dev${nl}.evil.example/">`,
+        "https://react.dev.evil.example",
+      ],
+      [
+        "url= and a space",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;url=https://react.dev @evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "url= and a >",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;url=https://react.dev>@evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "a protocol-relative URL",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;//evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "a protocol-relative URL after url=",
+        "index.html",
+        '<meta http-equiv="refresh" content="5, URL = //evil.example/">',
+        "https://evil.example",
+      ],
+      [
+        "an unquoted value",
+        "index.html",
+        "<meta http-equiv=refresh content=0;https://react.dev,@evil.example>",
+        "https://evil.example",
+      ],
+      [
+        "an unquoted value a script writes",
+        "assets/a.js",
+        "e.innerHTML='<meta http-equiv=refresh content=0;https://react.dev,@evil.example>';",
+        "https://evil.example",
+      ],
+      [
+        "a value a script sets",
+        "assets/a.js",
+        'm.httpEquiv="refresh";m.content="0;https://react.dev @evil.example/";',
+        "https://evil.example",
+      ],
+      [
+        "a quote in a srcset's absolute candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png 1x, https://react.dev\'@evil.example/b.png 2x"})',
+        "https://evil.example",
+      ],
+      // A user name read past a guessed end is read up to a `>` that may end the tag, too.
+      [
+        "a user name before a >",
+        "index.html",
+        "<p>x 0;https://react.dev,@evil.example>y</p>",
+        "https://evil.example",
+      ],
+    ];
+    for (const [what, file, text, origin] of cases) {
+      const found = staticOrigins(t, { [file]: text });
+      assert.ok(found.includes(origin), `${what}: ${found.join()}`);
+    }
+    /** @type {[string, string][]} */
+    const passes = [
+      ["index.html", '<meta http-equiv="refresh" content="0;https://react.dev/errors">'],
+      ["index.html", '<meta http-equiv="refresh" content="0;url=\'https://react.dev\'">'],
+      ["assets/a.js", 'x="1, https://react.dev and more";y="2 https://react.dev, see";'],
+      ["assets/a.js", "a.x='used'.length;// https://react.dev here\nb();"],
+    ];
+    for (const [file, text] of passes) {
+      assert.deepEqual(staticRules(t, { [file]: text }), [], text);
+    }
+  });
+
+  it("reads a fixed host a template literal's substitution follows, and one it precedes", (t) => {
+    const d = "$";
+    const nl = String.fromCharCode(10);
+    /** @type {[string, string, string, string][]} */
+    const cases = [
+      [
+        "a substitution after the host",
+        "assets/a.js",
+        `fetch(\`https://evil.example${d}{p}\`)`,
+        "https://evil.example",
+      ],
+      [
+        "a protocol-relative URL",
+        "assets/a.js",
+        `i.src=\`//evil.example${d}{p}\``,
+        "https://evil.example",
+      ],
+      [
+        "a WebSocket",
+        "assets/a.js",
+        `new WebSocket(\`wss://evil.example${d}{q}\`)`,
+        "wss://evil.example",
+      ],
+      [
+        "a port built at run time",
+        "assets/a.js",
+        `fetch(\`https://evil.example:${d}{port}/x\`)`,
+        "https://evil.example",
+      ],
+      [
+        "an unquoted attribute a script writes",
+        "assets/a.js",
+        `e.innerHTML=\`<img src=https://evil.example${d}{p}>\``,
+        "https://evil.example",
+      ],
+      // Right after a substitution, the template literal goes on to its backtick.
+      [
+        "a space after a substitution",
+        "assets/a.js",
+        `fetch(\`${d}{a}https://react.dev @evil.example/x\`)`,
+        "https://evil.example",
+      ],
+      [
+        "a new line after a substitution",
+        "assets/a.js",
+        `fetch(\`${d}{a}https://react.dev${nl}.evil.example/x\`)`,
+        "https://react.dev.evil.example",
+      ],
+      [
+        "slashes after a substitution",
+        "assets/a.js",
+        `e.innerHTML=\`<img src${d}{eq}//evil.example/p.png>\`;`,
+        "https://evil.example",
+      ],
+      // Outside a script nothing is built at run time: a `$` is the host's own.
+      [
+        "a $ in markup",
+        "index.html",
+        '<script src="https://evil$.example/x.js"></script>',
+        "https://evil$.example",
+      ],
+      [
+        "a $ in an unquoted attribute",
+        "index.html",
+        "<img src=//$.evil.example/p.png>",
+        "https://$.evil.example",
+      ],
+      [
+        "a $ in a stylesheet",
+        "assets/a.css",
+        "a{b:url(//x$.evil.example/p.png)}",
+        "https://x$.evil.example",
+      ],
+      [
+        "a $ with no brace in a script",
+        "assets/a.js",
+        'fetch("https://evil$.example/x")',
+        "https://evil$.example",
+      ],
+    ];
+    for (const [what, file, text, origin] of cases) {
+      const found = staticOrigins(t, { [file]: text });
+      assert.ok(found.includes(origin), `${what}: ${found.join()}`);
+    }
+    for (const text of [
+      `fetch(\`https://${d}{host}/x\`);fetch(\`//${d}{host}:${d}{port}/x\`);`,
+      `fetch(\`https://${d}{a}.${d}{b}/x\`);fetch(\`http://localhost:${d}{port}/x\`);`,
+      `fetch(\`https://react.dev/${d}{p}\`);x=\`${d}{a}https://react.dev for the docs\`;`,
+      `x=\`${d}{a}https://react.dev/errors/${d}{c}\`;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -779,7 +1151,9 @@ describe("static builds", () => {
       originsIn("HTTPS://A.Example.com/x https://a.example.com/y http://b.example.org:8080/"),
       ["https://a.example.com", "http://b.example.org:8080"],
     );
-    assert.deepEqual(originsIn(`\`https://$${"{host}"}/x\` https:// //`), []);
+    assert.deepEqual(originsIn(`\`https://$${"{host}"}/x\` https:// //`, { kind: "script" }), []);
+    // Outside a script nothing is built at run time: a `$` is the host's own.
+    assert.deepEqual(originsIn(`"https://$${"{host}"}/x"`), [`https://$${"{host}"}`]);
   });
 });
 

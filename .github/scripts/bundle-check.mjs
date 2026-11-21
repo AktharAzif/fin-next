@@ -19,26 +19,29 @@
 //       `__vite-browser-external`); no test seam marker;
 //     - in the same files, no third-party origin: every http, https, ws or wss URL and every
 //       protocol-relative one where a URL starts (after a quote, an unquoted attribute's `=` in
-//       markup or in a start tag a script writes, CSS's url(, or as a srcset candidate; and after
-//       any C0 control or space, which the URL parser strips first) has an origin on
-//       ALLOWED_ORIGINS, the namespace and message URLs the pinned libraries carry, none of which
-//       is fetched; and no URL with a user name or password, whose host is not the one it seems
-//       to name. Each URL is read as a browser reads it, in every reading of the text a browser
-//       may apply (readings: JavaScript's and JSON's escapes, a classic script's octal ones
-//       included, CSS's, HTML's character references; a character a reference or a CSS escape
-//       spells is data to the markup's or the stylesheet's tokenizer, never a value's or a tag's
-//       end): its scheme in any case, a backslash as a slash, any run of slashes, no slashes at all
-//       where a literal starts (`"wss:host"`), tabs and new lines dropped, and its authority
-//       everything up to the first /, \, ? or # or where the browser ends its literal (a quote;
-//       ASCII white space or `>` after an unquoted attribute; ASCII white space or `)` in an
-//       unquoted url(; ASCII white space in a srcset), less the C0 controls and spaces the URL
+//       markup or in a start tag a script writes, CSS's url(, a refresh's time, a template
+//       literal's substitution, or as a srcset candidate; and after any C0 control or space, which
+//       the URL parser strips first) has an origin on ALLOWED_ORIGINS, the namespace and message
+//       URLs the pinned libraries carry, none of which is fetched; and no URL with a user name or
+//       password, whose host is not the one it seems to name. Each URL is read as a browser reads
+//       it, in every reading of the text a browser may apply (readings: JavaScript's and JSON's
+//       escapes, a classic script's octal ones included, CSS's, HTML's character references, and
+//       one after another where a browser applies them in turn, as to CSS or a style attribute a
+//       script holds; a character a reference or a CSS escape spells is data to the markup's or
+//       the stylesheet's tokenizer, never a value's or a tag's end): its scheme in any case, a
+//       backslash as a slash, any run of slashes, no slashes at all where a literal starts
+//       (`"wss:host"`), tabs and new lines dropped, and its authority everything up to the first
+//       /, \, ? or # or where the browser ends its literal (a quote; ASCII white space or `>`
+//       after an unquoted attribute; ASCII white space or `)` in an unquoted url(; ASCII white
+//       space in a srcset; the end of a refresh's value), less the C0 controls and spaces the URL
 //       parser strips at its end, the host after its last `@`. White space after the slashes is
 //       the URL's own. A quote inside the literal may end the script's own string or a value the
-//       quote's other spelling opened, so the URL is read both up to it and past it. A URL whose
-//       authority (or a srcset that does not close) runs past what the scanner reads, or whose
-//       host it reads but a URL parser refuses, is refused, never read as its first part names or
-//       passed as a host built at run time. A host the text builds at run time
-//       (`"https://" + host`) is not read here: the page's own policy refuses it in the browser;
+//       quote's other spelling opened, so the URL is read both up to it and past it; so is a
+//       script's `${`, which may be a template literal's substitution. A URL whose authority (or
+//       a srcset that does not close) runs past what the scanner reads, or whose host it reads but
+//       a URL parser refuses, is refused, never read as its first part names or passed as a host
+//       built at run time. A host a script builds at run time (`"https://" + host`,
+//       `https://${host}`) is not read here: the page's own policy refuses it in the browser;
 //     - no source map (`*.map` in any case, or a `sourceMappingURL` comment pointing at one);
 //     - nothing a deployment refuses (release-static.mjs's artefactProblems: `_headers` or
 //       `env.json`, which the deploy renders, SF-05; a Worker control file; a path read two ways;
@@ -224,30 +227,47 @@ const fromJsCode = (code) =>
  */
 
 /**
- * A text with the escapes a pattern finds read, and which characters they spelled.
- * @param {string} text
+ * A text with the escapes a pattern finds read, and which characters they spelled. Over a reading
+ * that is itself spelled (CSS's escapes in a style attribute, after HTML's references), a
+ * character the earlier reading spelled stays spelled where it is copied unchanged.
+ * @param {string | Reading} input
  * @param {RegExp} pattern a global pattern
  * @param {(m: RegExpExecArray) => string} decode an escape's text, or the match unchanged
  * @returns {Reading}
  */
-function readEscapes(text, pattern, decode) {
+function readEscapes(input, pattern, decode) {
+  const { text, spelled: before } =
+    typeof input === "string" ? { text: input, spelled: null } : input;
   // An escape is two characters or more and spells two code units at most.
   const spelled = new Uint8Array(text.length);
   let out = "";
   let last = 0;
   let any = false;
+  /** @param {number} from @param {number} to */
+  const copy = (from, to) => {
+    if (before !== null && from < to) {
+      const part = before.subarray(from, to);
+      spelled.set(part, out.length);
+      if (part.includes(1)) any = true;
+    }
+    out += text.slice(from, to);
+  };
   for (const m of text.matchAll(pattern)) {
     const at = m.index ?? 0;
-    out += text.slice(last, at);
+    copy(last, at);
     const c = decode(m);
-    if (c !== m[0] && c !== "") {
-      spelled.fill(1, out.length, out.length + c.length);
-      any = true;
+    if (c === m[0]) {
+      copy(at, at + c.length);
+    } else {
+      if (c !== "") {
+        spelled.fill(1, out.length, out.length + c.length);
+        any = true;
+      }
+      out += c;
     }
-    out += c;
     last = at + m[0].length;
   }
-  out += text.slice(last);
+  copy(last, text.length);
   return { text: out, spelled: any ? spelled.subarray(0, out.length) : null };
 }
 
@@ -274,8 +294,8 @@ export function decodeJsEscapes(text) {
 
 /**
  * A text with CSS's escapes read (`\2f`, `\2f ` and `\/`; an escaped new line is dropped), and
- * which characters they spelled.
- * @param {string} text
+ * which characters they spelled (with those an earlier reading spelled, over a Reading).
+ * @param {string | Reading} text
  * @returns {Reading}
  */
 function readCssEscapes(text) {
@@ -328,8 +348,11 @@ const isSpelled = (reading, i) => reading.spelled !== null && reading.spelled[i]
 
 /**
  * Every reading of a text a browser may apply to the strings in it: a script's or JSON's through
- * JavaScript's escapes (and HTML's references, for markup a script writes); a stylesheet's
- * through CSS's escapes; markup, and any other file, as written and through each of them.
+ * JavaScript's escapes, and after them HTML's references (markup a script writes), CSS's escapes
+ * (CSS a script holds: `element.style`, `insertRule`, a stylesheet a string fills) and both in
+ * turn (a style attribute in markup a script writes); a stylesheet's through CSS's escapes;
+ * markup, and any other file, as written and through each of them, a style attribute's
+ * references and then its CSS escapes included.
  * @param {string} text
  * @param {string} kind "script", "style" or "markup"
  * @returns {Reading[]}
@@ -350,17 +373,25 @@ export function readings(text, kind) {
   };
   if (kind === "script") {
     const js = decodeJsEscapes(text);
+    const html = readHtmlReferences(js);
     add({ text: js, spelled: null });
-    add(readHtmlReferences(js));
+    add(html);
+    add(readCssEscapes(js));
+    add(readCssEscapes(html));
   } else if (kind === "style") {
     add(readCssEscapes(text));
   } else {
     const js = decodeJsEscapes(text);
+    const html = readHtmlReferences(text);
+    const jsHtml = readHtmlReferences(js);
     add({ text, spelled: null });
-    add(readHtmlReferences(text));
+    add(html);
     add({ text: js, spelled: null });
-    add(readHtmlReferences(js));
+    add(jsHtml);
     add(readCssEscapes(text));
+    add(readCssEscapes(html));
+    add(readCssEscapes(js));
+    add(readCssEscapes(jsHtml));
   }
   return all;
 }
@@ -412,16 +443,19 @@ const cssBadUrl = (c) => {
   );
 };
 /**
- * @typedef {{ kind: "quoted", end: string, spelled: boolean }
+ * Where a URL is, which decides where its text ends (`guessed`: a refresh's or a substitution's
+ * context contextsBefore adds, in which a host no URL parser takes is no finding).
+ * @typedef {({ kind: "quoted", end: string, spelled: boolean }
  *   | { kind: "srcset", end: number }
- *   | { kind: "attribute" | "css" | "none" }} UrlContext
+ *   | { kind: "attribute" | "css" | "none" }) & { guessed?: boolean }} UrlContext
  */
 
 /**
  * Where a start tag that can hold an attribute opens: `<`, a name a fetching element has
- * (letters, digits and hyphens), then white space or `/`.
+ * (letters, digits and hyphens), then white space or `/`, or a raw quote, which may end the
+ * script's string with the tag going on in the next (`"<img"+" src=..."`).
  */
-const TAG_OPEN = /<[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /]/g;
+const TAG_OPEN = /<[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /"'`]/g;
 // The HTML tokenizer's states inside a start tag, as bits, so every tag open at once is followed
 // in one pass: before an attribute's name, in it, after it, before its value, in a double- or
 // single-quoted value, in an unquoted one, after a quoted one.
@@ -435,9 +469,12 @@ const UNQUOTED = 64;
 const AFTER_QUOTED = 128;
 
 /**
- * One tokenizer state's next on a character (0 when the tag ends at `>`). A quote an escape
- * spelled is a quote: the browser reads the string the script writes. A character a reference
- * spelled is data (`data`): the tokenizer reads the reference as text.
+ * One tokenizer state's next states on a character, as bits (0 when the tag ends at `>`). A quote
+ * an escape spelled is a quote: the browser reads the string the script writes. A raw quote that
+ * opens a value may instead end the script's own string, the value being built at run time and
+ * the tag going on in the next string (`'<img alt='+x+" src=..."`), so it opens both a quoted
+ * value and an unquoted one. A character a reference spelled is data (`data`): the tokenizer
+ * reads the reference as text.
  * @param {number} state
  * @param {string} c
  * @param {boolean} data
@@ -452,7 +489,8 @@ function nextTagState(state, c, data) {
   if (state === UNQUOTED) return space ? BEFORE_NAME : UNQUOTED;
   if (state === BEFORE_VALUE) {
     if (space) return BEFORE_VALUE;
-    return double ? DOUBLE : single ? SINGLE : UNQUOTED;
+    const raw = c === '"' || c === "'" ? UNQUOTED : 0;
+    return double ? DOUBLE | raw : single ? SINGLE | raw : UNQUOTED;
   }
   const slash = !data && c === "/";
   if (state === BEFORE_NAME) return space || slash ? BEFORE_NAME : NAME;
@@ -490,13 +528,15 @@ function substitutions(reading) {
 }
 
 /**
- * A start tag's states after a substitution: those before it (it may be empty), a name's (it may
- * write one), and an unquoted value's (it may write one).
+ * A start tag's states after a substitution, which may write any text: those before it (it may be
+ * empty), a name's (it may write one), a new attribute's (it may end a value: `"`, `" `), and an
+ * unquoted value's after `=` (it may write one).
  * @param {number} live
  */
 function afterSubstitution(live) {
-  let after = live;
-  if ((live & (BEFORE_NAME | NAME | AFTER_NAME | AFTER_QUOTED)) !== 0) after |= NAME;
+  if (live === 0) return 0;
+  let after = live | NAME;
+  if ((live & (DOUBLE | SINGLE | UNQUOTED)) !== 0) after |= AFTER_QUOTED | BEFORE_NAME;
   if ((live & BEFORE_VALUE) !== 0) after |= UNQUOTED;
   return after;
 }
@@ -506,8 +546,10 @@ function afterSubstitution(live) {
  * as an HTML tokenizer reads it from its `<` (markup a script writes: `e.innerHTML='<img
  * src=//host/p.png>'`). A regular expression's `x=/\/a\//` is in none. Every tag open at a point
  * is followed at once (a tag inside another's quoted value included), so the pass is linear. A
- * character a reference spelled is data (`&gt;` ends no tag), and the tags open before a
- * template literal's `${...}` pass over it whatever it holds (`${a>b}` ends no tag).
+ * character a reference spelled is data (`&gt;` ends no tag). What looks like a template
+ * literal's `${...}` is read both ways: as literal text, which it is in a plain string or when
+ * its braces were paired wrongly, and as a substitution, after whose `}` the states held at its
+ * `${` go on as well (`${a>b}` ends no tag). Both readings are kept, so neither drops an `=`.
  * @param {Reading} reading
  * @returns {Set<number>}
  */
@@ -537,18 +579,9 @@ function attributeEquals(reading) {
       if (target === Infinity) break;
       i = Math.max(i, target);
     }
-    const top = held.at(-1);
-    if (top !== undefined && i === top.end) {
-      held.pop();
-      live = afterSubstitution(top.live);
-      continue;
-    }
+    // A substitution's states are held at its `${`; the literal reading steps through its text.
     const end = live === 0 ? undefined : spans.get(i);
-    if (end !== undefined) {
-      held.push({ end, live });
-      live = 0;
-      continue;
-    }
+    if (end !== undefined) held.push({ end, live });
     const c = text[i] ?? "";
     const data = isSpelled(reading, i);
     if (c === "=" && !data && (live & (NAME | AFTER_NAME)) !== 0) equals.add(i);
@@ -557,6 +590,11 @@ function attributeEquals(reading) {
       if ((live & bit) !== 0) after |= nextTagState(bit, c, data);
     }
     live = after;
+    // At its `}`, the held states go on beside the literal reading's, never in place of them.
+    for (let top = held.at(-1); top !== undefined && top.end === i; top = held.at(-1)) {
+      held.pop();
+      live |= afterSubstitution(top.live);
+    }
     while (next < opens.length && (opens[next] ?? 0) <= i) {
       if (opens[next] === i) live |= BEFORE_NAME;
       next++;
@@ -595,23 +633,92 @@ function contextBefore(reading, index, kind, inTag) {
 }
 
 /**
- * @typedef {{ authority: string, cut: boolean, crossed: boolean }} AuthorityRead
+ * What starts a refresh's URL (HTML's shared declarative refresh steps): the start of a quoted or
+ * unquoted value, ASCII white space, a time of digits and dots (a digit in it: prose's `'a'.` is
+ * no time), `;`, `,` or white space, an optional `url=`, then what the URL parser strips first
+ * (a C0 control or a space; `\p{Cc}` holds those and a few more, which only widens the match).
+ * The URL is the rest of the value.
+ */
+const REFRESH_PREFIX =
+  /([="'`\u{e000}-\u{e002}])[\t\n\f\r ]*[0-9.]*[0-9][0-9.]*(?:[\t\n\f\r ]*[;,]|[\t\n\f\r ])[\t\n\f\r ]*(?:url[\t\n\f\r ]*=[\t\n\f\r ]*)?[\p{Cc} ]*$/iu;
+/** How far before a URL the scanner looks for a refresh's start: a bound on its work only. */
+const MAX_REFRESH_PREFIX = 256;
+
+/**
+ * Every context a URL may be in (contextBefore's, and each reading a browser may apply instead),
+ * so its end is read in each and none is dropped. Beside the first: a later candidate of a srcset
+ * a script sets from a string (`srcSet:"/a.png 1x, https://host/b.png 2x"`), which runs to ASCII
+ * white space; the text right after a template literal's substitution (`${a}https://host/`),
+ * which runs to the literal's backtick; and a refresh's URL (`content="0;https://host/"`), which
+ * runs to the end of the value. The last two are guessed: a host read in them that no URL parser
+ * takes is no finding (the first context's reading still is).
+ * @param {Reading} reading
+ * @param {number} index where the URL starts
+ * @param {string} kind "script", "style" or "markup"
+ * @param {(eq: number) => boolean} inTag whether the `=` at an index is an attribute's in a tag
+ * @param {(brace: number) => boolean} closesSubstitution whether the `}` at an index ends a `${`
+ * @returns {UrlContext[]}
+ */
+function contextsBefore(reading, index, kind, inTag, closesSubstitution) {
+  const { text } = reading;
+  /** @type {UrlContext[]} */
+  const all = [contextBefore(reading, index, kind, inTag)];
+  if (all[0]?.kind === "none" && laterSrcsetCandidate(text, index)) {
+    all.push({ kind: "srcset", end: text.length });
+  }
+  const brace = index - 1;
+  const pastSubstitution =
+    kind === "script" &&
+    text[brace] === "}" &&
+    !isSpelled(reading, brace) &&
+    closesSubstitution(brace);
+  if (pastSubstitution) all.push({ kind: "quoted", end: "`", spelled: false, guessed: true });
+  const from = Math.max(0, index - MAX_REFRESH_PREFIX);
+  const refresh = REFRESH_PREFIX.exec(text.slice(from, index));
+  if (refresh !== null) {
+    const at = from + refresh.index;
+    const c = text[at] ?? "";
+    const spelled = isSpelled(reading, at);
+    if (QUOTES.has(c)) {
+      all.push({ kind: "quoted", end: c, spelled, guessed: true });
+    } else if (!spelled && (kind === "markup" || (kind === "script" && inTag(at)))) {
+      all.push({ kind: "attribute", guessed: true });
+    }
+  }
+  return all;
+}
+
+/**
+ * An authority as one reading reads it: `cut` when it ran past MAX_AUTHORITY; `crossed` when it
+ * was read past where the literal may end, or in a guessed context; `built` when a script's
+ * template literal substitution (a raw `${`) stands in it or right after it.
+ * @typedef {{ authority: string, cut: boolean, crossed: boolean, built: boolean }} AuthorityRead
  */
 
 /**
  * Where nothing known starts a URL, the scanner's end for it (white space, a quote, a bracket, a
  * comma or a semicolon) is a guess: a URL parser keeps all but the quote in a user name
- * (`0;https://react.dev,@host/` in a refresh). The authority read on from there to the next ASCII
- * white space, quote, `/`, `\`, `?` or `#`, when it reaches an `@` (`crossed`, as a reading past
- * where the literal may end); null otherwise.
+ * (`see https://react.dev,@host/`). The authority read on from there to the next ASCII white
+ * space, quote, `/`, `\`, `?` or `#`, when it reaches an `@` (`crossed`, as a reading past where
+ * the literal may end), and also up to a `>` on the way, which may end an unquoted attribute's
+ * value and its tag; none when no `@` is reached.
  * @param {Reading} reading
  * @param {number} from where the guessed end is
  * @param {number} start where the authority starts
  * @param {string} authority the authority up to the guessed end
- * @returns {AuthorityRead | null}
+ * @param {boolean} built as AuthorityRead's
+ * @returns {AuthorityRead[]}
  */
-function userNamePast(reading, from, start, authority) {
+function userNamePast(reading, from, start, authority, built) {
   const { text } = reading;
+  /** @type {AuthorityRead[]} */
+  const reads = [];
+  /** @param {string} on */
+  const keep = (on) => {
+    if (on.includes("@", authority.length)) {
+      reads.push({ authority: on, cut: false, crossed: true, built });
+    }
+  };
   let on = authority;
   for (let i = from; i < text.length && i - start < MAX_AUTHORITY; i++) {
     const c = text[i] ?? "";
@@ -621,9 +728,11 @@ function userNamePast(reading, from, start, authority) {
     }
     if (ASCII_SPACE.has(c) || "/\\?#".includes(c)) break;
     if (QUOTES.has(c) && !isSpelled(reading, i)) break;
+    if (c === ">" && !isSpelled(reading, i)) keep(on);
     on += UNMARKED.get(c) ?? c;
   }
-  return on.includes("@", authority.length) ? { authority: on, cut: false, crossed: true } : null;
+  keep(on);
+  return reads;
 }
 
 /**
@@ -632,26 +741,31 @@ function userNamePast(reading, from, start, authority) {
  * the URL's own (in a quoted literal, or spelled by a reference or an escape). The literal ends
  * at its closing quote; at ASCII white space or `>` after an unquoted attribute; at ASCII white
  * space, `)` or what makes a bad URL in CSS's url(; at ASCII white space in a srcset candidate;
- * and, where nothing known starts the URL (it is not a literal's start), at white space, quotes
- * and brackets, and read on for a user name (userNamePast). A character a reference or an escape
- * spelled never ends a literal. A quote inside a quoted literal, an unquoted attribute or a srcset
- * may end the script's own string, or close a value its other spelling opened: the authority is
- * read both up to it and past it (`crossed`). `cut` when it ran past MAX_AUTHORITY instead.
+ * and, where nothing known starts the URL (it is not a literal's start), at white space (not a
+ * byte order mark, which the host parser drops), quotes and brackets, and read on for a user name
+ * (userNamePast). A character a reference or an escape spelled never ends a literal. A quote
+ * inside a quoted literal, an unquoted attribute or a srcset may end the script's own string, or
+ * close a value its other spelling opened: the authority is read both up to it and past it
+ * (`crossed`). In a script, a raw `${` may be a template literal's substitution, which the script
+ * fills in at run time: the authority is read both up to it, which names the host when one stands
+ * before it, and past it (`built`). `cut` when it ran past MAX_AUTHORITY instead.
  * @param {Reading} reading
  * @param {number} start
  * @param {UrlContext} context
+ * @param {boolean} script whether the text is a script's, whose `${` may be a substitution
  * @returns {AuthorityRead[]}
  */
-function readAuthority(reading, start, context) {
+function readAuthority(reading, start, context, script) {
   const { text } = reading;
   /** @type {AuthorityRead[]} */
   const reads = [];
   const stop = context.kind === "srcset" ? Math.min(context.end, text.length) : text.length;
   let authority = "";
-  let crossed = false;
+  let crossed = context.guessed === true;
+  let built = false;
   for (let i = start; i < stop; i++) {
     if (i - start >= MAX_AUTHORITY) {
-      reads.push({ authority, cut: true, crossed });
+      reads.push({ authority, cut: true, crossed, built });
       return reads;
     }
     const c = text[i] ?? "";
@@ -664,17 +778,23 @@ function readAuthority(reading, start, context) {
     }
     if ("/\\?#".includes(c)) break;
     if (context.kind === "quoted" && c === context.end && spelled === context.spelled) break;
+    if (script && c === "$" && text[i + 1] === "{" && !spelled && !isSpelled(reading, i + 1)) {
+      reads.push({ authority, cut: false, crossed, built: true });
+      built = true;
+      authority += "${";
+      i++;
+      continue;
+    }
     if (context.kind === "none") {
-      if (/\s/.test(c) || QUOTES.has(c) || "<>()[]{},;".includes(c)) {
-        const on = userNamePast(reading, i, start, authority);
-        if (on !== null) reads.push(on);
+      if ((/\s/.test(c) && c !== "\u{feff}") || QUOTES.has(c) || "<>()[]{},;".includes(c)) {
+        reads.push(...userNamePast(reading, i, start, authority, built));
         break;
       }
     } else if (!spelled) {
       if (context.kind === "css") {
         if (c === " " || c === "\f" || c === ")" || cssBadUrl(c)) break;
       } else if (QUOTES.has(c)) {
-        reads.push({ authority, cut: false, crossed });
+        reads.push({ authority, cut: false, crossed, built });
         crossed = true;
       } else if (context.kind === "attribute" && (c === " " || c === "\f" || c === ">")) {
         break;
@@ -682,7 +802,7 @@ function readAuthority(reading, start, context) {
     }
     authority += UNMARKED.get(c) ?? c;
   }
-  reads.push({ authority, cut: false, crossed });
+  reads.push({ authority, cut: false, crossed, built });
   return reads;
 }
 
@@ -702,7 +822,7 @@ function readAuthority(reading, start, context) {
  * @param {AuthorityRead} read
  * @returns {FoundUrl | null}
  */
-function foundUrl(scheme, { authority, cut, crossed }) {
+function foundUrl(scheme, { authority, cut, crossed, built }) {
   let end = authority.length;
   while (end > 0 && stripped(authority[end - 1] ?? "")) end--;
   const read = authority.slice(0, end);
@@ -716,13 +836,12 @@ function foundUrl(scheme, { authority, cut, crossed }) {
     // No host a URL parser takes.
   }
   if (url === null) {
-    // Not refused: a host the text builds at run time (`https://${host}`: the page's own policy
-    // refuses it in the browser), a reading past a quote that may end the literal (the reading up
-    // to it is checked too), a host with no letter or digit (a device path's `//./`), and one
-    // that starts with white space, which no host does (a comment's `// note`; with a user name
-    // after it, the URL parses and is read).
-    const unparsed =
-      !cut && !crossed && !read.includes("$") && /[\p{L}\p{N}]/u.test(read) && !/^\s/u.test(read);
+    // Not refused: a host a script builds at run time (`https://${host}`: the page's own policy
+    // refuses it in the browser), a reading past a quote that may end the literal or in a guessed
+    // context (the reading up to it, or in the first context, is checked too), a host with no
+    // letter or digit (a device path's `//./`), and one that starts with white space, which no
+    // host does (a comment's `// note`; with a user name after it, the URL parses and is read).
+    const unparsed = !cut && !crossed && !built && /[\p{L}\p{N}]/u.test(read) && !/^\s/u.test(read);
     return { url: at, origin: null, userinfo: false, unread: cut, unparsed };
   }
   // Read past a quote that ends the script's string, the host's last label holds the quote and the
@@ -731,7 +850,10 @@ function foundUrl(scheme, { authority, cut, crossed }) {
   if (crossed && /["'`]/.test(url.hostname.replace(/\.$/, "").split(".").at(-1) ?? "")) {
     return null;
   }
-  const runTime = !/[A-Za-z0-9]/.test(url.hostname) || url.hostname.includes("$");
+  // A host a script's substitution stands in is built at run time; the reading up to the
+  // substitution names the fixed part before it, when there is one. A `$` anywhere else, or in
+  // markup or a stylesheet, is the host's own.
+  const runTime = !/[A-Za-z0-9]/.test(url.hostname) || (built && url.hostname.includes("${"));
   return {
     url: at,
     origin: runTime ? null : url.origin,
@@ -811,7 +933,7 @@ function scanReading(reading, kind, found) {
    * @param {UrlContext} context
    */
   const read = (scheme, start, context) => {
-    for (const r of readAuthority(reading, start, context)) {
+    for (const r of readAuthority(reading, start, context, kind === "script")) {
       const authority = context.kind === "srcset" ? r.authority.replace(/,+$/, "") : r.authority;
       keep(foundUrl(scheme, { ...r, authority }));
     }
@@ -823,28 +945,34 @@ function scanReading(reading, kind, found) {
     equals ??= attributeEquals(reading);
     return equals.has(eq);
   };
+  /** @type {Set<number> | null} */
+  let substitutionEnds = null;
+  /** @param {number} brace */
+  const closesSubstitution = (brace) => {
+    substitutionEnds ??= new Set(substitutions(reading).values());
+    return substitutionEnds.has(brace);
+  };
   for (const m of text.matchAll(SCHEME)) {
     const scheme = (m[1] ?? "").replace(/[\t\n\r]/g, "").toLowerCase();
     const after = (m.index ?? 0) + m[0].length;
-    const context = contextBefore(reading, m.index ?? 0, kind, inTag);
     SLASH_RUN.lastIndex = after;
     const run = SLASH_RUN.exec(text)?.[0] ?? "";
-    // With no slash, only where a literal starts (`"wss:host"`): `{https:443}` names no URL.
-    if (run === "" && context.kind === "none") continue;
-    read(scheme, after + run.length, context);
+    for (const context of contextsBefore(reading, m.index ?? 0, kind, inTag, closesSubstitution)) {
+      // With no slash, only where a literal or a value starts (`"wss:host"`): `{https:443}` names
+      // no URL, nor does a scheme after a comma (`{http:80,https:443}`).
+      if (run === "" && (context.kind === "none" || context.kind === "srcset")) continue;
+      read(scheme, after + run.length, context);
+    }
   }
   for (const m of text.matchAll(TWO_SLASHES)) {
     const start = m.index ?? 0;
     if (/[/\\:]/.test(text[start - 1] ?? "")) continue; // inside a run, or a scheme's slashes
-    /** @type {UrlContext} */
-    let context = contextBefore(reading, start, kind, inTag);
-    if (context.kind === "none" && laterSrcsetCandidate(text, start)) {
-      context = { kind: "srcset", end: text.length };
-    }
-    if (context.kind === "none") continue;
     SLASH_RUN.lastIndex = start;
     // White space after the slashes is the URL's own: its host's, or a user name's before an `@`.
-    read("https", start + (SLASH_RUN.exec(text)?.[0].length ?? 0), context);
+    const host = start + (SLASH_RUN.exec(text)?.[0].length ?? 0);
+    for (const context of contextsBefore(reading, start, kind, inTag, closesSubstitution)) {
+      if (context.kind !== "none") read("https", host, context);
+    }
   }
   for (const m of text.matchAll(SRCSET)) {
     const open = m[1] ?? "";
