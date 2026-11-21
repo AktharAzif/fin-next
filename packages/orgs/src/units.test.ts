@@ -136,8 +136,10 @@ describe("the notices", () => {
 
   it("carry a typed name only when the email's rule accepts it, and never drop the notice for one", () => {
     expect(displayValue("personName", "Ada Lovelace")).toBe("Ada Lovelace");
-    expect(displayValue("personName", "Ada2026Lovelace99X")).toBeUndefined();
-    expect(orgNameForEmail("Acme2026Payments99X")).toBe("Your team on Fin");
+    // A name in a code's shape, which the email's name rule hides (a backup code; an enrolment code
+    // run together).
+    expect(displayValue("personName", "Ada12-Byron")).toBeUndefined();
+    expect(orgNameForEmail("ACME2026PAYMENTS")).toBe("Your team on Fin");
     expect(orgNameForEmail("Acme Payments")).toBe("Acme Payments");
   });
 });

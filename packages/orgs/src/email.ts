@@ -3,7 +3,7 @@
 // unit, so the action that needed it rolls back. Only the worker sends. The templates themselves
 // (copy, classes, subdomains) are packages/email's `orgs/` folder; this module checks each row's
 // parameters against the template's own strict schema before any SQL.
-import { findTemplate, param } from "@fin/email";
+import { findTemplate, HIDDEN_VALUE, param } from "@fin/email";
 import type { LineSink, UnitTx } from "@fin/identity";
 import { type DateClock, newId } from "./ids.ts";
 
@@ -97,8 +97,9 @@ export function displayValue(
   value: string | null | undefined,
 ): string | undefined {
   if (value === null || value === undefined) return undefined;
-  const trimmed = value.trim();
-  return param[kind].safeParse(trimmed).success ? trimmed : undefined;
+  // A name field hides, rather than refuses, a value its rule does not accept (HIDDEN_VALUE).
+  const parsed = param[kind].safeParse(value.trim());
+  return parsed.success && parsed.data !== HIDDEN_VALUE ? parsed.data : undefined;
 }
 
 /** The organisation's name for a notice; a neutral label when the email's rule refuses the name. */
