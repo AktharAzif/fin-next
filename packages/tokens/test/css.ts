@@ -66,6 +66,72 @@ export function normalise(value: string): string {
     .toLowerCase();
 }
 
+/** A Tailwind `@utility` block: its own declarations, and each nested block's (`@media ...`, `&...`). */
+export type Utility = {
+  name: string;
+  declarations: Map<string, string>;
+  nested: { prelude: string; declarations: Map<string, string> }[];
+};
+
+/** The index just past the `}` that closes the block whose `{` is at `open`. */
+function closing(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return i + 1;
+  }
+  throw new Error("a block is not closed");
+}
+
+/** Every `@utility` in a stylesheet, by name; one level of nested blocks is read. */
+export function readUtilities(css: string): Map<string, Utility> {
+  const text = stripComments(css);
+  const out = new Map<string, Utility>();
+  for (const match of text.matchAll(/@utility\s+([\w-]+)\s*\{/g)) {
+    const name = match[1] ?? "";
+    const open = (match.index ?? 0) + match[0].length - 1;
+    const body = text.slice(open + 1, closing(text, open) - 1);
+    let own = "";
+    const nested: Utility["nested"] = [];
+    let from = 0;
+    for (let i = body.indexOf("{"); i !== -1; i = body.indexOf("{", from)) {
+      const before = body.slice(from, i);
+      const cut = before.lastIndexOf(";") + 1;
+      own += before.slice(0, cut);
+      const end = closing(body, i);
+      nested.push({
+        prelude: before.slice(cut).replace(/\s+/g, " ").trim(),
+        declarations: readAllDeclarations(body.slice(i + 1, end - 1)),
+      });
+      from = end;
+    }
+    own += body.slice(from);
+    if (out.has(name)) throw new Error(`@utility ${name} is defined twice`);
+    out.set(name, { name, declarations: readAllDeclarations(own), nested });
+  }
+  return out;
+}
+
+/** Every declaration of a rule body with no nested blocks, custom properties or not. */
+export function readAllDeclarations(body: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const part of body.split(";")) {
+    const colon = part.indexOf(":");
+    if (colon === -1) continue;
+    const name = part.slice(0, colon).trim();
+    if (name === "") continue;
+    if (out.has(name)) throw new Error(`${name} is declared twice in one rule`);
+    out.set(
+      name,
+      part
+        .slice(colon + 1)
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+  }
+  return out;
+}
+
 /** The rule whose selector and context match exactly; throws when there is not exactly one. */
 export function findRule(rules: Rule[], selector: string, context = ""): Rule {
   const found = rules.filter((r) => r.selector === selector && r.context === context);

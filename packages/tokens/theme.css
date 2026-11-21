@@ -127,7 +127,7 @@
   --shadow-overlay: var(--fin-shadow-overlay);
   --shadow-button: var(--fin-shadow-button);
   --shadow-button-hover: var(--fin-shadow-button-hover);
-  --shadow-input: var(--fin-shadow-input);
+  --shadow-input: var(--themed-shadow-input);
   --shadow-focus: var(--fin-shadow-focus);
   --shadow-invalid: var(--fin-shadow-invalid);
   --shadow-invalid-focus: var(--fin-shadow-invalid-focus);
@@ -202,6 +202,25 @@
   --default-transition-timing-function: var(--fin-ease-out);
 }
 
+/* Tailwind draws a shadow utility as one list (inset shadow, inset ring, ring offset, ring, then
+   the shadow), and a `none` anywhere in that list voids the whole box-shadow, rings included. The
+   export's input shadow is `none` in dark, so shadow-input reads this stand-in: the export's value
+   where it is a shadow, and an empty shadow (Tailwind's own `0 0 #0000`) where the export says
+   none. The theme selectors are tokens.css's, and the tokens test checks the stand-in against the
+   export in each theme, so a new export value fails it until this changes too. */
+:root,
+[data-theme="light"] {
+  --themed-shadow-input: var(--fin-shadow-input);
+}
+[data-theme="dark"] {
+  --themed-shadow-input: 0 0 #0000;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --themed-shadow-input: 0 0 #0000;
+  }
+}
+
 /* The UI SDK's state attributes, as variants (state-open:opacity-100, state-checked:bg-...). */
 @custom-variant state-open (&[data-open]);
 @custom-variant state-closed (&[data-closed]);
@@ -225,11 +244,20 @@
   outline-offset: calc(var(--fin-focus-width) * -1);
 }
 
+/* Reduced motion, for every utility below that transitions a transform or a size: nothing moves,
+   turns, scales or grows (spec 06 §5.1, AC-UI-13), so under prefers-reduced-motion: reduce each
+   keeps only its colour and opacity transitions. A value that still changes there (a toast's
+   place in the stack, a switch's thumb) then changes at once. The tokens also make the press and
+   pop scales 1 and the overlay offsets 0, so those values do not change at all. */
+
 /* Presses: scale to 0.97 over 140ms (1 under reduced motion, from the token). */
 @utility transition-press {
   transition-property: scale, color, background-color, border-color, box-shadow, opacity;
   transition-duration: var(--fin-duration-fast);
   transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: color, background-color, border-color, box-shadow, opacity;
+  }
 }
 @utility scale-press {
   scale: var(--fin-motion-press-scale);
@@ -295,23 +323,31 @@
 }
 
 /* Overlays animate themselves (spec 06 §3.3): entries on data-starting-style, exits on
-   data-ending-style at 0.75 of the entry. Under reduced motion the tokens make the scale 1 and the
-   durations 140ms, so only the fade is left. */
+   data-ending-style at 0.75 of the entry. Under reduced motion only the fade is left, at 140ms. */
 @utility transition-popup {
   transition-property: opacity, scale, translate;
   transition-duration: var(--fin-duration-base);
   transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
 }
 @utility transition-tooltip {
   transition-property: opacity, scale;
   transition-duration: var(--fin-duration-fast);
   transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
 }
 @utility transition-dialog {
   transition-property: opacity, scale, translate, display, overlay;
   transition-behavior: allow-discrete;
   transition-duration: var(--fin-duration-slow);
   transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity, display, overlay;
+  }
 }
 @utility transition-fade {
   transition-property: opacity;
@@ -336,6 +372,9 @@
   transition-property: opacity, scale;
   transition-duration: var(--fin-motion-swap);
   transition-timing-function: var(--fin-ease-in-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
 }
 
 /* Fields colour their own edge and halo on focus and when invalid. */
@@ -375,6 +414,9 @@
   transition-property: translate, scale, opacity, height;
   transition-duration: var(--fin-duration-base);
   transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
   &:not([data-front], [data-expanded]) {
     height: var(--toast-front-height);
   }
