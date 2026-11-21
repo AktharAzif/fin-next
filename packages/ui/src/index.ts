@@ -84,15 +84,6 @@ export {
   ReportFailures,
   useReportFailure,
 } from "./lib/failures.tsx";
-// The QR code (UR-13): the component only; its encoder is a chunk the component fetches itself.
-export type { QrLevel, QrMatrix } from "./lib/qr/encode.ts";
-export {
-  QrCode,
-  type QrCodeProps,
-  type QrCodeState,
-  QrCodeView,
-  type QrCodeViewProps,
-} from "./lib/qr/qr-code.tsx";
 export {
   DocsLink,
   EmptyState,

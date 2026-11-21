@@ -5,7 +5,8 @@
 // tile shows a placeholder while it loads, and "Try again" when it could not load or draw, so the
 // screen's other way in, the key for manual entry, is never held up. Nothing here makes an image
 // URL or parses markup. The value (an otpauth: URI carries the shared secret) goes only into the
-// drawing: never into an attribute, a label or a failure report.
+// drawing: never into an attribute, a label or a failure report. Screens import it from
+// `@fin/ui/qr`, as the shell comes from `@fin/ui/shell`.
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 import { Button } from "../../foundation/button.tsx";
 import { Skeleton } from "../../foundation/skeleton.tsx";
@@ -13,6 +14,8 @@ import { useAnnounceOnMount } from "../announce.ts";
 import { cn } from "../cn.ts";
 import { useReportFailure } from "../failures.tsx";
 import type { encodeQr, QrLevel, QrMatrix } from "./encode.ts";
+
+export type { QrLevel, QrMatrix } from "./encode.ts";
 
 interface Encoder {
   readonly encodeQr: typeof encodeQr;

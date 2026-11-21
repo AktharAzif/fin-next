@@ -2,9 +2,8 @@
 // else (no image, no image URL, no style attribute, no markup from a string), it scans back to the
 // value, and the value appears nowhere but in the drawing.
 import { describe, expect, it } from "vitest";
-import { QrCode, QrCodeView } from "../../src/index.ts";
 import { encodeQr, type QrMatrix } from "../../src/lib/qr/encode.ts";
-import { darkRuns } from "../../src/lib/qr/qr-code.tsx";
+import { darkRuns, QrCode, QrCodeView } from "../../src/lib/qr/qr-code.tsx";
 import { attr, render, tagsWith, text } from "../html.ts";
 import { decodeQr } from "./decode.ts";
 

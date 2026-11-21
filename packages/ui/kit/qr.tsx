@@ -3,7 +3,8 @@
 // which must not land in the other cases' announcements, and the live code's chunk must wait until
 // the spec has had the chance to hold it back or refuse it.
 import { useState } from "react";
-import { Button, QrCode, QrCodeView } from "../src/index.ts";
+import { Button } from "../src/index.ts";
+import { QrCode, QrCodeView } from "../src/lib/qr/qr-code.tsx";
 import { KIT_QR_LABEL, KIT_QR_VALUE } from "./qr-sample.ts";
 
 export function QrSection() {
