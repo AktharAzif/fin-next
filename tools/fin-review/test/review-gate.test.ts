@@ -280,6 +280,21 @@ describe("the review counts tiers as plan does (§2.4), and binary files by name
     assert.deepEqual((result["blockers"] as Array<Record<string, unknown>>).map((blocker) => [blocker["rule"], blocker["path"]]), [["coverage", "scripts/release.sh"]]);
     assert.match(JSON.stringify(result["notUnits"]), /its bytes start like an image, but its name is not one/);
   });
+
+  it("an image name over text or a planted header is never exempt on tier S: the text is a unit, the binary blocks", async () => {
+    fx.pr(85, {
+      "packages/crypto/src/logo.gif": "GIF89a=1;globalThis.ran='MARKER-GIF';\n",
+      "packages/crypto/src/blob.png": Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("\0payload")]),
+    });
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "85"], h.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    const { result } = reviewed(h);
+    assert.deepEqual((result["blockers"] as Array<Record<string, unknown>>).map((blocker) => [blocker["rule"], blocker["path"]]), [["coverage", "packages/crypto/src/blob.png"]]);
+    const plan = readJson(join(lastRun(fx), "plan.json"));
+    assert.ok((plan["units"] as Array<Record<string, unknown>>).some((unit) => unit["path"] === "packages/crypto/src/logo.gif"), "the text is a unit");
+    assert.match(calls(h).find((call) => call.spec.lens === "security")?.spec.prompt ?? "", /MARKER-GIF/);
+  });
 });
 
 describe("tiers and scope come from the default branch (§2.4)", () => {

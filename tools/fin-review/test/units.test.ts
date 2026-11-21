@@ -1,6 +1,7 @@
 // Units, chunks, shards and one hop (spec 07 §2.5, §5.5; T-RV-24).
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { compileGlob } from "../src/plan/glob.ts";
 import type { Tier } from "../src/roles.ts";
@@ -10,7 +11,10 @@ import { MAX_UNIT_LINES, chunkFile, splitLines } from "../src/units/chunk.ts";
 import { blocksCoverage, estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
 import type { Excluded } from "../src/units/inventory.ts";
 import { buildContextPack, dataBlock, numbered } from "../src/review/prompts.ts";
-import { DATA_RULE } from "../src/review/procedure.ts";
+import { DATA_RULE, loadProcedure } from "../src/review/procedure.ts";
+import { mediaFormat, verifiedExclusion } from "../src/units/content.ts";
+import { TOOL_ROOT } from "./helpers/cli.ts";
+import { avif, bmp, eot, gif, ico, jpeg, png, pngChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
 
 function declarations(count: number, lines: number): string {
   const out: string[] = ['import { x } from "./x.ts";', ""];
@@ -55,12 +59,8 @@ describe("chunks (T-RV-24)", () => {
 });
 
 describe("inventory and shards", () => {
-  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from("IHDR")]);
-  // A WOFF2 header: signature, flavor, the file's length, one table.
-  const WOFF2 = Buffer.alloc(48);
-  WOFF2.write("wOF2", 0, "latin1");
-  WOFF2.writeUInt32BE(48, 8);
-  WOFF2.writeUInt16BE(1, 12);
+  const PNG = png();
+  const WOFF2 = woff2();
 
   it("excludes by content only: the lockfile, images, fonts and source maps whose bytes are what the name says", () => {
     const files: Record<string, Uint8Array> = {
@@ -178,26 +178,86 @@ describe("inventory and shards", () => {
   });
 
   it("a font or icon laid out as its format is excluded by its name and bytes", () => {
-    // TrueType: one table whose record points past the directory and within the file.
-    const ttf = Buffer.alloc(64);
-    ttf.writeUInt32BE(0x00010000, 0);
-    ttf.writeUInt16BE(1, 4);
-    ttf.write("head", 12, "latin1");
-    ttf.writeUInt32BE(28, 20);
-    ttf.writeUInt32BE(36, 24);
-    // ICO: one image whose entry points past the directory and within the file.
-    const ico = Buffer.alloc(40);
-    ico.writeUInt16LE(1, 2);
-    ico.writeUInt16LE(1, 4);
-    ico.writeUInt32LE(18, 14);
-    ico.writeUInt32LE(22, 18);
-    const files: Record<string, Uint8Array> = { "fonts/a.ttf": ttf, "img/b.ico": ico };
+    const files: Record<string, Uint8Array> = { "fonts/a.ttf": ttf(), "img/b.ico": ico() };
     const { excluded } = inventory(
       Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
       (path) => files[path] ?? null,
       ["**/*.ttf", "**/*.ico"].map(compileGlob),
     );
     assert.deepEqual(excluded.map((item) => `${item.path}:${item.reason}:${item.content}:${blocksCoverage(item)}`), ["fonts/a.ttf:excluded:font:false", "img/b.ico:excluded:image:false"]);
+  });
+
+  it("an image or font is exempt only laid out end to end as the format its extension names", () => {
+    const formats: Record<string, Buffer> = {
+      "a.png": png(),
+      "a.jpg": jpeg(),
+      "a.jpeg": jpeg(),
+      "a.gif": gif(),
+      "a.webp": webp(),
+      "a.avif": avif(),
+      "a.ico": ico(),
+      "a.bmp": bmp(),
+      "a.ttf": ttf(),
+      "a.otf": ttf(),
+      "a.woff": woff(),
+      "a.woff2": woff2(),
+      "a.eot": eot(),
+    };
+    for (const [name, bytes] of Object.entries(formats)) {
+      const kind = /\.(?:ttf|otf|woff2?|eot)$/.test(name) ? "font" : "image";
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), kind, name);
+      assert.equal(verifiedExclusion(`assets/${name}`, Buffer.concat([bytes, Buffer.from(";run();\n")])), null, `${name} with bytes after its end`);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes.subarray(0, bytes.length - 4)), null, `${name} cut short`);
+    }
+    // One format's bytes under another format's extension.
+    assert.equal(verifiedExclusion("assets/a.png", gif()), null);
+    assert.equal(verifiedExclusion("assets/a.gif", png()), null);
+    assert.equal(verifiedExclusion("assets/a.ttf", woff()), null);
+    assert.equal(verifiedExclusion("assets/a.jpg", png()), null);
+    // A PNG chunk whose CRC does not match, and a chunk after IEND.
+    const badCrc = png();
+    badCrc[17] = (badCrc[17] ?? 0) ^ 1;
+    assert.equal(mediaFormat(badCrc), null);
+    assert.equal(mediaFormat(Buffer.concat([png(), pngChunk("tEXt", Buffer.from("k\0v"))])), null);
+    assert.equal(mediaFormat(png([pngChunk("tEXt", Buffer.from("k\0v"))])), "png", "a chunk before IEND is part of the layout");
+  });
+
+  it("text or a planted header under an image name is never exempt: it is reviewed as text, or blocks on tier S as binary", () => {
+    const { exclusions } = loadProcedure(join(TOOL_ROOT, "..", "..", "docs", "review"));
+    const elf = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(24, 0x41)]);
+    const files: Record<string, Uint8Array> = {
+      // Each is plain text that Node runs as code when it is required or run by name.
+      "packages/server/src/logo.gif": Buffer.from("GIF89a=1;globalThis.ran='MARKER-GIF';\n"),
+      "packages/server/src/logo.webp": Buffer.from("RIFF=0//WEBP\nglobalThis.ran='MARKER-WEBP';\n"),
+      "packages/server/src/logo.avif": Buffer.from("//  ftypavif\nglobalThis.ran='MARKER-AVIF';\n"),
+      "packages/server/src/loader.gif": Buffer.from('GIF89a=1;require("node:child_process").execSync("id"); // MARKER-LOADER\n'),
+      // Binary under an image name with only the format's first bytes, or a whole image and more after it.
+      "packages/server/src/blob.png": Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), elf]),
+      "packages/server/src/blob.jpg": Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0x00]), Buffer.from("payload")]),
+      "packages/server/src/tail.gif": Buffer.concat([gif(), Buffer.from("\n;globalThis.ran=1;\n")]),
+      "packages/server/src/tail.webp": Buffer.concat([webp().subarray(0, 12), Buffer.from("VP8L"), Buffer.from([4, 0, 0, 0, 0x2f, 0, 0, 0]), Buffer.from("\0payload")]),
+    };
+    const { units, excluded } = inventory(
+      Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
+      (path) => files[path] ?? null,
+      exclusions,
+    );
+    assert.deepEqual([...new Set(units.map((unit) => unit.path))].sort(), [
+      "packages/server/src/loader.gif",
+      "packages/server/src/logo.avif",
+      "packages/server/src/logo.gif",
+      "packages/server/src/logo.webp",
+    ]);
+    for (const marker of ["MARKER-GIF", "MARKER-WEBP", "MARKER-AVIF", "MARKER-LOADER"]) assert.ok(units.some((unit) => unit.text.includes(marker)), marker);
+    assert.deepEqual(
+      excluded.map((item) => [item.path, item.reason, blocksCoverage(item)]),
+      [
+        ["packages/server/src/blob.png", "binary", true],
+        ["packages/server/src/blob.jpg", "binary", true],
+        ["packages/server/src/tail.gif", "binary", true],
+        ["packages/server/src/tail.webp", "binary", true],
+      ],
+    );
   });
 
   it("a symbolic link is a unit holding its target; a submodule and a path not at the head are not, and block on S and N", () => {

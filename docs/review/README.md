@@ -83,8 +83,15 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   and on tier S the attack pass once per mapped profile, at most `maxSessions` (default 8) at once.
 - **Units, by content.** A code file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
   `.cjs`) is always a unit, whatever its name or bytes. A path that `exclusions.json` names is left
-  out only when its bytes are what the name says (an image or a font by its magic bytes, the pnpm
-  lockfile, a source map); a file with a NUL in its first 8,000 bytes is binary; every other file is
+  out only when its bytes are what the name says: the pnpm lockfile, a source map, or an image or a
+  font laid out end to end as the format its extension names (every PNG chunk with its CRC up to
+  IEND, every JPEG segment up to EOI, every GIF block up to the trailer, and the RIFF, box, directory
+  and table structures of WebP, AVIF, ICO, BMP, TrueType and OpenType, WOFF, WOFF2 and EOT), with
+  nothing after the format's end, and never bytes the engine would read as text. A planted header,
+  a format's first bytes in front of other content, or one format under another's extension is not
+  an image or a font. What no layout check can rule out is a real image that also carries text in a
+  part the format leaves free; such a file is still never sent to a model, so whatever reads or runs
+  it is the reviewed code. A file with a NUL in its first 8,000 bytes is binary; every other file is
   a unit, decoded as UTF-8 with any invalid byte replaced, so one stray byte never takes it out of
   the review. A symbolic link is a unit holding its target, with the target one hop away; a
   submodule is never a unit. Every changed path that is not a unit (deleted, excluded, binary, a
@@ -92,8 +99,8 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   `result.json` (`notUnits`) and `summary.md`; test-truth also gets the text of every test the
   change deletes. On tier S or N, a binary file and a submodule block as a file no lens could review;
   a missing one always does. Only a file excluded by its name and its bytes (an image or font
-  extension whose bytes are laid out as that format, the lockfile, a source map) is exempt: a binary
-  file whose first bytes merely look like an image or a font blocks like any other.
+  extension whose bytes are laid out end to end as that format, the lockfile, a source map) is
+  exempt: a binary file whose first bytes merely look like an image or a font blocks like any other.
 - **`commit`** reviews the delta since `--since` (the last reviewed head), and the files that import
   the changed ones. It stays a delta only when spec 07 §2.3.2's conditions hold against the newest
   local, non-advisory `pr` or `commit` run of the same pull request at `--since`; otherwise it runs

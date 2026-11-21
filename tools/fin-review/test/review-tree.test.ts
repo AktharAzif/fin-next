@@ -8,11 +8,12 @@ import { countingRandom, readJson, reviewFixture, runFixtureCli } from "./helper
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
 import { calls, harness, lastRun, script } from "./helpers/review-harness.ts";
 import type { Harness } from "./helpers/review-harness.ts";
+import { png } from "./helpers/media.ts";
 
 describe("the reviewed tree: the head's blobs, every changed path accounted for", () => {
   let fx: ReviewFixture;
   const random = countingRandom();
-  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from("IHDR")]);
+  const PNG = png();
   before(() => {
     fx = reviewFixture();
   });
