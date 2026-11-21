@@ -14,7 +14,10 @@ import {
   MenuSeparator,
 } from "../data/dropdown-menu.tsx";
 import { Button } from "../foundation/button.tsx";
+import { announce } from "../lib/announce.ts";
 import type { ShellLink } from "./Sidebar.tsx";
+
+const FAILED = "The organisation didn’t change. Try again.";
 
 export interface OrganisationOption {
   readonly id: string;
@@ -62,6 +65,8 @@ export function OrganisationSwitcher({
       () => {
         setPendingId(null);
         setFailed(true);
+        // Spoken through the one assertive region (spec 06 §9), not a live region of its own.
+        announce(FAILED, "assertive");
       },
     );
   };
@@ -111,9 +116,7 @@ export function OrganisationSwitcher({
         </MenuRadioGroup>
       ) : null}
       {failed ? (
-        <p role="alert" className="m-0 px-2 py-1.5 text-caption text-status-danger-fg">
-          The organisation didn’t change. Try again.
-        </p>
+        <p className="m-0 px-2 py-1.5 text-caption text-status-danger-fg">{FAILED}</p>
       ) : null}
       {organisations.length > 0 ? <MenuSeparator /> : null}
       <MenuItem icon={<PlusIcon />} render={<Link href={createHref} />}>
