@@ -520,6 +520,161 @@ describe("forms the reader refuses rather than misreads", () => {
   });
 });
 
+describe("line breaks, characters, escapes and block scalars YAML reads otherwise", () => {
+  const THIRD_PARTY = `tj-actions/changed-files@${"a".repeat(40)} # v46.0.5`;
+  const RUN = '        run: |\n          echo "$VALUE" # a shell comment\n';
+
+  /** @type {[string, string][]} */
+  const breaks = [
+    ["a carriage return", "\r"],
+    ["a next-line character (U+0085)", "\u0085"],
+    ["a line separator (U+2028)", "\u{2028}"],
+    ["a paragraph separator (U+2029)", "\u{2029}"],
+  ];
+  for (const [name, brk] of breaks) {
+    it(`refuses ${name}, which YAML reads as a line break and the reader does not`, () => {
+      const hidden = planted(RUN, `        run: echo hi${brk}      - uses: ${THIRD_PARTY}\n`);
+      assert.ok(rules(hidden).includes("line-break"), name);
+      const trigger = planted("  pull_request:\n", `  pull_request:${brk}  pull_request_review:\n`);
+      assert.ok(rules(trigger).includes("line-break"), name);
+    });
+  }
+
+  it("passes CRLF line endings, which both read alike", () => {
+    assert.deepEqual(rules(CLEAN.replaceAll("\n", "\r\n")), []);
+  });
+
+  it("refuses a control, format or space character other than space and tab", () => {
+    const save = `      - uses: actions/cache/save@${SHA} # v6.1.0\n        if: github.event_name == 'push' && runner.os != 'a\u{a0}#' || true\n        with:\n          path: x\n          key: y\n`;
+    /** @type {[string, string][]} */
+    const odd = [
+      ["a no-break space before #", planted("      - name: Run\n", `${save}      - name: Run\n`)],
+      ["a byte-order mark", `\u{feff}${CLEAN}`],
+      [
+        "a zero-width space in a key",
+        planted("    timeout-minutes: 5", "    time\u{200b}out-minutes: 5"),
+      ],
+      ["an em space", planted("    timeout-minutes: 5", "    timeout-minutes:\u{2003}5")],
+      ["a control character", planted("name: sample", "name: sam\u0001ple")],
+      ["a bidirectional control", planted("name: sample", "name: sam\u{202e}ple")],
+    ];
+    for (const [what, text] of odd) {
+      assert.ok(rules(text).includes("character"), what);
+    }
+  });
+
+  /** @type {[string, string, string][]} */
+  const escaped = [
+    ["an escaped uses key", RUN, `      - "u\\x73es": ${THIRD_PARTY}\n`],
+    [
+      "an escaped uses key in a flow mapping",
+      RUN,
+      `      - { "u\\x73es": tj-actions/changed-files@${"a".repeat(40)} } # v46.0.5\n`,
+    ],
+    [
+      "an escaped trigger in a flow sequence",
+      "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+      'on: [pull_request, "pull_request_t\\x61rget"]\n',
+    ],
+    ["an escaped trigger key", "  pull_request:\n", '  "pull_request_t\\x61rget":\n'],
+    [
+      "an escaped trigger in a block sequence",
+      "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+      'on:\n  - push\n  - "pull_request_t\\x61rget"\n',
+    ],
+    [
+      "an escaped trigger value",
+      "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+      'on: "pull_request_r\\x65view_comment"\n',
+    ],
+    ["an escaped run key", RUN, `        "r\\x75n": echo ${E} steps.x.outputs.y }}\n`],
+    ["an escaped expression in run", RUN, `        run: "echo \\x24{{ github.sha }}"\n`],
+    [
+      "strangers' text behind an escape",
+      `VALUE: ${E} github.sha }}`,
+      `VALUE: "${E} github.event.pull_request.t\\x69tle }}"`,
+    ],
+    [
+      "an escaped || in a cache save's condition",
+      "      - name: Run\n",
+      `      - uses: actions/cache/save@${SHA} # v6.1.0\n        if: "github.event_name == 'push' && true \\x7c\\x7c true"\n        with:\n          path: x\n          key: y\n      - name: Run\n`,
+    ],
+    ["an escaped quote", "name: sample", 'name: "sam\\"ple"'],
+  ];
+  for (const [what, from, to] of escaped) {
+    it(`refuses ${what}`, () => {
+      const found = rules(planted(from, to));
+      assert.ok(found.includes("yaml-escape"), `${what}: ${found.join(", ")}`);
+    });
+  }
+
+  it("keeps a backslash outside a double-quoted scalar, and reads a single quote's ''", () => {
+    assert.deepEqual(rules(planted(RUN, "        run: printf 'a\\n' \"b\" # x\n")), []);
+    assert.deepEqual(rules(planted("name: sample", "name: 'a\\b'")), []);
+    const save = (/** @type {string} */ when) =>
+      planted(
+        "      - name: Run\n",
+        `      - uses: actions/cache/save@${SHA} # v6.1.0\n        if: ${when}\n        with:\n          path: x\n          key: y\n      - name: Run\n`,
+      );
+    assert.deepEqual(rules(save("'github.event_name == ''push'''"), "ci.yml"), []);
+    assert.ok(
+      rules(save("'github.event_name == ''push'' || true'"), "ci.yml").includes("cache-save"),
+    );
+  });
+
+  /** @type {[string, string, string][]} */
+  const blocks = [
+    [
+      "a trigger as a block scalar",
+      "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+      "on: >-\n  pull_request_review_comment\n",
+    ],
+    ["a trigger's value as a block scalar", "  pull_request:\n", "  pull_request: |\n    x\n"],
+    [
+      "secrets: inherit as a block scalar",
+      "    timeout-minutes: 5\n",
+      "    timeout-minutes: 5\n    secrets: >-\n      inherit\n",
+    ],
+    [
+      "a step's condition as a block scalar",
+      "      - name: Run\n",
+      "      - name: Run\n        if: >-\n          always()\n",
+    ],
+    [
+      "a uses: as a block scalar",
+      `uses: actions/checkout@${SHA} # v7.0.1`,
+      `uses: >-\n          actions/checkout@${SHA}`,
+    ],
+    ["a block scalar's indentation indicator", "run: |\n", "run: |2\n"],
+  ];
+  for (const [what, from, to] of blocks) {
+    it(`refuses ${what}`, () => {
+      const found = rules(planted(from, to));
+      assert.ok(found.includes("block-scalar"), `${what}: ${found.join(", ")}`);
+    });
+  }
+
+  it("keeps block scalars where no rule reads a scalar: run, options, description, with and env", () => {
+    const service = planted(
+      "    steps:\n",
+      `    services:\n      pg:\n        image: postgres:18.7-trixie@sha256:${"e".repeat(64)}\n        options: >-\n          --health-cmd x\n    steps:\n`,
+    );
+    assert.deepEqual(rules(service), []);
+    const withPath = planted(
+      "        with:\n          persist-credentials: false\n",
+      "        with:\n          persist-credentials: false\n          sparse-checkout: |\n            .github\n",
+    );
+    assert.deepEqual(rules(withPath), []);
+    const action = `name: local\ndescription: |\n  a composite action\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        echo hi\n`;
+    assert.deepEqual(checkAction("action.yml", action), []);
+    assert.ok(
+      checkAction("action.yml", action.replace("using: composite", "using: >-\n    docker"))
+        .map((f) => f.rule)
+        .includes("block-scalar"),
+    );
+  });
+});
+
 describe("strangers' text in other spellings", () => {
   for (const spelling of [
     "github.event['pull_request']['title']",

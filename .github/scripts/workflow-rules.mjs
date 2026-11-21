@@ -31,10 +31,16 @@
 //     on push (an actions/cache/save whose `if:` is not `github.event_name == 'push' && ...`, or
 //     actions/cache, which saves in its post step), and a cache of the review ledger;
 //   - and every YAML form the reader below does not read, so no rule is ever skipped by a file it
-//     misreads: a tab in the indentation, a sequence item no deeper than its key, a flow
-//     collection that does not close on its line or that it cannot read, a value continued on
-//     the next line other than as a block scalar (| or >), an explicit key (`? `), an anchor,
-//     alias, tag or merge key, a key given twice in one mapping, and more than one document;
+//     misreads: a line break other than LF or CRLF (a CR alone, NEL, LS or PS, which YAML reads
+//     as one); a control, format or space character other than space and tab, anywhere (YAML's
+//     white space is space and tab only); a backslash escape in a double-quoted scalar, key or
+//     value (YAML decodes `\x75`, the rules would compare it undecoded); a tab in the
+//     indentation, a sequence item no deeper than its key, a flow collection that does not close
+//     on its line or that it cannot read, a value continued on the next line other than as a
+//     block scalar (| or >), a block scalar with an indentation indicator or anywhere but a run:,
+//     options:, description:, with: or env: value (elsewhere a rule may compare the value), an
+//     explicit key (`? `), an anchor, alias, tag or merge key, a key given twice in one mapping,
+//     and more than one document;
 // and, across files, a Postgres image in a workflow that differs from compose.yaml's.
 //
 // The reader outlines YAML's block style and reads a flow collection that closes on its own line
@@ -90,28 +96,55 @@ export const NO_CACHE_WORKFLOWS = new Set(["release.yml", "dependencies.yml", "n
 /** Keys whose value a runner hands to a shell as a command. */
 const COMMAND_KEYS = new Set(["run", "shell"]);
 
-const KEY = /^("[^"]*"|'[^']*'|[^\s"'#:{}[\],&*!|>%@`][^:#]*?)\s*:(?=\s|$)/;
+// White space is a space or a tab, as YAML's is (JavaScript's \s holds many more, refused below).
+const KEY = /^("[^"]*"|'[^']*'|[^ \t"'#:{}[\],&*!|>%@`][^:#]*?)[ \t]*:(?=[ \t]|$)/;
 const PINNED = /^([\w.-]+)\/([\w.-]+)(\/[\w./-]+)?@([0-9a-f]{40})$/;
+/** A block scalar's header in any form YAML takes, and the form the reader reads. */
 const BLOCK_SCALAR = /^[|>][1-9+-]*$/;
+const READ_BLOCK_SCALAR = /^[|>][+-]?$/;
+/**
+ * Where a block scalar may stand: as the value of these keys, or of any key under `with:` or
+ * `env:`. No rule reads these as one scalar (a command's lines, a container's options, an
+ * action's description, inputs and settings, each read line by line or compared and refused when
+ * not equal); everywhere else a rule may compare the value, which the outline keeps as `|` or `>`.
+ */
+const BLOCK_SCALAR_KEYS = new Set(["run", "options", "description"]);
+const BLOCK_SCALAR_PARENTS = new Set(["with", "env"]);
+/** Line breaks YAML reads and a line split on LF does not: CR without LF, NEL, LS and PS. */
+const LINE_BREAK = /\r(?!\n)|[\u0085\u{2028}\u{2029}]/gu;
+/**
+ * Characters YAML and the reader would read apart: controls (but tab, LF and CRLF's CR), format
+ * characters (the byte-order mark, zero-width and bidirectional controls), every space but U+0020
+ * (YAML's white space is space and tab; JavaScript's trims and \s take the rest too), and U+FFFD,
+ * which stands for bytes that are not UTF-8. The line breaks above have their own finding.
+ */
+const ODD_CHARACTER = /(?![\t\n\r\u0085\u{2028}\u{2029} ])[\p{Cc}\p{Cf}\p{Z}\u{FFFD}]/gu;
 /** An anchor, an alias or a tag where a value or an entry starts. */
 const ALIAS_START = /^[&*!]/;
 /** A save that runs on push only: `github.event_name == 'push'`, alone or first in a conjunction. */
 const PUSH_ONLY = /^github\.event_name\s*==\s*'push'\s*(?:&&[^|]*)?$/;
 
 /**
- * The text of a line before its comment: a `#` at the start or after a space, outside quotes.
+ * Reads a line as YAML does for two things: where its comment starts (a `#` at the start or after
+ * a space or tab, outside quotes), and whether a double-quoted scalar on it holds a backslash
+ * escape (`\x75`, `\u{75}`, `\"` and the rest), which YAML decodes and the rules would compare
+ * undecoded, so it is refused.
  * @param {string} line
- * @returns {string}
+ * @returns {{ content: string, escape: boolean }}
  */
-export function stripComment(line) {
+function readLine(line) {
   let quote = "";
+  let escaped = false;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote !== "") {
       if (c === quote) {
         if (quote === "'" && line[i + 1] === "'") i++;
         else quote = "";
-      } else if (c === "\\" && quote === '"') i++;
+      } else if (c === "\\" && quote === '"') {
+        escaped = true;
+        i++;
+      }
       continue;
     }
     if (c === '"' || c === "'") {
@@ -120,20 +153,34 @@ export function stripComment(line) {
       if (before === "" || /[:\-[{,]$/.test(before)) quote = c;
       continue;
     }
-    if (c === "#" && (i === 0 || /\s/.test(line[i - 1] ?? ""))) return line.slice(0, i);
+    if (c === "#" && (i === 0 || /[ \t]/.test(line[i - 1] ?? ""))) {
+      return { content: line.slice(0, i), escape: escaped };
+    }
   }
-  return line;
+  return { content: line, escape: escaped };
 }
 
 /**
+ * The text of a line before its comment: a `#` at the start or after a space, outside quotes.
+ * @param {string} line
+ * @returns {string}
+ */
+export function stripComment(line) {
+  return readLine(line).content;
+}
+
+/**
+ * A scalar as YAML reads it: a single-quoted one with its `''` read as `'`, a double-quoted one
+ * without its quotes (an escape in one is refused, so there is nothing to decode).
  * @param {string} key
  * @returns {string}
  */
 function unquote(key) {
   const t = key.trim();
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-    return t.slice(1, -1);
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    return t.slice(1, -1).replaceAll("''", "'");
   }
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1);
   return t;
 }
 
@@ -244,12 +291,12 @@ export function parseFlow(text, at) {
       return fail("unclosed");
     }
     if (ALIAS_START.test(c)) fail("alias");
-    if ("?|>%@`".includes(c) || (c === "-" && /\s/.test(text[i + 1] ?? " "))) fail("syntax");
+    if ("?|>%@`".includes(c) || (c === "-" && /[ \t]/.test(text[i + 1] ?? " "))) fail("syntax");
     const start = i;
     while (i < text.length) {
       const d = text[i] ?? "";
       if (",[]{}".includes(d)) break;
-      if (d === ":" && (i + 1 === text.length || /[\s,[\]{}]/.test(text[i + 1] ?? ""))) break;
+      if (d === ":" && (i + 1 === text.length || /[ \t,[\]{}]/.test(text[i + 1] ?? ""))) break;
       i++;
     }
     return text.slice(start, i).trimEnd();
@@ -390,6 +437,25 @@ export function parseOutline(file, text) {
     }
     return null;
   };
+  /** The line an index of the text is on. */
+  const lineAt = (/** @type {number} */ index) => text.slice(0, index).split("\n").length;
+  // Characters that make YAML and this reader see different lines or different text, anywhere
+  // in the file (a line break inside a block scalar ends it just the same).
+  for (const m of text.matchAll(LINE_BREAK)) {
+    add(
+      lineAt(m.index ?? 0),
+      "line-break",
+      "a line break YAML reads and this reader does not (CR without LF, NEL, LS or PS): end lines with LF",
+    );
+  }
+  for (const m of text.matchAll(ODD_CHARACTER)) {
+    const code = (m[0].codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0");
+    add(
+      lineAt(m.index ?? 0),
+      "character",
+      `the character U+${code}: no control, format or space character but space and tab`,
+    );
+  }
   const lines = text.split(/\r?\n/);
   for (const [index, raw] of lines.entries()) {
     const line = index + 1;
@@ -404,7 +470,14 @@ export function parseOutline(file, text) {
     if (lead.includes("\t")) {
       add(line, "indentation", "a tab in the indentation");
     }
-    const stripped = stripComment(raw);
+    const { content: stripped, escape: escapedScalar } = readLine(raw);
+    if (escapedScalar) {
+      add(
+        line,
+        "yaml-escape",
+        "no backslash escape in a double-quoted scalar: YAML decodes it, the rules would not",
+      );
+    }
     if (stripped.trim() === "") continue;
     let col = lead.length;
     let rest = stripped.slice(col).trimEnd();
@@ -455,6 +528,17 @@ export function parseOutline(file, text) {
         add(line, "yaml-alias", "no anchor, alias or tag: the reader does not follow them");
       } else if (BLOCK_SCALAR.test(value)) {
         block = { node, parentIndent: col };
+        const where =
+          BLOCK_SCALAR_KEYS.has(node.key ?? "") || BLOCK_SCALAR_PARENTS.has(parent.key ?? "");
+        if (!READ_BLOCK_SCALAR.test(value)) {
+          add(line, "block-scalar", "no indentation indicator on a block scalar (| or > alone)");
+        } else if (!where) {
+          add(
+            line,
+            "block-scalar",
+            `a block scalar only as run:, options:, description: or a with: or env: value; write ${clean(node.key ?? "", 60)}'s value on its line`,
+          );
+        }
       } else if (value !== "") {
         node.inline = true;
         if (/^[[{]/.test(value)) {
