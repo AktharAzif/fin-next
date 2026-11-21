@@ -61,6 +61,7 @@ export {
   type RoleDraft,
   readingOf,
   readsAsBuiltIn,
+  roleNameKey,
   validateRole,
 } from "./engine/role-editor.ts";
 export {

@@ -1,6 +1,7 @@
 // Roles: resolving a stored role key, what a role allows, its label and its summary (spec 02 §8.1
 // to §8.3). A role Fin does not know, or one that no longer exists, allows nothing.
 import { isPermission, sortPermissions } from "./permissions.ts";
+import { hasVisibleText } from "./text.ts";
 import type {
   BuiltInRole,
   Catalogue,
@@ -180,10 +181,13 @@ export function describePermissions<P extends string>(
   return sentences.join(" ");
 }
 
-/** A role's summary: a built-in's own; a custom role's description, or the generated sentence. */
+/**
+ * A role's summary: a built-in's own; a custom role's description, or the generated sentence when
+ * the description shows nothing (empty, white space, or characters that draw as nothing).
+ */
 export function summary<P extends string>(cat: Catalogue<P>, role: RoleLookup): string {
   if (typeof role === "string") return NOTHING_YET;
   if (role.kind === "built_in") return builtInRole(cat, role.key)?.summary ?? NOTHING_YET;
-  if (role.description.trim() !== "") return role.description;
+  if (hasVisibleText(role.description)) return role.description;
   return describePermissions(cat, permissionsOf(cat, role));
 }
