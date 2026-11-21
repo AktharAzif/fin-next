@@ -11,9 +11,11 @@ export const entries: readonly CatalogEntry[] = [
     kind: "failure",
     level: "error",
     writtenBy:
-      "recordAudit (packages/audit, and identity's recorder), when the database refuses the event (an FA SQLSTATE) or the input check refuses it; the action rolls back and answers 500 with the request ID only",
+      "recordAudit (packages/audit) when the database refuses the event with an FA SQLSTATE, with `auditEvent` and `sqlstate` (its input refusals and other database errors write no line); identity's recorder when its input check refuses the event (`sqlstate` `input`) or the database refuses it with any code (the SQLSTATE as it is, `unknown` when there is none), but it passes the event's name as `event`, which the envelope keeps as the line's own name, so its lines carry `sqlstate` only until identity renames the field. The action rolls back and answers 500 with the request ID only",
     // Spec 08 §7.2 names the audit event's field `event`; the envelope owns `event` (the line's own
-    // name, MC-03), so the writer calls it `auditEvent`.
+    // name, MC-03), so packages/audit calls it `auditEvent`. Identity's recorder still passes
+    // `event`, which an envelope-wins sink drops; test/audit-alerts.test.ts holds `writtenBy` and
+    // the runbook to the fields each writer passes.
     fields: { auditEvent: "string", sqlstate: "string" },
     alerts: ["audit-not-written"],
   },
