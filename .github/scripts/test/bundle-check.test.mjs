@@ -529,6 +529,47 @@ describe("static builds", () => {
         "assets/a.js",
         'jsx("img",{srcSet:"/a.png 1x, https://react.dev,@evil.example/b.png 2x"})',
       ],
+      // A later candidate a script sets, whatever the candidates before it look like.
+      [
+        "a candidate after two with no descriptor",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png, /b.png, //evil.example/c.png 3x"})',
+      ],
+      [
+        "a candidate set after two",
+        "assets/a.js",
+        'i.setAttribute("srcset","/a.png 1x, /b.png, //evil.example/c.png 3x")',
+      ],
+      [
+        "white space before the first candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:" /a.png, //evil.example/c.png 2x"})',
+      ],
+      [
+        "a template literal over several lines",
+        "assets/a.js",
+        'jsx("img",{srcSet:`\n  /a.png,\n  //evil.example/b.png 2x\n`})',
+      ],
+      [
+        "a descriptor with an exponent",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png 1e1x, //evil.example/c.png 2x"})',
+      ],
+      [
+        "an absolute candidate after two",
+        "assets/a.js",
+        `jsx("img",{srcSet:"/a.png, /b.png, https://react.dev'@evil.example/c.png 3x"})`,
+      ],
+      [
+        "a substitution in a candidate with a descriptor",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{b}/a.png 1x, //evil.example/b.png 2x\`})`,
+      ],
+      [
+        "a substitution in a candidate with no descriptor",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{b}/a.png, //evil.example/b.png 2x\`})`,
+      ],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -673,6 +714,45 @@ describe("static builds", () => {
       ],
       ["a tag's name ending its string", `e.innerHTML="<img"+" src=//evil.example/p.png>";`],
       ["the same delimiter twice", `e.innerHTML="<img alt="+x+" src=//evil.example/p.png>";`],
+      // A brace in a string or a regular expression in a substitution, and a `>` in its code (an
+      // arrow function, a comparison): its `}` is the one a JavaScript lexer pairs it with.
+      [
+        "an arrow function and a brace in a regular expression",
+        `function f(a){e.innerHTML=\`<img alt=${"$"}{a.map(x=>x.replace(/{/g,'')).join()} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "a comparison and a brace in a string",
+        `function f(a,b){e.innerHTML=\`<img ${"$"}{a>b?"{":""} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "an arrow function and a closing brace in a string",
+        `function f(a){e.innerHTML=\`<img alt=${"$"}{a.split("}").map(p=>p).join()} src=//evil.example/p.png>\`}`,
+      ],
+      [
+        "a closing brace in a string, then a comparison",
+        `e.innerHTML=\`<img ${"$"}{a?"}":b>c} src=//evil.example/p.png>\`;`,
+      ],
+      // Code between two strings, a `>` in it: the script's own quotes close no value.
+      [
+        "a comparison between two strings",
+        `e.innerHTML="<img "+(a>b?"x":"y")+" src=//evil.example/p.png>";`,
+      ],
+      [
+        "a value an escaped quote opens, a > in the next string",
+        `e.innerHTML="<img alt=\\""+b+">\\" src=//evil.example/p.png>";`,
+      ],
+      [
+        "a value an escaped apostrophe opens, a > in the next string",
+        `e.innerHTML='<img alt=\\''+b+'>\\' src=//evil.example/p.png>';`,
+      ],
+      [
+        "a value an escaped quote opens, over three strings",
+        `e.innerHTML="<img alt=\\""+n+" > "+m+"\\" src=//evil.example/p.png>";`,
+      ],
+      [
+        "a value an escaped apostrophe opens, over three strings",
+        `e.innerHTML='<img alt=\\''+n+' > '+m+'\\' src=//evil.example/p.png>';`,
+      ],
     ];
     for (const [what, text] of cases) {
       const found = staticRules(t, { "assets/a.js": text });
@@ -681,12 +761,16 @@ describe("static builds", () => {
         `${what}: ${found.join()}`,
       );
     }
-    // A regular expression's `=/\/x\//` is in no start tag, whatever `<` stands before it.
+    // A regular expression's `=/\/x\//` is in no start tag, whatever `<` stands before it, nor
+    // is code after a tag a substitution or a concatenation stood in, once the tag has ended.
     for (const text of [
       "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;}",
       "if(a<b){x=1}y=/\\/assets\\//;",
       "e.innerHTML='<b>x</b>';y=/\\/assets\\//;",
       "e.innerHTML='<img src=//react.dev/a.png>';",
+      `e.innerHTML=\`<b ${"$"}{a}>\`;f("x");const r = /\\\\/g;`,
+      'e.innerHTML="<b "+a+">";f("x");const r = /\\\\/g;',
+      `e.innerHTML=\`<b ${"$"}{a?"{":""}>\`;f("x");const r = /\\\\/g;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -867,6 +951,43 @@ describe("static builds", () => {
         "<p>x 0;https://react.dev,@evil.example>y</p>",
         "https://evil.example",
       ],
+      // A refresh skips any amount of white space and reads any number of digits and dots.
+      [
+        "long white space before the URL",
+        "index.html",
+        `<meta http-equiv="refresh" content="0;${" ".repeat(300)}//evil.example/">`,
+        "https://evil.example",
+      ],
+      [
+        "long white space before a URL with a user name",
+        "index.html",
+        `<meta http-equiv="refresh" content="0;${" ".repeat(300)}https://react.dev @evil.example/">`,
+        "https://evil.example",
+      ],
+      [
+        "a long time",
+        "index.html",
+        `<meta http-equiv="refresh" content="0.${"0".repeat(300)};//evil.example/">`,
+        "https://evil.example",
+      ],
+      [
+        "long white space before the time",
+        "index.html",
+        `<meta http-equiv="refresh" content="${" ".repeat(300)}0;https://react.dev @evil.example/">`,
+        "https://evil.example",
+      ],
+      [
+        "long white space after url=",
+        "index.html",
+        `<meta http-equiv="refresh" content="0; url=${" ".repeat(300)}https://react.dev @evil.example/">`,
+        "https://evil.example",
+      ],
+      [
+        "long white space in a value a script sets",
+        "assets/a.js",
+        `m.content="0;${" ".repeat(300)}https://react.dev @evil.example/"`,
+        "https://evil.example",
+      ],
     ];
     for (const [what, file, text, origin] of cases) {
       const found = staticOrigins(t, { [file]: text });
@@ -882,6 +1003,16 @@ describe("static builds", () => {
     for (const [file, text] of passes) {
       assert.deepEqual(staticRules(t, { [file]: text }), [], text);
     }
+  });
+
+  it("looks for a refresh before each URL in time linear in the text", (t) => {
+    // Quoted path data: a digit run and white space before each `//`, as an icon set has.
+    const piece = `<path d="${"1".repeat(120)}${" ".repeat(120)}x//a"/>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(3_000)}</svg>`;
+    const started = performance.now();
+    assert.deepEqual(staticRules(t, { "assets/a.svg": svg }), []);
+    const took = performance.now() - started;
+    assert.ok(took < 3_000, `${Math.round(took)} ms for ${svg.length} characters`);
   });
 
   it("reads a fixed host a template literal's substitution follows, and one it precedes", (t) => {
@@ -938,6 +1069,44 @@ describe("static builds", () => {
         `e.innerHTML=\`<img src${d}{eq}//evil.example/p.png>\`;`,
         "https://evil.example",
       ],
+      // Past what the URL parser strips, which an empty substitution leaves at the URL's start.
+      [
+        "a space between a substitution and the URL",
+        "assets/a.js",
+        `fetch(\`${d}{a} https://react.dev @evil.example/x\`)`,
+        "https://evil.example",
+      ],
+      [
+        "a tab between a substitution and the URL",
+        "assets/a.js",
+        `fetch(\`${d}{a}\\thttps://react.dev\\n.evil.example/x\`)`,
+        "https://react.dev.evil.example",
+      ],
+      [
+        "a space between a substitution and slashes",
+        "assets/a.js",
+        `i.src=\`${d}{p} //evil.example/x.png\``,
+        "https://evil.example",
+      ],
+      // A substitution's `}` as a lexer finds it, whatever braces its strings and expressions hold.
+      [
+        "a brace in a string in the substitution",
+        "assets/a.js",
+        `fetch(\`${d}{a?"{":""}https://react.dev @evil.example/x\`)`,
+        "https://evil.example",
+      ],
+      [
+        "a closing brace in a string in the substitution",
+        "assets/a.js",
+        `i.src=\`${d}{a?"}":""}//evil.example/x.png\``,
+        "https://evil.example",
+      ],
+      [
+        "a brace in a regular expression in the substitution",
+        "assets/a.js",
+        `i.src=\`${d}{a.replace(/{/g,"")}//evil.example/x.png\``,
+        "https://evil.example",
+      ],
       // Outside a script nothing is built at run time: a `$` is the host's own.
       [
         "a $ in markup",
@@ -973,6 +1142,9 @@ describe("static builds", () => {
       `fetch(\`https://${d}{a}.${d}{b}/x\`);fetch(\`http://localhost:${d}{port}/x\`);`,
       `fetch(\`https://react.dev/${d}{p}\`);x=\`${d}{a}https://react.dev for the docs\`;`,
       `x=\`${d}{a}https://react.dev/errors/${d}{c}\`;`,
+      // A `}` that closes a block, not a substitution, starts no URL: a comment after it is code's.
+      `if(a){b()} // @ts-expect-error${nl}c();x=\`${d}{"{"}\`;`,
+      `function f(){}${nl}${nl}// Node walkers.${nl}${nl}var base = {};x=\`${d}{"{"}\`;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }

@@ -503,8 +503,13 @@ function nextTagState(state, c, data) {
 }
 
 /**
- * Where each `${` of a reading whose `}` closes it starts, mapped to that `}`: a template
- * literal's substitution, which a script fills in at run time.
+ * Where each raw `${` of a reading starts (a template literal's substitution, which a script
+ * fills in at run time, or text in a plain string), mapped to the `}` that closes it, or to -1
+ * when none is known. Braces counted as code's close it where no quote, backtick or `/` stands
+ * in it; elsewhere a brace in a string, a nested template literal or a regular expression may
+ * pair with the wrong one (`${a?"{":""}`, `${s.split("}")}`, `${a.replace(/{/g,"")}`), so
+ * lexSubstitutions reads it as JavaScript instead. A brace a reference or an escape spelled is
+ * text in a string, never code's.
  * @param {Reading} reading
  * @returns {Map<number, number>}
  */
@@ -514,17 +519,112 @@ function substitutions(reading) {
   const spans = new Map();
   /** @type {number[]} */
   const open = [];
+  let lastUnsure = -1;
+  let unsure = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === "{") {
-      const raw = text[i - 1] === "$" && !isSpelled(reading, i) && !isSpelled(reading, i - 1);
+    if (c === '"' || c === "'" || c === "`" || c === "/") {
+      lastUnsure = i;
+    } else if (c === "{" && !isSpelled(reading, i)) {
+      const raw = text[i - 1] === "$" && !isSpelled(reading, i - 1);
       open.push(raw ? i - 1 : -1);
-    } else if (c === "}") {
+      if (raw) spans.set(i - 1, -1);
+    } else if (c === "}" && !isSpelled(reading, i)) {
       const start = open.pop();
-      if (start !== undefined && start >= 0) spans.set(start, i);
+      if (start !== undefined && start >= 0) {
+        if (lastUnsure < start) spans.set(start, i);
+        else unsure = true;
+      }
     }
   }
+  if (unsure || open.some((start) => start >= 0)) lexSubstitutions(reading, spans);
   return spans;
+}
+
+/** In lexSubstitutions' frames: a `{` in code, and a nested template literal's text. */
+const BRACE = -1;
+const TEMPLATE = -2;
+/** What a regular expression may follow in code (a `/` after anything else divides). */
+const REGEX_AFTER = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
+const REGEX_KEYWORD =
+  /(?:^|[^\w$])(?:return|typeof|case|in|of|void|delete|throw|new|else|do|yield|await)[\t\n\f\r ]*$/;
+
+/**
+ * Pairs each raw `${` whose `}` substitutions does not know with the `}` a JavaScript lexer
+ * pairs it with, reading its text as code: strings and regular expressions skipped, nested
+ * template literals and their substitutions followed, braces counted. A `${` in a plain string
+ * starts no substitution, but no lexer that starts mid-file can tell, so each raw `${` starts one,
+ * in code too (where JavaScript has none, so the lexer is out of step there). Each string and
+ * regular expression ends at the next raw quote or `/` (found once and again only when passed),
+ * so the pass is linear; one the lexer misreads costs only that `${`'s pairing.
+ * @param {Reading} reading
+ * @param {Map<number, number>} spans
+ */
+function lexSubstitutions(reading, spans) {
+  const { text } = reading;
+  /** A substitution's start, BRACE or TEMPLATE, innermost last. */
+  /** @type {number[]} */
+  const frames = [];
+  /** The next raw quotes and `/`, found once each and again only when passed. */
+  const ahead = new Map();
+  /** @param {string} c @param {number} from */
+  const nextAt = (c, from) => {
+    let at = ahead.get(c);
+    if (at === undefined || at < from) {
+      at = nextRaw(reading, c, from);
+      ahead.set(c, at);
+    }
+    return at;
+  };
+  // The last character of code before a `/`, which tells a regular expression from a division.
+  let prev = "{";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] ?? "";
+    if (isSpelled(reading, i)) continue;
+    if (c === "$" && text[i + 1] === "{" && !isSpelled(reading, i + 1)) {
+      frames.push(i);
+      prev = "{";
+      i++;
+      continue;
+    }
+    const top = frames.at(-1);
+    if (top === undefined || top === TEMPLATE) {
+      if (c === "`" && top === TEMPLATE) {
+        frames.pop();
+        prev = ")";
+      }
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      if (c === "`") {
+        frames.push(TEMPLATE);
+        continue;
+      }
+      const close = nextAt(c, i + 1);
+      if (close !== Infinity) i = close;
+      prev = ")";
+    } else if (c === "/") {
+      const regex =
+        REGEX_AFTER.has(prev) ||
+        (prev === "a" && REGEX_KEYWORD.test(text.slice(Math.max(0, i - 24), i)));
+      const close = regex ? nextAt("/", i + 1) : Infinity;
+      if (close !== Infinity) {
+        i = close;
+        prev = ")";
+      } else {
+        prev = "/";
+      }
+    } else if (c === "{") {
+      frames.push(BRACE);
+      prev = c;
+    } else if (c === "}") {
+      const start = frames.pop();
+      if (start !== undefined && start >= 0 && spans.get(start) === -1) spans.set(start, i);
+      prev = ")";
+    } else if (!ASCII_SPACE.has(c)) {
+      prev = /[\w$]/.test(c) ? "a" : c;
+    }
+  }
 }
 
 /**
@@ -541,19 +641,61 @@ function afterSubstitution(live) {
   return after;
 }
 
+/** The raw quotes a script's own strings may end at, each with its own held states. */
+const SCRIPT_QUOTES = ['"', "'", "`"];
+
+/**
+ * Whether a quote at an index stands at a concatenation, the next (`step` 1) or the last (-1)
+ * character past ASCII white space being `+`: the string may end there and the code after it
+ * run up to the next string (`"<img "+(a>b?x:y)+" src=...>"`).
+ * @param {string} text
+ * @param {number} at
+ * @param {number} step
+ */
+function concatenated(text, at, step) {
+  let k = at + step;
+  while (ASCII_SPACE.has(text[k] ?? "")) k += step;
+  return text[k] === "+";
+}
+/**
+ * How far after a `${` whose `}` is unknown (substitutions: -1) attributeEquals takes any raw `}`
+ * to be the one: a bound on its work and on the readings it adds, past which only the literal
+ * reading goes on.
+ */
+const MAX_SUBSTITUTION = 4096;
+
+/**
+ * The next index at or after `from` where a reading holds a character as written (not spelled
+ * by a reference or an escape), or Infinity.
+ * @param {Reading} reading
+ * @param {string} c
+ * @param {number} from
+ */
+function nextRaw(reading, c, from) {
+  let k = reading.text.indexOf(c, from);
+  while (k !== -1 && isSpelled(reading, k)) k = reading.text.indexOf(c, k + 1);
+  return k === -1 ? Infinity : k;
+}
+
 /**
  * The `=` signs of a reading that give an attribute its value in some start tag, each tag read
  * as an HTML tokenizer reads it from its `<` (markup a script writes: `e.innerHTML='<img
  * src=//host/p.png>'`). A regular expression's `x=/\/a\//` is in none. Every tag open at a point
  * is followed at once (a tag inside another's quoted value included), so the pass is linear. A
- * character a reference spelled is data (`&gt;` ends no tag). What looks like a template
- * literal's `${...}` is read both ways: as literal text, which it is in a plain string or when
- * its braces were paired wrongly, and as a substitution, after whose `}` the states held at its
- * `${` go on as well (`${a>b}` ends no tag). Both readings are kept, so neither drops an `=`.
+ * character a reference spelled is data (`&gt;` ends no tag). Where the script's own code may
+ * stand between pieces of the markup, the tag is read both through that code as text and past
+ * it, so neither reading drops an `=`:
+ * - a template literal's `${...}`: after its `}`, the states held at its `${` go on as well
+ *   (afterSubstitution; `${a>b}` ends no tag). Where no `}` is known to close it (substitutions:
+ *   -1), every raw `}` up to MAX_SUBSTITUTION after it may be the one, so they go on after each;
+ * - code between two strings: a raw quote at a concatenation may end the script's string
+ *   (`"<img "+(a>b?x:y)+" src=...>"`, `"<img alt=\""+b+">\" src=...>"`), so the states at it
+ *   go on again at the next raw quote of its kind a `+` stands before, which may open the next.
  * @param {Reading} reading
+ * @param {() => Map<number, number>} spansOf the reading's substitutions
  * @returns {Set<number>}
  */
-function attributeEquals(reading) {
+function attributeEquals(reading, spansOf) {
   const { text } = reading;
   /** @type {Set<number>} */
   const equals = new Set();
@@ -568,26 +710,61 @@ function attributeEquals(reading) {
     if (raw) opens.push(last);
   }
   if (opens.length === 0) return equals;
-  const spans = substitutions(reading);
+  const spans = spansOf();
   /** @type {{ end: number, live: number }[]} */
   const held = [];
+  /** States held at a raw quote, by SCRIPT_QUOTES' index, to go on at the next one. */
+  const atQuote = [0, 0, 0];
+  /** The states at substitutions whose `}` is unknown, and how far a `}` may close one. */
+  let unsureLive = 0;
+  let unsureUntil = -1;
+  /** The next raw `}` and quotes, found once each and again only when passed. */
+  const ahead = new Map();
+  /** @param {string} c @param {number} from */
+  const nextAt = (c, from) => {
+    let at = ahead.get(c);
+    if (at === undefined || at < from) {
+      at = nextRaw(reading, c, from);
+      ahead.set(c, at);
+    }
+    return at;
+  };
   let live = 0;
   let next = 0;
   for (let i = 0; i < text.length; i++) {
     if (live === 0) {
-      const target = Math.min(held.at(-1)?.end ?? Infinity, opens[next] ?? Infinity);
+      let target = Math.min(held.at(-1)?.end ?? Infinity, opens[next] ?? Infinity);
+      const brace = unsureUntil < i ? Infinity : nextAt("}", i);
+      if (brace <= unsureUntil) target = Math.min(target, brace);
+      SCRIPT_QUOTES.forEach((q, k) => {
+        if (atQuote[k] !== 0) target = Math.min(target, nextAt(q, i));
+      });
       if (target === Infinity) break;
       i = Math.max(i, target);
     }
-    // A substitution's states are held at its `${`; the literal reading steps through its text.
-    const end = live === 0 ? undefined : spans.get(i);
-    if (end !== undefined) held.push({ end, live });
     const c = text[i] ?? "";
     const data = isSpelled(reading, i);
+    // A substitution's states are held at its `${`; the literal reading steps through its text.
+    const end = live === 0 ? undefined : spans.get(i);
+    if (end === -1) {
+      if (unsureUntil < i) unsureLive = 0;
+      unsureLive |= live;
+      unsureUntil = i + MAX_SUBSTITUTION;
+    } else if (end !== undefined) {
+      held.push({ end, live });
+    }
     if (c === "=" && !data && (live & (NAME | AFTER_NAME)) !== 0) equals.add(i);
     let after = 0;
     for (let bit = 1; bit <= AFTER_QUOTED; bit <<= 1) {
       if ((live & bit) !== 0) after |= nextTagState(bit, c, data);
+    }
+    const quote = data ? -1 : SCRIPT_QUOTES.indexOf(c);
+    if (quote !== -1) {
+      if (atQuote[quote] !== 0 && concatenated(text, i, -1)) {
+        after |= atQuote[quote] ?? 0;
+        atQuote[quote] = 0;
+      }
+      if (live !== 0 && concatenated(text, i, 1)) atQuote[quote] = live;
     }
     live = after;
     // At its `}`, the held states go on beside the literal reading's, never in place of them.
@@ -595,6 +772,7 @@ function attributeEquals(reading) {
       held.pop();
       live |= afterSubstitution(top.live);
     }
+    if (i <= unsureUntil && c === "}" && !data) live |= afterSubstitution(unsureLive);
     while (next < opens.length && (opens[next] ?? 0) <= i) {
       if (opens[next] === i) live |= BEFORE_NAME;
       next++;
@@ -632,51 +810,88 @@ function contextBefore(reading, index, kind, inTag) {
   return { kind: "none" };
 }
 
+/** A refresh's time: digits and dots. */
+const TIME = /[0-9.]/;
+/** A refresh's value starts at a quote, or at `=` in markup or in a start tag a script writes. */
+const VALUE_START = new Set(["=", ...QUOTES]);
+
 /**
- * What starts a refresh's URL (HTML's shared declarative refresh steps): the start of a quoted or
- * unquoted value, ASCII white space, a time of digits and dots (a digit in it: prose's `'a'.` is
- * no time), `;`, `,` or white space, an optional `url=`, then what the URL parser strips first
- * (a C0 control or a space; `\p{Cc}` holds those and a few more, which only widens the match).
- * The URL is the rest of the value.
+ * Where the value starts whose refresh URL (HTML's shared declarative refresh steps) starts at
+ * an index, or -1: the value's start, ASCII white space, a time of digits and dots (a digit in
+ * it: prose's `'a'.` is no time), `;`, `,` or white space, white space, an optional `url=`, then
+ * what the URL parser strips first (a C0 control or a space). Read back from the URL with no
+ * bound: each run it passes holds no URL's start (a scheme's letter or a slash), so the runs read
+ * back from two URLs never overlap and the work stays linear.
+ * @param {Reading} reading
+ * @param {number} index
  */
-const REFRESH_PREFIX =
-  /([="'`\u{e000}-\u{e002}])[\t\n\f\r ]*[0-9.]*[0-9][0-9.]*(?:[\t\n\f\r ]*[;,]|[\t\n\f\r ])[\t\n\f\r ]*(?:url[\t\n\f\r ]*=[\t\n\f\r ]*)?[\p{Cc} ]*$/iu;
-/** How far before a URL the scanner looks for a refresh's start: a bound on its work only. */
-const MAX_REFRESH_PREFIX = 256;
+function refreshStart(reading, index) {
+  const { text } = reading;
+  const space = (/** @type {number} */ k) => ASCII_SPACE.has(text[k] ?? "");
+  let i = index - 1;
+  while (i >= 0 && stripped(text[i] ?? "")) i--;
+  const gap = i < index - 1;
+  let sep = false;
+  if (text[i] === "=") {
+    i--;
+    while (i >= 0 && space(i)) i--;
+    if (i < 2 || text.slice(i - 2, i + 1).toLowerCase() !== "url") return -1;
+    i -= 3;
+    const before = i;
+    while (i >= 0 && space(i)) i--;
+    sep = i < before;
+  } else {
+    sep = gap;
+  }
+  if (text[i] === ";" || text[i] === ",") {
+    i--;
+    while (i >= 0 && space(i)) i--;
+    sep = true;
+  }
+  // A time ends at the separator: white space right after it, or `;` or `,`.
+  if (!sep || !(space(i + 1) || text[i + 1] === ";" || text[i + 1] === ",")) return -1;
+  let digit = false;
+  while (i >= 0 && TIME.test(text[i] ?? "")) {
+    if (text[i] !== ".") digit = true;
+    i--;
+  }
+  if (!digit) return -1;
+  while (i >= 0 && space(i)) i--;
+  return VALUE_START.has(text[i] ?? "") ? i : -1;
+}
 
 /**
  * Every context a URL may be in (contextBefore's, and each reading a browser may apply instead),
  * so its end is read in each and none is dropped. Beside the first: a later candidate of a srcset
  * a script sets from a string (`srcSet:"/a.png 1x, https://host/b.png 2x"`), which runs to ASCII
- * white space; the text right after a template literal's substitution (`${a}https://host/`),
- * which runs to the literal's backtick; and a refresh's URL (`content="0;https://host/"`), which
- * runs to the end of the value. The last two are guessed: a host read in them that no URL parser
- * takes is no finding (the first context's reading still is).
+ * white space; the text right after a template literal's substitution (`${a} https://host/`,
+ * past what the URL parser strips), which runs to the literal's backtick; and a refresh's URL
+ * (`content="0;https://host/"`), which runs to the end of the value. The last two are guessed: a
+ * host read in them that no URL parser takes is no finding (the first context's reading still
+ * is).
  * @param {Reading} reading
  * @param {number} index where the URL starts
  * @param {string} kind "script", "style" or "markup"
  * @param {(eq: number) => boolean} inTag whether the `=` at an index is an attribute's in a tag
+ * @param {(comma: number) => boolean} inSrcset whether a srcset's candidate list a quote opens
+ *   runs to the comma at an index
  * @param {(brace: number) => boolean} closesSubstitution whether the `}` at an index ends a `${`
  * @returns {UrlContext[]}
  */
-function contextsBefore(reading, index, kind, inTag, closesSubstitution) {
+function contextsBefore(reading, index, kind, inTag, inSrcset, closesSubstitution) {
   const { text } = reading;
   /** @type {UrlContext[]} */
   const all = [contextBefore(reading, index, kind, inTag)];
-  if (all[0]?.kind === "none" && laterSrcsetCandidate(text, index)) {
+  let before = index - 1;
+  while (before >= 0 && stripped(text[before] ?? "")) before--;
+  if (all[0]?.kind === "none" && text[before] === "," && inSrcset(before)) {
     all.push({ kind: "srcset", end: text.length });
   }
-  const brace = index - 1;
-  const pastSubstitution =
-    kind === "script" &&
-    text[brace] === "}" &&
-    !isSpelled(reading, brace) &&
-    closesSubstitution(brace);
-  if (pastSubstitution) all.push({ kind: "quoted", end: "`", spelled: false, guessed: true });
-  const from = Math.max(0, index - MAX_REFRESH_PREFIX);
-  const refresh = REFRESH_PREFIX.exec(text.slice(from, index));
-  if (refresh !== null) {
-    const at = from + refresh.index;
+  if (kind === "script" && text[before] === "}" && closesSubstitution(before)) {
+    all.push({ kind: "quoted", end: "`", spelled: false, guessed: true });
+  }
+  const at = refreshStart(reading, index);
+  if (at !== -1) {
     const c = text[at] ?? "";
     const spelled = isSpelled(reading, at);
     if (QUOTES.has(c)) {
@@ -886,30 +1101,71 @@ function srcsetStarts(text, from, end) {
   return starts;
 }
 
+/** What no srcset candidate's URL or descriptor holds, but code does. */
+const NOT_SRCSET = /[()[\]{}<>;]/;
+/** A template literal's substitution in a candidate's URL (`${base}/a.png`), which is no code. */
+const CANDIDATE_SUBSTITUTION = /\$\{[^{}\s"'`]*\}/g;
+/** A srcset candidate's descriptor: a density, a width or a height. */
+const DESCRIPTOR = /^[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?[xwh]$/;
+
 /**
- * Whether two slashes start a later candidate of a srcset a script sets from a string
- * (`srcSet:"/a.png 1x, //host/b.png 2x"`, `setAttribute("srcset", ...)`): they follow a comma,
- * which follows a descriptor (`2x`, `640w`, `1.5x`) or a first candidate a quote opens.
+ * Whether a comma ends a candidate of a srcset a script sets from a string (`srcSet:"/a.png 1x,
+ * /b.png, //host/c.png 2x"`, a template literal over several lines, `setAttribute("srcset",
+ * ...)`), so a URL after it is a later candidate: a descriptor (`2x`, `640w`, `1e1x`) after white
+ * space stands before it, or, read back from it, the candidates' URLs and descriptors (runs split
+ * at ASCII white space and commas, none holding a bracket, a brace outside a `${...}`, `<`, `>`
+ * or `;`, as code does) reach a quote. Each comma passed is remembered with the answer, so each
+ * run is read back once and the work stays linear.
  * @param {string} text
- * @param {number} start where the slashes are
+ * @param {number} comma
+ * @param {Map<number, boolean>} known the answers so far, for this text
  */
-function laterSrcsetCandidate(text, start) {
-  let i = start - 1;
-  while (i >= 0 && ASCII_SPACE.has(text[i] ?? "")) i--;
-  if (text[i] !== ",") return false;
-  i--;
-  while (i >= 0 && ASCII_SPACE.has(text[i] ?? "")) i--;
-  if ("xwh".includes(text[i] ?? "_")) {
-    let j = i - 1;
-    while (j >= 0 && /[0-9.]/.test(text[j] ?? "")) j--;
-    if (j < i - 1 && ASCII_SPACE.has(text[j] ?? "")) return true;
+function srcsetCandidateEnd(text, comma, known) {
+  let d = comma - 1;
+  while (d >= 0 && ASCII_SPACE.has(text[d] ?? "")) d--;
+  let s = d;
+  while (
+    s >= 0 &&
+    !ASCII_SPACE.has(text[s] ?? "") &&
+    !QUOTES.has(text[s] ?? "") &&
+    text[s] !== ","
+  ) {
+    s--;
   }
-  let k = i;
-  while (k >= 0 && i - k < 256 && !ASCII_SPACE.has(text[k] ?? "") && !QUOTES.has(text[k] ?? "")) {
-    if (text[k] === ",") return false;
-    k--;
+  if (ASCII_SPACE.has(text[s] ?? "") && DESCRIPTOR.test(text.slice(s + 1, d + 1))) return true;
+  /** @type {number[]} */
+  const passed = [];
+  let answer = false;
+  let end = -1;
+  let first = "";
+  for (let i = comma; ; i--) {
+    const c = text[i] ?? "";
+    const quote = QUOTES.has(c);
+    if (i >= 0 && !quote && c !== "," && !ASCII_SPACE.has(c)) {
+      if (end === -1) end = i;
+      continue;
+    }
+    if (end !== -1) {
+      first = text.slice(i + 1, end + 1);
+      if (NOT_SRCSET.test(first.replace(CANDIDATE_SUBSTITUTION, ""))) break;
+      end = -1;
+    }
+    if (i < 0) break;
+    if (quote) {
+      answer = first !== "";
+      break;
+    }
+    if (c === ",") {
+      const before = known.get(i);
+      if (before !== undefined) {
+        answer = before;
+        break;
+      }
+      passed.push(i);
+    }
   }
-  return k < i && QUOTES.has(text[k] ?? "");
+  for (const at of passed) known.set(at, answer);
+  return answer;
 }
 
 /**
@@ -938,26 +1194,39 @@ function scanReading(reading, kind, found) {
       keep(foundUrl(scheme, { ...r, authority }));
     }
   };
+  /** @type {Map<number, number> | null} */
+  let spans = null;
+  const spansOf = () => {
+    spans ??= substitutions(reading);
+    return spans;
+  };
   /** @type {Set<number> | null} */
   let equals = null;
   /** @param {number} eq */
   const inTag = (eq) => {
-    equals ??= attributeEquals(reading);
+    equals ??= attributeEquals(reading, spansOf);
     return equals.has(eq);
   };
+  /** @type {Map<number, boolean>} */
+  const srcsetEnds = new Map();
+  /** @param {number} comma */
+  const inSrcset = (comma) => srcsetCandidateEnd(text, comma, srcsetEnds);
   /** @type {Set<number> | null} */
   let substitutionEnds = null;
   /** @param {number} brace */
   const closesSubstitution = (brace) => {
-    substitutionEnds ??= new Set(substitutions(reading).values());
-    return substitutionEnds.has(brace);
+    substitutionEnds ??= new Set(spansOf().values());
+    return !isSpelled(reading, brace) && substitutionEnds.has(brace);
   };
+  /** @param {number} start */
+  const contexts = (start) =>
+    contextsBefore(reading, start, kind, inTag, inSrcset, closesSubstitution);
   for (const m of text.matchAll(SCHEME)) {
     const scheme = (m[1] ?? "").replace(/[\t\n\r]/g, "").toLowerCase();
     const after = (m.index ?? 0) + m[0].length;
     SLASH_RUN.lastIndex = after;
     const run = SLASH_RUN.exec(text)?.[0] ?? "";
-    for (const context of contextsBefore(reading, m.index ?? 0, kind, inTag, closesSubstitution)) {
+    for (const context of contexts(m.index ?? 0)) {
       // With no slash, only where a literal or a value starts (`"wss:host"`): `{https:443}` names
       // no URL, nor does a scheme after a comma (`{http:80,https:443}`).
       if (run === "" && (context.kind === "none" || context.kind === "srcset")) continue;
@@ -970,7 +1239,7 @@ function scanReading(reading, kind, found) {
     SLASH_RUN.lastIndex = start;
     // White space after the slashes is the URL's own: its host's, or a user name's before an `@`.
     const host = start + (SLASH_RUN.exec(text)?.[0].length ?? 0);
-    for (const context of contextsBefore(reading, start, kind, inTag, closesSubstitution)) {
+    for (const context of contexts(start)) {
       if (context.kind !== "none") read("https", host, context);
     }
   }
