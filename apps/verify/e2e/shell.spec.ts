@@ -3,7 +3,13 @@
 // before the first paint; the link token in the fragment leaves the address bar and the history
 // before anything else runs; and /api/health answers through the stub.
 import { expect, test } from "@playwright/test";
-import { ready, serveStatic, watchPolicy } from "../../console/e2e/support/static.ts";
+import {
+  bootState,
+  holdEntry,
+  ready,
+  serveStatic,
+  watchPolicy,
+} from "../../console/e2e/support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4403";
 // A token-shaped value, built at run time (the public-safety scan never sees a literal one).
@@ -53,22 +59,44 @@ test("@journey verify follows the system theme before the first paint", async ({
   policy = await watchPolicy(context);
   const page = await context.newPage();
   await serveStatic(context, { dir: "dist/static/verify", profile: "hosted", origin: ORIGIN });
+  // main.tsx is held, so what the page shows now is theme.js and the boot skeleton alone.
+  const entry = await holdEntry(page, "dist/static/verify");
+  await page.goto("/p", { waitUntil: "commit" });
+  await entry.requested;
+  expect(await bootState(page)).toEqual({
+    theme: "dark",
+    choice: "system",
+    boot: "auth",
+    sidebar: null,
+    background: "rgb(10, 10, 10)",
+    bootSidebarWidth: null,
+    ready: false,
+  });
+  entry.release();
+  await ready(page);
+  await expect(page.locator("[data-boot-block]")).toHaveCount(0);
+  await context.close();
+});
+
+test("@journey with storage blocked verify renders in the system theme", async ({ browser }) => {
+  const context = await browser.newContext({ colorScheme: "dark", baseURL: ORIGIN });
+  policy = await watchPolicy(context);
+  const page = await context.newPage();
+  await serveStatic(context, { dir: "dist/static/verify", profile: "hosted", origin: ORIGIN });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
-    requestAnimationFrame(() => {
-      const root = document.documentElement;
-      (window as unknown as { __firstFrame: unknown }).__firstFrame = [
-        root.getAttribute("data-theme"),
-        root.getAttribute("data-boot"),
-      ];
+    Object.defineProperty(window, "localStorage", {
+      get() {
+        throw new DOMException("blocked", "SecurityError");
+      },
     });
   });
-  await page.goto("/p");
+  await page.goto("/c");
   await ready(page);
-  // The first frame's callback can run after the page is ready (WebKit paints later).
-  const first = await page.waitForFunction(
-    () => (window as unknown as { __firstFrame?: unknown }).__firstFrame,
-  );
-  expect(await first.jsonValue()).toEqual(["dark", "auth"]);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("heading", { level: 1, name: "Verify" })).toBeVisible();
+  expect(errors).toEqual([]);
   await context.close();
 });
 

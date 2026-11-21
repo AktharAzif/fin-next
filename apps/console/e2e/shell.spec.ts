@@ -3,7 +3,14 @@
 // edge toggle collapses and expands the sidebar, the phone sheet opens, a signed-out visit goes to
 // sign-in, and /api/health answers through the stub. Against the built dist/static/.
 import { expect, type Page, type Route, test } from "@playwright/test";
-import { problem, ready, serveStatic, watchPolicy } from "./support/static.ts";
+import {
+  bootState,
+  holdEntry,
+  problem,
+  ready,
+  serveStatic,
+  watchPolicy,
+} from "./support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4401";
 
@@ -102,38 +109,53 @@ test("@csp a signed-out visit goes to sign-in, keeping a safe next", async ({ pa
   await expect(page.locator("[data-slot=auth-layout]")).toBeVisible();
 });
 
-test("@journey the stored theme applies before the first paint", async ({ page }) => {
+test("@journey the stored theme and sidebar apply before the first paint", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await signedIn(page);
+  // main.tsx is held, so what the page shows now is theme.js and the boot skeleton alone.
+  const entry = await holdEntry(page, "dist/static");
   await page.addInitScript(() => {
     try {
       window.localStorage.setItem("fin-theme", "dark");
+      window.localStorage.setItem("fin-sidebar", "collapsed");
     } catch {
       // A browser without storage: the test then fails on the theme below.
     }
-    requestAnimationFrame(() => {
-      const root = document.documentElement;
-      (window as unknown as { __firstFrame: unknown }).__firstFrame = {
-        theme: root.getAttribute("data-theme"),
-        choice: root.getAttribute("data-theme-choice"),
-        boot: root.getAttribute("data-boot"),
-        background: getComputedStyle(document.body).backgroundColor,
-      };
-    });
   });
-  await page.goto("/");
-  await ready(page);
-  // The first frame's callback can run after the page is ready (WebKit paints later), so wait for
-  // it: what it recorded is still the first frame.
-  const first = await (
-    await page.waitForFunction(() => (window as unknown as { __firstFrame?: unknown }).__firstFrame)
-  ).jsonValue();
-  expect(first).toEqual({
+  await page.goto("/", { waitUntil: "commit" });
+  await entry.requested;
+  expect(await bootState(page)).toEqual({
     theme: "dark",
     choice: "dark",
     boot: "app",
+    sidebar: "collapsed",
     background: "rgb(10, 10, 10)",
+    bootSidebarWidth: "64px",
+    ready: false,
   });
+  entry.release();
+  await ready(page);
+  await expect(page.locator("[data-boot-block]")).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("[data-sidebar-mode]")).toHaveCSS("width", "64px");
+});
+
+test("@journey the boot skeleton draws the full sidebar when nothing is stored", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signedIn(page);
+  const entry = await holdEntry(page, "dist/static");
+  await page.goto("/", { waitUntil: "commit" });
+  await entry.requested;
+  expect(await bootState(page)).toMatchObject({
+    sidebar: "expanded",
+    bootSidebarWidth: "224px",
+    ready: false,
+  });
+  entry.release();
+  await ready(page);
+  await expect(page.locator("[data-boot-block]")).toHaveCount(0);
 });
 
 test("@journey with storage blocked the page follows the system theme", async ({ browser }) => {
@@ -141,6 +163,8 @@ test("@journey with storage blocked the page follows the system theme", async ({
   const page = await context.newPage();
   policy = await watchPolicy(context);
   await signedIn(page);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     Object.defineProperty(window, "localStorage", {
       get() {
@@ -153,6 +177,8 @@ test("@journey with storage blocked the page follows the system theme", async ({
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme-choice", "system");
   await expect(page.locator("html")).toHaveAttribute("data-sidebar", "expanded");
+  await expect(page.getByRole("heading", { level: 1, name: "Welcome, Maya" })).toBeVisible();
+  expect(errors).toEqual([]);
   await context.close();
 });
 
@@ -187,7 +213,7 @@ test("@journey the edge toggle collapses and expands the sidebar, and remembers"
     "page",
   );
 
-  // A reload draws the rail before the first paint.
+  // A reload keeps the rail (the first-paint test checks the boot skeleton draws it too).
   await page.reload();
   await ready(page);
   await expect(page.locator("html")).toHaveAttribute("data-sidebar", "collapsed");

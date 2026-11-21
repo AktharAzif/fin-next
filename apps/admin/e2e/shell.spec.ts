@@ -4,7 +4,14 @@
 // expands the sidebar, `/` opens Staff (Saturday's only list), a member of staff part-way through
 // signing in goes to the factor step, and /api/health answers through the stub.
 import { expect, type Page, type Route, test } from "@playwright/test";
-import { problem, ready, serveStatic, watchPolicy } from "../../console/e2e/support/static.ts";
+import {
+  bootState,
+  holdEntry,
+  problem,
+  ready,
+  serveStatic,
+  watchPolicy,
+} from "../../console/e2e/support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4402";
 
@@ -98,30 +105,66 @@ test("@journey a signed-out visit goes to sign-in", async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin Admin" })).toBeVisible();
 });
 
-test("@journey Fin Admin follows the system theme before the first paint", async ({ browser }) => {
+test("@journey Fin Admin follows the system theme and the stored sidebar before the first paint", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    colorScheme: "dark",
+    baseURL: ORIGIN,
+    viewport: { width: 1440, height: 900 },
+  });
+  policy = await watchPolicy(context);
+  const page = await context.newPage();
+  await serve(page, viewer(NADIA));
+  // main.tsx is held, so what the page shows now is theme.js and the boot skeleton alone.
+  const entry = await holdEntry(page, "dist/static");
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem("fin-theme", "light");
+      window.localStorage.setItem("fin-sidebar", "collapsed");
+    } catch {
+      // No storage: the test then fails on the sidebar below.
+    }
+  });
+  await page.goto("/staff", { waitUntil: "commit" });
+  await entry.requested;
+  expect(await bootState(page)).toEqual({
+    theme: "dark",
+    choice: "system",
+    boot: "app",
+    sidebar: "collapsed",
+    background: "rgb(10, 10, 10)",
+    bootSidebarWidth: "64px",
+    ready: false,
+  });
+  entry.release();
+  await ready(page);
+  await expect(page.locator("[data-boot-block]")).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("[data-sidebar-mode]")).toHaveCSS("width", "64px");
+  await context.close();
+});
+
+test("@journey with storage blocked Fin Admin renders in the system theme", async ({ browser }) => {
   const context = await browser.newContext({ colorScheme: "dark", baseURL: ORIGIN });
   policy = await watchPolicy(context);
   const page = await context.newPage();
   await serve(page, viewer(NADIA));
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
-    try {
-      window.localStorage.setItem("fin-theme", "light");
-    } catch {
-      // No storage: the system theme applies anyway.
-    }
-    requestAnimationFrame(() => {
-      (window as unknown as { __firstFrame: unknown }).__firstFrame =
-        document.documentElement.getAttribute("data-theme");
+    Object.defineProperty(window, "localStorage", {
+      get() {
+        throw new DOMException("blocked", "SecurityError");
+      },
     });
   });
   await page.goto("/staff");
   await ready(page);
-  // The first frame's callback can run after the page is ready (WebKit paints later).
-  const first = await page.waitForFunction(
-    () => (window as unknown as { __firstFrame?: unknown }).__firstFrame,
-  );
-  expect(await first.jsonValue()).toBe("dark");
-  await expect(page.locator("html")).toHaveAttribute("data-theme-choice", "system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveAttribute("data-sidebar", "expanded");
+  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  expect(errors).toEqual([]);
   await context.close();
 });
 

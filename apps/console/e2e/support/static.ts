@@ -158,6 +158,64 @@ export async function watchPolicy(context: BrowserContext): Promise<string[]> {
   return seen;
 }
 
+export interface HeldEntry {
+  /** Resolves once the browser has asked for the entry module. */
+  requested: Promise<void>;
+  /** Lets the entry module load. */
+  release(): void;
+}
+
+/**
+ * Holds the build's entry module (the one `<script type="module">` in index.html) until released,
+ * so a test can read the page as the boot skeleton draws it, before main.tsx runs (AC-UI-08).
+ */
+export async function holdEntry(page: Page, dir: string): Promise<HeldEntry> {
+  const html = readFileSync(join(resolve(dir), "index.html"), "utf8");
+  const src = /<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/.exec(html)?.[1];
+  if (src === undefined) throw new Error(`no module script in ${dir}/index.html`);
+  let requested!: () => void;
+  let release!: () => void;
+  const asked = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === src,
+    async (route) => {
+      requested();
+      await released;
+      await route.fallback();
+    },
+  );
+  return { requested: asked, release };
+}
+
+/**
+ * The page as the boot skeleton draws it: waits for the stylesheet, then reads the attributes
+ * theme.js set, the body's background and the boot sidebar's width, and whether the entry has run.
+ */
+export async function bootState(page: Page) {
+  await page.locator("[data-boot-block]").first().waitFor({ state: "attached" });
+  await page.waitForFunction(() =>
+    [...document.styleSheets].some((sheet) => sheet.href?.includes("/assets/") === true),
+  );
+  return page.evaluate(() => {
+    const root = document.documentElement;
+    const sidebar = document.querySelector("[data-boot-sidebar]");
+    return {
+      theme: root.getAttribute("data-theme"),
+      choice: root.getAttribute("data-theme-choice"),
+      boot: root.getAttribute("data-boot"),
+      sidebar: root.getAttribute("data-sidebar"),
+      background: getComputedStyle(document.body).backgroundColor,
+      bootSidebarWidth: sidebar === null ? null : getComputedStyle(sidebar).width,
+      ready: document.body.hasAttribute("data-ready"),
+    };
+  });
+}
+
 /** Waits for the root to mark the first route resolved (FW-C16). */
 export async function ready(page: Page): Promise<void> {
   await page.locator("body[data-ready]").waitFor({ state: "attached" });
