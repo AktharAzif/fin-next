@@ -122,6 +122,9 @@ describe("loadProcessConfig", () => {
 describe("loadIngressConfig", () => {
   const proofs = (roles: string[]) =>
     JSON.stringify(Object.fromEntries(roles.map((r) => [r, [randomProof(), randomProof()]])));
+  /** A JSON object's text with a `__proto__` member added, which JSON.stringify never writes. */
+  const withProtoKey = (json: string, value: unknown): string =>
+    `${json.slice(0, -1)},"__proto__":${JSON.stringify(value)}}`;
 
   it("reads one origin, the connector services and the proofs", () => {
     const config = loadIngressConfig(
@@ -139,10 +142,13 @@ describe("loadIngressConfig", () => {
   });
 
   it("refuses a role spelled __proto__, which a record would drop without a word", () => {
-    const origins = JSON.stringify({
-      verify: "https://verify.example.net",
-      selfie: "https://selfie.example.net",
-    }).replace("}", ',"__proto__":"https://other.example.net"}');
+    const origins = withProtoKey(
+      JSON.stringify({
+        verify: "https://verify.example.net",
+        selfie: "https://selfie.example.net",
+      }),
+      "https://other.example.net",
+    );
     expect(
       configError(() =>
         loadIngressConfig(
@@ -156,7 +162,7 @@ describe("loadIngressConfig", () => {
         ),
       ),
     ).toMatchObject({ variable: "FIN_PUBLIC_ORIGIN", problem: "malformed" });
-    const proofsWithProto = proofs(["console"]).replace("}", `,"__proto__":["${"a".repeat(43)}"]}`);
+    const proofsWithProto = withProtoKey(proofs(["console"]), ["a".repeat(43)]);
     expect(
       configError(() =>
         loadIngressConfig(
