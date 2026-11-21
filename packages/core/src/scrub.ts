@@ -10,11 +10,17 @@ const MAX_DEPTH = 8;
 function applyShape(text: string, shape: Shape): string {
   shape.pattern.lastIndex = 0;
   const token = shape.token;
-  return typeof token === "string"
-    ? text.replace(shape.pattern, token)
-    : text.replace(shape.pattern, (match: string, ...rest: unknown[]) =>
-        token(match, ...rest.filter((r): r is string => typeof r === "string")),
-      );
+  if (typeof token === "string") return text.replace(shape.pattern, token);
+  return text.replace(shape.pattern, (match: string, ...rest: unknown[]) => {
+    // After the match come the groups (a string, or undefined for one that took no part), then
+    // the offset, the whole text and, with named groups, an object of them.
+    const offset = rest.findIndex((item) => typeof item === "number");
+    return token(match, {
+      groups: rest.slice(0, offset).map((group) => (typeof group === "string" ? group : "")),
+      offset: rest[offset] as number,
+      input: rest[offset + 1] as string,
+    });
+  });
 }
 
 /** Replaces every known shape in a string with its token. */
@@ -28,13 +34,16 @@ function normalisedKey(key: string): string {
   return key.toLowerCase().replace(/[_-]/g, "");
 }
 
-/** Whether a field's value is withheld whatever it holds. */
+/**
+ * Whether a field's value is withheld whatever it holds. The list alone decides, so `keyId` and
+ * `orgId` are kept (no such name is listed) and `taxId` and `tax_id` are withheld (`taxid` is).
+ */
 export function isWithheldField(key: string): boolean {
-  if (/(?:Id|_id|Ids|_ids)$/.test(key)) return false;
   return WITHHELD_FIELDS.has(normalisedKey(key));
 }
 
 const ERROR_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
+const MECHANISM_TYPE = /^[A-Za-z][\w.]{0,63}$/;
 
 /** The class name of a thrown value that reached a line as a field: nothing else of it is kept. */
 function errorNameOf(error: Error): string {
@@ -194,9 +203,14 @@ export function scrubEvent<T extends object>(event: T): T {
   }
   if (isRecord(source.tags)) {
     const tags: Json = {};
+    // Tags are an object like any other: a withheld name is withheld, and keys are scrubbed text.
     for (const [key, value] of Object.entries(source.tags)) {
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-        tags[key] = typeof value === "string" ? scrubText(value).slice(0, 200) : value;
+        tags[scrubText(key)] = isWithheldField(key)
+          ? WITHHELD
+          : typeof value === "string"
+            ? scrubText(value).slice(0, 200)
+            : value;
       }
     }
     out.tags = tags;
@@ -216,7 +230,10 @@ export function scrubEvent<T extends object>(event: T): T {
             : WITHHELD;
         if (isRecord(value.mechanism)) {
           const mechanism: Json = {};
-          if (typeof value.mechanism.type === "string") mechanism.type = value.mechanism.type;
+          // A mechanism is named by the SDK ("generic", "auto.node.onuncaughtexception"); any
+          // other text in it is not kept.
+          const type = value.mechanism.type;
+          if (typeof type === "string" && MECHANISM_TYPE.test(type)) mechanism.type = type;
           if (typeof value.mechanism.handled === "boolean") {
             mechanism.handled = value.mechanism.handled;
           }
@@ -256,7 +273,11 @@ export function scrubBreadcrumb<T extends object>(breadcrumb: T): T | null {
     const data: Json = {};
     for (const key of ["from", "to"]) {
       const item = source.data[key];
-      if (typeof item === "string") data[key] = scrubText(item.replace(/[?#].*$/, ""));
+      if (typeof item !== "string") continue;
+      // The path alone: everything from its first `?` or `#` goes, found in one pass (the
+      // pattern /[?#].*$/ tries every `?` to the end of its line, which is quadratic).
+      const end = item.search(/[?#]/);
+      data[key] = scrubText(end === -1 ? item : item.slice(0, end));
     }
     out.data = data;
   }

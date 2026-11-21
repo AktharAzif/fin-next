@@ -50,8 +50,19 @@ function ipv6(rand: () => number): string {
   return `${left}::${right}`;
 }
 
+interface Sample {
+  name: string;
+  value: string;
+  token: string;
+  /**
+   * A run of digits inside a word belongs to the word (a digest such as the release, or an ID),
+   * so DIGITS keeps spec 08's `\b` and such a sample is planted beside non-letters only.
+   */
+  wordBound?: true;
+}
+
 /** One generator per shape the scrubbers know, each with the token it must become. */
-function samples(rand: () => number): { name: string; value: string; token: string }[] {
+function samples(rand: () => number): Sample[] {
   const b64json = (obj: unknown): string => btoa(JSON.stringify(obj));
   return [
     {
@@ -197,7 +208,7 @@ function samples(rand: () => number): { name: string; value: string; token: stri
       value: join("/invite/", pick(rand, "abcdef", 10), "9", pick(rand, B64URL, 30)),
       token: "/invite/[segment]",
     },
-    { name: "long digits", value: "4111111111111111", token: "[digits]" },
+    { name: "long digits", value: "4111111111111111", token: "[digits]", wordBound: true },
     { name: "code beside code", value: "code: 123456", token: "code [code]" },
     { name: "code beside otp", value: "otp=12345678", token: "otp [code]" },
     { name: "code beside pin", value: "PIN 1234567", token: "PIN [code]" },
@@ -261,36 +272,119 @@ describe("scrubText", () => {
     for (const keep of [
       "std::vector",
       "Foo::Bar",
+      "Array::new",
+      "io::Error",
       "at 09:48:23.123",
       "aa:bb:cc:dd:ee:ff",
       "ab:cd:ef:01:23:45:67",
       "ratio 16:9",
+      "https://docs.example.net/x",
+      "[x]:8080",
     ]) {
-      expect(scrubText(keep)).toBe(keep);
+      expect(scrubText(keep), keep).toBe(keep);
     }
   });
 
-  it("scrubs 256 KB of any adversarial shape in linear time", () => {
-    const size = 256 * 1024;
-    const runs = [
-      "a".repeat(size),
-      "a.".repeat(size / 2),
-      "0123456789abcdef".repeat(size / 16),
-      "a:".repeat(size / 2),
-      "a::".repeat(size / 3),
-      "eyJ".repeat(size / 3),
-      "/".repeat(size),
-      `/${"A1".repeat(size / 2)}`,
-      "@a".repeat(size / 2),
-      "1".repeat(size),
-      "https://".repeat(size / 8),
-      "?".repeat(size),
-    ];
-    for (const run of runs) {
+  it("removes an IPv6 address whatever letter stands beside it", () => {
+    const full = ["2001", "db8", "85a3", "0", "0", "8a2e", "370", "7334"].join(":");
+    for (const [text, expected] of [
+      [`ip=${full}x`, "ip=[ip]x"],
+      ["2001:db8::1x", "[ip]x"],
+      ["from 2001:db8:4f2a::17beZ", "from [ip]Z"],
+      [`peer ${full}in pool`, "peer [ip]in pool"],
+      ["x2001:db8::1", "x[ip]"],
+      ["_2001:db8::1_", "_[ip]_"],
+      ["in2001:db8::1in", "in[ip]in"],
+      ["xfe80::1", "x[ip]"],
+      ["fe80::1%en0x pool", "[ip] pool"],
+      // A hex letter beside the address joins its run, and the whole run goes.
+      ["a2001:db8::1", "[ip]"],
+      [`${full}f`, "[ip]"],
+      // A colon kept outside is a label's or a port's, never the address's neighbour.
+      ["ip:::1", "ip:[ip]"],
+      ["x:2001:db8::1:y", "x:[ip]:y"],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+      expect(scrubText(`(${text})`), text).toBe(`(${expected})`);
+    }
+  });
+
+  it("removes an IPv4 address whatever letter or _ stands beside it", () => {
+    for (const [text, expected] of [
+      ["x203.0.113.7", "x[ip]"],
+      ["203.0.113.7x", "[ip]x"],
+      ["ip_198.51.100.4", "ip_[ip]"],
+      ["peer192.0.2.10in pool", "peer[ip]in pool"],
+      ["1.2.3.4.5", "[ip].5"],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+    }
+    for (const keep of ["1234.5.6.7", "1.2.3.4567", "cloudflared 2026.11.1", "v26.13.1"]) {
+      expect(scrubText(keep), keep).toBe(keep);
+    }
+  });
+
+  it("scrubs 1 MB of an adversarial input for every shape in linear time", () => {
+    // Four times the largest body Fin accepts. Each input repeats what starts a match and never
+    // finishes it, which is what makes an open-ended part quadratic.
+    const size = 1024 * 1024;
+    const fill = (unit: string, tail = ""): string =>
+      unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+    const begin = join(dashes, "BEGIN ", "PRIVATE KEY", dashes);
+    const end = join(dashes, "END ");
+    const runs: Record<string, string> = {
+      "private key, BEGIN after BEGIN": fill(begin),
+      "private key, a long body and no END": `${begin}\n${fill("A")}`,
+      "private key, ENDs of something else": `${begin}${fill(`${end}X `)}`,
+      "private key, a long header": join(dashes, "BEGIN ", fill("A")),
+      "age identity": fill(["AGE", "SECRET", "KEY", "1"].join("-")),
+      "Fin API key": fill(["fin", "live", "sk", ""].join("_")),
+      "Fin key-like": fill(["fin", "test", ""].join("_")),
+      "webhook secret": fill(join("wh", "sec_")),
+      "Cloudflare token": fill(join("cf", "at_")),
+      "JWT, eyJ after eyJ": fill("eyJ"),
+      "JWT, a short part after each": fill("eyJabcdefgh."),
+      "heartbeat URL, one long host": `https://${fill(join("better", "stack"))}`,
+      "heartbeat URL, a host and no path": fill(join("https://a.", "better", "stack.com/api/v1/")),
+      "heartbeat URL, one host of dots": `https://${fill(join("a.", "better", "stack."))}`,
+      "DSN, a login and no host": fill("https://a@"),
+      "DSN, one long login": `https://${fill("a")}`,
+      "Postgres URL, logins and no @": fill(join("postgres", "://a:")),
+      "Postgres URL, ql and a password": fill(join("postgres", "ql://a:b")),
+      "Postgres URL, one long password": join("postgres", "://a:", fill("b")),
+      "Postgres URL, no colon after the login": fill(join("postgres", "://a")),
+      "bearer, no token": fill(join("bea", "rer ")),
+      "bearer, a long gap": join("bea", "rer", fill(" ")),
+      "basic, no token": fill(join("bas", "ic ")),
+      "__Host- cookie, no =": fill("__Host-a"),
+      "__Secure- cookie, no =": fill("__Secure-"),
+      "cookie, one long name": `__Host-${fill("a")}`,
+      "Access cookie": fill("CF_Authorization"),
+      "ingress proof, a long gap": join("fin-ingress-proof:", fill(" ")),
+      "email, no @": fill("a."),
+      "email, @ after @": fill("@a"),
+      "email, a long domain": `a@${fill("a.")}`,
+      "IPv4, dots and no end": fill("1.1.1."),
+      "IPv6, hex and colons and no end": fill("a:", "g"),
+      "IPv6, compressed runs": fill("1::", "x"),
+      "IPv6, hex and no colon": fill("0123456789abcdef"),
+      "IPv6, zones": fill("::1%a"),
+      "IPv6, colons then a hex digit": fill(":", "a"),
+      "IPv6, a hex digit between colons": `${fill(":")}a${fill(":")}`,
+      "IPv6, colons and no hex": fill(":"),
+      "query string": fill("?"),
+      "ID-bearing path": fill("/c/"),
+      "long segment": `/${fill("A1")}`,
+      slashes: fill("/"),
+      "digits, then a letter": fill("1", "a"),
+      "code, no digits": fill("code "),
+      letters: fill("a"),
+    };
+    for (const [name, run] of Object.entries(runs)) {
       const t0 = performance.now();
       scrubText(run);
-      // A quadratic shape takes seconds here; every linear one takes a few milliseconds.
-      expect(performance.now() - t0, run.slice(0, 12)).toBeLessThan(500);
+      // A quadratic part takes seconds here, or minutes; every linear one a few milliseconds.
+      expect(performance.now() - t0, name).toBeLessThan(1000);
     }
   });
 
@@ -302,15 +396,99 @@ describe("scrubText", () => {
   });
 });
 
+/** Each withheld name's words, to spell it as code does: taxId, TaxId, tax_id, TAX_ID, tax-id. */
+const WORDS: Readonly<Record<string, readonly string[]>> = {
+  name: ["name"],
+  firstname: ["first", "name"],
+  lastname: ["last", "name"],
+  fullname: ["full", "name"],
+  displayname: ["display", "name"],
+  holdername: ["holder", "name"],
+  email: ["email"],
+  emailaddress: ["email", "address"],
+  phone: ["phone"],
+  address: ["address"],
+  street: ["street"],
+  postcode: ["post", "code"],
+  zip: ["zip"],
+  dob: ["dob"],
+  dateofbirth: ["date", "of", "birth"],
+  ip: ["ip"],
+  ipaddress: ["ip", "address"],
+  clientip: ["client", "ip"],
+  useragent: ["user", "agent"],
+  password: ["password"],
+  secret: ["secret"],
+  token: ["token"],
+  code: ["code"],
+  otp: ["otp"],
+  cookie: ["cookie"],
+  authorization: ["authorization"],
+  apikey: ["api", "key"],
+  key: ["key"],
+  accountnumber: ["account", "number"],
+  iban: ["iban"],
+  taxid: ["tax", "id"],
+  ssn: ["ssn"],
+  note: ["note"],
+  message: ["message"],
+  body: ["body"],
+  query: ["query"],
+  querystring: ["query", "string"],
+  url: ["url"],
+  headers: ["headers"],
+  details: ["details"],
+  answers: ["answers"],
+};
+
+const capital = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1);
+
+/** Every spelling of a withheld name that code and JSON use. */
+function spellings(name: string): string[] {
+  const words = WORDS[name] ?? [name];
+  const [first = "", ...rest] = words;
+  return [
+    name,
+    name.toUpperCase(),
+    `${name.slice(0, 1)}_${name.slice(1)}`,
+    first + rest.map(capital).join(""),
+    words.map(capital).join(""),
+    words.join("_"),
+    words.join("_").toUpperCase(),
+    words.join("-"),
+  ];
+}
+
 describe("scrubLine", () => {
-  it("withholds every listed field name at any depth, in any case and with _ or -", () => {
+  it("withholds every listed field name at any depth, in every spelling code uses", () => {
+    expect(Object.keys(WORDS).sort()).toEqual([...WITHHELD_FIELDS].sort());
     for (const name of WITHHELD_FIELDS) {
-      const variants = [name, name.toUpperCase(), `${name.slice(0, 1)}_${name.slice(1)}`];
-      for (const key of variants) {
+      for (const key of spellings(name)) {
         const line = scrubLine({ event: "request", outer: { inner: [{ [key]: "anything" }] } });
-        expect(line.outer).toEqual({ inner: [{ [key]: WITHHELD }] });
-        expect(scrubLine({ event: "x", [key]: { deep: 1 } })[key]).toBe(WITHHELD);
+        expect(line.outer, key).toEqual({ inner: [{ [key]: WITHHELD }] });
+        expect(scrubLine({ event: "x", [key]: { deep: 1 } })[key], key).toBe(WITHHELD);
+        expect(() => assertNoPersonalShapes({ [key]: "anything" }), key).toThrow();
       }
+    }
+  });
+
+  it("withholds a tax ID under the names code gives it, though they end in Id", () => {
+    const line = scrubLine({
+      event: "x",
+      taxId: "12-3456789",
+      tax_id: "12-3456789",
+      TaxId: "AB123456C",
+      applicant: { taxId: "123-45-6789", tax_id: "123-45-6789" },
+    });
+    expect(line).toEqual({
+      event: "x",
+      taxId: WITHHELD,
+      tax_id: WITHHELD,
+      TaxId: WITHHELD,
+      applicant: { taxId: WITHHELD, tax_id: WITHHELD },
+    });
+    for (const key of ["taxId", "tax_id", "TaxId", "TAX_ID"]) {
+      expect(() => assertNoPersonalShapes({ [key]: "123-45-6789" }), key).toThrow();
     }
   });
 
@@ -400,11 +578,15 @@ describe("scrubLine", () => {
     const rand = prng(20261121);
     const keys = ["route", "reason", "detail_text", "items", "note_list", "context", "status"];
     // Shapes are planted between neighbours a log line really has: spaces, a label's colon, an
-    // assignment, list and call punctuation, a host and port, a sentence's end.
-    const before = [" ", ":", "=", ",", "(", "[", "ip:", "for "];
-    const after = [" ", ":", ",", ")", "]", ";", ".", ":443"];
-    const choose = (list: readonly string[]): string =>
-      list[Math.floor(rand() * list.length)] ?? " ";
+    // assignment, list and call punctuation, a host and port, a sentence's end; and glued to a
+    // word, as text run together leaves them.
+    const glued = ["x", "in", "Z", "_"];
+    const before = [" ", ":", "=", ",", "(", "[", "ip:", "for ", ...glued];
+    const after = [" ", ":", ",", ")", "]", ";", ".", ":443", ...glued];
+    const choose = (list: readonly string[], sample: Sample): string => {
+      const usable = sample.wordBound ? list.filter((item) => !glued.includes(item)) : list;
+      return usable[Math.floor(rand() * usable.length)] ?? " ";
+    };
     for (let round = 0; round < 300; round++) {
       const planted = samples(rand);
       const secrets: string[] = [];
@@ -412,7 +594,7 @@ describe("scrubLine", () => {
         const sample = planted[Math.floor(rand() * planted.length)];
         if (sample === undefined) return "";
         secrets.push(sample.value);
-        return `${pick(rand, "abc ", 5)}${choose(before)}${sample.value}${choose(after)}${pick(rand, "xyz ", 5)}`;
+        return `${pick(rand, "abc ", 5)}${choose(before, sample)}${sample.value}${choose(after, sample)}${pick(rand, "xyz ", 5)}`;
       };
       const build = (depth: number): unknown => {
         const kind = Math.floor(rand() * 5);
@@ -549,6 +731,45 @@ describe("scrubEvent and scrubBreadcrumb", () => {
       { category: "navigation", data: { from: "/c/[segment]", to: "/settings" } },
     ]);
     expect(scrubBreadcrumb({ category: "fetch", data: { url: "/x" } })).toBeNull();
+    expect(
+      scrubBreadcrumb({ category: "navigation", data: { from: "/a?x=1\nb", to: "/b#t\nc" } }),
+    ).toEqual({ category: "navigation", data: { from: "/a", to: "/b" } });
+  });
+
+  it("cuts a long breadcrumb's query in linear time", () => {
+    const size = 1024 * 1024;
+    for (const from of [`${"?".repeat(size)}\nx`, "#\n".repeat(size / 2), "/".repeat(size)]) {
+      const t0 = performance.now();
+      scrubBreadcrumb({ category: "navigation", data: { from } });
+      expect(performance.now() - t0, from.slice(0, 4)).toBeLessThan(1000);
+    }
+  });
+
+  it("applies the field rule to tags and keeps a mechanism only by its SDK name", () => {
+    const out = scrubEvent({
+      tags: {
+        fin_fixed_message: "false",
+        requestId: "req_01jd2k3m4n5p6q7r8s9t0v1w2x",
+        email: "x",
+        "jane.doe@example.com": "1",
+      },
+      exception: {
+        values: [
+          { type: "Error", mechanism: { type: "jane.doe@example.com handled", handled: false } },
+          { type: "Error", mechanism: { type: "auto.node.onuncaughtexception", handled: false } },
+        ],
+      },
+    }) as { tags: Record<string, unknown>; exception: { values: { mechanism: unknown }[] } };
+    expect(out.tags).toEqual({
+      fin_fixed_message: "false",
+      requestId: "req_01jd2k3m4n5p6q7r8s9t0v1w2x",
+      email: WITHHELD,
+      "[email]": "1",
+    });
+    expect(out.exception.values.map((value) => value.mechanism)).toEqual([
+      { handled: false },
+      { type: "auto.node.onuncaughtexception", handled: false },
+    ]);
   });
 });
 
