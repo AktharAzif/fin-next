@@ -11,13 +11,18 @@
 //     test support has an entry point (exports, imports, main, module, browser, bin, jsnext:main,
 //     jsnext) that names test support (as a file, a directory or a name a resolver completes), a
 //     test file, a node_modules path, a path out of the repository or, in a browser or imports
-//     map, a package path that reaches one, so the harness never reaches deployable code (the
+//     map, a package path that reaches one (a folder mapping, `"./lib/": "./"`, read as the
+//     pattern `./*`), or that is not spelled plainly (percent-encoding, which Node decodes in an
+//     exports target, or a backslash), so the harness never reaches deployable code (the
 //     steward's decision of 21 Nov; see TEST_SUPPORT below);
 //   - outside tests and test support, a relative import stays inside the repository and out of
 //     node_modules, and a package's subpath has no empty, `.`, `..` or node_modules segment, so
-//     neither can reach a file the rules on names and paths do not see; and every pattern of an
+//     neither can reach a file the rules on names and paths do not see; every pattern of an
 //     `import.meta.glob` call (Vite's static loader) is a literal relative path that stays in the
-//     repository, out of node_modules and test support, and cannot match a test file;
+//     repository, out of node_modules and test support, and cannot match a test file; and Vite's
+//     other build-time loaders are read the same way: an `import()` of a template as the glob Vite
+//     expands it into (each substitution a wildcard), and `new URL(<string>, import.meta.url)`,
+//     whose file Vite bundles as a worker or copies into the build, as an import of that string;
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
 //     packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
@@ -54,6 +59,21 @@
 // built at run time, a trick on the lexer) cannot be excluded by a lexer, and is a review finding
 // by definition, which fin-review's lenses treat as critical. The control-path approval rule
 // returns in hardening (BD-02).
+// Known limits, left to review. The rules on test support read the spellings their tests list;
+// the shapes below only deliberate disguise produces, so the check does not chase them further:
+// a lint against mistakes; the release build refuses any module from packages/testing; a
+// disguised import in Fin's own code is a review finding by definition. The tests keep the same
+// list (LEFT_TO_REVIEW).
+//   - a query or fragment suffix on the specifier, read only as written and without it, and in a
+//     manifest's entry point only without it (Vite follows `"main": "./src?/../test/x.ts"` as a
+//     path);
+//   - a bare specifier that climbs out of its package or through node_modules other than by the
+//     segments package-subpath refuses (a symbolic link in a package's directory, say);
+//   - a typed or parenthesised import.meta.glob, read only bare or with one named type argument
+//     (`import.meta.glob<Record<string, M>>(...)` and `(import.meta.glob)(...)` are not read);
+//   - a glob whose fixed end is itself a test file's ending, refused only when a test file's name
+//     can end with that end (`./**/*.ts`, `./**/*.test.ts`), not when it holds more of one
+//     (`./**/*.db.test.ts`, `./routes/*n.test.ts`).
 // How imports are read. Every `import` and `export` keyword is read as a statement, with comments
 // wherever JavaScript allows them and every string escape and line continuation decoded, and so is
 // every call of import(), require() and getBuiltinModule(), an optional call or an escaped name
@@ -89,7 +109,10 @@ import { coveredBy, globToRegExp, isRecord, listFiles, readJson, report } from "
 /**
  * @typedef {{ type: "name" | "string" | "template" | "punct" | "regex" | "number" | "other",
  *   value: string, raw: string, start: number, afterDot?: boolean, closesKeywordParen?: boolean,
- *   closesBlock?: boolean }} Token
+ *   closesBlock?: boolean, quasi?: string, head?: boolean }} Token
+ * A token that ends a part of a template's text (the `${` after it, or the whole template or its
+ * last part, up to the closing backtick) has that part's text as written in `quasi`, and in
+ * `head` whether the part starts the template.
  */
 /** @typedef {{ kind: "name" | "string" | "punct", value: string }} ClauseToken */
 
@@ -518,6 +541,70 @@ function findGlobCalls(tokens) {
 }
 
 /**
+ * Reads a template with a substitution, from the `${` that ends its head, as the glob Vite makes
+ * of it: its text as written, each substitution a `*`. Templates inside a substitution are
+ * skipped whole.
+ * @param {Token[]} tokens
+ * @param {number} i
+ * @returns {string | undefined} undefined when `tokens[i]` starts no such template
+ */
+function templateGlob(tokens, i) {
+  const opens = (/** @type {Token | undefined} */ t) => t?.type === "punct" && t.value === "${";
+  const first = tokens[i];
+  if (first?.head !== true || !opens(first)) return undefined;
+  let pattern = `${first.quasi}*`;
+  let nested = 0;
+  for (const t of tokens.slice(i + 1)) {
+    if (t.quasi === undefined) continue;
+    if (t.head === true) nested += opens(t) ? 1 : 0;
+    else if (nested > 0) nested -= opens(t) ? 0 : 1;
+    else if (opens(t)) pattern += `${t.quasi}*`;
+    else return pattern + t.quasi;
+  }
+  return undefined;
+}
+
+/**
+ * Vite's build-time loaders besides import.meta.glob, in code: an `import()` of a template with a
+ * substitution, which Vite expands into the glob of its text (`pattern`), and
+ * `new URL(<string>, import.meta.url)`, whose file Vite bundles as a worker's code (inside
+ * `new Worker` or `new SharedWorker`) or copies into the build (`specifier`).
+ * @param {Token[]} tokens
+ * @returns {{ start: number, pattern?: string, specifier?: string }[]}
+ */
+function findViteLoads(tokens) {
+  const punct = (/** @type {Token | undefined} */ t, /** @type {string} */ value) =>
+    t?.type === "punct" && t.value === value;
+  const keyword = (/** @type {Token | undefined} */ t, /** @type {string} */ value) =>
+    t?.type === "name" && t.value === value && t.afterDot !== true;
+  /** @type {{ start: number, pattern?: string, specifier?: string }[]} */
+  const loads = [];
+  for (const [k, token] of tokens.entries()) {
+    if (keyword(token, "import") && punct(tokens[k + 1], "(")) {
+      const pattern = templateGlob(tokens, k + 2);
+      if (pattern !== undefined) loads.push({ start: token.start, pattern });
+      continue;
+    }
+    const arg = tokens[k + 3];
+    if (
+      keyword(token, "new") &&
+      keyword(tokens[k + 1], "URL") &&
+      punct(tokens[k + 2], "(") &&
+      (arg?.type === "string" || arg?.type === "template") &&
+      punct(tokens[k + 4], ",") &&
+      keyword(tokens[k + 5], "import") &&
+      punct(tokens[k + 6], ".") &&
+      tokens[k + 7]?.value === "meta" &&
+      punct(tokens[k + 8], ".") &&
+      tokens[k + 9]?.value === "url"
+    ) {
+      loads.push({ start: token.start, specifier: arg.value });
+    }
+  }
+  return loads;
+}
+
+/**
  * @param {string} name
  * @param {string[]} patterns exact names or globs
  * @returns {boolean}
@@ -870,12 +957,14 @@ export function lex(text) {
           value: plain ? whole.value : "",
           raw: text.slice(from - 1, j + 1),
           start: from - 1,
+          quasi: text.slice(from, j),
+          head,
         });
         return j + 1;
       } else if (ch === "$" && text.charAt(j + 1) === "{") {
         clear(from, j);
         braces.push("template");
-        push({ type: "punct", value: "${", raw: "${", start: j });
+        push({ type: "punct", value: "${", raw: "${", start: j, quasi: text.slice(from, j), head });
         return j + 2;
       }
     }
@@ -1307,8 +1396,78 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
     }
   }
   if (!isTest) checkCodeNames(lexed.tokens, statements, loadsChecked, lineAt, add);
-  // Vite's static loader: outside tests and test support, every pattern it may load is read.
-  if (!isTest && !isTestSupport(file)) {
+  const mayLoadTestSupport = isTest || isTestSupport(file);
+  /**
+   * The rules that keep the harness, test support and test files out of code that runs, for one
+   * module it loads by `specifier`: by a package's name (`byName`), or by a relative path that can
+   * name `targets` (none for a specifier that is not relative).
+   * @param {number} line
+   * @param {string} specifier
+   * @param {string[]} targets
+   * @param {boolean} byName
+   */
+  const checkReach = (line, specifier, targets, byName) => {
+    // The harness only in tests and test support: by its package name (in any case, as a
+    // case-insensitive file system finds it, and with any query or fragment), a workspace
+    // package's test support by that package's name, or a file of test support by a relative
+    // path, which reaches the same code. A type-only import is refused too: deployable code needs
+    // no type of it.
+    if (
+      !mayLoadTestSupport &&
+      ((byName && namesTestSupport(specifier)) ||
+        targets.some((target) => TEST_SUPPORT_TARGET.some((pattern) => pattern.test(target))))
+    ) {
+      add(
+        line,
+        "testing-import",
+        "only tests and test support (e2e/, a package's test/, packages/testing, playwright.config.ts) import @fin/testing or a file of test support, so the harness never reaches deployable code",
+      );
+    }
+    // A package's subpath names a file inside that package: a resolver follows `.`, `..` and empty
+    // segments out of it (`@types/node/../../../packages/testing/src/index.ts`) and node_modules
+    // into another package's files, to code the rules on package names never see.
+    if (!mayLoadTestSupport && byName && leavesItsPackage(specifier)) {
+      add(
+        line,
+        "package-subpath",
+        "a package's subpath names a file inside it: no empty, `.`, `..` or node_modules segment, which a resolver follows out of the package",
+      );
+    }
+    // A relative path stays inside the repository and out of node_modules: one that leaves the
+    // checkout and comes back by its directory's name, or walks into an installed package, reaches
+    // code (the harness included) that the rules on package names and repository paths never see.
+    if (
+      !mayLoadTestSupport &&
+      targets.some(
+        (target) =>
+          target === ".." || target.startsWith("../") || NODE_MODULES_SEGMENT.test(target),
+      )
+    ) {
+      add(
+        line,
+        "relative-escape",
+        "a relative import names a file of this repository outside node_modules; an installed package is imported by its name, so the package rules can read it",
+      );
+    }
+    if (
+      !isTest &&
+      (targets.length > 0 ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some(
+        namesTestFile,
+      )
+    ) {
+      add(
+        line,
+        "test-file-import",
+        "code that runs imports no test file: a test's own imports are not held to these rules",
+      );
+    }
+  };
+  // Vite's build-time loaders, read outside tests and test support: every pattern of
+  // import.meta.glob; an import() of a template, which Vite expands into the glob of its text;
+  // and new URL(<string>, import.meta.url), whose file Vite bundles as a worker or copies into the
+  // build, read as an import of that string (one without `./` both as a relative path, which Vite
+  // tries first, and as a package's name).
+  if (!mayLoadTestSupport) {
     for (const { start, patterns } of findGlobCalls(lexed.tokens)) {
       if (patterns !== undefined && !patterns.some((p) => globReachesTests(file, p))) continue;
       add(
@@ -1316,6 +1475,19 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
         "glob-import",
         "import.meta.glob takes literal relative patterns, with no base or exhaustive option, that stay in the repository and out of node_modules and test support and cannot match a test file",
       );
+    }
+    for (const { start, pattern, specifier } of findViteLoads(lexed.tokens)) {
+      if (pattern !== undefined && /^\.\.?\//.test(pattern) && globReachesTests(file, pattern)) {
+        add(
+          lineAt(start),
+          "glob-import",
+          "Vite expands an import() of a template into the glob of its text, each substitution a wildcard: that glob stays in the repository and out of node_modules and test support, and cannot match a test file",
+        );
+      }
+      if (specifier !== undefined && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(specifier)) {
+        const relative = /^\.\.?(?:\/|$)/.test(specifier);
+        checkReach(lineAt(start), specifier, relativeTargets(file, specifier), !relative);
+      }
     }
   }
 
@@ -1432,59 +1604,7 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
       }
     }
     const targets = relative ? relativeTargets(file, specifier) : [];
-    const mayLoadTestSupport = isTest || isTestSupport(file);
-    // The harness only in tests and test support: by its package name (in any case, as a
-    // case-insensitive file system finds it, and with any query or fragment), a workspace
-    // package's test support by that package's name, or a file of test support by a relative path,
-    // which reaches the same code. A type-only import is refused too: deployable code needs no type
-    // of it.
-    if (
-      !mayLoadTestSupport &&
-      ((bare && builtin === undefined && namesTestSupport(specifier)) ||
-        targets.some((target) => TEST_SUPPORT_TARGET.some((pattern) => pattern.test(target))))
-    ) {
-      add(
-        line,
-        "testing-import",
-        "only tests and test support (e2e/, a package's test/, packages/testing, playwright.config.ts) import @fin/testing or a file of test support, so the harness never reaches deployable code",
-      );
-    }
-    // A package's subpath names a file inside that package: a resolver follows `.`, `..` and empty
-    // segments out of it (`@types/node/../../../packages/testing/src/index.ts`) and node_modules
-    // into another package's files, to code the rules on package names never see.
-    if (!mayLoadTestSupport && bare && builtin === undefined && leavesItsPackage(specifier)) {
-      add(
-        line,
-        "package-subpath",
-        "a package's subpath names a file inside it: no empty, `.`, `..` or node_modules segment, which a resolver follows out of the package",
-      );
-    }
-    // A relative path stays inside the repository and out of node_modules: one that leaves the
-    // checkout and comes back by its directory's name, or walks into an installed package, reaches
-    // code (the harness included) that the rules on package names and repository paths never see.
-    if (
-      !mayLoadTestSupport &&
-      targets.some(
-        (target) =>
-          target === ".." || target.startsWith("../") || NODE_MODULES_SEGMENT.test(target),
-      )
-    ) {
-      add(
-        line,
-        "relative-escape",
-        "a relative import names a file of this repository outside node_modules; an installed package is imported by its name, so the package rules can read it",
-      );
-    }
-    if (
-      !isTest &&
-      (relative ? targets : [specifier.replace(/[?#].*$/, ""), specifier]).some(namesTestFile)
-    ) {
-      add(
-        line,
-        "test-file-import",
-        "code that runs imports no test file: a test's own imports are not held to these rules",
-      );
-    }
+    checkReach(line, specifier, targets, bare && builtin === undefined);
     const testRunner = isTest && name === "vitest";
     if (relativeOnly && !relative) {
       add(line, "relative-only", "the watcher uses Web APIs and relative imports only");
@@ -1696,12 +1816,15 @@ function fieldPaths(value) {
  * and as a name a resolver completes with an extension (`./x.test`, `playwright.config`). A
  * pattern target (with `*`) is read as every path it can expand to: refused when its fixed part
  * lies in test support or stops at a directory that holds test support, or when its fixed end can
- * end a test file's name (`./src/*.ts` reaches `./src/x.test.ts`).
+ * end a test file's name (`./src/*.ts` reaches `./src/x.test.ts`). A target not spelled plainly
+ * is refused: Node decodes percent-encoding in an exports target (`./%74est/x.ts` is
+ * `./test/x.ts`), and a URL parser reads `\` as `/`.
  * @param {string} dir the manifest's directory ("." at the root)
  * @param {string} target
  * @returns {boolean}
  */
 function exposesTestSupport(dir, target) {
+  if (/^\s|\s$|[\\%\p{Cc}]/u.test(target)) return true;
   const path = posix.join(dir, target.replace(/[?#].*$/, "")).replace(/^\.(?:\/|$)/, "");
   if (path === ".." || path.startsWith("../") || NODE_MODULES_SEGMENT.test(path)) return true;
   const readings = [path, `${path.replace(/\/+$/, "")}/`, `${path}.ts`];
@@ -1763,9 +1886,13 @@ export function checkManifest(file, text) {
     // A browser map's and an imports map's values may name another module by its package name
     // (`"./src/clock.ts": "@fin/testing"`), which is read as a bare specifier as well as a path.
     const mapsModules = field === "imports" || (field === "browser" && isRecord(manifest[field]));
+    // A subpath map's folder mapping (`"./lib/": "./"`), which Vite still follows, exposes every
+    // file below its target, so the target is read as a pattern (`./` as `./*`).
+    const subpaths = field === "exports" || field === "imports";
     for (const target of new Set(fieldPaths(manifest[field]))) {
       const byName = mapsModules && !/^(?:\.\.?(?:\/|$)|\/)/.test(target);
-      if (!exposesTestSupport(dir, target) && !(byName && bareTargetReachesTests(target))) {
+      const read = subpaths && target.endsWith("/") ? `${target}*` : target;
+      if (!exposesTestSupport(dir, read) && !(byName && bareTargetReachesTests(target))) {
         continue;
       }
       const targetAt = text.indexOf(JSON.stringify(target), Math.max(fieldAt, 0));
@@ -1773,7 +1900,7 @@ export function checkManifest(file, text) {
         file,
         line: lineAt(targetAt >= 0 ? targetAt : Math.max(fieldAt, 0)),
         rule: "testing-export",
-        message: `a package's ${field} names no test support, test file, node_modules path, path out of the repository or package that loads one, so its name never loads the harness into deployable code`,
+        message: `a package's ${field} names no test support, test file, node_modules path, path out of the repository or package that loads one, and spells each path plainly, so its name never loads the harness into deployable code`,
       });
     }
   }
