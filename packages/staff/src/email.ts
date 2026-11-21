@@ -10,6 +10,7 @@ import { type Clock, type LineSink, sqlState, type UnitTx } from "./ports.ts";
 export type StaffNoticeTemplate =
   | "staff/staff-access-changed"
   | "staff/staff-factors-reset"
+  | "staff/staff-role-permissions-changed"
   | "staff/staff-switch-changed";
 
 export interface StaffNotice {

@@ -1,7 +1,8 @@
 // @fin/staff: Fin Admin's staff (spec 02 §6.4, §6.5, §8.3, §10, §16.4, §17.3): requireStaff and
-// the same-person check, staff members and the prebuilt roles, the staff-change lock and the last
-// Admin, enrolment codes, the kill switches, the Access drift check, the staff area's audit events
-// and its notices. The staff realm itself (Better Auth, the gate, the ceremonies) is @fin/identity's.
+// the same-person check, staff members, the prebuilt roles and custom staff roles (§10.7), the
+// staff-change lock and the last Admin, enrolment codes, the kill switches, the Access drift
+// check, the staff area's audit events and its notices. The staff realm itself (Better Auth, the
+// gate, the ceremonies) is @fin/identity's.
 export {
   type AccessApplication,
   AccessDriftUnavailable,
@@ -45,6 +46,17 @@ export {
   staffRoleLabel,
   TOP_ROLE,
 } from "./catalogue.ts";
+export {
+  checkStaffRoleDraft,
+  cleanRoleText,
+  createStaffRole,
+  deleteStaffRole,
+  type SavedStaffRole,
+  STAFF_ROLE_EDIT_BUCKET,
+  STAFF_ROLE_EDIT_WINDOWS,
+  type StaffRoleDraft,
+  updateStaffRole,
+} from "./custom-roles.ts";
 export { createStaffDeps, type StaffDeps } from "./deps.ts";
 export {
   activeAdminAddresses,
@@ -92,7 +104,14 @@ export {
   type StaffActor,
   type StaffGateState,
 } from "./require-staff.ts";
-export { getStaffRole, listStaffRoles, type StaffRoleDetail, type StaffRoleView } from "./roles.ts";
+export {
+  type CustomStaffRoleRow,
+  customStaffRoleRows,
+  getStaffRole,
+  listStaffRoles,
+  type StaffRoleDetail,
+  type StaffRoleView,
+} from "./roles.ts";
 export { INTENT_HEADER, type IntentRefusal, intentProblem, requireIntent } from "./step-up.ts";
 export { listSwitches, SWITCH_NAME, type SwitchRow, setSwitch } from "./switches.ts";
 export { type StaffViewer, staffViewer } from "./viewer.ts";

@@ -1,0 +1,104 @@
+{
+  "board": "AdminRoleEditor",
+  "canvas": "fin-admin",
+  "route": "/staff/roles/$roleKey",
+  "states": {
+    "edit": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "new": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "duplicate": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey a role key that names nothing is not found, and a prebuilt role is duplicated"
+    },
+    "prebuilt": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey a role key that names nothing is not found, and a prebuilt role is duplicated"
+    },
+    "limited": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "saving": { "status": "pending", "day": "h-02" },
+    "saved": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "saveFailed": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "names the conflict, the limit, the move and a role beyond the actor's"
+    },
+    "givingRefused": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "names the conflict, the limit, the move and a role beyond the actor's"
+    },
+    "stepUp": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "loading": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "draw AdminRoles and AdminRoleEditor with shapes and a header, never a spinner"
+    },
+    "failed": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "fail to the page's own state, with the request ID"
+    },
+    "notFound": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey a role key that names nothing is not found, and a prebuilt role is duplicated"
+    }
+  }
+}

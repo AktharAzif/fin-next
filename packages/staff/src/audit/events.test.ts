@@ -11,13 +11,26 @@ const stf = "stf_01jd0000000000000000000000";
 const sti = "sti_01jd0000000000000000000000";
 const aud = "aud_01jd0000000000000000000000";
 
+const SCALARS = ["string", "number", "boolean", "enum", "literal", "int"];
+
+/** A field's type, under a nullable wrapper; a list's elements must be scalars (§16.1). */
+function isFlatField(field: z.ZodType): boolean {
+  const def = field._zod.def as {
+    type: string;
+    innerType?: z.ZodType;
+    element?: z.ZodType;
+  };
+  if (def.type === "nullable" && def.innerType !== undefined) return isFlatField(def.innerType);
+  if (def.type === "array" && def.element !== undefined) {
+    return SCALARS.includes((def.element._zod.def as { type: string }).type);
+  }
+  return SCALARS.includes(def.type);
+}
+
 function isFlat(schema: z.ZodObject): boolean {
   const def = schema._zod.def as { catchall?: { _zod: { def: { type: string } } } };
   if (def.catchall?._zod.def.type !== "never") return false;
-  return Object.values(schema.shape).every((field) => {
-    const type = (field as z.ZodType)._zod.def.type;
-    return ["string", "number", "boolean", "enum", "literal", "int"].includes(type);
-  });
+  return Object.values(schema.shape).every((field) => isFlatField(field as z.ZodType));
 }
 
 describe("the staff events", () => {
@@ -28,6 +41,9 @@ describe("the staff events", () => {
       "staff.member_added",
       "staff.member_removed",
       "staff.role_changed",
+      "staff.role_created",
+      "staff.role_deleted",
+      "staff.role_updated",
       "switch.cleared",
       "switch.set",
     ]);
@@ -47,6 +63,9 @@ describe("the staff events", () => {
       "staff.member_added": null,
       "staff.member_removed": "staff_removed",
       "staff.role_changed": "staff_role_lowered",
+      "staff.role_created": null,
+      "staff.role_deleted": null,
+      "staff.role_updated": "staff_role_lowered",
       "switch.cleared": "switch_cleared",
       "switch.set": "switch_set",
     });
@@ -141,6 +160,75 @@ describe("staffAuditPayload", () => {
     );
     expect(lowered.journal).toBe(true);
     expect(raised.journal).toBe(false);
+  });
+
+  it("writes a custom role edit's journal entry only when it took permissions away", () => {
+    const srl = "srl_01jd0000000000000000000000";
+    const edit = (removed: string[]) =>
+      staffAuditPayload(
+        {
+          event: "staff.role_updated",
+          actor: {
+            kind: "staff",
+            id: stf,
+            stepUp: { kind: "intent", method: "passkey", ref: sti },
+          },
+          target: srl,
+          metadata: { added: ["rfis.read"], removed, holders: 2, renamed: false },
+          request,
+        },
+        aud,
+        "r",
+        null,
+      );
+    expect(edit(["customers.reveal"]).journal).toBe(true);
+    expect(edit([]).journal).toBe(false);
+    expect(edit([]).payload).toMatchObject({ target_id: srl, step_up_ref: sti });
+  });
+
+  it("keeps a custom role's events to its ID and permission keys, never its typed name", () => {
+    const srl = "srl_01jd0000000000000000000000";
+    const created = STAFF_EVENTS["staff.role_created"].metadata;
+    expect(created.safeParse({ permissions: ["customers.read", "rfis.read"] }).success).toBe(true);
+    // A typed name or description, a key the catalogue does not know, or a key twice: refused.
+    expect(created.safeParse({ permissions: ["rfis.read"], name: "Support" }).success).toBe(false);
+    expect(created.safeParse({ permissions: ["Support team"] }).success).toBe(false);
+    expect(created.safeParse({ permissions: ["rfis.read", "rfis.read"] }).success).toBe(false);
+    const deleted = STAFF_EVENTS["staff.role_deleted"].metadata;
+    expect(deleted.safeParse({ movedTo: "viewer", membersMoved: 3 }).success).toBe(true);
+    expect(deleted.safeParse({ movedTo: srl, membersMoved: 0 }).success).toBe(true);
+    expect(deleted.safeParse({ movedTo: null, membersMoved: 0 }).success).toBe(true);
+    expect(deleted.safeParse({ movedTo: "someone@example.com", membersMoved: 0 }).success).toBe(
+      false,
+    );
+    // The target is the role's own ID.
+    expect(() =>
+      staffAuditPayload(
+        {
+          event: "staff.role_created",
+          actor: { kind: "staff", id: stf },
+          target: stf,
+          metadata: { permissions: ["rfis.read"] },
+        },
+        aud,
+        "r",
+        null,
+      ),
+    ).toThrow(StaffAuditError);
+    // Only staff make, change and delete them.
+    expect(() =>
+      staffAuditPayload(
+        {
+          event: "staff.role_deleted",
+          actor: { kind: "operator", id: "run_1" },
+          target: srl,
+          metadata: { movedTo: null, membersMoved: 0 },
+        },
+        aud,
+        "r",
+        null,
+      ),
+    ).toThrow(StaffAuditError);
   });
 
   it("refuses the wrong actor, the wrong target, an unknown event and bad metadata", () => {

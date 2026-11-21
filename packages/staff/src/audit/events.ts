@@ -1,15 +1,19 @@
 // The staff area's management events (spec 02 §16.4; spec 08 §3.4's `staff.ts` rows, D08-33's
-// canonical names): adding, changing, removing and resetting staff, the operator's bootstrap of
-// the first Admin, and the kill switches. @fin/identity's STAFF_REALM_EVENTS holds the rest of the
-// fragment (the sign-in, factor, step-up and enrolment-code events its realm writes).
+// canonical names): adding, changing, removing and resetting staff, custom staff roles made,
+// changed and deleted (stretch 3, §10.7), the operator's bootstrap of the first Admin, and the kill
+// switches. @fin/identity's STAFF_REALM_EVENTS holds the rest of the fragment (the sign-in, factor,
+// step-up and enrolment-code events its realm writes).
 //
 // These are written in @fin/audit's `defineEvents` shape (category, scope, roles, actors, target,
 // a strict flat metadata schema, the journal kind), so they move unchanged into
 // packages/audit/src/events/staff.ts with identity's half when that fragment is assembled; until
 // then the registry rows come from `staffEventTypeRows()` (recorded under the PR's open items).
 //
-// Metadata is flat: IDs, role keys, codes, counts and flags. Never a name, an address, a code, a
-// token or typed text (spec 02 §16.1, ARCHITECTURE §8.2).
+// Metadata is flat: IDs, role keys, permission keys, codes, counts and flags, and short lists of
+// permission keys (the "before and after" of §16.1). Never a name, an address, a code, a token or
+// typed text (spec 02 §16.1, ARCHITECTURE §8.2): a custom role's name and description are typed,
+// so its events carry only its `srl_` ID, and the audit log resolves the name at read time.
+import { staffCatalogue } from "@fin/access";
 import { STAFF_REALM_EVENTS } from "@fin/identity";
 import * as z from "zod";
 
@@ -40,6 +44,18 @@ const roleKey = z.string().regex(/^(viewer|compliance|operator|admin|srl_[0-9a-h
 /** A preset reason code, as ops.set_switch checks it: never typed text. */
 export const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const reasonCode = z.string().regex(REASON_CODE);
+/** Permission keys of the staff catalogue, each at most once (at most 26). */
+const permissionKeys = z
+  .array(z.enum(staffCatalogue.keys as readonly [string, ...string[]]))
+  .max(staffCatalogue.keys.length)
+  .refine((keys) => new Set(keys).size === keys.length, "each permission once");
+const count = z.int().min(0);
+const roleUpdated = z.strictObject({
+  added: permissionKeys,
+  removed: permissionKeys,
+  holders: count,
+  renamed: z.boolean(),
+});
 
 export const STAFF_EVENTS = {
   "staff.member_added": {
@@ -89,6 +105,37 @@ export const STAFF_EVENTS = {
       factorsRemoved: z.int().min(0),
     }),
     journal: { kind: "staff_factors_reset" },
+  },
+  // Custom staff roles (stretch 3, §10.7; §16.3's role events in the staff scope). Only an Admin
+  // holds `staffRoles.manage`, so only staff record them.
+  "staff.role_created": {
+    category: "staff",
+    scope: "staff",
+    roles: ["fin_admin"],
+    actors: ["staff"],
+    target: "srl",
+    metadata: z.strictObject({ permissions: permissionKeys }),
+  },
+  "staff.role_updated": {
+    category: "staff",
+    scope: "staff",
+    roles: ["fin_admin"],
+    actors: ["staff"],
+    target: "srl",
+    metadata: roleUpdated,
+    // Permissions taken from a role lower every holder (spec 08 §3.10).
+    journal: {
+      kind: "staff_role_lowered",
+      when: (m: z.infer<typeof roleUpdated>) => m.removed.length > 0,
+    },
+  },
+  "staff.role_deleted": {
+    category: "staff",
+    scope: "staff",
+    roles: ["fin_admin"],
+    actors: ["staff"],
+    target: "srl",
+    metadata: z.strictObject({ movedTo: roleKey.nullable(), membersMoved: count }),
   },
   "staff.bootstrapped": {
     category: "staff",

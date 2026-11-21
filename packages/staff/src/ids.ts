@@ -6,7 +6,7 @@ import type { Clock } from "./ports.ts";
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
-export type StaffIdPrefix = "stf" | "enc" | "aud" | "jrn" | "eml" | "sti" | "req";
+export type StaffIdPrefix = "stf" | "enc" | "srl" | "aud" | "jrn" | "eml" | "sti" | "req";
 
 const SHAPE = /^[a-z]{3}_[0-9a-hjkmnp-tv-z]{26}$/;
 
