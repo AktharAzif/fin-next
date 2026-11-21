@@ -1,0 +1,301 @@
+{
+  "$comment": "Staging's public desired state for pnpm fin (ARCHITECTURE §3.1, §11.8; spec 01 §6, §7). Names and settings only: every hostname, ID and threshold comes from the private overlay at run time ([G-09]). Hosts are written by role.",
+  "environment": "staging",
+  "zone": {
+    "$comment": "The staging hosts live on a zone another product shares (owner, 21 Nov). Zone-wide settings change only with --allow-shared-zone-settings; zone rules match Fin's own hosts only.",
+    "shared": true,
+    "settings": {
+      "min_tls_version": "1.2",
+      "tls_1_3": "on",
+      "0rtt": "off",
+      "always_use_https": "off",
+      "ssl_automatic_mode": "custom",
+      "ip_geolocation": "on",
+      "rocket_loader": "off",
+      "email_obfuscation": "off",
+      "automatic_https_rewrites": "off",
+      "hotlink_protection": "off",
+      "polish": "off",
+      "mirage": "off",
+      "security_header": {
+        "strict_transport_security": {
+          "enabled": false,
+          "max_age": 0,
+          "include_subdomains": false,
+          "preload": false,
+          "nosniff": false
+        }
+      }
+    },
+    "watchedOnly": [
+      "web_analytics",
+      "zaraz",
+      "markdown_for_agents",
+      "bot_fight_mode",
+      "universal_ssl"
+    ]
+  },
+  "hostRoles": {
+    "browser": ["console", "admin", "verify", "selfie", "docs"],
+    "apiPaths": ["console", "admin", "verify", "selfie"],
+    "api": "api"
+  },
+  "tunnels": {
+    "public": {
+      "name": "fin-next-staging-public",
+      "connector": "cloudflared-public",
+      "standby": "cloudflared-public-b",
+      "hosts": ["api", "console", "verify", "selfie", "docs"]
+    },
+    "admin": {
+      "name": "fin-next-staging-admin",
+      "connector": "cloudflared-admin",
+      "standby": "cloudflared-admin-b",
+      "hosts": ["admin"]
+    }
+  },
+  "static": {
+    "console": {
+      "script": "fin-next-staging-console-static",
+      "host": "console",
+      "app": "console",
+      "dir": "dist/static",
+      "profile": "app",
+      "apiRoute": true
+    },
+    "admin": {
+      "script": "fin-next-staging-admin-static",
+      "host": "admin",
+      "app": "admin",
+      "dir": "dist/static",
+      "profile": "app",
+      "apiRoute": true
+    },
+    "verify": {
+      "script": "fin-next-staging-verify-static",
+      "host": "verify",
+      "app": "verify",
+      "dir": "dist/static/verify",
+      "profile": "hosted",
+      "apiRoute": true
+    },
+    "selfie": {
+      "script": "fin-next-staging-selfie-static",
+      "host": "selfie",
+      "app": "verify",
+      "dir": "dist/static/selfie",
+      "profile": "selfie",
+      "apiRoute": true
+    },
+    "docs": {
+      "script": "fin-next-staging-docs-static",
+      "host": "docs",
+      "app": "docs",
+      "dir": "dist/static",
+      "profile": "docs",
+      "apiRoute": false
+    }
+  },
+  "staticOrder": ["verify", "selfie", "admin", "console", "docs"],
+  "access": {
+    "application": "fin-next-staging-admin",
+    "policy": "fin-next-staging-staff",
+    "host": "admin",
+    "sessionDuration": "8h",
+    "identityProvider": "onetimepin"
+  },
+  "email": {
+    "subdomains": ["auth", "notify"],
+    "dmarcPolicy": "none",
+    "token": {
+      "name": "fin-next-staging-email",
+      "permissionGroup": "Email Sending Write",
+      "expiryDays": 180,
+      "service": "worker",
+      "variable": "FIN_EMAIL_TOKEN"
+    }
+  },
+  "rules": {
+    "rate": {
+      "threshold": "api-v4",
+      "periodSeconds": 10,
+      "mitigationTimeoutSeconds": 10,
+      "pathPrefix": "/v4/"
+    }
+  },
+  "railway": {
+    "project": "fin-next-staging",
+    "region": "us-east4-eqdc4a",
+    "imageRepository": "ghcr.io/aktharazif/",
+    "deployOrder": ["payments", "api", "worker", "edge", "verify", "admin", "console"],
+    "connectorOrder": ["cloudflared-admin", "cloudflared-public"],
+    "sealedVariables": [
+      "TUNNEL_TOKEN",
+      "FIN_INGRESS_PROOFS",
+      "FIN_DB_PASSWORD",
+      "FIN_CALLER_KEY_1",
+      "FIN_TELEMETRY_TOKEN",
+      "FIN_ERRORS_DSN",
+      "FIN_EMAIL_TOKEN",
+      "FIN_SEED_INBOX",
+      "BETTER_AUTH_SECRETS",
+      "FIN_HEARTBEAT_*_URL",
+      "FIN_VAULT_*_ACCESS_KEY_ID",
+      "FIN_VAULT_*_SECRET_ACCESS_KEY"
+    ],
+    "services": {
+      "cloudflared-public": {
+        "image": "fin-next-connector",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 35,
+        "restart": "ALWAYS",
+        "memoryMb": 256,
+        "staticEgress": true
+      },
+      "cloudflared-admin": {
+        "image": "fin-next-connector",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 35,
+        "restart": "ALWAYS",
+        "memoryMb": 256,
+        "staticEgress": true
+      },
+      "cloudflared-public-b": {
+        "image": "fin-next-connector",
+        "replicas": 0,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 35,
+        "restart": "ALWAYS",
+        "memoryMb": 256,
+        "staticEgress": true,
+        "noToken": true
+      },
+      "cloudflared-admin-b": {
+        "image": "fin-next-connector",
+        "replicas": 0,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 35,
+        "restart": "ALWAYS",
+        "memoryMb": 256,
+        "staticEgress": true,
+        "noToken": true
+      },
+      "edge": {
+        "image": "fin-next-edge",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 40,
+        "restart": "ALWAYS",
+        "memoryMb": 512,
+        "staticEgress": false
+      },
+      "api": {
+        "image": "fin-next-api",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 40,
+        "restart": "ALWAYS",
+        "memoryMb": 1024,
+        "staticEgress": true
+      },
+      "worker": {
+        "image": "fin-next-api",
+        "startCommand": "dist/main.js --worker",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 60,
+        "restart": "ALWAYS",
+        "memoryMb": 1024,
+        "staticEgress": true
+      },
+      "payments": {
+        "image": "fin-next-payments",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 60,
+        "restart": "ALWAYS",
+        "memoryMb": 1024,
+        "staticEgress": true
+      },
+      "console": {
+        "image": "fin-next-console",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 40,
+        "restart": "ALWAYS",
+        "memoryMb": 1024,
+        "staticEgress": false
+      },
+      "admin": {
+        "image": "fin-next-admin",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 40,
+        "restart": "ALWAYS",
+        "memoryMb": 1024,
+        "staticEgress": false
+      },
+      "verify": {
+        "image": "fin-next-verify",
+        "replicas": 1,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 15,
+        "drainingSeconds": 40,
+        "restart": "ALWAYS",
+        "memoryMb": 512,
+        "staticEgress": false
+      },
+      "migrate": {
+        "image": "fin-next-api",
+        "startCommand": "dist/main.js --migrate",
+        "replicas": 1,
+        "healthcheck": null,
+        "overlapSeconds": 0,
+        "drainingSeconds": 0,
+        "restart": "NEVER",
+        "memoryMb": 1024,
+        "staticEgress": false,
+        "task": true
+      },
+      "backup": {
+        "image": "fin-next-backup",
+        "replicas": 1,
+        "healthcheck": null,
+        "overlapSeconds": 0,
+        "drainingSeconds": 0,
+        "restart": "NEVER",
+        "memoryMb": 1024,
+        "staticEgress": false,
+        "cron": "17 3 * * *"
+      },
+      "cloudflared-db": {
+        "image": "fin-next-connector",
+        "replicas": 0,
+        "healthcheck": "/readyz",
+        "overlapSeconds": 0,
+        "drainingSeconds": 35,
+        "restart": "NEVER",
+        "memoryMb": 256,
+        "staticEgress": false,
+        "noToken": true
+      },
+      "postgres": {
+        "template": true,
+        "replicas": 1,
+        "staticEgress": false
+      }
+    }
+  }
+}
