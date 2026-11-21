@@ -7,11 +7,11 @@
 //
 // Rules: each phase's entrypoint is read; only rules whose ref starts with `fin_next_` are compared,
 // created, updated or deleted, each through the per-rule endpoints. A phase entrypoint is created
-// only when it does not exist (checked again just before). Ingress proofs keep their current values;
+// only when it does not exist (checked again just before). After the run, each phase entrypoint is
+// read back and hashed as the watcher hashes it, for `run.done`. Ingress proofs keep their values;
 // a host with no proof gets a new one (32 random bytes, base64url), which is set sealed on the
 // services that check it before the rule that sends it is written (spec 01 §7.6's order).
 
-import { createHash } from "node:crypto";
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
 import type { Context } from "../core/context.ts";
@@ -19,6 +19,7 @@ import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
 import { cloudflare, railway } from "./common.ts";
+import { rulesetHash } from "./hash.ts";
 import {
   comparable,
   type DesiredRule,
@@ -65,12 +66,22 @@ function newProof(ctx: Context): Secret {
   return new Secret(Buffer.from(ctx.runtime.random(32)).toString("base64url"));
 }
 
-/** A stable hash of Fin's rules in one phase, for the run record and the watcher. */
-export function ruleSetHash(rules: readonly DesiredRule[]): string {
-  const sorted = [...rules]
-    .sort((a, b) => a.ref.localeCompare(b.ref))
-    .map((r) => canonical(ruleBody(r)));
-  return createHash("sha256").update(sorted.join("\n")).digest("hex");
+/**
+ * Each phase entrypoint's hash as it stands now (every rule in it, the other product's included),
+ * computed as the watcher computes it, for `run.done`'s `rulesetHashes`.
+ */
+async function readRulesetHashes(
+  api: ReturnType<typeof cloudflare>["api"],
+  zonePath: string,
+): Promise<Record<string, string>> {
+  const hashes: Record<string, string> = {};
+  for (const phase of PHASES) {
+    const ruleset = await api.getOptional<Ruleset>(
+      `${zonePath}/rulesets/phases/${phase}/entrypoint`,
+    );
+    hashes[phase] = rulesetHash(ruleset?.rules ?? []);
+  }
+  return hashes;
 }
 
 async function settingChanges(
@@ -255,13 +266,14 @@ export const zoneApply: Command = {
     }
     const rw =
       plan !== undefined && plan.newProofs.size > 0 && !ctx.dryRun ? railway(ctx) : undefined;
-    const hashes: Record<string, string> = {};
-    if (plan !== undefined) {
-      for (const phase of PHASES) {
-        const inPhase = plan.rules.filter((r) => r.phase === phase && r.held === undefined);
-        if (inPhase.length > 0) hashes[phase] = ruleSetHash(inPhase);
+    const readBack = async (): Promise<Record<string, unknown>> => {
+      if (plan === undefined) return {};
+      const rulesetHashes = await readRulesetHashes(api, zonePath);
+      for (const [phase, hash] of Object.entries(rulesetHashes)) {
+        ctx.out.info(`rule set ${phase}: ${hash}`);
       }
-    }
+      return { rulesetHashes };
+    };
     return ctx.applyPlan(
       "zone",
       changes,
@@ -340,7 +352,8 @@ export const zoneApply: Command = {
         );
         plan.entrypoints.set(phase, updated);
       },
-      { ruleHashes: hashes },
+      {},
+      readBack,
     );
   },
 };

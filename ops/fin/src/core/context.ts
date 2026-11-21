@@ -96,6 +96,8 @@ export class Context {
     changes: readonly Change[],
     apply: (change: Change) => Promise<void>,
     fields: Record<string, unknown> = {},
+    /** Read back after the changes (or when nothing changed); its fields join `run.done`. */
+    after?: () => Promise<Record<string, unknown>>,
   ): Promise<number> {
     for (const line of formatPlan(title, changes)) this.out.info(line);
     const todo = pending(changes);
@@ -106,6 +108,7 @@ export class Context {
     }
     if (todo.length === 0) {
       this.out.info("nothing to change");
+      if (after !== undefined) await after();
       return summary.held === 0 ? 0 : 1;
     }
     checkDeletes(changes, flagInt(this.args, "confirm-delete"));
@@ -121,7 +124,8 @@ export class Context {
         );
         this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
       }
-      this.run.finish("ok", { plan: summary, ...fields });
+      const readBack = after === undefined ? {} : await after();
+      this.run.finish("ok", { plan: summary, ...fields, ...readBack });
     } catch (error) {
       this.run.finish("failed", {
         plan: summary,

@@ -297,6 +297,20 @@ export class FakeCloudflare {
         return envelope(a);
       }
     }
+    if (at(`^${account}/access/apps/([a-f0-9-]+)$`) && method === "GET") {
+      const a = this.apps.find((x) => x.id === hit.m?.[1]);
+      if (a === undefined) return failure(404, 12130, "not found");
+      const ids = Array.isArray(a.policies)
+        ? (a.policies as Array<{ id: string; precedence: number }>)
+        : [];
+      return envelope({
+        ...a,
+        policies: ids.map((p) => ({
+          ...this.policies.find((q) => q.id === p.id),
+          precedence: p.precedence,
+        })),
+      });
+    }
     if (at(`^${account}/access/apps/([a-f0-9-]+)$`) && method === "PUT") {
       const i = this.apps.findIndex((a) => a.id === hit.m?.[1]);
       this.apps[i] = { ...body, id: hit.m?.[1] ?? "", aud: hex(64, "5") } as unknown as Json & {

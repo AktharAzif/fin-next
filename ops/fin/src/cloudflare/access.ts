@@ -18,6 +18,7 @@ import { ConfigError, RefusedError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { cloudflare } from "./common.ts";
+import { accessPolicyHash } from "./hash.ts";
 
 interface IdentityProvider {
   id: string;
@@ -198,38 +199,53 @@ export const accessApply: Command = {
       });
     }
 
-    return ctx.applyPlan("access", changes, async (change) => {
-      if (change.kind === "access-policy") {
-        const target = { kind: "access-policy" as const, name: ctx.settings.access.policy };
-        policy =
+    return ctx.applyPlan(
+      "access",
+      changes,
+      async (change) => {
+        if (change.kind === "access-policy") {
+          const target = { kind: "access-policy" as const, name: ctx.settings.access.policy };
+          policy =
+            change.action === "create"
+              ? await writer.write<Policy>(
+                  target,
+                  "POST",
+                  `${accountPath}/access/policies`,
+                  wantPolicy,
+                )
+              : await writer.write<Policy>(
+                  target,
+                  "PUT",
+                  `${accountPath}/access/policies/${policy?.id}`,
+                  wantPolicy,
+                );
+          return;
+        }
+        if (policy === undefined) throw new Error("the Access policy does not exist");
+        const body = desiredApp(ctx, idp, policy.id);
+        const target = { kind: "access-app" as const, name: ctx.settings.access.application, host };
+        app =
           change.action === "create"
-            ? await writer.write<Policy>(
-                target,
-                "POST",
-                `${accountPath}/access/policies`,
-                wantPolicy,
-              )
-            : await writer.write<Policy>(
+            ? await writer.write<AccessApp>(target, "POST", `${accountPath}/access/apps`, body)
+            : await writer.write<AccessApp>(
                 target,
                 "PUT",
-                `${accountPath}/access/policies/${policy?.id}`,
-                wantPolicy,
+                `${accountPath}/access/apps/${app?.id}`,
+                body,
               );
-        return;
-      }
-      if (policy === undefined) throw new Error("the Access policy does not exist");
-      const body = desiredApp(ctx, idp, policy.id);
-      const target = { kind: "access-app" as const, name: ctx.settings.access.application, host };
-      app =
-        change.action === "create"
-          ? await writer.write<AccessApp>(target, "POST", `${accountPath}/access/apps`, body)
-          : await writer.write<AccessApp>(
-              target,
-              "PUT",
-              `${accountPath}/access/apps/${app?.id}`,
-              body,
-            );
-      if (app.aud !== undefined) ctx.masker.register(app.aud, "<access-aud>");
-    });
+        if (app.aud !== undefined) ctx.masker.register(app.aud, "<access-aud>");
+      },
+      {},
+      async () => {
+        // The policies as the application now holds them, hashed as the watcher hashes them.
+        if (app === undefined) return {};
+        const current = await api.get<AccessApp>(`${accountPath}/access/apps/${app.id}`);
+        const hash = accessPolicyHash(
+          Array.isArray(current.policies) ? (current.policies as unknown[]) : [],
+        );
+        ctx.out.info(`access policy hash: ${hash}`);
+        return { accessPolicyHash: hash };
+      },
+    );
   },
 };
