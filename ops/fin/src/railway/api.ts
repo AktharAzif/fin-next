@@ -6,7 +6,9 @@
 // mutate() checks the mutation it is about to send, not a label beside it: outside a registered run
 // it refuses; the mutation must call exactly one root field, one of WRITE_FIELDS, with no selection
 // set; its `environmentId` must be the overlay's environment; and every service it names (its
-// `serviceId`, or each service of an environment patch) must be one of the project's services.
+// `serviceId`, or each service of an environment patch) must be one of the project's services. A
+// variableDelete (whose arguments travel in one `input`) also names the overlay's project, and
+// removes only a variable of DELETABLE_VARIABLES.
 //
 // Operation shapes: the project's services, serviceInstanceUpdate and serviceInstanceDeployV2 are
 // the ones the hand provisioning used; environmentPatchCommit with
@@ -30,13 +32,18 @@ const MAX_DETAIL = 400;
 
 /**
  * The root fields a `pnpm fin` mutation may call: environmentPatchCommit (setVariables), and
- * serviceInstanceUpdate and serviceInstanceDeployV2 (`railway deploy`). Nothing deletes or creates.
+ * serviceInstanceUpdate, serviceInstanceDeployV2 and variableDelete (`railway deploy`). Nothing
+ * creates, and the one delete removes a variable of DELETABLE_VARIABLES.
  */
 const WRITE_FIELDS: ReadonlySet<string> = new Set([
   "environmentPatchCommit",
   "serviceInstanceUpdate",
   "serviceInstanceDeployV2",
+  "variableDelete",
 ]);
+
+/** The variables a mutation may delete: migrate's superuser reference, after its run (spec 01 §6.6). */
+const DELETABLE_VARIABLES: ReadonlySet<string> = new Set(["FIN_BOOTSTRAP_DATABASE_URL"]);
 
 /** `mutation <name>(<args>) { <field>(<args>) }`: one root field call and no selection set. */
 const ONE_FIELD = /^\s*mutation\s+\w+\s*(?:\([^)]*\))?\s*\{\s*(\w+)\s*\([^(){}]*\)\s*\}\s*$/;
@@ -146,19 +153,30 @@ export class RailwayApi {
     const field = ONE_FIELD.exec(query)?.[1];
     if (field === undefined || !WRITE_FIELDS.has(field)) {
       throw new RefusedError(
-        "railway: a mutation calls one of the fields pnpm fin writes (environment patch, instance update, deploy)",
+        "railway: a mutation calls one of the fields pnpm fin writes (environment patch, instance update, deploy, variable delete)",
       );
     }
-    if (variables.environmentId !== this.#environmentId) {
+    // variableDelete carries its arguments in one input object.
+    const args =
+      field === "variableDelete" ? ((variables.input ?? {}) as Record<string, unknown>) : variables;
+    if (args.environmentId !== this.#environmentId) {
       throw new RefusedError("railway: a mutation names the overlay's environment");
     }
+    if (
+      field === "variableDelete" &&
+      (args.projectId !== this.#projectId || !DELETABLE_VARIABLES.has(String(args.name)))
+    ) {
+      throw new RefusedError(
+        "railway: a variable delete names the overlay's project and only migrate's superuser reference",
+      );
+    }
     const known = new Set((await this.services()).values());
-    const patch = variables.patch as { services?: Record<string, unknown> } | undefined;
+    const patch = args.patch as { services?: Record<string, unknown> } | undefined;
     const named = [
-      ...(variables.serviceId === undefined ? [] : [String(variables.serviceId)]),
+      ...(args.serviceId === undefined ? [] : [String(args.serviceId)]),
       ...Object.keys(patch?.services ?? {}),
     ];
-    if (field !== "environmentPatchCommit" && variables.serviceId === undefined) {
+    if (field !== "environmentPatchCommit" && args.serviceId === undefined) {
       throw new RefusedError(`railway: ${field} names its service`);
     }
     if (named.some((id) => !known.has(id))) {

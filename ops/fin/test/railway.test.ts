@@ -674,7 +674,8 @@ describe("railway deploy", () => {
     assert.equal(await deploy(h, manifest(h)), EXIT.refused);
     assert.match(h.runtime.err(), /after the deploy: console \(healthcheck\)/);
     assert.match(h.readable(), /"event":"deploy.failed"[^\n]*"step":"checks"/);
-    assert.equal(h.records().at(-1)?.result, "failed");
+    // A safety rule's refusal (exit 77) closes the run as refused, not failed.
+    assert.equal(h.records().at(-1)?.result, "refused");
   });
 
   it("parses the manifest's minimum schema version and records it with the run and each step", async () => {
@@ -728,7 +729,7 @@ describe("railway deploy", () => {
       ["migrate"],
       "nothing rolls while the reference stands",
     );
-    assert.equal(h.records().at(-1)?.result, "failed");
+    assert.equal(h.records().at(-1)?.result, "refused");
   });
 
   it("refuses unless ci.yml's merge job succeeded for the commit, before reading Railway", async () => {
@@ -796,6 +797,14 @@ function setup() {
   return { rw, run, api };
 }
 
+const DELETE =
+  "mutation finVariableDelete($input: VariableDeleteInput!) { variableDelete(input: $input) }";
+
+function deleteInput(serviceId: string, name = "FIN_BOOTSTRAP_DATABASE_URL") {
+  const { projectId, environmentId } = overlay.railway;
+  return { projectId, environmentId, serviceId, name };
+}
+
 const PATCH =
   "mutation finPatch($environmentId: String!, $patch: EnvironmentConfig, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }";
 
@@ -819,6 +828,11 @@ describe("the Railway client's writes", () => {
         "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }",
         { serviceId: uuid("f"), environmentId: env },
       ],
+      // A variable delete removes only migrate's superuser reference, in the overlay's project.
+      [DELETE, { input: deleteInput(worker, "FIN_RELEASE") }],
+      [DELETE, { input: { ...deleteInput(worker), projectId: uuid("e") } }],
+      [DELETE, { input: { ...deleteInput(worker), environmentId: uuid("e") } }],
+      [DELETE, { input: deleteInput(uuid("f")) }],
     ];
     for (const [query, variables] of refusals) {
       await assert.rejects(api.mutate(run, query, variables), RefusedError, query);
