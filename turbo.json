@@ -1,0 +1,26 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "cacheDir": ".turbo/cache",
+  "globalDependencies": [
+    ".node-version",
+    "pnpm-workspace.yaml",
+    "pnpm-lock.yaml",
+    "tsconfig.base.json",
+    "biome.json",
+    "tools/layout.json",
+    "turbo.json"
+  ],
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+    "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
+    "lint": { "outputs": [] },
+    "test": { "outputs": [] },
+    "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
+    "//#lint:root": { "cache": false },
+    "//#typecheck:root": {
+      "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
+      "outputs": []
+    },
+    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+  }
+}
