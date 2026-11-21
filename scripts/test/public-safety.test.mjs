@@ -2,7 +2,7 @@
 // built at run time, so this file itself stays clean, and every test that runs the command checks
 // that its output never repeats the value it found.
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -392,6 +392,81 @@ describe("public-safety over a repository", () => {
     const dir = makeRepo({ "a.md": "fine\n" });
     writeFileSync(join(dir, "untracked.md"), `${PLANTED.token}\n`);
     assert.deepEqual(scanTree(dir, []), []);
+  });
+
+  test("a tracked file is read as git stores it, and its working tree copy where it differs", () => {
+    const dir = makeRepo({
+      "staged.md": `mail ${PLANTED.staffAddress}\n`,
+      "edited.md": "fine\n",
+      "deleted.md": `key ${PLANTED.token}\n`,
+      "same.md": `host ${PLANTED.privateIp}\n`,
+    });
+    writeFileSync(join(dir, "staged.md"), "clean now, but not staged\n");
+    writeFileSync(join(dir, "edited.md"), `fine\nhost ${PLANTED.privateIp}\n`);
+    rmSync(join(dir, "deleted.md"));
+    const found = scanTree(dir, []).map((f) => `${f.file}:${f.line} ${f.rule} ${f.message}`);
+    assert.equal(found.length, 4, found.join("\n"));
+    assert.match(found[0] ?? "", /^deleted\.md:1 token .*\(in the copy git has staged\)$/);
+    assert.match(found[1] ?? "", /^edited\.md:2 private-ip .*\(in the working tree, not staged\)$/);
+    assert.match(found[2] ?? "", /^same\.md:1 private-ip .*address$/);
+    assert.match(found[3] ?? "", /^staged\.md:1 email-address .*\(in the copy git has staged\)$/);
+  });
+
+  test("a working-tree-encoding attribute does not hide what git publishes", (t) => {
+    // IBM037 (EBCDIC) for the characters of `staff: <address>`, as a checkout would write it.
+    const ebcdic = (/** @type {string} */ text) =>
+      Buffer.from(
+        [...text].map((c) => {
+          const code = c.charCodeAt(0);
+          if (c >= "a" && c <= "i") return 0x81 + code - 0x61;
+          if (c >= "j" && c <= "r") return 0x91 + code - 0x6a;
+          if (c >= "s" && c <= "z") return 0xa2 + code - 0x73;
+          if (c >= "0" && c <= "9") return 0xf0 + code - 0x30;
+          return { " ": 0x40, ".": 0x4b, "-": 0x60, ":": 0x7a, "@": 0x7c, "\n": 0x25 }[c] ?? 0x6f;
+        }),
+      );
+    const dir = makeRepo({ ".gitattributes": "leak.txt working-tree-encoding=IBM037\n" });
+    writeFileSync(join(dir, "leak.txt"), ebcdic(`staff: ${PLANTED.staffAddress}\n`));
+    try {
+      git(dir, ["add", "-A"]);
+    } catch {
+      t.skip("this git cannot convert IBM037");
+      return;
+    }
+    assert.equal(git(dir, ["show", ":leak.txt"]), `staff: ${PLANTED.staffAddress}\n`);
+    const run = runScript("scripts/public-safety.mjs", ["--root", dir]);
+    assert.equal(run.status, 1, run.output);
+    assert.match(run.output, /^leak\.txt:1 email-address: /m);
+    assert.ok(!run.output.includes(PLANTED.staffAddress), "the output repeats a value");
+  });
+
+  test("a byte-order mark or text after the first page hides nothing in the tree or a commit", () => {
+    const payload = `mail ${PLANTED.staffAddress}\nhost console.${ZONE}\n`;
+    const files = {
+      "ff-fe.txt": Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(payload)]),
+      "fe-ff.txt": Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(payload)]),
+      "utf32-mark.txt": Buffer.concat([Buffer.from([0xff, 0xfe, 0, 0]), Buffer.from(payload)]),
+      "late16.txt": Buffer.concat([
+        Buffer.from(`${"x".repeat(9090)}\n`),
+        Buffer.from(payload, "utf16le"),
+      ]),
+      "late16be.txt": Buffer.concat([
+        Buffer.from(`${"y".repeat(8193)}\n`),
+        encode(payload, "utf16be", false),
+      ]),
+    };
+    const dir = makeRepo({ "a.md": "fine\n" });
+    for (const [name, bytes] of Object.entries(files)) writeFileSync(join(dir, name), bytes);
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "encoded"]);
+    const head = git(dir, ["rev-parse", "HEAD"]).trim();
+    const perFile = (/** @type {{ file: string, rule: string }[]} */ findings) =>
+      Object.keys(files).map((name) =>
+        rules(findings.filter((f) => f.file.split(" ")[0] === name)).join(","),
+      );
+    const expected = Object.keys(files).map(() => "email-address,refuse-list");
+    assert.deepEqual(perFile(scanTree(dir, [ZONE])), expected);
+    assert.deepEqual(perFile(scanCommits(dir, [head], [ZONE])), expected);
   });
 
   test("an unreadable overlay makes the command exit 2", () => {
