@@ -47,10 +47,14 @@ Unicode's confusables data lists (Lisu "ꓮꓓꓟꓲꓠ" is "ADMIN"), Latin lett
 ("ȡ", D WITH CURL, is d), letters drawn as punctuation ("Adminꞏ" is "Admin·"), digits, signs,
 symbols and spacing marks drawn as letters ("Adm1n", "0perator", "⍺dmin"), letter pairs drawn as
 one ("rn", "cl", and "cI" or "c1" as well), I and l, and invisible characters do not make a name
-different. A name is read as stored and as drawn on a left-to-right and a right-to-left line, where
-a run of right-to-left letters is drawn reversed, and two names are the same when they are alike in
-one of these orders. A letter that is not an ASCII one may stand for one letter in four of a
-built-in's name, whatever it reads as, as a letter of no Latin reading may.
+different. A name is read as stored and as drawn on a left-to-right and a right-to-left line, in
+the order Unicode's bidirectional algorithm (UAX #9) draws it: a run of right-to-left letters, and
+an Arabic-Indic number beside one, is drawn reversed, a number keeps its separators and currency
+signs, and a spacing mark is written left to right. Two names are the same when they are alike in
+one of these orders, case ignored in every script ("Группа" is "группа", "Straße" is "STRASSE"),
+and a capital drawn as a Latin capital its small letter is not ("Ηelp" with a Greek Eta) is the
+same as both. A letter that is not an ASCII one may stand for one letter in four of a built-in's
+name, whatever it reads as, as a letter of no Latin reading may.
 
 ## Look-alike data
 
@@ -61,8 +65,10 @@ hand-made rows, which take precedence (small capitals, the case-insensitive read
 and Greek, Coptic alfa, the clicks). The members of each of Unicode's classes read alike. The
 reading folds case, so a small letter drawn as no Latin letter reads as its capital does, and a
 capital reads as its small letter only when Unicode draws it so: a capital drawn otherwise (Greek
-Γ, Armenian Ա) reads as no Latin letter. `src/engine/drawn-order.ts` holds the characters written
-right to left (`DerivedBidiClass.txt` 18.0.0) and the order a line draws a name in.
+Γ, Armenian Ա) reads as no Latin letter against the built-ins' names (comparing two custom roles'
+names, which ignores case, reads it as its small letter). `src/engine/drawn-order.ts` holds each
+character's bidirectional class (`DerivedBidiClass.txt` 18.0.0) and the paired brackets
+(`BidiBrackets.txt` 18.0.0), and the order a line draws a name in.
 
 `src/test-support/confusables.ts` commits every entry of Unicode's file but those whose source is
 ASCII or draws as nothing, and `src/test-support/latin-letters.ts` the Latin letters compatibility
@@ -71,8 +77,11 @@ does not read as its prototype is drawn, when two members of a class read differ
 capital reads as its small letter though Unicode does not draw it so, when a letter named for a
 Latin letter (with a stroke, hook, curl or tail, a form of it such as insular or script, or a small
 capital) does not read as it, when a derived row is not one the data asks for, or when the
-runtime's Unicode is newer than the data. `src/engine/drawn-order.test.ts` holds the
-right-to-left characters to the runtime's scripts. To refresh for a newer file, replace the data
+runtime's Unicode is newer than the data. `src/engine/drawn-order.test.ts` holds the classes to
+the runtime's scripts and the drawn order to Unicode's conformance tests, in the subset committed
+as `src/test-support/bidi-cases.ts` (every case of `BidiTest.txt` of up to three characters of the
+classes a name holds, and the cases of `BidiCharacterTest.txt` without explicit formatting
+characters, before its permutations of brackets). To refresh for a newer file, replace the data
 the same way and add or change the rows each failing test names. These files carry Unicode's data
 under the Unicode License v3, whose notice the rows file holds.
 

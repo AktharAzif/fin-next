@@ -138,8 +138,9 @@ export interface Glyph {
 
 /**
  * The order a name is read in: as stored, or as drawn on a left-to-right or a right-to-left line
- * (src/engine/drawn-order.ts), where a run of right-to-left letters is drawn reversed. A name is
- * compared in each, so neither the order it is kept in nor the line it is shown on hides a name.
+ * (src/engine/drawn-order.ts, by Unicode's bidirectional algorithm), where a run of right-to-left
+ * letters, and an Arabic-Indic number beside one, is drawn reversed. A name is compared in each,
+ * so neither the order it is kept in nor the line it is shown on hides a name.
  */
 export type ReadingOrder = "stored" | "ltr" | "rtl";
 const READING_ORDERS: readonly ReadingOrder[] = ["stored", "ltr", "rtl"];
@@ -157,18 +158,24 @@ function folded(text: string, order: ReadingOrder): string {
 }
 
 /**
- * What one folded character is drawn as: a look-alike capital's reading; a capital Unicode draws
- * unlike its small letter as that small letter, read as no Latin letter; or else the character
- * lower-cased and each look-alike letter made what it is drawn as (Latin letters, a sign, a dot).
+ * What one folded character's small letter is drawn as: the character lower-cased and each
+ * look-alike letter made what it is drawn as (Latin letters, a sign, a dot).
+ */
+function smallDrawnAs(char: string): string {
+  let out = "";
+  for (const lower of char.toLowerCase()) out += LOOK_ALIKES.get(lower) ?? lower;
+  return out;
+}
+
+/**
+ * What one folded character is drawn as, for reading a name against the built-ins' names: a
+ * look-alike capital's reading; a capital Unicode draws unlike its small letter as that small
+ * letter, read as no Latin letter; or else what its small letter is drawn as (`smallDrawnAs`).
  */
 function drawnAs(char: string): string {
   const capital = CAPITALS.get(char);
-  if (capital === undefined && UNLIKE_CAPITALS.has(char)) return char.toLowerCase();
-  let out = "";
-  for (const lower of (capital ?? char).toLowerCase()) {
-    out += LOOK_ALIKES.get(lower) ?? lower;
-  }
-  return out;
+  if (capital !== undefined) return smallDrawnAs(capital);
+  return UNLIKE_CAPITALS.has(char) ? char.toLowerCase() : smallDrawnAs(char);
 }
 
 const isFreeLetter = (char: string) => /^\p{L}$/u.test(char) && !/^[A-Za-z]$/.test(char);
@@ -305,27 +312,87 @@ export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
   return false;
 }
 
-/** A name's key (`roleNameKey`) in a reading order. */
-function keyIn(name: string, order: ReadingOrder): string {
-  let key = "";
+/**
+ * What each character of a name may be drawn as in a reading order, for comparing two names, case
+ * ignored: invisible characters removed, normalised, folded (`folded`), and each character read as
+ * its small letter is drawn (`smallDrawnAs`); a small letter whose capital has another small letter
+ * (final ς, whose capital is Σ, as σ's is; ß, whose capitals are SS) also as that one is, as
+ * Unicode's case folding reads it; and a capital drawn as a Latin capital its small letter is not
+ * (Greek Η, drawn as H though η is drawn as n) also as that capital is. A capital Unicode draws
+ * unlike its small letter (Greek Γ) reads as its small letter here, since the names are compared
+ * ignoring case. The first reading of each character makes the name's key (`roleNameKey`).
+ */
+function readingsIn(name: string, order: ReadingOrder): (readonly string[])[] {
+  const readings: (readonly string[])[] = [];
   for (const char of folded(normaliseRoleText(withoutInvisible(name)), order)) {
-    key += drawnAs(char);
+    const capital = CAPITALS.get(char);
+    const forms = new Set([smallDrawnAs(char), smallDrawnAs(char.toUpperCase())]);
+    if (capital !== undefined) forms.add(smallDrawnAs(capital));
+    readings.push([...forms]);
   }
-  return key;
+  return readings;
 }
 
 /**
- * The form two custom roles' names may not share (spec 02 §8.4: unique per organisation, ignoring
- * case), as the name is drawn on a left-to-right line: invisible characters removed, normalised,
- * folded (`folded`), lower-cased, and look-alike letters made what they are drawn as. Digits,
- * spaces, punctuation and accents are kept, so "Tier 1" and "Tier 2", or "Café" and "Cafe", are
- * different names, while "Support" with a Cyrillic о or a Lisu ꓢ is the same name as "Support",
- * and "Supportꞏ" (a letter drawn as a middle dot) the same as "Support·". `validateRole` compares
- * the keys in every reading order, so two names drawn alike on either kind of line, or stored
- * alike, are the same name.
+ * Whether two names' characters, each read as one of its readings (`readingsIn`), can make the same
+ * text. Each state is the characters of each name read and the text one has read past the other; a
+ * state seen before was a dead end.
+ */
+function readAlike(a: readonly (readonly string[])[], b: readonly (readonly string[])[]): boolean {
+  const seen = new Set<string>();
+  const states: [number, number, string, string][] = [[0, 0, "", ""]];
+  for (let state = states.pop(); state !== undefined; state = states.pop()) {
+    const [i, j, readA, readB] = state;
+    const common = Math.min(readA.length, readB.length);
+    if (readA.slice(0, common) !== readB.slice(0, common)) continue;
+    const aheadA = readA.slice(common);
+    const aheadB = readB.slice(common);
+    const key = `${i} ${j} ${aheadA === "" ? `b${aheadB}` : `a${aheadA}`}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (aheadA === "" && i < a.length) {
+      for (const reading of a[i] ?? []) states.push([i + 1, j, reading, aheadB]);
+    } else if (aheadB === "" && j < b.length) {
+      for (const reading of b[j] ?? []) states.push([i, j + 1, aheadA, reading]);
+    } else if (aheadA === "" && aheadB === "" && i === a.length && j === b.length) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A name's key, case ignored, as drawn on a left-to-right line: invisible characters removed,
+ * normalised, folded (`folded`), lower-cased, and look-alike letters made what they are drawn as.
+ * Digits, spaces, punctuation and accents are kept, so "Tier 1" and "Tier 2", or "Café" and
+ * "Cafe", are different names, while "Support" with a Cyrillic о or a Lisu ꓢ is the same name as
+ * "Support", "Supportꞏ" (a letter drawn as a middle dot) the same as "Support·", and "Группа" the
+ * same as "группа". Two names with one key are the same name (spec 02 §8.4: unique per
+ * organisation, ignoring case); `validateRole` also reads a capital drawn as a Latin capital its
+ * small letter is not as that capital, so "Ηelp" with a Greek Eta is the same name as "ηelp" and as
+ * "Help", and compares the names in every reading order.
  */
 export function roleNameKey(name: string): string {
-  return keyIn(name, "ltr");
+  return keyOf(readingsIn(name, "ltr"));
+}
+
+/** The key of a name's readings: the first reading of each character. */
+const keyOf = (readings: readonly (readonly string[])[]) =>
+  readings.map((reading) => reading[0] ?? "").join("");
+
+/**
+ * Whether two names are the same name (`name_taken`): alike in one reading order, each character
+ * read as one of its readings (`readingsIn`). A name longer than any name may be is not compared
+ * (the length rule refuses it), and a taken name that long is compared by its keys alone.
+ */
+function sameName(name: string, other: string): boolean {
+  if (name.length > READ_LIMIT) return false;
+  return READING_ORDERS.some((order) => {
+    const a = readingsIn(name, order);
+    const b = readingsIn(other, order);
+    if (keyOf(a) === keyOf(b)) return true;
+    return other.length <= READ_LIMIT && readAlike(a, b);
+  });
 }
 
 export interface RoleDraft<P extends string> {
@@ -351,8 +418,9 @@ export interface RoleCheckOptions {
  * Every rule a custom role's draft breaks, in a fixed order (empty when it may be saved):
  * - `name`: not 1 to 40 characters and at most 5 words, not normalised, a character that draws as
  *   nothing (src/engine/text.ts), or refused by `names.roleName`;
- * - `name_taken`: another custom role in the realm has it, ignoring case, invisible characters and
- *   look-alike letters (`roleNameKey`), stored alike or drawn alike on either kind of line;
+ * - `name_taken`: another custom role in the realm has it, ignoring case in every script, invisible
+ *   characters and look-alike letters (`roleNameKey`, `readingsIn`), stored alike or drawn alike on
+ *   either kind of line;
  * - `reads_as_built_in`: a built-in's name, or one that reads as one (`readsAsBuiltIn`: "Super
  *   Admin", "Admins", "Adm1n");
  * - `description`: over 120 characters, not normalised, a character that draws as nothing, or
@@ -371,9 +439,8 @@ export function validateRole<P extends string>(
   const problems: RoleProblem[] = [];
   const { name, description } = draft;
   if (!nameFloor(name) || options.names?.roleName(name) === false) problems.push("name");
-  const keys = READING_ORDERS.map((order) => keyIn(name, order));
   for (const taken of options.takenNames ?? []) {
-    if (READING_ORDERS.some((order, i) => keyIn(taken, order) === keys[i])) {
+    if (sameName(name, taken)) {
       problems.push("name_taken");
       break;
     }

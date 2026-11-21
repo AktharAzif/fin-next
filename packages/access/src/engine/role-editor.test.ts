@@ -168,8 +168,40 @@ describe("names already taken in the realm", () => {
     ["a kra, drawn as κ", "Ris\u{138}", ["Risk"]],
     ["a turned w, drawn as м", "Tea\u{28d}", ["Team"]],
     ["a Latin letter named for another", "Suppo\u{a7a7}t", ["Support"]],
+    // Case is ignored in every script, a capital Unicode draws unlike its small letter included.
+    ["Cyrillic capitals", "\u{413}\u{440}\u{443}\u{43f}\u{43f}\u{430}", ["группа"]],
+    ["Cyrillic small letters", "группа", ["\u{413}\u{440}\u{443}\u{43f}\u{43f}\u{430}"]],
+    ["all Cyrillic capitals", "\u{413}\u{41e}\u{421}\u{422}\u{42c}", ["гость"]],
+    ["a Greek gamma", "Ομαδα \u{393}", ["ομαδα \u{3b3}"]],
+    ["a Greek sigma", "\u{3a3}igma", ["\u{3c3}igma"]],
+    ["a Greek final sigma", "Team\u{3c2}", ["TEAM\u{3a3}"]],
+    ["an Armenian ayb", "\u{531}yb", ["\u{561}yb"]],
+    ["a Georgian capital", "\u{1c97}x", ["\u{10d7}x"]],
+    ["a sharp s", "Stra\u{df}e", ["STRASSE"]],
+    // A capital drawn as a Latin capital its small letter is not is the same as both.
+    ["a Greek capital eta, for its small letter", "\u{397}elp", ["\u{3b7}elp"]],
+    ["a Greek capital eta, for an H", "\u{397}elp", ["Help"]],
+    ["a Greek capital nu, for its small letter", "\u{39d}ote", ["\u{3bd}ote"]],
   ])("is taken: %s", (_what, name, takenNames) => {
     expect(taken(name, takenNames)).toEqual(["name_taken"]);
+  });
+
+  it("ignores the case of every letter that has another", () => {
+    const wrong: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const char = String.fromCodePoint(cp);
+      if (!/^\p{L}$/u.test(char)) continue;
+      for (const other of new Set([char.toLowerCase(), char.toUpperCase()])) {
+        if (other === char) continue;
+        const name = `Team ${char}`;
+        const otherName = `Team ${other}`;
+        if (taken(name, [otherName]).length === 0 || taken(otherName, [name]).length === 0) {
+          wrong.push(`U+${cp.toString(16).toUpperCase()}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 
   it.each([
@@ -189,6 +221,9 @@ describe("names already taken in the realm", () => {
     expect(roleNameKey("Supp\u{43e}rt")).toBe("support");
     expect(roleNameKey("Support\u{3164}\u{fe0f}")).toBe("support");
     expect(roleNameKey("Tier 1")).not.toBe(roleNameKey("Tier 2"));
+    // Case ignored, a capital drawn unlike its small letter (Г, Γ, Ա) included.
+    expect(roleNameKey("\u{413}\u{440}\u{443}\u{43f}\u{43f}\u{430}")).toBe(roleNameKey("группа"));
+    expect(roleNameKey("\u{393}\u{3a3}\u{531}")).toBe(roleNameKey("\u{3b3}\u{3c3}\u{561}"));
     // As drawn on a left-to-right line: the right-to-left run "اه" is drawn "ها", "ol".
     expect(roleNameKey("Po\u{627}\u{647}")).toBe("pool");
   });
@@ -422,6 +457,26 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     }
   });
 
+  // Names whose stored order reads as no built-in's, drawn as one by the rules for numbers beside
+  // right-to-left letters: Arabic-Indic digits (Arabic numbers) one, five and seven, drawn as l, o
+  // and v, are drawn right to left of a right-to-left letter or of each other; a separator inside a
+  // number, or a currency sign beside it, belongs to the number; Old Turkic U+10C21 is drawn as i.
+  it.each([
+    ["Administra\u{665}\u{7e0}r", [dash, staff]], // drawn "Administra\u{7e0}\u{665}r", "...tor"
+    ["Opera\u{665}\u{7e0}r", [staff]], // drawn "Opera\u{7e0}\u{665}r"
+    ["\u{661}\u{5d8}ewer", [staff]], // drawn "\u{5d8}\u{661}ewer", "vlewer"
+    ["\u{661} \u{667}ewer", [staff]], // drawn "\u{667} \u{661}ewer"
+    ["Ad\u{661}\u{10c21}n", [dash, staff]], // drawn "Ad\u{10c21}\u{661}n"
+    ["Oper\u{647}4.7r", [staff]], // drawn "Oper4.7\u{647}r": 4 a, 7 t, heh o
+    ["Oper\u{647}4,7r", [staff]],
+    ["Oper\u{647}4:7r", [staff]],
+    ["V\u{5d8}1\u{20ac}er", [staff]], // drawn "V1\u{20ac}\u{5d8}er": 1 i, the euro e, tet v
+  ] as const)("%j, read in the order a line draws its numbers, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
   // A capital Unicode draws unlike its small letter reads as no Latin letter (Armenian Ա, though ա
   // is drawn as w; Greek Σ, though σ is drawn as o), so it may stand for the letter it is seen as.
   it.each([
@@ -506,6 +561,18 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     // Under the text limit, but folding to more glyphs than a name can hold.
     expect(readsAsBuiltIn(dash, `Admin${"\u{2473}".repeat(200)}`)).toBe(false);
     expect(readsAsBuiltIn(dash, `Admin${"\u{2473}".repeat(2)}`)).toBe(true);
+  });
+
+  it("refuses text far longer than a name by the length rule alone, whatever it holds", () => {
+    // Right-to-left letters, so the text has an order to draw it in, and taken names to compare.
+    const long = "\u{5d0}a".repeat(1_000_000);
+    const problems = validateRole(
+      anyDash,
+      { name: long, description: "", permissions: ["customers.read"] },
+      all(dash),
+      { takenNames: ["Support", long.slice(0, 40)] },
+    );
+    expect(problems).toEqual(["name"]);
   });
 
   it("compares each realm only with its own built-ins", () => {

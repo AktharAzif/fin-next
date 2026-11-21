@@ -21,8 +21,8 @@
 // replace the data and add or change the rows each failing test names (the package README
 // describes the selection).
 //
-// This file, src/engine/drawn-order.ts and the files in src/test-support/ named above hold data
-// derived from Unicode's data files:
+// This file, src/engine/drawn-order.ts, the files in src/test-support/ named above and
+// src/test-support/bidi-cases.ts hold data derived from Unicode's data files:
 //
 // UNICODE LICENSE V3
 //
