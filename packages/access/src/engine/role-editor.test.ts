@@ -323,6 +323,11 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "\u{237a}dmin", // U+237A APL FUNCTIONAL SYMBOL ALPHA
     "Admi\u{2229}", // U+2229 INTERSECTION, drawn as an n
     "Adm\u{627}n", // an Arabic alef, drawn as an l
+    "AcImin", // c and a capital I drawn together as d
+    "Ac1min",
+    "Ac|min",
+    "Ac!min",
+    "AcIministrator",
   ])("%j reads as built-in in both realms", (name) => {
     for (const cat of [dash, staff] as Catalogue[]) {
       expect(readsAsBuiltIn(cat, name), cat.realm).toBe(true);
@@ -335,6 +340,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "Super \u{a4ee}\u{a4d3}\u{a4df}\u{a4f2}\u{a4e0}",
     "\u{a4e2}\u{a4f4}\u{a4d1}\u{a4f0}\u{a4e3} \u{a4ee}\u{a4d3}\u{a4df}\u{a4f2}\u{a4e0}", // "SUPER ADMIN"
     "Super\u{a78f}admin",
+    "Super AcImin",
   ])("%j reads as built-in in the dashboard", (name) => {
     expect(readsAsBuiltIn(dash, name)).toBe(true);
   });
@@ -346,6 +352,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "VI\u{a4f0}\u{a4ea}ER",
     "OPE\u{a4e3}A\u{a4d4}O\u{a4e3}",
     "\u{a4da}\u{a4f3}\u{a4df}PLIANCE",
+    "Vie\u{2228}\u{2228}er", // two logical-or signs drawn as w
     "\u{3f9}ompliance", // U+03F9 GREEK CAPITAL LUNATE SIGMA SYMBOL, drawn as C
   ])("%j reads as built-in in Fin Admin", (name) => {
     expect(readsAsBuiltIn(staff, name)).toBe(true);
@@ -367,6 +374,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     "\u{935}\u{94d}\u{92f}\u{935}\u{938}\u{94d}\u{925}\u{93e}\u{92a}\u{915}", // Hindi "administrator"
     "\u{7ba1}\u{7406}\u{5458}", // Chinese "administrator"
     "\u{30aa}\u{30da}\u{30ec}\u{30fc}\u{30bf}\u{30fc}", // Japanese "operator"
+    "Ac\u{3b4}min", // a letter of no Latin reading is never half of a pair
   ])("%j does not read as built-in in either realm", (name) => {
     for (const cat of [dash, staff] as Catalogue[]) {
       expect(readsAsBuiltIn(cat, name), cat.realm).toBe(false);

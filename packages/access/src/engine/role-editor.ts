@@ -195,9 +195,9 @@ const same = (a: string, b: string) => (a === "l" ? "i" : a) === (b === "l" ? "i
 
 /**
  * Whether the glyphs spell `target` (Latin letters): each letter by a glyph that reads as it (I
- * and l alike), "m", "w" and "d" also by two letters drawn as one, and at most one letter in four
- * by a letter of no Latin reading; digits and signs read as their letters or are passed over; and
- * one plural "s" may follow.
+ * and l alike), "m", "w" and "d" also by two glyphs drawn as one (each read as a letter is, so
+ * "cI", "c1" and "c|" are "cl"), and at most one letter in four by a letter of no Latin reading;
+ * digits and signs read as their letters or are passed over; and one plural "s" may follow.
  */
 function spells(glyphs: readonly Glyph[], target: string): boolean {
   const letters = target.length;
@@ -223,10 +223,9 @@ function spells(glyphs: readonly Glyph[], target: string): boolean {
     return (
       pair !== undefined &&
       next !== undefined &&
-      !glyph.optional &&
-      !next.optional &&
-      glyph.reads === pair[0] &&
-      next.reads === pair[1] &&
+      next.reads !== null &&
+      same(glyph.reads, pair[0]) &&
+      same(next.reads, pair[1]) &&
       from(at + 2, done + 1, guesses, plural)
     );
   };
@@ -256,8 +255,8 @@ function builtInReadings(cat: Catalogue): Set<string> {
  * are drawn as ("Adm1n", "0perator", "@dmin", "⍺dmin"); "rn", "vv" and "cl" may read as "m", "w"
  * and "d"; I and l read alike; and a letter of no Latin reading may stand for one letter in four.
  * So "Super Admin", "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha,
- * "ꓮꓓꓟꓲꓠ" in Lisu letters, "Adminꞏ" and "Adrnin" are all refused. Text longer than any name may
- * be is not read (the length rule refuses it).
+ * "ꓮꓓꓟꓲꓠ" in Lisu letters, "Adminꞏ", "Adrnin" and "AcImin" are all refused. Text longer than
+ * any name may be is not read (the length rule refuses it).
  */
 export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
   if (name.length > READ_LIMIT) return false;

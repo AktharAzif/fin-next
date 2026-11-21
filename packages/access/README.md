@@ -44,9 +44,9 @@ fillers and variation selectors, and the blank symbols; `src/engine/text.ts`). C
 with the built-in roles' (`readsAsBuiltIn`) and with the realm's other custom roles
 (`roleNameKey`, for `name_taken`) is the engine's alone: look-alike letters of every script
 Unicode's confusables data lists (Lisu "ꓮꓓꓟꓲꓠ" is "ADMIN"), letters drawn as punctuation
-("Adminꞏ" is "Admin·"), digits, signs and symbols drawn as letters ("Adm1n", "0perator", "⍺dmin"),
-letter pairs drawn as one ("rn", "cl"), I and l, and invisible characters do not make
-a name different.
+("Adminꞏ" is "Admin·"), digits, signs and symbols drawn as letters ("Adm1n", "0perator",
+"⍺dmin"), letter pairs drawn as one ("rn", "cl", and "cI" or "c1" as well), I and l, and
+invisible characters do not make a name different.
 
 ## Look-alike data
 
