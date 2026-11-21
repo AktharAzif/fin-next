@@ -1,0 +1,75 @@
+{
+  "$comment": "Heartbeats for staging (spec 01 §8.5). Grace periods come from the overlay (grace.<name>, OB-13). Each heartbeat URL is resolved at run time and set as a sealed variable of the one process that pings it; it is never committed or printed. The apply pauses a heartbeat the files drop, never deletes it (OB-16).",
+  "defaults": {
+    "policy": "staging-quiet",
+    "notify": {
+      "email": true,
+      "sms": false,
+      "call": false,
+      "push": false,
+      "critical_alert": false
+    },
+    "runbook": "docs/runbooks/duty-stalled.md"
+  },
+  "heartbeats": [
+    {
+      "name": "watcher",
+      "period": 60,
+      "grace": "@grace.watcher",
+      "pingedBy": "the watcher, after each run (its secret FIN_HEARTBEAT_WATCHER_URL)",
+      "secondCheck": "pnpm fin verify",
+      "runbook": "docs/runbooks/watcher-down.md",
+      "holder": "watcher"
+    },
+    {
+      "name": "scheduler-worker",
+      "period": 60,
+      "grace": "@grace.scheduler-worker",
+      "pingedBy": "worker's scheduler, each minute it holds the lease",
+      "secondCheck": "no-logs-worker",
+      "holder": "worker"
+    },
+    {
+      "name": "scheduler-payments",
+      "period": 60,
+      "grace": "@grace.scheduler-payments",
+      "pingedBy": "payments' scheduler",
+      "secondCheck": "no-logs-payments",
+      "holder": "payments"
+    },
+    {
+      "name": "email-delivery-check",
+      "period": 86400,
+      "grace": "@grace.email-delivery-check",
+      "pingedBy": "worker, after the delivery check sends (S0-09)",
+      "secondCheck": "email-not-sent",
+      "holder": "worker"
+    },
+    {
+      "name": "backup-nightly",
+      "period": 86400,
+      "grace": "@grace.backup-nightly",
+      "pingedBy": "backup",
+      "secondCheck": "backup-stale (the watcher's vault inventory)",
+      "runbook": "docs/runbooks/backup.md",
+      "holder": "backup"
+    },
+    {
+      "name": "backup-hourly",
+      "period": 3600,
+      "grace": "@grace.backup-hourly",
+      "pingedBy": "backup",
+      "secondCheck": "backup-stale (the watcher's vault inventory)",
+      "runbook": "docs/runbooks/backup.md",
+      "holder": "backup"
+    },
+    {
+      "name": "verify-daily",
+      "period": 86400,
+      "grace": "@grace.verify-daily",
+      "pingedBy": "the scheduled pnpm fin verify",
+      "secondCheck": "none",
+      "holder": "ops"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G). L-SAT-05 extends this fragment with the rest of group G as the sender lands.",
+  "alerts": [
+    {
+      "name": "email-not-sent",
+      "group": "G",
+      "severity": "P",
+      "sources": ["worker"],
+      "seriesBy": "class",
+      "query": { "count": { "events": ["email.send_failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Mail is failing to send. Failures: {{value}}.",
+      "metadata": {
+        "check": "The code on email.send_failed and the step it names; Cloudflare's status.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email.md"
+      }
+    },
+    {
+      "name": "email-outbox-age",
+      "group": "G",
+      "severity": "P",
+      "sources": ["worker"],
+      "query": {
+        "max": {
+          "event": "job.run",
+          "field": "oldestDueS",
+          "where": [{ "field": "job", "eq": "email-send" }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.email-outbox-age",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 120,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The oldest due email has waited {{value}} s: the sender is behind or stopped.",
+      "metadata": {
+        "check": "The worker's email loop (job.run job=email-send) and its lease; Cloudflare's status.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email.md"
+      }
+    },
+    {
+      "name": "email-setting-changed",
+      "group": "G",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["email"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A sending domain turned preview or drop-suppressed on, a domain is gone, or _dmarc disappeared.",
+      "metadata": {
+        "check": "pnpm fin email verify staging; Cloudflare's audit log for Email Sending.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email.md"
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@fin/ops-monitoring",
+  "private": true,
+  "type": "module",
+  "description": "Better Stack as code: the staging files, the event catalogue, monitoring:check and the apply command (spec 01 §8, spec 08 §7.11)",
+  "exports": {
+    "./apply": "./src/apply.ts",
+    "./check": "./src/check.ts",
+    "./betterstack": "./src/betterstack.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "monitoring:check": "node src/check-cli.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

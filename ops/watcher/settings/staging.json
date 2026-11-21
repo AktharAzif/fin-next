@@ -1,0 +1,78 @@
+{
+  "$comment": "The watcher's public settings for staging (spec 01 §7.3 to §7.8, §7.11). Hosts are named by role; the deploy adds the private part at run time (the account ID, the zone and real hostnames, each tunnel's static egress addresses, the registered rule set and Access policy hashes) and uploads the whole as the Worker's FIN_WATCHER_SETTINGS. None of the private part is ever committed.",
+  "environment": "staging",
+  "scriptName": "fin-next-staging-watcher",
+  "cron": "* * * * *",
+  "compatibilityDate": "2026-11-20",
+  "telemetrySource": "fin-next-staging-watcher",
+  "heartbeat": "watcher",
+  "connectorVersion": "2026.11.1",
+  "tunnels": {
+    "public": {
+      "name": "fin-next-staging-public",
+      "replicas": 1,
+      "egressServices": ["cloudflared-public", "cloudflared-public-b"],
+      "hosts": ["api", "console", "verify", "selfie", "docs"]
+    },
+    "admin": {
+      "name": "fin-next-staging-admin",
+      "replicas": 1,
+      "egressServices": ["cloudflared-admin", "cloudflared-admin-b"],
+      "hosts": ["admin"]
+    }
+  },
+  "static": [
+    { "name": "fin-next-staging-console-static", "host": "console" },
+    { "name": "fin-next-staging-admin-static", "host": "admin" },
+    { "name": "fin-next-staging-verify-static", "host": "verify" },
+    { "name": "fin-next-staging-selfie-static", "host": "selfie" },
+    { "name": "fin-next-staging-docs-static", "host": "docs" }
+  ],
+  "staticCompatibilityDate": "2026-11-20",
+  "routes": [
+    { "host": "console", "path": "/*", "script": "fin-next-staging-console-static" },
+    { "host": "console", "path": "/api/*", "script": null },
+    { "host": "admin", "path": "/*", "script": "fin-next-staging-admin-static" },
+    { "host": "admin", "path": "/api/*", "script": null },
+    { "host": "verify", "path": "/*", "script": "fin-next-staging-verify-static" },
+    { "host": "verify", "path": "/api/*", "script": null },
+    { "host": "selfie", "path": "/*", "script": "fin-next-staging-selfie-static" },
+    { "host": "selfie", "path": "/api/*", "script": null },
+    { "host": "docs", "path": "/*", "script": "fin-next-staging-docs-static" }
+  ],
+  "zoneSettings": {
+    "min_tls_version": "1.2",
+    "tls_1_3": "on",
+    "0rtt": "off",
+    "always_use_https": "off",
+    "ip_geolocation": "on",
+    "rocket_loader": "off",
+    "email_obfuscation": "off",
+    "automatic_https_rewrites": "off",
+    "polish": "off",
+    "mirage": "off",
+    "hotlink_protection": "off",
+    "security_header": { "strict_transport_security": { "enabled": false } }
+  },
+  "universalSsl": true,
+  "botFightMode": false,
+  "rulesetPhases": [
+    "http_request_late_transform",
+    "http_request_dynamic_redirect",
+    "http_request_firewall_custom",
+    "http_ratelimit",
+    "http_config_settings",
+    "http_request_cache_settings"
+  ],
+  "access": {
+    "appName": "fin-next-staging-admin",
+    "host": "admin",
+    "sessionDuration": "8h",
+    "sameSite": "lax",
+    "bindingCookie": true,
+    "httpOnly": true,
+    "appLauncherVisible": false,
+    "mfaRequired": true
+  },
+  "email": { "subdomains": ["auth", "notify"] }
+}

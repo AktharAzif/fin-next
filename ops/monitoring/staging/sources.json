@@ -1,0 +1,65 @@
+{
+  "$comment": "Better Stack Telemetry sources for staging (spec 01 §8.2). Files name things: each source is fin-next-staging-<service>; IDs, tokens and ingest hosts are resolved at run time and never committed. dataRegion is the API's value for OB-02's Europe region. holders lists the services whose sealed variables receive the source's ingest host and token (FIN_TELEMETRY_HOST, FIN_TELEMETRY_TOKEN); it defaults to the service itself. The ops source's token reaches pnpm fin at the secure prompt, so no service holds it.",
+  "team": "fin-staging",
+  "environment": "staging",
+  "namePrefix": "fin-next-staging-",
+  "platform": "http",
+  "dataRegion": "germany",
+  "sources": [
+    {
+      "service": "edge",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "api",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "worker",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "payments",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "console",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "admin",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "verify",
+      "writes": "spec 01 §8.9's lines"
+    },
+    {
+      "service": "migrate",
+      "writes": "migrate.* and task lines"
+    },
+    {
+      "service": "backup",
+      "writes": "job.run"
+    },
+    {
+      "service": "connector",
+      "writes": "connector.*, from all four cloudflared-* services (the service field tells them apart)",
+      "holders": [
+        "cloudflared-public",
+        "cloudflared-public-b",
+        "cloudflared-admin",
+        "cloudflared-admin-b"
+      ]
+    },
+    {
+      "service": "watcher",
+      "writes": "watcher.*"
+    },
+    {
+      "service": "ops",
+      "writes": "deploy.* and run.*, shipped by pnpm fin for its runs",
+      "holders": []
+    }
+  ]
+}

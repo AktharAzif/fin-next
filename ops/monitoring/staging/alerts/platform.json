@@ -1,0 +1,598 @@
+{
+  "$comment": "Phase 0's platform alerts (spec 01 §8.7; spec 08 §7.8's rows for groups A, B and J). Each threshold names an overlay key (@thresholds.<key>) that pnpm fin monitoring apply fills in; @any fires on any matching line and @none on no line at all. Every staging alert routes to staging-quiet, email only.",
+  "alerts": [
+    {
+      "name": "no-logs-{service}",
+      "forEach": [
+        "edge",
+        "api",
+        "worker",
+        "payments",
+        "console",
+        "admin",
+        "verify",
+        "backup",
+        "connector",
+        "watcher"
+      ],
+      "group": "A",
+      "severity": "P",
+      "sources": ["{service}"],
+      "query": { "lines": {} },
+      "operator": "lower_than",
+      "threshold": "@none",
+      "window": "@thresholds.no-logs-{service}",
+      "check_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "start_incident",
+      "policy": "staging-quiet",
+      "incident_cause": "No line from {service} in its window: the service stopped, or its shipping did.",
+      "metadata": {
+        "check": "Railway's deployment state for {service}; its stdout for telemetry.ship_failed; Better Stack's status page for EU ingest delays.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/no-logs.md"
+      }
+    },
+    {
+      "name": "process-crash",
+      "group": "A",
+      "severity": "P",
+      "sources": [
+        "edge",
+        "api",
+        "worker",
+        "payments",
+        "console",
+        "admin",
+        "verify",
+        "migrate",
+        "backup",
+        "connector"
+      ],
+      "query": {
+        "count": { "events": ["process.uncaught_exception", "process.unhandled_rejection"] }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "An unhandled error ended a process. Count: {{value}}.",
+      "metadata": {
+        "check": "The service's Errors application for the release; the errorId on the crash line.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/process-crash.md"
+      }
+    },
+    {
+      "name": "process-restarts",
+      "group": "A",
+      "severity": "N",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin", "verify", "connector"],
+      "query": { "count": { "events": ["process.start"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.process-restarts",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A service started more often than its limit in 15 minutes: a crash loop or memory kills. Starts: {{value}}.",
+      "metadata": {
+        "check": "Crash lines and rss_mb for the service; Railway's restart reasons.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/process-crash.md"
+      }
+    },
+    {
+      "name": "shutdown-forced",
+      "group": "A",
+      "severity": "N",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin", "verify", "connector"],
+      "query": { "count": { "events": ["shutdown.forced"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A process ran out of draining time and was stopped with work in flight.",
+      "metadata": {
+        "check": "Slow background work in the shutdown line's background count; FIN_DRAIN_SECONDS against Railway's draining time.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/process-crash.md"
+      }
+    },
+    {
+      "name": "telemetry-gaps",
+      "group": "A",
+      "severity": "N",
+      "sources": [
+        "edge",
+        "api",
+        "worker",
+        "payments",
+        "console",
+        "admin",
+        "verify",
+        "migrate",
+        "backup",
+        "connector"
+      ],
+      "query": {
+        "count": {
+          "events": ["telemetry.recovered"],
+          "whereAny": [{ "field": "linesLost", "gt": 0 }, { "field": "statuses", "contains": 402 }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Lines were lost on the way to Better Stack, or ingest answered 402 (a spending cap).",
+      "metadata": {
+        "check": "The statuses on telemetry.recovered: 402 is the quota, 403 the token, 5xx Better Stack.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/telemetry-gaps.md"
+      }
+    },
+    {
+      "name": "clock-skew",
+      "group": "A",
+      "severity": "N",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin", "verify", "backup"],
+      "query": {
+        "max": { "event": "process.health", "field": "clockSkewMs", "abs": true }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.clock-skew",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 120,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A process and the database disagree on the time by {{value}} ms.",
+      "metadata": {
+        "check": "Which replicas skew (one host or all); Railway's status.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/clock-skew.md"
+      }
+    },
+    {
+      "name": "dns-lookup-failing",
+      "group": "A",
+      "severity": "N",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin", "verify", "connector"],
+      "query": { "count": { "events": ["dns.lookup_failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A service cannot resolve a *.railway.internal name: private DNS is failing.",
+      "metadata": {
+        "check": "The target on dns.lookup_failed and whether stale answers are still served; Railway's private network status.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/private-dns.md"
+      }
+    },
+    {
+      "name": "5xx-rate-{service}",
+      "forEach": [
+        { "service": "edge", "flow": "F1" },
+        { "service": "api", "flow": "F1" },
+        { "service": "payments", "flow": "F11" },
+        { "service": "console", "flow": "F24" },
+        { "service": "admin", "flow": "F6" },
+        { "service": "verify", "flow": "F7" }
+      ],
+      "group": "B",
+      "severity": "P",
+      "sources": ["{service}"],
+      "query": {
+        "ratio": {
+          "event": "request",
+          "match": [{ "field": "statusClass", "eq": "5xx" }],
+          "minCount": "@thresholds.5xx-rate-min-count"
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.5xx-rate-{service}",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 60,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "{service} served 5xx answers above its ratio (with at least the minimum count). Ratio: {{value}}.",
+      "metadata": {
+        "check": "The top route by 5xx for {service}; the last release.",
+        "flow": "{flow}",
+        "runbook": "docs/runbooks/5xx-rate.md"
+      }
+    },
+    {
+      "name": "5xx-count-{service}",
+      "forEach": [
+        { "service": "edge", "flow": "F1" },
+        { "service": "api", "flow": "F1" },
+        { "service": "payments", "flow": "F11" },
+        { "service": "console", "flow": "F24" },
+        { "service": "admin", "flow": "F6" },
+        { "service": "verify", "flow": "F7" }
+      ],
+      "group": "B",
+      "severity": "P",
+      "sources": ["{service}"],
+      "query": {
+        "count": { "events": ["request"], "where": [{ "field": "statusClass", "eq": "5xx" }] }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.5xx-count-{service}",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "{service} served more 5xx answers than its absolute limit, whatever the ratio. Count: {{value}}.",
+      "metadata": {
+        "check": "The top route by 5xx for {service}; the last release.",
+        "flow": "{flow}",
+        "runbook": "docs/runbooks/5xx-rate.md"
+      }
+    },
+    {
+      "name": "tunnel-connectors",
+      "group": "B",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["connectors"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A tunnel has the wrong number of connectors, a connector on the wrong version, or one from an address outside its service's static egress: possibly a leaked tunnel token.",
+      "metadata": {
+        "check": "The detail code on watcher.check_failed; the tunnel's connector list (evict-tunnel.md steps 1 and 2).",
+        "flow": "F22",
+        "runbook": "docs/runbooks/evict-tunnel.md"
+      }
+    },
+    {
+      "name": "tunnel-config-drift",
+      "group": "B",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["tunnel-config", "dns"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A tunnel became remotely managed, or a host's DNS record no longer points, proxied, at its own tunnel.",
+      "metadata": {
+        "check": "The registered runs in the ops bucket; Cloudflare's audit log for the tunnel or record.",
+        "flow": "F22",
+        "runbook": "docs/runbooks/tunnel-config-drift.md"
+      }
+    },
+    {
+      "name": "railway-exposed",
+      "group": "B",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["railway"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A Railway service has a public domain or a TCP proxy.",
+      "metadata": {
+        "check": "Railway's audit log for who added it; remove it.",
+        "flow": "F22",
+        "runbook": "docs/runbooks/railway-exposed.md"
+      }
+    },
+    {
+      "name": "static-deployment-changed",
+      "group": "B",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["routes", "static"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A Workers route changed, or a static deployment gained a script, a binding, a schedule, a domain or a workers.dev or preview address.",
+      "metadata": {
+        "check": "The detail code; Cloudflare's audit log for the deployment or route.",
+        "flow": "F22",
+        "runbook": "docs/runbooks/static-deployment-changed.md"
+      }
+    },
+    {
+      "name": "cloudflare-config-changed",
+      "group": "J",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [{ "field": "check", "in": ["rules", "zone", "access"] }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A rule set, a zone setting or the Access application or policy changed outside a pnpm fin run.",
+      "metadata": {
+        "check": "Cloudflare's audit log; the last registered rules or access run.",
+        "flow": "F22",
+        "runbook": "docs/runbooks/cloudflare-config-changed.md"
+      }
+    },
+    {
+      "name": "ingress-untrusted-peer",
+      "group": "B",
+      "severity": "P",
+      "sources": ["edge", "api", "payments", "console", "admin", "verify"],
+      "query": { "count": { "events": ["ingress.untrusted_peer"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Something on the private network called a service directly, or without the host's ingress proof.",
+      "metadata": {
+        "check": "The calling peer's service; a redeploy that reused an address; a half-done ingress-proof rotation.",
+        "flow": "F1",
+        "runbook": "docs/runbooks/ingress-untrusted-peer.md"
+      }
+    },
+    {
+      "name": "outside-request",
+      "group": "B",
+      "severity": "P",
+      "sources": ["api", "payments"],
+      "query": { "count": { "events": ["api.outside_request"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A call reached api or payments outside the door matrix.",
+      "metadata": {
+        "check": "The route and operation on the line; which service called.",
+        "flow": "F1",
+        "runbook": "docs/runbooks/outside-request.md"
+      }
+    },
+    {
+      "name": "caller-signature-invalid",
+      "group": "B",
+      "severity": "P",
+      "sources": ["api", "payments"],
+      "query": { "count": { "events": ["caller.signature_invalid"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A signed service call failed verification: forged, stale, or for another audience.",
+      "metadata": {
+        "check": "A half-done caller-key rotation; the calling service named on the line.",
+        "flow": "F1",
+        "runbook": "docs/runbooks/outside-request.md"
+      }
+    },
+    {
+      "name": "csp-reports",
+      "group": "B",
+      "severity": "N",
+      "sources": ["console", "admin", "verify"],
+      "query": { "count": { "events": ["csp.report"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.csp-reports",
+      "check_period": 300,
+      "query_period": 3600,
+      "confirmation_period": 0,
+      "recovery_period": 3600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Page-policy violation reports above their hourly volume: a page broke its policy, or someone is injecting.",
+      "metadata": {
+        "check": "The directive and blocked origin by release.",
+        "flow": "F24",
+        "runbook": "docs/runbooks/csp-reports.md"
+      }
+    },
+    {
+      "name": "github-settings-changed",
+      "group": "J",
+      "severity": "P",
+      "sources": ["ops"],
+      "query": {
+        "count": {
+          "events": ["run.done"],
+          "where": [
+            { "field": "command", "eq": "github verify" },
+            { "field": "result", "eq": "drift" }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 300,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 86400,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "pnpm fin github verify found the repository settings, the ruleset or an environment different from the files.",
+      "metadata": {
+        "check": "The owner's GitHub security log for who changed what.",
+        "flow": "F17",
+        "runbook": "docs/runbooks/github-settings-changed.md"
+      }
+    },
+    {
+      "name": "monitoring-drift",
+      "group": "J",
+      "severity": "N",
+      "sources": ["ops"],
+      "query": {
+        "count": {
+          "events": ["run.done"],
+          "where": [
+            { "field": "command", "in": ["monitoring apply", "verify"] },
+            { "field": "result", "eq": "drift" }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 300,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 86400,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Better Stack differs from ops/monitoring (the daily dry run), or Better Stack paused an alert itself.",
+      "metadata": {
+        "check": "pnpm fin monitoring apply staging --dry-run; each alert's paused_reason.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/monitoring-drift.md"
+      }
+    },
+    {
+      "name": "vault-inventory-changed",
+      "group": "J",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [
+            { "field": "check", "in": ["vault"] },
+            { "field": "detail", "notIn": ["backup_stale", "backup_small"] }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A locked object in the staging vault was removed or changed before its lock ended.",
+      "metadata": {
+        "check": "R2's bucket settings and lock rules; the vault account's members.",
+        "flow": "F16",
+        "runbook": "docs/runbooks/vault-inventory-changed.md"
+      }
+    },
+    {
+      "name": "backup-stale",
+      "group": "H",
+      "severity": "P",
+      "sources": ["watcher"],
+      "seriesBy": "target",
+      "query": {
+        "count": {
+          "events": ["watcher.check_failed"],
+          "where": [
+            { "field": "check", "in": ["vault"] },
+            { "field": "detail", "in": ["backup_stale", "backup_small"] }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 120,
+      "confirmation_period": 0,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The newest dump in the backups bucket is older than its period, or far smaller than the last.",
+      "metadata": {
+        "check": "The backup service's last job.run line; its R2 writer token's expiry.",
+        "flow": "F16",
+        "runbook": "docs/runbooks/backup.md"
+      }
+    }
+  ]
+}
