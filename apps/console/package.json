@@ -11,19 +11,20 @@
     "build:server": "vite build --config vite.server.config.ts",
     "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
     "routes": "node scripts/generate-routes.mjs",
-    "typecheck": "pnpm run routes && tsc -p tsconfig.json && pnpm run typecheck:server",
+    "typecheck": "pnpm run routes && tsc -p tsconfig.json && tsc -p e2e/tsconfig.json && pnpm run typecheck:server",
     "typecheck:server": "tsc -p src/server/tsconfig.json",
     "lint": "biome check .",
     "pretest": "pnpm run routes",
     "test": "vitest run --config ../../vitest.config.ts",
     "test:db": "vitest run --config ../../vitest.config.ts --mode db",
-    "e2e": "pnpm run build && playwright test"
+    "e2e": "pnpm run build && node e2e/support/artefacts.ts dist/e2e-rendered && FIN_E2E_APPS=console FIN_E2E_RENDERED_DIR=\"$PWD/dist/e2e-rendered\" playwright test --config ../../playwright.config.ts"
   },
   "dependencies": {
     "@fin/access": "workspace:*",
     "@fin/app-contracts": "workspace:*",
     "@fin/core": "workspace:*",
     "@fin/frame": "workspace:*",
+    "@fin/icons": "workspace:*",
     "@fin/identity": "workspace:*",
     "@fin/motion": "workspace:*",
     "@fin/orgs": "workspace:*",
@@ -31,6 +32,7 @@
     "@fin/tokens": "workspace:*",
     "@fin/ui": "workspace:*",
     "@fin/web-host": "workspace:*",
+    "@simplewebauthn/browser": "catalog:",
     "@tanstack/react-router": "catalog:",
     "better-auth": "catalog:",
     "hono": "catalog:",
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
+    "@fin/testing": "workspace:*",
     "@playwright/test": "catalog:",
     "@tailwindcss/vite": "catalog:",
     "@tanstack/router-plugin": "catalog:",

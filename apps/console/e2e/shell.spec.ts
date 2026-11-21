@@ -2,6 +2,7 @@
 // production page policy with no violation, the stored theme applies before the first paint, the
 // edge toggle collapses and expands the sidebar, the phone sheet opens, a signed-out visit goes to
 // sign-in, and /api/health answers through the stub. Against the built dist/static/.
+import { join } from "node:path";
 import { expect, type Page, type Route, test } from "@playwright/test";
 import {
   bootState,
@@ -13,7 +14,13 @@ import {
   watchPolicy,
 } from "./support/static.ts";
 
-const ORIGIN = "http://127.0.0.1:4401";
+/** The project's origin: the harness's console host, or the stand-in config's loopback one. */
+function origin(): string {
+  const base = test.info().project.use.baseURL;
+  return typeof base === "string" && base !== "" ? new URL(base).origin : "http://127.0.0.1:4401";
+}
+
+const DIST = join(import.meta.dirname, "../dist/static");
 // The value a library prints while it loads, built at run time.
 const ADDRESS = ["maya.rivera", "example.com"].join("@");
 
@@ -59,9 +66,9 @@ test.afterEach(() => {
 
 async function signedIn(page: Page) {
   await serveStatic(page.context(), {
-    dir: "dist/static",
+    dir: DIST,
     profile: "app",
-    origin: ORIGIN,
+    origin: origin(),
     api: {
       "/api/viewer": (route) =>
         route.fulfill({
@@ -75,9 +82,9 @@ async function signedIn(page: Page) {
 
 async function signedOut(page: Page) {
   await serveStatic(page.context(), {
-    dir: "dist/static",
+    dir: DIST,
     profile: "app",
-    origin: ORIGIN,
+    origin: origin(),
     api: { "/api/viewer": (route) => route.fulfill(problem(401, "unauthenticated")) },
   });
 }
@@ -120,7 +127,7 @@ test("@csp a signed-out visit goes to sign-in, keeping a safe next", async ({ pa
   await signedOut(page);
   await page.goto("/settings/team");
   await ready(page);
-  await expect(page).toHaveURL(`${ORIGIN}/sign-in?next=%2Fsettings%2Fteam`);
+  await expect(page).toHaveURL(`${origin()}/sign-in?next=%2Fsettings%2Fteam`);
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin" })).toBeVisible();
   await expect(page.locator("[data-slot=auth-layout]")).toBeVisible();
 });
@@ -129,7 +136,7 @@ test("@journey the stored theme and sidebar apply before the first paint", async
   await page.setViewportSize({ width: 1440, height: 900 });
   await signedIn(page);
   // main.tsx is held, so what the page shows now is theme.js and the boot skeleton alone.
-  const entry = await holdEntry(page, "dist/static");
+  const entry = await holdEntry(page, DIST);
   await page.addInitScript(() => {
     try {
       window.localStorage.setItem("fin-theme", "dark");
@@ -161,7 +168,7 @@ test("@journey the boot skeleton draws the full sidebar when nothing is stored",
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signedIn(page);
-  const entry = await holdEntry(page, "dist/static");
+  const entry = await holdEntry(page, DIST);
   await page.goto("/", { waitUntil: "commit" });
   await entry.requested;
   expect(await bootState(page)).toMatchObject({
@@ -175,7 +182,7 @@ test("@journey the boot skeleton draws the full sidebar when nothing is stored",
 });
 
 test("@journey with storage blocked the page follows the system theme", async ({ browser }) => {
-  const context = await browser.newContext({ colorScheme: "dark", baseURL: ORIGIN });
+  const context = await browser.newContext({ colorScheme: "dark", baseURL: origin() });
   const page = await context.newPage();
   policy = await watchPolicy(context);
   await signedIn(page);
@@ -340,9 +347,9 @@ async function serveViewerOnDemand(
   const answers: Array<(route: Route) => Promise<void>> = [];
   const held: Array<() => void> = [];
   await serveStatic(page.context(), {
-    dir: "dist/static",
+    dir: DIST,
     profile: "app",
-    origin: ORIGIN,
+    origin: origin(),
     api: {
       ...api,
       "/api/viewer": async (route) => {
@@ -422,7 +429,7 @@ test("@journey a restored page with the same session shows again", async ({ page
   viewer.release();
   await expect(heading).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
-  await expect(page).toHaveURL(`${ORIGIN}/`);
+  await expect(page).toHaveURL(`${origin()}/`);
 });
 
 test("@journey after Log out, a restored page with the same session shows again", async ({
@@ -457,7 +464,7 @@ test("@journey after Log out, a restored page with the same session shows again"
   await expect(heading).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-locked", /.*/);
   await expect(page.locator("#root")).not.toHaveAttribute("hidden", /.*/);
-  await expect(page).toHaveURL(`${ORIGIN}/`);
+  await expect(page).toHaveURL(`${origin()}/`);
 });
 
 test("@csp /api/health answers through the stub, same origin", async ({ page }) => {
