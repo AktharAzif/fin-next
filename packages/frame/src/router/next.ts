@@ -1,7 +1,9 @@
 // The `next` of a sign-in redirect (FW-C09, spec 06 §2.3 step 4): kept only when it is a path on
 // this app that starts with a single `/` and matches a route. Anything else (another origin, a
 // protocol-relative or backslashed path, a path under /api, a control character) is dropped, so a
-// link can never send a person off the app after they sign in.
+// link can never send a person off the app after they sign in. The checks run on the path as the
+// URL parser resolves it, because that path is what the caller navigates to: `/..//host` comes out
+// of the parser as `//host`, which a browser reads as another origin.
 
 const MAX_NEXT_LENGTH = 2048;
 
@@ -25,6 +27,8 @@ export function safeNext(value: unknown, matches: (pathname: string) => boolean)
   }
   if (url.origin !== "https://fin.invalid") return null;
   const path = url.pathname;
+  // Dot segments are resolved by now; what is returned must still start with a single `/`.
+  if (!path.startsWith("/") || path.startsWith("//")) return null;
   if (path === "/api" || path.startsWith("/api/")) return null;
   if (!matches(path)) return null;
   return `${path}${url.search}${url.hash}`;

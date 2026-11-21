@@ -1,4 +1,6 @@
+import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
+import { routeMatcher } from "../src/boot/root.tsx";
 import { deepestStaticData } from "../src/router/matches.ts";
 import { safeNext, signInHref } from "../src/router/next.ts";
 import { isRouterHref } from "../src/router/RouterLink.tsx";
@@ -41,6 +43,33 @@ describe("safeNext (FW-C09)", () => {
     expect(safeNext(42, known)).toBeNull();
   });
 
+  it("checks the path after the URL parser has resolved its dot segments", () => {
+    // A matcher that accepts every path, as an app with a root catch-all route does: the check on
+    // the normalised path is what keeps `next` on this origin.
+    const everything = () => true;
+    for (const value of [
+      "/..//evil.example.com",
+      "/a/../..//evil.example.com",
+      "/.//evil.example.com",
+      "/%2e%2e//evil.example.com",
+      "/%2E//evil.example.com",
+      "/x/..//evil.example.com/payments/pay_1",
+      "/x/./..//evil.example.com?next=1#a",
+    ]) {
+      expect(safeNext(value, everything), value).toBeNull();
+    }
+    // Dot segments that stay on the app resolve to the path they name, checked like any other.
+    expect(safeNext("/settings/../audit-log", known)).toBe("/audit-log");
+    expect(safeNext("/x/../api/viewer", everything)).toBeNull();
+    for (const value of ["/settings/team", "/audit-log?view=aud_1#top"]) {
+      const next = safeNext(value, everything);
+      expect(next).not.toBeNull();
+      expect(new URL(next ?? "", "https://console.example.com").origin).toBe(
+        "https://console.example.com",
+      );
+    }
+  });
+
   it("builds the sign-in redirect with the path only", () => {
     expect(signInHref({ pathname: "/settings/team", search: "?view=invite" }, known)).toBe(
       "/sign-in?next=%2Fsettings%2Fteam%3Fview%3Dinvite",
@@ -58,6 +87,26 @@ describe("isRouterHref", () => {
     expect(isRouterHref("/api")).toBe(false);
     expect(isRouterHref("//cdn.example.com/x")).toBe(false);
     expect(isRouterHref("https://docs.example.com/")).toBe(false);
+  });
+
+  it("reads the path as the URL parser resolves it", () => {
+    expect(isRouterHref("/x/../api/viewer")).toBe(false);
+    expect(isRouterHref("/%2e%2e/api")).toBe(false);
+    expect(isRouterHref("/..//cdn.example.com/x")).toBe(false);
+    expect(isRouterHref("/\\cdn.example.com/x")).toBe(false);
+    expect(isRouterHref("/settings/../audit-log")).toBe(true);
+  });
+});
+
+describe("routeMatcher", () => {
+  it("never matches a path that would read as another origin", () => {
+    const rootRoute = createRootRoute();
+    const splat = createRoute({ getParentRoute: () => rootRoute, path: "$" });
+    const router = createRouter({ routeTree: rootRoute.addChildren([splat]) });
+    const matches = routeMatcher(router);
+    expect(matches("/anything/at/all")).toBe(true);
+    expect(matches("//evil.example.com")).toBe(false);
+    expect(safeNext("/x/..//evil.example.com", matches)).toBeNull();
   });
 });
 

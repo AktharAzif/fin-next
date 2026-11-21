@@ -26,11 +26,18 @@ import { useStore } from "../runtime/store.ts";
 import { type StepUpContentProps, StepUpHost } from "../step-up/step-up.tsx";
 import { adminGate, consoleGate } from "./gates.ts";
 
-/** Whether the app has a route for a pathname (not counting the root's catch-all not-found). */
+/**
+ * Whether the app has a route for a pathname (not counting the root's catch-all not-found). A path
+ * that does not start with a single `/` is never a route of this app, whatever a splat would match:
+ * a browser reads `//host` as another origin.
+ */
 export function routeMatcher(
   router: Pick<AnyRouter, "getMatchedRoutes">,
 ): (pathname: string) => boolean {
-  return (pathname) => router.getMatchedRoutes(pathname)[2] !== undefined;
+  return (pathname) =>
+    pathname.startsWith("/") &&
+    !pathname.startsWith("//") &&
+    router.getMatchedRoutes(pathname)[2] !== undefined;
 }
 
 interface GuardInput<V> {

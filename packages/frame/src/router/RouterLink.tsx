@@ -14,10 +14,22 @@ export interface RouterLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement>
   ref?: Ref<HTMLAnchorElement>;
 }
 
-/** True for a path on this app that the router may handle (never /api, never another origin). */
+/**
+ * True for a path on this app that the router may handle (never /api, never another origin). The
+ * path is read as the URL parser resolves it, dot segments, tabs and backslashes included, so
+ * `/x/../api/viewer` stays a browser navigation and `/..//host` is never handed to the router.
+ */
 export function isRouterHref(href: string): boolean {
-  if (!href.startsWith("/") || href.startsWith("//")) return false;
-  const path = href.split(/[?#]/, 1)[0] ?? "";
+  if (!href.startsWith("/") || href.startsWith("//") || href.includes("\\")) return false;
+  let url: URL;
+  try {
+    url = new URL(href, "https://fin.invalid");
+  } catch {
+    return false;
+  }
+  if (url.origin !== "https://fin.invalid") return false;
+  const path = url.pathname;
+  if (path.startsWith("//")) return false;
   return path !== "/api" && !path.startsWith("/api/");
 }
 
