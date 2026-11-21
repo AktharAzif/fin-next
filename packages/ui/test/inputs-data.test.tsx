@@ -119,7 +119,13 @@ describe("ErrorState", () => {
     expect(text(html)).toContain("Check your connection and try again.");
     expect(text(html)).toContain("Try again");
     expect(html).toContain("req_01HZX4K9M2");
-    expect(html).toContain('role="alert"');
+  });
+
+  it("adds no live region of its own, in any size: it is spoken through announce()", () => {
+    for (const size of ["section", "page", "inline"] as const) {
+      const html = render(<ErrorState size={size} title="Couldn’t load webhooks" />);
+      expect(html).not.toMatch(/role="(?:alert|status|log)"|aria-live/);
+    }
   });
 
   it("uses the page's heading level when the header already has the h1", () => {

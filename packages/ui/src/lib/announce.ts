@@ -1,7 +1,8 @@
 // Spoken updates go through the SDK's announce(), so each document has exactly one polite and one
-// assertive live region (spec 06 §3.3, §9). Components never make live regions of their own.
+// assertive live region (spec 06 §3.3, §9). Components never make live regions of their own: no
+// role="alert" or "status", no aria-live (a source rule in test/rules.test.ts holds this).
 import { announce as sdkAnnounce } from "@ui-sdk/core";
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 export type Priority = "polite" | "assertive";
 
@@ -19,4 +20,9 @@ export function useAnnounceOnMount(text: string | null, priority: Priority = "po
     said.current = true;
     announce(text, priority);
   }, [text, priority]);
+}
+
+/** The words of a node that is plain text, for announcing it; anything else says nothing. */
+export function plainText(node: ReactNode): string {
+  return typeof node === "string" || typeof node === "number" ? String(node) : "";
 }

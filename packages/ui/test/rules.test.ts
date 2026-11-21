@@ -1,7 +1,7 @@
 // The UI's source rules that unit tests can hold (spec 06 §11.5, AC-UI-01): in @fin/ui's source,
 // no hex colour and no arbitrary Tailwind value in a class string, no dangerouslySetInnerHTML,
-// innerHTML, setAttribute("style"), eval or new Function, no refused SDK entry, and no copy with a
-// straight apostrophe or "organization".
+// innerHTML, setAttribute("style"), eval or new Function, no live region of a component's own, no
+// refused SDK entry, and no copy with a straight apostrophe or "organization".
 import { describe, expect, it } from "vitest";
 
 const sources = import.meta.glob<string>("../src/**/*.{ts,tsx}", {
@@ -10,10 +10,16 @@ const sources = import.meta.glob<string>("../src/**/*.{ts,tsx}", {
   eager: true,
 });
 
+/** A file's code with its block comments and whole-line comments left out. */
+function withoutComments(code: string): string {
+  return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
 /** Every string literal and template literal in a file's code (comments left out). */
 function strings(code: string): string[] {
-  const bare = code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-  return [...bare.matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? "");
+  return [...withoutComments(code).matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map(
+    (m) => m[1] ?? m[2] ?? "",
+  );
 }
 
 describe("@fin/ui's source", () => {
@@ -52,6 +58,23 @@ describe("@fin/ui's source", () => {
     ];
     const found = files.flatMap(([file, code]) =>
       refused.filter((pattern) => pattern.test(code)).map((pattern) => `${file}: ${pattern}`),
+    );
+    expect(found).toEqual([]);
+  });
+
+  it("makes no live region of its own: spoken updates go through announce()", () => {
+    // Spec 06 §3.3 and §9: each document has exactly one polite and one assertive region, the
+    // SDK's. A role of alert, status or log, an aria-live or an <output> would add another.
+    const refused = [
+      /\brole=\{?\s*["'](?:alert|status|log|marquee|timer)["']/,
+      /\brole:\s*["'](?:alert|status|log|marquee|timer)["']/,
+      /aria-live/,
+      /<output\b/,
+    ];
+    const found = files.flatMap(([file, code]) =>
+      refused
+        .filter((pattern) => pattern.test(withoutComments(code)))
+        .map((pattern) => `${file}: ${pattern}`),
     );
     expect(found).toEqual([]);
   });

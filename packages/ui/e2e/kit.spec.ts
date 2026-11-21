@@ -162,7 +162,43 @@ test.describe("the page policy @csp", () => {
   });
 });
 
+/** Every live region in the document, by its politeness (spec 06 §9: one polite, one assertive). */
+const liveRegions = (page: Page) =>
+  page.evaluate(() =>
+    [
+      ...document.querySelectorAll(
+        '[aria-live]:not([aria-live="off"]), [role="alert"], [role="status"], [role="log"], [role="marquee"], [role="timer"], output',
+      ),
+    ]
+      .map((el) => {
+        const live = el.getAttribute("aria-live");
+        if (live !== null) return live;
+        return el.getAttribute("role") === "alert" ? "assertive" : "polite";
+      })
+      .sort(),
+  );
+
 test.describe("the components @kit", () => {
+  test("one polite and one assertive live region, however many error states and toasts show", async ({
+    page,
+  }) => {
+    // The kit renders two ErrorStates, skeleton regions and an OTP input in an error status.
+    await expect.poll(() => liveRegions(page)).toEqual(["assertive", "polite"]);
+    const table = section(page, "table");
+    await table.getByRole("button", { name: "Show error" }).click();
+    await expect(table.getByText("Couldn’t load members")).toBeVisible();
+    // The error state is spoken once, at once, through the SDK's assertive region.
+    await expect(page.locator('[data-ui-sdk-announcer="assertive"]')).toHaveText(
+      "Couldn’t load members. Check your connection and try again.",
+    );
+    await page.locator('[data-kit="toast-error"]').click();
+    await page.locator('[data-kit="toast-success"]').click();
+    await expect(
+      page.getByRole("region", { name: "Notifications" }).getByText("Webhook created"),
+    ).toBeVisible();
+    expect(await liveRegions(page)).toEqual(["assertive", "polite"]);
+  });
+
   test("tokens reach the page: the system's theme by default, an explicit theme over it", async ({
     page,
   }) => {

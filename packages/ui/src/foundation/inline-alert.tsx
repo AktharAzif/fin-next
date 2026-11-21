@@ -9,7 +9,7 @@ import {
   XIcon,
 } from "@fin/icons";
 import type { ReactNode } from "react";
-import { useAnnounceOnMount } from "../lib/announce.ts";
+import { plainText, useAnnounceOnMount } from "../lib/announce.ts";
 import { cn } from "../lib/cn.ts";
 import { IconButton } from "./button.tsx";
 
@@ -53,13 +53,10 @@ const TONES: Record<InlineAlertTone, { box: string; icon: ReactNode }> = {
   },
 };
 
-function plain(node: ReactNode): string {
-  return typeof node === "string" || typeof node === "number" ? String(node) : "";
-}
-
 export function InlineAlert(props: InlineAlertProps) {
   const tone = TONES[props.tone];
-  const spoken = props.live === undefined ? null : `${props.title} ${plain(props.children)}`.trim();
+  const spoken =
+    props.live === undefined ? null : `${props.title} ${plainText(props.children)}`.trim();
   useAnnounceOnMount(spoken, props.live ?? "polite");
   return (
     <div
