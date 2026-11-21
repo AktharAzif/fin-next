@@ -12,17 +12,25 @@
 //                      except GitHub's own merge commits: two or more parents and GitHub as the
 //                      committer (GitHub writes the merging user's offset into those); a push that
 //                      creates the branch checks the head commit alone
-//   any other event    the head commit alone
+//   any other event    (workflow_dispatch) every commit HEAD_SHA holds that main does not, read
+//                      from refs/remotes/origin/main (the job's full checkout fetches it), with no
+//                      exception: a run started by hand on a pull request's branch posts this
+//                      check for its head, so it checks everything the branch would bring, never
+//                      the head alone; without main's ref the input is unusable
 // An operator script that rebuilds a pull request as one UTC commit on top of main and sets the
 // status itself checks the same thing; this job passes on that commit too.
 //
-// Output: one `commit-dates-utc.commit` line per commit and a closing `commit-dates-utc.result`.
-// Exit 0 when every checked commit is UTC, 1 when one is not, 2 when the input is unusable.
+// Output: a `commit-dates-utc.range` line, one `commit-dates-utc.commit` line per commit and a
+// closing `commit-dates-utc.result`. Exit 0 when every checked commit is UTC, 1 when one is not,
+// 2 when the input is unusable.
 import { annotation, clean, git, isMain, isSha, say, ZERO_SHA } from "./lib/ci.mjs";
 
 /** The most commits one run reads; more means the range is not a pull request's. */
 export const MAX_COMMITS = 5000;
 export const UTC = "+0000";
+/** Where the commits main already holds are read from, for an event with no base of its own. */
+export const MAIN_REF = "refs/remotes/origin/main";
+const MAIN_UNAVAILABLE = "main_unavailable";
 /** GitHub's committer identity on the merge commits it writes (built, so no address is stored). */
 export const GITHUB_COMMITTER = { name: "GitHub", email: ["noreply", "github.com"].join("@") };
 
@@ -90,17 +98,41 @@ export function judge(commit, event) {
 }
 
 /**
- * The commits to check for an event.
+ * Where the commits to check start for an event: the commit whose ancestors are left out, or null
+ * for a push that creates the branch (its head alone is checked). An event with no base of its
+ * own starts at main's commit (MAIN_REF); without it, this throws MAIN_UNAVAILABLE.
+ * @param {{ event: string, base: string, cwd: string }} input
+ * @returns {string | null}
+ */
+export function rangeStart({ event, base, cwd }) {
+  if (event === "pull_request") return base;
+  if (event === "push") return base === "" || base === ZERO_SHA ? null : base;
+  /** @type {string} */
+  let main;
+  try {
+    main = git(["rev-parse", "--verify", "--quiet", `${MAIN_REF}^{commit}`], { cwd }).trim();
+  } catch {
+    throw new Error(MAIN_UNAVAILABLE);
+  }
+  if (!isSha(main)) throw new Error(MAIN_UNAVAILABLE);
+  return main;
+}
+
+/**
+ * The commits to check for an event (see the header), and where their range starts.
  * @param {{ event: string, base: string, head: string, cwd: string }} input
- * @returns {string[]}
+ * @returns {{ start: string | null, shas: string[] }}
  */
 export function commitsToCheck({ event, base, head, cwd }) {
-  const ranged = event === "pull_request" || (event === "push" && base !== "" && base !== ZERO_SHA);
-  if (!ranged) return [head];
-  const out = git(["rev-list", "--reverse", `--max-count=${MAX_COMMITS + 1}`, `${base}..${head}`], {
-    cwd,
-  });
-  return out.split("\n").filter((line) => line !== "");
+  const start = rangeStart({ event, base, cwd });
+  if (start === null) return { start, shas: [head] };
+  const out = git(
+    ["rev-list", "--reverse", `--max-count=${MAX_COMMITS + 1}`, `${start}..${head}`],
+    {
+      cwd,
+    },
+  );
+  return { start, shas: out.split("\n").filter((line) => line !== "") };
 }
 
 /**
@@ -119,14 +151,23 @@ export function run(ctx) {
     ctx.print("commit-dates-utc.result result=fail code=sha_invalid");
     return 2;
   }
+  /** @type {string | null} */
+  let start;
   /** @type {string[]} */
   let shas;
   try {
-    shas = commitsToCheck({ event, base, head, cwd: ctx.cwd });
-  } catch {
-    ctx.print("commit-dates-utc.result result=fail code=range_unreadable");
+    ({ start, shas } = commitsToCheck({ event, base, head, cwd: ctx.cwd }));
+  } catch (error) {
+    const code =
+      error instanceof Error && error.message === MAIN_UNAVAILABLE
+        ? MAIN_UNAVAILABLE
+        : "range_unreadable";
+    ctx.print(`commit-dates-utc.result result=fail code=${code}`);
     return 2;
   }
+  ctx.print(
+    `commit-dates-utc.range event=${event} from=${start ?? "none"} head=${head} commits=${shas.length}`,
+  );
   if (shas.length > MAX_COMMITS) {
     ctx.print(`commit-dates-utc.result result=fail code=too_many_commits limit=${MAX_COMMITS}`);
     return 2;

@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { GITHUB_COMMITTER, isGithubMerge, judge, parseCommit, run } from "../commit-dates-utc.mjs";
+import {
+  GITHUB_COMMITTER,
+  isGithubMerge,
+  judge,
+  MAIN_REF,
+  parseCommit,
+  run,
+} from "../commit-dates-utc.mjs";
 import { collect, commit, gitRepo, mergeCommit, runGit } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../commit-dates-utc.mjs", import.meta.url));
@@ -199,19 +206,66 @@ describe("run over a repository", () => {
     assert.equal(check(dir, { EVENT_NAME: "push", BASE_SHA: before, HEAD_SHA: after }).code, 1);
   });
 
-  it("checks the head alone for a push that creates the branch, and for other events", (t) => {
+  it("checks the head alone for a push that creates the branch", (t) => {
     const dir = gitRepo(t);
     commit(dir, { authorOffset: "+0100" });
     const head = commit(dir);
     for (const env of [
       { EVENT_NAME: "push", BASE_SHA: ZERO, HEAD_SHA: head },
       { EVENT_NAME: "push", BASE_SHA: "", HEAD_SHA: head },
-      { EVENT_NAME: "workflow_dispatch", BASE_SHA: "", HEAD_SHA: head },
     ]) {
       const { code, lines } = check(dir, env);
       assert.equal(code, 0, `${env.EVENT_NAME}: ${lines.join("\n")}`);
       assert.match(lines.at(-1) ?? "", /commits=1 /);
     }
+  });
+
+  it("on a run started by hand, checks every commit the branch holds that main does not", (t) => {
+    const dir = gitRepo(t);
+    const main = commit(dir);
+    runGit(dir, ["update-ref", MAIN_REF, main]);
+    runGit(dir, ["checkout", "--quiet", "-b", "feature"]);
+    const bad = commit(dir, { committerOffset: "-0300" });
+    const head = commit(dir);
+    const { code, lines } = check(dir, {
+      EVENT_NAME: "workflow_dispatch",
+      BASE_SHA: "",
+      HEAD_SHA: head,
+    });
+    assert.equal(code, 1, "a non-UTC commit below the head fails the check");
+    assert.ok(
+      lines.includes(
+        `commit-dates-utc.range event=workflow_dispatch from=${main} head=${head} commits=2`,
+      ),
+    );
+    assert.ok(lines.some((l) => l.includes(`sha=${bad}`) && l.includes("code=committer_offset")));
+    assert.match(lines.at(-1) ?? "", /result=fail commits=2 checked=2 failed=1/);
+  });
+
+  it("on a run started by hand on main itself, has nothing to check and passes", (t) => {
+    const dir = gitRepo(t);
+    commit(dir, { authorOffset: "+0100" });
+    const head = commit(dir);
+    runGit(dir, ["update-ref", MAIN_REF, head]);
+    const { code, lines } = check(dir, {
+      EVENT_NAME: "workflow_dispatch",
+      BASE_SHA: "",
+      HEAD_SHA: head,
+    });
+    assert.equal(code, 0, lines.join("\n"));
+    assert.match(lines.at(-1) ?? "", /result=pass commits=0 checked=0 failed=0/);
+  });
+
+  it("refuses a run started by hand when main's commit cannot be read", (t) => {
+    const dir = gitRepo(t);
+    const head = commit(dir);
+    const { code, lines } = check(dir, {
+      EVENT_NAME: "workflow_dispatch",
+      BASE_SHA: "",
+      HEAD_SHA: head,
+    });
+    assert.equal(code, 2);
+    assert.equal(lines.at(-1), "commit-dates-utc.result result=fail code=main_unavailable");
   });
 
   it("refuses unusable input with exit 2", (t) => {
