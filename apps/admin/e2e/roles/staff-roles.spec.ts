@@ -48,7 +48,7 @@ test("@journey an Admin makes, changes, gives and deletes a custom staff role, a
 
   // Staff has two tabs; Roles lists the four prebuilt roles and no custom one yet.
   const tabs = page.getByRole("navigation", { name: "Staff" });
-  await expect(tabs.getByRole("link", { name: "Staff" })).toHaveAttribute("aria-current", "page");
+  await expect(tabs.getByRole("link", { name: "Members" })).toHaveAttribute("aria-current", "page");
   await tabs.getByRole("link", { name: "Roles" }).click();
   await expect(page).toHaveURL(`${ORIGIN}/staff/roles`);
   await expect(tabs.getByRole("link", { name: "Roles" })).toHaveAttribute("aria-current", "page");
@@ -98,7 +98,7 @@ test("@journey an Admin makes, changes, gives and deletes a custom staff role, a
   ).toBeVisible();
 
   // Give it to Mei: the Staff page's picker lists the custom role beside the prebuilt ones.
-  await page.getByRole("link", { name: "Staff", exact: true }).first().click();
+  await page.getByRole("list", { name: "Settings" }).getByRole("link", { name: "Staff" }).click();
   await page.getByRole("button", { name: "Add staff" }).click();
   const add = page.getByRole("dialog", { name: "Add staff" });
   await add.getByRole("textbox", { name: "Work email" }).fill(mei);

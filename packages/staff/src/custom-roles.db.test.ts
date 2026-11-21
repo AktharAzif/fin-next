@@ -219,8 +219,9 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
         "invalid",
         { fields: [{ path: "name", code: "reads_as_built_in" }] },
       ],
+      // "Admin" with a Cyrillic capital A: mixed scripts, and it reads as the prebuilt role.
       [
-        draft("Аdmin", ["customers.read"]),
+        draft("\u0410dmin", ["customers.read"]),
         "invalid",
         {
           fields: [
