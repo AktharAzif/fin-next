@@ -20,13 +20,35 @@ export const ENGINE_COPY: EngineCopy = { commit: "e".repeat(40), procedureHash: 
 
 export type Handler = (spec: SessionSpec, attempt: number) => FakeReply | undefined;
 
-/** A script: the first handler that answers wins; otherwise a clean output or a confirming sceptic. */
+const CLAIM_HEADER = "# The fix a lens claims (at the head you are given)\n";
+
+/** A fix check: the sceptic of a prior blocker a lens claimed fixed. */
+export function isFixCheck(spec: SessionSpec): boolean {
+  return spec.role.startsWith("sceptic") && spec.prompt.includes(CLAIM_HEADER);
+}
+
+/** The fix a fix check was shown, read back from its prompt's DATA block. */
+export function claimedFix(spec: SessionSpec): { fixWhere: Record<string, unknown>; fixQuote: { path: string; text: string } } {
+  const rest = spec.prompt.slice(spec.prompt.indexOf(CLAIM_HEADER) + CLAIM_HEADER.length);
+  return JSON.parse(rest.slice(0, rest.indexOf("\n===== END DATA"))) as { fixWhere: Record<string, unknown>; fixQuote: { path: string; text: string } };
+}
+
+/** A fix check that finds the defect gone, quoting the claimed fix as its guard. */
+export function fixHolds(spec: SessionSpec): FakeReply {
+  return { kind: "result", output: { verdict: "REFUTED", guardQuotes: [claimedFix(spec).fixQuote], reason: "Every path to the defect passes through the fix." } };
+}
+
+/**
+ * A script: the first handler that answers wins; otherwise a clean output, a confirming sceptic,
+ * or a fix check that finds the claimed fix holds.
+ */
 export function script(...handlers: Handler[]): FakeScript {
   return (spec, attempt) => {
     for (const handler of handlers) {
       const reply = handler(spec, attempt);
       if (reply !== undefined) return reply;
     }
+    if (isFixCheck(spec)) return fixHolds(spec);
     if (spec.role.startsWith("sceptic")) return { kind: "result", output: CONFIRMED };
     if (spec.role === "second-look") return { kind: "result", output: { verdict: "STANDS", quotes: [], reason: "Every path passes the guard." } };
     return { kind: "result", output: cleanOutput(spec) };

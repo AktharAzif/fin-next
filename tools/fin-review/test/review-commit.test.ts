@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { cleanOutput, countingRandom, cryptoFinding, readJson, reviewFixture, runDirs, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
-import { ENGINE_COPY, calls, findingsOf, harness, lastRun, script } from "./helpers/review-harness.ts";
+import { ENGINE_COPY, MODELS, calls, findingsOf, harness, isFixCheck, lastRun, script } from "./helpers/review-harness.ts";
+import type { Handler, Harness } from "./helpers/review-harness.ts";
 
 describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
   let fx: ReviewFixture;
@@ -196,7 +197,7 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.ok((result["blockers"] as Array<Record<string, unknown>>).some((blocker) => blocker["rule"] === "coverage" && blocker["path"] === "scripts/release.sh"));
   });
 
-  it("a prior blocker closes only with a fix in a file it names: not a changed line elsewhere, nor the same text moved to a new file", async () => {
+  it("a prior blocker closes only with a fix in a file tied to it: not a changed line of an unrelated file, nor the defect moved to a new file, nor the line the move left behind", async () => {
     // Long enough that a one-line fix keeps a renamed file over git's 50% similarity.
     const defect = "// Comparing secrets.\n// They come from the caller.\n// Keep this small.\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const VERSION = 1;\n";
     const h0 = fx.pr(16, { "packages/crypto/src/index.ts": defect });
@@ -214,6 +215,19 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     const moved = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/compare.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/compare.ts", text: "return a === b;" }).services);
     assert.notEqual(moved.code, 0, moved.stdout + moved.stderr);
     assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    // Nor the line the move left behind in the file the blocker names: the quoted defect now lies in
+    // another changed file, so no claim is taken, in a pr run or a commit since the blocker's head.
+    const stubClaim = (): ReturnType<typeof claiming> =>
+      claiming({ path: "packages/crypto/src/index.ts", startLine: 1, endLine: 1 }, { path: "packages/crypto/src/index.ts", text: 'export { sameSecret } from "./compare.ts";' });
+    const stub = await runFixtureCli(fx, ["pr", "--pr", "16"], stubClaim().services);
+    assert.equal(stub.code, 1, stub.stdout + stub.stderr);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    const claim = ((readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0]?.["claim"] ?? {}) as Record<string, unknown>;
+    assert.equal(claim["outcome"], "not_accepted");
+    assert.match(String((claim["notAccepted"] as unknown[])[0]), /no longer in packages\/crypto\/src\/index\.ts but now lies in packages\/crypto\/src\/compare\.ts/);
+    const stubCommit = await runFixtureCli(fx, ["commit", "--pr", "16", "--since", h0], stubClaim().services);
+    assert.equal(stubCommit.code, 1, stubCommit.stdout + stubCommit.stderr);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open in a commit too");
     // The file renamed as it was: the renamed file may hold a fix, but nothing in it changed.
     const h3 = fx.pr(16, { "packages/crypto/src/index.ts": null, "packages/crypto/src/secret.ts": defect }, h0);
     const renamed = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/secret.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/secret.ts", text: "return a === b;" }).services);
@@ -222,6 +236,93 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     const fixed = defect.replace("return a === b;", "return timingSafeEqual(Buffer.from(a), Buffer.from(b));");
     fx.pr(16, { "packages/crypto/src/secret.ts": fixed }, h3);
     const closed = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/secret.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/secret.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" }).services);
+    assert.equal(closed.code, 0, closed.stdout + closed.stderr);
+  });
+
+  it("a fix may lie in a file tied to the blocker (a new test of the file it names), and closes only when its fix check finds the defect gone", async () => {
+    // A high test-truth blocker on packages/crypto/src/index.ts: no test fails when sameSecret is wrong.
+    const h0 = fx.pr(20, { "packages/crypto/src/index.ts": "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n" });
+    const finder = harness(fx, script((spec) => (spec.lens === "test-truth" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { severity: "high", title: "No test fails when sameSecret is wrong" })]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "20"], finder.services)).code, 1);
+    // The fix is a new test; the code itself needs no change.
+    const test = 'import assert from "node:assert/strict";\nimport { sameSecret } from "./index.ts";\n\nassert.equal(sameSecret("a", "b"), false);\n';
+    fx.pr(20, { "packages/crypto/src/same-secret.test.ts": test }, h0);
+    const claim = {
+      id: "P1",
+      status: "fixed",
+      fixWhere: { path: "packages/crypto/src/same-secret.test.ts", startLine: 4, endLine: 4 },
+      fixQuote: { path: "packages/crypto/src/same-secret.test.ts", text: 'assert.equal(sameSecret("a", "b"), false);' },
+    };
+    const claiming = (...first: Handler[]) =>
+      harness(fx, script(...first, (spec) => (spec.lens === "test-truth" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [claim] } } : undefined)), random);
+    const priorClaim = (): Record<string, unknown> => ((readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0]?.["claim"] ?? {}) as Record<string, unknown>;
+    const fixChecks = (h: Harness): string[] => calls(h).filter((call) => isFixCheck(call.spec)).map((call) => call.spec.role);
+
+    // The fix check finds the defect still there: the blocker stays open, and the lens's answer stands.
+    const stillThere = claiming((spec) => (isFixCheck(spec) ? { kind: "result", output: { verdict: "CONFIRMED", guardQuotes: [], reason: "The test never runs." } } : undefined));
+    const open = await runFixtureCli(fx, ["pr", "--pr", "20"], stillThere.services);
+    assert.equal(open.code, 1, open.stdout + open.stderr);
+    assert.equal(priorClaim()["outcome"], "still_there");
+    assert.match(JSON.stringify(readJson(join(lastRun(fx), "result.json"))["blockers"]), /its fix check found the defect still there/);
+    assert.deepEqual(fixChecks(stillThere), ["sceptic1"], "the first check confirming the defect ends the check");
+    const truth = calls(stillThere).find((call) => call.spec.lens === "test-truth");
+    assert.match(truth?.spec.prompt ?? "", /"fixMayBeIn": \[[^\]]*"packages\/crypto\/src\/same-secret\.test\.ts"/);
+    const check = calls(stillThere).find((call) => isFixCheck(call.spec));
+    assert.match(check?.spec.prompt ?? "", /# The blocking finding \(reported on an earlier head of this pull request\)/);
+    assert.ok(!(check?.spec.prompt ?? "").includes(String(readJson(join(lastRun(fx), "findings.json"))["runId"])), "the prompt never holds a run ID");
+
+    // A high blocker takes two checks, the second on the attack model; an UNSURE second keeps it open.
+    const unsure = claiming((spec) => (isFixCheck(spec) && spec.role === "sceptic2" ? { kind: "result", output: { verdict: "UNSURE", guardQuotes: [], reason: "Cannot tell." } } : undefined));
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "20"], unsure.services)).code, 1);
+    assert.deepEqual(fixChecks(unsure), ["sceptic1", "sceptic2"]);
+    assert.equal(priorClaim()["outcome"], "unsure");
+    // A refutation whose guard is not in the tree is no refutation.
+    const unguarded = claiming((spec) => (isFixCheck(spec) ? { kind: "result", output: { verdict: "REFUTED", guardQuotes: [{ path: "packages/crypto/src/same-secret.test.ts", text: "assert.ok(nothing)" }], reason: "Guarded." } } : undefined));
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "20"], unguarded.services)).code, 1);
+    // A fix check served by another model: the run could not check.
+    const mismatch = claiming((spec) => (isFixCheck(spec) ? { kind: "result", output: { verdict: "REFUTED", guardQuotes: [claim.fixQuote], reason: "Guarded." }, served: [MODELS.fable] } : undefined));
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "20"], mismatch.services)).code, 2);
+    assert.equal(priorClaim()["outcome"], "unchecked");
+
+    // Both checks find the defect gone, each quoting the guard at this head: the blocker closes.
+    const holds = claiming();
+    const closed = await runFixtureCli(fx, ["pr", "--pr", "20"], holds.services);
+    assert.equal(closed.code, 0, closed.stdout + closed.stderr);
+    assert.deepEqual(fixChecks(holds), ["sceptic1", "sceptic2"]);
+    assert.equal(priorClaim()["outcome"], "fixed");
+    assert.deepEqual(readJson(join(lastRun(fx), "result.json"))["openBlockers"], []);
+  });
+
+  it("a claim the engine cannot take leaves the blocker open without failing the lens, and a fix after a file the blocker names was deleted may lie in any changed file", async () => {
+    // The defect lives in legacy.ts, which index.ts re-exports; sameSecret in index.ts has the same text.
+    const base = "// Comparing secrets.\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const VERSION = 1;\n";
+    const legacy = "export function legacyCompare(a: string, b: string): boolean {\n  return a === b;\n}\n";
+    const h0 = fx.pr(21, { "packages/crypto/src/legacy.ts": legacy, "packages/crypto/src/index.ts": `${base}export { legacyCompare } from "./legacy.ts";\n` });
+    const atLegacy = { where: [{ path: "packages/crypto/src/legacy.ts", startLine: 1, endLine: 3 }], quotes: [{ path: "packages/crypto/src/legacy.ts", text: "return a === b;" }] };
+    const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, atLegacy)]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "21"], finder.services)).code, 1);
+    const claiming = (fixWhere: Record<string, unknown>, fixQuote: Record<string, unknown>, ...first: Handler[]) =>
+      harness(fx, script(...first, (spec) => (spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere, fixQuote }] } } : undefined)), random);
+
+    // Unchanged code quoted as the fix: the engine cannot take it, so the blocker stays open (exit 1),
+    // and the lens is not failed for a true answer it gave.
+    fx.pr(21, { "docs/plan/notes.md": "# notes\n" }, h0);
+    const unchanged = claiming({ path: "packages/crypto/src/legacy.ts", startLine: 2, endLine: 2 }, { path: "packages/crypto/src/legacy.ts", text: "return a === b;" });
+    const kept = await runFixtureCli(fx, ["pr", "--pr", "21"], unchanged.services);
+    assert.equal(kept.code, 1, kept.stdout + kept.stderr);
+    assert.deepEqual(calls(unchanged).filter((call) => call.spec.lens === "security").map((call) => call.attempt), [1], "not retried");
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["lenses"] as Record<string, unknown>)["security"], "done");
+
+    // legacy.ts deleted and its re-export removed: the change to index.ts may be quoted as the fix
+    // (the lines either side of the removed one), and sameSecret's own text, there before, is no move.
+    fx.pr(21, { "packages/crypto/src/legacy.ts": null, "packages/crypto/src/index.ts": base }, h0);
+    const removal = { path: "packages/crypto/src/index.ts", startLine: 6, endLine: 6 };
+    const removalQuote = { path: "packages/crypto/src/index.ts", text: "export const VERSION = 1;" };
+    const doubted = claiming(removal, removalQuote, (spec) => (isFixCheck(spec) ? { kind: "result", output: { verdict: "CONFIRMED", guardQuotes: [], reason: "Still reachable." } } : undefined));
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "21"], doubted.services)).code, 1, "the fix check decides");
+    assert.ok(calls(doubted).some((call) => isFixCheck(call.spec)), "the engine took the claim and checked it");
+    assert.equal(((readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0]?.["claim"] as Record<string, unknown>)["outcome"], "still_there");
+    const closed = await runFixtureCli(fx, ["pr", "--pr", "21"], claiming(removal, removalQuote).services);
     assert.equal(closed.code, 0, closed.stdout + closed.stderr);
   });
 

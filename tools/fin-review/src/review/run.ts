@@ -44,7 +44,7 @@ import { MAX_PROMPT_BYTES } from "../runner/cli.ts";
 import type { SessionResult, SessionRunner, SessionSpec } from "../runner/types.ts";
 import { profilesFor } from "./attack.ts";
 import { outputProblem, SEVERITIES, validateOutput } from "./findings.ts";
-import type { FileSource, Finding, Quote, Severity, ValidationContext } from "./findings.ts";
+import type { FileSource, Finding, FixScope, PriorCheck, Quote, Severity, ValidationContext, Where } from "./findings.ts";
 import { attackRequired, isLens, requiredLenses } from "./lenses.ts";
 import type { Lens } from "./lenses.ts";
 import { acquireLock, LockHeldError } from "./lock.ts";
@@ -52,7 +52,7 @@ import type { Lock } from "./lock.ts";
 import { Pool } from "./pool.ts";
 import { ATTACK, checklistIds, sessionSchema } from "./procedure.ts";
 import type { AttackProfile, Procedure } from "./procedure.ts";
-import { buildContextPack, dataBlock, lensPrompt, numberedFile, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
+import { buildContextPack, dataBlock, fixCheckPrompt, lensPrompt, numberedFile, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
 import { compileSchema } from "./schema.ts";
 import type { Refutation } from "./prompts.ts";
 import type { EngineCopy, EngineCopyInput } from "./engine-copy.ts";
@@ -167,8 +167,65 @@ interface SessionPlan {
   readonly allowed: ReadonlySet<string> | null;
   /** Prompt IDs (P1, P2, ...) of the prior blockers shown to this session. */
   readonly priors: ReadonlyMap<string, OpenBlocker>;
-  /** For each prompt ID, the lines changed since that blocker was found; a fix must touch one. */
-  readonly fixLines: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
+  /** For each prompt ID, where a fix of that blocker may be quoted (its tied files and their changed lines). */
+  readonly fixScopes: ReadonlyMap<string, FixScope>;
+}
+
+/** One sceptic's answer in a prior blocker's fix check (findings.json). */
+interface FixCheckRecord {
+  readonly role: Role;
+  readonly session: string;
+  /** CONFIRMED (the defect is still there), REFUTED or UNSURE; null when the session gave no usable answer. */
+  readonly verdict: string | null;
+  /** True for a refutation whose guard quotes are exact substrings of the head's files. */
+  readonly guarded: boolean;
+  readonly guardQuotes: readonly Quote[];
+  readonly reason: string;
+  readonly issue?: string;
+}
+
+/** What the lens shown a prior blocker said of it, and what came of it (findings.json). */
+interface PriorClaim {
+  readonly session: string;
+  /** What the lens answered: `fixed` or `open` (silence records no claim). */
+  readonly said: "fixed" | "open";
+  /** Why the engine could not take a `fixed` claim, which leaves the blocker open. */
+  readonly notAccepted: readonly string[];
+  readonly fixWhere?: Where;
+  readonly fixQuote?: Quote;
+  /** open (the lens said so), not_accepted, checking, fixed, still_there, unsure or unchecked. */
+  outcome: "open" | "not_accepted" | "checking" | "fixed" | "still_there" | "unsure" | "unchecked";
+  readonly checks: FixCheckRecord[];
+}
+
+function claimOf(session: string, check: PriorCheck): PriorClaim {
+  const said = check.status === "fixed" || check.notAccepted.length > 0 ? "fixed" : "open";
+  return {
+    session,
+    said,
+    notAccepted: check.notAccepted,
+    ...(check.fixWhere === undefined ? {} : { fixWhere: check.fixWhere }),
+    ...(check.fixQuote === undefined ? {} : { fixQuote: check.fixQuote }),
+    outcome: check.notAccepted.length > 0 ? "not_accepted" : said === "fixed" ? "checking" : "open",
+    checks: [],
+  };
+}
+
+/** Why a prior blocker the run carried is still open, for its blocker's detail. */
+function stillOpenDetail(claim: PriorClaim | undefined): string {
+  switch (claim?.outcome) {
+    case undefined:
+    case "open":
+      return "a blocker open at the last reviewed head is not shown fixed";
+    case "not_accepted":
+      return "a blocker open at the last reviewed head is claimed fixed, but the claim cannot be accepted";
+    case "still_there":
+      return "a blocker open at the last reviewed head is claimed fixed, and its fix check found the defect still there";
+    case "unsure":
+      return "a blocker open at the last reviewed head is claimed fixed, and its fix check could not confirm the fix";
+    default:
+      return "a blocker open at the last reviewed head is claimed fixed, and its fix check did not finish";
+  }
 }
 
 interface SessionRecord {
@@ -382,34 +439,115 @@ async function newestRunOnHistory(home: string, pr: number, head: string, mirror
 
 /** Most paths a blocker may name whose changed lines are read for checking a quoted fix. */
 const MAX_FIX_PATHS = 64;
+/** Most files tied to one blocker whose changed lines are read; past it the rest hold no fix (fail closed). */
+const MAX_FIX_FILES = 256;
+/** Most files the prompt lists as where a blocker's fix may lie. */
+const MAX_FIX_LISTED = 64;
+
+/** A text with every white-space character taken out, so a moved quote is found however it is laid out. */
+function squeezed(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
+function occurrences(text: string, part: string): number {
+  if (part === "") return 0;
+  let count = 0;
+  for (let at = text.indexOf(part); at >= 0; at = text.indexOf(part, at + part.length)) count++;
+  return count;
+}
+
+/** The tree of `sha` by path, read once per run for every blocker found there. */
+type TreeAt = (sha: string) => Promise<Map<string, TreeEntry>>;
 
 /**
- * Where a fix of a blocker found at `from` may be quoted from at `head`: each file the blocker's
- * `where` names, at the path it has at the head (followed through a rename since `from`, never a
- * copy), with the lines of it that changed since `from` (rename-aware, so a file moved as it was
- * has none). A file deleted since then is absent: it cannot hold a quote.
+ * Where a fix of a blocker found at `from` may be quoted at `head` (FixScope, src/review/findings.ts):
+ *
+ * - each file the blocker's `where` names, at its path at the head (followed through a rename since
+ *   `from`, never a copy), and the files tied to one: its tests (by name, or a test that imports
+ *   it) and the files one hop from it in the head's import graph (its imports and importers);
+ * - when a file it names was deleted since `from`, every file changed since then too;
+ *
+ * each with the lines of it that changed since `from` (rename-aware, so a file moved as it was has
+ * none, and a file unchanged since has none). And whether the defect moved: a text the blocker
+ * quotes that is no longer in its own file (or any file the blocker names) at the head, but occurs
+ * more often than at `from` in another file changed since, has left with the defect, and no claim
+ * is accepted while it is there.
  */
-async function fixLinesFor(mirror: string, from: string, head: string, blocker: OpenBlocker, env: Readonly<Record<string, string | undefined>>): Promise<Map<string, Set<number>>> {
+async function fixScopeFor(
+  mirror: string,
+  from: string,
+  head: string,
+  blocker: OpenBlocker,
+  files: TreeFiles,
+  graph: ImportGraph,
+  treeAt: TreeAt,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<FixScope> {
   const out = new Map<string, Set<number>>();
   const where = Array.isArray(blocker.finding.where) ? blocker.finding.where : [];
   const paths = sortedUnique(where.map((item) => (isJsonObject(item) && typeof item.path === "string" ? item.path : "")).filter((path) => path !== ""));
-  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return out;
+  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return { files: out, moved: null };
   if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) {
-    for (const path of paths) out.set(path, new Set());
-    return out;
+    // Nothing changed since the blocker was found (or the change cannot be shown): no line can be a fix.
+    for (const path of paths) if (files.kind(path) === "file") out.set(path, new Set());
+    return { files: out, moved: null };
   }
   const delta = await diffTwoDot(mirror, from, head, env);
-  for (const path of paths) {
+  const atHead = (path: string): string | null => {
     const renamed = delta.find((entry) => entry.status === "R" && entry.oldPath === path);
-    if (renamed !== undefined) {
-      out.set(renamed.path, await changedLineNumbers(mirror, from, head, renamed.path, env, path));
-      continue;
-    }
+    if (renamed !== undefined) return renamed.path;
     const own = delta.find((entry) => entry.path === path && entry.oldPath === null);
-    if (own?.status === "D") continue;
-    out.set(path, own === undefined ? new Set() : await changedLineNumbers(mirror, from, head, path, env));
+    return own?.status === "D" || files.kind(path) !== "file" ? null : path;
+  };
+  const named = paths.map((path) => atHead(path)).filter((path): path is string => path !== null);
+  const deletedNamed = named.length < paths.length;
+  const changedSince = delta.filter((entry) => entry.status !== "D" && files.kind(entry.path) === "file");
+
+  // The files tied to the blocker, the named ones first so a cap never drops them.
+  const tied = new Set<string>(named);
+  const near = new Set<string>();
+  for (const path of named) {
+    for (const test of readTestsFor(path, files, graph, Number.POSITIVE_INFINITY)) near.add(test);
+    for (const hop of [...graph.importsOf(path), ...graph.importersOf(path)]) near.add(hop);
   }
-  return out;
+  if (deletedNamed) for (const entry of changedSince) near.add(entry.path);
+  for (const path of sortedUnique(near)) if (files.kind(path) === "file" && tied.size < MAX_FIX_FILES) tied.add(path);
+
+  for (const path of tied) {
+    const entry = delta.find((item) => item.path === path && item.status !== "D");
+    if (entry === undefined) out.set(path, new Set());
+    else if (entry.status === "R" && entry.oldPath !== null) out.set(path, await changedLineNumbers(mirror, from, head, path, env, entry.oldPath));
+    else out.set(path, await changedLineNumbers(mirror, from, head, path, env));
+  }
+
+  // Did the quoted defect leave its file for another file changed since?
+  let moved: string | null = null;
+  const quotes = Array.isArray(blocker.finding.quotes) ? blocker.finding.quotes : [];
+  const namedTexts = named.map((path) => squeezed(files.text(path) ?? ""));
+  for (const quote of quotes) {
+    if (moved !== null || !isJsonObject(quote) || typeof quote.text !== "string" || typeof quote.path !== "string") continue;
+    const part = squeezed(quote.text);
+    if (part === "") continue;
+    const home = atHead(quote.path);
+    if (home !== null && squeezed(files.text(home) ?? "").includes(part)) continue;
+    if (namedTexts.some((text) => text.includes(part))) continue;
+    for (const entry of changedSince) {
+      if (entry.path === home) continue;
+      const now = occurrences(squeezed(files.text(entry.path) ?? ""), part);
+      if (now === 0) continue;
+      let before = 0;
+      if (entry.status !== "A") {
+        const old = (await treeAt(from)).get(entry.oldPath ?? entry.path);
+        const bytes = old === undefined || old.type !== "blob" ? undefined : (await readBlobs(mirror, [old.oid], env)).blobs.get(old.oid);
+        before = bytes === undefined ? 0 : occurrences(squeezed(decodeText(bytes)), part);
+      }
+      if (now > before) {
+        moved = `the code the blocker quotes is no longer in ${quote.path} but now lies in ${entry.path}, a file changed since it was found: a moved defect is not a fixed one`;
+        break;
+      }
+    }
+  }
+  return { files: out, moved };
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
@@ -457,18 +595,19 @@ function sortedUnique(items: Iterable<string>): string[] {
   return [...new Set(items)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-function readTestsFor(unitPath: string, files: TreeFiles, graph: ImportGraph): string[] {
+/** A unit's tests: those named for it, and up to `importing` other tests that import it (spec 07 §2.5: three). */
+function readTestsFor(unitPath: string, files: TreeFiles, graph: ImportGraph, importing = 3): string[] {
   if (TEST_RE.test(unitPath)) return [];
   const dir = posix.dirname(unitPath);
   const stem = posix.basename(unitPath).replace(/\.[^.]+$/, "");
   const named = [`${stem}.test.ts`, `${stem}.test.tsx`, `${stem}.db.test.ts`]
     .map((name) => (dir === "." ? name : `${dir}/${name}`))
     .filter((path) => files.has(path));
-  const importing = graph
+  const importers = graph
     .importersOf(unitPath)
     .filter((path) => TEST_RE.test(path) && !named.includes(path))
-    .slice(0, 3);
-  return [...named, ...importing];
+    .slice(0, importing);
+  return [...named, ...importers];
 }
 
 function readRulesFiles(engineRoot: string): Array<{ path: string; text: string }> {
@@ -485,19 +624,23 @@ function readRulesFiles(engineRoot: string): Array<{ path: string; text: string 
   return out;
 }
 
-function priorBlockData(priors: ReadonlyMap<string, OpenBlocker>): string {
-  const list = [...priors].map(([promptId, blocker]) => ({
-    id: promptId,
-    lens: blocker.finding.lens,
-    ...(blocker.finding.profile === undefined ? {} : { profile: blocker.finding.profile }),
-    class: blocker.finding.class,
-    severity: blocker.finding.severity,
-    where: blocker.finding.where,
-    quotes: blocker.finding.quotes,
-    title: blocker.finding.title,
-    claim: blocker.finding.claim,
-    scenario: blocker.finding.scenario,
-  }));
+function priorBlockData(priors: ReadonlyMap<string, OpenBlocker>, scopes: ReadonlyMap<string, FixScope>): string {
+  const list = [...priors].map(([promptId, blocker]) => {
+    const tied = sortedUnique(scopes.get(blocker.id)?.files.keys() ?? []);
+    return {
+      id: promptId,
+      lens: blocker.finding.lens,
+      ...(blocker.finding.profile === undefined ? {} : { profile: blocker.finding.profile }),
+      class: blocker.finding.class,
+      severity: blocker.finding.severity,
+      where: blocker.finding.where,
+      quotes: blocker.finding.quotes,
+      title: blocker.finding.title,
+      claim: blocker.finding.claim,
+      scenario: blocker.finding.scenario,
+      fixMayBeIn: tied.length > MAX_FIX_LISTED ? [...tied.slice(0, MAX_FIX_LISTED), `... and ${tied.length - MAX_FIX_LISTED} more`] : tied,
+    };
+  });
   return dataBlock(`# Prior blockers\n${JSON.stringify(list, null, 2)}\n`);
 }
 
@@ -750,8 +893,14 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     // it and stays open until that lens quotes its fix on lines changed since it was found.
     const carriedFrom = await newestRunOnHistory(deps.home, req.pr, head, mirror, env);
     const priorBlockers = carriedFrom?.openBlockers ?? [];
-    const fixLinesByBlocker = new Map<string, Map<string, Set<number>>>();
-    for (const blocker of priorBlockers) fixLinesByBlocker.set(blocker.id, await fixLinesFor(mirror, blocker.foundAt, head, blocker, env));
+    const trees = new Map<string, Map<string, TreeEntry>>();
+    const treeAt: TreeAt = async (sha) => {
+      let tree = trees.get(sha);
+      if (tree === undefined) trees.set(sha, (tree = new Map((await lsTree(mirror, sha, env)).map((entry) => [entry.path, entry]))));
+      return tree;
+    };
+    const fixScopesByBlocker = new Map<string, FixScope>();
+    for (const blocker of priorBlockers) fixScopesByBlocker.set(blocker.id, await fixScopeFor(mirror, blocker.foundAt, head, blocker, files, graph, treeAt, env));
 
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
     const lensSet = new Set<Lens>(tier === null ? [] : requiredLenses(config.lenses, tier, changed.map((path) => path.path)));
@@ -789,7 +938,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // ---- sessions ----
-    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, fixLinesByBlocker, patch, unitDiffs, rulesFiles: engine.rulesFiles ?? readRulesFiles(deps.engineRoot) });
+    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, fixScopesByBlocker, patch, unitDiffs, rulesFiles: engine.rulesFiles ?? readRulesFiles(deps.engineRoot) });
     writeJson(join(runDir, "plan.json"), {
       v: 1,
       runId,
@@ -828,6 +977,8 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     const findings: FindingRecord[] = [];
     const verifications: Array<Promise<void>> = [];
     const priorStatus = new Map<string, "fixed" | "open">();
+    /** What the lens shown each prior blocker said of it, and what its fix check found. */
+    const priorClaims = new Map<string, PriorClaim>();
     let findingCount = 0;
     let verifyCouldNotCheck = false;
     state.to("reviewing");
@@ -977,10 +1128,62 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       }
     };
 
+    /**
+     * The fix check of a prior blocker a lens claims fixed, with a claim the engine accepted: the
+     * blocker's finding and the claimed fix go to a sceptic (two, the second on the attack model,
+     * for a high or critical blocker), asked whether the defect can still happen at this head. It
+     * closes only when every one refutes it with a guard quoted from this head; a confirmation, an
+     * UNSURE, an unguarded refutation or a session that could not answer leaves it open (and a
+     * model mismatch or a budget stop makes the run could-not-check, as for any sceptic).
+     */
+    const checkFix = async (blocker: OpenBlocker, fixWhere: Where, fixQuote: Quote): Promise<void> => {
+      const claim = priorClaims.get(blocker.id);
+      if (claim === undefined) return;
+      claim.outcome = "checking";
+      const index = String(priorBlockers.indexOf(blocker) + 1).padStart(3, "0");
+      const roles: Role[] = severityRank(blocker.finding.severity) >= severityRank("high") ? ["sceptic1", "sceptic2"] : ["sceptic1"];
+      const prompt = fixCheckPrompt(blocker.finding, { fixWhere, fixQuote }, procedure.fixCheckPrompt);
+      const schema = procedure.schemas.sceptic;
+      for (const role of roles) {
+        const id = `${role}-prior-${index}`;
+        const record: SessionRecord = { id, role, lensKey: `fix:${blocker.id}`, state: "pending", result: null, unitIds: [] };
+        records.push(record);
+        const accept = (output: unknown): string | null => {
+          if (!isJsonObject(output)) return "the output is not an object";
+          const quotes = output["guardQuotes"];
+          return Array.isArray(quotes) ? quotesProblem(quotes as unknown as Quote[], files) : null;
+        };
+        const result = await runSession(record, specFor(role, id, {}, prompt, schema), accept);
+        const usable =
+          result !== null &&
+          isJsonObject(result.output) &&
+          (result.state === "ok" || (result.failure === "schema" && compileSchema(schema)(result.output).length === 0));
+        if (result === null || !usable || !isJsonObject(result.output)) {
+          const issue = result === null ? `${role} ${record.state}` : `${role} ${record.state}${result.failure === undefined ? "" : ` (${result.failure})`}`;
+          claim.checks.push({ role, session: id, verdict: null, guarded: false, guardQuotes: [], reason: "", issue });
+          claim.outcome = "unchecked";
+          if (result === null || result.failure === "model_mismatch" || result.failure === "budget") verifyCouldNotCheck = true;
+          return;
+        }
+        const out = result.output;
+        const verdict = typeof out["verdict"] === "string" ? out["verdict"] : "UNSURE";
+        const guardQuotes = Array.isArray(out["guardQuotes"]) ? (out["guardQuotes"] as unknown as Quote[]) : [];
+        const guarded = verdict === "REFUTED" && guardQuotes.length > 0 && quotesProblem(guardQuotes, files) === null;
+        const reason = filterText(typeof out["reason"] === "string" ? out["reason"] : "", procedure.injectionPatterns);
+        claim.checks.push({ role, session: id, verdict, guarded, guardQuotes, reason });
+        if (!guarded) {
+          claim.outcome = verdict === "CONFIRMED" ? "still_there" : "unsure";
+          return;
+        }
+      }
+      claim.outcome = "fixed";
+      priorStatus.set(blocker.id, "fixed");
+    };
+
     const runLens = async (plan: SessionPlan): Promise<void> => {
       const record: SessionRecord = { id: plan.id, role: plan.role, lensKey: plan.lensKey, state: "pending", result: null, unitIds: plan.units.map((unit) => unit.id) };
       records.push(record);
-      const ctx: ValidationContext = { schema: plan.schema, checklist: plan.checklist, allowed: plan.allowed, files, fixLines: plan.fixLines };
+      const ctx: ValidationContext = { schema: plan.schema, checklist: plan.checklist, allowed: plan.allowed, files, fixScopes: plan.fixScopes };
       const extra: { lens?: string; profile?: string; shard?: number } = {
         lens: plan.lens,
         ...(plan.profile === null ? {} : { profile: plan.profile.id }),
@@ -1020,12 +1223,17 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           rec.verifyIssue = "low findings get no sceptic in this slice";
         }
       }
-      // A prior blocker closes only on an answer the engine accepted whole: an output kept after a
-      // failed attempt still adds its valid findings (that only blocks more), but closes nothing.
+      // A prior blocker's claim counts only in an answer the engine accepted whole: an output kept
+      // after a failed attempt still adds its valid findings (that only blocks more), but claims
+      // nothing. A claim the engine accepts goes to a fix check; only that can close the blocker.
       if (result.state !== "ok") return;
       for (const check of validated.prior) {
         const blocker = plan.priors.get(check.id);
-        if (blocker !== undefined && check.status === "fixed" && check.problems.length === 0) priorStatus.set(blocker.id, "fixed");
+        if (blocker === undefined || priorClaims.has(blocker.id)) continue;
+        priorClaims.set(blocker.id, claimOf(plan.id, check));
+        if (check.status === "fixed" && check.problems.length === 0 && check.notAccepted.length === 0 && check.fixWhere !== undefined && check.fixQuote !== undefined) {
+          verifications.push(checkFix(blocker, check.fixWhere, check.fixQuote));
+        }
       }
     };
 
@@ -1070,7 +1278,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       if (item.blocking) blockers.push({ rule: "coverage", path: item.path, detail: `${item.path} changed and no lens could review it (${item.note}; tier ${item.tier})` });
     }
     const stillOpen = priorBlockers.filter((blocker) => priorStatus.get(blocker.id) !== "fixed");
-    for (const blocker of stillOpen) blockers.push({ rule: "prior", finding: blocker.id, lens: blocker.lensKey, detail: "a blocker open at the last reviewed head is not shown fixed" });
+    for (const blocker of stillOpen) blockers.push({ rule: "prior", finding: blocker.id, lens: blocker.lensKey, detail: stillOpenDetail(priorClaims.get(blocker.id)) });
 
     const couldNotCheck = lensKeys.some((key) => lensStates[key] !== "done") || verifyCouldNotCheck;
     const outcome: RunOutcomeName = couldNotCheck ? "could_not_check" : blockers.length > 0 ? "blocked" : "pass";
@@ -1127,7 +1335,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       v: 1,
       runId,
       findings,
-      priorBlockers: priorBlockers.map((blocker) => ({ id: blocker.id, status: priorStatus.get(blocker.id) ?? "open" })),
+      priorBlockers: priorBlockers.map((blocker) => ({ id: blocker.id, status: priorStatus.get(blocker.id) ?? "open", claim: priorClaims.get(blocker.id) ?? null })),
     });
     writeJson(join(runDir, "sessions.json"), { v: 1, runId, sessions: records });
     writeJson(join(runDir, "result.json"), summary);
@@ -1219,7 +1427,7 @@ interface PlanInput {
   readonly deleted: ReadonlyMap<string, string>;
   readonly priorBlockers: readonly OpenBlocker[];
   /** By prior blocker: each file it names (at its head path) and the lines of it changed since it was found. */
-  readonly fixLinesByBlocker: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
+  readonly fixScopesByBlocker: ReadonlyMap<string, FixScope>;
   readonly patch: { readonly text: string; readonly truncated: boolean };
   /** `commit` only: each changed unit's diff since the last reviewed head. */
   readonly unitDiffs: ReadonlyMap<string, string>;
@@ -1326,7 +1534,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
     const instruction = opts.profile === null ? (procedure.lensPrompts.get(opts.lens as Lens) ?? "") : procedure.attackPrompt;
     const prompt = lensPrompt({
       evidence: opts.evidence,
-      extra: [...opts.extraBlocks, ...(priors.size > 0 ? [priorBlockData(priors)] : [])],
+      extra: [...opts.extraBlocks, ...(priors.size > 0 ? [priorBlockData(priors, input.fixScopesByBlocker)] : [])],
       instruction,
       lens: lensName,
       checklist: items,
@@ -1347,7 +1555,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
       checklist: items.map((item) => item.id),
       allowed: opts.allowed,
       priors,
-      fixLines: new Map([...priors].map(([promptId, blocker]) => [promptId, input.fixLinesByBlocker.get(blocker.id) ?? new Map<string, Set<number>>()])),
+      fixScopes: new Map([...priors].map(([promptId, blocker]): [string, FixScope] => [promptId, input.fixScopesByBlocker.get(blocker.id) ?? { files: new Map(), moved: null }])),
     };
   };
 

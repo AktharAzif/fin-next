@@ -6,10 +6,16 @@
 // `finding` comes with at least one finding. Rule 5, the filter of free text addressed to a reviewer,
 // is src/review/injection.ts, applied by the run before anyone else sees a finding.
 //
-// A prior blocker is `fixed` only with a quote of the fix (spec 07 §2.3.2) that comes from the file
-// its `fixWhere` names, which must be a file the blocker names (or that file renamed), lies within
-// those lines, and touches a line changed since the blocker was found: what was already there then
-// cannot be its fix, so an unchanged tree, another file or the same text moved closes nothing.
+// A prior blocker's `fixed` claim is accepted only with a quote of the fix (spec 07 §2.3.2) from the
+// file its `fixWhere` names, within those lines, touching a line changed since the blocker was found,
+// in a file tied to the blocker: one it names (or that file renamed), a test of such a file, a file
+// one hop from it in the import graph, or, where a file it names was deleted since, any file changed
+// since (FixScope, computed by the run). What was already there cannot be a fix, and no claim is
+// accepted while the text the blocker quotes has left its file for another file changed since:
+// a moved defect is not a fixed one. A claim the engine cannot accept leaves the blocker open and is
+// recorded with its reasons; it does not fail the output (a fabricated quote or a path outside the
+// tree still does, as rules 2 and 3 say). An accepted claim is only a claim: the run sends it to a
+// sceptic, and the blocker closes only when the sceptic finds the defect gone (src/review/run.ts).
 //
 // An output that breaks any rule is retried once in a fresh session (§4.6). Findings are judged one
 // by one: an invalid finding is recorded as `invalid` and never shown, and the valid findings of the
@@ -64,12 +70,20 @@ export interface ValidationContext {
   /** The paths a finding may name; null for the whole tree (joins, attack, sibling). */
   readonly allowed: ReadonlySet<string> | null;
   readonly files: FileSource;
+  /** For each prior blocker shown to the session, by its prompt ID: where a fix of it may be quoted. */
+  readonly fixScopes?: ReadonlyMap<string, FixScope>;
+}
+
+/** Where a fix of one prior blocker may be quoted at the head, and whether any can be accepted. */
+export interface FixScope {
   /**
-   * For each prior blocker shown to the session (by its prompt ID), each file the blocker names, at
-   * its path at the head, with the lines of it that changed since the blocker was found. A fix can
-   * only be quoted from such lines.
+   * Each file at the head tied to the blocker (a file it names or that file renamed, a test of one,
+   * a file one hop from one; any file changed since when one it names was deleted), with the lines
+   * of it that changed since the blocker was found. A fix is quoted only from such lines.
    */
-  readonly fixLines?: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
+  readonly files: ReadonlyMap<string, ReadonlySet<number>>;
+  /** Why no claim can be accepted however it is quoted (the quoted defect moved to another file); null otherwise. */
+  readonly moved: string | null;
 }
 
 export interface FindingCheck {
@@ -81,9 +95,12 @@ export interface FindingCheck {
 
 export interface PriorCheck {
   readonly id: string;
-  /** "fixed" only with a valid quote of the fix. */
+  /** "fixed" when the session claims a fix the engine accepts (for a sceptic to check); else "open". */
   readonly status: "fixed" | "open";
+  /** Rule 1 to 3 problems: the output is rejected and retried. */
   readonly problems: readonly string[];
+  /** Why a well-formed `fixed` claim cannot be accepted: the blocker stays open, the output stands. */
+  readonly notAccepted: readonly string[];
   readonly fixWhere?: Where;
   readonly fixQuote?: Quote;
 }
@@ -130,16 +147,21 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
 }
 
 /**
- * Why a quoted fix of prior blocker `id` cannot show that it was fixed: the quote must come from
- * the file `where` names, which must be a file the blocker itself names (or that file renamed), lie
- * within its lines, and touch a line that changed since the blocker was found. Nothing that was
- * already there when the blocker was found can be its fix, nor anything in another file: a line
- * changed elsewhere, or the same text moved to a new file, fixes nothing the blocker names.
+ * Why a quoted fix of prior blocker `id` cannot be accepted: the quote must come from the file
+ * `where` names, a file tied to the blocker (FixScope.files), lie within its lines, and touch a line
+ * that changed since the blocker was found; and the text the blocker quotes must not have moved to
+ * another file changed since. Nothing that was already there when the blocker was found can be its
+ * fix, nor a line changed in a file unrelated to it.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
+  const scope = ctx.fixScopes?.get(id);
+  if (scope === undefined) return [`${id} is not a prior blocker shown to this session`];
+  if (scope.moved !== null) return [`${id}: ${scope.moved}`];
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
-  const changed = ctx.fixLines?.get(id)?.get(where.path);
-  if (changed === undefined) return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not a file the blocker names (or that file renamed)`];
+  const changed = scope.files.get(where.path);
+  if (changed === undefined) {
+    return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not tied to the blocker (a file it names or that file renamed, a test of one, or a file one hop from one)`];
+  }
   const text = ctx.files.text(where.path) ?? "";
   const slice = text.split("\n").slice(where.startLine - 1, where.endLine).join("\n");
   const wanted = lf(quote.text);
@@ -224,22 +246,28 @@ export function validateOutput(output: unknown, ctx: ValidationContext): Validat
     const id = raw["id"];
     const schemaProblems = (priorErrors.get(index) ?? []).map(describe);
     if (schemaProblems.length > 0) {
-      prior.push({ id, status: "open", problems: schemaProblems });
+      prior.push({ id, status: "open", problems: schemaProblems, notAccepted: [] });
       return;
     }
     if (raw["status"] !== "fixed") {
-      prior.push({ id, status: "open", problems: [] });
+      prior.push({ id, status: "open", problems: [], notAccepted: [] });
       return;
     }
     const fixWhere = raw["fixWhere"] as unknown as Where | undefined;
     const fixQuote = raw["fixQuote"] as unknown as Quote | undefined;
     if (fixWhere === undefined || fixQuote === undefined) {
-      prior.push({ id, status: "open", problems: [`${id} is marked fixed without a quoted fix at a path:line`] });
+      prior.push({ id, status: "open", problems: [], notAccepted: [`${id} is marked fixed without a quoted fix at a path:line`] });
       return;
     }
+    // Rules 2 and 3: a place outside the tree or a quote that is not in its file is a wrong answer.
     const problems = [...whereProblems(fixWhere, ctx, null), ...quoteProblems(fixQuote, ctx)];
-    if (problems.length === 0) problems.push(...fixProblems(id, fixWhere, fixQuote, ctx));
-    prior.push(problems.length === 0 ? { id, status: "fixed", problems, fixWhere, fixQuote } : { id, status: "open", problems });
+    if (problems.length > 0) {
+      prior.push({ id, status: "open", problems, notAccepted: [] });
+      return;
+    }
+    // A true quote the engine cannot take as a fix leaves the blocker open; the output stands.
+    const notAccepted = fixProblems(id, fixWhere, fixQuote, ctx);
+    prior.push(notAccepted.length === 0 ? { id, status: "fixed", problems: [], notAccepted, fixWhere, fixQuote } : { id, status: "open", problems: [], notAccepted, fixWhere, fixQuote });
   });
 
   const gaps = Array.isArray(output["procedureGaps"]) ? output["procedureGaps"].filter((gap): gap is string => typeof gap === "string") : [];

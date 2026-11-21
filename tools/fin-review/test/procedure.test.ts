@@ -39,6 +39,11 @@ describe("docs/review", () => {
     assert.match(PROCEDURE.attackPrompt, /Quote the guard on every path with\s+its `path:line`/);
     assert.match(PROCEDURE.scepticPrompt, /REFUTED/);
     assert.match(PROCEDURE.secondLookPrompt, /break the refutation/);
+    // The fix check: the defect at this head, wherever its code now lives, refuted only with a guard.
+    assert.match(PROCEDURE.fixCheckPrompt, /^# The fix check\n/);
+    assert.match(PROCEDURE.fixCheckPrompt, /anywhere the same code now lives \(moved, renamed or copied\)/);
+    assert.match(PROCEDURE.fixCheckPrompt, /A\s+refutation without a quoted guard counts as UNSURE/);
+    assert.equal(PROCEDURE.sources.has("docs/review/prompts/fix-check.md"), true, "its bytes are part of the engine-copy check");
   });
 
   it("attack.md's profile table lists exactly the profiles of attack-profiles.json, with the same paths", () => {

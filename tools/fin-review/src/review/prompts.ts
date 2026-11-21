@@ -161,6 +161,8 @@ export function lensPrompt(input: LensPromptInput): string {
       "",
       `The blocking findings open at the last reviewed head are in the DATA block headed "Prior blockers" (${input.priorIds.join(", ")}). For each, return an entry in \`priorBlockers\` with its \`id\`: \`fixed\` only when a change made since the blocker was found fixes it, with \`fixWhere\` giving the lines of that fix (they must include a line that changed since then) and \`fixQuote\` quoting the fix exactly, from those lines of the same file; otherwise \`open\`. Saying nothing keeps a blocker open.`,
       "",
+      "A fix is accepted only from a file tied to the blocker, which its entry lists as `fixMayBeIn`: a file the blocker names (or that file renamed), a test of such a file, or a file one hop from one (a file it imports or a file that imports it); when a file the blocker names was deleted since, any file changed since. Moving, renaming or copying the defect is not a fix: no claim is accepted while the code the blocker quotes has moved to another changed file. A sceptic checks every fix you claim at this head, and the blocker stays open unless the sceptic finds the defect gone, so claim `fixed` only for a defect that can no longer happen.",
+      "",
     );
   }
   return parts.join("\n");
@@ -186,6 +188,17 @@ export function findingEvidence(finding: Finding): Record<string, unknown> {
 /** The user message of a sceptic session. */
 export function scepticPrompt(finding: Finding, instruction: string): string {
   const evidence = dataBlock(`# The candidate finding\n${JSON.stringify(findingEvidence(finding), null, 2)}\n`);
+  return [evidence, "# Your task", "", instruction.trim(), ""].join("\n");
+}
+
+/**
+ * The user message of a fix check: a sceptic shown a prior blocker's finding and the fix a lens
+ * claims for it, asked whether the defect can still happen at this head.
+ */
+export function fixCheckPrompt(finding: Finding, claim: { readonly fixWhere: unknown; readonly fixQuote: unknown }, instruction: string): string {
+  const evidence = dataBlock(
+    `# The blocking finding (reported on an earlier head of this pull request)\n${JSON.stringify(findingEvidence(finding), null, 2)}\n\n# The fix a lens claims (at the head you are given)\n${JSON.stringify({ fixWhere: claim.fixWhere, fixQuote: claim.fixQuote }, null, 2)}\n`,
+  );
   return [evidence, "# Your task", "", instruction.trim(), ""].join("\n");
 }
 

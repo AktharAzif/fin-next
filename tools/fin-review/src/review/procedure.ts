@@ -46,6 +46,8 @@ export interface Procedure {
   readonly attackPrompt: string;
   readonly scepticPrompt: string;
   readonly secondLookPrompt: string;
+  /** The sceptic's task for a prior blocker a lens claims fixed (prompts/fix-check.md). */
+  readonly fixCheckPrompt: string;
   /** Checklists by lens, and `attack`. */
   readonly checklists: ReadonlyMap<string, readonly ChecklistItem[]>;
   readonly schemas: { readonly session: object; readonly sceptic: object; readonly secondLook: object; readonly doctor: object };
@@ -212,6 +214,7 @@ export function loadProcedure(dir: string): Procedure {
   const attackPrompt = readText(r, "prompts/attack.md") ?? "";
   const scepticPrompt = readText(r, "prompts/sceptic.md") ?? "";
   const secondLookPrompt = readText(r, "prompts/second-look.md") ?? "";
+  const fixCheckPrompt = readText(r, "prompts/fix-check.md") ?? "";
   const schemas = {
     session: schemaFile(r, "schema/session-output.schema.json"),
     sceptic: schemaFile(r, "schema/sceptic-output.schema.json"),
@@ -230,6 +233,7 @@ export function loadProcedure(dir: string): Procedure {
     attackPrompt,
     scepticPrompt,
     secondLookPrompt,
+    fixCheckPrompt,
     checklists,
     schemas: Object.freeze(schemas),
     profiles: Object.freeze(profiles),

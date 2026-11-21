@@ -11,6 +11,7 @@ tree under review, so a pull request cannot change the procedure that judges it.
 | `prompts/lens-<lens>.md` | The question and method of each lens: correctness, security, quality, performance, rules, joins, test-truth, infra, dependency |
 | `prompts/attack.md` | The attack pass and its profile table |
 | `prompts/sceptic.md`, `prompts/second-look.md` | The sceptic and the second look of §2.9 |
+| `prompts/fix-check.md` | The sceptic's task for a prior blocker a lens claims fixed (below, under prior blockers) |
 | `checklists/<lens>.md` | Each lens's items (`- **ID** text`); every list has ALL-01 |
 | `schema/session-output.schema.json` | A lens, joins or attack session's output (§2.8); the engine narrows `lens`, `profile`, `checked[].item` and `priorBlockers[].id` per session |
 | `schema/sceptic-output.schema.json`, `schema/second-look-output.schema.json`, `schema/doctor-output.schema.json` | The other sessions' outputs |
@@ -126,15 +127,30 @@ the bytes on the disk) and whether it was the default branch's engine copy.
   records the delta's).
 - **Prior blockers.** Every run, `pr` and an escalated `commit` included, carries the blockers left
   open by the newest gating run of the pull request at the head or at one of its ancestors. Each is
-  shown again (as `P1`, `P2`, ...) to the lens that found it, and it closes only when that lens marks
-  it `fixed` with a `fixWhere` and a `fixQuote` from the same file, that file one the blocker itself
-  names (or that file renamed since, found with git's rename detection), the quote within those lines
-  and touching a line that changed since the blocker was found (compared with the file before its
-  rename, so a file moved as it was has no changed line). Text that was already there cannot be a
-  fix, so a run on an unchanged head, a changed line of another file, or the same text moved to a
-  new file closes nothing; silence keeps a blocker open. A claim counts only in an output the engine
-  accepted whole: a lens that ended `incomplete` closes nothing, though its valid findings still
-  count. No sceptic checks a fix claim in this slice.
+  shown again (as `P1`, `P2`, ...) to the lens that found it, with `fixMayBeIn`: the files where a
+  fix of it may lie. A blocker closes in two steps. First the engine must accept the lens's `fixed`
+  claim: a `fixWhere` and a `fixQuote` from the same file, the quote within those lines and touching
+  a line that changed since the blocker was found (compared with the file before its rename, so a
+  file moved as it was has no changed line), in a file tied to the blocker: one it names (or that
+  file renamed since, found with git's rename detection), a test of such a file (by name, or a test
+  that imports it), or a file one hop from one in the head's import graph (its imports and
+  importers); where a file the blocker names was deleted since, any file changed since. And no claim
+  is accepted while the code the blocker quotes (compared with white space taken out) has left its
+  own file and occurs more often than before in another file changed since: a moved defect, and the
+  line a move leaves behind, are not a fix. Then the claim goes to a fix check
+  (`prompts/fix-check.md`, the sceptic schema): a sceptic on the overall model, and for a high or
+  critical blocker a second on the attack model, each shown the finding and the claimed fix and
+  asked whether the defect can still happen at this head; the blocker closes only when every one
+  refutes it with a guard quoted from the head. A confirmation, an UNSURE, an unguarded refutation or
+  a check that could not run keeps it open (a model mismatch or a budget stop in a check makes the
+  run could-not-check). Text that was already there cannot be a fix, so a run on an unchanged head,
+  or a changed line of a file unrelated to the blocker, closes nothing; silence keeps a blocker open.
+  A claim the engine cannot accept keeps the blocker open without failing the lens (its reasons are
+  in `findings.json`); a claim whose place or quote is not in the tree is a wrong answer, which fails
+  the output as any finding's would. A claim counts only in an output the engine accepted whole: a
+  lens that ended `incomplete` claims nothing, though its valid findings still count. `findings.json`
+  records, for every carried blocker, what the lens said, why a claim was not accepted, and each
+  check's verdict.
 - **Output.** stdout holds counts only. `$FIN_REVIEW_HOME/runs/<run-id>/` holds `state.json`,
   `plan.json`, each session's settings, MCP config and result, `findings.json` (every candidate,
   invalid ones included with their reasons), `summary.md` (the findings' text; invalid ones are never
