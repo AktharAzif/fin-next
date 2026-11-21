@@ -12,12 +12,15 @@ a `--rotate-ingress-proofs` step exists, rotate one host by hand-off to the comm
    request header transform phase. Requests to that host now arrive without a proof and get 403
    `ingress.untrusted_peer`: do this in a quiet window.
 2. Delete that one rule, then run `node ops/fin/src/main.ts zone apply staging --only rules`. It
-   generates a new proof for the role, sets it sealed in `FIN_INGRESS_PROOFS` on the service that
-   checks it, and only then writes the rule again. The variable commit starts no deployment
-   (`skipDeploys`): the service still holds the old proof.
-3. Redeploy it: run `railway deploy` again for the release staging runs (`railway-deploy.md`); every
-   Fin service rolls and takes its variables.
-4. Check: `/api/health` answers through the host; no `ingress.untrusted_peer` lines after the
+   generates a new proof for the role and sets it sealed in `FIN_INGRESS_PROOFS` on the service
+   that checks it, in a commit that starts no deployment, read back until it shows. Then it
+   redeploys that service as a step of its own (the rotation, `pnpm-fin.md`: `~ update redeploy
+   <service> [FIN_INGRESS_PROOFS]`, a `run.step` and a `rotation.redeployed` line), waits for
+   `SUCCESS`, reads back again, and only then writes the rule that sends the new proof. If the
+   redeploy or a read-back fails, no rule is written and the output says the rotation is not done:
+   fix the cause and run the same command again (the rule is still missing, so it makes a proof
+   once more and redeploys).
+3. Check: `/api/health` answers through the host; no `ingress.untrusted_peer` lines after the
    redeploy.
 
 The two-value overlap (add the new value to the service, deploy, switch the rule, remove the old

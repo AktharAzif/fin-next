@@ -54,6 +54,11 @@ export interface PlanHooks {
    * way the run ends, so the run log names it even when no one saw the output.
    */
   leftover?: () => string | undefined;
+  /**
+   * Fields run.done records on every way the run ends, as they stand when it closes (railway
+   * deploy's `awaitingRemoval`: the variables it overwrote with the inert value). Never printed.
+   */
+  record?: () => Record<string, unknown>;
   /** Read back after a registered run's changes; its fields join `run.done` (never printed). */
   after?: () => Promise<Record<string, unknown>>;
 }
@@ -199,7 +204,13 @@ export class Context {
         // run.done records it all the same.
       }
     }
-    this.run.finish(result, { ...fields, ...left });
+    let recorded: Record<string, unknown> = {};
+    try {
+      recorded = this.#hooks.record?.() ?? {};
+    } catch {
+      // run.done is written all the same.
+    }
+    this.run.finish(result, { ...fields, ...recorded, ...left });
   }
 
   /** What finishRun records about the cleanup: nothing when it has nothing left to undo. */

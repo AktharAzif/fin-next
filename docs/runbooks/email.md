@@ -30,8 +30,8 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`.
 
 ## Containment
 
-1. A token problem: rotate it (`rotate-email-token`): `pnpm fin email token staging`, then deploy
-   worker.
+1. A token problem: rotate it (`rotate-email-token`): `pnpm fin email token staging --rotate`,
+   which redeploys worker with the new token and reads it back before it revokes the old one.
 2. A setting change: restore it with `pnpm fin email domains staging` and read it back; never
    remove a sending domain without restoring DMARC. A weakened or missing DMARC record lets
    anyone send as `auth.` or `notify.`: restore it at `p=reject` (BD-17) first, then look for

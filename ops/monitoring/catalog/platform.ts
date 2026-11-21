@@ -459,4 +459,13 @@ export const entries: readonly CatalogEntry[] = [
     noAlert:
       "what it names is bounded and caught again without it: the one-run token expires within the hour, and a superuser reference left on migrate refuses the next railway deploy and is reported by railway verify (superuser-reference); run.done in the run log records the same instruction",
   },
+  {
+    event: "rotation.redeployed",
+    kind: "unit",
+    level: "info",
+    writtenBy:
+      "pnpm fin email token, tunnel create and zone apply, once a service that held a rotated secret runs a deployment that took the new value, read back (the steward's ruling of 22 Nov: a rotation is done only then)",
+    fields: { command: "string", services: "string[]", variables: "string[]" },
+    alerts: [],
+  },
 ];

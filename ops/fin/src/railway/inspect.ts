@@ -11,11 +11,15 @@
 //
 // Variables are read unrendered, so a reference (`${{postgres.DATABASE_URL}}`) is seen as a
 // reference and never rendered into a value that carries the template's password. Of the values,
-// only PORT's is kept; for every other variable only the name is kept, and whether it refers to a
-// template's variables (spec 01 §6.3). Nothing else of a value is kept, printed or logged. Railway
+// only PORT's and the write marker's (FIN_VARIABLES_RUN, which every `pnpm fin` commit sets to its
+// run and write) are kept; for every other variable only the name is kept, whether it refers to a
+// template's variables (spec 01 §6.3), whether it holds the inert value a run leaves instead of a
+// removal (rule 3 of the steward's ruling of 22 Nov), and, when the caller names the values it
+// wrote, whether each one differs. Nothing else of a value is kept, printed or logged. Railway
 // answers a sealed variable with its name and a null value: such a name is sealed, and present.
 // The read is eventually consistent: straight after a write it may still answer what stood before,
-// so a read-back of a write is tried again for a short, bounded time (readVariablesBack).
+// so a read-back of a write is tried again for a short, bounded time (readVariablesBack), and
+// counts only once it shows that write (the marker; rule 4).
 //
 // Names come from Railway, so every lookup by one goes through Object.hasOwn: a service named
 // `constructor` is an unknown service like any other.
@@ -51,6 +55,8 @@ export interface InstanceState {
   sealedVariables?: string[];
   /** The readable variables whose value refers to a template service's variables (§6.3). */
   templateReferences?: string[];
+  /** The readable variables that hold the inert value: each waits for removal (rule 3). */
+  inertVariables?: string[];
   /** PORT's value, or null when it is not readable (§6.2: PORT=8080 on every service). */
   port?: string | null;
   egress?: string[];
@@ -104,6 +110,20 @@ const VARIABLES =
 /** The superuser reference that may exist only inside a registered run (spec 01 §6.3, §6.6). */
 export const BOOTSTRAP_REFERENCE = "FIN_BOOTSTRAP_DATABASE_URL";
 
+/**
+ * The plain variable every `pnpm fin` variable commit sets, in the same commit, to the run and the
+ * write that made it (`<run ID>:<n>`): a read that shows it has seen that write (rule 4). Not a
+ * secret, and read by no Fin service.
+ */
+export const WRITE_MARKER = "FIN_VARIABLES_RUN";
+
+/**
+ * The value a variable is overwritten with where no deployment is wanted, instead of a removal
+ * (rule 3: Railway's variableDelete takes no skipDeploys). It is no URL, so `migrate` refuses it at
+ * its configuration check as it refuses an absent superuser reference.
+ */
+export const INERT_VALUE = "inert";
+
 /** The rows of spec 01 §6.2, §6.3 and §6.8 that Phase 0 has no read for. */
 export const NO_READ_ROWS = [
   "memory limits, PITR and the deployment webhook (no read in Phase 0; checked by hand against spec 01 §6)",
@@ -124,6 +144,8 @@ export interface Inspection {
   variablesUnread: string[];
   /** Whether Railway refused the instance settings read: health checks and the rest unread. */
   settingsUnread: boolean;
+  /** `<service> <variable>` for each variable that holds the inert value (rule 3). */
+  awaitingRemoval: string[];
 }
 
 /**
@@ -184,20 +206,33 @@ export interface Variables {
   sealed: string[];
   /** The readable variables whose value refers to a template service's variables. */
   templateReferences: string[];
+  /** The readable variables that hold the inert value (rule 3). */
+  inert: string[];
   /** PORT's value, or null when it is not readable. */
   port: string | null;
+  /** The write marker's value (WRITE_MARKER), or null when it is not readable. */
+  marker: string | null;
+  /** Of the values the caller expected, the names whose readable value is not that value. */
+  differs: string[];
+}
+
+/** A variable's own value from Railway's answer (a name like `constructor` is a name like any). */
+function own(variables: Readonly<Record<string, unknown>>, name: string): unknown {
+  return Object.hasOwn(variables, name) ? variables[name] : undefined;
 }
 
 /**
  * Reads one service's variables, unrendered, and keeps only what the checks need: the readable
- * names, the sealed names, the names that refer to a template, and PORT's value. Throws on a
- * refusal like any read.
+ * names, the sealed names, the names that refer to a template or hold the inert value, PORT's
+ * value, the write marker's value, and, of `expect` (plain values the caller wrote), the names
+ * whose value differs. Throws on a refusal like any read.
  */
 export async function readVariables(
   rw: RailwayApi,
   settings: Settings,
   service: string,
   serviceId: string,
+  expect: Readonly<Record<string, string>> = {},
 ): Promise<Variables> {
   const v = await rw.query<{ variables: Record<string, unknown> | null }>(VARIABLES, {
     projectId: rw.projectId,
@@ -205,13 +240,19 @@ export async function readVariables(
     serviceId,
   });
   const variables = v.variables ?? {};
-  const port = Object.hasOwn(variables, "PORT") ? variables.PORT : undefined;
+  const port = own(variables, "PORT");
+  const marker = own(variables, WRITE_MARKER);
   const names = Object.keys(variables);
   return {
     readable: names.filter((name) => variables[name] !== null),
     sealed: names.filter((name) => variables[name] === null),
     templateReferences: templateReferences(service, variables, templateServices(settings)),
+    inert: names.filter((name) => variables[name] === INERT_VALUE),
     port: typeof port === "string" ? port : null,
+    marker: typeof marker === "string" ? marker : null,
+    differs: Object.entries(expect)
+      .filter(([name, value]) => own(variables, name) !== value)
+      .map(([name]) => name),
   };
 }
 
@@ -223,7 +264,9 @@ export const READ_BACK_PAUSE_MS = 2_000;
  * Reads back one service's variables after a write, until `settled` says the write shows, or
  * READ_BACK_READS reads were made: Railway's read is eventually consistent, so a read straight
  * after a write may still answer what stood before it. Returns the last read, which alone may
- * report a mismatch. A refusal or a failed read throws at once, like any read.
+ * report a mismatch. A refusal or a failed read throws at once, like any read. A caller's
+ * `settled` holds only for a read that shows the write itself (its marker), never for one that
+ * merely lacks what the write replaced: a read from before the write lacks it too (rule 4).
  */
 export async function readVariablesBack(
   rw: RailwayApi,
@@ -232,9 +275,10 @@ export async function readVariablesBack(
   serviceId: string,
   sleep: (ms: number) => Promise<void>,
   settled: (variables: Variables) => boolean,
+  expect: Readonly<Record<string, string>> = {},
 ): Promise<Variables> {
   for (let read = 1; ; read++) {
-    const variables = await readVariables(rw, settings, service, serviceId);
+    const variables = await readVariables(rw, settings, service, serviceId, expect);
     if (settled(variables) || read >= READ_BACK_READS) return variables;
     await sleep(READ_BACK_PAUSE_MS);
   }
@@ -340,6 +384,7 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
       state.readableVariables = v.readable;
       state.sealedVariables = v.sealed;
       state.templateReferences = v.templateReferences;
+      state.inertVariables = v.inert;
       state.port = v.port;
     } catch (error) {
       if (!isRefusal(error)) throw error;
@@ -381,7 +426,25 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
   for (const [field, names] of unanswered)
     notChecked.push(`${field} of ${names.join(", ")} (Railway answered no value)`);
   notChecked.push(...NO_READ_ROWS);
-  return { instances, notChecked, egressUnread, variablesUnread, settingsUnread };
+  const awaitingRemoval = [...instances].flatMap(([name, state]) =>
+    (state.inertVariables ?? []).map((variable) => `${name} ${variable}`),
+  );
+  return { instances, notChecked, egressUnread, variablesUnread, settingsUnread, awaitingRemoval };
+}
+
+/**
+ * Whether a service's variables hold the superuser reference by its own name: present and sealed
+ * (its value cannot be read), or readable with any value but the inert one (rule 3).
+ */
+export function holdsBootstrapReference(
+  readable: readonly string[],
+  sealed: readonly string[],
+  inert: readonly string[],
+): boolean {
+  return (
+    sealed.includes(BOOTSTRAP_REFERENCE) ||
+    (readable.includes(BOOTSTRAP_REFERENCE) && !inert.includes(BOOTSTRAP_REFERENCE))
+  );
 }
 
 const DIGEST_REF = /^ghcr\.io\/[a-z0-9-]+\/(fin-next-[a-z0-9-]+)@sha256:[0-9a-f]{64}$/;
@@ -419,10 +482,14 @@ function exposureFindings(
     );
   }
   const references = new Set(got.templateReferences ?? []);
-  // Present, sealed or not: a sealed superuser reference stands all the same.
+  // Present, sealed or not: a sealed superuser reference stands all the same. Only the inert value
+  // a run leaves it (rule 3), which is readable, does not.
   if (
-    (got.readableVariables ?? []).includes(BOOTSTRAP_REFERENCE) ||
-    (got.sealedVariables ?? []).includes(BOOTSTRAP_REFERENCE)
+    holdsBootstrapReference(
+      got.readableVariables ?? [],
+      got.sealedVariables ?? [],
+      got.inertVariables ?? [],
+    )
   )
     references.add(BOOTSTRAP_REFERENCE);
   if (references.size > 0) {

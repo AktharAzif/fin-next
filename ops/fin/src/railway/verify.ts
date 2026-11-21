@@ -124,6 +124,9 @@ export const railwayVerify: Command = {
       );
     ctx.out.info(`railway ${ctx.environment}: ${inspection.instances.size} service(s) read`);
     for (const f of found) ctx.out.info(`  ! ${f.service} ${f.check}: ${f.detail}`);
+    // Not drift: a value a run overwrote with the inert one, since a delete would start a
+    // deployment (rule 3); it is removed by a planned deployment that does not take it.
+    for (const a of inspection.awaitingRemoval) ctx.out.info(`  waits for removal: ${a} (inert)`);
     for (const n of inspection.notChecked) ctx.out.info(`  ? not checked: ${n}`);
     ctx.out.info(
       found.length === 0 ? "railway verify: no drift" : `railway verify: ${found.length} drift(s)`,
@@ -131,6 +134,7 @@ export const railwayVerify: Command = {
     ctx.run.line("railway.verify", found.length === 0 ? "info" : "warn", {
       drift: found.length,
       checks: found.map((f) => `${f.service}:${f.check}`),
+      awaitingRemoval: inspection.awaitingRemoval,
     });
     return found.length === 0 ? EXIT.ok : EXIT.drift;
   },

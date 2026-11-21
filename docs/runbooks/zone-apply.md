@@ -52,9 +52,14 @@ a refusal of it (a plan limit, say) never stops a required rule.
 An existing proof is kept. A host with no proof gets a new one (32 random bytes, base64url). The
 new proof is set first, sealed, as `FIN_INGRESS_PROOFS` on the services that check it (edge: api;
 console; admin; verify: verify and selfie), and only then is the rule that sends it written. That
-variable write needs `FIN_RAILWAY_TOKEN_FILE`. It commits with `skipDeploys: true`, so no deployment
-starts: each service takes its new proof at its next deployment (`railway deploy`, which rolls every
-Fin service), and until then that host answers the new rule's requests with 403.
+variable write needs `FIN_RAILWAY_TOKEN_FILE`, and so does the dry run of a plan with a new proof,
+which reads which of those services have a deployment. It commits with `skipDeploys: true`, so the
+commit starts no deployment, and is read back until a read shows it (`pnpm-fin.md`). A service with
+no deployment takes the proof at its first (`railway deploy`); nothing is deployed for it. A
+service that has a deployment holds the old proofs, so the plan redeploys it as a step of its own
+(`~ update redeploy <service> [FIN_INGRESS_PROOFS]`), waits for `SUCCESS` and reads back, before
+any rule is written: no host ever answers the new rule's requests with 403. If a redeploy or a
+read-back fails, no rule is written; run the command again once the cause is fixed.
 Escrow comes before the variable in the plan; staging has no escrow recipient yet (BD-14), so a lost
 proof is replaced by rotation (`rotate-ingress-proof.md`).
 

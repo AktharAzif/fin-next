@@ -21,17 +21,22 @@
 //   6. register the run (the lock, `deploy.started`);
 //   7. when the release lists migrations, run `migrate` with the new api image and the superuser
 //      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
-//      the run), poll its log until `migrate.done` for this release, then remove the reference and
-//      read migrate's variables back to confirm it is gone, sealed or not (again, for up to 10 s,
-//      while a lagging read still shows it; on every way the run ends: a failure,
-//      and a stop, which cuts the wait short, or, while the write that sets the reference is in
-//      flight, waits for that write and starts no migrate; a run closed at once first, or a
-//      removal that failed, says to remove it by hand, and run.done records that as `leftover`);
+//      the run), poll its log until `migrate.done` for this release, then overwrite the reference
+//      with the inert value (a commit that starts no deployment: Railway's variable delete takes
+//      no skipDeploys, so it would start a second migrate run, rule 3) and read migrate's
+//      variables back until they show that write with no reference, sealed or not (for up to
+//      10 s; a read that only lacks the reference proves nothing, rule 4); on every way the run
+//      ends: a failure, and a stop, which cuts the wait short, or, while the write that sets the
+//      reference is in flight, waits for that write and starts no migrate. A run closed at once
+//      first, an overwrite that failed, or a write setting the reference that got no answer (it
+//      may land later) says to make it inert by hand, and run.done records that as `leftover`;
+//      run.done records the inert variable as `awaitingRemoval` (railway verify lists it);
 //   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT (a
-//      commit that starts no deployment of its own, like migrate's), then the one deploy that
-//      takes them, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
-//      release's minimum schema version, recorded with every step) and the running digest;
+//      commit that starts no deployment of its own, like migrate's, read back until it shows so
+//      the deployment takes it), then the one deploy that takes them, waiting for SUCCESS
+//      (Railway's health check is /readyz, which fails below the release's minimum schema
+//      version, recorded with every step) and the running digest;
 //   9. roll cloudflared-admin and cloudflared-public unless they run the release's image now (set
 //      to it, with a newest deployment that ended SUCCESS on it);
 //  10. check again everything steps 2 and 4 refuse on, and that every service is set to the digest
@@ -52,10 +57,12 @@ import { DataError, ProviderError, RefusedError, UsageError } from "../core/erro
 import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import { checkMergeJob, verifiedManifest, verifyImage } from "../release/provenance.ts";
-import type { RailwayApi } from "./api.ts";
+import type { RailwayApi, Written } from "./api.ts";
 import {
   BOOTSTRAP_REFERENCE,
   findings,
+  holdsBootstrapReference,
+  INERT_VALUE,
   type Inspection,
   inspectRailway,
   isRefusal,
@@ -64,48 +71,32 @@ import {
   readVariablesBack,
   type Variables,
 } from "./inspect.ts";
+import {
+  confirmWrittenOrAccepted,
+  deploymentStatus,
+  FAILED,
+  POLL_MS,
+  SERVICE_TIMEOUT_MS,
+  showsWrite,
+  startDeployment,
+  waitForDeployment,
+} from "./rollout.ts";
 import { imageRef, readRunning } from "./running.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
-const POLL_MS = 5_000;
-const SERVICE_TIMEOUT_MS = 15 * 60_000;
-const FAILED = new Set(["FAILED", "CRASHED", "REMOVED", "SKIPPED"]);
 
 const INSTANCE_UPDATE =
   "mutation finInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }";
-const DEPLOY =
-  "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }";
-// UNVERIFIED field names (SP-03): a deployment's status and its log lines.
-const DEPLOYMENT = "query finDeployment($id: String!) { deployment(id: $id) { id status } }";
+// UNVERIFIED field names (SP-03): a deployment's log lines.
 const LOGS =
   "query finLogs($deploymentId: String!) { deploymentLogs(deploymentId: $deploymentId, limit: 500) { message } }";
 
-async function deploymentStatus(rw: RailwayApi, id: string): Promise<string> {
-  const data = await rw.query<{ deployment: { status: string } }>(DEPLOYMENT, { id });
-  return data.deployment.status;
-}
-
-async function waitForDeployment(
-  ctx: Context,
-  rw: RailwayApi,
-  id: string,
-  what: string,
-): Promise<void> {
-  const attempts = Math.ceil(SERVICE_TIMEOUT_MS / POLL_MS);
-  for (let i = 0; i < attempts; i++) {
-    const status = await deploymentStatus(rw, id);
-    if (status === "SUCCESS") return;
-    if (FAILED.has(status)) {
-      throw new ProviderError("railway", `${what}: the deployment ended ${status}`, 0);
-    }
-    // A stop cuts the wait short (a StoppedError), so the run closes within its settle time.
-    await ctx.run.pause(POLL_MS);
-  }
-  throw new ProviderError(
-    "railway",
-    `${what}: the deployment did not finish within ${SERVICE_TIMEOUT_MS / 60_000} minutes`,
-    0,
-  );
+/**
+ * Whether a failed write may still have been applied: it got no answer (a timeout, a lost
+ * connection) or Railway's own 5xx. Any other failure was answered, or never sent.
+ */
+function outcomeUnknown(error: unknown): boolean {
+  return error instanceof ProviderError && (error.status === 0 || error.status >= 500);
 }
 
 /**
@@ -167,8 +158,8 @@ async function waitForMigrate(
         0,
       );
     }
-    // A stop cuts the wait short (a StoppedError): the caller then removes the superuser reference
-    // while the run may still write.
+    // A stop cuts the wait short (a StoppedError): the caller then makes the superuser reference
+    // inert while the run may still write.
     await ctx.run.pause(POLL_MS);
   }
   throw new ProviderError(
@@ -307,6 +298,11 @@ export const railwayDeploy: Command = {
         `static egress differs from spec 01 §6.5 on ${egress.map((f) => f.service).join(", ")}; fix it by hand (P-13), then deploy`,
       );
     }
+    for (const a of before.awaitingRemoval) {
+      ctx.out.info(
+        `  waits for removal: ${a} (inert: a variable delete would start a deployment, so it is removed only by a planned deployment that does not take it)`,
+      );
+    }
     const egressUnchecked = before.egressUnread.length > 0;
     if (egressUnchecked && !accepted.egress) {
       throw new RefusedError(
@@ -422,104 +418,127 @@ export const railwayDeploy: Command = {
 
     let started = false;
     const reference = s.bootstrapReference;
-    /** What of the superuser reference a read of migrate's variables still shows, sealed or not. */
+    /**
+     * What of the superuser reference a read of migrate's variables still shows: any reference to
+     * the template, and the variable by its name (the settings name no other), sealed, or readable
+     * with anything but the inert value.
+     */
     const standing = (v: Variables): string[] => [
       ...new Set([
         ...v.templateReferences,
-        ...[...v.readable, ...v.sealed].filter(
-          (n) => n === reference.variable || n === BOOTSTRAP_REFERENCE,
-        ),
+        ...(holdsBootstrapReference(v.readable, v.sealed, v.inert) ? [BOOTSTRAP_REFERENCE] : []),
       ]),
     ];
     /**
-     * Confirms migrate's variables no longer hold the superuser reference (spec 01 §6.3, §6.6),
-     * reading again for a short, bounded time while a read still shows it (the read may lag the
-     * delete). The waits are not cut short by a stop: this is the clean-up a stop runs, and the
-     * stop's own deadline bounds it.
+     * Confirms migrate's variables show the inert overwrite (spec 01 §6.3, §6.6; rule 4): a read
+     * that shows the overwrite's own marker, the inert value, and no reference under any name,
+     * read again for a short, bounded time until one does (the read may lag the write). A read that
+     * only lacks the reference is no proof: a read from before the write that set it lacks it too.
+     * Returns false when Railway refused the read and the operator accepted that: nothing is
+     * proved then. The waits are not cut short by a stop: this is the clean-up a stop runs, and
+     * the stop's own deadline bounds it.
      */
-    const confirmRemoved = async (serviceId: string): Promise<void> => {
-      let left: string[];
+    const confirmInert = async (written: Written): Promise<boolean> => {
+      let v: Variables;
       try {
-        const v = await readVariablesBack(
+        v = await readVariablesBack(
           rw,
           ctx.settings,
           "migrate",
-          serviceId,
+          written.serviceId,
           ctx.runtime.sleep,
-          (read) => standing(read).length === 0,
+          (read) => showsWrite(read, written) && standing(read).length === 0,
+          written.plain,
         );
-        left = standing(v);
       } catch (error) {
         if (!isRefusal(error) || !accepted.variables) throw error;
         ctx.out.warn(
-          `Railway refused migrate's variables read: check by hand now that ${reference.variable} is gone from migrate (spec 01 §6.3)`,
+          `Railway refused migrate's variables read, so the inert overwrite of ${reference.variable} is not proved: check migrate's variables by hand now (spec 01 §6.3)`,
         );
-        return;
+        return false;
+      }
+      const left = standing(v);
+      if (!showsWrite(v, written)) {
+        throw new RefusedError(
+          `Railway's variables read never showed ${reference.variable} overwritten with ${INERT_VALUE} on migrate: ${byHand}; no service rolls while it may stand`,
+        );
       }
       if (left.length > 0) {
         throw new RefusedError(
-          `${left.includes(reference.variable) ? reference.variable : left.join(", ")} is still on migrate after its removal: remove it by hand now (spec 01 §6.3, §6.6); no service rolls while it stands`,
+          `${left.includes(reference.variable) ? reference.variable : left.join(", ")} still holds a superuser reference on migrate after it was made inert: ${byHand}; no service rolls while it stands`,
         );
       }
+      return true;
     };
     /**
-     * migrate's superuser reference, from just before it is set until its removal settles. The
-     * removal runs once, whoever asks first: migrate's own change once migrate ends, or the plan's
-     * cleanup on any other way out (an error, a stop), while the run may still write. It waits for
-     * the write that sets the reference (`setting`) to settle first, so a stop while that write is
-     * in flight (slow, or waiting out a 429) cannot delete before it lands. Until the removal is
-     * confirmed (pending, or failed), a run closed at once says to remove the reference by hand,
-     * and run.done records it (the plan's leftover).
+     * migrate's superuser reference, from just before it is set until it is made inert. The
+     * overwrite runs once, whoever asks first: migrate's own change once migrate ends, or the
+     * plan's cleanup on any other way out (an error, a stop), while the run may still write. It
+     * waits for the write that sets the reference (`setting`) to settle first, so a stop while that
+     * write is in flight (slow, or waiting out a 429) cannot overwrite before it lands. It is a
+     * commit with skipDeploys, never a delete (rule 3): Railway's variable delete takes no
+     * skipDeploys, and the migrate run it would start is one nobody asked for. Until the inert
+     * value is confirmed (pending, failed, or after a setting write whose answer was lost, which
+     * may land after it), a run closed at once says to make it inert by hand, and run.done records
+     * it (the plan's leftover). Once confirmed, the variable waits for removal (`awaitingRemoval`).
      */
     let migrateReference:
       | {
-          serviceId: string;
-          setting: Promise<void>;
-          removal: Promise<void> | undefined;
-          removed: boolean;
+          setting: Promise<Written>;
+          overwrite: Promise<void> | undefined;
+          neutralized: boolean;
+          awaiting: boolean;
         }
       | undefined;
-    const byHand = "remove it by hand now (spec 01 §6.3, §6.6)";
-    const removeReference = (): Promise<void> => {
+    const byHand = `set it to ${INERT_VALUE} by hand now (spec 01 §6.3, §6.6)`;
+    const neutralizeReference = (): Promise<void> => {
       const set = migrateReference;
       if (set === undefined) return Promise.resolve();
-      set.removal ??= (async () => {
+      set.overwrite ??= (async () => {
         try {
+          let lost = false;
           try {
             await set.setting;
-          } catch {
-            // A write that failed may still have been applied: the reference is removed anyway.
+          } catch (error) {
+            // A write with no answer may still land, after the overwrite too.
+            lost = outcomeUnknown(error);
           }
-          if (!(await rw.deleteVariable(ctx.run, set.serviceId, reference.variable))) {
-            ctx.out.warn(
-              `Railway took no skipDeploys on the removal of ${reference.variable}: a migrate deployment it starts runs without the reference and stops at its configuration check`,
+          const written = await rw.setVariables(
+            ctx.run,
+            ctx.settings,
+            "migrate",
+            { [reference.variable]: INERT_VALUE },
+            `pnpm fin railway deploy ${release.slice(0, 12)}: superuser reference made inert (${ctx.run.id})`,
+          );
+          if (!(await confirmInert(written))) return;
+          set.awaiting = true;
+          if (lost) {
+            ctx.out.error(
+              `the write that set ${reference.variable} on migrate got no answer, so it may still land after the inert value: check migrate's variables, and ${byHand}`,
             );
+            return;
           }
-          await confirmRemoved(set.serviceId);
-          set.removed = true;
+          set.neutralized = true;
         } catch (error) {
-          ctx.out.error(`${reference.variable} could not be removed from migrate: ${byHand}`);
+          ctx.out.error(`${reference.variable} could not be made inert on migrate: ${byHand}`);
           throw error;
         }
       })();
-      return set.removal;
+      return set.overwrite;
     };
-    const runMigrate = async (serviceId: string) => {
+    const runMigrate = async () => {
       let failure: unknown;
       try {
-        // A stop that came while the reference was being set does not start migrate: its removal
-        // waits for that write, and the run stays open meanwhile.
+        // A stop that came while the reference was being set does not start migrate: the
+        // overwrite waits for that write, and the run stays open meanwhile.
         ctx.run.assertNotStopped();
-        const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
-          serviceId,
-          environmentId: rw.environmentId,
-        });
-        await waitForMigrate(ctx, rw, deployed.serviceInstanceDeployV2, release);
+        const id = await startDeployment(ctx, rw, "migrate");
+        await waitForMigrate(ctx, rw, id, release);
       } catch (error) {
         failure = error;
       }
       try {
-        await removeReference();
+        await neutralizeReference();
       } catch (error) {
         failure ??= error;
       }
@@ -574,19 +593,23 @@ export const railwayDeploy: Command = {
             `pnpm fin railway deploy ${release.slice(0, 12)} (${ctx.run.id})`,
           );
           // From here the reference may be on migrate, whatever this write answers (nothing runs
-          // between the call and this line, so no answer or stop comes first); its removal waits
-          // for the write to settle.
+          // between the call and this line, so no answer or stop comes first); the inert
+          // overwrite waits for the write to settle.
           if (roll.task) {
-            migrateReference = { serviceId, setting, removal: undefined, removed: false };
+            migrateReference = {
+              setting,
+              overwrite: undefined,
+              neutralized: false,
+              awaiting: false,
+            };
           }
-          await setting;
-          if (roll.task) await runMigrate(serviceId);
+          // The deployment takes the variables Railway holds when it starts: it starts only once a
+          // read shows this write (rule 4).
+          await confirmWrittenOrAccepted(ctx, rw, await setting, accepted.variables);
+          if (roll.task) await runMigrate();
           else {
-            const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
-              serviceId,
-              environmentId: rw.environmentId,
-            });
-            await waitForDeployment(ctx, rw, deployed.serviceInstanceDeployV2, roll.service);
+            const id = await startDeployment(ctx, rw, roll.service);
+            await waitForDeployment(ctx, rw, id, roll.service);
           }
           onRelease.set(roll.service, roll.ref);
           ctx.run.line("deploy.step", "info", {
@@ -606,11 +629,15 @@ export const railwayDeploy: Command = {
       },
       { release, minimumSchemaVersion: schema, ...unchecked },
       {
-        cleanup: removeReference,
+        cleanup: neutralizeReference,
         leftover: () =>
-          migrateReference !== undefined && !migrateReference.removed
-            ? `${reference.variable} may still be on migrate: ${byHand}`
+          migrateReference !== undefined && !migrateReference.neutralized
+            ? `${reference.variable} may still hold the superuser reference on migrate: ${byHand}`
             : undefined,
+        record: () =>
+          migrateReference?.awaiting === true
+            ? { awaitingRemoval: [`migrate ${reference.variable}`] }
+            : {},
         after: async () => {
           if (!started) return {};
           const after = await inspectRailway(ctx, rw);

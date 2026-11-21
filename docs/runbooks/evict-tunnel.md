@@ -42,7 +42,8 @@ Keep the evidence first, then cut the tunnel (staging has no standby tunnel yet)
    then fails at Cloudflare while the static files still load; this is the intended outage.
 4. Create a new locally managed tunnel `fin-next-staging-<role>` with `pnpm fin tunnel create
    staging <role>`, which sets its token as the connector service's sealed `TUNNEL_TOKEN` without
-   printing it, and repoint the role's CNAMEs with `pnpm fin routes apply staging`.
+   printing it, redeploys the connector and reads it back (`rotate-tunnel-token.md`), and repoint
+   the role's CNAMEs with `pnpm fin routes apply staging`.
 5. Rotate the role's ingress proofs (`rotate-ingress-proof`): they travelled with every request.
 6. Confirm: the watcher's next run passes `connectors` for the role, the monitors are green, and
    `ingress.untrusted_peer` is at zero.

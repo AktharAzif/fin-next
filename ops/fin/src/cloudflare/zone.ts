@@ -15,7 +15,11 @@
 // masker (a short number would rewrite the run's own numbers); it is redacted from the provider
 // errors of the rate phase's writes, the only requests that carry it. Ingress proofs keep their
 // values; a host with no proof gets a new one (32 random bytes, base64url), which is set sealed on
-// the services that check it before the rule that sends it is written (spec 01 §7.6's order).
+// the services that check it before the rule that sends it is written (spec 01 §7.6's order), in a
+// commit that starts no deployment, read back until it shows. A service that has a deployment holds
+// the old proofs, so it is redeployed as a step of its own, waits for SUCCESS and is read back
+// before any rule is written (a rotation, rule 2 of the steward's ruling of 22 Nov); one with no
+// deployment takes them at its first (rule 1).
 
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
@@ -24,6 +28,8 @@ import { RefusedError } from "../core/errors.ts";
 import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
+import type { RailwayApi, Written } from "../railway/api.ts";
+import { confirmWritten, deployedOf, redeploy, redeployChange } from "../railway/rollout.ts";
 import type { Redaction, WriteTarget } from "./api.ts";
 import { bindZone, cloudflare, railway, registerId } from "./common.ts";
 import { finRulesetHash, isFinRule } from "./hash.ts";
@@ -208,6 +214,7 @@ async function rulePlan(
   ctx: Context,
   api: ReturnType<typeof cloudflare>["api"],
   zonePath: string,
+  railwayFor: () => RailwayApi,
 ): Promise<RulePlan> {
   const s = ctx.settings;
   const entrypoints = new Map<Phase, Ruleset | undefined>();
@@ -280,16 +287,25 @@ async function rulePlan(
   }
 
   const changes: Change[] = [];
-  // The services learn a new proof before any rule sends it.
-  for (const [service, roles] of Object.entries(s.ingressProofs)) {
-    const fresh = roles.filter((r) => newProofs.has(r));
-    if (fresh.length === 0) continue;
+  // The services learn a new proof before any rule sends it: a running one only by a redeploy.
+  const proofServices = Object.entries(s.ingressProofs)
+    .filter(([, roles]) => roles.some((r) => newProofs.has(r)))
+    .map(([service]) => service);
+  const running =
+    proofServices.length === 0
+      ? new Set<string>()
+      : await deployedOf(ctx, railwayFor(), proofServices);
+  for (const service of proofServices) {
+    const fresh = (s.ingressProofs[service] ?? []).filter((r) => newProofs.has(r));
     changes.push({
       kind: "variable",
       name: `${service}.FIN_INGRESS_PROOFS`,
       action: "update",
-      detail: `sealed; new proof for ${fresh.join(", ")}`,
+      detail: `sealed; new proof for ${fresh.join(", ")}; a commit that starts no deployment, read back`,
     });
+  }
+  for (const service of proofServices) {
+    if (running.has(service)) changes.push(redeployChange(service, ["FIN_INGRESS_PROOFS"]));
   }
   const ruleChange = (rule: DesiredRule): Change => {
     const found = existing.get(rule.ref);
@@ -339,16 +355,22 @@ export const zoneApply: Command = {
     const zonePath = await bindZone(ctx, api);
     const changes: Change[] = [];
     if (only !== "rules") changes.push(...(await settingChanges(ctx, api, zonePath)));
+    // Railway is read (which proof services have a deployment) and written only for a new proof,
+    // so a run with none needs no Railway token.
+    let rw: RailwayApi | undefined;
+    const railwayFor = () => {
+      rw ??= railway(ctx);
+      return rw;
+    };
     let plan: RulePlan | undefined;
     if (only !== "settings") {
-      plan = await rulePlan(ctx, api, zonePath);
+      plan = await rulePlan(ctx, api, zonePath, railwayFor);
       changes.push(...plan.changes);
     }
     if (ctx.settings.zone.watchedOnly.length > 0) {
       ctx.out.info(`watched, not applied here: ${ctx.settings.zone.watchedOnly.join(", ")}`);
     }
-    const rw =
-      plan !== undefined && plan.newProofs.size > 0 && !ctx.dryRun ? railway(ctx) : undefined;
+    const written = new Map<string, Written>();
 
     /** The one write a setting or rule change sends, from the entrypoints as they stand. */
     const writeFor = (change: Change): Write | undefined => {
@@ -419,13 +441,28 @@ export const zoneApply: Command = {
           for (const role of roles) value[role] = [plan.proofs.get(role)?.reveal() ?? ""];
           const json = new Secret(JSON.stringify(value));
           ctx.masker.register(json.reveal(), "<ingress-proofs>");
-          await rw?.setVariables(
+          const commit = await railwayFor().setVariables(
             ctx.run,
             ctx.settings,
             service,
             { FIN_INGRESS_PROOFS: json },
             `pnpm fin zone apply: ingress proofs (${ctx.run.id})`,
           );
+          await confirmWritten(ctx, railwayFor(), commit);
+          written.set(service, commit);
+          return;
+        }
+        if (change.kind === "redeploy") {
+          const commit = written.get(change.name);
+          if (commit === undefined) throw new Error(`no proofs were set on ${change.name}`);
+          try {
+            await redeploy(ctx, railwayFor(), commit, ["FIN_INGRESS_PROOFS"]);
+          } catch (error) {
+            ctx.out.error(
+              `the rotation is not done: ${change.name} may still hold the old proofs, and no rule that sends the new one is written; once the cause is fixed, run zone apply again`,
+            );
+            throw error;
+          }
           return;
         }
         if (plan !== undefined && change.kind === "rule" && change.action === "create") {
@@ -457,7 +494,7 @@ export const zoneApply: Command = {
       {},
       {
         check: (change) => {
-          if (change.kind === "variable") {
+          if (change.kind === "variable" || change.kind === "redeploy") {
             const service = change.name.split(".")[0] ?? "";
             if (ctx.settings.railway.services[service] === undefined) {
               throw new RefusedError(

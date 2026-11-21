@@ -79,7 +79,7 @@ function report(out: Output, error: unknown): number {
  * While the run may hold the lock, a stop closes it before the process exits: the run is marked
  * stopped so no further change starts; a change in flight gets up to INTERRUPT_SETTLE_MS to settle
  * (applyPlan then records it, runs the plan's cleanup and closes the run); a run still open after
- * that has the plan's cleanup run here (a one-run token revoked, a superuser reference removed,
+ * that has the plan's cleanup run here (a one-run token revoked, a superuser reference made inert,
  * while the run may still write) and is then closed, its run.done naming the change in flight. An
  * uncaught error does not wait. A run that registered nothing has its lock released. When the stop
  * insists (closeNow), the run is closed at once, and what the cleanup has not done yet is printed

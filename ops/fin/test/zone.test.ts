@@ -29,7 +29,11 @@ describe("zone apply", () => {
     const code = await h.run(["zone", "apply", "staging", "--dry-run"]);
     assert.equal(code, 1);
     assert.equal(h.cf.writes().length, 0);
-    assert.equal(h.rw.operations.length, 0, "a dry run reads nothing from Railway");
+    assert.deepEqual(
+      h.rw.operations,
+      ["finStatus"],
+      "a dry run reads from Railway only which proof services have a deployment",
+    );
     const out = h.runtime.out();
     assert.match(out, /\+ create rule http_request_dynamic_redirect\/fin_next_https_browser_hosts/);
     assert.match(out, /~ update variable edge.FIN_INGRESS_PROOFS .*new proof for api/);

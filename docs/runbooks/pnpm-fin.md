@@ -114,6 +114,32 @@ are written only through the per-rule endpoints and only when their `ref` starts
 Zone writes go only to the zone ID the guard checked against Cloudflare's own answer. A refusal
 exits 77 and sends nothing.
 
+### Railway variable writes: no deploy nobody asked for
+
+The steward's ruling of 22 Nov. Every Railway variable write of every command keeps these:
+
+1. **Provisioning and configuration** writes commit with `skipDeploys: true` and start nothing: the
+   service takes them at its next deployment (`railway deploy`).
+2. **Rotations** (a secret a running service holds: `email token` replacing a token, `tunnel
+   create` making a tunnel anew, `zone apply` making a new ingress proof) commit with
+   `skipDeploys: true`, then redeploy each service that has a deployment as a step of the plan
+   of its own (`~ update redeploy <service> [<variables>]`, a `run.step` and a
+   `rotation.redeployed` line naming the services), wait for `SUCCESS` and read back. The rotation
+   is done only then, and only then is an old secret revoked or a rule written that sends the new
+   one. A service with no deployment holds nothing: it takes the value at its first deployment,
+   and nothing is deployed for it. A redeploy is refused when the service is set to an image its
+   newest deployment does not run (it would roll that image).
+3. **Removals**: nothing deletes a variable, since Railway's `variableDelete` takes no
+   `skipDeploys` and would start a deployment. A value no deployment may carry is overwritten with
+   `inert` (`skipDeploys: true`) and waits for removal: `run.done` records it as
+   `awaitingRemoval`, and `railway verify` lists it (`waits for removal`). It is removed only by a
+   planned deployment that does not take it.
+4. **Read-back**: every commit also sets the plain `FIN_VARIABLES_RUN` to `<run ID>:<n>`. A read
+   proves a write only once it shows that marker, each sealed name (with a null value) and each
+   plain value as written, read again every 2 seconds for 10 seconds at most; a read that only
+   lacks what the write replaced proves nothing, since a read from before the write lacks it too.
+   A deployment that should take a write starts only once a read shows it.
+
 ## The run log and the run lock (interim, until the R2 vault exists)
 
 The plan keeps registrations in the `fin-next-staging-ops` bucket and the lock in

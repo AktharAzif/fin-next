@@ -17,8 +17,11 @@ read (`?`), which never counts as passing:
   registered run, no `FIN_BOOTSTRAP_DATABASE_URL` and no variable under any name that refers to the
   database template's variables (`${{postgres.…}}`, spec 01 §6.3), sealed or not. Variables are
   read unrendered, so a reference is never rendered into a value that carries the superuser
-  password; only the names, and PORT's value, are kept. Railway answers a sealed variable with its
-  name and a null value: such a name counts as sealed, and as present;
+  password; only the names, PORT's value and the write marker's (`FIN_VARIABLES_RUN`) are kept.
+  Railway answers a sealed variable with its name and a null value: such a name counts as sealed,
+  and as present. A `FIN_BOOTSTRAP_DATABASE_URL` that holds the readable value `inert` is no
+  reference: a deploy left it so instead of deleting it, and verify lists it as
+  `waits for removal: migrate FIN_BOOTSTRAP_DATABASE_URL (inert)`, which is not drift;
 - region, replicas, restart policy; app sleeping off; outbound IPv6 off; `PORT=8080`;
 - the health check (`/readyz`, 60 s), overlap and draining, start command and cron;
 - the image is set by digest from `ghcr.io/aktharazif/`, is the service's own image, and is the
@@ -96,25 +99,37 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    and one of arguments only exits within seconds and logs nothing), with
    `FIN_BOOTSTRAP_DATABASE_URL` set to the reference
    `${{postgres.DATABASE_URL}}` and `FIN_RUN_ID` for this run only (spec 01 §6.6 step 6; migrate gives
-   `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
-   `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
-   deployment. Then it removes the reference, whether migrate passed or failed, and reads migrate's
-   variables back, sealed names included. Railway's read can lag a write, so while a read still
-   shows the reference it reads again, every 2 seconds, six reads at most: if the reference is still
-   there after that, nothing rolls (exit 77). A signal (Ctrl-C,
-   SIGTERM, a closed terminal) cuts the wait short, and the reference is removed before `run.done`;
-   a signal that comes while the write setting the reference is still in flight (slow, or waiting
-   out a 429) starts no `migrate`, and the removal waits for that write to settle first.
-   If the removal fails, the reference stays, or the run is closed at once before it could (Ctrl-\,
-   a later second Ctrl-C, the five-second deadline), remove the variable from `migrate` by hand at
-   once. The output says so, and so does the record, which outlives a closed terminal: the run's
-   `run.done` in the run log carries `leftover` (`FIN_BOOTSTRAP_DATABASE_URL may still be on
-   migrate: remove it by hand now (spec 01 §6.3, §6.6)`) and, when the removal failed,
-   `cleanupFailed` and its `cleanupError`; a `run.leftover` line with the same fields goes just
-   before `run.done`'s line, in `lines.jsonl` and to the `ops` source.
+   `fin_owner` a password valid until the run's end and clears it). The write is read back until
+   it shows (its `FIN_VARIABLES_RUN` marker and the reference) before migrate starts, so the
+   deployment takes it. It reads migrate's log until `migrate.done` for this release (up to 15
+   minutes), and stops on `migrate.failed` or a failed deployment. Then, whether migrate passed or
+   failed, it overwrites the reference with the plain value `inert`, in a commit that starts no
+   deployment: Railway's variable delete takes no `skipDeploys`, so a removal would start a second
+   `migrate` run, which stops at its configuration check and writes `migrate.failed` for a release
+   that succeeded. It reads migrate's variables back, sealed names included, until a read shows
+   that commit's own marker, the value `inert` and no reference under any name, every 2 seconds,
+   six reads at most; a read that merely lacks the reference proves nothing (a read from before
+   the write that set it lacks it too). If none shows it, nothing rolls (exit 77). `run.done`
+   records the variable as `awaitingRemoval` (`migrate FIN_BOOTSTRAP_DATABASE_URL`), and
+   `railway verify` lists it; the next deploy with migrations sets the reference over it for its
+   own run and leaves it inert again. It is removed only by a planned `migrate` deployment that
+   does not take it, which no `pnpm fin` command has yet; until then it stays inert. A signal
+   (Ctrl-C, SIGTERM, a closed terminal) cuts the wait short, and the reference is made inert
+   before `run.done`; a signal that comes while the write setting the reference is still in flight
+   (slow, or waiting out a 429) starts no `migrate`, and the overwrite waits for that write to
+   settle first. If the overwrite fails or never shows, if the write setting the reference got no
+   answer (a timeout, a lost connection or a 5xx: it may still land after the inert value), or if
+   the run is closed at once before it could (Ctrl-\, a later second Ctrl-C, the five-second
+   deadline), look at migrate's variables and set `FIN_BOOTSTRAP_DATABASE_URL` to `inert` by hand
+   at once. The output says so, and so does the record, which outlives a closed terminal: the
+   run's `run.done` in the run log carries `leftover` (`FIN_BOOTSTRAP_DATABASE_URL may still hold
+   the superuser reference on migrate: set it to inert by hand now (spec 01 §6.3, §6.6)`) and,
+   when the overwrite failed, `cleanupFailed` and its `cleanupError`; a `run.leftover` line with
+   the same fields goes just before `run.done`'s line, in `lines.jsonl` and to the `ops` source.
 9. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
-   then a deploy, waiting up to 15 minutes for `SUCCESS` (step 5's health check).
+   read back until the write shows, then a deploy, waiting up to 15 minutes for `SUCCESS` (step
+   5's health check). A write that never shows starts no deployment (exit 69).
 10. Rolls `cloudflared-admin` and `cloudflared-public` unless they run the release's image now: set
     to it, with a newest deployment that ended `SUCCESS` on it. A connector whose newest deployment
     crashed, runs another image, or whose image Railway does not say, rolls. The standby `-b`
@@ -125,12 +140,12 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
     and verify hosts. `deploy.done` is written and `run.done` records the digest of every service on
     the release, kept connectors included, which `railway verify` then checks.
 
-Every variable write commits with `skipDeploys: true`, so it starts no deployment of its own: the
-one deployment of each service is the deploy that steps 8 and 9 start, and `migrate` runs once per
-run (a second run would race the password it gives `fin_owner`). Whether Railway's variable delete
-takes `skipDeploys` is not yet confirmed (SP-03): if it does not, the reference is removed without
-it and the output says so; a `migrate` deployment that removal starts stops at its configuration
-check, since the reference is gone.
+No deploy nobody asked for (the steward's ruling of 22 Nov; `pnpm-fin.md`): every variable write
+commits with `skipDeploys: true`, so it starts no deployment of its own, and nothing deletes a
+variable (Railway's `VariableDeleteInput` has no `skipDeploys`). The one deployment of each service
+is the deploy that steps 8 and 9 start, and `migrate` runs once per run (a second run would race
+the password it gives `fin_owner`). Every commit also sets the plain `FIN_VARIABLES_RUN` to
+`<run ID>:<n>`, which no Fin service reads: it is how a read-back knows it has seen that write.
 
 Not done here yet: reading the schema version through `api`'s private health (the operator machine
 has no route into Railway's private network; `/readyz` enforces it per service, steps 5 and 9).
@@ -149,5 +164,5 @@ back, deploy the previous release's manifest the same way; `migrate` never runs 
 
 Wake the owner if a service shows a domain or a TCP proxy that nobody added in a registered run
 (`railway-exposed.md`), if an attestation fails for a digest that came from `release.yml`, or if
-`FIN_BOOTSTRAP_DATABASE_URL` or any other reference to the database template is found on a service
-outside a run.
+`FIN_BOOTSTRAP_DATABASE_URL` (with any value but `inert`) or any other reference to the database
+template is found on a service outside a run.

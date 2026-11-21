@@ -15,11 +15,13 @@ import { loadSettings } from "../src/core/settings.ts";
 import { RailwayApi } from "../src/railway/api.ts";
 import { migrateOutcome } from "../src/railway/deploy.ts";
 import {
+  INERT_VALUE,
   isRefusal,
   NO_READ_ROWS,
   READ_BACK_PAUSE_MS,
   READ_BACK_READS,
   readVariables,
+  WRITE_MARKER,
 } from "../src/railway/inspect.ts";
 import {
   fakeRuntime,
@@ -128,11 +130,21 @@ function migrateWaits(holdLog = false) {
   return { h, file: manifest(h, { migrations: ["x.sql"] }), log, reached: reached.wait };
 }
 
-const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL", skipDeploys: true }];
+/** The commits that overwrote migrate's superuser reference with the inert value (rule 3). */
+const inertWrites = (h: H) =>
+  h.rw.patches.filter(
+    (p) =>
+      h.rw.nameOf(p.serviceId) === "migrate" &&
+      p.variables.FIN_BOOTSTRAP_DATABASE_URL?.value === INERT_VALUE,
+  );
 
-/** What a stop that could not remove the superuser reference says to do (the plan's leftover). */
+/** Whether migrate's superuser reference holds the inert value now. */
+const inert = (h: H) =>
+  h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL === INERT_VALUE;
+
+/** What a stop that could not make the superuser reference inert says to do (the leftover). */
 const REMOVE_BY_HAND =
-  /^FIN_BOOTSTRAP_DATABASE_URL may still be on migrate: remove it by hand now \(spec 01 §6\.3, §6\.6\)$/;
+  /^FIN_BOOTSTRAP_DATABASE_URL may still hold the superuser reference on migrate: set it to inert by hand now \(spec 01 §6\.3, §6\.6\)$/;
 
 /**
  * The run log's run.done and the run.leftover line kept (and shipped) with it, once each has said
@@ -157,9 +169,15 @@ function leftoverRecorded(h: H): {
   return { done, line };
 }
 
-/** Whether the superuser reference is still on migrate. */
-const standing = (h: H) =>
-  h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL !== undefined;
+/** Whether the superuser reference still stands on migrate (anything but the inert value). */
+const standing = (h: H) => {
+  const migrate = h.rw.instances.get("migrate");
+  const value = migrate?.variables.FIN_BOOTSTRAP_DATABASE_URL;
+  return (
+    migrate?.sealed.has("FIN_BOOTSTRAP_DATABASE_URL") === true ||
+    (value !== undefined && value !== INERT_VALUE)
+  );
+};
 
 /** Lets the work in progress run for a while (no real I/O happens in these tests). */
 async function settle(): Promise<void> {
@@ -564,7 +582,7 @@ describe("railway deploy", () => {
     );
   });
 
-  it("runs migrate first with the superuser reference for this run only, and removes it afterwards", async () => {
+  it("runs migrate first with the superuser reference for this run only, and makes it inert afterwards", async () => {
     const h = provisioned();
     const file = manifest(h, { migrations: ["20261121100000_audit_core.sql"] });
     assert.equal(await deploy(h, file), EXIT.ok, h.runtime.err());
@@ -573,8 +591,9 @@ describe("railway deploy", () => {
     const started = h.rw.migrateEnvironments[0];
     assert.match(started?.FIN_BOOTSTRAP_DATABASE_URL ?? "", /^\$\{\{postgres\.DATABASE_URL\}\}$/);
     assert.match(started?.FIN_RUN_ID ?? "", /^run_/);
-    assert.deepEqual(h.rw.variableDeletes, REMOVED);
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.deepEqual(h.rw.variableDeletes, [], "no variable is deleted");
+    assert.equal(inertWrites(h).length, 1);
+    assert.equal(inert(h), true);
   });
 
   it("waits for a migrate.done that reaches the log after Railway reports SUCCESS", async () => {
@@ -594,7 +613,7 @@ describe("railway deploy", () => {
     assert.ok(h.rw.updates.some((u) => u.service === "console"));
   });
 
-  it("stops without migrate.done, rolls nothing after a failed migrate, and still removes the reference", async () => {
+  it("stops without migrate.done, rolls nothing after a failed migrate, and still makes the reference inert", async () => {
     const h = provisioned((x) => {
       x.rw.migrateLogs = () => [JSON.stringify({ event: "migrate.failed" })];
     });
@@ -604,7 +623,8 @@ describe("railway deploy", () => {
       ["migrate"],
       "nothing rolls after a failed migrate",
     );
-    assert.equal(h.rw.variableDeletes.length, 1);
+    assert.equal(inertWrites(h).length, 1);
+    assert.equal(inert(h), true);
     assert.match(h.readable(), /"event":"deploy.failed"/);
     assert.equal(h.records().at(-1)?.result, "failed");
     const h2 = provisioned((x) => {
@@ -615,7 +635,7 @@ describe("railway deploy", () => {
     assert.match(h2.runtime.err(), /ended CRASHED with no migrate.done for this release/);
   });
 
-  it("removes the superuser reference when a signal stops the run during the migrate wait, which the stop cuts short", async () => {
+  it("makes the superuser reference inert when a signal stops the run during the migrate wait, which the stop cuts short", async () => {
     const { h, file } = migrateWaits();
     // Neither a poll's pause nor the stop's settle wait ends on its own: only the stop ends the
     // pause, and the run closes once the change in flight settles.
@@ -624,8 +644,9 @@ describe("railway deploy", () => {
     await until(() => h.rw.operations.includes("finLogs"));
     assert.equal(await h.runtime.interrupt("SIGTERM"), true);
     assert.equal(await pending, EXIT.terminated, h.runtime.err());
-    assert.deepEqual(h.rw.variableDeletes, REMOVED);
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.equal(inertWrites(h).length, 1);
+    assert.equal(inert(h), true);
+    assert.deepEqual(h.rw.writeDeployments, [], "the overwrite starts no migrate deployment");
     assert.deepEqual(
       h.rw.updates.map((u) => u.service),
       ["migrate"],
@@ -640,28 +661,29 @@ describe("railway deploy", () => {
     h.assertNoLeak();
   });
 
-  it("removes the superuser reference before it closes the run when the migrate wait does not settle in time", async () => {
+  it("makes the superuser reference inert before it closes the run when the migrate wait does not settle in time", async () => {
     const { h, file, log, reached } = migrateWaits(true);
     const pending = deploy(h, file);
     await reached;
     // The fake runtime's sleep returns at once: the settle wait times out with the log read held.
     assert.equal(await h.runtime.interrupt("SIGTERM"), true);
-    assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed while the run could still write");
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.equal(inertWrites(h).length, 1, "made inert while the run could still write");
+    assert.equal(inert(h), true);
     const done = h.records().at(-1);
     assert.equal(done?.event, "run.done");
     assert.equal(done?.interrupted, "SIGTERM");
     assert.deepEqual(done?.inFlight, { kind: "task", name: "migrate", action: "update" });
+    assert.deepEqual(done?.awaitingRemoval, ["migrate FIN_BOOTSTRAP_DATABASE_URL"]);
     log.open();
     assert.equal(await pending, EXIT.terminated, h.runtime.err());
-    assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed once");
+    assert.equal(inertWrites(h).length, 1, "made inert once");
     assert.deepEqual(
       h.rw.updates.map((u) => u.service),
       ["migrate"],
     );
   });
 
-  it("says to remove the superuser reference by hand when a stop closes the run at once before it could", async () => {
+  it("says to make the superuser reference inert by hand when a stop closes the run at once before it could", async () => {
     const { h, file, log, reached } = migrateWaits(true);
     Object.assign(h.runtime, { sleep: () => new Promise<void>(() => {}) });
     const pending = deploy(h, file);
@@ -671,7 +693,7 @@ describe("railway deploy", () => {
     assert.equal(h.runtime.forceClose("SIGQUIT"), true);
     assert.match(
       h.runtime.err(),
-      /FIN_BOOTSTRAP_DATABASE_URL may still be on migrate: remove it by hand now \(spec 01 §6\.3, §6\.6\)/,
+      /FIN_BOOTSTRAP_DATABASE_URL may still hold the superuser reference on migrate: set it to inert by hand now \(spec 01 §6\.3, §6\.6\)/,
     );
     assert.equal(h.records().at(-1)?.forced, "SIGQUIT");
     log.open();
@@ -679,7 +701,7 @@ describe("railway deploy", () => {
     await pending;
   });
 
-  it("removes the superuser reference only once the write setting it lands, when a stop comes while that write is in flight, and starts no migrate", async () => {
+  it("makes the superuser reference inert only once the write setting it lands, when a stop comes while that write is in flight, and starts no migrate", async () => {
     const h = provisioned();
     const file = manifest(h, { migrations: ["x.sql"] });
     const { write, reached } = referenceWriteHeld(h);
@@ -689,13 +711,13 @@ describe("railway deploy", () => {
     const stopping = h.runtime.interrupt("SIGTERM");
     await until(() => h.runtime.err().includes("closing the run"));
     await settle();
-    assert.deepEqual(h.rw.variableDeletes, [], "no delete while the write is in flight");
+    assert.equal(inertWrites(h).length, 0, "no overwrite while the write is in flight");
     assert.notEqual(h.records().at(-1)?.event, "run.done", "the run stays open meanwhile");
     write.open();
     assert.equal(await stopping, true);
     assert.equal(await pending, EXIT.terminated, h.runtime.err());
-    assert.deepEqual(h.rw.variableDeletes, REMOVED);
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.equal(inertWrites(h).length, 1);
+    assert.equal(inert(h), true);
     assert.equal(h.rw.operations.includes("finDeploy"), false, "migrate never starts after a stop");
     assert.doesNotMatch(h.runtime.err(), /by hand/);
     const done = h.records().at(-1);
@@ -703,7 +725,7 @@ describe("railway deploy", () => {
     assert.equal(done?.interrupted, "SIGTERM");
   });
 
-  it("removes the superuser reference after a 429 on the write setting it is waited out, when a stop comes during that wait", async () => {
+  it("makes the superuser reference inert after a 429 on the write setting it is waited out, when a stop comes during that wait", async () => {
     const h = provisioned();
     const file = manifest(h, { migrations: ["x.sql"] });
     const { write, reached } = referenceWriteHeld(h, true);
@@ -712,22 +734,22 @@ describe("railway deploy", () => {
     const stopping = h.runtime.interrupt("SIGTERM");
     await until(() => h.runtime.err().includes("closing the run"));
     await settle();
-    assert.deepEqual(h.rw.variableDeletes, [], "no delete while the write waits to be re-sent");
+    assert.equal(inertWrites(h).length, 0, "no overwrite while the write waits to be re-sent");
     write.open();
     await stopping;
     assert.equal(await pending, EXIT.terminated, h.runtime.err());
     const patches = h.sequence.flatMap((call, i) => (call === "rw finPatch" ? [i] : []));
-    assert.equal(patches.length, 2, "the write is re-sent after the 429");
-    assert.ok(
-      (patches[1] ?? Number.POSITIVE_INFINITY) < h.sequence.indexOf("rw finVariableDelete"),
-      "the delete follows the re-sent write",
+    assert.equal(patches.length, 3, "the write is re-sent after the 429, then made inert");
+    assert.deepEqual(
+      h.rw.patches.map((p) => p.variables.FIN_BOOTSTRAP_DATABASE_URL?.value),
+      [reference("postgres", "DATABASE_URL"), INERT_VALUE],
+      "the overwrite follows the re-sent write",
     );
-    assert.deepEqual(h.rw.variableDeletes, REMOVED);
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.equal(inert(h), true);
     assert.equal(h.rw.operations.includes("finDeploy"), false);
   });
 
-  it("says to remove the superuser reference by hand when the run is closed at once while the write setting it is in flight", async () => {
+  it("says to make the superuser reference inert by hand when the run is closed at once while the write setting it is in flight", async () => {
     const h = provisioned();
     const file = manifest(h, { migrations: ["x.sql"] });
     const { write, reached } = referenceWriteHeld(h);
@@ -739,7 +761,7 @@ describe("railway deploy", () => {
     assert.equal(h.runtime.forceClose("deadline"), true);
     assert.match(
       h.runtime.err(),
-      /FIN_BOOTSTRAP_DATABASE_URL may still be on migrate: remove it by hand now \(spec 01 §6\.3, §6\.6\)/,
+      /FIN_BOOTSTRAP_DATABASE_URL may still hold the superuser reference on migrate: set it to inert by hand now \(spec 01 §6\.3, §6\.6\)/,
     );
     assert.equal(h.records().at(-1)?.forced, "deadline");
     write.open();
@@ -758,29 +780,30 @@ describe("railway deploy", () => {
     h.runtime.closeOutput();
     const stopping = h.runtime.interrupt("SIGHUP");
     await settle();
-    assert.deepEqual(h.rw.variableDeletes, [], "the removal waits for the write");
+    assert.equal(inertWrites(h).length, 0, "the overwrite waits for the write");
     // The write is still in flight at the five-second deadline.
     assert.equal(h.runtime.forceClose("deadline"), true);
     const { done, line } = leftoverRecorded(h);
     assert.equal(done.interrupted, "SIGHUP");
     assert.equal(done.forced, "deadline");
-    assert.equal(done.cleanupFailed, undefined, "the removal had not failed: it had not run");
+    assert.equal(done.cleanupFailed, undefined, "the overwrite had not failed: it had not run");
     assert.equal(line.cleanupFailed, undefined);
     write.open();
     await stopping;
     assert.equal(await pending, EXIT.hangup);
-    // The real process exits at the deadline; here the removal comes too late to write.
+    // The real process exits at the deadline; here the overwrite comes too late to write.
     assert.equal(standing(h), true, "the record names a reference that is really there");
     assert.equal(h.rw.operations.includes("finDeploy"), false);
     h.assertNoLeak();
   });
 
-  it("records in the run log the superuser reference a hangup leaves while a removal Railway accepted without removing anything is read back", async () => {
+  it("records in the run log the superuser reference a hangup leaves while an overwrite Railway accepted without applying it is read back", async () => {
     const { h, file } = migrateWaits();
-    h.rw.variableDeleteNoop = true;
+    h.rw.ignorePatch = (_service, variables) =>
+      variables.FIN_BOOTSTRAP_DATABASE_URL?.value === INERT_VALUE;
     const readBack = gate();
     // The migrate wait and the stop's settle wait end only when the run stops or closes; the
-    // read-back after the removal waits until the test opens it, so the deadline comes first.
+    // read-back after the overwrite waits until the test opens it, so the deadline comes first.
     Object.assign(h.runtime, {
       sleep: (ms: number) =>
         ms === READ_BACK_PAUSE_MS ? readBack.wait : new Promise<void>(() => {}),
@@ -789,29 +812,31 @@ describe("railway deploy", () => {
     await until(() => h.rw.operations.includes("finLogs"));
     h.runtime.closeOutput();
     const stopping = h.runtime.interrupt("SIGHUP");
-    await until(() => h.rw.variableDeletes.length === 1);
+    await until(() => inertWrites(h).length === 1);
     await settle();
     assert.notEqual(h.records().at(-1)?.event, "run.done", "the run waits for the read-back");
     assert.equal(h.runtime.forceClose("deadline"), true);
     const { done } = leftoverRecorded(h);
     assert.equal(done.interrupted, "SIGHUP");
     assert.equal(done.forced, "deadline");
+    assert.equal(done.awaitingRemoval, undefined, "nothing was proved inert");
     readBack.open();
     await stopping;
     assert.equal(await pending, EXIT.hangup);
-    assert.deepEqual(h.rw.variableDeletes, REMOVED);
-    assert.equal(standing(h), true, "Railway accepted the removal and removed nothing");
+    assert.equal(inertWrites(h).length, 1);
+    assert.equal(standing(h), true, "Railway accepted the overwrite and applied nothing");
     h.assertNoLeak();
   });
 
   for (const closer of ["the stop's trap", "applyPlan"] as const) {
-    it(`records in the run log a removal that failed after a hangup, when ${closer} closes the run, with no one reading the output`, async () => {
-      // With the log read held past the settle wait, the trap runs the removal and closes the run;
-      // with the migrate wait cut short by the stop, migrate's own change removes it and applyPlan
-      // closes the run.
+    it(`records in the run log an inert overwrite that failed after a hangup, when ${closer} closes the run, with no one reading the output`, async () => {
+      // With the log read held past the settle wait, the trap runs the overwrite and closes the
+      // run; with the migrate wait cut short by the stop, migrate's own change runs it and
+      // applyPlan closes the run.
       const trap = closer === "the stop's trap";
       const { h, file, log, reached } = migrateWaits(trap);
-      h.rw.variableDeleteNoop = true;
+      h.rw.ignorePatch = (_service, variables) =>
+        variables.FIN_BOOTSTRAP_DATABASE_URL?.value === INERT_VALUE;
       if (!trap) {
         Object.assign(h.runtime, {
           sleep: (ms: number) =>
@@ -838,22 +863,23 @@ describe("railway deploy", () => {
         assert.equal(record.cleanupFailed, true);
         assert.match(
           String(record.cleanupError),
-          /^FIN_BOOTSTRAP_DATABASE_URL is still on migrate after its removal: remove it by hand now/,
+          /^Railway's variables read never showed FIN_BOOTSTRAP_DATABASE_URL overwritten with inert on migrate: set it to inert by hand now/,
         );
       }
-      assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed once");
+      assert.equal(inertWrites(h).length, 1, "overwritten once");
       assert.equal(standing(h), true);
       h.assertNoLeak();
     });
   }
 
-  it("records nothing left over when the superuser reference is removed", async () => {
+  it("records nothing left over when the superuser reference is made inert, and records it as waiting for removal", async () => {
     const h = provisioned();
     assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
     const done = h.records().at(-1);
     assert.equal(done?.result, "ok");
     assert.equal(done?.leftover, undefined);
     assert.equal(done?.cleanupFailed, undefined);
+    assert.deepEqual(done?.awaitingRemoval, ["migrate FIN_BOOTSTRAP_DATABASE_URL"]);
     assert.equal(
       h.lines().some((l) => l.event === "run.leftover"),
       false,
@@ -1103,12 +1129,16 @@ describe("railway deploy", () => {
     assert.equal(h2.rw.updates.length, 0);
   });
 
-  it("confirms the superuser reference is gone from migrate, and stops before rolling when it is not", async () => {
+  it("confirms the superuser reference is inert on migrate, and stops before rolling when it is not", async () => {
     const h = provisioned((x) => {
-      x.rw.variableDeleteNoop = true;
+      x.rw.ignorePatch = (_service, variables) =>
+        variables.FIN_BOOTSTRAP_DATABASE_URL?.value === INERT_VALUE;
     });
     assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.refused);
-    assert.match(h.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
+    assert.match(
+      h.runtime.err(),
+      /never showed FIN_BOOTSTRAP_DATABASE_URL overwritten with inert on migrate/,
+    );
     assert.deepEqual(
       h.rw.updates.map((u) => u.service),
       ["migrate"],
@@ -1122,7 +1152,7 @@ describe("railway deploy", () => {
     assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
     assert.ok(h.rw.patches.length > 1);
     for (const p of h.rw.patches) assert.equal(p.skipDeploys, true, p.serviceId);
-    assert.deepEqual(h.rw.variableDeletes, REMOVED, "the removal passes skipDeploys too");
+    assert.deepEqual(h.rw.variableDeletes, [], "no variable is deleted");
     assert.deepEqual(h.rw.writeDeployments, [], "no variable write started a deployment");
     assert.equal(h.rw.migrateEnvironments.length, 1, "one migrate run, the one the deploy started");
     assert.equal(
@@ -1132,24 +1162,7 @@ describe("railway deploy", () => {
     );
   });
 
-  it("removes the superuser reference without skipDeploys when Railway's variable delete takes none, and says so", async () => {
-    const h = provisioned((x) => {
-      x.rw.variableDeleteRefusesSkipDeploys = true;
-    });
-    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
-    assert.deepEqual(h.rw.variableDeletes, [{ ...REMOVED[0], skipDeploys: false }]);
-    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
-    assert.match(
-      h.runtime.err(),
-      /took no skipDeploys on the removal of FIN_BOOTSTRAP_DATABASE_URL/,
-    );
-    // The deployment that removal started runs without the reference.
-    assert.deepEqual(h.rw.writeDeployments, ["migrate"]);
-    assert.equal(h.rw.migrateEnvironments.length, 2);
-    assert.equal(h.rw.migrateEnvironments[1]?.FIN_BOOTSTRAP_DATABASE_URL, undefined);
-  });
-
-  it("reads migrate's variables again while a lagging read still shows the removed reference, and stops only once the bounded wait is out", async () => {
+  it("reads migrate's variables again while a lagging read does not show the inert overwrite, and stops only once the bounded wait is out", async () => {
     const waits: number[] = [];
     const lagging = (reads: number) =>
       provisioned((x) => {
@@ -1160,12 +1173,18 @@ describe("railway deploy", () => {
           },
         });
       });
+    /** The calls after the inert overwrite: migrate's second variable commit of the run. */
+    const afterInert = (x: H) => {
+      const patches = x.sequence.flatMap((call, i) => (call === "rw finPatch" ? [i] : []));
+      return x.sequence.slice((patches[1] ?? x.sequence.length) + 1);
+    };
     const h = lagging(2);
     assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
-    assert.deepEqual(
-      waits.filter((ms) => ms === READ_BACK_PAUSE_MS),
-      [READ_BACK_PAUSE_MS, READ_BACK_PAUSE_MS],
-      "two lagging reads, two short waits",
+    const reads = afterInert(h);
+    assert.equal(
+      reads.findIndex((c) => c !== "rw finVariables"),
+      3,
+      "two lagging reads, then the one that shows the write",
     );
     assert.ok(
       h.rw.updates.some((u) => u.service === "console"),
@@ -1174,32 +1193,37 @@ describe("railway deploy", () => {
     assert.equal(h.records().at(-1)?.result, "ok");
 
     waits.length = 0;
+    // Every read lags: the write that sets the reference never shows, so migrate never starts,
+    // and the overwrite never shows either.
     const h2 = lagging(100);
-    assert.equal(await deploy(h2, manifest(h2, { migrations: ["x.sql"] })), EXIT.refused);
-    assert.match(h2.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
-    const afterDelete = h2.sequence.slice(h2.sequence.indexOf("rw finVariableDelete"));
+    assert.equal(await deploy(h2, manifest(h2, { migrations: ["x.sql"] })), EXIT.unavailable);
+    assert.match(
+      h2.runtime.err(),
+      /migrate: Railway's variables read did not show this run's write/,
+    );
+    assert.equal(h2.rw.operations.includes("finDeploy"), false, "migrate never starts");
     assert.equal(
-      afterDelete.filter((call) => call === "rw finVariables").length,
+      afterInert(h2).filter((call) => call === "rw finVariables").length,
       READ_BACK_READS,
       "a bounded number of reads",
     );
-    assert.equal(waits.filter((ms) => ms === READ_BACK_PAUSE_MS).length, READ_BACK_READS - 1);
+    assert.equal(waits.filter((ms) => ms === READ_BACK_PAUSE_MS).length, 2 * (READ_BACK_READS - 1));
     assert.deepEqual(
       h2.rw.updates.map((u) => u.service),
       ["migrate"],
       "nothing rolls while the reference may stand",
     );
+    assert.match(String(h2.records().at(-1)?.leftover), REMOVE_BY_HAND);
   });
 
-  it("finds the superuser reference on migrate after its removal when Railway answers it sealed", async () => {
+  it("finds the superuser reference on migrate after the overwrite when Railway answers it sealed", async () => {
     const h = provisioned((x) => {
-      x.rw.variableDeleteNoop = true;
       const fetch = x.rw.fetch;
       Object.assign(x.rw, {
         fetch: async (url: string, init: RequestInit) => {
           const answer = await fetch(url, init);
           const migrate = x.rw.instances.get("migrate");
-          if (String(init.body).includes("finVariableDelete") && migrate !== undefined) {
+          if (String(init.body).includes(`"value":"${INERT_VALUE}"`) && migrate !== undefined) {
             delete migrate.variables.FIN_BOOTSTRAP_DATABASE_URL;
             migrate.sealed.add("FIN_BOOTSTRAP_DATABASE_URL");
           }
@@ -1208,7 +1232,8 @@ describe("railway deploy", () => {
       });
     });
     assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.refused);
-    assert.match(h.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
+    assert.match(h.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL overwritten with inert on migrate/);
+    assert.equal(standing(h), true);
   });
 
   it("refuses unless ci.yml's merge job succeeded for the commit, before reading Railway", async () => {
@@ -1317,10 +1342,10 @@ describe("the Railway client's writes", () => {
         "mutation finDeploy($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }",
         { serviceId: uuid("f"), environmentId: env },
       ],
-      // A variable delete removes only migrate's superuser reference, in the overlay's project.
+      // No variable is deleted, not even the superuser reference (rule 3).
+      [DELETE, { input: deleteInput(worker) }],
       [DELETE, { input: deleteInput(worker, "FIN_RELEASE") }],
       [DELETE, { input: { ...deleteInput(worker), projectId: uuid("e") } }],
-      [DELETE, { input: { ...deleteInput(worker), environmentId: uuid("e") } }],
       [DELETE, { input: deleteInput(uuid("f")) }],
     ];
     for (const [query, variables] of refusals) {
@@ -1333,9 +1358,9 @@ describe("the Railway client's writes", () => {
     );
   });
 
-  it("sets variables with skipDeploys, sealed where they must be", async () => {
+  it("sets variables with skipDeploys, sealed where they must be, and its own write marker", async () => {
     const { rw, run, api } = setup();
-    await api.setVariables(
+    const first = await api.setVariables(
       run,
       settings,
       "worker",
@@ -1346,32 +1371,18 @@ describe("the Railway client's writes", () => {
     assert.equal(rw.patches[0]?.skipDeploys, true);
     assert.equal(rw.patches[0]?.variables.FIN_DB_PASSWORD?.isSealed, true);
     assert.deepEqual(rw.writeDeployments, []);
-  });
-
-  it("removes a variable with skipDeploys, and without it only when Railway's schema refuses the field", async () => {
-    const { rw, run, api } = setup();
-    const worker = await api.serviceId("worker");
-    assert.equal(await api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"), true);
-    assert.deepEqual(rw.variableDeletes, [
-      { service: "worker", name: "FIN_BOOTSTRAP_DATABASE_URL", skipDeploys: true },
-    ]);
-    rw.variableDeleteRefusesSkipDeploys = true;
-    assert.equal(await api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"), false);
-    assert.deepEqual(rw.variableDeletes.at(-1), {
-      service: "worker",
-      name: "FIN_BOOTSTRAP_DATABASE_URL",
-      skipDeploys: false,
-    });
-    // Any other failure is no reason to drop skipDeploys: nothing is sent again.
-    rw.variableDeleteRefusesSkipDeploys = false;
-    rw.transient.add("finVariableDelete");
-    const before = rw.operations.filter((op) => op === "finVariableDelete").length;
+    // The marker is plain, names the run and the write, and comes back for the read-back.
+    assert.equal(first.marker, `${run.id}:1`);
+    assert.deepEqual(rw.patches[0]?.variables[WRITE_MARKER], { value: first.marker });
+    assert.deepEqual(first.sealed, ["FIN_DB_PASSWORD"]);
+    assert.deepEqual(first.plain, { FIN_RELEASE: RELEASE, [WRITE_MARKER]: first.marker });
+    const second = await api.setVariables(run, settings, "worker", { FIN_RELEASE: RELEASE }, "t");
+    assert.equal(second.marker, `${run.id}:2`, "each write its own marker");
     await assert.rejects(
-      api.deleteVariable(run, worker, "FIN_BOOTSTRAP_DATABASE_URL"),
-      ProviderError,
+      api.setVariables(run, settings, "worker", { [WRITE_MARKER]: "x" }, "t"),
+      RefusedError,
     );
-    assert.equal(rw.operations.filter((op) => op === "finVariableDelete").length, before + 1);
-    await assert.rejects(api.deleteVariable(run, worker, "FIN_RELEASE"), RefusedError);
+    assert.equal(rw.patches.length, 2);
   });
 
   it("reads a sealed variable, which Railway answers with a null value, as sealed and present", async () => {
@@ -1384,5 +1395,13 @@ describe("the Railway client's writes", () => {
     assert.deepEqual(v.readable.sort(), ["FIN_SERVICE", "PORT"]);
     assert.deepEqual(v.sealed, ["FIN_DB_PASSWORD"]);
     assert.equal(v.port, "8080");
+    assert.equal(v.marker, null);
+    // Compared where it is read: only the names that differ are kept, never a value.
+    const compared = await readVariables(api, settings, "api", await api.serviceId("api"), {
+      FIN_SERVICE: "api",
+      PORT: "3000",
+      FIN_DB_PASSWORD: "x",
+    });
+    assert.deepEqual(compared.differs, ["PORT", "FIN_DB_PASSWORD"]);
   });
 });

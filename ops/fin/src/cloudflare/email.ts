@@ -9,11 +9,16 @@
 // `pnpm fin email token <env>`: mints the account-owned Email Sending token (one permission group,
 // this account only, a client IP filter to `worker`'s static egress, an expiry of at most 180 days)
 // and sets it as `worker`'s sealed FIN_EMAIL_TOKEN with the plain FIN_EMAIL_ACCOUNT_ID and
-// FIN_EMAIL_FROM. An existing token of the same name is kept unless --rotate, or unless it cannot
-// be the one worker holds: a token that is no longer active (expired or disabled), or one minted by
-// a run of this command that never set it on worker (Cloudflare shows a value only when it mints
-// it, so such a token's value is lost). Then, as with --rotate, the new one is minted and set
-// first, and only afterwards are the old ones revoked. Tokens are named by ordinal, never by ID.
+// FIN_EMAIL_FROM, in a commit that starts no deployment, read back until it shows. An existing
+// token of the same name is kept unless --rotate, or unless it cannot be the one worker holds: a
+// token that is no longer active (expired or disabled), or one minted by a run of this command that
+// never set it on worker (Cloudflare shows a value only when it mints it, so such a token's value
+// is lost). Then, as with --rotate, the new one is minted and set first; when worker has a
+// deployment, it holds the old token, so worker is redeployed as a step of its own, waits for
+// SUCCESS and is read back (a rotation, rule 2 of the steward's ruling of 22 Nov), and only
+// afterwards are the old ones revoked (ARCHITECTURE §4.9: Railway, then verify, then revoke). A
+// first token, with none to replace, is provisioning (rule 1): worker takes it at its next
+// deployment. Tokens are named by ordinal, never by ID.
 
 import type { Command } from "../command.ts";
 import { flagBool } from "../core/args.ts";
@@ -21,6 +26,8 @@ import type { Context } from "../core/context.ts";
 import { ConfigError, RefusedError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
+import type { Written } from "../railway/api.ts";
+import { confirmWritten, deployedOf, redeploy, redeployChange } from "../railway/rollout.ts";
 import type { WriteTarget } from "./api.ts";
 import { bindZone, cloudflare, railway, registerId } from "./common.ts";
 
@@ -372,17 +379,24 @@ export const emailToken: Command = {
         kind: "variables",
         name: t.service,
         action: "update",
-        detail: `${t.variable} (sealed), FIN_EMAIL_ACCOUNT_ID, FIN_EMAIL_FROM`,
+        detail: `${t.variable} (sealed), FIN_EMAIL_ACCOUNT_ID, FIN_EMAIL_FROM; a commit that starts no deployment, read back`,
       });
+      // A rotation: the old tokens are revoked only once the service that may hold one runs the
+      // new token (rule 2). A service with no deployment holds none.
+      const holds = revoke.size > 0 && (await deployedOf(ctx, rw, [t.service])).has(t.service);
+      if (holds) changes.push(redeployChange(t.service, [t.variable]));
       for (const name of revoke.keys())
         changes.push({
           kind: "token-revoke",
           name,
           action: "update",
-          detail: "revoked after the new token is set",
+          detail: holds
+            ? `revoked once ${t.service} runs the new token, read back`
+            : `revoked after the new token is set (${t.service} has no deployment that holds the old one)`,
         });
     }
     let minted: Secret | undefined;
+    let written: Written | undefined;
     const target = (id?: string): WriteTarget => ({
       kind: "token",
       name: t.name,
@@ -418,7 +432,7 @@ export const emailToken: Command = {
         if (change.kind === "variables") {
           if (minted === undefined) throw new Error("no token was minted");
           const from = `account-security@${ctx.overlay.emailSubdomains.auth ?? ""}`;
-          await rw.setVariables(
+          written = await rw.setVariables(
             ctx.run,
             ctx.settings,
             t.service,
@@ -429,6 +443,19 @@ export const emailToken: Command = {
             },
             `pnpm fin email token (${ctx.run.id})`,
           );
+          await confirmWritten(ctx, rw, written);
+          return;
+        }
+        if (change.kind === "redeploy") {
+          if (written === undefined) throw new Error("the new token was not set");
+          try {
+            await redeploy(ctx, rw, written, [t.variable]);
+          } catch (error) {
+            ctx.out.error(
+              `the rotation is not done: ${t.service} may still run the old token, which is not revoked; once the cause is fixed, run: pnpm fin email token ${ctx.environment} --rotate`,
+            );
+            throw error;
+          }
           return;
         }
         const old = revoke.get(change.name);
@@ -440,7 +467,7 @@ export const emailToken: Command = {
         check: (change) => {
           if (change.kind === "token")
             writer.check(target(), "POST", `${accountPath}/tokens`, mint);
-          else if (change.kind === "variables") {
+          else if (change.kind === "variables" || change.kind === "redeploy") {
             if (ctx.settings.railway.services[t.service] === undefined) {
               throw new RefusedError(
                 `railway: ${t.service} is not a service the public settings list`,
