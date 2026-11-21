@@ -4,8 +4,10 @@
 //   { state: "pending", email }               aal1, no factor yet: enrolment only
 //   { state: "factor_step", email, methods }  aal1 with a factor
 //   { state: "ok", staff, permissions, environment }
-// The session, the same-person check and the role are read now, as on every route. A GET writes no
-// audit row of its own and spends nothing.
+// The session, the same-person check and the role are read now, as on every route, and the
+// session's renewal reaches the answer as on every route (§11.2); signed out, an Access identity
+// the staff table does not list writes `staff.not_listed` (§18.1). A GET writes no audit row of its
+// own and spends nothing.
 import type { StaffPermission } from "@fin/access";
 import { AuthRefusal, type Realm, type RequestContext } from "@fin/identity";
 import {
@@ -14,7 +16,13 @@ import {
   staffPermissionsOf,
   staffRoleLabel,
 } from "./catalogue.ts";
-import { type FactorMethod, methodsOf } from "./require-staff.ts";
+import {
+  type FactorMethod,
+  methodsOf,
+  noteNotListed,
+  type RequireStaffOptions,
+  readStaffSession,
+} from "./require-staff.ts";
 
 export type StaffViewer =
   | { state: "signed_out"; accessEmail: string | null }
@@ -32,12 +40,15 @@ export async function staffViewer(
   request: Request,
   context: RequestContext,
   environment: string,
+  options: Pick<RequireStaffOptions, "setCookies"> = {},
 ): Promise<StaffViewer> {
   return realm.run(context, async (tx, state) => {
-    await realm.api.getSession({ headers: request.headers });
+    const setCookies = await readStaffSession(realm, request);
     const prior = state.prior;
     const access = context.access ?? null;
     if (prior === null) {
+      options.setCookies?.push(...setCookies);
+      await noteNotListed(realm, tx, context);
       return { state: "signed_out", accessEmail: access?.email.trim().toLowerCase() ?? null };
     }
     if (
@@ -49,6 +60,7 @@ export async function staffViewer(
       realm.runtime.lines.write("staff.access_mismatch", "warn", { staffId: prior.person.id });
       throw new AuthRefusal("access_mismatch", "staff.access_mismatch");
     }
+    options.setCookies?.push(...setCookies);
     const factors = {
       passkeys: prior.factors.passkeys,
       authenticator: prior.factors.authenticator,

@@ -1,8 +1,10 @@
 // Fin Admin's route handlers, one per route-policy entry (spec 02 §14.3). Each runs its work in the
 // staff realm's unit of work (`realm.run`): requireStaff with the entry's permission and the
 // assurance it may be reached at, then the action from @fin/staff, whose intent, audit event,
-// revocation-journal entry and notices commit with it or not at all. An answer that carries an
-// enrolment code is sent once, with `Cache-Control: no-store` (every answer of the host has it).
+// revocation-journal entry and notices commit with it or not at all. The session read's
+// `Set-Cookie` values go to the request's collector, which registerRoutes copies onto the answer.
+// An answer that carries an enrolment code is sent once, with `Cache-Control: no-store` (every
+// answer of the host has it).
 import type { StaffPermission } from "@fin/access";
 import type { Realm, RequestContext } from "@fin/identity";
 import {
@@ -60,6 +62,7 @@ function guarded<T>(
       const who = await requireStaff(realm, args.c.req.raw, args.context, {
         ...(permission === undefined ? {} : { permission }),
         reach,
+        setCookies: args.setCookies,
       });
       return fn(tx, who, args);
     });
@@ -72,8 +75,12 @@ const str = (value: unknown): string => String(value);
 export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteHandler>> {
   const { realm } = deps;
   return {
-    "viewer.get": async ({ c, context }: HandlerArgs) =>
-      ok(await staffViewer(realm, c.req.raw, context as RequestContext, deps.environment)),
+    "viewer.get": async ({ c, context, setCookies }: HandlerArgs) =>
+      ok(
+        await staffViewer(realm, c.req.raw, context as RequestContext, deps.environment, {
+          setCookies,
+        }),
+      ),
 
     "enrolment.redeem": async (args) => {
       const result = await guarded(realm, "enrolment.redeem", (tx, who, { input }) =>

@@ -3,6 +3,8 @@
 // before any handler; every route but the two refuses a request with no session, an aal1 session
 // of a pending member and one at the factor step; every permission check refuses a role lacking
 // the permission; and a session presented under another Access identity is ended and refused.
+// Also: an Access identity the staff table does not list writes `staff.not_listed` (§18.1, S2-24),
+// and a session a route renewed sends its renewed cookie (§11.2).
 import { createStaffHarness, type StaffHarness, unique } from "@fin/staff/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ADMIN_POLICIES, type PolicyId } from "./policy/index.ts";
@@ -13,6 +15,7 @@ import {
   enrolThroughHost,
   type HostMember,
   pendingThroughHost,
+  type Reply,
 } from "./testing/host.ts";
 
 let h: StaffHarness;
@@ -195,5 +198,104 @@ describe("the same person on every request (§10.5)", () => {
     expect(h.lines.named("staff.access_mismatch").some((l) => l.staffId === member.staffId)).toBe(
       true,
     );
+  });
+});
+
+describe("an Access identity the staff table does not list (§18.1, S2-24)", () => {
+  it("writes staff.not_listed on every app route it reaches, and a member does not", async () => {
+    const before = h.lines.named("staff.not_listed").length;
+    const stranger = host.client(unique("not.listed"));
+    expect((await stranger.get("/api/viewer")).json).toMatchObject({ state: "signed_out" });
+    expect((await send(stranger, "staff.list")).status).toBe(401);
+    expect((await send(stranger, "enrolment.redeem")).status).toBe(401);
+    // A removed member with no session, and one whose session the removal left behind.
+    const gone = unique("removed");
+    await h.seedMember(gone, "viewer", "removed");
+    expect((await send(host.client(gone), "staff.list")).status).toBe(401);
+    const removed = await enrolThroughHost(h, host, unique("removed.later"), "viewer");
+    await h.fixture(
+      "UPDATE staff.member SET status = 'removed', removed_at = now() WHERE id = $1",
+      [removed.staffId],
+    );
+    expect((await removed.client.get("/api/viewer")).json).toMatchObject({ state: "signed_out" });
+    expect(h.lines.named("staff.not_listed").slice(before)).toEqual([
+      { reason: "request" },
+      { reason: "request" },
+      { reason: "request" },
+      { reason: "request" },
+      { reason: "request" },
+    ]);
+    // A listed member without a session, active or pending, is no stranger to the list.
+    const quiet = h.lines.named("staff.not_listed").length;
+    expect((await host.client(target.email).get("/api/viewer")).json).toMatchObject({
+      state: "signed_out",
+    });
+    expect((await send(host.client(target.email), "staff.list")).status).toBe(401);
+    const waiting = unique("pending.listed");
+    await h.seedMember(waiting, "viewer", "pending");
+    expect((await send(host.client(waiting), "enrolment.redeem")).status).toBe(401);
+    expect(h.lines.named("staff.not_listed")).toHaveLength(quiet);
+  });
+});
+
+describe("a renewed session reaches the browser (§11.1, §11.2)", () => {
+  /** Moves the member's sessions into the renewal window (less than 55 minutes left). */
+  async function age(staffId: string) {
+    await h.fixture(
+      "UPDATE staff.session SET expires_at = now() + interval '3000 seconds' WHERE user_id = $1",
+      [staffId],
+    );
+  }
+
+  const sessionCookie = (reply: Reply) =>
+    reply.headers.getSetCookie().find((c) => c.startsWith("__Host-fin-admin.session_token="));
+
+  async function secondsLeft(staffId: string): Promise<number> {
+    const result = await h.admin.query<{ left: number }>(
+      "SELECT min(extract(epoch FROM expires_at - now()))::integer AS left FROM staff.session WHERE user_id = $1",
+      [staffId],
+    );
+    return Number(result.rows[0]?.left);
+  }
+
+  it("sends the renewed cookie on the app routes that renew the session", async () => {
+    const member = await enrolThroughHost(h, host, unique("renewed"), "admin");
+    await age(member.staffId);
+    const listed = await member.client.get("/api/staff?page=1&size=25");
+    expect(listed.status).toBe(200);
+    expect(sessionCookie(listed)).toMatch(/max-age=3600/i);
+    expect(await secondsLeft(member.staffId)).toBeGreaterThan(3500);
+
+    await age(member.staffId);
+    const viewer = await member.client.get("/api/viewer");
+    expect(viewer.json).toMatchObject({ state: "ok" });
+    expect(sessionCookie(viewer)).toMatch(/max-age=3600/i);
+
+    // A refusal answered after its unit committed (an intent was made) carries it too.
+    await age(member.staffId);
+    const asked = await member.client.post("/api/staff", {
+      email: unique("renewed.added"),
+      roleKey: "viewer",
+    });
+    expect(asked.json).toMatchObject({ code: "step_up_required" });
+    expect(sessionCookie(asked)).toMatch(/max-age=3600/i);
+
+    // Nothing to renew: no cookie.
+    const fresh = await member.client.get("/api/staff?page=1&size=25");
+    expect(fresh.status).toBe(200);
+    expect(sessionCookie(fresh)).toBeUndefined();
+  });
+
+  it("sends the renewed cookie on the enrolment route a pending member reaches", async () => {
+    const email = unique("renewed.pending");
+    const staffId = await h.seedMember(email, "viewer", "pending");
+    const code = await h.issueCode(staffId);
+    const client = host.client(email);
+    const signedIn = await client.signInByCode((address) => h.latestCode(address));
+    expect(signedIn.status).toBe(200);
+    await age(staffId);
+    const redeemed = await client.post("/api/enrolment/redeem", { code });
+    expect(redeemed.status).toBe(200);
+    expect(sessionCookie(redeemed)).toMatch(/max-age=3600/i);
   });
 });

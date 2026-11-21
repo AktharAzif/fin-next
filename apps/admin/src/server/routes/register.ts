@@ -4,7 +4,10 @@
 // field and the problem, never the value), the front door's facts become the realm's request
 // context (the request ID, the tunnel's client address, the user agent and the Access identity the
 // host verified), and a refusal is answered as a problem document with the request line's outcome
-// and bounded reason. The origin gate, the body limit and the Access check ran before (§2.2).
+// and bounded reason. The `Set-Cookie` values reading the staff session produced (its renewal, or
+// the clearing of a dead one) go onto every answer whose unit committed: a success, and a refusal
+// that commits what led to it (§11.2); a refusal that rolled back sends none, since the renewal
+// rolled back with it. The origin gate, the body limit and the Access check ran before (§2.2).
 import { AuthRefusal, type RequestContext } from "@fin/identity";
 import type { FinContext, FinEnv } from "@fin/server/http";
 import { StaffRefusal } from "@fin/staff";
@@ -21,6 +24,8 @@ export interface HandlerArgs {
   c: FinContext;
   context: RequestContext;
   input: RouteInput;
+  /** Collects the session read's `Set-Cookie` values (requireStaff's `setCookies`) for the answer. */
+  setCookies: string[];
 }
 
 export type RouteAnswer =
@@ -59,6 +64,16 @@ function answerRefusal(c: FinContext, refuse: Refuse, error: AuthRefusal | Staff
   c.set("outcome", "refused");
   c.set("reason", error.lineReason);
   return refuse(c, error.status, error.code, error.extensions);
+}
+
+/** Whether the route's unit committed before this refusal was thrown (realm.run's rule). */
+function committedBefore(error: AuthRefusal | StaffRefusal): boolean {
+  return error instanceof AuthRefusal && !error.rollback;
+}
+
+function withCookies(response: Response, setCookies: readonly string[]): Response {
+  for (const cookie of setCookies) response.headers.append("set-cookie", cookie);
+  return response;
 }
 
 async function readBody(c: FinContext): Promise<{ ok: true; value: unknown } | { ok: false }> {
@@ -115,23 +130,28 @@ export function registerRoutes(
         body = parsed.data as Record<string, unknown>;
       }
       const context = requestContextOf(c);
+      const setCookies: string[] = [];
       let answer: RouteAnswer;
       try {
         answer = await handler({
           c,
           context,
           input: { params: params.data as Record<string, unknown>, query, body },
+          setCookies,
         });
       } catch (error) {
         if (error instanceof AuthRefusal || error instanceof StaffRefusal) {
-          return answerRefusal(c, refuse, error);
+          const refused = answerRefusal(c, refuse, error);
+          return committedBefore(error) ? withCookies(refused, setCookies) : refused;
         }
         throw error;
       }
-      if ("refusal" in answer) return answerRefusal(c, refuse, answer.refusal);
+      if ("refusal" in answer) {
+        return withCookies(answerRefusal(c, refuse, answer.refusal), setCookies);
+      }
       c.set("actor", "staff");
       c.set("outcome", "ok");
-      return c.json(answer.body as object, answer.status);
+      return withCookies(c.json(answer.body as object, answer.status), setCookies);
     });
   }
 }

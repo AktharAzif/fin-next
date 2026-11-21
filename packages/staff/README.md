@@ -22,7 +22,10 @@ await realm.run(context, async (tx) => {
 - `requireStaff` reads the staff session through the realm on every request (the gate and the
   Access check of §10.5 run in the realm's hook), checks the same person again (the session's
   Access `sub` and the member's address against the verified token), the gate state the route may
-  be reached at, and the route's permission, resolved from the member's role now.
+  be reached at, and the route's permission, resolved from the member's role now. The read renews
+  the session; its `Set-Cookie` values go to `setCookies`, which the API half copies onto every
+  answer whose unit committed (§11.2). With no session, an Access identity the staff table does
+  not list (or lists as removed) writes `staff.not_listed` (§18.1). `staffViewer` does the same.
 - Every staff change takes the staff-change lock, reads the actor and the target again, applies
   §8.5's rules and the last-Admin rule (`409 last_top_role`), and only then asks for the intent
   (`who.stepUp`), which it spends in the same transaction as the change, its audit event, its
