@@ -20,6 +20,12 @@ import {
   staffGate,
   trustedBrowserEligible,
 } from "../gate.ts";
+import {
+  GOOGLE_PATHS,
+  googleBefore,
+  googleCallbackBefore,
+  isCallbackPath,
+} from "../google/hooks.ts";
 import type { CountedBucket } from "../limits.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
@@ -66,13 +72,26 @@ const BODY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "/passkey/verify-authentication": ["response"],
   "/passkey/delete-passkey": ["id"],
   "/sign-out": [],
+  // Google (stretch 5, §5.8): redirect only, so no ID token, scopes, login hint, extra
+  // authorization parameters or `additionalData` from the client.
+  "/sign-in/social": [
+    "provider",
+    "callbackURL",
+    "errorCallbackURL",
+    "newUserCallbackURL",
+    "disableRedirect",
+  ],
+  "/link-social": ["provider", "callbackURL", "errorCallbackURL", "disableRedirect"],
+  "/unlink-account": ["accountId"],
 };
 
 export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<unknown> {
   const state = requestState(rt);
   const tx = unitOf(rt);
   const realm = rt.settings.realm;
-  const rule = rt.policy.rules.find((r) => r.path === ctx.path) ?? null;
+  const rule =
+    rt.policy.rules.find((r) => r.path === ctx.path) ??
+    (isCallbackPath(ctx.path) ? rt.policy.match("/callback/google", "GET") : null);
   if (rule === null || rule.class === "blocked") {
     // The allowlist answered before the router for HTTP; this is the second layer for server calls.
     rt.lines.write("auth.endpoint_blocked", "warn", {
@@ -109,6 +128,10 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   }
   if (ctx.path === "/passkey/verify-authentication") {
     await notePasskeyCounter(rt, ctx, state, tx);
+  }
+  if (realm === "developer" && GOOGLE_PATHS.has(ctx.path)) await googleBefore(rt, ctx, state, tx);
+  if (realm === "developer" && isCallbackPath(ctx.path)) {
+    return googleCallbackBefore(rt, ctx, state, tx);
   }
   return undefined;
 }
@@ -214,6 +237,8 @@ function isGetPath(state: RequestState): boolean {
 
 function targetOf(path: string, body: Record<string, unknown>, personId: string): string {
   if (path === "/passkey/delete-passkey" && typeof body.id === "string") return body.id;
+  // Unlinking binds the account it removes (§7.6's `account.google_unlink`).
+  if (path === "/unlink-account" && typeof body.accountId === "string") return body.accountId;
   return personId;
 }
 

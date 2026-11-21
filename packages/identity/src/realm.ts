@@ -28,6 +28,9 @@ import {
   type EndpointRule,
 } from "./endpoint-policy.ts";
 import { AuthRefusal, problemResponse } from "./errors.ts";
+import { googleCallbackLocation, googleRequestRefusal } from "./google/hooks.ts";
+import { finGooglePlugin } from "./google/plugin.ts";
+import { createGoogleSignIn, type GoogleSignIn } from "./google/provider.ts";
 import { afterHook } from "./hooks/after.ts";
 import { beforeHook } from "./hooks/before.ts";
 import type { HookContext } from "./hooks/context.ts";
@@ -64,6 +67,8 @@ export interface RealmDeps {
   killSwitch?: KillSwitchReader;
   /** Other areas' step-up action fragments (IF-03). */
   actions?: readonly (readonly StepUpAction[])[];
+  /** The outbound fetch for Google's token and key endpoints (the global one by default). */
+  fetch?: typeof fetch;
 }
 
 export interface RealmSession {
@@ -129,7 +134,11 @@ function idPrefixFor(realm: RealmSettings["realm"], model: string): IdPrefix {
 const internal = { input: false, required: false } as const;
 
 /** Builds the library options for a realm (§3.3, §3.4); exported for the configuration test. */
-export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAuthOptions {
+export function buildAuthOptions(
+  rt: RealmRuntime,
+  db: PgFinDatabase,
+  google: GoogleSignIn | null = null,
+): BetterAuthOptions {
   const { settings } = rt;
   const developer = settings.realm === "developer";
   const schema = developer ? developerSchema : staffSchema;
@@ -205,10 +214,20 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
     },
     account: {
       accountLinking: developer
-        ? { enabled: true, disableImplicitLinking: true, allowDifferentEmails: false }
+        ? {
+            enabled: true,
+            disableImplicitLinking: true,
+            allowDifferentEmails: false,
+            // Unlinking Google never strands a person: the emailed code always signs them in
+            // (§5.2), so the library's "last account" rule (which counts only account rows) is off.
+            allowUnlinkingAll: true,
+          }
         : { enabled: false },
       storeStateStrategy: "database",
       skipStateCookieCheck: false,
+      // A Google sign-in rewrites no account row: Fin keeps no provider token (§4.2), and an
+      // update that names `provider_id` would need an audit event on every sign-in (§13.8).
+      updateAccountOnSignIn: false,
     },
     verification: { disableCleanup: true },
     emailAndPassword: { enabled: false },
@@ -294,6 +313,8 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
           : {}),
         accountLockout: { enabled: true, maxFailedAttempts: 10, durationSeconds: 3600 },
       }),
+      // Google (stretch 5, §5.8): only when the console's OAuth client is configured (CR-12).
+      ...(google === null ? [] : [finGooglePlugin(google.provider)]),
     ],
   } as BetterAuthOptions;
 }
@@ -348,7 +369,42 @@ export function createRealm(deps: RealmDeps): Realm {
     requests: new AsyncLocalStorage<RequestState>(),
     docsOrigin: deps.docsOrigin,
   };
-  const auth = betterAuth(buildAuthOptions(rt, deps.db));
+  const google =
+    settings.google === null || settings.realm !== "developer"
+      ? null
+      : createGoogleSignIn({
+          settings: settings.google,
+          clock: deps.clock,
+          lines: deps.lines,
+          realm: "developer",
+          stateCookie: `${settings.cookiePrefix}.state`,
+          flow: () => requestState(rt).google,
+          ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+        });
+  const auth = betterAuth(buildAuthOptions(rt, deps.db, google));
+
+  /**
+   * Google's callback does its outbound calls (the code exchange, the provider's keys) before the
+   * request's unit of work opens, reading the OAuth state in a short unit of its own, so no pooled
+   * client is held across them (ARCHITECTURE principle 14).
+   */
+  async function prefetchGoogle(request: Request, state: RequestState): Promise<void> {
+    if (google === null) return;
+    await rt.requests.run(state, () =>
+      google.prefetch(request, async (identifier) => {
+        const context = (await auth.$context) as unknown as {
+          internalAdapter: {
+            findVerificationValue(id: string): Promise<{ value: string } | null>;
+          };
+        };
+        return rt.db.unit(
+          async () =>
+            (await context.internalAdapter.findVerificationValue(identifier))?.value ?? null,
+          { requestId: state.context.requestId },
+        );
+      }),
+    );
+  }
 
   const problem = (state: RequestState, refusal: AuthRefusal): Response => {
     state.line.outcome = "refused";
@@ -419,8 +475,26 @@ export function createRealm(deps: RealmDeps): Realm {
       finishLine(rt, state, refused.status);
       return refused;
     }
+    if (
+      google !== null &&
+      request.method === "POST" &&
+      (rule.path === "/sign-in/social" || rule.path === "/link-social")
+    ) {
+      // §2.3's redirect rule answers `400 invalid` before the library's own origin check.
+      const fields = await googleRequestRefusal(request.clone(), rule.path, settings.publicOrigin);
+      if (fields !== null) {
+        state.line.outcome = "refused";
+        state.line.reason = "body.google";
+        const refused = problemResponse(rt.docsOrigin, "invalid", context.requestId, { fields });
+        finishLine(rt, state, refused.status);
+        return refused;
+      }
+    }
     let response: Response;
     try {
+      if (rule.path === "/callback/:id" && request.method === "GET") {
+        await prefetchGoogle(request, state);
+      }
       const answer = await rt.db.unit(
         (tx) =>
           rt.requests.run(state, async () => {
@@ -449,6 +523,9 @@ export function createRealm(deps: RealmDeps): Realm {
         { requestId: context.requestId },
       );
       if (!answer.headers.has("cache-control")) answer.headers.set("cache-control", "no-store");
+      if (google !== null && rule.path === "/callback/:id") {
+        googleCallbackLocation(answer.headers, state.google);
+      }
       response = new Response(answer.body.byteLength === 0 ? null : answer.body, {
         status: answer.status,
         headers: answer.headers,

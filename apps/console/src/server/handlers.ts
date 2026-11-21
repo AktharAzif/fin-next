@@ -171,6 +171,11 @@ export const HANDLERS = {
     return ok({ asking });
   },
 
+  async signInMethods(_input, deps) {
+    // A setting read at start-up, the same for everyone: no session, no database.
+    return ok({ google: deps.orgs.realm.settings.features.google });
+  },
+
   async viewer(input, deps) {
     return ok(await person(input, deps, (tx, who) => viewerOf(deps.orgs, tx, who)));
   },

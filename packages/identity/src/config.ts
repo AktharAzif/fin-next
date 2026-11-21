@@ -3,6 +3,7 @@
 // T-SAT-03). Code names hosts by role; the real hostnames arrive only through
 // FIN_PUBLIC_ORIGIN (and FIN_API_ORIGIN under the split-host fallback) at deploy time.
 import type { LimitKey } from "./crypto/keyed.ts";
+import { GoogleConfigError, type GoogleSettings, readGoogleSettings } from "./google/settings.ts";
 
 export type RealmName = "developer" | "staff";
 export type Environment = "development" | "test" | "staging" | "production";
@@ -35,6 +36,8 @@ export interface RealmSettings {
   secrets: readonly RealmSecret[];
   limitKeys: readonly LimitKey[];
   features: { passwords: boolean; google: boolean };
+  /** Google sign-in's client and provider when it is on (§5.8), else null. */
+  google: GoogleSettings | null;
 }
 
 export class RealmConfigError extends Error {
@@ -168,14 +171,19 @@ export function readRealmSettings(
   if (apiUrl !== null && apiUrl.origin === publicUrl.origin) {
     throw new RealmConfigError("FIN_API_ORIGIN equals FIN_PUBLIC_ORIGIN; leave it unset instead");
   }
-  const features = {
-    passwords: env.FIN_FEATURE_PASSWORDS === "on",
-    google: env.FIN_FEATURE_GOOGLE === "on",
-  };
-  if (features.passwords || features.google) {
-    // Stretch items 2 and 5 (spec 02 §1.2) are not built: refusing beats a half-built path.
-    throw new RealmConfigError("passwords and Google sign-in are not built in this release");
+  if (env.FIN_FEATURE_PASSWORDS === "on") {
+    // Stretch item 2 (spec 02 §1.2) is not built: refusing beats a half-built path.
+    throw new RealmConfigError("passwords are not built in this release");
   }
+  // Stretch item 5 (§5.8): off unless switched on with the console's OAuth client (CR-12).
+  let google: GoogleSettings | null;
+  try {
+    google = readGoogleSettings(realm, env, environment, publicUrl.origin);
+  } catch (error) {
+    if (error instanceof GoogleConfigError) throw new RealmConfigError(error.message);
+    throw error;
+  }
+  const features = { passwords: false, google: google !== null };
   return {
     realm,
     environment,
@@ -189,6 +197,7 @@ export function readRealmSettings(
     secrets: parseSecrets(requireValue(env, "BETTER_AUTH_SECRETS")),
     limitKeys: parseLimitKeys(env),
     features,
+    google,
   };
 }
 
