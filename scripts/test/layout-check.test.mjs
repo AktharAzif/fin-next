@@ -330,6 +330,9 @@ describe("layout:check", () => {
       "packages/money/package.yml",
       "packages/money/package.json5",
       "packages/core/package.yaml",
+      // A case-insensitive file system gives pnpm these as package.yaml and package.json5.
+      "packages/money/Package.YAML",
+      "packages/core/PACKAGE.json5",
     ]) {
       const dir = fixture({ files: { [file]: 'name: "@fin/money"\n' } });
       assert.deepEqual(rules(checkLayout(dir).findings), ["manifest-format"], file);
@@ -373,6 +376,7 @@ describe("layout:check", () => {
       "packages/core/vitest.config.ts",
       "packages/core/vitest.config.mts",
       "packages/core/vitest.workspace.ts",
+      "packages/core/Vitest.Config.TS",
     ]) {
       const dir = fixture({ files: { [file]: "export default {};\n" } });
       assert.deepEqual(rules(checkLayout(dir).findings), ["vitest-config"], file);

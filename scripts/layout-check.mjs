@@ -401,9 +401,10 @@ export function checkLayout(root) {
 
   // Manifests are package.json only: pnpm reads the other formats too, and nothing checks them.
   // The root vitest.config.ts is the only Vitest configuration: the package scripts name it with
-  // --config, so a package's own would be passed by without a word.
+  // --config, so a package's own would be passed by without a word. Names are compared in lower
+  // case, as a case-insensitive file system (macOS, Windows) matches them.
   for (const file of files) {
-    const base = file.split("/").pop() ?? "";
+    const base = (file.split("/").pop() ?? "").toLowerCase();
     if (OTHER_MANIFESTS.has(base)) {
       findings.push({
         file,
