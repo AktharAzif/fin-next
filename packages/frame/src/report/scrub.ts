@@ -341,18 +341,22 @@ export const SHAPES: readonly Shape[] = Object.freeze([
 /**
  * A URL's fragment of 16 characters or more, or one holding a `=`: a link token, or a code beside
  * its key (`#c=12345678`). It runs after SHAPES, and takes the tokens they leave (`[email]`) with
- * the rest, so a fragment is removed whole whatever the rows before it found in it. A short
- * fragment with no `=` (`#root`, `#42`, a colour) is kept.
+ * the rest. The code row's token is the one with a space in it (`otp [code]`, where a fragment
+ * held `otp=123456`, or an address with `pin` and a date in it), so the fragment runs on over
+ * exactly ` [code]`; no other row leaves a space where the fragment had none. So a fragment is
+ * removed whole whatever the rows before it found in it. A short fragment with no `=` (`#root`,
+ * `#42`, a colour) is kept.
  *
  * The fragment runs to whitespace, `"`, `<`, `>` or a backtick: what the URL Standard's fragment
  * percent-encode set never leaves raw in an href. Every other character can stand in one, raw:
  * RFC 3986's `'`, `(` and `)` (which encodeURIComponent never escapes either), `{`, `}`, `|`, `^`,
  * `\`, a second `#`, and in a decoded fragment or one built by hand any letter. A closing quote
- * or bracket right after a fragment goes with it.
+ * or bracket right after a fragment goes with it. (The run's class never takes a space, so the
+ * pattern is read in linear time.)
  */
 const FRAGMENT: Shape = {
   name: "fragment",
-  pattern: /#[^\s"<>`]*/gu,
+  pattern: /#[^\s"<>`]*(?: \[code\][^\s"<>`]*)*/gu,
   token: (match) => (match.length > 16 || match.includes("=") ? "#[fragment]" : match),
 };
 

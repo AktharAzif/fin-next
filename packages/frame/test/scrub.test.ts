@@ -443,6 +443,14 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       ],
       // A code beside its key, however short.
       ["/verify-email#c=12345678", "/verify-email#[fragment]"],
+      // The code row leaves `word [code]`, with a space, inside a fragment that holds a code word
+      // and digits (an address with a birth date, or a code key): the rest goes too (R-17).
+      [
+        `https://console.example.com/sign-in/code#e=${encodeURIComponent(["crispin.19850412", "example.com"].join("@"))}&c=87654321`,
+        "https://console.example.com/sign-in/code#[fragment]",
+      ],
+      [`/invite#otp=123456&t=${token}`, "/invite#[fragment]"],
+      [`/a#pin-123456&b=code:1234567&t=${token}`, "/a#[fragment]"],
     ] as const) {
       expect(scrubText(text), text).toBe(expected);
     }
@@ -493,6 +501,12 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       );
       const built = `/sign-in/code#e=${encodeURIComponent(address)}&c=12345678`;
       expect(scrubText(built), built).toBe("/sign-in/code#[fragment]");
+      // A local part the code row reads as a code beside its word.
+      const coded = [`pin-${character}123456`, "example.com"].join("@");
+      const href = new URL(`https://console.example.com/sign-in/code#e=${coded}&c=12345678`).href;
+      expect(scrubText(href), href).toBe("https://console.example.com/sign-in/code#[fragment]");
+      const encoded = `/sign-in/code#e=${encodeURIComponent(coded)}&c=12345678`;
+      expect(scrubText(encoded), encoded).toBe("/sign-in/code#[fragment]");
     }
   });
 
@@ -740,6 +754,8 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       "fragment, one long one": () => `#${fill("a=")}`,
       "fragment, quotes and parentheses": () => fill("#'()"),
       "fragment, ended by spaces": () => fill("#a=b "),
+      "fragment, code words and digits": () => fill("#pin-123456"),
+      "fragment, code tokens and no #": () => fill(" [code]"),
     };
     for (const [name, run] of Object.entries(runs)) {
       it(name, () => {
