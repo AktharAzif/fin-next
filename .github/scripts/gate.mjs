@@ -12,7 +12,9 @@
 //                   it was not needed; a job the plan required that was skipped, cancelled or failed
 //                   fails the gate (spec 01 §5.4 rule 1)
 //   needs-complete  the jobs this gate knows ci.yml has are all in `needs`, so dropping one from
-//                   gate's needs fails rather than silently passes
+//                   gate's needs fails rather than silently passes; the other way round, a job
+//                   added to ci.yml and left out of gate's needs, is workflow-rules.mjs's
+//                   `gate-needs` rule in the static job
 // and prints one `deferred` line for each rule left to hardening: the owner's approval of a
 // control-path pull request (rule 2), the review receipt (rule 3) and the merge commit's tree on
 // `main` (rule 4). Every rule prints `gate.rule name=<rule> result=<pass|fail|skip|deferred>
