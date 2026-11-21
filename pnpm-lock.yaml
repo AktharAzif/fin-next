@@ -579,6 +579,15 @@ importers:
       '@fin/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@fin/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
+      '@fin/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@fin/keys':
+        specifier: workspace:*
+        version: link:../../packages/keys
       '@fin/server':
         specifier: workspace:*
         version: link:../../packages/server
@@ -586,12 +595,18 @@ importers:
         specifier: 'catalog:'
         version: 4.13.19
     devDependencies:
+      '@biomejs/biome':
+        specifier: 'catalog:'
+        version: 2.6.8
       '@fin/web-host':
         specifier: workspace:*
         version: link:../../packages/web-host
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
+      pg:
+        specifier: 'catalog:'
+        version: 8.23.1
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
