@@ -1,19 +1,27 @@
 // The boot skeletons are the frame as it will draw (spec 06 §2.2, §5.2; FW-S3 measures them): the
-// rows that give the page its height come from AppShell's own markup, so the first render does not
-// move the page. The console draws the Sandbox strip on every page until go-live; Fin Admin never
-// does. Below 1024px both draw the phone header's two rows.
+// rows that give the page its height come from AppShell's and AuthLayout's own markup, so the first
+// render does not move the page. The console draws the Sandbox strip on every page until go-live;
+// Fin Admin never does. Below 1024px both draw the phone header's two rows; the signed-out pages
+// have no card chrome below 640px.
+import { AuthCard, AuthLayout } from "@fin/ui";
 import { AppShell, DeploymentBadge, EnvironmentSwitch } from "@fin/ui/shell";
 import type { AnchorHTMLAttributes } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import adminSkeleton from "../boot/admin-skeleton.html?raw";
 import appSkeleton from "../boot/app-skeleton.html?raw";
+import authSkeleton from "../boot/auth-skeleton.html?raw";
 
-/** The classes that set a box's height or the space around it. */
+/**
+ * The classes that set a box's height, the space in and around it and where its content sits, at
+ * every breakpoint (`sm:p-8` counts; colours and display do not).
+ */
 function geometry(classes: string): string[] {
   return classes
     .split(/\s+/)
-    .filter((name) => /^(?:h|min-h|p|px|py|pt|pb|gap)-/.test(name) || name === "border-b")
+    .filter((name) =>
+      /^(?:[a-z]+:)*(?:(?:h|min-h|p|px|py|pt|pb|gap|items|justify)-|border-b$)/.test(name),
+    )
     .sort();
 }
 
@@ -114,6 +122,33 @@ describe("the boot skeletons' geometry", () => {
         "overflow-hidden",
       );
     }
+    expect(classOf(authSkeleton, /data-boot-block="auth"[^>]*class="([^"]*)"/)).toContain(
+      "overflow-hidden",
+    );
     expect(appSkeleton).toMatch(/data-skeleton class="h-8 w-36 min-w-0 shrink /);
+  });
+
+  it("auth: AuthLayout's gutters, header row, card position and card padding", () => {
+    const page = renderToStaticMarkup(
+      <AuthLayout homeHref="/" linkAs={Link}>
+        <AuthCard title="Sign in to Fin">
+          <p>form</p>
+        </AuthCard>
+      </AuthLayout>,
+    );
+    const pairs: [RegExp, RegExp][] = [
+      [/data-slot="auth-layout" class="([^"]*)"/, /data-boot-block="auth"[^>]*class="([^"]*)"/],
+      [/<header class="([^"]*)">/, /data-boot-header="auth" class="([^"]*)"/],
+      [/<main id="main" class="([^"]*)">/, /data-boot-main class="([^"]*)"/],
+      [
+        /<section aria-labelledby="auth-card-title" class="([^"]*)">/,
+        /data-boot-card class="([^"]*)"/,
+      ],
+    ];
+    for (const [drawn, booted] of pairs) {
+      expect(geometry(classOf(authSkeleton, booted)), String(booted)).toEqual(
+        geometry(classOf(page, drawn)),
+      );
+    }
   });
 });
