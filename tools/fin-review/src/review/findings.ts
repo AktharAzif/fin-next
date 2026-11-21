@@ -9,13 +9,16 @@
 // A prior blocker's `fixed` claim is accepted only with a quote of the fix (spec 07 §2.3.2) from the
 // file its `fixWhere` names, within those lines, touching a line changed since the blocker was found,
 // in a file tied to the blocker: one it names (or that file renamed), a test of such a file, a file
-// one hop from it in the import graph, or, where a file it names was deleted since, any file changed
-// since (FixScope, computed by the run). What was already there cannot be a fix, and no claim is
-// accepted while the text the blocker quotes has left its file for another file changed since:
-// a moved defect is not a fixed one. A claim the engine cannot accept leaves the blocker open and is
-// recorded with its reasons; it does not fail the output (a fabricated quote or a path outside the
-// tree still does, as rules 2 and 3 say). An accepted claim is only a claim: the run sends it to a
-// sceptic, and the blocker closes only when the sceptic finds the defect gone (src/review/run.ts).
+// one hop from it in the import graph, a file changed since in which the code the blocker quotes now
+// occurs more often than it did (where the defect may have moved or been copied), or, where a file it
+// names was deleted since, any file changed since (FixScope, computed by the run). What was already
+// there cannot be a fix. A claim the engine cannot accept leaves the blocker open and is recorded
+// with its reasons; it does not fail the output (a fabricated quote or a path outside the tree still
+// does, as rules 2 and 3 say). An accepted claim is only a claim: the run sends it to a sceptic, told
+// where the quoted code now also appears, and the blocker closes only when every sceptic finds the
+// defect gone, there too (src/review/run.ts). A moved defect is not a fixed one, and that is the fix
+// check's to judge: no text match can tell a move from a fix (a comment holding the old line defeats
+// it, and an unrelated line that matches it would refuse a real fix).
 //
 // An output that breaks any rule is retried once in a fresh session (§4.6). Findings are judged one
 // by one: an invalid finding is recorded as `invalid` and never shown, and the valid findings of the
@@ -74,16 +77,21 @@ export interface ValidationContext {
   readonly fixScopes?: ReadonlyMap<string, FixScope>;
 }
 
-/** Where a fix of one prior blocker may be quoted at the head, and whether any can be accepted. */
+/** Where a fix of one prior blocker may be quoted at the head, and where its quoted code went. */
 export interface FixScope {
   /**
-   * Each file at the head tied to the blocker (a file it names or that file renamed, a test of one,
-   * a file one hop from one; any file changed since when one it names was deleted), with the lines
-   * of it that changed since the blocker was found. A fix is quoted only from such lines.
+   * Each file at the head tied to the blocker (a file it names or that file renamed, a file in
+   * `quotedElsewhere`, a test of a named file, a file one hop from one; any file changed since when
+   * one it names was deleted), with the lines of it that changed since the blocker was found. A fix
+   * is quoted only from such lines.
    */
   readonly files: ReadonlyMap<string, ReadonlySet<number>>;
-  /** Why no claim can be accepted however it is quoted (the quoted defect moved to another file); null otherwise. */
-  readonly moved: string | null;
+  /**
+   * The files changed since the blocker was found, other than a quote's own file, in which code the
+   * blocker quotes (white space taken out) now occurs more often than it did then: where the defect
+   * may have moved or been copied. Its fix check is shown them and takes two sceptics. Sorted.
+   */
+  readonly quotedElsewhere: readonly string[];
 }
 
 export interface FindingCheck {
@@ -149,18 +157,17 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
 /**
  * Why a quoted fix of prior blocker `id` cannot be accepted: the quote must come from the file
  * `where` names, a file tied to the blocker (FixScope.files), lie within its lines, and touch a line
- * that changed since the blocker was found; and the text the blocker quotes must not have moved to
- * another file changed since. Nothing that was already there when the blocker was found can be its
- * fix, nor a line changed in a file unrelated to it.
+ * that changed since the blocker was found. Nothing that was already there when the blocker was
+ * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
+ * fix check's to judge (src/review/run.ts).
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);
   if (scope === undefined) return [`${id} is not a prior blocker shown to this session`];
-  if (scope.moved !== null) return [`${id}: ${scope.moved}`];
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
   const changed = scope.files.get(where.path);
   if (changed === undefined) {
-    return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not tied to the blocker (a file it names or that file renamed, a test of one, or a file one hop from one)`];
+    return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not tied to the blocker (a file it names or that file renamed, a file its quoted code now also appears in, a test of one, or a file one hop from one)`];
   }
   const text = ctx.files.text(where.path) ?? "";
   const slice = text.split("\n").slice(where.startLine - 1, where.endLine).join("\n");

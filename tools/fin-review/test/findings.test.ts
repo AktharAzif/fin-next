@@ -115,7 +115,7 @@ describe("finding validation (T-RV-13)", () => {
     const ids = ["P1", "P2", "P3", "P4"];
     // Line 2 of src/a.ts changed since each blocker was found.
     const changed = new Map([["src/a.ts", new Set([2])]]);
-    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ids), fixScopes: new Map(ids.map((id) => [id, { files: changed, moved: null }])) });
+    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ids), fixScopes: new Map(ids.map((id) => [id, { files: changed, quotedElsewhere: [] }])) });
     const validated = validateOutput(
       output([], {
         priorBlockers: [
@@ -138,17 +138,17 @@ describe("finding validation (T-RV-13)", () => {
     assert.match(problem(output([], { priorBlockers: [] })) ?? "", /priorBlockers is not allowed/);
   });
 
-  it("a claim is never accepted while the text the blocker quotes has moved to another changed file", () => {
-    const moved = "the text the blocker quotes now lies in src/b.ts, a file changed since it was found: a moved defect is not a fixed one";
-    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", { files: new Map([["src/a.ts", new Set([2])]]), moved }]]) });
-    const check = validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "src/a.ts", startLine: 2, endLine: 2 }, fixQuote: { path: "src/a.ts", text: "return x + 1;" } }] }), c).prior[0];
-    assert.equal(check?.status, "open");
-    assert.match(check?.notAccepted[0] ?? "", /now lies in src\/b\.ts/);
+  it("where the quoted code now also appears refuses no claim: the fix check judges it, and a file it went to may hold the fix", () => {
+    const scope = { files: new Map([["src/a.ts", new Set([2])], ["src/other.ts", new Set([1])]]), quotedElsewhere: ["src/other.ts"] };
+    const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", scope]]) });
+    const claim = (where: Record<string, unknown>, quote: Record<string, unknown>) => validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: where, fixQuote: quote }] }), c).prior[0];
+    assert.equal(claim({ path: "src/a.ts", startLine: 2, endLine: 2 }, { path: "src/a.ts", text: "return x + 1;" })?.status, "fixed", "a fix in the file the blocker names");
+    assert.equal(claim({ path: "src/other.ts", startLine: 1, endLine: 1 }, { path: "src/other.ts", text: "export const other = 1;" })?.status, "fixed", "a fix where the quoted code went");
   });
 
   it("a quoted fix must come from its own file, within its lines, and touch a line changed since the blocker was found", () => {
     const fixed = (where: Record<string, unknown>, quote: Record<string, unknown>, changed: Map<string, Set<number>>) => {
-      const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", { files: changed, moved: null }]]) });
+      const c = ctx({ schema: sessionSchema(PROCEDURE, "security", null, ITEMS, ["P1"]), fixScopes: new Map([["P1", { files: changed, quotedElsewhere: [] }]]) });
       const check = validateOutput(output([], { priorBlockers: [{ id: "P1", status: "fixed", fixWhere: where, fixQuote: quote }] }), c).prior[0];
       return check === undefined ? undefined : { status: check.status, problems: [...check.problems, ...check.notAccepted] };
     };

@@ -33,6 +33,16 @@ export function claimedFix(spec: SessionSpec): { fixWhere: Record<string, unknow
   return JSON.parse(rest.slice(0, rest.indexOf("\n===== END DATA"))) as { fixWhere: Record<string, unknown>; fixQuote: { path: string; text: string } };
 }
 
+const ELSEWHERE_HEADER = "# Where the code the finding quotes now also appears (files changed since it was reported)\n";
+
+/** The files a fix check was told now also hold the code the blocker quotes; [] when it was told of none. */
+export function shownElsewhere(spec: SessionSpec): string[] {
+  const at = spec.prompt.indexOf(ELSEWHERE_HEADER);
+  if (at < 0) return [];
+  const rest = spec.prompt.slice(at + ELSEWHERE_HEADER.length);
+  return JSON.parse(rest.slice(0, rest.indexOf(`\n\n${CLAIM_HEADER}`))) as string[];
+}
+
 /** A fix check that finds the defect gone, quoting the claimed fix as its guard. */
 export function fixHolds(spec: SessionSpec): FakeReply {
   return { kind: "result", output: { verdict: "REFUTED", guardQuotes: [claimedFix(spec).fixQuote], reason: "Every path to the defect passes through the fix." } };
