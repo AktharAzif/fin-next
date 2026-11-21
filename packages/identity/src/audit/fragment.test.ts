@@ -1,7 +1,10 @@
 // The registry's copy of this package's events (spec 08 §3.2): packages/audit/src/events/identity.ts,
 // and the staff realm's half of staff.ts, are what `migrate` syncs to audit.event_type, so
 // audit.record() takes exactly what this package records. Every event matches there field by field:
-// category, scope, roles, actors, target prefix and metadata schema.
+// category, scope, roles, actors, target prefix and metadata schema. This package does not depend
+// on @fin/audit, so its turbo.json lists the registry files read here among its test and typecheck
+// inputs: an edit to the registry's copy alone reruns this test rather than replaying it from
+// cache (layout:check's task-inputs rule holds the list complete).
 import { describe, expect, it } from "vitest";
 import * as z from "zod";
 import { events as identityFragment } from "../../../audit/src/events/identity.ts";

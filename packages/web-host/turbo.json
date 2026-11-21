@@ -1,0 +1,20 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/static-check.mjs",
+        "$TURBO_ROOT$/scripts/lib/repo.mjs"
+      ]
+    },
+    "typecheck": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/scripts/static-check.mjs",
+        "$TURBO_ROOT$/scripts/lib/repo.mjs"
+      ]
+    }
+  }
+}

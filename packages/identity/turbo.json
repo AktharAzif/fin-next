@@ -1,0 +1,22 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/audit/src/define.ts",
+        "$TURBO_ROOT$/packages/audit/src/events/identity.ts",
+        "$TURBO_ROOT$/packages/audit/src/events/staff.ts"
+      ]
+    },
+    "typecheck": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/audit/src/define.ts",
+        "$TURBO_ROOT$/packages/audit/src/events/identity.ts",
+        "$TURBO_ROOT$/packages/audit/src/events/staff.ts"
+      ]
+    }
+  }
+}

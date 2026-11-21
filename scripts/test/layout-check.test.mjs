@@ -7,6 +7,7 @@ import {
   checkLayout,
   checkTestScripts,
   entryFor,
+  inputsCover,
   parseCodeowners,
   VITEST_SCRIPTS,
   validateLayout,
@@ -409,6 +410,180 @@ describe("layout:check", () => {
     }
   });
 
+  describe("the tasks a package's unit tests feed hash what those tests read", () => {
+    // @fin/core's unit test holds a copy equal to a registry kept in @fin/web-host, which
+    // @fin/core does not depend on: the registry and its own import are read from outside.
+    const TYPECHECK = "tsc -p tsconfig.json";
+    const core = (/** @type {Record<string, unknown>} */ extra = {}) => ({
+      "packages/core/package.json": JSON.stringify({
+        name: "@fin/core",
+        private: true,
+        scripts: { ...VITEST_SCRIPTS, typecheck: TYPECHECK },
+        ...extra,
+      }),
+      "packages/core/src/copy.test.ts":
+        '// Not an import: "../../web-host/src/unread.ts".\n' +
+        'import { registry } from "../../web-host/src/registry.ts";\n' +
+        "export { registry };\n",
+      "packages/web-host/src/registry.ts":
+        'import { shape } from "./shape.ts";\nexport const registry = shape;\n',
+      "packages/web-host/src/shape.ts": "export const shape = 1;\n",
+    });
+    const inputs = (/** @type {string[]} */ list) =>
+      JSON.stringify({
+        extends: ["//"],
+        tasks: { test: { inputs: list }, typecheck: { inputs: list } },
+      });
+    const both = [
+      "$TURBO_DEFAULT$",
+      "$TURBO_ROOT$/packages/web-host/src/registry.ts",
+      "$TURBO_ROOT$/packages/web-host/src/shape.ts",
+    ];
+    /** @param {any} l */
+    const withRootTurbo = (l) => {
+      l.entries[0].files.push("turbo.json");
+    };
+
+    test("a file read from outside the package and not among the inputs fails, for each task", () => {
+      const { findings } = checkLayout(fixture({ files: core() }));
+      assert.deepEqual(rules(findings), ["task-inputs"]);
+      assert.deepEqual(
+        findings.map((f) => `${f.file}:${f.line}`),
+        [
+          "packages/core/src/copy.test.ts:2",
+          "packages/web-host/src/registry.ts:1",
+          "packages/core/src/copy.test.ts:2",
+          "packages/web-host/src/registry.ts:1",
+        ],
+      );
+      assert.match(findings[0]?.message ?? "", /@fin\/core's test task reads packages\/web-host\//);
+      assert.match(findings[2]?.message ?? "", /@fin\/core's typecheck task reads /);
+    });
+
+    test("listing every file the tests reach, by path or glob, passes", () => {
+      const listed = fixture({
+        files: { ...core(), "packages/core/turbo.json": inputs(both) },
+      });
+      assert.deepEqual(checkLayout(listed).findings, []);
+      const glob = fixture({
+        files: {
+          ...core(),
+          "packages/core/turbo.json": inputs([
+            "$TURBO_DEFAULT$",
+            "$TURBO_ROOT$/packages/web-host/src/*.ts",
+          ]),
+        },
+      });
+      assert.deepEqual(checkLayout(glob).findings, []);
+    });
+
+    test("a file reached through another outside file must be listed too", () => {
+      const dir = fixture({
+        files: { ...core(), "packages/core/turbo.json": inputs(both.slice(0, 2)) },
+      });
+      const { findings } = checkLayout(dir);
+      assert.deepEqual(
+        findings.map((f) => `${f.file}:${f.line}`),
+        ["packages/web-host/src/registry.ts:1", "packages/web-host/src/registry.ts:1"],
+      );
+      assert.match(findings[0]?.message ?? "", /reads packages\/web-host\/src\/shape\.ts /);
+    });
+
+    test("a negated input takes a file back out", () => {
+      const dir = fixture({
+        files: {
+          ...core(),
+          "packages/core/turbo.json": inputs([
+            ...both,
+            "!$TURBO_ROOT$/packages/web-host/src/shape.ts",
+          ]),
+        },
+      });
+      assert.equal(checkLayout(dir).findings.length, 2);
+    });
+
+    test("inputs without $TURBO_DEFAULT$ fail, since the package's own files would not count", () => {
+      const dir = fixture({
+        files: { ...core(), "packages/core/turbo.json": inputs(both.slice(1)) },
+      });
+      const { findings } = checkLayout(dir);
+      assert.deepEqual(rules(findings), ["task-inputs"]);
+      assert.deepEqual(
+        findings.map((f) => f.file),
+        ["packages/core/turbo.json", "packages/core/turbo.json"],
+      );
+    });
+
+    test("a ^typecheck dependency covers the type check, never the test run", () => {
+      const dir = fixture({
+        layout: withRootTurbo,
+        files: {
+          ...core({ devDependencies: { "@fin/web-host": "workspace:*" } }),
+          "turbo.json": JSON.stringify({
+            tasks: { typecheck: { dependsOn: ["^typecheck"] }, test: { outputs: [] } },
+          }),
+        },
+      });
+      const { findings } = checkLayout(dir);
+      assert.equal(findings.length, 2);
+      for (const finding of findings) assert.match(finding.message, /@fin\/core's test task /);
+    });
+
+    test("a global dependency is hashed for every task", () => {
+      const dir = fixture({
+        layout: withRootTurbo,
+        files: {
+          ...core(),
+          "turbo.json": JSON.stringify({ globalDependencies: ["packages/web-host/src/*.ts"] }),
+        },
+      });
+      assert.deepEqual(checkLayout(dir).findings, []);
+    });
+
+    test("integration tests, journeys and other runners are not the unit run", () => {
+      const outside = 'import "../../web-host/src/registry.ts";\n';
+      const dir = fixture({
+        files: {
+          ...core(),
+          "packages/core/src/copy.test.ts": "export {};\n",
+          "packages/core/src/copy.db.test.ts": outside,
+          "packages/core/e2e/copy.test.ts": outside,
+          "packages/core/src/copy.ts": outside,
+        },
+      });
+      assert.deepEqual(checkLayout(dir).findings, []);
+      const other = fixture({
+        files: {
+          ...core({ scripts: { test: "node --test", typecheck: TYPECHECK } }),
+        },
+      });
+      assert.deepEqual(checkLayout(other).findings, []);
+    });
+
+    test("a JavaScript file's declarations beside it count as read", () => {
+      const dir = fixture({
+        files: {
+          ...core(),
+          "packages/core/src/copy.test.ts": 'import "../../web-host/test/platform.mjs";\n',
+          "packages/web-host/test/platform.mjs": "export {};\n",
+          "packages/web-host/test/platform.d.mts": "export {};\n",
+        },
+      });
+      const read = checkLayout(dir).findings.map((f) => /reads (\S+) /.exec(f.message)?.[1]);
+      assert.deepEqual(read, [
+        "packages/web-host/test/platform.mjs",
+        "packages/web-host/test/platform.d.mts",
+        "packages/web-host/test/platform.mjs",
+        "packages/web-host/test/platform.d.mts",
+      ]);
+    });
+
+    test("a turbo.json that is not a JSON object fails closed", () => {
+      const dir = fixture({ files: { "packages/core/turbo.json": "[]\n" } });
+      assert.deepEqual(rules(checkLayout(dir).findings), ["task-inputs"]);
+    });
+  });
+
   test("the command prints file and rule and exits 1 on a finding", () => {
     const dir = fixture({ files: { "stray.txt": "x\n" } });
     const run = runScript("scripts/layout-check.mjs", ["--root", dir]);
@@ -455,6 +630,15 @@ describe("layout helpers", () => {
     assert.equal(entryFor(layout, "docs/reviewer.md")?.path, "docs");
     assert.equal(entryFor(layout, "a.md")?.kind, "root");
     assert.equal(entryFor(layout, "b.md"), undefined);
+  });
+
+  test("a task's inputs name a repository path only through $TURBO_ROOT$", () => {
+    const file = "packages/audit/src/events/staff.ts";
+    assert.ok(inputsCover([`$TURBO_ROOT$/${file}`], file));
+    assert.ok(inputsCover(["$TURBO_ROOT$/packages/audit/src/**/*.ts"], file));
+    assert.ok(!inputsCover(["$TURBO_ROOT$/packages/audit/src/*.ts"], file));
+    assert.ok(!inputsCover(["$TURBO_DEFAULT$", `../audit/src/events/staff.ts`, file], file));
+    assert.ok(!inputsCover(["$TURBO_ROOT$/packages/audit/**", `!$TURBO_ROOT$/${file}`], file));
   });
 
   test("CODEOWNERS parsing drops the leading slash and keeps line numbers", () => {
