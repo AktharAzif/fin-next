@@ -29,8 +29,10 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    wherever it appears, Fin's own words included, and the placeholder would then show what it
    stands for. The check refuses an overlay for another environment, a host that is not one label below
    the zone, a host whose label is not on `allowedNames.labels`, a never-touch entry that is not a
-   label under the zone (it accepts `legacy`, `legacy.`, `legacy.<zone>` and `@`), and an allowed
-   name that is, or sits under, a never-touch label. `cloudflare.zoneId` and `access.allowDomains`
+   label under the zone (it accepts `legacy`, `legacy.`, `legacy.<zone>` and `@`), a never-touch
+   entry written as a wildcard (`*.legacy`: a never-touch label already covers itself and every
+   name under it, so write `legacy` instead; read as one name, `*.legacy` would protect nothing
+   below it), and an allowed name that is, or sits under, a never-touch label. `cloudflare.zoneId` and `access.allowDomains`
    are optional: the zone's ID is checked against Cloudflare at run time (below), and the domains
    serve the owner's staging decision that Access admits the company domain with a one-time PIN.
    `dmarc.policy`, when present, must equal `email.dmarcPolicy` in `ops/environments/staging.json`,
