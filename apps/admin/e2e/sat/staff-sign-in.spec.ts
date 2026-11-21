@@ -2,7 +2,7 @@
 // wrong code says so; someone Access lets in who is not staff sees the same screens and gets no
 // code; signing out ends with sign-in; and the sign-in page draws in light and dark.
 import { expect, test } from "@fin/testing/playwright";
-import { enrol, inApp, ORIGIN, server, throughAccess } from "../support/journey.ts";
+import { enrol, expectHome, inApp, ORIGIN, server, throughAccess } from "../support/journey.ts";
 
 test.beforeEach(async () => {
   await server.reset();
@@ -37,8 +37,7 @@ test("@journey a wrong emailed code, then a passkey alone after signing out", as
 
   // A passkey alone signs a member of staff in (aal2): no code, no factor step.
   await page.getByRole("button", { name: "Sign in with a passkey" }).click();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
-  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  await expectHome(page);
   const events = (await server.audit()).filter((e) => e.event === "staff.signed_in");
   expect(events.length).toBeGreaterThanOrEqual(2);
 });
