@@ -141,6 +141,145 @@ describe("static builds", () => {
     );
   });
 
+  it("reads a URL's host as a browser does, whatever ends the scanner's reading early", (t) => {
+    const nl = String.fromCharCode(10);
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["a user name cut by (", "assets/a.js", 'location="https://react.dev(1)@evil.example/c"'],
+      ["a user name cut by {", "assets/a.js", 'x="https://www.w3.org{x}@evil.example/"'],
+      [
+        "a user name cut by ^",
+        "assets/a.css",
+        "a{background:url(https://react.dev^@evil.example/p.png)}",
+      ],
+      [
+        "a user name cut by a space",
+        "index.html",
+        '<a href="https://react.dev @evil.example/">x</a>',
+      ],
+      ["a user name cut by |", "assets/a.js", 'x="https://react.dev|@evil.example/"'],
+      [
+        "a user name behind an escaped quote",
+        "assets/a.js",
+        'x="https://react.dev\\"@evil.example/"',
+      ],
+      ["a user name behind an escape", "assets/a.js", 'x="https://react.dev\\u0040evil.example/"'],
+      [
+        "a user name with a comma in CSS",
+        "assets/a.css",
+        "a{b:url(https://react.dev,@evil.example/p.png)}",
+      ],
+      [
+        "a new line in the host",
+        "index.html",
+        `<script src="https://www.w3.org${nl}.evil.example/x.js"></script>`,
+      ],
+      [
+        "a tab escape in the host",
+        "assets/a.js",
+        'import("https://react.dev\\t.evil.example/x.js")',
+      ],
+      ["a tab in the scheme", "assets/a.js", 'fetch("ht\\ttps://evil.example/c")'],
+      ["JSON-escaped protocol-relative slashes", "assets/a.json", '{"u":"\\/\\/evil.example\\/c"}'],
+      ["three slashes", "index.html", '<script src="///evil.example/x.js"></script>'],
+      ["a slash and a backslash", "index.html", '<script src="/\\evil.example/x.js"></script>'],
+      ["two backslashes", "assets/a.js", 'fetch("\\\\\\\\evil.example/c")'],
+      ["an empty user name", "index.html", '<script src="//@evil.example/x.js"></script>'],
+      [
+        "srcset's second candidate",
+        "index.html",
+        '<img srcset="/a.png 1x, //evil.example/b.png 2x">',
+      ],
+      [
+        "srcset's absolute candidate with a comma",
+        "index.html",
+        '<img srcset="/a.png 1x, https://react.dev,@evil.example/b.png 2x">',
+      ],
+      ["a scheme with no slashes", "assets/a.js", 'new WebSocket("wss:evil.example/c")'],
+      ["backslashes after the scheme", "assets/a.js", 'fetch("https:\\\\\\\\evil.example/c")'],
+      [
+        "HTML character references",
+        "index.html",
+        '<script src="https:&#x2f;&#x2f;evil.example/x.js"></script>',
+      ],
+      [
+        "named character references",
+        "index.html",
+        '<a href="https&colon;&sol;&sol;evil.example/">x</a>',
+      ],
+      ["braced unicode escapes", "assets/a.js", 'fetch("https:\\u{2f}\\u{2f}evil.example/c")'],
+      ["CSS escapes", "assets/a.css", "a{b:url(https:\\2f\\2f evil.example/p.png)}"],
+      ["an XHTML page", "page.xhtml", '<script src="https://evil.example/x.js"></script>'],
+      ["an unknown extension", "assets/a.data", 'fetch("https://evil.example/c")'],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(
+        found.includes("third-party-origin") || found.includes("url-userinfo"),
+        `${what}: ${found.join()}`,
+      );
+    }
+    assert.ok(
+      staticRules(t, { LICENSE: "FIN_SESSION_SECRET" }).includes("setting-name"),
+      "an extensionless file",
+    );
+  });
+
+  it("passes the spellings a bundle uses for its own and the allowed origins", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      [
+        "protocol checks",
+        "assets/a.js",
+        'a.protocol==="https:"||a.protocol==="wss:";b={http:80,https:443};',
+      ],
+      [
+        "a prefix check",
+        "assets/a.js",
+        'e.startsWith("https://")||e.startsWith("//");f="//"+location.host;',
+      ],
+      ["a UNC check", "assets/a.js", 'if(p.startsWith("\\\\\\\\"))x();'],
+      [
+        "regular expressions",
+        "assets/a.js",
+        "x=/\\/\\/+/g;y=/\\/assets\\//;z=a.replace(/\\/\\//,'/');",
+      ],
+      [
+        "a host built at run time",
+        "assets/a.js",
+        `fetch(\`//${"$"}{host}/x\`);fetch(\`https://${"$"}{host}/x\`);`,
+      ],
+      [
+        "an allowed URL in escaped HTML",
+        "assets/a.js",
+        'e.innerHTML="<a href=\\"https://react.dev\\">x</a>";',
+      ],
+      [
+        "an allowed URL with escaped slashes",
+        "assets/a.json",
+        '{"u":"https:\\/\\/react.dev\\/errors\\/"}',
+      ],
+      [
+        "a relative srcset",
+        "index.html",
+        '<img srcset="/a.png 1x, /b.png 2x, data:image/png;base64,AA== 3x">',
+      ],
+      [
+        "an allowed namespace in a CSS data URL",
+        "assets/a.css",
+        "a{b:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E\")}",
+      ],
+      [
+        "an image's own metadata",
+        "assets/a.png",
+        `\u{89}PNG\u{0}\u{0}http://ns.adobe.com/xap/1.0/\u{0}`,
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      assert.deepEqual(staticRules(t, { [file]: text }), [], what);
+    }
+  });
+
   it("refuses secret shapes and whatever public-safety refuses, in any built file", (t) => {
     const token = ["whsec", "_", "QmFzZTY0U2VjcmV0VmFsdWVGb3JUZXN0aW5n"].join("");
     const address = ["ops-lead", "corp.example.co"].join("@");
