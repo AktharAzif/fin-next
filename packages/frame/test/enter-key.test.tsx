@@ -11,7 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { presentedPage, usePathname, usePresentedPage } from "../src/router/matches.ts";
+import { presentedPage, usePathname, usePresentedPage, useSearch } from "../src/router/matches.ts";
 
 beforeAll(() => {
   vi.stubGlobal("window", {
@@ -31,9 +31,15 @@ async function until(check: () => boolean): Promise<void> {
   expect(check()).toBe(true);
 }
 
-/** A page that prints both readings, so static markup shows what each hook returns. */
+/** A page that prints the readings, so static markup shows what each hook returns. */
 function Readings() {
-  return <p data-page={usePresentedPage()} data-location={usePathname()} />;
+  return (
+    <p
+      data-page={usePresentedPage()}
+      data-location={usePathname()}
+      data-search={JSON.stringify(useSearch())}
+    />
+  );
 }
 
 function app(initial: string) {
@@ -112,5 +118,23 @@ describe("the page key (spec 06 §5.1)", () => {
 
   it("is empty before anything is drawn", () => {
     expect(presentedPage([])).toBe("");
+  });
+});
+
+describe("the frame's search parameters", () => {
+  it("are the page drawn's, so the environment's cues change with the page, never before it", async () => {
+    // Production to Sandbox: until Sandbox's page is drawn, the page on screen is Production's, and
+    // the strip, the switch and the title must keep saying so.
+    const { router, release, render } = app("/a?env=production");
+    await router.load();
+    expect(render()).toContain('data-search="{&quot;env&quot;:&quot;production&quot;}"');
+    const navigation = router.navigate({ href: "/b" });
+    await until(() => router.state.status === "pending" && router.state.location.pathname === "/b");
+    expect(router.state.location.search).toEqual({});
+    expect(render()).toContain('data-search="{&quot;env&quot;:&quot;production&quot;}"');
+    release();
+    await navigation;
+    await until(() => router.state.status === "idle");
+    expect(render()).toContain('data-search="{}"');
   });
 });

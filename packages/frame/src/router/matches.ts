@@ -15,6 +15,7 @@ import { type FinStaticData, readStaticData } from "./static-data.ts";
 export interface MatchLike {
   readonly staticData?: unknown;
   readonly pathname?: unknown;
+  readonly search?: unknown;
   readonly status?: unknown;
   readonly _notFound?: unknown;
 }
@@ -82,9 +83,18 @@ export function usePresentedPage(): string {
   return useAnyMatches({ select: presentedPage });
 }
 
-/** The parsed search of the current location (an object of the route's search params). */
+/** The search parameters of the page drawn: the deepest presented match's, or none. */
+export function presentedSearch(matches: readonly MatchLike[]): unknown {
+  return matches.at(-1)?.search;
+}
+
+/**
+ * The parsed search parameters of the page drawn (an object of the route's search params). Like
+ * the page key, it follows the presented route, not the pending location, so the environment's
+ * cues (the Sandbox strip, EnvironmentSwitch, the title) change with the page they describe.
+ */
 export function useSearch(): unknown {
-  return useRouterValue((state) => state.location.search as unknown);
+  return useAnyMatches({ select: presentedSearch });
 }
 
 /** True while a navigation's loaders run; hover preloads never change it (spec 06 §5.1). */
