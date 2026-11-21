@@ -19,6 +19,7 @@ import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 import type { StaffMember, StaffRole } from "../api/contracts.ts";
 import { formatUtc } from "../format.ts";
+import { StaffTabs } from "../roles/StaffTabs.tsx";
 import {
   AddStaffDialog,
   actorOf,
@@ -159,7 +160,12 @@ function columns(
 export function StaffSkeleton() {
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="Staff" description={STAFF_DESCRIPTION} linkAs={RouterLink} />
+      <PageHeader
+        title="Staff"
+        description={STAFF_DESCRIPTION}
+        tabs={<StaffTabs current="staff" />}
+        linkAs={RouterLink}
+      />
       <div className="flex flex-col gap-16">
         <Table
           caption="Staff list"
@@ -211,6 +217,7 @@ export function StaffPage({
     <PageHeader
       title="Staff"
       description={STAFF_DESCRIPTION}
+      tabs={<StaffTabs current="staff" />}
       linkAs={RouterLink}
       {...(data.kind === "ready"
         ? {

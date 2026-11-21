@@ -19,6 +19,7 @@
 // journeys run against it unchanged (FIN_E2E_ADMIN_API=external) and this file goes.
 import { createHash, randomBytes } from "node:crypto";
 import { base32Encode, decodeToken, totp, totpCounter, verifyRs256 } from "@fin/testing";
+import { StaffRolesStandIn } from "../roles/stand-in.ts";
 import {
   assertionChallenge,
   assertionCredentialId,
@@ -418,6 +419,8 @@ export class AdminApiStandIn {
   enrolmentCodes = new Map<string, EnrolmentCode>();
   challenges = new Map<string, Challenge>();
   audit: AuditEvent[] = [];
+  /** Custom staff roles (stretch 3), with their own routes (e2e/roles/stand-in.ts). */
+  readonly staffRoles = new StaffRolesStandIn();
 
   constructor(options: AdminApiOptions) {
     this.#options = options;
@@ -443,7 +446,13 @@ export class AdminApiStandIn {
     this.enrolmentCodes.clear();
     this.challenges.clear();
     this.audit = [];
+    this.staffRoles.reset();
     this.#offsetMs = 0;
+  }
+
+  /** A prebuilt role, or a custom staff role the stand-in holds. */
+  #role(key: string): Role | undefined {
+    return roleOf(key) ?? this.staffRoles.role(key);
   }
 
   #record(
@@ -719,8 +728,30 @@ export class AdminApiStandIn {
     if ("status" in working) return working;
     const { session: s, member: m } = working;
     if (key === "GET /api/staff") return this.#needs(m, "staff.read") ?? this.#listStaff(m);
-    if (key === "GET /api/staff-roles")
-      return this.#needs(m, "staff.read") ?? ok({ roles: this.#roles() });
+    if (path === "/api/staff-roles" || path.startsWith("/api/staff-roles/")) {
+      return this.staffRoles.route({
+        method: request.method,
+        path,
+        body: context.body,
+        actor: m,
+        needs: (permission) => this.#needs(m, permission),
+        stepUp: (action, reasonKey, params) =>
+          this.#stepUp(context, s, m, action, reasonKey, params),
+        record: (event, target, metadata) => this.#record(event, m.id, target, metadata),
+        holders: (roleKey) =>
+          [...this.members.values()].filter((x) => x.roleKey === roleKey && x.status !== "removed"),
+        move: (memberId, roleKey) => {
+          const holder = this.members.get(memberId);
+          if (holder === undefined) return;
+          holder.roleKey = roleKey;
+          for (const x of [...this.sessions.values()])
+            if (x.memberId === memberId) this.#end(x, "signed_out");
+        },
+        prebuilt: ROLES,
+        problem,
+        ok,
+      });
+    }
     if (key === "POST /api/staff") return this.#addStaff(context, s, m);
     if (key === "GET /api/account") return this.#account(s, m);
     if (key === "POST /api/account/sessions/revoke-others")
@@ -750,7 +781,7 @@ export class AdminApiStandIn {
   }
 
   #needs(member: Member, permission: string): Answer | null {
-    return roleOf(member.roleKey)?.permissions.includes(permission) === true
+    return this.#role(member.roleKey)?.permissions.includes(permission) === true
       ? null
       : problem("forbidden", { permission });
   }
@@ -760,16 +791,6 @@ export class AdminApiStandIn {
     if (member.passkeys.length > 0) methods.push("passkey");
     if (member.totp?.enabled === true) methods.push("authenticator");
     return methods;
-  }
-
-  #roles() {
-    return ROLES.map((role) => ({
-      key: role.key,
-      label: role.label,
-      summary: role.summary,
-      builtIn: true,
-      permissions: [...role.permissions],
-    }));
   }
 
   // ── Step-up (§7) ──
@@ -881,7 +902,7 @@ export class AdminApiStandIn {
     if (session.assurance === "aal1") {
       return ok({ state: "factor_step", email: member.email, methods: this.#methods(member) });
     }
-    const role = roleOf(member.roleKey);
+    const role = this.#role(member.roleKey);
     return ok({
       state: "ok",
       staff: {
@@ -1359,7 +1380,7 @@ export class AdminApiStandIn {
       id: member.id,
       email: member.email,
       roleKey: member.roleKey,
-      roleLabel: roleOf(member.roleKey)?.label ?? member.roleKey,
+      roleLabel: this.#role(member.roleKey)?.label ?? member.roleKey,
       status: member.status === "pending" ? "pending" : "active",
       lastSignedInAt:
         member.lastSignedInAt === null ? null : new Date(member.lastSignedInAt).toISOString(),
@@ -1376,13 +1397,13 @@ export class AdminApiStandIn {
 
   /** §8.5's rules, in the staff-change lock's order; null when the change may go ahead. */
   #giving(actor: Member, target: Member | null, roleKey: string | null): Answer | null {
-    const actorRole = roleOf(actor.roleKey);
+    const actorRole = this.#role(actor.roleKey);
     const holds = (key: string) =>
-      (roleOf(key)?.permissions ?? []).every((p) => actorRole?.permissions.includes(p));
+      (this.#role(key)?.permissions ?? []).every((p) => actorRole?.permissions.includes(p));
     if (target !== null && target.id === actor.id)
       return problem("giving_refused", { problem: "self" });
     if (roleKey !== null) {
-      if (roleOf(roleKey) === undefined)
+      if (this.#role(roleKey) === undefined)
         return problem("giving_refused", { problem: "unknown_role" });
       if (roleKey === "admin" && actor.roleKey !== "admin")
         return problem("giving_refused", { problem: "top_only" });

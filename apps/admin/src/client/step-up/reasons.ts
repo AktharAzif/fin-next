@@ -27,6 +27,10 @@ const REASONS: Readonly<Record<string, Reason>> = {
   "staff.remove": need("remove {email} from staff", "email"),
   "staff.reset_factors": need("reset {email}’s second factors", "email"),
   "staff.enrolment_code": need("make a new enrolment code for {email}", "email"),
+  // §15.5's `staffRole.*`, keyed as the intent table writes them (`staff_role.*`).
+  "staff_role.create": need("create the staff role {role}", "role"),
+  "staff_role.update": need("save the staff role {role}", "role"),
+  "staff_role.delete": need("delete the staff role {role}", "role"),
   "account.passkey_add": () => "add a passkey",
   "account.passkey_remove": need("remove the passkey “{name}”", "name"),
   "account.totp_enable": () => "set up an authenticator app",
