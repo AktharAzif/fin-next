@@ -79,7 +79,34 @@ export interface RequestState {
     publicKey: string;
     expectedChallenge: string;
   } | null;
+  /** A password sign-in, reset or change in progress (passwords/flows.ts, §5.7). */
+  password: PasswordRequest | null;
+  /**
+   * The one-time stand-in for the library's password re-check on a two-factor path, set only
+   * after Fin's own step-up rule passed (passwords/flows.ts, `waivePasswordRecheck`).
+   */
+  passwordWaiver: { path: string; nonce: string } | null;
   readonly line: Record<string, LineValue>;
+}
+
+/** What the before-hook learnt about a password request, for the session fields and after-hook. */
+export interface PasswordRequest {
+  /** The address as sent, lower-cased. */
+  email: string;
+  /** The account with that address, if any. */
+  person: { id: string; email: string } | null;
+  /** The browser presents a known-browser cookie of that account (§5.5): never paused. */
+  knownBrowser: boolean;
+  /** Sign-in: the live trusted-browser row this browser holds, when the person may use one. */
+  trustedBrowserId: string | null;
+  /** Sign-in: the person's gate facts, read before the library made the session. */
+  facts: PersonGateFacts | null;
+  /** Reset: the emailed-code request the try counted against. */
+  codeRequestId: string | null;
+  /** Reset: whether the account had a password before (a reset) or not (a first password). */
+  hadPassword: boolean;
+  /** Reset: the sessions that were live before; the library ends them all. */
+  sessionIds: readonly string[];
 }
 
 export function newRequestState(realm: RealmName, context: RequestContext): RequestState {
@@ -99,6 +126,8 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     finishingAuthenticator: false,
     removedTwoFactorId: null,
     passkeyCounter: null,
+    password: null,
+    passwordWaiver: null,
     // §18.1: `none` until a live session is read or made.
     line: { realm, assurance: "none" },
   };

@@ -33,6 +33,9 @@ import { beforeHook } from "./hooks/before.ts";
 import type { HookContext } from "./hooks/context.ts";
 import { databaseHooks } from "./hooks/database.ts";
 import { createLimitStore, type LimitStore, LimitStoreError } from "./limits.ts";
+import { verifyWithWaiver } from "./passwords/flows.ts";
+import { createPasswordHasher, type PasswordHasher } from "./passwords/hasher.ts";
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "./passwords/policy.ts";
 import type { Clock } from "./ports/clock.ts";
 import { AuditGuardError, UnitRolledBackError, type UnitTx } from "./ports/db.ts";
 import { ID_PREFIXES, type IdPrefix, newId } from "./ports/ids.ts";
@@ -62,6 +65,8 @@ export interface RealmDeps {
   email?: EmailEnqueue;
   limits?: LimitStore;
   killSwitch?: KillSwitchReader;
+  /** The password hasher (passwords/hasher.ts); one per process with its hashing slots. */
+  passwords?: PasswordHasher;
   /** Other areas' step-up action fragments (IF-03). */
   actions?: readonly (readonly StepUpAction[])[];
 }
@@ -151,7 +156,12 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
   }) => {
     const state = requestState(rt);
     const tx = unitOf(rt);
-    if (type !== "sign-in") throw new Error("identity: only sign-in codes are sent");
+    if (type === "forget-password" && developer && settings.features.passwords) {
+      // A password reset's code (§5.7); the library sends one only for an existing account.
+      await rt.email(tx, { template: "identity/reset-password", to: email, params: { code: otp } });
+      return;
+    }
+    if (type !== "sign-in") throw new Error("identity: only sign-in and reset codes are sent");
     await rt.email(tx, {
       template: developer ? `identity/${state.codeTemplate}` : "staff/staff-sign-in-code",
       to: email,
@@ -211,7 +221,24 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
       skipStateCookieCheck: false,
     },
     verification: { disableCleanup: true },
-    emailAndPassword: { enabled: false },
+    // Passwords (stretch 2, §5.7, [SA-07]): the developer realm only, hashed by Fin's argon2id.
+    // Sign-up stays Fin's own route (/sign-up/email is blocked); a reset ends every session.
+    emailAndPassword:
+      developer && settings.features.passwords
+        ? {
+            enabled: true,
+            disableSignUp: true,
+            minPasswordLength: PASSWORD_MIN_LENGTH,
+            maxPasswordLength: PASSWORD_MAX_LENGTH,
+            requireEmailVerification: true,
+            autoSignIn: false,
+            revokeSessionsOnPasswordReset: true,
+            password: {
+              hash: (password: string) => rt.passwords.hash(password),
+              verify: (input: { hash: string; password: string }) => verifyWithWaiver(rt, input),
+            },
+          }
+        : { enabled: false },
     advanced: {
       cookiePrefix: settings.cookiePrefix,
       useSecureCookies: false,
@@ -347,6 +374,7 @@ export function createRealm(deps: RealmDeps): Realm {
     actions: stepUpCatalogue(deps.actions ?? []),
     requests: new AsyncLocalStorage<RequestState>(),
     docsOrigin: deps.docsOrigin,
+    passwords: deps.passwords ?? createPasswordHasher({ lines: deps.lines }),
   };
   const auth = betterAuth(buildAuthOptions(rt, deps.db));
 

@@ -172,9 +172,13 @@ export function readRealmSettings(
     passwords: env.FIN_FEATURE_PASSWORDS === "on",
     google: env.FIN_FEATURE_GOOGLE === "on",
   };
-  if (features.passwords || features.google) {
-    // Stretch items 2 and 5 (spec 02 §1.2) are not built: refusing beats a half-built path.
-    throw new RealmConfigError("passwords and Google sign-in are not built in this release");
+  if (features.passwords && realm !== "developer") {
+    // Staff never have passwords (spec 02 §3.3, §4.3).
+    throw new RealmConfigError("FIN_FEATURE_PASSWORDS is the developer realm's only");
+  }
+  if (features.google) {
+    // Stretch item 5 (spec 02 §1.2) is not built: refusing beats a half-built path.
+    throw new RealmConfigError("FIN_FEATURE_GOOGLE: Google sign-in is not built in this release");
   }
   return {
     realm,

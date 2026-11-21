@@ -14,8 +14,14 @@ export const IDENTITY_ROUTES = [
     scope: "public",
     stepUp: "none",
     assurance: "none",
-    // The Turnstile slot is kept and ignored until [FD-06] is approved (§1.4).
-    body: z.strictObject({ name: typedName, email, turnstile: z.string().max(4096).optional() }),
+    // The Turnstile slot is kept and ignored until [FD-06] is approved (§1.4). The password, with
+    // passwords on (§5.7): bounded here, its rule checked by the action (`problem: password_*`).
+    body: z.strictObject({
+      name: typedName,
+      email,
+      password: z.string().max(1024).optional(),
+      turnstile: z.string().max(4096).optional(),
+    }),
     query: "none",
     limits: ["sign_up_network", "sign_up_address", "code_send"],
     audit: [],

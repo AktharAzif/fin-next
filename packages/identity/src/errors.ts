@@ -118,7 +118,10 @@ export function problemResponse(
     "cache-control": "no-store",
     ...extraHeaders,
   });
-  if (code === "rate_limited" && typeof extensions.retry_after === "number") {
+  if (
+    (code === "rate_limited" || code === "unavailable") &&
+    typeof extensions.retry_after === "number"
+  ) {
     headers.set("retry-after", String(extensions.retry_after));
   }
   return new Response(JSON.stringify(body), { status, headers });

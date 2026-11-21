@@ -50,6 +50,9 @@ const SPEC_ROUTES = [
   "PUT /api/roles/:roleId",
   "POST /api/roles/:roleId/delete",
   "GET /api/audit-log",
+  // Passwords (stretch 2, §5.7): the methods offered, and the reset link's check.
+  "GET /api/sign-in/methods",
+  "POST /api/reset-password/code-link",
 ];
 
 function registered(): string[] {
@@ -126,7 +129,13 @@ describe("the console's route policy", () => {
     for (const p of CONSOLE_POLICY) {
       for (const event of p.audit) expect(known.has(event), `${p.id}: ${event}`).toBe(true);
     }
-    const quiet = new Set(["signUp", "codeLink", "viewerOrganization", "invitationOpen"]);
+    const quiet = new Set([
+      "signUp",
+      "codeLink",
+      "resetCodeLink",
+      "viewerOrganization",
+      "invitationOpen",
+    ]);
     for (const p of CONSOLE_POLICY.filter((q) => q.method !== "GET" && !quiet.has(q.id))) {
       expect(p.audit.length, p.id).toBeGreaterThan(0);
     }

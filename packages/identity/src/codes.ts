@@ -30,6 +30,18 @@ import type { LineSink } from "./ports/log.ts";
 export const CODE_LIFETIME_MS = 15 * MINUTE;
 export const TRIES_PER_CLASS = 3;
 
+/**
+ * What a code is for. A password-reset code (§5.7) lives beside an address's sign-in code under
+ * the same rules, with its own live request, tries and allowances: one never supersedes or spends
+ * the other.
+ */
+export type CodePurpose = "sign_in" | "password_reset";
+
+/** The suffix that keeps a purpose's per-address counts apart (none for sign-in codes). */
+function purposeSuffix(purpose: CodePurpose): string {
+  return purpose === "sign_in" ? "" : `:${purpose}`;
+}
+
 export interface LiveCodeRequest {
   id: string;
   browserHash: Buffer;
@@ -95,7 +107,7 @@ async function liveRequests(
   hasher: KeyedHasher,
   email: string,
   now: Date,
-  options: { lock?: boolean } = {},
+  options: { lock?: boolean; purpose?: CodePurpose } = {},
 ): Promise<LiveCodeRequest[]> {
   const result = await db.query<{
     id: string;
@@ -107,10 +119,10 @@ async function liveRequests(
   }>(
     `SELECT id, browser_hash, browser_known, browser_tries, other_tries, codeless
        FROM identity.email_code_request
-      WHERE email_hash = ANY($1) AND purpose = 'sign_in' AND superseded_at IS NULL
+      WHERE email_hash = ANY($1) AND purpose = $3 AND superseded_at IS NULL
         AND used_at IS NULL AND expires_at > $2
       ORDER BY created_at DESC, id DESC${options.lock === true ? " FOR UPDATE" : ""}`,
-    [hasher.hashes("email", email.toLowerCase()), now],
+    [hasher.hashes("email", email.toLowerCase()), now, options.purpose ?? "sign_in"],
   );
   return result.rows.map((row) => ({
     id: row.id,
@@ -128,7 +140,7 @@ export async function liveCodeRequest(
   hasher: KeyedHasher,
   email: string,
   now: Date,
-  options: { lock?: boolean } = {},
+  options: { lock?: boolean; purpose?: CodePurpose } = {},
 ): Promise<LiveCodeRequest | null> {
   return (await liveRequests(db, hasher, email, now, options)).find((r) => !r.codeless) ?? null;
 }
@@ -155,8 +167,13 @@ export interface CodeRequestDeps {
 }
 
 /** The per-address `code_send` subject: browsers known for the address count apart (S2-38). */
-export function codeSendSubject(hasher: KeyedHasher, email: string, known: boolean): string {
-  return `${hasher.bucket("email", email.toLowerCase())}:${known ? "known" : "other"}`;
+export function codeSendSubject(
+  hasher: KeyedHasher,
+  email: string,
+  known: boolean,
+  purpose: CodePurpose = "sign_in",
+): string {
+  return `${hasher.bucket("email", email.toLowerCase())}:${known ? "known" : "other"}${purposeSuffix(purpose)}`;
 }
 
 /**
@@ -233,13 +250,20 @@ async function supersede(db: Queryable, ids: readonly string[], now: Date): Prom
 async function insertRequest(
   db: Queryable,
   deps: CodeRequestDeps,
-  input: { email: string; browserToken: string; known: boolean; codeless: boolean; now: Date },
+  input: {
+    email: string;
+    browserToken: string;
+    known: boolean;
+    codeless: boolean;
+    now: Date;
+    purpose?: CodePurpose;
+  },
 ): Promise<string> {
   const id = newId("emr", deps.clock);
   await db.query(
     `INSERT INTO identity.email_code_request
        (id, email_hash, purpose, browser_hash, browser_known, codeless, created_at, expires_at)
-     VALUES ($1, $2, 'sign_in', $3, $4, $5, $6, $7)`,
+     VALUES ($1, $2, $8, $3, $4, $5, $6, $7)`,
     [
       id,
       deps.hasher.hash("email", input.email),
@@ -248,6 +272,7 @@ async function insertRequest(
       input.codeless,
       input.now,
       new Date(input.now.getTime() + CODE_LIFETIME_MS),
+      input.purpose ?? "sign_in",
     ],
   );
   return id;
@@ -272,13 +297,16 @@ export async function requestCode(
     userId: string | null;
     /** Count the address's `code_send` here (false when signUp() already counted it). */
     countRequest: boolean;
+    /** A sign-in code unless named (a password reset, §5.7). */
+    purpose?: CodePurpose;
   },
 ): Promise<CodeRequestOutcome> {
   const email = input.email.toLowerCase();
+  const purpose = input.purpose ?? "sign_in";
   await lockAddress(db, deps, email);
   const now = deps.clock.now();
-  const subject = deps.hasher.bucket("email", email);
-  const live = await liveRequests(db, deps.hasher, email, now, { lock: true });
+  const subject = `${deps.hasher.bucket("email", email)}${purposeSuffix(purpose)}`;
+  const live = await liveRequests(db, deps.hasher, email, now, { lock: true, purpose });
   const code = live.find((r) => !r.codeless) ?? null;
   const known = await askerKnown(db, deps.hasher, email, code, input);
 
@@ -286,7 +314,7 @@ export async function requestCode(
     const requests = await deps.limits.consume(
       db,
       "code_send",
-      codeSendSubject(deps.hasher, email, known),
+      codeSendSubject(deps.hasher, email, known, purpose),
     );
     if (!requests.allowed) {
       return { send: false, reason: "rate_limited", retryAfter: requests.retryAfter };
@@ -312,6 +340,7 @@ export async function requestCode(
     known,
     codeless: false,
     now,
+    purpose,
   });
   return { send: true, requestId: id };
 }
@@ -383,11 +412,19 @@ export type CodeAttempt =
 export async function attemptCode(
   db: Queryable,
   deps: { clock: Clock; hasher: KeyedHasher },
-  input: { email: string; browserToken: string | null; accountExists: boolean },
+  input: {
+    email: string;
+    browserToken: string | null;
+    accountExists: boolean;
+    purpose?: CodePurpose;
+  },
 ): Promise<CodeAttempt> {
   await lockAddress(db, deps, input.email);
   const now = deps.clock.now();
-  const live = await liveRequests(db, deps.hasher, input.email, now, { lock: true });
+  const live = await liveRequests(db, deps.hasher, input.email, now, {
+    lock: true,
+    purpose: input.purpose ?? "sign_in",
+  });
   const own = live.find((r) => sameBrowser(deps.hasher, r, input.browserToken));
   const target = own ?? live.find((r) => !r.codeless) ?? live[0];
   if (target === undefined) return { allowed: true, requestId: null, askingBrowser: false };

@@ -52,7 +52,10 @@ export function problem(
     "cache-control": "no-store",
     ...headers,
   });
-  if (code === "rate_limited" && typeof extensions.retry_after === "number") {
+  if (
+    (code === "rate_limited" || code === "unavailable") &&
+    typeof extensions.retry_after === "number"
+  ) {
     answer.set("retry-after", String(extensions.retry_after));
   }
   return new Response(JSON.stringify(body), { status, headers: answer });

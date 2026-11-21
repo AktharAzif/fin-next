@@ -49,6 +49,10 @@ export const IDENTITY_LINES = {
   "staff.access_mismatch": { kind: "security", alerts: ["admin-access-mismatch"] },
   "staff.enrolment_refused": { kind: "security", alerts: ["staff-enrolment-refused"] },
   "staff.enrolled": { kind: "security", alerts: ["staff-enrolled"] },
+  // Passwords (stretch 2, §5.7, §18.2's stretch alert; the alerts' definitions and runbooks go to
+  // ops/monitoring with its lane).
+  "auth.password_paused": { kind: "security", alerts: ["password-guessing-spread"] },
+  "auth.password_hash_busy": { kind: "failure", alerts: ["password-hashing-saturated"] },
   "email.security_unsent": { kind: "failure", alerts: ["security-email-unsent"] },
   "audit.write_failed": { kind: "failure", alerts: ["audit-not-written"] },
   "database.audit_guard": { kind: "failure", alerts: ["audit-guard"] },

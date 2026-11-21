@@ -6,6 +6,7 @@ import type { KeyedHasher } from "./crypto/keyed.ts";
 import type { EmailEnqueue } from "./email/enqueue.ts";
 import type { EndpointPolicy } from "./endpoint-policy.ts";
 import type { LimitStore } from "./limits.ts";
+import type { PasswordHasher } from "./passwords/hasher.ts";
 import type { Clock } from "./ports/clock.ts";
 import type { FinDatabase, Queryable, UnitTx } from "./ports/db.ts";
 import type { LineSink } from "./ports/log.ts";
@@ -38,6 +39,8 @@ export interface RealmRuntime {
   readonly requests: AsyncLocalStorage<RequestState>;
   /** The docs origin problem types are built on (`https://developer.<zone>`). */
   readonly docsOrigin: string;
+  /** argon2id with the process's hashing slots (passwords/hasher.ts, §5.7). */
+  readonly passwords: PasswordHasher;
 }
 
 export class RealmStateError extends Error {

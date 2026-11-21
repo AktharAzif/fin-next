@@ -58,6 +58,7 @@ import {
   revokeOthers,
   revokeTrustedBrowser,
 } from "./account.ts";
+import { PASSWORD_HANDLERS } from "./passwords.ts";
 import { isTimeZone } from "./policy/schemas.ts";
 import type { ConsoleDeps, RouteInput } from "./routes.ts";
 import { viewerOf } from "./viewer.ts";
@@ -144,6 +145,7 @@ export const HANDLERS = {
     const answer = await signUp(deps.orgs.realm, input.request, input.context, {
       name: input.body.name,
       email: input.body.email,
+      ...(input.body.password === undefined ? {} : { password: input.body.password }),
     });
     return { status: answer.status, body: answer.body, setCookies: answer.setCookies };
   },
@@ -480,4 +482,6 @@ export const HANDLERS = {
       ),
     );
   },
+
+  ...PASSWORD_HANDLERS,
 } satisfies Record<string, Handler>;
