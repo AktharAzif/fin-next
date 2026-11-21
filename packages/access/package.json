@@ -1,0 +1,21 @@
+{
+  "name": "@fin/access",
+  "private": true,
+  "type": "module",
+  "description": "The permission engine and both permission catalogues (spec 02 §8). Pure and browser-safe.",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.engine.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

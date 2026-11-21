@@ -1,0 +1,112 @@
+// @fin/access: the permission engine and both catalogues (spec 02 §8; DECISIONS SA-11, SA-12,
+// SA-16, SA-32). Pure and browser-safe: no node:* import, no clock, no randomness, no I/O. Checks
+// are by permission, never by role; anything unknown fails closed.
+
+export {
+  type DashboardPermission,
+  type DashboardRoleKey,
+  dashboardCatalogue,
+} from "./catalogue/dashboard/index.ts";
+export {
+  type StaffPermission,
+  type StaffRoleKey,
+  staffCatalogue,
+} from "./catalogue/staff/index.ts";
+export {
+  assembleCatalogue,
+  CatalogueError,
+  type CatalogueInput,
+  type KeysOf,
+} from "./engine/assemble.ts";
+export {
+  type ActingInput,
+  actingProblem,
+  type DeletionInput,
+  deletionProblem,
+  type EditingInput,
+  editingProblem,
+  type GivingInput,
+  givingProblem,
+  lastTopRoleProblem,
+  outranks,
+  type TopRoleChange,
+  type TopRoleInput,
+} from "./engine/giving.ts";
+export {
+  can,
+  canAll,
+  canAny,
+  dependentsOf,
+  isPermission,
+  isPrivileged,
+  missingNeed,
+  needsOf,
+  permissionDiff,
+  permissionSet,
+  privilegeAdded,
+  sortPermissions,
+  tick,
+  untick,
+  withNeeds,
+} from "./engine/permissions.ts";
+export {
+  CUSTOM_ROLE_LIMIT,
+  customRoleLimitReached,
+  normaliseRoleText,
+  ROLE_DESCRIPTION_MAX_LENGTH,
+  ROLE_EDIT_LIMITS,
+  ROLE_NAME_MAX_LENGTH,
+  ROLE_NAME_MAX_WORDS,
+  type RoleCheckOptions,
+  type RoleDraft,
+  readingOf,
+  readsAsBuiltIn,
+  validateRole,
+} from "./engine/role-editor.ts";
+export {
+  builtInRole,
+  describePermissions,
+  isBuiltInKey,
+  isCustomRoleId,
+  isTopRole,
+  listInWords,
+  NO_ACCESS_LABEL,
+  NOTHING_YET,
+  permissionLabel,
+  permissionsOf,
+  resolveRole,
+  roleKeyOf,
+  roleLabel,
+  sameRole,
+  summary,
+} from "./engine/roles.ts";
+export type {
+  ActingProblem,
+  BuiltInRole,
+  Catalogue,
+  CustomRoleRecord,
+  DeletionProblem,
+  EditingProblem,
+  GivingProblem,
+  GroupSpec,
+  PermissionDef,
+  PermissionGroup,
+  PermissionOf,
+  PermissionSpec,
+  Realm,
+  RoleKeyOf,
+  RoleLookup,
+  RoleProblem,
+  RoleRef,
+  StepUpKind,
+  SummaryPhrase,
+} from "./engine/types.ts";
+export {
+  allows,
+  disabledReason,
+  type Guarded,
+  NOT_ALLOWED_REASON,
+  type Requirement,
+  visibleGroups,
+  visibleItems,
+} from "./engine/visibility.ts";
