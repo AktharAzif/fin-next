@@ -62,12 +62,12 @@ const customerTabs = (page: Page) =>
 
 /** The text colour tokens as computed colours, for the theme the page shows. */
 async function textTokens(page: Page) {
-  return page.evaluate(() => {
+  return page.evaluate(function readTextTokens() {
     const root = getComputedStyle(document.documentElement);
     const rgb = (name: string) => {
       const hex = root.getPropertyValue(name).trim().replace(/^#/, "");
       const [r, g, b] = [0, 2, 4].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
-      return `rgb(${r}, ${g}, ${b})`;
+      return `rgb(${[r, g, b].join(", ")})`;
     };
     return {
       primary: rgb("--fin-color-text-primary"),
@@ -441,7 +441,8 @@ test.describe("the components @kit", () => {
     await expect(details).toHaveAttribute("aria-selected", "true");
     await expect(customer.getByRole("tabpanel")).toHaveText("The details.");
     // A disabled tab: the arrows reach it, but it is never chosen, by the keys or by a click.
-    await page.keyboard.press("ArrowRight");
+    await page.keyboard.down("ArrowRight");
+    await page.keyboard.up("ArrowRight");
     await expect(documents).toBeFocused();
     await expect(documents).toHaveAttribute("aria-disabled", "true");
     await expect(documents).toHaveAttribute("aria-selected", "false");
@@ -470,7 +471,7 @@ test.describe("the components @kit", () => {
       const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[];
       const panel = root.querySelector('[role="tabpanel"]') as HTMLElement;
       const label = (tab: HTMLElement) => {
-        const range = document.createRange();
+        const range = tab.ownerDocument.createRange();
         range.selectNodeContents(tab.firstChild as Node);
         return range.getBoundingClientRect();
       };
@@ -554,7 +555,7 @@ test.describe("the components @kit", () => {
     });
     expect(ring).toEqual({ width: "2px", offset: "-2px", style: "solid" });
 
-    const settings = page.getByRole("navigation", { name: "Settings" });
+    const settings = section(page, "tabs").getByRole("navigation", { name: "Settings" });
     const linkPaint = (name: string) =>
       settings.getByRole("link", { name }).evaluate((el) => {
         const mark = getComputedStyle(el, "::after");
@@ -575,7 +576,7 @@ test.describe("the components @kit", () => {
       const list = box.querySelector('[role="tablist"]') as HTMLElement;
       const panel = box.querySelector('[role="tabpanel"]') as HTMLElement;
       const px = (n: number) => Math.round(n) + 0;
-      const range = document.createRange();
+      const range = list.ownerDocument.createRange();
       range.selectNodeContents(list.querySelector('[role="tab"]')?.firstChild as Node);
       // The tablist is the row: it draws the rule and scrolls.
       const rowBox = list.getBoundingClientRect();

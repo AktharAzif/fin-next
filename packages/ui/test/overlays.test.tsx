@@ -623,7 +623,7 @@ describe("Tabs and TabLinks", () => {
           </TabPanel>
         </Tabs>
         <Tabs defaultValue="a" {...functionChild} />
-        <Tabs defaultValue="a">
+        <Tabs value="a" onValueChange={noop}>
           <TabsList aria-label="Other" {...functionChild} />
           <TabPanel value="a" {...functionChild} />
         </Tabs>
@@ -642,7 +642,7 @@ describe("Tabs and TabLinks", () => {
       "smuggled",
       "style=",
       'tabindex="5"',
-      'role="presentation"',
+      `role="${foreign.role}"`,
       "aria-hidden",
       "aria-describedby",
       'aria-orientation="vertical"',
