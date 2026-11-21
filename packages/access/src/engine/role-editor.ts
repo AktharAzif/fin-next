@@ -59,8 +59,9 @@ const table = (...rows: readonly string[]): ReadonlyMap<string, string> =>
       }),
   );
 
-/** The entries of the tables below, for the test that each is one character and its reading. */
-export const LOOK_ALIKE_ROWS: readonly string[] = [
+// The look-alike tables' rows, each entry one character and its reading. Exported apart from the
+// declaration (below), for the test that checks each entry's shape.
+const LOOK_ALIKE_ROWS: readonly string[] = [
   // Capitals whose lower-case forms read otherwise, made Latin capitals before lower-casing.
   "ΗH ΜM ΝN ΥY ΖZ",
   // Letters, after lower-casing, and the Latin letter each is drawn as. Cyrillic:
@@ -80,6 +81,9 @@ export const LOOK_ALIKE_ROWS: readonly string[] = [
   // Letters drawn as punctuation: two clicks and the saltillo.
   "ǀ| ǃ! ꞌ'",
 ];
+
+export { LOOK_ALIKE_ROWS };
+
 const CAPITALS = table(LOOK_ALIKE_ROWS[0] ?? "");
 const LOOK_ALIKES = table(...LOOK_ALIKE_ROWS.slice(1));
 
