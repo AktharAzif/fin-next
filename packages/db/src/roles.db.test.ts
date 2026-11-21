@@ -6,7 +6,7 @@
 // check), attributes, and the backup login's reach past row-level security (DA-15).
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { expandMatrix, grantDrift, liveMemberships, loadFragments } from "./grants.ts";
 import { assertServiceLogin } from "./login-check.ts";
 import { GRANTS_DIR } from "./migrations.ts";
@@ -21,6 +21,10 @@ import {
   testContext,
   testLoginPassword,
 } from "./testing/index.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

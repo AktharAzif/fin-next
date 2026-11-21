@@ -8,7 +8,8 @@
 //   - everything that changes a role (the bootstrap, fin_owner's password) runs under one
 //     cluster-wide advisory lock held on the admin database, so two files never race on pg_authid;
 //   - every test bootstrap sizes the logins' CONNECTION LIMIT for TEST_REPLICAS replicas, because
-//     turbo runs each package's test:db at the same time and the limits are shared by all of them;
+//     turbo runs each package's test:db at the same time, Vitest runs a package's files in parallel,
+//     and the limits are shared by all of them;
 //   - `database(group)` hands out one pool per login for the file, so a test never leaves idle
 //     connections of its own behind against those limits.
 import { createHash } from "node:crypto";

@@ -1,7 +1,7 @@
 // AC-P0-39: from an empty Postgres 18, the bootstrap and the Phase 0 migrations of spec 01 §6.10 apply
 // in order and create exactly its tables and functions with exactly its grants; the kill switches hold
 // their six seeds `off`. And the runner's own contract: checksums, the lock, idempotence.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bootstrap, bootstrapFiles } from "./bootstrap.ts";
 import { expandMatrix, livePrivileges, loadFragments, privilegeKey } from "./grants.ts";
 import {
@@ -19,6 +19,10 @@ import {
   testReplicas,
   testVerifiers,
 } from "./testing/index.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

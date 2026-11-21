@@ -2,7 +2,7 @@
 // fin_owner login goes unrecorded), AC-P0-39 (fin_owner cannot drop, alter, update, delete or truncate
 // ops.privileged_login) and the record itself (ARCHITECTURE §6.3, DECISIONS P-19); and the bootstrap
 // adopting only the superuser's tables it made itself (the record and ops.environment).
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bootstrap, type Environment } from "./bootstrap.ts";
 import { loadFragments } from "./grants.ts";
 import { BOOTSTRAP_DIR, GRANTS_DIR } from "./migrations.ts";
@@ -14,6 +14,10 @@ import {
   testReplicas,
   testVerifiers,
 } from "./testing/index.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

@@ -76,11 +76,13 @@ not yet read that the transaction failed.
 ## Tests
 
 Unit tests run with `pnpm test`; integration tests (`*.db.test.ts`) with `pnpm test:db`, against
-`FIN_TEST_DATABASE_URL` (a superuser URL to a loopback Postgres 18). `createTestDatabase({ prefix })`
+`FIN_TEST_DATABASE_URL` (a superuser URL to a loopback Postgres 18), both through the root
+`vitest.config.ts` (the package has no Vitest configuration of its own). `createTestDatabase({ prefix })`
 from `@fin/db/testing` gives each test file a fresh database, bootstrapped for the `ci` environment and
-migrated. The roles are cluster-wide and turbo runs the packages' integration tests at the same time,
-so the test bootstrap sizes connection limits for `TEST_REPLICAS` replicas and `database(group)` gives a
-file one pool per login. `connect(login, applicationName, startupOptions)` takes startup settings
+migrated. The roles are cluster-wide, turbo runs the packages' integration tests at the same time and
+Vitest runs a package's files in parallel, so the test bootstrap sizes connection limits for
+`TEST_REPLICAS` replicas, `database(group)` gives a file one pool per login, and each integration file
+sets its own timeouts (`vi.setConfig`), as its database is made under the cluster-wide lock. `connect(login, applicationName, startupOptions)` takes startup settings
 (`-c name=value`) as a client would send them. The TLS test starts its own throwaway cluster when
 `FIN_TEST_PG_BINDIR` names the directory holding `initdb` and `pg_ctl`, and is skipped otherwise; the
 same variable lets the roles test run `pg_dump` as the backup login.

@@ -8,8 +8,12 @@ import {
   testContext,
   testLoginPassword,
 } from "@fin/db/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { probeDatabaseFromEnv, readDatabaseProbe, runDatabaseProbe } from "./probe.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let probe: FinDatabase;

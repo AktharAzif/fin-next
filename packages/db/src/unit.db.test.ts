@@ -1,6 +1,6 @@
 // The unit of work on a real pool (ARCHITECTURE §3.5): one transaction, no client held across an
 // outbound call, no session-level SET, non-idle clients destroyed, and the async-context binding.
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   ClientHeldAcrossCallError,
   NestedUnitError,
@@ -15,6 +15,10 @@ import {
   testContext,
 } from "./testing/index.ts";
 import { assertNotHoldingClient, type FinDatabase, isHoldingClient, type UnitTx } from "./unit.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let edge: FinDatabase;

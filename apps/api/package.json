@@ -5,8 +5,10 @@
   "scripts": {
     "lint": "biome check src/migrate src/tasks src/worker/probe",
     "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p src/migrate/tsconfig.json",
-    "test": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.config.ts",
-    "test:db": "node ../../packages/audit/src/gen.ts && vitest run --config src/migrate/vitest.db.config.ts"
+    "pretest": "node ../../packages/audit/src/gen.ts",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "pretest:db": "node ../../packages/audit/src/gen.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
   },
   "dependencies": {
     "@fin/audit": "workspace:*",

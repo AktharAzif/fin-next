@@ -9,9 +9,13 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { readPresentedCertificate } from "./connect.ts";
 import { clientConfig, InsecureAuthenticationError, ScramOnlyClient } from "./pool.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 const BINDIR = process.env.FIN_TEST_PG_BINDIR ?? "";
 const enabled = BINDIR !== "";

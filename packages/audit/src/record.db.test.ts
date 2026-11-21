@@ -10,12 +10,16 @@ import {
   type ServiceGroup,
 } from "@fin/db";
 import { collectLines, createTestDatabase, type TestDatabase, testContext } from "@fin/db/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AuditRole } from "./define.ts";
 import { AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
 import { AuditWriteError, type RecordInput, recordAudit } from "./record.ts";
 import { tripSwitch } from "./switches.ts";
 import { eventTypeRows, syncEventTypes } from "./sync.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

@@ -10,8 +10,12 @@ import {
   testSuperuserUrl,
   testVerifiersJson,
 } from "@fin/db/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { EXIT_CONFIG, EXIT_FAILED, EXIT_OK, runMigrateCli } from "./main.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

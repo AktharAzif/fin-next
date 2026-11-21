@@ -4,7 +4,7 @@
 // sequencer's gapless chaining with no writer waiting on another (T08-10), epochs (a start holds new
 // writers off and its wait is bounded) and the environment's refusals (T08-15, §3.9), and the journal
 // and anchor functions. recordAudit, the registry and the TypeScript hash are @fin/audit's.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
 import {
@@ -14,6 +14,10 @@ import {
   testContext,
   testId,
 } from "./testing/index.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;

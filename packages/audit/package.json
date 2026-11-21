@@ -9,8 +9,10 @@
     "gen": "node src/gen.ts",
     "lint": "node src/gen.ts && biome check .",
     "typecheck": "node src/gen.ts && tsc -p tsconfig.json",
-    "test": "node src/gen.ts && vitest run",
-    "test:db": "node src/gen.ts && vitest run --config vitest.db.config.ts"
+    "pretest": "node src/gen.ts",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "pretest:db": "node src/gen.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
   },
   "dependencies": {
     "@fin/db": "workspace:*",

@@ -2,7 +2,7 @@
 // checked functions and their refusals, and row-level security on the leases, duty state and jobs.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AuditGuardError } from "./errors.ts";
 import type { GuardRegistration } from "./guards/types.ts";
 import {
@@ -23,6 +23,10 @@ import {
   testContext,
   testId,
 } from "./testing/index.ts";
+
+// The integration timeouts, which the root Vitest configuration leaves to each file: a file's
+// database is made under the cluster-wide lock that other files' bootstraps may hold.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 let db: TestDatabase;
 let su: PgClient;
