@@ -153,43 +153,78 @@ describe("config/env-refusals.json (spec 07 §4.3)", () => {
   };
   const TABLE_SETTINGS_KEYS = ["model", "availableModels", "effortLevel", "maxEffortLevel", "modelSettings", "apiKeyHelper", "fallbackModel"];
 
-  /** Names the pinned Claude Code reads that change the model, effort, endpoint, credential or settings source, beyond §4.3's table. */
-  const BEYOND_TABLE = [
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "ANTHROPIC_DEFAULT_MODEL",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION",
-    "FALLBACK_FOR_ALL_PRIMARY_MODELS",
-    "CLAUDE_CODE_ALLOW_OTHER_MODELS",
-    "CLAUDE_CODE_DISABLE_THINKING",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "CLAUDE_CODE_SUBAGENT_EFFORT",
-    "CLAUDE_EFFORT",
-    "CLAUDE_CODE_API_BASE_URL",
-    "ANTHROPIC_FOUNDRY_BASE_URL",
-    "ANTHROPIC_AWS_BASE_URL",
-    "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
-    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
-    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-    "CLAUDE_CODE_USE_GATEWAY",
-    "CLAUDE_CODE_USE_MANTLE",
-    "CLAUDE_CODE_HTTPS_PROXY",
-    "CLAUDE_CODE_HTTP_PROXY",
-    "CLAUDE_CODE_PROXY_URL",
-    "NODE_EXTRA_CA_CERTS",
-    "NODE_TLS_REJECT_UNAUTHORIZED",
-    "SSL_CERT_FILE",
-    "ANTHROPIC_FOUNDRY_API_KEY",
-    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
-    "ANTHROPIC_AWS_API_KEY",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "CLAUDE_CODE_GATEWAY_TOKEN",
-    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-    "ANTHROPIC_IDENTITY_TOKEN",
-    "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
-    "CLAUDE_CONFIG_DIR",
-    "ANTHROPIC_CONFIG_DIR",
-    "BUN_OPTIONS",
+  /**
+   * Names the pinned Claude Code reads that change the model, effort, endpoint, credential or
+   * settings source, beyond §4.3's table, with the kind each is refused as. CLAUDE_CODE_EXTRA_BODY
+   * is merged into every request body after the model, max_tokens and thinking, so it can replace
+   * all three and the effort.
+   */
+  const BEYOND_TABLE: ReadonlyArray<readonly [string, string]> = [
+    ["ANTHROPIC_DEFAULT_FABLE_MODEL", "model"],
+    ["ANTHROPIC_DEFAULT_MODEL", "model"],
+    ["ANTHROPIC_CUSTOM_MODEL_OPTION", "model"],
+    ["FALLBACK_FOR_ALL_PRIMARY_MODELS", "model"],
+    ["CLAUDE_CODE_ALLOW_OTHER_MODELS", "model"],
+    ["CLAUDE_CODE_DISABLE_THINKING", "model"],
+    ["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "model"],
+    ["CLAUDE_CODE_SUBAGENT_EFFORT", "model"],
+    ["CLAUDE_EFFORT", "model"],
+    ["CLAUDE_CODE_EXTRA_BODY", "model"],
+    ["CLAUDE_CODE_MAX_OUTPUT_TOKENS", "model"],
+    ["CLAUDE_CODE_API_BASE_URL", "endpoint"],
+    ["ANTHROPIC_FOUNDRY_BASE_URL", "endpoint"],
+    ["ANTHROPIC_AWS_BASE_URL", "endpoint"],
+    ["ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "endpoint"],
+    ["ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "endpoint"],
+    ["ANTHROPIC_CUSTOM_HEADERS", "endpoint"],
+    ["CLAUDE_CODE_USE_ANTHROPIC_AWS", "endpoint"],
+    ["CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "endpoint"],
+    ["CLAUDE_CODE_USE_GATEWAY", "endpoint"],
+    ["CLAUDE_CODE_USE_MANTLE", "endpoint"],
+    ["CLAUDE_CODE_HTTPS_PROXY", "endpoint"],
+    ["CLAUDE_CODE_HTTP_PROXY", "endpoint"],
+    ["CLAUDE_CODE_PROXY_URL", "endpoint"],
+    ["CLAUDE_CODE_CUSTOM_OAUTH_URL", "endpoint"],
+    ["USE_LOCAL_OAUTH", "endpoint"],
+    ["USE_STAGING_OAUTH", "endpoint"],
+    ["CLAUDE_LOCAL_OAUTH_API_BASE", "endpoint"],
+    ["CLAUDE_LOCAL_OAUTH_APPS_BASE", "endpoint"],
+    ["CLAUDE_LOCAL_OAUTH_CONSOLE_BASE", "endpoint"],
+    ["CLAUDE_BRIDGE_BASE_URL", "endpoint"],
+    ["SESSION_INGRESS_URL", "endpoint"],
+    ["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "endpoint"],
+    ["NODE_EXTRA_CA_CERTS", "endpoint"],
+    ["NODE_TLS_REJECT_UNAUTHORIZED", "endpoint"],
+    ["SSL_CERT_FILE", "endpoint"],
+    ["ANTHROPIC_FOUNDRY_API_KEY", "credential"],
+    ["ANTHROPIC_FOUNDRY_AUTH_TOKEN", "credential"],
+    ["ANTHROPIC_AWS_API_KEY", "credential"],
+    ["AWS_BEARER_TOKEN_BEDROCK", "credential"],
+    ["CLAUDE_CODE_GATEWAY_TOKEN", "credential"],
+    ["CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "credential"],
+    ["CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "credential"],
+    ["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "credential"],
+    ["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "credential"],
+    ["CLAUDE_CODE_OAUTH_CLIENT_ID", "credential"],
+    ["ANTHROPIC_IDENTITY_TOKEN", "credential"],
+    ["CLAUDE_CODE_MANAGED_SETTINGS_PATH", "settings"],
+    ["CLAUDE_CODE_MOCK_REMOTE_SETTINGS", "settings"],
+    ["CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION", "settings"],
+    ["CLAUDE_CONFIG_DIR", "settings"],
+    ["ANTHROPIC_CONFIG_DIR", "settings"],
+    ["BUN_OPTIONS", "injection"],
+    ["CLAUDE_CODE_PROCESS_WRAPPER", "injection"],
+  ];
+
+  /** The names a refused family would catch that the engine needs, each for its own reason. */
+  const ALLOWED = [
+    "ANTHROPIC_FEDERATION_RULE_ID", // §4.3's CI federation inputs
+    "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", // §4.3 sets it for every session
+    "CLAUDE_CODE_OAUTH_TOKEN", // §7.3's local credential, which a session receives
+    "NO_PROXY",
   ];
 
   it("contains §4.3's table, kinds included", () => {
@@ -219,10 +254,34 @@ describe("config/env-refusals.json (spec 07 §4.3)", () => {
     assert.deepEqual(checkEnvironment({ NODE_OPTIONS: undefined }, refusals), []);
   });
 
-  it("checkEnvironment refuses every name beyond the table that changes the model, effort, endpoint or credential", () => {
-    for (const name of BEYOND_TABLE) {
-      const found = checkEnvironment({ [name]: "1" }, refusals);
-      assert.equal(found.length, 1, name);
+  it("checkEnvironment refuses every name beyond the table that changes the model, effort, endpoint, credential or settings source", () => {
+    for (const [name, kind] of BEYOND_TABLE) {
+      assert.deepEqual(checkEnvironment({ [name]: '{"model":"claude-haiku-4-5","output_config":{"effort":"low"}}' }, refusals), [{ name, kind }], name);
+    }
+  });
+
+  it("checkEnvironment refuses every CLAUDE*, ANTHROPIC_* and OAUTH name by default, and allows only the names the engine needs", () => {
+    assert.deepEqual([...refusals.allowed].sort(), ALLOWED);
+    for (const name of ALLOWED) assert.deepEqual(checkEnvironment({ [name]: "x" }, refusals), [], name);
+    // Names the client may read today or add tomorrow: none is known to be harmless.
+    for (const [name, kind] of [
+      ["CLAUDECODE", "client"],
+      ["CLAUDEAI_CONNECTORS_DISABLED", "client"],
+      ["CLAUDE_CODE_ENTRYPOINT", "client"],
+      ["CLAUDE_CODE_SIMPLE", "client"],
+      ["CLAUDE_CODE_PLUGIN_DIRS", "client"],
+      ["CLAUDE_CODE_SOMETHING_NEXT_RELEASE_ADDS", "client"],
+      ["CLAUDE_ENV_FILE", "client"],
+      ["claude_code_entrypoint", "client"],
+      ["CCR_ANYTHING", "client"],
+      ["ANTHROPIC_WORKSPACE_ID", "endpoint"],
+      ["ANTHROPIC_BETAS", "endpoint"],
+      ["CLAUDE_CODE_NEW_EXTRA_BODY_FIELD", "model"],
+      ["MAX_MCP_OUTPUT_TOKENS", "model"],
+      ["USE_OTHER_OAUTH", "credential"],
+      ["CLAUDE_CODE_OAUTH_SCOPES", "credential"],
+    ] as const) {
+      assert.deepEqual(checkEnvironment({ [name]: "1" }, refusals), [{ name, kind }], name);
     }
   });
 
@@ -348,10 +407,19 @@ describe("the engine refuses a refused environment (T-RV-06's environment half)"
   });
 
   it("as a real process, and for a family name, escaped", () => {
-    const run = spawnCli(["options"], { env: { PATH: process.env["PATH"], ANTHROPIC_NEW_ENDPOINT: "x", "CLAUDE_X_MODEL": "y" } });
+    const run = spawnCli(["options"], { env: { PATH: process.env["PATH"], ANTHROPIC_NEW_ENDPOINT: "x", "CLAUDE_X_MODEL": "y", CLAUDECODE: "1" } });
     assert.equal(run.code, 78);
     assert.match(run.stderr, /environment_refused: ANTHROPIC_NEW_ENDPOINT is set \(endpoint\)/);
     assert.match(run.stderr, /environment_refused: CLAUDE_X_MODEL is set \(model\)/);
+    assert.match(run.stderr, /environment_refused: CLAUDECODE is set \(client\)/);
+  });
+
+  it("refuses a request body that would replace the model and effort, as a real process", () => {
+    const body = '{"model":"claude-haiku-4-5","output_config":{"effort":"low"}}';
+    const run = spawnCli(["options"], { env: { PATH: process.env["PATH"], CLAUDE_CODE_EXTRA_BODY: body } });
+    assert.equal(run.code, 78);
+    assert.equal(run.stdout, "");
+    assert.equal(run.stderr, "fin-review: refused: environment_refused: CLAUDE_CODE_EXTRA_BODY is set (model); unset it to run fin-review.\n", "the value is never printed");
   });
 
   it("plan and help do not check it: CI's plan job and a help text start no session", async () => {

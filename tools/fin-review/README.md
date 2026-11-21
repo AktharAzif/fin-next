@@ -16,13 +16,17 @@ Every option takes `--name value` or `--name=value`. A refused option prints
 `fin-review: refused: <code>: <message>` on stderr and exits 64 before anything else happens; an
 invalid file under `config/` makes every command exit 78 (spec 07 §2.1 lists every exit code).
 Every command but `plan` and `help` also exits 78 (`environment_refused`) when its environment holds
-a variable `config/env-refusals.json` refuses (spec 07 §3.5, §4.3): the names of §4.3's table and the
-others the pinned Claude Code reads that change the model, effort, endpoint, credential or settings
-source, and their families by pattern (every `ANTHROPIC_*` name but the CI federation inputs, every
-`CLAUDE_CODE_USE_*`, `*_BASE_URL`, `*_PROXY`, `*_API_KEY`, `*_AUTH_TOKEN`, `*_MODEL`, effort,
-thinking and fallback name, and `NODE_*`, `BUN_*`, `SSL_CERT_*`). `checkSettings` refuses any
-settings key not listed as harmless, any `env` entry, and any `permissions` entry that would widen
-spec 07 §4.2's grant.
+a variable `config/env-refusals.json` refuses (spec 07 §3.5, §4.3). The client's own families are
+refused by default, because each Claude Code release reads new names: every `CLAUDE*`, `CCR_*` and
+`ANTHROPIC_*` name and every name holding `OAUTH`, except the few the engine needs (the CI
+federation inputs, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and the local credential
+`CLAUDE_CODE_OAUTH_TOKEN`). Exact entries give the known names their kind (§4.3's table, and others
+such as `CLAUDE_CODE_EXTRA_BODY`, which rewrites the request body, model and effort included), and
+patterns refuse the families outside those prefixes (`*_BASE_URL`, `*_PROXY`, `*_API_KEY`,
+`*_AUTH_TOKEN`, `*_MODEL`, effort, thinking, fallback, extra-body and output-token names, and
+`NODE_*`, `BUN_*`, `SSL_CERT_*`, `AWS_ENDPOINT_URL*`). So run it from a clean environment, not from
+inside a Claude Code session. `checkSettings` refuses any settings key not listed as harmless, any
+`env` entry, and any `permissions` entry that would widen spec 07 §4.2's grant.
 
 Every line printed from data the engine read (a path, a package name, a JSON key, a program's
 message) is escaped to printable ASCII, so it can start neither a terminal control sequence nor a

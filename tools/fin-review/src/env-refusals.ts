@@ -4,12 +4,16 @@
 // 78 (`environment_refused`) before any session when either finds something.
 //
 // §4.3's table is a floor: any name the pinned Claude Code reads that changes the model, the
-// effort, the endpoint or the credential is refused too. Exact names cover what is known; the
-// patterns refuse the families those names come from (every ANTHROPIC_* name, every provider
-// switch, every *_BASE_URL, *_PROXY, *_API_KEY, *_AUTH_TOKEN, *_MODEL, effort, thinking and
-// fallback name, and the runtime's own NODE_*, BUN_* and SSL_CERT_* settings), so a new variant
-// is refused by default; `allowed` lists the few names a pattern would catch that the engine
-// itself needs (the CI federation inputs of §4.3).
+// effort, the endpoint, the credential or the settings source is refused too. A hand-made list of
+// such names cannot keep up with the client, so its own families are refused by default: every
+// CLAUDE* and ANTHROPIC_* name, and every name holding OAUTH, is refused unless `allowed` lists it
+// (the CI federation inputs and the session settings of §4.3, and the local credential of §7.3).
+// Exact names give the kind of the known ones (CLAUDE_CODE_EXTRA_BODY, which rewrites the request
+// body, is a model refusal); the other patterns refuse the families outside those prefixes (every
+// provider switch, *_BASE_URL, *_PROXY, *_API_KEY, *_AUTH_TOKEN, *_MODEL, effort, thinking,
+// fallback, extra-body and output-token name, and the runtime's own NODE_*, BUN_* and SSL_CERT_*
+// settings). A pattern's kind is the first that matches, so the generic CLAUDE* family, kind
+// `client` (a client variable not known to be harmless), comes last.
 //
 // Settings: a session's environment is built from nothing (§4.3), so a settings file's `env` block
 // is refused whatever it names. Top-level keys are refused unless listed as harmless
@@ -20,8 +24,8 @@
 import { escapeText } from "./display.ts";
 import { isJsonObject } from "./json.ts";
 
-export type RefusalKind = "endpoint" | "model" | "credential" | "injection" | "settings";
-const KINDS: readonly RefusalKind[] = ["endpoint", "model", "credential", "injection", "settings"];
+export type RefusalKind = "endpoint" | "model" | "credential" | "injection" | "settings" | "client";
+const KINDS: readonly RefusalKind[] = ["endpoint", "model", "credential", "injection", "settings", "client"];
 
 export interface RefusedVariable {
   readonly name: string;
