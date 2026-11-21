@@ -3,15 +3,20 @@
 // intent bound to it exists), with that intent unproved, expired, for another action, of another
 // member's session, or for other parameters; passes once with a fresh proved one; and two
 // concurrent re-sends with one intent make exactly one change.
-import { createStaffHarness, type StaffHarness, unique } from "@fin/staff/testing";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ADMIN_POLICIES, type PolicyId } from "./policy/index.ts";
+import {
+  createStaffHarness,
+  type StaffHarness,
+  unique,
+} from "../../../../packages/staff/test/index.ts";
 import {
   type AdminHost,
   createAdminHost,
   enrolThroughHost,
   type HostMember,
-} from "./testing/host.ts";
+} from "../../test/host.ts";
+import { ADMIN_POLICIES, type PolicyId } from "./policy/index.ts";
 
 let h: StaffHarness;
 let host: AdminHost;

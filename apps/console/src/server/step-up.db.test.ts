@@ -12,11 +12,14 @@
 //     same intent never serves again.
 // Every window route passes within the window of a proof and not after it.
 import { randomBytes } from "node:crypto";
-import { createTestDatabase, seed, type TestDatabase, totpCode } from "@fin/orgs/testing";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { defineConsoleService } from "./main.ts";
-import { CONSOLE_POLICY, type RoutePolicy } from "./policy/index.ts";
+import {
+  createTestDatabase,
+  seed,
+  type TestDatabase,
+  totpCode,
+} from "../../../../packages/orgs/test/index.ts";
 import {
   type Booted,
   Client,
@@ -25,7 +28,9 @@ import {
   ORIGIN,
   type Reply,
   steppedUp,
-} from "./test/client.ts";
+} from "../../test/client.ts";
+import { defineConsoleService } from "./main.ts";
+import { CONSOLE_POLICY, type RoutePolicy } from "./policy/index.ts";
 
 let database: TestDatabase;
 let api: Booted;

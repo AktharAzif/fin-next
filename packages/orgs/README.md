@@ -46,7 +46,7 @@ await realm.run(context, async (tx, state) => {
 | `src/guards.ts` | the audit-guard registrations the `_orgs_guards` migration installs |
 | `migrations/` | `_orgs_tables`, `_orgs_views` (views and the two audit reads), `_orgs_guards` |
 | `grants/orgs.json` | the area's grants, in packages/db's fragment shape |
-| `test/` | the Postgres 18 template (identity's platform fixture, both areas' migrations and grants, the journal stand-in) and the realm harness, exported as `@fin/orgs/testing` |
+| `test/` | the Postgres 18 template (identity's platform fixture, both areas' migrations and grants, the journal stand-in) and the realm harness, which tests import by its path (no package exports test support) |
 
 ## Tests
 

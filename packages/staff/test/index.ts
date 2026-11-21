@@ -1,4 +1,4 @@
-// @fin/staff/testing: the staff area's integration harness on the real platform, for this package's
+// The staff area's integration harness on the real platform, for this package's
 // tests and Fin Admin's (apps/admin). Imported only by *.test.ts files.
 export {
   type AccessIdentity,

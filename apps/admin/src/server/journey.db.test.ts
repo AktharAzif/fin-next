@@ -7,15 +7,15 @@
 // sessions end), and cannot remove themselves, the last Admin.
 
 import { generateEnrolmentCode, hashEnrolmentCode } from "@fin/staff";
+import { base32Decode, totp } from "@fin/testing";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
   SoftAuthenticator,
   type StaffHarness,
   unique,
-} from "@fin/staff/testing";
-import { base32Decode, totp } from "@fin/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type AdminClient, type AdminHost, createAdminHost } from "./testing/host.ts";
+} from "../../../../packages/staff/test/index.ts";
+import { type AdminClient, type AdminHost, createAdminHost } from "../../test/host.ts";
 
 let h: StaffHarness;
 let host: AdminHost;

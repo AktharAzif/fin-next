@@ -11,11 +11,14 @@
 //   - a read: 200 for a member who may read it.
 // Every route must have its sample here, so a route added to the policy without one fails the test.
 import { randomBytes } from "node:crypto";
-import { createTestDatabase, seed, type TestDatabase, totpCode } from "@fin/orgs/testing";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { defineConsoleService } from "./main.ts";
-import { CONSOLE_POLICY, type RouteId } from "./policy/index.ts";
+import {
+  createTestDatabase,
+  seed,
+  type TestDatabase,
+  totpCode,
+} from "../../../../packages/orgs/test/index.ts";
 import {
   type Booted,
   Client,
@@ -23,7 +26,9 @@ import {
   latestCode,
   ORIGIN,
   steppedUp,
-} from "./test/client.ts";
+} from "../../test/client.ts";
+import { defineConsoleService } from "./main.ts";
+import { CONSOLE_POLICY, type RouteId } from "./policy/index.ts";
 
 let database: TestDatabase;
 let api: Booted;

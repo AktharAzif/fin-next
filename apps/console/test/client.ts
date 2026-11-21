@@ -4,9 +4,9 @@
 // is given, and arrives from a connector peer with the client's address in `CF-Connecting-IP`.
 // Addresses use example.com only; secrets are made at run time.
 import { randomBytes } from "node:crypto";
-import { base32Decode, totpCode } from "@fin/orgs/testing";
 import type { bootApi } from "@fin/web-host/testing";
 import type { Pool } from "pg";
+import { base32Decode, totpCode } from "../../../packages/orgs/test/index.ts";
 
 export const HOST = "console.example.com";
 export const ORIGIN = `https://${HOST}`;

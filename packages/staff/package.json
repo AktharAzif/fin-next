@@ -4,8 +4,7 @@
   "type": "module",
   "description": "Fin Admin's staff: requireStaff, members and roles, the staff-change lock and the last Admin, enrolment codes, switches, the Access drift check and the staff audit events (spec 02 §6.4, §6.5, §10).",
   "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./test/index.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "lint": "biome check .",

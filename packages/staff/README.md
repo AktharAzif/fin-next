@@ -46,7 +46,7 @@ await realm.run(context, async (tx) => {
 | `src/access-drift.ts` | the Access drift check |
 | `src/audit/`, `src/email.ts`, `src/actions.ts`, `src/guards.ts` | the area's events, notices, step-up actions and guards |
 | `migrations/`, `grants/` | the staff schema's tables, views and bootstrap function, in the runner's format |
-| `test/` | the integration harness on the real platform (`@fin/staff/testing`) |
+| `test/` | the integration harness on the real platform, which tests import by its path (no package exports test support) |
 
 ## Tests
 

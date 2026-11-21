@@ -7,11 +7,15 @@
 import { Readiness } from "@fin/server/health";
 import { ConnectorPeers } from "@fin/server/ingress";
 import { capture, randomProof } from "@fin/server/testing";
-import type { StaffHarness } from "@fin/staff/testing";
-import { ADMIN_ORIGIN, DOCS_ORIGIN, SoftAuthenticator } from "@fin/staff/testing";
 import { AccessStandIn } from "@fin/testing";
 import { AccessVerifier, createApiHost } from "@fin/web-host";
-import { adminHooks } from "../app.ts";
+import type { StaffHarness } from "../../../packages/staff/test/index.ts";
+import {
+  ADMIN_ORIGIN,
+  DOCS_ORIGIN,
+  SoftAuthenticator,
+} from "../../../packages/staff/test/index.ts";
+import { adminHooks } from "../src/server/app.ts";
 
 export const TEAM = "fin-test-team";
 export const CONNECTOR = "2001:db8::c1";

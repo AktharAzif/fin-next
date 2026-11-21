@@ -6,10 +6,9 @@
 // invitee's role and removes them. Every step's audit event is on the organisation's audit log with
 // the address and the device, and every notice is queued.
 import { randomBytes } from "node:crypto";
-import { createTestDatabase, type TestDatabase } from "@fin/orgs/testing";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { defineConsoleService } from "./main.ts";
+import { createTestDatabase, type TestDatabase } from "../../../../packages/orgs/test/index.ts";
 import {
   type Booted,
   Client,
@@ -17,7 +16,8 @@ import {
   latestCode,
   ORIGIN,
   steppedUp,
-} from "./test/client.ts";
+} from "../../test/client.ts";
+import { defineConsoleService } from "./main.ts";
 
 let database: TestDatabase;
 let api: Booted;

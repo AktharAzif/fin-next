@@ -3,10 +3,14 @@
 // signed out with an intent, every other one with an intent; a trusted browser forgotten with an
 // intent; the lists; and switching the current organisation, which is navigation and writes nothing.
 import { randomBytes } from "node:crypto";
-import { createTestDatabase, seed, type TestDatabase, totpCode } from "@fin/orgs/testing";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { defineConsoleService } from "./main.ts";
+import {
+  createTestDatabase,
+  seed,
+  type TestDatabase,
+  totpCode,
+} from "../../../../packages/orgs/test/index.ts";
 import {
   type Booted,
   Client,
@@ -14,7 +18,8 @@ import {
   latestCode,
   ORIGIN,
   steppedUp,
-} from "./test/client.ts";
+} from "../../test/client.ts";
+import { defineConsoleService } from "./main.ts";
 
 let database: TestDatabase;
 let api: Booted;

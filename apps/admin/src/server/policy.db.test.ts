@@ -5,9 +5,13 @@
 // the permission; and a session presented under another Access identity is ended and refused.
 // Also: an Access identity the staff table does not list writes `staff.not_listed` (§18.1, S2-24),
 // and a session a route renewed sends its renewed cookie (§11.2).
-import { createStaffHarness, type StaffHarness, unique } from "@fin/staff/testing";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ADMIN_POLICIES, type PolicyId } from "./policy/index.ts";
+import {
+  createStaffHarness,
+  type StaffHarness,
+  unique,
+} from "../../../../packages/staff/test/index.ts";
 import {
   type AdminClient,
   type AdminHost,
@@ -16,7 +20,8 @@ import {
   type HostMember,
   pendingThroughHost,
   type Reply,
-} from "./testing/host.ts";
+} from "../../test/host.ts";
+import { ADMIN_POLICIES, type PolicyId } from "./policy/index.ts";
 
 let h: StaffHarness;
 let host: AdminHost;

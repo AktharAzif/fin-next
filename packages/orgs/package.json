@@ -4,8 +4,7 @@
   "type": "module",
   "description": "Organisations, members, invitations, custom roles and requireActor (spec 02 §9, §13.2, §14.1; DECISIONS SA-10, SA-11, SA-32, SA-33, SA-34, BC-06).",
   "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./test/index.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "lint": "biome check .",
