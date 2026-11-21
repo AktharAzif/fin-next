@@ -143,22 +143,51 @@ test.describe("the page policy @csp", () => {
   test("the built assets carry no data: URL, no agent bridge and no development marker", async ({
     page,
   }) => {
+    // Every file the build emitted, from its manifest (entries, the chunks the SDK imports lazily,
+    // stylesheets and fonts), with the page itself and what it names: not only what index.html
+    // loads, since a lazily loaded chunk is never named there.
     const files = await page.evaluate(async () => {
-      const urls = [
-        ...[...document.querySelectorAll("script[src]")].map((s) => (s as HTMLScriptElement).src),
-        ...[...document.querySelectorAll('link[rel="stylesheet"]')].map(
-          (l) => (l as HTMLLinkElement).href,
-        ),
-      ];
-      return Promise.all(urls.map(async (url) => ({ url, text: await (await fetch(url)).text() })));
-    });
-    expect(files.length).toBeGreaterThanOrEqual(2);
-    for (const file of files) {
-      expect(file.text, file.url).not.toMatch(/url\(\s*["']?data:/i);
-      for (const marker of ["modelContext", "registerTools", "ui-sdk.devtools", "__UI_SDK__"]) {
-        expect(file.text.includes(marker), `${marker} in ${file.url}`).toBe(false);
+      type Chunk = { file: string; css?: string[]; assets?: string[] };
+      const manifest = (await (await fetch("/.vite/manifest.json")).json()) as Record<
+        string,
+        Chunk
+      >;
+      const paths = new Set<string>(["index.html"]);
+      for (const chunk of Object.values(manifest)) {
+        for (const path of [chunk.file, ...(chunk.css ?? []), ...(chunk.assets ?? [])]) {
+          paths.add(path);
+        }
       }
-      if (file.url.endsWith(".css")) {
+      for (const el of document.querySelectorAll<HTMLScriptElement | HTMLLinkElement>(
+        'script[src], link[rel="stylesheet"]',
+      )) {
+        paths.add(new URL(el instanceof HTMLScriptElement ? el.src : el.href).pathname.slice(1));
+      }
+      return Promise.all(
+        [...paths].sort().map(async (path) => {
+          const response = await fetch(`/${path}`);
+          const text = /\.(?:js|css|html)$/.test(path) ? await response.text() : "";
+          return { path, status: response.status, text };
+        }),
+      );
+    });
+    const listed = files.map((file) => file.path);
+    expect(listed.filter((path) => path.endsWith(".js")).length).toBeGreaterThanOrEqual(2);
+    expect(listed.filter((path) => path.endsWith(".css")).length).toBeGreaterThanOrEqual(1);
+    // Whatever the page loaded from the build is in that list, so the list is the whole build.
+    const loaded = record.served.filter((path) => /\.(?:js|css|woff2)$/.test(path));
+    expect(loaded.filter((path) => !listed.includes(path))).toEqual([]);
+    for (const file of files) {
+      expect(file.status, file.path).toBe(200);
+      // A data: URL in a stylesheet or in a script's strings (a typed one, or url(data:…)); the
+      // message names the file and the match, not the whole file.
+      for (const pattern of [/url\(\s*["']?data:[^)]{0,40}/i, /\bdata:[a-z]+\/[a-z0-9.+-]+/i]) {
+        expect(file.text.match(pattern)?.[0] ?? null, `data: URL in ${file.path}`).toBeNull();
+      }
+      for (const marker of ["modelContext", "registerTools", "ui-sdk.devtools", "__UI_SDK__"]) {
+        expect(file.text.includes(marker), `${marker} in ${file.path}`).toBe(false);
+      }
+      if (file.path.endsWith(".css")) {
         expect(file.text.replace(/^(?:\s|\/\*[\s\S]*?\*\/)*/, "")).toMatch(/^@layer\s+ui-sdk\b/);
       }
     }
@@ -424,13 +453,77 @@ test.describe("the components @kit", () => {
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog", { name: "Create API key" });
     await expect(dialog).toBeVisible();
-    expect(await layoutWidth(dialog)).toBe(480);
+    // 480 wide, and 16px from each edge on a phone.
+    const viewport = page.viewportSize()?.width ?? 0;
+    expect(await layoutWidth(dialog)).toBe(Math.min(480, viewport - 32));
     expect(await dialog.evaluate((el) => getComputedStyle(el).paddingTop)).toBe("24px");
     expect(await dialog.evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe("none");
     await expect(page.getByRole("heading", { name: "Create API key" })).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(opener).toBeFocused();
+  });
+
+  test("modal: the page behind does not scroll, by wheel or by keys, until it closes", async ({
+    page,
+  }) => {
+    const opener = page.getByRole("button", { name: "Create API key" });
+    await opener.scrollIntoViewIfNeeded();
+    const scrollY = () => page.evaluate(() => Math.round(window.scrollY));
+    await opener.click();
+    const dialog = page.getByRole("dialog", { name: "Create API key" });
+    await expect(dialog).toBeVisible();
+    const before = await scrollY();
+    const viewport = page.viewportSize() ?? { width: 0, height: 0 };
+    await page.mouse.move(viewport.width / 2, viewport.height - 8);
+    await page.mouse.wheel(0, 600);
+    await page.mouse.wheel(0, -300);
+    for (const key of ["PageDown", "End", "ArrowDown", "Space"]) await page.keyboard.press(key);
+    // Give a scroll that was not stopped the time to happen.
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
+    expect(await scrollY()).toBe(before);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await page.mouse.wheel(0, 600);
+    await expect.poll(scrollY).toBeGreaterThan(before);
+  });
+
+  test("sizes: avatars, their flag and a growing textarea compute their sizes under the policy", async ({
+    page,
+  }) => {
+    const avatars = section(page, "brand").locator('[data-slot="avatar"]');
+    const sizes = await avatars.evaluateAll((els) =>
+      els.map((el) => {
+        const face = el.firstElementChild as HTMLElement;
+        return [face.offsetWidth, face.offsetHeight];
+      }),
+    );
+    expect(sizes).toEqual([
+      [40, 40],
+      [32, 32],
+      [24, 24],
+      [20, 20],
+    ]);
+    const flag = await avatars
+      .first()
+      .locator("svg")
+      .evaluate((el) => {
+        const box = el.getBoundingClientRect();
+        return [box.width, box.height];
+      });
+    expect(flag).toEqual([16, 16]);
+    // A remark grows from 3 rows (80px) to 10 (220px), then scrolls inside itself.
+    const remark = page.getByRole("textbox", { name: /^Description/ });
+    const height = () => remark.evaluate((el) => (el as HTMLElement).offsetHeight);
+    expect(await height()).toBe(80);
+    await remark.fill(["one", "two", "three", "four", "five", "six"].join("\n"));
+    await expect.poll(height).toBeGreaterThan(80);
+    expect(await height()).toBeLessThan(220);
+    await remark.fill(Array.from({ length: 16 }, (_, i) => `line ${i + 1}`).join("\n"));
+    await expect.poll(height).toBe(220);
+    expect(await remark.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
   });
 
   test("confirm dialog: no X; while busy it says so and nothing dismisses it; then it closes", async ({
@@ -506,7 +599,31 @@ test.describe("the components @kit", () => {
     const input = page.getByRole("textbox", { name: "Verification code" });
     await expect(input).toHaveAttribute("autocomplete", "one-time-code");
     await input.focus();
-    await input.fill("654321");
+    // A paste event carrying the code as a clipboard delivers it, spaces and all, so the SDK's
+    // paste path (which strips separators) is what fills the boxes: a script's paste inserts
+    // nothing by itself. Firefox builds the event's clipboardData from its own dataType and data
+    // fields and ignores a DataTransfer passed in, so the event carries both.
+    const handled = await input.evaluate((el) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", "654 321");
+      const init = {
+        clipboardData: data,
+        dataType: "text/plain",
+        data: "654 321",
+        bubbles: true,
+        cancelable: true,
+      };
+      const event = new ClipboardEvent("paste", init);
+      el.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(handled).toBe(true);
+    await expect(
+      section(page, "otp")
+        .locator('[data-slot="fin-otp"]')
+        .first()
+        .locator('[data-slot="otp-input-slot"]'),
+    ).toHaveText(["6", "5", "4", "3", "2", "1"]);
     await expect(page.locator('[data-kit="otp-handed"]')).toHaveText("654321");
     await expect(section(page, "otp").getByText(/That code isn’t right/)).toBeVisible();
     const selected = await input.evaluate((el) => {
@@ -541,6 +658,18 @@ test.describe("the components @kit", () => {
       scrollY: Math.round(window.scrollY),
     }));
     expect(state).toEqual({ active: "BODY", scrollY: 0 });
+  });
+
+  test("OTP input: a code that expires while the person is elsewhere leaves focus there", async ({
+    page,
+  }) => {
+    const expire = page.locator('[data-kit="otp-expire"]');
+    await keyboardFocus(page, expire);
+    await page.keyboard.press("Enter");
+    await expect(section(page, "otp").getByText("This code expired. Send a new code.")).toHaveCount(
+      2,
+    );
+    await expect(expire).toBeFocused();
   });
 
   test("OTP resend: focus stays on it while it sends and counts down; start and end are said", async ({
@@ -661,6 +790,25 @@ test.describe("the components @kit", () => {
       rowStops: ["mem_04"],
       controls: ownControls,
     });
+    // A control another row mounts later, without the table drawing again (a cell's own state),
+    // and a tabindex put back on a control taken out: both leave the Tab order at once. The probe
+    // stands in for them from outside React, then goes.
+    const outOfOrder = await table.locator("tbody").evaluate(async (body) => {
+      const other = body.querySelector<HTMLElement>('tr[data-row-id="mem_01"]');
+      const cell = other?.querySelector("td");
+      if (other === null || cell === null || cell === undefined) return "no row";
+      const probe = document.createElement("button");
+      probe.type = "button";
+      probe.textContent = "probe";
+      cell.append(probe);
+      const before = other.querySelector<HTMLElement>("[data-row-tabindex]");
+      before?.setAttribute("tabindex", "0");
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const result = [probe.tabIndex, before === null ? -1 : before.tabIndex];
+      probe.remove();
+      return result;
+    });
+    expect(outOfOrder).toEqual([-1, -1]);
     await page.keyboard.press("End");
     await expect(rows.nth(3)).toBeFocused();
     await page.keyboard.press("Home");

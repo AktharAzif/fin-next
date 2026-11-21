@@ -68,6 +68,8 @@ type ToastFn = ((input: string | ToastMessage) => string) & {
   dismiss: (id?: string) => void;
   /** How many toasts are showing, for tests. */
   count: () => number;
+  /** Whether the toast with this ID (as toast() returned it) is still showing. */
+  has: (id: string) => boolean;
 };
 
 /** Shows a toast whose title is the outcome: "Webhook created", "Couldn't create webhook". */
@@ -79,6 +81,10 @@ export const toast: ToastFn = Object.assign(
     info: (input: string | ToastMessage) => show("info", input),
     dismiss: (id?: string) => getQueue().dismiss(id),
     count: () => getQueue().toasts().length,
+    has: (id: string) =>
+      getQueue()
+        .toasts()
+        .some((t) => t.id === id),
   },
 );
 

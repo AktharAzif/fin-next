@@ -34,7 +34,13 @@ const TYPES: Record<string, string> = {
 
 const DIST = decodeURIComponent(new URL("../dist/kit/", import.meta.url).pathname);
 
-export type PageRecord = { violations: string[]; consoleErrors: string[]; offsite: string[] };
+export type PageRecord = {
+  violations: string[];
+  consoleErrors: string[];
+  offsite: string[];
+  /** Every path the page was served from dist/kit, in order ("index.html", "assets/…"). */
+  served: string[];
+};
 
 declare global {
   interface Window {
@@ -44,7 +50,7 @@ declare global {
 
 /** Opens the kit under the policy and returns what the page did that it must not. */
 export async function openKit(page: Page, query = ""): Promise<PageRecord> {
-  const record: PageRecord = { violations: [], consoleErrors: [], offsite: [] };
+  const record: PageRecord = { violations: [], consoleErrors: [], offsite: [], served: [] };
   await page.addInitScript(() => {
     window.__violations = [];
     document.addEventListener("securitypolicyviolation", (event) => {
@@ -80,6 +86,7 @@ export async function openKit(page: Page, query = ""): Promise<PageRecord> {
     if (ext === "html") headers["content-security-policy"] = PAGE_POLICY;
     try {
       await route.fulfill({ path: DIST + path, headers });
+      record.served.push(path);
     } catch {
       await route.fulfill({
         status: 404,

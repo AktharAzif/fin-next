@@ -240,26 +240,34 @@ describe("Toaster and toast()", () => {
   it("evicts the oldest non-error toast for a fourth, and keeps errors", () => {
     toast.dismiss();
     const error = toast.error("Couldn’t create webhook");
-    toast.success("Webhook created");
-    toast.info("Fin was updated");
+    const success = toast.success("Webhook created");
+    const info = toast.info("Fin was updated");
     expect(toast.count()).toBe(3);
-    toast("Key copied");
+    const copied = toast("Key copied");
     expect(toast.count()).toBe(3);
-    toast("Saved");
-    toast("Done");
+    // The oldest non-error went, not the older error.
+    expect([toast.has(error), toast.has(success), toast.has(info), toast.has(copied)]).toEqual([
+      true,
+      false,
+      true,
+      true,
+    ]);
+    const saved = toast("Saved");
+    const done = toast("Done");
     expect(toast.count()).toBe(3);
-    expect(error).toBeTruthy();
+    expect([error, saved, done].map((id) => toast.has(id))).toEqual([true, true, true]);
+    expect([info, copied].map((id) => toast.has(id))).toEqual([false, false]);
     toast.dismiss();
     expect(toast.count()).toBe(0);
   });
 
   it("evicts the oldest when every toast is an error", () => {
     toast.dismiss();
-    toast.error("One");
-    toast.error("Two");
-    toast.error("Three");
-    toast.error("Four");
+    const one = toast.error("One");
+    const rest = [toast.error("Two"), toast.error("Three"), toast.error("Four")];
     expect(toast.count()).toBe(3);
+    expect(toast.has(one)).toBe(false);
+    expect(rest.map((id) => toast.has(id))).toEqual([true, true, true]);
     toast.dismiss();
   });
 });

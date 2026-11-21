@@ -24,8 +24,10 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], ...desktop, colorScheme: "dark" },
     },
     {
+      // Spec 06 §10.2: the @kit cases run on a phone too (their geometry is viewport-aware), plus
+      // anything tagged @phone.
       name: "phone",
-      grep: /@phone/,
+      grep: /@kit|@phone/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 390, height: 844 },

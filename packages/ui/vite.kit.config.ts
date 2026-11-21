@@ -18,6 +18,9 @@ export default defineConfig(({ mode }) => ({
     assetsDir: "assets",
     assetsInlineLimit: 0,
     sourcemap: false,
+    // The spec reads .vite/manifest.json to check every file the build emitted, the chunks the SDK
+    // loads lazily included (index.html names only the entry script and stylesheet).
+    manifest: true,
     modulePreload: { polyfill: false },
     target: "baseline-widely-available",
   },
