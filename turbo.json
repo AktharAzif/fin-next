@@ -22,6 +22,14 @@
       "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
       "outputs": []
     },
-    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] },
+    "@fin/console#test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/orgs/src/**",
+        "$TURBO_ROOT$/packages/server/src/telemetry/**"
+      ],
+      "outputs": []
+    }
   }
 }
