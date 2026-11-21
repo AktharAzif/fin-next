@@ -18,6 +18,7 @@ import {
 } from "@fin/identity";
 import type { Pool } from "pg";
 import { CredentialRegistry } from "../src/credentials.ts";
+import { createRole } from "../src/custom-roles.ts";
 import {
   type ActorOptions,
   type Guarded,
@@ -27,6 +28,9 @@ import {
   type RealmState,
   requireActor,
 } from "../src/guard.ts";
+import { acceptInvitation, inviteMember } from "../src/invitations.ts";
+import { changeMemberRole, removeMember } from "../src/members.ts";
+import { createFirstOrganization } from "../src/organizations.ts";
 import { createOrgs, type Orgs } from "../src/orgs.ts";
 import { ORGS_ACTIONS } from "../src/step-up.ts";
 import type { TestDatabase } from "./db.ts";
@@ -424,4 +428,155 @@ export function extensionsOf(outcome: Outcome<unknown>): Record<string, unknown>
   if (outcome.ok) return {};
   const error = outcome.error as { extensions?: Record<string, unknown> };
   return error.extensions ?? {};
+}
+
+/** A person with an authenticator who owns a first organisation as its Super admin. */
+export async function ownerWithOrganization(
+  h: Harness,
+  label: string,
+): Promise<{ who: SignedIn; orgId: string; name: string; memberId: string }> {
+  const who = await person(h, label);
+  const made = await asPerson(h, who, {}, { stepUp: { kind: "none" } }, (tx, g) =>
+    createFirstOrganization(h.orgs, tx, g),
+  );
+  if (!made.ok) throw made.error;
+  const member = await h.admin.query<{ id: string }>(
+    "SELECT id FROM identity.member WHERE organization_id = $1 AND user_id = $2",
+    [made.value.orgId, who.userId],
+  );
+  return {
+    who,
+    orgId: made.value.orgId,
+    name: made.value.name,
+    memberId: String(member.rows[0]?.id),
+  };
+}
+
+/** Invites an address with an intent, as the actor. */
+export function inviteAs(
+  h: Harness,
+  actor: SignedIn,
+  orgId: string,
+  email: string,
+  roleKey: string,
+): Promise<Outcome<{ invitationId: string; expiresAt: string }>> {
+  return withIntent(h, actor, (headers) =>
+    asActor(
+      h,
+      actor,
+      orgId,
+      { body: { email, roleKey }, headers },
+      {
+        permission: "member.invite",
+        lock: true,
+        stepUp: { kind: "intent", action: "member.invite" },
+      },
+      (tx, a) => inviteMember(h.orgs, tx, a, { email, roleKey }),
+    ),
+  );
+}
+
+/** Accepts an invitation as the invitee (an intent once they have a factor). */
+export function acceptAs(
+  h: Harness,
+  invitee: SignedIn,
+  invitationId: string,
+): Promise<Outcome<{ orgId: string; memberId: string; roleKey: string }>> {
+  return withIntent(h, invitee, (headers) =>
+    asPerson(
+      h,
+      invitee,
+      { headers },
+      { stepUp: { kind: "intent_if_factor", action: "invitation.accept" } },
+      (tx, g) => acceptInvitation(h.orgs, tx, g, invitationId),
+    ),
+  );
+}
+
+/** A member of the organisation in the role given, invited by the owner and accepted. */
+export async function memberOf(
+  h: Harness,
+  owner: SignedIn,
+  orgId: string,
+  label: string,
+  roleKey: string,
+  options: { factor?: boolean } = {},
+): Promise<{ who: SignedIn; memberId: string }> {
+  const email = unique(label);
+  const invited = await inviteAs(h, owner, orgId, email, roleKey);
+  if (!invited.ok) throw invited.error;
+  const who = await person(h, label, { email, factor: options.factor ?? true });
+  const joined = await acceptAs(h, who, invited.value.invitationId);
+  if (!joined.ok) throw joined.error;
+  return { who, memberId: joined.value.memberId };
+}
+
+/** Makes a custom role in the organisation with an intent, as the actor. */
+export async function roleAs(
+  h: Harness,
+  actor: SignedIn,
+  orgId: string,
+  name: string,
+  permissions: string[],
+): Promise<string> {
+  const made = await withIntent(h, actor, (headers) =>
+    asActor(
+      h,
+      actor,
+      orgId,
+      { body: { name, description: "", permissions }, headers },
+      { permission: "role.manage", lock: true, stepUp: { kind: "intent", action: "role.create" } },
+      (tx, a) => createRole(h.orgs, tx, a, { name, description: "", permissions }),
+    ),
+  );
+  if (!made.ok) throw made.error;
+  return made.value.roleId;
+}
+
+/** The team-change actions with their policy options, as the console's routes declare them. */
+export const ACT = {
+  role: {
+    permission: "member.role",
+    lock: true,
+    stepUp: { kind: "intent", action: "member.role" },
+  },
+  remove: {
+    permission: "member.invite",
+    lock: true,
+    stepUp: { kind: "intent", action: "member.remove" },
+  },
+} as const satisfies Record<string, ActorOptions>;
+
+export function changeRoleAs(
+  h: Harness,
+  actor: SignedIn,
+  orgId: string,
+  memberId: string,
+  roleKey: string,
+  rollCredentials = true,
+) {
+  return withIntent(h, actor, (headers) =>
+    asActor(
+      h,
+      actor,
+      orgId,
+      { method: "PATCH", body: { roleKey, rollCredentials }, headers },
+      ACT.role,
+      (tx, a) => changeMemberRole(h.orgs, tx, a, memberId, { roleKey, rollCredentials }),
+    ),
+  );
+}
+
+export function removeAs(
+  h: Harness,
+  actor: SignedIn,
+  orgId: string,
+  memberId: string,
+  rollCredentials = true,
+) {
+  return withIntent(h, actor, (headers) =>
+    asActor(h, actor, orgId, { body: { rollCredentials }, headers }, ACT.remove, (tx, a) =>
+      removeMember(h.orgs, tx, a, memberId, { rollCredentials }),
+    ),
+  );
 }

@@ -4,7 +4,7 @@
 // area (OrgRefusal: scope, giving, outrank, last holder) answers its own code and marks the request
 // line `refused` with its bounded reason; a store failure answers 503; anything else is the host's
 // reported 500.
-import { AuthRefusal, AuditGuardError, UnitRolledBackError } from "@fin/identity";
+import { AuditGuardError, AuthRefusal, UnitRolledBackError } from "@fin/identity";
 import { isOrgRefusal, ORG_PROBLEM_TITLE, type OrgProblemCode } from "@fin/orgs";
 import { type FinContext, markOutcome, PROBLEM_EXTENSIONS } from "@fin/server/http";
 

@@ -39,7 +39,12 @@ export type ConsoleViewer =
       }[];
       currentOrgId: string | null;
       permissions: string[];
-      invitations: { invitationId: string; orgName: string; roleLabel: string; expiresAt: string }[];
+      invitations: {
+        invitationId: string;
+        orgName: string;
+        roleLabel: string;
+        expiresAt: string;
+      }[];
     };
 
 /** How many backup codes the person has left, or null without an authenticator (§5.4). */
@@ -52,13 +57,23 @@ async function backupCodesLeft(realm: Realm, tx: UnitTx, userId: string): Promis
   if (stored === undefined || !stored.verified) return null;
   if (stored.backup_codes === null || stored.backup_codes === "") return 0;
   // The library keeps them encrypted under the realm's secrets; only their count leaves here.
-  const context = (await realm.auth.$context) as unknown as { secretConfig: unknown };
-  const plain = await symmetricDecrypt({
-    key: context.secretConfig as Parameters<typeof symmetricDecrypt>[0]["key"],
-    data: stored.backup_codes,
-  });
-  const codes: unknown = JSON.parse(plain);
-  return Array.isArray(codes) ? codes.length : 0;
+  try {
+    const context = (await realm.auth.$context) as unknown as { secretConfig: unknown };
+    const plain = await symmetricDecrypt({
+      key: context.secretConfig as Parameters<typeof symmetricDecrypt>[0]["key"],
+      data: stored.backup_codes,
+    });
+    const codes: unknown = JSON.parse(plain);
+    return Array.isArray(codes) ? codes.length : 0;
+  } catch {
+    // No configured secret version opens them (spec 02 §18.1): the count is unknown, the viewer
+    // still answers, and the line raises `secret-unreadable`.
+    realm.runtime.lines.write("auth.secret_unreadable", "error", {
+      realm: "developer",
+      kind: "backup_codes",
+    });
+    return null;
+  }
 }
 
 export async function viewerOf(orgs: Orgs, tx: UnitTx, who: Guarded): Promise<ConsoleViewer> {

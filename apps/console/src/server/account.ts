@@ -200,12 +200,7 @@ export async function revokeOneSession(
   // Another person's session, this one and an unknown one are the same answer.
   if (own.rowCount === 0) throw notFound("account.session");
   await who.confirm({ body: {}, target: sessionId, organizationId: null });
-  const done = await revokeSession(
-    orgs.realm.runtime,
-    tx,
-    sessionActor(who, request),
-    sessionId,
-  );
+  const done = await revokeSession(orgs.realm.runtime, tx, sessionActor(who, request), sessionId);
   if (!done) throw notFound("account.session");
   return { sessionId };
 }

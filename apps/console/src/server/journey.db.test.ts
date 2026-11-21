@@ -51,7 +51,10 @@ describe("the console's API, end to end", () => {
     const owner = new Client(api);
 
     // Sign up: a code to the address, the account made only when the code comes back (S2-05).
-    const signUp = await owner.call("POST", "/api/sign-up", { name: "Ada Owner", email: ownerEmail });
+    const signUp = await owner.call("POST", "/api/sign-up", {
+      name: "Ada Owner",
+      email: ownerEmail,
+    });
     expect(signUp.status).toBe(202);
     expect(signUp.json).toEqual({ status: "code_sent" });
     const signedIn = await owner.call("POST", "/api/auth/sign-in/email-otp", {
@@ -92,14 +95,20 @@ describe("the console's API, end to end", () => {
 
     // The invitation, with an intent bound to the address and the role (§7.6, §9.3).
     const invite = await steppedUp(database.admin, owner, (headers) =>
-      owner.org(orgId, "POST", "/api/team/invitations", { email: inviteeEmail, roleKey: "admin" }, headers),
+      owner.org(
+        orgId,
+        "POST",
+        "/api/team/invitations",
+        { email: inviteeEmail, roleKey: "admin" },
+        headers,
+      ),
     );
     expect(invite.done.status).toBe(201);
     const invitationId = String(invite.done.json.invitationId);
     const team = await owner.org(orgId, "GET", "/api/team");
-    expect((team.json.invitations as { invitationId: string }[]).map((i) => i.invitationId)).toEqual([
-      invitationId,
-    ]);
+    expect(
+      (team.json.invitations as { invitationId: string }[]).map((i) => i.invitationId),
+    ).toEqual([invitationId]);
 
     // The invitee opens the link (the token from the fragment, in a body), then signs in.
     const mail = await database.admin.query<{ token: string }>(
@@ -132,7 +141,9 @@ describe("the console's API, end to end", () => {
     const fromCookie = await invitee.call("GET", "/api/invitation");
     expect(fromCookie.json).toMatchObject({ invitationId, state: "for_you" });
     const mine = await invitee.call("GET", "/api/invitations/mine");
-    expect((mine.json.invitations as { invitationId: string }[])[0]?.invitationId).toBe(invitationId);
+    expect((mine.json.invitations as { invitationId: string }[])[0]?.invitationId).toBe(
+      invitationId,
+    );
 
     // Accepting: the invitee has no factor yet, so no intent (§7.6); the Admin role then holds them.
     const accepted = await invitee.call("POST", `/api/invitations/${invitationId}/accept`);
@@ -150,19 +161,29 @@ describe("the console's API, end to end", () => {
     expect(changed.done.status).toBe(200);
     const notHeld = await invitee.call("GET", "/api/viewer");
     expect(notHeld.json).toMatchObject({ gate: "ok", currentOrgId: orgId });
-    expect([...(notHeld.json.permissions as string[])].sort()).toEqual(["auditLog.read", "member.read"]);
+    expect([...(notHeld.json.permissions as string[])].sort()).toEqual([
+      "auditLog.read",
+      "member.read",
+    ]);
     const refused = await invitee.org(orgId, "POST", "/api/team/invitations", {
       email: `other.${tag}@example.com`,
       roleKey: roleId,
     });
-    expect(refused).toMatchObject({ status: 403, json: { code: "forbidden", permission: "member.invite" } });
+    expect(refused).toMatchObject({
+      status: 403,
+      json: { code: "forbidden", permission: "member.invite" },
+    });
 
     // The owner removes them, with an intent; their access to the organisation ends at once.
     const removed = await steppedUp(database.admin, owner, (headers) =>
       owner.org(orgId, "POST", `/api/team/members/${memberId}/remove`, {}, headers),
     );
     expect(removed.done.status).toBe(200);
-    expect(removed.done.json.credentials).toEqual({ listed: 0, rolledNow: 0, rollingWithinHour: 0 });
+    expect(removed.done.json.credentials).toEqual({
+      listed: 0,
+      rolledNow: 0,
+      rollingWithinHour: 0,
+    });
     const gone = await invitee.org(orgId, "GET", "/api/team");
     expect(gone).toMatchObject({ status: 404, json: { code: "not_found" } });
 
@@ -200,7 +221,9 @@ describe("the console's API, end to end", () => {
     // The member no longer exists, so the object has no current label (§14.5).
     expect(filtered.json.filterLabel).toBeNull();
     const byRole = await owner.org(orgId, "GET", `/api/audit-log?range=all&target=${roleId}`);
-    expect((byRole.json.items as { event: string }[]).map((i) => i.event)).toEqual(["role.created"]);
+    expect((byRole.json.items as { event: string }[]).map((i) => i.event)).toEqual([
+      "role.created",
+    ]);
     expect(byRole.json.filterLabel).toBe("Support");
     const roles = await owner.org(orgId, "GET", "/api/audit-log?range=all&targetKind=role");
     expect((roles.json.items as { event: string }[]).map((i) => i.event)).toEqual(["role.created"]);

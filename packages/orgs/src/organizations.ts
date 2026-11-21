@@ -58,7 +58,7 @@ const MAIL_HOSTS = new Set(["mail", "email", "m", "mx", "smtp", "webmail", "post
 
 /**
  * The first organisation's name (§5.9): built from the work address's domain ("Acme Payments" for
- * ada@acme-payments.com), else from the first name ("Ada's organisation"), passed through the
+ * an address at acme-payments.example.net), else from the first name ("Ada's organisation"), passed through the
  * organisation-name rule; "My organisation" when nothing usable can be built. The domain's most
  * specific label that is not a mail host and not its top-level label names the organisation.
  */

@@ -46,7 +46,9 @@ export class Client {
       headers: {
         "user-agent": this.userAgent,
         "cf-connecting-ip": this.ip,
-        ...(unsafe ? { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-fin-app": "console" } : {}),
+        ...(unsafe
+          ? { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-fin-app": "console" }
+          : {}),
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(this.jar.size > 0
           ? { cookie: [...this.jar].map(([k, v]) => `${k}=${v}`).join("; ") }
@@ -75,7 +77,13 @@ export class Client {
   }
 
   /** An organisation route: `Fin-Organization` with the call. */
-  org(orgId: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
+  org(
+    orgId: string,
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+  ) {
     return this.call(method, path, body, { "fin-organization": orgId, ...headers });
   }
 }

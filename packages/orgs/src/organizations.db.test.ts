@@ -71,7 +71,13 @@ describe("POST /api/orgs/first", () => {
     );
     expect(session.rows[0]?.current_organization_id).toBe(orgId);
     // A Super admin is privileged; with no factor the person is now held (§5.9, [SA-05]).
-    const held = await asPerson(h, who, { method: "GET" }, { stepUp: { kind: "none" } }, async () => 1);
+    const held = await asPerson(
+      h,
+      who,
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      async () => 1,
+    );
     expect(codeOf(held)).toBe("second_factor_required");
     expect(extensionsOf(held)).toMatchObject({ hold: true });
     // Refused once the person has a membership.
@@ -153,9 +159,23 @@ async function ownerWithOrganization(label: string) {
 describe("Fin-Organization (S2-10, AC-SAT-34)", () => {
   it("is required, and a non-member's, a deleted and an unknown organisation are all 404", async () => {
     const { who, orgId } = await ownerWithOrganization("scope");
-    const missing = await asActor(h, who, null, { method: "GET" }, { stepUp: { kind: "none" } }, async () => 1);
+    const missing = await asActor(
+      h,
+      who,
+      null,
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      async () => 1,
+    );
     expect(codeOf(missing)).toBe("organization_required");
-    const malformed = await asActor(h, who, "org_nope", { method: "GET" }, { stepUp: { kind: "none" } }, async () => 1);
+    const malformed = await asActor(
+      h,
+      who,
+      "org_nope",
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      async () => 1,
+    );
     expect(codeOf(malformed)).toBe("not_found");
     const other = await ownerWithOrganization("scope_other");
     const notMine = await asActor(
@@ -176,8 +196,17 @@ describe("Fin-Organization (S2-10, AC-SAT-34)", () => {
       async () => 1,
     );
     expect(codeOf(unknown)).toBe("not_found");
-    await seed(h.admin, "UPDATE identity.organization SET deleted_at = now() WHERE id = $1", [orgId]);
-    const deleted = await asActor(h, who, orgId, { method: "GET" }, { stepUp: { kind: "none" } }, async () => 1);
+    await seed(h.admin, "UPDATE identity.organization SET deleted_at = now() WHERE id = $1", [
+      orgId,
+    ]);
+    const deleted = await asActor(
+      h,
+      who,
+      orgId,
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      async () => 1,
+    );
     expect(codeOf(deleted)).toBe("not_found");
   });
 
@@ -194,19 +223,33 @@ describe("Fin-Organization (S2-10, AC-SAT-34)", () => {
     );
     expect(second.ok).toBe(true);
     // The session now points at the second; the header still decides.
-    const seen = await asActor(h, who, orgId, { method: "GET" }, { stepUp: { kind: "none" } }, async (_tx, a) => a.organization.id);
+    const seen = await asActor(
+      h,
+      who,
+      orgId,
+      { method: "GET" },
+      { stepUp: { kind: "none" } },
+      async (_tx, a) => a.organization.id,
+    );
     expect(seen.ok && seen.value).toBe(orgId);
     // Switching is navigation only: no audit row.
     const before = (await h.events()).length;
-    const switched = await asPerson(h, who, { method: "PUT" }, { stepUp: { kind: "none" } }, (tx, g) =>
-      switchOrganization(h.orgs, tx, g, orgId),
+    const switched = await asPerson(
+      h,
+      who,
+      { method: "PUT" },
+      { stepUp: { kind: "none" } },
+      (tx, g) => switchOrganization(h.orgs, tx, g, orgId),
     );
     expect(switched.ok).toBe(true);
     expect((await h.events()).length).toBe(before);
     const list = await asPerson(h, who, { method: "GET" }, { stepUp: { kind: "none" } }, (tx, g) =>
       listOrganizations(tx, g, { page: 1, size: 25 }),
     );
-    expect(list.ok && list.value.items.map((o) => o.roleLabel)).toEqual(["Super admin", "Super admin"]);
+    expect(list.ok && list.value.items.map((o) => o.roleLabel)).toEqual([
+      "Super admin",
+      "Super admin",
+    ]);
   });
 });
 
@@ -219,7 +262,11 @@ describe("PATCH /api/org", () => {
         who,
         orgId,
         { method: "PATCH", body: { name: to }, headers },
-        { permission: "organization.update", lock: true, stepUp: { kind: "intent", action: "org.rename" } },
+        {
+          permission: "organization.update",
+          lock: true,
+          stepUp: { kind: "intent", action: "org.rename" },
+        },
         (tx, a) => renameOrganization(h.orgs, tx, a, { name: to }),
       );
     const same = await rename(name, {});
@@ -241,11 +288,17 @@ describe("DELETE /api/org", () => {
         who,
         orgId,
         { method: "DELETE", body: { confirmName } },
-        { permission: "organization.delete", lock: true, stepUp: { kind: "intent", action: "org.delete" } },
+        {
+          permission: "organization.delete",
+          lock: true,
+          stepUp: { kind: "intent", action: "org.delete" },
+        },
         (tx, a) => deleteOrganization(h.orgs, tx, a, { confirmName }),
       );
     expect(codeOf(await remove(`${name}x`))).toBe("invalid");
-    await seed(h.admin, "UPDATE identity.organization SET live_status = 'approved' WHERE id = $1", [orgId]);
+    await seed(h.admin, "UPDATE identity.organization SET live_status = 'approved' WHERE id = $1", [
+      orgId,
+    ]);
     expect(codeOf(await remove(name))).toBe("approved_for_live");
   });
 
@@ -275,7 +328,11 @@ describe("DELETE /api/org", () => {
         who,
         orgId,
         { method: "DELETE", body: { confirmName: name }, headers },
-        { permission: "organization.delete", lock: true, stepUp: { kind: "intent", action: "org.delete" } },
+        {
+          permission: "organization.delete",
+          lock: true,
+          stepUp: { kind: "intent", action: "org.delete" },
+        },
         (tx, a) => deleteOrganization(h.orgs, tx, a, { confirmName: name }),
       ),
     );
@@ -285,13 +342,22 @@ describe("DELETE /api/org", () => {
       [orgId],
     );
     expect(org.rows[0]?.deleted_at).not.toBeNull();
-    expect((await h.admin.query("SELECT 1 FROM identity.member WHERE organization_id = $1", [orgId])).rowCount).toBe(0);
-    expect((await h.admin.query("SELECT 1 FROM identity.role WHERE organization_id = $1", [orgId])).rowCount).toBe(0);
+    expect(
+      (await h.admin.query("SELECT 1 FROM identity.member WHERE organization_id = $1", [orgId]))
+        .rowCount,
+    ).toBe(0);
+    expect(
+      (await h.admin.query("SELECT 1 FROM identity.role WHERE organization_id = $1", [orgId]))
+        .rowCount,
+    ).toBe(0);
     const invitation = await h.admin.query<{ status: string; cancel_reason: string }>(
       "SELECT status, cancel_reason FROM identity.invitation WHERE organization_id = $1",
       [orgId],
     );
-    expect(invitation.rows[0]).toEqual({ status: "cancelled", cancel_reason: "organisation_deleted" });
+    expect(invitation.rows[0]).toEqual({
+      status: "cancelled",
+      cancel_reason: "organisation_deleted",
+    });
     const deleted = await h.events({ event: "organization.deleted", organizationId: orgId });
     expect(deleted[0]?.metadata).toEqual({ members: 1, invitations: 1, keysRevoked: 0 });
     expect(deleted[0]?.ref_ids).toContain("rol_01jd0000000000000000000001");
@@ -300,7 +366,10 @@ describe("DELETE /api/org", () => {
       [deleted[0]?.id],
     );
     expect(journal.rows[0]?.kind).toBe("organisation_deleted");
-    const cancelled = await h.events({ event: "member.invitation_cancelled", organizationId: orgId });
+    const cancelled = await h.events({
+      event: "member.invitation_cancelled",
+      organizationId: orgId,
+    });
     expect(cancelled[0]?.metadata).toEqual({ reason: "organisation_deleted" });
     const mail = await h.outbox(who.email);
     expect(mail.some((m) => m.template === "orgs/organization-deleted")).toBe(true);

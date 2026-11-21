@@ -13,8 +13,8 @@ import {
   type UnitTx,
 } from "@fin/identity";
 import {
-  acceptInvitation,
   type AuditLogQuery,
+  acceptInvitation,
   cancelInvitation,
   changeInvitation,
   changeMemberRole,
@@ -413,10 +413,7 @@ export const HANDLERS = {
 
   async roleCreate(input, deps) {
     const body = input.body as { name: string; description: string; permissions: string[] };
-    return ok(
-      await actor(input, deps, (tx, a) => createRole(deps.orgs, tx, a, body)),
-      201,
-    );
+    return ok(await actor(input, deps, (tx, a) => createRole(deps.orgs, tx, a, body)), 201);
   },
 
   async roleUpdate(input, deps) {

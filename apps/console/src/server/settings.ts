@@ -11,7 +11,9 @@ import type { Env, Environment } from "@fin/server/config";
 import pg, { type Pool } from "pg";
 
 /** The realm's name for the process's environment (the realm says `test` where the platform says `ci`). */
-export function realmEnvironment(environment: Environment): "development" | "test" | "staging" | "production" {
+export function realmEnvironment(
+  environment: Environment,
+): "development" | "test" | "staging" | "production" {
   return environment === "ci" ? "test" : environment;
 }
 

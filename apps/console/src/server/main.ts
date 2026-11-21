@@ -10,7 +10,7 @@
 // core's (`resolver`); the gap is recorded for P0-D.
 import type { Clock } from "@fin/core";
 import { createPgDatabase, createRealm, type LineSink, type Realm } from "@fin/identity";
-import { createOrgs, CredentialRegistry, ORGS_ACTIONS, type Orgs } from "@fin/orgs";
+import { CredentialRegistry, createOrgs, ORGS_ACTIONS, type Orgs } from "@fin/orgs";
 import type { BuiltService, ServiceContext, ServiceDefinition } from "@fin/server";
 import { loadDocsOrigin, loadIngressConfig } from "@fin/server/config";
 import type { FinContext } from "@fin/server/http";
@@ -18,7 +18,7 @@ import { ConnectorPeers } from "@fin/server/ingress";
 import type { Telemetry } from "@fin/server/telemetry";
 import { type AuthHook, createApiHost } from "@fin/web-host";
 import type { Pool } from "pg";
-import { requestContext, registerRoutes } from "./routes.ts";
+import { registerRoutes, requestContext } from "./routes.ts";
 import { createConsolePool, poolSettings, realmSettings } from "./settings.ts";
 
 export interface ConsoleOverrides {
@@ -33,7 +33,8 @@ export function lineSink(telemetry: Telemetry): LineSink {
   return {
     write: (event, level, fields) => {
       const clean: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(fields)) if (value !== undefined) clean[key] = value;
+      for (const [key, value] of Object.entries(fields))
+        if (value !== undefined) clean[key] = value;
       telemetry.log(event, clean, level);
     },
   };

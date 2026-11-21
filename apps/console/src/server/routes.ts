@@ -4,10 +4,11 @@
 // handler, and answers JSON with `Cache-Control: no-store` and any `Set-Cookie` the session's refresh
 // or the handler produced. A refusal answers its own problem; anything else reaches the host's
 // reported 500. Handlers run their guard and their action in one unit of work (`realm.run`).
+
+import { isBuiltInKey } from "@fin/access";
 import { isId as coreIsId, type IdPrefix } from "@fin/core";
 import type { RequestContext } from "@fin/identity";
 import { CATALOGUE, type Orgs } from "@fin/orgs";
-import { isBuiltInKey } from "@fin/access";
 import type { FinContext, FinEnv } from "@fin/server/http";
 import type { Hono } from "hono";
 import type * as z from "zod";
@@ -83,7 +84,7 @@ async function readBody(c: FinContext): Promise<{ ok: true; value: unknown } | {
   }
 }
 
-function answer(c: FinContext, result: RouteAnswer, cookies: readonly string[]): Response {
+function answer(result: RouteAnswer, cookies: readonly string[]): Response {
   const headers = new Headers({
     "content-type": "application/json",
     "cache-control": "no-store",
@@ -125,7 +126,8 @@ export function registerRoutes(api: Hono<FinEnv>, deps: ConsoleDeps): void {
         query = parsed.data as Record<string, unknown>;
       }
       let body: Record<string, unknown> = {};
-      const read = policy.method === "GET" ? { ok: true as const, value: undefined } : await readBody(c);
+      const read =
+        policy.method === "GET" ? { ok: true as const, value: undefined } : await readBody(c);
       if (!read.ok) return invalid(c, deps, [{ path: "body", code: "invalid_json" }]);
       if (policy.body === "none") {
         if (read.value !== undefined) {
@@ -149,7 +151,7 @@ export function registerRoutes(api: Hono<FinEnv>, deps: ConsoleDeps): void {
       try {
         const result = await handler(input, deps);
         if (policy.guard !== "public") c.set("actor", "session");
-        return answer(c, result, input.cookies);
+        return answer(result, input.cookies);
       } catch (error) {
         const refused = refusalAnswer(c, deps.docsOrigin, error);
         if (refused !== null) return refused;

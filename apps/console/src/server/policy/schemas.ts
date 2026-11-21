@@ -19,9 +19,7 @@ export const roleKey = z.string().regex(/^([a-z][a-z_]{0,31}|rol_[0-9a-hjkmnp-tv
 
 export const orgId = z.string().regex(/^org_[0-9a-hjkmnp-tv-z]{26}$/);
 
-export const permissionKeys = z
-  .array(z.string().regex(/^[a-z][a-zA-Z]*\.[a-z][a-z_]*$/))
-  .max(64);
+export const permissionKeys = z.array(z.string().regex(/^[a-z][a-zA-Z]*\.[a-z][a-z_]*$/)).max(64);
 
 /** Paging on app lists (§14.1): `page` from 1, `size` 25 by default and at most 100. */
 export const paging = {
