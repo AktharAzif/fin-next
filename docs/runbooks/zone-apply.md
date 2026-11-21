@@ -87,4 +87,7 @@ The run stops at the failed write; everything before it stays applied and is in 
 Fix the cause and re-run: the plan reads the current state, so only what is missing is sent. A 4xx
 naming a rule limit means the zone's plan has no room (5 custom rules, 1 rate rule on Free): stop
 and tell the owner, never remove the other product's rules. A provider's error is printed masked
-and names no rule or rule set ID (`<rule:fin_next_...>`, `<id>`).
+and names no rule or rule set ID (`<rule:fin_next_...>`, `<id>`). The private rate threshold is
+redacted (`<threshold:api-v4>`) from the errors of the rate phase's writes, the only requests that
+carry it; it is never registered with the masker, which would rewrite every equal number in the
+output and the run log.
