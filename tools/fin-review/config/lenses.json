@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "note": "Required lenses per tier (spec 07 §2.6). always runs on every change of that tier; a conditional lens runs on the tiers it names when a changed path matches one of its globs. attack is the attack pass, on tier S only and never switched off ([RV-07]).",
+  "tiers": {
+    "S": { "always": ["correctness", "security", "quality", "performance", "rules", "joins", "test-truth"], "attack": true },
+    "N": { "always": ["correctness", "security", "quality", "performance", "rules", "joins"], "attack": false },
+    "D": { "always": ["correctness", "rules"], "attack": false }
+  },
+  "conditional": [
+    {
+      "lens": "test-truth",
+      "tiers": ["N"],
+      "note": "A test or behaviour changed: any code or test file.",
+      "paths": [
+        "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts", "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs", "**/*.sql",
+        "**/*.css"
+      ]
+    },
+    {
+      "lens": "infra",
+      "tiers": ["S", "N"],
+      "paths": [
+        "ops/**", ".github/**", "**/Dockerfile", "**/Dockerfile.*", "**/*.Dockerfile", "**/*.dockerfile",
+        "compose.yaml", "**/compose.yaml", ".dockerignore"
+      ]
+    },
+    {
+      "lens": "dependency",
+      "tiers": ["S", "N"],
+      "paths": [
+        "**/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".github/workflows/**", ".github/actions/**",
+        "**/Dockerfile", "**/Dockerfile.*", "**/*.Dockerfile", "**/*.dockerfile"
+      ]
+    }
+  ]
+}

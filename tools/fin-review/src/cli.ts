@@ -16,6 +16,10 @@ import type { OptionError, OptionKey, ReviewOptions } from "./options.ts";
 import { COMPUTED_EVENTS, EVENT_RE, computePlan, planOutputLine } from "./plan/plan.ts";
 import { ROLES, floorViolations, isTier, sessionModel } from "./roles.ts";
 import type { FloorViolation, Role, SessionModel, Tier } from "./roles.ts";
+import { runDoctor } from "./doctor.ts";
+import type { DoctorServices } from "./doctor.ts";
+import { runReviewCommand } from "./review/commands.ts";
+import type { ReviewServices } from "./review/commands.ts";
 
 export interface CliContext {
   readonly argv: readonly string[];
@@ -25,17 +29,19 @@ export interface CliContext {
   readonly configDir: string;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  /** The clock, randomness, sessions and GitHub reads of `pr`, `commit` and `doctor`; tests replace them. */
+  readonly services?: ReviewServices & DoctorServices;
 }
 
 /** Codes for refused run options; the R11 options use OptionErrorCode. */
-type RunErrorCode = "unknown_command" | "unknown_option" | "duplicate_option" | "wrong_type" | "missing_option" | "invalid_value";
+export type RunErrorCode = "unknown_command" | "unknown_option" | "duplicate_option" | "wrong_type" | "missing_option" | "invalid_value";
 
-interface Refusal {
+export interface Refusal {
   readonly code: string;
   readonly message: string;
 }
 
-interface FlagSpec {
+export interface FlagSpec {
   readonly flag: string;
   readonly key: string;
   readonly takesValue: boolean;
@@ -43,7 +49,7 @@ interface FlagSpec {
   readonly review: boolean;
 }
 
-const REVIEW_FLAGS: readonly FlagSpec[] = (Object.keys(OPTION_FLAGS) as OptionKey[]).map((key) => ({
+export const REVIEW_FLAGS: readonly FlagSpec[] = (Object.keys(OPTION_FLAGS) as OptionKey[]).map((key) => ({
   flag: OPTION_FLAGS[key],
   key,
   takesValue: key !== "fast",
@@ -73,11 +79,11 @@ interface ParsedArgs {
   readonly refusals: Refusal[];
 }
 
-function refusal(code: RunErrorCode, message: string): Refusal {
+export function refusal(code: RunErrorCode, message: string): Refusal {
   return { code, message };
 }
 
-function shown(value: string): string {
+export function shown(value: string): string {
   return `"${displayValue(value)}"`;
 }
 
@@ -132,12 +138,12 @@ export function parseArgs(tokens: readonly string[], specs: readonly FlagSpec[])
   return { review, reviewDuplicates, run, refusals };
 }
 
-function printRefusals(ctx: CliContext, refusals: readonly Refusal[]): number {
+export function printRefusals(ctx: CliContext, refusals: readonly Refusal[]): number {
   for (const item of refusals) ctx.stderr(`fin-review: refused: ${item.code}: ${item.message}\n`);
   return EXIT.usage;
 }
 
-function optionRefusals(errors: readonly OptionError[]): Refusal[] {
+export function optionRefusals(errors: readonly OptionError[]): Refusal[] {
   return errors.map((error) => ({ code: error.code, message: error.message }));
 }
 
@@ -148,7 +154,22 @@ Usage: node tools/fin-review/src/main.ts <command> [options]
 Commands:
   plan       The CI plan: changed files, tiers, path classes, job flags, affected packages
   options    Print the resolved review options and each role's model and effort, as JSON
+  pr         Review a pull request in locked local sessions (the gate)
+  commit     Review a pull request's delta since its last reviewed head; escalates to pr
+  doctor     Check the session lock-down (D1, D2, D4; D5 with --live)
   help       Print this text
+
+pr --pr <n> [--repo <dir>] [R11 options] [--advisory]:
+commit --pr <n> --since <sha> [--repo <dir>] [R11 options] [--advisory]:
+  --pr <n>                    The pull request; its head is fetched into $FIN_REVIEW_HOME
+  --since <sha>               commit: the last reviewed head (a local run of pr or commit at it)
+  --repo <dir>                The repository whose origin holds the pull request (default: .)
+  --advisory                  Run below the tier S effort floor; not a gate result
+  Prints counts only; findings go to $FIN_REVIEW_HOME/runs/<run-id>/ (default ~/.fin-review).
+  Exit 0 no blockers, 1 blockers, 2 could not check, 64 refused, 69 unavailable, 75 busy, 78 lock-down.
+
+doctor [--live]:
+  --live                      Also start one locked session per model (D5; costs a little)
 
 plan:
   --base <sha> --head <sha>   The merge-base diff base...head (40-character SHAs)
@@ -166,9 +187,17 @@ options (R11: only opus or fable, each effort high or above):
   --advisory                       With --tier, report a floor breach instead of refusing
 
 Fable overall with an Opus attack is refused; Opus overall with a Fable attack is allowed.
-Every option takes "--name value" or "--name=value". Exit codes: 0 pass, 64 refused,
-65 bad data, 70 internal error, 78 configuration.
+Every option takes "--name value" or "--name=value". Exit codes: 0 pass, 1 blocked, 2 could not
+check, 64 refused, 65 bad data, 69 unavailable, 70 internal error, 75 busy, 78 configuration.
 `;
+
+const DOCTOR_FLAGS: readonly FlagSpec[] = [{ flag: "--live", key: "live", takesValue: false, review: false }];
+
+function doctorCommand(ctx: CliContext, config: EngineConfig, tokens: readonly string[]): Promise<number> | number {
+  const args = parseArgs(tokens, DOCTOR_FLAGS);
+  if (args.refusals.length > 0) return printRefusals(ctx, args.refusals);
+  return runDoctor(ctx, config, args.run.get("live") === true, ctx.services);
+}
 
 /** Runs one command and returns its exit code. Never throws. */
 export async function runCli(ctx: CliContext): Promise<number> {
@@ -212,6 +241,11 @@ async function dispatch(ctx: CliContext): Promise<number> {
       return runPlan(ctx, config, rest);
     case "options":
       return runOptions(ctx, config, rest);
+    case "pr":
+    case "commit":
+      return runReviewCommand(ctx, config, command, rest, ctx.services);
+    case "doctor":
+      return doctorCommand(ctx, config, rest);
     case undefined:
       ctx.stderr(HELP);
       return printRefusals(ctx, [refusal("unknown_command", "No command given.")]);
@@ -223,7 +257,7 @@ async function dispatch(ctx: CliContext): Promise<number> {
 // ---- options ----------------------------------------------------------------------------------
 
 /** The machine's local defaults from $FIN_REVIEW_HOME/config.json, when that is set. */
-function machineDefaults(ctx: CliContext, config: EngineConfig): ReviewOptions {
+export function machineDefaults(ctx: CliContext, config: EngineConfig): ReviewOptions {
   const home = ctx.env["FIN_REVIEW_HOME"];
   if (home === undefined || home === "") return config.defaults;
   if (!isAbsolute(home) || home.includes("\0")) {

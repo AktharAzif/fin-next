@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fin-review doctor D5 session output (spec 07 §4.7)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer"],
+  "properties": {
+    "answer": { "type": "string", "minLength": 1, "maxLength": 40 }
+  }
+}

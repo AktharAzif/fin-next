@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "fin-review second-look output (spec 07 §2.9)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "quotes", "reason"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["BROKEN", "STANDS"] },
+    "quotes": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "text"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "text": { "type": "string", "minLength": 1, "maxLength": 300 }
+        }
+      }
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 600 }
+  }
+}

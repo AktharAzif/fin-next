@@ -84,9 +84,9 @@ export class FixtureRepo {
     return runGit(this.dir, ["rev-parse", ref]).trim();
   }
 
-  /** Runs any git command in the repository (for test setup only). */
-  git(args: string[]): string {
-    return runGit(this.dir, args);
+  /** Runs any git command in the repository (for test setup only), with `input` on stdin. */
+  git(args: string[], input?: Buffer): string {
+    return runGit(this.dir, args, input);
   }
 }
 

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "note": "Provisional [RV-13] defaults (spec 07 §4.1, §5.6, S7-27), in USD estimated from each session's total_cost_usd. maxTurns is recorded per session; the pinned CLI documents no turn flag, so the budget and the timeout bound a session (docs/review/README.md).",
+  "sessionUsd": {
+    "lens": 12, "joins": 12, "test-truth": 12, "sibling": 6,
+    "sceptic1": 6, "sceptic2": 6, "sceptic3": 6, "second-look": 6,
+    "attack": 20, "doctor": 0.5
+  },
+  "maxTurns": {
+    "lens": 60, "joins": 60, "test-truth": 60, "sibling": 40,
+    "sceptic1": 30, "sceptic2": 30, "sceptic3": 30, "second-look": 30,
+    "attack": 80, "doctor": 1
+  },
+  "timeoutMinutes": {
+    "lens": 30, "joins": 30, "test-truth": 30, "sibling": 15,
+    "sceptic1": 15, "sceptic2": 15, "sceptic3": 15, "second-look": 15,
+    "attack": 30, "doctor": 5
+  },
+  "runUsd": {
+    "commit": 40,
+    "pr": { "D": 15, "N": 60, "S": 120 }
+  }
+}

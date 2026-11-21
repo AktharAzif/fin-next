@@ -1,0 +1,5 @@
+{
+  "claudeCode": "2.1.328",
+  "minimum": "2.1.321",
+  "note": "The pinned Claude Code (spec 07 §4.1, S7-28): the version installed on the build machine on 21 Nov 2026. The doctor's D1 refuses any other version; a change here is a control-path pull request."
+}

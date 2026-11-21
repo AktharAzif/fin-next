@@ -18,7 +18,17 @@ describe("loading the committed configuration", () => {
   });
 
   it("names every file the loader reads", () => {
-    assert.deepEqual([...CONFIG_FILES].sort(), ["ci-map.json", "ci.json", "defaults.json", "env-refusals.json", "floor.json", "models.json"]);
+    assert.deepEqual([...CONFIG_FILES].sort(), [
+      "budgets.json",
+      "ci-map.json",
+      "ci.json",
+      "client.json",
+      "defaults.json",
+      "env-refusals.json",
+      "floor.json",
+      "lenses.json",
+      "models.json",
+    ]);
   });
 });
 

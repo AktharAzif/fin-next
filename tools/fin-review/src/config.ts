@@ -11,6 +11,12 @@ import { parseCiConfig, parseCiMap } from "./plan/ci-map.ts";
 import type { CiConfig, CiMap } from "./plan/ci-map.ts";
 import { parseFloorConfig } from "./roles.ts";
 import type { FloorConfig } from "./roles.ts";
+import { parseBudgets } from "./budget.ts";
+import type { BudgetsConfig } from "./budget.ts";
+import { parseLensesConfig } from "./review/lenses.ts";
+import type { LensesConfig } from "./review/lenses.ts";
+import { parseClientConfig } from "./runner/client.ts";
+import type { ClientConfig } from "./runner/client.ts";
 
 export interface EngineConfig {
   readonly models: ModelsConfig;
@@ -19,6 +25,9 @@ export interface EngineConfig {
   readonly envRefusals: EnvRefusals;
   readonly ciMap: CiMap;
   readonly ci: CiConfig;
+  readonly client: ClientConfig;
+  readonly budgets: BudgetsConfig;
+  readonly lenses: LensesConfig;
 }
 
 export interface ConfigProblem {
@@ -26,7 +35,17 @@ export interface ConfigProblem {
   readonly message: string;
 }
 
-export const CONFIG_FILES = ["models.json", "defaults.json", "floor.json", "env-refusals.json", "ci-map.json", "ci.json"] as const;
+export const CONFIG_FILES = [
+  "models.json",
+  "defaults.json",
+  "floor.json",
+  "env-refusals.json",
+  "ci-map.json",
+  "ci.json",
+  "client.json",
+  "budgets.json",
+  "lenses.json",
+] as const;
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 
@@ -53,8 +72,22 @@ export function loadEngineConfig(configDir: string): { ok: true; value: EngineCo
   const envRefusals = read("env-refusals.json", parseEnvRefusals);
   const ciMap = read("ci-map.json", parseCiMap);
   const ci = read("ci.json", parseCiConfig);
-  if (problems.length > 0 || models === null || defaults === null || floor === null || envRefusals === null || ciMap === null || ci === null) {
+  const client = read("client.json", parseClientConfig);
+  const budgets = read("budgets.json", parseBudgets);
+  const lenses = read("lenses.json", parseLensesConfig);
+  if (
+    problems.length > 0 ||
+    models === null ||
+    defaults === null ||
+    floor === null ||
+    envRefusals === null ||
+    ciMap === null ||
+    ci === null ||
+    client === null ||
+    budgets === null ||
+    lenses === null
+  ) {
     return { ok: false, problems };
   }
-  return { ok: true, value: Object.freeze({ models, defaults, floor, envRefusals, ciMap, ci }) };
+  return { ok: true, value: Object.freeze({ models, defaults, floor, envRefusals, ciMap, ci, client, budgets, lenses }) };
 }
