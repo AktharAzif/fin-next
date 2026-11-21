@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { after, before, describe, it } from "node:test";
@@ -348,6 +348,29 @@ describe("runProgram", () => {
       assert.equal(resolveProgram("planted", { PATH: `.:${bin}` }, tree), join(bin, "planted"));
       const run = await runProgram("planted", [], { ...base, cwd: tree, env: { PATH: `.:${bin}` } });
       assert.equal(run.stdout.toString("utf8"), "planted\n");
+    });
+
+    it("never runs a program from the working directory spelled in another case, or reached through a link", { skip: !POSIX }, async () => {
+      const tree = join(tmp.dir, "Cased");
+      mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true });
+      const planted = join(tree, "node_modules", ".bin", "planted");
+      writeFileSync(planted, "#!/bin/sh\necho planted\n");
+      chmodSync(planted, 0o755);
+      const linked = join(tmp.dir, "into-tree");
+      symlinkSync(join(tree, "node_modules"), linked);
+      const pairs: Array<[string, string]> = [[tree, join(linked, ".bin")]];
+      // On a disk that ignores case (the build machine's), the other spellings are the same folder.
+      for (const spelled of [join(tmp.dir, "cased"), join(tmp.dir, "CASED")]) {
+        if (!existsSync(spelled)) continue;
+        pairs.push([tree, join(spelled, "node_modules", ".bin")], [spelled, join(tree, "node_modules", ".bin")], [spelled, join(spelled, "node_modules", ".bin")]);
+      }
+      for (const [cwd, dir] of pairs) {
+        const env = { PATH: `${dir}:/usr/bin:/bin` };
+        assert.equal(resolveProgram("planted", env, cwd), null, `${cwd} with ${dir}`);
+        await assert.rejects(runProgram("planted", [], { ...base, cwd, env }), ProgramError, `${cwd} with ${dir}`);
+      }
+      const bin = join(tmp.dir, "bin");
+      assert.equal(resolveProgram("planted", { PATH: `${join(linked, ".bin")}:${bin}` }, tree), join(bin, "planted"), "the next folder outside the tree is used");
     });
 
     it("looks git up on PATH like any other program", async () => {

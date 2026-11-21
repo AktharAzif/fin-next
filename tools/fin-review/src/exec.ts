@@ -4,7 +4,10 @@
 // A program named without a path is looked up in the PATH of the environment it is given, in
 // absolute directories only and never in or below the working directory, so a file planted in a
 // reviewed tree cannot stand in for git (Windows would otherwise search the working directory
-// before PATH). On POSIX systems each child leads its own process group: a timeout or the output
+// before PATH). "In or below" is decided on the disk, not by spelling: by canonical paths (links
+// resolved and, where the disk ignores case, its own spelling), and by device and inode up the
+// directory's folders, so neither another case nor another path to the tree hides it. On POSIX
+// systems each child leads its own process group: a timeout or the output
 // cap kills the whole group, so a grandchild that inherited the output pipes (git's lazy fetch,
 // say) can neither keep the call waiting nor outlive it, and the call settles once the child has
 // exited. If the engine itself is interrupted while children run, their groups go with it.
@@ -12,7 +15,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ProgramError } from "./errors.ts";
 
 export interface RunOptions {
@@ -94,11 +97,54 @@ function untrackGroup(pid: number): void {
   if (runningGroups.size === 0) removeHandlers();
 }
 
-function realOrResolved(path: string): string {
+/**
+ * `path` with every link resolved and, on a disk that ignores case, in the disk's own spelling
+ * (the native realpath reports it; Node's own does not); resolved by name when it does not exist.
+ */
+function canonicalPath(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
-    return resolve(path);
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+interface FileIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+/** The device and inode of `path`, or null when it cannot be read or has no usable inode. */
+function identityOf(path: string): FileIdentity | null {
+  try {
+    const stats = statSync(path, { bigint: true });
+    return stats.ino === 0n ? null : { dev: stats.dev, ino: stats.ino };
+  } catch {
+    return null;
+  }
+}
+
+/** The working directory a program must not come from: its canonical path and its identity on the disk. */
+interface Tree {
+  readonly root: string;
+  readonly identity: FileIdentity | null;
+}
+
+/** True when `dir` is the tree or a folder below it. */
+function insideTree(dir: string, tree: Tree): boolean {
+  const real = canonicalPath(dir);
+  const below = tree.root.endsWith(sep) ? tree.root : `${tree.root}${sep}`;
+  if (real === tree.root || real.startsWith(below)) return true;
+  if (tree.identity === null) return false;
+  // `real` has no link left in it, so its folders are the directory's own ancestors.
+  for (let current = real; ; current = dirname(current)) {
+    const identity = identityOf(current);
+    if (identity !== null && identity.dev === tree.identity.dev && identity.ino === tree.identity.ino) return true;
+    if (dirname(current) === current) return false;
   }
 }
 
@@ -121,22 +167,22 @@ function pathVariable(env: Readonly<Record<string, string>>): string {
 /**
  * The absolute file `program` runs from, or null when there is none. An absolute program is used
  * as given; a bare name is looked up in the PATH of `env`, skipping every entry that is not an
- * absolute directory and every directory at or below `cwd`; a relative path is refused, because
- * it would resolve against `cwd`.
+ * absolute directory and every directory that is `cwd` or lies below it, however either is
+ * spelled; a relative path is refused, because it would resolve against `cwd`.
  */
 export function resolveProgram(program: string, env: Readonly<Record<string, string>>, cwd: string): string | null {
   if (isAbsolute(program)) return isExecutableFile(program) ? program : null;
   if (program.includes("/") || program.includes("\\")) return null;
-  const root = realOrResolved(cwd);
-  const below = root.endsWith(sep) ? root : `${root}${sep}`;
+  const root = canonicalPath(cwd);
+  const tree: Tree = { root, identity: identityOf(root) };
   const names = WINDOWS && !/\.(?:exe|com)$/i.test(program) ? [`${program}.exe`, `${program}.com`] : [program];
   for (const dir of pathVariable(env).split(delimiter)) {
     if (dir === "" || !isAbsolute(dir)) continue;
-    const real = realOrResolved(dir);
-    if (real === root || real.startsWith(below)) continue;
     for (const name of names) {
       const candidate = join(dir, name);
-      if (isExecutableFile(candidate)) return candidate;
+      if (!isExecutableFile(candidate)) continue;
+      if (insideTree(dir, tree)) break;
+      return candidate;
     }
   }
   return null;

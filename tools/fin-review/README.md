@@ -89,11 +89,13 @@ or `packages/` that is no package, or a package graph that cannot be read (`work
 
 ## Tests
 
-`node --test "test/**/*.test.ts"` (or `pnpm test` here) runs the whole suite in under ten seconds.
-It needs `git` on `PATH`; the fixtures are built with `git fast-import` in temporary directories.
+`node --test "test/**/*.test.ts"` (or `pnpm test` here) runs the whole suite in about ten seconds
+(T-RV-45 allows 30). It needs `git` on `PATH`; the fixtures are built with `git fast-import` in
+temporary directories.
 
 Programs start through `src/exec.ts` only: found on `PATH` in absolute directories outside the
-working directory, never by a shell, with a timeout and an output cap. On POSIX systems each runs in
-its own process group, which a timeout or the cap kills whole, so the call settles on time whatever
-the program's own children do. In a blobless checkout (CI's), the blobs `plan` lacks are fetched in
-one request.
+working directory (decided on the disk, by canonical path and by device and inode, so another case
+or another path to the tree does not hide it), never by a shell, with a timeout and an output cap.
+On POSIX systems each runs in its own process group, which a timeout or the cap kills whole, so the
+call settles on time whatever the program's own children do. In a blobless checkout (CI's), the
+blobs `plan` lacks are fetched in one request.
