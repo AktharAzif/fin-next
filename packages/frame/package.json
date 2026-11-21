@@ -1,0 +1,35 @@
+{
+  "name": "@fin/frame",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The web apps' frames, router glue, navigation trees, route states, theme bootstrap, env.json loader and api() client (spec 06 §2, §4, §5)",
+  "sideEffects": [
+    "*.css"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./boot/*": "./boot/*"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fin/app-contracts": "workspace:*",
+    "@fin/ui": "workspace:*",
+    "@tanstack/react-router": "catalog:",
+    "zod": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}

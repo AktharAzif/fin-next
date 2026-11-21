@@ -1,0 +1,32 @@
+{
+  "name": "@fin/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fin's controls and surfaces on the UI SDK (spec 06 §3)",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "exports": {
+    "./shell": "./src/shell/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ui-sdk/core": "catalog:",
+    "@ui-sdk/react": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}
