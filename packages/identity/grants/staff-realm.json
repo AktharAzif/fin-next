@@ -1,0 +1,97 @@
+{
+  "$comment": "The staff realm's sign-in tables (spec 02 §13.7, fin_admin's row, for the tables this lane creates). L-SAT-04's staff.json adds the staff roles, the change lock and its views.",
+  "area": "staff-realm",
+  "grants": [
+    {
+      "role": "fin_admin",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "tables": [
+        "staff.member",
+        "staff.session",
+        "staff.account",
+        "staff.verification",
+        "staff.passkey",
+        "staff.two_factor",
+        "staff.assurance",
+        "staff.totp_step",
+        "staff.enrolment_code"
+      ]
+    },
+    {
+      "role": "fin_api",
+      "privileges": ["SELECT"],
+      "tables": ["staff.session_view", "staff.proof_view", "staff.member_view"]
+    },
+    {
+      "role": "fin_worker",
+      "privileges": ["EXECUTE"],
+      "functions": ["staff.sweep()"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "tables": ["staff.member", "staff.assurance", "staff.totp_step"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "staff.session",
+      "columns": [
+        "id",
+        "user_id",
+        "expires_at",
+        "ip_address",
+        "user_agent",
+        "assurance",
+        "absolute_expires_at",
+        "created_via",
+        "access_sub",
+        "enrolment_open_until",
+        "step_up_failures",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "staff.passkey",
+      "columns": [
+        "id",
+        "name",
+        "public_key",
+        "user_id",
+        "credential_id",
+        "counter",
+        "device_type",
+        "backed_up",
+        "transports",
+        "aaguid",
+        "created_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "staff.two_factor",
+      "columns": ["id", "user_id", "verified", "failed_verification_count", "locked_until"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "staff.enrolment_code",
+      "columns": [
+        "id",
+        "member_id",
+        "reason",
+        "issued_by",
+        "issued_at",
+        "expires_at",
+        "redeemed_at",
+        "redeemed_session_id",
+        "voided_at",
+        "failed_tries"
+      ]
+    }
+  ]
+}
