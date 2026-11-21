@@ -9,11 +9,19 @@
 // edit from `git status`. So besides a clean `git status` and the trees at HEAD equal to the default
 // branch's, the check walks the files on the disk, hashes each as a git blob (with no git, filter or
 // configuration involved) and compares them with the entries of HEAD; refuses any index entry git
-// would not compare with the disk; and compares the bytes the engine actually loaded (its config and
-// its procedure, EngineConfig.sources and Procedure.sources) with HEAD's, so a file changed and
-// changed back between load and check is found too. The rules files the rules lens reads are taken
-// from the same verified bytes. The engine's own modules are verified on the disk only: what Node
-// loaded at start cannot be hashed from inside it.
+// would not compare with the disk; and compares the bytes the engine actually loaded with HEAD's:
+// its config and its procedure (EngineConfig.sources and Procedure.sources), and every module of its
+// code as Node loaded it (recorded by the bootstrap, src/main.ts, with a synchronous load hook
+// registered before any other engine module loads, and main.ts hashing itself first). So a file
+// changed and changed back between load and check is found too, code included, and a module loaded
+// from outside the engine's paths, or an engine not started through main.ts, is refused. The rules
+// files the rules lens reads are taken from the same verified bytes.
+//
+// What no check inside the engine can catch is an engine that is itself changed where it starts (a
+// main.ts that skips the hook, or one changed and put back within the moment before it hashes
+// itself): such an engine runs other code, which can say anything. The check guards an unchanged
+// engine against a changed checkout, and a local user who can run other code is the trimmed phase's
+// trust (docs/review/README.md).
 //
 // Every run records the engine's commit and the procedure hash of §4.8: the SHA-256 of the sorted
 // `<path> <blob id>` lines of every file under docs/review/ and tools/fin-review/config/, computed
@@ -22,7 +30,8 @@
 
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, posix, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { escapeText } from "../display.ts";
 import { canonicalPath } from "../exec.ts";
 import { gitBlobId } from "../git.ts";
@@ -59,6 +68,49 @@ export interface EngineCopyInput {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The blob ID of the bytes the engine loaded, by repository path (EngineConfig.sources, Procedure.sources). */
   readonly loaded?: ReadonlyMap<string, string>;
+  /**
+   * Every module Node loaded, by file: URL, with the blob ID of the source it loaded, as the
+   * bootstrap recorded it (CliContext.loadedModules); absent when the engine was not started
+   * through src/main.ts, which is refused.
+   */
+  readonly modules?: ReadonlyMap<string, string>;
+}
+
+/** The engine's entry file, which the bootstrap always records. */
+export const ENTRY_MODULE = "tools/fin-review/src/main.ts";
+
+/**
+ * The modules Node loaded, by repository path, and why some cannot be checked: a module outside the
+ * engine's checkout or its paths, or no record from the bootstrap at all.
+ */
+export function loadedModulePaths(engineRoot: string, modules: ReadonlyMap<string, string> | undefined): { byPath: Map<string, string>; problems: string[] } {
+  const byPath = new Map<string, string>();
+  if (modules === undefined || modules.size === 0) {
+    return { byPath, problems: [`the engine was not started through ${ENTRY_MODULE}, so the code Node loaded was not recorded`] };
+  }
+  const root = canonicalPath(engineRoot);
+  const outside: string[] = [];
+  for (const [url, oid] of modules) {
+    let file: string;
+    try {
+      file = fileURLToPath(url);
+    } catch {
+      outside.push("(a module that is not a file)");
+      continue;
+    }
+    const rel = relative(root, file);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+      outside.push(`${posix.basename(file.split(sep).join("/"))} (outside the engine's checkout)`);
+      continue;
+    }
+    const path = rel.split(sep).join("/");
+    if (!ENGINE_PATHS.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) outside.push(path);
+    else byPath.set(path, oid);
+  }
+  const problems: string[] = [];
+  if (outside.length > 0) problems.push(`the engine loaded modules from outside its paths: ${listed(outside.sort())}`);
+  if (!byPath.has(ENTRY_MODULE)) problems.push(`the engine's record of the code Node loaded does not hold ${ENTRY_MODULE}`);
+  return { byPath, problems };
 }
 
 /** The procedure hash of `[path, blob id]` lines (spec 07 §4.8). */
@@ -149,9 +201,12 @@ export async function checkEngineCopy(engineRoot: string, input: EngineCopyInput
   const differ = differences(disk.entries, tree);
   if (differ.length > 0) problems.push(`the engine's files on the disk differ from its commit: ${listed(differ)}`);
 
-  // The bytes the engine loaded against the commit's.
+  // The bytes the engine loaded against the commit's: config, procedure, and the code as Node loaded it.
   const blobs = new Map(tree.filter((entry) => entry.type === "blob").map((entry) => [entry.path, entry.oid]));
-  const stale = [...(input.loaded ?? new Map<string, string>())].filter(([path, oid]) => blobs.get(path) !== oid).map(([path]) => path).sort();
+  const modules = loadedModulePaths(engineRoot, input.modules);
+  problems.push(...modules.problems);
+  const loaded = [...(input.loaded ?? new Map<string, string>()), ...modules.byPath];
+  const stale = [...new Set(loaded.filter(([path, oid]) => blobs.get(path) !== oid).map(([path]) => path))].sort();
   if (stale.length > 0) problems.push(`the engine loaded files whose bytes differ from its commit: ${listed(stale)}`);
 
   const procedureFiles: Array<[string, string]> = [];

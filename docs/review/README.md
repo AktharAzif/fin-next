@@ -46,11 +46,17 @@ the default branch holds; `--advisory` runs anyway and is recorded as advisory. 
 what the engine runs, not git's view of it: every file under those paths is hashed on the disk as a
 git blob (no git, filter or configuration involved) and compared with the commit; an index entry
 git would not compare with the disk (assume-unchanged, skip-worktree) is refused; `git status` runs
-with its stat checks at full strength; and the bytes the engine loaded from `config/` and
-`docs/review/` are compared with the commit's, so a file changed and put back between load and
-check is caught too. The rules lens gets `AGENTS.md` and `CONTRIBUTING.md` from those verified
-bytes. (The engine's own modules are checked on the disk only: what Node loaded cannot be hashed
-from inside it.) Until fin-review is on the default branch, every run is advisory. Every record
+with its stat checks at full strength; and the bytes the engine loaded are compared with the
+commit's: those of `config/` and `docs/review/`, and every module of its code as Node loaded it.
+`src/main.ts` is a bootstrap that imports only `node:*` built-ins, hashes its own file, and
+registers a synchronous load hook (`module.registerHooks`) before it loads any other engine
+module; the hook records the git blob ID of each module's source as Node reads it. So a file
+changed and put back between load and check is caught, code included; a module loaded from outside
+the engine's paths, or an engine not started through `src/main.ts`, is refused. The rules lens gets
+`AGENTS.md` and `CONTRIBUTING.md` from those verified bytes. No check inside the engine can catch an
+engine changed where it starts (a `main.ts` that skips the hook, or one changed and put back within
+the moment before it hashes itself): that is other code running, and a local user who can run
+other code is the trust this phase has (below). Until fin-review is on the default branch, every run is advisory. Every record
 holds `engine`: the engine's commit, the procedure hash of §4.8 (the SHA-256 of the sorted
 `<path> <blob id>` lines of every file under `docs/review/` and `tools/fin-review/config/`, from
 the bytes on the disk) and whether it was the default branch's engine copy.

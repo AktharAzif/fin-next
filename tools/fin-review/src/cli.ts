@@ -43,6 +43,11 @@ export interface CliContext {
   readonly stderr: (text: string) => void;
   /** The clock, randomness, sessions and GitHub reads of `pr`, `commit` and `doctor`; tests replace them. */
   readonly services?: ReviewServices & DoctorServices;
+  /**
+   * Every engine module Node loaded, by file: URL, with the blob ID of the source it loaded, as the
+   * bootstrap (src/main.ts) recorded it; absent when the engine was not started through it.
+   */
+  readonly loadedModules?: ReadonlyMap<string, string>;
 }
 
 /** Codes for refused run options; the R11 options use OptionErrorCode. */

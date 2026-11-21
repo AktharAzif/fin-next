@@ -232,7 +232,12 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
       engineRoot,
       engineCopy:
         services?.engineCopy ??
-        ((input: EngineCopyInput) => checkEngineCopy(engineRoot, { ...input, loaded: new Map([...(config.sources ?? new Map<string, string>()), ...procedure.sources]) })),
+        ((input: EngineCopyInput) =>
+          checkEngineCopy(engineRoot, {
+            ...input,
+            loaded: new Map([...(config.sources ?? new Map<string, string>()), ...procedure.sources]),
+            ...(ctx.loadedModules === undefined ? {} : { modules: ctx.loadedModules }),
+          })),
       clock,
       random,
       stdout: ctx.stdout,
