@@ -6,7 +6,8 @@
 // page is thought to meet: what a library prints is not known in advance, and a missing row is a
 // value that reaches the console.
 //
-// Where the patterns differ from spec 08 §5.4's table (as @fin/core records them, but for EMAIL):
+// Where the patterns differ from spec 08 §5.4's table (as @fin/core records them, but for EMAIL and
+// QUERY_STRING):
 //   - IPV6 takes each whole run of hex digits and colons that holds a colon and removes it when it
 //     is address-shaped: it holds `::` or eight groups or more, whatever stands beside it. A time
 //     ("09:48:23") or a MAC address is kept, while "ip:<address>", "<address>:443", an address
@@ -18,8 +19,13 @@
 //     in it from each `@` and its domain, the local part reaching back to the start of the run or
 //     to the end of the address before it. It removes what the table's row removes, the second of
 //     two addresses joined by `%2C`, `+`, `-` or `_` among them, in linear time (the row as written
-//     is quadratic on a long run with no `@`). @fin/core's row still starts only where a run
-//     starts, which misses that second address, and needs the same change;
+//     is quadratic on a long run with no `@`). A local part also holds an apostrophe after its
+//     first character ("o'brien"), where the table's row stops and leaves what came before it (a
+//     first name, an initial). @fin/core's row still starts only where a run starts, which misses
+//     that second address, stops at an apostrophe, and needs the same change;
+//   - QUERY_STRING is not stopped by `'`, which encodeURIComponent leaves in a value
+//     ("?e=o'brien%40example.com&token=…" would print all after it). @fin/core's row needs the
+//     same change;
 //   - TOKEN_JSON also takes `+`, `/` and `=`, so a tunnel token (standard base64) goes whole;
 //   - LONG_SEGMENT removes a path segment of 24 or more base64url characters when it holds a digit
 //     or both cases, so a route template ("/passkey/generate-authenticate-options") survives;
@@ -160,8 +166,8 @@ const INGRESS_PROOF: Shape = {
   token: "Fin-Ingress-Proof: [secret]",
 };
 
-/** A character of an address's local part, as the table's row writes it. */
-const LOCAL_PART = /[A-Za-z0-9._%+-]/u;
+/** A character of an address's local part: the table's row's, and an apostrophe (O'Brien's). */
+const LOCAL_PART = /[A-Za-z0-9._%+'-]/u;
 
 /** An `@` and its domain, as the table's row writes them. */
 const AT_DOMAIN = /@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
@@ -170,8 +176,10 @@ const AT_DOMAIN = /@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
  * The addresses in one run of address characters, each made `[email]`. From each `@` and its
  * domain, the local part reaches back over local-part characters to the start of the run or to
  * the end of the address before it: where the table's row, read left to right, starts its match.
- * An `@` with nothing before it is kept, as the row keeps it. Each step back crosses a character
- * no other step crosses, so the run is read a bounded number of times.
+ * The apostrophes it starts with are a quote's, not the address's, and are kept, so a quoted
+ * address keeps its quotes; an `@` with nothing else before it is kept, as the row keeps it. Each
+ * step back crosses a character no other step crosses, and each step forward one that step back
+ * crossed, so the run is read a bounded number of times.
  */
 function emailToken(run: string): string {
   let out = "";
@@ -179,6 +187,7 @@ function emailToken(run: string): string {
   for (const at of run.matchAll(AT_DOMAIN)) {
     let start = at.index;
     while (start > copied && LOCAL_PART.test(run.charAt(start - 1))) start -= 1;
+    while (start < at.index && run.charAt(start) === "'") start += 1;
     if (start === at.index) continue;
     out += `${run.slice(copied, start)}[email]`;
     copied = at.index + at[0].length;
@@ -191,7 +200,7 @@ const EMAIL: Shape = {
   // The whole run of address characters and `@`s that holds an `@`: the lookbehind starts it at
   // the run's first character and the greedy parts end it at its last, so it is read once;
   // emailToken finds the addresses in it.
-  pattern: /(?<![A-Za-z0-9._%+@-])[A-Za-z0-9._%+-]*@[A-Za-z0-9._%+@-]*/gu,
+  pattern: /(?<![A-Za-z0-9._%+'@-])[A-Za-z0-9._%+'-]*@[A-Za-z0-9._%+'@-]*/gu,
   token: (run) => emailToken(run),
 };
 
@@ -265,7 +274,9 @@ const IPV6: Shape = {
 
 const QUERY_STRING: Shape = {
   name: "query-string",
-  pattern: /\?[^\s"'#]*/gu,
+  // Not stopped by `'`, which encodeURIComponent leaves in a value: a closing quote right after a
+  // query goes with it.
+  pattern: /\?[^\s"#]*/gu,
   token: "?[query]",
 };
 
@@ -332,10 +343,16 @@ export const SHAPES: readonly Shape[] = Object.freeze([
  * its key (`#c=12345678`). It runs after SHAPES, and takes the tokens they leave (`[email]`) with
  * the rest, so a fragment is removed whole whatever the rows before it found in it. A short
  * fragment with no `=` (`#root`, `#42`, a colour) is kept.
+ *
+ * The fragment runs to whitespace, `"`, `<`, `>` or a backtick: what the URL Standard's fragment
+ * percent-encode set never leaves raw in an href. Every other character can stand in one, raw:
+ * RFC 3986's `'`, `(` and `)` (which encodeURIComponent never escapes either), `{`, `}`, `|`, `^`,
+ * `\`, a second `#`, and in a decoded fragment or one built by hand any letter. A closing quote
+ * or bracket right after a fragment goes with it.
  */
 const FRAGMENT: Shape = {
   name: "fragment",
-  pattern: /#[A-Za-z0-9._~%+/=&:@?!$,;*[\]-]*/gu,
+  pattern: /#[^\s"<>`]*/gu,
   token: (match) => (match.length > 16 || match.includes("=") ? "#[fragment]" : match),
 };
 

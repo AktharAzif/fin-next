@@ -1,7 +1,8 @@
 // The browser's scrub shapes (spec 08 §5.4, every row; spec 06 §2.3 step 1), then its own rows: one
 // case per row, the strings no row may touch, and the runs that would make a pattern slow. The
 // cases are @fin/core's (P0-D) for the same rows, so this table keeps passing once the guard imports
-// `@fin/core/scrub` instead of its copy (with the email row's change that @fin/core still needs).
+// `@fin/core/scrub` instead of its copy (with the email and query rows' changes that @fin/core
+// still needs).
 // Every secret-shaped value is built at run time, so the public-safety check never sees one in the
 // file.
 import { describe, expect, it } from "vitest";
@@ -447,6 +448,110 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
     }
   });
 
+  it("remove a fragment whole, whatever characters a fragment may hold", () => {
+    const rand = prng(6);
+    const token = pick(rand, B64URL, 43);
+    const apostrophe = ["o'brien", "example.com"].join("@");
+    const parenthesis = ["maya(work)", "example.com"].join("@");
+    const accented = ["josé", "example.com"].join("@");
+    for (const [text, expected] of [
+      // RFC 3986's sub-delims `'`, `(` and `)`, which encodeURIComponent never escapes.
+      [`/sign-in/code#e=${encodeURIComponent(apostrophe)}&c=12345678`, "/sign-in/code#[fragment]"],
+      [`/sign-in/code#e=${apostrophe}&c=12345678`, "/sign-in/code#[fragment]"],
+      [`/sign-in/code#e=${encodeURIComponent(parenthesis)}&c=12345678`, "/sign-in/code#[fragment]"],
+      [`/sign-in/code#e=${parenthesis}&c=12345678`, "/sign-in/code#[fragment]"],
+      ["#t=(token)", "#[fragment]"],
+      // What the URL Standard leaves raw in a fragment besides them, a second `#` among them.
+      [`/invite#t={${token}}|^\\`, "/invite#[fragment]"],
+      [`/invite#t=a#${token}`, "/invite#[fragment]"],
+      // A decoded fragment, or one built by hand, can hold any letter.
+      [`/sign-in/code#e=${accented}&c=12345678`, "/sign-in/code#[fragment]"],
+      // A closing quote or bracket right after a fragment goes with it; whitespace, `"`, `<`, `>`
+      // and a backtick end it, as the URL Standard never leaves them raw in one.
+      [`see ('/invite#t=${token}') now`, "see ('/invite#[fragment] now"],
+      [`<a href="/invite#t=${token}">`, `<a href="/invite#[fragment]">`],
+      [`\`/invite#t=${token}\``, "`/invite#[fragment]`"],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+    }
+  });
+
+  it("remove a fragment whole whichever character it holds, as a page's URL prints it", () => {
+    // Every printable ASCII character and a space, a letter beyond ASCII and an emoji, each in a
+    // sign-in link's address: as the URL parser leaves it in an href, and as encodeURIComponent
+    // leaves it in a link built by hand.
+    const characters = [
+      ...Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)),
+      "é",
+      "\u{1f600}",
+    ];
+    for (const character of characters) {
+      const address = [`a${character}b`, "example.com"].join("@");
+      const parsed = new URL(`https://console.example.com/sign-in/code#e=${address}&c=12345678`);
+      expect(scrubText(parsed.href), parsed.href).toBe(
+        "https://console.example.com/sign-in/code#[fragment]",
+      );
+      const built = `/sign-in/code#e=${encodeURIComponent(address)}&c=12345678`;
+      expect(scrubText(built), built).toBe("/sign-in/code#[fragment]");
+    }
+  });
+
+  it("remove a query string whole, whatever characters encodeURIComponent leaves in it", () => {
+    const rand = prng(7);
+    const token = pick(rand, B64URL, 43);
+    const apostrophe = ["o'brien", "example.com"].join("@");
+    for (const [text, expected] of [
+      [`/verify?email=${encodeURIComponent(apostrophe)}&token=${token}`, "/verify?[query]"],
+      [`/sign-in?e=${encodeURIComponent(apostrophe)}&c=12345678 sent`, "/sign-in?[query] sent"],
+      [`/invite?from=o'brien#t=${token}`, "/invite?[query]#[fragment]"],
+      // A closing single quote goes with the query; a double quote or `#` ends it.
+      [`fetch('/x?e=1') failed`, "fetch('/x?[query] failed"],
+      [`"/x?e=1"`, `"/x?[query]"`],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+    }
+    for (const code of [...Array.from({ length: 0x7f - 0x21 }, (_, i) => 0x21 + i), 0xe9]) {
+      const value = encodeURIComponent(`a${String.fromCharCode(code)}b`);
+      const text = `/verify?e=${value}&token=${token}`;
+      expect(scrubText(text), text).toBe("/verify?[query]");
+    }
+  });
+
+  it("remove an address with an apostrophe in its local part whole, quotes around it kept", () => {
+    const address = (local: string, domain = "example.com"): string => [local, domain].join("@");
+    for (const [text, expected] of [
+      [address("o'brien"), "[email]"],
+      [address("mary.o'brien"), "[email]"],
+      [`${address("O'Brien")}, ${address("d'arcy", "example.org")}`, "[email], [email]"],
+      [`${address("ann")}'${address("o'neil")}`, "[email]'[email]"],
+      [`'${address("alice")}'`, "'[email]'"],
+      [`name='${address("o'brien")}'`, "name='[email]'"],
+      [`''${address("x'y")}`, "''[email]"],
+      [address("o'"), "[email]"],
+      // An `@` with only quotes before it has no local part, as the table's row reads it.
+      [address("'"), address("'")],
+      [`it's ${address("bob")}`, "it's [email]"],
+    ] as const) {
+      expect(scrubText(text), text).toBe(expected);
+    }
+  });
+
+  it("remove what the table's email row removes and an apostrophe inside a local part (property test)", () => {
+    // The table's row, its local part also holding an apostrophe after its first character: the
+    // part before an apostrophe (a first name, an initial) is the address's too.
+    const row = /[A-Za-z0-9._%+-][A-Za-z0-9._%+'-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
+    const pieces = ["a", "bo", ".", "+", "-", "@", "'", "''", "ab.co", "@ab.co", "'@ab.co", " "];
+    const rand = prng(8);
+    for (let i = 0; i < 3000; i++) {
+      const length = 1 + Math.floor(rand() * 16);
+      const text = Array.from(
+        { length },
+        () => pieces[Math.floor(rand() * pieces.length)] ?? "",
+      ).join("");
+      expect(scrubText(text), text).toBe(text.replace(row, "[email]"));
+    }
+  });
+
   it("remove a private key cut short, which has no END line", () => {
     const begin = join(dashes, "BEGIN ", "PRIVATE KEY", dashes);
     const end = join(dashes, "END ", "PRIVATE KEY", dashes);
@@ -605,6 +710,10 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       "email, a long local part": () => `${fill("a%")}@`,
       "email, addresses run together": () => fill(`${address}%2C`),
       "email, domains with no top level": () => fill("a@b.c"),
+      "email, apostrophes and no @": () => fill("a'"),
+      "email, quotes before each @": () => fill("'@a.co"),
+      "email, apostrophes between addresses": () => fill(`a'${address}'`),
+      "email, quotes and no local part": () => fill("''@"),
       "IPv4, dots and no end": () => fill("1.1.1."),
       "IPv4, escapes and dots": () => fill("%201.1."),
       "IPv6, hex and colons and no end": () => fill("a:", "g"),
@@ -620,6 +729,7 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       "IPv6, a hex digit between colons": () => `${fill(":")}a${fill(":")}`,
       "IPv6, colons and no hex": () => fill(":"),
       "query string": () => fill("?"),
+      "query string, apostrophes": () => fill("?'"),
       "ID-bearing path": () => fill("/c/"),
       "long segment": () => `/${fill("A1")}`,
       slashes: () => fill("/"),
@@ -628,6 +738,8 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
       "fragment, # after #": () => fill("#"),
       "fragment, short ones": () => fill("#a"),
       "fragment, one long one": () => `#${fill("a=")}`,
+      "fragment, quotes and parentheses": () => fill("#'()"),
+      "fragment, ended by spaces": () => fill("#a=b "),
     };
     for (const [name, run] of Object.entries(runs)) {
       it(name, () => {
