@@ -7,7 +7,9 @@
 // import) still cannot ship it. It fails the build when any module of the bundle's graph lies
 // under packages/testing/, compared by real path (symbolic links, such as pnpm's workspace links,
 // resolved, and on a case-insensitive file system the name's case as stored), and names each such
-// module by its repository path. serverBundleConfig adds it to every release build.
+// module by its repository path. serverBundleConfig adds it to every release build, to the main
+// bundle's plugins and to each worker's (a `?worker` import is a bundle of its own, built with only
+// the worker's plugins).
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Plugin } from "vite";

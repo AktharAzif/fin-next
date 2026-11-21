@@ -16,6 +16,17 @@
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "outputs": [] },
     "test": { "outputs": [] },
+    "@fin/server#test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/apps/*/package.json",
+        "$TURBO_ROOT$/apps/*/vite.server.config.ts",
+        "$TURBO_ROOT$/apps/*/src/**",
+        "$TURBO_ROOT$/packages/testing/package.json",
+        "$TURBO_ROOT$/packages/testing/src/**"
+      ],
+      "outputs": []
+    },
     "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
     "//#lint:root": { "cache": false },
     "//#typecheck:root": {

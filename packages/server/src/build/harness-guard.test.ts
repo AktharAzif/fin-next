@@ -1,10 +1,12 @@
 // The release bundle's harness guard (harness-guard.ts). Planted apps in a temporary directory load
 // the test harness by its package name (linked into node_modules as pnpm links a workspace
-// package), by a relative path and through import.meta.glob: each release build fails with the
+// package), by a relative path, through import.meta.glob and from a worker's bundle (`?worker`,
+// which Vite builds apart with the worker's own plugins): each release build fails with the
 // guard's message naming the module by its repository path and writes no bundle, while the same
 // app's `test` build holds the harness, which that target may (spec 01 §4.9). Each of the guard's
 // three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts) carries
-// the guard in a release build and still builds, with nothing of the harness in its source map.
+// the guard in a release build, in its main bundle and in every worker's, and still builds, with
+// nothing of the harness in any of its source maps.
 import {
   existsSync,
   globSync,
@@ -45,12 +47,14 @@ function temporary(): string {
   return dir;
 }
 
+type Source = (harness: (path: string) => string) => string;
+
 /**
  * A planted app: @fin/testing linked into its node_modules as pnpm links a workspace package, and
  * an entry `src/server.node.ts` whose text `entry` writes, given how the entry's directory reaches
- * a file of the harness by a relative path.
+ * a file of the harness by a relative path; `files` adds others beside the entry the same way.
  */
-function plant(entry: (harness: (path: string) => string) => string): string {
+function plant(entry: Source, files: Readonly<Record<string, Source>> = {}): string {
   const root = temporary();
   mkdirSync(join(root, "node_modules/@fin"), { recursive: true });
   symlinkSync(HARNESS, join(root, "node_modules/@fin/testing"), "dir");
@@ -58,6 +62,7 @@ function plant(entry: (harness: (path: string) => string) => string): string {
   const harness = (path: string) => relative(from, join(HARNESS, path)).split(sep).join("/");
   mkdirSync(from, { recursive: true });
   writeFileSync(join(root, ENTRY), entry(harness));
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(from, name), text(harness));
   return root;
 }
 
@@ -66,6 +71,15 @@ async function bundle(root: string, env: Record<string, string>): Promise<string
   const config = serverBundleConfig({ root, entry: ENTRY }, env);
   await build({ ...config, configFile: false, logLevel: "silent" });
   return readFileSync(join(root, "dist/server/main.js"), "utf8");
+}
+
+/** The text of every file the planted app's build wrote to dist/server/, its maps included. */
+function written(root: string): string {
+  const out = join(root, "dist/server");
+  return globSync("**/*", { cwd: out, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), "utf8"))
+    .join("\n");
 }
 
 describe("harnessModules", () => {
@@ -116,6 +130,19 @@ describe("serverBundleConfig and the harness guard", () => {
     expect(names(RELEASE)).toEqual([HARNESS_GUARD]);
     expect(names({})).toEqual([HARNESS_GUARD]);
     expect(names(TEST)).toEqual([]);
+  });
+
+  it("adds it to a worker's bundle in a release build as well", async () => {
+    const names = async (env: Record<string, string>) => {
+      const worker = serverBundleConfig({ root: REPOSITORY, entry: ENTRY }, env).worker;
+      const plugins = (await worker?.plugins?.()) ?? [];
+      return plugins.map((plugin) =>
+        plugin !== null && typeof plugin === "object" && "name" in plugin ? plugin.name : null,
+      );
+    };
+    expect(await names(RELEASE)).toEqual([HARNESS_GUARD]);
+    expect(await names({})).toEqual([HARNESS_GUARD]);
+    expect(await names(TEST)).toEqual([]);
   });
 });
 
@@ -179,6 +206,37 @@ describe("a release build that loads the harness fails", () => {
   }, 60_000);
 });
 
+// Vite builds a `?worker` or `?sharedworker` import as a bundle of its own, with only the worker's
+// plugins (config.worker.plugins). In a server bundle the worker's map, its sources' text included,
+// is written to assets/ beside main.js and, with `&inline`, the worker's code goes into main.js as
+// text. The main graph holds only the virtual module, so the main bundle's guard never sees the
+// worker's graph: a release build guards the worker's bundle too. The test build shows the route
+// reaches the harness: its output holds the harness's code.
+describe("a release build whose worker loads the harness fails", () => {
+  it.each(["?worker", "?worker&inline", "?worker&url", "?sharedworker"])(
+    "imported with %s",
+    async (query) => {
+      const root = plant(
+        () =>
+          `import Planted from ${JSON.stringify(`./planted-worker.ts${query}`)};\n` +
+          "export const planted = Planted;\n",
+        {
+          "planted-worker.ts": (harness) =>
+            `import { totp } from ${JSON.stringify(harness("src/totp.ts"))};\n` +
+            "(globalThis as Record<string, unknown>).planted = totp;\n",
+        },
+      );
+      await expect(bundle(root, RELEASE)).rejects.toThrow(
+        harnessMessage(["packages/testing/src/totp.ts"]),
+      );
+      expect(existsSync(join(root, "dist/server/main.js"))).toBe(false);
+      await bundle(root, TEST);
+      expect(written(root)).toContain("function totp(");
+    },
+    60_000,
+  );
+});
+
 describe("each of the guard's checks", () => {
   it.each(["load", "buildEnd", "generateBundle"] as const)(
     "%s refuses on its own",
@@ -200,6 +258,9 @@ describe("each of the guard's checks", () => {
   );
 });
 
+// These tests read files outside packages/server (each app's manifest, vite.server.config.ts and
+// sources, and packages/testing), so turbo.json names them as inputs of `@fin/server#test`: a
+// change to any of them runs the tests again instead of replaying a cached pass.
 describe("the real server bundles", () => {
   const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
     .map((path) => path.split(sep).join("/"))
@@ -219,6 +280,8 @@ describe("the real server bundles", () => {
         "build",
       );
       expect(resolved.plugins.map((plugin) => plugin.name)).toContain(HARNESS_GUARD);
+      const worker = await resolved.worker.plugins([]);
+      expect(worker.plugins.map((plugin) => plugin.name)).toContain(HARNESS_GUARD);
       const outDir = temporary();
       await build({
         configFile,
@@ -227,10 +290,14 @@ describe("the real server bundles", () => {
         build: { outDir, emptyOutDir: true },
       });
       expect(existsSync(join(outDir, "main.js"))).toBe(true);
-      const map: unknown = JSON.parse(readFileSync(join(outDir, "main.js.map"), "utf8"));
-      const sources = (map as { sources: string[] }).sources.map((source) =>
-        resolve(outDir, source),
-      );
+      // Every map the build wrote, a worker's bundle's included, each read against its own place.
+      const maps = globSync("**/*.map", { cwd: outDir });
+      expect(maps).toContain("main.js.map");
+      const sources = maps.flatMap((path) => {
+        const map: unknown = JSON.parse(readFileSync(join(outDir, path), "utf8"));
+        const at = dirname(join(outDir, path));
+        return (map as { sources: string[] }).sources.map((source) => resolve(at, source));
+      });
       expect(sources.length).toBeGreaterThan(0);
       expect(harnessModules(sources)).toEqual([]);
     },

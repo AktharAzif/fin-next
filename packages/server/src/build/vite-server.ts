@@ -4,6 +4,8 @@
 // so a release bundle refuses every seam variable (config/seams.ts). A release bundle also carries
 // the harness guard (harness-guard.ts): the build fails when its module graph holds anything under
 // packages/testing/, which only the `test` target may contain (spec 01 §4.9; ARCHITECTURE §3.5).
+// Vite builds a `?worker` or `?sharedworker` import as a separate bundle that takes only
+// `worker.plugins`, never `plugins`, so the guard is given to the worker's bundle as well.
 import type { UserConfig } from "vite";
 import { harnessGuard } from "./harness-guard.ts";
 
@@ -28,12 +30,14 @@ export function serverBundleConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): UserConfig {
   const target = serverBundleTarget(env);
+  const guards = () => (target === "release" ? [harnessGuard()] : []);
   return {
     root: options.root,
     publicDir: false,
     logLevel: "warn",
     clearScreen: false,
-    plugins: target === "release" ? [harnessGuard()] : [],
+    plugins: guards(),
+    worker: { plugins: guards },
     define: { __FIN_BUILD_TARGET__: JSON.stringify(target) },
     ssr: { target: "node", noExternal: true, external: ["pg-native"] },
     build: {
