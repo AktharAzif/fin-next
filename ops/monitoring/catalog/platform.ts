@@ -1,10 +1,16 @@
 // The platform's events (spec 01 §8.9; spec 08 §7.2's own lines where they name a Phase 0 event).
-// Every event Phase 0 writes is here, with its kind, its fields beyond the envelope, and the alerts
-// in ops/monitoring/<env>/alerts/*.json that watch it, or a written reason for none.
+// Every event of spec 01 §8.9 is here, and the process lines the platform's writers add beside
+// them (a start refused or failed, a lost stdout, the connector's cloudflared lines), each with its
+// kind, its fields beyond the envelope, and the alerts in ops/monitoring/<env>/alerts/*.json that
+// watch it, or a written reason for none.
 import type { CatalogEntry } from "./types.ts";
 
 const PROCESSES =
   "every Fin process (edge, api, worker, payments, console, admin, verify, migrate, backup, the connector supervisor)";
+
+/** Why a refused start needs no alert of its own (config.invalid, process.mode_*). */
+const START_REFUSED =
+  "The process exits before it serves; pnpm fin railway deploy waits for each service's deployment, so a release or setting that cannot start stops with deploy.failed in front of the operator who ran it. Phase 0's staging files define no alert of their own for it";
 
 export const entries: readonly CatalogEntry[] = [
   {
@@ -45,6 +51,47 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy: PROCESSES,
     fields: { node: "string" },
     alerts: ["process-restarts"],
+  },
+  {
+    event: "process.start_failed",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "packages/server's runService (every service it starts) and the connector supervisor, when the start throws before the process serves; then a flush and exit 1",
+    fields: { errorName: "string", errorCode: "string" },
+    alerts: [],
+    noAlert:
+      "packages/server's start also sends the error to the service's Errors application (reportError), which emails new errors; the connector, which has no Errors client, leaves its tunnel without connectors (tunnel-connectors); and pnpm fin railway deploy stops with deploy.failed when a service does not come up",
+  },
+  {
+    event: "config.invalid",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "packages/server's runService, the connector supervisor and the api worker's settings, for a setting that is missing or malformed: the variable's name and the problem, never its value; then exit 78. Before telemetry exists it is a raw line on stdout only",
+    fields: { variable: "string", problem: "string" },
+    alerts: [],
+    noAlert: START_REFUSED,
+  },
+  {
+    event: "process.mode_unavailable",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "the api image's entry, on stdout only, for a start flag naming a mode this entry does not run (exit 64); the entry that runs the worker and migrate modes writes process.mode_refused instead",
+    fields: { mode: "string" },
+    alerts: [],
+    noAlert: START_REFUSED,
+  },
+  {
+    event: "process.mode_refused",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "the api image's entry, on stdout only, for a start command it refuses (an unknown mode, or a mode's arguments its CLI refuses): the mode, never an argument, and the usage; then exit 64",
+    fields: { mode: "string", usage: "string" },
+    alerts: [],
+    noAlert: START_REFUSED,
   },
   {
     event: "process.health",
@@ -159,6 +206,15 @@ export const entries: readonly CatalogEntry[] = [
       "The supervisor exits on purpose so Railway restarts it; a connector that stays down shows in the watcher's connector count (tunnel-connectors), no-logs-connector and the tunnel half's monitors",
   },
   {
+    event: "connector.cloudflared_log",
+    kind: "info",
+    level: "info",
+    writtenBy:
+      "the connector supervisor, one per line cloudflared prints, cut and scrubbed, on stdout only (Railway's copy, never shipped)",
+    fields: { text: "string" },
+    alerts: [],
+  },
+  {
     event: "ingress.untrusted_peer",
     kind: "security",
     level: "warn",
@@ -215,6 +271,28 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy: "every Fin process's transport, on the first good batch after a failure",
     fields: { failedSends: "number", linesLost: "number", statuses: "number[]" },
     alerts: ["telemetry-gaps"],
+  },
+  {
+    event: "telemetry.stdout_failed",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "packages/server's runService and the connector supervisor, once, when stdout fails (its reader has gone): Node's error code; the writes to stdout stop, nothing else does",
+    fields: { errorCode: "string" },
+    alerts: [],
+    noAlert:
+      "Only Railway's copy stops: this line and every later one still ship to Better Stack, which is the record (ARCHITECTURE §10.3), and the process serves on",
+  },
+  {
+    event: "telemetry.bad_event",
+    kind: "failure",
+    level: "warn",
+    writtenBy:
+      "packages/server's line formatter, in place of an event name that is not a bounded code (a writer's bug), with the writer's level and fields; a name built at run time, so MC-01's scan cannot see it",
+    fields: {},
+    alerts: [],
+    noAlert:
+      "A writer's bug, not an incident: the line still ships with its fields, and MC-01 already makes the catalogue hold every name the code writes as a literal",
   },
   {
     event: "error.unexpected",

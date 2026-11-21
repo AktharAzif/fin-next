@@ -1,8 +1,9 @@
 // The audit area's lines (spec 08 §3.3, §3.5 and §7.2's own lines), written wherever an action
 // records its event: packages/audit's recordAudit (the api tasks, run by migrate), identity's
 // recorder for the sign-in, organisation and staff events, and the unit of work that meets the
-// guard's FA010. The group D alerts that watch them are in alerts/audit.json; the chain, anchor,
-// check and journal lines of §3.14 come with the duties that write them.
+// guard's FA010, and packages/audit's tripSwitch, which records a kill switch's trip. The group D
+// alerts that watch them are in alerts/audit.json; the chain, anchor, check and journal lines of
+// §3.14 come with the duties that write them.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -27,5 +28,16 @@ export const entries: readonly CatalogEntry[] = [
     alerts: [],
     noAlert:
       "audit-guard (P, spec 08 §3.14 group D) is owed by this area's alert fragment, with its runbook audit-guard.md, which have not landed",
+  },
+  {
+    event: "switch.tripped",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "packages/audit's tripSwitch, after ops.trip_switch() sets a kill switch on and records its audit event (spec 08 §7.2): the switch and the reason code",
+    fields: { switch: "string", reasonCode: "string" },
+    alerts: [],
+    noAlert:
+      "money-switch-tripped (P, spec 04 §30.3, group F) is owed by the money area's alert fragment, which has not landed; no Phase 0 code calls tripSwitch yet",
   },
 ];

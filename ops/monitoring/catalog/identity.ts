@@ -1,0 +1,100 @@
+// The identity area's lines (spec 02 §18.1), written by packages/identity's line port
+// (`lines.write`) for both realms, and by the orgs and staff packages and the console's API half
+// where they run identity's gates. packages/identity/src/monitoring.ts keeps the same list beside
+// the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
+// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
+// identity area's alert fragment (alerts/identity.json), which has not landed; until then each
+// failure or security entry names the alert it is owed, or why none.
+import type { CatalogEntry } from "./types.ts";
+
+const OWED = "is owed by the identity area's alert fragment, which has not landed";
+
+export const entries: readonly CatalogEntry[] = [
+  {
+    event: "auth.gate_refused",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "the realm's before-hook, requirePerson, and the orgs and staff guards, for a session the gate does not let through (spec 02 §6.2, §6.4)",
+    fields: { realm: "string", state: "string" },
+    alerts: [],
+    noAlert:
+      "An expected refusal (a session not yet at the state the route needs); spec 02 §18.3 panels it by state and §18.2 names no alert for it",
+  },
+  {
+    event: "auth.code_contested",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "the sign-in code requests, when a browser the address does not know is refused a new code over a live one, or uses the strangers' share (spec 02 §5.2)",
+    fields: { reason: "string", userId: "string" },
+    alerts: [],
+    noAlert: `sign-in-code-contested (N, spec 02 §18.2) ${OWED}`,
+  },
+  {
+    event: "auth.secret_unreadable",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "the TOTP check and the console's viewer, when no configured secret version opens a stored secret",
+    fields: { realm: "string", kind: "string" },
+    alerts: [],
+    noAlert: `secret-unreadable (P, spec 02 §18.2) ${OWED}`,
+  },
+  {
+    event: "auth.unhandled_error",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "the realm's error handler, beside error.unexpected with the same errorId, for an error no refusal names (500)",
+    fields: { realm: "string", authPath: "string", errorId: "string" },
+    alerts: [],
+    noAlert: `sign-in-failing (P, spec 02 §18.2) ${OWED}; meanwhile the error reaches the service's Errors application through error.unexpected`,
+  },
+  {
+    event: "auth.library_log",
+    kind: "info",
+    level: "warn",
+    writtenBy:
+      "the auth library's logger, its warnings and errors by level only (the line's level is the library's; no message is kept)",
+    fields: { realm: "string" },
+    alerts: [],
+  },
+  {
+    event: "step_up.refused",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "the step-up intents and ceremonies (identity, and the orgs and staff guards), for an intent or a ceremony that cannot serve (spec 02 §7.5)",
+    fields: { realm: "string", action: "string", reason: "string" },
+    alerts: [],
+    noAlert: `step-up-failing (N, spec 02 §18.2, on reason digest above its threshold) ${OWED}`,
+  },
+  {
+    event: "step_up.locked",
+    kind: "security",
+    level: "warn",
+    writtenBy: "the step-up counter, when the fifth failure ends the session (spec 02 §7.7)",
+    fields: { realm: "string" },
+    alerts: [],
+    noAlert: `step-up-locked (N, spec 02 §18.2) ${OWED}`,
+  },
+  {
+    event: "limits.refused",
+    kind: "info",
+    level: "info",
+    writtenBy: "the auth limiter, for a request over its bucket's allowance (spec 02 §5.6)",
+    fields: { bucket: "string" },
+    alerts: [],
+  },
+  {
+    event: "limits.store_failed",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "the auth limiter, when its store cannot be read or written; it fails closed, so the request is refused (503)",
+    fields: { bucket: "string" },
+    alerts: [],
+    noAlert: `rate-limiter-failing (P, spec 02 §18.2) ${OWED}`,
+  },
+];
