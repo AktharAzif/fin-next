@@ -48,7 +48,7 @@ EXECUTION, the change is named, and the higher file holds until it is amended to
 |---|---|
 | `<zone>` | A Fin zone. In production [FD-10] may put the docs host on its own registrable domain; `<zone>` in `developer.<zone>` then means that domain. Nothing in this file depends on the docs and the API being same-site |
 | `<staging-zone>` | The staging zone ([FD-09]) |
-| `<app>.<zone>` | A host, for example `api.<staging-zone>` |
+| `<app>.<zone>` | A host, for example `gateway.<staging-zone>` |
 | `<docs origin>`, `<api origin>`, `<console origin>` | `https://developer.<zone>`, `https://api.<zone>`, `https://console.<zone>`, read from configuration at run time, never written in the repository ([G-09]) |
 
 **Public by design (R12).** This file names no credential, token, account or tunnel ID, zone name,
@@ -1310,8 +1310,8 @@ values (from spec 03's `packages/kyc` export used by the console's Simulator too
 `env.json`:
 
 ```json
-{ "environment": "staging", "release": "<sha>", "apiOrigin": "https://api.<staging-zone>",
-  "docsOrigin": "https://developer.<staging-zone>", "consoleOrigin": "https://console.<staging-zone>",
+{ "environment": "staging", "release": "<sha>", "apiOrigin": "https://gateway.<staging-zone>",
+  "docsOrigin": "https://docs.<staging-zone>", "consoleOrigin": "https://console.<staging-zone>",
   "statusOrigin": null, "keySalt": "fin-stg-1", "indexable": false }
 ```
 
@@ -1506,7 +1506,7 @@ Rendered for staging, once the owner's yes on the exception is recorded:
 ```
 /*
   Cache-Control: no-cache
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.<staging-zone>; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://gateway.<staging-zone>; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Strict-Transport-Security: max-age=63072000; includeSubDomains
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
@@ -1898,7 +1898,7 @@ fails when the rule it names breaks.
 | T05-56 | B | Bundle budgets of §8.14 | L-SUN-09 |
 | T05-57 | I | `/reports/docs`: wrong origin 403; over 8 KB 413; a planted address, key or email in any field never reaches the shipped line; caps drop and count | L-MON-08 |
 | T05-58 | E2E | Phone widths 390px and 360px, light and dark, for home, a guide, the reference, an error page | L-MON-08 |
-| T05-59 | STG | The header matrix on staging: `/`, a guide, `/reference`, `/assets/<file>`, `/env.json` and an unknown path each carry the `docs` profile's headers once; an unknown path and `developer.<staging-zone>/api/x` each answer the home page with status 200 from the static host (never the tunnel), and in a browser show "Page not found" with `noindex`; `fin-next-staging-docs-static` reads back with spec 01 §7.4's invariant and is not reachable on `workers.dev` | L-MON-09 |
+| T05-59 | STG | The header matrix on staging: `/`, a guide, `/reference`, `/assets/<file>`, `/env.json` and an unknown path each carry the `docs` profile's headers once; an unknown path and `docs.<staging-zone>/api/x` each answer the home page with status 200 from the static host (never the tunnel), and in a browser show "Page not found" with `noindex`; `fin-next-staging-docs-static` reads back with spec 01 §7.4's invariant and is not reachable on `workers.dev` | L-MON-09 |
 | T05-60 | STG | The release smoke calls `GET /v4/whoami` with the smoke organisation's Sandbox key and opens the reference | L-MON-09 |
 | T05-61 | E2E | On the static host with the single-page fallback, `/no-such-page` and `/guides/no-such-guide` answer 200 with the home page; the shell shows "Page not found" with its links, sets that title and adds `noindex`; the legacy-anchor redirect does not run; `/` itself still shows the home content | L-MON-08 |
 
@@ -1947,7 +1947,7 @@ fails when the rule it names breaks.
 | A05-37 | I | `resetSandbox` deletes only the calling organisation's Sandbox data and needs a full-access Sandbox key | |
 | A05-38 | I | `searchCustomers` finds by email, phone and name, and no personal data reaches a URL, a line or a cursor | |
 | A05-39 | I | `listEvents` filters by type or group, customer, RFI and creation time | |
-| A05-40 | STG | The getting-started guide and the reference for every Sunday and Monday operation are live on `developer.<staging-zone>` (R16 at staging-complete per EXECUTION §0.2) | |
+| A05-40 | STG | The getting-started guide and the reference for every Sunday and Monday operation are live on `docs.<staging-zone>` (R16 at staging-complete per EXECUTION §0.2) | |
 
 By day: Saturday A05-01 to A05-06 (stretch); Sunday A05-07, A05-09 to A05-22, A05-27, A05-37 to
 A05-39; Monday A05-08, A05-23 to A05-26, A05-28, A05-29, A05-32 to A05-35, A05-40; H-08 A05-30,

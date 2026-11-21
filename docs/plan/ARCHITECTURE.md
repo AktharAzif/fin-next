@@ -1412,7 +1412,7 @@ Where requests go, for example:
 | `https://api.<zone>/v4/customers` | the public tunnel, then `edge` |
 | `http://console.<zone>/` | a 308 to https from a Single Redirect (§5.6) |
 
-Staging names the same hosts on `<staging-zone>`: `console.<staging-zone>`, `api.<staging-zone>`
+Staging names the same hosts on `<staging-zone>`: `console.<staging-zone>`, `gateway.<staging-zone>`
 and so on.
 
 **Zones** ([FD-09], [FD-10]). Staging puts every host on `<staging-zone>`, a new zone in a new

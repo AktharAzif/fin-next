@@ -138,7 +138,7 @@ At the Phase 0 exit (13:30), staging is a walking skeleton:
   policy proven (SP-01).
 - Railway staging runs 15 services (three at 0 replicas) and Postgres 18 with PITR, with no public
   domain and no TCP proxy anywhere.
-- Cloudflare serves five static hosts with no code, routes `/api/*` and `api.<staging-zone>`
+- Cloudflare serves five static hosts with no code, routes `/api/*` and `gateway.<staging-zone>`
   through two tunnels, puts Access in front of Fin Admin, and has the email sending domains onboarded.
 - Better Stack receives every service's lines and errors; monitors, heartbeats and alerts exist and
   email the quiet staging policy.
@@ -168,7 +168,7 @@ flowchart LR
 ```
 
 Every request to Railway enters through a connector. The static half of every app host never reaches
-Railway. `developer.<staging-zone>` has no `/api/` path at all.
+Railway. `docs.<staging-zone>` has no `/api/` path at all.
 
 ---
 
@@ -1230,12 +1230,12 @@ Names stay one level below the zone, so Universal SSL covers them (ARCHITECTURE 
 
 | Host | DNS record | Static | `/api/*` | Tunnel and service | Access | Requirement |
 |---|---|---|---|---|---|---|
-| `api.<staging-zone>` | proxied CNAME to the public tunnel | none | (every path) | public tunnel to `edge` | no | R16 |
+| `gateway.<staging-zone>` | proxied CNAME to the public tunnel | none | (every path) | public tunnel to `edge` | no | R16 |
 | `console.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-console-static` | no-Worker route | public tunnel to `console` | no | R6 |
-| `verify.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-verify-static` | no-Worker route | public tunnel to `verify` | no | R7 |
+| `onboard.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-verify-static` | no-Worker route | public tunnel to `verify` | no | R7 |
 | `selfie.<staging-zone>` | proxied CNAME to the public tunnel | `fin-next-staging-selfie-static` | no-Worker route | public tunnel to `verify` | no | R7, [SA-26] |
-| `developer.<staging-zone>` | proxied CNAME to the public tunnel (the catch-all answers 404 if the static route ever vanished) | `fin-next-staging-docs-static` | none | none | no | R16 |
-| `admin.<staging-zone>` | proxied CNAME to the admin tunnel | `fin-next-staging-admin-static` | no-Worker route | admin tunnel to `admin` | whole host | R6 |
+| `docs.<staging-zone>` | proxied CNAME to the public tunnel (the catch-all answers 404 if the static route ever vanished) | `fin-next-staging-docs-static` | none | none | no | R16 |
+| `staff.<staging-zone>` | proxied CNAME to the admin tunnel | `fin-next-staging-admin-static` | no-Worker route | admin tunnel to `admin` | whole host | R6 |
 | `auth.<staging-zone>`, `notify.<staging-zone>` | written and locked by Email Sending | none | none | none | no | R3 |
 
 Every CNAME targets `<tunnel id>.cfargotunnel.com`, written by `pnpm fin routes apply staging` from the
@@ -1258,17 +1258,17 @@ target is anything but the map's own. Rendered for the public tunnel:
 
 ```yaml
 ingress:
-  - hostname: api.<staging-zone>
+  - hostname: gateway.<staging-zone>
     service: http://edge.railway.internal:8080
-    originRequest: { httpHostHeader: api.<staging-zone> }
+    originRequest: { httpHostHeader: gateway.<staging-zone> }
   - hostname: console.<staging-zone>
     path: ^/api/
     service: http://console.railway.internal:8080
     originRequest: { httpHostHeader: console.<staging-zone> }
-  - hostname: verify.<staging-zone>
+  - hostname: onboard.<staging-zone>
     path: ^/api/
     service: http://verify.railway.internal:8080
-    originRequest: { httpHostHeader: verify.<staging-zone> }
+    originRequest: { httpHostHeader: onboard.<staging-zone> }
   - hostname: selfie.<staging-zone>
     path: ^/api/
     service: http://verify.railway.internal:8080
@@ -1280,11 +1280,11 @@ And for the admin tunnel:
 
 ```yaml
 ingress:
-  - hostname: admin.<staging-zone>
+  - hostname: staff.<staging-zone>
     path: ^/api/
     service: http://admin.railway.internal:8080
     originRequest:
-      httpHostHeader: admin.<staging-zone>
+      httpHostHeader: staff.<staging-zone>
       access: { required: true, teamName: <team>, audTag: [<aud>] }
   - service: http_status:404
 ```
@@ -1317,10 +1317,10 @@ Five assets-only deployments, one per static app, each a Worker **with no script
 | Deployment | Built from | Host route | `_headers` profile |
 |---|---|---|---|
 | `fin-next-staging-console-static` | `apps/console` `dist/static` | `console.<staging-zone>/*` | `app` (console) |
-| `fin-next-staging-admin-static` | `apps/admin` `dist/static` | `admin.<staging-zone>/*` | `app` (admin) |
-| `fin-next-staging-verify-static` | `apps/verify` `dist/static/verify` | `verify.<staging-zone>/*` | `hosted` |
+| `fin-next-staging-admin-static` | `apps/admin` `dist/static` | `staff.<staging-zone>/*` | `app` (admin) |
+| `fin-next-staging-verify-static` | `apps/verify` `dist/static/verify` | `onboard.<staging-zone>/*` | `hosted` |
 | `fin-next-staging-selfie-static` | `apps/verify` `dist/static/selfie` | `selfie.<staging-zone>/*` | `selfie` (strict until SP-11 lists Sumsub's hosts on Sunday) |
-| `fin-next-staging-docs-static` | `apps/docs` `dist/static` | `developer.<staging-zone>/*` | `docs` |
+| `fin-next-staging-docs-static` | `apps/docs` `dist/static` | `docs.<staging-zone>/*` | `docs` |
 
 **The invariant.** Each deployment's configuration is exactly: `compatibility_date: "2026-11-20"`;
 `assets.not_found_handling: "single-page-application"`; `assets.html_handling: "auto-trailing-slash"`;
@@ -1387,7 +1387,7 @@ appendix C adopts it:
    | `app` (admin) | the same |
    | `hosted` (verify) | `Referrer-Policy: no-referrer`; `Permissions-Policy` denies every feature, passkeys included |
    | `selfie` | as `hosted` until Sunday; then `script-src 'self' https://static.sumsub.com`, `frame-src` the exact hosts SP-11 records, camera and microphone for that frame only ([SA-26]); a test fails if any other profile names a Sumsub host (FW-C20) |
-   | `docs` | `connect-src 'self' https://api.<staging-zone>` for Try it (R16, [AP-10]); the docs exception, `style-src 'self' 'unsafe-inline'` and `img-src 'self' data:` for Scalar's run-time styles and images, added to the profile only by the pull request that records the owner's yes in [AP-11]'s status, and `'self'` alone until then ([SA-45], FW-C05); `form-action 'none'`; no `report-to` and no `Reporting-Endpoints` (the docs host has no `/api/`; the page reports violations to the edge, spec 05 §8.13); `Referrer-Policy: no-referrer`; `Permissions-Policy` as `hosted`. This row is the docs site's only header source; `apps/docs` has no headers file of its own, and spec 05 §8.11 shows the rendered result |
+   | `docs` | `connect-src 'self' https://gateway.<staging-zone>` for Try it (R16, [AP-10]); the docs exception, `style-src 'self' 'unsafe-inline'` and `img-src 'self' data:` for Scalar's run-time styles and images, added to the profile only by the pull request that records the owner's yes in [AP-11]'s status, and `'self'` alone until then ([SA-45], FW-C05); `form-action 'none'`; no `report-to` and no `Reporting-Endpoints` (the docs host has no `/api/`; the page reports violations to the edge, spec 05 §8.13); `Referrer-Policy: no-referrer`; `Permissions-Policy` as `hosted`. This row is the docs site's only header source; `apps/docs` has no headers file of its own, and spec 05 §8.11 shows the rendered result |
 
    `Strict-Transport-Security` takes the value of the zone's class (ARCHITECTURE §5.8): on the
    staging zone and production's main zone `max-age=63072000; includeSubDomains`, with no `preload`
@@ -1423,15 +1423,15 @@ matches `/apix` and has a documented specificity problem (research note C1 §2).
 |---|---|
 | `console.<staging-zone>/*` | `fin-next-staging-console-static` |
 | `console.<staging-zone>/api/*` | none |
-| `admin.<staging-zone>/*` | `fin-next-staging-admin-static` |
-| `admin.<staging-zone>/api/*` | none |
-| `verify.<staging-zone>/*` | `fin-next-staging-verify-static` |
-| `verify.<staging-zone>/api/*` | none |
+| `staff.<staging-zone>/*` | `fin-next-staging-admin-static` |
+| `staff.<staging-zone>/api/*` | none |
+| `onboard.<staging-zone>/*` | `fin-next-staging-verify-static` |
+| `onboard.<staging-zone>/api/*` | none |
 | `selfie.<staging-zone>/*` | `fin-next-staging-selfie-static` |
 | `selfie.<staging-zone>/api/*` | none |
-| `developer.<staging-zone>/*` | `fin-next-staging-docs-static` |
+| `docs.<staging-zone>/*` | `fin-next-staging-docs-static` |
 
-`api.<staging-zone>` has no route. A request for `/api` with no slash reaches the SPA, which draws
+`gateway.<staging-zone>` has no route. A request for `/api` with no slash reaches the SPA, which draws
 "Page not found"; no SPA defines a route under `/api` (a test walks each route tree).
 
 ### 7.6 Rules and zone settings
@@ -1442,14 +1442,14 @@ transform, redirect, configuration and cache rules each.
 
 | Kind | Name | Expression | Action |
 |---|---|---|---|
-| Request header transform | `ingress-proof-api` | `http.host eq "api.<staging-zone>"` | set `Fin-Ingress-Proof` to the api host's current proof |
+| Request header transform | `ingress-proof-api` | `http.host eq "gateway.<staging-zone>"` | set `Fin-Ingress-Proof` to the api host's current proof |
 | Request header transform | `ingress-proof-console`, `-admin`, `-verify`, `-selfie` | `http.host eq "<host>" and starts_with(http.request.uri.path, "/api/")` | set `Fin-Ingress-Proof` to that host's proof (S0-08: the static half never sees it) |
 | Single redirect | `https-browser-hosts` | `not ssl and http.host in {<console> <admin> <verify> <selfie> <developer>} and http.request.method in {"GET" "HEAD"}` | 308 to `https://` with the same host, path and query |
-| WAF custom | `http-unsafe-block` | `not ssl and http.host ne "api.<staging-zone>" and not http.request.method in {"GET" "HEAD"}` | block |
+| WAF custom | `http-unsafe-block` | `not ssl and http.host ne "gateway.<staging-zone>" and not http.request.method in {"GET" "HEAD"}` | block |
 | WAF custom (prepared, disabled) | `ks-api-all`, `ks-api-money`, `ks-signups` | all of `api.`; the money path prefixes (filled on Monday); the sign-up paths under `/api/auth/` | block, toggled by `pnpm fin killswitch staging <rule> on` (or `off`) ([OP-01]) |
 | Rate limit | `api-v4` | `starts_with(http.request.uri.path, "/v4/")` | per address, 10 s period, block 10 s, JSON problem body; threshold from the overlay ([OB-13]) |
-| Configuration | `api-paths-no-challenge` | `http.host eq "api.<staging-zone>" or starts_with(http.request.uri.path, "/api/")` | Browser Integrity Check off; Security Level `essentially_off` ([FD-07]) |
-| Cache | `api-bypass` | `http.host eq "api.<staging-zone>" or starts_with(http.request.uri.path, "/api/")` | bypass cache |
+| Configuration | `api-paths-no-challenge` | `http.host eq "gateway.<staging-zone>" or starts_with(http.request.uri.path, "/api/")` | Browser Integrity Check off; Security Level `essentially_off` ([FD-07]) |
+| Cache | `api-bypass` | `http.host eq "gateway.<staging-zone>" or starts_with(http.request.uri.path, "/api/")` | bypass cache |
 
 Ingress proofs are 32 random bytes generated by `pnpm fin secrets generate staging ingress-proofs`,
 escrowed, set on the services (`FIN_INGRESS_PROOFS`) and then in the transform rules, in that order;
@@ -1468,7 +1468,7 @@ records what the tunnel sees).
 
 | Field | Value |
 |---|---|
-| Application | self-hosted, name `fin-next-staging-admin`, destination `admin.<staging-zone>` (the whole host: static and `/api/` alike) |
+| Application | self-hosted, name `fin-next-staging-admin`, destination `staff.<staging-zone>` (the whole host: static and `/api/` alike) |
 | Session | 8 hours; binding cookie on; HTTP-only cookie; `SameSite=Lax`; not shown in the App Launcher |
 | Policy | one Allow policy whose include is the **exact list of staff addresses** from the overlay; never a domain, never "Everyone", never a bare one-time-PIN include |
 | Independent MFA | required on the application; staging allows TOTP as well as security keys and biometrics; MFA session no longer than the Access session (SP-09 confirms availability on Zero Trust Free and the API field names) |
@@ -1552,7 +1552,7 @@ settings daily.
 ### 7.12 If SP-25 fails: the fallback shape
 
 Per-app API hosts on the same site (OD-3's fallback; research note C3 §3): `console-api.`,
-`admin-api.` and `verify-api.<staging-zone>`, each a proxied CNAME to its tunnel with the ingress rule
+`admin-api.` and `onboard-api.<staging-zone>`, each a proxied CNAME to its tunnel with the ingress rule
 matching the whole API host; the static hosts keep their assets-only deployments, bound by a Workers
 Custom Domain instead of a route; exact single-origin CORS with credentials and
 `Access-Control-Max-Age: 7200` in `packages/web-host`; `Sec-Fetch-Site` must be `same-site`;
@@ -1598,10 +1598,10 @@ repository links and AI off.
 | `watcher` | none (its failures are lines) | `watcher.*` |
 | `ops` (lines `pnpm fin` ships for its runs) | none | `deploy.*`, `run.*` |
 | (no source) | `console-web`, `admin-web`, `verify-web`, platform `react_errors` | browser errors through each app's `/api/monitoring/envelope` |
-| (no source) | `docs-web`, platform `react_errors` | the docs pages' failure reports, through the edge at `POST https://api.<staging-zone>/reports/docs` |
+| (no source) | `docs-web`, platform `react_errors` | the docs pages' failure reports, through the edge at `POST https://gateway.<staging-zone>/reports/docs` |
 
 The docs site has no `/api/` path, no ingress rule and no service ([FD-18], DECISIONS appendix C
-SF-01), so its pages report to the edge instead: `POST https://api.<staging-zone>/reports/docs`, which
+SF-01), so its pages report to the edge instead: `POST https://gateway.<staging-zone>/reports/docs`, which
 feeds the Errors application `fin-next-staging-docs-web` (spec 05 §8.13, spec 08 D08-32, ARCHITECTURE
 §10.5). Phase 0's `monitoring apply` makes `docs-web`; the edge's receiver (`apps/edge/src/reports/`)
 and the pages' reporter land with the docs lanes (spec 05 §12), and Phase 0's docs placeholder sends
@@ -1623,15 +1623,15 @@ repository), and names the `staging-quiet` policy (ARCHITECTURE §10.6).
 
 | Monitor | Check | Expect |
 |---|---|---|
-| `api-health` | `GET https://api.<staging-zone>/health` | 200 |
-| `api-unauthenticated` | `GET https://api.<staging-zone>/v4/whoami` with no key | 401 with the keyword `errors/unauthenticated` |
+| `api-health` | `GET https://gateway.<staging-zone>/health` | 200 |
+| `api-unauthenticated` | `GET https://gateway.<staging-zone>/v4/whoami` with no key | 401 with the keyword `errors/unauthenticated` |
 | `api-canary` | `GET /v4/whoami` with the canary's restricted Sandbox key (CR-19) | 200; created once API keys land, `api-health` until then |
 | `console-sign-in` | `GET https://console.<staging-zone>/sign-in` | 200 with the app shell's keyword (the static half) |
 | `console-api-health` | `GET https://console.<staging-zone>/api/health` | 200 (the tunnel half) |
-| `verify` | `GET https://verify.<staging-zone>/` | 200 with keyword |
-| `verify-api-health` | `GET https://verify.<staging-zone>/api/health` | 200 |
-| `admin` | `GET https://admin.<staging-zone>/` without following redirects | 302 to the Access sign-in |
-| `docs` | `GET https://developer.<staging-zone>/` | 200 with keyword |
+| `verify` | `GET https://onboard.<staging-zone>/` | 200 with keyword |
+| `verify-api-health` | `GET https://onboard.<staging-zone>/api/health` | 200 |
+| `admin` | `GET https://staff.<staging-zone>/` without following redirects | 302 to the Access sign-in |
+| `docs` | `GET https://docs.<staging-zone>/` | 200 with keyword |
 
 ### 8.5 Heartbeats
 
@@ -1982,7 +1982,7 @@ are checked by 23:59 on Saturday (EXECUTION §2.11, §3.7). C2 at 13:00 is a che
 | AC-P0-23 [STG] | Each static host answers with its profile's headers exactly (§7.4): the CSP, HSTS, `Cache-Control: no-cache` on HTML and `env.json`, `public, max-age=31536000, immutable` once on `/assets/*`; an unknown path answers `index.html` with 200; any `*.map` answers 404 |
 | AC-P0-24 [STG] | On `console.` and `verify.`, `/api/health` is answered by the API half through the tunnel; a JSON POST from the page reaches the API half with no OPTIONS and no 3xx; `/api` without a slash is the SPA; on `developer.` no path reaches Railway |
 | AC-P0-25 [STG] | Every static deployment has assets only (no module, no binding, no `workers.dev` address, no preview URL), and the zone's Workers routes equal §7.5; a change made in a drill to a throwaway deployment raises `static-deployment-changed` within 2 minutes |
-| AC-P0-26 [STG] | Unauthenticated requests to `admin.<staging-zone>` for `/`, a hashed asset and `/api/health` all receive Access's redirect; a request to the admin API half from a non-connector peer with a forged `Cf-Access-Jwt-Assertion` gets 403 |
+| AC-P0-26 [STG] | Unauthenticated requests to `staff.<staging-zone>` for `/`, a hashed asset and `/api/health` all receive Access's redirect; a request to the admin API half from a non-connector peer with a forged `Cf-Access-Jwt-Assertion` gets 403 |
 | AC-P0-27 [CI] (end of Saturday) | Over the day's pull-request runs, `plan` p50 is at most 15 s and warm `check` p50 at most 4 minutes; a docs-only pull request runs only `plan`, `check`, `static` and `gate` (numbers recorded by the steward at C2 and C4) |
 | AC-P0-28 [STG] | `pnpm fin verify staging` exits 0: every row of §6.2, Serverless off, outbound IPv6 off, static egress on exactly the listed services with the overlay's addresses, PITR on, the deployment webhook present, no staged change |
 | AC-P0-29 [STG] | Postgres reports its version (recorded); every service connects with `verify-full` against `FIN_DB_CA_PEM`; `fin_owner` has no valid password outside a registered run; a privileged login outside a registered run raises `privileged-login` |
