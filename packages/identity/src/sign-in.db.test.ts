@@ -15,7 +15,7 @@ import {
   passkeyCeremony,
   registerPasskey,
 } from "../test/harness.ts";
-import { codeLinkAsking } from "./codes.ts";
+import { codeLinkAsking, lockAddress } from "./codes.ts";
 import { signUp } from "./sign-up.ts";
 
 let database: TestDatabase;
@@ -172,36 +172,106 @@ describe("one live code per address (§5.2, S2-38)", () => {
     }
   });
 
-  it("finishes overlapping sign-ups, code requests and tries for one address from one network", async () => {
-    // Each takes the network's limits, then the address's lock, then the address's limits: none
-    // waits on another in a circle, whichever order they meet in.
-    for (const registered of [true, false]) {
-      const email = unique(registered ? "mixed.registered" : "mixed.fresh");
-      if (registered) await codeSignIn(h, h.browser(), email);
-      const ip = `2001:db8:${Math.floor(Math.random() * 0xffff).toString(16)}::9`;
-      const up = () => {
-        const b = h.browser({ ip });
-        return signUp(
-          h.realm,
-          b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
-          b.context(),
-          { name: "Ada Lovelace", email },
-        ).then((answer) => answer.status);
-      };
-      const ask = () => sendCode(h.browser({ ip }), email).then((answer) => answer.status);
-      const guess = () =>
-        post(h.browser({ ip }), "/api/auth/sign-in/email-otp", { email, otp: "00000000" }).then(
-          (answer) => answer.status,
+  it("finishes overlapping sign-ups, code requests and tries for one address, each from its own network", async () => {
+    // Each unit takes its locks in lockAddress()'s order: sign-up's own limits, the network's code
+    // limit, the address's lock, then the address's code limits. Every browser here is on its own
+    // network, so nothing makes the units take turns before the address's lock: a path that took
+    // the address's code limits before the lock would wait on another in a circle, and Postgres
+    // would end one of them (a sign-up that throws, or a 500).
+    for (let run = 0; run < 6; run += 1) {
+      for (const registered of [true, false]) {
+        const email = unique(registered ? "mixed.registered" : "mixed.fresh");
+        if (registered) await codeSignIn(h, h.browser(), email);
+        const up = () => {
+          const b = h.browser();
+          return signUp(
+            h.realm,
+            b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
+            b.context(),
+            { name: "Ada Lovelace", email },
+          ).then(
+            (answer) => String(answer.status),
+            // A refusal carries its status; anything else (a deadlock) fails the test below.
+            (error: { status?: number; code?: string }) =>
+              error.status === undefined
+                ? `error ${error.code ?? "unknown"}`
+                : String(error.status),
+          );
+        };
+        const ask = () => sendCode(h.browser(), email).then((answer) => String(answer.status));
+        const guess = () =>
+          post(h.browser(), "/api/auth/sign-in/email-otp", { email, otp: "00000000" }).then(
+            (answer) => String(answer.status),
+          );
+        const statuses = await Promise.all([up(), ask(), guess(), up(), ask(), guess()]);
+        for (const status of statuses)
+          expect(["200", "202", "400", "403", "429"]).toContain(status);
+        // Every browser here is a stranger to the address, so at most one request stands: a code
+        // or a codeless request, never both, and never two of either.
+        const live = await h.admin.query<{ n: string }>(
+          `SELECT count(*) AS n FROM identity.email_code_request
+            WHERE email_hash = $1 AND superseded_at IS NULL AND used_at IS NULL`,
+          [h.realm.runtime.hasher.hash("email", email)],
         );
-      const statuses = await Promise.all([up(), ask(), guess(), up(), ask(), guess()]);
-      for (const status of statuses) expect([200, 202, 400, 403, 429]).toContain(status);
-      const live = await h.admin.query<{ n: string }>(
-        `SELECT count(*) AS n FROM identity.email_code_request
-          WHERE email_hash = $1 AND superseded_at IS NULL AND used_at IS NULL AND NOT codeless`,
-        [h.realm.runtime.hasher.hash("email", email)],
-      );
-      expect(Number(live.rows[0]?.n)).toBeLessThanOrEqual(1);
+        expect(Number(live.rows[0]?.n)).toBeLessThanOrEqual(1);
+      }
     }
+  });
+
+  it("holds the address's lock as a row only the console's role may lock, never an advisory lock", async () => {
+    // Any login may take an advisory lock, and its key shows in pg_locks: one held open would
+    // stall every request for the address. The row is in a table only fin_console may write (the
+    // grant tests refuse every other role), and while it is held nothing advisory is.
+    const email = unique("lock.row");
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = () => {};
+    const isHeld = new Promise<void>((resolve) => {
+      held = resolve;
+    });
+    const first = h.db.unit(async (tx) => {
+      await lockAddress(tx, h.realm.runtime, email);
+      held();
+      await released;
+    });
+    let secondHeld = false;
+    let second: Promise<void> | null = null;
+    try {
+      await isHeld;
+      const advisory = await h.admin.query(
+        `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+          WHERE l.locktype = 'advisory' AND d.datname = current_database()`,
+      );
+      expect(advisory.rowCount).toBe(0);
+      // A second unit for the address waits on the first's row until it ends.
+      second = h.db.unit(async (tx) => {
+        await lockAddress(tx, h.realm.runtime, email);
+        secondHeld = true;
+      });
+      let waiting = false;
+      for (let i = 0; i < 250 && !waiting && !secondHeld; i += 1) {
+        const waits = await h.admin.query(
+          `SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        waiting = (waits.rowCount ?? 0) > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(secondHeld).toBe(false);
+      expect(waiting).toBe(true);
+    } finally {
+      release();
+      await first;
+      await second;
+    }
+    expect(secondHeld).toBe(true);
+    const row = await h.admin.query(
+      "SELECT 1 FROM identity.email_code_lock WHERE email_hash = $1",
+      [h.realm.runtime.hasher.hash("email", email)],
+    );
+    expect(row.rowCount).toBe(1);
   });
 
   it("never lets a browser that is not known supersede a known browser's code", async () => {

@@ -324,4 +324,27 @@ describe("the sweeps (§13.4)", () => {
     expect(await row(dead.sessionToken())).toBeUndefined();
     expect(await row(live.sessionToken())).toBeDefined();
   });
+
+  it("delete an address's lock row only once it is old", async () => {
+    const hash = (email: string) => h.realm.runtime.hasher.hash("email", email);
+    const old = hash(unique("sweep.lock.old"));
+    const fresh = hash(unique("sweep.lock.fresh"));
+    await seed(
+      h.admin,
+      `INSERT INTO identity.email_code_lock (email_hash, locked_at)
+       VALUES ($1, now() - interval '3 hours'), ($2, now() - interval '1 hour')`,
+      [old, fresh],
+    );
+    const worker = database.login("fin_worker");
+    const swept = await worker.query<{ table_name: string; deleted: string }>(
+      "SELECT * FROM identity.sweep()",
+    );
+    const counts = Object.fromEntries(swept.rows.map((r) => [r.table_name, Number(r.deleted)]));
+    expect(counts["identity.email_code_lock"]).toBeGreaterThanOrEqual(1);
+    const left = await h.admin.query<{ email_hash: Buffer }>(
+      "SELECT email_hash FROM identity.email_code_lock WHERE email_hash = ANY($1)",
+      [[old, fresh]],
+    );
+    expect(left.rows.map((r) => r.email_hash.toString("hex"))).toEqual([fresh.toString("hex")]);
+  });
 });

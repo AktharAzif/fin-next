@@ -75,6 +75,16 @@ CREATE TABLE identity.email_code_request (
 );
 CREATE INDEX email_code_request_live ON identity.email_code_request (email_hash, purpose, created_at DESC);
 
+-- The per-address lock that serialises an address's code requests, codeless requests and code
+-- tries (codes.ts, lockAddress()): each takes a row lock here, held until its unit ends. A row
+-- lock needs UPDATE on the table, which only fin_console holds, so no other login can take or hold
+-- it (an advisory lock is one any login could take), and nothing here is readable by another role.
+-- `email_hash` is the address's keyed hash under the newest key; the sweep deletes old rows.
+CREATE TABLE identity.email_code_lock (
+  email_hash bytea PRIMARY KEY CHECK (length(email_hash) = 32),
+  locked_at timestamptz NOT NULL
+);
+
 -- A sign-up waiting for its mailbox to be proved (§5.1, S2-05): no user row exists before.
 CREATE TABLE identity.sign_up_request (
   id text PRIMARY KEY CHECK (id ~ '^sur_[0-9a-hjkmnp-tv-z]{26}$'),

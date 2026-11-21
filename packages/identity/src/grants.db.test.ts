@@ -77,6 +77,39 @@ describe("each role holds only its own tables", () => {
   });
 });
 
+describe("the address lock (codes.ts) is the console's alone", () => {
+  // A row lock needs UPDATE on the table: a login that could take one could stall every code
+  // request, codeless request and code try for an address by holding it open.
+  const others = ["fin_admin", "fin_api", "fin_worker", "fin_readonly"] as const;
+  const statements = [
+    "SELECT 1 FROM identity.email_code_lock FOR UPDATE",
+    "SELECT 1 FROM identity.email_code_lock FOR KEY SHARE",
+    "SELECT email_hash, locked_at FROM identity.email_code_lock",
+    "UPDATE identity.email_code_lock SET locked_at = now()",
+    "INSERT INTO identity.email_code_lock (email_hash, locked_at) VALUES (decode(repeat('00', 32), 'hex'), now())",
+  ];
+  it.each(others.flatMap((role) => statements.map((text) => [role, text] as const)))(
+    "%s may not: %s",
+    async (role, text) => {
+      expect(await sqlstate(role, text)).toBe("42501");
+    },
+  );
+
+  it("fin_console may take it", async () => {
+    expect(
+      await sqlstate(
+        "fin_console",
+        `INSERT INTO identity.email_code_lock (email_hash, locked_at)
+         VALUES (decode(repeat('01', 32), 'hex'), now())
+         ON CONFLICT (email_hash) DO UPDATE SET locked_at = EXCLUDED.locked_at`,
+      ),
+    ).toBeNull();
+    expect(
+      await sqlstate("fin_console", "SELECT 1 FROM identity.email_code_lock FOR UPDATE"),
+    ).toBeNull();
+  });
+});
+
 describe("fin_readonly reads no secret column", () => {
   it.each([
     "SELECT token FROM identity.session",

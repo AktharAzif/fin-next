@@ -44,9 +44,13 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
   `identity.email_code_request`): no code is right for it, it never supersedes a known browser's
   live code, and the browser's next steps answer as they would for an unknown address. A browser
   known for the account records none and leaves the live code as it was.
-- Every code request, codeless request and code try for one address takes the address's
-  transaction lock first (`lockAddress()`), after the network's limits and before the address's,
-  so overlapping requests leave one live code and one asking browser.
+- Every code request, codeless request and code try for one address takes the address's lock
+  (`lockAddress()`) before it reads the live requests, so overlapping requests leave one live code
+  and one asking browser. The lock is a row lock on the address's row in
+  `identity.email_code_lock`, which only `fin_console` may write or lock, never an advisory lock
+  (any login may take one). Every path takes its locks in one order: sign-up's own limits
+  (`sign_up_network`, then `sign_up_address`, which only sign-up takes), then the network's code
+  limit, then the address's lock, then the address's code limits.
 - The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
   Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
 

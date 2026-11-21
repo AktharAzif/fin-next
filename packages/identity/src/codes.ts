@@ -13,8 +13,9 @@
 // already knows the account exists, so there is nothing to keep alike, and its sign-up leaves the
 // live code and its tries alone.
 //
-// Every request, codeless request and try for one address takes the address's lock first, so they
-// run one after another and "one live code" holds when they overlap (see lockAddress()).
+// Every request, codeless request and try for one address takes the address's lock before it reads
+// the live requests, so they run one after another and "one live code" holds when they overlap.
+// The lock is a row only the console's role may lock (see lockAddress()).
 
 import { isKnownBrowserForEmail } from "./browsers.ts";
 import type { KeyedHasher } from "./crypto/keyed.ts";
@@ -43,17 +44,31 @@ export interface LiveCodeRequest {
  * Holds the address's lock until the unit ends: every request, codeless request and try for the
  * address takes it before it reads the live requests, so two that overlap run one after the other
  * and the second sees what the first recorded. Without it, two code requests for one address could
- * each find no live code and both record one. Taken after the per-network limits and before any
- * per-address one, in every path, so that two units never wait on each other in a circle.
+ * each find no live code and both record one.
+ *
+ * The lock is the address's row in `identity.email_code_lock`, written here so the row lock lasts
+ * until commit (an address's first request inserts it; one that overlaps waits on the insert, then
+ * locks the row). Only fin_console may write or lock that table, so no other login can take the
+ * lock and hold it open to stall the address's sign-ins, nor watch it. Never an advisory lock:
+ * any login may take one, and its key shows in pg_locks.
+ *
+ * Every path takes its locks in one order, so that two units never wait on each other in a circle:
+ * sign-up's own limits first (`sign_up_network`, then `sign_up_address`, which only sign-up takes);
+ * then the network's code limit (`code_send`, or `code_sign_in` for a try); then this lock; then
+ * the address's code limits (`code_send` for the address, the strangers' share and the allowance of
+ * code emails, and their pause) and its requests. Nothing per address comes before this lock but
+ * `sign_up_address`, which no unit takes after it.
  */
 export async function lockAddress(
   db: Queryable,
-  hasher: KeyedHasher,
+  deps: { clock: Clock; hasher: KeyedHasher },
   email: string,
 ): Promise<void> {
-  await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-    `email_code_request:${hasher.bucket("email", email.toLowerCase())}`,
-  ]);
+  await db.query(
+    `INSERT INTO identity.email_code_lock (email_hash, locked_at) VALUES ($1, $2)
+     ON CONFLICT (email_hash) DO UPDATE SET locked_at = EXCLUDED.locked_at`,
+    [deps.hasher.hash("email", email.toLowerCase()), deps.clock.now()],
+  );
 }
 
 /**
@@ -246,7 +261,7 @@ export async function requestCode(
   },
 ): Promise<CodeRequestOutcome> {
   const email = input.email.toLowerCase();
-  await lockAddress(db, deps.hasher, email);
+  await lockAddress(db, deps, email);
   const now = deps.clock.now();
   const subject = deps.hasher.bucket("email", email);
   const live = await liveRequests(db, deps.hasher, email, now, { lock: true });
@@ -309,7 +324,7 @@ export async function requestCodeless(
   },
 ): Promise<CodelessOutcome> {
   const email = input.email.toLowerCase();
-  await lockAddress(db, deps.hasher, email);
+  await lockAddress(db, deps, email);
   const now = deps.clock.now();
   const subject = deps.hasher.bucket("email", email);
   const live = await liveRequests(db, deps.hasher, email, now, { lock: true });
@@ -356,7 +371,7 @@ export async function attemptCode(
   deps: { clock: Clock; hasher: KeyedHasher },
   input: { email: string; browserToken: string | null; accountExists: boolean },
 ): Promise<CodeAttempt> {
-  await lockAddress(db, deps.hasher, input.email);
+  await lockAddress(db, deps, input.email);
   const now = deps.clock.now();
   const live = await liveRequests(db, deps.hasher, input.email, now, { lock: true });
   const own = live.find((r) => sameBrowser(deps.hasher, r, input.browserToken));

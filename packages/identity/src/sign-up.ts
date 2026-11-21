@@ -57,9 +57,10 @@ export async function signUp(
     // Velocity per network and per address ([SA-40]), then the code request's own limits
     // (`code_send` per network and per address, §5.6), counted here for both branches so that a
     // used-up allowance refuses a registered and an unknown address alike. The code asked for
-    // below is therefore not counted again. The address's lock comes after the network's limits and
-    // before the address's code requests, the order a code request from the library takes them in
-    // (see lockAddress()), so a sign-up and a code request never wait on each other in a circle.
+    // below is therefore not counted again. The order is lockAddress()'s, the one every path takes:
+    // sign-up's own limits (`sign_up_address` is taken by sign-up alone), then the network's code
+    // limit, then the address's lock, then the address's code requests, so a sign-up, a code
+    // request and a code try never wait on each other in a circle.
     for (const [bucket, subject] of [
       ["sign_up_network", rt.hasher.bucket("network", state.network)],
       ["sign_up_address", rt.hasher.bucket("email", email)],
@@ -68,7 +69,7 @@ export async function signUp(
       ["code_send", codeSendSubject(rt.hasher, email, false)],
     ] as const) {
       if (subject === null) {
-        await lockAddress(tx, rt.hasher, email);
+        await lockAddress(tx, rt, email);
         continue;
       }
       const result = await rt.limits.consume(tx, bucket, subject);

@@ -22,6 +22,11 @@
     },
     {
       "role": "fin_console",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "tables": ["identity.email_code_lock"]
+    },
+    {
+      "role": "fin_console",
       "privileges": ["SELECT"],
       "tables": ["identity.privileged_permission"]
     },
