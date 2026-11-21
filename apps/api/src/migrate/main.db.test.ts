@@ -145,24 +145,25 @@ describe("migrate --migrate", () => {
   });
 
   it("builds the email sender's schema and email.enqueue()'s allowlist from the template catalogue", async () => {
-    // The sender's tables and the outbox's sender columns (packages/email's migration).
+    // The sender's tables and the outbox's sender columns (packages/email's migration), all in
+    // email_private beside the outbox; the template grants and email.enqueue() stay in email.
     const objects = await su.query<{ name: string; found: boolean }>(
       `SELECT name, pg_catalog.to_regclass(name) IS NOT NULL AS found
        FROM unnest($1::text[]) AS t(name) ORDER BY name`,
       [
         [
-          "email.recipient_window",
-          "email.daily_budget",
-          "email.send_bucket",
-          "email.delivery_check",
-          "email.delivery_check_turn",
+          "email_private.recipient_window",
+          "email_private.daily_budget",
+          "email_private.send_bucket",
+          "email_private.delivery_check",
+          "email_private.delivery_check_turn",
         ],
       ],
     );
     for (const row of objects.rows) expect(row.found, row.name).toBe(true);
     const columns = await su.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM information_schema.columns
-       WHERE table_schema = 'email' AND table_name = 'outbox'
+       WHERE table_schema = 'email_private' AND table_name = 'outbox'
          AND column_name IN ('folded_into', 'first_due_at', 'counted')`,
     );
     expect(columns.rows[0]?.n).toBe(3);
@@ -186,12 +187,21 @@ describe("migrate --migrate", () => {
     }));
     expect(rows.rows.sort(byKey)).toEqual(want.sort(byKey));
 
-    // Only the worker holds the sender's tables.
-    const privileges = await su.query<{ worker: boolean; console: boolean }>(
-      `SELECT has_table_privilege('fin_worker', 'email.send_bucket', 'UPDATE') AS worker,
-              has_table_privilege('fin_console', 'email.send_bucket', 'SELECT') AS console`,
+    // Only the worker holds the sender's tables, and only the worker may use their schema.
+    const privileges = await su.query<{
+      worker: boolean;
+      console: boolean;
+      worker_schema: boolean;
+      console_schema: boolean;
+    }>(
+      `SELECT has_table_privilege('fin_worker', 'email_private.send_bucket', 'UPDATE') AS worker,
+              has_table_privilege('fin_console', 'email_private.send_bucket', 'SELECT') AS console,
+              has_schema_privilege('fin_worker', 'email_private', 'USAGE') AS worker_schema,
+              has_schema_privilege('fin_console', 'email_private', 'USAGE') AS console_schema`,
     );
-    expect(privileges.rows).toEqual([{ worker: true, console: false }]);
+    expect(privileges.rows).toEqual([
+      { worker: true, console: false, worker_schema: true, console_schema: false },
+    ]);
 
     // The console may queue a sign-in code; the api's login may not (FE001).
     const signInCode = (id: string) =>
@@ -220,7 +230,7 @@ describe("migrate --migrate", () => {
     } finally {
       await apiLogin.end();
     }
-    await su.query("DELETE FROM email.outbox");
+    await su.query("DELETE FROM email_private.outbox");
   });
 
   it("reads the image's layout at FIN_DB_ASSETS_DIR: the same files, so nothing is pending", async () => {

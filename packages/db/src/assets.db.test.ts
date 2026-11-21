@@ -95,8 +95,8 @@ describe("every package's files, from an empty database", () => {
       [
         [
           "audit.event",
-          "email.outbox",
-          "email.send_bucket",
+          "email_private.outbox",
+          "email_private.send_bucket",
           "ops.kill_switch",
           "identity.user",
           "identity.session_view",
