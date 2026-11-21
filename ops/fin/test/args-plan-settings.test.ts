@@ -93,6 +93,19 @@ describe("plans", () => {
   });
 });
 
+/** The parts of the staging file these tests change. */
+interface StagingRaw {
+  email: { dmarcPolicy: string; token: { service: string } };
+  railway: { deployOrder: string[]; connectorOrder: string[] };
+  tunnels: { public: { standby: string } };
+  staticOrder: string[];
+  static: Record<string, unknown>;
+}
+
+function stagingRaw(): StagingRaw {
+  return JSON.parse(readFileSync(join(REPO_ROOT, "ops", "environments", "staging.json"), "utf8"));
+}
+
 describe("the public settings", () => {
   it("loads ops/environments/staging.json", () => {
     const s = loadSettings(REPO_ROOT, "staging");
@@ -102,6 +115,54 @@ describe("the public settings", () => {
     assert.equal(mustBeSealed(s, "TUNNEL_TOKEN"), true);
     assert.equal(mustBeSealed(s, "FIN_HEARTBEAT_WATCHER_URL"), true);
     assert.equal(mustBeSealed(s, "FIN_SERVICE"), false);
+  });
+
+  it("keeps staging's sending subdomains at DMARC p=reject ([BD-17])", () => {
+    assert.equal(loadSettings(REPO_ROOT, "staging").email.dmarcPolicy, "reject");
+    for (const policy of ["none", "quarantine"]) {
+      const raw = stagingRaw();
+      raw.email.dmarcPolicy = policy;
+      assert.throws(() => parseSettings(raw, "staging"), /email.dmarcPolicy must be reject/);
+    }
+  });
+
+  it("requires every caller key to be sealed, the rotated ones included", () => {
+    const s = loadSettings(REPO_ROOT, "staging");
+    for (const name of ["FIN_CALLER_KEY_1", "FIN_CALLER_KEY_2", "FIN_CALLER_KEY_10"]) {
+      assert.equal(mustBeSealed(s, name), true, name);
+    }
+    assert.equal(mustBeSealed(s, "FIN_CALLER_PUBLIC_KEYS"), false);
+  });
+
+  it("runs both backup schedules of spec 01 §6.2: nightly and hourly", () => {
+    const services = loadSettings(REPO_ROOT, "staging").railway.services;
+    assert.equal(services.backup?.cron, "17 3 * * *");
+    assert.equal(services["backup-hourly"]?.cron, "5 * * * *");
+    assert.equal(services["backup-hourly"]?.image, services.backup?.image);
+    assert.equal(services["backup-hourly"]?.startCommand, "dist/main.js --hourly");
+  });
+
+  it("never takes a name every object inherits for a service or a static deployment", () => {
+    for (const change of [
+      (raw: StagingRaw) => raw.railway.deployOrder.push("constructor"),
+      (raw: StagingRaw) => raw.railway.connectorOrder.push("toString"),
+      (raw: StagingRaw) => (raw.email.token.service = "hasOwnProperty"),
+      (raw: StagingRaw) => (raw.tunnels.public.standby = "valueOf"),
+      (raw: StagingRaw) => raw.staticOrder.push("hasOwnProperty"),
+    ]) {
+      const raw = stagingRaw();
+      change(raw);
+      assert.throws(
+        () => parseSettings(raw, "staging"),
+        /no service|does not exist|no static deployment/,
+      );
+    }
+    const raw = stagingRaw();
+    raw.static = JSON.parse(`{"__proto__": ${JSON.stringify(raw.static.console)}}`);
+    assert.throws(
+      () => parseSettings(raw, "staging"),
+      /static has a key that is not a deployment name/,
+    );
   });
 
   it("holds no private value: no zone, no ID, no address", () => {

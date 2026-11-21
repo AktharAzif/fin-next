@@ -106,7 +106,7 @@
   },
   "email": {
     "subdomains": ["auth", "notify"],
-    "dmarcPolicy": "none",
+    "dmarcPolicy": "reject",
     "token": {
       "name": "fin-next-staging-email",
       "permissionGroup": "Email Sending Write",
@@ -133,7 +133,7 @@
       "TUNNEL_TOKEN",
       "FIN_INGRESS_PROOFS",
       "FIN_DB_PASSWORD",
-      "FIN_CALLER_KEY_1",
+      "FIN_CALLER_KEY_*",
       "FIN_TELEMETRY_TOKEN",
       "FIN_ERRORS_DSN",
       "FIN_EMAIL_TOKEN",
@@ -279,6 +279,18 @@
         "memoryMb": 1024,
         "staticEgress": false,
         "cron": "17 3 * * *"
+      },
+      "backup-hourly": {
+        "image": "fin-next-backup",
+        "startCommand": "dist/main.js --hourly",
+        "replicas": 1,
+        "healthcheck": null,
+        "overlapSeconds": 0,
+        "drainingSeconds": 0,
+        "restart": "NEVER",
+        "memoryMb": 1024,
+        "staticEgress": false,
+        "cron": "5 * * * *"
       },
       "cloudflared-db": {
         "image": "fin-next-connector",

@@ -11,6 +11,15 @@ import { HOST_ROLES } from "./overlay.ts";
 export const ENVIRONMENTS = ["staging"] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];
 
+/**
+ * The DMARC policy each environment's sending subdomains keep. Staging stays at `p=reject`, as
+ * Cloudflare wrote the records when it onboarded the subdomains ([BD-17], spec 01 §7.8); a file
+ * that says otherwise is refused, so no command can weaken them from the desired state.
+ */
+export const DMARC_POLICY: Readonly<Record<Environment, "none" | "quarantine" | "reject">> = {
+  staging: "reject",
+};
+
 export type TunnelRole = "public" | "admin";
 export type HeaderProfile = "app" | "hosted" | "selfie" | "docs";
 export type RestartPolicy = "ALWAYS" | "NEVER" | "ON_FAILURE";
@@ -188,6 +197,10 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
   const staticRaw = c.obj(top.static, "static");
   const statics: Record<string, StaticSettings> = {};
   for (const [name, value] of Object.entries(staticRaw)) {
+    if (!SERVICE.test(name)) {
+      c.problems.push("static has a key that is not a deployment name");
+      continue;
+    }
     const s = c.obj(value, `static.${name}`);
     statics[name] = {
       script: c.str(s.script, `static.${name}.script`, own),
@@ -207,7 +220,10 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
   const servicesRaw = c.obj(railway.services, "railway.services");
   const services: Record<string, ServiceSettings> = {};
   for (const [name, value] of Object.entries(servicesRaw)) {
-    if (!SERVICE.test(name)) c.problems.push(`railway.services.${name} is not a service name`);
+    if (!SERVICE.test(name)) {
+      c.problems.push("railway.services has a key that is not a service name");
+      continue;
+    }
     const s = c.obj(value, `railway.services.${name}`);
     const p = `railway.services.${name}`;
     const service: ServiceSettings = {
@@ -296,23 +312,29 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
     },
   };
 
-  // Cross-references: every name a list uses must exist.
+  // Cross-references: every name a list uses must exist, as the map's own key (never a name every
+  // object inherits, such as constructor).
   for (const name of [...settings.railway.deployOrder, ...settings.railway.connectorOrder]) {
-    if (services[name] === undefined)
+    if (!Object.hasOwn(services, name))
       c.problems.push(`railway order names ${name}, which has no service`);
   }
   for (const t of Object.values(tunnels)) {
     for (const service of [t.connector, t.standby]) {
-      if (services[service] === undefined)
+      if (!Object.hasOwn(services, service))
         c.problems.push(`tunnel ${t.name} names ${service}, which has no service`);
     }
   }
   for (const name of settings.staticOrder) {
-    if (statics[name] === undefined)
+    if (!Object.hasOwn(statics, name))
       c.problems.push(`staticOrder names ${name}, which has no static deployment`);
   }
-  if (services[settings.email.token.service] === undefined) {
+  if (!Object.hasOwn(services, settings.email.token.service)) {
     c.problems.push("email.token.service names a service that does not exist");
+  }
+  if (settings.email.dmarcPolicy !== DMARC_POLICY[environment]) {
+    c.problems.push(
+      `email.dmarcPolicy must be ${DMARC_POLICY[environment]} on ${environment} ([BD-17])`,
+    );
   }
   if (settings.email.token.expiryDays < 1 || settings.email.token.expiryDays > 180) {
     c.problems.push("email.token.expiryDays must be between 1 and 180");
