@@ -52,6 +52,32 @@ async function tabTo(page: Page, target: Locator) {
   await expect(target).toBeFocused();
 }
 
+/** The kit's page-level tabs (the section also holds a drawer's tabs). */
+const customerTabs = (page: Page) =>
+  section(page, "tabs")
+    .locator('[data-slot="tabs"]')
+    .filter({
+      has: page.getByRole("tablist", { name: "Customer", exact: true }),
+    });
+
+/** The text colour tokens as computed colours, for the theme the page shows. */
+async function textTokens(page: Page) {
+  return page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const rgb = (name: string) => {
+      const hex = root.getPropertyValue(name).trim().replace(/^#/, "");
+      const [r, g, b] = [0, 2, 4].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+      return `rgb(${r}, ${g}, ${b})`;
+    };
+    return {
+      primary: rgb("--fin-color-text-primary"),
+      secondary: rgb("--fin-color-text-secondary"),
+      tertiary: rgb("--fin-color-text-tertiary"),
+      disabled: rgb("--fin-color-text-disabled"),
+    };
+  });
+}
+
 /** Layout width, unaffected by an entry transition's scale. */
 const layoutWidth = (target: ReturnType<Page["locator"]>) =>
   target.evaluate((el) => (el as HTMLElement).offsetWidth);
@@ -406,21 +432,149 @@ test.describe("the components @kit", () => {
   });
 
   test("tabs: arrows move and select; TabLinks mark the current page", async ({ page }) => {
-    const overview = page.getByRole("tab", { name: "Overview" });
+    const customer = customerTabs(page);
+    const overview = customer.getByRole("tab", { name: "Overview" });
+    const details = customer.getByRole("tab", { name: "Details" });
+    const documents = customer.getByRole("tab", { name: "Documents" });
     await overview.click();
     await page.keyboard.press("ArrowRight");
-    await expect(page.getByRole("tab", { name: "Details" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    await expect(page.getByRole("tabpanel")).toHaveText("The details.");
+    await expect(details).toHaveAttribute("aria-selected", "true");
+    await expect(customer.getByRole("tabpanel")).toHaveText("The details.");
+    // A disabled tab: the arrows reach it, but it is never chosen, by the keys or by a click.
+    await page.keyboard.press("ArrowRight");
+    await expect(documents).toBeFocused();
+    await expect(documents).toHaveAttribute("aria-disabled", "true");
+    await expect(documents).toHaveAttribute("aria-selected", "false");
+    await expect(details).toHaveAttribute("aria-selected", "true");
+    await expect(customer.getByRole("tabpanel")).toHaveText("The details.");
     await page.keyboard.press("End");
-    await expect(page.getByRole("tab", { name: /Money/ })).toBeFocused();
+    await expect(customer.getByRole("tab", { name: /Money/ })).toBeFocused();
+    await details.click();
+    await documents.click({ force: true });
+    await expect(details).toHaveAttribute("aria-selected", "true");
+    await expect(customer.getByRole("tabpanel")).toHaveText("The details.");
     await expect(
       page
         .getByRole("navigation", { name: "Settings" })
         .getByRole("link", { name: "Organisation" }),
     ).toHaveAttribute("aria-current", "page");
+  });
+
+  test("tabs: the board's gaps, the chosen tab and the current link (AC-UI-07)", async ({
+    page,
+  }) => {
+    const customer = customerTabs(page);
+    const look = await customer.evaluate((root) => {
+      const px = (n: number) => Math.round(n) + 0;
+      const row = root.querySelector('[data-slot="tabs-row"]') as HTMLElement;
+      const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[];
+      const panel = root.querySelector('[role="tabpanel"]') as HTMLElement;
+      const label = (tab: HTMLElement) => {
+        const range = document.createRange();
+        range.selectNodeContents(tab.firstChild as Node);
+        return range.getBoundingClientRect();
+      };
+      const [overview, details, documents] = tabs.map(label);
+      const rowBox = row.getBoundingClientRect();
+      const panelBox = panel.getBoundingClientRect();
+      return {
+        // The first label on the content edge; labels 28px apart; the panel's first line 24px
+        // under the 1px rule.
+        edge: px((overview?.left ?? 0) - rowBox.left),
+        apart: [
+          px((details?.left ?? 0) - (overview?.right ?? 0)),
+          px((documents?.left ?? 0) - (details?.right ?? 0)),
+        ],
+        under: px(
+          panelBox.top + Number.parseFloat(getComputedStyle(panel).paddingTop) - rowBox.bottom,
+        ),
+        rule: getComputedStyle(row).borderBottomWidth,
+        height: px(tabs[0]?.getBoundingClientRect().height ?? 0),
+      };
+    });
+    expect(look).toEqual({ edge: 0, apart: [28, 28], under: 24, rule: "1px", height: 40 });
+
+    // Read at rest, before any click (a tab's colour fades between states): Overview is chosen.
+    const token = await textTokens(page);
+    const details = customer.getByRole("tab", { name: "Details" });
+    const states = await customer.evaluate((root) => {
+      const paint = (el: Element | null) => {
+        if (el === null) return null;
+        const mark = getComputedStyle(el, "::after");
+        return {
+          colour: getComputedStyle(el).color,
+          weight: getComputedStyle(el).fontWeight,
+          mark: mark.backgroundColor,
+          markBox: [mark.height, mark.left, mark.right, mark.bottom].join(" "),
+        };
+      };
+      const count = root.querySelector('[data-slot="tab-count"]');
+      return {
+        chosen: paint(root.querySelector('[role="tab"][aria-selected="true"]')),
+        other: paint(
+          root.querySelector('[role="tab"][aria-selected="false"]:not([aria-disabled])'),
+        ),
+        disabled: paint(root.querySelector('[role="tab"][aria-disabled="true"]')),
+        count:
+          count === null
+            ? null
+            : { colour: getComputedStyle(count).color, weight: getComputedStyle(count).fontWeight },
+      };
+    });
+    const none = "rgba(0, 0, 0, 0)";
+    expect(states.chosen).toEqual({
+      colour: token.primary,
+      weight: "500",
+      mark: token.primary,
+      markBox: "2px 8px 8px 0px",
+    });
+    expect(states.other).toMatchObject({ colour: token.secondary, weight: "500", mark: none });
+    expect(states.disabled).toMatchObject({ colour: token.disabled, mark: none });
+    expect(states.count).toEqual({ colour: token.tertiary, weight: "400" });
+
+    // Focus draws the one ring inside the tab, so the row's edge never clips it.
+    await keyboardFocus(page, details);
+    const ring = await details.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { width: s.outlineWidth, offset: s.outlineOffset, style: s.outlineStyle };
+    });
+    expect(ring).toEqual({ width: "2px", offset: "-2px", style: "solid" });
+
+    const settings = page.getByRole("navigation", { name: "Settings" });
+    const linkPaint = (name: string) =>
+      settings.getByRole("link", { name }).evaluate((el) => ({
+        colour: getComputedStyle(el).color,
+        mark: getComputedStyle(el, "::after").backgroundColor,
+      }));
+    expect(await linkPaint("Organisation")).toEqual({ colour: token.primary, mark: token.primary });
+    expect(await linkPaint("Team")).toEqual({ colour: token.secondary, mark: none });
+  });
+
+  test("tabs in a drawer: labels 24px in; a row too wide scrolls in itself, not the page", async ({
+    page,
+  }) => {
+    const drawer = page.locator('[data-kit="tabs-drawer"]');
+    const fit = await drawer.evaluate((box) => {
+      const row = box.querySelector('[data-slot="tabs-row"]') as HTMLElement;
+      const list = box.querySelector('[role="tablist"]') as HTMLElement;
+      const panel = box.querySelector('[role="tabpanel"]') as HTMLElement;
+      const px = (n: number) => Math.round(n) + 0;
+      const range = document.createRange();
+      range.selectNodeContents(list.querySelector('[role="tab"]')?.firstChild as Node);
+      const rowBox = row.getBoundingClientRect();
+      const panelBox = panel.getBoundingClientRect();
+      const ps = getComputedStyle(panel);
+      return {
+        inset: px(range.getBoundingClientRect().left - rowBox.left),
+        panel: [
+          px(panelBox.left + Number.parseFloat(ps.paddingLeft) - rowBox.left),
+          px(panelBox.top + Number.parseFloat(ps.paddingTop) - rowBox.bottom),
+        ],
+        scrolls: getComputedStyle(list).overflowX === "auto" && list.scrollWidth > list.clientWidth,
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    expect(fit).toEqual({ inset: 24, panel: [24, 20], scrolls: true, page: 0 });
   });
 
   test("toasts: three at most, the oldest non-error evicted, errors stay; F8 reaches them", async ({

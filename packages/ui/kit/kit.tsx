@@ -638,12 +638,16 @@ export function Kit(props: { onReady: () => void }) {
               <TabsList aria-label="Customer">
                 <Tab value="overview">Overview</Tab>
                 <Tab value="details">Details</Tab>
+                <Tab value="documents" disabled>
+                  Documents
+                </Tab>
                 <Tab value="money" count={3}>
                   Money
                 </Tab>
               </TabsList>
               <TabPanel value="overview">The overview.</TabPanel>
               <TabPanel value="details">The details.</TabPanel>
+              <TabPanel value="documents">The documents.</TabPanel>
               <TabPanel value="money">The money.</TabPanel>
             </Tabs>
             <TabLinks label="Settings">
@@ -653,6 +657,24 @@ export function Kit(props: { onReady: () => void }) {
               <TabLink href="#team">Team</TabLink>
               <TabLink href="#roles">Roles</TabLink>
             </TabLinks>
+            {/* A drawer's tabs, wider than an S drawer: the row scrolls inside itself. */}
+            <div
+              data-kit="tabs-drawer"
+              className="w-full max-w-drawer-s overflow-hidden rounded-md bg-surface-raised shadow-ring"
+            >
+              <Tabs variant="drawer" defaultValue="overview">
+                <TabsList aria-label="Customer drawer">
+                  <Tab value="overview">Overview and tasks</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                  <Tab value="beneficiaries">Beneficiaries</Tab>
+                  <Tab value="transactions">Transactions</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+                <TabPanel value="beneficiaries">No beneficiaries yet.</TabPanel>
+                <TabPanel value="transactions">No transactions yet.</TabPanel>
+              </Tabs>
+            </div>
           </Section>
 
           <Section name="states" title="EmptyState and ErrorState">
