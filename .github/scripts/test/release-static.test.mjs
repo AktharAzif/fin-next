@@ -205,6 +205,8 @@ describe("stageOutput", () => {
       ["assets/_headers", /deploy renders it/],
       ["assets/a%2e.js", /the path holds/],
       [`assets/a${String.fromCharCode(0x200b)}.js`, /the path holds/],
+      ["assets/logo (1)-Bq3x.svg", /the path holds a character the deploy refuses/],
+      ["assets/ü-1.css", /the path holds a character the deploy refuses/],
     ];
     for (const [file, why] of refused) {
       const root = tempDir(t);
@@ -221,7 +223,7 @@ describe("stageOutput", () => {
     writeTree(root, {
       "b/index.html": "",
       "b/assets/A.JS.MAP": "{}",
-      "b/assets/logo (1)-Bq3x.svg": "<svg/>",
+      "b/assets/logo_1@2x~a+b=c,d-Bq3x.svg": "<svg/>",
     });
     const staged = stageOutput({
       from: join(root, "b"),
@@ -231,7 +233,7 @@ describe("stageOutput", () => {
     });
     assert.deepEqual(staged, { files: 2, maps: 1 });
     assert.ok(existsSync(join(root, "om", "assets", "A.JS.MAP")));
-    assert.ok(existsSync(join(root, "o", "assets", "logo (1)-Bq3x.svg")));
+    assert.ok(existsSync(join(root, "o", "assets", "logo_1@2x~a+b=c,d-Bq3x.svg")));
   });
 
   it("refuses an asset over the deploy's 25 MiB limit", (t) => {
@@ -249,14 +251,27 @@ describe("stageOutput", () => {
 });
 
 describe("artefactPathProblem", () => {
-  it("keeps the names a bundler emits and refuses what reads two ways or leaves the folder", () => {
+  it("keeps exactly the names the deploy takes and refuses what reads two ways or leaves the folder", () => {
     for (const ok of [
       "/index.html",
+      "/assets/index-Bq3x_9Z.js",
+      "/assets/~a_b@c+d=e,f.js",
+      "/.well-known/security.txt",
+    ]) {
+      assert.equal(artefactPathProblem(ok), null, ok);
+    }
+    // A bundler keeps these in an asset's name, but ops/fin's zip reader (SEGMENT) refuses the
+    // archive that holds one, so the release refuses the build rather than carry it (FW-C13).
+    for (const named of [
       "/assets/logo (1)-Bq3x.svg",
       "/assets/~a!b_c@d+e.js",
       "/assets/ü-1.css",
+      "/assets/a'b.js",
+      "/assets/a&b.js",
+      "/assets/[a]-1.js",
+      "/assets/a b.js",
     ]) {
-      assert.equal(artefactPathProblem(ok), null, ok);
+      assert.match(String(artefactPathProblem(named)), /the deploy refuses/, named);
     }
     for (const bad of [
       "assets/a.js",
@@ -361,7 +376,7 @@ describe("FW-C13: carrying the previous release's assets", () => {
     ]);
   });
 
-  it("refuses an asset path from a manifest that could leave assets/ or read two ways", (t) => {
+  it("refuses an asset path from a manifest that could leave assets/, reads two ways or the deploy refuses", (t) => {
     const prev = tempDir(t);
     for (const bad of [
       "/assets/../../etc/passwd",
@@ -372,16 +387,20 @@ describe("FW-C13: carrying the previous release's assets", () => {
       "/assets/a%2f..%2fb.js",
       "/assets/a\\b.js",
       "/assets/a\u0000.js",
+      "/assets/logo (1)-Bq3x.svg",
+      "/assets/ü-1.css",
       7,
     ]) {
       const manifest = { static: { console: { ownAssets: [bad] } } };
       assert.throws(() => previousOwnAssets(manifest, "console", prev), /refused/, String(bad));
     }
-    const named = { static: { console: { ownAssets: ["/assets/logo (1)-Bq3x.svg"] } } };
-    assert.deepEqual(previousOwnAssets(named, "console", prev), ["/assets/logo (1)-Bq3x.svg"]);
+    const named = { static: { console: { ownAssets: ["/assets/logo_1@2x~a+b=c,d-Bq3x.svg"] } } };
+    assert.deepEqual(previousOwnAssets(named, "console", prev), [
+      "/assets/logo_1@2x~a+b=c,d-Bq3x.svg",
+    ]);
   });
 
-  it("carries an asset whose name a bundler keeps (spaces, brackets) into the next release", (t) => {
+  it("refuses at build time a name the deploy refuses, and carries every name it takes", (t) => {
     const root = tempDir(t);
     const layout = JSON.stringify({
       entries: [{ kind: "app", path: "apps/console", name: "@fin/console", static: "console" }],
@@ -401,16 +420,23 @@ describe("FW-C13: carrying the previous release's assets", () => {
       build({ root, env, runBuild: () => {} });
       return env;
     };
-    // Release A builds an asset named as Vite names `logo (1).svg`.
-    const a = release(PREV, { "assets/app-1.js": "one", "assets/logo (1)-Bq3x.svg": "<svg/>" });
+    // A name Vite keeps for `logo (1).svg` is one `fin static render` refuses: the build fails
+    // here, before it is attested and carried into every later release (FW-C13).
+    assert.throws(
+      () => release(PREV, { "assets/logo (1)-Bq3x.svg": "<svg/>" }),
+      /the path holds a character the deploy refuses/,
+    );
+    // Release A builds an asset whose name holds every mark the deploy takes.
+    const named = "assets/logo_1@2x~a+b=c,d-Bq3x.svg";
+    const a = release(PREV, { "assets/app-1.js": "one", [named]: "<svg/>" });
     const first = /** @type {any} */ (merge({ root, env: a }));
-    assert.deepEqual(first.console.ownAssets, ["/assets/app-1.js", "/assets/logo (1)-Bq3x.svg"]);
+    assert.deepEqual(first.console.ownAssets, ["/assets/app-1.js", `/${named}`]);
     const manifestA = { static: { console: { ownAssets: first.console.ownAssets } } };
     const artefactA = join(root, "keep", `static-console-${PREV}`);
     writeTree(root, {
       [`keep/static-console-${PREV}/index.html`]: "<p>a",
       [`keep/static-console-${PREV}/assets/app-1.js`]: "one",
-      [`keep/static-console-${PREV}/assets/logo (1)-Bq3x.svg`]: "<svg/>",
+      [`keep/static-console-${PREV}/${named}`]: "<svg/>",
     });
     // Release B, the next one, carries both of A's assets in.
     const b = release(SHA, { "assets/app-2.js": "two" });
@@ -421,10 +447,10 @@ describe("FW-C13: carrying the previous release's assets", () => {
         "utf8",
       ),
       [`release/previous/static/static-console-${PREV}/assets/app-1.js`]: "one",
-      [`release/previous/static/static-console-${PREV}/assets/logo (1)-Bq3x.svg`]: "<svg/>",
+      [`release/previous/static/static-console-${PREV}/${named}`]: "<svg/>",
     });
     const second = /** @type {any} */ (merge({ root, env: { ...b, PREVIOUS_SHA: PREV } }));
-    assert.deepEqual(second.console.carried, ["/assets/app-1.js", "/assets/logo (1)-Bq3x.svg"]);
+    assert.deepEqual(second.console.carried, ["/assets/app-1.js", `/${named}`]);
     assert.deepEqual(second.console.ownAssets, ["/assets/app-2.js"]);
   });
 });

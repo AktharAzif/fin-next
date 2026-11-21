@@ -11,7 +11,7 @@
 //             stages each output in release/static/<key>/ and moves every source map out into
 //             release/source-maps/<key>/; refuses a build no artefact may be (artefactProblems:
 //             _headers or env.json, which the deploy renders, SF-05; a Worker control file; a
-//             path the deploy and a browser would read two ways; an asset over 25 MiB), or a link
+//             path the deploy refuses or would read two ways; an asset over 25 MiB), or a link
 //   take      (static, from here on no dependency code runs) admits what the build job staged,
 //             downloaded into release-staged/: static/, source-maps/ and meta/static-build.json
 //             only, no link, copied into release/ before anything else is downloaded there
@@ -35,7 +35,8 @@
 // Only the previous release's *own* assets travel (the ones its build produced, which its
 // manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
 // same path rule (artefactPathProblem) admits a release's own assets and the previous release's
-// list, so no name one release accepts can break the release after it.
+// list, and it is the deploy's own (ops/fin's zip reader), so no name one release accepts can break
+// the release after it or its deploy.
 // Node built-ins only. Every line it prints is `release.<what> key=value ...`.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -81,29 +82,34 @@ export const MAX_ARTEFACT_FILES = 20_000;
 const MIGRATION = /^\d{14}_[a-z][a-z0-9-]*_[a-z0-9][a-z0-9_]*\.sql$/;
 /** A package folder whose files migrate reads (packages/db/src/assets.ts's PACKAGE_NAME). */
 const PACKAGE = /^[a-z][a-z0-9-]*$/;
+/**
+ * The characters a path segment of an artefact may hold: exactly ops/fin's zip reader's SEGMENT
+ * (ops/fin/src/static/zip.ts), which `fin static render` applies to every entry of the archive.
+ */
+const SEGMENT = /^[A-Za-z0-9._@~+=,-]+$/;
 
 /**
- * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy,
- * Cloudflare and a browser all read one way: absolute, with no empty, `.` or `..` segment, no
- * backslash, no `%` (read again as an escape), `?` or `#` (they end a URL's path), no control or
- * invisible format character, and at most 1,024 characters. Spaces, brackets and letters beyond
- * ASCII are kept, as the bundler keeps them in an asset's name (`logo (1)-Bq3x.svg`).
+ * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy
+ * takes and that the deploy, Cloudflare and a browser all read one way: absolute, at most 1,024
+ * characters, with no empty, `.` or `..` segment, and every segment made only of ASCII letters,
+ * digits and `. _ @ ~ + = , -` (SEGMENT, the deploy's own rule). So no backslash, no `%` (read
+ * again as an escape), no `?` or `#` (they end a URL's path), no control or format character, and
+ * no space, bracket, `!`, `'`, `&` or letter beyond ASCII either: a bundler keeps those in an
+ * asset's name (`logo (1)-Bq3x.svg`), but `fin static render` refuses the archive that holds one,
+ * so the release refuses the build here rather than carry an asset no later release could deploy
+ * (FW-C13). Rename the source file instead.
  * @param {unknown} path
  * @returns {string | null}
  */
 export function artefactPathProblem(path) {
   if (typeof path !== "string" || !path.startsWith("/")) return "is not an absolute URL path";
   if (path.length > 1024) return "is longer than 1,024 characters";
-  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\%?#]/u.test(path)) {
-    return "holds a control or format character, a backslash, %, ? or #";
-  }
-  if (
-    path
-      .slice(1)
-      .split("/")
-      .some((s) => s === "" || s === "." || s === "..")
-  ) {
+  const segments = path.slice(1).split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) {
     return "has an empty, . or .. segment";
+  }
+  if (!segments.every((s) => SEGMENT.test(s))) {
+    return "holds a character the deploy refuses (it takes A-Z a-z 0-9 . _ @ ~ + = , - only)";
   }
   return null;
 }
@@ -473,7 +479,8 @@ export function previousOwnAssets(manifest, key, previousDir) {
     walkFiles(join(previousDir, "assets")).map((f) => posix.join("/assets", f.path.slice(1)));
   for (const path of paths) {
     // The same rule this release's own paths passed (merge), so no name a release accepted
-    // breaks the one after it; only what could leave assets/ or read two ways is refused.
+    // breaks the one after it: a path that could leave assets/ or that the deploy refuses is
+    // refused.
     if (
       typeof path !== "string" ||
       !path.startsWith("/assets/") ||

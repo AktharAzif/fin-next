@@ -44,8 +44,8 @@
 //       `https://${host}`) is not read here: the page's own policy refuses it in the browser;
 //     - no source map (`*.map` in any case, or a `sourceMappingURL` comment pointing at one);
 //     - nothing a deployment refuses (release-static.mjs's artefactProblems: `_headers` or
-//       `env.json`, which the deploy renders, SF-05; a Worker control file; a path read two ways;
-//       an asset over 25 MiB);
+//       `env.json`, which the deploy renders, SF-05; a Worker control file; a path the deploy
+//       refuses or would read two ways; an asset over 25 MiB);
 //   and no link anywhere. The built index.html's inline scripts, handlers and the rest of FW-C04
 // are scripts/static-check.mjs's, which the build job runs next; gitleaks scans the same folders
 // (gitleaks-static.sh). While no app has been built, the check passes with a notice.
