@@ -9,8 +9,12 @@
 // inside the repository so the asset's name is the one a real app's build gives. Each of the
 // guard's three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts)
 // carries the guard in a release build, in its main bundle and in every worker's, and still builds,
-// with nothing of the harness in any of its source maps and every source of the repository it
-// holds an input of `@fin/server#test`.
+// with no module of the harness in its graph and no file of it in its output, as the build itself
+// reports them. turbo runs these tests on every run, so no cached pass hides a release build that
+// lost the guard; planted apps whose config's helper spreads the guard away, whose file of
+// re-exports loads the harness by a typed glob, or whose stylesheet inlines an asset linked to a
+// harness file, fail the same check.
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   globSync,
@@ -24,8 +28,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
-import { build, type Plugin, resolveConfig } from "vite";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { build, type Plugin } from "vite";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   HARNESS_GUARD,
@@ -411,28 +415,165 @@ describe("each of the guard's checks", () => {
   });
 });
 
+/** What one bundle of a release build ran with and held: the main bundle, or a worker's. */
+interface Bundle {
+  worker: boolean;
+  /** The plugins the bundle's build ran, by name. */
+  plugins: string[];
+  /** Every module of the bundle's graph, as the build lists it at its end (this.getModuleIds()). */
+  modules: string[];
+  /** Each file the bundle's output holds, by its source: its chunks' code and its assets'. */
+  outputs: (string | Uint8Array)[];
+  /** The files each asset of the output was read from, as paths. */
+  assets: string[];
+}
+
+/** What a server bundle's release build, run from its config file, resolved, ran with and held. */
+interface Inspection {
+  /** Each bundle the build made: the main bundle and each worker's. */
+  bundles: Bundle[];
+  /** The plugins the resolved config gives a worker's bundle, whether or not the app has one. */
+  workerPlugins: string[];
+  /** The main bundle's entry, as a path. */
+  entry: string;
+  outDir: string;
+}
+
+const names = (plugins: readonly { name: string }[]): string[] =>
+  plugins.map((plugin) => plugin.name);
+
 /**
- * The inputs turbo.json gives `@fin/server#test`, as globs relative to the repository's root: the
- * package's own files for `$TURBO_DEFAULT$`, and each `$TURBO_ROOT$/` glob.
+ * A plugin that records what the bundle it is built into ran with and held, as that build reports
+ * it: the plugins its environment ran; at its end every module of its graph, those that add no
+ * code to the output (a file of re-exports) included, which a source map does not name; and the
+ * output it generates, each asset's files included, which no module or map names. In the main
+ * bundle it also takes, from the config the build resolved, the entry and the plugins that config
+ * gives a worker's bundle.
  */
-function serverTestInputs(): string[] {
-  const turbo = JSON.parse(readFileSync(join(REPOSITORY, "turbo.json"), "utf8")) as {
-    tasks?: Record<string, { inputs?: string[] }>;
+function recorder(inspection: Inspection): Plugin {
+  let worker = false;
+  let recorded: Bundle | undefined;
+  return {
+    name: "fin:test-bundle-recorder",
+    async configResolved(config) {
+      worker = config.isWorker;
+      if (worker) return;
+      inspection.entry = resolve(config.root, String(config.build.ssr));
+      inspection.workerPlugins = names((await config.worker.plugins([])).plugins);
+    },
+    buildEnd() {
+      recorded = {
+        worker,
+        plugins: names(this.environment.plugins),
+        modules: [...this.getModuleIds()],
+        outputs: [],
+        assets: [],
+      };
+      inspection.bundles.push(recorded);
+    },
+    generateBundle(_options, bundle) {
+      if (recorded === undefined) throw new Error("a bundle was generated before its build ended");
+      const root = this.environment.config.root;
+      for (const file of Object.values(bundle)) {
+        if (file.type === "chunk") {
+          recorded.outputs.push(file.code);
+        } else {
+          recorded.outputs.push(file.source);
+          recorded.assets.push(...file.originalFileNames.map((name) => resolve(root, name)));
+        }
+      }
+    },
   };
-  return (turbo.tasks?.["@fin/server#test"]?.inputs ?? []).flatMap((input) => {
-    if (input === "$TURBO_DEFAULT$") return ["packages/server/**"];
-    if (input.startsWith("$TURBO_ROOT$/")) return [input.slice("$TURBO_ROOT$/".length)];
-    return [];
+}
+
+/**
+ * Runs the release build of the server bundle `configFile` describes, as the app's `build:server`
+ * runs it (`vite build --config`, though the config is imported by Node rather than bundled first,
+ * so the build writes nothing beside it), into a temporary directory, with a recorder added to its
+ * plugins and to every worker's.
+ */
+async function inspect(configFile: string): Promise<Inspection> {
+  vi.stubEnv("FIN_BUILD_TARGET", "release");
+  const inspection: Inspection = { bundles: [], workerPlugins: [], entry: "", outDir: temporary() };
+  await build({
+    configFile,
+    configLoader: "native",
+    logLevel: "silent",
+    build: { outDir: inspection.outDir, emptyOutDir: true },
+    plugins: [recorder(inspection)],
+    worker: { plugins: () => [recorder(inspection)] },
+  });
+  return inspection;
+}
+
+/**
+ * What makes an inspected release build unfit to ship, read from the build itself: a config that
+ * gives a worker's bundle no guard, a bundle built without the guard, any module of the harness in
+ * a bundle's graph, and any file of the harness its output carries as an asset or whole
+ * (harnessContents, which compares with every file of packages/testing). The main bundle comes
+ * first, then each worker's.
+ */
+function problems(inspection: Inspection): string[] {
+  const found: string[] = [];
+  if (!inspection.workerPlugins.includes(HARNESS_GUARD)) {
+    found.push("the release config gives a worker's bundle no guard");
+  }
+  const main = inspection.bundles.filter((bundle) => !bundle.worker).length;
+  if (main !== 1) found.push(`the build made ${main} main bundles`);
+  const bundles = [...inspection.bundles].sort((a, b) => Number(a.worker) - Number(b.worker));
+  for (const bundle of bundles) {
+    const which = bundle.worker ? "a worker's bundle" : "the main bundle";
+    if (!bundle.plugins.includes(HARNESS_GUARD)) found.push(`${which} was built without the guard`);
+    const harness = harnessModules(bundle.modules);
+    if (harness.length > 0) found.push(`${which} holds the harness: ${harness.join(", ")}`);
+    const carried = [
+      ...new Set([...harnessModules(bundle.assets), ...harnessContents(bundle.outputs)]),
+    ].sort();
+    if (carried.length > 0) found.push(`${which} carries the harness: ${carried.join(", ")}`);
+  }
+  return found;
+}
+
+/** The sources the source maps a build wrote name, each map read against its own place. */
+function mapSources(outDir: string): string[] {
+  return globSync("**/*.map", { cwd: outDir }).flatMap((path) => {
+    const map: unknown = JSON.parse(readFileSync(join(outDir, path), "utf8"));
+    const at = dirname(join(outDir, path));
+    return (map as { sources: string[] }).sources.map((source) => resolve(at, source));
   });
 }
 
-// These tests read files outside packages/server: each app's manifest, tsconfig.json,
-// vite.server.config.ts and sources, and every workspace package's manifest, tsconfig.json and
-// sources (serverBundleConfig sets `ssr.noExternal`, so a server bundle holds each @fin package its
-// app imports, and a package that loaded packages/testing would put the harness in it). turbo.json
-// names them as inputs of `@fin/server#test`, so a change to any of them runs the tests again
-// instead of replaying a cached pass; each bundle's test checks that every source of the repository
-// its maps name is one of those inputs.
+/**
+ * How turbo resolves `@fin/server#test` in this checkout, by its own dry run, which reads turbo.json
+ * and any package's turbo.json (a package's configuration overrides the root's) as a run does.
+ */
+function serverTestTask(): { cache: boolean } {
+  const turbo = join(REPOSITORY, "node_modules/.bin/turbo");
+  const out = execFileSync(turbo, ["run", "test", "--filter=@fin/server", "--dry=json"], {
+    cwd: REPOSITORY,
+    encoding: "utf8",
+    env: { ...process.env, TURBO_TELEMETRY_DISABLED: "1" },
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const dry = JSON.parse(out) as {
+    tasks: { taskId: string; resolvedTaskDefinition: { cache: boolean } }[];
+  };
+  const task = dry.tasks.find((each) => each.taskId === "@fin/server#test");
+  if (task === undefined) throw new Error("turbo's dry run holds no @fin/server#test");
+  return task.resolvedTaskDefinition;
+}
+
+// These tests read files no list of a task's inputs can name before they exist: any file an app's
+// vite.server.config.ts imports (a helper it spreads into its config), every module of a bundle's
+// graph wherever it lies (a file of re-exports adds no code, so no map names it), every file of
+// packages/testing (harnessContents compares each output with them all), and any file Vite reads
+// itself into a bundle as an asset. A cached pass replayed after a change to one of them could
+// hide a release build that lost the guard and ships the harness. So turbo never caches
+// `@fin/server#test`: the tests run on every `turbo run test`, which costs `pnpm check` the
+// package's whole suite (4 to 16 s on a developer's machine, by its load) even when nothing
+// changed. Each real-bundle test reads the build itself: the plugins each of its bundles ran,
+// every module of each one's graph and its output, as the build reports them.
 describe("the real server bundles", () => {
   const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
     .map((path) => path.split(sep).join("/"))
@@ -442,48 +583,180 @@ describe("the real server bundles", () => {
     expect(configs.length).toBeGreaterThan(0);
   });
 
+  it("are checked on every run of the tests, never by a cached pass", () => {
+    expect(serverTestTask().cache).toBe(false);
+  }, 30_000);
+
   it.each(configs)(
-    "%s carries the guard in a release build and still builds",
+    "%s carries the guard in every bundle of a release build and still builds",
     async (path) => {
-      vi.stubEnv("FIN_BUILD_TARGET", "release");
-      const configFile = join(REPOSITORY, path);
-      const resolved = await resolveConfig(
-        { configFile, configLoader: "native", logLevel: "silent" },
-        "build",
-      );
-      expect(resolved.plugins.map((plugin) => plugin.name)).toContain(HARNESS_GUARD);
-      const worker = await resolved.worker.plugins([]);
-      expect(worker.plugins.map((plugin) => plugin.name)).toContain(HARNESS_GUARD);
-      const outDir = temporary();
-      await build({
-        configFile,
-        configLoader: "native",
-        logLevel: "silent",
-        build: { outDir, emptyOutDir: true },
-      });
-      expect(existsSync(join(outDir, "main.js"))).toBe(true);
-      // Every map the build wrote, a worker's bundle's included, each read against its own place.
-      const maps = globSync("**/*.map", { cwd: outDir });
-      expect(maps).toContain("main.js.map");
-      const sources = maps.flatMap((path) => {
-        const map: unknown = JSON.parse(readFileSync(join(outDir, path), "utf8"));
-        const at = dirname(join(outDir, path));
-        return (map as { sources: string[] }).sources.map((source) => resolve(at, source));
-      });
-      expect(sources.length).toBeGreaterThan(0);
-      expect(harnessModules(sources)).toEqual([]);
-      // Every source of the repository the bundle holds, its dependencies' aside (the lockfile, a
-      // global dependency, pins those), is an input of `@fin/server#test`.
-      const inputs = serverTestInputs();
-      const repository = realpathSync.native(REPOSITORY);
-      const real = (path: string) => (existsSync(path) ? realpathSync.native(path) : path);
-      const unlisted = sources
-        .map((source) => relative(repository, real(source)).split(sep).join("/"))
-        .filter((source) => source !== ".." && !source.startsWith("../") && !isAbsolute(source))
-        .filter((source) => !source.split("/").includes("node_modules"))
-        .filter((source) => !inputs.some((input) => matchesGlob(source, input)));
-      expect(unlisted).toEqual([]);
+      const inspection = await inspect(join(REPOSITORY, path));
+      expect(problems(inspection)).toEqual([]);
+      expect(existsSync(join(inspection.outDir, "main.js"))).toBe(true);
+      const main = inspection.bundles.find((bundle) => !bundle.worker);
+      expect(main?.modules).toContain(inspection.entry);
     },
     60_000,
   );
+});
+
+/**
+ * A planted app that builds from its own vite.server.config.ts as a real app does, with
+ * `@fin/server`, `@fin/testing` and `vite` linked into its node_modules as pnpm links them; `files`
+ * writes each file under its root, given how that file's directory reaches the harness's files.
+ */
+function plantApp(files: Readonly<Record<string, Source>>): string {
+  const root = temporary();
+  mkdirSync(join(root, "node_modules/@fin"), { recursive: true });
+  symlinkSync(HARNESS, join(root, "node_modules/@fin/testing"), "dir");
+  symlinkSync(join(REPOSITORY, "packages/server"), join(root, "node_modules/@fin/server"), "dir");
+  const vite = realpathSync.native(join(REPOSITORY, "packages/server/node_modules/vite"));
+  symlinkSync(vite, join(root, "node_modules/vite"), "dir");
+  for (const [name, text] of Object.entries(files)) {
+    const file = join(root, name);
+    const harness = (path: string) =>
+      relative(dirname(file), join(HARNESS, path)).split(sep).join("/");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text(harness));
+  }
+  return root;
+}
+
+// A planted app whose config takes a helper's config after serverBundleConfig's, and whose entry
+// starts a worker and imports through a file of re-exports at the app's root: files a change could
+// add to an app without touching its vite.server.config.ts's call or its src/. `files` adds others.
+const helped = (
+  helper: string,
+  barrel: Source,
+  files: Readonly<Record<string, Source>> = {},
+): Record<string, Source> => ({
+  ...files,
+  "vite.server.config.ts": () =>
+    'import { serverBundleConfig } from "@fin/server/vite";\n' +
+    'import { defineConfig } from "vite";\n' +
+    'import { shared } from "./vite.shared.ts";\n\n' +
+    "export default defineConfig({\n" +
+    '  ...serverBundleConfig({ root: import.meta.dirname, entry: "src/server.node.ts" }),\n' +
+    "  ...shared,\n" +
+    "});\n",
+  "vite.shared.ts": () =>
+    `import type { UserConfig } from "vite";\n\nexport const shared: UserConfig = ${helper};\n`,
+  "zz-barrel.ts": barrel,
+  "src/value.ts": () => "export const value = 1;\n",
+  "src/planted-worker.ts": () => "(globalThis as Record<string, unknown>).planted = 1;\n",
+  [ENTRY]: () =>
+    'import Planted from "./planted-worker.ts?worker&inline";\n' +
+    'import { planted, value } from "../zz-barrel.ts";\n' +
+    "export const harness = [Planted, planted, value];\n",
+});
+/** Helpers: one that keeps serverBundleConfig's plugins, and ones that spread them away. */
+const KEEPS = "{}";
+const SPREADS_AWAY = "{ plugins: [], worker: {} }";
+const SPREADS_WORKERS_AWAY = "{ worker: {} }";
+/**
+ * Files of re-exports: one that adds no code, one that loads the harness by a typed glob, and one
+ * that takes an `?inline` stylesheet whose `url()` names a file outside src/.
+ */
+const REEXPORTS: Source = () => 'export { value, value as planted } from "./src/value.ts";\n';
+const GLOBS: Source = (harness) =>
+  'export { value } from "./src/value.ts";\n' +
+  `export const planted = import.meta.glob<Record<string, unknown>>(${JSON.stringify(
+    harness("src/tot?.ts"),
+  )}, { eager: true });\n`;
+const STYLES: Source = () =>
+  'export { value } from "./src/value.ts";\n' +
+  'export { default as planted } from "./src/planted.css?inline";\n';
+const STYLESHEET: Record<string, Source> = {
+  "src/planted.css": () => 'a { background: url("../assets/banner.bin"); }\n',
+};
+
+// A change can hide a release build that has lost the guard and ships the harness in two ways:
+// turbo replays a cached pass of these tests, or the tests, when they run, read something other
+// than the build. Here a helper the app's config imports spreads the guard away, and a file of
+// re-exports beside the entry loads the harness through a typed glob; no list of inputs named
+// either file, and the file of re-exports adds no code of its own until it globs. An asset outside
+// src/ that is a link to a harness file, which a stylesheet's `url()` inlines, is no module at
+// all. The tests run on every change (above), and each case is what they then report.
+describe("a release build that lost the guard fails the real-bundle check", () => {
+  const config = (root: string) => join(root, "vite.server.config.ts");
+  // A file of the harness that Vite inlines as a data: URL (under 4 KiB).
+  const small = globSync("src/**/*.ts", { cwd: HARNESS })
+    .map((path) => path.split(sep).join("/"))
+    .sort()
+    .find((path) => {
+      const size = statSync(join(HARNESS, path)).size;
+      return size > 0 && size < 4096;
+    });
+  /** The planted app `files` make, with assets/banner.bin a link to the small harness file. */
+  const withBanner = (files: Record<string, Source>): string => {
+    if (small === undefined) throw new Error("the harness holds no file the test can inline");
+    const root = plantApp(files);
+    mkdirSync(join(root, "assets"));
+    symlinkSync(join(HARNESS, small), join(root, "assets/banner.bin"));
+    return root;
+  };
+
+  it("with only the config's helper changed: no bundle carries the guard", async () => {
+    const inspection = await inspect(config(plantApp(helped(SPREADS_AWAY, REEXPORTS))));
+    expect(problems(inspection)).toEqual([
+      "the release config gives a worker's bundle no guard",
+      "the main bundle was built without the guard",
+      "a worker's bundle was built without the guard",
+    ]);
+  }, 60_000);
+
+  it("with a helper that spreads away only the worker's guard", async () => {
+    const inspection = await inspect(config(plantApp(helped(SPREADS_WORKERS_AWAY, REEXPORTS))));
+    expect(problems(inspection)).toEqual([
+      "the release config gives a worker's bundle no guard",
+      "a worker's bundle was built without the guard",
+    ]);
+  }, 60_000);
+
+  it("with the helper and the file of re-exports changed: the build ships the harness", async () => {
+    const inspection = await inspect(config(plantApp(helped(SPREADS_AWAY, GLOBS))));
+    expect(readFileSync(join(inspection.outDir, "main.js"), "utf8")).toContain("function totp(");
+    expect(problems(inspection)).toEqual([
+      "the release config gives a worker's bundle no guard",
+      "the main bundle was built without the guard",
+      "the main bundle holds the harness: packages/testing/src/totp.ts",
+      "a worker's bundle was built without the guard",
+    ]);
+  }, 60_000);
+
+  it("with only the file of re-exports changed: the guard refuses the build", async () => {
+    await expect(inspect(config(plantApp(helped(KEEPS, GLOBS))))).rejects.toThrow(
+      harnessMessage(["packages/testing/src/totp.ts"]),
+    );
+  }, 60_000);
+
+  it("with the helper changed and an asset linked to a harness file: the output carries it", async () => {
+    const inspection = await inspect(config(withBanner(helped(SPREADS_AWAY, STYLES, STYLESHEET))));
+    const file = readFileSync(join(HARNESS, String(small)));
+    expect(readFileSync(join(inspection.outDir, "main.js"), "utf8")).toContain(
+      file.toString("base64"),
+    );
+    expect(problems(inspection)).toEqual([
+      "the release config gives a worker's bundle no guard",
+      "the main bundle was built without the guard",
+      `the main bundle carries the harness: packages/testing/${small}`,
+      "a worker's bundle was built without the guard",
+    ]);
+  }, 60_000);
+
+  it("with only the asset linked to a harness file: the guard refuses the build", async () => {
+    await expect(inspect(config(withBanner(helped(KEEPS, STYLES, STYLESHEET))))).rejects.toThrow(
+      harnessMessage([`packages/testing/${small}`]),
+    );
+  }, 60_000);
+
+  it("and reads every bundle and module, a file of re-exports the maps leave out included", async () => {
+    const root = plantApp(helped(KEEPS, REEXPORTS));
+    const inspection = await inspect(config(root));
+    expect(problems(inspection)).toEqual([]);
+    expect(inspection.bundles.map((bundle) => bundle.worker).sort()).toEqual([false, true]);
+    const barrel = join(root, "zz-barrel.ts");
+    expect(inspection.bundles.flatMap((bundle) => bundle.modules)).toContain(barrel);
+    expect(mapSources(inspection.outDir)).not.toContain(barrel);
+  }, 60_000);
 });
