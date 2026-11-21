@@ -48,6 +48,18 @@ export {
 export { REALM_GUARDS } from "./guards.ts";
 export { createLimitStore, LIMITS, type LimitStore } from "./limits.ts";
 export { checkName, NAME_RULES, type NameKind } from "./names.ts";
+export {
+  createPasswordHasher,
+  type PasswordHasher,
+  type PasswordHasherOptions,
+} from "./passwords/hasher.ts";
+export { type ResetLinkState, resetCodeLink } from "./passwords/links.ts";
+export {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  type PasswordProblem,
+  passwordProblem,
+} from "./passwords/policy.ts";
 export { type Clock, ManualClock, systemClock } from "./ports/clock.ts";
 export { AuditGuardError, type FinDatabase, UnitRolledBackError, type UnitTx } from "./ports/db.ts";
 export { isId, newId } from "./ports/ids.ts";

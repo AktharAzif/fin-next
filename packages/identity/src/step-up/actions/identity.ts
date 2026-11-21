@@ -61,6 +61,14 @@ export const IDENTITY_ACTIONS: readonly StepUpAction[] = [
     reasonKey: "forget_browser",
     bind: [],
   },
+  // Stretch 2 (§5.7): the digest never binds a password (§7.2), only the person.
+  {
+    key: "account.password_change",
+    realm: "developer",
+    kind: "intent",
+    reasonKey: "change_password",
+    bind: [],
+  },
   {
     key: "staff.factor_add",
     realm: "staff",
@@ -100,6 +108,7 @@ export const SELF_PATH_ACTIONS = {
     "/two-factor/enable": "account.totp_enable",
     "/two-factor/disable": "account.totp_disable",
     "/two-factor/generate-backup-codes": "account.backup_codes",
+    "/change-password": "account.password_change",
   },
   staff: {
     "/passkey/generate-register-options": "staff.factor_add",

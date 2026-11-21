@@ -14,6 +14,8 @@ import { finCookieName, readCookie, serializeFinCookie } from "./cookies.ts";
 import { randomToken } from "./crypto/keyed.ts";
 import { AuthRefusal } from "./errors.ts";
 import { checkName } from "./names.ts";
+import { assertNewPassword } from "./passwords/policy.ts";
+import { signUpPasswordHash } from "./passwords/sign-up.ts";
 import { DAY } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 import type { Realm } from "./realm.ts";
@@ -42,7 +44,7 @@ export async function signUp(
   realm: Realm,
   request: Request,
   context: RequestContext,
-  input: { name: unknown; email: unknown },
+  input: { name: unknown; email: unknown; password?: unknown },
 ): Promise<SignUpAnswer> {
   if (realm.settings.realm !== "developer") throw new Error("signUp is the developer realm's");
   const rt = realm.runtime;
@@ -53,6 +55,17 @@ export async function signUp(
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
     const fields = [...(name.ok ? [] : ["name"]), ...(EMAIL.test(email) ? [] : ["email"])];
     if (!name.ok || fields.length > 0) throw new AuthRefusal("invalid", "body.invalid", { fields });
+    // The password rule before any limit is counted, so a refused password costs no allowance;
+    // the hash after them, for a registered and an unknown address alike (§5.7).
+    if (input.password !== undefined && input.password !== null) {
+      if (!rt.settings.features.passwords) {
+        throw new AuthRefusal("invalid", "passwords.off", {
+          fields: ["password"],
+          problem: "password_not_offered",
+        });
+      }
+      assertNewPassword(input.password, "password", { email });
+    }
 
     // Velocity per network and per address ([SA-40]), then the code request's own limits
     // (`code_send` per network and per address, §5.6), counted here for both branches so that a
@@ -80,6 +93,7 @@ export async function signUp(
       }
     }
     state.codeSendCounted = true;
+    const passwordHash = await signUpPasswordHash(rt, input.password, email);
 
     const cookieHeader = request.headers.get("cookie");
     const sent = (cookie: "sign_up_browser" | "code_browser" | "known_browser"): string | null => {
@@ -114,8 +128,9 @@ export async function signUp(
 
     const now = rt.clock.now();
     await tx.query(
-      `INSERT INTO identity.sign_up_request (id, email, name, browser_hash, created_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO identity.sign_up_request
+         (id, email, name, browser_hash, created_at, expires_at, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         newId("sur", rt.clock),
         email,
@@ -123,6 +138,7 @@ export async function signUp(
         rt.hasher.hash("sign_up_browser", signUpToken),
         now,
         new Date(now.getTime() + DAY),
+        passwordHash,
       ],
     );
     // The code goes through the library, from this browser, holding the two tokens the answer

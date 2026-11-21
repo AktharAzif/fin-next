@@ -94,24 +94,28 @@
       "test": "@journey too many emails, and offline, are said on the card"
     },
     "password": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
     },
     "signingIn": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
     },
     "wrongPassword": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
     },
     "tooManyTries": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
     },
     "ourSide": {
       "status": "covered",
@@ -124,14 +128,16 @@
       "day": "sat"
     },
     "passwordPaused": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
     },
     "pausedLinkRefused": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
     },
     "tooManyEmails": {
       "status": "covered",

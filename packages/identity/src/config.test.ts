@@ -56,12 +56,23 @@ describe("readRealmSettings refuses a bad start", () => {
     ["a missing limit key", { FIN_LIMIT_KEY_1: undefined }],
     ["a short limit key", { FIN_LIMIT_KEY_1: "00ff" }],
     ["an unknown environment", { FIN_ENVIRONMENT: "qa" }],
-    ["passwords switched on before they are built", { FIN_FEATURE_PASSWORDS: "on" }],
+    ["Google switched on before it is built", { FIN_FEATURE_GOOGLE: "on" }],
   ])("refuses %s", (_label, env) => {
     const merged = { ...testEnv("developer"), ...env };
     for (const [key, value] of Object.entries(env))
       if (value === undefined) delete merged[key as keyof typeof merged];
     expect(() => readRealmSettings("developer", merged)).toThrow(RealmConfigError);
+  });
+
+  it("turns passwords on in the developer realm only (stretch 2, §3.3)", () => {
+    expect(
+      readRealmSettings("developer", testEnv("developer", { FIN_FEATURE_PASSWORDS: "on" }))
+        .features,
+    ).toEqual({ passwords: true, google: false });
+    expect(readRealmSettings("developer", testEnv("developer")).features.passwords).toBe(false);
+    expect(() =>
+      readRealmSettings("staff", testEnv("staff", { FIN_FEATURE_PASSWORDS: "on" })),
+    ).toThrow(RealmConfigError);
   });
 
   it("allows http only in development", () => {

@@ -21,6 +21,12 @@ import {
   trustedBrowserEligible,
 } from "../gate.ts";
 import type { CountedBucket } from "../limits.ts";
+import {
+  isPasswordPath,
+  PASSWORD_BODY_FIELDS,
+  passwordBefore,
+  waivePasswordRecheck,
+} from "../passwords/flows.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
@@ -66,6 +72,7 @@ const BODY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "/passkey/verify-authentication": ["response"],
   "/passkey/delete-passkey": ["id"],
   "/sign-out": [],
+  ...PASSWORD_BODY_FIELDS,
 };
 
 export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<unknown> {
@@ -89,11 +96,13 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   await stepUpRule(rt, ctx, state, tx);
   await finLimits(rt, ctx, state, tx, rule);
   stripBody(ctx, state);
+  await waivePasswordRecheck(rt, ctx, state, tx);
 
   if (realm === "developer") {
     if (ctx.path === "/email-otp/send-verification-otp")
       return developerCodeSend(rt, ctx, state, tx);
     if (ctx.path === "/sign-in/email-otp") return developerCodeSignIn(rt, ctx, state, tx);
+    if (isPasswordPath(ctx.path)) return passwordBefore(rt, ctx, state, tx);
   } else {
     if (ctx.path === "/email-otp/send-verification-otp") return staffCodeSend(rt, ctx, state, tx);
     if (ctx.path === "/sign-in/email-otp") return staffCodeSignIn(rt, ctx, state, tx);
@@ -225,7 +234,13 @@ async function stepUpRule(
 ): Promise<void> {
   const realm = rt.settings.realm;
   const actionKey = (SELF_PATH_ACTIONS[realm] as Readonly<Record<string, string>>)[ctx.path];
-  if (actionKey === undefined) return;
+  if (actionKey === undefined) {
+    // A step_up_self path with no action would run with no step-up at all: fail closed.
+    if (state.rule?.class === "step_up_self") {
+      throw new AuthRefusal("forbidden", "step_up.unknown_action");
+    }
+    return;
+  }
   const action = rt.actions.get(actionKey);
   const prior = state.prior;
   if (action === undefined || prior === null)

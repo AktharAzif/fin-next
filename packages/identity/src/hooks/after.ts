@@ -11,6 +11,8 @@ import { randomToken } from "../crypto/keyed.ts";
 import { assertionVerified } from "../crypto/webauthn.ts";
 import { AuthRefusal } from "../errors.ts";
 import { personGate, trustedBrowserEligible } from "../gate.ts";
+import { isPasswordPath, passwordAfter } from "../passwords/flows.ts";
+import { applySignUpPassword } from "../passwords/sign-up.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
@@ -85,6 +87,13 @@ export async function afterHook(rt: RealmRuntime, ctx: HookContext): Promise<voi
     case "/sign-out":
       return failed ? undefined : signedOut(rt, tx, state);
     default:
+      if (state.realm === "developer" && isPasswordPath(ctx.path)) {
+        return passwordAfter(rt, ctx, tx, state, failed, {
+          knownBrowserNotice: (person, first) =>
+            knownBrowserNotice(rt, ctx, tx, state, person, first),
+          consumeIntent: () => consumeRequestIntent(rt, tx, state),
+        });
+      }
       return undefined;
   }
 }
@@ -233,6 +242,8 @@ async function codeSignedIn(
         signIn.signUpRequestId,
         rt.clock.now(),
       ]);
+      // The password chosen at sign-up, if any (§5.1, §5.7), under the same `user.created`.
+      await applySignUpPassword(tx, rt, signIn.signUpRequestId, userId);
     }
   }
   const facts = await personGate(tx, userId);

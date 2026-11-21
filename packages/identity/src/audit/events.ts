@@ -89,6 +89,7 @@ export const IDENTITY_EVENTS = {
         "other_browser",
         "passkey_failed",
         "too_many_tries",
+        "wrong_password",
       ]),
     }),
   ),
@@ -145,6 +146,23 @@ export const IDENTITY_EVENTS = {
     roles: ["fin_console", "fin_api"],
     actors: ["user", "staff", "system"],
   },
+  // Passwords (stretch 2, §5.7, §16.2). A password chosen at sign-up comes with `user.created`.
+  "password.set": person("security", "usr", z.strictObject({ sessionsEnded: z.int().min(0) })),
+  "password.changed": person("security", "usr", empty),
+  "password.reset_requested": person("security", "usr", empty),
+  "password.reset": person("security", "usr", z.strictObject({ sessionsEnded: z.int().min(0) })),
+  "password.reset_failed": person(
+    "security",
+    "usr",
+    z.strictObject({
+      reason: z.enum(["wrong_code", "expired", "too_many_tries", "other_browser"]),
+    }),
+  ),
+  "password.paused": person(
+    "security",
+    "usr",
+    z.strictObject({ scope: z.enum(["network", "address"]), until: isoTime }),
+  ),
 } as const satisfies Record<string, EventSpec>;
 
 /** Staff scope, recorded by `fin_admin`: the events the staff realm's sign-in writes (§16.4). */

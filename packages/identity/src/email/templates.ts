@@ -53,10 +53,23 @@ export const IDENTITY_TEMPLATES = {
         "backup_codes_regenerated",
         "browser_trusted",
         "signed_out_everywhere",
+        "password_changed",
+        "password_reset",
       ]),
       device: device.optional(),
       time,
     }),
+  },
+  // Passwords (stretch 2, §5.7): the reset code, and the once-a-day notice of a pause.
+  "identity/reset-password": {
+    class: "code",
+    role: "fin_console",
+    params: z.strictObject({ code: signInCode }),
+  },
+  "identity/password-paused": {
+    class: "security",
+    role: "fin_console",
+    params: z.strictObject({ userId: z.string(), time }),
   },
   "identity/account-locked": {
     class: "security",

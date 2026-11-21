@@ -1,7 +1,8 @@
 // Create your Fin account (SignUp board; spec 02 §5.1): the name and work email, then an emailed
 // code. The answer is the same whether or not the address has an account (an existing one is told
 // by email), so the page never says which. With an invitation waiting in the cookie, the address
-// field says whom it is for. The password field comes with passwords (stretch 2).
+// field says whom it is for. With passwords on (stretch 2, §5.7) the form asks for one too; the
+// server checks its rule and keeps only its hash until the address is confirmed.
 import { useFin } from "@fin/frame";
 import { AuthCard, Button, Field, Input } from "@fin/ui";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
@@ -9,6 +10,14 @@ import { useEffect, useState } from "react";
 import { signUp } from "../../api/contracts/auth.ts";
 import { waitingInvitation } from "../../api/contracts/invitations.ts";
 import { commonAlert, type Failure, failureOf, invalidFields } from "../../api/failures.ts";
+import {
+  charactersShort,
+  PASSWORD_HELPER,
+  type PasswordProblem,
+  passwordError,
+  passwordProblemOf,
+  usePasswordsOffered,
+} from "../../auth/passwords.ts";
 import { looksLikeEmail, rememberEmail } from "../../auth/pending.ts";
 import { AlertFrom, AuthLoading, LeadLink } from "../../components/auth.tsx";
 import { NAME_RULE } from "../../format/text.ts";
@@ -29,6 +38,9 @@ function SignUpPage() {
   const [invitedFor, setInvitedFor] = useState<string | null>(null);
   const [alert, setAlert] = useState<Failure | null>(null);
   const [creating, setCreating] = useState(false);
+  const passwords = usePasswordsOffered();
+  const [password, setPassword] = useState("");
+  const [passwordProblem, setPasswordProblem] = useState<PasswordProblem | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -48,18 +60,27 @@ function SignUpPage() {
   const create = async () => {
     const badName = name.trim() === "";
     const badEmail = !looksLikeEmail(email);
+    const shortPassword = passwords === true && charactersShort(password) > 0;
     setNameRefused(badName);
     setEmailInvalid(badEmail);
-    if (badName || badEmail) return;
+    setPasswordProblem(shortPassword ? "short" : null);
+    if (badName || badEmail || shortPassword) return;
     setCreating(true);
     setAlert(null);
     try {
-      await fin.api(signUp, { name: name.trim(), email: email.trim() });
+      await fin.api(signUp, {
+        name: name.trim(),
+        email: email.trim(),
+        ...(passwords === true ? { password } : {}),
+      });
       rememberEmail(email.trim());
       await router.navigate({ href: "/verify-email" });
     } catch (error) {
       const failure = failureOf(error);
-      if (failure === "invalid") {
+      const problem = passwordProblemOf(error);
+      if (problem !== null) {
+        setPasswordProblem(problem);
+      } else if (failure === "invalid") {
         const fields = invalidFields(error);
         setNameRefused(fields.has("name"));
         setEmailInvalid(fields.has("email"));
@@ -114,6 +135,27 @@ function SignUpPage() {
             disabled={creating}
           />
         </Field>
+        {passwords === true ? (
+          <Field
+            label="Password"
+            helper={PASSWORD_HELPER}
+            {...(passwordProblem === null
+              ? {}
+              : { error: passwordError(passwordProblem, password) })}
+          >
+            <Input
+              type="password"
+              name="password"
+              autoComplete="new-password"
+              value={password}
+              onValueChange={(value) => {
+                setPassword(value);
+                if (passwordProblem !== null) setPasswordProblem(null);
+              }}
+              disabled={creating}
+            />
+          </Field>
+        ) : null}
         <Button type="submit" variant="primary" size="lg" loading={creating}>
           Create account
         </Button>

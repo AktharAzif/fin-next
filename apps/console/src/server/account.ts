@@ -49,7 +49,7 @@ async function passkeys(tx: UnitTx, userId: string, page: { page: number; size: 
   );
 }
 
-/** `GET /api/account/security` (§14.2). Passwords and Google are not built (stretch 2 and 5). */
+/** `GET /api/account/security` (§14.2). Google is not built (stretch 5). */
 export async function accountSecurity(tx: UnitTx, who: Guarded) {
   const browsers = await tx.query<{
     id: string;
@@ -66,12 +66,18 @@ export async function accountSecurity(tx: UnitTx, who: Guarded) {
     "SELECT verified FROM identity.two_factor WHERE user_id = $1",
     [who.person.id],
   );
+  // Whether the account has a password (stretch 2, §5.7): read, never the hash.
+  const password = await tx.query<{ set: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM identity.account
+                     WHERE user_id = $1 AND provider_id = 'credential' AND password IS NOT NULL) AS set`,
+    [who.person.id],
+  );
   return {
     name: who.person.name,
     email: who.person.email,
     passkeys: await passkeys(tx, who.person.id, { page: 1, size: 25 }),
     authenticator: twoFactor.rows[0]?.verified === true ? "on" : "off",
-    passwordSet: false,
+    passwordSet: password.rows[0]?.set === true,
     googleLinked: false,
     trustedBrowsers: browsers.rows.map((b) => ({
       id: b.id,

@@ -1,8 +1,9 @@
 // Sign in (SignIn board; spec 02 §5.2, §5.3, §15.2): the passkey button and the email field's
 // passkey autofill first, then the work email, which sends an emailed code and opens the code
 // page. `?error=` says why the person is here (signed out, or after too many wrong tries); `?next=`
-// is kept, if it is a path of this app, for after the sign-in. Passwords and Google are stretch
-// items, not built here.
+// is kept, if it is a path of this app, for after the sign-in. With passwords on (stretch 2, §5.7)
+// "Continue" opens the password step (-passwords/PasswordStep.tsx) instead of sending a code.
+// Google is a stretch item, not built here.
 import type { ConsoleViewer } from "@fin/app-contracts";
 import { useFin } from "@fin/frame";
 import { FingerprintIcon } from "@fin/icons";
@@ -13,6 +14,7 @@ import { sendSignInCode } from "../../api/contracts/auth.ts";
 import { commonAlert, type Failure, failureOf } from "../../api/failures.ts";
 import { ceremonyApi } from "../../api/library.ts";
 import { destinationAfterSignIn, stepFor, withNext } from "../../auth/after-sign-in.ts";
+import { passwordsOffered } from "../../auth/passwords.ts";
 import { looksLikeEmail, rememberEmail } from "../../auth/pending.ts";
 import {
   authenticateWithPasskey,
@@ -22,6 +24,7 @@ import {
   passkeysSupported,
 } from "../../auth/webauthn.ts";
 import { AlertFrom, AuthLoading, LeadLink, OrRule } from "../../components/auth.tsx";
+import { PasswordStep } from "../-passwords/PasswordStep.tsx";
 
 const ERRORS = ["signed_out", "too_many_tries"] as const;
 
@@ -134,6 +137,8 @@ function SignInPage() {
   const [email, setEmail] = useState("");
   const [emailInvalid, setEmailInvalid] = useState(false);
   const [busy, setBusy] = useState<"passkey" | "email" | null>(null);
+  // The password step, with passwords on (§5.7): the address it is for.
+  const [passwordFor, setPasswordFor] = useState<string | null>(null);
   const supported = passkeysSupported();
   const mounted = useRef(true);
 
@@ -202,6 +207,11 @@ function SignInPage() {
     setBusy("email");
     setAlert(null);
     try {
+      if (await passwordsOffered()) {
+        // With passwords, the address goes on to the password step; nothing is sent yet.
+        setPasswordFor(address);
+        return;
+      }
       await ceremonyApi()(sendSignInCode, { email: address, type: "sign-in" });
       rememberEmail(address);
       await router.navigate({ href: withNext("/sign-in/code", next) });
@@ -212,6 +222,20 @@ function SignInPage() {
       if (mounted.current) setBusy(null);
     }
   };
+
+  if (passwordFor !== null) {
+    return (
+      <PasswordStep
+        email={passwordFor}
+        next={next}
+        onChange={() => {
+          setEmail(passwordFor);
+          setPasswordFor(null);
+        }}
+        onSignedIn={finish}
+      />
+    );
+  }
 
   return (
     <AuthCard

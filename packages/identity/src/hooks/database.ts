@@ -80,6 +80,24 @@ export function databaseHooks(rt: RealmRuntime) {
           expiresAt: new Date(now.getTime() + FACTOR_STEP_LIFETIME_MS),
         };
       }
+    } else if (path === "/sign-in/email" && realm === "developer" && state.password !== null) {
+      // A password sign-in (§5.7, §6.1): aal1, and never a proof of the mailbox, so a password
+      // alone never enrols a first factor (§6.3). A person with a factor is at the factor step
+      // (10 minutes) unless a live trusted browser of theirs holds the session (§6.6).
+      const request = state.password;
+      const trusted = request.trustedBrowserId;
+      const atFactorStep = (request.facts?.factorCount ?? 0) > 0 && trusted === null;
+      const absolute = new Date(now.getTime() + ABSOLUTE_MS[realm]);
+      fields = {
+        assurance: "aal1",
+        createdVia: "password",
+        mailboxProvedAt: null,
+        trustedBrowserId: trusted,
+        absoluteExpiresAt: absolute,
+        expiresAt: new Date(
+          now.getTime() + (atFactorStep ? FACTOR_STEP_LIFETIME_MS : IDLE_MS[realm]),
+        ),
+      };
     } else if (path === "/passkey/verify-authentication") {
       const replaces = prior !== null && prior.person.id === userId;
       const absolute = replaces
