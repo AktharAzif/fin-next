@@ -132,15 +132,25 @@ export function onSignals(shutdown: Shutdown, target: NodeJS.EventEmitter = proc
 /** What the crash handlers need of the error reporter; the connector, which has none, passes none. */
 export type CrashReporter = Pick<Reporter, "reportError" | "flush">;
 
+/** How long a crash's line and Errors event have to leave the process. */
+export const CRASH_FLUSH_MS = 2000;
+/** The exit a crash cannot outlive, whatever its flush does. */
+export const CRASH_DEADLINE_MS = 2500;
+/** Exceptions after the first with no turn of the event loop between them: a loop, not a burst. */
+export const CRASH_LOOP_LIMIT = 1000;
+
 /**
  * Crash handlers (ARCHITECTURE §3.5, §10.3): an uncaught exception is logged, reported and flushed
  * for at most 2 seconds, then the process exits 1; an unhandled rejection is logged and reported,
  * never silent. The line carries safeError's fields and first frames, so a process with no error
  * reporter (the connector supervisor, decision 12) still records where it failed.
  *
- * A second uncaught exception while the first is handled exits 1 at once: when recording a crash
- * throws again and again (as writing to a stdout whose reader had gone once did), each throw would
- * start one more flush, and the event loop would never reach the first flush's timer.
+ * Exceptions that follow the first while it is handled (two requests that hit one bug) record and
+ * start nothing, so the first crash's flush runs to its end and its line and event leave the
+ * process. Two bounds keep the exit certain: a timer armed with the first exception exits 1 at
+ * CRASH_DEADLINE_MS whatever the flush does, and CRASH_LOOP_LIMIT exceptions with no turn of the
+ * event loop between them (a callback that throws and queues itself again, which no timer would
+ * outlast) exit 1 at once.
  */
 export function onCrash(
   options: { telemetry: Telemetry; reporter?: CrashReporter; exit: (code: number) => void },
@@ -148,6 +158,10 @@ export function onCrash(
 ): void {
   let crashing = false;
   let exited = false;
+  let sameTurn = 0;
+  const nextTurn = (): void => {
+    sameTurn = 0;
+  };
   const exit = (code: number): void => {
     if (exited) return;
     exited = true;
@@ -163,16 +177,27 @@ export function onCrash(
   };
   target.on("uncaughtException", (error: unknown) => {
     if (crashing) {
-      exit(1);
+      if (sameTurn === 0) setImmediate(nextTurn);
+      sameTurn++;
+      if (sameTurn >= CRASH_LOOP_LIMIT) exit(1);
       return;
     }
     crashing = true;
-    options.telemetry.logUnit("process.uncaught_exception", fields(error), "error");
-    options.reporter?.reportError(error, { job: "process" });
+    // Referenced: it holds the process open until it exits, if nothing else does first.
+    const deadline = setTimeout(() => exit(1), CRASH_DEADLINE_MS);
+    try {
+      options.telemetry.logUnit("process.uncaught_exception", fields(error), "error");
+      options.reporter?.reportError(error, { job: "process" });
+    } catch {
+      // Recording a crash never stops its exit; the deadline stands.
+    }
     void Promise.allSettled([
-      options.telemetry.flush(2000),
-      options.reporter?.flush(2000) ?? Promise.resolve(true),
-    ]).finally(() => exit(1));
+      options.telemetry.flush(CRASH_FLUSH_MS),
+      options.reporter?.flush(CRASH_FLUSH_MS) ?? Promise.resolve(true),
+    ]).finally(() => {
+      clearTimeout(deadline);
+      exit(1);
+    });
   });
   target.on("unhandledRejection", (reason: unknown) => {
     options.telemetry.logUnit("process.unhandled_rejection", fields(reason), "error");

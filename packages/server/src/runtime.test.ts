@@ -228,7 +228,8 @@ describe("runService", () => {
 
 /**
  * A service run as its own process, with the process handlers on. Every request writes a line;
- * what it ships goes to a file; a byte on stdin throws from an event handler, uncaught.
+ * what it ships goes to a file; each byte on stdin throws from a timer, uncaught, and the bytes of
+ * one write throw in the same turn of the event loop.
  */
 function serviceChild(): { script: string; shipped: string } {
   const dir = mkdtempSync(join(tmpdir(), "fin-stdout-gone-"));
@@ -259,8 +260,12 @@ await runService(
     },
   },
 );
-process.stdin.on("data", () => {
-  throw new Error("planted");
+process.stdin.on("data", (chunk) => {
+  for (let i = 0; i < chunk.length; i++) {
+    setTimeout(() => {
+      throw new Error("planted");
+    }, 0);
+  }
 });
 `,
   );
@@ -309,5 +314,21 @@ describe("runService when stdout's reader goes away", () => {
     expect(await run.exit(4000)).toBe(1);
     expect(run.stderr()).toBe("");
     expect(shippedEvents(shipped)).toContain("process.uncaught_exception");
+  }, 30_000);
+
+  it("ships the first crash's lines and exits 1 within the flush when more exceptions follow", async () => {
+    const { script, shipped } = serviceChild();
+    const run = await spawnThenCloseStdout(
+      script,
+      baseEnv("api", { PORT: String(await freePort()) }),
+    );
+    run.child.stdin.write("xxx");
+    expect(await run.exit(4000)).toBe(1);
+    expect(run.stderr()).toBe("");
+    const events = shippedEvents(shipped);
+    expect(events).toEqual(
+      expect.arrayContaining(["process.uncaught_exception", "error.unexpected"]),
+    );
+    expect(events.filter((event) => event === "process.uncaught_exception")).toHaveLength(1);
   }, 30_000);
 });

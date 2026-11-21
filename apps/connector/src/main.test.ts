@@ -261,7 +261,8 @@ describe("main", () => {
 
 /**
  * The supervisor run as its own process, as the image runs it (signal and crash handlers on), with
- * the stand-in for cloudflared; a byte on stdin throws from an event handler, uncaught.
+ * the stand-in for cloudflared; each byte on stdin throws from a timer, uncaught, and the bytes of
+ * one write throw in the same turn of the event loop.
  */
 async function connectorChild(): Promise<{ script: string; env: Record<string, string> }> {
   const dir = mkdtempSync(join(tmpdir(), "fin-connector-stdout-"));
@@ -283,8 +284,12 @@ await main({
   configPath: ${JSON.stringify(join(dir, "cloudflared", "config.yml"))},
   metrics: ${JSON.stringify(`127.0.0.1:${await freePort()}`)},
 });
-process.stdin.on("data", () => {
-  throw new Error("planted");
+process.stdin.on("data", (chunk) => {
+  for (let i = 0; i < chunk.length; i++) {
+    setTimeout(() => {
+      throw new Error("planted");
+    }, 0);
+  }
 });
 `,
   );
@@ -320,6 +325,14 @@ describe("main when stdout's reader goes away", () => {
     const { script, env } = await connectorChild();
     const run = await spawnThenCloseStdout(script, env);
     run.child.stdin.write("x");
+    expect(await run.exit(4000)).toBe(1);
+    expect(run.stderr()).toBe("");
+  }, 30_000);
+
+  it("exits 1 once, within the crash flush, when more exceptions follow the first", async () => {
+    const { script, env } = await connectorChild();
+    const run = await spawnThenCloseStdout(script, env);
+    run.child.stdin.write("xxx");
     expect(await run.exit(4000)).toBe(1);
     expect(run.stderr()).toBe("");
   }, 30_000);

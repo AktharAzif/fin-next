@@ -1,9 +1,21 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { gunzipSync } from "node:zlib";
+import { describe, expect, it, vi } from "vitest";
 import { Readiness } from "./health/readiness.ts";
 import type { HttpServerHandle } from "./http/serve.ts";
-import { createShutdown, onCrash, onSignals, planShutdown } from "./shutdown.ts";
-import { capture } from "./testing/capture.ts";
+import { Reporter } from "./report.ts";
+import {
+  type CrashReporter,
+  createShutdown,
+  onCrash,
+  onSignals,
+  planShutdown,
+} from "./shutdown.ts";
+import type { Transport } from "./telemetry/ship.ts";
+import { capture, type Line, TEST_RELEASE } from "./testing/capture.ts";
+
+const errorsDsn = (): string =>
+  ["https://", "k".repeat(32), "@s1.eu-nbg-2.betterstackdata.com/4242"].join("");
 
 describe("planShutdown", () => {
   it("fits every phase inside FIN_DRAIN_SECONDS", () => {
@@ -166,19 +178,103 @@ describe("onCrash", () => {
     expect(exits).toEqual([1]);
   });
 
-  it("exits at once on a second uncaught exception while the first is handled, and only once", async () => {
-    // Recording a crash can itself throw (a stdout whose reader has gone): each throw would
-    // otherwise start another flush, and the event loop would never reach the first one's timer.
+  it("ships the first crash's line and Errors event when more exceptions follow, and exits once", async () => {
+    // Two requests that hit one bug throw a few milliseconds apart, while the first crash's line
+    // and event are still on their way (each send here takes 150 ms).
+    const shipped: string[] = [];
+    const transport: Transport = async (body) => {
+      await new Promise((r) => setTimeout(r, 150));
+      for (const line of JSON.parse(gunzipSync(body).toString("utf8")) as Line[]) {
+        shipped.push(String(line.event));
+      }
+      return 202;
+    };
+    const { telemetry } = capture({ transport });
+    const envelopes: string[] = [];
+    const reporter = new Reporter({
+      dsn: errorsDsn(),
+      release: TEST_RELEASE,
+      environment: "ci",
+      service: "api",
+      telemetry,
+      fetch: (async (_url: string, init: RequestInit) => {
+        await new Promise((r) => setTimeout(r, 150));
+        envelopes.push(String(init.body));
+        return new Response("{}", { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const target = new EventEmitter();
+    const atExit: { code: number; shipped: string[]; envelopes: number; ms: number }[] = [];
+    const t0 = performance.now();
+    onCrash(
+      {
+        telemetry,
+        reporter,
+        exit: (code) =>
+          atExit.push({
+            code,
+            shipped: [...shipped],
+            envelopes: envelopes.length,
+            ms: performance.now() - t0,
+          }),
+      },
+      target,
+    );
+    target.emit("uncaughtException", new RangeError("first"));
+    target.emit("uncaughtException", new TypeError("second"));
+    await new Promise((r) => setTimeout(r, 5));
+    target.emit("uncaughtException", new TypeError("third"));
+    expect(atExit).toEqual([]);
+    await vi.waitFor(() => expect(atExit).toHaveLength(1), { timeout: 3000, interval: 20 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(atExit).toHaveLength(1);
+    const [end] = atExit;
+    expect(end?.code).toBe(1);
+    expect(end?.shipped).toEqual(
+      expect.arrayContaining(["process.uncaught_exception", "error.unexpected"]),
+    );
+    expect(end?.shipped.filter((event) => event === "process.uncaught_exception")).toHaveLength(1);
+    expect(end?.envelopes).toBe(1);
+    expect(end?.ms).toBeLessThan(2000);
+  });
+
+  it("exits 1 at the crash deadline when the flush never settles", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { telemetry } = capture();
+      const target = new EventEmitter();
+      const exits: number[] = [];
+      const reporter: CrashReporter = {
+        reportError: () => "",
+        flush: () => new Promise<boolean>(() => undefined),
+      };
+      onCrash({ telemetry, reporter, exit: (code) => exits.push(code) }, target);
+      target.emit("uncaughtException", new Error("first"));
+      target.emit("uncaughtException", new Error("second"));
+      await vi.advanceTimersByTimeAsync(2499);
+      expect(exits).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(exits).toEqual([1]);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(exits).toEqual([1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exits 1 at once when exceptions keep coming with no turn of the event loop between them", () => {
+    // A callback that throws and queues itself again as a microtask or a tick never lets a timer
+    // run, the flush's deadline among them.
     const { telemetry, reporter } = capture();
     const target = new EventEmitter();
     const exits: number[] = [];
     onCrash({ telemetry, reporter, exit: (code) => exits.push(code) }, target);
     target.emit("uncaughtException", new Error("first"));
+    for (let i = 0; i < 999; i++) target.emit("uncaughtException", new Error("again"));
     expect(exits).toEqual([]);
-    target.emit("uncaughtException", new Error("second"));
+    target.emit("uncaughtException", new Error("again"));
     expect(exits).toEqual([1]);
-    target.emit("uncaughtException", new Error("third"));
-    await new Promise((r) => setTimeout(r, 50));
+    target.emit("uncaughtException", new Error("again"));
     expect(exits).toEqual([1]);
   });
 
