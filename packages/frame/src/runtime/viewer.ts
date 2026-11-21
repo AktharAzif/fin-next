@@ -7,7 +7,11 @@ import { isApiError } from "../api/errors.ts";
 import { createStore, type Store } from "./store.ts";
 
 export interface ViewerStore<V> extends Store<V | null> {
-  /** Fetches the viewer again and stores it; resolves with what it stored. */
+  /**
+   * Fetches the viewer again and resolves with what it fetched. Only the newest reload's answer is
+   * stored: when reloads overlap (an organisation switch and a back-forward check), an older answer
+   * that arrives later never replaces a newer one.
+   */
   reload(): Promise<V | null>;
 }
 
@@ -29,11 +33,14 @@ export function createViewerStore<V>(
   load: () => Promise<V | null>,
 ): ViewerStore<V> {
   const store = createStore<V | null>(initial);
+  let newest = 0;
   return {
     ...store,
     async reload() {
+      newest += 1;
+      const run = newest;
       const next = await load();
-      store.set(next);
+      if (run === newest) store.set(next);
       return next;
     },
   };

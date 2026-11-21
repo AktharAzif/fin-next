@@ -3,7 +3,9 @@
 // `403 step_up_required`; the app's own modal content (spec 02 §15, `src/client/step-up/**`, the
 // identity lanes') runs the passkey or code ceremony and calls `prove` with the proved intent, or
 // `cancel`. The host then hears the re-sent request's outcome: done (close), invalid ("That didn't
-// work. Try again."), or failed. One request at a time; a second asks while one is open are refused.
+// work. Try again."), or failed. One request at a time: a second that asks while one is asking or
+// its re-send is in flight is refused, and each outcome reaches only the request it was proved for,
+// so a late answer can never close or change a request opened after it.
 import type { StepUpRequired } from "@fin/app-contracts";
 import { type ReactNode, useEffect } from "react";
 import type { StepUpProof } from "../api/client.ts";
@@ -29,52 +31,74 @@ export interface StepUpController {
   attach(attached: boolean): void;
 }
 
+/** One open request: who is waiting for the proof, until the person proves or closes. */
+interface Ticket {
+  waiting: ((proof: StepUpProof | null) => void) | null;
+}
+
 export function createStepUpController(): StepUpController {
   const state = createStore<StepUpState | null>(null);
   let attached = false;
-  let resolve: ((proof: StepUpProof | null) => void) | null = null;
+  // The request the dialog shows, or null. Every change checks it is still the same ticket.
+  let current: Ticket | null = null;
 
-  const finish = (proof: StepUpProof | null) => {
-    const done = resolve;
-    resolve = null;
-    done?.(proof);
+  /** Closes the dialog: the waiting api() call (if any) hears null, a late outcome is ignored. */
+  const close = () => {
+    const ticket = current;
+    current = null;
+    state.set(null);
+    const waiting = ticket?.waiting ?? null;
+    if (ticket !== null) ticket.waiting = null;
+    waiting?.(null);
   };
 
   return {
     state,
     attach(next) {
       attached = next;
-      if (!next && resolve !== null) {
-        finish(null);
-        state.set(null);
-      }
+      if (!next && current !== null) close();
     },
     request(required) {
-      if (!attached || resolve !== null) return Promise.resolve(null);
+      const open = state.get();
+      if (!attached || open?.status === "asking" || open?.status === "sending") {
+        return Promise.resolve(null);
+      }
+      // A finished request still on screen ("That didn't work") gives way to the new one.
+      const ticket: Ticket = { waiting: null };
+      current = ticket;
       state.set({ required, status: "asking" });
-      return new Promise<StepUpProof | null>((settle) => {
-        resolve = settle;
+      return new Promise<StepUpProof | null>((resolve) => {
+        ticket.waiting = resolve;
       });
     },
     prove(intentId) {
-      const current = state.get();
-      if (current === null || resolve === null) return;
-      state.set({ ...current, status: "sending" });
+      const ticket = current;
+      const open = state.get();
+      const waiting = ticket?.waiting ?? null;
+      if (ticket === null || open === null || waiting === null) return;
+      ticket.waiting = null;
+      state.set({ ...open, status: "sending" });
       let settled = false;
-      finish({
+      waiting({
         intentId,
         settle(outcome) {
           if (settled) return;
           settled = true;
-          const open = state.get();
-          if (open === null) return;
-          state.set(outcome === "done" ? null : { ...open, status: outcome });
+          // The dialog was closed, or now shows a later request: this outcome is not its own.
+          if (current !== ticket) return;
+          const shown = state.get();
+          if (shown === null) return;
+          if (outcome === "done") {
+            current = null;
+            state.set(null);
+          } else {
+            state.set({ ...shown, status: outcome });
+          }
         },
       });
     },
     cancel() {
-      finish(null);
-      state.set(null);
+      close();
     },
   };
 }
