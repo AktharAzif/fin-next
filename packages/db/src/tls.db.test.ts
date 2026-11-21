@@ -44,8 +44,19 @@ function selfSigned(name: string, san: string): string {
     ].join("\n"),
   );
   openssl([
-    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
-    "-keyout", `${name}.key`, "-out", `${name}.crt`, "-config", `${name}.cnf`,
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "2",
+    "-keyout",
+    `${name}.key`,
+    "-out",
+    `${name}.crt`,
+    "-config",
+    `${name}.cnf`,
   ]);
   return readFileSync(join(dir, `${name}.crt`), "utf8");
 }
@@ -58,9 +69,20 @@ beforeAll(async () => {
   otherCert = selfSigned("other", "DNS:localhost");
   execFileSync("chmod", ["600", join(dir, "server.key")]);
   writeFileSync(join(dir, "pw"), password);
-  execFileSync(join(BINDIR, "initdb"), [
-    "-D", join(dir, "data"), "-U", "postgres", "--auth=scram-sha-256", `--pwfile=${join(dir, "pw")}`, "-E", "UTF8",
-  ], { stdio: "ignore" });
+  execFileSync(
+    join(BINDIR, "initdb"),
+    [
+      "-D",
+      join(dir, "data"),
+      "-U",
+      "postgres",
+      "--auth=scram-sha-256",
+      `--pwfile=${join(dir, "pw")}`,
+      "-E",
+      "UTF8",
+    ],
+    { stdio: "ignore" },
+  );
   port = 41000 + Math.floor(Math.random() * 8000);
   writeFileSync(
     join(dir, "data", "postgresql.auto.conf"),
@@ -83,21 +105,33 @@ beforeAll(async () => {
       "",
     ].join("\n"),
   );
-  execFileSync(join(BINDIR, "pg_ctl"), ["-D", join(dir, "data"), "-l", join(dir, "log"), "-w", "start"], {
-    stdio: "ignore",
-  });
+  execFileSync(
+    join(BINDIR, "pg_ctl"),
+    ["-D", join(dir, "data"), "-l", join(dir, "log"), "-w", "start"],
+    {
+      stdio: "ignore",
+    },
+  );
 }, 120_000);
 
 afterAll(() => {
   if (!enabled || dir === "") return;
   try {
-    execFileSync(join(BINDIR, "pg_ctl"), ["-D", join(dir, "data"), "-m", "immediate", "stop"], { stdio: "ignore" });
+    execFileSync(join(BINDIR, "pg_ctl"), ["-D", join(dir, "data"), "-m", "immediate", "stop"], {
+      stdio: "ignore",
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-function client(host: string, caPem: string, servername: string, user = "postgres", pass = password): ScramOnlyClient {
+function client(
+  host: string,
+  caPem: string,
+  servername: string,
+  user = "postgres",
+  pass = password,
+): ScramOnlyClient {
   return new ScramOnlyClient({
     ...clientConfig({
       host,
@@ -115,7 +149,9 @@ function client(host: string, caPem: string, servername: string, user = "postgre
 async function connects(c: ScramOnlyClient): Promise<string> {
   try {
     await c.connect();
-    const result = await c.query<{ ssl: boolean }>("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()");
+    const result = await c.query<{ ssl: boolean }>(
+      "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+    );
     return result.rows[0]?.ssl === true ? "tls" : "plain";
   } catch (error) {
     return (error as { code?: string }).code ?? (error as Error).name;
@@ -126,11 +162,22 @@ async function connects(c: ScramOnlyClient): Promise<string> {
 
 describe.skipIf(!enabled)("TLS to Postgres 18 (P-18)", () => {
   it("prints the chain the server presents, with its SHA-256 fingerprint", async () => {
-    const presented = await readPresentedCertificate({ host: "127.0.0.1", port, database: "postgres" });
+    const presented = await readPresentedCertificate({
+      host: "127.0.0.1",
+      port,
+      database: "postgres",
+    });
     expect(presented.chain).toHaveLength(1);
     const body = (pem: string) => pem.replace(/-----[A-Z ]+-----|\s/g, "");
     expect(body(presented.chain[0] ?? "")).toBe(body(serverCert));
-    const fingerprint = execFileSync("openssl", ["x509", "-noout", "-fingerprint", "-sha256", "-in", join(dir, "server.crt")])
+    const fingerprint = execFileSync("openssl", [
+      "x509",
+      "-noout",
+      "-fingerprint",
+      "-sha256",
+      "-in",
+      join(dir, "server.crt"),
+    ])
       .toString()
       .trim()
       .split("=")[1];
@@ -147,7 +194,9 @@ describe.skipIf(!enabled)("TLS to Postgres 18 (P-18)", () => {
   });
 
   it("refuses a server name the certificate does not carry", async () => {
-    expect(await connects(client("127.0.0.1", serverCert, "db.example.com"))).toBe("ERR_TLS_CERT_ALTNAME_INVALID");
+    expect(await connects(client("127.0.0.1", serverCert, "db.example.com"))).toBe(
+      "ERR_TLS_CERT_ALTNAME_INVALID",
+    );
   });
 
   it("refuses cleartext password authentication before sending the password", async () => {
