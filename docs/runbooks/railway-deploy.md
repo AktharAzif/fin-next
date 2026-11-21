@@ -95,8 +95,11 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
    `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
    deployment. Then it removes the reference, whether migrate passed or failed, and reads migrate's
-   variables back: if the reference is still there, nothing rolls (exit 77). If the removal fails or
-   the reference stays, remove the variable from `migrate` by hand at once.
+   variables back: if the reference is still there, nothing rolls (exit 77). A signal (Ctrl-C,
+   SIGTERM, a closed terminal) cuts the wait short, and the reference is removed before `run.done`.
+   If the removal fails, the reference stays, or the run is closed at once before it could (Ctrl-\,
+   a later second Ctrl-C, the five-second deadline; the output says so), remove the variable from
+   `migrate` by hand at once.
 9. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
    then a deploy, waiting up to 15 minutes for `SUCCESS` (step 5's health check).

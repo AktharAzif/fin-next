@@ -79,16 +79,27 @@ export function hostsFor(ctx: Context, key: string): Partial<Record<HostRole, st
   return hosts;
 }
 
-/** Checks a rendered output against the deploy's hostnames. */
+/** Checks a rendered output (both files, as the renderer gave their bytes) against the deploy's hostnames. */
 export function checkRendered(ctx: Context, key: string, release: string, out: RenderOutput): void {
   if (typeof out.headers !== "string" || out.headers.trim() === "")
     throw new DataError(`${key}: the renderer gave no _headers`);
   if (out.headers.split("\n").some((line) => line.length > 2000))
     throw new DataError(`${key}: a _headers line is over 2,000 characters`);
-  const env = JSON.stringify(out.env);
-  if (out.env.release !== release)
+  if (typeof out.envJson !== "string" || out.envJson.trim() === "")
+    throw new DataError(`${key}: the renderer gave no env.json`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out.envJson);
+  } catch {
+    throw new DataError(`${key}: the rendered env.json is not JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new DataError(`${key}: the rendered env.json is not an object`);
+  const fields = parsed as Record<string, unknown>;
+  const env = out.envJson;
+  if (fields.release !== release)
     throw new DataError(`${key}: env.json does not carry this release`);
-  if (out.env.environment !== ctx.environment)
+  if (fields.environment !== ctx.environment)
     throw new DataError(`${key}: env.json does not carry this environment`);
   const allowed = new Set(Object.values(hostsFor(ctx, key)).map((h) => h.toLowerCase()));
   const zone = ctx.overlay.zone.toLowerCase();
@@ -113,12 +124,13 @@ export function checkRendered(ctx: Context, key: string, release: string, out: R
   }
 }
 
-/** The bytes of the two rendered files, exactly as render writes them and deploy compares them. */
+/**
+ * The bytes of the two rendered files, exactly as render writes them and deploy compares them: the
+ * renderer's own, each ending in a newline.
+ */
 export function renderedContents(out: RenderOutput): { headers: string; env: string } {
-  return {
-    headers: out.headers.endsWith("\n") ? out.headers : `${out.headers}\n`,
-    env: `${JSON.stringify(out.env)}\n`,
-  };
+  const line = (text: string) => (text.endsWith("\n") ? text : `${text}\n`);
+  return { headers: line(out.headers), env: line(out.envJson) };
 }
 
 /** Renders and checks one deployment's two files. */

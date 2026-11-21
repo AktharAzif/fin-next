@@ -33,6 +33,19 @@ export interface PlanHooks {
    * sends nothing.
    */
   check?: (change: Change) => void;
+  /**
+   * Undoes what a run must not leave behind (a one-run token, a superuser reference), on every way
+   * a registered plan ends, while the run may still write: after its changes (before `after`),
+   * after an error or a refusal, and after a stop (the trap runs it before it closes a run the plan
+   * has not closed). It runs once, however many ask, and prints what to do by hand when it fails.
+   * Its failure fails a run that would have passed; it never hides the error a run ends with.
+   */
+  cleanup?: () => Promise<void>;
+  /**
+   * What is left to do by hand while the cleanup has not finished: the trap prints it when a stop
+   * closes the run at once (SIGQUIT, a later signal, the deadline) before the cleanup could.
+   */
+  leftover?: () => string | undefined;
   /** Read back after a registered run's changes; its fields join `run.done` (never printed). */
   after?: () => Promise<Record<string, unknown>>;
 }
@@ -66,6 +79,9 @@ export class Context {
   readonly #overlay: Overlay | undefined;
   #guard: Guard | undefined;
   readonly #credentials = new Map<CredentialVariable, Secret>();
+  /** The applied plan's hooks, from its registration on (cleanUp() and leftover() use them). */
+  #hooks: PlanHooks = {};
+  #cleaning: Promise<void> | undefined;
 
   constructor(options: ContextOptions) {
     this.runtime = options.runtime;
@@ -127,10 +143,27 @@ export class Context {
   }
 
   /**
+   * Runs the applied plan's cleanup (PlanHooks.cleanup) once; every later call gets the same
+   * promise. applyPlan calls it on each way out, and the stop's trap before it closes the run.
+   */
+  cleanUp(): Promise<void> {
+    const cleanup = this.#hooks.cleanup;
+    if (cleanup === undefined) return Promise.resolve();
+    this.#cleaning ??= cleanup();
+    return this.#cleaning;
+  }
+
+  /** What the applied plan's cleanup has left to do by hand, while it has not finished. */
+  leftover(): string | undefined {
+    return this.#hooks.leftover?.();
+  }
+
+  /**
    * Prints a plan, and unless this is a dry run applies its pending changes in order inside a
    * registered run: run.registered (shipped at once) before the first change, one run.step per
    * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Every pending
-   * change is checked first (hooks.check), so a refusal sends nothing; what hooks.after reads back
+   * change is checked first (hooks.check), so a refusal sends nothing; hooks.cleanup runs before
+   * run.done on every way out (after the changes, an error, a stop); what hooks.after reads back
    * after the changes joins run.done. Returns the exit code: 0 when everything planned was applied
    * (or, in a dry run, when nothing differs), 1 when a dry run shows changes or some changes were
    * held. A run applies one plan.
@@ -163,6 +196,8 @@ export class Context {
     checkDeletes(changes, flagInt(this.args, "confirm-delete"));
     for (const change of todo) hooks.check?.(change);
     this.run.register({ plan: summary, ...fields });
+    // From here a stop's trap finds the cleanup, whatever this plan is waiting on.
+    this.#hooks = hooks;
     await this.run.flushLines();
     let readBack: Record<string, unknown> = {};
     try {
@@ -181,10 +216,16 @@ export class Context {
           this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
         }
       }
+      await this.cleanUp();
       readBack = hooks.after === undefined ? {} : await hooks.after();
       // A stop that came while the last change was in flight: that change is recorded above.
       this.run.assertNotStopped();
     } catch (error) {
+      try {
+        await this.cleanUp();
+      } catch {
+        // The cleanup said what to do by hand; the run ends with its own error.
+      }
       this.run.finish(resultOf(error), {
         plan: summary,
         error: error instanceof Error ? error.message : "failed",

@@ -5,10 +5,12 @@
 // run can never hide it. Telemetry never changes the exit code. From just before a mutating run
 // takes the lock until it has released it, a stop (SIGINT, SIGTERM, SIGHUP; with main.ts's guards,
 // a closed standard output or error, or an uncaught error) closes it as failed: no further change
-// starts, the change in flight is given time to settle and is recorded if it does, then run.done,
-// the lock released and the lines kept and shipped, before the process exits 130, 143, 129 or 70.
-// SIGQUIT, a later second Ctrl-C or SIGTERM, and the clean-up's deadline close it at once instead
-// (run.done naming the change in flight, the lock released) and exit (core/runtime.ts).
+// starts, the change in flight is given time to settle and is recorded if it does, then the plan's
+// cleanup (PlanHooks.cleanup), run.done, the lock released and the lines kept and shipped, before
+// the process exits 130, 143, 129 or 70. SIGQUIT, a later second Ctrl-C or SIGTERM, and the
+// clean-up's deadline close it at once instead (run.done naming the change in flight, what the
+// cleanup has not done printed as something to do by hand, the lock released) and exit
+// (core/runtime.ts).
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
@@ -74,9 +76,12 @@ function report(out: Output, error: unknown): number {
 /**
  * While the run may hold the lock, a stop closes it before the process exits: the run is marked
  * stopped so no further change starts; a change in flight gets up to INTERRUPT_SETTLE_MS to settle
- * (applyPlan then records it and closes the run); a run still open after that is closed here, its
- * run.done naming the change in flight. An uncaught error does not wait. A run that registered
- * nothing has its lock released. When the stop insists (closeNow), the run is closed at once.
+ * (applyPlan then records it, runs the plan's cleanup and closes the run); a run still open after
+ * that has the plan's cleanup run here (a one-run token revoked, a superuser reference removed,
+ * while the run may still write) and is then closed, its run.done naming the change in flight. An
+ * uncaught error does not wait. A run that registered nothing has its lock released. When the stop
+ * insists (closeNow), the run is closed at once, and what the cleanup has not done yet is printed
+ * as something to do by hand.
  */
 function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
   return runtime.trap({
@@ -86,6 +91,13 @@ function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
       if (ctx.run.registered && !ctx.run.finished) {
         if (ctx.run.inFlight !== undefined && cause !== "uncaught-error") {
           await Promise.race([ctx.run.closed, runtime.sleep(INTERRUPT_SETTLE_MS)]);
+        }
+        if (!ctx.run.finished) {
+          try {
+            await ctx.cleanUp();
+          } catch {
+            // The cleanup said what to do by hand.
+          }
         }
         if (!ctx.run.finished) ctx.run.finish("failed", { error: stopDescription(cause) });
       } else ctx.run.close();
@@ -106,6 +118,8 @@ function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
         ctx.run.close();
         return;
       }
+      const left = ctx.leftover();
+      if (left !== undefined) out.error(left);
       const stopped = ctx.run.stopped;
       ctx.run.finish("failed", {
         error: stopped === undefined ? what : stopDescription(stopped),

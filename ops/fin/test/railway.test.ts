@@ -74,6 +74,53 @@ function manifest(h: H, extra: Record<string, unknown> = {}, attested = true): s
 const deploy = (h: H, file: string, ...more: string[]) =>
   h.run(["railway", "deploy", "staging", "--release", RELEASE, "--manifest", file, ...more]);
 
+/** Waits until the condition holds, letting other work run between checks. */
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !condition(); i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(condition(), "the condition never held");
+}
+
+/** A promise and the function that settles it. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let open: () => void = () => {};
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
+/**
+ * A release with migrations whose migrate never writes migrate.done, so the deploy waits on it;
+ * with `holdLog`, the first read of migrate's log is held in flight until `log.open()`.
+ */
+function migrateWaits(holdLog = false) {
+  const h = provisioned((x) => {
+    x.rw.migrateLogs = () => [JSON.stringify({ event: "migrate.started" })];
+    x.rw.deployStatuses = ["DEPLOYING"];
+  });
+  const log = gate();
+  const reached = gate();
+  if (holdLog) {
+    const fetch = h.rw.fetch;
+    let held = false;
+    Object.assign(h.rw, {
+      fetch: async (url: string, init: RequestInit) => {
+        if (!held && String(init.body).includes("finLogs")) {
+          held = true;
+          reached.open();
+          await log.wait;
+        }
+        return fetch(url, init);
+      },
+    });
+  }
+  return { h, file: manifest(h, { migrations: ["x.sql"] }), log, reached: reached.wait };
+}
+
+const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL" }];
+
 describe("railway verify", () => {
   it("reports every service without an image until the first deploy, and nothing else", async () => {
     const h = provisioned();
@@ -473,6 +520,70 @@ describe("railway deploy", () => {
     });
     assert.equal(await deploy(h2, manifest(h2, { migrations: ["x.sql"] })), EXIT.unavailable);
     assert.match(h2.runtime.err(), /ended CRASHED with no migrate.done for this release/);
+  });
+
+  it("removes the superuser reference when a signal stops the run during the migrate wait, which the stop cuts short", async () => {
+    const { h, file } = migrateWaits();
+    // Neither a poll's pause nor the stop's settle wait ends on its own: only the stop ends the
+    // pause, and the run closes once the change in flight settles.
+    Object.assign(h.runtime, { sleep: () => new Promise<void>(() => {}) });
+    const pending = deploy(h, file);
+    await until(() => h.rw.operations.includes("finLogs"));
+    assert.equal(await h.runtime.interrupt("SIGTERM"), true);
+    assert.equal(await pending, EXIT.terminated, h.runtime.err());
+    assert.deepEqual(h.rw.variableDeletes, REMOVED);
+    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    assert.deepEqual(
+      h.rw.updates.map((u) => u.service),
+      ["migrate"],
+      "nothing rolls after the stop",
+    );
+    assert.match(h.runtime.err(), /deploy stopped at migrate; on the new release: none/);
+    const done = h.records().at(-1);
+    assert.equal(done?.event, "run.done");
+    assert.equal(done?.result, "failed");
+    assert.equal(done?.interrupted, "SIGTERM");
+    assert.equal(done?.inFlight, undefined, "migrate's change settled within the settle time");
+    h.assertNoLeak();
+  });
+
+  it("removes the superuser reference before it closes the run when the migrate wait does not settle in time", async () => {
+    const { h, file, log, reached } = migrateWaits(true);
+    const pending = deploy(h, file);
+    await reached;
+    // The fake runtime's sleep returns at once: the settle wait times out with the log read held.
+    assert.equal(await h.runtime.interrupt("SIGTERM"), true);
+    assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed while the run could still write");
+    assert.equal(h.rw.instances.get("migrate")?.variables.FIN_BOOTSTRAP_DATABASE_URL, undefined);
+    const done = h.records().at(-1);
+    assert.equal(done?.event, "run.done");
+    assert.equal(done?.interrupted, "SIGTERM");
+    assert.deepEqual(done?.inFlight, { kind: "task", name: "migrate", action: "update" });
+    log.open();
+    assert.equal(await pending, EXIT.terminated, h.runtime.err());
+    assert.deepEqual(h.rw.variableDeletes, REMOVED, "removed once");
+    assert.deepEqual(
+      h.rw.updates.map((u) => u.service),
+      ["migrate"],
+    );
+  });
+
+  it("says to remove the superuser reference by hand when a stop closes the run at once before it could", async () => {
+    const { h, file, log, reached } = migrateWaits(true);
+    Object.assign(h.runtime, { sleep: () => new Promise<void>(() => {}) });
+    const pending = deploy(h, file);
+    await reached;
+    const stopping = h.runtime.interrupt("SIGINT");
+    await until(() => h.runtime.err().includes("closing the run"));
+    assert.equal(h.runtime.forceClose("SIGQUIT"), true);
+    assert.match(
+      h.runtime.err(),
+      /FIN_BOOTSTRAP_DATABASE_URL may still be on migrate: remove it by hand now \(spec 01 §6\.3, §6\.6\)/,
+    );
+    assert.equal(h.records().at(-1)?.forced, "SIGQUIT");
+    log.open();
+    await stopping;
+    await pending;
   });
 
   it("reads migrate's log lines as JSON objects only", () => {

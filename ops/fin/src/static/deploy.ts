@@ -22,7 +22,9 @@
 // The upload never uses CR-20, which lives only in the `staging-static` environment, nor the operator
 // token: `pnpm fin` mints a one-run token with the operator token (CR-05), holding Workers Scripts
 // Write on this account only and expiring within the hour, uses it for the uploads, and revokes it
-// when the run ends, whether the uploads passed or failed.
+// when the run ends, whether the uploads passed or failed or a signal stopped the run (the plan's
+// cleanup, which the stop's trap runs too); a run closed at once before it could says to revoke it
+// by hand.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -244,29 +246,43 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
           }),
         ),
       ];
-      let minted: { id: string; token: Secret } | undefined;
+      /** The one-run token's mint, from the moment it is sent. */
+      let mint: Promise<ApiToken> | undefined;
+      let token: Secret | undefined;
+      /** The revocation: it runs once, on every way the run ends (the plan's cleanup). */
+      let revocation: Promise<void> | undefined;
+      let revocationSettled = false;
+      const revokeByHand = `revoke it by hand now (it expires within ${t.expiryMinutes} minutes)`;
       const uploaded: string[] = [];
-      const revoke = async (): Promise<void> => {
-        if (minted === undefined) return;
-        const { id } = minted;
-        minted = undefined;
-        try {
-          await writer.write(target(id), "DELETE", `${accountPath}/tokens/${id}`);
+      const revoke = (): Promise<void> => {
+        revocation ??= (async () => {
+          if (mint === undefined) return;
+          let id: string;
+          try {
+            // A mint still in flight when the run stops is waited for, so its token is revoked too.
+            ({ id } = await mint);
+          } catch {
+            return;
+          }
+          try {
+            await writer.write(target(id), "DELETE", `${accountPath}/tokens/${id}`);
+          } catch (error) {
+            ctx.out.error(`the one-run token ${t.name} could not be revoked: ${revokeByHand}`);
+            throw error;
+          }
           ctx.run.step("token", t.name, "revoke");
           ctx.out.info(`  revoked the one-run token ${t.name}`);
-        } catch (error) {
-          ctx.out.error(
-            `the one-run token ${t.name} could not be revoked: revoke it by hand now (it expires within ${t.expiryMinutes} minutes)`,
-          );
-          throw error;
-        }
+        })().finally(() => {
+          revocationSettled = true;
+        });
+        return revocation;
       };
       return ctx.applyPlan(
         "static deploy",
         changes,
         async (change) => {
           if (change.kind === "token") {
-            const created = await writer.write<ApiToken>(
+            mint = writer.write<ApiToken>(
               target(),
               "POST",
               `${accountPath}/tokens`,
@@ -278,18 +294,19 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
                 t.expiryMinutes,
               ),
             );
+            const created = await mint;
             if (typeof created.value !== "string" || created.value === "")
               throw new ProviderError("cloudflare", "Cloudflare answered no token value", 0);
             ctx.masker.register(created.value, "<static-run-token>");
-            minted = { id: created.id, token: new Secret(created.value) };
+            token = new Secret(created.value);
             return;
           }
           const item = prepared.find((p) => p.deployment.script === change.name);
           if (item === undefined) return;
           try {
-            if (minted === undefined) throw new Error("no one-run token was minted");
+            if (token === undefined) throw new Error("no one-run token was minted");
             const result = await uploadPrepared(item, {
-              client: cloudflareClient(minted.token.reveal(), ctx.runtime.fetch),
+              client: cloudflareClient(token.reveal(), ctx.runtime.fetch),
               accountId: ctx.overlay.cloudflare.accountId,
               beforeWrite: (what) => ctx.run.assertWritable(what),
               log: (line) => ctx.out.info(line),
@@ -311,11 +328,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
                 prepared.slice(prepared.indexOf(item) + 1).map((p) => p.key),
               ),
             );
-            try {
-              await revoke();
-            } catch {
-              // Already reported; the upload's own error is the one the run ends with.
-            }
+            // The token is revoked by the plan's cleanup, before run.done.
             throw translate(error);
           }
         },
@@ -325,8 +338,12 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
           ...(deploymentsUnchecked ? { deploymentsUnchecked: true } : {}),
         },
         {
+          cleanup: revoke,
+          leftover: () =>
+            mint !== undefined && !revocationSettled
+              ? `the one-run token ${t.name} may not be revoked: ${revokeByHand}`
+              : undefined,
           after: async () => {
-            await revoke();
             ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });
             return {};
           },

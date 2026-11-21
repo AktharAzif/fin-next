@@ -78,16 +78,19 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    exit 129), a standard output or error that closes under it (a `| head` or a `| less` that quits,
    exit 70), and an error nothing caught (exit 70, with a fixed message). No further change starts.
    The change in flight gets up to three seconds to finish and is recorded as a step if it does
-   (not after an uncaught error). Then `run.done` is written with `failed`, `interrupted` (what
-   stopped it) and, when a change had not finished in time, `inFlight` naming it (it may have been
-   applied). The lock is released and the lines are kept and shipped.
+   (not after an uncaught error); a change that waits on a provider (a deploy, a migration) stops
+   waiting at once. Then what the run must not leave behind is undone (`static deploy`'s one-run
+   token, `railway deploy`'s superuser reference on `migrate`), and `run.done` is written with
+   `failed`, `interrupted` (what stopped it) and, when a change had not finished in time, `inFlight`
+   naming it (it may have been applied). The lock is released and the lines are kept and shipped.
 
    All of this takes five seconds at most. A repeated hangup (a closing terminal can send more than
    one) and any second signal within a second of the first belong to the same stop and change
    nothing. A second Ctrl-C or SIGTERM after that, Ctrl-\ (SIGQUIT, exit 131) at any time, and the
-   five-second deadline close the run at once instead: `run.done` is written with `forced` (what
-   cut the wait short) and `inFlight` naming the change still in flight, the lock is released, and
-   the process exits; lines not shipped yet stay in `lines.jsonl`. Re-run with `--dry-run` to see
+   five-second deadline close the run at once instead: the output names anything not yet undone to
+   undo by hand, `run.done` is written with `forced` (what cut the wait short) and `inFlight` naming
+   the change still in flight, the lock is released, and the process exits; lines not shipped yet
+   stay in `lines.jsonl`. Re-run with `--dry-run` to see
    what the interrupted run left undone. Only SIGKILL (and a crash of Node or of the machine)
    leaves a run open; its lock then needs `lock break` (below).
 

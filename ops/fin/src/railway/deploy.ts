@@ -22,7 +22,8 @@
 //   7. when the release lists migrations, run `migrate` with the new api image and the superuser
 //      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
 //      the run), poll its log until `migrate.done` for this release, then remove the reference and
-//      read migrate's variables back to confirm it is gone;
+//      read migrate's variables back to confirm it is gone (on every way the run ends: a failure,
+//      and a stop, which cuts the wait short; a run closed at once first says to remove it by hand);
 //   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
 //      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
@@ -94,7 +95,8 @@ async function waitForDeployment(
     if (FAILED.has(status)) {
       throw new ProviderError("railway", `${what}: the deployment ended ${status}`, 0);
     }
-    await ctx.runtime.sleep(POLL_MS);
+    // A stop cuts the wait short (a StoppedError), so the run closes within its settle time.
+    await ctx.run.pause(POLL_MS);
   }
   throw new ProviderError(
     "railway",
@@ -131,9 +133,9 @@ export function migrateOutcome(
 /**
  * Waits for `migrate.done` for this release (spec 01 §6.9 step 3). `migrate` has no health check, so
  * Railway's SUCCESS says only that the container started, and its log reaches the API late: each
- * pass reads the log, then the deployment's status, until the line arrives, `migrate.failed` or a
- * failed deployment stops it, or the time runs out. A failed status gets one last log read, in
- * case the line was still on its way.
+ * pass reads the log, then the deployment's status, until the line arrives, `migrate.failed`, a
+ * failed deployment or a stop ends it, or the time runs out. A failed status gets one last log
+ * read, in case the line was still on its way.
  */
 async function waitForMigrate(
   ctx: Context,
@@ -154,7 +156,7 @@ async function waitForMigrate(
     if (await read()) return;
     const status = await deploymentStatus(rw, id);
     if (FAILED.has(status)) {
-      await ctx.runtime.sleep(POLL_MS);
+      await ctx.run.pause(POLL_MS);
       if (await read()) return;
       throw new ProviderError(
         "railway",
@@ -162,7 +164,9 @@ async function waitForMigrate(
         0,
       );
     }
-    await ctx.runtime.sleep(POLL_MS);
+    // A stop cuts the wait short (a StoppedError): the caller then removes the superuser reference
+    // while the run may still write.
+    await ctx.run.pause(POLL_MS);
   }
   throw new ProviderError(
     "railway",
@@ -439,7 +443,39 @@ export const railwayDeploy: Command = {
         );
       }
     };
-    const runMigrate = async (serviceId: string, roll: Roll) => {
+    /**
+     * migrate's superuser reference, from just before it is set until its removal settles. The
+     * removal runs once, whoever asks first: migrate's own change once migrate ends, or the plan's
+     * cleanup on any other way out (an error, a stop), while the run may still write.
+     */
+    let migrateReference:
+      | { serviceId: string; removal: Promise<void> | undefined; settled: boolean }
+      | undefined;
+    const byHand = "remove it by hand now (spec 01 §6.3, §6.6)";
+    const removeReference = (): Promise<void> => {
+      const set = migrateReference;
+      if (set === undefined) return Promise.resolve();
+      set.removal ??= (async () => {
+        try {
+          await rw.mutate(ctx.run, VARIABLE_DELETE, {
+            input: {
+              projectId: rw.projectId,
+              environmentId: rw.environmentId,
+              serviceId: set.serviceId,
+              name: reference.variable,
+            },
+          });
+          await confirmRemoved(set.serviceId);
+        } catch (error) {
+          ctx.out.error(`${reference.variable} could not be removed from migrate: ${byHand}`);
+          throw error;
+        } finally {
+          set.settled = true;
+        }
+      })();
+      return set.removal;
+    };
+    const runMigrate = async (serviceId: string) => {
       let failure: unknown;
       try {
         const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
@@ -451,19 +487,8 @@ export const railwayDeploy: Command = {
         failure = error;
       }
       try {
-        await rw.mutate(ctx.run, VARIABLE_DELETE, {
-          input: {
-            projectId: rw.projectId,
-            environmentId: rw.environmentId,
-            serviceId,
-            name: reference.variable,
-          },
-        });
-        await confirmRemoved(serviceId);
+        await removeReference();
       } catch (error) {
-        ctx.out.error(
-          `${reference.variable} could not be removed from ${roll.service}: remove it by hand now (spec 01 §6.3, §6.6)`,
-        );
         failure ??= error;
       }
       if (failure !== undefined) throw failure;
@@ -498,6 +523,8 @@ export const railwayDeploy: Command = {
               ...(want?.startCommand === undefined ? {} : { startCommand: want.startCommand }),
             },
           });
+          // From here the reference may be on migrate, whatever this write answers.
+          if (roll.task) migrateReference = { serviceId, removal: undefined, settled: false };
           await rw.setVariables(
             ctx.run,
             ctx.settings,
@@ -514,7 +541,7 @@ export const railwayDeploy: Command = {
             },
             `pnpm fin railway deploy ${release.slice(0, 12)} (${ctx.run.id})`,
           );
-          if (roll.task) await runMigrate(serviceId, roll);
+          if (roll.task) await runMigrate(serviceId);
           else {
             const deployed = await rw.mutate<{ serviceInstanceDeployV2: string }>(ctx.run, DEPLOY, {
               serviceId,
@@ -540,6 +567,11 @@ export const railwayDeploy: Command = {
       },
       { release, minimumSchemaVersion: schema, ...unchecked },
       {
+        cleanup: removeReference,
+        leftover: () =>
+          migrateReference !== undefined && !migrateReference.settled
+            ? `${reference.variable} may still be on migrate: ${byHand}`
+            : undefined,
         after: async () => {
           if (!started) return {};
           const after = await inspectRailway(ctx, rw);

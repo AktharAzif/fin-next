@@ -93,9 +93,11 @@ Then, in order:
    `assets: {jwt, config: {not_found_handling, html_handling, _headers}}`); `workers.dev` and previews
    off; the re-read (no module, no handler, no binding, assets present, `workers.dev` and previews
    off);
-3. the one-run token is revoked when the run ends, whether the uploads passed or failed. If the
-   revocation fails, the output says so: revoke `fin-next-staging-static-run` in Cloudflare by hand
-   (it expires within the hour anyway).
+3. the one-run token is revoked when the run ends, whether the uploads passed or failed or a signal
+   stopped the run (Ctrl-C, SIGTERM, a closed terminal: it is revoked before `run.done`). If the
+   revocation fails, or the run is closed at once before it could (Ctrl-\, a later second Ctrl-C,
+   the five-second deadline), the output says so: revoke `fin-next-staging-static-run` in Cloudflare
+   by hand (it expires within the hour anyway).
 
 A failure stops the run; the output says which host serves which release
 (`static deploy stopped at <key> (it may serve either release); new release on: ...; previous

@@ -88,6 +88,8 @@ export class Run {
   #stopped: StopCause | undefined;
   #inFlight: InFlight | undefined;
   readonly #closed = Promise.withResolvers<void>();
+  /** Settles when something stops the run, so a wait (pause()) is cut short. */
+  readonly #stopping = Promise.withResolvers<void>();
 
   constructor(runtime: Runtime, log: RunLog, out: Output, options: RunOptions) {
     this.#runtime = runtime;
@@ -164,6 +166,17 @@ export class Run {
    */
   stop(cause: StopCause): void {
     this.#stopped ??= cause;
+    this.#stopping.resolve();
+  }
+
+  /**
+   * Waits `ms` while a change polls a provider, or less once something stops the run; then throws
+   * a StoppedError if something did. A change that waits long (a deploy, a migration) uses it, so
+   * a stop reaches it well within the time the trap gives the change in flight to settle.
+   */
+  async pause(ms: number): Promise<void> {
+    await Promise.race([this.#runtime.sleep(ms), this.#stopping.promise]);
+    this.assertNotStopped();
   }
 
   /** Throws a StoppedError (the stop's exit code) once something stopped the run. */

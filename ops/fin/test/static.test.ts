@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import {
+  renderStatic,
+  type RenderInput as WebHostRenderInput,
+} from "../../../packages/web-host/src/static/render.ts";
 import { ACCOUNT, FakeGh, FakeStatic } from "../../../tools/static-deploy/test/fake.ts";
 import { runCli } from "../src/cli.ts";
 import { EXIT } from "../src/core/errors.ts";
@@ -56,28 +60,52 @@ function refsOf(images: Record<string, string>): Map<string, string> {
   return refs;
 }
 
-/** A renderer that behaves like packages/web-host's will: headers from the profile, env.json. */
+/**
+ * A renderer that answers as packages/web-host's does: headers from the profile, and env.json as
+ * the bytes it renders.
+ */
 function fakeRenderer(
   seen: RenderInput[] = [],
   override?: (input: RenderInput) => { headers: string; env: Record<string, unknown> },
 ): StaticRenderer {
+  const bytes = (env: Record<string, unknown>) => `${JSON.stringify(env, null, 2)}\n`;
   return {
     renderStatic(input) {
       seen.push(input);
-      if (override !== undefined) return override(input);
+      if (override !== undefined) {
+        const { headers, env } = override(input);
+        return { headers, envJson: bytes(env) };
+      }
       const connect = input.profile === "docs" ? `'self' https://${input.hosts.api}` : "'self'";
       return {
         headers: `/*\n  Cache-Control: no-cache\n  Content-Security-Policy: default-src 'none'; connect-src ${connect}\n/assets/*\n  ! Cache-Control\n  Cache-Control: public, max-age=31536000, immutable\n`,
-        env: {
+        envJson: bytes({
           environment: input.environment,
           release: input.release,
           consoleOrigin: `https://${input.hosts.console}`,
           docsOrigin: `https://${input.hosts.docs}`,
           ...(input.profile === "docs" ? { apiOrigin: `https://${input.hosts.api}` } : {}),
-        },
+        }),
       };
     },
   };
+}
+
+/** Waits until the condition holds, letting other work run between checks. */
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !condition(); i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(condition(), "the condition never held");
+}
+
+/** A sleep that never ends: a stop's settle wait then lasts until the change in flight settles. */
+const NEVER = () => new Promise<void>(() => {});
+
+/** The hosts `static render` gives the renderer for an output (hostsFor). */
+function hostsOf(key: string): Record<string, string> {
+  const { pg: _pg, admin, ...hosts } = overlayFixture().hosts;
+  return key === "admin" ? { ...hosts, admin } : hosts;
 }
 
 function buildFiles(key: string): ZipInput[] {
@@ -135,11 +163,12 @@ function release(
   return { archives, manifestFile, gh };
 }
 
+/** Renders with a test renderer, or with packages/web-host's own through the default loader. */
 async function render(
   r: Release,
   env: Record<string, string>,
   out: string,
-  renderer: StaticRenderer = fakeRenderer(),
+  renderer: StaticRenderer | "web-host" = fakeRenderer(),
   extra: string[] = [],
 ) {
   const rt = fakeRuntime({ env, exec: r.gh.exec });
@@ -159,7 +188,7 @@ async function render(
       ...extra,
     ],
     rt,
-    [staticRenderCommand(async () => renderer)],
+    [renderer === "web-host" ? staticRenderCommand() : staticRenderCommand(async () => renderer)],
   );
   return { code, rt };
 }
@@ -227,6 +256,49 @@ describe("static render", () => {
     );
     assert.match(readFileSync(join(out, "console", "_headers"), "utf8"), /Cache-Control: no-cache/);
     assert.equal(rt.out().includes(ZONE), false);
+  });
+
+  it("renders with packages/web-host's own renderer through the default loader, writing its bytes as they are", async () => {
+    const { env, dir } = commandEnv();
+    const r = release(dir);
+    const out = join(dir, "out");
+    const { code, rt } = await render(r, env, out, "web-host");
+    assert.equal(code, EXIT.ok, rt.err());
+    for (const key of KEYS) {
+      const expected = renderStatic({
+        output: key as WebHostRenderInput["output"],
+        environment: "staging",
+        release: RELEASE,
+        hosts: hostsOf(key),
+      });
+      assert.equal(readFileSync(join(out, key, "_headers"), "utf8"), expected.headers, key);
+      assert.equal(readFileSync(join(out, key, "env.json"), "utf8"), expected.envJson, key);
+    }
+    const docs = JSON.parse(readFileSync(join(out, "docs", "env.json"), "utf8"));
+    assert.equal(docs.apiOrigin, `https://gateway.${ZONE}`);
+    assert.equal(docs.release, RELEASE);
+    for (const key of KEYS.filter((k) => k !== "admin")) {
+      const files = ["_headers", "env.json"].map((f) => readFileSync(join(out, key, f), "utf8"));
+      assert.equal(files.join("").includes(`staff.${ZONE}`), false, `${key} names no admin host`);
+    }
+    assert.equal(rt.out().includes(ZONE), false);
+  });
+
+  it("refuses with a config error when packages/web-host's renderer refuses the input", async () => {
+    const { env, dir } = commandEnv();
+    const overlay = overlayFixture();
+    const { docs: _docs, ...hosts } = overlay.hosts;
+    env.FIN_OVERLAY_FILE = writePrivate(
+      dir,
+      "overlay-no-docs.json",
+      JSON.stringify({ ...overlay, hosts }),
+    );
+    const r = release(dir);
+    const out = join(dir, "out");
+    const { code, rt } = await render(r, env, out, "web-host", ["--only", "console"]);
+    assert.equal(code, EXIT.config, rt.err());
+    assert.match(rt.err(), /static console: the renderer refused: .*docs role/);
+    assert.equal(existsSync(join(out, "console")), false);
   });
 
   it("refuses an unattested manifest, an unattested archive, and an archive whose SHA-256 is not the manifest's", async () => {
@@ -392,13 +464,14 @@ describe("static deploy (pnpm fin)", () => {
     {
       runs = [{ release: RELEASE, result: "ok" }],
       live = true,
-    }: { runs?: readonly Logged[]; live?: boolean } = {},
+      webHost = false,
+    }: { runs?: readonly Logged[]; live?: boolean; webHost?: boolean } = {},
   ) {
     const { env, dir } = commandEnv();
     seedRunLog(env, runs);
     const r = release(dir, change);
     const out = join(dir, "rendered");
-    const { code, rt } = await render(r, env, out);
+    const { code, rt } = await render(r, env, out, webHost ? "web-host" : fakeRenderer());
     assert.equal(code, EXIT.ok, rt.err());
     const cfToken = fakeToken("cf");
     env.FIN_CF_TOKEN_FILE = writePrivate(dir, "cf-token", cfToken);
@@ -414,10 +487,23 @@ describe("static deploy (pnpm fin)", () => {
     const statics = new FakeStatic(MINTED);
     const sequence: string[] = [];
     let failPut: string | undefined;
+    /** Calls held in flight until the test opens them: the first call each one matches. */
+    const holds: Array<{
+      match: (method: string, path: string) => boolean;
+      reached: () => void;
+      wait: Promise<void>;
+    }> = [];
     const fetch = async (url: string, init: RequestInit) => {
       if (url.startsWith("https://backboard.railway.com/")) return rw.fetch(url, init);
       const path = new URL(url).pathname;
-      sequence.push(`${init.method ?? "GET"} ${path}`);
+      const method = init.method ?? "GET";
+      sequence.push(`${method} ${path}`);
+      const held = holds.find((h) => h.match(method, path));
+      if (held !== undefined) {
+        holds.splice(holds.indexOf(held), 1);
+        held.reached();
+        await held.wait;
+      }
       if (path.includes("/tokens")) return cf.fetch(url, init);
       if (failPut !== undefined && init.method === "PUT" && path.endsWith(`/${failPut}`))
         return new Response(JSON.stringify({ success: false, errors: [], result: null }), {
@@ -425,9 +511,16 @@ describe("static deploy (pnpm fin)", () => {
         });
       return statics.fetch(url, init);
     };
-    const run = async (extra: string[] = [], dirArg = out) => {
-      const rt = fakeRuntime({ env, fetch, exec: r.gh.exec, repoRoot: repoWithStatic(dir) });
-      const code = await runCli(
+    /** Starts a deploy without waiting for it (the test may stop it meanwhile). */
+    const start = (extra: string[] = [], dirArg = out, sleep?: (ms: number) => Promise<void>) => {
+      const rt = fakeRuntime({
+        env,
+        fetch,
+        exec: r.gh.exec,
+        repoRoot: repoWithStatic(dir),
+        ...(sleep === undefined ? {} : { sleep }),
+      });
+      const done = runCli(
         [
           "static",
           "deploy",
@@ -441,9 +534,26 @@ describe("static deploy (pnpm fin)", () => {
           ...extra,
         ],
         rt,
-        [staticDeployCommand(async () => fakeRenderer())],
+        [webHost ? staticDeployCommand() : staticDeployCommand(async () => fakeRenderer())],
       );
-      return { code, rt };
+      return { rt, done };
+    };
+    const run = async (extra: string[] = [], dirArg = out) => {
+      const { rt, done } = start(extra, dirArg);
+      return { code: await done, rt };
+    };
+    /** Holds the first call that matches in flight until open() (reached settles once it is). */
+    const hold = (match: (method: string, path: string) => boolean) => {
+      let reached: () => void = () => {};
+      let open: () => void = () => {};
+      const isReached = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const wait = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      holds.push({ match, reached, wait });
+      return { reached: isReached, open };
     };
     /** A real `railway deploy` of RELEASE (its manifest) or OTHER (other digests), attested. */
     const railwayDeploy = async (sha: string): Promise<number> => {
@@ -477,6 +587,8 @@ describe("static deploy (pnpm fin)", () => {
       statics,
       sequence,
       run,
+      start,
+      hold,
       railwayDeploy,
       failAt: (script: string) => {
         failPut = script;
@@ -738,5 +850,108 @@ describe("static deploy (pnpm fin)", () => {
     );
     assert.equal(t.cf.tokens.length, 0, "revoked after the failure");
     assert.ok(t.sequence.some((s) => s.startsWith("DELETE")));
+  });
+
+  /** The records of the last static deploy run in the run log. */
+  const records = (t: { env: Record<string, string> }) => {
+    const all = runsLog(t)
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // The fake runtime gives every run the same ID, so the run starts at its registration.
+    return all.slice(
+      all.findLastIndex((r) => r.event === "run.registered" && r.command === "static deploy"),
+    );
+  };
+  const isMint = (method: string, path: string) => method === "POST" && path.endsWith("/tokens");
+
+  it("revokes the one-run token when a signal stops the run while the token is being minted", async () => {
+    const t = await rendered();
+    const mint = t.hold(isMint);
+    // The settle wait lasts until the change in flight settles.
+    const { rt, done } = t.start([], t.out, NEVER);
+    await mint.reached;
+    const stopping = rt.interrupt("SIGINT");
+    await until(() => rt.err().includes("closing the run"));
+    mint.open();
+    assert.equal(await stopping, true);
+    assert.equal(await done, EXIT.interrupted, rt.err());
+    assert.equal(t.cf.tokens.length, 0, "the token minted as the run stopped is revoked");
+    assert.equal(t.sequence.at(-1)?.startsWith("DELETE"), true);
+    assert.equal(t.statics.calls.length, 0, "nothing is uploaded after the stop");
+    assert.match(rt.out(), /revoked the one-run token fin-next-staging-static-run/);
+    assert.deepEqual(
+      records(t).map((r) => [r.event, r.kind, r.action, r.result, r.interrupted]),
+      [
+        ["run.registered", undefined, undefined, undefined, undefined],
+        ["run.step", "token", "create", undefined, undefined],
+        ["run.step", "token", "revoke", undefined, undefined],
+        ["run.done", undefined, undefined, "failed", "SIGINT"],
+      ],
+    );
+    for (const value of [MINTED, ACCOUNT]) assert.equal(rt.all().includes(value), false);
+  });
+
+  it("revokes the one-run token before it closes the run when an upload in flight does not settle in time", async () => {
+    const t = await rendered();
+    const upload = t.hold(
+      (method, path) => method === "PUT" && path.endsWith("/fin-next-staging-verify-static"),
+    );
+    // The fake runtime's sleep returns at once: the settle wait times out.
+    const { rt, done } = t.start();
+    await upload.reached;
+    assert.equal(await rt.interrupt("SIGTERM"), true);
+    assert.equal(t.cf.tokens.length, 0, "revoked while the run could still write");
+    const log = records(t);
+    assert.deepEqual(
+      log.filter((r) => r.event === "run.step").map((r) => [r.kind, r.action]),
+      [
+        ["token", "create"],
+        ["token", "revoke"],
+      ],
+    );
+    const closed = log.at(-1);
+    assert.equal(closed?.event, "run.done");
+    assert.equal(closed?.interrupted, "SIGTERM");
+    assert.deepEqual(closed?.inFlight, {
+      kind: "static",
+      name: "fin-next-staging-verify-static",
+      action: "update",
+    });
+    upload.open();
+    assert.notEqual(await done, EXIT.ok);
+    assert.deepEqual(
+      [...t.statics.scripts.keys()],
+      ["fin-next-staging-verify-static"],
+      "no later deployment is uploaded once the run is closed",
+    );
+    assert.equal(t.sequence.filter((s) => s.startsWith("DELETE")).length, 1, "revoked once");
+  });
+
+  it("says to revoke the one-run token by hand when a stop closes the run at once before it could", async () => {
+    const t = await rendered();
+    const mint = t.hold(isMint);
+    const { rt, done } = t.start([], t.out, NEVER);
+    await mint.reached;
+    const stopping = rt.interrupt("SIGINT");
+    await until(() => rt.err().includes("closing the run"));
+    assert.equal(rt.forceClose("SIGQUIT"), true);
+    assert.match(
+      rt.err(),
+      /the one-run token fin-next-staging-static-run may not be revoked: revoke it by hand now \(it expires within 60 minutes\)/,
+    );
+    assert.equal(records(t).at(-1)?.forced, "SIGQUIT");
+    mint.open();
+    await stopping;
+    await done;
+  });
+
+  it("renders and uploads with packages/web-host's own renderer: the rendered files equal a fresh render", async () => {
+    const t = await rendered({}, { webHost: true });
+    const { code, rt } = await t.run();
+    assert.equal(code, EXIT.ok, rt.err());
+    assert.match(rt.out(), /5 rendered _headers and env.json equal a fresh render/);
+    assert.equal(t.statics.scripts.size, KEYS.length);
+    assert.equal(t.cf.tokens.length, 0);
   });
 });
