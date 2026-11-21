@@ -1,251 +1,240 @@
-// Tabs (spec 06 §3.3, the Tabs board). Tabs, TabsList, Tab and TabPanel switch between views of one
-// record or list without leaving the page; TabLinks and TabLink draw the same row as links, for
-// tabs that are routes of their own (Settings, a customer's page). The SDK's tabs bring the roles,
-// the arrow keys, Home and End, and the panel wiring; this file adds Fin's look: 40px tabs with
-// labels 28px apart, a 2px mark under the chosen tab, a 1px rule under the row, a count only for
-// work that waits, and the inside focus ring where an outside one would be cut off.
+// Tabs and TabLinks (spec 06 §3.3; the design canvases' Tabs board).
 //
-// Closed props: each part reads the props its type lists, one by one, and hands the SDK or the
-// page nothing else. A style, an id, a data or aria attribute, raw markup or a `render` that a
-// caller slips in (a spread escapes tsc's excess-property check) never reaches the markup.
+// Tabs switch between views of one object or list without leaving the page: Transactions' All and
+// To settle, the sections of a record in a drawer. The UI SDK's tabs entry carries the WAI-ARIA
+// tabs pattern (the named tablist with a single tab stop, arrow keys that move and select, Home and
+// End, each panel labelled by its tab, panels mounted only while chosen); Fin adds the look and two
+// layouts:
+//
+// - `variant="page"`, under a page header. The row reaches 8px past the content on each side, the
+//   side padding of one tab, so labels start on the content edge and the inset focus ring never
+//   meets a label; the 1px rule below stays on the content's own width.
+// - `variant="drawer"`, under a drawer header. The caller lets the tabs run out to the drawer's
+//   edges, the rule spans the whole drawer, and the row is padded so labels start on the drawer's
+//   24px content edge.
+//
+// In both, a row too wide for its box (several tabs on a phone) scrolls sideways inside itself
+// instead of widening the page. A count follows a label only for work that waits for someone
+// ("To settle 3"); with nothing waiting there is no count at all, never a 0.
+//
+// TabLinks draw the same row as a named <nav> of ordinary links, for tabs that are addresses of
+// their own (Settings' sections, a customer's `?tab=`). They are not a tablist: every link is in
+// the Tab order and the one on show carries aria-current="page". @fin/ui knows no router, so the
+// app's router link comes in through `linkAs`.
 import {
   Tabs as SdkTabs,
   TabsList as SdkTabsList,
   TabsPanel as SdkTabsPanel,
   TabsTab as SdkTabsTab,
 } from "@ui-sdk/react/tabs";
-import { type ComponentType, createContext, type ReactNode, useContext } from "react";
+import {
+  type ComponentProps,
+  createContext,
+  type ElementType,
+  type ReactNode,
+  useContext,
+} from "react";
 import { cn } from "../lib/cn.ts";
 
-/** `page` sits under a page header; `drawer` under a drawer's header, inset to its padding. */
-export type TabsVariant = "page" | "drawer";
+type Layout = "page" | "drawer";
 
-export type TabsProps = {
-  /** The chosen tab, when the page holds it (from `?tab=`, say). `null` chooses none. */
-  value?: string | null | undefined;
-  /** The tab chosen first when the page does not hold the choice; else the first enabled tab. */
-  defaultValue?: string | null | undefined;
-  /** Hears the tab a person chooses, by pointer or keys; not called for the first choice. */
-  onValueChange?: ((value: string | null) => void) | undefined;
-  variant?: TabsVariant | undefined;
-  className?: string | undefined;
-  children?: ReactNode;
+const LayoutContext = createContext<Layout>("page");
+
+/** The box that holds a row: it draws the 1px rule along its bottom edge. */
+const BAR = "min-w-0 border-b border-border";
+
+/** The row itself, per layout; it scrolls sideways rather than overflow its box. */
+const ROW: Record<Layout, string> = {
+  page: "-mx-2 flex overflow-x-auto",
+  drawer: "flex overflow-x-auto px-4",
 };
 
-/** The tablist's name: its own words, or the ID of the element that names it. One is required. */
-type TabsListName =
-  | { "aria-label": string; "aria-labelledby"?: undefined }
-  | { "aria-labelledby": string; "aria-label"?: undefined };
+/** A tab or a tab link: 40px tall, 8px of padding either side, its label in the label role. */
+const ITEM =
+  "relative inline-flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xs px-2 text-label text-text-secondary no-underline transition-fade focus-visible:outline-focus-inset";
 
-export type TabsListProps = TabsListName & {
-  /** Goes on the row around the list (its margin, say); the list keeps its own placing. */
-  className?: string | undefined;
-  children?: ReactNode;
-};
+/** The 2px bar under the chosen label, kept on ::after and faded in when it is chosen. */
+const MARK =
+  "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-text-primary after:opacity-0 after:transition-fade";
 
-export type TabProps = {
-  /** Pairs the tab with the TabPanel of the same value. */
-  value: string;
-  /** Reachable by the arrow keys, never chosen. */
-  disabled?: boolean | undefined;
-  /** Work waiting behind the tab. Left out unless it is a whole number above 0. */
-  count?: number | undefined;
-  className?: string | undefined;
-  children?: ReactNode;
-};
+/** A tab's chosen and unavailable looks, from the SDK's data-selected and data-disabled. */
+const TAB_STATES =
+  "cursor-pointer state-active:text-text-primary state-active:after:opacity-100 state-disabled:cursor-not-allowed state-disabled:text-text-disabled";
 
-export type TabPanelProps = {
-  value: string;
-  className?: string | undefined;
-  children?: ReactNode;
-};
+/** The number of things waiting behind a tab, after its label; nothing when none wait. */
+function Count(props: { value: number | undefined }) {
+  if (props.value === undefined || !(props.value > 0)) return null;
+  return (
+    <span className="text-text-tertiary tabular-nums">{props.value.toLocaleString("en-GB")}</span>
+  );
+}
 
-/** What TabLinks hands the app's link component: these four props and no others. */
-export type TabLinkTargetProps = {
-  href: string;
-  className: string;
-  "aria-current"?: "page";
+export type TabsProps = Omit<
+  ComponentProps<typeof SdkTabs>,
+  "orientation" | "className" | "render" | "children"
+> & {
+  /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
+  variant?: Layout;
+  className?: string;
   children: ReactNode;
 };
 
-export type TabLinksProps = {
-  /** Names the navigation landmark ("Settings"). */
-  label: string;
-  variant?: TabsVariant | undefined;
-  /** The app's router link; a plain <a> when left out. */
-  linkAs?: ComponentType<TabLinkTargetProps> | undefined;
-  className?: string | undefined;
-  children?: ReactNode;
-};
-
-export type TabLinkProps = {
-  href: string;
-  /** Marks the page being shown (aria-current="page"). */
-  current?: boolean | undefined;
-  count?: number | undefined;
-  className?: string | undefined;
-  children?: ReactNode;
-};
-
-const VariantContext = createContext<TabsVariant>("page");
-
-function Anchor(props: TabLinkTargetProps) {
-  return (
-    <a href={props.href} className={props.className} aria-current={props["aria-current"]}>
-      {props.children}
-    </a>
-  );
-}
-
-const LinkContext = createContext<ComponentType<TabLinkTargetProps>>(Anchor);
-
-/** Anything but `drawer` is the page variant, so an unknown value still draws a usable row. */
-const variantOf = (variant: unknown): TabsVariant => (variant === "drawer" ? "drawer" : "page");
-
 /**
- * Content only. The SDK calls a function child with its state, so a function that got past the
- * types (a spread, plain JavaScript) is dropped here instead.
+ * Views of one object or list, one shown at a time. Uncontrolled with `defaultValue`, else the
+ * first tab that can be chosen; controlled with `value` and `onValueChange` (for a `?tab=` in the
+ * URL). The tabs always run in a row.
  */
-const content = (node: ReactNode): ReactNode => (typeof node === "function" ? null : node);
-
-/** A count is shown only for waiting work: a whole number above 0, written plainly (1234). */
-function countText(count: unknown): string | null {
-  return typeof count === "number" && Number.isSafeInteger(count) && count > 0
-    ? String(count)
-    : null;
-}
-
-/** The 1px rule under the row. */
-const ROW = "border-b border-border";
-
-/**
- * The list: 12px between tabs, which with each tab's 8px padding puts labels 28px apart. On a page
- * it pulls back by that 8px so the first label sits on the content edge; in a drawer it sits 16px
- * in, so labels start 24px from the edge. A row too wide scrolls inside itself.
- */
-const LIST = "flex gap-3 overflow-x-auto";
-const LIST_PLACE: Record<TabsVariant, string> = {
-  page: "-mx-2",
-  drawer: "px-4",
-};
-
-/**
- * A panel starts 24px under the rule on a page. In a drawer it carries the drawer's padding and
- * reaches the drawer's edges, so its focus ring (the SDK makes a panel with nothing focusable a
- * tab stop) is drawn inside, where the drawer cannot cut it off.
- */
-const PANEL_PLACE: Record<TabsVariant, string> = {
-  page: "pt-6",
-  drawer: "px-6 py-5 focus-visible:outline-focus-inset",
-};
-
-/** A tab or tab link: 40px tall, the label type, the mark drawn by ::after, the ring inside. */
-const ITEM = cn(
-  "relative inline-flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap px-2",
-  "text-label transition-fade focus-visible:outline-focus-inset",
-  "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-transparent after:transition-fade",
-);
-
-/** A tab's colours by the SDK's state: secondary, primary with the mark when chosen, muted off. */
-const TAB_STATE = cn(
-  "text-text-secondary cursor-pointer",
-  "not-state-disabled:hover:text-text-primary",
-  "state-active:text-text-primary state-active:after:bg-text-primary",
-  "state-disabled:cursor-not-allowed state-disabled:text-text-disabled",
-);
-
-const LINK_STATE = {
-  current: "text-text-primary after:bg-text-primary",
-  other: "text-text-secondary hover:text-text-primary",
-};
-
-function Count(props: { text: string | null }) {
-  if (props.text === null) return null;
+export function Tabs({ variant = "page", className, children, ...props }: TabsProps) {
   return (
-    <span data-slot="tab-count" className="font-regular text-text-tertiary">
-      {props.text}
-    </span>
-  );
-}
-
-export function Tabs(props: TabsProps) {
-  const listener = props.onValueChange;
-  return (
-    <VariantContext value={variantOf(props.variant)}>
-      <SdkTabs
-        value={props.value}
-        defaultValue={props.defaultValue}
-        onValueChange={listener === undefined ? undefined : (next) => listener(next)}
-        className={cn("flex flex-col", props.className)}
-      >
-        {content(props.children)}
+    <LayoutContext.Provider value={variant}>
+      <SdkTabs {...props} data-variant={variant} className={cn("min-w-0", className)}>
+        {children}
       </SdkTabs>
-    </VariantContext>
+    </LayoutContext.Provider>
   );
 }
 
-export function TabsList(props: TabsListProps) {
-  const variant = useContext(VariantContext);
-  const label = props["aria-label"];
+type TabsListProps = Omit<
+  ComponentProps<typeof SdkTabsList>,
+  "className" | "render" | "children"
+> & {
+  /** What the tabs switch between ("Customer"); it is the tablist's name, so it is required. */
+  "aria-label": string;
+  /** Classes for the bar around the row (its margins and placement). */
+  className?: string;
+  children: ReactNode;
+};
+
+/** The row of tabs over its rule. */
+export function TabsList({ className, children, ...props }: TabsListProps) {
+  const layout = useContext(LayoutContext);
   return (
-    <div data-slot="tabs-row" className={cn(ROW, props.className)}>
-      <SdkTabsList
-        aria-label={label}
-        aria-labelledby={label === undefined ? props["aria-labelledby"] : undefined}
-        className={cn(LIST, LIST_PLACE[variant])}
-      >
-        {content(props.children)}
+    <div data-slot="tabs-bar" className={cn(BAR, className)}>
+      <SdkTabsList {...props} className={ROW[layout]}>
+        {children}
       </SdkTabsList>
     </div>
   );
 }
 
-export function Tab(props: TabProps) {
+type TabProps = Omit<ComponentProps<typeof SdkTabsTab>, "className" | "render" | "children"> & {
+  /** Work waiting for someone behind this tab; leave it out, or 0, when nothing waits. */
+  count?: number;
+  className?: string;
+  /** A noun in sentence case, the same words as the page or section it shows. */
+  children: ReactNode;
+};
+
+/**
+ * One tab, shown with the TabPanel of the same `value`. A `disabled` tab stays reachable with the
+ * arrow keys, as the pattern asks, but can't be chosen.
+ */
+export function Tab({ count, className, children, ...props }: TabProps) {
   return (
     <SdkTabsTab
-      value={props.value}
-      disabled={props.disabled === true}
-      className={cn(ITEM, TAB_STATE, props.className)}
+      {...props}
+      className={(state) =>
+        cn(ITEM, MARK, TAB_STATES, !state.disabled && "hover:text-text-primary", className)
+      }
     >
-      {content(props.children)}
-      <Count text={countText(props.count)} />
+      {children}
+      <Count value={count} />
     </SdkTabsTab>
   );
 }
 
-export function TabPanel(props: TabPanelProps) {
-  const variant = useContext(VariantContext);
+type TabPanelProps = Omit<ComponentProps<typeof SdkTabsPanel>, "className" | "render"> & {
+  className?: string;
+};
+
+/**
+ * The view for the Tab of the same `value`, in the page only while that tab is chosen. With
+ * nothing focusable inside it takes a tab stop of its own, and shows the focus ring there.
+ */
+export function TabPanel({ className, ...props }: TabPanelProps) {
   return (
-    <SdkTabsPanel value={props.value} className={cn(PANEL_PLACE[variant], props.className)}>
-      {content(props.children)}
-    </SdkTabsPanel>
+    <SdkTabsPanel
+      {...props}
+      className={cn("min-w-0 rounded-xs focus-visible:outline-focus", className)}
+    />
   );
 }
 
-export function TabLinks(props: TabLinksProps) {
+/** The app's router link: it receives the address, the classes, aria-current and the label. */
+type TabLinkElement = ElementType<{
+  href: string;
+  className?: string;
+  "aria-current"?: "page" | undefined;
+  children?: ReactNode;
+}>;
+
+const LinkContext = createContext<TabLinkElement>("a");
+
+type TabLinksProps = {
+  /** What the links move between ("Settings"); it names the <nav>. */
+  label: string;
+  /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
+  variant?: Layout;
+  /** The app's router link for every TabLink inside; a plain <a> when left out. */
+  linkAs?: TabLinkElement;
+  className?: string;
+  children: ReactNode;
+};
+
+/** Tabs that are links: the same row, as a named navigation landmark. */
+export function TabLinks({
+  label,
+  variant = "page",
+  linkAs = "a",
+  className,
+  children,
+}: TabLinksProps) {
   return (
-    <nav aria-label={props.label} className={cn(ROW, props.className)}>
-      <ul className={cn(LIST, LIST_PLACE[variantOf(props.variant)])}>
-        <LinkContext value={props.linkAs ?? Anchor}>{content(props.children)}</LinkContext>
-      </ul>
+    <nav aria-label={label} data-slot="tab-links" className={cn(BAR, className)}>
+      <div className={ROW[variant]}>
+        <LinkContext.Provider value={linkAs}>{children}</LinkContext.Provider>
+      </div>
     </nav>
   );
 }
 
-export function TabLink(props: TabLinkProps) {
-  const Link = useContext(LinkContext);
-  const current = props.current === true;
-  const marked = current ? ({ "aria-current": "page" } as const) : {};
+type TabLinkProps = {
+  href: string;
+  /** The address on show: underlined, and announced as the current page. */
+  current?: boolean;
+  /** Work waiting for someone behind this link; leave it out, or 0, when nothing waits. */
+  count?: number;
+  /** A router link for this one link, in place of the one TabLinks hands down. */
+  linkAs?: TabLinkElement;
+  className?: string;
+  children: ReactNode;
+};
+
+/** One link in TabLinks. */
+export function TabLink({
+  href,
+  current = false,
+  count,
+  linkAs,
+  className,
+  children,
+}: TabLinkProps) {
+  const inherited = useContext(LinkContext);
+  const Link = linkAs ?? inherited;
   return (
-    <li className="flex shrink-0">
-      <Link
-        href={props.href}
-        className={cn(ITEM, current ? LINK_STATE.current : LINK_STATE.other, props.className)}
-        {...marked}
-      >
-        {content(props.children)}
-        <Count text={countText(props.count)} />
-      </Link>
-    </li>
+    <Link
+      href={href}
+      aria-current={current ? "page" : undefined}
+      className={cn(
+        ITEM,
+        MARK,
+        "hover:text-text-primary",
+        current && "text-text-primary after:opacity-100",
+        className,
+      )}
+    >
+      {children}
+      <Count value={count} />
+    </Link>
   );
 }
