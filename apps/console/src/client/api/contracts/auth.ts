@@ -22,7 +22,8 @@ export const signUp = defineContract({
   name: "signUp.create",
   method: "POST",
   path: "/sign-up",
-  input: z.object({ name: z.string().max(200), email }),
+  // The password only with passwords on (stretch 2, §5.7), sent exactly as typed.
+  input: z.object({ name: z.string().max(200), email, password: z.string().max(1024).optional() }),
   output: z.looseObject({ status: z.literal("code_sent") }),
 });
 

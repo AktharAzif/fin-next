@@ -29,14 +29,16 @@
       "day": "sat"
     },
     "passwordShort": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey too short and too common are said on the field, then the account is asked"
     },
     "passwordCommon": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-2",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey too short and too common are said on the field, then the account is asked"
     },
     "creating": {
       "status": "covered",
