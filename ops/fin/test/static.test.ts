@@ -493,8 +493,14 @@ describe("static deploy (pnpm fin)", () => {
       reached: () => void;
       wait: Promise<void>;
     }> = [];
+    /** The lines shipped to the ingest, once a test turns shipping on (FIN_OPS_INGEST_*). */
+    const shipped: Array<Record<string, unknown>> = [];
     const fetch = async (url: string, init: RequestInit) => {
       if (url.startsWith("https://backboard.railway.com/")) return rw.fetch(url, init);
+      if (url === "https://ingest.example.com/") {
+        shipped.push(...(JSON.parse(String(init.body)) as Array<Record<string, unknown>>));
+        return new Response("", { status: 202 });
+      }
       const path = new URL(url).pathname;
       const method = init.method ?? "GET";
       sequence.push(`${method} ${path}`);
@@ -586,6 +592,7 @@ describe("static deploy (pnpm fin)", () => {
       cf,
       statics,
       sequence,
+      shipped,
       run,
       start,
       hold,
@@ -601,6 +608,8 @@ describe("static deploy (pnpm fin)", () => {
 
   it("uploads every rendered build with a one-run token it mints and revokes, inside a registered run", async () => {
     const t = await rendered();
+    t.env.FIN_OPS_INGEST_HOST = "ingest.example.com";
+    t.env.FIN_OPS_INGEST_TOKEN_FILE = writePrivate(t.dir, "ingest-token", fakeToken("ingest"));
     const { code, rt } = await t.run();
     assert.equal(code, EXIT.ok, rt.err());
     assert.deepEqual(
@@ -646,6 +655,23 @@ describe("static deploy (pnpm fin)", () => {
     const lines = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8");
     assert.equal((lines.match(/"event":"deploy.static_step"/g) ?? []).length, 5);
     assert.match(lines, /"event":"deploy.static_done"/);
+    // The lines name the release they upload (deployedRelease); the envelope's release stays the
+    // commit of the checkout pnpm fin runs from. What is kept beside the run log is what ships.
+    // The render that came first wrote lines too, and shipped none (no ingest was set then).
+    const kept = lines
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .slice(-t.shipped.length);
+    assert.equal(kept[0]?.command, "static deploy");
+    assert.deepEqual(t.shipped, kept);
+    const deployLines = t.shipped.filter((l) => String(l.event).startsWith("deploy."));
+    assert.equal(deployLines.length, 6);
+    for (const line of deployLines) assert.equal(line.deployedRelease, RELEASE, String(line.event));
+    for (const line of t.shipped) {
+      assert.equal(line.release, hex(40, "e"), "the envelope's release is the checkout's commit");
+    }
+    assert.doesNotMatch(rt.err(), /envelope/);
   });
 
   it("refuses unless ci.yml's merge job succeeded for the commit, before any Cloudflare call, in a dry run too", async () => {

@@ -23,6 +23,7 @@ import {
   REPO_ROOT,
   tempDir,
   uuid,
+  writePrivate,
 } from "./helpers/fixtures.ts";
 import { FakeRailway, RENDERED_SECRET } from "./helpers/providers.ts";
 import { harness } from "./helpers/setup.ts";
@@ -123,6 +124,25 @@ function migrateWaits(holdLog = false) {
 }
 
 const REMOVED = [{ service: "migrate", name: "FIN_BOOTSTRAP_DATABASE_URL" }];
+
+/** The commit of the checkout pnpm fin runs from in these tests: every line's envelope `release`. */
+const CHECKOUT = hex(40, "e");
+
+/** Turns on shipping the run's lines to an ingest; returns every line shipped, in order. */
+function shipping(h: H): Array<Record<string, unknown>> {
+  const shipped: Array<Record<string, unknown>> = [];
+  const fetch = h.runtime.fetch;
+  Object.assign(h.runtime, {
+    fetch: async (url: string, init: RequestInit) => {
+      if (url !== "https://ingest.example.com/") return fetch(url, init);
+      shipped.push(...(JSON.parse(String(init.body)) as Array<Record<string, unknown>>));
+      return new Response("", { status: 202 });
+    },
+  });
+  h.env.FIN_OPS_INGEST_HOST = "ingest.example.com";
+  h.env.FIN_OPS_INGEST_TOKEN_FILE = writePrivate(h.dir, "ingest-token", fakeToken("ingest"));
+  return shipped;
+}
 
 /** Lets the work in progress run for a while (no real I/O happens in these tests). */
 async function settle(): Promise<void> {
@@ -911,6 +931,71 @@ describe("railway deploy", () => {
     const h2 = provisioned();
     assert.equal(await deploy(h2, manifest(h2, { minimumSchemaVersion: 7 })), EXIT.data);
     assert.match(h2.runtime.err(), /minimumSchemaVersion/);
+  });
+
+  it("names the release it deploys and each step's service in its lines, kept and shipped, while the envelope's release stays the checkout's commit", async () => {
+    const h = provisioned();
+    const shipped = shipping(h);
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    const kept = h.lines();
+    assert.deepEqual(shipped, kept, "every line kept beside the run log is shipped as it is");
+    const events = kept.map((l) => l.event);
+    assert.deepEqual(
+      [events[0], events[1], events.at(-2), events.at(-1)],
+      ["run.registered", "deploy.started", "deploy.done", "run.done"],
+    );
+    for (const line of [...kept, ...shipped]) {
+      if (String(line.event).startsWith("deploy."))
+        assert.equal(line.deployedRelease, RELEASE, String(line.event));
+      assert.equal(line.release, CHECKOUT, "the envelope's release is the operator checkout's");
+      assert.equal(line.service, "ops", "the envelope's service is ops");
+    }
+    for (const lines of [kept, shipped]) {
+      const steps = lines.filter((l) => l.event === "deploy.step");
+      assert.deepEqual(
+        steps.map((l) => [l.step, l.targetService, l.deployedRelease]),
+        [
+          ["migrate", "migrate", RELEASE],
+          ...[
+            "payments",
+            "api",
+            "worker",
+            "edge",
+            "verify",
+            "admin",
+            "console",
+            "cloudflared-admin",
+            "cloudflared-public",
+          ].map((s) => ["roll", s, RELEASE]),
+        ],
+      );
+      assert.equal(lines.find((l) => l.event === "deploy.done")?.deployedRelease, RELEASE);
+    }
+    // The run log's own records name the release and each change's service as they always did.
+    const records = h.records();
+    assert.equal(records.find((r) => r.event === "run.registered")?.release, RELEASE);
+    assert.equal(records.at(-1)?.release, RELEASE);
+    assert.deepEqual(
+      records.filter((r) => r.event === "run.step").map((r) => r.name),
+      h.rw.updates.map((u) => u.service),
+    );
+    assert.doesNotMatch(h.runtime.err(), /envelope/);
+  });
+
+  it("names the release and the service a deploy stopped at in deploy.failed, kept and shipped", async () => {
+    const h = provisioned((x) => {
+      x.rw.deployStatuses = ["DEPLOYING", "CRASHED"];
+    });
+    const shipped = shipping(h);
+    assert.equal(await deploy(h, manifest(h)), EXIT.unavailable);
+    for (const lines of [h.lines(), shipped]) {
+      const failed = lines.find((l) => l.event === "deploy.failed");
+      assert.equal(failed?.deployedRelease, RELEASE);
+      assert.equal(failed?.targetService, "payments");
+      assert.equal(failed?.step, "payments");
+      assert.equal(failed?.release, CHECKOUT);
+      assert.equal(failed?.service, "ops");
+    }
   });
 
   it("refuses when Railway refuses a variables read, so a superuser reference never passes unread, unless accepted (recorded)", async () => {

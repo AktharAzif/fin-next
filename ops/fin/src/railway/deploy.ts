@@ -523,7 +523,7 @@ export const railwayDeploy: Command = {
         if (!started) {
           started = true;
           ctx.run.line("deploy.started", "info", {
-            release,
+            deployedRelease: release,
             services: rolls.length,
             minimumSchemaVersion: schema,
           });
@@ -576,13 +576,17 @@ export const railwayDeploy: Command = {
           }
           onRelease.set(roll.service, roll.ref);
           ctx.run.line("deploy.step", "info", {
-            release,
+            deployedRelease: release,
             step: roll.task ? "migrate" : "roll",
-            service: roll.service,
+            targetService: roll.service,
             minimumSchemaVersion: schema,
           });
         } catch (error) {
-          ctx.run.line("deploy.failed", "error", { release, step: roll.service });
+          ctx.run.line("deploy.failed", "error", {
+            deployedRelease: release,
+            step: roll.service,
+            targetService: roll.service,
+          });
           const rolledSoFar = rolls.filter((r) => onRelease.has(r.service)).map((r) => r.service);
           ctx.out.error(
             `deploy stopped at ${roll.service}; on the new release: ${rolledSoFar.join(", ") || "none"}`,
@@ -602,13 +606,17 @@ export const railwayDeploy: Command = {
           const after = await inspectRailway(ctx, rw);
           const problems = [...refusals(ctx, after, rolled), ...unreadRefusals(after, accepted)];
           if (problems.length > 0) {
-            ctx.run.line("deploy.failed", "error", { release, step: "checks" });
+            ctx.run.line("deploy.failed", "error", { deployedRelease: release, step: "checks" });
             throw new RefusedError(`after the deploy: ${problems.join(", ")}`);
           }
           for (const [service, ref] of onRelease) {
             const instance = after.instances.get(service);
             if (instance?.image !== ref) {
-              ctx.run.line("deploy.failed", "error", { release, step: "digest" });
+              ctx.run.line("deploy.failed", "error", {
+                deployedRelease: release,
+                step: "digest",
+                targetService: service,
+              });
               throw new ProviderError(
                 "railway",
                 `${service} does not report the deployed digest`,
@@ -617,7 +625,11 @@ export const railwayDeploy: Command = {
             }
             // migrate runs to its end and serves nothing; migrate.done is its proof (step 7).
             if (!tasks.has(service) && instance.latestDeployment?.status !== "SUCCESS") {
-              ctx.run.line("deploy.failed", "error", { release, step: "digest" });
+              ctx.run.line("deploy.failed", "error", {
+                deployedRelease: release,
+                step: "digest",
+                targetService: service,
+              });
               throw new ProviderError(
                 "railway",
                 `${service}'s newest deployment is ${instance.latestDeployment?.status ?? "missing"}, not SUCCESS`,
@@ -627,7 +639,7 @@ export const railwayDeploy: Command = {
           }
           if (flagBool(ctx.args, "smoke")) await smoke(ctx);
           ctx.run.line("deploy.done", "info", {
-            release,
+            deployedRelease: release,
             services: onRelease.size,
             minimumSchemaVersion: schema,
             ...(notBuilt.length > 0 ? { notBuilt } : {}),

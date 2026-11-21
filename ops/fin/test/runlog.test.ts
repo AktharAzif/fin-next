@@ -3,16 +3,18 @@ import fs, { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { ENVELOPE_FIELDS as CATALOG_ENVELOPE_FIELDS } from "../../monitoring/catalog/types.ts";
 import { parseArgs } from "../src/core/args.ts";
 import { BusyError, FinError, LogIntegrityError } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import { Output } from "../src/core/output.ts";
-import { Run } from "../src/core/run.ts";
+import { ENVELOPE_FIELDS, Run } from "../src/core/run.ts";
 import { GENESIS, parseHead, RunLog, sha256 } from "../src/core/runlog.ts";
 import {
   type FakeRuntimeOptions,
   fakeRuntime,
   fakeToken,
+  hex,
   tempDir,
   writePrivate,
   ZONE,
@@ -699,6 +701,46 @@ describe("a registered run", () => {
     for (const file of [log.logPath, join(log.dir, "lines.jsonl")]) {
       assert.equal(readFileSync(file, "utf8").includes("2345678"), false, file);
     }
+  });
+
+  it("keeps the envelope's fields: a field named like one is refused by the type, and left out with a warning", () => {
+    const { run, log, runtime } = newRun();
+    run.register();
+    run.line("probe", "info", {
+      // @ts-expect-error: the envelope's release is the checkout's commit, not a line's to set
+      release: hex(40, "a"),
+      // @ts-expect-error: the envelope's service is ops
+      service: "api",
+      // @ts-expect-error: an optional envelope field is the envelope's too
+      requestId: "req_probe",
+      deployedRelease: hex(40, "a"),
+      targetService: "api",
+    });
+    run.finish("ok");
+    const kept = readFileSync(join(log.dir, "lines.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    for (const probe of [run.lines.find((l) => l.event === "probe"), kept[1]]) {
+      assert.equal(probe?.event, "probe");
+      assert.equal(probe?.release, hex(40, "e"), "the checkout's commit");
+      assert.equal(probe?.service, "ops");
+      assert.equal(Object.hasOwn(probe ?? {}, "requestId"), false);
+      assert.equal(probe?.deployedRelease, hex(40, "a"));
+      assert.equal(probe?.targetService, "api");
+    }
+    for (const field of ["release", "service", "requestId"]) {
+      assert.match(
+        runtime.err(),
+        new RegExp(
+          `the probe line names the envelope's own field ${field}; that field is left out`,
+        ),
+      );
+    }
+  });
+
+  it("names the same envelope fields as the monitoring catalogue", () => {
+    assert.deepEqual([...ENVELOPE_FIELDS], [...CATALOG_ENVELOPE_FIELDS]);
   });
 
   it("starts a telemetry line on a line of its own after a torn one in lines.jsonl", () => {

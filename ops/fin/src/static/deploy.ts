@@ -314,13 +314,16 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
             uploaded.push(item.key);
             ctx.run.line("deploy.static_step", "info", {
               deployment: change.name,
-              release,
+              deployedRelease: release,
               files: result.files,
               uploaded: result.uploaded,
               assetManifestHash: result.assetManifestHash,
             });
           } catch (error) {
-            ctx.run.line("deploy.failed", "error", { step: `static ${item.key}`, release });
+            ctx.run.line("deploy.failed", "error", {
+              step: `static ${item.key}`,
+              deployedRelease: release,
+            });
             ctx.out.error(
               stopSummary(
                 item.key,
@@ -344,7 +347,10 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
               ? `the one-run token ${t.name} may not be revoked: ${revokeByHand}`
               : undefined,
           after: async () => {
-            ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });
+            ctx.run.line("deploy.static_done", "info", {
+              deployedRelease: release,
+              deployments: uploaded.length,
+            });
             return {};
           },
         },

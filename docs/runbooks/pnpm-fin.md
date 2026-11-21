@@ -121,7 +121,10 @@ under `FIN_STATE_DIR` (default `~/.local/state/fin-next/<env>/`):
 - `lines.jsonl`: the runs' telemetry lines (spec 08 §7.2's envelope, service `ops`), written as
   they happen. They are also shipped to the `fin-next-staging-ops` source when
   `FIN_OPS_INGEST_HOST` and `FIN_OPS_INGEST_TOKEN_FILE` are set; a shipping problem is a warning
-  and never changes a command's exit code.
+  and never changes a command's exit code. A line's `release` is the envelope's: the commit of the
+  checkout `pnpm fin` ran from. The `deploy.*` lines name the release they deploy
+  `deployedRelease`, and the Railway service a step rolled or stopped at `targetService`; search
+  for those, not `release` or `service`, to follow a deploy.
 
 ### Checking the run log
 
