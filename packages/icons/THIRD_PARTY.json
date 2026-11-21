@@ -17,7 +17,8 @@
     "path": "licenses/web3icons-core-4.0.58.LICENCE",
     "package": "@web3icons/core",
     "version": "4.0.58",
-    "upstreamPath": "https://github.com/0xa3k5/web3icons/blob/763a55d66a03b21b603eb249f2df7c64a7522089/LICENCE",
+    "url": "https://raw.githubusercontent.com/0xa3k5/web3icons/763a55d66a03b21b603eb249f2df7c64a7522089/LICENCE",
+    "tag": "@web3icons/core@4.0.58",
     "sha256": "fcbc59252ec73f93cb16242e7a10157747058b70d561a2cec650d8dc60778263"
   }
 ]
