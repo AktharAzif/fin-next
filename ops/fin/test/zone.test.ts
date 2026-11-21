@@ -174,17 +174,97 @@ describe("zone apply", () => {
     }
   });
 
-  it("masks the private rate threshold wherever a provider echoes it", async () => {
-    const h = harness((o) => {
+  it("keeps the run log, the plan and the timestamps whole whatever the private threshold equals", async () => {
+    // Each threshold equals a number the run itself writes: a log seq (10, 16), the plan's count
+    // of creates (11 on the shared zone, 12 with the rate rule) and the month of every timestamp
+    // (11). None of them may be rewritten, and the run log must stay readable and intact.
+    const cases = [
+      { shared: true, threshold: 10, creates: 11 },
+      { shared: true, threshold: 11, creates: 11 },
+      { shared: false, threshold: 12, creates: 12 },
+      { shared: false, threshold: 16, creates: 12 },
+    ];
+    for (const { shared, threshold, creates } of cases) {
+      const h = harness(
+        (o) => {
+          o.thresholds = { "api-v4": threshold };
+        },
+        (s) => {
+          (s.zone as Record<string, unknown>).shared = shared;
+        },
+      );
+      h.env.GITHUB_ACTIONS = "true";
+      const label = `shared ${shared}, threshold ${threshold}`;
+      assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.ok, label);
+      assert.match(h.runtime.out(), new RegExp(`\\b${creates} to create\\b`), label);
+      const records = h.records();
+      assert.ok(records.length >= threshold, `${label}: the log reaches seq ${threshold}`);
+      records.forEach((r, i) => {
+        assert.equal(r.seq, i + 1, label);
+        assert.match(String(r.at), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, label);
+      });
+      assert.equal(records.at(-1)?.result, "ok", label);
+      assert.equal(records.at(-1)?.steps, records.length - 2, label);
+      assert.equal(await h.run(["log", "verify", "staging"]), EXIT.ok, label);
+      const text = h.readable();
+      assert.equal(text.includes("<threshold:"), false, `${label}: no number became a placeholder`);
+      assert.equal(
+        h.runtime.out().split("\n").includes(`::add-mask::${threshold}`),
+        false,
+        `${label}: the runner is never told to mask a short number`,
+      );
+    }
+  });
+
+  it("masks the private threshold in the provider errors of the rate rule's own writes", async () => {
+    const echo = "the plan allows no more than 4321 requests here";
+    // Not shared: the rate rule is written, and Cloudflare echoes its threshold in a refusal.
+    const h = harness(
+      (o) => {
+        o.thresholds = { "api-v4": 4321 };
+      },
+      (s) => {
+        (s.zone as Record<string, unknown>).shared = false;
+      },
+    );
+    h.cf.onRequest = (call) => {
+      const body = call.body as { ratelimit?: unknown; rules?: Array<{ ratelimit?: unknown }> };
+      const rate = body?.ratelimit !== undefined || body?.rules?.some((r) => r.ratelimit);
+      return rate ? FakeCloudflare.failure(400, 20120, echo) : undefined;
+    };
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.unavailable);
+    assert.match(h.runtime.err(), /no more than <threshold:api-v4> requests/);
+    assert.equal(h.readable().includes("4321"), false);
+    assert.equal(await h.run(["log", "verify", "staging"]), EXIT.ok);
+
+    // Shared: a rate rule of Fin's left from before is deleted, and its refusal is masked too.
+    const s = harness((o) => {
       o.thresholds = { "api-v4": 4321 };
     });
-    h.cf.onRequest = (call) =>
-      call.method === "POST"
-        ? FakeCloudflare.failure(400, 20120, "the plan allows no more than 4321 requests here")
-        : undefined;
-    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.unavailable);
-    assert.equal(h.readable().includes("4321"), false);
-    assert.match(h.runtime.err(), /<threshold:api-v4>/);
+    await s.run(["zone", "apply", "staging", "--only", "rules"]);
+    const old = {
+      id: hex(32, "9"),
+      phase: "http_ratelimit",
+      rules: [
+        {
+          id: hex(32, "8"),
+          ref: "fin_next_api_v4_rate",
+          expression: `(http.host eq "gateway.${ZONE}")`,
+          action: "block",
+          ratelimit: { period: 10, requests_per_period: 4321, mitigation_timeout: 10 },
+        },
+      ],
+    };
+    s.cf.rulesets.set(old.id, old);
+    s.cf.onRequest = (call) =>
+      call.method === "DELETE" ? FakeCloudflare.failure(400, 20120, echo) : undefined;
+    assert.equal(
+      await s.run(["zone", "apply", "staging", "--only", "rules", "--confirm-delete", "1"]),
+      EXIT.unavailable,
+    );
+    assert.match(s.runtime.err(), /no more than <threshold:api-v4> requests/);
+    assert.equal(s.readable().includes("4321"), false);
+    s.assertNoLeak();
   });
 
   it("masks a long provider error before it cuts it, so no part of a private value survives", async () => {

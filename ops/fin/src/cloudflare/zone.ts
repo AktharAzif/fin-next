@@ -11,9 +11,11 @@
 // while the zone is shared ([FD-09]), and otherwise comes last, after every deletion, so its
 // refusal never stops a required rule. Every pending write is checked before the run registers.
 // After the run, each phase's fin_next_ rules are read back and hashed as the watcher hashes them,
-// into `run.done` only (never printed). Ingress proofs keep their values; a host with no proof gets
-// a new one (32 random bytes, base64url), which is set sealed on the services that check it before
-// the rule that sends it is written (spec 01 §7.6's order).
+// into `run.done` only (never printed). The private rate threshold is never registered with the
+// masker (a short number would rewrite the run's own numbers); it is redacted from the provider
+// errors of the rate phase's writes, the only requests that carry it. Ingress proofs keep their
+// values; a host with no proof gets a new one (32 random bytes, base64url), which is set sealed on
+// the services that check it before the rule that sends it is written (spec 01 §7.6's order).
 
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
@@ -22,7 +24,7 @@ import { RefusedError } from "../core/errors.ts";
 import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
-import type { WriteTarget } from "./api.ts";
+import type { Redaction, WriteTarget } from "./api.ts";
 import { cloudflare, railway, registerId } from "./common.ts";
 import { finRulesetHash, isFinRule } from "./hash.ts";
 import {
@@ -62,7 +64,11 @@ interface Write {
   method: "POST" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
+  /** Private values this write alone carries, redacted from its provider error. */
+  redact?: readonly Redaction[];
 }
+
+const RATE_PHASE: Phase = "http_ratelimit";
 
 const PROOF = /^[A-Za-z0-9_-]{43}$/;
 
@@ -194,6 +200,8 @@ interface RulePlan {
   existing: Map<string, { phase: Phase; rule: Rule }>;
   newProofs: Set<HostRole>;
   proofs: Map<HostRole, Secret>;
+  /** The threshold values a write to the rate phase may carry, for its provider error alone. */
+  rateRedactions: Redaction[];
 }
 
 async function rulePlan(
@@ -227,11 +235,18 @@ async function rulePlan(
     if (current === undefined) newProofs.add(role);
   }
 
-  // The threshold is private ([OB-13]): masked wherever a provider might echo it.
+  // The threshold is private ([OB-13]), and a short number: it is never registered with the masker
+  // (which would rewrite every equal number in the run's output and log). Only the writes to the
+  // rate phase carry it (the overlay's value, or the value a rate rule of Fin's holds now), so only
+  // their provider errors are redacted. On a shared zone nothing sends it.
   const threshold = ctx.overlay.thresholds[s.rules.rate.threshold];
-  if (threshold !== undefined) {
-    ctx.masker.register(String(threshold), `<threshold:${s.rules.rate.threshold}>`);
+  const placeholder = `<threshold:${s.rules.rate.threshold}>`;
+  const held = new Set<number>(threshold === undefined ? [] : [threshold]);
+  for (const { phase, rule } of existing.values()) {
+    const now = rule.ratelimit?.requests_per_period;
+    if (phase === "http_ratelimit" && typeof now === "number") held.add(now);
   }
+  const rateRedactions: Redaction[] = [...held].map((n) => ({ value: String(n), placeholder }));
   if (s.zone.shared) {
     ctx.out.info(
       "rate rule: not written while the zone is shared ([FD-09]); Fin's own limits stand alone",
@@ -291,7 +306,7 @@ async function rulePlan(
   }
   // Last, after every deletion (the Free plan's one rate rule may need its slot freed first).
   for (const rule of rules) if (rule.optional === true) changes.push(ruleChange(rule));
-  return { changes, rules, entrypoints, existing, newProofs, proofs };
+  return { changes, rules, entrypoints, existing, newProofs, proofs, rateRedactions };
 }
 
 export const zoneApply: Command = {
@@ -346,12 +361,16 @@ export const zoneApply: Command = {
       const phase = phaseName as Phase;
       const desired = plan.rules.find((r) => r.ref === ref);
       const found = plan.existing.get(ref);
+      // Only a write to the rate phase carries a threshold, so only its error is redacted.
+      const redact =
+        phase === RATE_PHASE || found?.phase === RATE_PHASE ? { redact: plan.rateRedactions } : {};
       if (change.action === "delete" && found !== undefined) {
         const rulesetId = plan.entrypoints.get(found.phase)?.id ?? "";
         return {
           target: { kind: "rule", ref, hosts: [], rulesetId, id: found.rule.id },
           method: "DELETE",
           path: `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
+          ...redact,
         };
       }
       if (desired === undefined) return undefined;
@@ -362,6 +381,7 @@ export const zoneApply: Command = {
           method: "PATCH",
           path: `${zonePath}/rulesets/${rulesetId}/rules/${found.rule.id}`,
           body: ruleBody(desired),
+          ...redact,
         };
       }
       const ruleset = plan.entrypoints.get(phase);
@@ -371,6 +391,7 @@ export const zoneApply: Command = {
           method: "POST",
           path: `${zonePath}/rulesets`,
           body: { name: `fin-next ${phase}`, kind: "zone", phase, rules: [ruleBody(desired)] },
+          ...redact,
         };
       }
       return {
@@ -378,6 +399,7 @@ export const zoneApply: Command = {
         method: "POST",
         path: `${zonePath}/rulesets/${ruleset.id}/rules`,
         body: ruleBody(desired),
+        ...redact,
       };
     };
 
@@ -420,6 +442,7 @@ export const zoneApply: Command = {
           write.method,
           write.path,
           write.body,
+          { redact: write.redact ?? [] },
         );
         if (plan !== undefined && change.kind === "rule" && write.method === "POST") {
           const phase = (change.name.split("/")[0] ?? "") as Phase;

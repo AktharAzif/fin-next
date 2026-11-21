@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { CloudflareApi, CloudflareWriter, type WriteTarget } from "../src/cloudflare/api.ts";
+import {
+  CloudflareApi,
+  CloudflareWriter,
+  maskedDetail,
+  type WriteTarget,
+} from "../src/cloudflare/api.ts";
 import { RefusedError } from "../src/core/errors.ts";
 import { Guard } from "../src/core/guard.ts";
 import { Masker } from "../src/core/mask.ts";
@@ -520,6 +525,24 @@ describe("the Cloudflare writer", () => {
 });
 
 describe("a provider error", () => {
+  it("redacts a value only its write carries before the cut, and only where it stands alone", () => {
+    const masker = new Masker();
+    const redact = [{ value: "4321", placeholder: "<threshold:api-v4>" }];
+    assert.equal(
+      maskedDetail(
+        masker,
+        '20120 "requests_per_period":4321; no more than 4321. (14321, 4321.5, 2026-11-21T04:43:21Z)',
+        400,
+        redact,
+      ),
+      '20120 "requests_per_period":<threshold:api-v4>; no more than <threshold:api-v4>. (14321, 4321.5, 2026-11-21T04:43:21Z)',
+    );
+    // A cut that would land inside the number leaves no part of it.
+    const cut = maskedDetail(masker, `${"y".repeat(398)} 4321`, 400, redact);
+    assert.equal(cut.includes("43"), false);
+    assert.equal(masker.size, 0, "nothing is registered with the masker");
+  });
+
   it("is masked before it is cut, and its path names no ID", async () => {
     const token = fakeToken("m");
     const cf = new FakeCloudflare(token);

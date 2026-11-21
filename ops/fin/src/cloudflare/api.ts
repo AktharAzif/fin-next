@@ -18,8 +18,10 @@
 // lint against mistakes, not a parser: a deliberately obfuscated expression is a review finding.
 //
 // A provider's error names neither a private value nor an object ID: its text is masked before it
-// is cut (a value cut in two would no longer match the masker), and every ID-shaped segment of the
-// path is replaced by `<id>` (spec 01 §9.2: names, never IDs). Context.applyPlan records each change
+// is cut (a value cut in two would no longer match the masker), a value only one write carries (the
+// rate rule's threshold, a short number the masker must never hold) is redacted from that write's
+// error alone, and every ID-shaped segment of the path is replaced by `<id>` (spec 01 §9.2: names,
+// never IDs). Context.applyPlan records each change
 // as a run step once its writes have succeeded.
 
 import { ProviderError, RefusedError } from "../core/errors.ts";
@@ -60,9 +62,49 @@ function withQuery(path: string, query?: Query): string {
   return `${path}?${params.toString()}`;
 }
 
-/** A provider's text, masked first and only then cut, so no part of a private value survives. */
-export function maskedDetail(masker: Masker, text: string, max = MAX_DETAIL): string {
-  const masked = masker.mask(text);
+/**
+ * A private value only one write's request carries (the rate rule's threshold), kept out of that
+ * write's provider error. A short number is never registered with the masker: the masker runs over
+ * every line and record, where such a number would rewrite the run's own numbers (a log seq, a
+ * count, a timestamp) and show where it stood. Here only a provider's error text is touched.
+ */
+export interface Redaction {
+  value: string;
+  placeholder: string;
+}
+
+/** Options for one write. */
+export interface WriteOptions {
+  /** Values replaced in this write's provider error, before the cut (see Redaction). */
+  redact?: readonly Redaction[];
+}
+
+/** Replaces each value where it stands as a token of its own (not inside a word or a number). */
+function redacted(text: string, redact: readonly Redaction[]): string {
+  let out = text;
+  for (const { value, placeholder } of redact) {
+    if (value === "") continue;
+    const body = value.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+    const token = new RegExp(
+      `(?<![0-9A-Za-z_])(?<![0-9][.:-])${body}(?![0-9A-Za-z_])(?![.:-][0-9])`,
+      "g",
+    );
+    out = out.replace(token, placeholder);
+  }
+  return out;
+}
+
+/**
+ * A provider's text, masked (and redacted) first and only then cut, so no part of a private value
+ * survives.
+ */
+export function maskedDetail(
+  masker: Masker,
+  text: string,
+  max = MAX_DETAIL,
+  redact: readonly Redaction[] = [],
+): string {
+  const masked = redacted(masker.mask(text), redact);
   return masked.length <= max ? masked : `${masked.slice(0, max)}...`;
 }
 
@@ -130,12 +172,15 @@ export class CloudflareApi {
     path: string,
     status: number,
     envelope: Envelope<unknown> | undefined,
+    redact: readonly Redaction[] = [],
   ): never {
     const errors = envelope?.errors ?? [];
     const codes = errors.map((e) => e.code ?? 0);
     const detail = maskedDetail(
       this.#masker,
       errors.map((e) => `${e.code ?? "?"} ${e.message ?? ""}`.trim()).join("; "),
+      MAX_DETAIL,
+      redact,
     );
     throw new ProviderError(
       "cloudflare",
@@ -189,10 +234,15 @@ export class CloudflareApi {
   }
 
   /** Sends a write. Keyed by a symbol this module keeps: only CloudflareWriter calls it. */
-  async [SEND]<T>(method: WriteMethod, path: string, body?: unknown): Promise<T> {
+  async [SEND]<T>(
+    method: WriteMethod,
+    path: string,
+    body: unknown,
+    redact: readonly Redaction[],
+  ): Promise<T> {
     const { status, envelope } = await this.#call<T>(method, path, body);
     if (status >= 300 || envelope === undefined || envelope.success === false) {
-      this.#fail(method, path, status, envelope);
+      this.#fail(method, path, status, envelope, redact);
     }
     return envelope.result;
   }
@@ -621,10 +671,11 @@ export class CloudflareWriter {
     method: WriteMethod,
     path: string,
     body?: unknown,
+    options: WriteOptions = {},
   ): Promise<T> {
     this.#run.assertWritable(`${method} ${target.kind}`);
     this.check(target, method, path, body);
-    return this.#api[SEND]<T>(method, path, body);
+    return this.#api[SEND]<T>(method, path, body, options.redact ?? []);
   }
 }
 
