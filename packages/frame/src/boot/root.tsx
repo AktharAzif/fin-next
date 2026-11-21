@@ -1,8 +1,9 @@
 // What each app's `routes/__root.tsx` renders and runs (spec 06 §2.5): the frame switch around the
 // outlet, the root StepUp host, and the root's effects: the document title from the route's
-// `pageName` (S6-07), focus to the page's <h1> after a navigation (S6-17), `data-ready` on <body>
-// once the first route has resolved (FW-C16), and a check of the session when the page comes back
-// from the back-forward cache (FW-C14). The guards run in the root route's `beforeLoad`.
+// `pageName` (S6-07), focus to the page's <h1> and its title announced after a navigation (S6-17),
+// and `data-ready` on <body> once the first route has resolved (FW-C16). The guards run in the root
+// route's `beforeLoad`; the back-forward cache's check (FW-C14) is installed by startApp, which
+// holds the element the app renders into.
 import type { ConsoleViewer, StaffViewer } from "@fin/app-contracts";
 import { ReportFailures, Toaster, TooltipProvider } from "@fin/ui";
 import { type AnyRouter, Outlet, redirect } from "@tanstack/react-router";
@@ -15,7 +16,6 @@ import { reportBrowserError } from "../report/report.ts";
 import { FrameSwitch } from "../router/FrameSwitch.tsx";
 import {
   deepestStaticData,
-  useAnyRouter,
   useRouterValue,
   useRouteStaticData,
   useSearch,
@@ -26,6 +26,7 @@ import { type FinRouterContext, useFin } from "../runtime/runtime.tsx";
 import { useStore } from "../runtime/store.ts";
 import { type StepUpContentProps, StepUpHost } from "../step-up/step-up.tsx";
 import { adminGate, consoleGate } from "./gates.ts";
+import { focusNewPage } from "./page-effects.ts";
 
 /**
  * Whether the app has a route for a pathname (not counting the root's catch-all not-found). A path
@@ -96,7 +97,6 @@ export function guardAdminHome(input: { context: FinRouterContext<StaffViewer> }
 
 function useRootEffects(fallbackFrame: FrameKind): void {
   const fin = useFin();
-  const router = useAnyRouter();
   const staticData = useRouteStaticData();
   const search = useSearch();
   const status = useRouterValue((state) => state.status);
@@ -121,7 +121,9 @@ function useRootEffects(fallbackFrame: FrameKind): void {
     document.title = title;
   }, [title]);
 
-  // data-ready once the first route has resolved; focus to the <h1> on each later new path.
+  // data-ready once the first route has resolved; on each later new path, focus to the page's <h1>
+  // and its title announced once (S6-17). A change of search parameters only never gets here: the
+  // resolved pathname is the same.
   useEffect(() => {
     if (status !== "idle" || resolved === null) return;
     if (firstPath.current === null) {
@@ -131,22 +133,8 @@ function useRootEffects(fallbackFrame: FrameKind): void {
     }
     if (firstPath.current === resolved) return;
     firstPath.current = resolved;
-    const heading = document.querySelector<HTMLElement>("#main h1");
-    heading?.focus({ preventScroll: true });
-  }, [status, resolved]);
-
-  // A page restored from the back-forward cache checks the session before anything is used.
-  useEffect(() => {
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted) return;
-      fin.viewer.reload().then(
-        () => router.invalidate(),
-        () => window.location.reload(),
-      );
-    };
-    window.addEventListener("pageshow", onPageShow);
-    return () => window.removeEventListener("pageshow", onPageShow);
-  }, [fin, router]);
+    focusNewPage(document, title);
+  }, [status, resolved, title]);
 }
 
 export interface FinRootProps {

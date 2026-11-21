@@ -9,7 +9,8 @@
 //      first navigation from the viewer (401 on an `app` route goes to `/sign-in?next=`);
 //   5. React's first render replaces the static boot skeleton; React's own failure handlers report
 //      through the seam rather than printing the error whole;
-//   6. the root sets `data-ready` once the first route has resolved;
+//   6. the root sets `data-ready` once the first route has resolved; from here a page restored
+//      from the back-forward cache stays hidden until the session has been checked again;
 //   7. after the first paint: one reload on a failed chunk.
 // Until the first render, the static skeleton from index.html stays on screen.
 import type { AppContract, AppName, ContractOutput } from "@fin/app-contracts";
@@ -31,6 +32,7 @@ import { createStore } from "../runtime/store.ts";
 import { createViewerStore, fetchViewer } from "../runtime/viewer.ts";
 import { createStepUpController } from "../step-up/step-up.tsx";
 import { frameApiHooks } from "./api-hooks.ts";
+import { installBackForwardGuard } from "./page-effects.ts";
 import { routeMatcher } from "./root.tsx";
 
 export interface StartOptions<C extends AppContract> {
@@ -152,6 +154,18 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
       report: reportBrowserError,
     }),
   );
+
+  // A page restored from the back-forward cache stays hidden until the session has been checked
+  // again (FW-C14): a 401 there sends an `app` route to sign-in before anything is revealed.
+  installBackForwardGuard({
+    target: window,
+    container,
+    recheck: async () => {
+      await viewer.reload();
+      await router.invalidate();
+    },
+    reload: () => window.location.reload(),
+  });
 
   reactRoot.render(
     <FinRuntimeProvider runtime={runtime as FinRuntime}>

@@ -75,7 +75,13 @@ export function ErrorState(props: ErrorStateProps) {
       </span>
       <div role="alert" className="flex max-w-form flex-col gap-1">
         <Heading
-          className={cn("m-0 text-text-primary", size === "page" ? "text-heading" : "text-label")}
+          // The page's h1 takes focus after a navigation (spec 06 §2.5, S6-17), as PageHeader's does.
+          {...(Heading === "h1" ? { tabIndex: -1 } : {})}
+          className={cn(
+            "m-0 text-text-primary",
+            size === "page" ? "text-heading" : "text-label",
+            Heading === "h1" && "outline-none",
+          )}
         >
           {props.title}
         </Heading>
