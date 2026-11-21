@@ -172,51 +172,60 @@ describe("one live code per address (§5.2, S2-38)", () => {
     }
   });
 
-  it("finishes overlapping sign-ups, code requests and tries for one address, each from its own network", async () => {
-    // Each unit takes its locks in lockAddress()'s order: sign-up's own limits, the network's code
-    // limit, the address's lock, then the address's code limits. Every browser here is on its own
-    // network, so nothing makes the units take turns before the address's lock: a path that took
-    // the address's code limits before the lock would wait on another in a circle, and Postgres
-    // would end one of them (a sign-up that throws, or a 500).
-    for (let run = 0; run < 6; run += 1) {
-      for (const registered of [true, false]) {
-        const email = unique(registered ? "mixed.registered" : "mixed.fresh");
-        if (registered) await codeSignIn(h, h.browser(), email);
-        const up = () => {
-          const b = h.browser();
-          return signUp(
-            h.realm,
-            b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
-            b.context(),
-            { name: "Ada Lovelace", email },
-          ).then(
-            (answer) => String(answer.status),
-            // A refusal carries its status; anything else (a deadlock) fails the test below.
-            (error: { status?: number; code?: string }) =>
-              error.status === undefined
-                ? `error ${error.code ?? "unknown"}`
-                : String(error.status),
-          );
-        };
-        const ask = () => sendCode(h.browser(), email).then((answer) => String(answer.status));
-        const guess = () =>
-          post(h.browser(), "/api/auth/sign-in/email-otp", { email, otp: "00000000" }).then(
-            (answer) => String(answer.status),
-          );
-        const statuses = await Promise.all([up(), ask(), guess(), up(), ask(), guess()]);
-        for (const status of statuses)
-          expect(["200", "202", "400", "403", "429"]).toContain(status);
-        // Every browser here is a stranger to the address, so at most one request stands: a code
-        // or a codeless request, never both, and never two of either.
-        const live = await h.admin.query<{ n: string }>(
-          `SELECT count(*) AS n FROM identity.email_code_request
+  it.each([
+    ["from one network", true],
+    ["each from its own network", false],
+  ] as const)(
+    "finishes overlapping sign-ups, code requests and tries for one address, %s",
+    async (_shape, oneNetwork) => {
+      // Each unit takes its locks in lockAddress()'s order: sign-up's own limits, the network's code
+      // limit, the address's lock, then the address's code limits. From one network, a path that
+      // took the network's code limit after the address's lock would wait on another in a circle;
+      // each on its own network, nothing makes the units take turns before the address's lock, so a
+      // path that took the address's code limits before the lock would. Postgres would end one of
+      // them (a sign-up that throws, or a 500).
+      for (let run = 0; run < 6; run += 1) {
+        for (const registered of [true, false]) {
+          const email = unique(registered ? "mixed.registered" : "mixed.fresh");
+          if (registered) await codeSignIn(h, h.browser(), email);
+          const ip = `2001:db8:${Math.floor(Math.random() * 0xffff).toString(16)}::9`;
+          const browser = () => h.browser(oneNetwork ? { ip } : {});
+          const up = () => {
+            const b = browser();
+            return signUp(
+              h.realm,
+              b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
+              b.context(),
+              { name: "Ada Lovelace", email },
+            ).then(
+              (answer) => String(answer.status),
+              // A refusal carries its status; anything else (a deadlock) fails the test below.
+              (error: { status?: number; code?: string }) =>
+                error.status === undefined
+                  ? `error ${error.code ?? "unknown"}`
+                  : String(error.status),
+            );
+          };
+          const ask = () => sendCode(browser(), email).then((answer) => String(answer.status));
+          const guess = () =>
+            post(browser(), "/api/auth/sign-in/email-otp", { email, otp: "00000000" }).then(
+              (answer) => String(answer.status),
+            );
+          const statuses = await Promise.all([up(), ask(), guess(), up(), ask(), guess()]);
+          for (const status of statuses)
+            expect(["200", "202", "400", "403", "429"]).toContain(status);
+          // Every browser here is a stranger to the address, so at most one request stands: a code
+          // or a codeless request, never both, and never two of either.
+          const live = await h.admin.query<{ n: string }>(
+            `SELECT count(*) AS n FROM identity.email_code_request
             WHERE email_hash = $1 AND superseded_at IS NULL AND used_at IS NULL`,
-          [h.realm.runtime.hasher.hash("email", email)],
-        );
-        expect(Number(live.rows[0]?.n)).toBeLessThanOrEqual(1);
+            [h.realm.runtime.hasher.hash("email", email)],
+          );
+          expect(Number(live.rows[0]?.n)).toBeLessThanOrEqual(1);
+        }
       }
-    }
-  });
+    },
+  );
 
   it("holds the address's lock as a row only the console's role may lock, never an advisory lock", async () => {
     // Any login may take an advisory lock, and its key shows in pg_locks: one held open would
