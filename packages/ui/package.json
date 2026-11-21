@@ -12,7 +12,7 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --config ../../vitest.config.ts",
     "build:kit": "vite build --config vite.kit.config.ts --mode test",
     "e2e": "pnpm run build:kit && playwright test"
   },

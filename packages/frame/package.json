@@ -16,7 +16,7 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --config ../../vitest.config.ts",
     "build:harness": "vite build --config vite.harness.config.ts",
     "e2e": "pnpm run build:harness && playwright test"
   },
