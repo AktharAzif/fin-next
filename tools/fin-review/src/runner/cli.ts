@@ -18,6 +18,7 @@ import { runWithRetries } from "./check.ts";
 import { clientFingerprint } from "./client.ts";
 import { sessionEnv } from "./env.ts";
 import { ALLOWED_TOOLS, DENIED_TOOLS, buildSettings, isWithin, writeSessionFiles } from "./settings.ts";
+import type { Transport } from "../transport.ts";
 import type { OutputCheck, SessionResult, SessionRunner, SessionSpec } from "./types.ts";
 
 /** Every flag the runner passes; D2 checks each against the pinned CLI's --help. */
@@ -166,8 +167,15 @@ export interface CliRunnerOptions {
   readonly clock: Clock;
   /** The version D1 read (`claude --version`). */
   readonly clientVersion: string;
-  /** Other directories to deny ($FIN_REVIEW_SPOOL, $FIN_REVIEW_SHARE). */
+  /** Other directories to deny ($FIN_REVIEW_SPOOL, $FIN_REVIEW_SHARE, and under pool the forwarder's configuration directory). */
   readonly extraDenied: readonly string[];
+  /** How sessions reach Claude (src/transport.ts); direct when absent. */
+  readonly transport?: Transport;
+}
+
+/** The API host a session's result records: Anthropic's, or under pool the forwarder's host:port. */
+export function apiHostOf(transport: Transport | undefined): string {
+  return transport?.kind === "pool" ? transport.host : API_HOST;
 }
 
 function checkSpec(spec: SessionSpec, o: CliRunnerOptions): void {
@@ -201,7 +209,7 @@ export async function startAttempt(spec: SessionSpec, attempt: number, o: CliRun
   try {
     return await runProgramSettled(o.claudePath, args, {
       cwd: spec.treeDir,
-      env: sessionEnv(o.engineEnv, join(scratch, "tmp")),
+      env: sessionEnv(o.engineEnv, join(scratch, "tmp"), o.transport),
       input: Buffer.from(spec.prompt, "utf8"),
       timeoutMs: spec.timeoutMs,
       maxOutputBytes: MAX_OUTPUT_BYTES,
@@ -225,6 +233,6 @@ export class CliRunner implements SessionRunner {
   async run(spec: SessionSpec, signal: AbortSignal, accept?: OutputCheck): Promise<SessionResult> {
     const o = this.options;
     checkSpec(spec, o);
-    return runWithRetries(spec, (n) => startAttempt(spec, n, o, signal), { clock: o.clock, signal, clientVersion: o.clientVersion, apiHost: API_HOST }, accept);
+    return runWithRetries(spec, (n) => startAttempt(spec, n, o, signal), { clock: o.clock, signal, clientVersion: o.clientVersion, apiHost: apiHostOf(o.transport) }, accept);
   }
 }

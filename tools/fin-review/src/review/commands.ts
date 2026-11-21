@@ -2,9 +2,10 @@
 // (exit 78), then the run (src/review/run.ts). The dispatch has already refused an environment that
 // holds a variable of config/env-refusals.json (exit 78, [RV-19]). Order here: every refusal the
 // arguments alone cause is printed before anything else is read; then $FIN_REVIEW_HOME's place
-// (before anything under it is read), the machine's option defaults, the settings files a session
-// could read, the procedure and the pinned Claude Code.
+// (before anything under it is read), the machine's option defaults, the transport (src/transport.ts),
+// the settings and configuration files a session could read, the procedure and the pinned Claude Code.
 
+import { statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { CliContext, FlagSpec, Refusal } from "../cli.ts";
 import { REVIEW_FLAGS, machineDefaults, optionRefusals, parseArgs, printRefusals, refusal, shown } from "../cli.ts";
@@ -17,14 +18,17 @@ import { canonicalPath, isInsideOnDisk, pathOutside, resolveProgram, runProgram 
 import { isSha } from "../git.ts";
 import { pullFacts } from "../gh.ts";
 import type { PullFacts } from "../gh.ts";
-import { ensureHome, finReviewHome, guardHome, loadMachineConfig } from "../home.ts";
+import { ensureHome, finReviewHome, guardHome, loadMachineConfig, wouldLieInside } from "../home.ts";
 import type { MachineConfig } from "../home.ts";
 import { parseReviewOptions } from "../options.ts";
 import { CliRunner } from "../runner/cli.ts";
 import type { CliRunnerOptions } from "../runner/cli.ts";
 import { compareVersions, parseVersionOutput, pinClient } from "../runner/client.ts";
 import { engineHome, SESSION_PATH } from "../runner/env.ts";
-import { managedSettingsDir, settingsRefusals } from "../runner/settings-files.ts";
+import { settingsRefusals, settingsSources } from "../runner/settings-files.ts";
+import type { SourceOverrides } from "../runner/settings-files.ts";
+import { resolveTransport } from "../transport.ts";
+import type { Transport } from "../transport.ts";
 import type { SessionRunner } from "../runner/types.ts";
 import { checkEngineCopy } from "./engine-copy.ts";
 import type { EngineCopy, EngineCopyInput } from "./engine-copy.ts";
@@ -47,6 +51,28 @@ export interface ReviewServices {
   readonly engineCopy?: (input: EngineCopyInput) => Promise<EngineCopy>;
   /** The managed-settings folder the pinned Claude Code reads; default: the operating system's. */
   readonly managedSettingsDir?: string;
+  /** The other settings sources (managed preferences, platform, plist conversion); default: the machine's. */
+  readonly settingsOverrides?: SourceOverrides;
+}
+
+/**
+ * The transport of the engine's environment, its configuration directory resolved on the disk.
+ * Under pool that folder must exist, must not hold $FIN_REVIEW_HOME, and is denied to sessions.
+ */
+export function engineTransport(env: Readonly<Record<string, string | undefined>>, homePath: string): { transport: Transport; denied: string[] } {
+  const resolved = resolveTransport(env);
+  if (!resolved.ok) throw new ConfigError("FIN_REVIEW_TRANSPORT", resolved.errors);
+  const transport = resolved.value;
+  if (transport.kind !== "pool") return { transport, denied: [] };
+  let configDir: string;
+  try {
+    configDir = canonicalPath(transport.configDir);
+    if (!statSync(configDir).isDirectory()) throw new Error("not a folder");
+  } catch {
+    throw new ConfigError("CLAUDE_CONFIG_DIR", ["must name a folder that exists"]);
+  }
+  if (wouldLieInside(homePath, configDir)) throw new ConfigError("$FIN_REVIEW_HOME", ["must not lie inside CLAUDE_CONFIG_DIR"]);
+  return { transport, denied: [configDir] };
 }
 
 const VERSION_TIMEOUT_MS = 30_000;
@@ -133,9 +159,15 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
   const parsed = parseReviewOptions(args.review, "cli", machineDefaults(ctx, config), context);
   if (!parsed.ok) return printRefusals(ctx, optionRefusals(parsed.errors));
 
-  // §4.3's second half: no settings file a session could read sets a refused key (exit 78).
+  // §4.3's second half: no settings or configuration file a session could read sets a refused key
+  // (exit 78), for the transport the sessions will use.
+  const { transport, denied: transportDenied } = engineTransport(ctx.env, homePath);
   const realHome = canonicalPath(engineHome(ctx.env));
-  const settings = settingsRefusals(realHome, services?.managedSettingsDir ?? managedSettingsDir(), config.envRefusals);
+  const sources = settingsSources(realHome, transport, {
+    ...(services?.managedSettingsDir === undefined ? {} : { managedSettingsDir: services.managedSettingsDir }),
+    ...(services?.settingsOverrides ?? {}),
+  });
+  const settings = await settingsRefusals(sources, config.envRefusals);
   if (settings.length > 0) {
     for (const item of settings) ctx.stderr(`fin-review: refused: settings_refused: ${escapeText(item.file)}: ${item.problem}\n`);
     return EXIT.config;
@@ -168,7 +200,7 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
     if (slug === null) throw new DataError("the origin is not a GitHub repository, so its pull requests cannot be read");
     facts = (pr: number) => pullFacts(slug, pr, home, env);
   }
-  const denied = extraDenied(ctx.env);
+  const denied = [...extraDenied(ctx.env), ...transportDenied];
   const makeRunner = services?.makeRunner ?? ((options: CliRunnerOptions) => new CliRunner(options));
   return runReview(
     { mode, pr: Number(prText), since: since ?? null, options: parsed.value, advisory },
@@ -178,6 +210,7 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
       env,
       home,
       originUrl: url,
+      transport: transport.kind,
       facts,
       makeRunner: ({ runId, runDir }) =>
         makeRunner({
@@ -193,10 +226,13 @@ export async function runReviewCommand(ctx: CliContext, config: EngineConfig, mo
           clock,
           clientVersion,
           extraDenied: denied,
+          transport,
         }),
       maxSessions: machine.maxSessions,
       engineRoot,
-      engineCopy: services?.engineCopy ?? ((input: EngineCopyInput) => checkEngineCopy(engineRoot, input)),
+      engineCopy:
+        services?.engineCopy ??
+        ((input: EngineCopyInput) => checkEngineCopy(engineRoot, { ...input, loaded: new Map([...(config.sources ?? new Map<string, string>()), ...procedure.sources]) })),
       clock,
       random,
       stdout: ctx.stdout,

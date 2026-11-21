@@ -56,7 +56,11 @@ describe("chunks (T-RV-24)", () => {
 
 describe("inventory and shards", () => {
   const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from("IHDR")]);
-  const WOFF2 = Buffer.concat([Buffer.from("wOF2"), Buffer.alloc(40)]);
+  // A WOFF2 header: signature, flavor, the file's length, one table.
+  const WOFF2 = Buffer.alloc(48);
+  WOFF2.write("wOF2", 0, "latin1");
+  WOFF2.writeUInt32BE(48, 8);
+  WOFF2.writeUInt16BE(1, 12);
 
   it("excludes by content only: the lockfile, images, fonts and source maps whose bytes are what the name says", () => {
     const files: Record<string, Uint8Array> = {
@@ -117,11 +121,83 @@ describe("inventory and shards", () => {
     assert.deepEqual(units.map((unit) => unit.path), ["docs/notes.txt", "packages/crypto/src/index.ts", "packages/crypto/src/nul.ts"]);
     assert.equal(units.find((unit) => unit.path === "packages/crypto/src/index.ts")?.text, "// caf�\nexport const check = () => true; // MARKER-BODY");
     assert.equal(units.find((unit) => unit.path === "packages/crypto/src/nul.ts")?.text, "// �\nexport const ran = true;");
-    assert.deepEqual(excluded.map((item) => `${item.path}:${item.reason}:${item.content}`), ["src/blob.bin:binary:null", "img/inline.dat:binary:image"]);
+    assert.deepEqual(excluded.map((item) => `${item.path}:${item.reason}:${item.content}:${item.looksLike ?? "-"}`), ["src/blob.bin:binary:null:-", "img/inline.dat:binary:null:image"]);
     assert.equal(blocksCoverage(excluded[0] as Excluded), true, "a binary file on tier S that is no image or font blocks");
-    assert.equal(blocksCoverage(excluded[1] as Excluded), false, "an image is never sent to a model and does not block");
+    assert.equal(blocksCoverage(excluded[1] as Excluded), true, "image bytes under a name that is not an image's block like any binary");
     assert.equal(isBinary("a.ts", Buffer.from([0])), false);
     assert.equal(isBinary("a.bin", Buffer.from("plain")), false);
+  });
+
+  it("planted magic bytes never make a binary file media: on tier S or N it blocks, whatever its first bytes", () => {
+    // A NUL makes each binary; each starts with a format's magic, or hides one where a weak check looks.
+    const elfWithLp = Buffer.alloc(200);
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]).copy(elfWithLp, 0);
+    elfWithLp[34] = 0x4c;
+    elfWithLp[35] = 0x50;
+    const planted: Record<string, Uint8Array> = {
+      "scripts/release.sh": Buffer.from("GIF89a=1\n# \0\necho marker\n", "latin1"),
+      "scripts/png.sh": Buffer.concat([PNG, Buffer.from("\0\necho marker\n")]),
+      "ops/docker/entry": Buffer.from("OTTO\0\0\0\0rest"),
+      "ops/docker/font": Buffer.from("true\0\0\0\0rest"),
+      "ops/docker/woff": Buffer.from("wOFF\0\0\0\0rest"),
+      "ops/docker/ttf": Buffer.from([0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+      "packages/crypto/src/addon.node": elfWithLp,
+    };
+    const exclusions = ["**/*.png", "**/*.gif", "**/*.ttf", "**/*.otf", "**/*.woff", "**/*.eot"].map(compileGlob);
+    for (const tier of ["S", "N"] as Tier[]) {
+      const { units, excluded } = inventory(
+        Object.keys(planted).map((path) => ({ path, tier, kind: "file" as const })),
+        (path) => planted[path] ?? null,
+        exclusions,
+      );
+      assert.deepEqual(units, []);
+      for (const item of excluded) {
+        assert.equal(item.reason, "binary", item.path);
+        assert.equal(item.content, null, item.path);
+        assert.equal(blocksCoverage(item), true, `${item.path} on tier ${tier}`);
+      }
+      assert.equal(excluded.length, Object.keys(planted).length);
+    }
+    // Under a font or image name, the bytes must be laid out as that format, not just start as one.
+    const named: Record<string, Uint8Array> = {
+      "fonts/a.ttf": Buffer.from([0x00, 0x01, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0]),
+      "fonts/b.eot": elfWithLp,
+      "fonts/c.woff": Buffer.concat([Buffer.from("wOFF"), Buffer.alloc(60)]),
+      "img/d.ico": Buffer.concat([Buffer.from([0, 0, 1, 0, 9, 0]), Buffer.alloc(30)]),
+    };
+    const verified = inventory(
+      Object.keys(named).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
+      (path) => named[path] ?? null,
+      ["**/*.ttf", "**/*.eot", "**/*.woff", "**/*.ico"].map(compileGlob),
+    );
+    for (const item of verified.excluded) {
+      assert.notEqual(item.reason, "excluded", item.path);
+      assert.equal(blocksCoverage(item), true, item.path);
+    }
+    assert.equal(verified.excluded.length, Object.keys(named).length);
+  });
+
+  it("a font or icon laid out as its format is excluded by its name and bytes", () => {
+    // TrueType: one table whose record points past the directory and within the file.
+    const ttf = Buffer.alloc(64);
+    ttf.writeUInt32BE(0x00010000, 0);
+    ttf.writeUInt16BE(1, 4);
+    ttf.write("head", 12, "latin1");
+    ttf.writeUInt32BE(28, 20);
+    ttf.writeUInt32BE(36, 24);
+    // ICO: one image whose entry points past the directory and within the file.
+    const ico = Buffer.alloc(40);
+    ico.writeUInt16LE(1, 2);
+    ico.writeUInt16LE(1, 4);
+    ico.writeUInt32LE(18, 14);
+    ico.writeUInt32LE(22, 18);
+    const files: Record<string, Uint8Array> = { "fonts/a.ttf": ttf, "img/b.ico": ico };
+    const { excluded } = inventory(
+      Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
+      (path) => files[path] ?? null,
+      ["**/*.ttf", "**/*.ico"].map(compileGlob),
+    );
+    assert.deepEqual(excluded.map((item) => `${item.path}:${item.reason}:${item.content}:${blocksCoverage(item)}`), ["fonts/a.ttf:excluded:font:false", "img/b.ico:excluded:image:false"]);
   });
 
   it("a symbolic link is a unit holding its target; a submodule and a path not at the head are not, and block on S and N", () => {

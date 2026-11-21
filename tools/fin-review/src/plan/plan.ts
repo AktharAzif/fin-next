@@ -15,7 +15,10 @@
 // vanish. The path classes come from this engine's own config/ci-map.json (the engine copy from
 // main in CI, S7-04). The package graph is the union of the base's and the head's manifests.
 //
-// Links: a changed symbolic link or submodule runs everything at tier S, and a changed path that a
+// The tiers of a change are counted by changeTiers, which the review modes use too (src/review/run.ts),
+// so a review never runs at a lower tier than the plan gives the same change.
+//
+// Links: a changed symbolic link or submodule runs everything at tier S (and is itself tier S), and a changed path that a
 // symbolic link in either tree reaches also counts at the link's path (code reached through a link
 // is the link's code), through chains of links as a kernel follows them. When that reach cannot be
 // bounded (a link that may reach any path, a chain longer than a kernel follows, or more link paths
@@ -32,7 +35,7 @@ import type { DiffEntry, TreeEntry } from "../git.ts";
 import { parseJsonBytes } from "../json.ts";
 import type { Tier } from "../roles.ts";
 import { CLASS_NAMES, UNMAPPED, classesOf } from "./ci-map.ts";
-import type { CiClass, JobName } from "./ci-map.ts";
+import type { CiClass, CiMap, JobName } from "./ci-map.ts";
 import { compileGlob, foldAscii, isPlainPath, matchesAny } from "./glob.ts";
 import { maxTier, parseLayout, tierOf } from "./tiers.ts";
 import type { Layout, PathTier, TierSource } from "./tiers.ts";
@@ -205,20 +208,6 @@ interface Change {
   /** True when base and head have no single merge base. */
   ambiguous: boolean;
   notes: string[];
-}
-
-function unionOfDiffs(diffs: readonly DiffEntry[][]): DiffEntry[] {
-  const seen = new Set<string>();
-  const out: DiffEntry[] = [];
-  for (const diff of diffs) {
-    for (const entry of diff) {
-      const key = `${entry.status}\0${entry.oldPath ?? ""}\0${entry.path}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(entry);
-    }
-  }
-  return out;
 }
 
 /** The change from base to head: the diff since their merge base, or the union described above. */
@@ -460,23 +449,65 @@ export function linkPaths(path: string, index: LinkIndex, cap: number = MAX_LINK
   return out;
 }
 
-/** The deterministic part of the plan, from the git facts. Exported for tests. */
-export function assemble(input: AssembleInput): PlanResult {
-  const { event, computed, base, head, config, diff, loaded, workspace } = input;
-  const { ciMap, ci } = config;
-  const layout = loaded.layout;
-  const historyAmbiguous = input.historyAmbiguous ?? false;
-  const links = input.links ?? [];
-  const liveDirs = input.liveDirs ?? new Set(workspace === null ? [] : [...workspace.namesByDir.keys()].map(foldAscii));
-  const stalePackageDirs = input.stalePackageDirs ?? [];
-  const notes = [...(input.notes ?? [])];
+/**
+ * A path's tier as the plan and the review both count it: the layout's (tierOf), and a path the
+ * layout calls D that is not a documentation file, as ci-map.json's docs class defines one, is S
+ * (tier D is documentation, EXECUTION §1.7).
+ */
+export function pathTier(layout: Layout | null, ciMap: CiMap, path: string, classes: readonly CiClass[] = classesOf(ciMap, path)): PathTier {
+  const found = tierOf(layout, path);
+  if (found.tier === "D" && !classes.some((cls) => cls.name === "docs")) return { tier: "S", source: "not-documentation", entry: found.entry };
+  return found;
+}
 
-  // Every path of the change: a rename or copy counts at its old and its new path, and a path a
-  // link reaches also counts at the link's path.
-  const changedPaths: Array<{ path: string; status: string; side: "new" | "old" | "link"; link: string | null }> = [];
+/** One path of a change, with its tier. */
+export interface TieredPath {
+  readonly path: string;
+  readonly status: string;
+  /** "new" for the path at head, "old" for the base path of a rename or copy, "link" for a path reached through a symbolic link. */
+  readonly side: "new" | "old" | "link";
+  readonly link: string | null;
+  readonly classes: readonly CiClass[];
+  readonly tier: Tier;
+  readonly tierSource: TierSource;
+}
+
+export interface ChangeTiersInput {
+  /** The change; null when it is unknown (every path then counts, and the change is tier S). */
+  readonly diff: readonly DiffEntry[] | null;
+  readonly layout: Layout | null;
+  readonly ciMap: CiMap;
+  /** The symbolic links of every tree the change is read against. */
+  readonly links: readonly TreeLink[];
+  /** True when the change has no single merge base. */
+  readonly historyAmbiguous: boolean;
+}
+
+export interface ChangeTiers {
+  readonly paths: readonly TieredPath[];
+  /** The change's tier, the highest of its paths' (S when forced below); null when nothing changed. */
+  readonly tier: Tier | null;
+  /** A diff entry changed a symbolic link or a submodule. */
+  readonly linkChanged: boolean;
+  /** What the change reaches through links cannot be bounded. */
+  readonly linkOverflow: boolean;
+  readonly notes: readonly string[];
+}
+
+/**
+ * The tiers of a change, one function for the plan and the review (spec 07 §2.4): every path at
+ * its tier (pathTier), a changed link or submodule at tier S itself, a path a link reaches also at
+ * the link's path; the change is tier S when it is unknown, has no single merge base, changes a
+ * link or submodule, or reaches further through links than can be bounded.
+ */
+export function changeTiers(input: ChangeTiersInput): ChangeTiers {
+  const { diff, layout, ciMap, links, historyAmbiguous } = input;
+  const notes: string[] = [];
+  const changedPaths: Array<{ path: string; status: string; side: "new" | "old" | "link"; link: string | null; isLink: boolean }> = [];
   for (const entry of diff ?? []) {
-    changedPaths.push({ path: entry.path, status: entry.status, side: "new", link: null });
-    if (entry.oldPath !== null) changedPaths.push({ path: entry.oldPath, status: entry.status, side: "old", link: null });
+    const isLink = [entry.oldMode, entry.newMode].some((mode) => mode === SYMLINK_MODE || mode === GITLINK_MODE);
+    changedPaths.push({ path: entry.path, status: entry.status, side: "new", link: null, isLink });
+    if (entry.oldPath !== null) changedPaths.push({ path: entry.oldPath, status: entry.status, side: "old", link: null, isLink });
   }
   let linkOverflow = false;
   if (links.length > 0 && changedPaths.length > 0) {
@@ -502,28 +533,67 @@ export function assemble(input: AssembleInput): PlanResult {
           const key = foldAscii(alias.path);
           if (seen.has(key)) continue;
           seen.add(key);
-          reached.push({ path: alias.path, status, side: "link", link: alias.link });
+          reached.push({ path: alias.path, status, side: "link", link: alias.link, isLink: false });
         }
       }
       changedPaths.push(...reached);
     }
   }
-  const linkChanged = (diff ?? []).some((entry) => [entry.oldMode, entry.newMode].some((mode) => mode === SYMLINK_MODE || mode === GITLINK_MODE));
-
+  const linkChanged = changedPaths.some((path) => path.isLink);
   let tier: Tier | null = diff === null || historyAmbiguous || linkChanged || linkOverflow ? "S" : null;
+  const paths: TieredPath[] = [];
+  for (const { path, status, side, link, isLink } of changedPaths) {
+    const classes = classesOf(ciMap, path);
+    let found: PathTier = pathTier(layout, ciMap, path, classes);
+    // A changed link or submodule is tier S itself: what it stands for is not in the diff.
+    if (isLink && found.tier !== "S") found = { tier: "S", source: "link", entry: found.entry };
+    tier = tier === null ? found.tier : maxTier(tier, found.tier);
+    paths.push(Object.freeze({ path, status, side, link, classes, tier: found.tier, tierSource: found.source }));
+  }
+  return { paths, tier, linkChanged, linkOverflow, notes };
+}
+
+/** The union of several diffs, each entry once (a change with several merge bases). */
+export function unionOfDiffs(diffs: readonly DiffEntry[][]): DiffEntry[] {
+  const seen = new Set<string>();
+  const out: DiffEntry[] = [];
+  for (const diff of diffs) {
+    for (const entry of diff) {
+      const key = `${entry.status}\0${entry.oldPath ?? ""}\0${entry.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/** The deterministic part of the plan, from the git facts. Exported for tests. */
+export function assemble(input: AssembleInput): PlanResult {
+  const { event, computed, base, head, config, diff, loaded, workspace } = input;
+  const { ciMap, ci } = config;
+  const layout = loaded.layout;
+  const historyAmbiguous = input.historyAmbiguous ?? false;
+  const links = input.links ?? [];
+  const liveDirs = input.liveDirs ?? new Set(workspace === null ? [] : [...workspace.namesByDir.keys()].map(foldAscii));
+  const stalePackageDirs = input.stalePackageDirs ?? [];
+  const notes = [...(input.notes ?? [])];
+
+  // Every path of the change with its tier (changeTiers): a rename or copy counts at its old and its
+  // new path, and a path a link reaches also counts at the link's path.
+  const change = changeTiers({ diff, layout, ciMap, links, historyAmbiguous });
+  notes.push(...change.notes);
+  const { linkChanged, linkOverflow } = change;
+
+  const tier: Tier | null = change.tier;
   const classSet = new Set<string>();
   const files: PlanFile[] = [];
-  const pathClasses: Array<{ path: string; classes: CiClass[]; owners: string[] }> = [];
+  const pathClasses: Array<{ path: string; classes: readonly CiClass[]; owners: string[] }> = [];
   // A folder that stopped being a package but still holds files is a non-package folder (§10.2).
   let nonPackageFolder = stalePackageDirs.some((dir) => ci.packageRoots.includes(foldAscii(dir.split("/")[0] ?? "")));
 
-  for (const { path, status, side, link } of changedPaths) {
-    const classes = classesOf(ciMap, path);
-    let pathTier: PathTier = tierOf(layout, path);
-    if (pathTier.tier === "D" && !classes.some((cls) => cls.name === "docs")) {
-      pathTier = { tier: "S", source: "not-documentation", entry: pathTier.entry };
-    }
-    tier = tier === null ? pathTier.tier : maxTier(tier, pathTier.tier);
+  for (const { path, status, side, link, classes, tier: pathTierValue, tierSource } of change.paths) {
+    const pathTier = { tier: pathTierValue, source: tierSource };
     if (classes.length === 0) classSet.add(UNMAPPED);
     for (const cls of classes) classSet.add(cls.name);
     const owners = workspace === null ? [] : ownerNames(workspace, path);
@@ -622,7 +692,7 @@ export function assemble(input: AssembleInput): PlanResult {
   // The engine's paths changed, or may have: a path that is not plain may be one of them on the
   // build machine, and an unbounded link reach may include them.
   const selfTest = SELF_TEST_PATTERNS.map(compileGlob);
-  jobs.selfTest = diff === null || linkOverflow || changedPaths.some(({ path }) => !isPlainPath(path) || matchesAny(selfTest, path));
+  jobs.selfTest = diff === null || linkOverflow || change.paths.some(({ path }) => !isPlainPath(path) || matchesAny(selfTest, path));
 
   // Images and static outputs: the layout entries of the affected packages whose folders are live
   // at the head (a planned entry's package may not exist yet).

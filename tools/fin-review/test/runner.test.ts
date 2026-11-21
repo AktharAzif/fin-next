@@ -11,7 +11,9 @@ import type { ReviewOptions } from "../src/options.ts";
 import { ROLES, sessionModel } from "../src/roles.ts";
 import { CliRunner, FORBIDDEN_FLAGS, REPLACED_FLAGS, RUNNER_FLAGS, buildArgs, cliSchema, effectiveFast } from "../src/runner/cli.ts";
 import { clientFingerprint, pinClient } from "../src/runner/client.ts";
-import { SESSION_ENV_NAMES, sessionEnv } from "../src/runner/env.ts";
+import { POOL_SESSION_ENV_NAMES, SESSION_ENV_NAMES, sessionEnv } from "../src/runner/env.ts";
+import { DIRECT, resolveTransport } from "../src/transport.ts";
+import type { Transport } from "../src/transport.ts";
 import { DENIED_TOOLS, buildSettings } from "../src/runner/settings.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
 import { fakeClock } from "./helpers/review-fixture.ts";
@@ -274,7 +276,8 @@ process.stdin.on("end", () => {
   if (input.includes("SLEEP")) { setTimeout(() => {}, 60000); return; }
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "", stop_reason: "end_turn", total_cost_usd: 0.25,
     usage: { input_tokens: 3, cache_creation_input_tokens: 4, cache_read_input_tokens: 5, output_tokens: 6 },
-    modelUsage: { [model]: { inputTokens: 3, outputTokens: 6 } }, structured_output: { answer: "ready" } }) + "\\n");
+    modelUsage: input.includes("MISMATCH") ? { [model]: { inputTokens: 3, outputTokens: 6 }, "claude-haiku-9-9": { inputTokens: 1, outputTokens: 1 } } : { [model]: { inputTokens: 3, outputTokens: 6 } },
+    structured_output: { answer: "ready" } }) + "\\n");
 });
 `,
     );
@@ -282,8 +285,9 @@ process.stdin.on("end", () => {
   });
   after(() => tmp.cleanup());
 
-  function runner(engineEnv: Record<string, string>, fingerprint: string = clientFingerprint(claudePath) ?? ""): CliRunner {
+  function runner(engineEnv: Record<string, string>, fingerprint: string = clientFingerprint(claudePath) ?? "", transport: Transport = DIRECT): CliRunner {
     return new CliRunner({
+      transport,
       claudePath,
       claudeFingerprint: fingerprint,
       engineEnv,
@@ -333,6 +337,42 @@ process.stdin.on("end", () => {
     assert.deepEqual(JSON.parse(readFileSync(join(sessionDir, "mcp.json"), "utf8")), { mcpServers: {} });
     assert.equal(seen.args[seen.args.indexOf("--settings") + 1], join(sessionDir, "settings.json"));
     assert.deepEqual(readdirSync(join(home, "scratch")), []);
+  });
+
+  it("under the pool transport, sees exactly the fixed names and the three pool variables, and records the forwarder as its API host", async () => {
+    writeFileSync(record, "[]");
+    const engineEnv = {
+      HOME: userHome,
+      PATH: process.env["PATH"] ?? "",
+      FIN_REVIEW_TRANSPORT: "pool",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/",
+      ANTHROPIC_AUTH_TOKEN: "pool-token-value",
+      CLAUDE_CONFIG_DIR: join(userHome, "pool-config"),
+      GITHUB_TOKEN: "x",
+    };
+    const resolved = resolveTransport(engineEnv);
+    assert.ok(resolved.ok);
+    const treeDir = join(home, "trees", "run1");
+    const result = await runner(engineEnv, undefined, resolved.value).run(spec({ id: "pool-s0", treeDir, schema: SCHEMA }), new AbortController().signal);
+    assert.equal(result.state, "ok", result.failureDetail ?? "");
+    assert.equal(result.apiHost, "127.0.0.1:41234");
+    const [seen] = JSON.parse(readFileSync(record, "utf8")) as Array<{ env: string[] }>;
+    assert.deepEqual(seen?.env.filter((name) => name !== "__CF_USER_TEXT_ENCODING"), [...POOL_SESSION_ENV_NAMES].sort());
+  });
+
+  it("under the pool transport, a model other than the requested one in modelUsage is still refused, with no retry", async () => {
+    writeFileSync(record, "[]");
+    const engineEnv = { HOME: userHome, FIN_REVIEW_TRANSPORT: "pool", ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/", ANTHROPIC_AUTH_TOKEN: "t", CLAUDE_CONFIG_DIR: join(userHome, "pool-config") };
+    const resolved = resolveTransport(engineEnv);
+    assert.ok(resolved.ok);
+    const treeDir = join(home, "trees", "run1");
+    // With MISMATCH in the prompt the fake reports a second model in modelUsage, as a forwarder that
+    // served another model would.
+    const result = await runner(engineEnv, undefined, resolved.value).run(spec({ id: "pool-mismatch-s0", treeDir, schema: SCHEMA, prompt: "MISMATCH" }), new AbortController().signal);
+    assert.equal(result.state, "failed");
+    assert.equal(result.failure, "model_mismatch");
+    assert.equal(result.attempts, 1, "a mismatch is never retried");
+    assert.deepEqual([...result.modelObserved].sort(), [MODELS.opus, "claude-haiku-9-9"].sort());
   });
 
   it("times out, retries once in a fresh scratch home, then fails as timeout", async () => {

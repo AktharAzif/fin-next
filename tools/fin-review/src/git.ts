@@ -1,6 +1,7 @@
 // The git calls the engine makes, each through runProgram with validated arguments, and the
 // parsers for their NUL-separated output (so names with spaces, quotes or newlines survive).
 
+import { createHash } from "node:crypto";
 import { escapeText } from "./display.ts";
 import { ProgramError } from "./errors.ts";
 import { runProgram } from "./exec.ts";
@@ -23,6 +24,11 @@ export const GITLINK_MODE = "160000";
 
 export function isSha(value: unknown): value is string {
   return typeof value === "string" && SHA_RE.test(value);
+}
+
+/** The object ID git gives `bytes` as a blob (SHA-1 object format), computed without git or its filters. */
+export function gitBlobId(bytes: Uint8Array): string {
+  return createHash("sha1").update(`blob ${bytes.byteLength}\0`, "utf8").update(bytes).digest("hex");
 }
 
 function assertSha(value: string, what: string): void {

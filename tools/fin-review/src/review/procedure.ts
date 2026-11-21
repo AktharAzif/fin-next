@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigError } from "../errors.ts";
+import { gitBlobId } from "../git.ts";
 import { isJsonObject, readJsonFile } from "../json.ts";
 import { compileGlob, globError } from "../plan/glob.ts";
 import type { Glob } from "../plan/glob.ts";
@@ -54,11 +55,29 @@ export interface Procedure {
   readonly injectionPatterns: readonly RegExp[];
   /** docs/review/rules-digest.md, when the procedure has one. */
   readonly rulesDigest: string | null;
+  /**
+   * The git blob ID of the bytes each file was read from, by its path in the repository
+   * (`docs/review/<file>`), for the engine-copy check.
+   */
+  readonly sources: ReadonlyMap<string, string>;
 }
 
-function readText(dir: string, file: string, problems: string[], optional = false): string | null {
+/** Where the procedure lies in the repository, for Procedure.sources. */
+export const PROCEDURE_REPO_DIR = "docs/review";
+
+/** Where the procedure is read from, what went wrong, and the blob ID of every file read. */
+interface Reader {
+  readonly dir: string;
+  readonly problems: string[];
+  readonly sources: Map<string, string>;
+}
+
+function readText(r: Reader, file: string, optional = false): string | null {
+  const { dir, problems } = r;
   try {
-    const text = readFileSync(join(dir, file), "utf8");
+    const bytes = readFileSync(join(dir, file));
+    r.sources.set(`${PROCEDURE_REPO_DIR}/${file}`, gitBlobId(bytes));
+    const text = bytes.toString("utf8");
     if (Buffer.byteLength(text, "utf8") > MAX_PROMPT_BYTES) {
       problems.push(`${file} is larger than ${MAX_PROMPT_BYTES} bytes`);
       return null;
@@ -76,10 +95,10 @@ function readText(dir: string, file: string, problems: string[], optional = fals
   }
 }
 
-function readJson(dir: string, file: string, problems: string[]): unknown {
-  const read = readJsonFile(join(dir, file), MAX_JSON_BYTES);
+function readJson(r: Reader, file: string): unknown {
+  const read = readJsonFile(join(r.dir, file), MAX_JSON_BYTES, (bytes) => r.sources.set(`${PROCEDURE_REPO_DIR}/${file}`, gitBlobId(bytes)));
   if (!read.ok) {
-    problems.push(`${file}: ${read.error}`);
+    r.problems.push(`${file}: ${read.error}`);
     return undefined;
   }
   return read.value;
@@ -102,8 +121,9 @@ export function parseChecklist(text: string, file: string, problems: string[]): 
   return items;
 }
 
-function schemaFile(dir: string, file: string, problems: string[]): object {
-  const value = readJson(dir, file, problems);
+function schemaFile(r: Reader, file: string): object {
+  const { problems } = r;
+  const value = readJson(r, file);
   if (value === undefined) return {};
   try {
     compileSchema(value);
@@ -176,30 +196,32 @@ function parseExclusions(value: unknown, problems: string[]): Glob[] {
 /** Reads and checks every procedure file in `dir` (docs/review). Throws ConfigError. */
 export function loadProcedure(dir: string): Procedure {
   const problems: string[] = [];
-  const systemPrompt = readText(dir, "prompts/system.md", problems) ?? "";
+  const sources = new Map<string, string>();
+  const r: Reader = { dir, problems, sources };
+  const systemPrompt = readText(r, "prompts/system.md") ?? "";
   if (systemPrompt !== "" && !systemPrompt.startsWith(`${DATA_RULE}\n`)) problems.push("prompts/system.md must start with the DATA rule, verbatim");
   const lensPrompts = new Map<Lens, string>();
   const checklists = new Map<string, ChecklistItem[]>();
   for (const lens of LENSES) {
-    lensPrompts.set(lens, readText(dir, `prompts/lens-${lens}.md`, problems) ?? "");
-    const text = readText(dir, `checklists/${lens}.md`, problems);
+    lensPrompts.set(lens, readText(r, `prompts/lens-${lens}.md`) ?? "");
+    const text = readText(r, `checklists/${lens}.md`);
     if (text !== null) checklists.set(lens, parseChecklist(text, `checklists/${lens}.md`, problems));
   }
-  const attackChecklist = readText(dir, "checklists/attack.md", problems);
+  const attackChecklist = readText(r, "checklists/attack.md");
   if (attackChecklist !== null) checklists.set(ATTACK, parseChecklist(attackChecklist, "checklists/attack.md", problems));
-  const attackPrompt = readText(dir, "prompts/attack.md", problems) ?? "";
-  const scepticPrompt = readText(dir, "prompts/sceptic.md", problems) ?? "";
-  const secondLookPrompt = readText(dir, "prompts/second-look.md", problems) ?? "";
+  const attackPrompt = readText(r, "prompts/attack.md") ?? "";
+  const scepticPrompt = readText(r, "prompts/sceptic.md") ?? "";
+  const secondLookPrompt = readText(r, "prompts/second-look.md") ?? "";
   const schemas = {
-    session: schemaFile(dir, "schema/session-output.schema.json", problems),
-    sceptic: schemaFile(dir, "schema/sceptic-output.schema.json", problems),
-    secondLook: schemaFile(dir, "schema/second-look-output.schema.json", problems),
-    doctor: schemaFile(dir, "schema/doctor-output.schema.json", problems),
+    session: schemaFile(r, "schema/session-output.schema.json"),
+    sceptic: schemaFile(r, "schema/sceptic-output.schema.json"),
+    secondLook: schemaFile(r, "schema/second-look-output.schema.json"),
+    doctor: schemaFile(r, "schema/doctor-output.schema.json"),
   };
-  const profiles = parseProfiles(readJson(dir, "attack-profiles.json", problems), problems);
-  const exclusions = parseExclusions(readJson(dir, "exclusions.json", problems), problems);
-  const injectionPatterns = parseInjectionPatterns(readJson(dir, "injection-patterns.json", problems), problems);
-  const rulesDigest = readText(dir, "rules-digest.md", problems, true);
+  const profiles = parseProfiles(readJson(r, "attack-profiles.json"), problems);
+  const exclusions = parseExclusions(readJson(r, "exclusions.json"), problems);
+  const injectionPatterns = parseInjectionPatterns(readJson(r, "injection-patterns.json"), problems);
+  const rulesDigest = readText(r, "rules-digest.md", true);
   if (problems.length > 0) throw new ConfigError("docs/review", problems);
   return Object.freeze({
     dir,
@@ -214,6 +236,7 @@ export function loadProcedure(dir: string): Procedure {
     exclusions: Object.freeze(exclusions),
     injectionPatterns: Object.freeze(injectionPatterns),
     rulesDigest,
+    sources,
   });
 }
 

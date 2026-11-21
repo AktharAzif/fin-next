@@ -2,8 +2,10 @@
 //
 // Order of work for every command: load and validate the committed configuration (exit 78 on
 // any problem); for a command that resolves review options (every command but plan, help and
-// doctor), refuse an environment that holds a variable config/env-refusals.json names (exit 78,
-// `environment_refused`, §3.5 and §4.3); parse the arguments, refuse (exit 64, one
+// doctor), refuse a transport that cannot be used (exit 78, `transport_refused`; src/transport.ts)
+// and an environment that holds a variable config/env-refusals.json names (exit 78,
+// `environment_refused`, §3.5 and §4.3; under the pool transport its own three variables are
+// checked by the transport instead); parse the arguments, refuse (exit 64, one
 // `fin-review: refused: <code>: <message>` line per error) before anything else happens, then run.
 // The doctor reports a refused environment as its check D4, starts no session and exits 78.
 // Every line printed from data the engine read (a path, a package name, a program's message) is
@@ -15,7 +17,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { loadEngineConfig } from "./config.ts";
 import type { EngineConfig } from "./config.ts";
 import { escapeText } from "./display.ts";
-import { checkEnvironment } from "./env-refusals.ts";
+import { environmentRefusals } from "./runner/env.ts";
+import { resolveTransport } from "./transport.ts";
 import { ConfigError, DataError, EXIT, ProgramError } from "./errors.ts";
 import { ZERO_SHA, isSha } from "./git.ts";
 import { finReviewHome } from "./home.ts";
@@ -256,7 +259,12 @@ async function dispatch(ctx: CliContext): Promise<number> {
   const config = loaded.value;
   const [command, ...rest] = ctx.argv;
   if (command !== undefined && !ENVIRONMENT_UNCHECKED.has(command)) {
-    const refused = checkEnvironment(ctx.env, config.envRefusals);
+    const transport = resolveTransport(ctx.env);
+    if (!transport.ok) {
+      for (const error of transport.errors) ctx.stderr(line(`fin-review: refused: transport_refused: ${error}.`));
+      return EXIT.config;
+    }
+    const refused = environmentRefusals(ctx.env, config.envRefusals, transport.value);
     if (refused.length > 0) {
       for (const variable of refused) {
         ctx.stderr(line(`fin-review: refused: environment_refused: ${variable.name} is set (${variable.kind}); unset it to run fin-review.`));

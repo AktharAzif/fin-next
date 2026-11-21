@@ -5,7 +5,9 @@
 //   or bytes, because Node runs such a file with a NUL or a stray byte in it;
 // - a file whose path matches docs/review/exclusions.json is excluded only when its bytes are what
 //   the name says (an image or font by its magic bytes, the pnpm lockfile, a source map);
-// - a file with a NUL in its first 8,000 bytes (git's own rule) is binary and is not a unit;
+// - a file with a NUL in its first 8,000 bytes (git's own rule) is binary and is not a unit; its
+//   first bytes never make it media (that takes the name exclusions.json allows as well), so on
+//   tier S or N it blocks as a file no lens could review;
 // - every other file is a unit, its bytes decoded as UTF-8 with any invalid sequence replaced,
 //   so one stray byte cannot take a text file out of the review;
 // - a symbolic link is a unit whose text is its target; a submodule is never a unit.
@@ -50,8 +52,13 @@ export interface Excluded {
   readonly path: string;
   readonly reason: ExcludedReason;
   readonly tier: Tier;
-  /** What the bytes were verified to be, or null when they are none of the kinds never sent to a model. */
+  /**
+   * What the name says and the bytes were verified to be (an `excluded` file only); null otherwise.
+   * A binary file's content is never verified: its name is not one exclusions.json allows.
+   */
   readonly content: ContentKind | null;
+  /** A binary file only: the media its first bytes look like, for the report. It decides nothing. */
+  readonly looksLike?: "image" | "font";
 }
 
 /** Bytes git itself calls binary: a NUL in the first 8,000 (never for a code file). */
@@ -73,10 +80,15 @@ export function estimateTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, "utf8") / 3.5);
 }
 
-/** True when a changed path that yields no unit must block: nothing could review it (spec 07 §2.11 rule 6). */
+/**
+ * True when a changed path that yields no unit must block: nothing could review it (spec 07 §2.11
+ * rule 6). Only a file excluded by its name and verified bytes (an image or font with that
+ * extension and magic, the lockfile, a source map) is exempt; a binary file blocks on tier S or N
+ * whatever its first bytes look like, since those are the author's to choose.
+ */
 export function blocksCoverage(item: Excluded): boolean {
   if (item.reason === "missing") return true;
-  if (item.reason === "excluded" || item.content !== null) return false;
+  if (item.reason === "excluded" && item.content !== null) return false;
   return item.tier === "S" || item.tier === "N";
 }
 
@@ -111,7 +123,8 @@ export function inventory(
         continue;
       }
       if (isBinary(path, bytes)) {
-        excluded.push({ path, reason: "binary", tier, content: mediaKind(bytes) });
+        const looksLike = mediaKind(bytes);
+        excluded.push({ path, reason: "binary", tier, content: null, ...(looksLike === null ? {} : { looksLike }) });
         continue;
       }
     }

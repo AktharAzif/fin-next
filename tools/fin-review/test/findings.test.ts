@@ -141,11 +141,18 @@ describe("finding validation (T-RV-13)", () => {
     const quote = { path: "src/a.ts", text: "return x + 1;" };
     assert.equal(fixed(line2, quote, new Map([["src/a.ts", new Set([2])]]))?.status, "fixed");
     // Nothing changed since the blocker was found: the line it named is no fix of itself.
-    assert.match(fixed(line2, quote, new Map())?.problems[0] ?? "", /touches no line of src\/a\.ts that changed since the blocker was found/);
+    assert.match(fixed(line2, quote, new Map([["src/a.ts", new Set()]]))?.problems[0] ?? "", /touches no line of src\/a\.ts that changed since the blocker was found/);
     // A change elsewhere in the tree does not make an unchanged line a fix.
     assert.equal(fixed(line2, quote, new Map([["src/other.ts", new Set([1])], ["src/a.ts", new Set([3])]]))?.status, "open");
     // The quote must come from the file fixWhere names, and from within its lines.
     assert.match(fixed({ path: "src/other.ts", startLine: 1, endLine: 1 }, quote, new Map([["src/other.ts", new Set([1])]]))?.problems[0] ?? "", /quoted from "src\/a\.ts", not from "src\/other\.ts"/);
+    // fixWhere must be a file the blocker names (the map's keys): a changed line of another file,
+    // even one the session quotes exactly, closes nothing.
+    const otherLine = { path: "src/other.ts", startLine: 1, endLine: 1 };
+    const otherQuote = { path: "src/other.ts", text: "export const other = 1;" };
+    assert.match(fixed(otherLine, otherQuote, new Map([["src/a.ts", new Set([2])]]))?.problems[0] ?? "", /"src\/other\.ts", which is not a file the blocker names/);
+    assert.equal(fixed(otherLine, otherQuote, new Map([["src/a.ts", new Set([2])], ["src/other.ts", new Set([1])]]))?.status, "fixed", "a file the blocker names, renamed or not, may hold the fix");
+    assert.match(fixed(line2, quote, new Map())?.problems[0] ?? "", /not a file the blocker names/, "a blocker whose files are all gone closes on no quote");
     assert.match(fixed({ path: "src/a.ts", startLine: 3, endLine: 3 }, quote, new Map([["src/a.ts", new Set([3])]]))?.problems[0] ?? "", /not within src\/a\.ts:3-3/);
     // A wide fixWhere does not help: the quoted text itself must touch a changed line.
     assert.equal(fixed({ path: "src/a.ts", startLine: 1, endLine: 3 }, quote, new Map([["src/a.ts", new Set([3])]]))?.status, "open");

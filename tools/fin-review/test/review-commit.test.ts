@@ -174,6 +174,90 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal(closed.code, 0, closed.stdout + closed.stderr);
   });
 
+  it("a file no lens could review stays a blocker: a later commit, or the same head again, escalates to pr (prior_gap)", async () => {
+    // Tier S, a NUL in its bytes and no media magic: binary, so no lens reads it, and it blocks.
+    const h0 = fx.pr(15, { "scripts/release.sh": Buffer.from("#!/bin/sh\n# \0\necho marker\n", "latin1") });
+    const first = await runFixtureCli(fx, ["pr", "--pr", "15"], harness(fx, script(), random).services);
+    assert.equal(first.code, 1, first.stdout + first.stderr);
+    const blocked = readJson(join(lastRun(fx), "result.json"));
+    assert.deepEqual((blocked["blockers"] as Array<Record<string, unknown>>).map((blocker) => [blocker["rule"], blocker["path"]]), [["coverage", "scripts/release.sh"]]);
+    assert.deepEqual(blocked["openBlockers"], [], "a coverage gap is no finding");
+    // The same head again, as a commit: an empty delta cannot show the file reviewed.
+    const same = await runFixtureCli(fx, ["commit", "--pr", "15", "--since", h0], harness(fx, script(), random).services);
+    assert.match(same.stdout, /escalated from commit: prior_gap/);
+    assert.equal(same.code, 1, same.stdout + same.stderr);
+    // One more trivial commit: the delta does not touch the file, and the run still blocks on it.
+    const h1 = fx.pr(15, { "scripts/note.sh": "#!/bin/sh\necho note\n" }, h0);
+    const later = await runFixtureCli(fx, ["commit", "--pr", "15", "--since", h0], harness(fx, script(), random).services);
+    assert.match(later.stdout, /escalated from commit: prior_gap/);
+    assert.equal(later.code, 1, later.stdout + later.stderr);
+    const result = readJson(join(lastRun(fx), "result.json"));
+    assert.equal(result["head"], h1);
+    assert.ok((result["blockers"] as Array<Record<string, unknown>>).some((blocker) => blocker["rule"] === "coverage" && blocker["path"] === "scripts/release.sh"));
+  });
+
+  it("a prior blocker closes only with a fix in a file it names: not a changed line elsewhere, nor the same text moved to a new file", async () => {
+    // Long enough that a one-line fix keeps a renamed file over git's 50% similarity.
+    const defect = "// Comparing secrets.\n// They come from the caller.\n// Keep this small.\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const VERSION = 1;\n";
+    const h0 = fx.pr(16, { "packages/crypto/src/index.ts": defect });
+    const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec)]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "16"], finder.services)).code, 1);
+    const claiming = (fixWhere: Record<string, unknown>, fixQuote: Record<string, unknown>) =>
+      harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere, fixQuote }] } } : undefined)), random);
+    // An unrelated file, newly added: every line of it changed, and none fixes the blocker.
+    const h1 = fx.pr(16, { "docs/plan/notes.md": "# notes\n\nunrelated line\n" }, h0);
+    const unrelated = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "docs/plan/notes.md", startLine: 3, endLine: 3 }, { path: "docs/plan/notes.md", text: "unrelated line" }).services);
+    assert.notEqual(unrelated.code, 0, unrelated.stdout + unrelated.stderr);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    // The defect moved, word for word, into a new file the old one re-exports.
+    fx.pr(16, { "packages/crypto/src/index.ts": 'export { sameSecret } from "./compare.ts";\n', "packages/crypto/src/compare.ts": defect }, h1);
+    const moved = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/compare.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/compare.ts", text: "return a === b;" }).services);
+    assert.notEqual(moved.code, 0, moved.stdout + moved.stderr);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open");
+    // The file renamed as it was: the renamed file may hold a fix, but nothing in it changed.
+    const h3 = fx.pr(16, { "packages/crypto/src/index.ts": null, "packages/crypto/src/secret.ts": defect }, h0);
+    const renamed = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/secret.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/secret.ts", text: "return a === b;" }).services);
+    assert.notEqual(renamed.code, 0, renamed.stdout + renamed.stderr);
+    // A real fix in the renamed file closes it.
+    const fixed = defect.replace("return a === b;", "return timingSafeEqual(Buffer.from(a), Buffer.from(b));");
+    fx.pr(16, { "packages/crypto/src/secret.ts": fixed }, h3);
+    const closed = await runFixtureCli(fx, ["pr", "--pr", "16"], claiming({ path: "packages/crypto/src/secret.ts", startLine: 5, endLine: 5 }, { path: "packages/crypto/src/secret.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" }).services);
+    assert.equal(closed.code, 0, closed.stdout + closed.stderr);
+  });
+
+  it("a lens whose output was rejected closes no prior blocker, in its run or any later one", async () => {
+    const h0 = fx.pr(17, { "packages/crypto/src/index.ts": "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n" });
+    const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec)]) } : undefined)), random);
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "17"], finder.services)).code, 1);
+    const fixed = "import { timingSafeEqual } from \"node:crypto\";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n";
+    fx.pr(17, { "packages/crypto/src/index.ts": fixed }, h0);
+    // A well-quoted fix claim in an output the engine rejects (done: false) on both attempts.
+    const incomplete = harness(
+      fx,
+      script((spec) =>
+        spec.lens === "security"
+          ? {
+              kind: "result",
+              output: {
+                ...cleanOutput(spec),
+                done: false,
+                priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "packages/crypto/src/index.ts", startLine: 4, endLine: 4 }, fixQuote: { path: "packages/crypto/src/index.ts", text: "timingSafeEqual(Buffer.from(a), Buffer.from(b))" } }],
+              },
+            }
+          : undefined,
+      ),
+      random,
+    );
+    const rejected = await runFixtureCli(fx, ["commit", "--pr", "17", "--since", h0], incomplete.services);
+    assert.equal(rejected.code, 2, rejected.stdout + rejected.stderr);
+    assert.deepEqual(calls(incomplete).filter((call) => call.spec.lens === "security").map((call) => call.attempt), [1, 2]);
+    assert.equal((readJson(join(lastRun(fx), "result.json"))["openBlockers"] as unknown[]).length, 1, "the blocker stays open in that run");
+    // A later run whose sessions say nothing about it: still blocked.
+    const silent = await runFixtureCli(fx, ["pr", "--pr", "17"], harness(fx, script(), random).services);
+    assert.equal(silent.code, 1, silent.stdout + silent.stderr);
+    assert.deepEqual((readJson(join(lastRun(fx), "result.json"))["blockers"] as Array<Record<string, unknown>>).map((blocker) => blocker["rule"]), ["prior"]);
+  });
+
   it("escalates when the delta needs a lens the last reviewed head did not run (new_lens)", async () => {
     const h0 = fx.pr(12, { "packages/ui/src/button.ts": "export const button = 3;\n" });
     assert.equal((await runFixtureCli(fx, ["pr", "--pr", "12"], harness(fx, script(), random).services)).code, 0);

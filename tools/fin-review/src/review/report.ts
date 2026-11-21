@@ -96,13 +96,18 @@ export interface RunSummary {
   /** The default branch, whose layout gave the tiers and whose merge base with the head the run reviewed from. */
   readonly defaultBranch: string;
   readonly defaultTip: string;
+  /** The merge base the run recorded (the first of `mergeBases`). */
   readonly mergeBase: string;
+  /** Every merge base of the head and the default branch; more than one makes the change tier S. */
+  readonly mergeBases: readonly string[];
   /** The gating chain's tier: the change's, and in `commit` never below the last reviewed head's. */
   readonly tier: Tier | null;
   /** The tier of what this run reviewed (in `commit`, the delta's), which chose its lenses. */
   readonly deltaTier: Tier | null;
   /** The engine that ran: its commit, the procedure hash (spec 07 §4.8), and whether it was the default branch's engine copy. */
   readonly engine: { readonly commit: string | null; readonly procedureHash: string | null; readonly defaultCopy: boolean };
+  /** How the sessions reached Claude: `direct`, or `pool` through a local forwarder (decision BD-22). */
+  readonly transport: "direct" | "pool";
   /** `advisory` for an advisory run; otherwise what `outcome` says. */
   readonly result: RunResultName;
   /** What the run found: for an advisory run, what it would have been. */

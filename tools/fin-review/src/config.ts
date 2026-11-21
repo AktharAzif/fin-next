@@ -4,6 +4,7 @@
 import { join } from "node:path";
 import { parseEnvRefusals } from "./env-refusals.ts";
 import type { EnvRefusals } from "./env-refusals.ts";
+import { gitBlobId } from "./git.ts";
 import { readJsonFile } from "./json.ts";
 import { MAX_CONFIG_BYTES, parseDefaultsConfig, parseModelsConfig } from "./options.ts";
 import type { ModelsConfig, ReviewOptions } from "./options.ts";
@@ -28,7 +29,16 @@ export interface EngineConfig {
   readonly client: ClientConfig;
   readonly budgets: BudgetsConfig;
   readonly lenses: LensesConfig;
+  /**
+   * The git blob ID of the bytes each file was read from, by its path in the repository
+   * (`tools/fin-review/config/<file>`): the engine-copy check compares them with its commit, so a
+   * file changed on the disk and changed back cannot pass as the commit's.
+   */
+  readonly sources?: ReadonlyMap<string, string>;
 }
+
+/** Where config/ lies in the repository, for EngineConfig.sources. */
+export const CONFIG_REPO_DIR = "tools/fin-review/config";
 
 export interface ConfigProblem {
   readonly file: string;
@@ -52,8 +62,9 @@ type Parsed<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 /** Reads and validates every committed configuration file in `configDir`. */
 export function loadEngineConfig(configDir: string): { ok: true; value: EngineConfig } | { ok: false; problems: ConfigProblem[] } {
   const problems: ConfigProblem[] = [];
+  const sources = new Map<string, string>();
   const read = <T>(file: string, parse: (value: unknown) => Parsed<T>): T | null => {
-    const result = readJsonFile(join(configDir, file), MAX_CONFIG_BYTES);
+    const result = readJsonFile(join(configDir, file), MAX_CONFIG_BYTES, (bytes) => sources.set(`${CONFIG_REPO_DIR}/${file}`, gitBlobId(bytes)));
     if (!result.ok) {
       problems.push({ file, message: result.error });
       return null;
@@ -89,5 +100,5 @@ export function loadEngineConfig(configDir: string): { ok: true; value: EngineCo
   ) {
     return { ok: false, problems };
   }
-  return { ok: true, value: Object.freeze({ models, defaults, floor, envRefusals, ciMap, ci, client, budgets, lenses }) };
+  return { ok: true, value: Object.freeze({ models, defaults, floor, envRefusals, ciMap, ci, client, budgets, lenses, sources }) };
 }

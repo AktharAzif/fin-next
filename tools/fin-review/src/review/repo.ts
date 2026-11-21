@@ -11,7 +11,7 @@ import { isAbsolute, join } from "node:path";
 import { ProgramError } from "../errors.ts";
 import { canonicalPath, runProgram } from "../exec.ts";
 import { diffRaw, gitEnv, isSha, parseLsTreeZ } from "../git.ts";
-import type { DiffEntry } from "../git.ts";
+import type { DiffEntry, TreeEntry } from "../git.ts";
 
 export const PR_NUMBER_RE = /^[1-9][0-9]{0,6}$/;
 const REF_NAME_RE = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -199,13 +199,6 @@ export async function resolveCommit(mirror: string, ref: string, env: Readonly<R
   return result.code === 0 && isSha(sha) ? sha : null;
 }
 
-export async function mergeBase(mirror: string, a: string, b: string, env: Readonly<Record<string, string | undefined>>): Promise<string | null> {
-  if (!isSha(a) || !isSha(b)) throw new TypeError("merge-base needs two SHAs");
-  const result = await git({ cwd: mirror, args: ["merge-base", a, b], env, okCodes: [1] });
-  const sha = result.stdout.toString("utf8").trim();
-  return result.code === 0 && isSha(sha) ? sha : null;
-}
-
 export async function isAncestor(mirror: string, a: string, b: string, env: Readonly<Record<string, string | undefined>>): Promise<boolean> {
   if (!isSha(a) || !isSha(b)) throw new TypeError("is-ancestor needs two SHAs");
   return (await git({ cwd: mirror, args: ["merge-base", "--is-ancestor", a, b], env, okCodes: [1] })).code === 0;
@@ -273,13 +266,68 @@ export async function checkoutState(
     return null;
   }
   if (!isSha(head)) return null;
-  const status = (await git({ cwd: dir, args: ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames", "--", ...paths], env })).stdout;
+  // Stat checks at full strength and no untracked cache, so a setting cannot make git skip a file;
+  // what git's index hides anyway (assume-unchanged, skip-worktree) is found by indexFlags.
+  const status = (
+    await git({
+      cwd: dir,
+      args: [
+        ...STRICT_STATUS_CONFIG,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=matching",
+        "--no-renames",
+        "--",
+        ...paths,
+      ],
+      env,
+    })
+  ).stdout;
   const changed = status
     .toString("utf8")
     .split("\0")
     .filter((record) => record.length > 3)
     .map((record) => record.slice(3));
   return { top, head, changed };
+}
+
+const STRICT_STATUS_CONFIG: readonly string[] = [
+  "-c",
+  "core.checkStat=default",
+  "-c",
+  "core.trustctime=true",
+  "-c",
+  "core.ignoreStat=false",
+  "-c",
+  "core.untrackedCache=false",
+];
+
+/**
+ * The index entries under `paths` git would not compare with the disk: marked assume-unchanged
+ * (a lower-case tag of `ls-files -v`) or skip-worktree (tag S). An edit to such a file is not shown
+ * by `git status`.
+ */
+export async function indexFlags(dir: string, paths: readonly string[], env: Readonly<Record<string, string | undefined>>): Promise<string[]> {
+  assertDir(dir, "the engine checkout");
+  assertEnginePaths(paths);
+  const out = (await git({ cwd: dir, args: ["ls-files", "-v", "-z", "--", ...paths], env })).stdout.toString("utf8");
+  const flagged: string[] = [];
+  for (const record of out.split("\0")) {
+    if (record.length < 3 || record[1] !== " ") continue;
+    const tag = record[0] ?? "";
+    if (tag === "S" || (tag >= "a" && tag <= "z")) flagged.push(record.slice(2));
+  }
+  return flagged;
+}
+
+/** Every entry under `paths` at `rev` (files, links and submodules), sorted by path. */
+export async function entriesUnder(repo: string, rev: string, paths: readonly string[], env: Readonly<Record<string, string | undefined>>): Promise<TreeEntry[]> {
+  if (!isSha(rev)) throw new TypeError("a tree listing needs a SHA");
+  assertEnginePaths(paths);
+  const out = (await git({ cwd: repo, args: ["ls-tree", "-r", "-z", "--full-tree", rev, "--", ...paths], env })).stdout;
+  return parseLsTreeZ(out).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 /** The object ID `rev:path` names in the repository at `repo`, or null when there is none. */
@@ -291,27 +339,27 @@ export async function objectAt(repo: string, rev: string, path: string, env: Rea
   return result.code === 0 && isSha(oid) ? oid : null;
 }
 
-/** Every file under `paths` at `rev` in the repository at `repo`, as `[path, blob id]`, sorted by path. */
-export async function filesUnder(repo: string, rev: string, paths: readonly string[], env: Readonly<Record<string, string | undefined>>): Promise<Array<[string, string]>> {
-  if (!isSha(rev)) throw new TypeError("a tree listing needs a SHA");
-  assertEnginePaths(paths);
-  const out = (await git({ cwd: repo, args: ["ls-tree", "-r", "-z", "--full-tree", rev, "--", ...paths], env })).stdout;
-  return parseLsTreeZ(out)
-    .filter((entry) => entry.type === "blob")
-    .map((entry): [string, string] => [entry.path, entry.oid])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-}
-
 const HUNK_RE = /^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@/;
 
 /**
  * The line numbers of `path` at `b` that `a b` adds or changes, plus the lines either side of a
- * place where lines were only deleted (a fix that removes code is quoted by its neighbours).
+ * place where lines were only deleted (a fix that removes code is quoted by its neighbours). With
+ * `oldPath`, `path` is that file renamed: it is compared with `oldPath` at `a`, so a file moved as it
+ * was has no changed line.
  */
-export async function changedLineNumbers(mirror: string, a: string, b: string, path: string, env: Readonly<Record<string, string | undefined>>): Promise<Set<number>> {
+export async function changedLineNumbers(
+  mirror: string,
+  a: string,
+  b: string,
+  path: string,
+  env: Readonly<Record<string, string | undefined>>,
+  oldPath?: string,
+): Promise<Set<number>> {
   if (!isSha(a) || !isSha(b)) throw new TypeError("a diff needs two SHAs");
-  if (path.includes("\0")) throw new TypeError("refusing a diff path");
-  const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "--unified=0", "--no-relative", a, b, "--", `:(literal)${path}`], env })).stdout;
+  if (path.includes("\0") || oldPath?.includes("\0") === true) throw new TypeError("refusing a diff path");
+  const paths = oldPath === undefined ? [`:(literal)${path}`] : [`:(literal)${oldPath}`, `:(literal)${path}`];
+  const rename = oldPath === undefined ? [] : ["-M50"];
+  const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "--unified=0", "--no-relative", ...rename, a, b, "--", ...paths], env })).stdout;
   const lines = new Set<number>();
   for (const line of out.toString("utf8").split("\n")) {
     const match = HUNK_RE.exec(line);

@@ -23,7 +23,7 @@ The code: `src/runner/` (the session runner: `types.ts`, `cli.ts`, `settings.ts`
 validation, `verdicts.ts` the verdict table, `prompts.ts`, `procedure.ts`, `lenses.ts`, `attack.ts`,
 `schema.ts`, `repo.ts`, `lock.ts`, `pool.ts`, `report.ts`, `commands.ts`), `src/units/`,
 `src/plan/graph.ts` (one hop), `src/shard.ts`, `src/budget.ts`, `src/gh.ts`, `src/home.ts`,
-`src/clock.ts` and `src/doctor.ts`. The configuration adds `config/client.json` (the pin),
+`src/transport.ts`, `src/clock.ts` and `src/doctor.ts`. The configuration adds `config/client.json` (the pin),
 `config/budgets.json` ([RV-13]'s provisional caps) and `config/lenses.json` (the lenses per tier).
 
 Every option takes `--name value` or `--name=value`. A refused option prints
@@ -41,6 +41,26 @@ patterns refuse the families outside those prefixes (`*_BASE_URL`, `*_PROXY`, `*
 `NODE_*`, `BUN_*`, `SSL_CERT_*`, `AWS_ENDPOINT_URL*`). So run it from a clean environment, not from
 inside a Claude Code session. `checkSettings` refuses any settings key not listed as harmless, any
 `env` entry, and any `permissions` entry that would widen spec 07 §4.2's grant.
+
+The transport (`src/transport.ts`, decision BD-22) says how sessions reach Claude, and is read only
+from the engine's own environment: `FIN_REVIEW_TRANSPORT` unset or `direct` (spec 07 §4.3 as
+before), or `pool` for a machine where Claude Code reaches Claude through a local pool forwarder.
+Under `pool` exactly `ANTHROPIC_BASE_URL` (http or https to `127.0.0.1`, `[::1]` or `localhost`,
+an explicit port, no path beyond `/`), `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CONFIG_DIR` (an existing
+folder that does not hold `$FIN_REVIEW_HOME`) are accepted, checked by the transport and passed into
+every session in place of the login (`CLAUDE_CODE_OAUTH_TOKEN` is then refused, so there is one
+credential); every other variable is refused as under `direct`, and the modelUsage check after each
+session still decides which model ran. An invalid transport exits 78 (`transport_refused`), naming
+the variable and never its value. Every run records `transport` in `plan.json`, `state.json` and
+`result.json`. A Claude Code session sets many other `CLAUDE*` variables (its effort among them),
+so start the engine from an environment that holds only what it needs, the token read from a file
+inside the command as AGENTS.md §7 says:
+
+```
+env -i HOME="$HOME" PATH="<node's folder>:/usr/bin:/bin" FIN_REVIEW_TRANSPORT=pool \
+  ANTHROPIC_BASE_URL="http://127.0.0.1:<port>/" CLAUDE_CONFIG_DIR="<the forwarder's folder>" \
+  ANTHROPIC_AUTH_TOKEN="$(cat <token file>)" node tools/fin-review/src/main.ts pr --pr <n>
+```
 
 Every line printed from data the engine read (a path, a package name, a JSON key, a program's
 message) is escaped to printable ASCII, so it can start neither a terminal control sequence nor a

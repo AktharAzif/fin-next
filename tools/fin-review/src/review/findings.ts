@@ -7,8 +7,9 @@
 // is src/review/injection.ts, applied by the run before anyone else sees a finding.
 //
 // A prior blocker is `fixed` only with a quote of the fix (spec 07 §2.3.2) that comes from the file
-// its `fixWhere` names, lies within those lines, and touches a line changed since the blocker was
-// found: what was already there then cannot be its fix, so an unchanged tree closes nothing.
+// its `fixWhere` names, which must be a file the blocker names (or that file renamed), lies within
+// those lines, and touches a line changed since the blocker was found: what was already there then
+// cannot be its fix, so an unchanged tree, another file or the same text moved closes nothing.
 //
 // An output that breaks any rule is retried once in a fresh session (§4.6). Findings are judged one
 // by one: an invalid finding is recorded as `invalid` and never shown, and the valid findings of the
@@ -64,8 +65,9 @@ export interface ValidationContext {
   readonly allowed: ReadonlySet<string> | null;
   readonly files: FileSource;
   /**
-   * For each prior blocker shown to the session (by its prompt ID), the lines of each path at the
-   * head that changed since the blocker was found. A fix can only be quoted from such lines.
+   * For each prior blocker shown to the session (by its prompt ID), each file the blocker names, at
+   * its path at the head, with the lines of it that changed since the blocker was found. A fix can
+   * only be quoted from such lines.
    */
   readonly fixLines?: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
 }
@@ -129,21 +131,24 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
 
 /**
  * Why a quoted fix of prior blocker `id` cannot show that it was fixed: the quote must come from
- * the file `where` names, lie within its lines, and touch a line that changed since the blocker
- * was found. Nothing that was already there when the blocker was found can be its fix.
+ * the file `where` names, which must be a file the blocker itself names (or that file renamed), lie
+ * within its lines, and touch a line that changed since the blocker was found. Nothing that was
+ * already there when the blocker was found can be its fix, nor anything in another file: a line
+ * changed elsewhere, or the same text moved to a new file, fixes nothing the blocker names.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
+  const changed = ctx.fixLines?.get(id)?.get(where.path);
+  if (changed === undefined) return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not a file the blocker names (or that file renamed)`];
   const text = ctx.files.text(where.path) ?? "";
   const slice = text.split("\n").slice(where.startLine - 1, where.endLine).join("\n");
   const wanted = lf(quote.text);
-  const changed = ctx.fixLines?.get(id)?.get(where.path);
   let found = false;
   for (let at = slice.indexOf(wanted); at >= 0; at = slice.indexOf(wanted, at + 1)) {
     found = true;
     const first = where.startLine + (slice.slice(0, at).match(/\n/g)?.length ?? 0);
     const last = first + (wanted.match(/\n/g)?.length ?? 0);
-    for (let line = first; line <= last; line++) if (changed?.has(line) === true) return [];
+    for (let line = first; line <= last; line++) if (changed.has(line)) return [];
   }
   if (!found) return [`${id}: the fix's quote is not within ${where.path}:${where.startLine}-${where.endLine}`];
   return [`${id}: the quoted fix touches no line of ${where.path} that changed since the blocker was found`];

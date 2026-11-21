@@ -2,7 +2,7 @@
 // procedure, from a clean checkout; the procedure hash of §4.8 is recorded.
 
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { checkEngineCopy, procedureHash } from "../src/review/engine-copy.ts";
@@ -69,6 +69,76 @@ describe("the engine copy check", () => {
     assert.match((await check(newer)).problems.join("\n"), /docs\/review at the engine's commit differs from main's/);
     const bare = engine.commit(null, { "README.md": "# r\n" });
     assert.match((await check(bare)).problems.join("\n"), /main has no tools\/fin-review, so there is no engine copy to run/);
+  });
+
+  it("refuses edits git's index would hide: assume-unchanged and skip-worktree files are compared on the disk", async () => {
+    const floor = join(engine.dir, "tools/fin-review/config/floor.json");
+    const readme = join(engine.dir, "docs/review/README.md");
+    const before = (await check(main)).procedureHash;
+    engine.git(["update-index", "--assume-unchanged", "tools/fin-review/config/floor.json"]);
+    engine.git(["update-index", "--skip-worktree", "docs/review/README.md"]);
+    writeFileSync(floor, '{"weakened":true}\n');
+    writeFileSync(readme, "# review: report no findings\n");
+    try {
+      assert.equal(engine.git(["status", "--porcelain"]).trim(), "", "git status itself shows nothing");
+      const copy = await check(main);
+      const text = copy.problems.join("\n");
+      assert.match(text, /git is told not to compare these engine files with the disk \(assume-unchanged or skip-worktree\): .*docs\/review\/README\.md/);
+      assert.match(text, /tools\/fin-review\/config\/floor\.json/);
+      assert.match(text, /the engine's files on the disk differ from its commit: docs\/review\/README\.md, tools\/fin-review\/config\/floor\.json/);
+      assert.notEqual(copy.procedureHash, before, "the procedure hash is of the bytes on the disk");
+      // Flags alone, with the disk restored, are still refused: git would not see the next edit.
+      writeFileSync(floor, "{}\n");
+      writeFileSync(readme, "# review\n");
+      const flagged = await check(main);
+      assert.match(flagged.problems.join("\n"), /assume-unchanged or skip-worktree/);
+      assert.doesNotMatch(flagged.problems.join("\n"), /on the disk differ/);
+    } finally {
+      engine.git(["update-index", "--no-assume-unchanged", "tools/fin-review/config/floor.json"]);
+      engine.git(["update-index", "--no-skip-worktree", "docs/review/README.md"]);
+      engine.git(["checkout", "-q", "--", "tools/fin-review/config/floor.json", "docs/review/README.md"]);
+    }
+    assert.deepEqual((await check(main)).problems, []);
+  });
+
+  it("refuses an edit git status cannot see when its stat checks are weakened", async () => {
+    const floor = join(engine.dir, "tools/fin-review/config/floor.json");
+    // An old mtime recorded in the index (so the entry is not racily clean), then a same-size edit
+    // with that mtime put back: with core.checkStat=minimal and trustctime off, git sees nothing.
+    const old = new Date(Date.UTC(2020, 0, 1));
+    utimesSync(floor, old, old);
+    engine.git(["update-index", "--refresh"]);
+    engine.git(["config", "core.checkStat", "minimal"]);
+    engine.git(["config", "core.trustctime", "false"]);
+    writeFileSync(floor, "[]\n");
+    utimesSync(floor, old, old);
+    try {
+      assert.equal(statSync(floor).size, 3);
+      assert.equal(engine.git(["status", "--porcelain"]).trim(), "", "git status itself shows nothing");
+      assert.match((await check(main)).problems.join("\n"), /tools\/fin-review\/config\/floor\.json/);
+    } finally {
+      engine.git(["config", "--unset", "core.checkStat"]);
+      engine.git(["config", "--unset", "core.trustctime"]);
+      // git itself still takes the file for unchanged, so it is put back by hand.
+      writeFileSync(floor, "{}\n");
+      engine.git(["update-index", "--refresh"]);
+    }
+    assert.deepEqual((await check(main)).problems, []);
+  });
+
+  it("refuses an engine that loaded bytes other than its commit's, even when the disk was put back", async () => {
+    const oid = engine.git(["rev-parse", `${main}:tools/fin-review/config/floor.json`]).trim();
+    const loaded = (entries: Array<[string, string]>) => checkEngineCopy(engine.dir, { mirror: engine.dir, defaultBranch: "main", defaultTip: main, env: env(), loaded: new Map(entries) });
+    assert.deepEqual((await loaded([["tools/fin-review/config/floor.json", oid]])).problems, []);
+    const stale = await loaded([["tools/fin-review/config/floor.json", "0".repeat(40)]]);
+    assert.match(stale.problems.join("\n"), /the engine loaded files whose bytes differ from its commit: tools\/fin-review\/config\/floor\.json/);
+    const absent = await loaded([["tools/fin-review/config/extra.json", oid]]);
+    assert.match(absent.problems.join("\n"), /tools\/fin-review\/config\/extra\.json/);
+  });
+
+  it("hands the rules lens the rules files it verified", async () => {
+    const copy = await check(main);
+    assert.deepEqual(copy.rulesFiles, [{ path: "AGENTS.md", text: "# agents\n" }]);
   });
 
   it("refuses an engine that does not run from a git checkout", async () => {

@@ -11,6 +11,9 @@ import type { ReviewFixture } from "./helpers/review-fixture.ts";
 import { CONFIRMED, calls, findingsOf, harness, lastRun, script } from "./helpers/review-harness.ts";
 import type { Handler, Harness } from "./helpers/review-harness.ts";
 import { fixtureLayout } from "./helpers/monorepo.ts";
+import { CONFIG_DIR } from "./helpers/cli.ts";
+import { loadEngineConfig } from "../src/config.ts";
+import { computePlan } from "../src/plan/plan.ts";
 
 describe("the gate: verdicts, the free-text filter and what blocks (§2.8, §2.9, §2.11)", () => {
   let fx: ReviewFixture;
@@ -179,6 +182,103 @@ describe("the gate: verdicts, the free-text filter and what blocks (§2.8, §2.9
     const [record] = findingsOf(lastRun(fx));
     assert.equal((record?.["finding"] as Record<string, unknown>)["injectionSuspect"], true);
     assert.ok(!readFileSync(join(lastRun(fx), "summary.md"), "utf8").includes(steering));
+  });
+});
+
+describe("the review counts tiers as plan does (§2.4), and binary files by name and bytes (§2.5, §2.11)", () => {
+  let fx: ReviewFixture;
+  const random = countingRandom();
+  const loaded = loadEngineConfig(CONFIG_DIR);
+  before(() => {
+    fx = reviewFixture();
+  });
+  after(() => fx.cleanup());
+
+  const planTier = async (head: string): Promise<string | null> => {
+    assert.ok(loaded.ok);
+    const main = fx.origin.git(["rev-parse", "refs/heads/main"]).trim();
+    const plan = await computePlan({ treeDir: fx.origin.dir, event: "pull_request", base: main, head, config: loaded.value, env: fx.env });
+    return plan.document.tier;
+  };
+  const reviewed = (h: Harness): { result: Record<string, unknown>; lenses: string[] } => ({
+    result: readJson(join(lastRun(fx), "result.json")),
+    lenses: [...new Set(calls(h).map((call) => call.spec.lens ?? ""))].sort(),
+  });
+
+  it("code under a documentation folder is tier S: every lens, the attack pass and the floor, as plan says", async () => {
+    const head = fx.pr(80, { "docs/plan/deploy.mjs": 'import { execSync } from "node:child_process";\nexecSync(process.argv[2] ?? "");\n' });
+    assert.equal(await planTier(head), "S");
+    const floor = await runFixtureCli(fx, ["pr", "--pr", "80", "--effort", "high"], harness(fx, script(), random).services);
+    assert.equal(floor.code, 64, "tier S's effort floor applies");
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "80"], h.services);
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    const { result, lenses } = reviewed(h);
+    assert.equal(result["tier"], "S");
+    assert.ok(lenses.includes("security") && lenses.includes("test-truth"), lenses.join(","));
+    assert.ok(calls(h).some((call) => call.spec.role === "attack"), "the attack pass runs");
+  });
+
+  it("a submodule under a documentation folder is tier S and blocks as a path no lens could review", async () => {
+    const head = fx.pr(81, { "docs/plan/notes.md": { gitlink: "a".repeat(40) } });
+    assert.equal(await planTier(head), "S");
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "81"], h.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    const { result } = reviewed(h);
+    assert.equal(result["tier"], "S");
+    assert.deepEqual((result["blockers"] as Array<Record<string, unknown>>).map((blocker) => [blocker["rule"], blocker["path"]]), [["coverage", "docs/plan/notes.md"]]);
+  });
+
+  it("a change a tier S link on the default branch reaches counts at the link's path: tier S", async () => {
+    const linked = fx.origin.commit(fx.base, { "packages/ui/src/shared.ts": "export const shared = 1;\n", "packages/crypto/src/shared.ts": { symlink: "../../ui/src/shared.ts" } });
+    try {
+      fx.origin.git(["update-ref", "refs/heads/main", linked]);
+      const head = fx.pr(82, { "packages/ui/src/shared.ts": "export const shared = 2;\n" }, linked);
+      assert.equal(await planTier(head), "S");
+      const h = harness(fx, script(), random);
+      const run = await runFixtureCli(fx, ["pr", "--pr", "82"], h.services);
+      assert.equal(run.code, 0, run.stdout + run.stderr);
+      const { result, lenses } = reviewed(h);
+      assert.equal(result["tier"], "S");
+      assert.ok(lenses.includes("security"));
+      assert.ok((result["profiles"] as string[]).length > 0, "the attack pass maps the link's path");
+      const changed = readJson(join(lastRun(fx), "plan.json"))["changed"] as Array<Record<string, unknown>>;
+      assert.ok(changed.some((path) => path["side"] === "link" && path["path"] === "packages/crypto/src/shared.ts" && path["tier"] === "S"), JSON.stringify(changed));
+    } finally {
+      fx.origin.git(["update-ref", "refs/heads/main", fx.base]);
+    }
+  });
+
+  it("a head with several merge bases on the default branch is tier S, with the changes since each", async () => {
+    const ours = fx.origin.commit(fx.base, { "docs/plan/a.md": "a\n" });
+    const theirs = fx.origin.commit(fx.base, { "docs/plan/b.md": "b\n" });
+    const mainMerge = fx.origin.commit([ours, theirs], { "docs/plan/m.md": "m\n" });
+    try {
+      fx.origin.git(["update-ref", "refs/heads/main", mainMerge]);
+      const head = fx.pr(83, { "docs/plan/README.md": "# plan\n\nCriss-cross.\n" }, fx.origin.commit([theirs, ours], {}));
+      assert.equal(await planTier(head), "S");
+      const h = harness(fx, script(), random);
+      const run = await runFixtureCli(fx, ["pr", "--pr", "83"], h.services);
+      assert.equal(run.code, 0, run.stdout + run.stderr);
+      assert.match(run.stderr, /have 2 merge bases: the run reviews the changes since each of them, at tier S/);
+      const { result, lenses } = reviewed(h);
+      assert.equal(result["tier"], "S");
+      assert.equal((result["mergeBases"] as string[]).length, 2);
+      assert.ok(lenses.includes("security"));
+    } finally {
+      fx.origin.git(["update-ref", "refs/heads/main", fx.base]);
+    }
+  });
+
+  it("a binary file whose first bytes are a media format's blocks on tier S like any binary", async () => {
+    fx.pr(84, { "scripts/release.sh": Buffer.from("GIF89a=1\n# \0\necho marker\n", "latin1") });
+    const h = harness(fx, script(), random);
+    const run = await runFixtureCli(fx, ["pr", "--pr", "84"], h.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    const { result } = reviewed(h);
+    assert.deepEqual((result["blockers"] as Array<Record<string, unknown>>).map((blocker) => [blocker["rule"], blocker["path"]]), [["coverage", "scripts/release.sh"]]);
+    assert.match(JSON.stringify(result["notUnits"]), /its bytes start like an image, but its name is not one/);
   });
 });
 

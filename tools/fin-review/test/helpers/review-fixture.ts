@@ -207,7 +207,12 @@ export async function runFixtureCli(fx: ReviewFixture, argv: string[], services:
     stderr: (text) => {
       stderr += text;
     },
-    services: { managedSettingsDir: fx.managedDir, ...services },
+    // No test reads the machine's own managed settings, managed preferences or WSL marker.
+    services: {
+      managedSettingsDir: fx.managedDir,
+      settingsOverrides: { managedPreferencesDir: join(fx.dir, "managed-preferences"), wslMarker: join(fx.dir, "no-wsl-reg.exe") },
+      ...services,
+    },
   });
   return { code, stdout, stderr };
 }

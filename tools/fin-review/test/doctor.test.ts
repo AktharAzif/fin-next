@@ -1,14 +1,15 @@
 // The minimal doctor (spec 07 §4.7: D1, D2, D4, D5; T-RV-44's failure paths) with fakes.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { DOCTOR_PROMPT, missingFlags } from "../src/doctor.ts";
+import { DOCTOR_FLAGS_USED, DOCTOR_PROMPT, configEnvKeys, missingFlags } from "../src/doctor.ts";
 import type { DoctorServices } from "../src/doctor.ts";
 import type { RunOutcome } from "../src/exec.ts";
 import { loadCommittedModels } from "../src/options.ts";
 import { RUNNER_FLAGS } from "../src/runner/cli.ts";
+import type { CliRunnerOptions } from "../src/runner/cli.ts";
 import { fakeResultJson } from "../src/runner/fake.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
@@ -16,12 +17,20 @@ import { countingRandom, fakeClock, readJson, reviewFixture, runFixtureCli } fro
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
 
 const MODELS = loadCommittedModels();
-const HELP = `Usage: claude [options]\n  -p, --print  Print\n${RUNNER_FLAGS.filter((flag) => flag !== "-p").map((flag) => `  ${flag} <x>  text`).join("\n")}\n`;
+const HELP = `Usage: claude [options]\n  -p, --print  Print\n${[...RUNNER_FLAGS, ...DOCTOR_FLAGS_USED].filter((flag) => flag !== "-p").map((flag) => `  ${flag} <x>  text`).join("\n")}\n`;
 
-/** The pinned CLI's answers: its version, its help, and for -p with no input, the no-input error. */
-function fakeClaude(args: readonly string[], version = "2.1.328", help = HELP) {
+/** What 2.1.328's debug log says when it applied no env from its configuration. */
+const CLEAN_LOG = "2026-11-21T10:00:00.000Z [DEBUG] CA certs: Config fallback - globalEnv keys: , settingsEnv keys: none\n";
+
+/**
+ * The pinned CLI's answers: its version, its help, and for -p with no input, the no-input error;
+ * with --debug-file, it first writes `log` there (D3's probe).
+ */
+function fakeClaude(args: readonly string[], version = "2.1.328", help = HELP, log: string | null = CLEAN_LOG) {
   if (args[0] === "--version") return { code: 0, stdout: `${version} (Claude Code)\n`, stderr: "" };
   if (args[0] === "--help") return { code: 0, stdout: help, stderr: "" };
+  const debugFile = args.includes("--debug-file") ? args[args.indexOf("--debug-file") + 1] : undefined;
+  if (debugFile !== undefined && log !== null) writeFileSync(debugFile, log);
   const schema = args[args.indexOf("--json-schema") + 1] ?? "";
   if (schema.includes("$schema")) return { code: 1, stdout: "", stderr: 'Error: --json-schema is not a valid JSON Schema: no schema with key or ref "x"\n' };
   return { code: 1, stdout: "", stderr: "Error: Input must be provided either through stdin or as a prompt argument when using --print\n" };
@@ -112,7 +121,7 @@ describe("doctor", () => {
     const s = services();
     const refused = await runFixtureCli(fx, ["doctor", "--live"], s, { ...fx.env, ANTHROPIC_AUTH_TOKEN: "secret-value", ANTHROPIC_BASE_URL: "http://127.0.0.1:1" });
     assert.equal(refused.code, 78);
-    assert.match(refused.stdout, /^D4 fail: refused variables set: ANTHROPIC_AUTH_TOKEN \(credential\), ANTHROPIC_BASE_URL \(endpoint\)/m);
+    assert.match(refused.stdout, /^D4 fail: transport direct; refused variables set: ANTHROPIC_AUTH_TOKEN \(credential\), ANTHROPIC_BASE_URL \(endpoint\)/m);
     assert.match(refused.stdout, /^D5 skipped: not started/m);
     assert.ok(!refused.stdout.includes("secret-value"));
     assert.equal(s.started.length, 0);
@@ -146,6 +155,91 @@ describe("doctor", () => {
       rmSync(join(fx.userHome, ".claude"), { recursive: true, force: true });
     }
     assert.match((await runFixtureCli(fx, ["doctor"], services())).stdout, /^D3 pass: /m);
+  });
+
+  it("D3 runs the locked client with an empty stdin and --debug-file, and fails when it applied env from its configuration", async () => {
+    const probes: Array<{ args: readonly string[]; env: Record<string, string>; cwd: string }> = [];
+    const recording = (log: string | null) =>
+      services({
+        runClaude: async (_p, args, options) => {
+          if (options !== undefined) probes.push({ args, env: { ...options.env }, cwd: options.cwd });
+          return fakeClaude(args, "2.1.328", HELP, log);
+        },
+      });
+    const clean = await runFixtureCli(fx, ["doctor"], recording(CLEAN_LOG));
+    assert.equal(clean.code, 0, clean.stdout + clean.stderr);
+    assert.match(clean.stdout, /^D3 pass: .*the locked client applied no env from its configuration; server-managed settings: unknown/m);
+    const [probe] = probes;
+    assert.ok(probe !== undefined, "the probe ran with the session environment");
+    for (const flag of ["--setting-sources", "--restricted", "--strict-mcp-config", "--settings", "--debug-file"]) assert.ok(probe.args.includes(flag), flag);
+    assert.ok(!probe.args.includes("--fallback-model"));
+    assert.deepEqual(Object.keys(probe.env).sort(), ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER", "HOME", "LANG", "PATH", "TMPDIR"]);
+    assert.ok(probe.cwd.startsWith(join(realpathSync(fx.home), "trees")), probe.cwd);
+    assert.ok(!existsSync(probe.cwd), "the probe's tree is removed");
+    // The client took provider variables from its global configuration's env: D3 fails, D5 never starts.
+    const s = recording("x [DEBUG] CA certs: Config fallback - globalEnv keys: CLAUDE_CODE_USE_BEDROCK,ANTHROPIC_BASE_URL, settingsEnv keys: none\n");
+    const dirty = await runFixtureCli(fx, ["doctor", "--live"], s);
+    assert.equal(dirty.code, 78);
+    assert.match(dirty.stdout, /^D3 fail: the client applied env from its configuration: global CLAUDE_CODE_USE_BEDROCK, global ANTHROPIC_BASE_URL$/m);
+    assert.match(dirty.stdout, /^D5 skipped: not started/m);
+    assert.equal(s.started.length, 0);
+    // A log that does not say what it applied fails closed, and so does no log.
+    assert.match((await runFixtureCli(fx, ["doctor"], recording("nothing here\n"))).stdout, /^D3 fail: the probe's debug log does not say which configuration env the client applied$/m);
+    assert.match((await runFixtureCli(fx, ["doctor"], recording(null))).stdout, /^D3 fail: the probe wrote no debug log$/m);
+    // A --help that lacks --debug-file fails D2.
+    const noDebug = await runFixtureCli(fx, ["doctor"], services({ runClaude: async (_p, args) => fakeClaude(args, "2.1.328", HELP.replace("--debug-file", "--other")) }));
+    assert.match(noDebug.stdout, /^D2 fail: --help does not document --debug-file$/m);
+    assert.deepEqual(configEnvKeys("globalEnv keys: none, settingsEnv keys: none"), { globalEnv: [], settingsEnv: [] });
+    assert.deepEqual(configEnvKeys("globalEnv keys: A,B, settingsEnv keys: C"), { globalEnv: ["A", "B"], settingsEnv: ["C"] });
+  });
+
+  it("D3 fails for an env block in the global configuration ($HOME/.claude.json), which sessions would otherwise take", async () => {
+    writeFileSync(join(fx.userHome, ".claude.json"), JSON.stringify({ numStartups: 3, env: { CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BASE_URL: "https://example.com" } }));
+    try {
+      const s = services();
+      const run = await runFixtureCli(fx, ["doctor", "--live"], s);
+      assert.equal(run.code, 78, run.stdout + run.stderr);
+      assert.match(run.stdout, /^D3 fail: .*\/\.claude\.json: sets refused keys: env\.CLAUDE_CODE_USE_BEDROCK, env\.ANTHROPIC_BASE_URL$/m);
+      assert.match(run.stdout, /^D2 fail: --json-schema not probed: a settings or configuration file a session could read is refused \(D3\)$/m, "no client is started with that configuration");
+      assert.ok(!run.stdout.includes("example.com"));
+      assert.equal(s.started.length, 0);
+    } finally {
+      rmSync(join(fx.userHome, ".claude.json"), { force: true });
+    }
+  });
+
+  it("D4 and D5 under the pool transport: the transport is reported, and D5 runs through it", async () => {
+    const configDir = join(fx.userHome, "pool-config");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "settings.json"), JSON.stringify({ theme: "dark", env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/", ANTHROPIC_AUTH_TOKEN: "pool-token-value" } }));
+    const pool = { ...fx.env, FIN_REVIEW_TRANSPORT: "pool", ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/", ANTHROPIC_AUTH_TOKEN: "pool-token-value", CLAUDE_CONFIG_DIR: configDir };
+    const seen: CliRunnerOptions[] = [];
+    try {
+      const s = services({
+        startSession: async (spec, options) => {
+          seen.push(options);
+          return { kind: "exited", code: 0, signal: null, stdout: Buffer.from(fakeResultJson(spec, { kind: "result", output: { answer: "ready" } })), stderr: Buffer.alloc(0) };
+        },
+      });
+      const run = await runFixtureCli(fx, ["doctor", "--live"], s, pool);
+      assert.equal(run.code, 0, run.stdout + run.stderr);
+      assert.match(run.stdout, /^D4 pass: transport pool \(forwarder 127\.0\.0\.1:41234\); /m);
+      assert.match(run.stdout, /^D5 pass: .*\(transport pool\)$/m);
+      assert.equal(seen[0]?.transport?.kind, "pool");
+      assert.ok(seen[0]?.extraDenied.includes(realpathSync(configDir)), "the forwarder's configuration folder is denied to sessions");
+      assert.ok(!run.stdout.includes("pool-token-value"));
+      const doc = readJson(join(fx.home, "state", "doctor.json"));
+      assert.equal(doc["transport"], "pool");
+      assert.ok(!readFileSync(join(fx.home, "state", "doctor.json"), "utf8").includes("pool-token-value"));
+      // A base URL that is not a loopback forwarder fails D4, and nothing starts.
+      const far = services();
+      const remote = await runFixtureCli(fx, ["doctor", "--live"], far, { ...pool, ANTHROPIC_BASE_URL: "https://example.com:443/" });
+      assert.equal(remote.code, 78);
+      assert.match(remote.stdout, /^D4 fail: the transport cannot be used: FIN_REVIEW_TRANSPORT: ANTHROPIC_BASE_URL must be http/m);
+      assert.equal(far.started.length, 0);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   it("D1 fails when claudePath names no file, and the run starts nothing", async () => {

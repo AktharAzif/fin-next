@@ -54,8 +54,11 @@ export type JsonFileResult =
   | { ok: true; value: JsonValue }
   | { ok: false; missing: boolean; error: string };
 
-/** Reads and strictly parses a JSON file of at most `maxBytes`. Never throws for I/O. */
-export function readJsonFile(path: string, maxBytes: number): JsonFileResult {
+/**
+ * Reads and strictly parses a JSON file of at most `maxBytes`. Never throws for I/O. `onBytes` is
+ * given the bytes read, before parsing (the engine-copy check compares what it loaded with its commit).
+ */
+export function readJsonFile(path: string, maxBytes: number, onBytes?: (bytes: Buffer) => void): JsonFileResult {
   let bytes: Buffer;
   try {
     const stats = statSync(path);
@@ -69,6 +72,7 @@ export function readJsonFile(path: string, maxBytes: number): JsonFileResult {
     if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, missing: true, error: "missing" };
     return { ok: false, missing: false, error: `cannot be read (${String(code ?? "error")})` };
   }
+  onBytes?.(bytes);
   return parseJsonBytes(bytes);
 }
 

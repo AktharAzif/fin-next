@@ -390,6 +390,78 @@ describe("pr over the fixture repository with fake sessions", () => {
     }
   });
 
+  it("refuses (78) an env block in the global configuration, $HOME/.claude.json, which a session would otherwise take", async () => {
+    fx.pr(31, { "docs/plan/README.md": "# plan\n\nGlobal config.\n" });
+    const global = join(fx.userHome, ".claude.json");
+    writeFileSync(global, JSON.stringify({ numStartups: 2, env: { CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BEDROCK_BASE_URL: "https://example.com/secret-path" } }));
+    try {
+      const h = harness(fx, script(), random);
+      const run = await runFixtureCli(fx, ["pr", "--pr", "31"], h.services);
+      assert.equal(run.code, 78, run.stdout + run.stderr);
+      assert.match(run.stderr, /^fin-review: refused: settings_refused: .*\/\.claude\.json: sets refused keys: env\.CLAUDE_CODE_USE_BEDROCK, env\.ANTHROPIC_BEDROCK_BASE_URL$/m);
+      assert.ok(!run.stderr.includes("secret-path"));
+      assert.equal(calls(h).length, 0);
+    } finally {
+      rmSync(global, { force: true });
+    }
+  });
+
+  it("runs through the pool transport when asked: records it, hands it to every session, and still refuses other variables", async () => {
+    fx.pr(32, { "docs/plan/README.md": "# plan\n\nPool.\n" });
+    const configDir = join(fx.userHome, "pool-config");
+    mkdirSync(configDir, { recursive: true });
+    const pool = { ...fx.env, FIN_REVIEW_TRANSPORT: "pool", ANTHROPIC_BASE_URL: "http://127.0.0.1:41234/", ANTHROPIC_AUTH_TOKEN: "pool-token-value", CLAUDE_CONFIG_DIR: configDir };
+    try {
+      // Without FIN_REVIEW_TRANSPORT the same variables are refused, as before.
+      const direct = await runFixtureCli(fx, ["pr", "--pr", "32"], harness(fx, script(), random).services, { ...pool, FIN_REVIEW_TRANSPORT: "direct" });
+      assert.equal(direct.code, 78);
+      assert.match(direct.stderr, /environment_refused: ANTHROPIC_AUTH_TOKEN is set/);
+      const h = harness(fx, script(), random);
+      const transports: string[] = [];
+      const makeRunner = h.services.makeRunner;
+      assert.ok(makeRunner !== undefined);
+      const run = await runFixtureCli(
+        fx,
+        ["pr", "--pr", "32"],
+        {
+          ...h.services,
+          makeRunner: (options) => {
+            transports.push(options.transport?.kind ?? "none");
+            assert.ok(options.extraDenied.includes(realpathSync(configDir)), "the forwarder's folder is denied to sessions");
+            return makeRunner(options);
+          },
+        },
+        pool,
+      );
+      assert.equal(run.code, 0, run.stdout + run.stderr);
+      assert.deepEqual(transports, ["pool"]);
+      assert.equal(readJson(join(lastRun(fx), "result.json"))["transport"], "pool");
+      assert.equal(readJson(join(lastRun(fx), "plan.json"))["transport"], "pool");
+      assert.ok(!readFileSync(join(lastRun(fx), "result.json"), "utf8").includes("pool-token-value"));
+      // A forwarder that is not on this machine, or a path on it, is refused before anything runs.
+      for (const url of ["https://gateway.example.com:443/", "http://127.0.0.1:41234/v1/other"]) {
+        const far = harness(fx, script(), random);
+        const refused = await runFixtureCli(fx, ["pr", "--pr", "32"], far.services, { ...pool, ANTHROPIC_BASE_URL: url });
+        assert.equal(refused.code, 78, url);
+        assert.match(refused.stderr, /^fin-review: refused: transport_refused: ANTHROPIC_BASE_URL must be http/m);
+        assert.ok(!refused.stderr.includes("gateway.example.com"));
+        assert.equal(calls(far).length, 0);
+      }
+      // Every other model, effort or credential variable is still refused under pool.
+      for (const [name, value] of [["CLAUDE_EFFORT", "low"], ["ANTHROPIC_MODEL", "x"], ["ANTHROPIC_API_KEY", "k"], ["CLAUDE_CODE_USE_VERTEX", "1"]] as const) {
+        const refused = await runFixtureCli(fx, ["pr", "--pr", "32"], harness(fx, script(), random).services, { ...pool, [name]: value });
+        assert.equal(refused.code, 78, name);
+        assert.match(refused.stderr, new RegExp(`environment_refused: ${name} is set`));
+      }
+      // A configuration folder that does not exist is refused.
+      const missing = await runFixtureCli(fx, ["pr", "--pr", "32"], harness(fx, script(), random).services, { ...pool, CLAUDE_CONFIG_DIR: join(fx.userHome, "no-such-folder") });
+      assert.equal(missing.code, 78);
+      assert.match(missing.stderr, /CLAUDE_CONFIG_DIR: must name a folder that exists/);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a FIN_REVIEW_HOME inside the repository however it is spelled, before reading anything under it", async () => {
     const h = harness(fx, script(), random);
     // A link to the repository, and (on a disk that ignores case) another spelling of it.
@@ -461,9 +533,10 @@ describe("pr over the fixture repository with fake sessions", () => {
   });
 
   it("a session whose prompt is over the runner's cap is never started: the lens is incomplete, the run records could not check (exit 2)", async () => {
-    // A JSON file is never cut into chunks, so a large one is one unit, and its prompt passes the 4 MB cap.
-    const row = `${JSON.stringify({ id: "x".repeat(40), value: "y".repeat(60) })},\n`;
-    fx.pr(29, { "docs/plan/big.json": `[\n${row.repeat(Math.ceil((4.2 * 1024 * 1024) / row.length))}{}\n]\n` });
+    // Markdown with no `## ` heading is never cut into chunks, so a large one is one unit (tier D:
+    // documentation), and its prompt passes the 4 MB cap.
+    const row = `${"x".repeat(40)} ${"y".repeat(60)}\n`;
+    fx.pr(29, { "docs/plan/big.md": `# Big\n\n${row.repeat(Math.ceil((4.2 * 1024 * 1024) / row.length))}` });
     const h = harness(fx, script(), random);
     const run = await runFixtureCli(fx, ["pr", "--pr", "29"], h.services);
     assert.equal(run.code, 2, run.stdout + run.stderr);

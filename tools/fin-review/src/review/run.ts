@@ -19,17 +19,20 @@ import { join, posix } from "node:path";
 import type { Clock, RandomSource } from "../clock.ts";
 import { compactUtc } from "../clock.ts";
 import type { EngineConfig } from "../config.ts";
-import { EXIT } from "../errors.ts";
-import { diffRaw, isSha, lsTree, readBlobs } from "../git.ts";
+import { DataError, EXIT } from "../errors.ts";
+import { diffRaw, isSha, lsTree, mergeBases, readBlobs, SYMLINK_MODE } from "../git.ts";
 import type { DiffEntry, TreeEntry } from "../git.ts";
 import type { PullFacts } from "../gh.ts";
 import { isJsonObject, parseJsonBytes, readJsonFile } from "../json.ts";
 import type { ReviewOptions } from "../options.ts";
 import { buildGraph, CODE_FILE_RE, exportHeads } from "../plan/graph.ts";
-import { linkTarget } from "../plan/plan.ts";
+import { changeTiers, linkTarget, pathTier, unionOfDiffs } from "../plan/plan.ts";
+import type { TreeLink } from "../plan/plan.ts";
+import type { CiMap } from "../plan/ci-map.ts";
 import type { ImportGraph } from "../plan/graph.ts";
-import { maxTier, parseLayout, tierOf } from "../plan/tiers.ts";
+import { maxTier, parseLayout } from "../plan/tiers.ts";
 import type { Layout } from "../plan/tiers.ts";
+import type { TransportKind } from "../transport.ts";
 import { checkFloor, floorViolations, sessionModel } from "../roles.ts";
 import type { Role, Tier } from "../roles.ts";
 import { RunBudget } from "../budget.ts";
@@ -64,7 +67,6 @@ import {
   fetchPull,
   isAncestor,
   isRefName,
-  mergeBase,
   pullBaseRef,
   pullDefaultRef,
   pullHeadRef,
@@ -96,6 +98,8 @@ export interface ReviewDeps {
   /** $FIN_REVIEW_HOME, created and resolved. */
   readonly home: string;
   readonly originUrl: string;
+  /** How the sessions reach Claude (src/transport.ts), recorded in every run; direct when absent. */
+  readonly transport?: TransportKind;
   readonly facts: (pr: number) => Promise<PullFacts>;
   readonly makeRunner: (run: { readonly runId: string; readonly runDir: string }) => SessionRunner;
   readonly maxSessions: number;
@@ -112,6 +116,8 @@ export interface ReviewDeps {
 
 /** §2.3.2: a `commit` run stays a delta up to this many changed lines (S7-31). */
 export const COMMIT_MAX_LINES = 400;
+/** More merge bases than this is no history a pull request has (as plan.ts refuses it). */
+const MAX_MERGE_BASES = 64;
 const MAX_SCAN_BYTES = 1 << 20;
 const MAX_DIFF_BYTES = Math.floor(PACK_TOKENS * 3.5 * 0.8);
 const RULES_FILES = ["AGENTS.md", "CONTRIBUTING.md"];
@@ -121,7 +127,9 @@ const RUN_ID_RE = /^[0-9]{8}T[0-9]{6}Z-pr[0-9]{1,7}-[0-9a-f]{8}$/;
 interface ChangedPath {
   readonly path: string;
   readonly status: string;
-  readonly side: "new" | "old";
+  /** "link" for a path a symbolic link reaches (it counts at the link's path; it is no file of the head). */
+  readonly side: "new" | "old" | "link";
+  readonly link: string | null;
   readonly tier: Tier;
 }
 
@@ -133,6 +141,11 @@ interface PriorRun {
   readonly lensNames: readonly string[];
   readonly profiles: readonly string[];
   readonly openBlockers: readonly OpenBlocker[];
+  /**
+   * The blockers that run left open that are no finding: a changed path no lens could review, or a
+   * lens that was not done. No delta can show one resolved, so a `commit` after it escalates.
+   */
+  readonly openGaps: number;
   /** The default branch and the merge base the run reviewed from; null in a record that has none. */
   readonly defaultBranch: string | null;
   readonly mergeBase: string | null;
@@ -253,7 +266,7 @@ function excludedNote(item: Excluded): string {
     case "excluded":
       return `excluded: ${item.content ?? "content"}`;
     case "binary":
-      return item.content === null ? "binary, not reviewed" : `binary ${item.content}, never sent to a model`;
+      return item.looksLike === undefined ? "binary, not reviewed" : `binary, not reviewed (its bytes start like ${item.looksLike === "image" ? "an image" : "a font"}, but its name is not one)`;
     case "missing":
       return "missing from the mirror, not reviewed";
     case "submodule":
@@ -269,6 +282,26 @@ function excludedNote(item: Excluded): string {
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** The blocker rules that name no finding: a coverage gap and a lens that was not done. */
+const GAP_RULES: ReadonlySet<string> = new Set(["coverage", "lens"]);
+/** The blocker rules a record may hold; any other value is read as a gap (fail closed). */
+const KNOWN_RULES: ReadonlySet<string> = new Set(["confirmed", "plausible", "lens", "test-cannot-fail", "coverage", "unverified", "prior"]);
+
+/**
+ * How many blockers a run record left open that are no finding (spec 07 §2.11 rules 3 and 6). A
+ * record that is not a pass but lists no readable blockers counts as one: what it left open is unknown.
+ */
+function openGapsOf(doc: Record<string, unknown>): number {
+  const blockers = doc["blockers"];
+  if (!Array.isArray(blockers)) return doc["result"] === "pass" ? 0 : 1;
+  let gaps = 0;
+  for (const blocker of blockers) {
+    const rule = isJsonObject(blocker) ? blocker["rule"] : undefined;
+    if (typeof rule !== "string" || !KNOWN_RULES.has(rule) || GAP_RULES.has(rule)) gaps++;
+  }
+  return gaps;
 }
 
 /** A run record as `commit` and the carried blockers read it: its head and when it finished, too. */
@@ -320,6 +353,7 @@ export function readRunRecords(home: string, pr: number): RunRecord[] {
       lensNames: strings(doc["lensNames"]),
       profiles: strings(doc["profiles"]),
       openBlockers,
+      openGaps: openGapsOf(doc),
       defaultBranch: typeof defaultBranch === "string" && isRefName(defaultBranch) ? defaultBranch : null,
       mergeBase: isSha(recordedBase) ? recordedBase : null,
       procedureHash: typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? hash : null,
@@ -346,34 +380,65 @@ async function newestRunOnHistory(home: string, pr: number, head: string, mirror
   return null;
 }
 
-/** Most paths whose changed lines are read for checking quoted fixes; past it, no fix can be shown. */
-const MAX_FIX_PATHS = 1000;
+/** Most paths a blocker may name whose changed lines are read for checking a quoted fix. */
+const MAX_FIX_PATHS = 64;
 
-/** For each path changed at `head` since `from`, the lines that changed (see changedLineNumbers). */
-async function linesChangedSince(mirror: string, from: string, head: string, env: Readonly<Record<string, string | undefined>>): Promise<Map<string, Set<number>>> {
+/**
+ * Where a fix of a blocker found at `from` may be quoted from at `head`: each file the blocker's
+ * `where` names, at the path it has at the head (followed through a rename since `from`, never a
+ * copy), with the lines of it that changed since `from` (rename-aware, so a file moved as it was
+ * has none). A file deleted since then is absent: it cannot hold a quote.
+ */
+async function fixLinesFor(mirror: string, from: string, head: string, blocker: OpenBlocker, env: Readonly<Record<string, string | undefined>>): Promise<Map<string, Set<number>>> {
   const out = new Map<string, Set<number>>();
-  if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) return out;
-  const paths = sortedUnique((await diffTwoDot(mirror, from, head, env)).filter((entry) => entry.status !== "D").map((entry) => entry.path));
-  if (paths.length > MAX_FIX_PATHS) return out;
-  for (const path of paths) out.set(path, await changedLineNumbers(mirror, from, head, path, env));
+  const where = Array.isArray(blocker.finding.where) ? blocker.finding.where : [];
+  const paths = sortedUnique(where.map((item) => (isJsonObject(item) && typeof item.path === "string" ? item.path : "")).filter((path) => path !== ""));
+  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return out;
+  if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) {
+    for (const path of paths) out.set(path, new Set());
+    return out;
+  }
+  const delta = await diffTwoDot(mirror, from, head, env);
+  for (const path of paths) {
+    const renamed = delta.find((entry) => entry.status === "R" && entry.oldPath === path);
+    if (renamed !== undefined) {
+      out.set(renamed.path, await changedLineNumbers(mirror, from, head, renamed.path, env, path));
+      continue;
+    }
+    const own = delta.find((entry) => entry.path === path && entry.oldPath === null);
+    if (own?.status === "D") continue;
+    out.set(path, own === undefined ? new Set() : await changedLineNumbers(mirror, from, head, path, env));
+  }
   return out;
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
 
-function changedPaths(diff: readonly DiffEntry[], layout: Layout | null): ChangedPath[] {
-  const out: ChangedPath[] = [];
-  for (const entry of diff) {
-    out.push({ path: entry.path, status: entry.status, side: "new", tier: tierOf(layout, entry.path).tier });
-    if (entry.oldPath !== null) out.push({ path: entry.oldPath, status: entry.status, side: "old", tier: tierOf(layout, entry.oldPath).tier });
+/** Every symbolic link of the trees at `shas`, with the path each reaches (plan.ts's linkTarget). */
+async function treeLinks(mirror: string, shas: readonly string[], env: Readonly<Record<string, string | undefined>>): Promise<TreeLink[]> {
+  const entries: TreeEntry[] = [];
+  for (const sha of sortedUnique(shas)) for (const entry of await lsTree(mirror, sha, env)) if (entry.mode === SYMLINK_MODE) entries.push(entry);
+  if (entries.length === 0) return [];
+  const { blobs } = await readBlobs(mirror, sortedUnique(entries.map((entry) => entry.oid)), env);
+  const links = new Map<string, TreeLink>();
+  for (const entry of entries) {
+    const link = { path: entry.path, target: linkTarget(entry.path, blobs.get(entry.oid)) };
+    links.set(`${link.path}\0${link.target}`, link);
   }
-  return out;
+  return [...links.values()];
 }
 
-function highestTier(paths: readonly ChangedPath[]): Tier | null {
-  let tier: Tier | null = null;
-  for (const path of paths) tier = tier === null ? path.tier : maxTier(tier, path.tier);
-  return tier;
+/**
+ * The paths of a change and its tier, counted as `plan` counts them (plan.ts's changeTiers): tier D
+ * only for documentation files, a changed link or submodule at S, a path a link reaches also at the
+ * link's path, and S for a change with several merge bases or a link reach that cannot be bounded.
+ */
+function tieredChange(diff: readonly DiffEntry[], layout: Layout | null, ciMap: CiMap, links: readonly TreeLink[], historyAmbiguous: boolean): { changed: ChangedPath[]; tier: Tier | null } {
+  const change = changeTiers({ diff, layout, ciMap, links, historyAmbiguous });
+  return {
+    changed: change.paths.map((path) => ({ path: path.path, status: path.status, side: path.side, link: path.link, tier: path.tier })),
+    tier: change.tier,
+  };
 }
 
 async function layoutAt(mirror: string, sha: string, env: Readonly<Record<string, string | undefined>>): Promise<Layout | null> {
@@ -548,17 +613,25 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     // (spec 07 §2.4): the layout is the default branch's, and the change is everything on the head
     // since its merge base with that branch, so a pull request stacked on an unmerged branch is
     // reviewed with the branch's changes and cannot lower its own tier through it.
-    const base = await mergeBase(mirror, defaultTip, head, env);
+    // Every merge base, as `plan` reads them: with several (criss-cross merges) git alone would pick
+    // one by date, so the change is the union of the diffs from each, and it is tier S (§2.4).
+    const bases = (await mergeBases(mirror, defaultTip, head, env)).sort();
+    const base = bases[0] ?? null;
     if (base === null) {
       deps.stderr(`fin-review: error: the pull request's head shares no history with ${defaultBranch}\n`);
       state.to("refused", { reason: "no_merge_base" });
       return EXIT.data;
     }
+    if (bases.length > MAX_MERGE_BASES) throw new DataError(`the head and ${defaultBranch} have ${bases.length} merge bases`);
+    const historyAmbiguous = bases.length > 1;
+    if (historyAmbiguous) deps.stderr(`fin-review: the head and ${defaultBranch} have ${bases.length} merge bases: the run reviews the changes since each of them, at tier S\n`);
     if (facts.baseRef !== defaultBranch) {
       deps.stderr(`fin-review: the base is ${facts.baseRef}, not ${defaultBranch}: the run reviews everything on the head since its merge base with ${defaultBranch}\n`);
     }
     const layout = await layoutAt(mirror, defaultTip, env);
-    const prDiff = await diffRaw(mirror, base, head, env);
+    const prDiffs: DiffEntry[][] = [];
+    for (const from of bases) prDiffs.push(await diffRaw(mirror, from, head, env));
+    const prDiff = unionOfDiffs(prDiffs);
 
     // `commit`: stay a delta, or escalate to `pr` (§2.3.2).
     let mode: Mode = req.mode;
@@ -568,7 +641,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     let deltaFrom: string | null = null;
     if (req.mode === "commit") {
       const since = req.since ?? "";
-      const decision = await commitDecision(req, deps, mirror, since, head, layout, { defaultBranch, mergeBase: base }, engine.procedureHash);
+      const decision = await commitDecision(req, deps, mirror, since, head, layout, { defaultBranch, defaultTip, mergeBase: base, historyAmbiguous }, engine.procedureHash);
       if (decision.escalate !== null) {
         mode = "pr";
         escalated = decision.escalate;
@@ -578,10 +651,11 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         deltaFrom = since;
       }
     }
-    const changed = changedPaths(scopeDiff, layout);
+    // Tiers as `plan` counts them, with the links of every tree the change is read against.
+    const links = await treeLinks(mirror, [head, defaultTip, ...bases, ...(deltaFrom === null ? [] : [deltaFrom])], env);
+    const { changed, tier } = tieredChange(scopeDiff, layout, config.ciMap, links, deltaFrom === null && historyAmbiguous);
     // The change's own tier picks the lenses; a delta's tier never lowers the gating chain's, so the
     // floor, the budget and the recorded tier use the higher of the two (spec 07 §2.3.2, §2.4).
-    const tier = highestTier(changed);
     const gateTier: Tier | null = prior === null ? tier : tier === null ? prior.tier : prior.tier === null ? tier : maxTier(tier, prior.tier);
     const changedAtHead = sortedUnique(scopeDiff.filter((entry) => entry.status !== "D").map((entry) => entry.path));
 
@@ -602,7 +676,10 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     const headTree = await lsTree(mirror, head, env);
     const headMap = new Map(headTree.map((entry) => [entry.path, entry]));
     const pathProblems = treeProblems(headTree);
-    for (const path of sortedUnique(changed.filter((item) => !headMap.has(item.path)).map((item) => item.path))) {
+    // A path a link reaches is a name through the link, not a path of either tree: it counts for the
+    // tier and the attack profiles only.
+    const diffPaths = changed.filter((item) => item.side !== "link");
+    for (const path of sortedUnique(diffPaths.filter((item) => !headMap.has(item.path)).map((item) => item.path))) {
       const problem = pathTextProblem(path);
       if (problem !== null) pathProblems.push(problem);
     }
@@ -611,11 +688,14 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     // The head's blobs, by object ID: the units, the graph and every quote check read them, and
     // the tree the sessions read is written from them.
     const { blobs } = await readBlobs(mirror, headTree.filter((entry) => entry.type === "blob").map((entry) => entry.oid), env);
-    const deletedPaths = new Set(changed.filter((path) => !headMap.has(path.path)).map((path) => path.path));
+    const deletedPaths = new Set(diffPaths.filter((path) => !headMap.has(path.path)).map((path) => path.path));
     const deleted = new Map<string, string>();
-    if (deletedPaths.size > 0) {
-      const baseTree = await lsTree(mirror, deltaFrom ?? base, env);
-      const wanted = baseTree.filter((entry) => entry.type === "blob" && deletedPaths.has(entry.path));
+    // A deleted path's text from the side it was deleted from (each merge base, when there are several).
+    for (const from of deltaFrom === null ? bases : [deltaFrom]) {
+      if (deleted.size >= deletedPaths.size) break;
+      const baseTree = await lsTree(mirror, from, env);
+      const wanted = baseTree.filter((entry) => entry.type === "blob" && deletedPaths.has(entry.path) && !deleted.has(entry.path));
+      if (wanted.length === 0) continue;
       const read = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
       for (const entry of wanted) {
         const bytes = read.blobs.get(entry.oid);
@@ -648,8 +728,12 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     if (mode === "commit") {
       for (const path of changedAtHead) for (const importer of graph.importersOf(path)) if (files.kind(importer) === "file") unitPaths.add(importer);
     }
+    // A path's tier as the change counts it (a changed link at S included), else as `plan` would.
+    const changedTier = new Map<string, Tier>();
+    for (const item of diffPaths) changedTier.set(item.path, maxTier(changedTier.get(item.path) ?? item.tier, item.tier));
+    const tierFor = (path: string): Tier => changedTier.get(path) ?? pathTier(layout, config.ciMap, path).tier;
     const { units, excluded } = inventory(
-      sortedUnique(unitPaths).map((path) => ({ path, tier: tierOf(layout, path).tier, kind: files.kind(path) })),
+      sortedUnique(unitPaths).map((path) => ({ path, tier: tierFor(path), kind: files.kind(path) })),
       (path) => files.bytes(path),
       procedure.exclusions,
     );
@@ -666,8 +750,8 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     // it and stays open until that lens quotes its fix on lines changed since it was found.
     const carriedFrom = await newestRunOnHistory(deps.home, req.pr, head, mirror, env);
     const priorBlockers = carriedFrom?.openBlockers ?? [];
-    const fixLinesFrom = new Map<string, Map<string, Set<number>>>();
-    for (const foundAt of new Set(priorBlockers.map((blocker) => blocker.foundAt))) fixLinesFrom.set(foundAt, await linesChangedSince(mirror, foundAt, head, env));
+    const fixLinesByBlocker = new Map<string, Map<string, Set<number>>>();
+    for (const blocker of priorBlockers) fixLinesByBlocker.set(blocker.id, await fixLinesFor(mirror, blocker.foundAt, head, blocker, env));
 
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
     const lensSet = new Set<Lens>(tier === null ? [] : requiredLenses(config.lenses, tier, changed.map((path) => path.path)));
@@ -683,7 +767,19 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // The diffs the sessions see: the patch for joins, and each changed unit's delta in `commit`.
-    const patch = await unifiedDiff(mirror, deltaFrom ?? defaultTip, head, deltaFrom === null, MAX_DIFF_BYTES, env);
+    // With several merge bases a three-dot diff would show the changes since only one of them, so
+    // the patch is the diff since each, in turn.
+    let patch: { text: string; truncated: boolean };
+    if (deltaFrom === null && historyAmbiguous) {
+      const parts: string[] = [];
+      let truncated = false;
+      for (const from of bases) {
+        const part = await unifiedDiff(mirror, from, head, false, Math.floor(MAX_DIFF_BYTES / bases.length), env);
+        parts.push(`# Since merge base ${from}\n${part.text}`);
+        truncated ||= part.truncated;
+      }
+      patch = { text: parts.join("\n"), truncated };
+    } else patch = await unifiedDiff(mirror, deltaFrom ?? defaultTip, head, deltaFrom === null, MAX_DIFF_BYTES, env);
     const unitDiffs = new Map<string, string>();
     if (deltaFrom !== null) {
       for (const path of changedAtHead) {
@@ -693,7 +789,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // ---- sessions ----
-    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, fixLinesFrom, patch, unitDiffs });
+    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, fixLinesByBlocker, patch, unitDiffs, rulesFiles: engine.rulesFiles ?? readRulesFiles(deps.engineRoot) });
     writeJson(join(runDir, "plan.json"), {
       v: 1,
       runId,
@@ -707,10 +803,12 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       defaultBranch,
       defaultTip,
       mergeBase: base,
+      mergeBases: bases,
       since: req.since,
       tier: gateTier,
       deltaTier: tier,
       engine: { commit: engine.commit, procedureHash: engine.procedureHash, defaultCopy: engine.problems.length === 0, problems: engine.problems },
+      transport: deps.transport ?? "direct",
       changed,
       units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier, kind: unit.kind })),
       excluded,
@@ -720,7 +818,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       profiles: Object.fromEntries(profileMap),
       sessions: plans.map((plan) => ({ id: plan.id, role: plan.role, lensKey: plan.lensKey, shard: plan.shard, units: plan.units.map((unit) => unit.id) })),
     });
-    state.to("planned", { mode, escalated, head, baseRef: facts.baseRef, base: baseTip, defaultBranch, defaultTip, mergeBase: base, tier: gateTier });
+    state.to("planned", { mode, escalated, head, baseRef: facts.baseRef, base: baseTip, defaultBranch, defaultTip, mergeBase: base, tier: gateTier, transport: deps.transport ?? "direct" });
 
     const cap = mode === "commit" ? config.budgets.runUsd.commit : config.budgets.runUsd.pr[gateTier ?? "D"];
     const budget = new RunBudget(cap);
@@ -906,7 +1004,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           finding,
           reportedSeverity: check.ok ? finding.severity : null,
           severity: check.ok ? finding.severity : null,
-          tier: firstPath === undefined ? null : tierOf(layout, firstPath).tier,
+          tier: firstPath === undefined ? null : tierFor(firstPath),
           verdicts: [],
           secondLooks: [],
           verifyIssue: null,
@@ -922,6 +1020,9 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
           rec.verifyIssue = "low findings get no sceptic in this slice";
         }
       }
+      // A prior blocker closes only on an answer the engine accepted whole: an output kept after a
+      // failed attempt still adds its valid findings (that only blocks more), but closes nothing.
+      if (result.state !== "ok") return;
       for (const check of validated.prior) {
         const blocker = plan.priors.get(check.id);
         if (blocker !== undefined && check.status === "fixed" && check.problems.length === 0) priorStatus.set(blocker.id, "fixed");
@@ -1000,9 +1101,11 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       defaultBranch,
       defaultTip,
       mergeBase: base,
+      mergeBases: bases,
       tier: gateTier,
       deltaTier: tier,
       engine: { commit: engine.commit, procedureHash: engine.procedureHash, defaultCopy: engine.problems.length === 0 },
+      transport: deps.transport ?? "direct",
       result,
       outcome,
       exitCode,
@@ -1049,7 +1152,10 @@ type CommitDecision = { escalate: string; prior: null; delta: readonly DiffEntry
 /** The scope a run reviews from: the default branch and the head's merge base with it. */
 interface Scope {
   readonly defaultBranch: string;
+  readonly defaultTip: string;
   readonly mergeBase: string;
+  /** True when the head has several merge bases with the default branch. */
+  readonly historyAmbiguous: boolean;
 }
 
 async function commitDecision(
@@ -1069,14 +1175,16 @@ async function commitDecision(
   if (!isSha(since) || (await resolveCommit(mirror, since, env)) === null || !(await isAncestor(mirror, since, head, env))) return escalate("not_ancestor");
   // A procedure change invalidates what the prior run covered (spec 07 §4.8, §5.9).
   if (procedureHash === null || prior.procedureHash !== procedureHash) return escalate("procedure_changed");
+  // With several merge bases, which one a prior run reviewed from cannot be compared: review it all.
+  if (scope.historyAmbiguous) return escalate("history_ambiguous");
   // The prior run must have reviewed from the same branch and from a merge base this one still
   // contains; otherwise what lies between the two bases was never reviewed with the head.
   if (prior.defaultBranch !== scope.defaultBranch || prior.mergeBase === null || (await resolveCommit(mirror, prior.mergeBase, env)) === null) return escalate("base_changed");
   if (prior.mergeBase !== scope.mergeBase && !(await isAncestor(mirror, prior.mergeBase, scope.mergeBase, env))) return escalate("base_changed");
   if ((await changedLines(mirror, since, head, env)) > COMMIT_MAX_LINES) return escalate("delta_lines");
   const delta = await diffTwoDot(mirror, since, head, env);
-  const changed = changedPaths(delta, layout);
-  const tier = highestTier(changed);
+  const links = await treeLinks(mirror, [since, head, scope.defaultTip], env);
+  const { changed, tier } = tieredChange(delta, layout, config.ciMap, links, false);
   if (tier !== null && (prior.tier === null || maxTier(tier, prior.tier) !== prior.tier)) return escalate("tier_raised");
   if (tier !== null) {
     const lenses = requiredLenses(config.lenses, tier, changed.map((path) => path.path));
@@ -1087,6 +1195,9 @@ async function commitDecision(
     }
   }
   if (prior.result === "could_not_check") return escalate("prior_could_not_check");
+  // A changed path no lens could review, or a lens that was not done, is no finding a delta can
+  // show fixed: only a full review of the change can find it gone (spec 07 §2.11 rules 3 and 6).
+  if (prior.openGaps > 0) return escalate("prior_gap");
   return { escalate: null, prior, delta };
 }
 
@@ -1102,11 +1213,13 @@ interface PlanInput {
   readonly changed: readonly ChangedPath[];
   /** The changed paths that are not units, each with why; every pack names them. */
   readonly nonUnits: readonly NonUnit[];
+  /** The engine copy's rules files, as the engine-copy check read and verified them. */
+  readonly rulesFiles: ReadonlyArray<{ readonly path: string; readonly text: string }>;
   /** The text of each deleted path as it was before the change. */
   readonly deleted: ReadonlyMap<string, string>;
   readonly priorBlockers: readonly OpenBlocker[];
-  /** By the head a blocker was found at: the lines of each path changed since then. */
-  readonly fixLinesFrom: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
+  /** By prior blocker: each file it names (at its head path) and the lines of it changed since it was found. */
+  readonly fixLinesByBlocker: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<number>>>;
   readonly patch: { readonly text: string; readonly truncated: boolean };
   /** `commit` only: each changed unit's diff since the last reviewed head. */
   readonly unitDiffs: ReadonlyMap<string, string>;
@@ -1165,7 +1278,8 @@ function deletedTestsBlock(input: PlanInput): string | null {
 }
 
 function joinsEvidence(input: PlanInput): string {
-  const paths = input.changed.map((path) => `- ${path.path} (${path.status}, ${path.side === "old" ? "old path" : "at head"}, tier ${path.tier})`);
+  const where = (path: ChangedPath): string => (path.side === "old" ? "old path" : path.side === "link" ? `reached through the link ${path.link ?? ""}` : "at head");
+  const paths = input.changed.map((path) => `- ${path.path} (${path.status}, ${where(path)}, tier ${path.tier})`);
   const cut = input.patch.truncated ? " (cut at the context budget: read the files with your tools)" : "";
   return dataBlock(`# The patch\nChanged paths:\n${paths.join("\n")}\n\n# Unified diff${cut}\n${input.patch.text}\n`);
 }
@@ -1182,7 +1296,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
     return pack;
   };
   const deletedTests = deletedTestsBlock(input);
-  const rulesFiles = readRulesFiles(deps.engineRoot);
+  const rulesFiles = input.rulesFiles;
   const rulesBlock = dataBlock(
     rulesFiles.length === 0
       ? "# Rules files\nThe engine copy has no AGENTS.md or CONTRIBUTING.md.\n"
@@ -1233,7 +1347,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
       checklist: items.map((item) => item.id),
       allowed: opts.allowed,
       priors,
-      fixLines: new Map([...priors].map(([promptId, blocker]) => [promptId, input.fixLinesFrom.get(blocker.foundAt) ?? new Map<string, Set<number>>()])),
+      fixLines: new Map([...priors].map(([promptId, blocker]) => [promptId, input.fixLinesByBlocker.get(blocker.id) ?? new Map<string, Set<number>>()])),
     };
   };
 

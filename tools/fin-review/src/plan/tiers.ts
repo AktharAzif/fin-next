@@ -46,9 +46,11 @@ export interface Layout {
 /**
  * Where a path's tier came from. `not-documentation` is a path the layout calls D that is not a
  * documentation file (plan.ts): tier D is documentation (EXECUTION §1.7), so it counts as S.
- * `not-plain` is a path with a character outside printable ASCII (glob.ts's isPlainPath).
+ * `not-plain` is a path with a character outside printable ASCII (glob.ts's isPlainPath). `link` is
+ * a changed symbolic link or submodule the layout puts below S (plan.ts's changeTiers): what it
+ * stands for is not in the diff, so it counts as S.
  */
-export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout" | "not-documentation" | "not-plain";
+export type TierSource = "control" | "entry" | "entry-default" | "unmapped" | "no-layout" | "not-documentation" | "not-plain" | "link";
 
 export interface PathTier {
   readonly tier: Tier;

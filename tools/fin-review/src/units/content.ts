@@ -31,18 +31,79 @@ function isBmp(bytes: Uint8Array): boolean {
   return view.getUint32(2, true) === bytes.length && BMP_HEADER_SIZES.has(view.getUint32(14, true));
 }
 
-/** "image" or "font" when the bytes start as one of the formats exclusions.json names; else null. */
+function view(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/** An ICO file: reserved 0, type 1, 1 to 255 images whose directory entries lie within the file. */
+function isIco(bytes: Uint8Array): boolean {
+  if (!startsWith(bytes, [0x00, 0x00, 0x01, 0x00]) || bytes.length < 22) return false;
+  const v = view(bytes);
+  const count = v.getUint16(4, true);
+  const directory = 6 + 16 * count;
+  if (count < 1 || count > 255 || bytes.length < directory) return false;
+  for (let i = 0; i < count; i++) {
+    const entry = 6 + 16 * i;
+    const size = v.getUint32(entry + 8, true);
+    const offset = v.getUint32(entry + 12, true);
+    if (bytes[entry + 3] !== 0 || size === 0 || offset < directory || offset + size > bytes.length) return false;
+  }
+  return true;
+}
+
+/** An sfnt font (TrueType, OpenType): 1 to 512 tables whose records lie past the directory and within the file. */
+function isSfnt(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) return false;
+  const tag = ascii(bytes, 0, 4);
+  if (tag !== "OTTO" && tag !== "true" && !startsWith(bytes, [0x00, 0x01, 0x00, 0x00])) return false;
+  const v = view(bytes);
+  const tables = v.getUint16(4);
+  const directory = 12 + 16 * tables;
+  if (tables < 1 || tables > 512 || bytes.length < directory) return false;
+  for (let i = 0; i < tables; i++) {
+    const record = 12 + 16 * i;
+    const offset = v.getUint32(record + 8);
+    const length = v.getUint32(record + 12);
+    if (offset < directory || offset + length > bytes.length) return false;
+  }
+  return true;
+}
+
+/** WOFF and WOFF2: the signature and a header whose length field is the file's length. */
+function isWoff(bytes: Uint8Array): boolean {
+  const tag = ascii(bytes, 0, 4);
+  if ((tag !== "wOFF" && tag !== "wOF2") || bytes.length < 44) return false;
+  const v = view(bytes);
+  return v.getUint32(8) === bytes.length && v.getUint16(12) >= 1;
+}
+
+/** EOT: its size field is the file's length, a known version, and the magic number 0x504C at 34. */
+function isEot(bytes: Uint8Array): boolean {
+  if (bytes.length < 82) return false;
+  const v = view(bytes);
+  const version = v.getUint32(8, true);
+  return (
+    v.getUint32(0, true) === bytes.length &&
+    v.getUint32(4, true) <= bytes.length &&
+    (version === 0x00010000 || version === 0x00020001 || version === 0x00020002) &&
+    v.getUint16(34, true) === 0x504c
+  );
+}
+
+/**
+ * "image" or "font" when the bytes are laid out as one of the formats exclusions.json names; else
+ * null. It is only ever asked together with the name (verifiedExclusion): a few planted magic bytes
+ * at the start of any file never make it media.
+ */
 export function mediaKind(bytes: Uint8Array): "image" | "font" | null {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image"; // PNG
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image"; // JPEG
   if (["GIF87a", "GIF89a"].includes(ascii(bytes, 0, 6))) return "image";
   if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 12) === "WEBP") return "image";
   if (ascii(bytes, 4, 8) === "ftyp" && ["avif", "avis"].includes(ascii(bytes, 8, 12))) return "image";
-  if (startsWith(bytes, [0x00, 0x00, 0x01, 0x00]) && bytes.length >= 22) return "image"; // ICO
+  if (isIco(bytes)) return "image";
   if (isBmp(bytes)) return "image";
-  if (["wOFF", "wOF2", "OTTO", "true"].includes(ascii(bytes, 0, 4))) return "font";
-  if (startsWith(bytes, [0x00, 0x01, 0x00, 0x00]) && bytes.length >= 12) return "font"; // TrueType
-  if (bytes.length > 36 && bytes[34] === 0x4c && bytes[35] === 0x50) return "font"; // EOT's magic "LP"
+  if (isWoff(bytes) || isSfnt(bytes) || isEot(bytes)) return "font";
   return null;
 }
 
