@@ -24,13 +24,15 @@
 //             SP-26); sets the step outputs the uploads read
 //   record    adds each uploaded artefact's SHA-256, writes the checksums file actions/attest
 //             signs, and gives the static record's own SHA-256 as the step output record_sha256
-//   manifest  writes release-manifest.json: the commit, each image's digest from exactly one
-//             record per release image (readImageRecords), each static artefact's name, SHA-256
-//             and asset manifest hash, the source-map artefact, every package's migrations by
-//             migrate's own rule (readMigrations) and the minimum schema version, the newest of
-//             them. Any job of a run can replace an artefact of that run, but only a job sets
-//             its own outputs: each record is taken only when its SHA-256 equals the one the job
-//             that wrote it gave as an output (RECORD_SHA256_<IMAGE>, RECORD_SHA256_STATIC)
+//   manifest  writes release-manifest.json: the commit, every release image's digest from exactly
+//             one record per image (readImageRecords: an image whose record is missing, says it
+//             was not built or has no digest refuses the manifest), each static artefact's name,
+//             SHA-256 and asset manifest hash, the source-map artefact, every package's
+//             migrations by migrate's own rule (readMigrations) and the minimum schema version,
+//             the newest of them. Any job of a run can replace an artefact of that run, but only
+//             a job sets its own outputs: each record is taken only when its SHA-256 equals the
+//             one the job that wrote it gave as an output (RECORD_SHA256_<IMAGE>,
+//             RECORD_SHA256_STATIC)
 //
 // Only the previous release's *own* assets travel (the ones its build produced, which its
 // manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
@@ -55,7 +57,11 @@ import { dirname, extname, join, posix, relative, sep } from "node:path";
 import { addSummary, annotate, clean, isMain, isRecord, isSha, say, setOutput } from "./lib/ci.mjs";
 
 export const RELEASE = "release";
-/** The release images, one matrix entry each of release.yml's images job (release-image.sh). */
+/**
+ * The release images, one matrix entry each of release.yml's images job (release-image.sh), and
+ * every one required in each release. spec 01 §4.9's fin-next-payments and fin-next-backup are not
+ * among them: the release does not build them yet.
+ */
 export const RELEASE_IMAGES = ["console", "admin", "verify", "edge", "api", "connector"];
 const KEY = /^[a-z]+$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -713,13 +719,17 @@ export function record(ctx) {
  * record artefact, `image-record-<image>-<sha>/fin-next-<image>.json` (download-artifact's layout
  * without merge-multiple), exactly one for each of RELEASE_IMAGES and nothing else, each record
  * the very bytes the images job wrote (its SHA-256 is that job's output, which no other job can
- * set, while any job of the run can replace an artefact), naming its own image, and a built
- * image's reference this repository's own GHCR package, `ghcr.io/<owner>/fin-next-<image>`.
- * These digests are what the attested manifest names, so a missing, extra, second or replaced
- * record, or a reference elsewhere, refuses the release.
+ * set, while any job of the run can replace an artefact), naming its own image, saying it was
+ * built, with its digest and its reference this repository's own GHCR package,
+ * `ghcr.io/<owner>/fin-next-<image>`. Every release image is required (the steward's ruling of
+ * 22 Nov): these digests are what the attested manifest names and what the operator deploys, so a
+ * missing, extra, second or replaced record, an image not built or without a digest, or a
+ * reference elsewhere refuses the release, and no manifest is written.
  * @param {string} dir
  * @param {{ sha: string, owner: string, hashes: Record<string, string | undefined> }} run this
  *   run's commit, the repository's owner, and each image's record SHA-256 from the images job
+ * @returns {{ images: Record<string, string>, refs: Record<string, string> }} every release
+ *   image's digest and its reference at that digest
  */
 export function readImageRecords(dir, { sha, owner, hashes }) {
   if (!isSha(sha)) throw new Error("GITHUB_SHA is not a commit SHA");
@@ -730,13 +740,17 @@ export function readImageRecords(dir, { sha, owner, hashes }) {
   const images = {};
   /** @type {Record<string, string>} */
   const refs = {};
-  /** @type {{ image: string, why: string }[]} */
-  const skipped = [];
-  const expected = RELEASE_IMAGES.map((image) => `image-record-${image}-${sha}`).sort();
+  const folderOf = (/** @type {string} */ image) => `image-record-${image}-${sha}`;
   const folders = existsSync(dir) ? readdirSync(dir).sort() : [];
-  if (folders.join("\n") !== expected.join("\n")) {
+  const missing = RELEASE_IMAGES.filter((image) => !folders.includes(folderOf(image)));
+  const extra = folders.filter((folder) => !RELEASE_IMAGES.some((i) => folderOf(i) === folder));
+  if (missing.length > 0 || extra.length > 0) {
+    const problems = [
+      ...missing.map((image) => `no record of fin-next-${image}`),
+      ...extra.map((folder) => `an artefact no release image has, ${clean(folder, 120)}`),
+    ];
     throw new Error(
-      `the image records are not exactly one artefact per release image (${RELEASE_IMAGES.join(", ")})`,
+      `the image records are not exactly one artefact per release image (${RELEASE_IMAGES.join(", ")}): ${problems.join("; ")}`,
     );
   }
   const namespace = `ghcr.io/${owner.toLowerCase()}/`;
@@ -759,22 +773,25 @@ export function readImageRecords(dir, { sha, owner, hashes }) {
     if (!isRecord(rec) || rec.image !== name || !IMAGE.test(name)) {
       throw new Error(`${name}.json is not ${name}'s record`);
     }
-    if (rec.built === true) {
-      if (typeof rec.digest !== "string" || !DIGEST.test(rec.digest)) {
-        throw new Error(`${name}: the record's digest is not sha256:<hex>`);
-      }
-      if (rec.ref !== `${namespace}${name}`) {
-        throw new Error(`${name}: the record's reference is not ${namespace}${name}`);
-      }
-      images[name] = rec.digest;
-      refs[name] = `${rec.ref}@${rec.digest}`;
-    } else if (rec.built === false) {
-      skipped.push({ image: name, why: clean(rec.why ?? "not built", 200) });
-    } else {
-      throw new Error(`${name}: the record says neither built nor skipped`);
+    if (rec.built !== true) {
+      const why = typeof rec.why === "string" ? ` (${clean(rec.why, 200)})` : "";
+      throw new Error(
+        `${name} was not built${why}: every release image is required, so the release has no manifest`,
+      );
     }
+    if (rec.digest === undefined || rec.digest === null || rec.digest === "") {
+      throw new Error(`${name}: the record has no image digest`);
+    }
+    if (typeof rec.digest !== "string" || !DIGEST.test(rec.digest)) {
+      throw new Error(`${name}: the record's digest is not sha256:<hex>`);
+    }
+    if (rec.ref !== `${namespace}${name}`) {
+      throw new Error(`${name}: the record's reference is not ${namespace}${name}`);
+    }
+    images[name] = rec.digest;
+    refs[name] = `${rec.ref}@${rec.digest}`;
   }
-  return { images, refs, skipped };
+  return { images, refs };
 }
 
 /**
@@ -938,8 +955,8 @@ export function writeManifest(ctx) {
       isRecord(staticMeta) && isRecord(staticMeta.sourceMaps) ? staticMeta.sourceMaps : null,
     migrations,
     minimumSchemaVersion,
+    // Static outputs only: no release image is ever skipped (readImageRecords refuses one).
     skipped: {
-      images: images.skipped,
       static: isRecord(staticMeta) && Array.isArray(staticMeta.skipped) ? staticMeta.skipped : [],
     },
   };
@@ -965,7 +982,7 @@ export function writeManifest(ctx) {
       "",
       `Migrations: ${migrations.length}, minimum schema version ${minimumSchemaVersion === null ? "none" : `\`${minimumSchemaVersion}\``}.`,
       "",
-      `Skipped: ${[...manifest.skipped.images.map((s) => s.image), ...manifest.skipped.static.map((s) => (isRecord(s) ? String(s.key) : ""))].join(", ") || "none"}.`,
+      `Static outputs skipped: ${manifest.skipped.static.map((s) => (isRecord(s) ? String(s.key) : "")).join(", ") || "none"}.`,
     ].join("\n"),
     env,
   );

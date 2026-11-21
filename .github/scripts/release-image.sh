@@ -5,12 +5,21 @@
 #   connector                           ops/docker/connector.Dockerfile
 # Each is the `release` target, built by BuildKit through the docker CLI (no docker/* action) with
 # no cache, SOURCE_DATE_EPOCH from the commit and rewritten timestamps, the OCI source label, and
-# pushed to ghcr.io/<owner>/fin-next-<image> by digest (no tag). A missing Dockerfile, or an app
-# whose server half is not on main yet, skips with a notice. Either way it writes one record,
-# $RUNNER_TEMP/image-record/fin-next-<image>.json, which the manifest job reads, and sets the step
-# outputs built, name, digest and record_sha256_<image>: the record's SHA-256, which release.yml
-# makes a job output (one name per image, so the matrix legs' outputs combine) and the manifest
-# job checks the downloaded record against, since any job of the run can replace an artefact.
+# pushed to ghcr.io/<owner>/fin-next-<image> by digest (no tag). spec 01 §4.9's fin-next-payments
+# and fin-next-backup are not in the matrix: this release does not build them yet, and the script
+# refuses any image it does not name.
+#
+# Every image of the matrix is required (the steward's ruling of 22 Nov). A missing Dockerfile, a
+# missing build input, a failed build or a build that gives no digest fails this leg with an error
+# naming the image and what is missing; it never skips. The images job then fails, the manifest
+# job (which needs it) never runs, and the release has no manifest, so a release that lacks an
+# image is refused here rather than at deploy time by the operator's start condition.
+#
+# A built image writes one record, $RUNNER_TEMP/image-record/fin-next-<image>.json, which the
+# manifest job reads, and sets the step outputs name, digest and record_sha256_<image>: the
+# record's SHA-256, which release.yml makes a job output (one name per image, so the matrix legs'
+# outputs combine) and the manifest job checks the downloaded record against, since any job of the
+# run can replace an artefact.
 #
 # Inputs (environment): IMAGE, GH_TOKEN (the job's token, for the GHCR login only), and the
 # runner's GITHUB_* variables.
@@ -29,46 +38,35 @@ started_ms="$(date +%s%3N)"
 name="fin-next-${IMAGE}"
 record_dir="${RUNNER_TEMP}/image-record"
 record="${record_dir}/${name}.json"
-mkdir -p "$record_dir"
 
-record_output() {
-  local hash
-  hash="$(sha256sum "$record")"
-  echo "record_sha256_${IMAGE}=${hash%% *}" >> "$GITHUB_OUTPUT"
+# Ends the leg without its image: an error naming the image and what is missing, and no record or
+# output, so nothing downstream can take this release for one that has every image.
+fail() {
+  echo "::error title=${name}::${name} is not built: $1 (every image of the matrix is required)"
+  echo "release.image name=${name} result=fail ms=$(( $(date +%s%3N) - started_ms ))"
+  exit 1
 }
 
-skip() {
-  echo "::notice title=${name}::$1; skipped"
-  printf '{"image":"%s","built":false,"why":"%s"}\n' "$name" "$1" > "$record"
-  record_output
-  {
-    echo "built=false"
-    echo "name="
-    echo "digest="
-  } >> "$GITHUB_OUTPUT"
-  echo "release.image name=${name} built=false ms=$(( $(date +%s%3N) - started_ms ))"
-  exit 0
-}
-
-build_args=()
+# The build arguments are never empty: bash before 4.4 calls an empty array unbound under set -u.
 case "$IMAGE" in
   console | admin | verify | edge | api)
     dockerfile="ops/docker/app.Dockerfile"
     needs="apps/${IMAGE}/vite.server.config.ts"
-    build_args=(--build-arg "APP=${IMAGE}")
+    build_args=(--build-arg "APP=${IMAGE}" --build-arg SOURCE_DATE_EPOCH)
     ;;
   connector)
     dockerfile="ops/docker/connector.Dockerfile"
     needs="apps/connector/package.json"
+    build_args=(--build-arg SOURCE_DATE_EPOCH)
     ;;
   *)
-    echo "release-image: unknown image ${IMAGE}" >&2
+    echo "::error title=release-image::${name} is not a release image of release.yml's matrix"
     exit 64
     ;;
 esac
 
-[ -f "$dockerfile" ] || skip "${dockerfile} is not on main yet"
-[ -f "$needs" ] || skip "${needs} is not on main yet"
+[ -f "$dockerfile" ] || fail "its Dockerfile ${dockerfile} is missing"
+[ -f "$needs" ] || fail "its build input ${needs} is missing"
 
 owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
 ref="ghcr.io/${owner}/${name}"
@@ -89,12 +87,12 @@ printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --pass
 docker buildx create --name "$builder" --driver docker-container \
   --driver-opt "image=${buildkit}" --bootstrap > /dev/null
 
-docker buildx build \
+rm -f "$meta"
+if ! docker buildx build \
   --builder "$builder" \
   --file "$dockerfile" \
   --target release \
   "${build_args[@]}" \
-  --build-arg SOURCE_DATE_EPOCH \
   --platform linux/amd64 \
   --no-cache \
   --pull \
@@ -105,19 +103,23 @@ docker buildx build \
   --label "org.opencontainers.image.title=${name}" \
   --metadata-file "$meta" \
   --output "type=image,name=${ref},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true,rewrite-timestamp=true" \
-  .
-
-digest="$(node -e 'const m = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(m["containerimage.digest"] ?? ""))' "$meta")"
-if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-  echo "release-image: BuildKit gave no image digest for ${name}" >&2
-  exit 1
+  .; then
+  fail "the BuildKit build of ${dockerfile} failed"
 fi
 
+[ -s "$meta" ] || fail "BuildKit wrote no metadata file, so there is no image digest"
+digest="$(node -e 'const m = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(m["containerimage.digest"] ?? ""))' "$meta")" \
+  || fail "BuildKit's metadata file is not JSON, so there is no image digest"
+if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+  fail "BuildKit gave no image digest"
+fi
+
+mkdir -p "$record_dir"
 printf '{"image":"%s","built":true,"ref":"%s","digest":"%s"}\n' "$name" "$ref" "$digest" > "$record"
-record_output
+hash="$(sha256sum "$record")"
 {
-  echo "built=true"
   echo "name=${ref}"
   echo "digest=${digest}"
+  echo "record_sha256_${IMAGE}=${hash%% *}"
 } >> "$GITHUB_OUTPUT"
 echo "release.image name=${name} built=true digest=${digest} ms=$(( $(date +%s%3N) - started_ms ))"

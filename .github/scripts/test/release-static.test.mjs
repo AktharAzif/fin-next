@@ -1,7 +1,7 @@
 // release-static: the static outputs, staging and map strip, FW-C13's carry and its test, the
 // asset manifest hash the deploy compares, the previous-release lookup and the manifest.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -56,22 +56,33 @@ const RELEASE_KEYS = staticOutputs(
 const sha256 = (content) => createHash("sha256").update(content).digest("hex");
 
 /**
+ * The digest a test gives a release image when it names none: one of its own for each image.
+ * @param {string} image
+ */
+const imageDigest = (image) => `sha256:${HEX(String(RELEASE_IMAGES.indexOf(image) + 1))}`;
+
+/**
  * The image records as the manifest job downloads them: one artefact folder per release image,
- * each holding its one record. Images not named are skipped.
+ * each holding its one record. An image not named is built, in OWNER's package with its own
+ * digest (imageDigest), as release-image.sh records it.
  * @param {string} dir release/images
  * @param {string} sha
- * @param {Record<string, Record<string, unknown>>} [built] image to the record's fields
+ * @param {Record<string, Record<string, unknown>>} [fields] image to the record's fields
  * @returns {Record<string, string>} each record's SHA-256, as the images job's outputs give it
  */
-function imageRecords(dir, sha, built = {}) {
+function imageRecords(dir, sha, fields = {}) {
   /** @type {Record<string, string>} */
   const files = {};
   /** @type {Record<string, string>} */
   const hashes = {};
   for (const image of RELEASE_IMAGES) {
     const name = `fin-next-${image}`;
-    const fields = built[image] ?? { built: false, why: `ops/docker is not on main yet` };
-    const content = `${JSON.stringify({ image: name, ...fields })}\n`;
+    const record = fields[image] ?? {
+      built: true,
+      ref: `ghcr.io/${OWNER}/${name}`,
+      digest: imageDigest(image),
+    };
+    const content = `${JSON.stringify({ image: name, ...record })}\n`;
     files[`image-record-${image}-${sha}/${name}.json`] = content;
     hashes[image] = sha256(content);
   }
@@ -648,7 +659,6 @@ describe("build, merge, record and manifest end to end", () => {
 
     const hashes = imageRecords(join(root, "release", "images"), SHA, {
       api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("e")}` },
-      edge: { built: false, why: "ops/docker/app.Dockerfile is not on main yet" },
     });
     const manifest = writeManifest({
       root,
@@ -660,8 +670,21 @@ describe("build, merge, record and manifest end to end", () => {
     );
     assert.deepEqual(onDisk, JSON.parse(JSON.stringify(manifest)));
     assert.equal(onDisk.commit, SHA);
-    assert.deepEqual(onDisk.images, { "fin-next-api": `sha256:${HEX("e")}` });
+    // Every release image, each at the digest its record gives.
+    assert.deepEqual(
+      onDisk.images,
+      Object.fromEntries(
+        RELEASE_IMAGES.map((i) => [
+          `fin-next-${i}`,
+          i === "api" ? `sha256:${HEX("e")}` : imageDigest(i),
+        ]),
+      ),
+    );
     assert.equal(onDisk.imageRefs["fin-next-api"], `ghcr.io/owner/fin-next-api@sha256:${HEX("e")}`);
+    assert.equal(
+      onDisk.imageRefs["fin-next-connector"],
+      `ghcr.io/owner/fin-next-connector@${imageDigest("connector")}`,
+    );
     assert.deepEqual(Object.keys(onDisk.static), ["console", "verify", "selfie"]);
     assert.equal(onDisk.static.console.artefact, `static-console-${SHA}`);
     assert.equal(onDisk.static.console.sha256, HEX("a"));
@@ -678,19 +701,15 @@ describe("build, merge, record and manifest end to end", () => {
       "20261121120000_identity_realm.sql",
     ]);
     assert.equal(onDisk.minimumSchemaVersion, "20261121120000_identity_realm.sql");
-    assert.deepEqual(
-      onDisk.skipped.images.map((/** @type {any} */ s) => s.image),
-      RELEASE_IMAGES.filter((i) => i !== "api").map((i) => `fin-next-${i}`),
-    );
-    assert.deepEqual(
-      onDisk.skipped.images.find((/** @type {any} */ s) => s.image === "fin-next-edge"),
-      { image: "fin-next-edge", why: "ops/docker/app.Dockerfile is not on main yet" },
-    );
+    // Only a static output can be skipped; a release image never is.
+    assert.deepEqual(onDisk.skipped, {
+      static: [{ key: "docs", why: "apps/docs has no build script" }],
+    });
     assert.deepEqual(onDisk.run, { id: 42, attempt: 1, workflow: ".github/workflows/release.yml" });
     assert.deepEqual(manifestProblems(onDisk), []);
   });
 
-  it("with nothing on main, builds nothing and writes an empty but valid manifest", (t) => {
+  it("with no static app on main, builds no static output and writes a valid manifest", (t) => {
     const root = tempDir(t);
     writeTree(root, {
       "tools/layout.json": JSON.stringify({
@@ -723,16 +742,113 @@ describe("build, merge, record and manifest end to end", () => {
         RECORD_SHA256_STATIC: outputOf(join(root, "out.txt"), "record_sha256"),
       },
     });
-    assert.deepEqual(manifest.images, {});
+    assert.deepEqual(
+      Object.keys(manifest.images),
+      RELEASE_IMAGES.map((i) => `fin-next-${i}`),
+    );
     assert.deepEqual(manifest.static, {});
     assert.deepEqual(manifest.migrations, []);
     assert.equal(manifest.minimumSchemaVersion, null);
   });
 
+  it("refuses to write a manifest when any release image is missing, not built or has no digest", (t) => {
+    /**
+     * A run up to the manifest step, every image built, then `plant` changes the image records
+     * as the images job would have written them (each record's SHA-256 stays its own job's).
+     * @param {(dir: string) => Record<string, string>} plant
+     */
+    const runUpTo = (plant) => {
+      const root = tempDir(t);
+      writeTree(root, {
+        "tools/layout.json": JSON.stringify({
+          entries: [{ kind: "app", path: "apps/console", name: "@fin/console", static: "console" }],
+        }),
+      });
+      const out = join(root, "out.txt");
+      const env = { GITHUB_OUTPUT: out, GITHUB_SHA: SHA, GITHUB_REPOSITORY_OWNER: OWNER };
+      build({ root, env, runBuild: () => {} });
+      merge({ root, env });
+      record({ root, env });
+      const hashes = plant(join(root, "release", "images"));
+      return {
+        root,
+        env: { ...env, ...recordEnv(hashes), RECORD_SHA256_STATIC: outputOf(out, "record_sha256") },
+      };
+    };
+    const ref = "ghcr.io/owner/fin-next-edge";
+    /** @type {[string, (dir: string) => Record<string, string>, RegExp][]} */
+    const cases = [
+      [
+        "a record that says the image was not built",
+        (dir) =>
+          imageRecords(dir, SHA, {
+            edge: { built: false, why: "ops/docker/app.Dockerfile is missing" },
+          }),
+        /fin-next-edge was not built \(ops\/docker\/app\.Dockerfile is missing\): every release image is required/,
+      ],
+      [
+        "a built record with no digest",
+        (dir) => imageRecords(dir, SHA, { edge: { built: true, ref } }),
+        /fin-next-edge: the record has no image digest/,
+      ],
+      [
+        "a built record with an empty digest",
+        (dir) => imageRecords(dir, SHA, { edge: { built: true, ref, digest: "" } }),
+        /fin-next-edge: the record has no image digest/,
+      ],
+      [
+        "a record with no word on whether it was built",
+        (dir) => imageRecords(dir, SHA, { edge: { ref, digest: imageDigest("edge") } }),
+        /fin-next-edge was not built: every release image is required/,
+      ],
+      [
+        "no record of one image (its leg failed, or its artefact is gone)",
+        (dir) => {
+          const hashes = imageRecords(dir, SHA);
+          rmSync(join(dir, `image-record-connector-${SHA}`), { recursive: true });
+          return hashes;
+        },
+        /not exactly one artefact per release image .*: no record of fin-next-connector$/,
+      ],
+      [
+        "no image records at all",
+        () => ({}),
+        /no record of fin-next-console; no record of fin-next-admin; .*no record of fin-next-connector$/,
+      ],
+    ];
+    for (const [what, plant, why] of cases) {
+      const { root, env } = runUpTo(plant);
+      assert.throws(() => writeManifest({ root, env }), why, what);
+      assert.ok(!existsSync(join(root, "release", "out")), `${what}: no manifest is written`);
+    }
+    // The manifest step itself, as release.yml runs it: it fails with the error as an annotation
+    // and leaves no manifest for the upload and attest steps; with every image built it passes.
+    const manifestStep = (/** @type {{ root: string, env: Record<string, unknown> }} */ run) =>
+      spawnSync(
+        process.execPath,
+        [join(ROOT, ".github", "scripts", "release-static.mjs"), "manifest"],
+        {
+          cwd: run.root,
+          env: { PATH: process.env.PATH, ...run.env },
+          encoding: "utf8",
+        },
+      );
+    const bad = runUpTo((dir) => imageRecords(dir, SHA, { verify: { built: false, why: "x" } }));
+    const failed = manifestStep(bad);
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stdout, /^::error title=release::fin-next-verify was not built \(x\)/m);
+    assert.ok(!existsSync(join(bad.root, "release", "out", "release-manifest.json")));
+    const good = runUpTo((dir) => imageRecords(dir, SHA));
+    const passed = manifestStep(good);
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.match(passed.stdout, /^release\.manifest commit=1{40} images=6 /m);
+    assert.ok(existsSync(join(good.root, "release", "out", "release-manifest.json")));
+  });
+
   it("takes only the records their own jobs wrote, as those jobs' outputs pin them", (t) => {
     /**
-     * A run up to the manifest, with nothing built; then `plant` changes what the manifest job
-     * downloaded or was given.
+     * A run up to the manifest, with every image and no static output built; then `plant`
+     * changes what the manifest job downloaded or was given.
      * @param {(root: string, env: Record<string, string | undefined>) => void} plant
      */
     const manifestAfter = (plant) => {
@@ -759,7 +875,7 @@ describe("build, merge, record and manifest end to end", () => {
       plant(root, manifestEnv);
       return () => writeManifest({ root, env: manifestEnv });
     };
-    assert.deepEqual(manifestAfter(() => {})().images, { "fin-next-api": `sha256:${HEX("a")}` });
+    assert.equal(manifestAfter(() => {})().images["fin-next-api"], `sha256:${HEX("a")}`);
     const apiRecord = (/** @type {string} */ root) =>
       join(root, "release", "images", `image-record-api-${SHA}`, "fin-next-api.json");
     /** @type {[string, (root: string, env: Record<string, string | undefined>) => void, RegExp][]} */
@@ -928,14 +1044,18 @@ describe("the manifest's pieces", () => {
       api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("a")}` },
     });
     const read = readImageRecords(dir, { sha: SHA, owner: "Owner", hashes });
-    assert.deepEqual(read.images, { "fin-next-api": `sha256:${HEX("a")}` });
-    assert.deepEqual(read.refs, {
-      "fin-next-api": `ghcr.io/owner/fin-next-api@sha256:${HEX("a")}`,
-    });
-    assert.equal(read.skipped.length, RELEASE_IMAGES.length - 1);
+    assert.deepEqual(Object.keys(read), ["images", "refs"], "nothing is ever skipped");
+    assert.deepEqual(
+      Object.keys(read.images),
+      RELEASE_IMAGES.map((i) => `fin-next-${i}`),
+    );
+    assert.equal(read.images["fin-next-api"], `sha256:${HEX("a")}`);
+    assert.equal(read.images["fin-next-edge"], imageDigest("edge"));
+    assert.equal(read.refs["fin-next-api"], `ghcr.io/owner/fin-next-api@sha256:${HEX("a")}`);
+    assert.equal(read.refs["fin-next-edge"], `ghcr.io/owner/fin-next-edge@${imageDigest("edge")}`);
   });
 
-  it("refuses a malformed, foreign, missing, extra or second image record", (t) => {
+  it("refuses a malformed, foreign, unbuilt, missing, extra or second image record", (t) => {
     const good = {
       built: true,
       ref: "ghcr.io/owner/fin-next-api",
@@ -970,9 +1090,24 @@ describe("the manifest's pieces", () => {
         /is not fin-next-api's record/,
       ],
       [
-        "a record neither built nor skipped",
-        (dir) => imageRecords(dir, SHA, { api: { built: "yes" } }),
-        /neither built/,
+        "a record that is neither built nor not",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, built: "yes" } }),
+        /fin-next-api was not built: every release image is required/,
+      ],
+      [
+        "a record of an image that was not built",
+        (dir) => imageRecords(dir, SHA, { api: { built: false, why: "line one\nline two" } }),
+        /fin-next-api was not built \(line one\?line two\)/,
+      ],
+      [
+        "a built record without a digest",
+        (dir) => imageRecords(dir, SHA, { api: { built: true, ref: good.ref } }),
+        /fin-next-api: the record has no image digest/,
+      ],
+      [
+        "a built record with a null digest",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, digest: null } }),
+        /fin-next-api: the record has no image digest/,
       ],
       [
         "an extra record artefact",
@@ -981,7 +1116,21 @@ describe("the manifest's pieces", () => {
           writeTree(dir, { [`image-record-zz-${SHA}/fin-next-zz.json`]: "{}" });
           return hashes;
         },
-        /not exactly one artefact per release image/,
+        /not exactly one artefact per release image .*: an artefact no release image has, image-record-zz-1{40}$/,
+      ],
+      [
+        "a record of an image outside the matrix (payments is not built by this release)",
+        (dir) => {
+          const hashes = imageRecords(dir, SHA, { api: good });
+          writeTree(dir, {
+            [`image-record-payments-${SHA}/fin-next-payments.json`]: JSON.stringify({
+              image: "fin-next-payments",
+              ...good,
+            }),
+          });
+          return hashes;
+        },
+        /an artefact no release image has, image-record-payments-/,
       ],
       [
         "a missing record",
@@ -990,7 +1139,7 @@ describe("the manifest's pieces", () => {
           rmSync(join(dir, `image-record-edge-${SHA}`), { recursive: true });
           return hashes;
         },
-        /not exactly one artefact per release image/,
+        /not exactly one artefact per release image .*: no record of fin-next-edge$/,
       ],
       [
         "a record of another commit",
@@ -1375,9 +1524,47 @@ describe("release.yml", () => {
       record_sha256: `${E} steps.record.outputs.record_sha256 }}`,
     });
     assert.equal(env.RECORD_SHA256_STATIC, `${E} needs.static.outputs.record_sha256 }}`);
-    const script = readFileSync(join(ROOT, ".github", "scripts", "release-image.sh"), "utf8");
-    assert.match(script, /hash="\$\(sha256sum "\$record"\)"\n\s+echo "record_sha256_\$\{IMAGE\}=/);
-    assert.equal(script.match(/^\s*record_output$/gm)?.length, 2, "both records are hashed");
+    // release-image.sh's own output, the record's SHA-256, is checked by running it
+    // (release-image.test.mjs).
+  });
+
+  it("lets no image leg pass without its image, and writes no manifest after a failed leg", () => {
+    /**
+     * The node at a path of keys under a node, if there is one.
+     * @param {import("../workflow-rules.mjs").OutlineNode | undefined} node
+     * @param {string[]} keys
+     */
+    const at = (node, ...keys) => {
+      let found = node;
+      for (const key of keys) found = found === undefined ? undefined : child(found, key);
+      return found;
+    };
+    const images = job("images");
+    assert.equal(
+      at(images, "strategy", "matrix", "image")?.value,
+      `[${RELEASE_IMAGES.join(", ")}]`,
+      "the matrix builds exactly RELEASE_IMAGES, the images the manifest requires",
+    );
+    const steps = at(images, "steps")?.children ?? [];
+    for (const node of [images, ...steps]) {
+      assert.equal(at(node, "continue-on-error"), undefined, "a failed leg fails the job");
+    }
+    assert.equal(
+      at(
+        steps.find((s) => at(s, "id")?.value === "build"),
+        "run",
+      )?.value,
+      ".github/scripts/release-image.sh",
+    );
+    // The image is attested whenever the build step passed: no output decides to skip it.
+    const attest = steps.find((s) => (at(s, "uses")?.value ?? "").startsWith("actions/attest@"));
+    assert.ok(attest !== undefined);
+    assert.equal(at(attest, "if"), undefined);
+    // The manifest job needs the images job and runs only when it succeeded: no `if:`, such as
+    // always(), that would run it after a failed leg.
+    const manifest = job("manifest");
+    assert.equal(at(manifest, "needs")?.value, "[images, static]");
+    assert.equal(at(manifest, "if"), undefined);
   });
 
   it("downloads each image record into its own folder, never merged into one", () => {
