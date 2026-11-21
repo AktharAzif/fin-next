@@ -1,8 +1,8 @@
 -- The developer realm's library tables (spec 02 §13.2). Expand only. The columns are the ones
 -- Better Auth 1.7.25 and its two-factor and passkey plugins need, with Fin's session fields;
 -- SP-10's pin test compares them with the installed library (T-SAT-02).
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 CREATE TABLE identity."user" (
   id text PRIMARY KEY CHECK (id ~ '^usr_[0-9a-hjkmnp-tv-z]{26}$'),

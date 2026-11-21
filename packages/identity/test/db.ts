@@ -30,18 +30,31 @@ const PLATFORM_GRANTS: GrantFragment = {
   area: "platform-test",
   grants: [
     {
-      role: "fin_console",
+      on: "schema",
+      name: "audit",
+      privileges: ["USAGE"],
+      to: ["fin_api", "fin_console", "fin_admin"],
+    },
+    { on: "schema", name: "email", privileges: ["USAGE"], to: ["fin_console", "fin_admin"] },
+    { on: "schema", name: "ops", privileges: ["USAGE"], to: ["fin_console", "fin_admin"] },
+    {
+      on: "function",
+      name: "audit.record(jsonb)",
       privileges: ["EXECUTE"],
-      functions: ["audit.record(jsonb)", "email.enqueue(jsonb)"],
+      to: ["fin_api", "fin_console", "fin_admin"],
     },
     {
-      role: "fin_admin",
+      on: "function",
+      name: "email.enqueue(jsonb)",
       privileges: ["EXECUTE"],
-      functions: ["audit.record(jsonb)", "email.enqueue(jsonb)"],
+      to: ["fin_console", "fin_admin"],
     },
-    { role: "fin_api", privileges: ["EXECUTE"], functions: ["audit.record(jsonb)"] },
-    { role: "fin_console", privileges: ["SELECT"], tables: ["ops.kill_switch"] },
-    { role: "fin_admin", privileges: ["SELECT"], tables: ["ops.kill_switch"] },
+    {
+      on: "table",
+      name: "ops.kill_switch",
+      privileges: ["SELECT"],
+      to: ["fin_console", "fin_admin"],
+    },
   ],
 };
 

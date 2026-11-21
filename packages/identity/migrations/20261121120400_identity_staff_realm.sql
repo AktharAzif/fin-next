@@ -2,8 +2,8 @@
 -- named `member` (S2-23), Fin's session fields, proofs, the TOTP step and enrolment codes
 -- ([SA-29]). L-SAT-04 adds staff roles, the change lock, the bootstrap and the views in its own
 -- `_staff_*` migrations; this file holds only what the staff realm's sign-in needs to run.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 CREATE TABLE staff.member (
   id text PRIMARY KEY CHECK (id ~ '^stf_[0-9a-hjkmnp-tv-z]{26}$'),

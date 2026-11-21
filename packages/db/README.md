@@ -6,17 +6,44 @@ registrations, and typed access to Phase 0's `ops` tables.
 
 ## Adding to the schema (every area's lane)
 
-- **A migration** is `migrations/<YYYYMMDDHHMMSS>_<area>_<what>.sql`, hand-written, later than the newest
-  file on `main`, beginning with `SET LOCAL lock_timeout = '…';` and `SET LOCAL statement_timeout = '…';`.
-  The runner applies pending files in name order in one transaction under `LOCK TABLE
-  ops.schema_migrations IN EXCLUSIVE MODE`, records each file's SHA-256 and refuses a changed applied
-  file. A file whose first line is `-- fin:non-transactional` holds exactly one statement.
-- **Grants** go in `roles/grants/<area>.json` (`{ area, grants: [{ on, name, privileges, columns?, to }] }`).
-  The runner applies them exactly: everything Fin's roles hold on an object fin_owner owns is revoked and
-  re-granted from the fragments, so a statement no fragment allows fails with SQLSTATE 42501. Grant to
-  the group roles (`fin_api`, …), never to a login. `email.enqueue()` is owned by `fin_email_enqueue`
-  (NOLOGIN; fin_owner is its one member), whose grants the runner applies the same way; it may use
-  `email_private`, the worker's schema, and holds only what the function needs.
+- **A migration** is `migrations/<YYYYMMDDHHMMSS>_<area>_<what>.sql` in the package that owns the area
+  (this package's for Phase 0's), hand-written, later than the newest file on `main`, beginning with
+  `SET LOCAL lock_timeout = '…';` and `SET LOCAL statement_timeout = '…';`. The runner applies pending
+  files in name order across every package in one transaction under `LOCK TABLE ops.schema_migrations
+  IN EXCLUSIVE MODE`, records each file's SHA-256 and refuses a changed applied file. A file whose first
+  line is `-- fin:non-transactional` holds exactly one statement.
+- **Grants** go in `roles/grants/<area>.json` here or `grants/<area>.json` in the owning package
+  (`{ area, grants: [{ on, name, privileges, columns?, to }] }`). The runner applies them exactly:
+  everything Fin's roles hold on an object fin_owner owns is revoked and re-granted from the fragments,
+  so a statement no fragment allows fails with SQLSTATE 42501. Grant to the group roles (`fin_api`, …),
+  never to a login, and give each role `USAGE` on the schemas of its objects. `email.enqueue()` is owned
+  by `fin_email_enqueue` (NOLOGIN; fin_owner is its one member), whose grants the runner applies the same
+  way; it may use `email_private`, the worker's schema, and holds only what the function needs.
+
+## Every package's files
+
+`src/assets.ts` holds the one rule the runner, the image and the release manifest share. Under a root
+laid out as the repository is, it reads `packages/*/bootstrap/*.sql`, `packages/*/migrations/*.sql`,
+`packages/*/grants/*.json` and `packages/db/roles/grants/*.json`; each kind is one list in file-name
+order across packages, and two files of a kind with one name are refused (`db_assets_duplicate`), as
+are two migrations sharing a timestamp. A root with none of a kind is refused (`db_assets_missing`)
+before any statement runs, since an empty grant set would revoke everything.
+
+- **The root** is the repository when `migrate` runs from the source tree or from a bundle built in it
+  (found by walking up to `pnpm-workspace.yaml`), and `FIN_DB_ASSETS_DIR` otherwise. The app image
+  sets `FIN_DB_ASSETS_DIR=/app/db-assets` (`IMAGE_ASSETS_DIR`) and copies there, read-only, exactly the
+  files the rule finds, laid out as in the source: its `db-assets` stage runs
+  `node packages/db/src/assets-cli.ts stage /out/db-assets`, which checks the copy yields the same set
+  byte for byte. Outside the source tree without the variable, `migrate` exits 78 naming it.
+- **The release manifest's migrations** come from `listMigrations(root)`, or, for a script that may
+  not import this package, `node packages/db/src/assets-cli.ts migrations`, which prints
+  `{"migrations":[…],"minimumSchemaVersion":"<newest>"}`.
+- **Tests**: `createTestDatabase()` applies every package's files, as `migrate` does; pass
+  `packages: ["db"]` for Phase 0's alone (the AC-P0-39, role and guard-registry tests do).
+  `assets.db.test.ts` applies the whole set to an empty database. After the files and grants,
+  `migrate --migrate` runs its own step in the same transaction (apps/api's `afterMigrations`: the
+  audit registry and `email.enqueue()`'s template allowlist from the catalogue); a test that needs the
+  database exactly as `migrate` leaves it passes that step as `after`.
 - **A guarded table** (a write that must carry its audit event, spec 08 §3.5) is registered in
   `src/guards/<area>.ts` with `defineGuards`, and the area's migration calls
   `audit.install_guard('<table>'::regclass, ARRAY[<ops>], '<key column>', ARRAY[<events>])` with the same

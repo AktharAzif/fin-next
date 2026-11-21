@@ -3,29 +3,28 @@
   "area": "step-up",
   "grants": [
     {
-      "role": "fin_console",
-      "privileges": ["SELECT", "INSERT", "UPDATE"],
-      "tables": ["ops.step_up_intent"]
+      "on": "schema",
+      "name": "ops",
+      "privileges": ["USAGE"],
+      "to": ["fin_api", "fin_worker", "fin_console", "fin_admin", "fin_readonly"]
     },
     {
-      "role": "fin_admin",
+      "on": "table",
+      "name": "ops.step_up_intent",
       "privileges": ["SELECT", "INSERT", "UPDATE"],
-      "tables": ["ops.step_up_intent"]
+      "to": ["fin_console", "fin_admin"]
     },
     {
-      "role": "fin_api",
+      "on": "table",
+      "name": "ops.step_up_intent",
       "privileges": ["SELECT"],
-      "tables": ["ops.step_up_intent"]
+      "to": ["fin_api", "fin_readonly"]
     },
     {
-      "role": "fin_worker",
+      "on": "function",
+      "name": "ops.sweep_step_up()",
       "privileges": ["EXECUTE"],
-      "functions": ["ops.sweep_step_up()"]
-    },
-    {
-      "role": "fin_readonly",
-      "privileges": ["SELECT"],
-      "tables": ["ops.step_up_intent"]
+      "to": ["fin_worker"]
     }
   ]
 }

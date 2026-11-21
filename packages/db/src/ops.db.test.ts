@@ -32,7 +32,8 @@ let db: TestDatabase;
 let su: PgClient;
 
 beforeAll(async () => {
-  db = await createTestDatabase({ prefix: "p0e" });
+  // Phase 0's objects: packages/db's files alone (assets.db.test.ts applies every package's).
+  db = await createTestDatabase({ prefix: "p0e", packages: ["db"] });
   su = await db.superuser();
 });
 

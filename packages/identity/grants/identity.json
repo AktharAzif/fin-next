@@ -1,62 +1,131 @@
 {
-  "$comment": "The developer realm's grants (spec 02 §13.7). Read by the migration runner's grant renderer (packages/db, P0-E); test/grants.ts renders the same shape for the integration tests. A role named here holds exactly these privileges on these objects and USAGE on their schemas; every other statement fails with 42501.",
+  "$comment": "The developer realm's grants (spec 02 §13.7), in the migration runner's shape (packages/db's grants.ts), which applies them exactly; test/grants.ts renders the same fragments for this package's integration tests. A role named here holds exactly these privileges on these objects and USAGE on their schemas; every other statement fails with 42501.",
   "area": "identity",
   "grants": [
     {
-      "role": "fin_console",
+      "on": "schema",
+      "name": "identity",
+      "privileges": ["USAGE"],
+      "to": ["fin_api", "fin_worker", "fin_console", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.user",
       "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-      "tables": [
-        "identity.user",
-        "identity.session",
-        "identity.account",
-        "identity.verification",
-        "identity.passkey",
-        "identity.two_factor",
-        "identity.assurance",
-        "identity.totp_step",
-        "identity.known_browser",
-        "identity.trusted_browser",
-        "identity.email_code_request",
-        "identity.sign_up_request"
-      ]
+      "to": ["fin_console"]
     },
     {
-      "role": "fin_console",
+      "on": "table",
+      "name": "identity.session",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.account",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.verification",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.passkey",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.two_factor",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.assurance",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.totp_step",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.known_browser",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.trusted_browser",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.email_code_request",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.sign_up_request",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.email_code_lock",
       "privileges": ["SELECT", "UPDATE"],
-      "tables": ["identity.email_code_lock"]
+      "to": ["fin_console"]
     },
     {
-      "role": "fin_console",
+      "on": "table",
+      "name": "identity.privileged_permission",
       "privileges": ["SELECT"],
-      "tables": ["identity.privileged_permission"]
+      "to": ["fin_console", "fin_readonly"]
     },
     {
-      "role": "fin_console",
+      "on": "function",
+      "name": "identity.person_gate(text)",
       "privileges": ["EXECUTE"],
-      "functions": ["identity.person_gate(text)"]
+      "to": ["fin_api", "fin_console"]
     },
     {
-      "role": "fin_api",
+      "on": "table",
+      "name": "identity.session_view",
       "privileges": ["SELECT"],
-      "tables": ["identity.session_view", "identity.proof_view"]
+      "to": ["fin_api"]
     },
     {
-      "role": "fin_api",
-      "privileges": ["EXECUTE"],
-      "functions": [
-        "identity.person_gate(text)",
-        "identity.revoke_trusted_browsers(text, text, jsonb, text, text)"
-      ]
-    },
-    {
-      "role": "fin_worker",
-      "privileges": ["EXECUTE"],
-      "functions": ["identity.sweep()"]
-    },
-    {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.proof_view",
       "privileges": ["SELECT"],
-      "table": "identity.user",
+      "to": ["fin_api"]
+    },
+    {
+      "on": "function",
+      "name": "identity.revoke_trusted_browsers(text, text, jsonb, text, text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api"]
+    },
+    {
+      "on": "function",
+      "name": "identity.sweep()",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "identity.user",
+      "privileges": ["SELECT"],
       "columns": [
         "id",
         "name",
@@ -66,12 +135,13 @@
         "two_factor_enabled",
         "created_at",
         "updated_at"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.session",
       "privileges": ["SELECT"],
-      "table": "identity.session",
       "columns": [
         "id",
         "user_id",
@@ -87,12 +157,13 @@
         "current_organization_id",
         "created_at",
         "updated_at"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.account",
       "privileges": ["SELECT"],
-      "table": "identity.account",
       "columns": [
         "id",
         "user_id",
@@ -103,18 +174,20 @@
         "scope",
         "created_at",
         "updated_at"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.verification",
       "privileges": ["SELECT"],
-      "table": "identity.verification",
-      "columns": ["id", "identifier", "expires_at", "created_at", "updated_at"]
+      "columns": ["id", "identifier", "expires_at", "created_at", "updated_at"],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.passkey",
       "privileges": ["SELECT"],
-      "table": "identity.passkey",
       "columns": [
         "id",
         "name",
@@ -127,29 +200,39 @@
         "transports",
         "aaguid",
         "created_at"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.two_factor",
       "privileges": ["SELECT"],
-      "table": "identity.two_factor",
-      "columns": ["id", "user_id", "verified", "failed_verification_count", "locked_until"]
+      "columns": ["id", "user_id", "verified", "failed_verification_count", "locked_until"],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.assurance",
       "privileges": ["SELECT"],
-      "tables": ["identity.assurance", "identity.totp_step", "identity.privileged_permission"]
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.totp_step",
       "privileges": ["SELECT"],
-      "table": "identity.known_browser",
-      "columns": ["id", "user_id", "label", "first_seen_at", "last_seen_at"]
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.known_browser",
       "privileges": ["SELECT"],
-      "table": "identity.trusted_browser",
+      "columns": ["id", "user_id", "label", "first_seen_at", "last_seen_at"],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.trusted_browser",
+      "privileges": ["SELECT"],
       "columns": [
         "id",
         "user_id",
@@ -159,12 +242,13 @@
         "expires_at",
         "revoked_at",
         "revoked_reason"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.email_code_request",
       "privileges": ["SELECT"],
-      "table": "identity.email_code_request",
       "columns": [
         "id",
         "purpose",
@@ -176,13 +260,15 @@
         "other_tries",
         "superseded_at",
         "used_at"
-      ]
+      ],
+      "to": ["fin_readonly"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "identity.sign_up_request",
       "privileges": ["SELECT"],
-      "table": "identity.sign_up_request",
-      "columns": ["id", "email", "name", "invitation_id", "created_at", "expires_at", "used_at"]
+      "columns": ["id", "email", "name", "invitation_id", "created_at", "expires_at", "used_at"],
+      "to": ["fin_readonly"]
     }
   ]
 }

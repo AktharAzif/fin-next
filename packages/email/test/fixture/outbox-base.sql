@@ -3,9 +3,9 @@
 -- run against lane-prefixed roles: the grant table's role CHECK is left out, the seeded
 -- `ops/delivery-check` grant names `{{fin_worker}}`, and email.enqueue()'s owner is
 -- `{{fin_email_enqueue}}`. It also makes the two schemas, as the platform's bootstrap does. So
--- `email_sender.sql` is tested on the real upgrade path, seed row included. It also stands in for the
--- one `ops` table the worker's delivery check writes (`ops.duty_state`, P0-E's `<ts>_ops_core.sql`). It
--- is never applied anywhere but the test database; when the data lane's migrations are on main, the
+-- `<ts>_email_sender.sql` is tested on the real upgrade path, seed row included. It also stands in for
+-- the one `ops` table the worker's delivery check writes (`ops.duty_state`, P0-E's `<ts>_ops_core.sql`).
+-- It is never applied anywhere but the test database; when the data lane's migrations are on main, the
 -- tests apply those instead (open item in the pull request).
 CREATE SCHEMA email;
 CREATE SCHEMA email_private;

@@ -12,6 +12,7 @@ import {
   type LineSink,
   type PoolSettings,
   type Queryable,
+  type TlsSettings,
   type UnitContext,
 } from "@fin/db";
 import { z } from "zod";
@@ -134,16 +135,21 @@ export async function runDatabaseProbe(
 }
 
 const probeEnv = z.object({
+  FIN_ENVIRONMENT: z.enum(["development", "ci", "staging", "production"]).optional(),
   FIN_DB_HOST: z.string().min(1),
   FIN_DB_PORT: z.string().regex(/^[1-9][0-9]{0,4}$/),
   FIN_DB_NAME: z.string().min(1),
   FIN_DB_PROBE_PASSWORD: z.string().min(16).max(256),
-  FIN_DB_CA_PEM: z.string().min(1),
+  FIN_DB_CA_PEM: z.string().optional(),
 });
+
+const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /**
  * The probe's own one-connection pool, as fin_probe. FIN_DB_PROBE_PASSWORD is the worker's second
- * database credential (recorded as an open item for spec 01 §6.7's table and the provisioning).
+ * database credential (recorded as an open item for spec 01 §6.7's table and the provisioning). TLS
+ * follows the worker pool's rule (`poolSettingsFromEnv`): verify-full against the pinned CA, and off
+ * only in development or CI against a loopback database.
  */
 export function probeDatabaseFromEnv(
   env: Readonly<Record<string, string | undefined>>,
@@ -157,13 +163,24 @@ export function probeDatabaseFromEnv(
     );
   }
   const e = parsed.data;
+  let tls: TlsSettings;
+  if (e.FIN_DB_CA_PEM !== undefined && e.FIN_DB_CA_PEM !== "") {
+    tls = { caPem: e.FIN_DB_CA_PEM, servername: e.FIN_DB_HOST };
+  } else if (
+    (e.FIN_ENVIRONMENT === "development" || e.FIN_ENVIRONMENT === "ci") &&
+    LOOPBACK.has(e.FIN_DB_HOST)
+  ) {
+    tls = { insecureLoopback: true };
+  } else {
+    throw new DatabaseConfigError("FIN_DB_CA_PEM", "is required outside a loopback test database");
+  }
   const settings: PoolSettings = {
     host: e.FIN_DB_HOST,
     port: Number(e.FIN_DB_PORT),
     database: e.FIN_DB_NAME,
     user: "fin_probe",
     password: e.FIN_DB_PROBE_PASSWORD,
-    tls: { caPem: e.FIN_DB_CA_PEM, servername: e.FIN_DB_HOST },
+    tls,
     applicationName: "fin-worker-probe",
     max: 1,
   };

@@ -8,7 +8,10 @@
 #   docker build -f ops/docker/app.Dockerfile --build-arg APP=console --target release .
 # Node is PID 1: the distroless image's entrypoint is node, and the exec-form CMD carries the flags.
 # No NODE_OPTIONS, no shell, no package manager and no node_modules in either run image: the server
-# is one Vite SSR bundle with its map beside it, unserved (S0-13).
+# is one Vite SSR bundle with its map beside it, unserved (S0-13). Beside it, read-only, are the
+# database's files from every package (bootstrap, migrations, grants) at FIN_DB_ASSETS_DIR, which
+# the api image's `migrate` service reads: exactly the set packages/db/src/assets.ts finds in the
+# source tree, laid out as there.
 
 # ---- deps: the pinned build image, pnpm from its release asset by checksum, the workspace installed
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS deps
@@ -33,6 +36,10 @@ RUN pnpm fetch --frozen-lockfile
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
+# ---- the database's files: every package's bootstrap, migrations and grants, by assets.ts's rule
+FROM deps AS db-assets
+RUN node packages/db/src/assets-cli.ts stage /out/db-assets
+
 # ---- the two bundles
 FROM deps AS build-release
 ARG APP
@@ -52,7 +59,9 @@ FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f
 ARG APP
 WORKDIR /app
 COPY --from=build-test /src/apps/${APP}/dist/server/ /app/dist/
-ENV FIN_CONTAINER=1
+COPY --from=db-assets /out/db-assets/ /app/db-assets/
+ENV FIN_CONTAINER=1 \
+    FIN_DB_ASSETS_DIR=/app/db-assets
 USER nonroot
 EXPOSE 8080
 CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]
@@ -62,7 +71,9 @@ FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f
 ARG APP
 WORKDIR /app
 COPY --from=build-release /src/apps/${APP}/dist/server/ /app/dist/
-ENV FIN_CONTAINER=1
+COPY --from=db-assets /out/db-assets/ /app/db-assets/
+ENV FIN_CONTAINER=1 \
+    FIN_DB_ASSETS_DIR=/app/db-assets
 USER nonroot
 EXPOSE 8080
 CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]
