@@ -160,6 +160,14 @@ describe("names already taken in the realm", () => {
     // U+03F9 GREEK CAPITAL LUNATE SIGMA SYMBOL is drawn as C, though it folds to a sigma.
     ["a Greek lunate sigma for the C", "\u{3f9}ash desk", ["Cash desk"]],
     ["one of several", "Billing", ["Support", "Billing"]],
+    // Right-to-left letters, in the order they are drawn: Arabic heh (o) and alef (l).
+    ["right-to-left letters, drawn as the name", "Po\u{627}\u{647}", ["Pool"]],
+    ["right-to-left letters, stored as the name", "Po\u{647}\u{627}", ["Pool"]],
+    // Letters of one of Unicode's classes, read as the others are.
+    ["a sharp s, drawn as β", "\u{df}illing", ["Billing"]],
+    ["a kra, drawn as κ", "Ris\u{138}", ["Risk"]],
+    ["a turned w, drawn as м", "Tea\u{28d}", ["Team"]],
+    ["a Latin letter named for another", "Suppo\u{a7a7}t", ["Support"]],
   ])("is taken: %s", (_what, name, takenNames) => {
     expect(taken(name, takenNames)).toEqual(["name_taken"]);
   });
@@ -170,6 +178,8 @@ describe("names already taken in the realm", () => {
     ["an accent", "Café team", ["Cafe team"]],
     ["another word order", "Desk support", ["Support desk"]],
     ["no names taken", "Support desk", []],
+    // Each order is compared with the same order: on one line the two are drawn apart.
+    ["punctuation at the other end", "!Team", ["Team!"]],
   ])("is not taken: %s", (_what, name, takenNames) => {
     expect(taken(name, takenNames)).toEqual([]);
   });
@@ -179,6 +189,8 @@ describe("names already taken in the realm", () => {
     expect(roleNameKey("Supp\u{43e}rt")).toBe("support");
     expect(roleNameKey("Support\u{3164}\u{fe0f}")).toBe("support");
     expect(roleNameKey("Tier 1")).not.toBe(roleNameKey("Tier 2"));
+    // As drawn on a left-to-right line: the right-to-left run "اه" is drawn "ها", "ol".
+    expect(roleNameKey("Po\u{627}\u{647}")).toBe("pool");
   });
 });
 
@@ -380,6 +392,102 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
       expect(readsAsBuiltIn(cat, name), cat.realm).toBe(false);
     }
   });
+
+  // A sign compatibility folding turns into another drawn otherwise: U+FE31 PRESENTATION FORM FOR
+  // VERTICAL EM DASH is drawn as l, though it folds to an em dash.
+  it.each([
+    ["Adm\u{fe31}n", [dash, staff]],
+    ["Adm\u{fe31}nistrator", [dash, staff]],
+    ["Super Adm\u{fe31}n", [dash]],
+    ["Comp\u{fe31}iance", [staff]],
+  ] as const)("%j, with a sign drawn as l, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  // Right-to-left letters are drawn in the opposite order from the one they are stored in: Arabic
+  // heh (U+0647, drawn as o), N'Ko ta (U+07E0, t), Arabic alef (U+0627, l), Hebrew tet (U+05D8,
+  // v). Both orders are refused: the one drawn as the built-in's name, and the one stored as it.
+  it.each([
+    ["Administra\u{647}\u{7e0}r", [dash, staff]], // drawn "AdministraTor"
+    ["Administra\u{7e0}\u{647}r", [dash, staff]], // stored as "Administrator"
+    ["Opera\u{647}\u{7e0}r", [staff]], // drawn "OperaTor"
+    ["Opera\u{7e0}\u{647}r", [staff]],
+    ["\u{627}\u{5d8}ewer", [staff]], // drawn "vlewer"
+    ["\u{5d8}\u{627}ewer", [staff]],
+  ] as const)("%j, read in the order it is drawn and stored, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  // A capital Unicode draws unlike its small letter reads as no Latin letter (Armenian Ա, though ա
+  // is drawn as w; Greek Σ, though σ is drawn as o), so it may stand for the letter it is seen as.
+  it.each([
+    ["S\u{531}PER ADMIN", [dash]], // drawn "SUPER ADMIN"
+    ["S\u{54d}PER ADMIN", [dash]], // U+054D, which Unicode draws as U
+    ["SUP\u{3a3}R ADMIN", [dash]],
+    ["OP\u{3a3}RATOR", [staff]],
+    ["COMPLIANC\u{3a3}", [staff]],
+  ] as const)("%j, with a capital drawn unlike its small letter, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  it("reads such a capital as no Latin letter, and its small letter as its own row says", () => {
+    expect(readingOf("\u{531}")).toBe("\u{561}"); // Armenian Ա: no Latin reading
+    expect(readingOf("\u{561}")).toBe("w"); // ա is drawn as w
+    expect(readingOf("\u{393}")).toBe("\u{3b3}"); // Greek Γ: no Latin reading
+    expect(readingOf("\u{3b3}")).toBe("y"); // γ is drawn as y
+    expect(readingOf("\u{3a3}\u{3a9}")).toBe("\u{3c3}\u{3c9}"); // Σ and Ω
+    expect(readingOf("\u{1b2}")).toBe("v"); // LATIN CAPITAL LETTER V WITH HOOK, by its name
+  });
+
+  // Every member of one of Unicode's classes reads as the others: c with bar and Ukrainian ie as ε
+  // (e), Sinhala anusvara as o, and in name_taken below, sharp s as β, kra as κ, turned w as м.
+  it.each([
+    "Vi\u{a793}w\u{a793}r", // U+A793 LATIN SMALL LETTER C WITH BAR
+    "\u{475}\u{456}\u{454}\u{51d}\u{454}\u{433}", // all Cyrillic, drawn "viewer"
+    "Operat\u{d82}r", // U+0D82 SINHALA SIGN ANUSVARAYA
+    "Operat\u{c02}r", // U+0C02 TELUGU SIGN ANUSVARA
+  ])(
+    "%j, with letters and marks of a class read as its others, is refused in Fin Admin",
+    (name) => {
+      expect(nameProblems(name, staff)).toContain("reads_as_built_in");
+    },
+  );
+
+  // Latin letters named for another with a stroke, hook or curl, or a form of it, or a small capital.
+  it.each([
+    ["A\u{221}mi\u{235}", [dash, staff]], // d and n with curl
+    ["\u{2c65}dmi\u{a7a5}", [dash, staff]], // a and n with a stroke
+    ["A\u{221}mi\u{235}is\u{236}ra\u{236}or", [dash, staff]],
+    ["\u{a7a9}u\u{a751}er A\u{221}min", [dash]],
+    ["\u{2c71}ie\u{2c73}er", [staff]], // v with right hook, w with hook
+    ["O\u{a751}e\u{a7a7}a\u{236}or", [staff]],
+    ["\u{255}om\u{a753}\u{234}iance", [staff]],
+    ["Vie\u{a7c3}e\u{a783}", [staff]], // ANGLICANA W, INSULAR R
+    ["\u{1d8f}\u{1d81}min", [dash, staff]], // a and d with a hook
+  ] as const)("%j, with Latin letters named for others, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+    }
+  });
+
+  // A letter that is not an ASCII one may stand for one letter in four, whatever it reads as.
+  it.each([
+    ["Admi\u{43d}", [dash, staff]], // Cyrillic н, read as h, for the n
+    ["Operato\u{44c}", [staff]], // Cyrillic ь, read as b, for the r
+  ] as const)(
+    "%j, with a letter of another script read as another letter, is refused",
+    (name, cats) => {
+      for (const cat of cats as readonly Catalogue[]) {
+        expect(nameProblems(name, cat), cat.realm).toContain("reads_as_built_in");
+      }
+    },
+  );
 
   it("is refused in the draft, with the name's other problems", () => {
     for (const cat of [dash, staff] as Catalogue[]) {

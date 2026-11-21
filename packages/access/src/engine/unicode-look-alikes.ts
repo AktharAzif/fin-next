@@ -1,21 +1,28 @@
 // Look-alike rows derived from Unicode's confusables data (UTS #39, Unicode Security Mechanisms,
-// confusables.txt version 18.0.0, dated 2026-08-06), for the role editor's reading of a name
-// (src/engine/role-editor.ts). Each entry is one character and what it is drawn as: Latin
-// letters, a digit or sign that stands for one, punctuation, or letters of no Latin reading.
+// confusables.txt version 18.0.0, dated 2026-08-06) and the names of the Latin letters
+// (UnicodeData.txt 18.0.0), for the role editor's reading of a name (src/engine/role-editor.ts).
+// Each entry is one character and what it is drawn as: Latin letters, a digit or sign that stands
+// for one, punctuation, or letters of no Latin reading.
 //
-// The rows come from every entry whose prototype holds a Latin letter, a digit or a sign, or only
-// punctuation (a letter drawn as a dot or a dash), for the characters Unicode 17.0 (Node 26's)
+// The rows come from every entry of the file, for the characters Unicode 17.0 (Node 26's)
 // assigns, less what the reading already gets right: ASCII, compatibility folding, and the
-// hand-made rows in role-editor.ts, which take precedence. The reading ignores case, which adds
-// one rule: a small letter drawn as no Latin letter reads as its capital does (Cyrillic ь as Ь,
-// b), and a capital has a row of its own only when its small letter is drawn as another letter.
+// hand-made rows in role-editor.ts, which take precedence. Each of Unicode's classes (the entries
+// that share a prototype, with the prototype) reads as one: a letter other letters are drawn as
+// reads as they do (ß as β, b). A Latin letter the file does not draw reads as the letter its name
+// says it is a form of ("D WITH CURL" is d). The reading ignores case, which adds two rules: a
+// small letter drawn as no Latin letter reads as its capital does (Cyrillic ь as Ь, b), and a
+// capital reads as its small letter only when the file draws it so (Greek Γ is not y, though γ
+// is), so a capital has a row of its own, or none, when it is drawn otherwise.
 //
-// src/engine/look-alikes.test.ts holds the rows to Unicode's data, in the subset committed as
-// src/test-support/confusables.ts: every entry must read as its prototype is drawn, and every row
-// must be one an entry asks for. To refresh them for a newer file, replace the subset and add or
-// change the rows each failing entry names (the package README describes the selection).
+// src/engine/look-alikes.test.ts holds the rows to Unicode's data, committed as
+// src/test-support/confusables.ts and src/test-support/latin-letters.ts: every entry must read as
+// its prototype is drawn, the members of each class alike, each capital and each named letter as
+// the data says, and every row must be one the data asks for. To refresh them for a newer file,
+// replace the data and add or change the rows each failing test names (the package README
+// describes the selection).
 //
-// This file and src/test-support/confusables.ts hold data derived from Unicode's data files:
+// This file, src/engine/drawn-order.ts and the files in src/test-support/ named above hold data
+// derived from Unicode's data files:
 //
 // UNICODE LICENSE V3
 //
@@ -72,15 +79,54 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{1ee7b}\u{63a}l \u{1ee7c}\u{649}l \u{1ee7e}\u{6a1}l",
     // Greek
     "\u{3f2}c \u{3f9}c",
+    // Common: the vertical em dash, drawn as l, read as the bar
+    "\u{fe31}|",
   ]),
-  /** Capitals drawn as a Latin letter their small letters are not: read before lower-casing. */
+  /**
+   * Capitals drawn as a Latin letter their small letters are not, by their entries or their names:
+   * read before lower-casing.
+   */
   capitals: Object.freeze([
     // Warang Citi
     "\u{118a6}e \u{118b5}o \u{118bc}t",
     // Armenian
     "\u{545}3",
     // Coptic
-    "\u{3ec}6",
+    "\u{3ec}6 \u{2c9c}3 \u{2cdc}6",
+    // Georgian (An, drawn as insular T)
+    "\u{10a0}t",
+    // Latin, by name (V WITH HOOK, though its small letter is drawn as u)
+    "\u{1b2}v",
+  ]),
+  /**
+   * Capitals Unicode does not draw as their small letters, whose small letters are drawn as Latin
+   * ones (Greek Γ, though γ is y; Armenian Ա, though ա is w): read as no Latin letter.
+   */
+  unlikeCapitals: Object.freeze([
+    "\u{de}\u{14a}\u{194}\u{19c}\u{1f7}\u{393}\u{3a3}\u{3a9}\u{3f7}\u{40b}\u{40f}\u{413}\u{490}",
+    "\u{492}\u{4bc}\u{4be}\u{500}\u{531}\u{533}\u{536}\u{53c}\u{540}\u{542}\u{54c}\u{551}\u{552}",
+    "\u{554}\u{556}\u{13b1}\u{1c97}\u{1ca7}\u{1cb3}\u{2c6d}\u{2c84}\u{a646}\u{a694}\u{a760}",
+    "\u{a780}\u{a79e}\u{118a1}\u{118aa}\u{118b6}\u{118b7}",
+  ]),
+  /**
+   * Latin letters Unicode's confusables data does not draw, read as the letter their names say:
+   * a letter "WITH" a stroke, hook, curl or tail ("LATIN SMALL LETTER D WITH CURL" is d), and a
+   * small capital ("LATIN LETTER SMALL CAPITAL F" is f) (UnicodeData.txt 18.0.0). A capital reads
+   * as its small letter.
+   */
+  named: Object.freeze([
+    "\u{221}d \u{234}l \u{235}n \u{236}t \u{23f}s \u{240}z \u{24b}q \u{255}c \u{26c}l \u{291}z",
+    "\u{29b}g \u{1d0c}l \u{1d6c}b \u{1d6d}d \u{1d71}p \u{1d79}g \u{1d80}b \u{1d81}d \u{1d82}f",
+    "\u{1d84}k \u{1d85}l \u{1d86}m \u{1d87}n \u{1d88}p \u{1d89}r \u{1d8a}s \u{1d8d}x \u{1d8e}z",
+    "\u{1d8f}a \u{1d91}d \u{1d92}e \u{1d96}i \u{1d99}u \u{2c61}l \u{2c65}a \u{2c71}v \u{2c73}w",
+    "\u{2c74}v \u{2c78}e \u{2c7a}o \u{a730}f \u{a743}k \u{a745}k \u{a747}l \u{a749}l \u{a74d}o",
+    "\u{a751}p \u{a753}p \u{a755}p \u{a757}q \u{a759}q \u{a75f}v \u{a77c}f \u{a783}r \u{a785}s",
+    "\u{a787}t \u{a78e}l \u{a791}n \u{a794}c \u{a797}b \u{a7a1}g \u{a7a3}k \u{a7a5}n \u{a7a7}r",
+    "\u{a7a9}s \u{a7af}q \u{a7b9}u \u{a7c1}o \u{a7c3}w \u{a7c8}d \u{a7ca}s \u{a7cd}s \u{a7d1}g",
+    "\u{a7d9}s \u{a7ff}m \u{ab33}e \u{ab34}e \u{ab36}g \u{ab37}l \u{ab38}l \u{ab39}l \u{ab3a}m",
+    "\u{ab3b}n \u{ab45}r \u{ab46}r \u{ab49}r \u{ab4b}r \u{ab4c}r \u{ab56}x \u{ab57}x \u{ab58}x",
+    "\u{ab59}x \u{1df04}l \u{1df09}t \u{1df11}l \u{1df13}l \u{1df16}r \u{1df1a}i \u{1df1b}o",
+    "\u{1df1d}c \u{1df1e}s \u{1df25}d \u{1df26}l \u{1df27}n \u{1df28}r \u{1df29}s \u{1df2a}t",
   ]),
   /** Letters, after lower-casing, and what each is drawn as. */
   letters: Object.freeze([
@@ -88,8 +134,8 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{e6}ae \u{fe}p \u{14b}n \u{153}oe \u{183}b \u{185}b \u{18c}d \u{18d}g \u{192}f \u{1a8}2",
     "\u{1ab}t \u{1bb}2 \u{1bd}s \u{1bf}p \u{21d}3 \u{223}8 \u{242}? \u{24f}y \u{25c}3 \u{25f}j",
     "\u{263}y \u{26e}l3 \u{26f}w \u{276}oe \u{27c}r \u{284}f \u{290}z \u{292}3 \u{294}?",
-    "\u{29d}j \u{2a0}q \u{2a3}dz \u{2a4}d3 \u{2a5}d\u{291} \u{2a6}ts \u{2a7}t\u{283}",
-    "\u{2a8}t\u{255} \u{2a9}fn \u{2aa}ls \u{2ab}lz \u{1d08}3 \u{1d11}o \u{1d14}\u{1dd}o",
+    "\u{29d}j \u{2a0}q \u{2a3}dz \u{2a4}d3 \u{2a5}dz \u{2a6}ts \u{2a7}t\u{283}",
+    "\u{2a8}tc \u{2a9}fn \u{2aa}ls \u{2ab}lz \u{1d08}3 \u{1d11}o \u{1d14}\u{1dd}o",
     "\u{1d24}2 \u{1d6b}ue \u{1d6e}f \u{1d6f}m \u{1d70}n \u{1d72}r \u{1d73}r \u{1d74}s \u{1d75}t",
     "\u{1d76}z \u{1d7b}i \u{1d7c}i \u{1d7d}p \u{1d7e}u \u{1d83}g \u{1d8c}y \u{1e9d}f \u{1efb}ll",
     "\u{1eff}y \u{2c66}t \u{2c68}h \u{2c6a}k \u{2c6c}z \u{a729}t3 \u{a72b}e \u{a733}aa",
@@ -99,6 +145,10 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{ab35}f \u{ab3d}o \u{ab3e}o \u{ab41}\u{1dd}o \u{ab42}\u{1dd}o \u{ab43}co \u{ab44}co",
     "\u{ab47}r \u{ab48}r \u{ab4e}u \u{ab51}m \u{ab52}u \u{ab53}x \u{ab55}x \u{ab5a}y",
     "\u{ab62}\u{254}e \u{ab63}uo \u{ab64}a",
+    // Latin letters other letters are drawn as, read as those letters are: sharp s as β (b), kra
+    // as κ (k), turned w as м (m), c with bar as ε (e); Middle Scots s as sharp s; and two letters
+    // drawn as letters whose names say what they are (insular D, q with hook tail)
+    "\u{df}b \u{138}k \u{28d}m \u{a793}e \u{a7d7}b \u{a77a}d \u{1d90}q",
     // Canadian Aboriginal
     "\u{1424}\u{b0} \u{1427}\u{b7} \u{1428}\u{2c9} \u{1429}+ \u{142f}v \u{1433}>",
     "\u{1437}\u{b7}> \u{1438}< \u{143a}\u{b7}v \u{143b}v\u{b7} \u{1440}\u{b7}> \u{1441}>\u{b7}",
@@ -118,7 +168,7 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{499}3 \u{49b}k \u{49f}k \u{4a3}h \u{4ab}c \u{4ad}t \u{4b1}y \u{4b3}x \u{4bd}e \u{4bf}e",
     "\u{4c8}h \u{4ca}h \u{4ce}m \u{4d5}ae \u{4e1}3 \u{4e9}o \u{50d}g \u{511}e \u{1c82}o",
     "\u{1c83}c \u{1c84}7 \u{a645}2 \u{a647}i \u{a64d}w \u{a651}\u{2c9}bi \u{a68d}t \u{a695}h",
-    "\u{a699}oo",
+    "\u{a699}oo \u{454}e",
     // Hangul
     "\u{110b}o \u{111b}\u{1105}o \u{111d}\u{1106}o \u{112b}\u{1107}o \u{112c}\u{1107}\u{1107}o",
     "\u{1135}\u{1109}o \u{1141}o\u{1100} \u{1142}o\u{1103} \u{1143}o\u{1106} \u{1144}o\u{1107}",
@@ -130,10 +180,10 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{a976}o\u{1105} \u{a977}o\u{1112} \u{d7dd}\u{1105}o \u{d7eb}\u{1109}\u{1107}o",
     "\u{d7f4}\u{1140}\u{1107}o",
     // Coptic
-    "\u{3e9}2 \u{3ed}o \u{2c83}b \u{2c85}r \u{2c8d}z \u{2c8f}h \u{2c91}o \u{2c93}i \u{2c95}k",
-    "\u{2c99}m \u{2c9b}n \u{2c9d}3 \u{2c9f}o \u{2ca3}p \u{2ca5}c \u{2ca7}t \u{2ca9}y \u{2cad}x",
+    "\u{3e9}2 \u{3ed}o \u{2c83}b \u{2c85}r \u{2c89}e \u{2c8d}z \u{2c8f}h \u{2c91}o \u{2c93}i",
+    "\u{2c95}k \u{2c99}m \u{2c9b}n \u{2c9f}o \u{2ca3}p \u{2ca5}c \u{2ca7}t \u{2ca9}y \u{2cad}x",
     "\u{2cb1}w \u{2cb3}- \u{2cb5}<\u{b7} \u{2cb7}\u{2261} \u{2cbb}- \u{2cbd}w \u{2cc5}3",
-    "\u{2cc7}/ \u{2ccb}9 \u{2ccd}3 \u{2ccf}p \u{2cd1}l \u{2cd3}6 \u{2cdd}6",
+    "\u{2cc7}/ \u{2ccb}9 \u{2ccd}3 \u{2ccf}p \u{2cd1}l \u{2cd3}6",
     // Lisu
     "\u{a4d0}b \u{a4d1}p \u{a4d2}d \u{a4d3}d \u{a4d4}t \u{a4d6}g \u{a4d7}k \u{a4d9}j \u{a4da}c",
     "\u{a4dc}z \u{a4dd}f \u{a4df}m \u{a4e0}n \u{a4e1}l \u{a4e2}s \u{a4e3}r \u{a4e6}v \u{a4e7}h",
@@ -141,7 +191,7 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     // Cherokee
     "\u{13fa}h \u{13fb}g \u{ab74}o \u{ab79}y \u{ab7e}? \u{ab81}r \u{ab8d}y \u{ab8e}o \u{ab8f}t",
     "\u{ab92}h \u{ab97}w \u{ab9b}e \u{ab9c}u \u{ab9e}4 \u{ab9f}b \u{aba2}r \u{aba4}w \u{aba5}s",
-    "\u{abb7}d \u{abbb}o \u{abbe}6",
+    "\u{abb7}d \u{abbb}o \u{abbe}6 \u{13f8}b",
     // Warang Citi
     "\u{118c0}v \u{118c1}s \u{118c2}f \u{118c3}i \u{118c4}y \u{118c6}7 \u{118c8}o \u{118c9}z",
     "\u{118ca}3 \u{118cc}9 \u{118ce}e \u{118cf}4 \u{118d2}l \u{118d5}6 \u{118d6}9 \u{118d7}o",
@@ -247,7 +297,10 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     // Tirhuta
     "\u{114c5}w",
   ]),
-  /** Digits, punctuation and symbols drawn as Latin letters, each of which may stand for them. */
+  /**
+   * Digits, punctuation, symbols and spacing marks drawn as Latin letters, each of which may stand
+   * for them.
+   */
   signs: Object.freeze([
     // Common
     "\u{a2}c \u{a5}y \u{d7}x \u{964}l \u{965}ll \u{16ed}t \u{2016}ll \u{2030}oo \u{2031}ooo",
@@ -261,6 +314,8 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     "\u{1d100}l \u{1d134}c \u{1d373}t \u{1d377}l \u{1ed01}l \u{1f10f}s \u{1f16d}cc \u{1f16e}c",
     "\u{1f700}qe \u{1f707}ar \u{1f708}v \u{1f714}o \u{1f74c}c \u{1f75c}sss \u{1f768}t",
     "\u{1f76b}mb \u{1f76c}vb",
+    // Common: symbols drawn as c with bar, which reads as ε does
+    "\u{22f4}e \u{2377}e",
     // Greek
     "\u{1017e}f \u{1018b}d \u{1018e}n \u{1d206}e \u{1d207}b \u{1d20c}w \u{1d20d}v \u{1d212}t",
     "\u{1d213}f \u{1d216}r \u{1d21a}o \u{1d221}e \u{1d222}w \u{1d22a}l \u{1d245}n",
@@ -293,19 +348,19 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     // Gujarati
     "\u{ae6}o \u{ae9}e",
     // Malayalam
-    "\u{d66}o \u{d6d}g",
+    "\u{d02}o \u{d66}o \u{d6d}g",
     // Mende Kikakui
     "\u{1e8c7}l \u{1e8cb}b",
     // Modi
     "\u{11641}l \u{11642}ll",
     // Newa
-    "\u{1144b}l \u{1144c}ll",
+    "\u{11445}b \u{1144b}l \u{1144c}ll",
     // Old Hungarian
     "\u{10cfa}l \u{10cfc}x",
     // Old Italic
     "\u{10320}l \u{10322}x",
     // Oriya
-    "\u{b66}o \u{b68}g",
+    "\u{b03}b \u{b66}o \u{b68}g",
     // Saurashtra
     "\u{a8ce}l \u{a8cf}ll",
     // Sharada
@@ -325,7 +380,7 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     // Hebrew
     "\u{5c0}l",
     // Kannada
-    "\u{ce6}o",
+    "\u{c82}o \u{ce6}o",
     // Khmer
     "\u{17e0}o",
     // Lao
@@ -337,11 +392,13 @@ const UNICODE_LOOK_ALIKES = Object.freeze({
     // Tamil
     "\u{be6}o",
     // Telugu
-    "\u{c66}o",
+    "\u{c02}o \u{c66}o",
     // Thai
     "\u{e50}o",
     // Tirhuta
     "\u{114d0}o",
+    // Batak, Grantha and Sinhala vowel signs and anusvaras (spacing marks)
+    "\u{1bea}o \u{1bec}x \u{11302}o \u{d82}o",
   ]),
 });
 

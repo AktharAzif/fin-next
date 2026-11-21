@@ -3,6 +3,7 @@
 // `roleDescription` rules live in packages/identity/src/names.ts (§8.6), which the server passes in
 // as `options.names`, so the server always runs both. Comparing a name with the built-in roles'
 // and with the realm's other custom roles is this file's alone.
+import { drawnOrder } from "./drawn-order.ts";
 import { isPermission, missingNeed } from "./permissions.ts";
 import { hasInvisible, withoutInvisible } from "./text.ts";
 import type { Catalogue, RoleProblem } from "./types.ts";
@@ -67,8 +68,9 @@ const table = (...rows: readonly string[]): ReadonlyMap<string, string> =>
 // over the rows derived from Unicode's confusables data (src/engine/unicode-look-alikes.ts), which
 // cover every other script. Exported apart from the declaration (below), for the tests.
 const LOOK_ALIKE_ROWS: readonly string[] = [
-  // Capitals whose lower-case forms read otherwise, made Latin capitals before lower-casing.
-  "ΗH ΜM ΝN ΥY ΖZ",
+  // Capitals whose lower-case forms read otherwise, made Latin capitals before lower-casing; and
+  // Coptic Alfa, drawn as A as Greek Alpha is (Unicode's data does not list it).
+  "ΗH ΜM ΝN ΥY ΖZ ⲀA",
   // Letters, after lower-casing, and the Latin letter each is drawn as. Cyrillic:
   "аa вb еe кk мm нh оo рp сc тt уy хx іi јj ѕs ԁd ԛq ԝw үy һh ӏl ѵv",
   // Greek:
@@ -93,9 +95,15 @@ const LOOK_ALIKE_ROWS: readonly string[] = [
 export { LOOK_ALIKE_ROWS };
 
 // Each table holds Unicode's rows, then the hand-made ones, which replace them where both list a
-// character.
+// character. A capital Unicode does not draw as its small letter reads as no Latin letter
+// (`UNLIKE_CAPITALS`): Greek Γ is not y, though γ is.
 const CAPITALS = table(...UNICODE_LOOK_ALIKES.capitals, LOOK_ALIKE_ROWS[0] ?? "");
-const LOOK_ALIKES = table(...UNICODE_LOOK_ALIKES.letters, ...LOOK_ALIKE_ROWS.slice(1));
+const LOOK_ALIKES = table(
+  ...UNICODE_LOOK_ALIKES.named,
+  ...UNICODE_LOOK_ALIKES.letters,
+  ...LOOK_ALIKE_ROWS.slice(1),
+);
+const UNLIKE_CAPITALS: ReadonlySet<string> = new Set(UNICODE_LOOK_ALIKES.unlikeCapitals.join(""));
 const BEFORE_FOLDING = table(...UNICODE_LOOK_ALIKES.beforeFolding);
 
 // Digits and signs that may stand for a letter in a name, or be just what they are: "Adm1n",
@@ -116,57 +124,77 @@ const DRAWN_AS_ONE: ReadonlyMap<string, readonly [string, string]> = new Map([
 /**
  * One character of a name as it reads: a Latin letter (`reads`), a letter of no Latin reading
  * (`reads` null, which may stand for any one letter), and `optional` for a digit or sign, which
- * may stand for a letter or be passed over. A character drawn as several letters ("æ", "‖") is
- * a glyph for each.
+ * may stand for a letter or be passed over. A letter that is not an ASCII one once folded is
+ * `free`: whatever it reads as, it may also stand for any one letter, as a letter of no reading
+ * may, so a row that reads it only ever adds to what is refused. A character drawn as several
+ * letters ("æ", "‖") is a glyph for each.
  */
 export interface Glyph {
   readonly char: string;
   readonly reads: string | null;
   readonly optional: boolean;
+  readonly free: boolean;
 }
 
 /**
- * A text's characters folded as they are read: a letter that compatibility folding would turn
- * into one drawn otherwise read first (`BEFORE_FOLDING`), then compatibility-folded (NFKD).
+ * The order a name is read in: as stored, or as drawn on a left-to-right or a right-to-left line
+ * (src/engine/drawn-order.ts), where a run of right-to-left letters is drawn reversed. A name is
+ * compared in each, so neither the order it is kept in nor the line it is shown on hides a name.
  */
-function folded(text: string): string {
+export type ReadingOrder = "stored" | "ltr" | "rtl";
+const READING_ORDERS: readonly ReadingOrder[] = ["stored", "ltr", "rtl"];
+
+/**
+ * A text's characters folded as they are read: a character that compatibility folding would turn
+ * into one drawn otherwise read first (`BEFORE_FOLDING`), then compatibility-folded (NFKD), then
+ * put in the reading order.
+ */
+function folded(text: string, order: ReadingOrder): string {
   let out = "";
   for (const char of text) out += BEFORE_FOLDING.get(char) ?? char;
-  return out.normalize("NFKD");
+  const folding = out.normalize("NFKD");
+  return order === "stored" ? folding : drawnOrder(folding, order);
 }
 
 /**
- * What one folded character is drawn as: a look-alike capital's reading, or else the character
+ * What one folded character is drawn as: a look-alike capital's reading; a capital Unicode draws
+ * unlike its small letter as that small letter, read as no Latin letter; or else the character
  * lower-cased and each look-alike letter made what it is drawn as (Latin letters, a sign, a dot).
  */
 function drawnAs(char: string): string {
+  const capital = CAPITALS.get(char);
+  if (capital === undefined && UNLIKE_CAPITALS.has(char)) return char.toLowerCase();
   let out = "";
-  for (const lower of (CAPITALS.get(char) ?? char).toLowerCase()) {
+  for (const lower of (capital ?? char).toLowerCase()) {
     out += LOOK_ALIKES.get(lower) ?? lower;
   }
   return out;
 }
 
+const isFreeLetter = (char: string) => /^\p{L}$/u.test(char) && !/^[A-Za-z]$/.test(char);
+
 /**
- * The glyphs of a text: invisible characters removed, folded (`folded`), look-alike capitals and
- * letters made what they are drawn as, lower-cased; digits and signs drawn as letters made
- * optional glyphs; white space, punctuation, symbols, marks (accents) and modifier letters (a
- * raised apostrophe) left out, and so is a letter drawn as one ("Adminꞏ" reads as "Admin·").
- * Exported for the tests, not from the package.
+ * The glyphs of a text in a reading order (as drawn on a left-to-right line unless another is
+ * named): invisible characters removed, folded (`folded`), look-alike capitals and letters made
+ * what they are drawn as, lower-cased; digits and signs drawn as letters made optional glyphs;
+ * white space, punctuation, symbols, marks (accents) and modifier letters (a raised apostrophe)
+ * left out, and so is a letter drawn as one ("Adminꞏ" reads as "Admin·"). Exported for the
+ * tests, not from the package.
  */
-export function glyphsOf(text: string): Glyph[] {
+export function glyphsOf(text: string, order: ReadingOrder = "ltr"): Glyph[] {
   const glyphs: Glyph[] = [];
-  for (const char of folded(withoutInvisible(text))) {
+  for (const char of folded(withoutInvisible(text), order)) {
+    const free = isFreeLetter(char);
     for (const drawn of drawnAs(char)) {
       const sign = SIGNS.get(drawn);
       if (/^[a-z]$/.test(drawn)) {
-        glyphs.push({ char: drawn, reads: drawn, optional: false });
+        glyphs.push({ char: drawn, reads: drawn, optional: false, free });
       } else if (sign !== undefined) {
-        for (const reads of sign) glyphs.push({ char: drawn, reads, optional: true });
+        for (const reads of sign) glyphs.push({ char: drawn, reads, optional: true, free: false });
       } else if (/^\p{L}$/u.test(drawn) && !/^\p{Lm}$/u.test(drawn)) {
-        glyphs.push({ char: drawn, reads: null, optional: false });
+        glyphs.push({ char: drawn, reads: null, optional: false, free: true });
       } else if (/^\p{N}$/u.test(drawn)) {
-        glyphs.push({ char: drawn, reads: null, optional: true });
+        glyphs.push({ char: drawn, reads: null, optional: true, free: false });
       }
     }
   }
@@ -174,11 +202,11 @@ export function glyphsOf(text: string): Glyph[] {
 }
 
 /**
- * What a name reads as, letter by letter: invisible characters removed, compatibility-folded,
- * lower-cased, look-alike letters made Latin, and everything but letters dropped (spaces,
- * punctuation, digits and signs, accents, modifier letters, and letters drawn as punctuation); a
- * letter of no Latin reading stays as it is, and a final plural "s" is dropped. "Super-Admins 2!"
- * reads as "superadmin", and so does "ꓢuper ꓮdmin" in Lisu letters.
+ * What a name reads as, letter by letter, as drawn on a left-to-right line: invisible characters
+ * removed, compatibility-folded, lower-cased, look-alike letters made Latin, and everything but
+ * letters dropped (spaces, punctuation, digits and signs, accents, modifier letters, and letters
+ * drawn as punctuation); a letter of no Latin reading stays as it is, and a final plural "s" is
+ * dropped. "Super-Admins 2!" reads as "superadmin", and so does "ꓢuper ꓮdmin" in Lisu letters.
  */
 export function readingOf(text: string): string {
   let out = "";
@@ -196,8 +224,9 @@ const same = (a: string, b: string) => (a === "l" ? "i" : a) === (b === "l" ? "i
 /**
  * Whether the glyphs spell `target` (Latin letters): each letter by a glyph that reads as it (I
  * and l alike), "m", "w" and "d" also by two glyphs drawn as one (each read as a letter is, so
- * "cI", "c1" and "c|" are "cl"), and at most one letter in four by a letter of no Latin reading;
- * digits and signs read as their letters or are passed over; and one plural "s" may follow.
+ * "cI", "c1" and "c|" are "cl"), and at most one letter in four by a letter of no Latin reading
+ * or a free one (`Glyph.free`) read as another letter; digits and signs read as their letters or
+ * are passed over; and one plural "s" may follow.
  */
 function spells(glyphs: readonly Glyph[], target: string): boolean {
   const letters = target.length;
@@ -218,6 +247,7 @@ function spells(glyphs: readonly Glyph[], target: string): boolean {
     if (glyph.reads === null)
       return guesses < budget && from(at + 1, done + 1, guesses + 1, plural);
     if (same(glyph.reads, want) && from(at + 1, done + 1, guesses, plural)) return true;
+    if (glyph.free && guesses < budget && from(at + 1, done + 1, guesses + 1, plural)) return true;
     const pair = DRAWN_AS_ONE.get(want);
     const next = glyphs[at + 1];
     return (
@@ -253,31 +283,49 @@ function builtInReadings(cat: Catalogue): Set<string> {
  * confusables data lists, and of Latin, read as the Latin letters they are drawn as, and a letter
  * drawn as punctuation as that punctuation; digits, signs and symbols may read as the letters they
  * are drawn as ("Adm1n", "0perator", "@dmin", "⍺dmin"); "rn", "vv" and "cl" may read as "m", "w"
- * and "d"; I and l read alike; and a letter of no Latin reading may stand for one letter in four.
- * So "Super Admin", "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha,
- * "ꓮꓓꓟꓲꓠ" in Lisu letters, "Adminꞏ", "Adrnin" and "AcImin" are all refused. Text longer than
- * any name may be is not read (the length rule refuses it).
+ * and "d"; I and l read alike; a letter of no Latin reading, or one not an ASCII letter read as
+ * another, may stand for one letter in four; and the name is read as stored and as drawn on either
+ * kind of line, so right-to-left letters are read in the order they are seen. So "Super Admin",
+ * "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha, "ꓮꓓꓟꓲꓠ" in Lisu
+ * letters, "Adminꞏ", "Adrnin" and "AcImin" are all refused. Text longer than any name may be is
+ * not read (the length rule refuses it).
  */
 export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
   if (name.length > READ_LIMIT) return false;
-  const glyphs = glyphsOf(name);
-  if (glyphs.length === 0 || glyphs.length > GLYPH_LIMIT) return false;
-  for (const reading of builtInReadings(cat)) if (spells(glyphs, reading)) return true;
+  const readings = builtInReadings(cat);
+  const read = new Set<string>();
+  for (const order of READING_ORDERS) {
+    const glyphs = glyphsOf(name, order);
+    if (glyphs.length === 0 || glyphs.length > GLYPH_LIMIT) return false;
+    const seen = JSON.stringify(glyphs);
+    if (read.has(seen)) continue;
+    read.add(seen);
+    for (const reading of readings) if (spells(glyphs, reading)) return true;
+  }
   return false;
+}
+
+/** A name's key (`roleNameKey`) in a reading order. */
+function keyIn(name: string, order: ReadingOrder): string {
+  let key = "";
+  for (const char of folded(normaliseRoleText(withoutInvisible(name)), order)) {
+    key += drawnAs(char);
+  }
+  return key;
 }
 
 /**
  * The form two custom roles' names may not share (spec 02 §8.4: unique per organisation, ignoring
- * case): invisible characters removed, normalised, folded (`folded`), lower-cased, and look-alike
- * letters made what they are drawn as. Digits, spaces, punctuation and accents are kept, so
- * "Tier 1" and "Tier 2", or "Café" and "Cafe", are different names, while "Support" with a
- * Cyrillic о or a Lisu ꓢ is the same name as "Support", and "Supportꞏ" (a letter drawn as a
- * middle dot) the same as "Support·".
+ * case), as the name is drawn on a left-to-right line: invisible characters removed, normalised,
+ * folded (`folded`), lower-cased, and look-alike letters made what they are drawn as. Digits,
+ * spaces, punctuation and accents are kept, so "Tier 1" and "Tier 2", or "Café" and "Cafe", are
+ * different names, while "Support" with a Cyrillic о or a Lisu ꓢ is the same name as "Support",
+ * and "Supportꞏ" (a letter drawn as a middle dot) the same as "Support·". `validateRole` compares
+ * the keys in every reading order, so two names drawn alike on either kind of line, or stored
+ * alike, are the same name.
  */
 export function roleNameKey(name: string): string {
-  let key = "";
-  for (const char of folded(normaliseRoleText(withoutInvisible(name)))) key += drawnAs(char);
-  return key;
+  return keyIn(name, "ltr");
 }
 
 export interface RoleDraft<P extends string> {
@@ -304,7 +352,7 @@ export interface RoleCheckOptions {
  * - `name`: not 1 to 40 characters and at most 5 words, not normalised, a character that draws as
  *   nothing (src/engine/text.ts), or refused by `names.roleName`;
  * - `name_taken`: another custom role in the realm has it, ignoring case, invisible characters and
- *   look-alike letters (`roleNameKey`);
+ *   look-alike letters (`roleNameKey`), stored alike or drawn alike on either kind of line;
  * - `reads_as_built_in`: a built-in's name, or one that reads as one (`readsAsBuiltIn`: "Super
  *   Admin", "Admins", "Adm1n");
  * - `description`: over 120 characters, not normalised, a character that draws as nothing, or
@@ -323,9 +371,9 @@ export function validateRole<P extends string>(
   const problems: RoleProblem[] = [];
   const { name, description } = draft;
   if (!nameFloor(name) || options.names?.roleName(name) === false) problems.push("name");
-  const key = roleNameKey(name);
+  const keys = READING_ORDERS.map((order) => keyIn(name, order));
   for (const taken of options.takenNames ?? []) {
-    if (roleNameKey(taken) === key) {
+    if (READING_ORDERS.some((order, i) => keyIn(taken, order) === keys[i])) {
       problems.push("name_taken");
       break;
     }

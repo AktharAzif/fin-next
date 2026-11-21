@@ -43,29 +43,38 @@ characters that draw as nothing (`\p{C}`, the default-ignorable characters such 
 fillers and variation selectors, and the blank symbols; `src/engine/text.ts`). Comparing a name
 with the built-in roles' (`readsAsBuiltIn`) and with the realm's other custom roles
 (`roleNameKey`, for `name_taken`) is the engine's alone: look-alike letters of every script
-Unicode's confusables data lists (Lisu "ꓮꓓꓟꓲꓠ" is "ADMIN"), letters drawn as punctuation
-("Adminꞏ" is "Admin·"), digits, signs and symbols drawn as letters ("Adm1n", "0perator",
-"⍺dmin"), letter pairs drawn as one ("rn", "cl", and "cI" or "c1" as well), I and l, and
-invisible characters do not make a name different.
+Unicode's confusables data lists (Lisu "ꓮꓓꓟꓲꓠ" is "ADMIN"), Latin letters named for another
+("ȡ", D WITH CURL, is d), letters drawn as punctuation ("Adminꞏ" is "Admin·"), digits, signs,
+symbols and spacing marks drawn as letters ("Adm1n", "0perator", "⍺dmin"), letter pairs drawn as
+one ("rn", "cl", and "cI" or "c1" as well), I and l, and invisible characters do not make a name
+different. A name is read as stored and as drawn on a left-to-right and a right-to-left line, where
+a run of right-to-left letters is drawn reversed, and two names are the same when they are alike in
+one of these orders. A letter that is not an ASCII one may stand for one letter in four of a
+built-in's name, whatever it reads as, as a letter of no Latin reading may.
 
 ## Look-alike data
 
 `src/engine/unicode-look-alikes.ts` holds rows derived from Unicode's confusables data (UTS #39,
-`confusables.txt` 18.0.0) for the characters Node 26's Unicode (17.0) assigns, and
-`src/engine/role-editor.ts` holds the hand-made rows, which take precedence (small capitals, the
-case-insensitive readings of Cyrillic and Greek, Coptic alfa, the clicks). The reading folds case,
-so a small letter drawn as no Latin letter reads as its capital does, and a capital has a row of
-its own only when its small letter is drawn as another letter.
+`confusables.txt` 18.0.0) and from the names of the Latin letters (`UnicodeData.txt` 18.0.0), for
+the characters Node 26's Unicode (17.0) assigns, and `src/engine/role-editor.ts` holds the
+hand-made rows, which take precedence (small capitals, the case-insensitive readings of Cyrillic
+and Greek, Coptic alfa, the clicks). The members of each of Unicode's classes read alike. The
+reading folds case, so a small letter drawn as no Latin letter reads as its capital does, and a
+capital reads as its small letter only when Unicode draws it so: a capital drawn otherwise (Greek
+Γ, Armenian Ա) reads as no Latin letter. `src/engine/drawn-order.ts` holds the characters written
+right to left (`DerivedBidiClass.txt` 18.0.0) and the order a line draws a name in.
 
-`src/test-support/confusables.ts` commits the subset of Unicode's file the reading must agree
-with: every entry whose source is a visible, non-ASCII letter, digit, sign or symbol (not a mark or
-a modifier letter) and whose prototype holds a Latin letter, a digit or a sign, or, for a letter or
-digit, only punctuation; less the characters compatibility folding turns into ASCII, and digits,
-signs and symbols whose prototype is not all Latin. `src/engine/look-alikes.test.ts` fails when an
-entry does not read as its prototype is drawn, when a derived row is not one an entry asks for, or
-when the runtime's Unicode is newer than the data. To refresh for a newer file, select its entries
-the same way, replace the subset, and add or change the rows each failing entry names. Both files
-carry Unicode's data under the Unicode License v3, whose notice the rows file holds.
+`src/test-support/confusables.ts` commits every entry of Unicode's file but those whose source is
+ASCII or draws as nothing, and `src/test-support/latin-letters.ts` the Latin letters compatibility
+folding leaves as they are, with their names. `src/engine/look-alikes.test.ts` fails when an entry
+does not read as its prototype is drawn, when two members of a class read differently, when a
+capital reads as its small letter though Unicode does not draw it so, when a letter named for a
+Latin letter (with a stroke, hook, curl or tail, a form of it such as insular or script, or a small
+capital) does not read as it, when a derived row is not one the data asks for, or when the
+runtime's Unicode is newer than the data. `src/engine/drawn-order.test.ts` holds the
+right-to-left characters to the runtime's scripts. To refresh for a newer file, replace the data
+the same way and add or change the rows each failing test names. These files carry Unicode's data
+under the Unicode License v3, whose notice the rows file holds.
 
 ## On a screen
 
