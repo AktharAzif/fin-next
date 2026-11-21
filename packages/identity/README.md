@@ -47,7 +47,8 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
 - Every code request, codeless request and code try for one address takes the address's lock
   (`lockAddress()`) before it reads the live requests, so overlapping requests leave one live code
   and one asking browser. The lock is a row lock on the address's row in
-  `identity.email_code_lock`, which only `fin_console` may write or lock, never an advisory lock
+  `identity.email_code_lock`, which only `fin_console` may write or lock and which no function
+  another login may run touches (the hourly sweep never deletes its rows), never an advisory lock
   (any login may take one). Every path takes its locks in one order: sign-up's own limits
   (`sign_up_network`, then `sign_up_address`, which only sign-up takes), then the network's code
   limit, then the address's lock, then the address's code limits.

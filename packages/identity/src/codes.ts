@@ -48,9 +48,11 @@ export interface LiveCodeRequest {
  *
  * The lock is the address's row in `identity.email_code_lock`, written here so the row lock lasts
  * until commit (an address's first request inserts it; one that overlaps waits on the insert, then
- * locks the row). Only fin_console may write or lock that table, so no other login can take the
- * lock and hold it open to stall the address's sign-ins, nor watch it. Never an advisory lock:
- * any login may take one, and its key shows in pg_locks.
+ * locks the row). Only fin_console may write or lock that table, and no function another login
+ * may run touches it (identity.sweep() never deletes a row: a delete is a lock held to the end of
+ * the sweeper's transaction), so no other login can take the lock and hold it open to stall the
+ * address's sign-ins, nor watch it. Never an advisory lock: any login may take one, and its key
+ * shows in pg_locks.
  *
  * Every path takes its locks in one order, so that two units never wait on each other in a circle:
  * sign-up's own limits first (`sign_up_network`, then `sign_up_address`, which only sign-up takes);

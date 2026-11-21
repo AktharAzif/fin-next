@@ -10,7 +10,9 @@ import {
   type Harness,
   setUpAuthenticator,
 } from "../test/harness.ts";
+import { lockAddress } from "./codes.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
+import type { Queryable } from "./ports/db.ts";
 import { requirePerson } from "./require-person.ts";
 import { revokeOtherSessions, revokeSession } from "./sessions.ts";
 
@@ -325,7 +327,9 @@ describe("the sweeps (§13.4)", () => {
     expect(await row(live.sessionToken())).toBeDefined();
   });
 
-  it("delete an address's lock row only once it is old", async () => {
+  // A delete is a row lock held to the end of the sweeper's transaction: the sweep never touches an
+  // address's lock row (codes.ts), old or not, so fin_worker can never hold one.
+  it("never delete an address's lock row, old or not", async () => {
     const hash = (email: string) => h.realm.runtime.hasher.hash("email", email);
     const old = hash(unique("sweep.lock.old"));
     const fresh = hash(unique("sweep.lock.fresh"));
@@ -339,12 +343,44 @@ describe("the sweeps (§13.4)", () => {
     const swept = await worker.query<{ table_name: string; deleted: string }>(
       "SELECT * FROM identity.sweep()",
     );
-    const counts = Object.fromEntries(swept.rows.map((r) => [r.table_name, Number(r.deleted)]));
-    expect(counts["identity.email_code_lock"]).toBeGreaterThanOrEqual(1);
+    expect(swept.rows.map((r) => r.table_name)).not.toContain("identity.email_code_lock");
     const left = await h.admin.query<{ email_hash: Buffer }>(
       "SELECT email_hash FROM identity.email_code_lock WHERE email_hash = ANY($1)",
       [[old, fresh]],
     );
-    expect(left.rows.map((r) => r.email_hash.toString("hex"))).toEqual([fresh.toString("hex")]);
+    expect(left.rowCount).toBe(2);
+  });
+
+  it("never delay an address's lock while a fin_worker transaction that swept is left open", async () => {
+    const email = unique("sweep.lock.held");
+    await seed(
+      h.admin,
+      `INSERT INTO identity.email_code_lock (email_hash, locked_at)
+       VALUES ($1, now() - interval '3 hours')`,
+      [h.realm.runtime.hasher.hash("email", email)],
+    );
+    const sweeper = await database.login("fin_worker").connect();
+    const console = await database.login("fin_console").connect();
+    try {
+      await sweeper.query("BEGIN");
+      await sweeper.query("SELECT * FROM identity.sweep()");
+      await console.query("BEGIN");
+      await console.query("SET LOCAL lock_timeout = '2s'");
+      const db: Queryable = {
+        query: async (text, values) => {
+          const result = await console.query(text, values);
+          return { rows: result.rows as never[], rowCount: result.rowCount ?? 0 };
+        },
+      };
+      // With the sweep's delete in the open transaction, this waited until lock_timeout (55P03).
+      await expect(
+        lockAddress(db, { clock: h.realm.runtime.clock, hasher: h.realm.runtime.hasher }, email),
+      ).resolves.toBeUndefined();
+    } finally {
+      await console.query("ROLLBACK");
+      await sweeper.query("ROLLBACK");
+      console.release();
+      sweeper.release();
+    }
   });
 });

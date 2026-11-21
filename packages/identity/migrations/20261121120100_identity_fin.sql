@@ -77,9 +77,11 @@ CREATE INDEX email_code_request_live ON identity.email_code_request (email_hash,
 
 -- The per-address lock that serialises an address's code requests, codeless requests and code
 -- tries (codes.ts, lockAddress()): each takes a row lock here, held until its unit ends. A row
--- lock needs UPDATE on the table, which only fin_console holds, so no other login can take or hold
--- it (an advisory lock is one any login could take), and nothing here is readable by another role.
--- `email_hash` is the address's keyed hash under the newest key; the sweep deletes old rows.
+-- lock needs UPDATE (or DELETE) on the table, which only fin_console holds, and no function another
+-- login may run touches it, so no other login can take or hold it (an advisory lock is one any
+-- login could take), and nothing here is readable by another role. `email_hash` is the address's
+-- keyed hash under the newest key. No sweep deletes a row, since a delete is a lock too: the table
+-- keeps one 32-byte row per address that has asked.
 CREATE TABLE identity.email_code_lock (
   email_hash bytea PRIMARY KEY CHECK (length(email_hash) = 32),
   locked_at timestamptz NOT NULL

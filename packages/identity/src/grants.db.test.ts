@@ -87,6 +87,10 @@ describe("the address lock (codes.ts) is the console's alone", () => {
     "SELECT email_hash, locked_at FROM identity.email_code_lock",
     "UPDATE identity.email_code_lock SET locked_at = now()",
     "INSERT INTO identity.email_code_lock (email_hash, locked_at) VALUES (decode(repeat('00', 32), 'hex'), now())",
+    "DELETE FROM identity.email_code_lock",
+    "TRUNCATE identity.email_code_lock",
+    // In one simple query, which runs as one implicit transaction: LOCK TABLE needs a block.
+    "LOCK TABLE identity.email_code_lock IN ROW EXCLUSIVE MODE; SELECT 1",
   ];
   it.each(others.flatMap((role) => statements.map((text) => [role, text] as const)))(
     "%s may not: %s",
