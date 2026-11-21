@@ -61,10 +61,10 @@ describe("the email sink's command line", () => {
   });
 
   it("stamps them at FIN_E2E_CLOCK, and at --clock over it", async () => {
-    const env = { FIN_E2E_CLOCK: "2026-11-18T09:00:00+05:30" };
+    const env = { FIN_E2E_CLOCK: "2026-11-18T09:00:00-07:00" };
     const fromEnv = await start([], env);
-    expect(fromEnv.clock).toBe("2026-11-18T03:30:00.000Z");
-    expect(await stampOf(fromEnv.origin)).toBe("2026-11-18T03:30:00.000Z");
+    expect(fromEnv.clock).toBe("2026-11-18T16:00:00.000Z");
+    expect(await stampOf(fromEnv.origin)).toBe("2026-11-18T16:00:00.000Z");
     const fromFlag = await start(["--clock", "2026-11-19T00:00:00Z"], env);
     expect(fromFlag.clock).toBe("2026-11-19T00:00:00.000Z");
     expect(await stampOf(fromFlag.origin)).toBe("2026-11-19T00:00:00.000Z");

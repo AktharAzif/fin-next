@@ -175,7 +175,7 @@ describe("display values", () => {
     expect(param.code.safeParse("01234567").success).toBe(true);
     expect(param.code.safeParse("0123456").success).toBe(false);
     expect(param.time.safeParse("2026-11-21T04:30:00.000Z").success).toBe(true);
-    expect(param.time.safeParse("2026-11-21T10:00:00+05:30").success).toBe(false);
+    expect(param.time.safeParse("2026-11-20T21:30:00-07:00").success).toBe(false);
     expect(formatTime("2026-11-21T04:05:00.000Z")).toBe("21 Nov 2026, 04:05 UTC");
   });
 });
