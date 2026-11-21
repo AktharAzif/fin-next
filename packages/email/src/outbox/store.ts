@@ -1,5 +1,5 @@
 // Every statement the sender runs on the outbox and its tables (spec 01 §6.10 plus
-// `migrations/20261121194000_email_sender.sql`). Times are passed in from the injected clock, never
+// `migrations/20261121121000_email_sender.sql`). Times are passed in from the injected clock, never
 // read from the database's own clock, so the tests control time; every write after a claim is fenced
 // on `leased_by`, so a replica whose lease was taken over changes nothing.
 import { findTemplate } from "../catalogue.ts";

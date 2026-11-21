@@ -107,6 +107,15 @@ describe("migrate --bootstrap", () => {
 });
 
 describe("migrate --migrate", () => {
+  const signInCode = (id: string) =>
+    JSON.stringify({
+      id,
+      template: "identity/sign-in-code",
+      recipient_kind: "address",
+      recipient: "person@example.com",
+      params: { code: "12345678" },
+    });
+
   it("applies every package's migrations as fin_owner with a password for the run only, and syncs the registry", async () => {
     const { code, lines } = await cli(["--migrate"]);
     expect(code).toBe(EXIT_OK);
@@ -194,14 +203,6 @@ describe("migrate --migrate", () => {
     expect(privileges.rows).toEqual([{ worker: true, console: false }]);
 
     // The console may queue a sign-in code; the api's login may not (FE001).
-    const signInCode = (id: string) =>
-      JSON.stringify({
-        id,
-        template: "identity/sign-in-code",
-        recipient_kind: "address",
-        recipient: "person@example.com",
-        params: { code: "12345678" },
-      });
     const consoleLogin = await db.connect("fin_console_a");
     try {
       const queued = await consoleLogin.query<{ id: string }>(
@@ -221,6 +222,49 @@ describe("migrate --migrate", () => {
       await apiLogin.end();
     }
     await su.query("DELETE FROM email.outbox");
+  });
+
+  it("takes a template from a role whose rule no longer gives it, and keeps a newer release's template", async () => {
+    // Rows an earlier release's run could have left: the api's login holding the sign-in code (a
+    // template this catalogue gives only the console), and a template only a newer release knows.
+    await su.query(
+      `INSERT INTO email.template_grant (template, role, category, priority, carries_secret)
+       VALUES ('identity/sign-in-code', 'fin_api', 'code', 1, true),
+              ('kyc/from-a-newer-release', 'fin_api', 'customer', 3, false)`,
+    );
+    const apiLogin = await db.connect("fin_api_a");
+    try {
+      const queued = await apiLogin.query<{ id: string }>("SELECT email.enqueue($1::jsonb) AS id", [
+        signInCode(`eml_${"2".repeat(26)}`),
+      ]);
+      expect(queued.rows).toEqual([{ id: `eml_${"2".repeat(26)}` }]);
+
+      const { code, lines } = await cli(["--migrate"]);
+      expect(code).toBe(EXIT_OK);
+      expect(lines[1]).toMatchObject({ applied: 0 });
+
+      const rows = await su.query<{ template: string; role: string }>(
+        "SELECT template, role FROM email.template_grant",
+      );
+      const byKey = (
+        a: { template: string; role: string },
+        b: { template: string; role: string },
+      ) => (`${a.template} ${a.role}` < `${b.template} ${b.role}` ? -1 : 1);
+      const want = [
+        ...grantRows().map((g) => ({ template: g.template, role: g.role })),
+        { template: "kyc/from-a-newer-release", role: "fin_api" },
+      ];
+      expect(rows.rows.sort(byKey)).toEqual(want.sort(byKey));
+      await expect(
+        apiLogin.query("SELECT email.enqueue($1::jsonb)", [signInCode(`eml_${"3".repeat(26)}`)]),
+      ).rejects.toMatchObject({ code: "FE001" });
+    } finally {
+      await apiLogin.end();
+      await su.query("DELETE FROM email.outbox");
+      await su.query(
+        "DELETE FROM email.template_grant WHERE template = 'kyc/from-a-newer-release'",
+      );
+    }
   });
 
   it("reads the image's layout at FIN_DB_ASSETS_DIR: the same files, so nothing is pending", async () => {

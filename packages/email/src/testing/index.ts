@@ -3,7 +3,7 @@
 // imported by release code.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { grantInsertSql, SENDER_ROLES, type SenderRole } from "../catalogue.ts";
+import { grantSyncSql, SENDER_ROLES, type SenderRole } from "../catalogue.ts";
 import type { Queryable } from "../outbox/db.ts";
 import type { EmailPort, OutgoingEmail, SendOutcome } from "../port.ts";
 import type { EmailLog, Level } from "../sender/sender.ts";
@@ -89,7 +89,7 @@ export class LineRecorder implements EmailLog {
 const SQL_DIR = join(import.meta.dirname, "..", "..");
 
 /** This package's migration, which `migrate` applies over P0-E's outbox. */
-export const SENDER_MIGRATION = "20261121194000_email_sender.sql";
+export const SENDER_MIGRATION = "20261121121000_email_sender.sql";
 
 /**
  * The grant fragments the sender's objects take in `migrate` (packages/db/src/grants.ts's shape): P0-E's
@@ -154,5 +154,5 @@ export async function installOutboxSchema(
   await db.query(render(sql.base));
   await db.query(sql.extension);
   await db.query(render(sql.grants));
-  await db.query(grantInsertSql(roleName));
+  await db.query(grantSyncSql(roleName));
 }
