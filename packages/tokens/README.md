@@ -6,9 +6,9 @@ and the fonts (spec 06 §3.2).
 | File | Holds |
 |---|---|
 | `tokens.css` | Every `--fin-*` value (203 of them), light on `:root`, dark on `[data-theme="dark"]` and under the system's dark preference; both densities; the reduced-motion durations |
-| `theme.css` | Tailwind's theme with its own scales cleared (`--*: initial`), Fin's utilities (`outline-focus`, `transition-press`, `z-header`, `divider-dotted-x`, the overlay and toast utilities) and the SDK state variants (`state-open:`, `state-checked:`...) |
+| `theme.css` | Generated from `tokens.css` by `scripts/theme.ts` (`pnpm --filter @fin/tokens theme`): Tailwind's theme with its own scales cleared (`--*: initial`), Fin's utilities (`outline-focus`, `transition-press`, `z-header`, `divider-dotted-x`, the overlay and toast utilities) and the SDK state variants (`state-open:`, `state-checked:`...); `test/theme-file.test.ts` fails when it is stale |
 | `base.css` | The page colour, body type, selection and the one focus ring |
-| `fonts.css`, `fonts/` | Inter (variable) and Fira Mono (400, 500) as woff2 files, with `fonts/OFL.txt` |
+| `fonts.css`, `fonts/` | Inter (variable) and Fira Mono (400, 500) as woff2 files, with `fonts/OFL.txt`; `fonts.css` is generated from the files by `scripts/fonts.ts` (fin-font-metrics 1.0.0, `pnpm --filter @fin/tokens fonts`), the "Inter Fallback" overrides computed from Inter's own tables and Arial's metrics; `test/fonts.test.ts` fails when it is stale |
 | `export-pin/tokens.json` | The design system export's values, as it writes them; `test/tokens.test.ts` fails when `tokens.css` drifts from them |
 | `vite.ts` | `finLayerOrder()`, the build plugin that keeps `@layer ui-sdk;` the first statement of every emitted stylesheet |
 

@@ -404,7 +404,7 @@ export function Kit(props: { onReady: () => void }) {
   return (
     <FailureReporterProvider report={() => document.body.setAttribute("data-reported", "")}>
       <TooltipProvider delay={300}>
-        <div className="mx-auto flex max-w-layout-drawer-l flex-col gap-12 p-4 sm:p-8">
+        <div className="mx-auto flex max-w-drawer-l flex-col gap-12 p-4 sm:p-8">
           <PageHeader
             title="UI kit"
             description="Every @fin/ui component of waves 0 and 1, live."
