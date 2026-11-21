@@ -109,7 +109,6 @@ export {
 } from "./lookup.ts";
 export { checkKeyName, KEY_NAME_MAX, KEY_NAME_SENTENCE, type KeyNameRefusal } from "./names.ts";
 export { type KeyEnvironment, KNOWN_SALTS, SALTS, saltFor } from "./salts.ts";
-export { type KeySettings, keySettingsAbsent, keySettingsFromEnv } from "./settings.ts";
 export {
   accessLabel,
   checkScopes,
@@ -128,6 +127,7 @@ export {
   type ScopeProblem,
   scopesAllowedFor,
 } from "./scopes.ts";
+export { type KeySettings, keySettingsAbsent, keySettingsFromEnv } from "./settings.ts";
 export { KEYS_ACTIONS, type KeysActionKey } from "./step-up.ts";
 export type { DateClock, KeysLines, KeysTx } from "./tx.ts";
 export {
