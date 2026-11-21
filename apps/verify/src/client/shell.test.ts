@@ -1,8 +1,9 @@
-// Verify's shell as it ships (spec 06 §1.2, §2.2, §6.2, §6.4 checks 1, 2 and 7; S6-27): its two
-// documents, index.html and the selfie host's selfie.html, under the page policy with the boot
-// skeleton equal to @fin/frame's; public/theme.js and public-selfie/theme.js equal to the frame's;
-// static.json with exactly spec 01 §7.4's keys; and every route of both entries declaring its
-// static data, none under /api.
+// Verify's shell as it ships (spec 06 §1.2, §2.2, §2.3, §6.2, §6.4 checks 1, 2 and 7; S6-27): its
+// two documents, index.html and the selfie host's selfie.html, under the page policy with the boot
+// skeleton equal to @fin/frame's; each entry importing the scrubbing console guard straight after
+// its stylesheet, then the module that clears the fragment; public/theme.js and
+// public-selfie/theme.js equal to the frame's; static.json with exactly spec 01 §7.4's keys; and
+// every route of both entries declaring its static data, none under /api.
 
 import authSkeleton from "@fin/frame/boot/auth-skeleton.html?raw";
 import frameThemeJs from "@fin/frame/boot/theme.js?raw";
@@ -15,7 +16,9 @@ import selfieFavicon from "../../public-selfie/favicon.svg?raw";
 import selfieThemeJs from "../../public-selfie/theme.js?raw";
 import selfieHtml from "../../selfie.html?raw";
 import staticJsonText from "../../static.json?raw";
+import selfieMainTsx from "../selfie/main.tsx?raw";
 import { createSelfieRouter } from "../selfie/router.tsx";
+import mainTsx from "./main.tsx?raw";
 import { createAppRouter } from "./router.ts";
 
 const APP = "verify";
@@ -27,6 +30,28 @@ function block(html: string, name: string): string | null {
   if (start < 0 || end < 0) return null;
   return html.slice(start + `<!-- boot:${name} -->`.length, end);
 }
+
+/** The modules a source imports or re-exports from, in the order they are evaluated. */
+function imports(source: string): string[] {
+  return [...source.matchAll(/^(?:import|export)\s+(?:[^"';]*?\sfrom\s*)?"([^"]+)";$/gm)].map(
+    (match) => match[1] ?? "",
+  );
+}
+
+describe("the entries", () => {
+  it("import the stylesheet, the scrubbing console guard, then what clears the fragment, first", () => {
+    expect(imports(mainTsx).slice(0, 3)).toEqual([
+      "./styles.css",
+      "@fin/frame/report",
+      "./link-token.ts",
+    ]);
+    expect(imports(selfieMainTsx).slice(0, 3)).toEqual([
+      "./styles.css",
+      "@fin/frame/report",
+      "./ticket.ts",
+    ]);
+  });
+});
 
 const DOCUMENTS = [
   { file: "index.html", html: indexHtml, entry: "/src/client/main.tsx" },

@@ -7,6 +7,7 @@ import { expect, type Page, type Route, test } from "@playwright/test";
 import {
   bootState,
   holdEntry,
+  printWhileLoading,
   problem,
   ready,
   serveStatic,
@@ -14,6 +15,8 @@ import {
 } from "../../console/e2e/support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4402";
+// The value a library prints while it loads, built at run time.
+const ADDRESS = ["maya.rivera", "example.com"].join("@");
 
 const NADIA = {
   state: "ok",
@@ -73,6 +76,19 @@ test("@csp `/` opens Staff in AdminFrame under the production page policy", asyn
   );
   await expect(page.getByRole("radiogroup", { name: "Environment" })).toHaveCount(0);
   await expect(page.locator("[data-sidebar-mode]")).toHaveCSS("width", "224px");
+});
+
+test("@security the console guard is in place before any library is evaluated", async ({
+  page,
+}) => {
+  await serve(page, viewer(NADIA));
+  const prints = await printWhileLoading(page, ADDRESS);
+  await page.goto("/");
+  await ready(page);
+  expect(await prints.asked()).toBeGreaterThan(0);
+  expect(prints.lines).toContain("opening for [email]");
+  expect(prints.lines).toContain("TypeError");
+  expect(prints.lines.join("\n")).not.toContain(ADDRESS);
 });
 
 test("@journey the staff menu names the role and how they signed in", async ({ page }) => {

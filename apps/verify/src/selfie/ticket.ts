@@ -1,7 +1,8 @@
 // The selfie ticket (FW-C20, spec 03 §2.6, SD3-03). Verify opens the selfie host as
 // `https://selfie.<zone>/s#<sft id>.<secret>`, so the one-time ticket never reaches Cloudflare, a log
-// or a Referer. This module is the selfie entry's first import after the stylesheet: as it loads,
-// it reads the fragment and at once replaces the history entry with the bare path, so the ticket
+// or a Referer. This module is the selfie entry's first import after the stylesheet and the console
+// guard (Fin's own code, which never reads the address): as it loads, it reads the fragment and at
+// once replaces the history entry with the bare path, so the ticket
 // leaves the address bar and the history before any other code runs, the same way verify's link
 // token does. The ticket then lives only here until the page posts it to
 // `POST /api/selfie/session` (L-SUN-06's flow) and takes it, once.

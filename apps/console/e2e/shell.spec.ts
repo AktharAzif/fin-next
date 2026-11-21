@@ -6,6 +6,7 @@ import { expect, type Page, type Route, test } from "@playwright/test";
 import {
   bootState,
   holdEntry,
+  printWhileLoading,
   problem,
   ready,
   serveStatic,
@@ -13,6 +14,8 @@ import {
 } from "./support/static.ts";
 
 const ORIGIN = "http://127.0.0.1:4401";
+// The value a library prints while it loads, built at run time.
+const ADDRESS = ["maya.rivera", "example.com"].join("@");
 
 const MAYA = {
   gate: "ok",
@@ -98,6 +101,19 @@ test("@csp Home loads in AppFrame under the production page policy", async ({ pa
   // The stylesheet won: the SDK's reset did not beat Fin's utilities (FW-C06).
   const sidebar = page.locator("[data-sidebar-mode]");
   await expect(sidebar).toHaveCSS("width", "224px");
+});
+
+test("@security the console guard is in place before any library is evaluated", async ({
+  page,
+}) => {
+  await signedIn(page);
+  const prints = await printWhileLoading(page, ADDRESS);
+  await page.goto("/");
+  await ready(page);
+  expect(await prints.asked()).toBeGreaterThan(0);
+  expect(prints.lines).toContain("opening for [email]");
+  expect(prints.lines).toContain("TypeError");
+  expect(prints.lines.join("\n")).not.toContain(ADDRESS);
 });
 
 test("@csp a signed-out visit goes to sign-in, keeping a safe next", async ({ page }) => {

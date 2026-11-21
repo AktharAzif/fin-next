@@ -217,6 +217,45 @@ export async function bootState(page: Page) {
   });
 }
 
+/** What the page's console printed, and how often the planted library asked to print. */
+export interface LoadPrints {
+  /** Every console message's text, in order. */
+  lines: string[];
+  /** How many times the planted hook ran while React DOM was evaluated. */
+  asked(): Promise<number>;
+}
+
+/**
+ * Prints `value` while the libraries load, before the entry's own code runs (spec 06 §2.3 step 1):
+ * React DOM asks a devtools hook to check its build as its module is evaluated, and prints what
+ * that check throws whole (`console.error(err)`). The planted hook prints a line holding `value`,
+ * then throws an Error whose message holds it. Call before the page loads.
+ */
+export async function printWhileLoading(page: Page, value: string): Promise<LoadPrints> {
+  const lines: string[] = [];
+  page.on("console", (message) => {
+    lines.push(message.text());
+  });
+  await page.addInitScript((held) => {
+    const hooked = window as unknown as Record<string, unknown>;
+    hooked.__finLoadAsked = 0;
+    hooked.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+      checkDCE() {
+        hooked.__finLoadAsked = Number(hooked.__finLoadAsked) + 1;
+        // The page's own console, as a library reaches it.
+        const pageConsole = console;
+        pageConsole.info(`opening for ${held}`);
+        throw new TypeError(`nothing for ${held}`);
+      },
+    };
+  }, value);
+  return {
+    lines,
+    asked: () =>
+      page.evaluate(() => Number((window as unknown as Record<string, unknown>).__finLoadAsked)),
+  };
+}
+
 /** Waits for the root to mark the first route resolved (FW-C16). */
 export async function ready(page: Page): Promise<void> {
   await page.locator("body[data-ready]").waitFor({ state: "attached" });

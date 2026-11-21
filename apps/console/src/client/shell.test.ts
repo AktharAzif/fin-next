@@ -1,5 +1,6 @@
-// The console's shell as it ships (spec 06 §2.2, §6.2, §6.4 checks 1, 2 and 7): index.html under the
-// page policy with the boot skeletons equal to @fin/frame's, public/theme.js equal to the frame's,
+// The console's shell as it ships (spec 06 §2.2, §2.3, §6.2, §6.4 checks 1, 2 and 7): index.html
+// under the page policy with the boot skeletons equal to @fin/frame's, main.tsx importing the
+// scrubbing console guard straight after its stylesheet, public/theme.js equal to the frame's,
 // static.json with exactly spec 01 §7.4's keys, and every route declaring its static data, none
 // under /api.
 import appSkeleton from "@fin/frame/boot/app-skeleton.html?raw";
@@ -10,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import indexHtml from "../../index.html?raw";
 import themeJs from "../../public/theme.js?raw";
 import staticJsonText from "../../static.json?raw";
+import mainTsx from "./main.tsx?raw";
 import { createAppRouter } from "./router.ts";
 
 const APP = "console";
@@ -21,6 +23,19 @@ function block(html: string, name: string): string | null {
   if (start < 0 || end < 0) return null;
   return html.slice(start + `<!-- boot:${name} -->`.length, end);
 }
+
+/** The modules a source imports or re-exports from, in the order they are evaluated. */
+function imports(source: string): string[] {
+  return [...source.matchAll(/^(?:import|export)\s+(?:[^"';]*?\sfrom\s*)?"([^"]+)";$/gm)].map(
+    (match) => match[1] ?? "",
+  );
+}
+
+describe("main.tsx", () => {
+  it("imports the stylesheet, then the scrubbing console guard, before anything else", () => {
+    expect(imports(mainTsx).slice(0, 2)).toEqual(["./styles.css", "@fin/frame/report"]);
+  });
+});
 
 describe("index.html", () => {
   it("names the app and carries one nonce-less csp-nonce meta", () => {

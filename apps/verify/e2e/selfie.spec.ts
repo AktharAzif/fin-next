@@ -7,6 +7,7 @@ import { expect, test } from "@playwright/test";
 import {
   bootState,
   holdEntry,
+  printWhileLoading,
   ready,
   serveStatic,
   watchPolicy,
@@ -51,6 +52,20 @@ test("@security the ticket leaves the address bar and the history at once", asyn
   expect(await page.evaluate(() => location.hash)).toBe("");
   await page.goBack().catch(() => null);
   expect(page.url()).not.toContain(TICKET);
+});
+
+test("@security the console guard is in place before any library is evaluated", async ({
+  page,
+}) => {
+  const address = ["maya.rivera", "example.com"].join("@");
+  const prints = await printWhileLoading(page, address);
+  await page.goto(`/s#${TICKET}`);
+  await ready(page);
+  expect(await prints.asked()).toBeGreaterThan(0);
+  expect(prints.lines).toContain("opening for [email]");
+  expect(prints.lines).toContain("TypeError");
+  expect(prints.lines.join("\n")).not.toContain(address);
+  expect(prints.lines.join("\n")).not.toContain(TICKET);
 });
 
 test("@journey the selfie page follows the system theme before the first paint", async ({

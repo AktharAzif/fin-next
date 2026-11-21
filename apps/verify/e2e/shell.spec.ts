@@ -6,6 +6,7 @@ import { expect, test } from "@playwright/test";
 import {
   bootState,
   holdEntry,
+  printWhileLoading,
   ready,
   serveStatic,
   watchPolicy,
@@ -14,6 +15,8 @@ import {
 const ORIGIN = "http://127.0.0.1:4403";
 // A token-shaped value, built at run time (the public-safety scan never sees a literal one).
 const TOKEN = ["0123456789ABCDEF", "GHJKMNPQRSTVWXYZ"].join("");
+// The value a library prints while it loads, built at run time.
+const ADDRESS = ["maya.rivera", "example.com"].join("@");
 
 let policy: string[] = [];
 
@@ -52,6 +55,19 @@ test("@security the link token leaves the address bar and the history at once", 
   // The entry was replaced, not pushed: going back never reaches a URL that holds the token.
   await page.goBack().catch(() => null);
   expect(page.url()).not.toContain(TOKEN);
+});
+
+test("@security the console guard is in place before any library is evaluated", async ({
+  page,
+}) => {
+  const prints = await printWhileLoading(page, ADDRESS);
+  await page.goto(`/c#${TOKEN}`);
+  await ready(page);
+  expect(await prints.asked()).toBeGreaterThan(0);
+  expect(prints.lines).toContain("opening for [email]");
+  expect(prints.lines).toContain("TypeError");
+  expect(prints.lines.join("\n")).not.toContain(ADDRESS);
+  expect(prints.lines.join("\n")).not.toContain(TOKEN);
 });
 
 test("@journey verify follows the system theme before the first paint", async ({ browser }) => {
