@@ -19,6 +19,7 @@
 // journeys run against it unchanged (FIN_E2E_ADMIN_API=external) and this file goes.
 import { createHash, randomBytes } from "node:crypto";
 import { base32Encode, decodeToken, totp, totpCounter, verifyRs256 } from "@fin/testing";
+import { factorsResetNotice } from "../factor-reset/notice.ts";
 import {
   assertionChallenge,
   assertionCredentialId,
@@ -725,7 +726,9 @@ export class AdminApiStandIn {
     if (key === "GET /api/account") return this.#account(s, m);
     if (key === "POST /api/account/sessions/revoke-others")
       return this.#revokeOthers(context, s, m);
-    const staffMatch = /^\/api\/staff\/([^/]+)(\/remove|\/enrolment-code)?$/.exec(path);
+    const staffMatch = /^\/api\/staff\/([^/]+)(\/remove|\/enrolment-code|\/reset-factors)?$/.exec(
+      path,
+    );
     if (staffMatch !== null) {
       const target = this.members.get(decodeURIComponent(staffMatch[1] as string));
       if (request.method === "PATCH" && staffMatch[2] === undefined) {
@@ -736,6 +739,9 @@ export class AdminApiStandIn {
       }
       if (request.method === "POST" && staffMatch[2] === "/enrolment-code") {
         return this.#newCode(context, s, m, target);
+      }
+      if (request.method === "POST" && staffMatch[2] === "/reset-factors") {
+        return this.#resetFactors(context, s, m, target);
       }
     }
     return problem("not_found");
@@ -1515,6 +1521,69 @@ export class AdminApiStandIn {
     const code = this.#issueCode(target, "reissued", actor.id);
     const live = this.enrolmentCodes.get(target.id) as EnrolmentCode;
     return ok({ enrolmentCode: code, expiresAt: new Date(live.expiresAt).toISOString() });
+  }
+
+  /**
+   * Reset second factors (§10.2, [SA-14]): `staff.reset_factors`, §8.5's rules and the last Admin,
+   * then the intent; every session of the member ends, their passkeys and authenticator go, they
+   * are pending with a new code (in the answer once), and they and every active Admin are emailed.
+   */
+  async #resetFactors(
+    context: Context,
+    session: Session,
+    actor: Member,
+    target: Member | undefined,
+  ): Promise<Answer> {
+    const denied = this.#needs(actor, "staff.reset_factors");
+    if (denied !== null) return denied;
+    if (target === undefined || target.status === "removed") return problem("not_found");
+    const refused = this.#giving(actor, target, null);
+    if (refused !== null) return refused;
+    if (this.#lastAdmin(target)) return problem("last_top_role");
+    const stepUp = this.#stepUp(
+      context,
+      session,
+      actor,
+      "staff.reset_factors",
+      "staff.reset_factors",
+      { target: target.id },
+    );
+    if (stepUp !== null) return stepUp;
+    let sessionsEnded = 0;
+    for (const s of [...this.sessions.values()]) {
+      if (s.memberId !== target.id) continue;
+      this.#end(s, "signed_out");
+      sessionsEnded += 1;
+    }
+    const factorsRemoved = target.passkeys.length + (target.totp?.enabled === true ? 1 : 0);
+    target.passkeys = [];
+    target.totp = null;
+    target.status = "pending";
+    this.#record("staff.factors_reset", actor.id, target.id, { sessionsEnded, factorsRemoved });
+    const code = this.#issueCode(target, "reset", actor.id);
+    const live = this.enrolmentCodes.get(target.id) as EnrolmentCode;
+    const admins = [...this.members.values()].filter(
+      (m) => m.roleKey === "admin" && m.status === "active" && m.id !== target.id,
+    );
+    for (const [to, audience] of [
+      [target.email, "person"],
+      ...admins.map((m) => [m.email, "admins"] as const),
+    ] as const) {
+      await (this.#options.fetch ?? fetch)(`${this.#options.emailSink}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          factorsResetNotice({ to, audience, staffId: target.id, admin: this.#options.appOrigin }),
+        ),
+      });
+    }
+    return ok({
+      staffId: target.id,
+      status: "pending",
+      enrolmentCode: code,
+      enrolmentCodeId: live.id,
+      expiresAt: new Date(live.expiresAt).toISOString(),
+    });
   }
 
   // ── The member's own sign-in ──

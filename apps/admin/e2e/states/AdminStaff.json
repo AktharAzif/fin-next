@@ -99,7 +99,21 @@
       "spec": "apps/admin/src/client/staff/rules.test.ts",
       "test": "refuses a target whose role allows more than the actor's"
     },
-    "resetFactors": { "status": "pending", "day": "stretch-4" },
-    "resetCodeShown": { "status": "pending", "day": "stretch-4" }
+    "resetFactors": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "stretch-4",
+      "spec": "apps/admin/e2e/factor-reset/staff-factor-reset.spec.ts",
+      "test": "@journey an Admin resets a member's second factors: signed out at once, the old passkey refused, the new code once, and they enrol again"
+    },
+    "resetCodeShown": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "stretch-4",
+      "spec": "apps/admin/e2e/factor-reset/staff-factor-reset.spec.ts",
+      "test": "@journey an Admin resets a member's second factors: signed out at once, the old passkey refused, the new code once, and they enrol again"
+    }
   }
 }
