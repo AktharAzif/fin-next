@@ -55,9 +55,9 @@ describe("e2eClock (FIN_E2E_CLOCK)", () => {
   });
 
   it("stands at a given ISO time, or follows the system clock for 'wall'", () => {
-    const given = e2eClock("2026-11-18T09:30:00+05:30");
-    expect(given.setting).toBe("2026-11-18T04:00:00.000Z");
-    expect(given.now()).toBe(Date.parse("2026-11-18T04:00:00Z"));
+    const given = e2eClock("2026-11-18T09:30:00+05:45");
+    expect(given.setting).toBe("2026-11-18T03:45:00.000Z");
+    expect(given.now()).toBe(Date.parse("2026-11-18T03:45:00Z"));
     const wall = e2eClock("wall");
     expect(wall.setting).toBe("wall");
     expect(Math.abs(wall.now() - Date.now())).toBeLessThan(1000);
@@ -83,9 +83,9 @@ describe("journeyClock (the fixtures' browser and Node clock)", () => {
 
   it("pins the browser where a stopped run clock stands", () => {
     expect(journeyClock(e2eClock("canon"))).toEqual({ mode: "fixed", time: CANON_TIME });
-    expect(journeyClock(e2eClock("2026-11-18T09:00:00+05:30"))).toEqual({
+    expect(journeyClock(e2eClock("2026-11-18T09:00:00-07:00"))).toEqual({
       mode: "fixed",
-      time: "2026-11-18T03:30:00.000Z",
+      time: "2026-11-18T16:00:00.000Z",
     });
   });
 
@@ -144,8 +144,8 @@ describe("resolveTestClock (a test's clock options and the run's, together)", ()
       mode: "paused",
       time: wallRun().time,
     });
-    vi.stubEnv("FIN_E2E_CLOCK", "2026-11-18T09:00:00+05:30");
-    expect(resolveTestClock({})).toEqual({ mode: "fixed", time: "2026-11-18T03:30:00.000Z" });
+    vi.stubEnv("FIN_E2E_CLOCK", "2026-11-18T09:00:00-07:00");
+    expect(resolveTestClock({})).toEqual({ mode: "fixed", time: "2026-11-18T16:00:00.000Z" });
   });
 
   it("reads the run's clock only when the test leaves clockTime unset", () => {
@@ -162,7 +162,7 @@ describe("resolveTestClock (a test's clock options and the run's, together)", ()
   });
 
   it("gives the time in UTC, and refuses a clockTime that is not a time", () => {
-    expect(resolveTestClock({ clockTime: "2026-12-01T05:30:00+05:30" }, wallRun).time).toBe(SCENE);
+    expect(resolveTestClock({ clockTime: "2026-11-30T17:00:00-07:00" }, wallRun).time).toBe(SCENE);
     expect(() => resolveTestClock({ clockTime: "soon" }, wallRun)).toThrow(
       "clockTime is not a valid time",
     );
