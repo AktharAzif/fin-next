@@ -3,10 +3,14 @@
 // package), by a relative path, through import.meta.glob and from a worker's bundle (`?worker`,
 // which Vite builds apart with the worker's own plugins): each release build fails with the
 // guard's message naming the module by its repository path and writes no bundle, while the same
-// app's `test` build holds the harness, which that target may (spec 01 §4.9). Each of the guard's
-// three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts) carries
-// the guard in a release build, in its main bundle and in every worker's, and still builds, with
-// nothing of the harness in any of its source maps.
+// app's `test` build holds the harness, which that target may (spec 01 §4.9). So does a release
+// build that carries a harness file as an asset Vite read itself (a worker's
+// `new URL(..., import.meta.url)`, an `?inline` stylesheet's `url()`), inlined or emitted, planted
+// inside the repository so the asset's name is the one a real app's build gives. Each of the
+// guard's three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts)
+// carries the guard in a release build, in its main bundle and in every worker's, and still builds,
+// with nothing of the harness in any of its source maps and every source of the repository it
+// holds an input of `@fin/server#test`.
 import {
   existsSync,
   globSync,
@@ -15,14 +19,21 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
 import { build, type Plugin, resolveConfig } from "vite";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { HARNESS_GUARD, harnessGuard, harnessMessage, harnessModules } from "./harness-guard.ts";
+import {
+  HARNESS_GUARD,
+  harnessContents,
+  harnessGuard,
+  harnessMessage,
+  harnessModules,
+} from "./harness-guard.ts";
 import { serverBundleConfig } from "./vite-server.ts";
 
 const REPOSITORY = resolve(import.meta.dirname, "../../../..");
@@ -40,22 +51,37 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-/** A fresh temporary directory, by its real path (macOS's temporary directory is a link). */
-function temporary(): string {
-  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "fin-harness-guard-")));
+/**
+ * A fresh temporary directory under `parent` (the system's temporary directory by default), by its
+ * real path (macOS's temporary directory is a link).
+ */
+function temporary(parent: string = tmpdir()): string {
+  mkdirSync(parent, { recursive: true });
+  const dir = realpathSync.native(mkdtempSync(join(parent, "fin-harness-guard-")));
   made.push(dir);
   return dir;
 }
 
+/**
+ * A place inside the repository for a planted app, ignored by git and by every tool's sources, so a
+ * path the build writes relative to the app's root reaches the harness as a real app's does.
+ */
+const IN_REPOSITORY = join(REPOSITORY, "packages/server/node_modules/.cache");
+
 type Source = (harness: (path: string) => string) => string;
 
 /**
- * A planted app: @fin/testing linked into its node_modules as pnpm links a workspace package, and
- * an entry `src/server.node.ts` whose text `entry` writes, given how the entry's directory reaches
- * a file of the harness by a relative path; `files` adds others beside the entry the same way.
+ * A planted app under `parent`: @fin/testing linked into its node_modules as pnpm links a workspace
+ * package, and an entry `src/server.node.ts` whose text `entry` writes, given how the entry's
+ * directory reaches a file of the harness by a relative path; `files` adds others beside the entry
+ * the same way.
  */
-function plant(entry: Source, files: Readonly<Record<string, Source>> = {}): string {
-  const root = temporary();
+function plant(
+  entry: Source,
+  files: Readonly<Record<string, Source>> = {},
+  parent: string = tmpdir(),
+): string {
+  const root = temporary(parent);
   mkdirSync(join(root, "node_modules/@fin"), { recursive: true });
   symlinkSync(HARNESS, join(root, "node_modules/@fin/testing"), "dir");
   const from = dirname(join(root, ENTRY));
@@ -117,6 +143,53 @@ describe("harnessModules", () => {
         "node:http",
         "pg-native",
       ]),
+    ).toEqual([]);
+  });
+});
+
+describe("harnessContents", () => {
+  /** A repository whose harness holds `src/a.ts`, an empty file, and a dependency's file. */
+  function repository(): string {
+    const root = temporary();
+    const harness = join(root, "packages/testing");
+    mkdirSync(join(harness, "src"), { recursive: true });
+    mkdirSync(join(harness, "node_modules/dep"), { recursive: true });
+    writeFileSync(join(harness, "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(harness, "src/empty.ts"), "");
+    writeFileSync(join(harness, "node_modules/dep/index.js"), "export const dep = 1;\n");
+    return root;
+  }
+  const base64 = (text: string) => Buffer.from(text).toString("base64");
+
+  it("names a harness file an output carries whole: its bytes, or a data: URL of them", () => {
+    const root = repository();
+    const named = ["packages/testing/src/a.ts"];
+    const a = "export const a = 1;\n";
+    expect(harnessContents([`const u = "data:video/mp2t;base64,${base64(a)}";`], root)).toEqual(
+      named,
+    );
+    expect(harnessContents([`a{background:url("data:x;base64,${base64(a)}")}`], root)).toEqual(
+      named,
+    );
+    expect(harnessContents([new Uint8Array(Buffer.from(a))], root)).toEqual(named);
+    expect(harnessContents([a], root)).toEqual(named);
+  });
+
+  it("leaves every other output alone", () => {
+    const root = repository();
+    expect(
+      harnessContents(
+        [
+          `"data:text/plain;base64,${base64("other")}"`,
+          `"data:text/plain;base64,${base64("export const a = 1;\nmore")}"`,
+          "// export const a = 1;\n",
+          '"data:application/octet-stream;base64,"',
+          "",
+          `"data:text/javascript;base64,${base64("export const dep = 1;\n")}"`,
+          "export const dep = 1;\n",
+        ],
+        root,
+      ),
     ).toEqual([]);
   });
 });
@@ -237,6 +310,67 @@ describe("a release build whose worker loads the harness fails", () => {
   );
 });
 
+// Vite reads a file named in `new URL(..., import.meta.url)` (which a worker's bundle resolves, as
+// Vite builds it for a client) or in a stylesheet's `url()` itself, never loading it as a module.
+// It inlines the file as a data: URL when it is under 4 KiB or the URL asks with `?inline`, and
+// otherwise emits it as an asset named by its path relative to the app's root (which a server
+// build then leaves out of its output). The apps are planted inside the repository, so that path
+// is the one a real app's build gives. The test build shows the route reaches the harness: an
+// inlined file's bytes are in its output.
+describe("a release build that carries a harness file as an asset fails", () => {
+  const sized = (fits: (size: number) => boolean) => {
+    const file = globSync("src/**/*.ts", { cwd: HARNESS })
+      .map((path) => path.split(sep).join("/"))
+      .sort()
+      .find((path) => fits(statSync(join(HARNESS, path)).size));
+    if (file === undefined) throw new Error("no file of the harness has the size the test needs");
+    return file;
+  };
+  const small = sized((size) => size > 0 && size < 4096);
+  const large = sized((size) => size >= 4096);
+
+  const worker = (file: string): [Source, Record<string, Source>] => [
+    () =>
+      'import Planted from "./planted-worker.ts?worker&inline";\nexport const planted = Planted;\n',
+    {
+      "planted-worker.ts": (harness) =>
+        `export const url = new URL(${JSON.stringify(harness(file))}, import.meta.url);\n` +
+        "(globalThis as Record<string, unknown>).planted = url;\n",
+    },
+  ];
+  const stylesheet = (file: string): [Source, Record<string, Source>] => [
+    () => 'import css from "./planted.css?inline";\nexport const planted = css;\n',
+    { "planted.css": (harness) => `a { background: url(${JSON.stringify(harness(file))}); }\n` },
+  ];
+
+  it.each([
+    ["a worker's new URL() names a small file, inlined", worker(small), small, true],
+    ["a worker's new URL() names a larger file, emitted", worker(large), large, false],
+    [
+      "a worker's new URL() names a larger file with ?inline",
+      worker(`${large}?inline`),
+      large,
+      true,
+    ],
+    ["an ?inline stylesheet's url() names a small file, inlined", stylesheet(small), small, true],
+    ["an ?inline stylesheet's url() names a larger file, emitted", stylesheet(large), large, false],
+    ["an ?inline stylesheet's url() with ?inline", stylesheet(`${large}?inline`), large, true],
+  ] as const)(
+    "%s",
+    async (_name, [entry, files], file, inlined) => {
+      const root = plant(entry, files, IN_REPOSITORY);
+      const module = `packages/testing/${file}`;
+      await expect(bundle(root, RELEASE)).rejects.toThrow(harnessMessage([module]));
+      expect(existsSync(join(root, "dist/server/main.js"))).toBe(false);
+      await bundle(root, TEST);
+      if (inlined) {
+        expect(written(root)).toContain(readFileSync(join(HARNESS, file)).toString("base64"));
+      }
+    },
+    60_000,
+  );
+});
+
 describe("each of the guard's checks", () => {
   it.each(["load", "buildEnd", "generateBundle"] as const)(
     "%s refuses on its own",
@@ -256,11 +390,49 @@ describe("each of the guard's checks", () => {
     },
     60_000,
   );
+
+  it("generateBundle reads an asset's name relative to the build's root", () => {
+    type Hook = (this: unknown, options: unknown, bundle: unknown, isWrite: boolean) => void;
+    const generateBundle = harnessGuard().generateBundle as unknown as Hook;
+    const name = "../../packages/testing/src/later.ts";
+    const context = {
+      environment: { config: { root: join(REPOSITORY, "apps/planted") } },
+      error(message: string): never {
+        throw new Error(message);
+      },
+    };
+    const asset = { type: "asset", fileName: "assets/later.ts", originalFileNames: [name] };
+    const call = (source: string) =>
+      generateBundle.call(context, {}, { "assets/later.ts": { ...asset, source } }, false);
+    expect(harnessModules([name])).toEqual([]);
+    expect(() => call("not the harness's text")).toThrow(
+      harnessMessage(["packages/testing/src/later.ts"]),
+    );
+  });
 });
 
-// These tests read files outside packages/server (each app's manifest, vite.server.config.ts and
-// sources, and packages/testing), so turbo.json names them as inputs of `@fin/server#test`: a
-// change to any of them runs the tests again instead of replaying a cached pass.
+/**
+ * The inputs turbo.json gives `@fin/server#test`, as globs relative to the repository's root: the
+ * package's own files for `$TURBO_DEFAULT$`, and each `$TURBO_ROOT$/` glob.
+ */
+function serverTestInputs(): string[] {
+  const turbo = JSON.parse(readFileSync(join(REPOSITORY, "turbo.json"), "utf8")) as {
+    tasks?: Record<string, { inputs?: string[] }>;
+  };
+  return (turbo.tasks?.["@fin/server#test"]?.inputs ?? []).flatMap((input) => {
+    if (input === "$TURBO_DEFAULT$") return ["packages/server/**"];
+    if (input.startsWith("$TURBO_ROOT$/")) return [input.slice("$TURBO_ROOT$/".length)];
+    return [];
+  });
+}
+
+// These tests read files outside packages/server: each app's manifest, tsconfig.json,
+// vite.server.config.ts and sources, and every workspace package's manifest, tsconfig.json and
+// sources (serverBundleConfig sets `ssr.noExternal`, so a server bundle holds each @fin package its
+// app imports, and a package that loaded packages/testing would put the harness in it). turbo.json
+// names them as inputs of `@fin/server#test`, so a change to any of them runs the tests again
+// instead of replaying a cached pass; each bundle's test checks that every source of the repository
+// its maps name is one of those inputs.
 describe("the real server bundles", () => {
   const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
     .map((path) => path.split(sep).join("/"))
@@ -300,6 +472,17 @@ describe("the real server bundles", () => {
       });
       expect(sources.length).toBeGreaterThan(0);
       expect(harnessModules(sources)).toEqual([]);
+      // Every source of the repository the bundle holds, its dependencies' aside (the lockfile, a
+      // global dependency, pins those), is an input of `@fin/server#test`.
+      const inputs = serverTestInputs();
+      const repository = realpathSync.native(REPOSITORY);
+      const real = (path: string) => (existsSync(path) ? realpathSync.native(path) : path);
+      const unlisted = sources
+        .map((source) => relative(repository, real(source)).split(sep).join("/"))
+        .filter((source) => source !== ".." && !source.startsWith("../") && !isAbsolute(source))
+        .filter((source) => !source.split("/").includes("node_modules"))
+        .filter((source) => !inputs.some((input) => matchesGlob(source, input)));
+      expect(unlisted).toEqual([]);
     },
     60_000,
   );
