@@ -133,7 +133,7 @@ report at the end of each day carries this table, so a partial requirement is a 
 |---|---|---|
 | R1 Production-ready, from scratch | Partial | Production readiness is §7's gates (PG-01 to PG-14). Nothing is ported: the owner answered [UI-12] no (21 Nov, about 08:28), so the UI is built fresh from the canvases and [G-04] has no exception (§0.3, decision 2) |
 | R2 Everything on Railway, including the database | Full for compute and the database. Off Railway by the owner's decisions: the apps' static files (assets-only deployments that run no code, [FD-17]), and the vault, the watcher ([OB-18]), the tunnels' edge, Access and email ([P-02]) | none: [P-02] was decided overnight |
-| R3 Cloudflare Email Sending | Full on staging, sent only by `worker` from its static egress | Production: the beta acceptance ([EM-02]) and the two-week warm-up ([EM-08]) |
+| R3 Cloudflare Email Sending | Full on staging, sent only by `worker` from its static egress | Production: the beta acceptance ([EM-02]) and the two-week warm-up ([EM-08]) (the warm-up largely falls away on the owner's existing production domain; a short ramp may remain) |
 | R4 Cloudflare in front of Railway | Full: tunnels for every API host, assets-only static deployments for every app host, one origin per app, watched every minute | The evict drill and SP-04h in hardening (PG-05) |
 | R5 Better Stack replaces Grafana and Sentry | Full on staging | Production team, paging and the responder gate (PG-09) |
 | R6 Auth with roles | Partial if the Saturday stretch slips: custom staff roles and the AdminRoleEditor, the staff factor reset, passwords and Google | Sunday's spill block, then H-02 |
@@ -151,9 +151,16 @@ report at the end of each day carries this table, so a partial requirement is a 
 **What this plan does not promise.** Production cannot open on Monday night. The earliest realistic
 production date depends on the 7-day email soak, 7 days of a green watcher, the production sending
 domains' two-week warm-up, a cold review of the whole codebase, drills, the responder gate,
-production accounts and vendor answers (§7). The estimate is **production open to real developers not
-before the week of 14 Dec 2026**, and live money later, both UNVERIFIED until the hardening shows its
-pace.
+production accounts and vendor answers (§7). The owner's input of 21 Nov (about 22:10) removes most
+of the warm-up and the accounts: production uses the owner's existing production domain, with its
+already warmed sending reputation, its existing accounts and its vendor relationships (a short ramp
+may remain on Cloudflare Email Sending). Production is then gated by the hardening, the cold review,
+the drills and the 7-day soaks, which run on staging from staging-complete. The estimate is
+**production open to real developers at the earliest the week of 7 Dec 2026, UNVERIFIED**, and live
+money later, both until the hardening shows its pace. Three questions remain with the owner: a
+cutover of the existing product's production or a fresh start on that domain; which provider sends
+that domain's mail today; and whether a Sumsub production app exists for it, with MassPay live's
+status.
 
 ### 0.3 Before Saturday 10:00, the owner provides
 
@@ -1632,7 +1639,7 @@ in parallel. The lanes keep the same ownership rules and review gates.
 | H-08 | Docs | Guides for every area, the changelog with an Atom feed, search, error pages, response examples on every operation | PG-02 |
 | H-09 | Personal data lifecycle | The erasure flow (deactivate and delete applicants, `erased_at`, the 90-day Sandbox retention), counsel's retention answer (old D18) | PG-07 |
 | H-10 | The old staging | No hostname cutover ([FD-09]): fin-next's staging names on the shared zone are final; retiring the old staging at parity (§9.3) is the old repository's own work | PG-12 |
-| H-11 | Production build | §7.2's accounts and services, Postgres HA ([P-10]), the production zones chosen early ([FD-10]) and the sending domains' two-week warm-up started at once ([EM-08]), the production OAuth client, the production Sumsub app, the operator user and launcher, a throwaway environment provisioned from scratch ([OP-09]) | PG-10 |
+| H-11 | Production build | §7.2's accounts and services, Postgres HA ([P-10]), the production zones chosen early ([FD-10]) and the sending domains' two-week warm-up started at once ([EM-08]) (both largely fall away: the owner, 21 Nov about 22:10, production uses the owner's existing production domain, its accounts and its already warm sending reputation; a short ramp on Cloudflare Email Sending may remain; three questions remain with the owner, §0.3), the production OAuth client, the production Sumsub app, the operator user and launcher, a throwaway environment provisioned from scratch ([OP-09]) | PG-10 |
 | H-12 | Soaks and drills | The 7-day email soak; 7 days of the watcher green; the drill list (PG-05) | PG-04, PG-05 |
 | H-13 | Cold review | `all --cold` with the owner's chosen models; every confirmed medium or above fixed | PG-01 |
 | H-14 | Runtime | The Node upgrade runbook and base-image digest updates; the Bun canary job kept green or its failures recorded (R15) | PG-09 |
@@ -1640,12 +1647,13 @@ in parallel. The lanes keep the same ownership rules and review gates.
 
 **Indicative order** (UNVERIFIED pace):
 
-- **Tue 24 to Thu 26 Nov:** H-01 first; H-03, H-04 and H-05 alongside; the production zones chosen and
-  the email warm-up started (H-11).
+- **Tue 24 to Thu 26 Nov:** H-01 first; H-03, H-04 and H-05 alongside; H-11's accounts checked
+  against the owner's existing ones (the zones and the warm-up largely fall away: production uses
+  the owner's existing production domain).
 - **Fri 27 Nov to Fri 4 Dec:** H-02, H-06 to H-09 and H-15; the soaks (H-12) run from staging-complete;
   the production build (H-11) beside them; the cold review (H-13) once the code stops moving.
-- **From the week of 14 Dec:** the production gates are checked; production opens on the owner's go
-  (PG-13). Live money waits for PG-14.
+- **From the week of 7 Dec at the earliest (UNVERIFIED):** the production gates are checked;
+  production opens on the owner's go (PG-13). Live money waits for PG-14.
 
 ---
 
@@ -1898,7 +1906,7 @@ DECISIONS.md:
 | The UI packages, built fresh ([UI-12]) | A few extra hours on the UI lane beyond the port's estimate of 21 to 34 agent-hours and 6 to 9 hours of wall clock, across P0-G's waves and L-SAT-12; auth's backend lanes run in parallel | D3 §4.3; the steward, 21 Nov |
 | Platform, monthly | ARCHITECTURE §4.11's table: about 290 to 420 USD before review spend; static asset requests are free, and Workers Paid is already counted for email and the watcher | B2, B3, B4, C1 |
 | Staging-complete | Target Thu 26 Nov 22:00 | Two spill days after Monday |
-| Production open | Not before the week of 14 Dec 2026 | The soaks start at staging-complete; the production domains' two-week warm-up; the production build, the cold review and the drills run beside them |
+| Production open | The week of 7 Dec 2026 at the earliest (UNVERIFIED) | The soaks start at staging-complete; the hardening, the production build, the cold review and the drills run beside them; the warm-up largely falls away (the owner, 21 Nov, about 22:10) |
 | Live money | After PG-14, which depends on MassPay's answers | Vendor-led |
 
 The steward records measured times, costs and usage per pull request and per night in the end-of-day

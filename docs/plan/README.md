@@ -81,7 +81,7 @@ repository `aktharazif/fin-next` (R12). This plan is committed before any code (
 - Staging-complete is targeted for Thursday 26 Nov at 22:00.
 - Production is not promised for any date. It waits for 14 production gates (PG-01 to PG-14): soaks,
   drills, a cold review of the whole codebase, the email warm-up and vendor answers. The estimate is
-  that production opens to real developers in the week of 14 Dec 2026 at the earliest, and live money
+  that production opens to real developers in the week of 7 Dec 2026 at the earliest, and live money
   opens later. Both dates are UNVERIFIED.
 
 **What the owner did first.** At the Saturday sitting on 21 Nov 2026, the owner answered the nine
@@ -309,7 +309,7 @@ package release ages are in UTC (EXECUTION, "How to read this file").
 | Tue 24 and Wed 25 Nov | Two spill days for the three days' must-haves | EXECUTION §6 |
 | Thu 26 Nov, 22:00 | **Staging-complete** (target, UNVERIFIED) | EXECUTION §0.1 |
 | From Fri 27 Nov | Hardening, H-01 to H-15: screens to full coverage, fin-review v2, security depth, operations, monitoring, performance, docs, the personal-data lifecycle, the production build, soaks and drills, the cold review, portability. Also what moves to hardening from Phase 0 (D6): the builder account and its token, the agents' dedicated OS users, signed review receipts and the private overlay's ceremony | EXECUTION §6 |
-| Week of 14 Dec 2026 at the earliest | The production gates are checked, and production opens on the owner's go (PG-13). Live money waits for PG-14 | EXECUTION §6, §7 |
+| Week of 7 Dec 2026 at the earliest (UNVERIFIED) | The production gates are checked, and production opens on the owner's go (PG-13). Live money waits for PG-14 | EXECUTION §6, §7 |
 
 **Every day** has four checkpoints: C1 triage at 08:00, C2 midday at 13:00, C3 the cut decision at
 18:00 and C4 deploy at 22:00. Merge batches run every 90 minutes. The next morning's 08:00 to 11:00
