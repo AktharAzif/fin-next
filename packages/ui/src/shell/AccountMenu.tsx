@@ -13,6 +13,7 @@ import {
   SunIcon,
   UserCircleIcon,
 } from "@fin/icons";
+import type { ComponentPropsWithRef } from "react";
 import {
   DropdownMenu,
   MenuItem,
@@ -21,6 +22,7 @@ import {
   MenuSeparator,
 } from "../data/dropdown-menu.tsx";
 import { Avatar } from "../foundation/avatar.tsx";
+import { cn } from "../lib/cn.ts";
 import type { ShellLink } from "./Sidebar.tsx";
 
 export type ShellThemeChoice = "light" | "dark" | "system";
@@ -36,13 +38,24 @@ export function nameFromEmail(email: string): string {
     .join(" ");
 }
 
-function Trigger({ label, name, email }: { label: string; name: string; email: string }) {
+type TriggerProps = ComponentPropsWithRef<"button"> & {
+  label: string;
+  name: string;
+  email: string;
+};
+
+/** The menu's trigger. The menu renders it with its own props and ref, so both are passed on. */
+function Trigger({ label, name, email, className, ...props }: TriggerProps) {
   return (
     <button
       type="button"
+      {...props}
       aria-label={label}
       data-account-menu=""
-      className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-control border-0 bg-transparent px-1 text-text-tertiary outline-none transition-colors duration-fast hover:bg-fill-hover hover:text-text-secondary focus-visible:outline-focus state-open:bg-fill-hover"
+      className={cn(
+        "inline-flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-control border-0 bg-transparent px-1 text-text-tertiary outline-none transition-colors duration-fast hover:bg-fill-hover hover:text-text-secondary focus-visible:outline-focus state-open:bg-fill-hover",
+        className,
+      )}
     >
       <Avatar name={name} email={email} size={24} />
       <CaretDownIcon className="hidden lg:block" />

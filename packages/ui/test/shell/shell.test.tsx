@@ -276,6 +276,8 @@ describe("menus", () => {
     );
     expect(html).toContain('aria-label="Account menu, Maya Rivera"');
     expect(html).toContain(">MR<");
+    // The menu's own props reach the button: without them a press would never open it.
+    expect(html).toMatch(/<button[^>]*aria-haspopup="menu"[^>]*aria-label="Account menu/);
   });
 
   it("names the trigger by email when there is no name, with the first letter", () => {
