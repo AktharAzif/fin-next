@@ -164,6 +164,7 @@
         "id",
         "purpose",
         "browser_known",
+        "codeless",
         "created_at",
         "expires_at",
         "browser_tries",

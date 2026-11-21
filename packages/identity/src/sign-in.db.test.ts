@@ -390,6 +390,138 @@ describe("the same answers for registered and unknown addresses (T-SAT-32, AC-SA
     expect(b).toEqual(a);
   });
 
+  /** Signs up for `email` from a new browser, keeping the cookies the answer sets. */
+  async function signedUpBrowser(email: string): Promise<Browser> {
+    const asker = h.browser();
+    const answer = await signUp(
+      h.realm,
+      asker.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
+      asker.context(),
+      { name: "Ada Lovelace", email },
+    );
+    expect(answer.status).toBe(202);
+    for (const cookie of answer.setCookies)
+      asker.absorb(new Response(null, { headers: { "set-cookie": cookie } }));
+    return asker;
+  }
+
+  const asking = (b: Browser, email: string) =>
+    h.realm.run(b.context(), (tx) =>
+      codeLinkAsking(tx, h.realm.runtime, email, b.jar.get("__Host-fin.code_browser") ?? null),
+    );
+
+  /** Wrong codes from a browser, as status, body and header names. */
+  async function wrongCodes(b: Browser, email: string, times: number) {
+    const answers: unknown[] = [];
+    for (let i = 0; i < times; i += 1) {
+      const answer = await post(b, "/api/auth/sign-in/email-otp", { email, otp: "00000000" });
+      answers.push({
+        status: answer.status,
+        json: answer.json,
+        headers: [...answer.headers.keys()].sort(),
+      });
+    }
+    return answers;
+  }
+
+  /** What the browser that signed up can see next: the code-link check and its tries. */
+  async function afterSignUp(email: string) {
+    const asker = await signedUpBrowser(email);
+    const linked = await asking(asker, email);
+    const tries = await wrongCodes(asker, email, 5);
+    const elsewhere = await wrongCodes(h.browser(), email, 4);
+    return { linked, tries, elsewhere, stillLinked: await asking(asker, email) };
+  }
+
+  it("leaves the browser that signed up the same state for a registered and an unknown address", async () => {
+    const registered = unique("state.registered");
+    await codeSignIn(h, h.browser(), registered);
+    const a = await afterSignUp(registered);
+    const b = await afterSignUp(unique("state.fresh"));
+    expect(a).toEqual(b);
+    expect(b.linked).toBe(true);
+    expect((b.tries as { status: number }[]).map((t) => t.status)).toEqual([
+      400, 400, 400, 403, 403,
+    ]);
+    expect((b.elsewhere as { status: number }[]).map((t) => t.status)).toEqual([
+      400, 400, 400, 403,
+    ]);
+    // The registered address got its notice and no code.
+    expect((await h.outbox(registered)).at(-1)).toMatchObject({
+      template: "identity/already-registered",
+      params: {},
+    });
+  });
+
+  it("leaves the same state while the owner's known browser holds a live code, and never touches that code", async () => {
+    const registered = unique("state.contested");
+    const owner = h.browser();
+    await codeSignIn(h, owner, registered); // the owner's browser is now known for the address
+    await owner.post("/api/auth/sign-out");
+    await sendCode(owner, registered);
+    const ownersCode = (await h.latestCode(registered)) as string;
+    const a = await afterSignUp(registered);
+    const b = await afterSignUp(unique("state.contested.fresh"));
+    expect(a).toEqual(b);
+    // The owner's code is still the live one, its browser still the asking one.
+    expect(await h.latestCode(registered)).toBe(ownersCode);
+    expect(await asking(owner, registered)).toBe(true);
+    const signedIn = await post(owner, "/api/auth/sign-in/email-otp", {
+      email: registered,
+      otp: ownersCode,
+    });
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+
+  it("never lets a code through for the registered address's request from sign-up", async () => {
+    const registered = unique("state.no.code");
+    const owner = h.browser();
+    await codeSignIn(h, owner, registered);
+    await owner.post("/api/auth/sign-out");
+    await sendCode(owner, registered);
+    const ownersCode = (await h.latestCode(registered)) as string;
+    const asker = await signedUpBrowser(registered);
+    // Even the owner's right code fails in the browser that signed up, as a wrong code would.
+    const refused = await post(asker, "/api/auth/sign-in/email-otp", {
+      email: registered,
+      otp: ownersCode,
+    });
+    expect(refused.status).toBe(400);
+    expect(refused.json).toMatchObject({ code: "INVALID_OTP" });
+    expect(asker.sessionToken()).toBeNull();
+    const failed = (await h.events({ event: "sign_in.failed" })).at(-1);
+    expect(failed?.metadata).toEqual({ method: "email_otp", reason: "wrong_code" });
+    const signedIn = await post(owner, "/api/auth/sign-in/email-otp", {
+      email: registered,
+      otp: ownersCode,
+    });
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+
+  it("counts sign-up against the strangers' share of code emails alike for both", async () => {
+    // Each address has had one code asked by a browser not known for it (the registered one's
+    // first sign-in), so each has 2 of the strangers' 3 an hour left.
+    const registered = unique("share.registered");
+    await codeSignIn(h, h.browser(), registered);
+    const fresh = unique("share.fresh");
+    await sendCode(h.browser(), fresh);
+    // Sign-up uses one more; then three more browsers ask, and only the first gets a code.
+    const probe = async (email: string) => {
+      await signedUpBrowser(email);
+      const answers: boolean[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const b = h.browser();
+        expect((await sendCode(b, email)).status).toBe(200);
+        answers.push(await asking(b, email));
+      }
+      return answers;
+    };
+    const a = await probe(registered);
+    const b = await probe(fresh);
+    expect(a).toEqual(b);
+    expect(b).toEqual([true, false, false]);
+  });
+
   it("refuses a bad name with the field's sentence and no address in the answer", async () => {
     const b = h.browser();
     await expect(

@@ -5,8 +5,11 @@
 //
 // "The same" is checked to the byte (T-SAT-32): both branches count the same limits before they
 // part, and every cookie in the answer is written by serializeFinCookie() here, never copied from
-// the library's own serializer, whose attribute order differs.
-import { codeSendSubject } from "./codes.ts";
+// the library's own serializer, whose attribute order differs. What they leave behind is the same
+// too: the registered branch records a codeless request for the browser where the unknown one
+// records its code's, so the browser's next steps (a code tried, the code-link check, a code
+// asked again) answer alike.
+import { codeSendSubject, requestCodeless } from "./codes.ts";
 import { finCookieName, readCookie, serializeFinCookie } from "./cookies.ts";
 import { randomToken } from "./crypto/keyed.ts";
 import { AuthRefusal } from "./errors.ts";
@@ -71,12 +74,12 @@ export async function signUp(
     state.codeSendCounted = true;
 
     const cookieHeader = request.headers.get("cookie");
-    const existing = (cookie: "sign_up_browser" | "code_browser"): string => {
+    const sent = (cookie: "sign_up_browser" | "code_browser" | "known_browser"): string | null => {
       const value = readCookie(cookieHeader, finCookieName("developer", cookie));
-      return value !== null && TOKEN.test(value) ? value : randomToken();
+      return value !== null && TOKEN.test(value) ? value : null;
     };
-    const signUpToken = existing("sign_up_browser");
-    const codeToken = existing("code_browser");
+    const signUpToken = sent("sign_up_browser") ?? randomToken();
+    const codeToken = sent("code_browser") ?? randomToken();
     const setCookies = [
       serializeFinCookie("developer", "sign_up_browser", signUpToken),
       serializeFinCookie("developer", "code_browser", codeToken),
@@ -84,6 +87,17 @@ export async function signUp(
 
     const person = await personByEmail(tx, "developer", email);
     if (person !== null) {
+      // No code (§5.1): the notice goes instead. In the code's place the browser gets a codeless
+      // request, bound to `codeToken` and counted against the same share and allowance of code
+      // emails, which no code passes and which leaves a code the owner's known browser holds alone.
+      const recorded = await requestCodeless(tx, rt, {
+        email,
+        browserToken: codeToken,
+        knownBrowserToken: sent("known_browser"),
+        userId: person.id,
+      });
+      // The line carries what the unknown branch's would: the reason only when nothing is recorded.
+      if (!recorded.recorded) state.line.reason = `codes.${recorded.reason}`;
       await rt.email(tx, { template: "identity/already-registered", to: email, params: {} });
       return { status: 202, body: { status: "code_sent" }, setCookies };
     }
@@ -112,7 +126,7 @@ export async function signUp(
         codeToken,
       ),
     );
-    const sent = (await realm.api.sendVerificationOTP({
+    const asked = (await realm.api.sendVerificationOTP({
       body: { email, type: "sign-in" },
       headers,
       returnHeaders: true,
@@ -121,7 +135,7 @@ export async function signUp(
     // this answer differ from the registered one (or bind the code to a token the browser never
     // gets), so it fails closed.
     const codeCookie = `${finCookieName("developer", "code_browser")}=`;
-    for (const cookie of sent.headers?.getSetCookie() ?? []) {
+    for (const cookie of asked.headers?.getSetCookie() ?? []) {
       const value = cookie.startsWith(codeCookie)
         ? cookie.slice(codeCookie.length).split(";")[0]
         : null;

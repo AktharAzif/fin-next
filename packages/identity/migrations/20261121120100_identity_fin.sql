@@ -55,12 +55,16 @@ ALTER TABLE identity.session
   REFERENCES identity.trusted_browser (id) ON DELETE SET NULL;
 
 -- One live code per address and purpose, bound to the browser that asked (§5.2, [SA-35]).
+-- `codeless`: recorded in place of a code, by the sign-up of an address that already has an
+-- account (§5.1), so the browser that asked holds a request as it would for an unknown address;
+-- no code is right for it, and it never supersedes a known browser's live code.
 CREATE TABLE identity.email_code_request (
   id text PRIMARY KEY CHECK (id ~ '^emr_[0-9a-hjkmnp-tv-z]{26}$'),
   email_hash bytea NOT NULL CHECK (length(email_hash) = 32),
   purpose text NOT NULL CHECK (purpose IN ('sign_in', 'sign_up', 'password_reset')),
   browser_hash bytea NOT NULL CHECK (length(browser_hash) = 32),
   browser_known boolean NOT NULL,
+  codeless boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   browser_tries smallint NOT NULL DEFAULT 0 CHECK (browser_tries >= 0),

@@ -476,7 +476,14 @@ async function developerCodeSignIn(
         target: person.id,
         metadata: {
           method: "email_otp",
-          reason: attempt.reason === "too_many_tries" ? "too_many_tries" : "other_browser",
+          // A try against a codeless request (§5.1's registered sign-up) is a wrong code: no code
+          // is right for it.
+          reason:
+            attempt.reason === "too_many_tries"
+              ? "too_many_tries"
+              : attempt.reason === "codeless"
+                ? "wrong_code"
+                : "other_browser",
         },
       });
     }

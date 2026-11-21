@@ -39,6 +39,10 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
   current session came from, ending every other session.
 - A factor shown at a step-up raises the session to `aal2` (§6.1), so a trusted-browser session
   that has shown its factor keeps working when an action it takes revokes its row.
+- `signUp()` for an address that already has an account sends `already-registered` and no code,
+  and records a codeless request for the browser in the code's place (`codeless` in
+  `identity.email_code_request`): no code is right for it, it never supersedes a known browser's
+  live code, and the browser's next steps answer as they would for an unknown address.
 - The front door gives `context`: the request ID, `CF-Connecting-IP`, the user agent, the verified
   Access identity on Fin Admin, and `annotate` to add the auth fields to its own `request` line.
 
