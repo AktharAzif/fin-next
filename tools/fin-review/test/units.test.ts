@@ -15,7 +15,7 @@ import { DATA_RULE, loadProcedure } from "../src/review/procedure.ts";
 import { mediaFormat, verifiedExclusion } from "../src/units/content.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
 import { brotliCompressSync, deflateSync } from "node:zlib";
-import { avif, bmp, bmp8, box, brotliWithMetadata, eot, fullBox, gif, gifExtension, headTable, ico, icoBitmap, infe, itemReference, jpeg, jpegSegment, planted, png, pngChunk, riffChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
+import { FONT_NAME_RE, avif, bmp, bmp8, brotliWithMetadata, eot, exemptShapes, gif, headTable, ico, jpeg, misnamed, planted, png, pngChunk, textShaped, ttf, webp, woff, woff2 } from "./helpers/media.ts";
 
 function declarations(count: number, lines: number): string {
   const out: string[] = ['import { x } from "./x.ts";', ""];
@@ -211,10 +211,10 @@ describe("inventory and shards", () => {
       assert.equal(verifiedExclusion(`assets/${name}`, bytes.subarray(0, bytes.length - 4)), null, `${name} cut short`);
     }
     // One format's bytes under another format's extension.
-    assert.equal(verifiedExclusion("assets/a.png", gif()), null);
-    assert.equal(verifiedExclusion("assets/a.gif", png()), null);
-    assert.equal(verifiedExclusion("assets/a.ttf", woff()), null);
-    assert.equal(verifiedExclusion("assets/a.jpg", png()), null);
+    for (const [name, bytes] of Object.entries(misnamed())) {
+      assert.notEqual(mediaFormat(bytes), null, name);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
+    }
     // A PNG chunk whose CRC does not match, and a chunk after IEND.
     const badCrc = png();
     badCrc[17] = (badCrc[17] ?? 0) ^ 1;
@@ -224,9 +224,10 @@ describe("inventory and shards", () => {
   });
 
   it("a format's header whose length fields cover bytes of any kind, a structure the walk does not read, or a layout that fails any one check of a walk, is no image or font", () => {
-    // One shape per check of each walk (helpers/media.ts): taking any one check out makes its shape pass.
+    // Shapes for every check of each walk (helpers/media.ts): taking any one check out of content.ts
+    // makes one pass, except the checks test/content-guards.test.ts lists as changing nothing.
     const files = planted(Buffer.from("\0#!/bin/sh\necho MARKER-PAYLOAD\n"));
-    assert.ok(Object.keys(files).length >= 99, "no shape is dropped");
+    assert.ok(Object.keys(files).length >= 300, "no shape is dropped");
     for (const [name, bytes] of Object.entries(files)) {
       assert.equal(mediaFormat(bytes), null, name);
       assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
@@ -248,60 +249,7 @@ describe("inventory and shards", () => {
 
   it("the layouts real images and fonts use stay exempt, and each walk reads what its lengths cover", () => {
     const head = headTable();
-    // Some writers pad a bitmap with zero bytes after its last row.
-    const paddedBmp = Buffer.concat([bmp(), Buffer.alloc(2)]);
-    paddedBmp.writeUInt32LE(paddedBmp.length, 2);
-    // An ICC profile's header: its size, and the acsp signature at 36.
-    const icc = Buffer.alloc(132);
-    icc.writeUInt32BE(icc.length, 0);
-    icc.write("acsp", 36, "latin1");
-    const u32 = (...values: number[]): Buffer => Buffer.concat(values.map((value) => Buffer.from([value >>> 24, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff])));
-    const utf16 = (text: string): Buffer => Buffer.from(text, "utf16le");
-    const exempt: Record<string, Buffer> = {
-      "padded.bmp": paddedBmp,
-      "padded.ico": ico([Buffer.concat([icoBitmap(), Buffer.alloc(28)])]),
-      "compressed.woff": woff({ compressed: true, metadata: '<?xml version="1.0"?><metadata version="1.0"/>' }),
-      "obfuscated.eot": eot({ xor: true }),
-      "named.eot": eot({ names: [utf16("Example Sans"), utf16("Regular"), utf16("Version 1.000;PS 1.0;hotconv 1.0.88"), utf16("Example Sans Regular")] }),
-      "v22.eot": eot({ v22: { root: utf16("https://example.org/\0") } }),
-      "palette.bmp": bmp8(),
-      "both.ico": ico([icoBitmap(), png()]),
-      "larger.avif": avif(Buffer.alloc(300, 7)),
-      // An alpha item, its auxiliary type and reference, a data reference, and metadata items, as encoders write them.
-      "alpha.avif": avif(undefined, {
-        items: [infe(2, "av01", "Alpha\0", 1), infe(3, "Exif", "\0"), infe(4, "mime", "XMP\0application/rdf+xml\0")],
-        properties: [
-          box("av1C", Buffer.from([0x81, 0x00, 0x0c, 0x00, 0x0a, 0x0b, 0x00, 0x00, 0x00, 0x2d, 0x4c, 0xff, 0xb3, 0xdf, 0xff, 0x98, 0x04])),
-          fullBox("auxC", 0, Buffer.from("urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0", "latin1")),
-          fullBox("pixi", 0, Buffer.from([1, 8])),
-        ],
-        meta: [
-          fullBox("iref", 0, Buffer.concat([itemReference("auxl", 2, [1]), itemReference("cdsc", 3, [1]), itemReference("cdsc", 4, [1])])),
-          box("dinf", fullBox("dref", 0, Buffer.concat([u32(1), fullBox("url ", 0, Buffer.alloc(0), 1)]))),
-          box("grpl", fullBox("altr", 0, u32(5, 2, 1, 2))),
-        ],
-      }),
-      // Every other property type the walk knows, a colour profile among them.
-      "properties.avif": avif(undefined, {
-        properties: [
-          box("colr", Buffer.concat([Buffer.from("nclx", "latin1"), Buffer.from([0, 1, 0, 13, 0, 6, 0x80])])),
-          box("colr", Buffer.concat([Buffer.from("prof", "latin1"), icc])),
-          box("pasp", u32(1, 1)),
-          box("clap", u32(1, 1, 1, 1, 0, 1, 0, 1)),
-          box("irot", Buffer.from([1])),
-          box("imir", Buffer.from([0])),
-          box("lsel", Buffer.from([0, 0])),
-          box("a1op", Buffer.from([0])),
-          box("a1lx", Buffer.from([0, 0, 1, 0, 2, 0, 3])),
-          box("clli", Buffer.from([0, 100, 0, 50])),
-          box("mdcv", Buffer.alloc(24, 1)),
-        ],
-      }),
-      "comment.gif": gif([gifExtension(0xfe, Buffer.from("made by hand"))]),
-      "comment.jpg": jpeg([jpegSegment(0xfe, Buffer.from("made by hand"))]),
-      "exif.webp": webp([riffChunk("EXIF", Buffer.from("Exif\0\0MM\0*"))]),
-    };
-    for (const [name, bytes] of Object.entries(exempt)) assert.equal(verifiedExclusion(`assets/${name}`, bytes), /\.(?:woff|eot)$/.test(name) ? "font" : "image", name);
+    for (const [name, bytes] of Object.entries(exemptShapes())) assert.equal(verifiedExclusion(`assets/${name}`, bytes), FONT_NAME_RE.test(name) ? "font" : "image", name);
 
     // WOFF: a compressed table must inflate to its stated length, using every byte stored for it.
     assert.equal(mediaFormat(woff({ table: Buffer.concat([deflateSync(head), Buffer.from("tail")]) })), null, "bytes after a table's zlib stream");
@@ -381,7 +329,14 @@ describe("inventory and shards", () => {
       "packages/server/src/blob.jpg": Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0x00]), Buffer.from("payload")]),
       "packages/server/src/tail.gif": Buffer.concat([gif(), Buffer.from("\n;globalThis.ran=1;\n")]),
       "packages/server/src/tail.webp": Buffer.concat([webp().subarray(0, 12), Buffer.from("VP8L"), Buffer.from([4, 0, 0, 0, 0x2f, 0, 0, 0]), Buffer.from("\0payload")]),
+      // Laid out as the format its name says, but text the inventory reads as text (helpers/media.ts).
+      ...Object.fromEntries(Object.entries(textShaped()).map(([name, bytes]) => [`packages/server/src/${name}`, bytes])),
     };
+    for (const [name, bytes] of Object.entries(textShaped())) {
+      assert.notEqual(mediaFormat(bytes), null, `${name} is laid out as its format`);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
+    }
+    assert.equal(mediaFormat(Buffer.alloc(0)), null, "no bytes at all");
     const { units, excluded } = inventory(
       Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
       (path) => files[path] ?? null,
@@ -392,6 +347,7 @@ describe("inventory and shards", () => {
       "packages/server/src/logo.avif",
       "packages/server/src/logo.gif",
       "packages/server/src/logo.webp",
+      "packages/server/src/text.gif",
     ]);
     for (const marker of ["MARKER-GIF", "MARKER-WEBP", "MARKER-AVIF", "MARKER-LOADER"]) assert.ok(units.some((unit) => unit.text.includes(marker)), marker);
     assert.deepEqual(
