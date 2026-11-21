@@ -7,25 +7,22 @@
 // refuses a missing or malformed variable with exit 78 naming it (never its value), writes
 // migrate.started and migrate.done or migrate.failed (or task.done / task.failed), and exits non-zero on
 // any failure, which stops the deploy.
-import { join } from "node:path";
 import { syncEventTypes } from "@fin/audit";
 import {
-  BOOTSTRAP_DIR,
   bootstrap,
   type Clock,
   connectClient,
   createDatabase,
   createPool,
   DatabaseConfigError,
-  GRANTS_DIR,
+  dbAssetsRoot,
   type LineSink,
-  loadFragments,
-  MIGRATIONS_DIR,
+  type LoadedDbAssets,
+  loadDbAssets,
   MigrationError,
   parseReplicas,
   parseRoleVerifiers,
   parseSuperuserUrl,
-  readMigrations,
   readPresentedCertificate,
   runMigrations,
   sqlState,
@@ -108,16 +105,12 @@ function tlsFor(base: BaseEnv, host: string): TlsSettings {
   throw new DatabaseConfigError("FIN_DB_CA_PEM", "is required outside a loopback test database");
 }
 
-function assets(base: BaseEnv): { migrations: string; bootstrap: string; grants: string } {
-  if (base.FIN_DB_ASSETS_DIR === undefined || base.FIN_DB_ASSETS_DIR === "") {
-    return { migrations: MIGRATIONS_DIR, bootstrap: BOOTSTRAP_DIR, grants: GRANTS_DIR };
-  }
-  const dir = base.FIN_DB_ASSETS_DIR;
-  return {
-    migrations: join(dir, "migrations"),
-    bootstrap: join(dir, "bootstrap"),
-    grants: join(dir, "roles", "grants"),
-  };
+/**
+ * Every package's bootstrap, migrations and grants, read and checked before any connection: from
+ * FIN_DB_ASSETS_DIR in the image (ops/docker/app.Dockerfile sets it), from the source tree locally.
+ */
+function assets(base: BaseEnv): LoadedDbAssets {
+  return loadDbAssets(dbAssetsRoot({ FIN_DB_ASSETS_DIR: base.FIN_DB_ASSETS_DIR }));
 }
 
 function applicationName(base: BaseEnv): string {
@@ -160,7 +153,7 @@ async function bootstrapMode(
   const target = parseSuperuserUrl(env.FIN_BOOTSTRAP_DATABASE_URL);
   const verifiers = parseRoleVerifiers(env.FIN_ROLE_VERIFIERS);
   const replicas = parseReplicas(env.FIN_DB_REPLICAS);
-  const dirs = assets(base);
+  const files = assets(base);
   const client = await connectClient({
     ...target,
     tls: tlsFor(base, target.host),
@@ -171,8 +164,8 @@ async function bootstrapMode(
       verifiers,
       replicas,
       environment: base.FIN_ENVIRONMENT,
-      bootstrapDir: dirs.bootstrap,
-      fragments: loadFragments(dirs.grants),
+      files: files.bootstrap,
+      fragments: files.fragments,
     });
     log.write({
       event: "migrate.done",
@@ -196,9 +189,7 @@ async function migrateMode(
   clock: Clock,
 ): Promise<void> {
   const target = parseSuperuserUrl(env.FIN_BOOTSTRAP_DATABASE_URL);
-  const dirs = assets(base);
-  const files = readMigrations(dirs.migrations);
-  const fragments = loadFragments(dirs.grants);
+  const { migrations: files, fragments } = assets(base);
   const tls = tlsFor(base, target.host);
   const superuser = await connectClient({ ...target, tls, applicationName: applicationName(base) });
   try {

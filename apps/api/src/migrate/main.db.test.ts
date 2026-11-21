@@ -1,8 +1,11 @@
 // `migrate` end to end against Postgres 18 (spec 01 §6.6 steps 3 to 6, AC-P0-29's local half): the
 // bootstrap from an empty database, the migration run with fin_owner's per-run password (cleared after),
 // the registry sync, the privileged-login record naming the run, and the operator tasks.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AUDIT_EVENTS } from "@fin/audit";
-import type { PgClient } from "@fin/db";
+import { listMigrations, type PgClient, sourceRoot, stageDbAssets } from "@fin/db";
 import {
   createTestDatabase,
   type TestDatabase,
@@ -103,15 +106,22 @@ describe("migrate --bootstrap", () => {
 });
 
 describe("migrate --migrate", () => {
-  it("applies every migration as fin_owner with a password for the run only, and syncs the registry", async () => {
+  it("applies every package's migrations as fin_owner with a password for the run only, and syncs the registry", async () => {
     const { code, lines } = await cli(["--migrate"]);
     expect(code).toBe(EXIT_OK);
+    // The source tree's files (FIN_DB_ASSETS_DIR unset), every package's: the set the image ships.
+    const migrations = listMigrations(sourceRoot() ?? "");
+    expect(migrations.some((name) => /_identity_/.test(name))).toBe(true);
     expect(lines[1]).toMatchObject({
       event: "migrate.done",
       mode: "migrate",
-      applied: 5,
-      newest: expect.stringMatching(/_events_shell\.sql$/),
+      applied: migrations.length,
+      newest: migrations.at(-1),
     });
+    const recorded = await su.query<{ name: string }>(
+      "SELECT name FROM ops.schema_migrations ORDER BY name",
+    );
+    expect(recorded.rows.map((r) => r.name)).toEqual(migrations);
     const types = await su.query<{ n: number }>("SELECT count(*)::int AS n FROM audit.event_type");
     expect(types.rows[0]?.n).toBe(Object.keys(AUDIT_EVENTS).length);
     // AC-P0-29: fin_owner has no valid password once the run ends.
@@ -133,12 +143,35 @@ describe("migrate --migrate", () => {
     expect(lines[1]).toMatchObject({ applied: 0 });
   });
 
-  it("fails with migrate.failed and a non-zero exit when a migration fails", async () => {
+  it("reads the image's layout at FIN_DB_ASSETS_DIR: the same files, so nothing is pending", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fin-migrate-assets-"));
+    try {
+      const out = join(dir, "db-assets");
+      stageDbAssets(sourceRoot() ?? "", out);
+      const { code, lines } = await cli(["--migrate"], { FIN_DB_ASSETS_DIR: out });
+      expect(code).toBe(EXIT_OK);
+      expect(lines[1]).toMatchObject({ applied: 0, unknown: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a relative FIN_DB_ASSETS_DIR as configuration (exit 78)", async () => {
+    const { code, lines } = await cli(["--migrate"], { FIN_DB_ASSETS_DIR: "db-assets" });
+    expect(code).toBe(EXIT_CONFIG);
+    expect(lines.at(-1)).toMatchObject({ event: "migrate.failed", variable: "FIN_DB_ASSETS_DIR" });
+  });
+
+  it("fails with migrate.failed and a non-zero exit when the files are missing", async () => {
     const { code, lines } = await cli(["--migrate"], {
       FIN_DB_ASSETS_DIR: "/nonexistent-fin-assets",
     });
     expect(code).toBe(EXIT_FAILED);
-    expect(lines.at(-1)).toMatchObject({ event: "migrate.failed", mode: "migrate" });
+    expect(lines.at(-1)).toMatchObject({
+      event: "migrate.failed",
+      mode: "migrate",
+      code: "db_assets_missing",
+    });
   });
 });
 

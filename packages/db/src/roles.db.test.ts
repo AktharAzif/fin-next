@@ -44,7 +44,8 @@ let functions: Fn[] = [];
 const SCHEMAS = ["identity", "staff", "keys", "kyc", "money", "events", "email", "audit", "ops"];
 
 beforeAll(async () => {
-  db = await createTestDatabase({ prefix: "p0e" });
+  // Phase 0's objects: packages/db's files alone (assets.db.test.ts applies every package's).
+  db = await createTestDatabase({ prefix: "p0e", packages: ["db"] });
   su = await db.superuser();
   const rel = await su.query<{ name: string; kind: string; columns: string[] }>(
     `SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind,

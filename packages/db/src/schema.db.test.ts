@@ -1,6 +1,9 @@
 // AC-P0-39: from an empty Postgres 18, the bootstrap and the Phase 0 migrations of spec 01 §6.10 apply
 // in order and create exactly its tables and functions with exactly its grants; the kill switches hold
-// their six seeds `off`. And the runner's own contract: checksums, the lock, idempotence.
+// their six seeds `off`. And the runner's own contract: checksums, the lock, idempotence. Phase 0's
+// files are packages/db's, so this file's database takes packages/db's alone; assets.db.test.ts applies
+// every package's.
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bootstrap, bootstrapFiles } from "./bootstrap.ts";
 import { expandMatrix, livePrivileges, loadFragments, privilegeKey } from "./grants.ts";
@@ -28,7 +31,7 @@ let db: TestDatabase;
 let su: PgClient;
 
 beforeAll(async () => {
-  db = await createTestDatabase({ prefix: "p0e" });
+  db = await createTestDatabase({ prefix: "p0e", packages: ["db"] });
   su = await db.superuser();
 });
 
@@ -232,7 +235,10 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
             verifiers: testVerifiers(),
             replicas: testReplicas(),
             environment: "development",
-            bootstrapDir: BOOTSTRAP_DIR,
+            files: bootstrapFiles(BOOTSTRAP_DIR).map((name) => ({
+              name,
+              path: join(BOOTSTRAP_DIR, name),
+            })),
             fragments: loadFragments(GRANTS_DIR),
           }),
         ).rejects.toThrow(/another environment/);

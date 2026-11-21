@@ -1,5 +1,6 @@
-// The grant matrix (ARCHITECTURE §6.3, DECISIONS DA-03): one fragment per area in
-// packages/db/roles/grants/<area>.json, owned by the area's lane, rendered to SQL by the runner.
+// The grant matrix (ARCHITECTURE §6.3, DECISIONS DA-03): one fragment per area, in
+// packages/db/roles/grants/<area>.json or in the owning package's grants/<area>.json (assets.ts's
+// rule), owned by the area's lane, rendered to SQL by the runner.
 //
 // Applying is exact, not additive: for every object in Fin's schemas that the applying role owns, the
 // runner revokes everything from PUBLIC and from Fin's roles, then grants what the fragments say, in
@@ -126,11 +127,22 @@ export function parseFragment(file: string, text: string): GrantFragment {
   return { file, area: parsed.data.area, grants: parsed.data.grants };
 }
 
+/** Reads one directory's fragments, in name order. */
 export function loadFragments(dir: string): GrantFragment[] {
   const files = readdirSync(dir)
     .filter((name) => name.endsWith(".json"))
     .sort();
-  const fragments = files.map((name) => parseFragment(name, readFileSync(join(dir, name), "utf8")));
+  return loadFragmentFiles(files.map((name) => ({ name, path: join(dir, name) })));
+}
+
+/**
+ * Reads the fragments given (every package's, from discoverDbAssets): each file is named for its
+ * area, and no area appears twice, whichever packages the files come from.
+ */
+export function loadFragmentFiles(
+  files: readonly { name: string; path: string }[],
+): GrantFragment[] {
+  const fragments = files.map((file) => parseFragment(file.name, readFileSync(file.path, "utf8")));
   const areas = new Set<string>();
   for (const fragment of fragments) {
     if (`${fragment.area}.json` !== fragment.file) {
