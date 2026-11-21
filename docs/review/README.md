@@ -95,21 +95,38 @@ the bytes on the disk) and whether it was the default branch's engine copy.
 - **Units, by content.** A code file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
   `.cjs`) is always a unit, whatever its name or bytes. A path that `exclusions.json` names is left
   out only when its bytes are what the name says: the pnpm lockfile, a source map, or an image or a
-  font laid out end to end as the format its extension names, every byte in a structure the walk
-  reads (every PNG chunk with its CRC up to IEND, every JPEG segment up to EOI, every GIF block up to
-  the trailer, WebP's RIFF chunks, an AVIF still image's boxes with its item locations covering all
-  of its media data, an ICO's images and a bitmap's header, palette and rows end to end, a font's
-  tables end to end), only zero padding between them, nothing after the format's end, and never
-  bytes the engine would read as text. A font's compressed parts (WOFF's zlib tables and metadata,
-  WOFF2's brotli stream and metadata, an EOT's XOR obfuscation) are decoded and must come out at
-  exactly their stated lengths, every compressed byte read; what the walk cannot read (an AVIF
-  sequence, a compressed EOT, a bitmap with run-length compression or a colour profile, a font
-  collection) is not exempt. A planted header, a format's first bytes in front of other content, a
-  length field that covers bytes no structure holds, or one format under another's extension is not
-  an image or a font. What no layout check can rule out is a real image that also carries content in
-  a part the format leaves free (coded pixel or glyph data, which is never decoded, a comment,
-  metadata, a WOFF private block); such a file is still never sent to a model, so whatever reads or
-  runs it is the reviewed code. A file with a NUL in its first 8,000 bytes is binary; every other
+  font laid out end to end as the format its extension names, every byte in a structure the format
+  defines, of a type the walk knows, laid out as the format lays it out (every PNG chunk with its
+  CRC up to IEND, every JPEG marker segment up to EOI, every GIF block and extension up to the
+  trailer, WebP's chunks, an AVIF still image's boxes down to each item property, reference and data
+  reference, with its item locations covering all of its media data, an ICO's images and a bitmap's
+  header, palette and rows end to end, a font's tables end to end), only zero padding between them,
+  nothing after the format's end, and never bytes the engine would read as text. A box, chunk,
+  extension or segment the format does not define there (an AVIF free or skip box among them), a
+  WOFF or WOFF2 private block, an EOT's signature or EUDC font data, a palette on a bitmap of more
+  than 8 bits a pixel, and a name or string longer than the format's use needs (an AVIF handler or
+  item name, an EOT name over 512 bytes) are refused. A font's compressed parts (WOFF's zlib tables
+  and metadata, WOFF2's brotli stream and metadata, an EOT's XOR obfuscation) are decoded and must
+  come out at exactly their stated lengths, every compressed byte read; what the walk cannot read (an
+  AVIF sequence, a compressed EOT, a bitmap with run-length compression or a colour profile, a font
+  collection) is not exempt. A planted header, a length field that covers bytes no structure holds,
+  or one format under another's extension is not an image or a font.
+
+  The walk reads layout, not content, so like `imports:check` (DECISIONS BD-19) it is a check
+  against mistakes and planted headers, not a proof that a file holds nothing else. The data a
+  structure holds is never decoded and can be any bytes: a bitmap's rows, coded image data (a PNG
+  IDAT, a JPEG scan, a GIF image, a WebP or AVIF bitstream with its codec configuration), a font
+  table's contents, a brotli stream's metadata blocks (which decode to nothing, and which only a full
+  brotli decoder could find), comments and metadata (PNG ancillary chunks, JPEG APPn and COM
+  segments, GIF comment and application extensions, WebP ICCP, EXIF and XMP chunks, an AVIF's colour
+  profile and metadata items, WOFF and WOFF2 metadata), and the few bytes a header leaves free (an
+  EOT's names and root string, reserved and descriptive fields). So a short valid header in front of
+  other content passes when that content is what a structure holds. The same holds for a source map,
+  whose fields other than its version and mappings (its `sourcesContent` among them) are never read,
+  and for the lockfile, which only its first line identifies (the dependency lens reads it from the
+  tree). Such a file is still never sent to a model, so whatever reads or runs it is the reviewed
+  code, and every lens is told it changed.
+  A file with a NUL in its first 8,000 bytes is binary; every other
   file is a unit, decoded as UTF-8 with any invalid byte replaced, so one stray byte never takes it
   out of the review. A symbolic link is a unit holding its target, with the target one hop away; a
   submodule is never a unit. Every changed path that is not a unit (deleted, excluded, binary, a

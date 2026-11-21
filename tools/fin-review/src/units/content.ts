@@ -4,26 +4,38 @@
 // end to end as the format its extension names, the pnpm lockfile, or a source map. Anything else
 // is reviewed, or, when it cannot be, counted as a file no lens saw.
 //
-// An image or a font is walked from its first byte to its last, and every byte must belong to a
-// structure the format defines and the walk reads: each PNG chunk with its CRC, JPEG segment, GIF
-// block, RIFF chunk; an AVIF's boxes, with its item locations covering every byte of the media data;
-// an ICO's images and a bitmap's header, palette and rows, end to end; a font's tables end to end.
-// Only zero bytes may pad between them (where the format aligns) or after a bitmap's rows. A font's
+// An image or a font is walked from its first byte to its last, and every byte must lie in a
+// structure the format defines, of a type the walk knows, laid out as the format lays it out: each
+// PNG chunk with its CRC, JPEG marker segment, GIF block and extension, WebP chunk; an AVIF's boxes
+// down to each item property, reference and data reference, with its item locations covering every
+// byte of the media data; an ICO's images and a bitmap's header, palette and rows, end to end; a
+// font's tables end to end. Only zero bytes may pad between them (where the format aligns) or after
+// a bitmap's rows. A box, chunk, extension or segment of a type the format does not define for that
+// place (an AVIF free or skip box among them), a WOFF or WOFF2 private block, an EOT's signature or
+// EUDC font data, and a name or string longer than the format's use needs are refused. A font's
 // compressed parts are decompressed and must come out at exactly their stated lengths with every
 // compressed byte read (WOFF's zlib tables and metadata, WOFF2's brotli stream and metadata, an EOT's
 // XOR obfuscation undone). A layout the walk cannot read is never exempt: an AVIF image sequence, an
 // EOT compressed with MicroType Express, a compressed bitmap (run-length, JPEG or PNG) or one with a
-// colour profile, a font collection. So a few planted magic bytes, a valid header in front of other content,
-// a length field that covers bytes no structure holds, or bytes after the format's end never pass. A
-// media-named file the inventory would read as text (all valid UTF-8, no NUL in its first 8,000
-// bytes) is never exempt either: real image and font data is not text, so it is reviewed as text.
+// colour profile, a font collection. So planted magic bytes, a length field that covers bytes no
+// structure holds, or bytes after the format's end never pass. A media-named file the inventory
+// would read as text (all valid UTF-8, no NUL in its first 8,000 bytes) is never exempt either:
+// real image and font data is not text, so it is reviewed as text.
 //
-// What this cannot do is tell a real image from a real image that also hides content in the parts a
-// format leaves free: the coded data a structure holds is never decoded (the pixel data of a PNG
-// IDAT, a JPEG scan, a GIF image, a WebP or AVIF bitstream, a bitmap's rows; a font table's
-// contents), nor are comments, metadata and a WOFF private block. Such a file is still never a unit,
-// so whatever reads or runs it (a loader, a script, a workflow step) is the reviewed code, and the
-// lenses are told which media files changed (src/review/run.ts).
+// The walk reads layout, not content, so it is a check against mistakes and planted headers, not a
+// proof that a file holds nothing else (as imports:check is a lint, DECISIONS BD-19). The data a
+// structure holds is never decoded, and can be any bytes: a bitmap's rows; coded image data (a PNG
+// IDAT, a JPEG scan, a GIF image, a WebP or AVIF bitstream with its codec configuration); a font
+// table's contents, stored or compressed; a brotli stream's metadata blocks, which decode to
+// nothing; comments and metadata (PNG ancillary chunks, JPEG APPn and COM segments, GIF comment and
+// application extensions, WebP ICCP, EXIF and XMP chunks, an AVIF's colour profile and metadata
+// items, WOFF and WOFF2 metadata); and the few bytes a header leaves free (an EOT's names, at most
+// 512 bytes each, its root string, a header's reserved and descriptive fields). A short header in
+// front of other content therefore passes when that content is what a structure holds. So does a
+// source map's every field past its version and mappings (sourcesContent among them), and a
+// lockfile past its first line (the dependency lens reads it from the tree). Such a file is still
+// never a unit, so whatever reads or runs it (a loader, a script, a workflow step) is the reviewed
+// code, and the lenses are told which excluded files changed (src/review/run.ts).
 
 import { isUtf8 } from "node:buffer";
 import { posix } from "node:path";
@@ -66,6 +78,21 @@ const BMP_RGB = 0;
 const BMP_BITFIELDS = 3;
 /** The boxes an AVIF's meta box may hold, each at most once. */
 const AVIF_META_BOXES: ReadonlySet<string> = new Set(["hdlr", "pitm", "iloc", "iinf", "iprp", "iref", "idat", "dinf", "grpl"]);
+/** An AVIF's item reference types (iref) and entity group types (grpl), each read in full. */
+const AVIF_REFERENCES: ReadonlySet<string> = new Set(["auxl", "base", "cdsc", "dimg", "prem", "thmb"]);
+const AVIF_GROUPS: ReadonlySet<string> = new Set(["altr", "ster"]);
+/** Most bytes an AVIF's ftyp, hdlr name, item string, auxC type, auxC subtype and av1C configuration OBUs may take. */
+const AVIF_MAX_FTYP = 128;
+const AVIF_MAX_NAME = 64;
+const AVIF_MAX_STRING = 255;
+const AVIF_MAX_AUX_SUBTYPE = 64;
+const AVIF_MAX_AV1_CONFIG = 256;
+/** The chunks a WebP may hold (RIFF), and the extension labels of a GIF. */
+const WEBP_CHUNKS: ReadonlySet<string> = new Set(["VP8 ", "VP8L", "VP8X", "ALPH", "ANIM", "ANMF", "ICCP", "EXIF", "XMP "]);
+const GIF_LABELS: ReadonlySet<number> = new Set([0x01, 0xf9, 0xfe, 0xff]);
+/** Most bytes of an EOT's family, style, version or full name, and of its root string. */
+const EOT_MAX_NAME = 512;
+const EOT_MAX_ROOT = 1024;
 const PRINTABLE_TAG_RE = /^[\x20-\x7e]{4}$/;
 const MAX_SOURCE_MAP_BYTES = 64 * 1024 * 1024;
 /** Most bytes a font's compressed tables or metadata may stand for; past it the font is not exempt. */
@@ -99,6 +126,19 @@ function tiled(bytes: Uint8Array, from: number, blocks: ReadonlyArray<readonly [
     at = end;
   }
   return at <= bytes.length && bytes.length - at < align && zeros(bytes, at, bytes.length);
+}
+
+/**
+ * A printable ASCII string at `from` of at most `max` bytes, ended by a NUL before `to`: the offset
+ * after its NUL, or null when there is none.
+ */
+function cString(bytes: Uint8Array, from: number, to: number, max: number): number | null {
+  for (let at = from; at < to && at - from <= max; at++) {
+    const byte = bytes[at] ?? 0;
+    if (byte === 0) return at + 1;
+    if (byte < 0x20 || byte > 0x7e) return null;
+  }
+  return null;
 }
 
 /** True when every byte from `from` to `to` is zero. */
@@ -147,6 +187,15 @@ function isPng(bytes: Uint8Array): boolean {
   return false;
 }
 
+/**
+ * A marker that starts a segment of a JPEG (ITU T.81): a frame (SOFn), DHT, DAC, SOS, DQT, DNL, DRI,
+ * DHP, EXP, APPn or COM. The reserved markers (JPG, JPGn, RES), TEM, a restart, SOI and a stuffed
+ * zero are none.
+ */
+function isJpegSegment(marker: number): boolean {
+  return (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc8) || (marker >= 0xda && marker <= 0xef) || marker === 0xfe;
+}
+
 /** JPEG: SOI, then segments (and the entropy-coded data after each SOS), a frame and a scan, and EOI at the end. */
 function isJpeg(bytes: Uint8Array): boolean {
   if (!startsWith(bytes, [0xff, 0xd8])) return false;
@@ -161,8 +210,7 @@ function isJpeg(bytes: Uint8Array): boolean {
     if (marker === undefined) return false;
     at++;
     if (marker === 0xd9) return frame && scan && at === bytes.length;
-    // A stuffed zero, a second SOI, a restart or TEM outside entropy-coded data is no segment.
-    if (marker === 0x00 || marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) return false;
+    if (!isJpegSegment(marker)) return false;
     if (at + 2 > bytes.length) return false;
     const length = v.getUint16(at);
     if (length < 2 || at + length > bytes.length) return false;
@@ -195,7 +243,11 @@ function isJpeg(bytes: Uint8Array): boolean {
   }
 }
 
-/** GIF: header, screen descriptor, colour tables, every block and sub-block, one image or more, and the trailer at the end. */
+/**
+ * GIF: header, screen descriptor, colour tables, every block and sub-block, one image or more, and the
+ * trailer at the end; an extension only of a label GIF89a defines (plain text, graphic control,
+ * comment, application).
+ */
 function isGif(bytes: Uint8Array): boolean {
   const header = ascii(bytes, 0, 6);
   if ((header !== "GIF87a" && header !== "GIF89a") || bytes.length < 14) return false;
@@ -225,14 +277,18 @@ function isGif(bytes: Uint8Array): boolean {
       if (!subBlocks()) return false;
       image = true;
     } else if (kind === 0x21) {
-      if (at >= bytes.length) return false;
+      const label = bytes[at];
+      if (label === undefined || !GIF_LABELS.has(label)) return false;
       at++;
       if (!subBlocks()) return false;
     } else return false;
   }
 }
 
-/** WebP: RIFF's size is the file's, VP8, VP8L or VP8X first, every chunk within the file (an odd one padded with a zero), and an image chunk. */
+/**
+ * WebP: RIFF's size is the file's, VP8, VP8L or VP8X first, every chunk one the WebP container
+ * defines and within the file (an odd one padded with a zero), and an image chunk.
+ */
 function isWebp(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 12) !== "WEBP" || bytes.length < 20) return false;
   const v = view(bytes);
@@ -243,7 +299,7 @@ function isWebp(bytes: Uint8Array): boolean {
   while (at < bytes.length) {
     if (at + 8 > bytes.length) return false;
     const type = ascii(bytes, at, at + 4);
-    if (!PRINTABLE_TAG_RE.test(type)) return false;
+    if (!WEBP_CHUNKS.has(type)) return false;
     const size = v.getUint32(at + 4, true);
     const end = at + 8 + size + (size & 1);
     if (end > bytes.length || ((size & 1) === 1 && bytes[end - 1] !== 0)) return false;
@@ -323,8 +379,9 @@ function covers(extents: ReadonlyArray<readonly [number, number]>, regions: Read
  * AVIF, a still image (an image sequence is not walked here): top-level boxes end to end, a small
  * ftyp first naming avif, then one meta box and the mdat boxes, and nothing else. meta holds hdlr
  * ('pict') first, pitm, iinf, iloc and iprp, and only the other boxes an image's meta may hold, each
- * laid out in full; and iloc's extents cover every byte of each mdat (and of idat), so no byte of the
- * file lies outside a box the walk reads or an item's data.
+ * read to its last byte (item properties, references, entity groups and data references of the types
+ * the walk knows, a free or skip box nowhere); and iloc's extents cover every byte of each mdat (and
+ * of idat), so no byte of the file lies outside a box the walk reads or an item's data.
  */
 function isAvif(bytes: Uint8Array): boolean {
   const top = boxes(bytes, 0, bytes.length);
@@ -332,10 +389,10 @@ function isAvif(bytes: Uint8Array): boolean {
   if (top === null || ftyp === undefined) return false;
   // ftyp is a few brands long; a small size also keeps the file's first byte a zero.
   const size = ftyp.end - ftyp.start;
-  if (ftyp.type !== "ftyp" || ftyp.body !== ftyp.start + 8 || size < 16 || size > 4096 || (size - 16) % 4 !== 0) return false;
+  if (ftyp.type !== "ftyp" || ftyp.body !== ftyp.start + 8 || size < 16 || size > AVIF_MAX_FTYP || (size - 16) % 4 !== 0) return false;
   const brands = [ascii(bytes, ftyp.body, ftyp.body + 4)];
   for (let brand = ftyp.body + 8; brand < ftyp.end; brand += 4) brands.push(ascii(bytes, brand, brand + 4));
-  if (!brands.includes("avif")) return false;
+  if (!brands.includes("avif") || !brands.every((brand) => PRINTABLE_TAG_RE.test(brand))) return false;
   const rest = top.slice(1);
   const metas = rest.filter((box) => box.type === "meta");
   const mdats = rest.filter((box) => box.type === "mdat");
@@ -361,8 +418,9 @@ function avifMeta(bytes: Uint8Array, meta: Box, mdats: readonly Box[]): boolean 
   const iloc = byType.get("iloc");
   const iprp = byType.get("iprp");
   if (hdlr === undefined || pitm === undefined || iinf === undefined || iloc === undefined || iprp === undefined) return false;
-  // hdlr: pre_defined 0, handler pict, three reserved zero words, and a name ending in a NUL.
-  if (fullBoxVersion(bytes, hdlr) !== 0 || hdlr.end - hdlr.body < 25 || v.getUint32(hdlr.body + 4) !== 0 || ascii(bytes, hdlr.body + 8, hdlr.body + 12) !== "pict" || bytes[hdlr.end - 1] !== 0) return false;
+  // hdlr: pre_defined 0, handler pict, three reserved zero words, and a short printable name ending in a NUL, the box's last byte.
+  if (fullBoxVersion(bytes, hdlr) !== 0 || hdlr.end - hdlr.body < 25 || v.getUint32(hdlr.body + 4) !== 0 || ascii(bytes, hdlr.body + 8, hdlr.body + 12) !== "pict") return false;
+  if (cString(bytes, hdlr.body + 24, hdlr.end, AVIF_MAX_NAME) !== hdlr.end) return false;
   for (let reserved = hdlr.body + 12; reserved < hdlr.body + 24; reserved += 4) if (v.getUint32(reserved) !== 0) return false;
   // pitm: the primary item, one of iinf's.
   const pitmVersion = fullBoxVersion(bytes, pitm);
@@ -372,17 +430,54 @@ function avifMeta(bytes: Uint8Array, meta: Box, mdats: readonly Box[]): boolean 
   if (items === null || !items.has(primary)) return false;
   const extents = avifExtents(bytes, iloc, items);
   if (extents === null || !avifProperties(bytes, iprp, items)) return false;
-  // iref (a full box), dinf and grpl: each a list of boxes laid out in full.
-  for (const [type, full] of [["iref", true], ["dinf", false], ["grpl", false]] as const) {
-    const box = byType.get(type);
-    if (box === undefined) continue;
-    if (full && fullBoxVersion(bytes, box) === null) return false;
-    if (boxes(bytes, box.body + (full ? 4 : 0), box.end) === null) return false;
-  }
+  const iref = byType.get("iref");
+  const dinf = byType.get("dinf");
+  const grpl = byType.get("grpl");
+  if ((iref !== undefined && !avifReferences(bytes, iref, items)) || (dinf !== undefined && !avifDataReferences(bytes, dinf)) || (grpl !== undefined && !avifGroups(bytes, grpl, items))) return false;
   const idat = byType.get("idat");
   const inFile = mdats.map((box): [number, number] => [box.body, box.end]);
   const inIdat: Array<[number, number]> = idat === undefined ? [] : [[0, idat.end - idat.body]];
   return extents.file.length + extents.idat.length > 0 && covers(extents.file, inFile) && covers(extents.idat, inIdat);
+}
+
+/** iref (version 0 or 1): references of the types the walk knows, each from one of iinf's items to one or more, filling their boxes exactly. */
+function avifReferences(bytes: Uint8Array, iref: Box, items: ReadonlySet<number>): boolean {
+  const v = view(bytes);
+  const version = fullBoxVersion(bytes, iref);
+  const references = version === null || version > 1 ? null : boxes(bytes, iref.body + 4, iref.end);
+  if (references === null) return false;
+  const idSize = version === 0 ? 2 : 4;
+  const id = (at: number): number => (idSize === 2 ? v.getUint16(at) : v.getUint32(at));
+  return references.every((reference) => {
+    if (!AVIF_REFERENCES.has(reference.type) || reference.body + idSize + 2 > reference.end) return false;
+    const count = v.getUint16(reference.body + idSize);
+    if (count === 0 || reference.end - reference.body !== idSize + 2 + count * idSize || !items.has(id(reference.body))) return false;
+    for (let at = reference.body + idSize + 2; at < reference.end; at += idSize) if (!items.has(id(at))) return false;
+    return true;
+  });
+}
+
+/** dinf: one dref whose entries are each a `url ` entry flagged self-contained (the data is in this file) with no location. */
+function avifDataReferences(bytes: Uint8Array, dinf: Box): boolean {
+  const children = boxes(bytes, dinf.body, dinf.end);
+  const dref = children?.[0];
+  if (children?.length !== 1 || dref === undefined || dref.type !== "dref" || fullBoxVersion(bytes, dref) !== 0 || dref.body + 8 > dref.end) return false;
+  const count = view(bytes).getUint32(dref.body + 4);
+  const entries = boxes(bytes, dref.body + 8, dref.end);
+  return entries !== null && count > 0 && entries.length === count && entries.every((entry) => entry.type === "url " && entry.end - entry.body === 4 && fullBoxVersion(bytes, entry, 1) === 0 && bytes[entry.body + 3] === 1);
+}
+
+/** grpl: entity groups of the types the walk knows (version 0), each a group ID and its entities, all of iinf's items, filling their boxes exactly. */
+function avifGroups(bytes: Uint8Array, grpl: Box, items: ReadonlySet<number>): boolean {
+  const v = view(bytes);
+  const groups = boxes(bytes, grpl.body, grpl.end);
+  if (groups === null) return false;
+  return groups.every((group) => {
+    if (!AVIF_GROUPS.has(group.type) || fullBoxVersion(bytes, group) !== 0 || group.body + 12 > group.end) return false;
+    if (group.end - group.body !== 12 + 4 * v.getUint32(group.body + 8)) return false;
+    for (let at = group.body + 12; at < group.end; at += 4) if (!items.has(v.getUint32(at))) return false;
+    return true;
+  });
 }
 
 /** The item IDs of an iinf box whose infe entries (version 2 or 3) fill it exactly, as many as it says; null otherwise. */
@@ -402,9 +497,19 @@ function avifItems(bytes: Uint8Array, iinf: Box): Set<number> | null {
     const infeVersion = infe.type === "infe" ? fullBoxVersion(bytes, infe, 1) : null;
     if (infeVersion !== 2 && infeVersion !== 3) return null;
     const idSize = infeVersion === 2 ? 2 : 4;
-    // item_ID, item_protection_index, item_type, then NUL-terminated strings (the name, and a MIME item's type).
+    // item_ID, item_protection_index (0: no protection box is read), item_type, then short printable
+    // NUL-terminated strings filling the box: the name; a MIME item's content type and, optionally,
+    // its encoding; a URI item's URI type.
     const typeAt = infe.body + 4 + idSize + 2;
-    if (typeAt + 5 > infe.end || !PRINTABLE_TAG_RE.test(ascii(bytes, typeAt, typeAt + 4)) || bytes[infe.end - 1] !== 0) return null;
+    const itemType = ascii(bytes, typeAt, typeAt + 4);
+    if (typeAt + 5 > infe.end || !PRINTABLE_TAG_RE.test(itemType) || v.getUint16(typeAt - 2) !== 0) return null;
+    let strings = 0;
+    for (let at = typeAt + 4; at < infe.end; strings++) {
+      const next = cString(bytes, at, infe.end, AVIF_MAX_STRING);
+      if (next === null) return null;
+      at = next;
+    }
+    if (strings !== (itemType === "uri " ? 2 : 1) && !(itemType === "mime" && (strings === 2 || strings === 3))) return null;
     const id = idSize === 2 ? v.getUint16(infe.body + 4) : v.getUint32(infe.body + 4);
     if (ids.has(id)) return null;
     ids.add(id);
@@ -469,14 +574,64 @@ function avifExtents(bytes: Uint8Array, iloc: Box, items: ReadonlySet<number>): 
   return at === iloc.end ? { file, idat } : null;
 }
 
-/** iprp: ipco first, its properties laid out in full, then ipma boxes that associate iinf's items with them. */
+/** iprp: ipco first, its properties each of a type the walk knows and laid out in full, then ipma boxes that associate iinf's items with them. */
 function avifProperties(bytes: Uint8Array, iprp: Box, items: ReadonlySet<number>): boolean {
   const children = boxes(bytes, iprp.body, iprp.end);
   const ipco = children?.[0];
   if (children === null || ipco === undefined || ipco.type !== "ipco" || children.length < 2) return false;
   const properties = boxes(bytes, ipco.body, ipco.end);
-  if (properties === null || properties.length === 0) return false;
+  if (properties === null || properties.length === 0 || !properties.every((property) => avifProperty(bytes, property))) return false;
   return children.slice(1).every((ipma) => ipma.type === "ipma" && ipmaLaidOut(bytes, ipma, properties.length, items));
+}
+
+/**
+ * True for an item property of a type the walk knows (HEIF, MIAF and AV1-ISOBMFF) laid out to its
+ * last byte: fixed fields at their sizes with reserved bits zero; av1C's configuration OBUs (coded
+ * data) and auxC's subtype bounded; a colour profile only behind an ICC header that states its size.
+ */
+function avifProperty(bytes: Uint8Array, box: Box): boolean {
+  const v = view(bytes);
+  const size = box.end - box.body;
+  const first = bytes[box.body] ?? 0;
+  switch (box.type) {
+    case "ispe":
+      return fullBoxVersion(bytes, box) === 0 && size === 12;
+    case "pixi":
+      return fullBoxVersion(bytes, box) === 0 && size >= 5 && size === 5 + (bytes[box.body + 4] ?? 0);
+    case "av1C":
+      return first === 0x81 && size >= 4 && size <= 4 + AVIF_MAX_AV1_CONFIG && ((bytes[box.body + 3] ?? 0) & 0xe0) === 0;
+    case "colr": {
+      const kind = ascii(bytes, box.body, box.body + 4);
+      if (kind === "nclx") return size === 11 && ((bytes[box.body + 10] ?? 0) & 0x7f) === 0;
+      // An ICC profile: its header's size field is the profile's, and its signature is acsp.
+      return (kind === "prof" || kind === "rICC") && size >= 4 + 132 && v.getUint32(box.body + 4) === size - 4 && ascii(bytes, box.body + 40, box.body + 44) === "acsp";
+    }
+    case "pasp":
+      return size === 8;
+    case "clap":
+      return size === 32;
+    case "irot":
+      return size === 1 && (first & 0xfc) === 0;
+    case "imir":
+      return size === 1 && (first & 0xfe) === 0;
+    case "lsel":
+      return size === 2;
+    case "a1op":
+      return size === 1;
+    case "a1lx":
+      return (first & 0xfe) === 0 && size === ((first & 1) === 1 ? 13 : 7);
+    case "clli":
+      return size === 4;
+    case "mdcv":
+      return size === 24;
+    case "auxC": {
+      // A printable aux_type URN ending in a NUL, then a short aux_subtype.
+      const after = fullBoxVersion(bytes, box) === 0 ? cString(bytes, box.body + 4, box.end, AVIF_MAX_STRING) : null;
+      return after !== null && box.end - after <= AVIF_MAX_AUX_SUBTYPE;
+    }
+    default:
+      return false;
+  }
 }
 
 /** ipma: as many entries as it says, each an item and its property indexes (from 1; 0 for none), filling the box exactly. */
@@ -526,8 +681,9 @@ function bitmapLayout(bytes: Uint8Array, base: number, embedded: boolean): { rea
   if (headerSize >= 108 && [0x4c494e4b, 0x4d424544].includes(v.getUint32(base + 56, true))) return null;
   if (embedded && (height < 0 || height % 2 !== 0)) return null;
   const rows = embedded ? height / 2 : Math.abs(height);
+  // A palette only below 16 bits a pixel: at most 2^bits colours (0 for all of them).
   const used = core ? 0 : v.getUint32(base + 32, true);
-  if (bits <= 8 && used > 1 << bits) return null;
+  if (bits <= 8 ? used > 1 << bits : used !== 0) return null;
   const colours = bits <= 8 && used === 0 ? 1 << bits : used;
   const masks = compression === BMP_BITFIELDS && headerSize === 40 ? 12 : 0;
   const stride = Math.ceil((width * bits) / 32) * 4;
@@ -608,8 +764,8 @@ function isSfnt(bytes: Uint8Array): boolean {
 /**
  * WOFF: the length field is the file's; each table, inflated when stored compressed, comes out at
  * its stated length, every stored byte read (head with its magic); the metadata block inflates to its
- * stated length; and the tables, the metadata and the private block lie from the directory to the end
- * of the file with only zero padding between them.
+ * stated length; no private block (free-form data no format defines); and the tables and the metadata
+ * lie from the directory to the end of the file with only zero padding between them.
  */
 function isWoff(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "wOFF" || bytes.length < 44) return false;
@@ -644,9 +800,7 @@ function isWoff(bytes: Uint8Array): boolean {
     if (metaOffset + metaLength > bytes.length || decompressed("zlib", bytes.subarray(metaOffset, metaOffset + metaLength), metaOriginal) === null) return false;
     blocks.push([metaOffset, metaOffset + metaLength]);
   }
-  const privateOffset = v.getUint32(36);
-  const privateLength = v.getUint32(40);
-  if (privateOffset !== 0 || privateLength !== 0) blocks.push([privateOffset, privateOffset + privateLength]);
+  if (v.getUint32(36) !== 0 || v.getUint32(40) !== 0) return false;
   return head && tiled(bytes, directory, blocks, 4);
 }
 
@@ -665,8 +819,10 @@ function base128(bytes: Uint8Array, at: number): { value: number; length: number
 /**
  * WOFF2: the length field is the file's; the table directory; one brotli stream that decompresses,
  * every byte of it read, to exactly the tables' lengths (head, never transformed, with its magic);
- * a metadata block that decompresses to its stated length; and the stream, the metadata and the
- * private block from the directory to the end of the file with only zero padding between them.
+ * a metadata block that decompresses to its stated length; no private block; and the stream and the
+ * metadata from the directory to the end of the file with only zero padding between them. (A brotli
+ * metadata meta-block decodes to nothing, so the stream may hold bytes no table does; finding one
+ * takes a full brotli decoder, which this walk is not.)
  */
 function isWoff2(bytes: Uint8Array): boolean {
   if (ascii(bytes, 0, 4) !== "wOF2" || bytes.length < 48) return false;
@@ -719,16 +875,15 @@ function isWoff2(bytes: Uint8Array): boolean {
     if (metaOffset + metaLength > bytes.length || decompressed("brotli", bytes.subarray(metaOffset, metaOffset + metaLength), metaOriginal) === null) return false;
     blocks.push([metaOffset, metaOffset + metaLength]);
   }
-  const privateOffset = v.getUint32(40);
-  const privateLength = v.getUint32(44);
-  if (privateOffset !== 0 || privateLength !== 0) blocks.push([privateOffset, privateOffset + privateLength]);
+  if (v.getUint32(40) !== 0 || v.getUint32(44) !== 0) return false;
   return tiled(bytes, at, blocks, 4);
 }
 
 /**
- * EOT: its fixed header, every name string in turn, and the font data ending at the file's end: an
- * sfnt, stored plain or XOR-obfuscated. MicroType Express compression is not walked here, so a
- * compressed EOT is never exempt.
+ * EOT: its fixed header, every name string in turn (UTF-16, each at most EOT_MAX_NAME bytes, the root
+ * string at most EOT_MAX_ROOT), and the font data ending at the file's end: an sfnt, stored plain or
+ * XOR-obfuscated. MicroType Express compression is not walked here, so a compressed EOT is never
+ * exempt; nor is a version 2.2 EOT with a signature or EUDC font data, which the walk does not read.
  */
 function isEot(bytes: Uint8Array): boolean {
   if (bytes.length < 82) return false;
@@ -739,20 +894,22 @@ function isEot(bytes: Uint8Array): boolean {
   for (let reserved = 64; reserved < 80; reserved += 2) if (v.getUint16(reserved, true) !== 0) return false;
   // From Padding1 on: four names (family, style, version, full), each a zero padding, a size and its bytes.
   let at = 80;
-  /** Padding (zero), a size and that many bytes. */
-  const field = (): boolean => {
+  /** Padding (zero), an even size of at most `max` and that many bytes. */
+  const field = (max: number): boolean => {
     if (at + 4 > bytes.length || v.getUint16(at, true) !== 0) return false;
-    at += 4 + v.getUint16(at + 2, true);
+    const size = v.getUint16(at + 2, true);
+    if (size > max || size % 2 !== 0) return false;
+    at += 4 + size;
     return at <= bytes.length;
   };
-  for (let name = 0; name < 4; name++) if (!field()) return false;
-  if (version !== 0x00010000 && !field()) return false;
+  for (let name = 0; name < 4; name++) if (!field(EOT_MAX_NAME)) return false;
+  if (version !== 0x00010000 && !field(EOT_MAX_ROOT)) return false;
   if (version === 0x00020002) {
+    // RootStringCheckSum and EUDCCodePage; then an empty signature, and EUDCFlags and EUDCFontSize both zero.
     at += 8;
-    if (!field()) return false;
-    if (at + 8 > bytes.length) return false;
-    const eudcSize = v.getUint32(at + 4, true);
-    at += 8 + eudcSize;
+    if (!field(0)) return false;
+    if (at + 8 > bytes.length || v.getUint32(at, true) !== 0 || v.getUint32(at + 4, true) !== 0) return false;
+    at += 8;
   }
   if (at + fontDataSize !== bytes.length) return false;
   const flags = v.getUint32(12, true);

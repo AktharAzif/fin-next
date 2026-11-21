@@ -15,7 +15,7 @@ import { DATA_RULE, loadProcedure } from "../src/review/procedure.ts";
 import { mediaFormat, verifiedExclusion } from "../src/units/content.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
 import { brotliCompressSync, deflateSync } from "node:zlib";
-import { avif, bmp, bmp8, eot, gif, headTable, ico, icoBitmap, jpeg, planted, png, pngChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
+import { avif, bmp, bmp8, box, brotliWithMetadata, eot, fullBox, gif, gifExtension, headTable, ico, icoBitmap, infe, itemReference, jpeg, jpegSegment, planted, png, pngChunk, riffChunk, ttf, webp, woff, woff2 } from "./helpers/media.ts";
 
 function declarations(count: number, lines: number): string {
   const out: string[] = ['import { x } from "./x.ts";', ""];
@@ -223,7 +223,7 @@ describe("inventory and shards", () => {
     assert.equal(mediaFormat(png([pngChunk("tEXt", Buffer.from("k\0v"))])), "png", "a chunk before IEND is part of the layout");
   });
 
-  it("a format's header whose length fields cover bytes of any kind is no image or font: every byte must lie in a structure the walk reads", () => {
+  it("a format's header whose length fields cover bytes of any kind, or a structure the walk does not read, is no image or font", () => {
     const files = planted(Buffer.from("\0#!/bin/sh\necho MARKER-PAYLOAD\n"));
     for (const [name, bytes] of Object.entries(files)) {
       assert.equal(mediaFormat(bytes), null, name);
@@ -249,15 +249,55 @@ describe("inventory and shards", () => {
     // Some writers pad a bitmap with zero bytes after its last row.
     const paddedBmp = Buffer.concat([bmp(), Buffer.alloc(2)]);
     paddedBmp.writeUInt32LE(paddedBmp.length, 2);
+    // An ICC profile's header: its size, and the acsp signature at 36.
+    const icc = Buffer.alloc(132);
+    icc.writeUInt32BE(icc.length, 0);
+    icc.write("acsp", 36, "latin1");
+    const u32 = (...values: number[]): Buffer => Buffer.concat(values.map((value) => Buffer.from([value >>> 24, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff])));
+    const utf16 = (text: string): Buffer => Buffer.from(text, "utf16le");
     const exempt: Record<string, Buffer> = {
       "padded.bmp": paddedBmp,
       "padded.ico": ico([Buffer.concat([icoBitmap(), Buffer.alloc(28)])]),
-      "compressed.woff": woff({ compressed: true, metadata: '<?xml version="1.0"?><metadata version="1.0"/>', private: Buffer.from([1, 2, 3]) }),
-      "private.woff": woff({ private: Buffer.from("free-form") }),
+      "compressed.woff": woff({ compressed: true, metadata: '<?xml version="1.0"?><metadata version="1.0"/>' }),
       "obfuscated.eot": eot({ xor: true }),
+      "named.eot": eot({ names: [utf16("Example Sans"), utf16("Regular"), utf16("Version 1.000;PS 1.0;hotconv 1.0.88"), utf16("Example Sans Regular")] }),
+      "v22.eot": eot({ v22: { root: utf16("https://example.org/\0") } }),
       "palette.bmp": bmp8(),
       "both.ico": ico([icoBitmap(), png()]),
       "larger.avif": avif(Buffer.alloc(300, 7)),
+      // An alpha item, its auxiliary type and reference, a data reference, and metadata items, as encoders write them.
+      "alpha.avif": avif(undefined, {
+        items: [infe(2, "av01", "Alpha\0", 1), infe(3, "Exif", "\0"), infe(4, "mime", "XMP\0application/rdf+xml\0")],
+        properties: [
+          box("av1C", Buffer.from([0x81, 0x00, 0x0c, 0x00, 0x0a, 0x0b, 0x00, 0x00, 0x00, 0x2d, 0x4c, 0xff, 0xb3, 0xdf, 0xff, 0x98, 0x04])),
+          fullBox("auxC", 0, Buffer.from("urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0", "latin1")),
+          fullBox("pixi", 0, Buffer.from([1, 8])),
+        ],
+        meta: [
+          fullBox("iref", 0, Buffer.concat([itemReference("auxl", 2, [1]), itemReference("cdsc", 3, [1]), itemReference("cdsc", 4, [1])])),
+          box("dinf", fullBox("dref", 0, Buffer.concat([u32(1), fullBox("url ", 0, Buffer.alloc(0), 1)]))),
+          box("grpl", fullBox("altr", 0, u32(5, 2, 1, 2))),
+        ],
+      }),
+      // Every other property type the walk knows, a colour profile among them.
+      "properties.avif": avif(undefined, {
+        properties: [
+          box("colr", Buffer.concat([Buffer.from("nclx", "latin1"), Buffer.from([0, 1, 0, 13, 0, 6, 0x80])])),
+          box("colr", Buffer.concat([Buffer.from("prof", "latin1"), icc])),
+          box("pasp", u32(1, 1)),
+          box("clap", u32(1, 1, 1, 1, 0, 1, 0, 1)),
+          box("irot", Buffer.from([1])),
+          box("imir", Buffer.from([0])),
+          box("lsel", Buffer.from([0, 0])),
+          box("a1op", Buffer.from([0])),
+          box("a1lx", Buffer.from([0, 0, 1, 0, 2, 0, 3])),
+          box("clli", Buffer.from([0, 100, 0, 50])),
+          box("mdcv", Buffer.alloc(24, 1)),
+        ],
+      }),
+      "comment.gif": gif([gifExtension(0xfe, Buffer.from("made by hand"))]),
+      "comment.jpg": jpeg([jpegSegment(0xfe, Buffer.from("made by hand"))]),
+      "exif.webp": webp([riffChunk("EXIF", Buffer.from("Exif\0\0MM\0*"))]),
     };
     for (const [name, bytes] of Object.entries(exempt)) assert.equal(verifiedExclusion(`assets/${name}`, bytes), /\.(?:woff|eot)$/.test(name) ? "font" : "image", name);
 
@@ -290,6 +330,39 @@ describe("inventory and shards", () => {
     const wide = bmp8();
     wide.writeInt32LE(5, 18);
     assert.equal(mediaFormat(wide), null, "a header that does not describe the pixels");
+  });
+
+  it("the walk reads layout, not content: what a structure holds stays exempt whatever its bytes, as the README says", () => {
+    // A shell script as a bitmap's row, a font table's contents, an AVIF's coded data, and a brotli
+    // metadata block: each lies in a structure the format defines, which the walk never decodes.
+    const script = Buffer.from(`#!/bin/sh\necho MARKER-PAYLOAD\n${"#".repeat(32)}\n`);
+    const row = Buffer.concat([script, Buffer.alloc((4 - (script.length % 4)) % 4, 0x23)]);
+    const rows = bmp();
+    const asRow = Buffer.concat([rows.subarray(0, 54), row]);
+    asRow.writeUInt32LE(asRow.length, 2);
+    asRow.writeInt32LE(row.length / 4, 18);
+    asRow.writeUInt16LE(32, 28);
+    const head = headTable();
+    const twoTables = Buffer.concat([
+      Buffer.from([0, 1, 0, 0, 0, 2, 0, 32, 0, 1, 0, 0]),
+      Buffer.from("blob\0\0\0\0", "latin1"),
+      Buffer.from([0, 0, 0, 44 + 56, 0, 0, 0, row.length]),
+      Buffer.from("head\0\0\0\0", "latin1"),
+      Buffer.from([0, 0, 0, 44, 0, 0, 0, head.length]),
+      head,
+      Buffer.alloc(2),
+      row,
+    ]);
+    const documented: Record<string, Buffer> = {
+      "rows.bmp": asRow,
+      "table.ttf": twoTables,
+      "coded.avif": avif(row),
+      "metadata.woff2": woff2({ stream: brotliWithMetadata(row, head) }),
+    };
+    for (const [name, bytes] of Object.entries(documented)) {
+      assert.ok(bytes.includes(script), name);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), /\.(?:ttf|woff2)$/.test(name) ? "font" : "image", name);
+    }
   });
 
   it("text or a planted header under an image name is never exempt: it is reviewed as text, or blocks on tier S as binary", () => {
