@@ -16,18 +16,20 @@
 //             downloaded into release-staged/: static/, source-maps/ and meta/static-build.json
 //             only, no link, copied into release/ before anything else is downloaded there
 //   previous  finds the previous release: the newest earlier run of release.yml for a push to
-//             main of this repository that left a release-<sha> manifest artefact
+//             main of this repository that succeeded and left a release-<sha> manifest artefact
 //   merge     takes nothing the build job staged on trust (stagedKeys), then FW-C13: carries the
 //             previous release's own hashed assets/ into each output (this release's files win),
 //             checks that every one of them is present and that the output is still one the
 //             deploy takes, and computes each output's asset manifest hash (tools/static-deploy's,
 //             SP-26); sets the step outputs the uploads read
-//   record    adds each uploaded artefact's SHA-256 and writes the checksums file actions/attest
-//             signs
+//   record    adds each uploaded artefact's SHA-256, writes the checksums file actions/attest
+//             signs, and gives the static record's own SHA-256 as the step output record_sha256
 //   manifest  writes release-manifest.json: the commit, each image's digest from exactly one
 //             record per release image (readImageRecords), each static artefact's name, SHA-256
 //             and asset manifest hash, the source-map artefact, the migrations and the minimum
-//             schema version
+//             schema version. Any job of a run can replace an artefact of that run, but only a
+//             job sets its own outputs: each record is taken only when its SHA-256 equals the one
+//             the job that wrote it gave as an output (RECORD_SHA256_<IMAGE>, RECORD_SHA256_STATIC)
 //
 // Only the previous release's *own* assets travel (the ones its build produced, which its
 // manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
@@ -216,6 +218,14 @@ export function assetManifestHash(dir) {
 }
 
 /**
+ * @param {Buffer} content
+ * @returns {string} its SHA-256 in hex
+ */
+function sha256Hex(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
  * @param {string} file
  * @param {string} text
  */
@@ -367,8 +377,8 @@ export function build(ctx) {
 
 /**
  * The previous release: the newest run of release.yml, other than this one and for another
- * commit, started by a push to main of this repository, that still holds its release-<sha>
- * manifest artefact (a run without one did not finish, and is no release).
+ * commit, started by a push to main of this repository, that completed successfully and still
+ * holds its release-<sha> manifest artefact (a run without one did not finish, and is no release).
  * @param {{ repo: string, runId: string, sha: string, request: ApiRequest, maxRuns?: number }} input
  * @returns {Promise<{ runId: string, sha: string } | null>}
  */
@@ -393,6 +403,10 @@ export async function findPreviousRelease({ repo, runId, sha, request, maxRuns =
       head === sha ||
       run.event !== "push" ||
       run.head_branch !== "main" ||
+      // A release is a run that finished: one that failed after leaving its manifest (before
+      // its attestation, say) is none.
+      run.status !== "completed" ||
+      run.conclusion !== "success" ||
       !/^\.github\/workflows\/release\.yml(?:@.*)?$/.test(String(run.path ?? "")) ||
       !sameRepo
     ) {
@@ -672,12 +686,12 @@ export function record(ctx) {
     checksums.push(`${digest}  ${sourceMaps.artefact}`);
   }
   const skipped = isRecord(merged) && Array.isArray(merged.skipped) ? merged.skipped : [];
-  writeFile(
-    join(root, RELEASE, "meta", "static.json"),
-    JSON.stringify({ static: statics, sourceMaps, skipped }),
-  );
+  const staticRecord = JSON.stringify({ static: statics, sourceMaps, skipped });
+  writeFile(join(root, RELEASE, "meta", "static.json"), staticRecord);
   writeFile(join(root, RELEASE, "meta", "static-checksums.txt"), `${checksums.join("\n")}\n`);
   setOutput("attest", checksums.length > 0 ? "true" : "false", env);
+  // The manifest job takes the record only with this SHA-256, a job output no other job can set.
+  setOutput("record_sha256", sha256Hex(Buffer.from(staticRecord)), env);
   for (const line of checksums) say(`release.static.record ${line.replace("  ", " artefact=")}`);
   return { static: statics, sourceMaps };
 }
@@ -688,13 +702,16 @@ export function record(ctx) {
  * The images the images job built, from the records the manifest job downloaded: one folder per
  * record artefact, `image-record-<image>-<sha>/fin-next-<image>.json` (download-artifact's layout
  * without merge-multiple), exactly one for each of RELEASE_IMAGES and nothing else, each record
- * naming its own image, and a built image's reference this repository's own GHCR package,
- * `ghcr.io/<owner>/fin-next-<image>`. These digests are what the attested manifest names, so a
- * missing, extra or second record, or a reference elsewhere, refuses the release.
+ * the very bytes the images job wrote (its SHA-256 is that job's output, which no other job can
+ * set, while any job of the run can replace an artefact), naming its own image, and a built
+ * image's reference this repository's own GHCR package, `ghcr.io/<owner>/fin-next-<image>`.
+ * These digests are what the attested manifest names, so a missing, extra, second or replaced
+ * record, or a reference elsewhere, refuses the release.
  * @param {string} dir
- * @param {{ sha: string, owner: string }} run this run's commit and the repository's owner
+ * @param {{ sha: string, owner: string, hashes: Record<string, string | undefined> }} run this
+ *   run's commit, the repository's owner, and each image's record SHA-256 from the images job
  */
-export function readImageRecords(dir, { sha, owner }) {
+export function readImageRecords(dir, { sha, owner, hashes }) {
   if (!isSha(sha)) throw new Error("GITHUB_SHA is not a commit SHA");
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) {
     throw new Error("GITHUB_REPOSITORY_OWNER is not an account name");
@@ -720,7 +737,15 @@ export function readImageRecords(dir, { sha, owner }) {
     if (files.length !== 1 || only === undefined || only.path !== `/${name}.json`) {
       throw new Error(`the record artefact of ${name} holds other than ${name}.json`);
     }
-    const rec = readJson(only.abs);
+    const expected = hashes[image];
+    if (typeof expected !== "string" || !HEX64.test(expected)) {
+      throw new Error(`no SHA-256 of ${name}'s record from the images job`);
+    }
+    const bytes = readFileSync(only.abs);
+    if (sha256Hex(bytes) !== expected) {
+      throw new Error(`${name}: the record is not the one the images job wrote`);
+    }
+    const rec = JSON.parse(bytes.toString("utf8"));
     if (!isRecord(rec) || rec.image !== name || !IMAGE.test(name)) {
       throw new Error(`${name}.json is not ${name}'s record`);
     }
@@ -829,9 +854,18 @@ export function writeManifest(ctx) {
   const images = readImageRecords(join(root, RELEASE, "images"), {
     sha,
     owner: env.GITHUB_REPOSITORY_OWNER ?? "",
+    hashes: Object.fromEntries(
+      RELEASE_IMAGES.map((image) => [image, env[`RECORD_SHA256_${image.toUpperCase()}`]]),
+    ),
   });
+  // The static record, only as the static job wrote it (its SHA-256 is that job's output).
   const staticFile = join(root, RELEASE, "meta", "static.json");
-  const staticMeta = existsSync(staticFile) ? readJson(staticFile) : {};
+  const staticBytes = existsSync(staticFile) ? readFileSync(staticFile) : null;
+  const staticHash = env.RECORD_SHA256_STATIC ?? "";
+  if (staticBytes === null || !HEX64.test(staticHash) || sha256Hex(staticBytes) !== staticHash) {
+    throw new Error("the static record is not the one the static job wrote");
+  }
+  const staticMeta = JSON.parse(staticBytes.toString("utf8"));
   const { migrations, minimumSchemaVersion } = readMigrations(root);
   const manifest = {
     v: 1,

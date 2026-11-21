@@ -2,7 +2,14 @@
 // asset manifest hash the deploy compares, the previous-release lookup and the manifest.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync, symlinkSync, truncateSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+} from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -44,22 +51,50 @@ const RELEASE_KEYS = staticOutputs(
   JSON.parse(readFileSync(join(ROOT, "tools", "layout.json"), "utf8")),
 ).map((o) => o.key);
 
+/** @param {string | Buffer} content */
+const sha256 = (content) => createHash("sha256").update(content).digest("hex");
+
 /**
  * The image records as the manifest job downloads them: one artefact folder per release image,
  * each holding its one record. Images not named are skipped.
  * @param {string} dir release/images
  * @param {string} sha
  * @param {Record<string, Record<string, unknown>>} [built] image to the record's fields
+ * @returns {Record<string, string>} each record's SHA-256, as the images job's outputs give it
  */
 function imageRecords(dir, sha, built = {}) {
   /** @type {Record<string, string>} */
   const files = {};
+  /** @type {Record<string, string>} */
+  const hashes = {};
   for (const image of RELEASE_IMAGES) {
     const name = `fin-next-${image}`;
     const fields = built[image] ?? { built: false, why: `ops/docker is not on main yet` };
-    files[`image-record-${image}-${sha}/${name}.json`] = JSON.stringify({ image: name, ...fields });
+    const content = `${JSON.stringify({ image: name, ...fields })}\n`;
+    files[`image-record-${image}-${sha}/${name}.json`] = content;
+    hashes[image] = sha256(content);
   }
   writeTree(dir, files);
+  return hashes;
+}
+
+/**
+ * The manifest step's environment for these record hashes (release.yml's job outputs).
+ * @param {Record<string, string>} hashes
+ */
+function recordEnv(hashes) {
+  return Object.fromEntries(
+    Object.entries(hashes).map(([image, hash]) => [`RECORD_SHA256_${image.toUpperCase()}`, hash]),
+  );
+}
+
+/**
+ * A step output the run wrote to a GITHUB_OUTPUT file.
+ * @param {string} file
+ * @param {string} name
+ */
+function outputOf(file, name) {
+  return new RegExp(`^${name}=(.*)$`, "m").exec(readFileSync(file, "utf8"))?.[1];
 }
 
 describe("staticOutputs", () => {
@@ -403,6 +438,8 @@ describe("findPreviousRelease", () => {
     event: "push",
     head_branch: "main",
     path: ".github/workflows/release.yml",
+    status: "completed",
+    conclusion: "success",
     repository: { full_name: REPO },
     head_repository: { full_name: REPO },
     ...overrides,
@@ -453,6 +490,29 @@ describe("findPreviousRelease", () => {
       },
     );
     assert.equal(await findPreviousRelease({ repo: REPO, runId: "99", sha: SHA, request }), null);
+  });
+
+  it("takes only a run that finished successfully, whatever artefacts it left", async () => {
+    const manifest = [{ name: `release-${PREV}`, expired: false }];
+    const { request } = api(
+      [
+        run({ id: 30, conclusion: "failure" }),
+        run({ id: 31, conclusion: "cancelled" }),
+        run({ id: 32, status: "in_progress", conclusion: null }),
+        run({ id: 33, conclusion: undefined }),
+        run({ id: 34, head_sha: "3".repeat(40) }),
+      ],
+      { 30: manifest, 31: manifest, 32: manifest, 33: manifest, 34: [] },
+    );
+    assert.equal(await findPreviousRelease({ repo: REPO, runId: "99", sha: SHA, request }), null);
+    const passed = api([run({ id: 30, conclusion: "failure" }), run({ id: 29 })], {
+      30: manifest,
+      29: manifest,
+    });
+    assert.deepEqual(
+      await findPreviousRelease({ repo: REPO, runId: "99", sha: SHA, request: passed.request }),
+      { runId: "29", sha: PREV },
+    );
   });
 
   it("finds none on the first release", async () => {
@@ -555,12 +615,18 @@ describe("build, merge, record and manifest end to end", () => {
     assert.match(checksums, new RegExp(`^${HEX("b")}  static-verify-${SHA}$`, "m"));
     assert.match(checksums, new RegExp(`^${HEX("d")}  source-maps-${SHA}$`, "m"));
     assert.match(readFileSync(outputFile, "utf8"), /^attest=true$/m);
+    const staticHash = outputOf(outputFile, "record_sha256");
+    assert.equal(staticHash, sha256(readFileSync(join(root, "release", "meta", "static.json"))));
 
-    imageRecords(join(root, "release", "images"), SHA, {
+    const hashes = imageRecords(join(root, "release", "images"), SHA, {
       api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("e")}` },
       edge: { built: false, why: "ops/docker/app.Dockerfile is not on main yet" },
     });
-    const manifest = writeManifest({ root, env, now: () => new Date("2026-11-21T12:00:00Z") });
+    const manifest = writeManifest({
+      root,
+      env: { ...env, ...recordEnv(hashes), RECORD_SHA256_STATIC: staticHash },
+      now: () => new Date("2026-11-21T12:00:00Z"),
+    });
     const onDisk = JSON.parse(
       readFileSync(join(root, "release", "out", "release-manifest.json"), "utf8"),
     );
@@ -618,12 +684,117 @@ describe("build, merge, record and manifest end to end", () => {
     merge({ root, env });
     record({ root, env });
     assert.match(readFileSync(join(root, "out.txt"), "utf8"), /^attest=false$/m);
-    imageRecords(join(root, "release", "images"), SHA);
-    const manifest = writeManifest({ root, env });
+    const hashes = imageRecords(join(root, "release", "images"), SHA);
+    const manifest = writeManifest({
+      root,
+      env: {
+        ...env,
+        ...recordEnv(hashes),
+        RECORD_SHA256_STATIC: outputOf(join(root, "out.txt"), "record_sha256"),
+      },
+    });
     assert.deepEqual(manifest.images, {});
     assert.deepEqual(manifest.static, {});
     assert.deepEqual(manifest.migrations, []);
     assert.equal(manifest.minimumSchemaVersion, null);
+  });
+
+  it("takes only the records their own jobs wrote, as those jobs' outputs pin them", (t) => {
+    /**
+     * A run up to the manifest, with nothing built; then `plant` changes what the manifest job
+     * downloaded or was given.
+     * @param {(root: string, env: Record<string, string | undefined>) => void} plant
+     */
+    const manifestAfter = (plant) => {
+      const root = tempDir(t);
+      writeTree(root, {
+        "tools/layout.json": JSON.stringify({
+          entries: [{ kind: "app", path: "apps/console", name: "@fin/console", static: "console" }],
+        }),
+      });
+      const out = join(root, "out.txt");
+      const env = { GITHUB_OUTPUT: out, GITHUB_SHA: SHA, GITHUB_REPOSITORY_OWNER: OWNER };
+      build({ root, env, runBuild: () => {} });
+      merge({ root, env });
+      record({ root, env });
+      const hashes = imageRecords(join(root, "release", "images"), SHA, {
+        api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("a")}` },
+      });
+      /** @type {Record<string, string | undefined>} */
+      const manifestEnv = {
+        ...env,
+        ...recordEnv(hashes),
+        RECORD_SHA256_STATIC: outputOf(out, "record_sha256"),
+      };
+      plant(root, manifestEnv);
+      return () => writeManifest({ root, env: manifestEnv });
+    };
+    assert.deepEqual(manifestAfter(() => {})().images, { "fin-next-api": `sha256:${HEX("a")}` });
+    const apiRecord = (/** @type {string} */ root) =>
+      join(root, "release", "images", `image-record-api-${SHA}`, "fin-next-api.json");
+    /** @type {[string, (root: string, env: Record<string, string | undefined>) => void, RegExp][]} */
+    const cases = [
+      [
+        "an image record replaced with an earlier digest",
+        (root) =>
+          writeTree(root, {
+            [`release/images/image-record-api-${SHA}/fin-next-api.json`]: `${JSON.stringify({
+              image: "fin-next-api",
+              built: true,
+              ref: "ghcr.io/owner/fin-next-api",
+              digest: `sha256:${HEX("d")}`,
+            })}\n`,
+          }),
+        /fin-next-api: the record is not the one the images job wrote/,
+      ],
+      [
+        "an image record replaced to say it was not built",
+        (root) =>
+          writeTree(root, {
+            [`release/images/image-record-api-${SHA}/fin-next-api.json`]: JSON.stringify({
+              image: "fin-next-api",
+              built: false,
+              why: "x",
+            }),
+          }),
+        /fin-next-api: the record is not the one the images job wrote/,
+      ],
+      [
+        "an image record with a byte added",
+        (root) => appendFileSync(apiRecord(root), " "),
+        /fin-next-api: the record is not the one the images job wrote/,
+      ],
+      [
+        "no SHA-256 from the images job for one image",
+        (_root, env) => {
+          env.RECORD_SHA256_EDGE = undefined;
+        },
+        /no SHA-256 of fin-next-edge's record from the images job/,
+      ],
+      [
+        "a static record replaced",
+        (root) =>
+          writeTree(root, {
+            "release/meta/static.json": JSON.stringify({ static: {}, sourceMaps: null, skipped: [] }),
+          }),
+        /the static record is not the one the static job wrote/,
+      ],
+      [
+        "a static record missing",
+        (root) => rmSync(join(root, "release", "meta", "static.json")),
+        /the static record is not the one the static job wrote/,
+      ],
+      [
+        "no SHA-256 from the static job",
+        (_root, env) => {
+          env.RECORD_SHA256_STATIC = "";
+        },
+        /the static record is not the one the static job wrote/,
+      ],
+    ];
+    for (const [what, plant, why] of cases) {
+      assert.throws(manifestAfter(plant), why, what);
+    }
   });
 
   it("refuses to record a built output without its artefact digest", (t) => {
@@ -719,10 +890,10 @@ describe("the manifest's pieces", () => {
 
   it("reads exactly one record per release image, in this repository's own package", (t) => {
     const dir = tempDir(t);
-    imageRecords(dir, SHA, {
+    const hashes = imageRecords(dir, SHA, {
       api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("a")}` },
     });
-    const read = readImageRecords(dir, { sha: SHA, owner: "Owner" });
+    const read = readImageRecords(dir, { sha: SHA, owner: "Owner", hashes });
     assert.deepEqual(read.images, { "fin-next-api": `sha256:${HEX("a")}` });
     assert.deepEqual(read.refs, {
       "fin-next-api": `ghcr.io/owner/fin-next-api@sha256:${HEX("a")}`,
@@ -736,7 +907,7 @@ describe("the manifest's pieces", () => {
       ref: "ghcr.io/owner/fin-next-api",
       digest: `sha256:${HEX("a")}`,
     };
-    /** @type {[string, (dir: string) => void, RegExp][]} */
+    /** @type {[string, (dir: string) => Record<string, string>, RegExp][]} */
     const cases = [
       [
         "a digest that is not sha256",
@@ -772,23 +943,25 @@ describe("the manifest's pieces", () => {
       [
         "an extra record artefact",
         (dir) => {
-          imageRecords(dir, SHA, { api: good });
+          const hashes = imageRecords(dir, SHA, { api: good });
           writeTree(dir, { [`image-record-zz-${SHA}/fin-next-zz.json`]: "{}" });
+          return hashes;
         },
         /not exactly one artefact per release image/,
       ],
       [
         "a missing record",
         (dir) => {
-          imageRecords(dir, SHA, { api: good });
+          const hashes = imageRecords(dir, SHA, { api: good });
           rmSync(join(dir, `image-record-edge-${SHA}`), { recursive: true });
+          return hashes;
         },
         /not exactly one artefact per release image/,
       ],
       [
         "a record of another commit",
         (dir) => {
-          imageRecords(dir, SHA, { api: good });
+          const hashes = imageRecords(dir, SHA, { api: good });
           rmSync(join(dir, `image-record-api-${SHA}`), { recursive: true });
           writeTree(dir, {
             [`image-record-api-${PREV}/fin-next-api.json`]: JSON.stringify({
@@ -796,28 +969,33 @@ describe("the manifest's pieces", () => {
               ...good,
             }),
           });
+          return hashes;
         },
         /not exactly one artefact per release image/,
       ],
       [
         "a second file in a record artefact",
         (dir) => {
-          imageRecords(dir, SHA, { api: good });
+          const hashes = imageRecords(dir, SHA, { api: good });
           writeTree(dir, {
             [`image-record-api-${SHA}/zz.json`]: JSON.stringify({ image: "fin-next-api", ...good }),
           });
+          return hashes;
         },
         /holds other than fin-next-api\.json/,
       ],
     ];
     for (const [what, plant, why] of cases) {
       const dir = join(tempDir(t), "images");
-      plant(dir);
-      assert.throws(() => readImageRecords(dir, { sha: SHA, owner: OWNER }), why, what);
+      const hashes = plant(dir);
+      assert.throws(() => readImageRecords(dir, { sha: SHA, owner: OWNER, hashes }), why, what);
     }
     const dir = join(tempDir(t), "images");
-    imageRecords(dir, SHA);
-    assert.throws(() => readImageRecords(dir, { sha: SHA, owner: "bad/owner" }), /account name/);
+    const hashes = imageRecords(dir, SHA);
+    assert.throws(
+      () => readImageRecords(dir, { sha: SHA, owner: "bad/owner", hashes }),
+      /account name/,
+    );
   });
 
   it("lists migrations in name order and ignores other files", (t) => {
@@ -1045,6 +1223,37 @@ describe("release.yml", () => {
     const taken = uploads.filter((u) => glob.test(u)).sort();
     const outputs = RELEASE_KEYS.map((key) => `static-${key}-${SHA}`).sort();
     assert.deepEqual(taken, outputs);
+  });
+
+  it("pins each record the manifest reads to an output of the job that wrote it", () => {
+    /** @param {import("../workflow-rules.mjs").OutlineNode | undefined} node */
+    const pairs = (node) =>
+      Object.fromEntries((node?.children ?? []).map((c) => [c.key ?? "", c.value]));
+    const images = pairs(child(job("images"), "outputs"));
+    const write = (child(job("manifest"), "steps")?.children ?? []).find((s) =>
+      (child(s, "run")?.value ?? "").includes("release-static.mjs manifest"),
+    );
+    const env = pairs(write === undefined ? undefined : child(write, "env"));
+    assert.equal(Object.keys(images).length, RELEASE_IMAGES.length);
+    for (const image of RELEASE_IMAGES) {
+      assert.equal(
+        images[`record_sha256_${image}`],
+        `${E} steps.build.outputs.record_sha256_${image} }}`,
+        image,
+      );
+      assert.equal(
+        env[`RECORD_SHA256_${image.toUpperCase()}`],
+        `${E} needs.images.outputs.record_sha256_${image} }}`,
+        image,
+      );
+    }
+    assert.deepEqual(pairs(child(job("static"), "outputs")), {
+      record_sha256: `${E} steps.record.outputs.record_sha256 }}`,
+    });
+    assert.equal(env.RECORD_SHA256_STATIC, `${E} needs.static.outputs.record_sha256 }}`);
+    const script = readFileSync(join(ROOT, ".github", "scripts", "release-image.sh"), "utf8");
+    assert.match(script, /hash="\$\(sha256sum "\$record"\)"\n\s+echo "record_sha256_\$\{IMAGE\}=/);
+    assert.equal(script.match(/^\s*record_output$/gm)?.length, 2, "both records are hashed");
   });
 
   it("downloads each image record into its own folder, never merged into one", () => {

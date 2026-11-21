@@ -8,7 +8,9 @@
 # pushed to ghcr.io/<owner>/fin-next-<image> by digest (no tag). A missing Dockerfile, or an app
 # whose server half is not on main yet, skips with a notice. Either way it writes one record,
 # $RUNNER_TEMP/image-record/fin-next-<image>.json, which the manifest job reads, and sets the step
-# outputs built, name and digest.
+# outputs built, name, digest and record_sha256_<image>: the record's SHA-256, which release.yml
+# makes a job output (one name per image, so the matrix legs' outputs combine) and the manifest
+# job checks the downloaded record against, since any job of the run can replace an artefact.
 #
 # Inputs (environment): IMAGE, GH_TOKEN (the job's token, for the GHCR login only), and the
 # runner's GITHUB_* variables.
@@ -29,9 +31,16 @@ record_dir="${RUNNER_TEMP}/image-record"
 record="${record_dir}/${name}.json"
 mkdir -p "$record_dir"
 
+record_output() {
+  local hash
+  hash="$(sha256sum "$record")"
+  echo "record_sha256_${IMAGE}=${hash%% *}" >> "$GITHUB_OUTPUT"
+}
+
 skip() {
   echo "::notice title=${name}::$1; skipped"
   printf '{"image":"%s","built":false,"why":"%s"}\n' "$name" "$1" > "$record"
+  record_output
   {
     echo "built=false"
     echo "name="
@@ -105,6 +114,7 @@ if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
 fi
 
 printf '{"image":"%s","built":true,"ref":"%s","digest":"%s"}\n' "$name" "$ref" "$digest" > "$record"
+record_output
 {
   echo "built=true"
   echo "name=${ref}"

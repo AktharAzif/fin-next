@@ -21,7 +21,10 @@
 #                 and gitleaks), and only then uploads static-<key>-<sha> (90 days), the source
 #                 maps as source-maps-<sha>, and attests them
 #   manifest      release-manifest.json (commit, image digests from exactly one record per image,
-#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested
+#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested.
+#                 Any job of the run could replace a record artefact (static-build runs the
+#                 dependencies' code), so each record is taken only with the SHA-256 the job that
+#                 wrote it gave as a job output, which no other job can set
 # No job restores or saves a cache (ARCHITECTURE §11.3). A run never cancels the one in progress,
 # but GitHub keeps one pending run per concurrency group: when a third release queues behind a
 # running one, the pending one is cancelled and that commit gets no release (no images, artefacts
@@ -57,6 +60,15 @@ jobs:
       fail-fast: false
       matrix:
         image: [console, admin, verify, edge, api, connector]
+    # Each record's SHA-256, which only this job can set (any job of the run can replace the
+    # record artefact). One name per image: each leg sets its own, and the legs' outputs combine.
+    outputs:
+      record_sha256_console: ${{ steps.build.outputs.record_sha256_console }}
+      record_sha256_admin: ${{ steps.build.outputs.record_sha256_admin }}
+      record_sha256_verify: ${{ steps.build.outputs.record_sha256_verify }}
+      record_sha256_edge: ${{ steps.build.outputs.record_sha256_edge }}
+      record_sha256_api: ${{ steps.build.outputs.record_sha256_api }}
+      record_sha256_connector: ${{ steps.build.outputs.record_sha256_connector }}
     steps:
       - name: Start the clock
         run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
@@ -142,6 +154,9 @@ jobs:
       actions: read # find the previous release's run and download its artefacts (FW-C13)
       id-token: write # the OIDC token Sigstore signs the attestation with
       attestations: write # store the attestation
+    # The static record's SHA-256, which only this job can set (see the images job).
+    outputs:
+      record_sha256: ${{ steps.record.outputs.record_sha256 }}
     steps:
       - name: Start the clock
         run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
@@ -311,6 +326,14 @@ jobs:
           name: record-static-${{ github.sha }}
           path: release/meta
       - name: Write release-manifest.json
+        env:
+          RECORD_SHA256_CONSOLE: ${{ needs.images.outputs.record_sha256_console }}
+          RECORD_SHA256_ADMIN: ${{ needs.images.outputs.record_sha256_admin }}
+          RECORD_SHA256_VERIFY: ${{ needs.images.outputs.record_sha256_verify }}
+          RECORD_SHA256_EDGE: ${{ needs.images.outputs.record_sha256_edge }}
+          RECORD_SHA256_API: ${{ needs.images.outputs.record_sha256_api }}
+          RECORD_SHA256_CONNECTOR: ${{ needs.images.outputs.record_sha256_connector }}
+          RECORD_SHA256_STATIC: ${{ needs.static.outputs.record_sha256 }}
         run: node .github/scripts/release-static.mjs manifest
       - name: Upload the release manifest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
