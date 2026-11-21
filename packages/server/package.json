@@ -1,0 +1,38 @@
+{
+  "name": "@fin/server",
+  "private": true,
+  "type": "module",
+  "description": "Fin's process core on Node: configuration, telemetry, error reporting, health, shutdown, private DNS, the ingress check and the SSRF-safe fetch.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./config": "./src/config/index.ts",
+    "./seams": "./src/config/seams.ts",
+    "./telemetry": "./src/telemetry/index.ts",
+    "./process-health": "./src/health/process-health.ts",
+    "./report": "./src/report.ts",
+    "./http": "./src/http/index.ts",
+    "./ingress": "./src/ingress/index.ts",
+    "./dns": "./src/dns/railway-lookup.ts",
+    "./fetch": "./src/fetch/delivery-fetch.ts",
+    "./vite": "./src/build/vite-server.ts",
+    "./testing": "./src/testing/capture.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fin/core": "workspace:*",
+    "@hono/node-server": "catalog:",
+    "@sentry/core": "catalog:",
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}
