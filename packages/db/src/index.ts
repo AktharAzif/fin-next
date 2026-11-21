@@ -101,6 +101,7 @@ export {
 } from "./pool.ts";
 export {
   connectionLimit,
+  ENQUEUE_OWNER,
   FIN_ROLES,
   FIN_SCHEMAS,
   GRANTEE_ROLES,

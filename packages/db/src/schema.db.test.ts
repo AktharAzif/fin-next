@@ -46,8 +46,8 @@ const EXPECTED_RELATIONS = [
   "audit.head table fin_owner",
   "audit.journal_entry table fin_owner",
   "audit.journal_shipped table fin_owner",
-  "email.outbox table fin_owner",
   "email.template_grant table fin_owner",
+  "email_private.outbox table fin_owner",
   "ops.duty_state table fin_owner",
   "ops.environment table postgres",
   "ops.job table fin_owner",
@@ -77,7 +77,7 @@ const EXPECTED_FUNCTIONS = [
   "audit.sequence(integer) fin_owner definer",
   "audit.start_epoch(text, bytea, text, text, text, text, text) fin_owner definer",
   "audit.unsequenced_age() fin_owner definer",
-  "email.enqueue(jsonb) fin_owner definer",
+  "email.enqueue(jsonb) fin_email_enqueue definer",
   "events.emit(jsonb) fin_owner definer",
   "ops.enqueue_job(text, text, jsonb, timestamp with time zone) fin_owner definer",
   "ops.set_switch(text, text, text, jsonb) fin_owner definer",
@@ -102,7 +102,7 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
     const result = await su.query<{ row: string }>(
       `SELECT n.nspname || '.' || c.relname || ' table ' || pg_get_userbyid(c.relowner) AS row
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','audit','ops','ops_guard')
+       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','email_private','audit','ops','ops_guard')
          AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
        ORDER BY 1`,
     );
@@ -117,7 +117,7 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
       `SELECT p.oid::regprocedure::text || ' ' || pg_get_userbyid(p.proowner) || ' ' ||
               CASE WHEN p.prosecdef THEN 'definer' ELSE 'invoker' END AS row, p.proconfig AS config
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','audit','ops','ops_guard')
+       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','email_private','audit','ops','ops_guard')
        ORDER BY 1`,
     );
     const owner = (await su.query<{ u: string }>("SELECT current_user AS u")).rows[0]?.u ?? "";
@@ -137,7 +137,7 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
       `SELECT p.oid::regprocedure::text AS name
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace,
             LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-       WHERE n.nspname IN ('events','email','audit','ops','ops_guard') AND a.grantee = 0`,
+       WHERE n.nspname IN ('events','email','email_private','audit','ops','ops_guard') AND a.grantee = 0`,
     );
     expect(result.rows).toEqual([]);
   });
@@ -155,17 +155,18 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
     }
   });
 
-  it("creates the nine schemas owned by fin_owner with nothing for PUBLIC, and ops_guard for the superuser", async () => {
+  it("creates the ten schemas owned by fin_owner with nothing for PUBLIC, and ops_guard for the superuser", async () => {
     const result = await su.query<{ name: string; owner: string; public_acl: number }>(
       `SELECT n.nspname AS name, pg_get_userbyid(n.nspowner) AS owner,
               (SELECT count(*)::int FROM aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a WHERE a.grantee = 0) AS public_acl
        FROM pg_namespace n
-       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','audit','ops','ops_guard')
+       WHERE n.nspname IN ('identity','staff','keys','kyc','money','events','email','email_private','audit','ops','ops_guard')
        ORDER BY 1`,
     );
     expect(result.rows.map((r) => r.name)).toEqual([
       "audit",
       "email",
+      "email_private",
       "events",
       "identity",
       "keys",

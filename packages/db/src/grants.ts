@@ -6,12 +6,18 @@
 // the migration's transaction. So live grants equal the matrix after every run, a grant removed from a
 // fragment is removed from the database, and a fragment naming an object that does not exist fails the
 // run. Objects the superuser owns (ops.privileged_login) are applied by `migrate --bootstrap`.
+//
+// "Owns" includes ownership through a role the applying role inherits directly: fin_owner applies the
+// grants on `email.enqueue()`, which fin_email_enqueue owns. An owner's own privileges on its object
+// are never revoked (fin_owner's on its objects, fin_email_enqueue's on enqueue: replacing a function
+// needs its owner's EXECUTE) and are not part of the matrix.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { MigrationError } from "./errors.ts";
 import { escapeIdentifier } from "./pg.ts";
 import {
+  ENQUEUE_OWNER,
   FIN_ROLES,
   FIN_SCHEMAS,
   GRANTEE_ROLES,
@@ -185,39 +191,50 @@ function quoteSignature(name: string): string {
   return `${quoteQualified(name.slice(0, open))}${name.slice(open)}`;
 }
 
+/** Each object's name, as the fragments write it, mapped to its owner. */
 interface OwnedObjects {
-  schemas: Set<string>;
-  tables: Set<string>;
-  functions: Set<string>;
-  sequences: Set<string>;
+  schemas: Map<string, string>;
+  tables: Map<string, string>;
+  functions: Map<string, string>;
+  sequences: Map<string, string>;
 }
 
-/** The objects in Fin's schemas the current role owns, by the names the fragments use. */
+/** The current role and the roles it inherits directly: the owners whose objects it applies. */
+const OWNERS = `(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user
+  UNION SELECT m.roleid FROM pg_catalog.pg_auth_members m
+          JOIN pg_catalog.pg_roles r ON r.oid = m.member
+         WHERE r.rolname = current_user AND m.inherit_option)`;
+
+/** The objects in Fin's schemas the current role owns, directly or through a role it inherits. */
 async function ownedObjects(q: Queryable): Promise<OwnedObjects> {
-  const schemas = await q.query<{ name: string }>(
-    `SELECT n.nspname AS name FROM pg_catalog.pg_namespace n
-     WHERE n.nspname = ANY ($1) AND n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)`,
+  const schemas = await q.query<{ name: string; owner: string }>(
+    `SELECT n.nspname AS name, pg_catalog.pg_get_userbyid(n.nspowner) AS owner
+     FROM pg_catalog.pg_namespace n
+     WHERE n.nspname = ANY ($1) AND n.nspowner IN ${OWNERS}`,
     [FIN_SCHEMAS],
   );
-  const relations = await q.query<{ name: string; kind: string }>(
-    `SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind
+  const relations = await q.query<{ name: string; kind: string; owner: string }>(
+    `SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind,
+            pg_catalog.pg_get_userbyid(c.relowner) AS owner
      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = ANY ($1) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-       AND c.relowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)`,
+       AND c.relowner IN ${OWNERS}`,
     [FIN_SCHEMAS],
   );
-  const functions = await q.query<{ name: string }>(
-    `SELECT p.oid::pg_catalog.regprocedure::text AS name
+  const functions = await q.query<{ name: string; owner: string }>(
+    `SELECT p.oid::pg_catalog.regprocedure::text AS name,
+            pg_catalog.pg_get_userbyid(p.proowner) AS owner
      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = ANY ($1)
-       AND p.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)`,
+     WHERE n.nspname = ANY ($1) AND p.proowner IN ${OWNERS}`,
     [FIN_SCHEMAS],
   );
+  const byName = (rows: readonly { name: string; owner: string }[]) =>
+    new Map(rows.map((r) => [r.name, r.owner]));
   return {
-    schemas: new Set(schemas.rows.map((r) => r.name)),
-    tables: new Set(relations.rows.filter((r) => r.kind !== "S").map((r) => r.name)),
-    sequences: new Set(relations.rows.filter((r) => r.kind === "S").map((r) => r.name)),
-    functions: new Set(functions.rows.map((r) => normaliseSignature(r.name))),
+    schemas: byName(schemas.rows),
+    tables: byName(relations.rows.filter((r) => r.kind !== "S")),
+    sequences: byName(relations.rows.filter((r) => r.kind === "S")),
+    functions: byName(functions.rows.map((r) => ({ ...r, name: normaliseSignature(r.name) }))),
   };
 }
 
@@ -250,19 +267,27 @@ export async function applyGrants(
   options: ApplyOptions = { missing: "error" },
 ): Promise<string[]> {
   const owned = await ownedObjects(q);
-  const everyone = ["PUBLIC", ...MANAGED_ROLES.map((r) => escapeIdentifier(r))].join(", ");
+  // Everyone but the object's owner, whose own privileges stay (see the header).
+  const everyoneBut = (owner: string) =>
+    ["PUBLIC", ...MANAGED_ROLES.filter((r) => r !== owner).map((r) => escapeIdentifier(r))].join(
+      ", ",
+    );
+  const sorted = (objects: Map<string, string>) =>
+    [...objects].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const statements: string[] = [];
-  for (const schema of [...owned.schemas].sort()) {
-    statements.push(`REVOKE ALL ON SCHEMA ${escapeIdentifier(schema)} FROM ${everyone}`);
+  for (const [schema, owner] of sorted(owned.schemas)) {
+    statements.push(`REVOKE ALL ON SCHEMA ${escapeIdentifier(schema)} FROM ${everyoneBut(owner)}`);
   }
-  for (const table of [...owned.tables].sort()) {
-    statements.push(`REVOKE ALL ON TABLE ${quoteQualified(table)} FROM ${everyone}`);
+  for (const [table, owner] of sorted(owned.tables)) {
+    statements.push(`REVOKE ALL ON TABLE ${quoteQualified(table)} FROM ${everyoneBut(owner)}`);
   }
-  for (const sequence of [...owned.sequences].sort()) {
-    statements.push(`REVOKE ALL ON SEQUENCE ${quoteQualified(sequence)} FROM ${everyone}`);
+  for (const [sequence, owner] of sorted(owned.sequences)) {
+    statements.push(
+      `REVOKE ALL ON SEQUENCE ${quoteQualified(sequence)} FROM ${everyoneBut(owner)}`,
+    );
   }
-  for (const fn of [...owned.functions].sort()) {
-    statements.push(`REVOKE ALL ON FUNCTION ${quoteSignature(fn)} FROM ${everyone}`);
+  for (const [fn, owner] of sorted(owned.functions)) {
+    statements.push(`REVOKE ALL ON FUNCTION ${quoteSignature(fn)} FROM ${everyoneBut(owner)}`);
   }
   for (const fragment of fragments) {
     for (const entry of fragment.grants) {
@@ -320,7 +345,8 @@ async function exists(q: Queryable, kind: "table" | "function", name: string): P
 /**
  * The live privileges of Fin's grantee roles (and PUBLIC, as the role "PUBLIC") on every object in
  * Fin's schemas, in the matrix's form: the drift check (`database.grants_drift`) and AC-P0-39's
- * "exactly its grants" test compare this with `expandMatrix`.
+ * "exactly its grants" test compare this with `expandMatrix`. An owner's own privileges on its object
+ * (fin_email_enqueue's EXECUTE on enqueue) are left out, as applying never touches them.
  */
 export async function livePrivileges(
   q: Queryable,
@@ -338,24 +364,24 @@ export async function livePrivileges(
      SELECT 'schema'::text AS kind, n.nspname::text AS object, a.privilege_type::text AS privilege,
             g.rolname::text AS role
      FROM pg_catalog.pg_namespace n, LATERAL aclexplode(n.nspacl) a JOIN grantees g ON g.oid = a.grantee
-     WHERE n.nspname = ANY ($1)
+     WHERE n.nspname = ANY ($1) AND a.grantee <> n.nspowner
      UNION ALL
      SELECT 'table', ns.nspname || '.' || c.relname, a.privilege_type, g.rolname
      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace,
           LATERAL aclexplode(c.relacl) a JOIN grantees g ON g.oid = a.grantee
-     WHERE ns.nspname = ANY ($1) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+     WHERE ns.nspname = ANY ($1) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND a.grantee <> c.relowner
      UNION ALL
      SELECT 'table', ns.nspname || '.' || c.relname || '(' || att.attname || ')', a.privilege_type, g.rolname
      FROM pg_catalog.pg_attribute att
      JOIN pg_catalog.pg_class c ON c.oid = att.attrelid
      JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace,
           LATERAL aclexplode(att.attacl) a JOIN grantees g ON g.oid = a.grantee
-     WHERE ns.nspname = ANY ($1) AND att.attnum > 0 AND NOT att.attisdropped
+     WHERE ns.nspname = ANY ($1) AND att.attnum > 0 AND NOT att.attisdropped AND a.grantee <> c.relowner
      UNION ALL
      SELECT 'function', p.oid::pg_catalog.regprocedure::text, a.privilege_type, g.rolname
      FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid = p.pronamespace,
           LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a JOIN grantees g ON g.oid = a.grantee
-     WHERE ns.nspname = ANY ($1)`,
+     WHERE ns.nspname = ANY ($1) AND a.grantee <> p.proowner`,
     [FIN_SCHEMAS, MANAGED_ROLES],
   );
   return result.rows
@@ -381,7 +407,9 @@ export interface Membership {
 /**
  * The memberships Fin's roles must have, and the only ones (P-20, ARCHITECTURE §6.3): each service
  * login in exactly its group, `fin_backup` in pg_read_all_data and `fin_probe` in pg_monitor (inherited,
- * never SET), and nothing else for any Fin role, as member or as the role granted.
+ * never SET), fin_owner in enqueue's owner (to own, replace and grant on `email.enqueue()`; the role
+ * holds nothing fin_owner does not own), and nothing else for any Fin role, as member or as the role
+ * granted.
  */
 export function expectedMemberships(): Membership[] {
   return [
@@ -394,6 +422,7 @@ export function expectedMemberships(): Membership[] {
     })),
     { member: "fin_backup", role: "pg_read_all_data", admin: false, inherit: true, set: false },
     { member: "fin_probe", role: "pg_monitor", admin: false, inherit: true, set: false },
+    { member: "fin_owner", role: ENQUEUE_OWNER, admin: false, inherit: true, set: true },
   ].sort((a, b) => membershipKey(a).localeCompare(membershipKey(b)));
 }
 
