@@ -12,6 +12,7 @@ import {
   disabledReason,
   type Guarded,
   NOT_ALLOWED_REASON,
+  type Requirement,
   visibleGroups,
   visibleItems,
 } from "./visibility.ts";
@@ -79,10 +80,11 @@ describe("navigation hides what a role cannot open", () => {
 
 describe("allows", () => {
   const held = permissionSet(staff, ["customers.read", "rfis.read"]);
+  const everything = permissionsOf(staff, { kind: "built_in", key: "admin" });
 
-  it("is always met without a requirement", () => {
+  it("is always met only when there is no requirement", () => {
     expect(allows<StaffPermission>(held, undefined)).toBe(true);
-    expect(allows<StaffPermission>(held, {})).toBe(true);
+    expect(allows<StaffPermission>(new Set(), undefined)).toBe(true);
   });
 
   it("needs all of allOf and one of anyOf", () => {
@@ -91,10 +93,32 @@ describe("allows", () => {
     expect(allows(held, { anyOf: ["rfis.manage", "rfis.read"] })).toBe(true);
     expect(allows(held, { anyOf: ["rfis.manage"] })).toBe(false);
     expect(allows(held, { allOf: ["customers.read"], anyOf: ["forms.manage"] })).toBe(false);
+    expect(allows(held, { allOf: ["rfis.manage"], anyOf: ["rfis.read"] })).toBe(false);
+    expect(allows(held, { allOf: ["customers.read"], anyOf: ["rfis.read"] })).toBe(true);
   });
 
-  it("fails closed on an empty anyOf", () => {
-    expect(allows(held, { anyOf: [] })).toBe(false);
+  // A requirement that names no permission is half-written, so it is met by nothing, not by
+  // everyone: even a role holding every permission is refused.
+  it.each<[string, Requirement<StaffPermission>]>([
+    ["an empty requirement", {}],
+    ["an empty allOf", { allOf: [] }],
+    ["an empty anyOf", { anyOf: [] }],
+    ["both empty", { allOf: [], anyOf: [] }],
+    ["an empty anyOf beside a met allOf", { allOf: ["customers.read"], anyOf: [] }],
+  ])("fails closed on %s", (_what, requirement) => {
+    expect(allows(held, requirement)).toBe(false);
+    expect(allows(everything, requirement)).toBe(false);
+    expect(disabledReason(everything, requirement)).toBe(NOT_ALLOWED_REASON);
+    expect(visibleItems(everything, [{ requires: requirement }])).toEqual([]);
+  });
+
+  it("reads an empty allOf beside a named anyOf as the anyOf alone", () => {
+    expect(allows(held, { allOf: [], anyOf: ["rfis.read"] })).toBe(true);
+    expect(allows(held, { allOf: [], anyOf: ["rfis.manage"] })).toBe(false);
+  });
+
+  it("fails closed on a requirement that is not an object", () => {
+    expect(allows(everything, null as unknown as Requirement<StaffPermission>)).toBe(false);
   });
 });
 

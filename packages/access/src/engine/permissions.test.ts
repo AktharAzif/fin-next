@@ -61,7 +61,9 @@ describe("can, canAll and canAny", () => {
   it("check every one, or any one", () => {
     expect(canAll(held, ["customers.read", "money.read"])).toBe(true);
     expect(canAll(held, ["customers.read", "money.transfer"])).toBe(false);
-    expect(canAll(held, [])).toBe(true);
+    // An empty list is a half-written requirement: met by nothing, even every permission.
+    expect(canAll(held, [])).toBe(false);
+    expect(canAll(new Set(dash.keys), [])).toBe(false);
     expect(canAny(held, ["money.transfer", "money.read"])).toBe(true);
     expect(canAny(held, ["money.transfer"])).toBe(false);
     expect(canAny(held, [])).toBe(false);

@@ -25,12 +25,15 @@ export function can<P extends string>(held: ReadonlySet<P>, key: NoInfer<P>): bo
   return held.has(key);
 }
 
-/** Whether the held set allows every one of `keys` (a route's or a page's "and"). */
+/**
+ * Whether the held set allows every one of `keys` (a route's or a page's "and"). Empty: no, as for
+ * `canAny`: a requirement that names no permission is half-written, so it fails closed.
+ */
 export function canAll<P extends string>(
   held: ReadonlySet<P>,
   keys: readonly NoInfer<P>[],
 ): boolean {
-  return keys.every((key) => held.has(key));
+  return keys.length > 0 && keys.every((key) => held.has(key));
 }
 
 /** Whether the held set allows at least one of `keys` (a route policy's `anyOf`). Empty: no. */

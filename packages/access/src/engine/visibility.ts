@@ -5,22 +5,29 @@
 /** The reason a control a role cannot use carries, as its description and tooltip. */
 export const NOT_ALLOWED_REASON = "Your role doesn't allow this. Ask someone who can change roles.";
 
-/** What opening a page or using a control needs: every one of `allOf`, and one of `anyOf`. */
+/**
+ * What opening a page or using a control needs: every one of `allOf`, and one of `anyOf`. It names
+ * at least one permission; to need nothing, give no requirement at all.
+ */
 export interface Requirement<P extends string> {
   readonly allOf?: readonly P[];
   readonly anyOf?: readonly P[];
 }
 
 /**
- * Whether the held set meets the requirement. No requirement means always (the dashboard's Home
- * and Settings). An empty `anyOf` is met by nothing, so a half-written requirement fails closed.
+ * Whether the held set meets the requirement. No requirement (`undefined`) means always (the
+ * dashboard's Home and Settings). A requirement that names no permission (`{}`, an empty `allOf`
+ * with no `anyOf`) and an empty `anyOf` are met by nothing, so a half-written requirement fails
+ * closed.
  */
 export function allows<P extends string>(
   held: ReadonlySet<P>,
   requirement: Requirement<NoInfer<P>> | undefined,
 ): boolean {
   if (requirement === undefined) return true;
+  if (typeof requirement !== "object" || requirement === null) return false;
   const { allOf, anyOf } = requirement;
+  if ((allOf?.length ?? 0) === 0 && (anyOf?.length ?? 0) === 0) return false;
   if (allOf !== undefined && !allOf.every((key) => held.has(key))) return false;
   if (anyOf !== undefined && !anyOf.some((key) => held.has(key))) return false;
   return true;
