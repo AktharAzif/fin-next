@@ -53,7 +53,8 @@ export class CatalogueError extends Error {
 }
 
 const STEP_UP_KINDS: ReadonlySet<StepUpKind> = new Set(["none", "window", "intent"]);
-const PERMISSION_KEY = /^[a-z][A-Za-z]*\.[a-z][a-z_]*$/;
+// `<area>.<action>`: a camel-case area and a lower-case action whose words one underscore joins.
+const PERMISSION_KEY = /^[a-z][A-Za-z]*\.[a-z]+(?:_[a-z]+)*$/;
 const GROUP_OR_ROLE_KEY = /^[a-z][a-z_]*$/;
 const ROLE_PREFIX = /^[a-z]{3}$/;
 
@@ -70,8 +71,10 @@ function deepFreeze<T>(value: T): T {
 
 /**
  * Builds a catalogue from its fragments and checks every structural rule: keys and labels present
- * and unique, needs known and acyclic, built-in roles closed under needs, only the top role holding
- * restricted permissions, and the top role holding everything. Throws `CatalogueError` otherwise.
+ * and unique (permission keys also ignoring case; group, permission and built-in role labels
+ * ignoring case, each among their own kind), needs known and acyclic, built-in roles closed under
+ * needs, only the top role holding restricted permissions, and the top role holding everything.
+ * Throws `CatalogueError` otherwise.
  */
 export function assembleCatalogue<const G extends readonly GroupSpec[], const R extends string>(
   input: CatalogueInput<G, R> & { readonly groups: KnownNames<G> },
@@ -93,16 +96,23 @@ function assemble(input: CatalogueInput<readonly GroupSpec[], string>): Catalogu
   }
   if (input.groups.length === 0) fail("there are no groups");
 
-  // Groups and permissions, in the editor's order.
+  // Groups and permissions, in the editor's order. A label or key seen before is kept lower-cased
+  // with what first had it, so a repeat in another case is refused too.
   const specs = new Map<string, PermissionSpec>();
   const groupOf = new Map<string, string>();
   const groupKeys = new Set<string>();
+  const groupLabels = new Map<string, string>();
+  const foldedKeys = new Map<string, string>();
   const groups: PermissionGroup[] = [];
   for (const group of input.groups) {
     if (!GROUP_OR_ROLE_KEY.test(group.key)) fail(`the group key "${group.key}" is malformed`);
     if (groupKeys.has(group.key)) fail(`the group "${group.key}" appears twice`);
     groupKeys.add(group.key);
     if (!filled(group.label)) fail(`the group "${group.key}" has no label`);
+    const labelTwin = groupLabels.get(group.label.toLowerCase());
+    if (labelTwin !== undefined)
+      fail(`the group "${group.key}" repeats the label of "${labelTwin}"`);
+    groupLabels.set(group.label.toLowerCase(), group.key);
     if (group.cant !== undefined && !filled(group.cant)) {
       fail(`the group "${group.key}" has an empty "can't" phrase`);
     }
@@ -110,6 +120,11 @@ function assemble(input: CatalogueInput<readonly GroupSpec[], string>): Catalogu
     for (const spec of group.permissions) {
       if (!PERMISSION_KEY.test(spec.key)) fail(`the permission key "${spec.key}" is malformed`);
       if (specs.has(spec.key)) fail(`the permission "${spec.key}" appears twice`);
+      const caseTwin = foldedKeys.get(spec.key.toLowerCase());
+      if (caseTwin !== undefined) {
+        fail(`the permission "${spec.key}" differs from "${caseTwin}" only in case`);
+      }
+      foldedKeys.set(spec.key.toLowerCase(), spec.key);
       specs.set(spec.key, spec);
       groupOf.set(spec.key, group.key);
     }
@@ -126,9 +141,13 @@ function assemble(input: CatalogueInput<readonly GroupSpec[], string>): Catalogu
     [...set].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
 
   // Each permission's own fields.
+  const permissionLabels = new Map<string, string>();
   for (const spec of specs.values()) {
     const at = `the permission "${spec.key}"`;
     if (!filled(spec.label)) fail(`${at} has no label`);
+    const labelTwin = permissionLabels.get(spec.label.toLowerCase());
+    if (labelTwin !== undefined) fail(`${at} repeats the label of "${labelTwin}"`);
+    permissionLabels.set(spec.label.toLowerCase(), spec.key);
     if (!filled(spec.description)) fail(`${at} has no description`);
     if (!STEP_UP_KINDS.has(spec.stepUp)) fail(`${at} has an unknown step-up kind`);
     for (const flag of ["privileged", "sandboxOnly", "restricted"] as const) {
