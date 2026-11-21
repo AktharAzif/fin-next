@@ -99,6 +99,12 @@ jobs:
           package-manager-cache: false
       - name: The Node the checks need (fails before a check can exit 0 unchecked)
         run: node .github/scripts/node-check.mjs
+      # The two control-path checks run here directly, before pnpm reads the policy: `pnpm check`
+      # runs them too, but through package.json's scripts, which are not a control path.
+      - name: Supply-chain policy (run directly, a control path)
+        run: node scripts/check-supply-chain.mjs
+      - name: Public safety (run directly, a control path)
+        run: node scripts/public-safety.mjs
       - name: Install pnpm (release asset, by checksum)
         run: .github/scripts/install-pnpm.sh
       - name: Find the pnpm store

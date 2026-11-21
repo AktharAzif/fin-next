@@ -378,6 +378,16 @@ describe("this repository", () => {
     }
   });
 
+  it("runs the control-path checks in check directly, before the install, not only via package.json", () => {
+    const list = steps("ci.yml", "check");
+    const install = list.findIndex((s) => runOf(s) === "pnpm install --frozen-lockfile");
+    assert.ok(install > 0, "check installs");
+    for (const script of ["scripts/check-supply-chain.mjs", "scripts/public-safety.mjs"]) {
+      const at = list.findIndex((s) => runOf(s) === `node ${script}`);
+      assert.ok(at >= 0 && at < install, `check runs node ${script} before the install`);
+    }
+  });
+
   it("checks the Node in check and build before any check script can run on it", () => {
     for (const name of ["check", "build"]) {
       const list = steps("ci.yml", name);
