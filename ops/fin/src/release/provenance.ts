@@ -4,8 +4,16 @@
 //   - ci.yml's `merge` job succeeded for the commit (spec 07 §2.3.4): the newest ci.yml run on a push
 //     to main for exactly this commit has finished and its `merge` job concluded `success`; anything
 //     else, a missing run or job included, refuses the deploy;
-//   - the release manifest's own attestation verifies, so its digests and hashes are release.yml's;
-//   - each image and each static artefact's attestation verifies with the same pinned identity.
+//   - the release manifest's own attestation verifies for this commit, so its digests and hashes
+//     are this release's (spec 01 §6.9 step 2: "each digest is in the release manifest");
+//   - each image's attestation verifies with the same pinned identity (release.yml, a push to main,
+//     no self-hosted runner), from whichever commit built it: release.yml rebuilds only the images
+//     that changed (ARCHITECTURE §11.7), and the manifest bound to this commit is what names the
+//     digest;
+//   - each static artefact's attestation verifies for this commit: release.yml builds every browser
+//     app each release (ARCHITECTURE §11.7, which holds over spec 01 §5.5's "affected"), carrying the
+//     previous release's assets in (FW-C13), so an artefact from another commit is not this
+//     release's.
 //
 // The attestation calls are tools/static-deploy's (provenance.ts), shared with the CI entry point.
 
@@ -13,7 +21,7 @@ import { StaticConfigError } from "../../../../tools/static-deploy/src/config.ts
 import {
   ProvenanceError,
   type ReleaseIdentity,
-  verifyAttestation,
+  verifyBuildAttestation,
   verifyFileAttestation,
 } from "../../../../tools/static-deploy/src/provenance.ts";
 import {
@@ -47,14 +55,16 @@ export function verifiedManifest(ctx: Context, file: string, release: string): R
   }
 }
 
-/** Verifies one image's attestation (`oci://<ref>`) for this release. */
-export function verifyImage(ctx: Context, ref: string, release: string): void {
+/**
+ * Verifies the attestation (`oci://<ref>`) of an image whose digest the verified release manifest
+ * names: release.yml on a push to main, from the commit that built it.
+ */
+export function verifyImage(ctx: Context, ref: string): void {
   try {
-    verifyAttestation(
+    verifyBuildAttestation(
       (program, args) => ctx.runtime.exec(program, args),
       `oci://${ref}`,
       releaseIdentity(ctx),
-      release,
       `the image ${ref.split("@")[0]?.split("/").at(-1) ?? "image"}`,
     );
   } catch (error) {

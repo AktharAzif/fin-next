@@ -1,11 +1,12 @@
 // `pnpm fin railway verify <env>` (spec 01 §6.8; [P-13]): Railway staging, provisioned by hand
 // against spec 01 §6's checklist, read back and compared row by row: every service exists, has no
 // public domain and no TCP proxy (listed in the settings or not), no instance in another
-// environment, runs in the region with its replicas, restart policy, health check, overlap and
-// draining, has app sleeping and outbound IPv6 off, runs an image by digest from the release
-// repository (and the digest the registered deploys recorded for it), keeps every secret sealed, and
-// has static egress exactly where §6.5 says, with the overlay's addresses. Read-only: it registers
-// no run. Exit 1 on any drift; what it could not read is listed, never passed.
+// environment and no variable that refers to the database template (§6.3), runs in the region with
+// its replicas, restart policy, health check, overlap and draining, has app sleeping and outbound
+// IPv6 off and PORT=8080, runs an image by digest from the release repository (and the digest the
+// registered deploys recorded for it), keeps every secret sealed, and has static egress exactly
+// where §6.5 says, with the overlay's addresses. Read-only: it registers no run. Exit 1 on any
+// drift; what it could not read is listed, never passed.
 
 import { railway } from "../cloudflare/common.ts";
 import type { Command } from "../command.ts";
@@ -32,6 +33,22 @@ export function lastDeployed(ctx: Context): Map<string, string> {
     }
   }
   return expected;
+}
+
+/**
+ * Whether this machine's run log records a successful registered `railway deploy` of the release:
+ * its services rolled, so its pages may follow (spec 01 §6.9, S0-06).
+ */
+export function railwayDeployed(ctx: Context, release: string): boolean {
+  return ctx.log
+    .records()
+    .some(
+      (r) =>
+        r.event === "run.done" &&
+        r.command === "railway deploy" &&
+        r.result === "ok" &&
+        r.release === release,
+    );
 }
 
 export const railwayVerify: Command = {

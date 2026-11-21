@@ -4,9 +4,17 @@
 //
 //   - the certificate's SubjectAlternativeName is release.yml at refs/heads/main of this repository,
 //     compared byte for byte (`--cert-identity`), so the owner's casing must be GitHub's own;
-//   - the source commit is the release (`--source-digest`) and the source ref is main;
+//   - the source ref is main;
 //   - the run was a `push` (read back from gh's JSON: gh has no flag for the trigger);
-//   - no self-hosted runner signed it.
+//   - no self-hosted runner signed it;
+//   - for what this release itself built (its release manifest, its static artefacts), the source
+//     commit is the release (`--source-digest`): verifyAttestation.
+//
+// An image is the exception (verifyBuildAttestation): release.yml rebuilds only the images that
+// changed (ARCHITECTURE §11.7, spec 01 §5.5), so the manifest's digest for an unchanged image was
+// built and attested by an earlier commit's run. The commit is bound once, through the release
+// manifest's own attestation, and each image's digest is trusted because that manifest names it;
+// its attestation must still be release.yml's, on a push to main, with no self-hosted runner.
 //
 // gh's JSON is read back and every one of those is checked again, so a gh that ignored a flag cannot
 // pass an attestation. A file is verified from a private copy, and the caller gets the bytes of that
@@ -68,8 +76,15 @@ export function signerIdentity(id: ReleaseIdentity): string {
   return `https://github.com/${id.repository}/${id.workflow}@${id.ref}`;
 }
 
-/** The arguments of one `gh attestation verify` call. */
-export function attestationArgs(subject: string, id: ReleaseIdentity, release: string): string[] {
+/**
+ * The arguments of one `gh attestation verify` call: bound to a commit when `release` is given, to
+ * any commit of the pinned ref otherwise.
+ */
+export function attestationArgs(
+  subject: string,
+  id: ReleaseIdentity,
+  release: string | undefined,
+): string[] {
   return [
     "attestation",
     "verify",
@@ -80,8 +95,7 @@ export function attestationArgs(subject: string, id: ReleaseIdentity, release: s
     signerIdentity(id),
     "--source-ref",
     id.ref,
-    "--source-digest",
-    release,
+    ...(release === undefined ? [] : ["--source-digest", release]),
     "--deny-self-hosted-runners",
     "--format",
     "json",
@@ -101,10 +115,36 @@ export function verifyAttestation(
   what: string,
 ): void {
   if (!SHA.test(release)) throw new ProvenanceError("the release must be a full commit SHA");
+  verify(exec, subject, id, release, what);
+}
+
+/**
+ * Verifies a build that an attested release manifest names by digest (an image): the same pinned
+ * identity, a push, main, no self-hosted runner, from whichever commit's release.yml run built it.
+ * Use it only for a subject whose digest came from a manifest verifyAttestation bound to the
+ * release, never for the manifest itself.
+ */
+export function verifyBuildAttestation(
+  exec: ExecFn,
+  subject: string,
+  id: ReleaseIdentity,
+  what: string,
+): void {
+  verify(exec, subject, id, undefined, what);
+}
+
+function verify(
+  exec: ExecFn,
+  subject: string,
+  id: ReleaseIdentity,
+  release: string | undefined,
+  what: string,
+): void {
+  const commit = release === undefined ? "" : " for this commit";
   const result = exec("gh", attestationArgs(subject, id, release));
   if (result.status !== 0) {
     throw new ProvenanceError(
-      `${what}: the attestation does not verify (built by ${id.workflow} on a push to ${id.ref} for this commit?)`,
+      `${what}: the attestation does not verify (built by ${id.workflow} on a push to ${id.ref}${commit}?)`,
     );
   }
   let parsed: unknown;
@@ -126,7 +166,7 @@ export function verifyAttestation(
     triggers.add(String(certificate.buildTrigger ?? "unknown"));
     if (
       certificate.buildTrigger === "push" &&
-      certificate.sourceRepositoryDigest === release &&
+      (release === undefined || certificate.sourceRepositoryDigest === release) &&
       certificate.sourceRepositoryRef === id.ref &&
       certificate.subjectAlternativeName === san
     ) {
@@ -134,7 +174,7 @@ export function verifyAttestation(
     }
   }
   throw new ProvenanceError(
-    `${what}: no verified attestation is from a push to ${id.ref} for this commit (triggers: ${[...triggers].join(", ") || "none"})`,
+    `${what}: no verified attestation is from a push to ${id.ref}${commit} (triggers: ${[...triggers].join(", ") || "none"})`,
   );
 }
 

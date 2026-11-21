@@ -5,24 +5,33 @@
 //      own attestation (release.yml, a push to main, this commit): its digests are trusted only then;
 //   2. refuse while any service, listed in the settings or not, has a public domain or a TCP proxy,
 //      while the project has a service the settings do not list or an instance in another
-//      environment, while a superuser reference stands outside a run, or while static egress
-//      differs from §6.5 or could not be read (staging is provisioned by hand, [P-13]: fix it there,
-//      then deploy; `--accept-unchecked-egress` takes an unread egress on the operator's word);
+//      environment, while a database template reference (the superuser URL, under any name) stands
+//      outside a run, or while static egress differs from §6.5 (staging is provisioned by hand,
+//      [P-13]: fix it there, then deploy); a read Railway refused that one of these checks needs
+//      refuses too, unless the operator checked it by hand and says so with a flag the run records
+//      (`--accept-unchecked-egress`, `--accept-unchecked-variables`, `--accept-unchecked-settings`);
 //   3. refuse a partial release: migrations with no api image, or a service the release builds no
-//      image for while it runs an earlier release's image;
-//   4. verify every image's attestation with the same pinned identity, bound to this commit;
-//   5. register the run (the lock, `deploy.started`);
-//   6. when the release lists migrations, run `migrate` with the new api image and the superuser
+//      image for while it runs an earlier release's image (the manifest names every service's digest,
+//      ARCHITECTURE §11.7, so a rollback to it is whole);
+//   4. refuse to roll a service whose Railway health check is not the settings' (/readyz, 60 s): it
+//      is what makes SUCCESS mean the service is ready, schema included;
+//   5. verify every image's attestation with the same pinned identity (release.yml, a push to main,
+//      no self-hosted runner); the commit is bound once, through the manifest that names the digests,
+//      because release.yml rebuilds only the images that changed;
+//   6. register the run (the lock, `deploy.started`);
+//   7. when the release lists migrations, run `migrate` with the new api image and the superuser
 //      reference set for this run only (§6.6 step 6; migrate gives fin_owner a password valid for
-//      the run), poll its log until `migrate.done` for this release, then remove the reference;
-//   7. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
+//      the run), poll its log until `migrate.done` for this release, then remove the reference and
+//      read migrate's variables back to confirm it is gone;
+//   8. roll payments, api, worker, edge, verify, admin, console: the image by digest, the start
 //      command, the plain FIN_SERVICE/FIN_ENVIRONMENT/FIN_RELEASE/FIN_DRAIN_SECONDS/PORT, then a
 //      deploy, waiting for SUCCESS (Railway's health check is /readyz, which fails below the
-//      release's minimum schema version) and the running digest;
-//   8. roll cloudflared-admin and cloudflared-public only when their image changed;
-//   9. check again that nothing is exposed and every service runs the digest recorded for it; with
-//      --smoke, fetch the public health paths; write `deploy.done`, and record in `run.done` the
-//      digest of every service on the release, rolled or kept, which `railway verify` checks.
+//      release's minimum schema version, recorded with every step) and the running digest;
+//   9. roll cloudflared-admin and cloudflared-public only when their image changed;
+//  10. check again everything steps 2 and 4 refuse on, and that every service runs the digest
+//      recorded for it; with --smoke, fetch the public health paths; write `deploy.done`, and record
+//      in `run.done` the digest of every service on the release, rolled or kept, which `railway
+//      verify` checks.
 //
 // A failed step stops the deploy: the services already rolled stay on the new release, the rest keep
 // the previous one, `deploy.failed` names the step and the output prints which service runs what.
@@ -37,7 +46,16 @@ import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
 import { checkMergeJob, verifiedManifest, verifyImage } from "../release/provenance.ts";
 import type { RailwayApi } from "./api.ts";
-import { findings, type Inspection, inspectRailway, REFUSED_CHECKS } from "./inspect.ts";
+import {
+  BOOTSTRAP_REFERENCE,
+  findings,
+  type Inspection,
+  inspectRailway,
+  isRefusal,
+  REFUSED_CHECKS,
+  ROLL_CHECKS,
+  readVariables,
+} from "./inspect.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
 const POLL_MS = 5_000;
@@ -155,11 +173,46 @@ async function waitForMigrate(
   );
 }
 
-/** The findings a deploy refuses on (exposure, unknown services, other environments, references). */
-export function refusals(ctx: Context, inspection: Inspection): string[] {
+/**
+ * The findings a deploy refuses on: exposure, unknown services, other environments and references
+ * on any service, and, on each service it rolls, a health check that is not the settings'.
+ */
+export function refusals(
+  ctx: Context,
+  inspection: Inspection,
+  rolled: ReadonlySet<string> = new Set(),
+): string[] {
   return findings(ctx, inspection)
-    .filter((f) => REFUSED_CHECKS.has(f.check))
+    .filter(
+      (f) => REFUSED_CHECKS.has(f.check) || (ROLL_CHECKS.has(f.check) && rolled.has(f.service)),
+    )
     .map((f) => `${f.service} (${f.check})`);
+}
+
+/** What the operator accepted on their own word, because Railway refused the read (recorded). */
+interface Accepted {
+  egress: boolean;
+  variables: boolean;
+  settings: boolean;
+}
+
+/**
+ * The refused reads a deploy depends on that the operator did not accept: the variables (the
+ * superuser-reference check) and the instance settings (the health check SUCCESS stands on).
+ */
+function unreadRefusals(inspection: Inspection, accepted: Accepted): string[] {
+  const out: string[] = [];
+  if (inspection.variablesUnread.length > 0 && !accepted.variables) {
+    out.push(
+      `Railway refused the variables read for ${inspection.variablesUnread.join(", ")}, so no database template reference (the superuser URL) can be ruled out there; check spec 01 §6.3 by hand, then pass --accept-unchecked-variables`,
+    );
+  }
+  if (inspection.settingsUnread && !accepted.settings) {
+    out.push(
+      "Railway refused the instance settings read, so the health checks the roll stands on (/readyz, 60 s) could not be checked; check them by hand, then pass --accept-unchecked-settings",
+    );
+  }
+  return out;
 }
 
 async function smoke(ctx: Context): Promise<void> {
@@ -200,6 +253,18 @@ export const railwayDeploy: Command = {
       kind: "boolean",
       description: "deploy although Railway refused the static egress read (checked by hand)",
     },
+    {
+      name: "accept-unchecked-variables",
+      kind: "boolean",
+      description:
+        "deploy although Railway refused a variables read (no superuser reference, checked by hand)",
+    },
+    {
+      name: "accept-unchecked-settings",
+      kind: "boolean",
+      description:
+        "deploy although Railway refused the instance settings read (health checks, checked by hand)",
+    },
   ],
   overlay: true,
   mutating: true,
@@ -212,8 +277,17 @@ export const railwayDeploy: Command = {
     if (manifestFile === undefined) throw new UsageError("--manifest is required");
     checkMergeJob(ctx, release);
     const manifest: ReleaseManifest = verifiedManifest(ctx, manifestFile, release);
+    const schema = manifest.minimumSchemaVersion;
+    ctx.out.info(
+      `minimum schema version: ${schema ?? "none"} (each service's /readyz fails below it; Railway's health check holds SUCCESS until /readyz passes)`,
+    );
     const s = ctx.settings.railway;
     const rw = railway(ctx);
+    const accepted: Accepted = {
+      egress: flagBool(ctx.args, "accept-unchecked-egress"),
+      variables: flagBool(ctx.args, "accept-unchecked-variables"),
+      settings: flagBool(ctx.args, "accept-unchecked-settings"),
+    };
     const before = await inspectRailway(ctx, rw);
     for (const n of before.notChecked) ctx.out.info(`  ? not checked: ${n}`);
     const refused = refusals(ctx, before);
@@ -229,15 +303,22 @@ export const railwayDeploy: Command = {
       );
     }
     const egressUnchecked = before.egressUnread.length > 0;
-    if (egressUnchecked && !flagBool(ctx.args, "accept-unchecked-egress")) {
+    if (egressUnchecked && !accepted.egress) {
       throw new RefusedError(
         `Railway refused the static egress read for ${before.egressUnread.join(", ")}, so the egress check could not run; check spec 01 §6.5 by hand, then pass --accept-unchecked-egress`,
       );
     }
-    if (egressUnchecked)
-      ctx.out.warn(
-        "static egress was not read; deploying on the operator's word (--accept-unchecked-egress)",
-      );
+    const unread = unreadRefusals(before, accepted);
+    if (unread.length > 0) throw new RefusedError(unread.join("; "));
+    const variablesUnchecked = before.variablesUnread.length > 0;
+    const settingsUnchecked = before.settingsUnread;
+    for (const [taken, what] of [
+      [egressUnchecked, "static egress was not read (--accept-unchecked-egress)"],
+      [variablesUnchecked, "some variables were not read (--accept-unchecked-variables)"],
+      [settingsUnchecked, "the health checks were not read (--accept-unchecked-settings)"],
+    ] as const) {
+      if (taken) ctx.out.warn(`${what}; deploying on the operator's word`);
+    }
 
     const rolls: Roll[] = [];
     const changes: Change[] = [];
@@ -297,12 +378,46 @@ export const railwayDeploy: Command = {
     for (const service of s.deployOrder) plan(service, false, false);
     for (const service of s.connectorOrder) plan(service, false, true);
 
+    const rolled = new Set(rolls.map((r) => r.service));
+    const health = refusals(ctx, before, rolled).filter((r) => !refused.includes(r));
+    if (health.length > 0) {
+      throw new RefusedError(
+        `refusing to roll: ${health.join(", ")}; Railway's health check (/readyz, 60 s) is what holds SUCCESS until a service is ready on its schema (spec 01 §6.2, §6.9 step 4); fix it by hand (P-13), then deploy`,
+      );
+    }
+
     const refs = new Set(rolls.map((r) => r.ref));
-    for (const ref of refs) verifyImage(ctx, ref, release);
-    ctx.out.info(`attestations: ${refs.size} image(s) verified for this commit`);
+    for (const ref of refs) verifyImage(ctx, ref);
+    ctx.out.info(
+      `attestations: ${refs.size} image(s) verified (release.yml, a push to main), each named by this commit's attested manifest`,
+    );
 
     let started = false;
     const reference = s.bootstrapReference;
+    /** Confirms migrate's variables no longer hold the superuser reference (spec 01 §6.3, §6.6). */
+    const confirmRemoved = async (serviceId: string): Promise<void> => {
+      let left: string[];
+      try {
+        const v = await readVariables(rw, ctx.settings, "migrate", serviceId);
+        left = [
+          ...new Set([
+            ...v.templateReferences,
+            ...v.names.filter((n) => n === reference.variable || n === BOOTSTRAP_REFERENCE),
+          ]),
+        ];
+      } catch (error) {
+        if (!isRefusal(error) || !accepted.variables) throw error;
+        ctx.out.warn(
+          `Railway refused migrate's variables read: check by hand now that ${reference.variable} is gone from migrate (spec 01 §6.3)`,
+        );
+        return;
+      }
+      if (left.length > 0) {
+        throw new RefusedError(
+          `${left.includes(reference.variable) ? reference.variable : left.join(", ")} is still on migrate after its removal: remove it by hand now (spec 01 §6.3, §6.6); no service rolls while it stands`,
+        );
+      }
+    };
     const runMigrate = async (serviceId: string, roll: Roll) => {
       let failure: unknown;
       try {
@@ -323,6 +438,7 @@ export const railwayDeploy: Command = {
             name: reference.variable,
           },
         });
+        await confirmRemoved(serviceId);
       } catch (error) {
         ctx.out.error(
           `${reference.variable} could not be removed from ${roll.service}: remove it by hand now (spec 01 §6.3, §6.6)`,
@@ -331,13 +447,22 @@ export const railwayDeploy: Command = {
       }
       if (failure !== undefined) throw failure;
     };
+    const unchecked = {
+      ...(egressUnchecked ? { egressUnchecked: true } : {}),
+      ...(variablesUnchecked ? { variablesUnchecked: true } : {}),
+      ...(settingsUnchecked ? { settingsUnchecked: true } : {}),
+    };
     return ctx.applyPlan(
       `railway deploy ${release.slice(0, 12)}`,
       changes,
       async (change) => {
         if (!started) {
           started = true;
-          ctx.run.line("deploy.started", "info", { release, services: rolls.length });
+          ctx.run.line("deploy.started", "info", {
+            release,
+            services: rolls.length,
+            minimumSchemaVersion: schema,
+          });
         }
         const roll = rolls.find((r) => r.service === change.name);
         if (roll === undefined) return;
@@ -381,24 +506,25 @@ export const railwayDeploy: Command = {
             release,
             step: roll.task ? "migrate" : "roll",
             service: roll.service,
+            minimumSchemaVersion: schema,
           });
         } catch (error) {
           ctx.run.line("deploy.failed", "error", { release, step: roll.service });
-          const rolled = rolls.filter((r) => onRelease.has(r.service)).map((r) => r.service);
+          const rolledSoFar = rolls.filter((r) => onRelease.has(r.service)).map((r) => r.service);
           ctx.out.error(
-            `deploy stopped at ${roll.service}; on the new release: ${rolled.join(", ") || "none"}`,
+            `deploy stopped at ${roll.service}; on the new release: ${rolledSoFar.join(", ") || "none"}`,
           );
           throw error;
         }
       },
-      { release, ...(egressUnchecked ? { egressUnchecked: true } : {}) },
+      { release, minimumSchemaVersion: schema, ...unchecked },
       async () => {
         if (!started) return {};
         const after = await inspectRailway(ctx, rw);
-        const exposedAfter = refusals(ctx, after);
-        if (exposedAfter.length > 0) {
+        const problems = [...refusals(ctx, after, rolled), ...unreadRefusals(after, accepted)];
+        if (problems.length > 0) {
           ctx.run.line("deploy.failed", "error", { release, step: "checks" });
-          throw new RefusedError(`after the deploy: ${exposedAfter.join(", ")}`);
+          throw new RefusedError(`after the deploy: ${problems.join(", ")}`);
         }
         for (const [service, ref] of onRelease) {
           if (after.instances.get(service)?.image !== ref) {
@@ -410,6 +536,7 @@ export const railwayDeploy: Command = {
         ctx.run.line("deploy.done", "info", {
           release,
           services: onRelease.size,
+          minimumSchemaVersion: schema,
           ...(notBuilt.length > 0 ? { notBuilt } : {}),
         });
         return {

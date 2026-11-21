@@ -1,18 +1,25 @@
 // Reading Railway staging back (spec 01 §6.1, §6.2, §6.3, §6.5, §6.8). The core read is the project
 // query the hand provisioning used on 21 Nov; the settings Railway may name differently
 // (healthcheck, overlap, draining, start command, cron), the readable variables and the static
-// egress are separate reads. A read Railway refuses (it answered, with a GraphQL error) is reported
-// as "not checked", never as passing, and is tried again for every service; a read that never got
-// an answer (a network error, a 429 or a 5xx after the retries) stops the command instead, so a
-// transient failure can never turn a check off. Every §6.8 row with no read in Phase 0 is listed as
-// not checked, and so is any compared field Railway answered with no value.
+// egress are separate reads. A read Railway refuses (it answered with a schema or authorisation
+// error) is reported as "not checked", never as passing, and is tried again for every service; any
+// other failure (no answer, a 429 or a 5xx after the retries, or a GraphQL error that is no refusal)
+// stops the command instead, so a transient failure can never turn a check off. The deploy refuses
+// on every refused read it depends on unless the operator accepts it with a flag the run records.
+// Every §6.2, §6.3 and §6.8 row with no read in Phase 0 is listed as not checked, and so is any
+// compared field Railway answered with no value.
+//
+// Variables are read unrendered, so a reference (`${{postgres.DATABASE_URL}}`) is seen as a
+// reference and never rendered into a value that carries the template's password. Of the values,
+// only PORT's is kept; for every other variable only the name is kept, and whether it refers to a
+// template's variables (spec 01 §6.3). Nothing else of a value is kept, printed or logged.
 //
 // Names come from Railway, so every lookup by one goes through Object.hasOwn: a service named
 // `constructor` is an unknown service like any other.
 
 import type { Context } from "../core/context.ts";
 import { ProviderError } from "../core/errors.ts";
-import { mustBeSealed, type ServiceSettings } from "../core/settings.ts";
+import { mustBeSealed, type ServiceSettings, type Settings } from "../core/settings.ts";
 import type { RailwayApi } from "./api.ts";
 
 export interface InstanceState {
@@ -35,7 +42,12 @@ export interface InstanceState {
     cronSchedule?: string | null;
   };
   tcpProxies?: number;
+  /** The names of the readable (unsealed) variables; undefined when the read was refused. */
   readableVariables?: string[];
+  /** The readable variables whose value refers to a template service's variables (§6.3). */
+  templateReferences?: string[];
+  /** PORT's value, or null when it is not readable (§6.2: PORT=8080 on every service). */
+  port?: string | null;
   egress?: string[];
   /** Whether the service has an instance in the overlay's environment. */
   inEnvironment: boolean;
@@ -79,19 +91,23 @@ const STATUS = `query finStatus($projectId: String!) { project(id: $projectId) {
 const EXTENDED = `query finStatusExtended($projectId: String!) { project(id: $projectId) { services { edges { node { name serviceInstances { edges { node { environmentId healthcheckPath healthcheckTimeout overlapSeconds drainingSeconds startCommand cronSchedule } } } } } } } }`;
 const TCP =
   "query finTcp($environmentId: String!, $serviceId: String!) { tcpProxies(environmentId: $environmentId, serviceId: $serviceId) { id } }";
-// UNVERIFIED (SP-03): the readable variables of a service; a sealed one is absent from the answer.
+// UNVERIFIED (SP-03): the readable variables of a service, unrendered (a reference stays a
+// reference); a sealed one is absent from the answer.
 const VARIABLES =
-  "query finVariables($projectId: String!, $environmentId: String!, $serviceId: String!) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }";
+  "query finVariables($projectId: String!, $environmentId: String!, $serviceId: String!) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, unrendered: true) }";
 
 /** The superuser reference that may exist only inside a registered run (spec 01 §6.3, §6.6). */
 export const BOOTSTRAP_REFERENCE = "FIN_BOOTSTRAP_DATABASE_URL";
 
-/** The rows of spec 01 §6.3 and §6.8 that Phase 0 has no read for. */
+/** The rows of spec 01 §6.2, §6.3 and §6.8 that Phase 0 has no read for. */
 export const NO_READ_ROWS = [
   "memory limits, PITR and the deployment webhook (no read in Phase 0; checked by hand against spec 01 §6)",
   "no staged but undeployed change (no read in Phase 0; check the environment's pending changes by hand)",
   "image auto-updates off, Railway's CDN and Edge Rules, hard usage limits (no read in Phase 0)",
   "shared variables holding a secret (no read in Phase 0)",
+  "each service's database login (spec 01 §6.2: the Postgres role behind FIN_DB_USER; no read in Phase 0)",
+  "no TUNNEL_TOKEN on the services that hold no token, and no database template reference set as a sealed variable (Railway returns no sealed variable)",
+  "Config as Code (a railway.json or railway.toml path) and a repository source on a service (no read in Phase 0 beyond the image-by-digest check)",
 ];
 
 export interface Inspection {
@@ -99,19 +115,90 @@ export interface Inspection {
   notChecked: string[];
   /** The services whose static egress Railway refused to read (the deploy refuses on these). */
   egressUnread: string[];
+  /** The services whose variables Railway refused to read (the deploy refuses on these). */
+  variablesUnread: string[];
+  /** Whether Railway refused the instance settings read: health checks and the rest unread. */
+  settingsUnread: boolean;
 }
 
 /**
- * Whether a failed read is Railway refusing the query (an answer with a GraphQL error), as opposed
- * to no usable answer at all, which must stop the command rather than turn a check off.
+ * The messages that say Railway refused the query itself: the schema has no such field or argument
+ * (SP-03's unverified names), or the token may not make it.
+ */
+const REFUSAL =
+  /Cannot query field|Unknown argument|Unknown type|Unknown field|is not defined by type|Not Authori[sz]ed|Unauthori[sz]ed|Forbidden|Permission denied|not permitted/i;
+
+/**
+ * Whether a failed read is Railway refusing the query (an answer with a schema or authorisation
+ * error), as opposed to no usable answer, or an error that is Railway's own failure, which must
+ * stop the command rather than turn a check off.
  */
 export function isRefusal(error: unknown): boolean {
-  return error instanceof ProviderError && [200, 400, 403].includes(error.status);
+  return (
+    error instanceof ProviderError &&
+    [200, 400, 403].includes(error.status) &&
+    REFUSAL.test(error.message)
+  );
+}
+
+/** The template services of the settings (the database), whose variables no service may refer to. */
+export function templateServices(settings: Settings): string[] {
+  return Object.entries(settings.railway.services)
+    .filter(([, s]) => s.template === true)
+    .map(([name]) => name);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The names of the variables whose value refers to a template service's variables
+ * (`${{postgres.DATABASE_URL}}`, spaces and case aside). A template's references to its own
+ * variables are its own; any other service's are what spec 01 §6.3 forbids outside a run.
+ */
+export function templateReferences(
+  service: string,
+  variables: Readonly<Record<string, unknown>>,
+  templates: readonly string[],
+): string[] {
+  const patterns = templates
+    .filter((t) => t !== service)
+    .map((t) => new RegExp(`\\$\\{\\{\\s*${escapeRegExp(t)}\\s*\\.`, "i"));
+  return Object.entries(variables)
+    .filter(([, value]) => typeof value === "string" && patterns.some((p) => p.test(value)))
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
+ * Reads one service's variables, unrendered, and keeps only what the checks need: the names, the
+ * names that refer to a template, and PORT's value. Throws on a refusal like any read.
+ */
+export async function readVariables(
+  rw: RailwayApi,
+  settings: Settings,
+  service: string,
+  serviceId: string,
+): Promise<{ names: string[]; templateReferences: string[]; port: string | null }> {
+  const v = await rw.query<{ variables: Record<string, unknown> | null }>(VARIABLES, {
+    projectId: rw.projectId,
+    environmentId: rw.environmentId,
+    serviceId,
+  });
+  const variables = v.variables ?? {};
+  const port = Object.hasOwn(variables, "PORT") ? variables.PORT : undefined;
+  return {
+    names: Object.keys(variables),
+    templateReferences: templateReferences(service, variables, templateServices(settings)),
+    port: typeof port === "string" ? port : null,
+  };
 }
 
 /** Reads every service of the project in this environment. */
 export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Inspection> {
   const notChecked: string[] = [];
+  let settingsUnread = false;
   const data = await rw.query<{ project: { services: { edges: Array<{ node: StatusNode }> } } }>(
     STATUS,
     { projectId: rw.projectId },
@@ -176,6 +263,7 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
     }
   } catch (error) {
     if (!isRefusal(error)) throw error;
+    settingsUnread = true;
     notChecked.push(
       "health checks, overlap, draining, start commands and crons (Railway refused the read; SP-03)",
     );
@@ -190,13 +278,10 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
     });
     state.tcpProxies = tcp.tcpProxies.length;
     try {
-      const v = await rw.query<{ variables: Record<string, string> }>(VARIABLES, {
-        projectId: rw.projectId,
-        environmentId: rw.environmentId,
-        serviceId: state.id,
-      });
-      // Only the names are kept: the values are never printed or logged.
-      state.readableVariables = Object.keys(v.variables ?? {});
+      const v = await readVariables(rw, ctx.settings, name, state.id);
+      state.readableVariables = v.names;
+      state.templateReferences = v.templateReferences;
+      state.port = v.port;
     } catch (error) {
       if (!isRefusal(error)) throw error;
       variablesUnread.push(name);
@@ -213,7 +298,7 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
   }
   if (variablesUnread.length > 0)
     notChecked.push(
-      `which variables are sealed on ${variablesUnread.join(", ")} (Railway refused the read; SP-03)`,
+      `which variables are sealed on ${variablesUnread.join(", ")}, their PORT, and whether a database template reference (the superuser URL) stands there (Railway refused the read; SP-03)`,
     );
   if (egressUnread.length > 0)
     notChecked.push(
@@ -237,7 +322,7 @@ export async function inspectRailway(ctx: Context, rw: RailwayApi): Promise<Insp
   for (const [field, names] of unanswered)
     notChecked.push(`${field} of ${names.join(", ")} (Railway answered no value)`);
   notChecked.push(...NO_READ_ROWS);
-  return { instances, notChecked, egressUnread };
+  return { instances, notChecked, egressUnread, variablesUnread, settingsUnread };
 }
 
 const DIGEST_REF = /^ghcr\.io\/[a-z0-9-]+\/(fin-next-[a-z0-9-]+)@sha256:[0-9a-f]{64}$/;
@@ -274,11 +359,14 @@ function exposureFindings(
       `${got.otherEnvironments} instance(s) in another environment of the project, ${got.otherDomains} with a public domain: only the default environment may exist (spec 01 §6.1, §6.3)`,
     );
   }
-  if ((got.readableVariables ?? []).includes(BOOTSTRAP_REFERENCE)) {
+  const references = new Set(got.templateReferences ?? []);
+  if ((got.readableVariables ?? []).includes(BOOTSTRAP_REFERENCE))
+    references.add(BOOTSTRAP_REFERENCE);
+  if (references.size > 0) {
     add(
       name,
       "superuser-reference",
-      `${BOOTSTRAP_REFERENCE} is set outside a registered run (spec 01 §6.3, §6.6)`,
+      `${[...references].sort().join(", ")}: a database template reference or ${BOOTSTRAP_REFERENCE} outside a registered run (spec 01 §6.3, §6.6)`,
     );
   }
 }
@@ -320,6 +408,9 @@ export function findings(ctx: Context, inspection: Inspection): Finding[] {
     const problem = imageProblem(got.image, want, s.imageRepository);
     if (problem !== undefined) add(name, "image", problem);
     const e = got.extended;
+    if (e === undefined && !inspection.settingsUnread) {
+      add(name, "healthcheck", "Railway's answer held no settings for this service's instance");
+    }
     if (e !== undefined) {
       const health = want.healthcheck ?? null;
       if ((e.healthcheckPath ?? null) !== health)
@@ -338,6 +429,15 @@ export function findings(ctx: Context, inspection: Inspection): Finding[] {
     for (const variable of got.readableVariables ?? []) {
       if (mustBeSealed(ctx.settings, variable))
         add(name, "sealed", `${variable} is readable: it must be sealed`);
+    }
+    if (got.readableVariables !== undefined && got.port !== "8080") {
+      add(
+        name,
+        "port",
+        got.port === null || got.port === undefined
+          ? "PORT is not set or not readable: it must be the plain 8080 (spec 01 §6.2)"
+          : "PORT is not 8080 (spec 01 §6.2)",
+      );
     }
     if (got.egress !== undefined) {
       if (want.staticEgress && got.egress.length === 0)
@@ -374,3 +474,9 @@ export const REFUSED_CHECKS: ReadonlySet<string> = new Set([
   "unknown",
   "superuser-reference",
 ]);
+
+/**
+ * The finding checks a deploy refuses on for each service it rolls, before and after: Railway's
+ * health check (/readyz, 60 s) is what makes SUCCESS mean the service is ready on its schema.
+ */
+export const ROLL_CHECKS: ReadonlySet<string> = new Set(["healthcheck", "healthcheck-timeout"]);

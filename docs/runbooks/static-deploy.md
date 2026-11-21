@@ -28,7 +28,9 @@ Before anything is written (spec 01 §6.9, static steps 1 and 2):
 - the release manifest's attestation verifies: release.yml at main of this repository, a `push`, for
   this commit;
 - each archive's SHA-256 is the manifest's `static.<key>.sha256`, and its own attestation verifies
-  with the same identity;
+  with the same identity, for this commit: release.yml builds every browser app each release and
+  carries the previous release's assets in (ARCHITECTURE §11.7, FW-C13), so an artefact another
+  commit built is not this release's;
 - each archive is unpacked in memory from the verified bytes (plain files only: no link, no unsafe
   path, sizes and CRC-32s as recorded), and its files hash to the manifest's `assetManifestHash`;
 - an archive that holds `_headers`, `env.json` or a source map is refused (exit 65);
@@ -50,13 +52,24 @@ node ops/fin/src/main.ts static deploy staging --release <sha> --manifest releas
 node ops/fin/src/main.ts static deploy staging --release <sha> --manifest release-manifest.json --dir <rendered>
 ```
 
-Before any write, and so in the dry run too: the manifest's attestation verifies; every selected
-deployment's `apps/<app>/static.json` holds only the allowlisted keys; every rendered build hashes
-to the manifest's `assetManifestHash`; every `env.json` carries this release and environment and
-every `_headers` holds a Content-Security-Policy for `/*` and no CORS header; and both files equal,
-byte for byte, a fresh render of this release. Any problem refuses the whole run (exit 65), so no
-host moves. The dry run proves the inputs and that CR-05 can read the token permission groups; it
-does not prove the deployed state (that is the watcher's `static` check).
+Before any write, and so in the dry run too:
+
+- `ci.yml`'s `merge` job succeeded for exactly this commit, on a push to main (spec 01 §6.9 step 2;
+  release.yml is the pushed commit's own workflow, so the merge job is what says the commit was
+  reviewed). Anything else refuses (exit 77);
+- this machine's run log records a successful `railway deploy` of this release, so its services have
+  rolled and a new page never meets an old API (S0-06). Without one the upload refuses (exit 77). To
+  put an earlier release's pages back (a rollback, which takes the pages back before the services,
+  spec 01 §6.9) when this machine's log does not record that release's Railway deploy, pass
+  `--static-rollback`, which the run records; the merge job is still checked;
+- the manifest's attestation verifies; every selected deployment's `apps/<app>/static.json` holds
+  only the allowlisted keys; every rendered build hashes to the manifest's `assetManifestHash`;
+  every `env.json` carries this release and environment and every `_headers` holds a
+  Content-Security-Policy for `/*` and no CORS header; and both files equal, byte for byte, a fresh
+  render of this release. Any problem refuses the whole run (exit 65), so no host moves.
+
+The dry run proves the inputs and that CR-05 can read the token permission groups; it does not
+prove the deployed state (that is the watcher's `static` check).
 
 Then, in order:
 
@@ -84,7 +97,9 @@ node tools/static-deploy/src/main.ts --env staging --release <sha> --manifest re
 ```
 
 It verifies the manifest's attestation and checks every deployment the same way (all but the fresh
-render, which `pnpm fin static render` in the same job did) before it reads the token.
+render, which `pnpm fin static render` in the same job did) before it reads the token. The merge job
+and the Railway roll are not checked there: the job runs only after `deploy-staging` (which checks
+the merge job) reached `rolled`, and CR-20 lives only in `staging-static`.
 
 The first upload comes before `pnpm fin routes apply` (the routes need the deployments to exist).
 
@@ -98,4 +113,6 @@ The first upload comes before `pnpm fin routes apply` (the routes need the deplo
 
 Render and upload the previous release's attested artefacts the same way, with the previous
 release's manifest and `--release`; the previous release's `/assets/` are carried in every build
-(FW-C13), so open tabs keep working.
+(FW-C13), so open tabs keep working. If this machine's run log does not record that release's
+`railway deploy`, add `--static-rollback` (recorded in the run). Then take the services back by
+deploying the previous release's manifest (`railway-deploy.md`, "If a deploy fails").

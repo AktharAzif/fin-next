@@ -13,9 +13,12 @@ read (`?`), which never counts as passing:
 - every service of `ops/environments/staging.json` exists in the environment; a service the settings
   do not list is drift (`unknown`), and its domains and TCP proxies are checked like any other's;
 - no public domain and no TCP proxy on any service (NB-07); no instance in another environment of
-  the project (spec 01 §6.1: only the default environment, no PR environments); no
-  `FIN_BOOTSTRAP_DATABASE_URL` outside a registered run;
-- region, replicas, restart policy; app sleeping off; outbound IPv6 off;
+  the project (spec 01 §6.1: only the default environment, no PR environments); outside a
+  registered run, no `FIN_BOOTSTRAP_DATABASE_URL` and no variable under any name that refers to the
+  database template's variables (`${{postgres.…}}`, spec 01 §6.3). Variables are read unrendered,
+  so a reference is never rendered into a value that carries the superuser password; only the
+  names, and PORT's value, are kept;
+- region, replicas, restart policy; app sleeping off; outbound IPv6 off; `PORT=8080`;
 - the health check (`/readyz`, 60 s), overlap and draining, start command and cron;
 - the image is set by digest from `ghcr.io/aktharazif/`, is the service's own image, and is the
   digest the registered deploys recorded for that service (every deploy records every service it
@@ -25,10 +28,15 @@ read (`?`), which never counts as passing:
 
 Listed as not checked, every time: memory limits, PITR and the deployment webhook; staged but
 undeployed changes; image auto-updates, Railway's CDN and Edge Rules, hard usage limits; shared
-variables holding a secret. Check those by hand. Also listed: any read Railway refused (SP-03,
-SP-08), any field Railway answered with no value, and the digest of a service no registered deploy
-in this machine's run log recorded. A read that got no answer at all (a network error, a 429 or a
-5xx after the retries) stops the command with exit 69 instead: run it again.
+variables holding a secret; each service's database login; that the no-token services hold no
+`TUNNEL_TOKEN` and that no database template reference is set as a sealed variable (Railway never
+returns a sealed variable); Config as Code and a repository source. Check those by hand. Also
+listed: any read Railway refused (SP-03, SP-08), naming what it leaves unchecked (a refused
+variables read leaves the superuser-reference check unchecked), any field Railway answered with no
+value, and the digest of a service no registered deploy in this machine's run log recorded. Only a
+schema or authorisation error counts as Railway refusing a read. Any other failure (no answer, a
+429 or a 5xx after the retries, or a GraphQL error that is Railway's own) stops the command with
+exit 69 instead: run it again.
 
 ```sh
 node ops/fin/src/main.ts railway verify staging     # exit 0 no drift, 1 drift
@@ -50,39 +58,53 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
 2. Verifies the release manifest's own attestation with `gh attestation verify`: the certificate
    identity is exactly `https://github.com/AktharAzif/fin-next/.github/workflows/release.yml@refs/heads/main`
    (the owner as GitHub writes it), the source commit is `--release`, the run was a `push`, and no
-   self-hosted runner signed it. Only then are its digests trusted.
+   self-hosted runner signed it. Only then are its digests trusted. Its minimum schema version is
+   printed and recorded with the run and every step.
 3. Refuses while any service, listed or not, has a public domain or a TCP proxy; while the project
-   has a service the settings do not list or an instance in another environment; while
-   `FIN_BOOTSTRAP_DATABASE_URL` is set outside a run; or while static egress differs from §6.5. Fix
-   that by hand first (P-13), then deploy. If Railway refuses the static egress read, the deploy
-   refuses too: check §6.5 by hand in Railway's dashboard, then pass `--accept-unchecked-egress`,
-   which the run records.
+   has a service the settings do not list or an instance in another environment; while a database
+   template reference (under any name, `FIN_BOOTSTRAP_DATABASE_URL` included) stands outside a run;
+   or while static egress differs from §6.5. Fix that by hand first (P-13), then deploy. A read
+   Railway refuses that one of these checks needs refuses the deploy too: check by hand, then pass
+   the matching flag, which the run records:
+   - the static egress read: check §6.5 in Railway's dashboard, then `--accept-unchecked-egress`;
+   - a variables read: check in the dashboard that no variable on the services named refers to
+     `postgres` (§6.3), then `--accept-unchecked-variables`;
+   - the instance settings read: check each service's health check (step 5), then
+     `--accept-unchecked-settings`.
 4. Refuses a partial release: migrations with no `fin-next-api` image, or a service the release
-   builds no image for while it runs an earlier release's image. A service that has never run an
-   image (payments, until its image exists) is kept, and `run.done` lists it under `notBuilt`.
-5. Verifies every image's attestation with the same identity, bound to this commit. Any failure
-   refuses the deploy before a change.
-6. Registers the run (the lock), `deploy.started`.
-7. When the release manifest lists migrations: runs `migrate` with the new api image
+   builds no image for while it runs an earlier release's image (the manifest names every service's
+   digest, ARCHITECTURE §11.7, so a rollback to it is whole). A service that has never run an image
+   (payments, until its image exists) is kept, and `run.done` lists it under `notBuilt`.
+5. Refuses to roll a service whose Railway health check is not the settings' (`/readyz`, 60 s, or
+   none for `migrate`): Railway holds `SUCCESS` until `/readyz` passes, and `/readyz` fails below the
+   release's minimum schema version, so that health check is what keeps a service from taking
+   traffic ahead of its schema. A service the deploy does not roll (the standbys) is only reported
+   by `railway verify`.
+6. Verifies every image's attestation with the same identity (release.yml, a push to main, no
+   self-hosted runner). An image need not be built by this commit: release.yml rebuilds only the
+   images that changed, and the manifest bound to this commit (step 2) is what names each digest.
+   Any failure refuses the deploy before a change.
+7. Registers the run (the lock), `deploy.started`.
+8. When the release manifest lists migrations: runs `migrate` with the new api image
    (`dist/main.js --migrate`), with `FIN_BOOTSTRAP_DATABASE_URL` set to the reference
    `${{postgres.DATABASE_URL}}` and `FIN_RUN_ID` for this run only (spec 01 §6.6 step 6; migrate gives
    `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
    `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
-   deployment. Then it removes the reference, whether migrate passed or failed. If the removal fails,
-   remove the variable from `migrate` by hand at once.
-8. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
+   deployment. Then it removes the reference, whether migrate passed or failed, and reads migrate's
+   variables back: if the reference is still there, nothing rolls (exit 77). If the removal fails or
+   the reference stays, remove the variable from `migrate` by hand at once.
+9. Rolls `payments`, `api`, `worker`, `edge`, `verify`, `admin`, `console`: image by digest, start
    command, the plain `FIN_SERVICE`, `FIN_ENVIRONMENT`, `FIN_RELEASE`, `FIN_DRAIN_SECONDS`, `PORT`,
-   then a deploy, waiting up to 15 minutes for `SUCCESS` (Railway's health check is `/readyz`, which
-   fails below the release's minimum schema version, so no service takes traffic ahead of its schema).
-9. Rolls `cloudflared-admin` and `cloudflared-public` only when their image changed. The standby
-   `-b` services and `cloudflared-db` are never rolled here.
-10. Checks again everything step 3 refuses on, and that each service on the release reports its
-    digest; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console and
-    verify hosts. `deploy.done` is written and `run.done` records the digest of every service on the
-    release, kept connectors included, which `railway verify` then checks.
+   then a deploy, waiting up to 15 minutes for `SUCCESS` (step 5's health check).
+10. Rolls `cloudflared-admin` and `cloudflared-public` only when their image changed. The standby
+    `-b` services and `cloudflared-db` are never rolled here.
+11. Checks again everything steps 3 and 5 refuse on, and that each service on the release reports
+    its digest; with `--smoke`, fetches `/health` on the API host and `/api/health` on the console
+    and verify hosts. `deploy.done` is written and `run.done` records the digest of every service on
+    the release, kept connectors included, which `railway verify` then checks.
 
 Not done here yet: reading the schema version through `api`'s private health (the operator machine
-has no route into Railway's private network; `/readyz` enforces it per service, step 8).
+has no route into Railway's private network; `/readyz` enforces it per service, steps 5 and 9).
 
 Then upload the static builds (`static-deploy.md`): a new page must never meet an old API.
 
@@ -96,4 +118,5 @@ back, deploy the previous release's manifest the same way; `migrate` never runs 
 
 Wake the owner if a service shows a domain or a TCP proxy that nobody added in a registered run
 (`railway-exposed.md`), if an attestation fails for a digest that came from `release.yml`, or if
-`FIN_BOOTSTRAP_DATABASE_URL` is found on a service outside a run.
+`FIN_BOOTSTRAP_DATABASE_URL` or any other reference to the database template is found on a service
+outside a run.

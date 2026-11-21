@@ -338,6 +338,14 @@ export class FakeCloudflare {
   }
 }
 
+/**
+ * What a rendered reference reads as: a superuser URL with the template's password in it (built at
+ * run time, so no source line holds a URL with a password).
+ */
+export const RENDERED_SECRET = ["postgresql:", "", `postgres:${"R".repeat(24)}@pg-host`, "db"].join(
+  "/",
+);
+
 export interface RailwayPatch {
   environmentId: string;
   serviceId: string;
@@ -369,6 +377,7 @@ interface ProvisionSettings {
   services: Record<
     string,
     {
+      template?: boolean;
       replicas: number;
       restart?: string;
       healthcheck?: string | null;
@@ -411,6 +420,15 @@ export class FakeRailway {
   readonly variableDeletes: Array<{ service: string; name: string }> = [];
   extendedRefused = false;
   variablesRefused = false;
+  /**
+   * Reads that answer 200 with a GraphQL error that is no refusal (Railway's own failure), by
+   * operation (`finVariables`) or operation and service (`finVariables:migrate`).
+   */
+  readonly transient = new Set<string>();
+  /** A variableDelete that Railway accepts without removing anything. */
+  variableDeleteNoop = false;
+  /** Called after each serviceInstanceUpdate, to change an instance the way Railway might. */
+  onUpdate: ((service: string, instance: FakeInstance) => void) | undefined;
   /** How the egress read answers: normally, a GraphQL refusal, or a 503 every time. */
   egressAnswer: "ok" | "refused" | "unavailable" = "ok";
   /** Instances of a service in another environment of the project, with their domains. */
@@ -481,7 +499,8 @@ export class FakeRailway {
         drainingSeconds: want.drainingSeconds ?? 0,
         startCommand: want.startCommand ?? null,
         cronSchedule: want.cron ?? null,
-        variables: {},
+        // The checklist sets PORT=8080 on every service it provisions (spec 01 §6.2).
+        variables: want.template === true ? {} : { PORT: "8080" },
         sealed: new Set(),
         latestDeployment: null,
       });
@@ -535,6 +554,12 @@ export class FakeRailway {
       new Response(JSON.stringify({ errors: [{ message: `Cannot query field ${what}` }] }), {
         status: 200,
       });
+    if (this.transient.has(op) || this.transient.has(`${op}:${service}`)) {
+      return new Response(
+        JSON.stringify({ data: null, errors: [{ message: "Problem processing request" }] }),
+        { status: 200 },
+      );
+    }
     if (op === "finStatus" || op === "finStatusExtended") {
       if (op === "finStatusExtended" && this.extendedRefused) return refused("healthcheckPath");
       return ok({
@@ -612,7 +637,18 @@ export class FakeRailway {
     }
     if (op === "finVariables") {
       if (this.variablesRefused) return refused("variables");
-      return ok({ variables: this.instances.get(service)?.variables ?? {} });
+      const raw = this.instances.get(service)?.variables ?? {};
+      // Railway renders a reference (`${{service.VAR}}`) into its value unless asked for the
+      // unrendered form; a rendered database reference carries the template's password.
+      const unrendered = /\bunrendered:\s*true\b/.test(query);
+      return ok({
+        variables: Object.fromEntries(
+          Object.entries(raw).map(([name, value]) => [
+            name,
+            unrendered ? value : value.replace(/\$\{\{[^}]*\}\}/g, RENDERED_SECRET),
+          ]),
+        ),
+      });
     }
     if (op === "finInstanceUpdate") {
       const input = variables.input as Json;
@@ -622,6 +658,7 @@ export class FakeRailway {
       if (instance !== undefined && source?.image !== undefined) instance.image = source.image;
       if (instance !== undefined && typeof input.startCommand === "string")
         instance.startCommand = input.startCommand;
+      if (instance !== undefined) this.onUpdate?.(service, instance);
       return ok({ serviceInstanceUpdate: true });
     }
     if (op === "finVariableDelete") {
@@ -629,7 +666,8 @@ export class FakeRailway {
       const target = this.nameOf(String(input.serviceId ?? "")) ?? "";
       this.variableDeletes.push({ service: target, name: String(input.name) });
       const instance = this.instances.get(target);
-      if (instance !== undefined) delete instance.variables[String(input.name)];
+      if (instance !== undefined && !this.variableDeleteNoop)
+        delete instance.variables[String(input.name)];
       return ok({ variableDelete: true });
     }
     if (op === "finDeploy") {

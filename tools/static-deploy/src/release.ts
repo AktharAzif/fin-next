@@ -1,11 +1,14 @@
 // The release manifest (`release-manifest.json`, ARCHITECTURE §11.7, written by release.yml): the
-// commit, each image's digest, each static artefact's SHA-256 and asset manifest hash. Only the
-// fields a deploy reads are validated here; anything malformed refuses the deploy.
+// commit, each image's digest, each static artefact's SHA-256 and asset manifest hash, the
+// migrations and the minimum schema version. Only the fields a deploy reads are validated here;
+// anything malformed refuses the deploy.
 //
 // A deploy trusts the manifest only once its own attestation verifies (release.yml attests it as
-// `release-<sha>`): loadVerifiedReleaseManifest checks it with the release's identity and parses the
-// exact bytes it verified. There is no unverified loader. Lookups by a name that came from outside go
-// through own(), so a key such as `constructor` is never mistaken for an entry.
+// `release-<sha>`): loadVerifiedReleaseManifest checks it with the release's identity, bound to this
+// commit, and parses the exact bytes it verified. There is no unverified loader. That binding is the
+// one that ties every digest to the release: an image an earlier commit built (release.yml rebuilds
+// only what changed) is trusted because this manifest names it. Lookups by a name that came from
+// outside go through own(), so a key such as `constructor` is never mistaken for an entry.
 
 import { StaticConfigError } from "./config.ts";
 import {
@@ -26,11 +29,17 @@ export interface ReleaseManifest {
   images: Record<string, string>;
   static: Record<string, StaticEntry>;
   migrations: string[];
+  /**
+   * The newest migration the release's code needs (release.yml writes the newest migration name,
+   * or null when the release ships none); each service's /readyz fails below it.
+   */
+  minimumSchemaVersion: string | null;
 }
 
 const SHA = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const SCHEMA_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,9 +92,18 @@ export function parseReleaseManifest(raw: unknown, release: string): ReleaseMani
   const migrations = raw.migrations ?? [];
   if (!Array.isArray(migrations) || migrations.some((m) => typeof m !== "string"))
     problems.push("migrations must be a list of names");
+  const schema = raw.minimumSchemaVersion ?? null;
+  if (schema !== null && (typeof schema !== "string" || !SCHEMA_VERSION.test(schema)))
+    problems.push("minimumSchemaVersion must be a migration name or null");
   if (problems.length > 0)
     throw new StaticConfigError(`the release manifest is invalid: ${problems.join("; ")}`);
-  return { commit: release, images, static: statics, migrations: migrations as string[] };
+  return {
+    commit: release,
+    images,
+    static: statics,
+    migrations: migrations as string[],
+    minimumSchemaVersion: schema as string | null,
+  };
 }
 
 /** An own entry of a record, or undefined (never an inherited member such as `constructor`). */

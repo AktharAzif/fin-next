@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import { ACCOUNT, FakeGh, FakeStatic } from "../../../tools/static-deploy/test/fake.ts";
 import { runCli } from "../src/cli.ts";
 import { EXIT } from "../src/core/errors.ts";
+import { Masker } from "../src/core/mask.ts";
+import { RunLog } from "../src/core/runlog.ts";
 import { staticDeployCommand } from "../src/static/deploy.ts";
 import { buildHash, staticRenderCommand } from "../src/static/render.ts";
 import type { RenderInput, StaticRenderer } from "../src/static/renderer.ts";
@@ -323,9 +325,28 @@ describe("static deploy (pnpm fin)", () => {
 
   const MINTED = `mintedvalue${"Q".repeat(30)}1`;
 
+  /**
+   * What this machine's run log holds about the release's Railway half: a successful registered
+   * `railway deploy` of it (the services rolled, S0-06), a failed one, one of another release, or
+   * nothing.
+   */
+  type RailwayHalf = "ok" | "failed" | "other" | "none";
+  function seedRunLog(env: Record<string, string>, half: RailwayHalf): void {
+    if (half === "none") return;
+    const log = new RunLog(join(env.FIN_STATE_DIR ?? "", "staging"), new Masker());
+    const at = new Date("2026-11-21T05:00:00Z");
+    log.append(at, "run_railway", "run.registered", { command: "railway deploy" });
+    log.append(at, "run_railway", "run.done", {
+      command: "railway deploy",
+      result: half === "failed" ? "failed" : "ok",
+      release: half === "other" ? hex(40, "d") : RELEASE,
+    });
+  }
+
   /** A rendered release, and the fakes a deploy talks to (the token mint and the uploads). */
-  async function rendered(change: Parameters<typeof release>[1] = {}) {
+  async function rendered(change: Parameters<typeof release>[1] = {}, half: RailwayHalf = "ok") {
     const { env, dir } = commandEnv();
+    seedRunLog(env, half);
     const r = release(dir, change);
     const out = join(dir, "rendered");
     const { code, rt } = await render(r, env, out);
@@ -426,6 +447,50 @@ describe("static deploy (pnpm fin)", () => {
     const lines = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8");
     assert.equal((lines.match(/"event":"deploy.static_step"/g) ?? []).length, 5);
     assert.match(lines, /"event":"deploy.static_done"/);
+  });
+
+  it("refuses unless ci.yml's merge job succeeded for the commit, before any Cloudflare call, in a dry run too", async () => {
+    for (const conclusion of ["failure", "cancelled", undefined]) {
+      const t = await rendered();
+      t.r.gh.mergeConclusion = conclusion;
+      for (const extra of [[], ["--dry-run"]]) {
+        const { code, rt } = await t.run(extra);
+        assert.equal(code, EXIT.refused, `${conclusion} ${extra.join(" ")}`);
+        assert.match(rt.err(), /ci\.yml's merge job/);
+      }
+      assert.ok(
+        t.r.gh.calls.some((c) => c[1] === "api"),
+        "the Actions API is read",
+      );
+      assert.equal(t.sequence.length, 0, "no token minted, nothing uploaded");
+    }
+  });
+
+  it("refuses unless this machine's run log records a successful railway deploy of the release (S0-06), in a dry run too", async () => {
+    for (const half of ["none", "failed", "other"] as const) {
+      const t = await rendered({}, half);
+      for (const extra of [[], ["--dry-run"]]) {
+        const { code, rt } = await t.run(extra);
+        assert.equal(code, EXIT.refused, `${half} ${extra.join(" ")}`);
+        assert.match(rt.err(), /no successful railway deploy of this release/);
+      }
+      assert.equal(t.sequence.length, 0, half);
+    }
+  });
+
+  it("uploads a static-only rollback with --static-rollback, which the run records", async () => {
+    const t = await rendered({}, "none");
+    const { code, rt } = await t.run(["--static-rollback"]);
+    assert.equal(code, EXIT.ok, rt.err());
+    const log = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "runs.jsonl"), "utf8");
+    assert.match(log, /"event":"run.registered"[^\n]*"staticRollback":true/);
+    const refused = await rendered({}, "none");
+    refused.r.gh.mergeConclusion = "failure";
+    assert.equal(
+      (await refused.run(["--static-rollback"])).code,
+      EXIT.refused,
+      "the merge job is checked for a rollback too",
+    );
   });
 
   it("dry run: verifies and checks everything, mints nothing and uploads nothing", async () => {

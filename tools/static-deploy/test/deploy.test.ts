@@ -15,6 +15,7 @@ import {
   ProvenanceError,
   type ReleaseIdentity,
   verifyAttestation,
+  verifyBuildAttestation,
 } from "../src/provenance.ts";
 import { parseReleaseManifest } from "../src/release.ts";
 import { verifyDeployment } from "../src/verify.ts";
@@ -299,6 +300,19 @@ describe("the release manifest", () => {
       RELEASE,
     );
     assert.equal(ok.images["fin-next-api"], `sha256:${"a".repeat(64)}`);
+    assert.equal(ok.minimumSchemaVersion, null, "absent: no minimum schema version");
+    const withSchema = parseReleaseManifest(
+      { commit: RELEASE, minimumSchemaVersion: "20261121100000_audit_core.sql" },
+      RELEASE,
+    );
+    assert.equal(withSchema.minimumSchemaVersion, "20261121100000_audit_core.sql");
+    for (const bad of [7, "", "../x", "a b"]) {
+      assert.throws(
+        () => parseReleaseManifest({ commit: RELEASE, minimumSchemaVersion: bad }, RELEASE),
+        /minimumSchemaVersion/,
+        String(bad),
+      );
+    }
     assert.throws(() => parseReleaseManifest({ commit: "f".repeat(40) }, RELEASE), /not --release/);
     assert.throws(
       () =>
@@ -355,6 +369,48 @@ describe("provenance (gh attestation verify)", () => {
     assert.throws(
       () => verifyAttestation(empty, subject, IDENTITY, RELEASE, "api"),
       /no attestation/,
+    );
+  });
+
+  it("verifies a build from any commit of main with the same pinned identity, for a digest an attested manifest names", () => {
+    const args = attestationArgs(subject, IDENTITY, undefined);
+    const flag = (name: string) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes("--source-digest"), false);
+    assert.equal(flag("--cert-identity"), RELEASE_SAN);
+    assert.equal(flag("--source-ref"), "refs/heads/main");
+    assert.ok(args.includes("--deny-self-hosted-runners"));
+    const gh = new FakeGh();
+    gh.builtFrom = "f".repeat(40);
+    verifyBuildAttestation(gh.exec, subject, IDENTITY, "api");
+    gh.trigger = "workflow_dispatch";
+    assert.throws(
+      () => verifyBuildAttestation(gh.exec, subject, IDENTITY, "api"),
+      /no verified attestation is from a push/,
+    );
+    gh.trigger = "push";
+    gh.san = RELEASE_SAN.replace("release.yml", "other.yml");
+    assert.throws(() => verifyBuildAttestation(gh.exec, subject, IDENTITY, "api"), ProvenanceError);
+    const otherRef = () => ({
+      status: 0,
+      stdout: JSON.stringify([
+        {
+          verificationResult: {
+            signature: {
+              certificate: {
+                subjectAlternativeName: RELEASE_SAN,
+                buildTrigger: "push",
+                sourceRepositoryDigest: "f".repeat(40),
+                sourceRepositoryRef: "refs/heads/other",
+              },
+            },
+          },
+        },
+      ]),
+      stderr: "",
+    });
+    assert.throws(
+      () => verifyBuildAttestation(otherRef, subject, IDENTITY, "api"),
+      /no verified attestation is from a push to refs\/heads\/main/,
     );
   });
 });

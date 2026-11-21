@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { signerIdentity } from "../../../tools/static-deploy/src/provenance.ts";
 import { FakeGh, RELEASE_SAN } from "../../../tools/static-deploy/test/fake.ts";
-import { EXIT } from "../src/core/errors.ts";
+import { EXIT, ProviderError } from "../src/core/errors.ts";
 import { parseOverlay } from "../src/core/overlay.ts";
 import { loadSettings } from "../src/core/settings.ts";
 import { migrateOutcome } from "../src/railway/deploy.ts";
-import { NO_READ_ROWS } from "../src/railway/inspect.ts";
+import { isRefusal, NO_READ_ROWS } from "../src/railway/inspect.ts";
 import { hex, overlayFixture, REPO_ROOT, uuid } from "./helpers/fixtures.ts";
+import { RENDERED_SECRET } from "./helpers/providers.ts";
 import { harness } from "./helpers/setup.ts";
 
 const RELEASE = hex(40, "a");
@@ -26,6 +27,9 @@ const IMAGES = {
   "fin-next-connector": DIGEST("9"),
 };
 const ref = (image: keyof typeof IMAGES) => `ghcr.io/aktharazif/${image}@${IMAGES[image]}`;
+/** A Railway reference (`${{service.VARIABLE}}`), built so that no source line holds one. */
+const reference = (service: string, variable: string, spaced = false) =>
+  ["$", "{{", spaced ? " " : "", `${service}.${variable}`, spaced ? " " : "", "}}"].join("");
 
 type H = ReturnType<typeof harness> & { gh: FakeGh };
 
@@ -140,8 +144,41 @@ describe("railway verify", () => {
     assert.match(out, /\? not checked: which variables are sealed on .*api/);
     assert.match(
       out,
+      /\? not checked: [^\n]*api[^\n]*a database template reference \(the superuser URL\)/,
+      "the not-checked line names the superuser-reference check",
+    );
+    assert.match(
+      out,
       /\? not checked: static egress on .*api.*\(Railway refused the read; SP-08\)/,
     );
+  });
+
+  it("finds a database template reference under any variable name, read unrendered, and PORT drift (spec 01 §6.2, §6.3)", async () => {
+    const h = provisioned((x) => {
+      const api = x.rw.instances.get("api");
+      const edge = x.rw.instances.get("edge");
+      const worker = x.rw.instances.get("worker");
+      const pg = x.rw.instances.get("postgres");
+      if (!api || !edge || !worker || !pg) throw new Error("fixture");
+      api.variables.DATABASE_URL = reference("postgres", "DATABASE_URL");
+      edge.variables.PGPASS = `x-${reference("Postgres", "PGPASSWORD", true)}`;
+      worker.variables.PORT = "3000";
+      // The template's own variables may refer to each other; that is no reference into a service.
+      pg.variables.DATABASE_URL = reference("postgres", "PGPASSWORD");
+    });
+    assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.drift);
+    const out = h.runtime.out();
+    assert.match(out, /! api superuser-reference: [^\n]*DATABASE_URL/);
+    assert.match(out, /! edge superuser-reference: [^\n]*PGPASS/);
+    assert.match(out, /! worker port: PORT is not 8080/);
+    assert.doesNotMatch(out, /! postgres superuser-reference/);
+    assert.doesNotMatch(out, /! (api|edge|console) port/);
+    assert.equal(h.readable().includes(RENDERED_SECRET), false);
+    assert.equal(h.readable().includes("R".repeat(24)), false, "no rendered value is printed");
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /api \(superuser-reference\)/);
+    assert.match(h.runtime.err(), /edge \(superuser-reference\)/);
+    assert.equal(h.rw.updates.length, 0);
   });
 
   it("lists every §6.8 row it has no read for, and a field Railway answered with no value", async () => {
@@ -153,6 +190,12 @@ describe("railway verify", () => {
     await h.run(["railway", "verify", "staging"]);
     const out = h.runtime.out();
     for (const row of NO_READ_ROWS) assert.ok(out.includes(`? not checked: ${row}`), row);
+    for (const row of [/database login/, /TUNNEL_TOKEN/, /sealed variable/, /Config as Code/]) {
+      assert.ok(
+        NO_READ_ROWS.some((r) => row.test(r)),
+        `a spec 01 §6.2/§6.3 row with no read: ${row}`,
+      );
+    }
     assert.match(out, /\? not checked: region of api \(Railway answered no value\)/);
   });
 
@@ -162,10 +205,27 @@ describe("railway verify", () => {
     });
     assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.unavailable);
   });
+
+  it("stops, rather than turning a check off, on a GraphQL error that is no refusal", async () => {
+    for (const op of ["finVariables:migrate", "finStatusExtended", "finEgress"]) {
+      const h = provisioned((x) => {
+        x.rw.transient.add(op);
+      });
+      assert.equal(await h.run(["railway", "verify", "staging"]), EXIT.unavailable, op);
+    }
+    const answered = (message: string, status = 200) =>
+      new ProviderError("railway", `railway finVariables answered ${status}: ${message}`, status);
+    assert.equal(isRefusal(answered('Cannot query field "variables" on type "Query".')), true);
+    assert.equal(isRefusal(answered("Not Authorized")), true);
+    assert.equal(isRefusal(answered('Unknown argument "unrendered"', 400)), true);
+    assert.equal(isRefusal(answered("Problem processing request")), false);
+    assert.equal(isRefusal(answered("Internal server error")), false);
+    assert.equal(isRefusal(answered("Not Authorized", 503)), false);
+  });
 });
 
 describe("railway deploy", () => {
-  it("checks the merge job, verifies the manifest and every image for this commit, rolls in order and records every digest", async () => {
+  it("checks the merge job, verifies the manifest for this commit and every image it names, rolls in order and records every digest", async () => {
     const h = provisioned();
     const code = await deploy(h, manifest(h));
     assert.equal(code, EXIT.ok, h.runtime.err());
@@ -179,11 +239,14 @@ describe("railway deploy", () => {
     for (const c of verifies) {
       const flag = (name: string) => c[c.indexOf(name) + 1];
       assert.equal(flag("--cert-identity"), RELEASE_SAN);
-      assert.equal(flag("--source-digest"), RELEASE);
       assert.equal(flag("--source-ref"), "refs/heads/main");
       assert.equal(flag("--format"), "json");
       assert.ok(c.includes("--deny-self-hosted-runners"));
       assert.equal(c.includes("--signer-workflow"), false);
+      // The manifest is bound to this commit; an image is bound through the manifest that names
+      // its digest, since release.yml rebuilds only the images that changed (ARCHITECTURE §11.7).
+      if (c[3]?.startsWith("oci://")) assert.equal(c.includes("--source-digest"), false);
+      else assert.equal(flag("--source-digest"), RELEASE);
     }
     const order = h.rw.updates.map((u) => u.service);
     assert.deepEqual(order, [
@@ -416,7 +479,7 @@ describe("railway deploy", () => {
     assert.equal(h2.rw.updates.length, 0);
   });
 
-  it("refuses an image or a manifest whose attestation does not verify for this commit, before any change", async () => {
+  it("refuses an image or a manifest whose attestation does not verify, before any change", async () => {
     const h = provisioned((x) => {
       x.gh.unattestedImages.add(`oci://${ref("fin-next-edge")}`);
     });
@@ -429,7 +492,8 @@ describe("railway deploy", () => {
     const h3 = provisioned((x) => {
       x.gh.builtFrom = hex(40, "b");
     });
-    assert.equal(await deploy(h3, manifest(h3)), EXIT.data, "built from another commit");
+    assert.equal(await deploy(h3, manifest(h3)), EXIT.data, "a manifest built from another commit");
+    assert.match(h3.runtime.err(), /the release manifest: the attestation does not verify/);
     assert.equal(h3.rw.updates.length, 0);
     const h4 = provisioned((x) => {
       x.gh.trigger = "workflow_dispatch";
@@ -437,6 +501,133 @@ describe("railway deploy", () => {
     assert.equal(await deploy(h4, manifest(h4)), EXIT.data);
     assert.match(h4.runtime.err(), /no verified attestation is from a push/);
     assert.equal(h4.rw.updates.length, 0);
+    const h5 = provisioned((x) => {
+      x.gh.triggerSubject.set(`oci://${ref("fin-next-payments")}`, "workflow_dispatch");
+    });
+    assert.equal(await deploy(h5, manifest(h5)), EXIT.data, "one image from a manual run");
+    assert.match(
+      h5.runtime.err(),
+      /the image fin-next-payments: no verified attestation is from a push/,
+    );
+    assert.equal(h5.rw.updates.length, 0);
+  });
+
+  it("deploys a release that rebuilt only some images: the others are trusted through this commit's attested manifest (ARCHITECTURE §11.7)", async () => {
+    const previous = hex(40, "e");
+    const h = provisioned((x) => {
+      for (const image of Object.keys(IMAGES) as Array<keyof typeof IMAGES>) {
+        if (image !== "fin-next-console")
+          x.gh.builtFromSubject.set(`oci://${ref(image)}`, previous);
+      }
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+    assert.equal(h.rw.instances.get("payments")?.image, ref("fin-next-payments"));
+    assert.equal(h.rw.instances.get("console")?.image, ref("fin-next-console"));
+    assert.equal(h.records().at(-1)?.result, "ok");
+  });
+
+  it("refuses to roll a service whose Railway health check is not /readyz with 60 s, the gate SUCCESS stands on", async () => {
+    const h = provisioned((x) => {
+      const api = x.rw.instances.get("api");
+      if (api) api.healthcheckPath = null;
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /api \(healthcheck\)/);
+    assert.equal(h.rw.updates.length, 0);
+    const h2 = provisioned((x) => {
+      const worker = x.rw.instances.get("worker");
+      if (worker) worker.healthcheckTimeout = 30;
+    });
+    assert.equal(await deploy(h2, manifest(h2)), EXIT.refused);
+    assert.match(h2.runtime.err(), /worker \(healthcheck-timeout\)/);
+    assert.equal(h2.rw.updates.length, 0);
+    const h3 = provisioned((x) => {
+      const standby = x.rw.instances.get("cloudflared-public-b");
+      if (standby) standby.healthcheckPath = null;
+    });
+    assert.equal(await deploy(h3, manifest(h3)), EXIT.ok, "a service the deploy does not roll");
+  });
+
+  it("refuses when Railway refuses the instance settings read, unless the operator accepts it, which the run records", async () => {
+    const h = provisioned((x) => {
+      x.rw.extendedRefused = true;
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /refused the instance settings read/);
+    assert.equal(h.rw.updates.length, 0);
+    assert.equal(
+      await deploy(h, manifest(h), "--accept-unchecked-settings"),
+      EXIT.ok,
+      h.runtime.err(),
+    );
+    const registered = h.records().find((r) => r.event === "run.registered");
+    assert.equal(registered?.settingsUnchecked, true);
+  });
+
+  it("stops after the roll when a rolled service's health check is no longer /readyz", async () => {
+    const h = provisioned((x) => {
+      x.rw.onUpdate = (service, instance) => {
+        if (service === "console") instance.healthcheckPath = null;
+      };
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /after the deploy: console \(healthcheck\)/);
+    assert.match(h.readable(), /"event":"deploy.failed"[^\n]*"step":"checks"/);
+    assert.equal(h.records().at(-1)?.result, "failed");
+  });
+
+  it("parses the manifest's minimum schema version and records it with the run and each step", async () => {
+    const h = provisioned();
+    const migration = "20261121100000_audit_core.sql";
+    const file = manifest(h, { migrations: [migration], minimumSchemaVersion: migration });
+    assert.equal(await deploy(h, file), EXIT.ok, h.runtime.err());
+    const steps = h.readable().match(/"event":"deploy.step"[^\n]*/g) ?? [];
+    assert.ok(steps.length > 0);
+    for (const step of steps) assert.ok(step.includes(`"minimumSchemaVersion":"${migration}"`));
+    assert.equal(
+      h.records().find((r) => r.event === "run.registered")?.minimumSchemaVersion,
+      migration,
+    );
+    const h2 = provisioned();
+    assert.equal(await deploy(h2, manifest(h2, { minimumSchemaVersion: 7 })), EXIT.data);
+    assert.match(h2.runtime.err(), /minimumSchemaVersion/);
+  });
+
+  it("refuses when Railway refuses a variables read, so a superuser reference never passes unread, unless accepted (recorded)", async () => {
+    const h = provisioned((x) => {
+      x.rw.variablesRefused = true;
+      const api = x.rw.instances.get("api");
+      if (api) api.variables.FIN_BOOTSTRAP_DATABASE_URL = reference("postgres", "DATABASE_URL");
+    });
+    assert.equal(await deploy(h, manifest(h)), EXIT.refused);
+    assert.match(h.runtime.err(), /refused the variables read/);
+    assert.match(h.runtime.out(), /\? not checked: [^\n]*a database template reference/);
+    assert.equal(h.rw.updates.length, 0);
+    assert.equal(
+      await deploy(h, manifest(h), "--accept-unchecked-variables"),
+      EXIT.ok,
+      h.runtime.err(),
+    );
+    assert.equal(h.records().find((r) => r.event === "run.registered")?.variablesUnchecked, true);
+    const h2 = provisioned((x) => {
+      x.rw.transient.add("finVariables:migrate");
+    });
+    assert.equal(await deploy(h2, manifest(h2)), EXIT.unavailable, "no refusal: stop");
+    assert.equal(h2.rw.updates.length, 0);
+  });
+
+  it("confirms the superuser reference is gone from migrate, and stops before rolling when it is not", async () => {
+    const h = provisioned((x) => {
+      x.rw.variableDeleteNoop = true;
+    });
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.refused);
+    assert.match(h.runtime.err(), /FIN_BOOTSTRAP_DATABASE_URL is still on migrate/);
+    assert.deepEqual(
+      h.rw.updates.map((u) => u.service),
+      ["migrate"],
+      "nothing rolls while the reference stands",
+    );
+    assert.equal(h.records().at(-1)?.result, "failed");
   });
 
   it("refuses unless ci.yml's merge job succeeded for the commit, before reading Railway", async () => {

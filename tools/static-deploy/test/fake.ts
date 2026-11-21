@@ -25,6 +25,14 @@ export class FakeGh {
   trigger = "push";
   /** The commit the attestations were built from; undefined means whichever commit is asked. */
   builtFrom: string | undefined;
+  /**
+   * Per subject (`oci://<ref>`, or a file's SHA-256): the commit that built it, over builtFrom. A
+   * release that rebuilds only the changed images carries the others from the commits that built
+   * them (ARCHITECTURE §11.7).
+   */
+  readonly builtFromSubject = new Map<string, string>();
+  /** Per subject: the event of the run that signed it, over trigger. */
+  readonly triggerSubject = new Map<string, string>();
   /** SHA-256s of the files with an attestation (anything else does not verify). */
   readonly attestedFiles = new Set<string>();
   /** Image subjects (`oci://...`) with no attestation. */
@@ -46,25 +54,26 @@ export class FakeGh {
     };
     if (args[0] === "attestation" && args[1] === "verify") {
       const subject = args[2] ?? "";
+      let key = subject;
       if (subject.startsWith("oci://")) {
         if (this.unattestedImages.has(subject)) return fail("no attestations found");
       } else {
-        let digest: string;
         try {
-          digest = createHash("sha256").update(readFileSync(subject)).digest("hex");
+          key = createHash("sha256").update(readFileSync(subject)).digest("hex");
         } catch {
           return fail("file not found");
         }
-        if (!this.attestedFiles.has(digest)) return fail("no attestations found");
+        if (!this.attestedFiles.has(key)) return fail("no attestations found");
       }
       if (flag("--repo")?.toLowerCase() !== REPOSITORY.toLowerCase())
         return fail("no attestations found");
       // gh compares --cert-identity with the certificate's SAN exactly, case included.
       if (flag("--cert-identity") !== this.san) return fail("verifying with issuer");
       const asked = flag("--source-digest");
-      const built = this.builtFrom ?? asked;
+      const built = this.builtFromSubject.get(key) ?? this.builtFrom ?? asked ?? "e".repeat(40);
       if (asked !== undefined && asked !== built)
         return fail(`expected SourceRepositoryDigest to be ${asked}, got ${built}`);
+      const trigger = this.triggerSubject.get(key) ?? this.trigger;
       if (flag("--format") !== "json") return { status: 0, stdout: "", stderr: "" };
       return {
         status: 0,
@@ -75,7 +84,7 @@ export class FakeGh {
               signature: {
                 certificate: {
                   subjectAlternativeName: this.san,
-                  buildTrigger: this.trigger,
+                  buildTrigger: trigger,
                   sourceRepositoryDigest: built,
                   sourceRepositoryRef: "refs/heads/main",
                 },

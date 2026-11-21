@@ -3,11 +3,16 @@
 // `pnpm fin static render` wrote, with the same code the CI job runs (tools/static-deploy), inside a
 // registered run.
 //
-// Before any write, and so in a dry run too: the release manifest's attestation verifies; every
-// selected deployment is checked (its static.json, its build's hash against that manifest, its
-// rendered files); and its `_headers` and `env.json` are rendered again from packages/web-host's
-// profiles and must equal, byte for byte, the files in `--dir`. Any problem refuses the whole run,
-// so no host is left on one release while another moved.
+// Before any write, and so in a dry run too: ci.yml's `merge` job succeeded for the commit (spec 01
+// §6.9 step 2: release.yml is the pushed commit's own workflow, so the merge job is what says the
+// commit was reviewed); this machine's run log records a successful `railway deploy` of the release,
+// so its services rolled first and a new page never meets an old API (S0-06, FW-C13), unless the
+// operator re-uploads an earlier release's pages with `--static-rollback`, which the run records;
+// the release manifest's attestation verifies; every selected deployment is checked (its
+// static.json, its build's hash against that manifest, its rendered files); and its `_headers` and
+// `env.json` are rendered again from packages/web-host's profiles and must equal, byte for byte,
+// the files in `--dir`. Any problem refuses the whole run, so no host is left on one release while
+// another moved.
 //
 // The upload never uses CR-20, which lives only in the `staging-static` environment, nor the operator
 // token: `pnpm fin` mints a one-run token with the operator token (CR-05), holding Workers Scripts
@@ -31,12 +36,13 @@ import {
 } from "../../../../tools/static-deploy/src/run.ts";
 import { cloudflare } from "../cloudflare/common.ts";
 import type { Command } from "../command.ts";
-import { flagString } from "../core/args.ts";
+import { flagBool, flagString } from "../core/args.ts";
 import type { Context } from "../core/context.ts";
-import { ConfigError, DataError, ProviderError, UsageError } from "../core/errors.ts";
+import { ConfigError, DataError, ProviderError, RefusedError, UsageError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
-import { verifiedManifest } from "../release/provenance.ts";
+import { railwayDeployed } from "../railway/verify.ts";
+import { checkMergeJob, verifiedManifest } from "../release/provenance.ts";
 import { renderFor, requireRenderer } from "./render.ts";
 import { loadWebHostRenderer, type RendererLoader } from "./renderer.ts";
 
@@ -121,6 +127,12 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         description: "the rendered builds (pnpm fin static render --out)",
       },
       { name: "only", kind: "string", description: "upload one deployment only" },
+      {
+        name: "static-rollback",
+        kind: "boolean",
+        description:
+          "re-upload a release's pages although this machine's run log records no railway deploy of it (a rollback; recorded in the run)",
+      },
     ],
     overlay: true,
     mutating: true,
@@ -141,6 +153,18 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         ctx.guard.checkOwnName(s.script, "static deployment");
       }
       const renderer = await requireRenderer(load);
+      checkMergeJob(ctx, release);
+      const rollback = flagBool(ctx.args, "static-rollback");
+      if (!railwayDeployed(ctx, release)) {
+        if (!rollback) {
+          throw new RefusedError(
+            "this machine's run log records no successful railway deploy of this release: the services roll first, so a new page never meets an old API (spec 01 §6.9, S0-06); run railway deploy, or pass --static-rollback to re-upload an earlier release's pages",
+          );
+        }
+        ctx.out.warn(
+          "no railway deploy of this release is recorded here; uploading its pages as a rollback (--static-rollback)",
+        );
+      }
       const manifest = verifiedManifest(ctx, manifestFile, release);
       let prepared: PreparedDeployment[];
       try {
@@ -262,7 +286,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
             throw translate(error);
           }
         },
-        { release },
+        { release, ...(rollback ? { staticRollback: true } : {}) },
         async () => {
           await revoke();
           ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });
