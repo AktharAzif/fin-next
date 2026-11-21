@@ -1,0 +1,11 @@
+{
+  "$comment": "The pin of fin-motion.css (spec 06 §5.1, AC-UI-03). Fin's own file under the owner's no to UI-12: written from the motion rules the pinned canvases document and the token values, with no verbatim copy of the canvases' stylesheet. A new hash is a reviewed pull request.",
+  "file": "fin-motion.css",
+  "sha256": "eb6be0957f8cf4f925f7b4917e724af8ff967871f985205c7bcc7805f23c3a63",
+  "bytes": 12228,
+  "written": "2026-11-21",
+  "describes": {
+    "canvases": ["Fin Dashboard · new design", "Fin Admin · new design"],
+    "canvasStylesheetSha256": "b0fa08dcd8a5da78914ca07c66c055dd7188dec40c961fb7cbad2117ebfe8dcc"
+  }
+}
