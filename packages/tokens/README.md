@@ -38,3 +38,25 @@ back in front, so the built file starts with it (static:check, FW-C06).
 Values come from the design system. A change lands there first; then `export-pin/tokens.json` and
 `tokens.css` change together in one reviewed pull request, and the drift and contrast tests say
 whether they agree.
+
+## Contrast (AC-UI-02, UR-21)
+
+`test/tokens.test.ts` measures every pair spec 06 §9 names in both themes: text and status text on
+each ground and on the hover and selected fills, badges on each ground and in hovered or selected
+rows (4.5:1), and the focus ring, the borders of controls, the 1px ring of buttons and the solid
+fills that mark a control (3:1). The export draws some of them below their ratio: the borders of
+fields, checkboxes and a switch's track, the buttons' ring, tertiary text in a selected row, and in
+dark some badges in hovered or selected rows. They are listed word for word, with both colours and
+the ratio, in `test/below-ratio.ts`, and raised to the design system as UR-21. The test fails when
+a pair is missing from the list, when a listed pair passes, and when a colour or a ratio changes.
+AC-UI-02 is not met while the list holds a pair.
+
+## Notes on the theme
+
+- Under `prefers-reduced-motion: reduce`, every utility that transitions a transform or a size
+  (`transition-press`, `transition-popup`, `transition-tooltip`, `transition-dialog`,
+  `animate-copied`, `fin-toast`) keeps only its colour and opacity transitions, so a toast's place
+  in the stack or a switch's thumb changes at once (spec 06 §5.1, AC-UI-13).
+- `shadow-input` reads `--themed-shadow-input`, the export's input shadow with an empty shadow
+  where the export says `none` (dark): Tailwind draws a shadow utility as one list with the ring
+  utilities, and a `none` in that list would void the whole `box-shadow`, rings included.

@@ -22,6 +22,18 @@ export function parseColour(value: string): Rgba {
   throw new Error(`not a colour this test reads: ${value}`);
 }
 
+/**
+ * The colour of a shadow token's 1px ring (`0px 0px 0px 1px <colour>`), the edge a button or a
+ * card draws with its shadow; throws when the shadow has no such layer.
+ */
+export function ringColour(shadow: string): string {
+  for (const layer of shadow.split(",")) {
+    const ring = /^0(?:px)?\s+0(?:px)?\s+0(?:px)?\s+1px\s+(.+)$/.exec(layer.trim());
+    if (ring?.[1] !== undefined) return ring[1].trim();
+  }
+  throw new Error(`no 1px ring in ${shadow}`);
+}
+
 /** `top` painted over an opaque `under`. */
 export function over(top: Rgba, under: Rgba): Rgba {
   if (under.a !== 1) throw new Error("the ground must be opaque");
