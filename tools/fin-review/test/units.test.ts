@@ -7,7 +7,8 @@ import type { Tier } from "../src/roles.ts";
 import { buildGraph, exportHeads, exportedNames } from "../src/plan/graph.ts";
 import { packShards } from "../src/shard.ts";
 import { MAX_UNIT_LINES, chunkFile, splitLines } from "../src/units/chunk.ts";
-import { estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
+import { blocksCoverage, estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
+import type { Excluded } from "../src/units/inventory.ts";
 import { buildContextPack, dataBlock, numbered } from "../src/review/prompts.ts";
 import { DATA_RULE } from "../src/review/procedure.ts";
 
@@ -54,31 +55,96 @@ describe("chunks (T-RV-24)", () => {
 });
 
 describe("inventory and shards", () => {
-  it("excludes the lockfile, images, maps and binary files, and keeps the rest with their tier", () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from("IHDR")]);
+  const WOFF2 = Buffer.concat([Buffer.from("wOF2"), Buffer.alloc(40)]);
+
+  it("excludes by content only: the lockfile, images, fonts and source maps whose bytes are what the name says", () => {
     const files: Record<string, Uint8Array> = {
-      "pnpm-lock.yaml": Buffer.from("lock\n"),
-      "img/logo.png": Buffer.from("png"),
-      "dist/x.js.map": Buffer.from("{}"),
-      "src/blob.bin": Buffer.from([0, 1, 2]),
-      "src/bad-utf8.ts": Buffer.from([0xc3, 0x28]),
+      "pnpm-lock.yaml": Buffer.from("lockfileVersion: '9.0'\n"),
+      "img/logo.png": PNG,
+      "fonts/a.woff2": WOFF2,
+      "dist/x.js.map": Buffer.from('{"version":3,"sources":[],"mappings":"AAAA"}'),
       "src/a.ts": Buffer.from("export const a = 1;\n"),
     };
-    const exclusions = ["pnpm-lock.yaml", "**/*.png", "**/*.map"].map(compileGlob);
+    const exclusions = ["pnpm-lock.yaml", "**/*.png", "**/*.woff2", "**/*.map"].map(compileGlob);
     const { units, excluded } = inventory(
-      [...Object.keys(files).map((path) => ({ path, tier: "S" as Tier })), { path: "gone.ts", tier: "N" as Tier }],
+      Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
       (path) => files[path] ?? null,
       exclusions,
     );
     assert.deepEqual(units.map((unit) => [unit.id, unit.tier, unit.text]), [["src/a.ts", "S", "export const a = 1;"]]);
     assert.deepEqual(
-      excluded.map((item) => `${item.path}:${item.reason}`).sort(),
-      ["dist/x.js.map:excluded", "gone.ts:missing", "img/logo.png:excluded", "pnpm-lock.yaml:excluded", "src/bad-utf8.ts:binary", "src/blob.bin:binary"],
+      excluded.map((item) => `${item.path}:${item.reason}:${item.content}`).sort(),
+      ["dist/x.js.map:excluded:sourcemap", "fonts/a.woff2:excluded:font", "img/logo.png:excluded:image", "pnpm-lock.yaml:excluded:lockfile"],
     );
-    assert.equal(isBinary(Buffer.from("plain")), false);
+    for (const item of excluded) assert.equal(blocksCoverage(item), false, item.path);
+  });
+
+  it("an excluded name with other content is reviewed: a name alone never hides a file", () => {
+    const files: Record<string, Uint8Array> = {
+      "pnpm-lock.yaml": Buffer.from("export const notALockfile = true;\n"),
+      "img/evil.png": Buffer.from("process.exit(0); // not an image\n"),
+      "dist/x.js.map": Buffer.from("{}"),
+      "src/keys.gen.ts": Buffer.from("export const keys = () => true;\n"),
+      "packages/ui/dist/bundle.min.js": Buffer.from("export const x = 1;\n"),
+      "icons/logo.svg": Buffer.from("<svg><script>alert(1)</script></svg>\n"),
+    };
+    // Exclusions as they were before: names alone, generated code and dist/ included.
+    const exclusions = ["pnpm-lock.yaml", "**/*.png", "**/*.map", "**/*.gen.ts", "**/*.min.js", "**/dist/**", "**/*.svg"].map(compileGlob);
+    const { units, excluded } = inventory(
+      Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
+      (path) => files[path] ?? null,
+      exclusions,
+    );
+    assert.deepEqual(excluded, []);
+    assert.deepEqual(units.map((unit) => unit.path).sort(), Object.keys(files).sort());
+  });
+
+  it("calls a file binary only for a NUL in its first 8,000 bytes, never a code file; other bytes are decoded, not dropped", () => {
+    const latin1 = Buffer.concat([Buffer.from("// caf"), Buffer.from([0xe9]), Buffer.from("\nexport const check = () => true; // MARKER-BODY\n")]);
+    const files: Record<string, Uint8Array> = {
+      "packages/crypto/src/index.ts": latin1,
+      "packages/crypto/src/nul.ts": Buffer.from("// \u0000\nexport const ran = true;\n"),
+      "docs/notes.txt": Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]),
+      "src/blob.bin": Buffer.from([1, 0, 2]),
+      "img/inline.dat": PNG,
+    };
+    const { units, excluded } = inventory(
+      Object.keys(files).map((path) => ({ path, tier: "S" as Tier, kind: "file" as const })),
+      (path) => files[path] ?? null,
+      [],
+    );
+    assert.deepEqual(units.map((unit) => unit.path), ["docs/notes.txt", "packages/crypto/src/index.ts", "packages/crypto/src/nul.ts"]);
+    assert.equal(units.find((unit) => unit.path === "packages/crypto/src/index.ts")?.text, "// caf�\nexport const check = () => true; // MARKER-BODY");
+    assert.equal(units.find((unit) => unit.path === "packages/crypto/src/nul.ts")?.text, "// �\nexport const ran = true;");
+    assert.deepEqual(excluded.map((item) => `${item.path}:${item.reason}:${item.content}`), ["src/blob.bin:binary:null", "img/inline.dat:binary:image"]);
+    assert.equal(blocksCoverage(excluded[0] as Excluded), true, "a binary file on tier S that is no image or font blocks");
+    assert.equal(blocksCoverage(excluded[1] as Excluded), false, "an image is never sent to a model and does not block");
+    assert.equal(isBinary("a.ts", Buffer.from([0])), false);
+    assert.equal(isBinary("a.bin", Buffer.from("plain")), false);
+  });
+
+  it("a symbolic link is a unit holding its target; a submodule and a path not at the head are not, and block on S and N", () => {
+    const { units, excluded } = inventory(
+      [
+        { path: "packages/crypto/src/index.ts", tier: "S", kind: "link" },
+        { path: "vendor/lib", tier: "N", kind: "submodule" },
+        { path: "docs/gone.md", tier: "D", kind: null },
+        { path: "docs/sub", tier: "D", kind: "submodule" },
+      ],
+      (path) => (path === "packages/crypto/src/index.ts" ? Buffer.from("../../ui/src/button.ts") : null),
+      [],
+    );
+    assert.deepEqual(units.map((unit) => [unit.path, unit.kind, unit.text]), [["packages/crypto/src/index.ts", "link", "../../ui/src/button.ts"]]);
+    assert.deepEqual(excluded.map((item) => [item.path, item.reason, blocksCoverage(item)]), [
+      ["vendor/lib", "submodule", true],
+      ["docs/gone.md", "missing", true],
+      ["docs/sub", "submodule", false],
+    ]);
   });
 
   it("packs units in path order into shards of at most the budget; a larger unit is a shard alone", () => {
-    const unit = (path: string, bytes: number) => ({ id: path, path, startLine: 1, endLine: 1, totalLines: 1, text: "x".repeat(bytes), tier: "S" as const });
+    const unit = (path: string, bytes: number) => ({ id: path, path, startLine: 1, endLine: 1, totalLines: 1, text: "x".repeat(bytes), tier: "S" as const, kind: "file" as const });
     const units = [unit("a", 35), unit("b", 35), unit("c", 350), unit("d", 7)];
     const shards = packShards(units, 20); // 10 tokens each for a and b, 100 for c, 2 for d
     assert.deepEqual(shards.map((shard) => shard.units.map((u) => u.id)), [["a", "b"], ["c"], ["d"]]);
@@ -148,7 +214,7 @@ describe("the context pack and DATA blocks (spec 07 §2.5, §4.8)", () => {
 
   it("numbers lines as the Read tool does, and cuts one-hop heads first, then tests, never a unit", () => {
     assert.equal(numbered("a\nb", 10), "10\ta\n11\tb");
-    const unit = { id: "u.ts", path: "u.ts", startLine: 1, endLine: 1, totalLines: 1, text: "x".repeat(300), tier: "S" as const };
+    const unit = { id: "u.ts", path: "u.ts", startLine: 1, endLine: 1, totalLines: 1, text: "x".repeat(300), tier: "S" as const, kind: "file" as const };
     const pack = buildContextPack(
       { units: [unit], tests: [{ path: "u.test.ts", text: "t".repeat(200) }], heads: [{ path: "h.ts", lines: ["export const h = 1;".repeat(10)] }], oneHop: ["h.ts"], digest: null },
       160,

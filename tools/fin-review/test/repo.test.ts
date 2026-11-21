@@ -2,13 +2,13 @@
 // and the session pool.
 
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { PULL_FILTER, parsePullFacts, pullFactsArgs } from "../src/gh.ts";
 import { LockHeldError, acquireLock } from "../src/review/lock.ts";
 import { Pool } from "../src/review/pool.ts";
-import { checkoutTree, ensureMirror, fetchPull, githubSlug, isRefName, isRemoteUrl, pullHeadRef, resolveCommit } from "../src/review/repo.ts";
+import { ensureMirror, fetchPull, githubSlug, isRefName, isRemoteUrl, pullHeadRef, resolveCommit } from "../src/review/repo.ts";
 import { FixtureRepo, tempDir } from "./helpers/git-fixture.ts";
 import { fakeClock } from "./helpers/review-fixture.ts";
 
@@ -69,31 +69,9 @@ describe("the mirror and the scratch tree", () => {
     assert.equal(await ensureMirror(home, origin.dir, env()), mirror, "the same origin reuses its mirror");
   });
 
-  it("checks a commit out with no .git, CRLF kept as committed, and links written as plain files", async () => {
-    const home = join(tmp.dir, "home2");
-    const mirror = await ensureMirror(home, origin.dir, env());
-    // Commit a symbolic link to /etc/passwd with fast-import's mode 120000.
-    const withLink = (() => {
-      const ref = "refs/heads/link";
-      const data = "/etc/passwd";
-      const script = `commit ${ref}\ncommitter F <f@example.com> 1763683200 +0000\ndata 1\nx\nfrom ${head}\nM 120000 inline evil\ndata ${data.length}\n${data}\n\ndone\n`;
-      origin.git(["fast-import", "--quiet", "--done"], Buffer.from(script));
-      return origin.git(["rev-parse", ref]).trim();
-    })();
-    origin.git(["update-ref", "refs/pull/8/head", withLink]);
-    await fetchPull(mirror, origin.dir, 8, "main", env());
-    const tree = join(home, "trees", "t1");
-    await checkoutTree(mirror, withLink, tree, join(home, "index"), env());
-    assert.ok(!existsSync(join(tree, ".git")));
-    assert.equal(readFileSync(join(tree, "src/a.ts"), "utf8"), "export const a = 1;\r\n");
-    assert.ok(lstatSync(join(tree, "evil")).isFile(), "a link is a plain file");
-    assert.equal(readFileSync(join(tree, "evil"), "utf8"), "/etc/passwd");
-  });
-
   it("refuses unsafe values before any git call", async () => {
     await assert.rejects(fetchPull("/x", "ext::sh", 1, "main", env()), TypeError);
     await assert.rejects(fetchPull("/x", origin.dir, 1, "-x", env()), TypeError);
-    await assert.rejects(checkoutTree("/x", "HEAD", "/y", "/z", env()), TypeError);
   });
 });
 

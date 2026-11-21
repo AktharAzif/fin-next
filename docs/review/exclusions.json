@@ -1,13 +1,10 @@
 {
   "version": 1,
-  "note": "Files that are never units (spec 07 §2.5): the lockfile (read by the dependency mode), images and fonts (never sent to a model), source maps and generated files. Binary files (a NUL byte, or not UTF-8) are excluded by content.",
+  "note": "Files that are never units (spec 07 §2.5), each excluded only when its bytes are what the name says: the lockfile (read by the dependency lens), raster images and fonts (by their magic bytes; never sent to a model) and source maps. A name alone never excludes a file, because the pull request's author chooses it: code files (.ts, .tsx, .mts, .cts, .js, .jsx, .mjs, .cjs) are always units, generated or not, and SVG is reviewed as text. A file with a NUL in its first 8,000 bytes is binary by content; on tier S or N, a binary file that is not an image or a font blocks the run as a file no lens could review.",
   "paths": [
     "pnpm-lock.yaml",
-    "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp", "**/*.avif", "**/*.ico", "**/*.bmp", "**/*.svg",
+    "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp", "**/*.avif", "**/*.ico", "**/*.bmp",
     "**/*.woff", "**/*.woff2", "**/*.ttf", "**/*.otf", "**/*.eot",
-    "**/*.map",
-    "**/*.min.js", "**/*.min.css",
-    "**/*.generated.ts", "**/*.generated.js", "**/*.gen.ts",
-    "**/dist/**", "**/node_modules/**"
+    "**/*.map"
   ]
 }

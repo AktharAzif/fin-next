@@ -31,6 +31,19 @@ export function numbered(text: string, first: number): string {
     .join("\n");
 }
 
+/** A whole file's text, numbered from 1, and its line count (a final newline starts no line). */
+export function numberedFile(text: string): { text: string; lines: number } {
+  const lines = text.split("\n");
+  const count = lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  return { text: numbered(lines.slice(0, count).join("\n"), 1), lines: count };
+}
+
+/** Where a unit lies in its file; a symbolic link says so, because its one line is the path it points to. */
+function unitPlace(unit: Unit): string {
+  const lines = `lines ${unit.startLine}-${unit.endLine} of ${unit.totalLines}`;
+  return unit.kind === "link" ? `${lines}; a symbolic link, whose text is the path it points to` : lines;
+}
+
 /** A block of repository text, headed by the DATA rule, between markers no content can forge. */
 export function dataBlock(content: string): string {
   const id = createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
@@ -67,14 +80,11 @@ function bytes(text: string): number {
  */
 export function buildContextPack(input: PackInput, budgetTokens: number = PACK_TOKENS): ContextPack {
   const budget = Math.floor(budgetTokens * BYTES_PER_TOKEN);
-  const unitParts = input.units.map(
-    (unit) => `# Unit ${unit.path} (lines ${unit.startLine}-${unit.endLine} of ${unit.totalLines})\n${numbered(unit.text, unit.startLine)}\n`,
-  );
+  const unitParts = input.units.map((unit) => `# Unit ${unit.path} (${unitPlace(unit)})\n${numbered(unit.text, unit.startLine)}\n`);
   const diffParts = (input.diffs ?? []).map((diff) => `# Diff ${diff.path} (since the last reviewed head)\n${diff.text}\n`);
   let tests = input.tests.map((test) => {
-    const lines = test.text.split("\n");
-    const count = lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-    return `# Test ${test.path} (lines 1-${count} of ${count})\n${numbered(lines.slice(0, count).join("\n"), 1)}\n`;
+    const file = numberedFile(test.text);
+    return `# Test ${test.path} (lines 1-${file.lines} of ${file.lines})\n${file.text}\n`;
   });
   let heads = input.heads
     .filter((head) => head.lines.length > 0)
@@ -90,7 +100,7 @@ export function buildContextPack(input: PackInput, budgetTokens: number = PACK_T
     [
       "# Scope",
       "Units under review:",
-      ...input.units.map((unit) => `- ${unit.path} lines ${unit.startLine}-${unit.endLine} of ${unit.totalLines}`),
+      ...input.units.map((unit) => `- ${unit.path} ${unitPlace(unit)}`),
       "Read tests:",
       ...(tests.length === 0 ? ["- none"] : input.tests.slice(0, tests.length).map((test) => `- ${test.path}`)),
       "Files one hop away (imports and importers), which findings may also name:",

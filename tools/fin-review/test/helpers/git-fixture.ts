@@ -9,8 +9,8 @@ import { join } from "node:path";
 /** A symbolic link to `symlink`, or a submodule entry at commit `gitlink`. */
 export type SpecialEntry = { readonly symlink: string } | { readonly gitlink: string };
 
-/** File contents by path; null deletes the path. */
-export type FileChanges = Readonly<Record<string, string | null | SpecialEntry>>;
+/** File contents by path (text, or exact bytes); null deletes the path. */
+export type FileChanges = Readonly<Record<string, string | Uint8Array | null | SpecialEntry>>;
 
 /** An environment for git that ignores the machine's own configuration. */
 export function fixtureEnv(home: string): Record<string, string> {
@@ -82,6 +82,13 @@ export class FixtureRepo {
         push(`D ${quotePath(path)}\n`);
         continue;
       }
+      if (content instanceof Uint8Array) {
+        push(`M 100644 inline ${quotePath(path)}\n`);
+        push(`data ${content.length}\n`);
+        chunks.push(Buffer.from(content));
+        push("\n");
+        continue;
+      }
       if (typeof content !== "string" && "gitlink" in content) {
         push(`M 160000 ${content.gitlink} ${quotePath(path)}\n`);
         continue;
@@ -94,7 +101,9 @@ export class FixtureRepo {
       push("\n");
     }
     push("\n");
-    runGit(this.dir, ["fast-import", "--quiet", "--done"], Buffer.concat([...chunks, Buffer.from("done\n")]));
+    // core.ignorecase=false: the tree holds exactly the paths given, on any disk (git init sets it
+    // true on a case-insensitive one, and fast-import would then fold Guard.ts and guard.ts).
+    runGit(this.dir, ["-c", "core.ignorecase=false", "fast-import", "--quiet", "--done"], Buffer.concat([...chunks, Buffer.from("done\n")]));
     return runGit(this.dir, ["rev-parse", ref]).trim();
   }
 

@@ -55,7 +55,17 @@ export interface Blocker {
   readonly rule: "confirmed" | "plausible" | "lens" | "test-cannot-fail" | "coverage" | "unverified" | "prior";
   readonly finding?: string;
   readonly lens?: string;
+  /** A changed path no lens could review (a coverage gap). */
+  readonly path?: string;
   readonly detail: string;
+}
+
+/** A changed path that is not a unit: why, its tier, and whether it blocks. */
+export interface NotUnitRecord {
+  readonly path: string;
+  readonly tier: Tier;
+  readonly note: string;
+  readonly blocking: boolean;
 }
 
 export interface OpenBlocker {
@@ -86,6 +96,8 @@ export interface RunSummary {
   readonly lensNames: readonly string[];
   readonly profiles: readonly string[];
   readonly counts: Counts;
+  /** Every changed path that is not a unit (deleted, excluded by content, binary, a submodule, missing). */
+  readonly notUnits: readonly NotUnitRecord[];
   readonly blockers: readonly Blocker[];
   readonly openBlockers: readonly OpenBlocker[];
   readonly sessions: number;
@@ -131,6 +143,9 @@ export function countLines(summary: RunSummary): string {
     `  findings: ${f.confirmed} confirmed, ${f.plausible} plausible, ${f.unverified} unverified, ${f.refuted} refuted, ${f.invalid} invalid`,
     `  by severity (not refuted): ${s.critical} critical, ${s.high} high, ${s.medium} medium, ${s.low} low`,
     `  lenses: ${l.done} done, ${l.incomplete} incomplete, ${l.refused} refused, ${l.budget_reached} budget_reached, ${l.cancelled} cancelled`,
+    ...(summary.notUnits.length === 0
+      ? []
+      : [`  not units: ${summary.notUnits.length} changed paths (${summary.notUnits.filter((item) => item.blocking).length} no lens could review)`]),
     `  blockers: ${c.blockers}`,
     `  run: ${summary.runId}`,
     "",
@@ -158,6 +173,11 @@ export function summaryMarkdown(summary: RunSummary, records: readonly FindingRe
     out.push(`- ${blocker.rule}${blocker.finding === undefined ? "" : ` ${blocker.finding}`}${blocker.lens === undefined ? "" : ` (${md(blocker.lens)})`}: ${md(blocker.detail)}`);
   }
   out.push("");
+  if (summary.notUnits.length > 0) {
+    out.push("## Changed paths with no unit", "", "| Path | Tier | Why | Blocks |", "|---|---|---|---|");
+    for (const item of summary.notUnits) out.push(`| \`${md(item.path)}\` | ${item.tier} | ${md(item.note)} | ${item.blocking ? "yes" : "no"} |`);
+    out.push("");
+  }
   const shown = records.filter((record) => record.state !== "invalid");
   out.push("## Findings", "");
   if (shown.length === 0) out.push("None.");

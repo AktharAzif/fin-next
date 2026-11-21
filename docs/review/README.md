@@ -15,7 +15,7 @@ tree under review, so a pull request cannot change the procedure that judges it.
 | `schema/session-output.schema.json` | A lens, joins or attack session's output (§2.8); the engine narrows `lens`, `profile`, `checked[].item` and `priorBlockers[].id` per session |
 | `schema/sceptic-output.schema.json`, `schema/second-look-output.schema.json`, `schema/doctor-output.schema.json` | The other sessions' outputs |
 | `attack-profiles.json` | The Phase 0 and Saturday attack profiles and `generic` (§2.7); `prompts/attack.md` shows the same table and a test keeps them equal |
-| `exclusions.json` | Files that are never units (§2.5) |
+| `exclusions.json` | Files that are never units (§2.5), each only when its bytes are what its name says |
 
 ## Running it
 
@@ -31,13 +31,32 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
 
 - **`pr`** reads the pull request's head SHA and base branch with `gh api` (nothing else: never a
   title, body, comment or head branch name), fetches the head and the base into a bare mirror under
-  `$FIN_REVIEW_HOME/repos/` (default `~/.fin-review`; refused inside the repository), and checks the
-  head out as `$FIN_REVIEW_HOME/trees/<run-id>`: no `.git`, symbolic links as plain files, no user or
-  system git configuration. It plans the units (the changed files at the head, chunked past 1,200
-  lines) and the change's tier (the highest of its paths', from `tools/layout.json` at the base),
+  `$FIN_REVIEW_HOME/repos/` (default `~/.fin-review`; refused inside the repository), and writes the
+  head's blobs, by the object IDs of its tree, as `$FIN_REVIEW_HOME/trees/<run-id>`. Nothing is
+  checked out, so no `.gitattributes` encoding, filter or line-ending rule and no git configuration
+  acts on the tree; it has no `.git`, a symbolic link is a plain file holding its target, and a
+  submodule is an empty folder. The units, the import graph and every quote check read the same
+  blobs, never the disk. A head the engine cannot show as it is ends the run with exit 65 before
+  any session: a path with a control or format character or bytes that are not UTF-8, an empty,
+  `.` or `..` segment, a segment a disk reads as `.git`, or two paths (or a path and a folder) that
+  a disk ignoring case or Unicode normalisation takes for one; every file is also created
+  exclusively, so a fold the check misses still fails closed. It plans the units (every changed
+  path at the head, chunked past 1,200 lines; see below) and the change's tier (the highest of its
+  paths', from `tools/layout.json` at the base),
   refuses a gating run below the effort floor (exit 64, `floor_tier_s`) before any session, and runs
   the lenses of that tier (`tools/fin-review/config/lenses.json`), one `joins` pass over the patch,
   and on tier S the attack pass once per mapped profile, at most `maxSessions` (default 8) at once.
+- **Units, by content.** A code file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
+  `.cjs`) is always a unit, whatever its name or bytes. A path that `exclusions.json` names is left
+  out only when its bytes are what the name says (an image or a font by its magic bytes, the pnpm
+  lockfile, a source map); a file with a NUL in its first 8,000 bytes is binary; every other file is
+  a unit, decoded as UTF-8 with any invalid byte replaced, so one stray byte never takes it out of
+  the review. A symbolic link is a unit holding its target, with the target one hop away; a
+  submodule is never a unit. Every changed path that is not a unit (deleted, excluded, binary, a
+  submodule, missing) is named with its reason in every lens's context, in `plan.json`,
+  `result.json` (`notUnits`) and `summary.md`; test-truth also gets the text of every test the
+  change deletes. On tier S or N, a binary file that is no image or font, and a submodule, block as a
+  file no lens could review; a missing one always does.
 - **`commit`** reviews the delta since `--since` (the last reviewed head), and the files that import
   the changed ones. It stays a delta only when spec 07 §2.3.2's conditions hold against the newest
   local, non-advisory `pr` or `commit` run of the same pull request at `--since`; otherwise it runs
@@ -52,7 +71,8 @@ Run it from a clean shell: the engine refuses to start (exit 78) while any varia
   `review.lock_broken`).
 - **Exit codes**: 0 no blockers; 1 blockers; 2 could not check (a required lens or profile
   `refused`, `incomplete`, `budget_reached` or `cancelled`, or a sceptic hit a model mismatch or the
-  budget); 64 refused options; 65 bad data; 69 GitHub or the remote unavailable; 70 internal; 75 the
+  budget); 64 refused options; 65 bad data (a head whose paths cannot be shown as they are); 69
+  GitHub or the remote unavailable; 70 internal; 75 the
   pull request's lock is held; 78 the lock-down (environment, configuration, procedure or the pinned
   Claude Code).
 
@@ -104,7 +124,8 @@ confirmed finding takes the highest severity a confirming sceptic gave.
 **What blocks** (§2.11): a confirmed critical, high or medium finding; a plausible critical or high
 finding; a medium or higher finding no sceptic could judge (`unverified`, fail-closed); a
 `test-cannot-fail` finding on a tier S path at any severity; a required lens or attack profile that
-is not `done`; a changed unit a required lens did not cover; a prior blocker not shown fixed.
+is not `done`; a changed unit a required lens did not cover, or a changed file no lens could review
+(above); a prior blocker not shown fixed.
 
 ## The locked session (spec 07 §4)
 

@@ -2,10 +2,13 @@
 //
 // A run: read the pull request's facts; fetch its head and base into the mirror; plan the units,
 // their tiers and the lenses and attack profiles of the change's tier; check the effort floor
-// (exit 64 before any session); check the tree out under $FIN_REVIEW_HOME/trees/<run-id>; run the
-// lens, joins and attack sessions with bounded concurrency, validating every output in code; send
-// each validated finding at medium or above to its sceptics as soon as it is validated; apply the
-// verdict table; write findings.json, summary.md and result.json under runs/<run-id>/; print counts.
+// (exit 64 before any session); read the head's blobs and write them as the tree under
+// $FIN_REVIEW_HOME/trees/<run-id> (src/review/tree.ts; exit 65 for paths that cannot be shown as
+// they are); run the lens, joins and attack sessions with bounded concurrency, validating every
+// output in code; send each validated finding at medium or above to its sceptics as soon as it is
+// validated; apply the verdict table; write findings.json, summary.md and result.json under
+// runs/<run-id>/; print counts. Unit text, the import graph and every quote check read the blobs,
+// never the disk.
 //
 // Trimmed Phase 0 (docs/review/README.md): no receipts. Coverage that a receipt chain would carry is
 // not read, so `pr` reviews every unit of the patch; `commit` takes its last reviewed head from
@@ -23,6 +26,7 @@ import type { PullFacts } from "../gh.ts";
 import { isJsonObject, parseJsonBytes, readJsonFile } from "../json.ts";
 import type { ReviewOptions } from "../options.ts";
 import { buildGraph, CODE_FILE_RE, exportHeads } from "../plan/graph.ts";
+import { linkTarget } from "../plan/plan.ts";
 import type { ImportGraph } from "../plan/graph.ts";
 import { maxTier, parseLayout, tierOf } from "../plan/tiers.ts";
 import type { Layout } from "../plan/tiers.ts";
@@ -31,8 +35,8 @@ import type { Role, Tier } from "../roles.ts";
 import { RunBudget } from "../budget.ts";
 import { packShards } from "../shard.ts";
 import type { Shard } from "../shard.ts";
-import { inventory } from "../units/inventory.ts";
-import type { Unit } from "../units/inventory.ts";
+import { blocksCoverage, decodeText, inventory } from "../units/inventory.ts";
+import type { Excluded, Unit } from "../units/inventory.ts";
 import type { SessionResult, SessionRunner, SessionSpec } from "../runner/types.ts";
 import { profilesFor } from "./attack.ts";
 import { outputProblem, SEVERITIES, validateOutput } from "./findings.ts";
@@ -44,12 +48,13 @@ import type { Lock } from "./lock.ts";
 import { Pool } from "./pool.ts";
 import { ATTACK, checklistIds, sessionSchema } from "./procedure.ts";
 import type { AttackProfile, Procedure } from "./procedure.ts";
-import { buildContextPack, dataBlock, lensPrompt, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
+import { buildContextPack, dataBlock, lensPrompt, numberedFile, PACK_TOKENS, scepticPrompt, secondLookPrompt } from "./prompts.ts";
 import { compileSchema } from "./schema.ts";
 import type { Refutation } from "./prompts.ts";
+import { entryKind, pathTextProblem, TreeError, treeProblems, writeTree } from "./tree.ts";
+import type { EntryKind } from "./tree.ts";
 import {
   changedLines,
-  checkoutTree,
   diffTwoDot,
   ensureMirror,
   fetchPull,
@@ -170,16 +175,20 @@ class RunState {
 
 // ---- Files of the reviewed tree -----------------------------------------------------------------
 
-/** The head's files from the checked-out tree, and deleted files from their base blobs. */
+/**
+ * The head's files from their blobs, by the object IDs of the head's tree (never from the disk, so
+ * nothing a checkout or a disk would change reaches a unit or a quote check), and deleted files
+ * from the blobs of the side they were deleted from.
+ */
 class TreeFiles implements FileSource {
-  private readonly treeDir: string;
   private readonly head: ReadonlyMap<string, TreeEntry>;
+  private readonly blobs: ReadonlyMap<string, Buffer>;
   private readonly deleted: ReadonlyMap<string, string>;
   private readonly cache = new Map<string, string | null>();
 
-  constructor(treeDir: string, head: ReadonlyMap<string, TreeEntry>, deleted: ReadonlyMap<string, string>) {
-    this.treeDir = treeDir;
+  constructor(head: ReadonlyMap<string, TreeEntry>, blobs: ReadonlyMap<string, Buffer>, deleted: ReadonlyMap<string, string>) {
     this.head = head;
+    this.blobs = blobs;
     this.deleted = deleted;
   }
 
@@ -187,25 +196,54 @@ class TreeFiles implements FileSource {
     return this.head.has(path);
   }
 
-  /** The bytes of a file of the head; only paths the head's tree lists are ever read. */
+  /** What `path` is at the head: a file, a symbolic link or a submodule; null when it is not there. */
+  kind(path: string): EntryKind | null {
+    const entry = this.head.get(path);
+    return entry === undefined ? null : entryKind(entry);
+  }
+
+  /** The bytes of a file or link of the head; only paths the head's tree lists are ever read. */
   bytes(path: string): Buffer | null {
     const entry = this.head.get(path);
     if (entry === undefined || entry.type !== "blob") return null;
-    try {
-      return readFileSync(join(this.treeDir, path));
-    } catch {
-      return null;
-    }
+    return this.blobs.get(entry.oid) ?? null;
   }
 
   text(path: string): string | null {
     if (this.cache.has(path)) return this.cache.get(path) ?? null;
     let text: string | null = null;
     const bytes = this.bytes(path);
-    if (bytes !== null) text = bytes.toString("utf8").replace(/\r\n/g, "\n");
+    if (bytes !== null) text = decodeText(bytes).replace(/\r\n/g, "\n");
     else if (this.deleted.has(path)) text = (this.deleted.get(path) ?? "").replace(/\r\n/g, "\n");
     this.cache.set(path, text);
     return text;
+  }
+}
+
+/** A changed path that is not a unit, as the lenses are told of it and the run records it. */
+interface NonUnit {
+  readonly path: string;
+  readonly tier: Tier;
+  /** Deleted, moved away, or one of inventory()'s reasons, with the verified content. */
+  readonly note: string;
+  /** True when it blocks as a coverage gap (spec 07 §2.11 rule 6). */
+  readonly blocking: boolean;
+}
+
+function excludedNote(item: Excluded): string {
+  switch (item.reason) {
+    case "excluded":
+      return `excluded: ${item.content ?? "content"}`;
+    case "binary":
+      return item.content === null ? "binary, not reviewed" : `binary ${item.content}, never sent to a model`;
+    case "missing":
+      return "missing from the mirror, not reviewed";
+    case "submodule":
+      return "a submodule, not reviewed";
+    default: {
+      const unreachable: never = item.reason;
+      throw new TypeError(`unknown reason ${String(unreachable)}`);
+    }
   }
 }
 
@@ -282,10 +320,6 @@ async function layoutAt(mirror: string, sha: string, env: Readonly<Record<string
   if (!parsed.ok) return null;
   const layout = parseLayout(parsed.value);
   return layout.ok ? layout.value : null;
-}
-
-function isReviewable(entry: TreeEntry | undefined): boolean {
-  return entry !== undefined && entry.type === "blob" && (entry.mode === "100644" || entry.mode === "100755");
 }
 
 function sortedUnique(items: Iterable<string>): string[] {
@@ -382,8 +416,13 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
   const lines = new Lines(runDir, runId, clock);
   const state = new RunState(runDir, runId, clock, { mode: req.mode, pr: req.pr, options: req.options, advisory: req.advisory });
   const treeDir = join(home, "trees", runId);
-  const indexFile = join(home, "scratch", `${runId}.index`);
   const signal = deps.signal ?? new AbortController().signal;
+  /** Exit 65 before any session: the head holds paths the engine cannot show as they are. */
+  const refuseTree = (problems: readonly string[]): number => {
+    for (const problem of problems) deps.stderr(`fin-review: error: the head cannot be reviewed: ${problem}\n`);
+    state.to("refused", { reason: "unsafe_tree" });
+    return EXIT.data;
+  };
   let lock: Lock | null = null;
   try {
     // ---- planning ----
@@ -468,47 +507,69 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     if (req.advisory) deps.stderr("advisory: not a gate receipt\n");
     if (req.options.fast) deps.stderr("fast: applies to Opus sessions only\n");
 
-    // The tree, its files and the import graph.
+    // The head's paths: refused before anything is read or written when one cannot be shown to a
+    // session as it is (a control character, a .git segment, two names a disk folds into one).
     const headTree = await lsTree(mirror, head, env);
     const headMap = new Map(headTree.map((entry) => [entry.path, entry]));
-    const deletedPaths = changed.filter((path) => !headMap.has(path.path)).map((path) => path.path);
+    const pathProblems = treeProblems(headTree);
+    for (const path of sortedUnique(changed.filter((item) => !headMap.has(item.path)).map((item) => item.path))) {
+      const problem = pathTextProblem(path);
+      if (problem !== null) pathProblems.push(problem);
+    }
+    if (pathProblems.length > 0) return refuseTree(pathProblems);
+
+    // The head's blobs, by object ID: the units, the graph and every quote check read them, and
+    // the tree the sessions read is written from them.
+    const { blobs } = await readBlobs(mirror, headTree.filter((entry) => entry.type === "blob").map((entry) => entry.oid), env);
+    const deletedPaths = new Set(changed.filter((path) => !headMap.has(path.path)).map((path) => path.path));
     const deleted = new Map<string, string>();
-    if (deletedPaths.length > 0) {
+    if (deletedPaths.size > 0) {
       const baseTree = await lsTree(mirror, deltaFrom ?? base, env);
-      const wanted = baseTree.filter((entry) => entry.type === "blob" && deletedPaths.includes(entry.path));
-      const { blobs } = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
+      const wanted = baseTree.filter((entry) => entry.type === "blob" && deletedPaths.has(entry.path));
+      const read = await readBlobs(mirror, wanted.map((entry) => entry.oid), env);
       for (const entry of wanted) {
-        const bytes = blobs.get(entry.oid);
-        if (bytes !== undefined) deleted.set(entry.path, bytes.toString("utf8"));
+        const bytes = read.blobs.get(entry.oid);
+        if (bytes !== undefined) deleted.set(entry.path, decodeText(bytes));
       }
     }
-    mkdirSync(join(home, "scratch"), { recursive: true, mode: 0o700 });
     rmSync(treeDir, { recursive: true, force: true });
-    await checkoutTree(mirror, head, treeDir, indexFile, env);
-    rmSync(indexFile, { force: true });
-    const files = new TreeFiles(treeDir, headMap, deleted);
+    try {
+      writeTree(treeDir, headTree, blobs);
+    } catch (error) {
+      if (!(error instanceof TreeError)) throw error;
+      return refuseTree(error.problems);
+    }
+    const files = new TreeFiles(headMap, blobs, deleted);
     const codeTexts = new Map<string, string>();
     const manifests = new Map<string, string>();
     for (const entry of headTree) {
-      if (!isReviewable(entry) || entry.path.split("/").includes("node_modules")) continue;
+      if (entryKind(entry) !== "file" || entry.path.split("/").includes("node_modules")) continue;
       const isManifest = entry.path === "package.json" || entry.path.endsWith("/package.json");
       if (!isManifest && !CODE_FILE_RE.test(entry.path)) continue;
       const bytes = files.bytes(entry.path);
       if (bytes === null || bytes.length > MAX_SCAN_BYTES) continue;
-      (isManifest ? manifests : codeTexts).set(entry.path, bytes.toString("utf8"));
+      (isManifest ? manifests : codeTexts).set(entry.path, decodeText(bytes));
     }
     const graph = buildGraph(new Set(headMap.keys()), codeTexts, manifests);
 
-    // Units: the changed files at the head; in a delta, also the files that import them.
-    const unitPaths = new Set(changedAtHead.filter((path) => isReviewable(headMap.get(path))));
+    // Units: every changed path at the head; in a delta, also the files that import them. A path
+    // that yields no unit is named to every lens and, when nothing could review it, blocks.
+    const unitPaths = new Set(changedAtHead);
     if (mode === "commit") {
-      for (const path of changedAtHead) for (const importer of graph.importersOf(path)) if (isReviewable(headMap.get(importer))) unitPaths.add(importer);
+      for (const path of changedAtHead) for (const importer of graph.importersOf(path)) if (files.kind(importer) === "file") unitPaths.add(importer);
     }
     const { units, excluded } = inventory(
-      sortedUnique(unitPaths).map((path) => ({ path, tier: tierOf(layout, path).tier })),
+      sortedUnique(unitPaths).map((path) => ({ path, tier: tierOf(layout, path).tier, kind: files.kind(path) })),
       (path) => files.bytes(path),
       procedure.exclusions,
     );
+    const nonUnits: NonUnit[] = [
+      ...excluded.map((item) => ({ path: item.path, tier: item.tier, note: excludedNote(item), blocking: blocksCoverage(item) })),
+      ...sortedUnique(deletedPaths).map((path) => {
+        const item = changed.find((entry) => entry.path === path);
+        return { path, tier: item?.tier ?? "S", note: item?.status === "D" ? "deleted" : "moved away", blocking: false };
+      }),
+    ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
     const priorBlockers = prior?.openBlockers ?? [];
@@ -535,7 +596,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
     }
 
     // ---- sessions ----
-    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, priorBlockers, patch, unitDiffs });
+    const plans = planSessions({ deps, units, lenses, profileMap, files, graph, changed, nonUnits, deleted, priorBlockers, patch, unitDiffs });
     writeJson(join(runDir, "plan.json"), {
       v: 1,
       runId,
@@ -549,8 +610,9 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       since: req.since,
       tier,
       changed,
-      units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier })),
+      units: units.map((unit) => ({ id: unit.id, path: unit.path, startLine: unit.startLine, endLine: unit.endLine, tier: unit.tier, kind: unit.kind })),
       excluded,
+      notUnits: nonUnits,
       lenses,
       profiles: Object.fromEntries(profileMap),
       sessions: plans.map((plan) => ({ id: plan.id, role: plan.role, lensKey: plan.lensKey, shard: plan.shard, units: plan.units.map((unit) => unit.id) })),
@@ -786,6 +848,10 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         blockers.push({ rule: "coverage", lens: plan.lensKey, detail: `${plan.units.length} units not covered by ${plan.lensKey} (session ${plan.id})` });
       }
     }
+    // A changed path no lens could read (binary, a submodule, missing) is a coverage gap too.
+    for (const item of nonUnits) {
+      if (item.blocking) blockers.push({ rule: "coverage", path: item.path, detail: `${item.path} changed and no lens could review it (${item.note}; tier ${item.tier})` });
+    }
     const stillOpen = priorBlockers.filter((blocker) => priorStatus.get(blocker.id) !== "fixed");
     for (const blocker of stillOpen) blockers.push({ rule: "prior", finding: blocker.id, lens: blocker.lensKey, detail: "a blocker open at the last reviewed head is not shown fixed" });
 
@@ -822,6 +888,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       lensNames: lenses,
       profiles: [...profileMap.keys()],
       counts: countFindings(findings, lensStates, units.length, sessionCount, blockers.length),
+      notUnits: nonUnits,
       blockers,
       openBlockers,
       sessions: sessionCount,
@@ -848,7 +915,6 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
   } finally {
     lock?.release();
     rmSync(treeDir, { recursive: true, force: true });
-    rmSync(indexFile, { force: true });
   }
 }
 
@@ -889,17 +955,33 @@ interface PlanInput {
   readonly files: TreeFiles;
   readonly graph: ImportGraph;
   readonly changed: readonly ChangedPath[];
+  /** The changed paths that are not units, each with why; every pack names them. */
+  readonly nonUnits: readonly NonUnit[];
+  /** The text of each deleted path as it was before the change. */
+  readonly deleted: ReadonlyMap<string, string>;
   readonly priorBlockers: readonly OpenBlocker[];
   readonly patch: { readonly text: string; readonly truncated: boolean };
   /** `commit` only: each changed unit's diff since the last reviewed head. */
   readonly unitDiffs: ReadonlyMap<string, string>;
 }
 
-function shardPack(units: readonly Unit[], input: PlanInput, extraPaths: readonly string[] = []): { evidence: string; allowed: Set<string> } {
+/** The changed paths that are not units, so no lens is told less of the change than it holds. */
+function nonUnitNote(nonUnits: readonly NonUnit[]): string {
+  if (nonUnits.length === 0) return "";
+  const lines = nonUnits.map((item) => `- ${item.path} (${item.note}; tier ${item.tier})`);
+  return `\n# Changed paths with no unit text\nThese paths changed but are not units of this run. A deleted path is in the patch; a path still in the tree can be read with your tools.\n${lines.join("\n")}\n`;
+}
+
+function shardPack(units: readonly Unit[], input: PlanInput): { evidence: string; allowed: Set<string> } {
   const { files, graph } = input;
   const paths = sortedUnique(units.map((unit) => unit.path));
+  // A symbolic link's target is one hop from it, so the lens sees what the link now stands for.
+  const linkTargets = units
+    .filter((unit) => unit.kind === "link")
+    .map((unit) => linkTarget(unit.path, files.bytes(unit.path) ?? undefined))
+    .filter((target) => target !== "" && files.has(target));
   const tests = sortedUnique(paths.flatMap((path) => readTestsFor(path, files, graph))).filter((path) => !paths.includes(path));
-  const oneHop = sortedUnique(paths.flatMap((path) => [...graph.importsOf(path), ...graph.importersOf(path)])).filter((path) => !paths.includes(path));
+  const oneHop = sortedUnique([...paths.flatMap((path) => [...graph.importsOf(path), ...graph.importersOf(path)]), ...linkTargets]).filter((path) => !paths.includes(path));
   const pack = buildContextPack({
     units,
     tests: tests.map((path) => ({ path, text: files.text(path) ?? "" })),
@@ -908,10 +990,31 @@ function shardPack(units: readonly Unit[], input: PlanInput, extraPaths: readonl
     digest: input.deps.procedure.rulesDigest,
     diffs: paths.filter((path) => input.unitDiffs.has(path)).map((path) => ({ path, text: input.unitDiffs.get(path) ?? "" })),
   });
-  const note = extraPaths.length === 0 ? "" : `\n# Changed paths in scope with no unit text (deleted or excluded)\n${extraPaths.map((path) => `- ${path}`).join("\n")}\n`;
   const allowed = new Set<string>([...paths, ...tests, ...oneHop]);
-  if (units.length === 0) for (const path of input.changed) if (files.text(path.path) !== null) allowed.add(path.path);
-  return { evidence: dataBlock(`${pack.content}${note}`), allowed };
+  for (const item of input.nonUnits) if (files.text(item.path) !== null) allowed.add(item.path);
+  return { evidence: dataBlock(`${pack.content}${nonUnitNote(input.nonUnits)}`), allowed };
+}
+
+const MAX_DELETED_TESTS_BYTES = 200 * 1024;
+
+/** For test-truth: every test the change deletes, numbered as it was, so a removed guard is seen. */
+function deletedTestsBlock(input: PlanInput): string | null {
+  const paths = sortedUnique([...input.deleted.keys()].filter((path) => TEST_RE.test(path)));
+  if (paths.length === 0) return null;
+  const parts: string[] = [];
+  let used = 0;
+  for (const path of paths) {
+    const file = numberedFile(input.files.text(path) ?? "");
+    const part = `# Deleted test ${path} (lines 1-${file.lines} of ${file.lines}, as it was before this change)\n${file.text}\n`;
+    const size = Buffer.byteLength(part, "utf8");
+    if (used + size > MAX_DELETED_TESTS_BYTES) {
+      parts.push(`# Deleted test ${path} (too long to show here; it is in the patch)\n`);
+      continue;
+    }
+    used += size;
+    parts.push(part);
+  }
+  return dataBlock(`# Tests this change deletes\n${parts.join("\n")}`);
 }
 
 function joinsEvidence(input: PlanInput): string {
@@ -931,7 +1034,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
     if (pack === undefined) shardPacks.set(shard.index, (pack = shardPack(shard.units, input)));
     return pack;
   };
-  const changedPathsList = sortedUnique(input.changed.map((path) => path.path));
+  const deletedTests = deletedTestsBlock(input);
   const rulesFiles = readRulesFiles(deps.engineRoot);
   const rulesBlock = dataBlock(
     rulesFiles.length === 0
@@ -989,11 +1092,11 @@ function planSessions(input: PlanInput): SessionPlan[] {
   for (const lens of lenses) {
     if (lens === "joins") continue;
     const role: Role = lens === "test-truth" ? "test-truth" : "lens";
-    const extraBlocks = lens === "rules" ? [rulesBlock] : [];
+    const extraBlocks = lens === "rules" ? [rulesBlock] : lens === "test-truth" && deletedTests !== null ? [deletedTests] : [];
     if (shards.length === 0) {
-      // No units (only deletions or excluded files): one session over the changed paths, so the
-      // lens still runs and any prior blocker of it is still shown.
-      const pack = shardPack([], input, changedPathsList);
+      // No units (only deletions or files no lens is sent): one session over the changed paths,
+      // so the lens still runs and any prior blocker of it is still shown.
+      const pack = shardPack([], input);
       plans.push(make({ lens, lensKey: lens, role, id: `${lens}-s0`, shard: null, evidence: pack.evidence, allowed: pack.allowed, profile: null, extraBlocks, showPriors: true }));
       continue;
     }
@@ -1011,7 +1114,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
     const lensKey = `${ATTACK}:${profileId}`;
     const profileShards = packShards(units.filter((unit) => paths.includes(unit.path)));
     if (profileShards.length === 0) {
-      const pack = shardPack([], input, paths);
+      const pack = shardPack([], input);
       plans.push(make({ lens: ATTACK, lensKey, role: "attack", id: `attack-${profileId}-s0`, shard: null, evidence: pack.evidence, allowed: null, profile, extraBlocks: [], showPriors: true }));
       continue;
     }

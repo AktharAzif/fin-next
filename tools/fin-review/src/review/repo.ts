@@ -1,11 +1,9 @@
 // The git work of a review run: a bare mirror per origin under $FIN_REVIEW_HOME/repos (never inside
-// the repository under review), fetching a pull request's head and base into it, and checking a
-// commit out as the scratch tree $FIN_REVIEW_HOME/trees/<run-id> that sessions read.
+// the repository under review), fetching a pull request's head and base into it, and the diffs the
+// sessions see. The tree sessions read is written from the head's blobs (src/review/tree.ts), never
+// checked out, so no attribute, filter or configuration acts on it.
 //
-// Every argument is validated before it is placed in a git call (spec 07 §2.1). The checkout runs
-// with no user or system git configuration (so no filter or hook from the machine runs on the
-// tree), with symbolic links written as plain files (so a link in a pull request cannot point a
-// session outside its tree), and leaves no .git in the tree.
+// Every argument is validated before it is placed in a git call (spec 07 §2.1).
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -218,17 +216,4 @@ export async function unifiedDiff(
   const out = (await git({ cwd: mirror, args: ["diff", "--no-color", "--no-ext-diff", "-M50", "--no-relative", ...range, "--", ...paths.map((path) => `:(literal)${path}`)], env })).stdout;
   if (out.length <= maxBytes) return { text: out.toString("utf8"), truncated: false };
   return { text: out.subarray(0, maxBytes).toString("utf8"), truncated: true };
-}
-
-/** Writes the tree of `sha` into the empty directory `treeDir`, with no .git and links as plain files. */
-export async function checkoutTree(mirror: string, sha: string, treeDir: string, indexFile: string, env: Readonly<Record<string, string | undefined>>): Promise<void> {
-  assertDir(mirror, "the mirror");
-  assertDir(treeDir, "the tree");
-  assertDir(indexFile, "the index file");
-  if (!isSha(sha)) throw new TypeError("a checkout needs a SHA");
-  mkdirSync(treeDir, { recursive: true, mode: 0o700 });
-  const isolated = { GIT_INDEX_FILE: indexFile, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
-  const config = ["-c", "core.symlinks=false", "-c", "core.autocrlf=false", "-c", "core.hooksPath=/dev/null", "-c", "core.bare=false"];
-  await git({ cwd: mirror, args: [...config, `--git-dir=${mirror}`, `--work-tree=${treeDir}`, "read-tree", sha], env, extraEnv: isolated });
-  await git({ cwd: mirror, args: [...config, `--git-dir=${mirror}`, `--work-tree=${treeDir}`, "checkout-index", "--all", "--force"], env, extraEnv: isolated });
 }
