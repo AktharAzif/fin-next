@@ -1,0 +1,17 @@
+Copyright (c) 2026 the owner of the GitHub repository aktharazif/fin-next. All rights reserved.
+
+This repository is not open source. Its source code is public so that it can be reviewed and so
+that its continuous integration can run in the open; publishing it grants no licence.
+
+No permission is granted to use, copy, modify, merge, publish, distribute, sublicense or sell any
+part of this repository, or to create works derived from it, except as the law allows without a
+licence (for example, viewing it on GitHub and making the copies GitHub's terms of service permit
+for that purpose).
+
+The name "Fin", its logo and its other brand assets are reserved and are not licensed for any use.
+
+Third-party components keep their own licences. Their notices sit beside the packages that carry
+them (for example the UI SDK under the Apache License 2.0, glyphs under the MIT licence and fonts
+under the SIL Open Font License 1.1) and take precedence over this file for those components.
+
+THE SOURCE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.

@@ -1,0 +1,315 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "assist": {
+    "enabled": true
+  },
+  "markdown": {
+    "formatter": {
+      "enabled": false
+    },
+    "linter": {
+      "enabled": false
+    }
+  },
+  "yaml": {
+    "formatter": {
+      "enabled": false
+    },
+    "linter": {
+      "enabled": false
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noConsole": "error"
+      },
+      "security": {
+        "noDangerouslySetInnerHtml": "error"
+      },
+      "style": {
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "bun": "Node is the only runtime (ARCHITECTURE §3.2).",
+              "drizzle-orm/bun-sql": "Node is the only runtime (ARCHITECTURE §3.2).",
+              "react-router-dom": "Refused by FW-C18; TanStack Router is the router.",
+              "clsx": "Refused by OD-5; use the in-house cn in @fin/ui.",
+              "tailwind-merge": "Refused by OD-5; use the in-house cn in @fin/ui.",
+              "radix-ui": "Refused by OD-5; controls come from @fin/ui on the UI SDK.",
+              "@rsbuild/core": "Refused by FW-C01.",
+              "@vitejs/plugin-rsc": "Refused by FW-C01.",
+              "node:http": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+              "node:https": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+              "node:net": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+              "node:dns": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+              "node:cluster": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+              "node:worker_threads": "Only packages/server and apps/connector use this module (spec 01 §4.6)."
+            },
+            "patterns": [
+              {
+                "group": ["bun:*"],
+                "message": "Node is the only runtime (ARCHITECTURE §3.2)."
+              },
+              {
+                "group": [
+                  "@tanstack/react-start",
+                  "@tanstack/react-start/**",
+                  "@tanstack/react-start-*",
+                  "@tanstack/react-start-*/**",
+                  "@tanstack/start-*",
+                  "@tanstack/start-*/**"
+                ],
+                "message": "Refused by FW-C01: no server functions or server components."
+              },
+              {
+                "group": [
+                  "react-server-dom-*",
+                  "react-server-dom-*/**",
+                  "@remix-run/**",
+                  "react-router-dom",
+                  "react-router-dom/**"
+                ],
+                "message": "Refused by FW-C01 and FW-C18."
+              },
+              {
+                "group": [
+                  "@radix-ui/**",
+                  "radix-ui",
+                  "radix-ui/**",
+                  "@phosphor-icons/**",
+                  "@fontsource*",
+                  "@fontsource*/**",
+                  "clsx",
+                  "clsx/**",
+                  "tailwind-merge",
+                  "tailwind-merge/**"
+                ],
+                "message": "Refused by OD-5 and G-06: controls, icons and fonts come from Fin's own packages."
+              },
+              {
+                "group": ["@ui-sdk/**"],
+                "message": "Only packages/ui imports the UI SDK; screens import controls from @fin/ui."
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/server/**", "apps/connector/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "bun": "Node is the only runtime (ARCHITECTURE §3.2).",
+                  "drizzle-orm/bun-sql": "Node is the only runtime (ARCHITECTURE §3.2).",
+                  "react-router-dom": "Refused by FW-C18; TanStack Router is the router.",
+                  "clsx": "Refused by OD-5; use the in-house cn in @fin/ui.",
+                  "tailwind-merge": "Refused by OD-5; use the in-house cn in @fin/ui.",
+                  "radix-ui": "Refused by OD-5; controls come from @fin/ui on the UI SDK.",
+                  "@rsbuild/core": "Refused by FW-C01.",
+                  "@vitejs/plugin-rsc": "Refused by FW-C01."
+                },
+                "patterns": [
+                  {
+                    "group": ["bun:*"],
+                    "message": "Node is the only runtime (ARCHITECTURE §3.2)."
+                  },
+                  {
+                    "group": [
+                      "@tanstack/react-start",
+                      "@tanstack/react-start/**",
+                      "@tanstack/react-start-*",
+                      "@tanstack/react-start-*/**",
+                      "@tanstack/start-*",
+                      "@tanstack/start-*/**"
+                    ],
+                    "message": "Refused by FW-C01: no server functions or server components."
+                  },
+                  {
+                    "group": [
+                      "react-server-dom-*",
+                      "react-server-dom-*/**",
+                      "@remix-run/**",
+                      "react-router-dom",
+                      "react-router-dom/**"
+                    ],
+                    "message": "Refused by FW-C01 and FW-C18."
+                  },
+                  {
+                    "group": [
+                      "@radix-ui/**",
+                      "radix-ui",
+                      "radix-ui/**",
+                      "@phosphor-icons/**",
+                      "@fontsource*",
+                      "@fontsource*/**",
+                      "clsx",
+                      "clsx/**",
+                      "tailwind-merge",
+                      "tailwind-merge/**"
+                    ],
+                    "message": "Refused by OD-5 and G-06: controls, icons and fonts come from Fin's own packages."
+                  },
+                  {
+                    "group": ["@ui-sdk/**"],
+                    "message": "Only packages/ui imports the UI SDK; screens import controls from @fin/ui."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/ui/**"],
+      "linter": {
+        "rules": {
+          "security": {
+            "noDangerouslySetInnerHtml": "off"
+          },
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "bun": "Node is the only runtime (ARCHITECTURE §3.2).",
+                  "drizzle-orm/bun-sql": "Node is the only runtime (ARCHITECTURE §3.2).",
+                  "react-router-dom": "Refused by FW-C18; TanStack Router is the router.",
+                  "clsx": "Refused by OD-5; use the in-house cn in @fin/ui.",
+                  "tailwind-merge": "Refused by OD-5; use the in-house cn in @fin/ui.",
+                  "radix-ui": "Refused by OD-5; controls come from @fin/ui on the UI SDK.",
+                  "@rsbuild/core": "Refused by FW-C01.",
+                  "@vitejs/plugin-rsc": "Refused by FW-C01.",
+                  "node:http": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "node:https": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "node:net": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "node:dns": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "node:cluster": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "node:worker_threads": "Only packages/server and apps/connector use this module (spec 01 §4.6).",
+                  "@ui-sdk/core": {
+                    "message": "Core's experimental helpers are refused (EX-30, spec 06 §11.5).",
+                    "importNames": [
+                      "createGridFocus",
+                      "createVirtualizer",
+                      "createCellRange",
+                      "createLasso"
+                    ]
+                  }
+                },
+                "patterns": [
+                  {
+                    "group": ["bun:*"],
+                    "message": "Node is the only runtime (ARCHITECTURE §3.2)."
+                  },
+                  {
+                    "group": [
+                      "@tanstack/react-start",
+                      "@tanstack/react-start/**",
+                      "@tanstack/react-start-*",
+                      "@tanstack/react-start-*/**",
+                      "@tanstack/start-*",
+                      "@tanstack/start-*/**"
+                    ],
+                    "message": "Refused by FW-C01: no server functions or server components."
+                  },
+                  {
+                    "group": [
+                      "react-server-dom-*",
+                      "react-server-dom-*/**",
+                      "@remix-run/**",
+                      "react-router-dom",
+                      "react-router-dom/**"
+                    ],
+                    "message": "Refused by FW-C01 and FW-C18."
+                  },
+                  {
+                    "group": [
+                      "@radix-ui/**",
+                      "radix-ui",
+                      "radix-ui/**",
+                      "@phosphor-icons/**",
+                      "@fontsource*",
+                      "@fontsource*/**",
+                      "clsx",
+                      "clsx/**",
+                      "tailwind-merge",
+                      "tailwind-merge/**"
+                    ],
+                    "message": "Refused by OD-5 and G-06: controls, icons and fonts come from Fin's own packages."
+                  },
+                  {
+                    "group": [
+                      "@ui-sdk/*/agent",
+                      "@ui-sdk/*/agent/**",
+                      "@ui-sdk/react/preferences",
+                      "@ui-sdk/react/preferences/**",
+                      "@ui-sdk/react/token-input",
+                      "@ui-sdk/react/token-input/**",
+                      "@ui-sdk/core/web.css",
+                      "@ui-sdk/core/web.css/**",
+                      "@ui-sdk/react/label",
+                      "@ui-sdk/react/label/**",
+                      "@ui-sdk/react/timeline",
+                      "@ui-sdk/react/timeline/**",
+                      "@ui-sdk/react/segmented-control",
+                      "@ui-sdk/react/segmented-control/**",
+                      "@ui-sdk/react/rating",
+                      "@ui-sdk/react/rating/**",
+                      "@ui-sdk/react/color-picker",
+                      "@ui-sdk/react/color-picker/**",
+                      "@ui-sdk/react/image-cropper",
+                      "@ui-sdk/react/image-cropper/**",
+                      "@ui-sdk/react/waterfall",
+                      "@ui-sdk/react/waterfall/**"
+                    ],
+                    "message": "This UI SDK entry is refused everywhere, packages/ui included (EX-30, spec 06 §11.5)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "packages/server/src/log/**",
+        "packages/core/src/console/**",
+        "scripts/**",
+        "ops/fin/**"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          }
+        }
+      }
+    }
+  ]
+}
