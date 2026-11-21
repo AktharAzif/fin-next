@@ -14,11 +14,21 @@
 //     page;
 //   - every header is checked against Cloudflare's allowlist before the call (one bad header fails
 //     the whole send); `from` is `{ address, name }`; one recipient per message.
-// Nothing here logs: the sender writes `email.sent` / `email.send_failed` from the outcome, which
-// holds codes and counts only, never an address.
+// Each try writes one `provider.call` line (ARCHITECTURE §10.2; spec 08 §7.2), so in-line retries,
+// throttles and timeouts reach the provider metrics: the outcome, a bounded failure and code, the
+// try's index and duration, and Fin's IDs, never an address. The sender writes `email.sent` /
+// `email.send_failed` from the outcome, once per row.
 import { checkHeaders, HeaderRefused } from "../../headers.ts";
-import type { EmailPort, FailureKind, OutgoingEmail, SendOutcome } from "../../port.ts";
+import type {
+  EmailPort,
+  FailureKind,
+  OutgoingEmail,
+  ProviderLog,
+  SendOutcome,
+} from "../../port.ts";
 import { API_ORIGIN } from "./hosts.ts";
+
+export const PROVIDER = "cloudflare-email";
 
 export interface AdapterClock {
   now(): number;
@@ -38,6 +48,8 @@ export interface CloudflareAdapterOptions {
   readonly budgetMs?: number;
   readonly maxTries?: number;
   readonly maxBodyBytes?: number;
+  /** Where each try's `provider.call` line goes; the worker passes its telemetry. */
+  readonly log?: ProviderLog;
 }
 
 export const TRY_TIMEOUT_MS = 5000;
@@ -123,7 +135,12 @@ export function parseAnswer(
     .map((e) =>
       typeof e === "object" && e !== null ? (e as Record<string, unknown>).code : undefined,
     )
-    .filter((c): c is number => typeof c === "number" && Number.isInteger(c));
+    // Cloudflare's codes are small positive integers; anything else is left out, so a code we write
+    // (`cf_<n>`, which becomes the outbox row's `last_error_code`) always has the shape its CHECK allows.
+    .filter(
+      (c): c is number =>
+        typeof c === "number" && Number.isSafeInteger(c) && c >= 0 && c <= 9_999_999,
+    );
   const result =
     typeof record.result === "object" && record.result !== null
       ? (record.result as Record<string, unknown>)
@@ -254,6 +271,40 @@ export function classify(answer: Answer): Verdict {
   };
 }
 
+type CallOutcome = "ok" | "refused" | "retry" | "unknown";
+type CallFailure =
+  | "unauthorized"
+  | "forbidden"
+  | "rate_limited"
+  | "server_error"
+  | "unavailable"
+  | "timeout"
+  | "network"
+  | "invalid_response";
+
+/** A failed try's `provider.call` outcome and failure (ARCHITECTURE §10.2's vocabulary). */
+export function callFailure(
+  kind: FailureKind,
+  code: string,
+  status: number | undefined,
+): { readonly outcome: CallOutcome; readonly failure?: CallFailure } {
+  switch (kind) {
+    case "throttled":
+      return { outcome: "retry", failure: "rate_limited" };
+    case "blocked":
+      return { outcome: "refused", failure: status === 401 ? "unauthorized" : "forbidden" };
+    case "permanent":
+      return { outcome: "refused" };
+    case "unknown":
+      if (code === "timeout") return { outcome: "unknown", failure: "timeout" };
+      if (code === "network") return { outcome: "unknown", failure: "network" };
+      if (status !== undefined && status >= 500) {
+        return { outcome: "unknown", failure: status === 503 ? "unavailable" : "server_error" };
+      }
+      return { outcome: "unknown", failure: "invalid_response" };
+  }
+}
+
 const realSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -271,6 +322,7 @@ export class CloudflareEmailAdapter implements EmailPort {
   private readonly budgetMs: number;
   private readonly maxTries: number;
   private readonly maxBodyBytes: number;
+  private readonly log: ProviderLog | undefined;
 
   constructor(options: CloudflareAdapterOptions) {
     if (!ACCOUNT_ID.test(options.accountId)) {
@@ -290,6 +342,36 @@ export class CloudflareEmailAdapter implements EmailPort {
     this.budgetMs = options.budgetMs ?? SEND_BUDGET_MS;
     this.maxTries = options.maxTries ?? MAX_TRIES;
     this.maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
+    this.log = options.log;
+  }
+
+  /** One `provider.call` line for one try. Fields are bounded codes and Fin's IDs only. */
+  private logCall(
+    message: OutgoingEmail,
+    retry: number,
+    durationMs: number,
+    status: number | undefined,
+    outcome: CallOutcome,
+    failure: CallFailure | undefined,
+    code: string | undefined,
+  ): void {
+    this.log?.log(
+      "provider.call",
+      {
+        provider: PROVIDER,
+        operation: "send",
+        ...(status === undefined ? {} : { status }),
+        durationMs,
+        outcome,
+        ...(failure === undefined ? {} : { failure }),
+        ...(code === undefined ? {} : { code }),
+        retry,
+        template: message.template,
+        class: message.category,
+        ...(message.emailId === undefined ? {} : { emailId: message.emailId }),
+      },
+      outcome === "ok" ? "info" : "warn",
+    );
   }
 
   async send(message: OutgoingEmail): Promise<SendOutcome> {
@@ -323,6 +405,8 @@ export class CloudflareEmailAdapter implements EmailPort {
     for (;;) {
       tries += 1;
       const left = this.budgetMs - elapsed();
+      const tryStarted = this.clock.now();
+      const tryMs = (): number => this.clock.now() - tryStarted;
       let answer: Answer;
       try {
         const response = await this.fetchImpl(this.url, {
@@ -345,10 +429,13 @@ export class CloudflareEmailAdapter implements EmailPort {
       } catch (error) {
         const timedOut =
           error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+        const code = timedOut ? "timeout" : "network";
+        const call = callFailure("unknown", code, undefined);
+        this.logCall(message, tries - 1, tryMs(), undefined, call.outcome, call.failure, undefined);
         return {
           ok: false,
           kind: "unknown",
-          code: timedOut ? "timeout" : "network",
+          code,
           tries,
           durationMs: elapsed(),
           severity: "none",
@@ -357,6 +444,7 @@ export class CloudflareEmailAdapter implements EmailPort {
 
       const verdict = classify(answer);
       if (verdict.ok) {
+        this.logCall(message, tries - 1, tryMs(), answer.status, "ok", undefined, undefined);
         return {
           ok: true,
           status: verdict.status,
@@ -365,6 +453,16 @@ export class CloudflareEmailAdapter implements EmailPort {
           httpStatus: answer.status,
         };
       }
+      const call = callFailure(verdict.kind, verdict.code, answer.status);
+      this.logCall(
+        message,
+        tries - 1,
+        tryMs(),
+        answer.status,
+        call.outcome,
+        call.failure,
+        verdict.code,
+      );
       if (verdict.retryInLine && tries < this.maxTries) {
         const backoff = this.random() * BACKOFF_BASE_MS * 2 ** (tries - 1);
         const wait = Math.max(answer.retryAfterMs ?? 0, backoff);

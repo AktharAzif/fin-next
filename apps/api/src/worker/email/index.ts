@@ -51,6 +51,8 @@ export async function startEmailWorker(
       token: config.token,
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
       clock: deps.clock,
+      // One `provider.call` line per try (ARCHITECTURE §10.2), into the worker's telemetry.
+      log: deps.log,
     });
   const heartbeat = {
     url: config.heartbeatUrl,

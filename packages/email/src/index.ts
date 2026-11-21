@@ -29,19 +29,37 @@ export { CLOUDFLARE_ALLOWED, checkHeaders, finHeaders, HeaderRefused } from "./h
 export { EMAIL_ID, newId } from "./ids.ts";
 export { type ClientLike, inTransaction, type PoolLike, type Queryable } from "./outbox/db.ts";
 export {
+  BucketMissing,
   type EnqueueInput,
+  EnqueueRefused,
   enqueue,
   type OutboxAge,
   type OutboxRow,
   outboxAge,
   type RecipientKind,
 } from "./outbox/store.ts";
-export { formatTime, param, SECRET_SHAPES, secretShapeIn } from "./params.ts";
-export type { EmailPort, FailureKind, Mailbox, OutgoingEmail, SendOutcome } from "./port.ts";
+export {
+  formatTime,
+  NAME_SECRET_SHAPES,
+  nameSecretShapeIn,
+  param,
+  SECRET_SHAPES,
+  type SecretShape,
+  secretShapeIn,
+} from "./params.ts";
+export type {
+  EmailPort,
+  FailureKind,
+  Mailbox,
+  OutgoingEmail,
+  ProviderLog,
+  SendOutcome,
+} from "./port.ts";
 export {
   AdapterConfigError,
   type CloudflareAdapterOptions,
   CloudflareEmailAdapter,
+  PROVIDER as CLOUDFLARE_PROVIDER,
 } from "./providers/cloudflare/adapter.ts";
 export { HOSTS as CLOUDFLARE_HOSTS } from "./providers/cloudflare/hosts.ts";
 export {
@@ -51,7 +69,15 @@ export {
   recipientHasher,
 } from "./recipient-key.ts";
 export { escapeHtml, RenderError, type Rendered, renderTemplate } from "./render.ts";
-export { backoffMs, DEFAULT_LIMITS, type SenderLimits } from "./sender/limits.ts";
+export {
+  type BudgetGroup,
+  backoffMs,
+  budgetRefusal,
+  budgetScopes,
+  checkLimits,
+  DEFAULT_LIMITS,
+  type SenderLimits,
+} from "./sender/limits.ts";
 export {
   type BatchResult,
   type EmailLog,

@@ -61,12 +61,46 @@ describe("display values", () => {
     ["a long digit run", "call 5551234567"],
     ["an enrolment code", ["7KQ2", "M9XA", "4RTB", "Z8HC"].join("-")],
     ["an enrolment code run together", "7KQ2M9XA4RTBZ8HC"],
+    ["an enrolment code run together, in lower case", "7kq2m9xa4rtbz8hc"],
     ["a backup code", ["aB3dE", "f9GhK"].join("-")],
     ["a token", "abcdef0123456789abcdef"],
     ["a Cloudflare token", ["cfat", "abcdefghijklmnop"].join("_")],
   ])("refuses %s", (_what, value) => {
     expect(secretShapeIn(value)).toBeTypeOf("string");
     expect(param.personName.safeParse(value).success).toBe(false);
+  });
+
+  // Spec 02 §8.6 lets a name hold letters, numbers and simple punctuation: every name it allows must
+  // be mailable, or the notice about that person, team or role could never be queued.
+  it.each([
+    ["personName", "Ann McKay-Jones"],
+    ["personName", "Anna McKay-Smith"],
+    ["personName", "Leonard McCoy-Smith"],
+    ["orgName", "DeVos-Group"],
+    ["orgName", "DeWit-Jones"],
+    ["orgName", "Acme-Payments-2025"],
+    ["orgName", "Northwind-Trading-2026"],
+    ["orgName", "Web3Infrastructure"],
+    ["orgName", "Acme Bank Card 2025"],
+    ["orgName", "MoneyJarCompany"],
+    ["orgName", "Acme2025Payments"],
+    ["roleLabel", "Level2-Support-Admins"],
+  ] as const)("accepts the ordinary %s %s", (field, value) => {
+    expect(param[field].safeParse(value).success).toBe(true);
+  });
+
+  it.each([
+    ["a Fin key", ["fin", "live", "sk", "0123456789ABCDEFGHIJabcdef"].join("_")],
+    ["a webhook secret", ["whsec", "abcdefghijklmnop0123"].join("_")],
+    ["a JWT", ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2lnbmF0dXJl"].join(".")],
+    ["an enrolment code", ["ABCD", "EFGH", "JK3M", "NPQR"].join("-")],
+    ["an enrolment code run together", "7KQ2M9XA4RTBZ8HC"],
+    ["an enrolment code run together, in lower case", "7kq2m9xa4rtbz8hc"],
+    ["a backup code", ["a1B2c", "D3e4F"].join("-")],
+  ])("still refuses %s in a name", (_what, value) => {
+    for (const field of ["personName", "orgName", "roleLabel"] as const) {
+      expect(param[field].safeParse(value).success, field).toBe(false);
+    }
   });
 
   it("refuses untrimmed, over-long and invisible text", () => {

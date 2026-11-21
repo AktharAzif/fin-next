@@ -33,11 +33,21 @@ interface Clock {
   advance(ms: number): void;
 }
 
+/** The error a promise rejects with (the test fails if it resolves). */
+async function failureOf(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error("expected a rejection");
+}
+
 function startClock(): Clock {
-  // Ahead of the database's own clock (rows are due at statement time), and never in an hour's last
-  // quarter, so one test's notices share one hourly window.
+  // Just ahead of the database's own clock (rows are due at statement time). It stands still until a
+  // test moves it, so the claims of one test share one hourly window wherever the hour is; it never
+  // jumps far ahead, which would age a code past its life (rows are stamped with the database's time).
   let t = Date.now() + 2_000;
-  if (new Date(t).getUTCMinutes() >= 45) t = Math.ceil(t / HOUR) * HOUR + MINUTE;
   return { now: () => t, advance: (ms) => (t += ms) };
 }
 
@@ -59,7 +69,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     await db.admin.query(
       "TRUNCATE email.outbox, email.recipient_window, email.daily_budget, email.delivery_check",
     );
-    await db.admin.query("UPDATE email.send_bucket SET tokens = 0, refilled_at = '-infinity'");
+    await db.admin.query(
+      `INSERT INTO email.send_bucket (name, tokens, refilled_at) VALUES ('cloudflare', 0, '-infinity')
+       ON CONFLICT (name) DO UPDATE SET tokens = 0, refilled_at = '-infinity'`,
+    );
     clock = startClock();
     port = new FakeTransport();
     log = new LineRecorder();
@@ -148,7 +161,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         }
       }
       await expect(
-        queue("fin_payments", "identity/sign-in-code", { code: "1" }),
+        queue("fin_payments", "identity/sign-in-code", { code: "12345678" }),
       ).rejects.toMatchObject({ code: "FE001" });
     });
 
@@ -226,7 +239,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
           template: "identity/new-sign-in",
           recipientKind: "address",
           recipient: "a@example.com",
-          params: {},
+          params: { userId: USER, device: "Safari on macOS", time: TIME },
         });
         await expect(
           enqueue(client, {
@@ -234,12 +247,158 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
             template: "staff/staff-new-sign-in",
             recipientKind: "address",
             recipient: "a@example.com",
-            params: {},
+            params: findTemplate("staff/staff-new-sign-in")?.sample as Record<string, unknown>,
           }),
         ).rejects.toMatchObject({ code: "FE001" });
         await client.query("ROLLBACK");
       } finally {
         client.release();
+      }
+      expect(await rows()).toEqual([]);
+    });
+
+    it("loads the template grants over the base migration's seeded row, with its class's priority", async () => {
+      const r = await db.admin.query<{ role: string; priority: number; carries_secret: boolean }>(
+        "SELECT role, priority, carries_secret FROM email.template_grant WHERE template = 'ops/delivery-check'",
+      );
+      expect(r.rows).toEqual([
+        { role: db.roleName("fin_worker"), priority: 4, carries_secret: false },
+      ]);
+      const signIn = await db.admin.query<{ priority: number; carries_secret: boolean }>(
+        "SELECT priority, carries_secret FROM email.template_grant WHERE template = 'identity/sign-in-code'",
+      );
+      expect(signIn.rows).toEqual([{ priority: 1, carries_secret: true }]);
+    });
+
+    it("refuses at queue time params the template refuses, so the action rolls back with it", async () => {
+      const client = await db.as.fin_console.connect();
+      try {
+        await client.query("BEGIN");
+        await enqueue(client, {
+          id: newId("eml", clock),
+          template: "identity/new-sign-in",
+          recipientKind: "address",
+          recipient: "a@example.com",
+          params: { userId: USER, device: "Safari on macOS", time: TIME },
+        });
+        const secret = ["fin", "live", "abcdefghijklmnop"].join("_");
+        const refused = enqueue(client, {
+          id: newId("eml", clock),
+          template: "identity/new-sign-in",
+          recipientKind: "address",
+          recipient: "a@example.com",
+          params: { userId: USER, device: secret, time: TIME },
+          dueAt: clock.now() + 365 * 24 * HOUR,
+        });
+        await expect(refused).rejects.toMatchObject({ code: "FE002", reason: "invalid_params" });
+        const error = await failureOf(refused);
+        expect(error.message).toContain("device");
+        expect(error.message).not.toContain(secret);
+        await expect(
+          enqueue(client, {
+            id: newId("eml", clock),
+            template: "orgs/member-removed",
+            recipientKind: "address",
+            recipient: "a@example.com",
+            params: { orgId: ORG, userId: USER, audience: "admins" },
+          }),
+        ).rejects.toMatchObject({ code: "FE002", reason: "invalid_params" });
+        await expect(
+          enqueue(client, {
+            id: newId("eml", clock),
+            template: "identity/no-such-template",
+            recipientKind: "address",
+            recipient: "a@example.com",
+            params: {},
+          }),
+        ).rejects.toMatchObject({ code: "FE002", reason: "unknown_template" });
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
+      expect(await rows()).toEqual([]);
+    });
+
+    it("queues and sends notices about ordinary names that hold digits, hyphens and capitals", async () => {
+      const sample = (id: string) => findTemplate(id)?.sample as Record<string, unknown>;
+      await queue("fin_console", "orgs/member-role-changed", {
+        ...sample("orgs/member-role-changed"),
+        orgName: "Web3Infrastructure",
+      });
+      await queue("fin_console", "orgs/member-joined", {
+        ...sample("orgs/member-joined"),
+        personName: "Anna McKay-Smith",
+      });
+      await queue("fin_console", "orgs/role-permissions-changed", {
+        ...sample("orgs/role-permissions-changed"),
+        roleLabel: "Level2-Support-Admins",
+      });
+      await queue("fin_console", "orgs/member-removed", {
+        ...sample("orgs/member-removed"),
+        orgName: "Acme-Payments-2025",
+      });
+      expect(await sender({ concurrency: 6, reservedUrgent: 1 }).runOnce()).toMatchObject({
+        sent: 4,
+        failed: 0,
+      });
+      expect(log.named("email.security_unsent")).toEqual([]);
+    });
+
+    it("refuses an unknown recipient kind with FE002, never echoing the row", async () => {
+      const secretCode = "48151623";
+      for (const kind of ["user", 5, "Address", "staff", []]) {
+        const attempt = db.as.fin_console.query("SELECT email.enqueue($1::jsonb)", [
+          JSON.stringify({
+            id: newId("eml", clock),
+            template: "identity/sign-in-code",
+            recipient_kind: kind,
+            recipient: "victim@example.com",
+            params: { code: secretCode },
+          }),
+        ]);
+        const error = (await attempt.then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as { code?: string; message?: string; detail?: string } | undefined;
+        expect(error?.code, String(kind)).toBe("FE002");
+        const said = `${error?.message ?? ""} ${error?.detail ?? ""}`;
+        expect(said).not.toContain("victim");
+        expect(said).not.toContain(secretCode);
+      }
+    });
+
+    it("refuses a NUL or a lone surrogate before the database can echo the input", async () => {
+      const lone = String.fromCharCode(0xd800);
+      const attempts = [
+        // In the address, before the code in the JSON text, and in a name after the address.
+        { recipient: `victim${String.fromCharCode(0)}@example.com`, params: { code: "48151623" } },
+        { recipient: `victim${lone}@example.com`, params: { code: "48151623" } },
+      ].map(({ recipient, params }) =>
+        enqueue(db.as.fin_console, {
+          id: newId("eml", clock),
+          template: "identity/sign-in-code",
+          recipientKind: "address",
+          recipient,
+          params,
+        }),
+      );
+      attempts.push(
+        enqueue(db.as.fin_console, {
+          id: newId("eml", clock),
+          template: "orgs/member-joined",
+          recipientKind: "address",
+          recipient: "victim@example.com",
+          params: {
+            ...(findTemplate("orgs/member-joined")?.sample as Record<string, unknown>),
+            personName: `Ann${lone} Lee`,
+          },
+        }),
+      );
+      for (const attempt of attempts) {
+        await expect(attempt).rejects.toMatchObject({ code: "FE002", reason: "bad_input" });
+        const error = await failureOf(attempt);
+        expect(error.message).not.toContain("victim");
+        expect(error.message).not.toContain("48151623");
       }
       expect(await rows()).toEqual([]);
     });
@@ -385,25 +544,80 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       });
     });
 
-    it("ends a row whose params no longer render, and one whose template is unknown", async () => {
-      await queue("fin_console", "identity/new-sign-in", {
+    // The caller checked its params at queue time, so a row this worker cannot render was queued by
+    // another release (a rolling deploy, or a rollback): it waits for a worker that knows it.
+    async function queueRaw(role: SenderRole, template: string, params: Record<string, unknown>) {
+      await db.as[role].query("SELECT email.enqueue($1::jsonb)", [
+        JSON.stringify({
+          id: newId("eml", clock),
+          template,
+          recipient_kind: "address",
+          recipient: "person@example.com",
+          params,
+        }),
+      ]);
+    }
+
+    it("keeps a security notice whose template this release does not know, never deleting it unsent", async () => {
+      await db.admin.query(
+        "INSERT INTO email.template_grant (template, role, category, priority, carries_secret) VALUES ('api-keys/key-changed', $1, 'security', 2, false)",
+        [db.roleName("fin_console")],
+      );
+      await queueRaw("fin_console", "api-keys/key-changed", { orgId: ORG, mode: "live" });
+      expect(await sender().runOnce()).toMatchObject({ failed: 1, sent: 0 });
+      const [row] = await rows();
+      expect(row).toMatchObject({
+        template: "api-keys/key-changed",
+        last_error_code: "unknown_template",
+      });
+      expect(new Date(row?.due_at ?? 0).getTime()).toBe(clock.now() + 5 * MINUTE);
+      expect(log.named("email.send_failed")[0]?.fields).toMatchObject({
+        code: "unknown_template",
+        reason: "release",
+        final: false,
+      });
+      expect(log.named("email.security_unsent")).toEqual([]);
+      for (let i = 0; i < 6; i++) {
+        clock.advance(5 * MINUTE);
+        await sender().runOnce();
+      }
+      expect(await rows()).toHaveLength(1);
+      expect(log.named("email.security_unsent")).toHaveLength(1);
+      expect(log.named("email.security_unsent")[0]?.fields).toMatchObject({
+        reason: "failed",
+        final: false,
+      });
+      // Only after a bound far longer than any deploy does it end, and it says so again.
+      clock.advance(7 * 24 * HOUR);
+      await sender().runOnce();
+      expect(await rows()).toEqual([]);
+      expect(log.named("email.security_unsent").at(-1)?.fields).toMatchObject({ final: true });
+      expect(port.sent).toHaveLength(0);
+    });
+
+    it("keeps a row whose params this release refuses, and ends ordinary mail only after a day", async () => {
+      await queueRaw("fin_console", "identity/new-sign-in", {
         userId: USER,
         device: "Safari",
-        time: "yesterday",
+        time: TIME,
+        browserKind: "a-param-from-a-newer-release",
       });
       await db.admin.query(
-        `INSERT INTO email.outbox (id, template, category, priority, recipient_kind, recipient, params, carries_code, due_at, enqueued_by, created_at)
-         VALUES ($1, 'ghost/none', 'notice', 3, 'address', 'a@example.com', '{}', false, now(), 'x', now())`,
+        `INSERT INTO email.outbox (id, template, category, priority, recipient_kind, recipient, params, carries_code, due_at, first_due_at, enqueued_by, created_at)
+         VALUES ($1, 'ghost/none', 'notice', 3, 'address', 'a@example.com', '{}', false, now(), now(), 'x', now())`,
         [newId("eml", clock)],
       );
       await sender().runOnce();
-      expect(await rows()).toEqual([]);
-      const codes = log
-        .named("email.send_failed")
-        .map((l) => l.fields.code)
-        .sort();
-      expect(codes).toEqual(["invalid_params", "unknown_template"]);
-      expect(log.named("email.security_unsent")[0]?.fields).toMatchObject({ reason: "failed" });
+      expect((await rows()).map((r) => r.last_error_code).sort()).toEqual([
+        "invalid_params",
+        "unknown_template",
+      ]);
+      clock.advance(25 * HOUR);
+      await sender().runOnce();
+      expect((await rows()).map((r) => r.template)).toEqual(["identity/new-sign-in"]);
+      expect(
+        log.named("email.send_failed").find((l) => l.fields.final === true)?.fields,
+      ).toMatchObject({ template: "ghost/none", code: "unknown_template", reason: "release" });
       expect(port.sent).toHaveLength(0);
     });
 
@@ -491,7 +705,14 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     });
 
     it("keeps the daily budget's security share from ordinary mail, and holds ordinary mail until tomorrow", async () => {
-      const limits = { dailyBudget: 3, dailySecurityReserve: 1, concurrency: 6, reservedUrgent: 1 };
+      const limits = {
+        dailyBudget: 3,
+        dailySecurityReserve: 1,
+        dailyCodeOnlyReserve: 0,
+        dailySecurityOnlyReserve: 0,
+        concurrency: 6,
+        reservedUrgent: 1,
+      };
       for (let i = 0; i < 3; i++) await invite(`p${i}@example.com`);
       const r = await sender(limits).runOnce();
       expect(r).toMatchObject({ sent: 2, deferred: 1 });
@@ -547,6 +768,134 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         final: true,
       });
     });
+
+    it("never lets other mail to an address use up the backstop its sign-in codes depend on", async () => {
+      const limits = { otherPerHour: 2, concurrency: 6, reservedUrgent: 1 };
+      for (let i = 0; i < 3; i++) await invite("victim@example.com");
+      // Other code templates, even from the same folder and service, have windows of their own.
+      for (let i = 0; i < 3; i++) {
+        await queue(
+          "fin_console",
+          "identity/reset-password",
+          { code: "11223344" },
+          "victim@example.com",
+        );
+      }
+      await sender(limits).runOnce();
+      expect(port.of("orgs/invitation")).toHaveLength(2);
+      expect(port.of("identity/reset-password")).toHaveLength(2);
+      await queue(
+        "fin_console",
+        "identity/sign-in-code",
+        { code: "24682468" },
+        "victim@example.com",
+      );
+      await queue(
+        "fin_admin",
+        "staff/staff-sign-in-code",
+        { code: "13571357" },
+        "victim@example.com",
+      );
+      await sender(limits).runOnce();
+      expect(port.of("identity/sign-in-code")).toHaveLength(1);
+      expect(port.of("staff/staff-sign-in-code")).toHaveLength(1);
+      expect(
+        log
+          .named("email.send_failed")
+          .filter((l) => l.fields.code === "recipient_limit")
+          .map((l) => l.fields.template)
+          .sort(),
+      ).toEqual(["identity/reset-password", "orgs/invitation"]);
+      // The backstop still holds for the code template itself.
+      for (let i = 0; i < 2; i++) {
+        await queue(
+          "fin_console",
+          "identity/sign-in-code",
+          { code: "24682468" },
+          "victim@example.com",
+        );
+      }
+      await sender(limits).runOnce();
+      expect(port.of("identity/sign-in-code")).toHaveLength(2);
+    });
+
+    it("gives back the budget of a send Cloudflare refused, and pauses the loop on a block", async () => {
+      const limits = {
+        dailyBudget: 4,
+        dailySecurityReserve: 1,
+        dailyCodeOnlyReserve: 0,
+        dailySecurityOnlyReserve: 0,
+        concurrency: 6,
+        reservedUrgent: 1,
+      };
+      for (let i = 0; i < 3; i++) await notice(`p${i}@example.com`);
+      port.answer(
+        failure("blocked", "http_401", { severity: "page" }),
+        failure("blocked", "http_401", { severity: "page" }),
+        failure("blocked", "http_401", { severity: "page" }),
+      );
+      const s = sender(limits);
+      expect(await s.runOnce()).toMatchObject({ sent: 0, failed: 3 });
+      const spent = await db.admin.query<{ count: number }>(
+        "SELECT coalesce(sum(count), 0)::int AS count FROM email.daily_budget",
+      );
+      expect(spent.rows[0]?.count).toBe(0);
+      // While Cloudflare refuses the token, this loop claims nothing and says so.
+      await code();
+      expect(await s.runOnce()).toMatchObject({ claimed: 0, paused: true });
+      clock.advance(5 * MINUTE);
+      expect(await s.runOnce()).toMatchObject({ sent: 4, paused: false });
+    });
+
+    it("keeps a share of the day for security notices that codes cannot spend", async () => {
+      const limits = {
+        dailyBudget: 6,
+        dailySecurityReserve: 4,
+        dailyCodeOnlyReserve: 2,
+        dailySecurityOnlyReserve: 2,
+        concurrency: 10,
+        reservedUrgent: 1,
+      };
+      for (let i = 0; i < 5; i++) {
+        await queue(
+          "fin_console",
+          "identity/confirm-email",
+          { code: "11223344" },
+          `s${i}@example.com`,
+        );
+      }
+      await sender(limits).runOnce();
+      expect(port.of("identity/confirm-email")).toHaveLength(4);
+      await notice("member@example.com");
+      await notice("member2@example.com");
+      await sender(limits).runOnce();
+      expect(port.of("identity/new-sign-in")).toHaveLength(2);
+      expect(log.named("email.security_unsent")).toEqual([]);
+    });
+
+    it("gives security notices a ceiling per organisation, so one cannot spend the day", async () => {
+      const limits = { dailySecurityPerOrganisation: 2, concurrency: 6, reservedUrgent: 1 };
+      for (let i = 0; i < 3; i++) {
+        await queue(
+          "fin_console",
+          "orgs/role-permissions-changed",
+          findTemplate("orgs/role-permissions-changed")?.sample as Record<string, unknown>,
+          `holder${i}@example.com`,
+        );
+      }
+      await sender(limits).runOnce();
+      expect(port.of("orgs/role-permissions-changed")).toHaveLength(2);
+      const [waiting] = await rows();
+      expect(waiting).toMatchObject({ last_error_code: "budget" });
+      expect(log.named("email.security_unsent")[0]?.fields).toMatchObject({ reason: "budget" });
+      expect(log.named("email.budget_reached")[0]?.fields).toMatchObject({
+        scope: "organisation",
+        orgId: ORG,
+      });
+      await code();
+      await sender(limits).runOnce();
+      expect(port.of("identity/sign-in-code")).toHaveLength(1);
+    });
   });
 
   describe("monitoring readings", () => {
@@ -558,6 +907,29 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       expect(age.urgentS).toBeGreaterThanOrEqual(90);
       expect(age.otherS).toBeGreaterThanOrEqual(90);
       expect(age.waiting).toBe(2);
+    });
+
+    it("keeps ageing the rows the token bucket holds back", async () => {
+      const limits = { bucket: { name: "cloudflare", capacity: 1, ratePerSecond: 1 / 600 } };
+      for (let i = 0; i < 3; i++) await code(String(30_000_000 + i));
+      const s = sender(limits);
+      expect(await s.runOnce()).toMatchObject({ sent: 1, deferred: 2 });
+      for (let i = 0; i < 4; i++) {
+        clock.advance(60_000);
+        await s.runOnce();
+      }
+      const waiting = await rows();
+      expect(waiting).toHaveLength(2);
+      expect(waiting.every((r) => r.attempts === 0)).toBe(true);
+      expect((await s.age()).urgentS).toBeGreaterThanOrEqual(240);
+    });
+
+    it("puts back a missing token bucket row instead of holding all mail", async () => {
+      await db.admin.query("DELETE FROM email.send_bucket");
+      await notice();
+      expect(await sender().runOnce()).toMatchObject({ sent: 1 });
+      const bucket = await db.admin.query("SELECT name FROM email.send_bucket");
+      expect(bucket.rows).toEqual([{ name: "cloudflare" }]);
     });
 
     it("sweeps old windows and budgets", async () => {

@@ -3,7 +3,7 @@
 // roles under a per-file prefix, so files can run in parallel on one shared cluster. Passwords are
 // made at run time and never printed.
 /// <reference path="./pg.d.ts" />
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import pg, { type Pool } from "pg";
 import { SENDER_ROLES, type SenderRole } from "../catalogue.ts";
 import { installOutboxSchema } from "./index.ts";
@@ -48,7 +48,10 @@ export async function openTestDatabase(suffix: string): Promise<TestDatabase> {
   await ignoreExists(bootstrap.query(`CREATE DATABASE ${name}`));
   await bootstrap.end();
 
-  const prefix = `l05${suffix.replace(/[^a-z0-9]/gu, "").slice(0, 8)}_`;
+  // Roles are cluster-wide: the database's name is part of the prefix, so two checkouts testing on
+  // one cluster with different FIN_TEST_DATABASE_URL databases never reset each other's logins.
+  const tag = createHash("sha256").update(name).digest("hex").slice(0, 6);
+  const prefix = `l05${suffix.replace(/[^a-z0-9]/gu, "").slice(0, 8)}${tag}_`;
   const roleName = (role: SenderRole): string => `${prefix}${role}`;
   const loginName = (role: SenderRole): string => `${prefix}${role}_a`;
   const admin = new pg.Pool({ connectionString: withDatabase(DATABASE_URL, name), max: 4 });

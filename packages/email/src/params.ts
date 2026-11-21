@@ -4,47 +4,116 @@
 //
 // No display value may carry a secret (T08-23, T-SAT-41): an API key, a webhook secret, a
 // Cloudflare token, a JWT, an enrolment code, a backup code, a link token or an address. Each
-// string is refused when it holds one of those shapes, so a caller that passes one by mistake has
-// its enqueue refused rather than its secret mailed.
+// string is refused when it holds one of those shapes, and `enqueue()` checks the params against
+// the template before the row is written, so a caller that passes one by mistake has its enqueue
+// (and so its action) refused rather than its secret mailed.
+//
+// Names are different: a person's, a team's or a role's name is whatever spec 02 §8.6's name rule
+// stored (letters, numbers and simple punctuation), so a name field refuses only shapes that rule
+// cannot produce by accident (`NAME_SECRET_SHAPES`). A name the rule allows but the email refused
+// would make every notice about that person, team or role impossible to queue.
 import { z } from "zod";
 
+export interface SecretShape {
+  readonly name: string;
+  readonly pattern: RegExp;
+}
+
 /** The secret shapes no display value may hold. */
-export const SECRET_SHAPES: readonly { readonly name: string; readonly pattern: RegExp }[] =
-  Object.freeze([
-    { name: "fin-api-key", pattern: /fin_(?:test|live)_[A-Za-z0-9_]{8,}/u },
-    { name: "webhook-secret", pattern: /whsec_[A-Za-z0-9+/=_-]{8,}/u },
-    { name: "cloudflare-token", pattern: /cf[au]t_[A-Za-z0-9_-]{8,}/u },
-    { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{8,}/u },
-    { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
-    // A staff enrolment code: 16 Crockford base32 characters (spec 02 §6.5), run together, or in
-    // four groups of four holding a digit (so four short words are not mistaken for one).
-    { name: "enrolment-code", pattern: /\b[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{16}\b/u },
-    {
-      name: "enrolment-code",
-      pattern:
-        /\b(?=[0-9A-Za-z -]{19}\b)(?=[A-Za-z -]{0,18}\d)[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}([- ])[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\1[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\1[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\b/u,
-    },
-    // A backup code as the library prints it: two groups of five, holding a digit or a case change
-    // inside a group (so a double-barrelled name such as "Smith-Jones" is not refused).
-    {
-      name: "backup-code",
-      pattern:
-        /\b(?=[A-Za-z0-9-]{11}\b)(?=[A-Za-z-]{0,10}\d|[A-Za-z0-9-]{0,9}[a-z][A-Z])[A-Za-z0-9]{5}-[A-Za-z0-9]{5}\b/u,
-    },
-    // Any long run that mixes letters and digits: a token, a key or a secret of some other shape.
-    {
-      name: "token-like",
-      pattern: /(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{16,}/u,
-    },
-    { name: "email", pattern: /[^\s@]+@[^\s@]+\.[^\s@]+/u },
-    { name: "url", pattern: /\b(?:https?:\/\/|www\.)/iu },
-    { name: "digits", pattern: /\d{7,}/u },
-  ]);
+export const SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
+  { name: "fin-api-key", pattern: /fin_(?:test|live)_[A-Za-z0-9_]{8,}/u },
+  { name: "webhook-secret", pattern: /whsec_[A-Za-z0-9+/=_-]{8,}/u },
+  { name: "cloudflare-token", pattern: /cf[au]t_[A-Za-z0-9_-]{8,}/u },
+  { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{8,}/u },
+  { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
+  // A staff enrolment code: 16 Crockford base32 characters (spec 02 §6.5), run together, or in
+  // four groups of four holding a digit (so four short words are not mistaken for one).
+  { name: "enrolment-code", pattern: /\b[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{16}\b/u },
+  {
+    name: "enrolment-code",
+    pattern:
+      /\b(?=[0-9A-Za-z -]{19}\b)(?=[A-Za-z -]{0,18}\d)[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}([- ])[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\1[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\1[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{4}\b/u,
+  },
+  // A backup code as the library prints it: two groups of five, holding a digit or a case change
+  // inside a group (so a double-barrelled name such as "Smith-Jones" is not refused).
+  {
+    name: "backup-code",
+    pattern:
+      /\b(?=[A-Za-z0-9-]{11}\b)(?=[A-Za-z-]{0,10}\d|[A-Za-z0-9-]{0,9}[a-z][A-Z])[A-Za-z0-9]{5}-[A-Za-z0-9]{5}\b/u,
+  },
+  // Any long run that mixes letters and digits: a token, a key or a secret of some other shape.
+  {
+    name: "token-like",
+    pattern: /(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{16,}/u,
+  },
+  { name: "email", pattern: /[^\s@]+@[^\s@]+\.[^\s@]+/u },
+  { name: "url", pattern: /\b(?:https?:\/\/|www\.)/iu },
+  { name: "digits", pattern: /\d{7,}/u },
+]);
+
+const CROCKFORD = "0-9A-HJKMNP-TV-Za-hjkmnp-tv-z";
+const CROCKFORD_UPPER = "0-9A-HJKMNP-TV-Z";
+const CROCKFORD_LOWER = "0-9a-hjkmnp-tv-z";
+
+/**
+ * The secret shapes a name may not hold: the prefixed keys and tokens, a whole JWT, a private key,
+ * an address, a web address, a run of 7 or more digits (spec 02 §8.6 refuses the last three too),
+ * and the codes in the forms Fin and the library print them, which always mix letters and digits.
+ * Left out on purpose: a long letters-and-digits run, a 5-5 pair with a case change, and four words
+ * of four letters, which are ordinary names ("Web3Infrastructure", "McKay-Jones", "Acme Bank Card
+ * 2025"). A code made of letters only cannot be told from a name, and the name rule allows both.
+ */
+export const NAME_SECRET_SHAPES: readonly SecretShape[] = Object.freeze([
+  { name: "fin-api-key", pattern: /fin_(?:test|live)_[A-Za-z0-9_]{8,}/u },
+  { name: "webhook-secret", pattern: /whsec_[A-Za-z0-9+/=_-]{8,}/u },
+  { name: "cloudflare-token", pattern: /cf[au]t_[A-Za-z0-9_-]{8,}/u },
+  // A JWT's header and the start of its payload ("eyJ...eyJ"), so "MoneyJarCompany" is a name.
+  { name: "jwt", pattern: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]*/u },
+  { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
+  // An enrolment code run together: 16 Crockford characters of one case holding a letter and a
+  // digit, as Fin prints it ("Acme2025Payments", which mixes cases, is a name).
+  {
+    name: "enrolment-code",
+    pattern: new RegExp(
+      `\\b(?=[0-9A-Za-z]{16}\\b)(?=[A-Za-z]{0,15}\\d)(?=\\d{0,15}[A-Za-z])(?:[${CROCKFORD_UPPER}]{16}|[${CROCKFORD_LOWER}]{16})\\b`,
+      "u",
+    ),
+  },
+  // Four groups of four, one of which mixes a letter and a digit (a code's groups almost always do;
+  // "Acme Bank Card 2025" has no such group).
+  {
+    name: "enrolment-code",
+    pattern: new RegExp(
+      `\\b(?=[0-9A-Za-z -]{19}\\b)(?=(?:[0-9A-Za-z]{4}[- ]){0,3}[0-9A-Za-z]{0,2}(?:[A-Za-z]\\d|\\d[A-Za-z]))[${CROCKFORD}]{4}([- ])[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\1[${CROCKFORD}]{4}\\b`,
+      "u",
+    ),
+  },
+  // A backup code holding a digit; a 5-5 pair of letters is a double-barrelled name.
+  {
+    name: "backup-code",
+    pattern: /\b(?=[A-Za-z0-9-]{11}\b)(?=[A-Za-z-]{0,10}\d)[A-Za-z0-9]{5}-[A-Za-z0-9]{5}\b/u,
+  },
+  { name: "email", pattern: /[^\s@]+@[^\s@]+\.[^\s@]+/u },
+  { name: "url", pattern: /\b(?:https?:\/\/|www\.)/iu },
+  { name: "digits", pattern: /\d{7,}/u },
+]);
+
+function firstShape(shapes: readonly SecretShape[], value: string): string | undefined {
+  for (const shape of shapes) if (shape.pattern.test(value)) return shape.name;
+  return undefined;
+}
 
 /** The first secret shape a value holds, or undefined. */
 export function secretShapeIn(value: string): string | undefined {
-  for (const shape of SECRET_SHAPES) if (shape.pattern.test(value)) return shape.name;
-  return undefined;
+  return firstShape(SECRET_SHAPES, value);
+}
+
+/**
+ * The first secret shape a name holds, or undefined. `packages/identity`'s name rule (spec 02 §8.6)
+ * should refuse these too, so that every stored name can be mailed (recorded in the pull request).
+ */
+export function nameSecretShapeIn(value: string): string | undefined {
+  return firstShape(NAME_SECRET_SHAPES, value);
 }
 
 // Invisible, bidirectional and other control characters (spec 02 §8.6 refuses them in names).
@@ -67,15 +136,24 @@ function isControl(value: string): boolean {
   return false;
 }
 
-/** A typed display value: bounded, single-line, no control characters, no secret shape. */
-export function displayText(max: number) {
+function boundedText(max: number, shapeIn: (value: string) => string | undefined) {
   return z
     .string()
     .min(1)
     .max(max)
     .refine((v) => !isControl(v), { message: "control characters are refused" })
     .refine((v) => v.trim() === v && v.trim().length > 0, { message: "untrimmed text is refused" })
-    .refine((v) => secretShapeIn(v) === undefined, { message: "a secret shape is refused" });
+    .refine((v) => shapeIn(v) === undefined, { message: "a secret shape is refused" });
+}
+
+/** A typed display value: bounded, single-line, no control characters, no secret shape. */
+export function displayText(max: number) {
+  return boundedText(max, secretShapeIn);
+}
+
+/** A stored name (spec 02 §8.6): as `displayText`, refusing only the shapes of `NAME_SECRET_SHAPES`. */
+export function nameText(max: number) {
+  return boundedText(max, nameSecretShapeIn);
 }
 
 /** Fin's IDs: `<prefix>_<26 Crockford base32>` (ARCHITECTURE §6.2). */
@@ -86,9 +164,9 @@ export function finId(prefix: string) {
 export const param = Object.freeze({
   /** An 8-digit emailed code (spec 02 §5.2). Nothing else is ever a code in an email. */
   code: z.string().regex(/^\d{8}$/u),
-  personName: displayText(60),
-  orgName: displayText(50),
-  roleLabel: displayText(40),
+  personName: nameText(60),
+  orgName: nameText(50),
+  roleLabel: nameText(40),
   /** A device label such as "Safari on macOS", built by the caller from the user agent. */
   device: displayText(80),
   /** An instant, rendered in UTC by the layout. */

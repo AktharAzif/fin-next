@@ -175,6 +175,43 @@ describe("EmailLoop", () => {
     await h.loop.idle();
     expect(h.sender.runs).toBe(2);
   });
+
+  it("starts no delivery check while one is still running on this replica", async () => {
+    const log = new LineRecorder();
+    const { schedule, timers } = manualScheduler();
+    let started = 0;
+    let finish: () => void = () => undefined;
+    const loop = new EmailLoop({
+      sender: new FakeSender(),
+      log,
+      clock: { now: () => 0 },
+      schedule,
+      deliveryCheck: () => {
+        started += 1;
+        return new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    await loop.start();
+    const checkTimer = timers.find((t) => t.everyMs === 900_000);
+    checkTimer?.run();
+    checkTimer?.run();
+    expect(started).toBe(1);
+    finish();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    checkTimer?.run();
+    expect(started).toBe(2);
+    finish();
+    await loop.stop();
+  });
+
+  it("says on the tick's line when the sender is paused", async () => {
+    const h = setup();
+    h.sender.batches = [{ ...EMPTY, paused: true }];
+    await h.loop.tick("poll");
+    expect(h.log.named("job.run")[0]?.fields).toMatchObject({ paused: true });
+  });
 });
 
 class FakeClient implements ListenClient {

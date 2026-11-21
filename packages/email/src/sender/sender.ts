@@ -3,17 +3,22 @@
 //   1. claims due rows, codes and security notices first, with a lease; ordinary mail may use only
 //      part of the batch, the rest is kept for codes and security notices;
 //   2. per row: drops a code that outlived its code; counts the recipient once (security notices
-//      past 5 an hour fold into a digest, never dropped; other classes have a backstop); resolves the
-//      recipient; renders Fin's own template; takes a token from the shared bucket (ordinary mail
-//      leaves a reserve); takes the daily budgets (ordinary mail leaves the security share); sends;
+//      past 5 an hour fold into a digest, never dropped; other classes have a backstop, one window
+//      per code template and one per class and folder for the rest); resolves the recipient; renders
+//      Fin's own template; takes a token from the shared bucket (ordinary mail leaves a reserve);
+//      takes the daily budgets (ordinary mail leaves the reserved share, codes and security notices
+//      each keep a part of it); sends;
 //   3. a sent row is deleted, so a code-bearing row never outlives its send; a failed one waits with
 //      backoff, or ends for good with `email.send_failed`, and a security row that cannot be sent
-//      writes `email.security_unsent`.
+//      writes `email.security_unsent`. A send Cloudflare refused gives its budget back, and a token
+//      or account refusal pauses this loop for the blocked wait.
+//   A row whose template or params this release does not know was queued by another release (the
+//   caller checked it at queue time): it waits for a worker that knows it, never deleted at once.
 // `flushDigests()` turns each digest's folded rows into one `ops/security-digest` row through
 // `email.enqueue()` in one transaction. Lines carry the template, class, code and IDs, never an
 // address, a subject or a parameter value.
 
-import { describe, findTemplate } from "../catalogue.ts";
+import { describe, findTemplate, TEMPLATES } from "../catalogue.ts";
 import {
   CLASS_RULES,
   type EmailClass,
@@ -35,15 +40,25 @@ import {
   lockFolded,
   type OutboxRow,
   outboxAge,
+  refundBudget,
   rescheduleRow,
   sweep,
   takeBudget,
   takeToken,
+  type WindowKind,
 } from "../outbox/store.ts";
 import type { EmailPort, Mailbox, SendOutcome } from "../port.ts";
 import type { RecipientHasher } from "../recipient-key.ts";
 import { RenderError, renderTemplate } from "../render.ts";
-import { backoffMs, DEFAULT_LIMITS, type SenderLimits } from "./limits.ts";
+import {
+  type BudgetGroup,
+  backoffMs,
+  budgetRefusal,
+  budgetScopes,
+  checkLimits,
+  DEFAULT_LIMITS,
+  type SenderLimits,
+} from "./limits.ts";
 
 export type Level = "info" | "warn" | "error";
 
@@ -96,12 +111,34 @@ export interface BatchResult {
   readonly deferred: number;
   /** True when a claim came back full, so the loop should run again at once. */
   readonly full: boolean;
+  /** True when Cloudflare refused the token or account and this loop is waiting before it claims. */
+  readonly paused?: boolean;
 }
 
 type RowResult = "sent" | "failed" | "folded" | "deferred" | "lost";
 
+/** The budget a send was counted against, so a refused send can give it back. */
+interface BudgetHeld {
+  readonly day: string;
+  readonly scopes: readonly string[];
+}
+
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
+
+/** The longest life of any code this release knows: a code row nobody can render is stale after it. */
+const LONGEST_CODE_MS = Math.max(...TEMPLATES.map((t) => t.codeTtlMs ?? 0));
+
+function budgetGroup(cls: EmailClass): BudgetGroup {
+  if (cls === "code") return "code";
+  return cls === "security" || cls === "ops" ? "security" : "ordinary";
+}
+
+function windowKind(template: Template): WindowKind {
+  if (template.class === "security" || template.class === "ops") return "security";
+  if (template.class === "code") return `code:${template.area}/${template.name}`;
+  return `${template.class}:${template.area}`;
+}
 
 function hourKey(ms: number): string {
   const d = new Date(Math.floor(ms / HOUR_MS) * HOUR_MS);
@@ -124,21 +161,28 @@ export class Sender {
   private readonly limits: SenderLimits;
   private readonly random: () => number;
   private readonly entityRef: () => string;
+  /**
+   * Until when this loop claims nothing after Cloudflare refused the token, the entitlement or the
+   * account (they page): every waiting row would otherwise call and fail in turn. It is load shedding
+   * for this replica only; nothing about a person is decided from it.
+   */
+  private pausedUntil = Number.NEGATIVE_INFINITY;
 
   constructor(options: SenderOptions) {
     this.o = options;
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.random = options.random ?? Math.random;
     this.entityRef = options.newEntityRef ?? (() => crypto.randomUUID());
-    if (this.limits.reservedUrgent >= this.limits.concurrency) {
-      throw new Error("reservedUrgent must leave ordinary mail at least one slot");
-    }
+    checkLimits(this.limits);
   }
 
   /** One pass: claim, process each row, report. */
   async runOnce(): Promise<BatchResult> {
     const { db, holder } = this.o;
     const now = this.o.clock.now();
+    if (now < this.pausedUntil) {
+      return { claimed: 0, sent: 0, failed: 0, folded: 0, deferred: 0, full: false, paused: true };
+    }
     const { concurrency, reservedUrgent, leaseMs } = this.limits;
     const urgent = await claimRows(db, {
       now,
@@ -167,6 +211,7 @@ export class Sender {
       folded: count("folded"),
       deferred: count("deferred"),
       full: urgent.length === concurrency || (room > 0 && ordinary.length === room),
+      paused: false,
     };
   }
 
@@ -206,16 +251,23 @@ export class Sender {
   private async process(row: OutboxRow): Promise<RowResult> {
     const now = this.o.clock.now();
     const template = findTemplate(row.template);
-    if (template === undefined) return this.end(row, undefined, "unknown_template", "permanent");
+    // Granted and queued, so another release knows it: wait for a worker that does (spec 01 §6.9
+    // rolls services after `migrate` and rolls back without it, so old and new run side by side).
+    if (template === undefined) {
+      return this.retry(row, undefined, "unknown_template", "release", undefined);
+    }
 
     if (template.codeTtlMs !== undefined && now >= row.createdAt + template.codeTtlMs) {
       return this.end(row, template, "expired", "permanent");
     }
 
-    // Count the recipient once per row, at claim time (spec 08 §4.3, [DA-16]).
+    // Count the recipient once per row, at claim time (spec 08 §4.3, [DA-16]). Security notices share
+    // one allowance. Every other class has backstop windows of its own, so no other class, service or
+    // template can use up the one a person's codes depend on: one per code template, one per class
+    // and template folder for notices and customer mail.
     if (row.category !== "ops" && !row.counted) {
       const key = this.o.hashRecipient(row.recipientKind, row.recipient);
-      const kind = row.category === "security" ? "security" : "other";
+      const kind = windowKind(template);
       const windowStart = Math.floor(now / HOUR_MS) * HOUR_MS;
       const count = await countRecipient(this.o.db, row.id, this.o.holder, key, kind, windowStart);
       if (count === undefined) return "lost";
@@ -234,7 +286,7 @@ export class Sender {
         });
         return "folded";
       }
-      if (kind === "other" && count > this.limits.otherPerHour) {
+      if (kind !== "security" && count > this.limits.otherPerHour) {
         return this.end(row, template, "recipient_limit", "permanent");
       }
     }
@@ -264,6 +316,11 @@ export class Sender {
       if (error instanceof RenderError && error.code === "link_origin_missing") {
         return this.retry(row, template, error.code, "blocked", undefined);
       }
+      // The caller checked the params against its release's template at queue time, so a refusal
+      // here means another release queued it (a new or changed param): wait for a worker that knows.
+      if (error instanceof RenderError && error.code === "invalid_params") {
+        return this.retry(row, template, error.code, "release", undefined);
+      }
       return this.end(
         row,
         template,
@@ -289,7 +346,7 @@ export class Sender {
     }
 
     const budget = await this.takeBudgets(row, template, now);
-    if (budget !== "ok") return budget;
+    if (typeof budget === "string") return budget;
 
     const outcome = await this.o.port.send({
       from,
@@ -300,49 +357,59 @@ export class Sender {
       headers: finHeaders(template.class, this.entityRef()),
       template: template.id,
       category: template.class,
+      emailId: row.id,
     });
-    return this.record(row, template, outcome);
+    return this.record(row, template, outcome, budget);
   }
 
   private async takeBudgets(
     row: OutboxRow,
     template: Template,
     now: number,
-  ): Promise<"ok" | RowResult> {
+  ): Promise<BudgetHeld | RowResult> {
     const reservedShare = CLASS_RULES[template.class].reservedShare;
+    const group = budgetGroup(template.class);
     const ordinaryLimit = this.limits.dailyBudget - this.limits.dailySecurityReserve;
-    const scopes = [
-      { scope: "environment", limit: reservedShare ? this.limits.dailyBudget : ordinaryLimit },
-    ];
-    const orgId = organisationOf(row.params);
-    if (orgId !== undefined && !reservedShare) {
-      scopes.push({ scope: `org:${orgId}`, limit: this.limits.dailyPerOrganisation });
-    }
-    const taken = await takeBudget(this.o.db, utcDay(now), scopes);
+    // An organisation's counter: ordinary mail ([SA-40]) and security notices each have their own.
+    const named = organisationOf(row.params);
+    const orgId =
+      group === "ordinary" || (group === "security" && template.class === "security")
+        ? named
+        : undefined;
+    const day = utcDay(now);
+    const scopes = budgetScopes(group, orgId);
+    const taken = await takeBudget(this.o.db, day, scopes, (counts) =>
+      budgetRefusal(group, counts, this.limits),
+    );
     const base = { template: row.template, class: row.category, emailId: row.id };
     if (taken.refusedBy === undefined) {
       if (reservedShare && (taken.counts.environment ?? 0) === ordinaryLimit + 1) {
-        // The first send into the security share today: ordinary mail has used its part.
+        // The first send into the reserved share today: ordinary mail has used its part. This is the
+        // early warning, well before the total (at 75% with the defaults).
         this.o.log.log(
           "email.budget_reached",
           { ...base, scope: "environment", share: "security" },
           "warn",
         );
       }
-      return "ok";
+      return { day, scopes: scopes.raise };
     }
     const scope = taken.refusedBy === "environment" ? "environment" : "organisation";
+    const spentAll = (taken.counts.environment ?? 0) >= this.limits.dailyBudget;
+    const share = !reservedShare
+      ? "ordinary"
+      : scope === "organisation" || spentAll
+        ? "all"
+        : group === "code"
+          ? "security_only"
+          : "code_only";
     this.o.log.log(
       "email.budget_reached",
-      {
-        ...base,
-        scope,
-        share: reservedShare ? "all" : "ordinary",
-        ...(orgId === undefined ? {} : { orgId }),
-      },
+      { ...base, scope, share, ...(orgId === undefined ? {} : { orgId }) },
       "warn",
     );
     if (template.class === "code") return this.end(row, template, "budget", "permanent");
+    // Security and ops rows past their share, or a security notice past its organisation's ceiling.
     if (reservedShare) {
       // Security and ops rows are never dropped for the budget: they wait and try again.
       return this.retry(row, template, "budget", "budget", this.limits.budgetWaitMs);
@@ -361,7 +428,25 @@ export class Sender {
     row: OutboxRow,
     template: Template,
     outcome: SendOutcome,
+    budget: BudgetHeld,
   ): Promise<RowResult> {
+    if (!outcome.ok) {
+      // Cloudflare sent nothing: a refused token or account, a throttle, or a refusal before or at
+      // the HTTP layer. Give the day's budget back, so refusals never spend it. An `unknown` outcome
+      // may have gone and a 2xx bounce was processed: those keep their count.
+      const sentNothing =
+        outcome.kind === "blocked" ||
+        outcome.kind === "throttled" ||
+        (outcome.kind === "permanent" &&
+          (outcome.httpStatus === undefined || outcome.httpStatus >= 400));
+      if (sentNothing) await refundBudget(this.o.db, budget.day, budget.scopes);
+      if (outcome.kind === "blocked") {
+        this.pausedUntil = Math.max(
+          this.pausedUntil,
+          this.o.clock.now() + this.limits.blockedWaitMs,
+        );
+      }
+    }
     if (outcome.ok) {
       // Deleted on send: a code-bearing row never outlives its message (ARCHITECTURE §9.4).
       const deleted = await deleteRow(this.o.db, row.id, this.o.holder);
@@ -402,10 +487,14 @@ export class Sender {
     return this.retry(row, template, outcome.code, outcome.kind, outcome.retryAfterMs, extra);
   }
 
-  /** Waits and tries again, or ends the row when its class allows no more tries. */
+  /**
+   * Waits and tries again, or ends the row when its class allows no more tries. `release` is a row
+   * this release cannot render (its template is unknown here, so `template` may be undefined): it
+   * waits the blocked wait each time, bounded by its age rather than its attempts.
+   */
   private async retry(
     row: OutboxRow,
-    template: Template,
+    template: Template | undefined,
     code: string,
     reason: string,
     waitHintMs: number | undefined,
@@ -414,13 +503,20 @@ export class Sender {
     const now = this.o.clock.now();
     const backoff = backoffMs(this.limits, row.attempts, this.random);
     const wait =
-      reason === "blocked"
+      reason === "blocked" || reason === "release"
         ? Math.max(this.limits.blockedWaitMs, waitHintMs ?? 0)
         : Math.max(waitHintMs ?? 0, reason === "budget" ? 0 : backoff);
-    const cls: EmailClass = template.class;
-    const codeExpired =
-      template.codeTtlMs !== undefined && now + wait >= row.createdAt + template.codeTtlMs;
-    const triesUsed = cls !== "security" && row.attempts >= this.limits.maxAttempts;
+    const cls: EmailClass = template?.class ?? row.category;
+    const codeTtlMs = template?.codeTtlMs ?? (cls === "code" ? LONGEST_CODE_MS : undefined);
+    const codeExpired = codeTtlMs !== undefined && now + wait >= row.createdAt + codeTtlMs;
+    const triesUsed =
+      reason === "release"
+        ? now >=
+          row.createdAt +
+            (cls === "security"
+              ? this.limits.securityReleaseWaitMaxMs
+              : this.limits.releaseWaitMaxMs)
+        : cls !== "security" && row.attempts >= this.limits.maxAttempts;
     if (codeExpired || triesUsed) {
       return this.end(row, template, code, codeExpired ? "expired" : reason, extra);
     }

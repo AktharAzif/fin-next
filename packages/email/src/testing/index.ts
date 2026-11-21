@@ -98,20 +98,25 @@ export function outboxSchemaSql(): { base: string; extension: string; grants: st
 }
 
 /**
- * Drops and recreates the `email` schema in the connected (lane-owned) database, applies the
- * extension and its grants with each group role mapped by `roleName`, and loads the generated
- * template grants.
+ * Drops and recreates the `email` (and stand-in `ops`) schema in the connected (lane-owned)
+ * database: the base migration with its seeded grant, then the extension and its grants with each
+ * group role mapped by `roleName`, then the generated template grants, exactly as the data lane's
+ * runner would load them over the seeded row.
  */
 export async function installOutboxSchema(
   db: Queryable,
   roleName: (role: SenderRole) => string,
 ): Promise<void> {
   const sql = outboxSchemaSql();
-  let grants = sql.grants;
-  for (const role of SENDER_ROLES) grants = grants.replaceAll(`{{${role}}}`, roleName(role));
+  const render = (text: string): string => {
+    let out = text;
+    for (const role of SENDER_ROLES) out = out.replaceAll(`{{${role}}}`, roleName(role));
+    return out;
+  };
   await db.query("DROP SCHEMA IF EXISTS email CASCADE");
-  await db.query(sql.base);
+  await db.query("DROP SCHEMA IF EXISTS ops CASCADE");
+  await db.query(render(sql.base));
   await db.query(sql.extension);
-  await db.query(grants);
+  await db.query(render(sql.grants));
   await db.query(grantInsertSql(roleName));
 }

@@ -63,8 +63,15 @@ const failure = (code: number) => ({
   result: null,
 });
 
+interface Line {
+  readonly event: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly level: string | undefined;
+}
+
 function harness(answers: (Response | Error | (() => Promise<Response>))[]) {
   const calls: Call[] = [];
+  const lines: Line[] = [];
   const sleeps: number[] = [];
   let now = 1_000_000;
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -86,8 +93,9 @@ function harness(answers: (Response | Error | (() => Promise<Response>))[]) {
       now += ms;
     },
     random: () => 0.5,
+    log: { log: (event, fields, level) => lines.push({ event, fields, level }) },
   });
-  return { adapter, calls, sleeps, advance: (ms: number) => (now += ms) };
+  return { adapter, calls, sleeps, lines, advance: (ms: number) => (now += ms) };
 }
 
 describe("CloudflareEmailAdapter", () => {
@@ -144,6 +152,76 @@ describe("CloudflareEmailAdapter", () => {
     const outcome = await h.adapter.send(MESSAGE);
     expect(outcome).toMatchObject({ ok: true, tries: 3 });
     expect(h.sleeps).toEqual([200, 400]);
+  });
+
+  it("writes one provider.call line per try, with IDs and codes only (ARCHITECTURE §10.2)", async () => {
+    const h = harness([json(429, failure(10004)), json(200, success({ delivered: ["x"] }))]);
+    await h.adapter.send({ ...MESSAGE, emailId: "eml_01jd0000000000000000000000" });
+    const calls = h.lines.filter((l) => l.event === "provider.call");
+    expect(calls.map((l) => l.fields)).toEqual([
+      {
+        provider: "cloudflare-email",
+        operation: "send",
+        status: 429,
+        durationMs: 100,
+        outcome: "retry",
+        failure: "rate_limited",
+        code: "cf_10004",
+        retry: 0,
+        template: "identity/sign-in-code",
+        class: "code",
+        emailId: "eml_01jd0000000000000000000000",
+      },
+      {
+        provider: "cloudflare-email",
+        operation: "send",
+        status: 200,
+        durationMs: 100,
+        outcome: "ok",
+        retry: 1,
+        template: "identity/sign-in-code",
+        class: "code",
+        emailId: "eml_01jd0000000000000000000000",
+      },
+    ]);
+    expect(JSON.stringify(h.lines)).not.toContain("@");
+  });
+
+  it.each<[Response | Error, Record<string, unknown>]>([
+    [json(401, failure(10000)), { outcome: "refused", failure: "unauthorized", status: 401 }],
+    [json(403, failure(10203)), { outcome: "refused", failure: "forbidden", status: 403 }],
+    [json(400, failure(10001)), { outcome: "refused", code: "cf_10001", status: 400 }],
+    [json(500, failure(10002)), { outcome: "unknown", failure: "server_error", status: 500 }],
+    [json(503, {}), { outcome: "unknown", failure: "unavailable", status: 503 }],
+    [json(200, { success: false }), { outcome: "unknown", failure: "invalid_response" }],
+    [
+      Object.assign(new Error("timed out"), { name: "TimeoutError" }),
+      { outcome: "unknown", failure: "timeout" },
+    ],
+    [new TypeError("fetch failed"), { outcome: "unknown", failure: "network" }],
+  ])("names a failed call's outcome and failure (%#)", async (answer, expected) => {
+    const h = harness([answer]);
+    await h.adapter.send(MESSAGE);
+    const calls = h.lines.filter((l) => l.event === "provider.call");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.fields).toMatchObject({ retry: 0, ...expected });
+    expect(calls[0]?.level).toBe("warn");
+  });
+
+  it("names only Cloudflare's own small numeric codes, so the outbox's error code keeps its shape", async () => {
+    for (const odd of [-1, 1e21, 2 ** 53, 0.5]) {
+      const h = harness([json(500, { success: false, errors: [{ code: odd }] })]);
+      const outcome = await h.adapter.send(MESSAGE);
+      expect(outcome).toMatchObject({ ok: false, code: "http_500" });
+    }
+    const h = harness([json(500, failure(10002))]);
+    expect(await h.adapter.send(MESSAGE)).toMatchObject({ code: "cf_10002" });
+  });
+
+  it("writes no provider.call when a header is refused before any call", async () => {
+    const h = harness([]);
+    await h.adapter.send({ ...MESSAGE, headers: { "List-Unsubscribe": "<x>" } });
+    expect(h.lines).toEqual([]);
   });
 
   it("stops after three tries and hands the throttle back to the outbox", async () => {

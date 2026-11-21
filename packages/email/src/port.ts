@@ -18,6 +18,17 @@ export interface OutgoingEmail {
   /** For the adapter's own observation; never sent as a header beyond X-Fin-Category. */
   readonly template: string;
   readonly category: EmailClass;
+  /** The outbox row's `eml_` ID, for the adapter's `provider.call` lines; never sent. */
+  readonly emailId?: string;
+}
+
+/** The line writer an adapter writes `provider.call` with (`@fin/server`'s Telemetry.log shape). */
+export interface ProviderLog {
+  log(
+    event: string,
+    fields: Readonly<Record<string, unknown>>,
+    level?: "info" | "warn" | "error",
+  ): void;
 }
 
 /**

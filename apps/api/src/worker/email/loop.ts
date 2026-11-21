@@ -1,8 +1,9 @@
 // The worker's email loop (ARCHITECTURE §9.4): `NOTIFY email_outbox` wakes it, a 5-second poll is the
 // backstop. Each tick drains the outbox while claims come back full, sends due digests, and writes one
 // `job.run` line (`job: "email-send"`) with `oldestDueS`, which `email-outbox-age` watches. The
-// delivery check runs at start and then on its own timer. A tick never throws: a failure is a
-// `job.run` with `result: "failed"`, and the next tick tries again.
+// delivery check runs at start and then on its own timer, one run at a time: a timer that fires while
+// a run is still going starts none. A tick never throws: a failure is a `job.run` with
+// `result: "failed"`, and the next tick tries again.
 import type { BatchResult, EmailLog } from "@fin/email";
 
 export const JOB = "email-send";
@@ -54,6 +55,7 @@ export class EmailLoop {
   private lastLineAt = Number.NEGATIVE_INFINITY;
   private lastSweepAt = Number.NEGATIVE_INFINITY;
   private stopped = false;
+  private checking: Promise<void> | undefined;
 
   constructor(options: EmailLoopOptions) {
     this.o = options;
@@ -72,17 +74,27 @@ export class EmailLoop {
       }
     }
     this.cancels.push(schedule(() => this.wake("poll"), this.o.pollMs ?? 5000));
-    const check = this.o.deliveryCheck;
-    if (check !== undefined) {
-      void check().catch(() => undefined);
+    if (this.o.deliveryCheck !== undefined) {
+      this.runCheck();
       this.cancels.push(
-        schedule(
-          () => void check().catch(() => undefined),
-          this.o.deliveryCheckEveryMs ?? 15 * 60_000,
-        ),
+        schedule(() => this.runCheck(), this.o.deliveryCheckEveryMs ?? 15 * 60_000),
       );
     }
     this.wake("start");
+  }
+
+  /** Starts the delivery check unless one is still running on this replica. */
+  private runCheck(): void {
+    const check = this.o.deliveryCheck;
+    if (check === undefined || this.stopped || this.checking !== undefined) return;
+    this.checking = check()
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        this.checking = undefined;
+      });
   }
 
   /** Asks for a tick; one runs at a time, and a wake during a tick runs one more after it. */
@@ -112,17 +124,20 @@ export class EmailLoop {
     await this.unlisten?.().catch(() => undefined);
     this.unlisten = undefined;
     await this.idle();
+    await this.checking;
   }
 
   async tick(trigger: Trigger): Promise<void> {
     const started = this.o.clock.now();
     const total = { claimed: 0, sent: 0, failed: 0, folded: 0, deferred: 0 };
+    let paused = false;
     const add = (r: BatchResult): void => {
       total.claimed += r.claimed;
       total.sent += r.sent;
       total.failed += r.failed;
       total.folded += r.folded;
       total.deferred += r.deferred;
+      if (r.paused === true) paused = true;
     };
     try {
       const max = this.o.maxRunsPerTick ?? 20;
@@ -157,6 +172,8 @@ export class EmailLoop {
           oldestOtherS: age.otherS,
           waiting: age.waiting,
           ...(runs >= max ? { capped: true } : {}),
+          // Cloudflare refused the token or account: this replica claims nothing for a while.
+          ...(paused ? { paused: true } : {}),
         });
       }
     } catch (error) {

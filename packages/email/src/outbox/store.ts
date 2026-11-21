@@ -2,8 +2,9 @@
 // `sql/email_sender.sql`). Times are passed in from the injected clock, never read from the
 // database's own clock, so the tests control time; every write after a claim is fenced on
 // `leased_by`, so a replica whose lease was taken over changes nothing.
+import { findTemplate } from "../catalogue.ts";
 import type { EmailClass } from "../classes.ts";
-import type { PoolLike, Queryable } from "./db.ts";
+import { inTransaction, type PoolLike, type Queryable } from "./db.ts";
 
 export type RecipientKind = "address" | "customer" | "person";
 
@@ -146,6 +147,16 @@ export async function rescheduleRow(
 }
 
 /**
+ * A recipient window's kind: `security` (the digest's allowance); a code template
+ * (`code:identity/sign-in-code`), so no other template can use up the backstop a code depends on; or
+ * a class and a template folder (`notice:orgs`, `customer:kyc`).
+ */
+export type WindowKind =
+  | "security"
+  | `code:${string}/${string}`
+  | `${"notice" | "customer"}:${string}`;
+
+/**
  * Counts a row against its recipient's window once (the `counted` flag makes a retried row count
  * only the first time) and returns the window's count, or undefined when it was already counted.
  */
@@ -154,7 +165,7 @@ export async function countRecipient(
   id: string,
   holder: string,
   key: string,
-  kind: "security" | "other",
+  kind: WindowKind,
   windowStart: number,
 ): Promise<number | undefined> {
   const result = await db.query<{ count: number }>(
@@ -195,10 +206,20 @@ export interface BucketSettings {
   readonly ratePerSecond: number;
 }
 
+/** The bucket's row is gone and could not be put back: every send would wait, so it is an error. */
+export class BucketMissing extends Error {
+  readonly code = "bucket_missing";
+  constructor() {
+    super("email.send_bucket has no row for the bucket");
+    this.name = "BucketMissing";
+  }
+}
+
 /**
  * Takes one token from the shared bucket, leaving at least `reserve` tokens (ordinary mail may not
  * dip into the share kept for codes and security notices). Returns how many seconds to wait when
- * refused.
+ * refused. A missing row (a restore leaves the table empty, [DA-15]) is put back full, as the
+ * migration seeds it; if it cannot be, `BucketMissing` is thrown rather than holding mail quietly.
  */
 export async function takeToken(
   db: Queryable,
@@ -206,22 +227,31 @@ export async function takeToken(
   reserve: number,
   now: number,
 ): Promise<{ readonly taken: boolean; readonly waitMs: number }> {
-  const result = await db.query<{ avail: number; taken: string | number }>(
-    `WITH cur AS (
-       SELECT name,
-              least($2::float8, tokens + greatest(0, extract(epoch FROM ($4::timestamptz - refilled_at))) * $3::float8) AS avail
-         FROM email.send_bucket WHERE name = $1 FOR UPDATE),
-     upd AS (
-       UPDATE email.send_bucket b
-          SET tokens = cur.avail - 1, refilled_at = greatest(b.refilled_at, $4::timestamptz)
-         FROM cur
-        WHERE b.name = cur.name AND cur.avail >= 1 + $5::float8
-        RETURNING b.name)
-     SELECT cur.avail, (SELECT count(*) FROM upd) AS taken FROM cur`,
-    [bucket.name, bucket.capacity, bucket.ratePerSecond, iso(now), reserve],
-  );
-  const row = result.rows[0];
-  if (row === undefined) return { taken: false, waitMs: 60_000 };
+  const take = () =>
+    db.query<{ avail: number; taken: string | number }>(
+      `WITH cur AS (
+         SELECT name,
+                least($2::float8, tokens + greatest(0, extract(epoch FROM ($4::timestamptz - refilled_at))) * $3::float8) AS avail
+           FROM email.send_bucket WHERE name = $1 FOR UPDATE),
+       upd AS (
+         UPDATE email.send_bucket b
+            SET tokens = cur.avail - 1, refilled_at = greatest(b.refilled_at, $4::timestamptz)
+           FROM cur
+          WHERE b.name = cur.name AND cur.avail >= 1 + $5::float8
+          RETURNING b.name)
+       SELECT cur.avail, (SELECT count(*) FROM upd) AS taken FROM cur`,
+      [bucket.name, bucket.capacity, bucket.ratePerSecond, iso(now), reserve],
+    );
+  let row = (await take()).rows[0];
+  if (row === undefined) {
+    await db.query(
+      `INSERT INTO email.send_bucket (name, tokens, refilled_at) VALUES ($1, 0, '-infinity')
+       ON CONFLICT (name) DO NOTHING`,
+      [bucket.name],
+    );
+    row = (await take()).rows[0];
+    if (row === undefined) throw new BucketMissing();
+  }
   if (Number(row.taken) > 0) return { taken: true, waitMs: 0 };
   const missing = 1 + reserve - Number(row.avail);
   return {
@@ -230,53 +260,65 @@ export async function takeToken(
   };
 }
 
+export interface BudgetTake {
+  /** The scope that refused, or undefined when the send was counted. */
+  readonly refusedBy: string | undefined;
+  /** Each scope's count: before the take when refused, after it when counted. */
+  readonly counts: Readonly<Record<string, number>>;
+}
+
 /**
- * Counts one send against each budget scope, all or none, in one transaction. Returns the scope that
- * refused, or undefined, and each scope's count after the take.
+ * Counts one send against the `raise` scopes, all or none, in one transaction: the `read` scopes'
+ * rows (a superset) are locked in one order, so two replicas never deadlock, `refuse` decides from
+ * all of their counts together (a share kept for one class depends on what the others have used),
+ * and only then are the `raise` counts raised. Agreement across replicas is Postgres's, never
+ * process memory's.
  */
 export async function takeBudget(
   pool: PoolLike,
   day: string,
-  scopes: readonly { readonly scope: string; readonly limit: number }[],
-): Promise<{
-  readonly refusedBy: string | undefined;
-  readonly counts: Readonly<Record<string, number>>;
-}> {
-  const client = await pool.connect();
-  let broken: Error | undefined;
-  try {
-    await client.query("BEGIN");
+  scopes: { readonly read: readonly string[]; readonly raise: readonly string[] },
+  refuse: (counts: Readonly<Record<string, number>>) => string | undefined,
+): Promise<BudgetTake> {
+  const read = [...new Set([...scopes.read, ...scopes.raise])].sort();
+  const raise = [...new Set(scopes.raise)];
+  return inTransaction(pool, async (tx) => {
+    await tx.query(
+      `INSERT INTO email.daily_budget (day, scope, count)
+       SELECT $1::date, s, 0 FROM unnest($2::text[]) AS s ORDER BY s
+       ON CONFLICT (day, scope) DO NOTHING`,
+      [day, read],
+    );
+    const locked = await tx.query<{ scope: string; count: number }>(
+      `SELECT scope, count FROM email.daily_budget
+        WHERE day = $1::date AND scope = ANY($2::text[]) ORDER BY scope FOR UPDATE`,
+      [day, read],
+    );
     const counts: Record<string, number> = {};
-    for (const { scope, limit } of scopes) {
-      const result =
-        limit < 1
-          ? { rows: [] as { count: number }[] }
-          : await client.query<{ count: number }>(
-              `INSERT INTO email.daily_budget (day, scope, count) VALUES ($1::date, $2, 1)
-               ON CONFLICT (day, scope) DO UPDATE SET count = email.daily_budget.count + 1
-                WHERE email.daily_budget.count < $3
-               RETURNING count`,
-              [day, scope, limit],
-            );
-      const row = result.rows[0];
-      if (row === undefined) {
-        await client.query("ROLLBACK");
-        return { refusedBy: scope, counts };
-      }
-      counts[scope] = Number(row.count);
-    }
-    await client.query("COMMIT");
+    for (const r of locked.rows) counts[r.scope] = Number(r.count);
+    const refusedBy = refuse(counts);
+    if (refusedBy !== undefined) return { refusedBy, counts };
+    const raised = await tx.query<{ scope: string; count: number }>(
+      `UPDATE email.daily_budget SET count = count + 1
+        WHERE day = $1::date AND scope = ANY($2::text[]) RETURNING scope, count`,
+      [day, raise],
+    );
+    for (const r of raised.rows) counts[r.scope] = Number(r.count);
     return { refusedBy: undefined, counts };
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (rollbackError) {
-      broken = rollbackError instanceof Error ? rollbackError : new Error("rollback failed");
-    }
-    throw error;
-  } finally {
-    client.release(broken ?? false);
-  }
+  });
+}
+
+/** Gives one send back to each scope it was counted against (Cloudflare sent nothing). */
+export async function refundBudget(
+  db: Queryable,
+  day: string,
+  scopes: readonly string[],
+): Promise<void> {
+  await db.query(
+    `UPDATE email.daily_budget SET count = greatest(count - 1, 0)
+      WHERE day = $1::date AND scope = ANY($2::text[])`,
+    [day, [...new Set(scopes)]],
+  );
 }
 
 export interface DueDigest {
@@ -342,8 +384,62 @@ export interface EnqueueInput {
   readonly dueAt?: number;
 }
 
-/** Calls `email.enqueue()`: the only way any service, the worker included, adds a row. */
+/**
+ * `enqueue()` refused the input before it reached the database. `code` is `email.enqueue()`'s own
+ * SQLSTATE for bad input, so callers handle both alike; the message names fields, never values.
+ */
+export class EnqueueRefused extends Error {
+  readonly code = "FE002";
+  readonly reason: "unknown_template" | "invalid_params" | "bad_input";
+  constructor(reason: EnqueueRefused["reason"], message: string) {
+    super(message);
+    this.name = "EnqueueRefused";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Whether a string Postgres's jsonb would refuse: U+0000, or a lone surrogate (JSON.stringify writes
+ * it as a `\udXXX` escape). Either error's CONTEXT quotes the JSON text up to that point, which holds
+ * the address and any code, so such input never reaches the cast.
+ */
+function refusedByJsonb(text: string): boolean {
+  return text.includes("\u0000") || !text.isWellFormed();
+}
+
+/** Whether any string inside, key or value, is one Postgres's jsonb would refuse. */
+function holdsRefused(value: unknown): boolean {
+  if (typeof value === "string") return refusedByJsonb(value);
+  if (Array.isArray(value)) return value.some(holdsRefused);
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).some(([k, v]) => refusedByJsonb(k) || holdsRefused(v));
+  }
+  return false;
+}
+
+/**
+ * Calls `email.enqueue()`: the only way any service, the worker included, adds a row. The params are
+ * checked against the template first, so a notice that could never be rendered fails here, in the
+ * caller's transaction, and the action rolls back with it (spec 08 §4.1, [SA-41], T08-24), rather
+ * than being dropped by the worker after the action has committed.
+ */
 export async function enqueue(db: Queryable, input: EnqueueInput): Promise<string> {
+  const template = findTemplate(input.template);
+  if (template === undefined) {
+    throw new EnqueueRefused(
+      "unknown_template",
+      "email.enqueue: no such template in the catalogue",
+    );
+  }
+  const parsed = template.params.safeParse(input.params);
+  if (!parsed.success) {
+    // The issue paths name fields only, never their values.
+    const fields = parsed.error.issues.map((i) => i.path.join(".") || "(root)").join(",");
+    throw new EnqueueRefused(
+      "invalid_params",
+      `email.enqueue: params refused for ${template.id}: ${fields}`,
+    );
+  }
   const p: Record<string, unknown> = {
     id: input.id,
     template: input.template,
@@ -352,6 +448,9 @@ export async function enqueue(db: Queryable, input: EnqueueInput): Promise<strin
     params: input.params,
   };
   if (input.dueAt !== undefined) p.due_at = iso(input.dueAt);
+  if (holdsRefused(p)) {
+    throw new EnqueueRefused("bad_input", "email.enqueue: a NUL or a lone surrogate is refused");
+  }
   const result = await db.query<{ id: string }>("SELECT email.enqueue($1::jsonb) AS id", [
     JSON.stringify(p),
   ]);
@@ -374,8 +473,10 @@ export interface OutboxAge {
 }
 
 /**
- * How long rows have waited, from when they became due, for `job.run`'s `oldestDueS`. Folded rows
- * are left out: they wait for their digest by design.
+ * How long rows have waited, from when they first became due (`first_due_at`, set once at enqueue),
+ * for `job.run`'s `oldestDueS`. A deferral by the token bucket or a budget moves `due_at` but never
+ * `first_due_at`, so a row held back again and again keeps ageing and `email-outbox-age` sees it.
+ * Folded rows are left out: they wait for their digest by design.
  */
 export async function outboxAge(db: Queryable, now: number): Promise<OutboxAge> {
   const result = await db.query<{
@@ -383,13 +484,11 @@ export async function outboxAge(db: Queryable, now: number): Promise<OutboxAge> 
     other: number | null;
     waiting: string | number;
   }>(
-    `WITH w AS (
-       SELECT priority, CASE WHEN attempts = 0 AND due_at > created_at THEN due_at ELSE created_at END AS since
-         FROM email.outbox WHERE folded_into IS NULL)
-     SELECT extract(epoch FROM ($1::timestamptz - min(since) FILTER (WHERE priority <= 2)))::float8 AS urgent,
-            extract(epoch FROM ($1::timestamptz - min(since) FILTER (WHERE priority > 2)))::float8 AS other,
+    `SELECT extract(epoch FROM ($1::timestamptz - min(first_due_at) FILTER (WHERE priority <= 2)))::float8 AS urgent,
+            extract(epoch FROM ($1::timestamptz - min(first_due_at) FILTER (WHERE priority > 2)))::float8 AS other,
             count(*) AS waiting
-       FROM w WHERE since <= $1::timestamptz`,
+       FROM email.outbox
+      WHERE folded_into IS NULL AND first_due_at <= $1::timestamptz`,
     [iso(now)],
   );
   const row = result.rows[0];

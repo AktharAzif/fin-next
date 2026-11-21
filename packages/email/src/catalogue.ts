@@ -132,7 +132,11 @@ export function describe(templateId: string): string | undefined {
   return BY_ID.get(templateId)?.digestLine;
 }
 
-/** The SQL that loads `grantRows()`, with each group role mapped (tests prefix them). */
+/**
+ * The SQL that loads `grantRows()`, with each group role mapped (tests prefix them). It upserts, so it
+ * loads over rows an earlier migration seeded (P0-E's `ops/delivery-check`) and sets each row's class,
+ * priority and secret flag to the catalogue's.
+ */
 export function grantInsertSql(roleName: (role: SenderRole) => string = (r) => r): string {
   const values = grantRows().map(
     (g) =>
@@ -140,6 +144,8 @@ export function grantInsertSql(roleName: (role: SenderRole) => string = (r) => r
   );
   return [
     "INSERT INTO email.template_grant (template, role, category, priority, carries_secret) VALUES",
-    `${values.join(",\n")};`,
+    values.join(",\n"),
+    "ON CONFLICT (template, role) DO UPDATE SET category = EXCLUDED.category,",
+    "  priority = EXCLUDED.priority, carries_secret = EXCLUDED.carries_secret;",
   ].join("\n");
 }
