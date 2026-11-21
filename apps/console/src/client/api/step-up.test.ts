@@ -39,7 +39,9 @@ function controller(answer: "prove" | "close") {
 describe("withIntent", () => {
   it("runs once without a step-up when the first try passes", async () => {
     const { stepUp, asked } = controller("prove");
-    await expect(withIntent(stepUp, { ask: async () => "first", proved: async () => "no" })).resolves.toBe("first");
+    await expect(
+      withIntent(stepUp, { ask: async () => "first", proved: async () => "no" }),
+    ).resolves.toBe("first");
     expect(asked).toEqual([]);
   });
 
@@ -117,7 +119,9 @@ describe("withIntent", () => {
   it("passes any other failure of the first try through", async () => {
     const { stepUp, asked } = controller("prove");
     const refused = problem(403, "forbidden");
-    await expect(withIntent(stepUp, { ask: async () => Promise.reject(refused), proved: async () => {} })).rejects.toBe(refused);
+    await expect(
+      withIntent(stepUp, { ask: async () => Promise.reject(refused), proved: async () => {} }),
+    ).rejects.toBe(refused);
     expect(asked).toEqual([]);
   });
 });
@@ -134,7 +138,9 @@ describe("stepUpOf and reactToGate", () => {
     let protect = 0;
     expect(reactToGate(stepUp, problem(403, "second_factor_required"), () => protect++)).toBe(true);
     expect(reactToGate(stepUp, problem(403, "fresh_session_required"), () => protect++)).toBe(true);
-    expect(reactToGate(stepUp, problem(403, "second_factor_required", { hold: true }), () => protect++)).toBe(true);
+    expect(
+      reactToGate(stepUp, problem(403, "second_factor_required", { hold: true }), () => protect++),
+    ).toBe(true);
     expect(reactToGate(stepUp, problem(403, "forbidden"), () => protect++)).toBe(false);
     expect(notices).toEqual(["second_factor_required", "fresh_session_required"]);
     expect(protect).toBe(1);
@@ -158,9 +164,16 @@ describe("failureOf", () => {
   });
 
   it("reads a problem's own fields, and the fields a 400 names", () => {
-    const refused = problem(400, "invalid", { fields: [{ path: "name", code: "x" }, { path: ["email"], code: "y" }] });
+    const refused = problem(400, "invalid", {
+      fields: [
+        { path: "name", code: "x" },
+        { path: ["email"], code: "y" },
+      ],
+    });
     expect([...invalidFields(refused)]).toEqual(["name", "email"]);
-    expect(problemField(problem(403, "giving_refused", { problem: "beyond" }), "problem")).toBe("beyond");
+    expect(problemField(problem(403, "giving_refused", { problem: "beyond" }), "problem")).toBe(
+      "beyond",
+    );
     expect(invalidFields(new Error("x")).size).toBe(0);
   });
 });

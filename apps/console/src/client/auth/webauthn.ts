@@ -81,7 +81,12 @@ async function ceremony<T>(run: () => Promise<T>): Promise<T> {
  */
 export async function authenticateWithPasskey(
   api: Api,
-  options: { autofill?: boolean; signal?: AbortSignal } = {},
+  options: {
+    autofill?: boolean;
+    signal?: AbortSignal;
+    /** Called once the browser handed over a passkey, just before Fin checks it. */
+    onChosen?: () => void;
+  } = {},
 ): Promise<void> {
   const requestOptions = await api(
     passkeyAuthenticationOptions,
@@ -94,6 +99,7 @@ export async function authenticateWithPasskey(
       useBrowserAutofill: options.autofill === true,
     }),
   );
+  options.onChosen?.();
   await api(passkeyVerifyAuthentication, {
     response: response as unknown as Record<string, unknown>,
   });

@@ -1,0 +1,69 @@
+{
+  "board": "VerifyEmail",
+  "canvas": "fin-dashboard",
+  "route": "/verify-email",
+  "states": {
+    "waiting": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "noAddress": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "wrongCode": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "linkExpired": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "resendReady": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyEmails": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "fromLink": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "confirming": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "linkElsewhere": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

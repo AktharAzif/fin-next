@@ -152,17 +152,24 @@ function SignInPage() {
     }
   };
 
-  // Conditional UI: a saved passkey offered in the email field's autofill signs in at once.
+  // Conditional UI: a saved passkey offered in the email field's autofill signs in at once. Until
+  // the person picks one, nothing the autofill request meets is theirs to hear about.
   useEffect(() => {
     mounted.current = true;
     let live = true;
+    let chosen = false;
     void (async () => {
       if (!supported || !(await autofillSupported()) || !live) return;
       try {
-        await authenticateWithPasskey(ceremonyApi(), { autofill: true });
+        await authenticateWithPasskey(ceremonyApi(), {
+          autofill: true,
+          onChosen: () => {
+            chosen = true;
+          },
+        });
         if (live) await finish();
       } catch (error) {
-        if (live) passkeyFailure(error);
+        if (live && chosen) passkeyFailure(error);
       }
     })();
     return () => {

@@ -61,7 +61,9 @@ describe("libraryFetch", () => {
 
 describe("liftLibraryError", () => {
   it("turns the library's { code, message } into a problem document with the same status", async () => {
-    const lifted = await liftLibraryError(json(401, { code: "INVALID_CODE", message: "Invalid code" }));
+    const lifted = await liftLibraryError(
+      json(401, { code: "INVALID_CODE", message: "Invalid code" }),
+    );
     expect(lifted.status).toBe(401);
     expect(lifted.headers.get("Content-Type")).toBe("application/problem+json");
     expect(await lifted.json()).toEqual({

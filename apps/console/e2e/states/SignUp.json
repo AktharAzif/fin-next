@@ -1,0 +1,70 @@
+{
+  "board": "SignUp",
+  "canvas": "fin-dashboard",
+  "route": "/sign-up",
+  "states": {
+    "form": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "invited": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "nameRefused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "emailInvalid": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passwordShort": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "passwordCommon": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "creating": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey @security sign up, a passkey and an authenticator, then sign in with each"
+    },
+    "didntWork": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "googleBusy": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

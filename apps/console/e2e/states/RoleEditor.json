@@ -1,0 +1,67 @@
+{
+  "board": "RoleEditor",
+  "canvas": "fin-dashboard",
+  "route": "/settings/roles/$roleKey",
+  "states": {
+    "edit": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+    },
+    "new": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a new role ticks what it needs and is created with its intent"
+    },
+    "duplicate": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "builtIn": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a built-in role is read-only and the list links each role"
+    },
+    "limited": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "saving": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a new role ticks what it needs and is created with its intent"
+    },
+    "saved": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+    },
+    "saveFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "failed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "notFound": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "givingRefused": {
+      "status": "new",
+      "uiRequest": "UR-28",
+      "drawn": false,
+      "reason": "403 giving_refused on save"
+    }
+  }
+}

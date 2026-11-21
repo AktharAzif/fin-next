@@ -2,10 +2,17 @@
 // production page policy with no violation, the stored theme applies before the first paint, the
 // edge toggle collapses and expands the sidebar, the phone sheet opens, a signed-out visit goes to
 // sign-in, and /api/health answers through the stub. Against the built dist/static/.
+import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 import { problem, ready, serveStatic, watchPolicy } from "./support/static.ts";
 
-const ORIGIN = "http://127.0.0.1:4401";
+/** The project's origin: the harness's console host, or the stand-in config's loopback one. */
+function origin(): string {
+  const base = test.info().project.use.baseURL;
+  return typeof base === "string" && base !== "" ? new URL(base).origin : "http://127.0.0.1:4401";
+}
+
+const DIST = join(import.meta.dirname, "../dist/static");
 
 const MAYA = {
   gate: "ok",
@@ -49,9 +56,9 @@ test.afterEach(() => {
 
 async function signedIn(page: Page) {
   await serveStatic(page.context(), {
-    dir: "dist/static",
+    dir: DIST,
     profile: "app",
-    origin: ORIGIN,
+    origin: origin(),
     api: {
       "/api/viewer": (route) =>
         route.fulfill({
@@ -65,9 +72,9 @@ async function signedIn(page: Page) {
 
 async function signedOut(page: Page) {
   await serveStatic(page.context(), {
-    dir: "dist/static",
+    dir: DIST,
     profile: "app",
-    origin: ORIGIN,
+    origin: origin(),
     api: { "/api/viewer": (route) => route.fulfill(problem(401, "unauthenticated")) },
   });
 }
@@ -97,7 +104,7 @@ test("@csp a signed-out visit goes to sign-in, keeping a safe next", async ({ pa
   await signedOut(page);
   await page.goto("/settings/team");
   await ready(page);
-  await expect(page).toHaveURL(`${ORIGIN}/sign-in?next=%2Fsettings%2Fteam`);
+  await expect(page).toHaveURL(`${origin()}/sign-in?next=%2Fsettings%2Fteam`);
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Fin" })).toBeVisible();
   await expect(page.locator("[data-slot=auth-layout]")).toBeVisible();
 });
@@ -137,7 +144,7 @@ test("@journey the stored theme applies before the first paint", async ({ page }
 });
 
 test("@journey with storage blocked the page follows the system theme", async ({ browser }) => {
-  const context = await browser.newContext({ colorScheme: "dark", baseURL: ORIGIN });
+  const context = await browser.newContext({ colorScheme: "dark", baseURL: origin() });
   const page = await context.newPage();
   policy = await watchPolicy(context);
   await signedIn(page);

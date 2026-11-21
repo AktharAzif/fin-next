@@ -1,0 +1,82 @@
+{
+  "board": "SignInCode",
+  "canvas": "fin-dashboard",
+  "route": "/sign-in/code",
+  "states": {
+    "waiting": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "noAddress": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "codeFull": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "wrongCode": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "linkExpired": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "resendReady": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyEmails": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "ourSide": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "linkOpened": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "linkSigningIn": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "linkElsewhere": {
+      "status": "pending",
+      "day": "sat",
+      "note": "drawn as the empty form with an address field (spec 02 §15.4, S2-39)"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

@@ -35,9 +35,15 @@ describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
 
   it("says why Save is off", () => {
     const actor = toPermissions(["customers.read", "member.read"]);
-    const empty = draftProblems({ name: "", description: "", permissions: toPermissions([]) }, actor);
+    const empty = draftProblems(
+      { name: "", description: "", permissions: toPermissions([]) },
+      actor,
+    );
     expect(whySaveIsOff(empty, "")).toBe("Name the role and tick at least one permission.");
-    const named = draftProblems({ name: "Support", description: "", permissions: toPermissions([]) }, actor);
+    const named = draftProblems(
+      { name: "Support", description: "", permissions: toPermissions([]) },
+      actor,
+    );
     expect(whySaveIsOff(named, "Support")).toBe("Tick at least one permission.");
     const ready = draftProblems(
       { name: "Support", description: "", permissions: toPermissions(["customers.read"]) },
@@ -46,7 +52,10 @@ describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
     expect(ready).toEqual([]);
     expect(whySaveIsOff(ready, "Support")).toBeNull();
     expect(
-      draftProblems({ name: "Super Admin", description: "", permissions: toPermissions(["customers.read"]) }, actor),
+      draftProblems(
+        { name: "Super Admin", description: "", permissions: toPermissions(["customers.read"]) },
+        actor,
+      ),
     ).toContain("reads_as_built_in");
   });
 
@@ -64,8 +73,22 @@ describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
 
 describe("choosing a role ([SA-32])", () => {
   const roles: RoleRow[] = [
-    { roleKey: "super_admin", roleId: null, label: "Super admin", builtIn: true, permissionCount: 26, holders: 1 },
-    { roleKey: "admin", roleId: null, label: "Admin", builtIn: true, permissionCount: 24, holders: 1 },
+    {
+      roleKey: "super_admin",
+      roleId: null,
+      label: "Super admin",
+      builtIn: true,
+      permissionCount: 26,
+      holders: 1,
+    },
+    {
+      roleKey: "admin",
+      roleId: null,
+      label: "Admin",
+      builtIn: true,
+      permissionCount: 24,
+      holders: 1,
+    },
     {
       roleKey: "rol_dev",
       roleId: "rol_dev",
@@ -79,7 +102,10 @@ describe("choosing a role ([SA-32])", () => {
   ];
 
   it("disables the top role for anyone but its holders, and a role beyond the actor", () => {
-    const choices = roleChoices(roles, { roleKey: "admin", permissions: ["member.read", "apiKey.read"] });
+    const choices = roleChoices(roles, {
+      roleKey: "admin",
+      permissions: ["member.read", "apiKey.read"],
+    });
     expect(choices.map((c) => [c.roleKey, c.reason])).toEqual([
       ["super_admin", "Only a Super admin can do this."],
       ["admin", "You don’t have this yourself."],
@@ -91,8 +117,13 @@ describe("choosing a role ([SA-32])", () => {
   it("offers what the actor may give, marks the current role, and describes each", () => {
     const all = ["webhooks.read", "apiKey.read", "member.read"];
     const choices = roleChoices(roles.slice(2), { roleKey: "admin", permissions: all }, "rol_dev");
-    expect(choices[0]).toMatchObject({ reason: "Current", description: "Builds and tests the integration in Sandbox." });
-    expect(firstGivable(roleChoices(roles.slice(2), { roleKey: "admin", permissions: all }))).toBe("rol_dev");
+    expect(choices[0]).toMatchObject({
+      reason: "Current",
+      description: "Builds and tests the integration in Sandbox.",
+    });
+    expect(firstGivable(roleChoices(roles.slice(2), { roleKey: "admin", permissions: all }))).toBe(
+      "rol_dev",
+    );
   });
 });
 

@@ -126,7 +126,8 @@ function AuditLogPage() {
   const range = search.range ?? DEFAULT_RANGE;
   const open =
     search.view === undefined ? null : (rows.find((row) => row.id === search.view) ?? null);
-  const you = signedIn?.viewer.user.id ?? null;
+  // The organisation's log names everyone, the viewer included ("You" is Account security's).
+  const you = null;
 
   const without = (...keys: (keyof AuditSearch)[]): AuditSearch => {
     const next: AuditSearch = { ...search };

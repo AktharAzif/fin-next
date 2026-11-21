@@ -647,7 +647,7 @@ function InviteDialog(props: {
           <Input
             type="email"
             value={email}
-            placeholder="name@company.com"
+            placeholder="name@example.com"
             autoComplete="off"
             disabled={busy}
             onValueChange={(value) => setEmail(value)}

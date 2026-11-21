@@ -1,0 +1,65 @@
+{
+  "board": "StepUp",
+  "canvas": "fin-dashboard",
+  "route": "root dialog",
+  "states": {
+    "code": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an invitation asks for the factor and is sent again once with the intent"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an invitation asks for the factor and is sent again once with the intent"
+    },
+    "wrongCode": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "backup": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "wrongBackup": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyWaiting": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/journeys.spec.ts",
+      "test": "@journey create an organisation, invite and accept, a role through the editor, the audit log"
+    },
+    "passkeyFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noPasskeyUsed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "paused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noPasskeySupport": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "setupFirst": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "byEmail": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "byEmailFailed": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

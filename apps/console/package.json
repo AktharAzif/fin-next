@@ -9,10 +9,10 @@
     "build": "vite build --mode production",
     "build:test": "vite build --mode test",
     "routes": "node scripts/generate-routes.mjs",
-    "typecheck": "pnpm run routes && tsc -p tsconfig.json",
+    "typecheck": "pnpm run routes && tsc -p tsconfig.json && tsc -p e2e/tsconfig.json",
     "lint": "biome check .",
-    "test": "pnpm run routes && vitest run",
-    "e2e": "pnpm run build && playwright test"
+    "test": "vitest run --config ../../vitest.config.ts",
+    "e2e": "pnpm run build && node e2e/support/artefacts.ts dist/e2e-rendered && FIN_E2E_APPS=console FIN_E2E_RENDERED_DIR=\"$PWD/dist/e2e-rendered\" playwright test --config ../../playwright.config.ts"
   },
   "dependencies": {
     "@fin/access": "workspace:*",

@@ -1,4 +1,4 @@
-import type { ConsoleViewer } from "@fin/app-contracts";
+import type { ConsoleViewer, ConsoleViewerSignedIn } from "@fin/app-contracts";
 import { describe, expect, it } from "vitest";
 import { hasFactor, welcomeRedirect } from "../components/welcome.ts";
 import { stepFor, withNext } from "./after-sign-in.ts";
@@ -9,7 +9,7 @@ import { ceremonyOutcome } from "./webauthn.ts";
 const routes = new Set(["/", "/settings/team", "/welcome/secure", "/sign-in"]);
 const matches = (path: string) => routes.has(path);
 
-function viewer(overrides: Partial<Extract<ConsoleViewer, { gate: "ok" }>> = {}): ConsoleViewer {
+function viewer(overrides: Partial<ConsoleViewerSignedIn> = {}): ConsoleViewer {
   return {
     gate: "ok",
     user: { id: "usr_1", name: "Maya Rivera", email: "maya@example.com" },
@@ -80,7 +80,11 @@ describe("where a person goes after signing in (spec 02 §5.9, §6.2)", () => {
   it("follows the gate", () => {
     expect(stepFor(null, null, matches)).toEqual({ kind: "go", href: "/sign-in" });
     expect(
-      stepFor({ gate: "factor_step", email: "m@example.com", methods: ["passkey"] }, "/settings/team", matches),
+      stepFor(
+        { gate: "factor_step", email: "m@example.com", methods: ["passkey"] },
+        "/settings/team",
+        matches,
+      ),
     ).toEqual({ kind: "go", href: "/sign-in/two-factor?next=%2Fsettings%2Fteam" });
     expect(stepFor(viewer({ gate: "protect_account" }), null, matches)).toEqual({
       kind: "go",
@@ -98,14 +102,24 @@ describe("where a person goes after signing in (spec 02 §5.9, §6.2)", () => {
     const unknown = viewer({
       currentOrgId: null,
       memberships: [
-        { orgId: "org_2", name: "Studio Ito", roleKey: "member", roleLabel: "No access", roleKnown: false, liveStatus: "sandbox" },
+        {
+          orgId: "org_2",
+          name: "Studio Ito",
+          roleKey: "member",
+          roleLabel: "No access",
+          roleKnown: false,
+          liveStatus: "sandbox",
+        },
       ],
     });
     expect(stepFor(unknown, null, matches)).toEqual({ kind: "go", href: "/no-access" });
   });
 
   it("keeps a safe next and drops an unsafe one", () => {
-    expect(stepFor(viewer(), "/settings/team", matches)).toEqual({ kind: "go", href: "/settings/team" });
+    expect(stepFor(viewer(), "/settings/team", matches)).toEqual({
+      kind: "go",
+      href: "/settings/team",
+    });
     expect(stepFor(viewer(), "//evil.example.com", matches)).toEqual({ kind: "go", href: "/" });
     expect(stepFor(viewer(), "/api/viewer", matches)).toEqual({ kind: "go", href: "/" });
     expect(withNext("/sign-in", "/")).toBe("/sign-in");
@@ -128,7 +142,8 @@ describe("the welcome pages are for a person with no factor", () => {
 
 describe("the browser's passkey errors", () => {
   it("reads the outcome from the error's name and code, never its message", () => {
-    const named = (name: string, code?: string) => Object.assign(new Error("site text"), { name, code });
+    const named = (name: string, code?: string) =>
+      Object.assign(new Error("site text"), { name, code });
     expect(ceremonyOutcome(named("NotAllowedError"))).toBe("cancelled");
     expect(ceremonyOutcome(named("AbortError"))).toBe("aborted");
     expect(ceremonyOutcome(named("Error", "ERROR_CEREMONY_ABORTED"))).toBe("aborted");

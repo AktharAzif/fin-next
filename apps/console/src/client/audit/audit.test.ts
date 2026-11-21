@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AuditRow } from "../api/contracts/audit.ts";
 import { auditQuery, emptyKind, objectChip, readAuditSearch } from "./filters.ts";
-import { actorName, categoryLabel, describe as sentence, sentenceText, verifiedLabel } from "./sentences.ts";
+import {
+  actorName,
+  categoryLabel,
+  describe as sentence,
+  sentenceText,
+  verifiedLabel,
+} from "./sentences.ts";
 
 function row(event: string, extra: Partial<AuditRow> = {}): AuditRow {
   return {
@@ -41,9 +47,9 @@ describe("the audit log's sentences (spec 02 §14.5)", () => {
   it("says You for the viewer's own rows, and Fin for the system", () => {
     expect(actorName(row("session.created"), "usr_maya")).toBe("You");
     expect(actorName(row("x", { actor: { kind: "system" } }))).toBe("Fin");
-    expect(actorName(row("x", { actor: { kind: "user", name: null, email: "a@example.com" } }))).toBe(
-      "a@example.com",
-    );
+    expect(
+      actorName(row("x", { actor: { kind: "user", name: null, email: "a@example.com" } })),
+    ).toBe("a@example.com");
   });
 
   it("counts the backup codes left, and reads an unknown event by its name", () => {
@@ -75,13 +81,30 @@ describe("the audit log's filters (spec 02 §15.2.1)", () => {
         view: "aud_9",
         other: "x",
       }),
-    ).toEqual({ q: " priya ", type: "team", range: "7d", page: 2, target: "mem_1", targetKind: "role", view: "aud_9" });
-    expect(readAuditSearch({ type: "money", range: "1y", page: "0", target: "../x", view: "x" })).toEqual({});
+    ).toEqual({
+      q: " priya ",
+      type: "team",
+      range: "7d",
+      page: 2,
+      target: "mem_1",
+      targetKind: "role",
+      view: "aud_9",
+    });
+    expect(
+      readAuditSearch({ type: "money", range: "1y", page: "0", target: "../x", view: "x" }),
+    ).toEqual({});
   });
 
   it("asks the API for the page's filters, 30 days by default", () => {
-    expect(auditQuery({}, "Europe/London")).toEqual({ range: "30d", tz: "Europe/London", page: 1, size: 25 });
-    expect(auditQuery({ target: "rol_1", view: "aud_1" }, "UTC")).toMatchObject({ target: "rol_1" });
+    expect(auditQuery({}, "Europe/London")).toEqual({
+      range: "30d",
+      tz: "Europe/London",
+      page: 1,
+      size: 25,
+    });
+    expect(auditQuery({ target: "rol_1", view: "aud_1" }, "UTC")).toMatchObject({
+      target: "rol_1",
+    });
     expect(auditQuery({ target: "rol_1", view: "aud_1" }, "UTC")).not.toHaveProperty("view");
   });
 
