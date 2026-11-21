@@ -356,10 +356,56 @@ export class FakeCloudflare {
   }
 }
 
+/**
+ * What a rendered reference reads as: a superuser URL with the template's password in it (built at
+ * run time, so no source line holds a URL with a password).
+ */
+export const RENDERED_SECRET = ["postgresql:", "", `postgres:${"R".repeat(24)}@pg-host`, "db"].join(
+  "/",
+);
+
 export interface RailwayPatch {
   environmentId: string;
   serviceId: string;
   variables: Record<string, { value: string; isSealed?: boolean }>;
+}
+
+export interface FakeInstance {
+  region: string;
+  numReplicas: number;
+  restartPolicyType: string;
+  sleepApplication: boolean;
+  ipv6EgressEnabled: boolean;
+  image: string | null;
+  domains: string[];
+  tcpProxies: number;
+  healthcheckPath: string | null;
+  healthcheckTimeout: number | null;
+  overlapSeconds: number;
+  drainingSeconds: number;
+  startCommand: string | null;
+  cronSchedule: string | null;
+  variables: Record<string, string>;
+  sealed: Set<string>;
+  latestDeployment: { id: string; status: string } | null;
+}
+
+interface ProvisionSettings {
+  region: string;
+  services: Record<
+    string,
+    {
+      template?: boolean;
+      replicas: number;
+      restart?: string;
+      healthcheck?: string | null;
+      overlapSeconds?: number;
+      drainingSeconds?: number;
+      startCommand?: string;
+      cron?: string;
+      staticEgress: boolean;
+    }
+  >;
 }
 
 export class FakeRailway {
@@ -370,19 +416,135 @@ export class FakeRailway {
   egress = new Map<string, string[]>();
   /** When set, the next environmentPatchCommit answers this GraphQL error instead. */
   failPatch: string | undefined;
+  readonly instances = new Map<string, FakeInstance>();
+  /** Every deployment, with the image it runs (the instance's image when it was made). */
+  readonly deployments = new Map<
+    string,
+    { service: string; statuses: string[]; logs: string[]; reads: number; image: string | null }
+  >();
+  readonly updates: Array<{ service: string; input: Json }> = [];
+  environmentId = "";
+  /** The statuses each new deployment reports, in turn; the last one repeats. */
+  deployStatuses = ["DEPLOYING", "SUCCESS"];
+  /** The log lines a migrate deployment writes, for a release. */
+  migrateLogs = (release: string) => [
+    JSON.stringify({ event: "migrate.started" }),
+    JSON.stringify({ event: "migrate.done", release }),
+  ];
+  /**
+   * How many log reads of a migrate deployment see only its first line, as when Railway's log
+   * ingestion lags the container (the rest of the lines arrive after that many reads).
+   */
+  migrateLogReadsBehind = 0;
+  /** The variables migrate's container started with, per migrate deployment. */
+  readonly migrateEnvironments: Array<Record<string, string>> = [];
+  readonly variableDeletes: Array<{ service: string; name: string }> = [];
+  extendedRefused = false;
+  variablesRefused = false;
+  /**
+   * Reads that answer 200 with a GraphQL error that is no refusal (Railway's own failure), by
+   * operation (`finVariables`) or operation and service (`finVariables:migrate`).
+   */
+  readonly transient = new Set<string>();
+  /** A variableDelete that Railway accepts without removing anything. */
+  variableDeleteNoop = false;
+  /** Called after each serviceInstanceUpdate, to change an instance the way Railway might. */
+  onUpdate: ((service: string, instance: FakeInstance) => void) | undefined;
+  /** How the egress read answers: normally, a GraphQL refusal, or a 503 every time. */
+  egressAnswer: "ok" | "refused" | "unavailable" = "ok";
+  /** Instances of a service in another environment of the project, with their domains. */
+  readonly otherEnvironment = new Map<string, string[]>();
+  /**
+   * How the read of a deployment's image answers: with its image, a GraphQL refusal, or a meta
+   * that names no image.
+   */
+  deploymentImageAnswer: "ok" | "refused" | "no-image" = "ok";
 
   constructor(token: string, names: readonly string[]) {
     this.token = token;
-    names.forEach((name, i) => {
-      this.services.set(
-        name,
-        uuid(String.fromCharCode(97 + (i % 6))).replace(/^.{2}/, String(i).padStart(2, "0")),
-      );
-    });
+    for (const name of names) this.addService(name);
+  }
+
+  /** Adds a service to the project (with no instance until one is set or provisioned). */
+  addService(name: string, instance?: Partial<FakeInstance>): void {
+    const i = this.services.size;
+    this.services.set(
+      name,
+      uuid(String.fromCharCode(97 + (i % 6))).replace(/^.{2}/, String(i).padStart(2, "0")),
+    );
+    if (instance !== undefined) {
+      this.instances.set(name, {
+        region: "us-east4-eqdc4a",
+        numReplicas: 1,
+        restartPolicyType: "ALWAYS",
+        sleepApplication: false,
+        ipv6EgressEnabled: false,
+        image: null,
+        domains: [],
+        tcpProxies: 0,
+        healthcheckPath: null,
+        healthcheckTimeout: null,
+        overlapSeconds: 0,
+        drainingSeconds: 0,
+        startCommand: null,
+        cronSchedule: null,
+        variables: {},
+        sealed: new Set(),
+        latestDeployment: null,
+        ...instance,
+      });
+    }
+  }
+
+  /**
+   * Makes a service run an image the way a finished deploy leaves it: the instance set to the
+   * image, and a newest deployment of that image that ended with the status (SUCCESS: serving).
+   */
+  running(service: string, image: string, status = "SUCCESS"): void {
+    const instance = this.instances.get(service);
+    if (instance === undefined) throw new Error(`no instance of ${service}`);
+    const id = `dep-${this.deployments.size + 1}`;
+    this.deployments.set(id, { service, statuses: [status], logs: [], reads: 0, image });
+    instance.image = image;
+    instance.latestDeployment = { id, status };
   }
 
   nameOf(id: string): string | undefined {
     return [...this.services.entries()].find(([, v]) => v === id)?.[0];
+  }
+
+  /** Provisions every service exactly as the settings say (spec 01 §6.2), with no image yet. */
+  provision(
+    settings: ProvisionSettings,
+    environmentId: string,
+    egress: Record<string, readonly string[]> = {},
+  ): void {
+    this.environmentId = environmentId;
+    let n = 0;
+    for (const [name, want] of Object.entries(settings.services)) {
+      n++;
+      this.instances.set(name, {
+        region: settings.region,
+        numReplicas: want.replicas,
+        restartPolicyType: want.restart ?? "ALWAYS",
+        sleepApplication: false,
+        ipv6EgressEnabled: false,
+        image: null,
+        domains: [],
+        tcpProxies: 0,
+        healthcheckPath: want.healthcheck ?? null,
+        healthcheckTimeout: want.healthcheck ? 60 : null,
+        overlapSeconds: want.overlapSeconds ?? 0,
+        drainingSeconds: want.drainingSeconds ?? 0,
+        startCommand: want.startCommand ?? null,
+        cronSchedule: want.cron ?? null,
+        // The checklist sets PORT=8080 on every service it provisions (spec 01 §6.2).
+        variables: want.template === true ? {} : { PORT: "8080" },
+        sealed: new Set(),
+        latestDeployment: null,
+      });
+      if (want.staticEgress) this.egress.set(name, [...(egress[name] ?? [`198.51.100.${n}`])]);
+    }
   }
 
   readonly fetch: FetchFn = async (_url, init) => {
@@ -420,10 +582,191 @@ export class FakeRailway {
           serviceId,
           variables: s.variables,
         });
+        const instance = this.instances.get(this.nameOf(serviceId) ?? "");
+        for (const [name, v] of Object.entries(s.variables)) {
+          if (instance === undefined) continue;
+          if (v.isSealed === true) {
+            instance.sealed.add(name);
+            delete instance.variables[name];
+          } else instance.variables[name] = v.value;
+        }
       }
       return ok({ environmentPatchCommit: "commit" });
     }
+    const service = this.nameOf(String(variables.serviceId ?? "")) ?? "";
+    const refused = (what: string) =>
+      new Response(JSON.stringify({ errors: [{ message: `Cannot query field ${what}` }] }), {
+        status: 200,
+      });
+    if (this.transient.has(op) || this.transient.has(`${op}:${service}`)) {
+      return new Response(
+        JSON.stringify({ data: null, errors: [{ message: "Problem processing request" }] }),
+        { status: 200 },
+      );
+    }
+    if (op === "finStatus" || op === "finStatusExtended") {
+      if (op === "finStatusExtended" && this.extendedRefused) return refused("healthcheckPath");
+      return ok({
+        project: {
+          services: {
+            edges: [...this.services].map(([name, id]) => {
+              const i = this.instances.get(name);
+              const node =
+                i === undefined
+                  ? undefined
+                  : op === "finStatus"
+                    ? {
+                        environmentId: this.environmentId,
+                        region: i.region,
+                        numReplicas: i.numReplicas,
+                        restartPolicyType: i.restartPolicyType,
+                        sleepApplication: i.sleepApplication,
+                        ipv6EgressEnabled: i.ipv6EgressEnabled,
+                        source: { image: i.image },
+                        domains: {
+                          serviceDomains: i.domains.map((domain) => ({ domain })),
+                          customDomains: [],
+                        },
+                        latestDeployment: i.latestDeployment,
+                      }
+                    : {
+                        environmentId: this.environmentId,
+                        healthcheckPath: i.healthcheckPath,
+                        healthcheckTimeout: i.healthcheckTimeout,
+                        overlapSeconds: i.overlapSeconds,
+                        drainingSeconds: i.drainingSeconds,
+                        startCommand: i.startCommand,
+                        cronSchedule: i.cronSchedule,
+                      };
+              const other = this.otherEnvironment.get(name);
+              const otherEdge =
+                other === undefined
+                  ? []
+                  : [
+                      {
+                        node:
+                          op === "finStatus"
+                            ? {
+                                environmentId: "other-environment",
+                                source: { image: null },
+                                domains: {
+                                  serviceDomains: other.map((domain) => ({ domain })),
+                                  customDomains: [],
+                                },
+                              }
+                            : { environmentId: "other-environment" },
+                      },
+                    ];
+              return {
+                node: {
+                  id,
+                  name,
+                  serviceInstances: {
+                    edges: [...(node === undefined ? [] : [{ node }]), ...otherEdge],
+                  },
+                },
+              };
+            }),
+          },
+        },
+      });
+    }
+    if (op === "finTcp") {
+      return ok({
+        tcpProxies: Array.from(
+          { length: this.instances.get(service)?.tcpProxies ?? 0 },
+          (_, i) => ({ id: String(i) }),
+        ),
+      });
+    }
+    if (op === "finVariables") {
+      if (this.variablesRefused) return refused("variables");
+      const raw = this.instances.get(service)?.variables ?? {};
+      // Railway renders a reference (`${{service.VAR}}`) into its value unless asked for the
+      // unrendered form; a rendered database reference carries the template's password.
+      const unrendered = /\bunrendered:\s*true\b/.test(query);
+      return ok({
+        variables: Object.fromEntries(
+          Object.entries(raw).map(([name, value]) => [
+            name,
+            unrendered ? value : value.replace(/\$\{\{[^}]*\}\}/g, RENDERED_SECRET),
+          ]),
+        ),
+      });
+    }
+    if (op === "finInstanceUpdate") {
+      const input = variables.input as Json;
+      this.updates.push({ service, input });
+      const instance = this.instances.get(service);
+      const source = input.source as { image?: string } | undefined;
+      if (instance !== undefined && source?.image !== undefined) instance.image = source.image;
+      if (instance !== undefined && typeof input.startCommand === "string")
+        instance.startCommand = input.startCommand;
+      if (instance !== undefined) this.onUpdate?.(service, instance);
+      return ok({ serviceInstanceUpdate: true });
+    }
+    if (op === "finVariableDelete") {
+      const input = variables.input as { serviceId?: string; name?: string };
+      const target = this.nameOf(String(input.serviceId ?? "")) ?? "";
+      this.variableDeletes.push({ service: target, name: String(input.name) });
+      const instance = this.instances.get(target);
+      if (instance !== undefined && !this.variableDeleteNoop)
+        delete instance.variables[String(input.name)];
+      return ok({ variableDelete: true });
+    }
+    if (op === "finDeploy") {
+      const id = `dep-${this.deployments.size + 1}`;
+      const release = this.instances.get(service)?.variables.FIN_RELEASE ?? "";
+      if (service === "migrate")
+        this.migrateEnvironments.push({ ...(this.instances.get(service)?.variables ?? {}) });
+      this.deployments.set(id, {
+        service,
+        statuses: [...this.deployStatuses],
+        logs: service === "migrate" ? this.migrateLogs(release) : [],
+        reads: 0,
+        image: this.instances.get(service)?.image ?? null,
+      });
+      const instance = this.instances.get(service);
+      if (instance !== undefined) instance.latestDeployment = { id, status: "DEPLOYING" };
+      return ok({ serviceInstanceDeployV2: id });
+    }
+    if (op === "finDeployment") {
+      const d = this.deployments.get(String(variables.id));
+      if (d === undefined) return refused("deployment");
+      const status =
+        d.statuses.length > 1 ? (d.statuses.shift() ?? "SUCCESS") : (d.statuses[0] ?? "SUCCESS");
+      const instance = this.instances.get(d.service);
+      if (instance !== undefined && instance.latestDeployment?.id === variables.id) {
+        instance.latestDeployment = { id: String(variables.id), status };
+      }
+      return ok({ deployment: { id: variables.id, status } });
+    }
+    if (op === "finDeploymentImage") {
+      if (this.deploymentImageAnswer === "refused") return refused("meta");
+      const d = this.deployments.get(String(variables.id));
+      if (d === undefined) return refused("deployment");
+      return ok({
+        deployment: {
+          id: variables.id,
+          status: d.statuses[0] ?? "SUCCESS",
+          meta:
+            this.deploymentImageAnswer === "no-image" ? { reason: "deploy" } : { image: d.image },
+        },
+      });
+    }
+    if (op === "finLogs") {
+      const d = this.deployments.get(String(variables.deploymentId));
+      if (d === undefined) return ok({ deploymentLogs: [] });
+      d.reads++;
+      const lines = d.reads <= this.migrateLogReadsBehind ? d.logs.slice(0, 1) : d.logs;
+      return ok({ deploymentLogs: lines.map((message) => ({ message })) });
+    }
     if (op === "finEgress") {
+      if (this.egressAnswer === "refused") return refused("egressGateways");
+      if (this.egressAnswer === "unavailable")
+        return new Response(JSON.stringify({ errors: [{ message: "unavailable" }] }), {
+          status: 503,
+        });
       const name = this.nameOf(String(variables.serviceId)) ?? "";
       return ok({ egressGateways: (this.egress.get(name) ?? []).map((ipv4) => ({ ipv4 })) });
     }

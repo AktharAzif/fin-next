@@ -14,6 +14,7 @@ import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
 import { CLOUDFLARE_COMMANDS } from "./commands/cloudflare.ts";
 import { CORE_COMMANDS } from "./commands/core.ts";
+import { DEPLOY_COMMANDS } from "./commands/deploy.ts";
 import { parseArgs } from "./core/args.ts";
 import { Context, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
@@ -27,7 +28,11 @@ import {
 } from "./core/runtime.ts";
 import { ENVIRONMENTS, isEnvironment, loadSettings } from "./core/settings.ts";
 
-export const COMMANDS: readonly Command[] = [...CORE_COMMANDS, ...CLOUDFLARE_COMMANDS];
+export const COMMANDS: readonly Command[] = [
+  ...CORE_COMMANDS,
+  ...CLOUDFLARE_COMMANDS,
+  ...DEPLOY_COMMANDS,
+];
 
 function usage(commands: readonly Command[]): string {
   const lines = ["usage: pnpm fin <command> <env> [arguments] [--flags]", "", "commands:"];

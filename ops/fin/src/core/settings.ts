@@ -4,6 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { MAIN_REF, REPOSITORY, WORKFLOW } from "../../../../tools/static-deploy/src/provenance.ts";
 import { ConfigError } from "./errors.ts";
 import type { HostRole } from "./overlay.ts";
 import { HOST_ROLES } from "./overlay.ts";
@@ -72,6 +73,15 @@ export interface Settings {
   ingressProofs: Record<string, HostRole[]>;
   static: Record<string, StaticSettings>;
   staticOrder: string[];
+  /** The one-run static upload token minted on the operator machine (spec 01 §6.9, BD-05). */
+  staticToken: { name: string; permissionGroup: string; expiryMinutes: number };
+  /** Who builds and attests a release, and the CI job a deploy requires (CI-05; spec 01 §6.9). */
+  release: {
+    repository: string;
+    workflow: string;
+    ref: string;
+    mergeCheck: { workflow: string; job: string };
+  };
   access: {
     application: string;
     policy: string;
@@ -102,6 +112,10 @@ export interface Settings {
     project: string;
     region: string;
     imageRepository: string;
+    /** The superuser reference set on `migrate` for one run only (spec 01 §6.6 steps 4 and 6). */
+    bootstrapReference: { variable: string; value: string };
+    /** The public health paths a deploy's --smoke fetches, by host role. */
+    smoke: Array<{ host: HostRole; path: string }>;
     deployOrder: string[];
     connectorOrder: string[];
     sealedVariables: string[];
@@ -229,6 +243,10 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
   const rules = c.obj(top.rules, "rules");
   const rate = c.obj(rules.rate, "rules.rate");
   const railway = c.obj(top.railway, "railway");
+  const bootstrapReference = c.obj(railway.bootstrapReference, "railway.bootstrapReference");
+  const release = c.obj(top.release, "release");
+  const mergeCheck = c.obj(release.mergeCheck, "release.mergeCheck");
+  const staticToken = c.obj(top.staticToken, "staticToken");
   const servicesRaw = c.obj(railway.services, "railway.services");
   const services: Record<string, ServiceSettings> = {};
   for (const [name, value] of Object.entries(servicesRaw)) {
@@ -277,6 +295,22 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
     ingressProofs,
     static: statics,
     staticOrder: c.list(top.staticOrder, "staticOrder"),
+    staticToken: {
+      name: c.str(staticToken.name, "staticToken.name", own),
+      permissionGroup: c.oneOf(staticToken.permissionGroup, "staticToken.permissionGroup", [
+        "Workers Scripts Write",
+      ]),
+      expiryMinutes: c.num(staticToken.expiryMinutes, "staticToken.expiryMinutes"),
+    },
+    release: {
+      repository: c.str(release.repository, "release.repository", REPOSITORY),
+      workflow: c.str(release.workflow, "release.workflow", WORKFLOW),
+      ref: c.str(release.ref, "release.ref", MAIN_REF),
+      mergeCheck: {
+        workflow: c.str(mergeCheck.workflow, "release.mergeCheck.workflow", WORKFLOW),
+        job: c.str(mergeCheck.job, "release.mergeCheck.job", /^[a-z][a-z0-9-]*$/),
+      },
+    },
     access: {
       application: c.str(access.application, "access.application", own),
       policy: c.str(access.policy, "access.policy", own),
@@ -318,6 +352,27 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
         "railway.imageRepository",
         /^ghcr\.io\/[a-z0-9-]+\/$/,
       ),
+      bootstrapReference: {
+        variable: c.str(
+          bootstrapReference.variable,
+          "railway.bootstrapReference.variable",
+          /^FIN_BOOTSTRAP_DATABASE_URL$/,
+        ),
+        value: c.str(
+          bootstrapReference.value,
+          "railway.bootstrapReference.value",
+          /^\$\{\{[a-z][a-z0-9-]*\.[A-Z][A-Z0-9_]*\}\}$/,
+        ),
+      },
+      smoke: (Array.isArray(railway.smoke) ? railway.smoke : []).map(
+        (entry: unknown, i: number) => {
+          const e = c.obj(entry, `railway.smoke[${i}]`);
+          return {
+            host: c.role(e.host, `railway.smoke[${i}].host`),
+            path: c.str(e.path, `railway.smoke[${i}].path`, /^\/[a-z/]+$/),
+          };
+        },
+      ),
       deployOrder: c.list(railway.deployOrder, "railway.deployOrder"),
       connectorOrder: c.list(railway.connectorOrder, "railway.connectorOrder"),
       sealedVariables: c.list(railway.sealedVariables, "railway.sealedVariables"),
@@ -331,6 +386,7 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
     if (!Object.hasOwn(services, name))
       c.problems.push(`railway order names ${name}, which has no service`);
   }
+  if (!Object.hasOwn(services, "migrate")) c.problems.push("railway.services has no migrate");
   for (const t of Object.values(tunnels)) {
     for (const service of [t.connector, t.standby]) {
       if (!Object.hasOwn(services, service))
@@ -344,12 +400,15 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
     }
   }
   for (const service of Object.keys(ingressProofs)) {
-    if (services[service] === undefined)
+    if (!Object.hasOwn(services, service))
       c.problems.push(`ingressProofs names ${service}, which has no service`);
   }
   for (const name of settings.staticOrder) {
     if (!Object.hasOwn(statics, name))
       c.problems.push(`staticOrder names ${name}, which has no static deployment`);
+  }
+  if (settings.staticToken.expiryMinutes < 5 || settings.staticToken.expiryMinutes > 60) {
+    c.problems.push("staticToken.expiryMinutes must be between 5 and 60 (a one-run token)");
   }
   if (!Object.hasOwn(services, settings.email.token.service)) {
     c.problems.push("email.token.service names a service that does not exist");
