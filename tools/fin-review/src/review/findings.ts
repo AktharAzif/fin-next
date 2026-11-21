@@ -8,17 +8,18 @@
 //
 // A prior blocker's `fixed` claim is accepted only with a quote of the fix (spec 07 §2.3.2) from the
 // file its `fixWhere` names, within those lines, touching a line changed since the blocker was found,
-// in a file tied to the blocker: one it names (or that file renamed), a test of such a file, a file
-// one hop from it in the import graph, a file changed since in which the code the blocker quotes now
-// occurs more often than it did (where the defect may have moved or been copied), or, where a file it
-// names was deleted since, any file changed since (FixScope, computed by the run). What was already
-// there cannot be a fix. A claim the engine cannot accept leaves the blocker open and is recorded
-// with its reasons; it does not fail the output (a fabricated quote or a path outside the tree still
-// does, as rules 2 and 3 say). An accepted claim is only a claim: the run sends it to a sceptic, told
-// where the quoted code now also appears, and the blocker closes only when every sceptic finds the
-// defect gone, there too (src/review/run.ts). A moved defect is not a fixed one, and that is the fix
-// check's to judge: no text match can tell a move from a fix (a comment holding the old line defeats
-// it, and an unrelated line that matches it would refuse a real fix).
+// in a file tied to the blocker: one it names (or the path git pairs it with as renamed), a test of
+// such a file, a file one hop from it in the import graph, a file changed since in which the code the
+// blocker quotes now occurs more often than it did (where the defect may have moved or been copied),
+// or, where a file it names was deleted since, any file changed since (FixScope, computed by the
+// run). What was already there cannot be a fix. A claim the engine cannot accept leaves the blocker
+// open and is recorded with its reasons; it does not fail the output (a fabricated quote or a path
+// outside the tree still does, as rules 2 and 3 say). An accepted claim is only a claim: the run
+// sends it to a sceptic, told every other file of the head the quoted code occurs in (changed since
+// or not) and the path git pairs each renamed file it names with, and the blocker closes only when
+// every sceptic finds the defect gone, there too (src/review/run.ts). A moved defect is not a fixed
+// one, and that is the fix check's to judge: no text match can tell a move from a fix (a comment
+// holding the old line defeats it, and an unrelated line that matches it would refuse a real fix).
 //
 // An output that breaks any rule is retried once in a fresh session (§4.6). Findings are judged one
 // by one: an invalid finding is recorded as `invalid` and never shown, and the valid findings of the
@@ -80,30 +81,40 @@ export interface ValidationContext {
 /** Where a fix of one prior blocker may be quoted at the head, and where its quoted code went. */
 export interface FixScope {
   /**
-   * Each file at the head tied to the blocker (a file it names or that file renamed, a file in
-   * `quotedElsewhere`, a test of a named file, a file one hop from one; any file changed since when
-   * one it names was deleted), with the lines of it that changed since the blocker was found. A fix
-   * is quoted only from such lines.
+   * Each file at the head tied to the blocker (a file it names or the path git pairs it with as
+   * renamed, a file in `quotedElsewhere`, a test of a named file, a file one hop from one; any file
+   * changed since when one it names was deleted), with the lines of it that changed since the blocker
+   * was found. A fix is quoted only from such lines.
    */
   readonly files: ReadonlyMap<string, ReadonlySet<number>>;
   /**
    * The files changed since the blocker was found, other than a quote's own file, in which code the
    * blocker quotes (white space taken out) now occurs more often than it did then: where the defect
-   * may have moved or been copied. Its fix check is shown every one of them and takes two sceptics;
-   * past MAX_FIX_CHECK_PATHS no fix claim is accepted. Sorted.
+   * may have moved or been copied. Such a file is tied to the blocker (a fix may be quoted from it).
+   * Its fix check is shown every one of them and takes two sceptics. Sorted.
    */
   readonly quotedElsewhere: readonly string[];
   /**
+   * Every other file of the head, other than a quote's own file and those in `quotedElsewhere`, in
+   * which code the blocker quotes occurs: files that already held it when the blocker was found
+   * (unchanged since, or changed with no more of it), where the defect may now be reached through
+   * code changed around it. Not tied to the blocker. Its fix check is shown every one of them and
+   * takes two sceptics. Sorted.
+   */
+  readonly quotedStillIn: readonly string[];
+  /**
    * Each path the blocker names (in `where` or a quote) that git reads as renamed since it was found,
-   * with its path at the head: the code it names may live there now. Its fix check is shown them and
-   * takes two sceptics. Sorted by `from`.
+   * with the path git pairs it with at the head (by how alike the two files are, so the code it names
+   * may be there, or may have gone elsewhere). Its fix check is shown them and takes two sceptics.
+   * Sorted by `from`.
    */
   readonly renamed: ReadonlyArray<{ readonly from: string; readonly to: string }>;
 }
 
 /**
- * Most files a fix check is shown as where a blocker's quoted code now also appears. A check is never
- * shown part of that list: past it, a fix claim for the blocker is not accepted, and it stays open.
+ * Most files a fix check is shown as holding a blocker's quoted code, `quotedElsewhere` and
+ * `quotedStillIn` together. A check is never shown part of either list: past it, a fix claim for the
+ * blocker is not accepted, and it stays open.
  */
 export const MAX_FIX_CHECK_PATHS = 64;
 
@@ -173,18 +184,21 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
  * that changed since the blocker was found. Nothing that was already there when the blocker was
  * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
  * fix check's to judge (src/review/run.ts), so no claim is taken when the check could not be shown
- * every file the blocker's quoted code now also appears in.
+ * every other file the blocker's quoted code occurs in.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);
   if (scope === undefined) return [`${id} is not a prior blocker shown to this session`];
-  if (scope.quotedElsewhere.length > MAX_FIX_CHECK_PATHS) {
-    return [`${id}: the code the blocker quotes now also appears in ${scope.quotedElsewhere.length} changed files, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken`];
+  const holding = scope.quotedElsewhere.length + scope.quotedStillIn.length;
+  if (holding > MAX_FIX_CHECK_PATHS) {
+    return [
+      `${id}: the code the blocker quotes occurs in ${holding} other files, more than a fix check is shown (${MAX_FIX_CHECK_PATHS}), so no fix of it is taken (${scope.quotedElsewhere.length} changed since with more of it, ${scope.quotedStillIn.length} that already held it)`,
+    ];
   }
   if (quote.path !== where.path) return [`${id}: the fix is quoted from ${JSON.stringify(quote.path)}, not from ${JSON.stringify(where.path)}`];
   const changed = scope.files.get(where.path);
   if (changed === undefined) {
-    return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not tied to the blocker (a file it names or that file renamed, a file its quoted code now also appears in, a test of one, or a file one hop from one)`];
+    return [`${id}: the fix is quoted from ${JSON.stringify(where.path)}, which is not tied to the blocker (a file it names or the path git pairs it with as renamed, a changed file its quoted code now occurs in more often than it did, a test of one, or a file one hop from one)`];
   }
   const text = ctx.files.text(where.path) ?? "";
   const slice = text.split("\n").slice(where.startLine - 1, where.endLine).join("\n");

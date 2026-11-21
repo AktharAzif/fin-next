@@ -33,24 +33,38 @@ export function claimedFix(spec: SessionSpec): { fixWhere: Record<string, unknow
   return JSON.parse(rest.slice(0, rest.indexOf("\n===== END DATA"))) as { fixWhere: Record<string, unknown>; fixQuote: { path: string; text: string } };
 }
 
-const ELSEWHERE_HEADER = "# Where the code the finding quotes now also appears (files changed since it was reported)\n";
-
-/** The files a fix check was told now also hold the code the blocker quotes; [] when it was told of none. */
-export function shownElsewhere(spec: SessionSpec): string[] {
-  const at = spec.prompt.indexOf(ELSEWHERE_HEADER);
+/** The JSON list a fix check's prompt holds under `header`; [] when it holds no such list. */
+function shownList<T>(spec: SessionSpec, header: string): T[] {
+  const at = spec.prompt.indexOf(header);
   if (at < 0) return [];
-  const rest = spec.prompt.slice(at + ELSEWHERE_HEADER.length);
-  return JSON.parse(rest.slice(0, rest.indexOf(`\n\n${CLAIM_HEADER}`))) as string[];
+  const rest = spec.prompt.slice(at + header.length);
+  return JSON.parse(rest.slice(0, rest.indexOf("\n\n# "))) as T[];
 }
 
-const RENAMED_HEADER = "# Where the files the finding names are now (renamed since it was reported)\n";
+const ELSEWHERE_HEADER = "# Where the code the finding quotes now occurs more often than it did (files changed since it was reported)\n";
+
+/** The files a fix check was told the code the blocker quotes moved or was copied to; [] when it was told of none. */
+export function shownElsewhere(spec: SessionSpec): string[] {
+  return shownList<string>(spec, ELSEWHERE_HEADER);
+}
+
+const STILL_HEADER = "# Where else the code the finding quotes occurs (files that already held it when it was reported)\n";
+
+/** The other files a fix check was told hold the code the blocker quotes, as they did then; [] when it was told of none. */
+export function shownStill(spec: SessionSpec): string[] {
+  return shownList<string>(spec, STILL_HEADER);
+}
+
+/** Every file a fix check was told holds the code the blocker quotes, both lists. */
+export function shownQuoted(spec: SessionSpec): string[] {
+  return [...shownElsewhere(spec), ...shownStill(spec)];
+}
+
+const RENAMED_HEADER = "# The paths git pairs files the finding names with (read as renamed since it was reported)\n";
 
 /** The renames of the files a blocker names that a fix check was shown; [] when it was shown none. */
 export function shownRenamed(spec: SessionSpec): Array<{ from: string; to: string }> {
-  const at = spec.prompt.indexOf(RENAMED_HEADER);
-  if (at < 0) return [];
-  const rest = spec.prompt.slice(at + RENAMED_HEADER.length);
-  return JSON.parse(rest.slice(0, rest.indexOf("\n\n# "))) as Array<{ from: string; to: string }>;
+  return shownList<{ from: string; to: string }>(spec, RENAMED_HEADER);
 }
 
 /** A fix check that finds the defect gone, quoting the claimed fix as its guard. */

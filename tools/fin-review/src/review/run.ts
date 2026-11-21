@@ -284,6 +284,11 @@ class TreeFiles implements FileSource {
     return this.head.has(path);
   }
 
+  /** Every file of the head (not a link or a submodule), sorted. */
+  filePaths(): string[] {
+    return sortedUnique([...this.head.values()].filter((entry) => entryKind(entry) === "file").map((entry) => entry.path));
+  }
+
   /** What `path` is at the head: a file, a symbolic link or a submodule; null when it is not there. */
   kind(path: string): EntryKind | null {
     const entry = this.head.get(path);
@@ -459,6 +464,9 @@ function occurrences(text: string, part: string): number {
 /** The tree of `sha` by path, read once per run for every blocker found there. */
 type TreeAt = (sha: string) => Promise<Map<string, TreeEntry>>;
 
+/** A file of the head with its white space taken out, read once per run for every blocker. */
+type SqueezedAt = (path: string) => string;
+
 /**
  * Where a fix of a blocker found at `from` may be quoted at `head` (FixScope, src/review/findings.ts):
  *
@@ -473,9 +481,14 @@ type TreeAt = (sha: string) => Promise<Map<string, TreeEntry>>;
  *
  * each with the lines of it that changed since `from` (rename-aware, so a file moved as it was has
  * none, and a file unchanged since has none). A text match cannot tell a move from a fix, so the fix
- * check decides, shown every file the quoted code now also appears in and every file the blocker
- * names (in `where` or a quote) that git reads as renamed since (`renamed`), which is where its code
- * now lives; past MAX_FIX_CHECK_PATHS such files no claim is taken (src/review/findings.ts).
+ * check decides. It is shown every file of the head, other than a quote's own, in which a text the
+ * blocker quotes occurs at all: those in `quotedElsewhere`, and the rest (`quotedStillIn`: files that
+ * already held it, unchanged since or changed around it, where the defect may now be reached through
+ * code changed around a line that was there before); and, for every file the blocker names (in
+ * `where` or a quote) that git reads as renamed since, the path git pairs it with (`renamed`), which
+ * git chooses by how alike the two files are, so the code may be there or may have gone elsewhere.
+ * Only `quotedElsewhere` ties a file as a place a fix may be quoted. Past MAX_FIX_CHECK_PATHS files in
+ * the two lists together no claim is taken (src/review/findings.ts).
  */
 async function fixScopeFor(
   mirror: string,
@@ -485,16 +498,18 @@ async function fixScopeFor(
   files: TreeFiles,
   graph: ImportGraph,
   treeAt: TreeAt,
+  squeezedAt: SqueezedAt,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<FixScope> {
   const out = new Map<string, Set<number>>();
   const where = Array.isArray(blocker.finding.where) ? blocker.finding.where : [];
   const paths = sortedUnique(where.map((item) => (isJsonObject(item) && typeof item.path === "string" ? item.path : "")).filter((path) => path !== ""));
-  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return { files: out, quotedElsewhere: [], renamed: [] };
+  // No file is tied to the blocker in either case below, so no claim can be taken and no check runs.
+  if (paths.length === 0 || paths.length > MAX_FIX_PATHS) return { files: out, quotedElsewhere: [], quotedStillIn: [], renamed: [] };
   if (from === head || (await resolveCommit(mirror, from, env)) === null || !(await isAncestor(mirror, from, head, env))) {
     // Nothing changed since the blocker was found (or the change cannot be shown): no line can be a fix.
     for (const path of paths) if (files.kind(path) === "file") out.set(path, new Set());
-    return { files: out, quotedElsewhere: [], renamed: [] };
+    return { files: out, quotedElsewhere: [], quotedStillIn: [], renamed: [] };
   }
   const delta = await diffTwoDot(mirror, from, head, env);
   const atHead = (path: string): string | null => {
@@ -507,23 +522,31 @@ async function fixScopeFor(
   const deletedNamed = named.length < paths.length;
   const changedSince = delta.filter((entry) => entry.status !== "D" && files.kind(entry.path) === "file");
 
-  // Where the code the blocker quotes now occurs more often than it did: the defect may be there now.
+  // Every other file of the head that holds code the blocker quotes: where it occurs more often than
+  // it did the defect may have moved or been copied there; anywhere else it may still be reached.
   const quoteList = (Array.isArray(blocker.finding.quotes) ? blocker.finding.quotes : []).filter(
     (quote) => isJsonObject(quote) && typeof quote.text === "string" && typeof quote.path === "string",
   );
   const quotes = quoteList.map((quote) => ({ home: atHead(quote.path), part: squeezed(quote.text) })).filter((quote) => quote.part !== "");
-  // Each file the blocker names, in `where` or a quote, that git reads as renamed: its code lives there now.
+  // Each file the blocker names, in `where` or a quote, that git reads as renamed, and the path git pairs it with.
   const renamed = sortedUnique([...paths, ...quoteList.map((quote) => quote.path)]).flatMap((path) => {
     const to = atHead(path);
     return to === null || to === path ? [] : [{ from: path, to }];
   });
+  const holding = new Set<string>();
+  const changedAt = new Map(changedSince.map((entry) => [entry.path, entry]));
   const counted: Array<{ entry: DiffEntry; part: string; now: number }> = [];
-  for (const entry of changedSince) {
-    const text = squeezed(files.text(entry.path) ?? "");
-    for (const quote of quotes) {
-      if (entry.path === quote.home) continue;
-      const now = occurrences(text, quote.part);
-      if (now > 0) counted.push({ entry, part: quote.part, now });
+  if (quotes.length > 0) {
+    for (const path of files.filePaths()) {
+      const text = squeezedAt(path);
+      for (const quote of quotes) {
+        if (path === quote.home) continue;
+        const now = occurrences(text, quote.part);
+        if (now === 0) continue;
+        holding.add(path);
+        const entry = changedAt.get(path);
+        if (entry !== undefined) counted.push({ entry, part: quote.part, now });
+      }
     }
   }
   const before = new Map<string, string>();
@@ -544,6 +567,7 @@ async function fixScopeFor(
   const elsewhere = new Set<string>();
   for (const { entry, part, now } of counted) if (now > occurrences(before.get(entry.path) ?? "", part)) elsewhere.add(entry.path);
   const quotedElsewhere = sortedUnique(elsewhere);
+  const quotedStillIn = sortedUnique([...holding].filter((path) => !elsewhere.has(path)));
 
   // The files tied to the blocker, the named ones and those the quoted code went to first so a cap never drops them.
   const tied = new Set<string>(named);
@@ -562,7 +586,7 @@ async function fixScopeFor(
     else if (entry.status === "R" && entry.oldPath !== null) out.set(path, await changedLineNumbers(mirror, from, head, path, env, entry.oldPath));
     else out.set(path, await changedLineNumbers(mirror, from, head, path, env));
   }
-  return { files: out, quotedElsewhere, renamed };
+  return { files: out, quotedElsewhere, quotedStillIn, renamed };
 }
 
 // ---- Planning helpers -------------------------------------------------------------------------
@@ -648,6 +672,7 @@ function priorBlockData(priors: ReadonlyMap<string, OpenBlocker>, scopes: Readon
   const list = [...priors].map(([promptId, blocker]) => {
     const tied = sortedUnique(scopes.get(blocker.id)?.files.keys() ?? []);
     const elsewhere = scopes.get(blocker.id)?.quotedElsewhere ?? [];
+    const still = scopes.get(blocker.id)?.quotedStillIn ?? [];
     const renamed = scopes.get(blocker.id)?.renamed ?? [];
     return {
       id: promptId,
@@ -663,6 +688,7 @@ function priorBlockData(priors: ReadonlyMap<string, OpenBlocker>, scopes: Readon
       fixMayBeIn: listed(tied),
       ...(renamed.length === 0 ? {} : { renamedSince: renamed }),
       ...(elsewhere.length === 0 ? {} : { quotedCodeAlsoIn: listed(elsewhere) }),
+      ...(still.length === 0 ? {} : { quotedCodeStillIn: listed(still) }),
     };
   });
   return dataBlock(`# Prior blockers\n${JSON.stringify(list, null, 2)}\n`);
@@ -923,8 +949,16 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
       if (tree === undefined) trees.set(sha, (tree = new Map((await lsTree(mirror, sha, env)).map((entry) => [entry.path, entry]))));
       return tree;
     };
+    // Every file of the head is searched for each blocker's quoted code; each is squeezed once.
+    const squeezedTexts = new Map<string, string>();
+    const squeezedAt: SqueezedAt = (path) => {
+      let text = squeezedTexts.get(path);
+      if (text === undefined) squeezedTexts.set(path, (text = squeezed(decodeText(files.bytes(path) ?? Buffer.alloc(0)))));
+      return text;
+    };
     const fixScopesByBlocker = new Map<string, FixScope>();
-    for (const blocker of priorBlockers) fixScopesByBlocker.set(blocker.id, await fixScopeFor(mirror, blocker.foundAt, head, blocker, files, graph, treeAt, env));
+    for (const blocker of priorBlockers) fixScopesByBlocker.set(blocker.id, await fixScopeFor(mirror, blocker.foundAt, head, blocker, files, graph, treeAt, squeezedAt, env));
+    squeezedTexts.clear();
 
     // Lenses and attack profiles of the change's tier, and any lens a prior blocker needs.
     const lensSet = new Set<Lens>(tier === null ? [] : requiredLenses(config.lenses, tier, changed.map((path) => path.path)));
@@ -1156,24 +1190,30 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
      * The fix check of a prior blocker a lens claims fixed, with a claim the engine accepted: the
      * blocker's finding and the claimed fix go to a sceptic (two, the second on the attack model,
      * for a high or critical blocker, when a file the blocker names was renamed since, or when the
-     * code the blocker quotes now also appears in another changed file; the check is shown each of
-     * them, never part of the list), asked whether the defect can still happen at this head. It
-     * closes only when every one refutes it with a guard quoted from this head; a confirmation, an
-     * UNSURE, an unguarded refutation or a session that could not answer leaves it open (and a
-     * model mismatch or a budget stop makes the run could-not-check, as for any sceptic).
+     * code the blocker quotes occurs in any other file of the head; the check is shown each such
+     * file and each path git pairs a named file with, never part of a list), asked whether the
+     * defect can still happen at this head. It closes only when every one refutes it with a guard
+     * quoted from this head; a confirmation, an UNSURE, an unguarded refutation or a session that
+     * could not answer leaves it open (and a model mismatch or a budget stop makes the run
+     * could-not-check, as for any sceptic).
      */
     const checkFix = async (blocker: OpenBlocker, fixWhere: Where, fixQuote: Quote): Promise<void> => {
       const claim = priorClaims.get(blocker.id);
       if (claim === undefined) return;
       const index = String(priorBlockers.indexOf(blocker) + 1).padStart(3, "0");
       const scope = fixScopesByBlocker.get(blocker.id);
-      const elsewhere = scope?.quotedElsewhere ?? [];
-      const renamed = scope?.renamed ?? [];
-      // The claim was not accepted past the cap (findings.ts); never show a check part of the list.
-      if (elsewhere.length > MAX_FIX_CHECK_PATHS) return;
+      // A claim with no scope cannot have been accepted (findings.ts): never check it, and it stays open.
+      if (scope === undefined) {
+        claim.outcome = "unchecked";
+        return;
+      }
+      const { quotedElsewhere, quotedStillIn, renamed } = scope;
+      // The claim was not accepted past the cap (findings.ts); never show a check part of a list.
+      if (quotedElsewhere.length + quotedStillIn.length > MAX_FIX_CHECK_PATHS) return;
       claim.outcome = "checking";
-      const roles: Role[] = severityRank(blocker.finding.severity) >= severityRank("high") || elsewhere.length > 0 || renamed.length > 0 ? ["sceptic1", "sceptic2"] : ["sceptic1"];
-      const prompt = fixCheckPrompt(blocker.finding, { fixWhere, fixQuote }, { quotedElsewhere: elsewhere, renamed }, procedure.fixCheckPrompt);
+      const moved = quotedElsewhere.length > 0 || quotedStillIn.length > 0 || renamed.length > 0;
+      const roles: Role[] = severityRank(blocker.finding.severity) >= severityRank("high") || moved ? ["sceptic1", "sceptic2"] : ["sceptic1"];
+      const prompt = fixCheckPrompt(blocker.finding, { fixWhere, fixQuote }, { quotedElsewhere, quotedStillIn, renamed }, procedure.fixCheckPrompt);
       const schema = procedure.schemas.sceptic;
       for (const role of roles) {
         const id = `${role}-prior-${index}`;
@@ -1370,6 +1410,7 @@ export async function runReview(req: ReviewRequest, deps: ReviewDeps): Promise<n
         id: blocker.id,
         status: priorStatus.get(blocker.id) ?? "open",
         quotedElsewhere: fixScopesByBlocker.get(blocker.id)?.quotedElsewhere ?? [],
+        quotedStillIn: fixScopesByBlocker.get(blocker.id)?.quotedStillIn ?? [],
         renamed: fixScopesByBlocker.get(blocker.id)?.renamed ?? [],
         claim: priorClaims.get(blocker.id) ?? null,
       })),
@@ -1592,7 +1633,7 @@ function planSessions(input: PlanInput): SessionPlan[] {
       checklist: items.map((item) => item.id),
       allowed: opts.allowed,
       priors,
-      fixScopes: new Map([...priors].map(([promptId, blocker]): [string, FixScope] => [promptId, input.fixScopesByBlocker.get(blocker.id) ?? { files: new Map(), quotedElsewhere: [], renamed: [] }])),
+      fixScopes: new Map([...priors].map(([promptId, blocker]): [string, FixScope] => [promptId, input.fixScopesByBlocker.get(blocker.id) ?? { files: new Map(), quotedElsewhere: [], quotedStillIn: [], renamed: [] }])),
     };
   };
 

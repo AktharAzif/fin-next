@@ -10,11 +10,14 @@ is CONFIRMED, REFUTED or UNSURE, about the defect, at this head.
   earlier head: the code may have moved since.
 - Read the files the finding names, the file of the claimed fix, and every path to the defect, with
   Read, Grep and Glob. Search the tree for the code the finding quotes: the defect may now live in
-  another file. When the DATA block lists files the finding names that were renamed since, read each
-  at its new path and judge the defect there: that is where its code now lives. When the DATA block
-  lists where the code the finding quotes now also appears, read each of those files and judge the
-  defect there as well: a match may be unrelated code, but a defect moved or copied there is not
-  fixed.
+  another file. When the DATA block lists the paths git pairs files the finding names with (read as
+  renamed since), read each and judge the defect there: git pairs two paths by how alike the files
+  are, so the finding's code may be there, or may have gone elsewhere while another file took over
+  its name. The DATA block lists every other file that holds the code the finding quotes: where it
+  now occurs more often than it did, and where else it occurs (files that already held it). Read each
+  of those files and judge the defect there as well: a match may be unrelated code, but a defect
+  moved or copied there, or reached there now through code changed around a line that was already
+  there, is not fixed.
 - **CONFIRMED**: the defect the finding describes can still happen at this head, in the place it
   names or anywhere the same code now lives (moved, renamed or copied). A fix that leaves any path
   to the defect open leaves it CONFIRMED. Leave `severity` out.
