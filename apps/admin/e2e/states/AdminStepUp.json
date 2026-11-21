@@ -1,0 +1,39 @@
+{
+  "board": "AdminStepUp",
+  "canvas": "fin-admin",
+  "route": "(the root dialog)",
+  "states": {
+    "both": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "passkeyOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey a new enrolment code, then removing the member, each with the passkey"
+    },
+    "appOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "passkeyPrompt": { "status": "pending", "day": "sat" },
+    "passkeyClosed": { "status": "pending", "day": "sat" },
+    "noPasskeySupport": { "status": "pending", "day": "sat" },
+    "codeShort": { "status": "pending", "day": "sat" },
+    "verifying": { "status": "pending", "day": "sat" },
+    "tooManyTries": { "status": "pending", "day": "sat" },
+    "cancelled": {
+      "status": "new",
+      "uiRequest": "UR-25",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey closing Confirm it's you adds nobody"
+    }
+  }
+}

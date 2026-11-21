@@ -1,0 +1,74 @@
+{
+  "board": "AdminSecondFactor",
+  "canvas": "fin-admin",
+  "route": "/sign-in/factor",
+  "states": {
+    "both": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+    },
+    "passkeyOnly": { "status": "pending", "day": "sat" },
+    "appOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a code sign-in is held at the factor step until the authenticator's code is right"
+    },
+    "passkeyPrompt": { "status": "pending", "day": "sat" },
+    "passkeyClosed": { "status": "pending", "day": "sat" },
+    "noPasskeySupport": { "status": "pending", "day": "sat" },
+    "noPasskey": { "status": "pending", "day": "sat" },
+    "codeShort": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a code sign-in is held at the factor step until the authenticator's code is right"
+    },
+    "verifying": { "status": "pending", "day": "sat" },
+    "tooManyTries": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with both factors is offered the passkey first, and too many tries end it"
+    },
+    "setup": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "setupPasskey": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey a wrong emailed code, then a passkey alone after signing out"
+    },
+    "setupPasskeyClosed": { "status": "pending", "day": "sat" },
+    "setupApp": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "setupAppShort": { "status": "pending", "day": "sat" },
+    "turningOn": { "status": "pending", "day": "sat" },
+    "enrolmentCode": {
+      "status": "new",
+      "uiRequest": "UR-24",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "enrolmentCodeWrong": {
+      "status": "new",
+      "uiRequest": "UR-24",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    }
+  }
+}

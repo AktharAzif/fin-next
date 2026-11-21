@@ -1,0 +1,99 @@
+{
+  "board": "AdminSignIn",
+  "canvas": "fin-admin",
+  "route": "/sign-in",
+  "states": {
+    "start": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "startEmpty": {
+      "status": "unreachable",
+      "reason": "Behind Cloudflare Access the viewer always names the Access address, which prefills the field; the empty field is drawn only without Access (local development)."
+    },
+    "ended": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@visual the sign-in page draws in the system theme, light or dark"
+    },
+    "googleFailed": { "status": "pending", "day": "stretch-5" },
+    "noGoogle": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey a wrong emailed code, then a passkey alone after signing out"
+    },
+    "notWorkEmail": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey the work email is checked before anything is sent"
+    },
+    "noEmail": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey the work email is checked before anything is sent"
+    },
+    "tooManyCodes": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey the code step says a short, expired or limited code, and while it sends"
+    },
+    "sending": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey the code step says a short, expired or limited code, and while it sends"
+    },
+    "code": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "codeResent": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a new code after 45 seconds, and the page says it was sent"
+    },
+    "codeShort": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey the code step says a short, expired or limited code, and while it sends"
+    },
+    "codeWrong": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey a wrong emailed code, then a passkey alone after signing out"
+    },
+    "codeExpired": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey the code step says a short, expired or limited code, and while it sends"
+    },
+    "codeLocked": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey the code step says a short, expired or limited code, and while it sends"
+    },
+    "verifying": { "status": "pending", "day": "sat" },
+    "passkey": {
+      "status": "new",
+      "uiRequest": "UR-22",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
+      "test": "@journey a wrong emailed code, then a passkey alone after signing out"
+    }
+  }
+}
