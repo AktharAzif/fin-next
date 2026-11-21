@@ -736,6 +736,35 @@ describe("imports:check", () => {
       `setTimeout${BT}tick()${BT};`,
       'window["setTimeout"]("tick()");',
       'setTimeout(("tick()"), 1);',
+      // The function bind returns, called; an argument that holds a call; the sink in
+      // parentheses, after a TypeScript assertion; Reflect's apply.
+      'setTimeout.bind(window)("tick()", 1);',
+      'setInterval.bind(null)("tick()", 1);',
+      'setTimeout.bind(window)?.("tick()", 1);',
+      'setTimeout.bind(window, "tick()")(1);',
+      'el.setAttribute.bind(el)("style", css);',
+      'el.toggleAttribute.bind(el)("style");',
+      'el.setAttributeNS(getNs(), "style", css);',
+      'el.setAttributeNS(ns(a()), "style", css);',
+      'el.setAttributeNS(ns /* a, b */, "style", css);',
+      'el.setAttributeNS("a,b", "style", css);',
+      'el.setAttributeNS.bind(el)(null, "style", css);',
+      'el.setAttributeNS.apply(el, [ns, "style", css]);',
+      '(setTimeout as any)("tick()", 1);',
+      '(0, setTimeout)("tick()", 1);',
+      'setTimeout!("tick()");',
+      'setTimeout(<any>"tick()");',
+      'setTimeout(("tick()" as string), 1);',
+      '(el.setAttribute as any)("style", css);',
+      'el!.setAttribute!("style", css);',
+      'el.setAttribute(<string>"style", css);',
+      'Reflect.apply(setTimeout, window, ["tick()", 1]);',
+      'Reflect.apply(window.setInterval as any, null, ["tick()", 1]);',
+      'Reflect.apply(el.setAttribute, el, ["style", css]);',
+      'Reflect.apply(el["setAttribute"], el, ["style", css]);',
+      'Reflect.apply(el.setAttributeNS, el, [null, "style", css]);',
+      "doc!.write(html);",
+      "getDoc!()!.write(html);",
       // Markup an iframe holds as its whole document, in any case, and the other parsers.
       "iframe.srcdoc = s;",
       '<iframe title="p" srcDoc={s} />',
@@ -769,6 +798,20 @@ describe("imports:check", () => {
       'globalThis.Function?.("x");',
       'new window.Function("x");',
       "top.eval(s);",
+      // A TypeScript assertion in the parentheses or after the name.
+      "(eval as any)(s);",
+      "(0, eval as typeof eval)(s);",
+      "(eval!)(s);",
+      "(eval satisfies typeof eval)(s);",
+      "(eval as (typeof eval))(s);",
+      "(<any>eval)(s);",
+      "(window.eval as any)(s);",
+      "(eval)!(s);",
+      "eval!(s);",
+      'Function!("x");',
+      'new (Function as any)("x");',
+      "Reflect.apply(<any>eval, null, [s]);",
+      "window!.eval(s);",
     ]) {
       assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
       for (const file of ["packages/ui/src/a.tsx", "apps/console/src/client/x.ts"]) {
@@ -792,8 +835,42 @@ describe("imports:check", () => {
       "Function.prototype.toString.call(f);",
       "const f: Function = g;",
       "const fn = (cb: Function) => cb;",
+      "const t = setTimeout.bind(window);",
+      "setTimeout.bind(window)(() => tick(), 1);",
+      "el.setAttribute.bind(el)('data-style', x);",
+      "el.setAttributeNS(getNs(), 'data-style', css);",
+      'el.setAttributeNS("a", "b", "style");',
+      "Reflect.apply(setTimeout, window, [tick, 1]);",
+      'Reflect.apply(el.setAttribute, el, ["data-x", "style"]);',
+      "const g = (cb as Function)(x);",
+      "(evaluate as any)(s);",
+      "const ok = evaluate!(s);",
+      "clearTimeout(t as ReturnType<typeof setTimeout>);",
+      "if (x !== eval) y();",
     ]) {
       assert.deepEqual(checkSource("apps/console/src/client/x.ts", src(line)), [], line);
+    }
+  });
+
+  test("the page policy reads a long run of white space, comments or assertions in linear time", {
+    timeout: 20_000,
+  }, () => {
+    const n = 20_000;
+    for (const text of [
+      `el.setAttributeNS(${" ".repeat(n)}`,
+      `el.setAttributeNS(${"/* c */".repeat(n / 4)}`,
+      `el.setAttributeNS(${'"a" '.repeat(n / 4)}`,
+      `setTimeout as any${" ".repeat(n)}`,
+      `(eval as any${" ".repeat(n)}`,
+      `Reflect.apply(setTimeout as any${"/* c */".repeat(n / 4)}`,
+      `doc${"!".repeat(n)}`,
+      `doc${" ! ".repeat(n / 2)}`,
+      `setTimeout${"/* c */!".repeat(n / 4)}`,
+    ]) {
+      const start = performance.now();
+      checkSource("apps/console/src/client/x.ts", src(text));
+      const took = performance.now() - start;
+      assert.ok(took < 2_000, `${text.slice(0, 30)}: ${Math.round(took)} ms`);
     }
   });
 
@@ -894,6 +971,98 @@ describe("imports:check", () => {
     const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
     assert.equal(run.status, 1);
     assert.match(run.output, /^packages\/frame\/src\/render\.ts:1 test-file-import: /m);
+  });
+
+  test("a package.json's browser map and entry fields send no code that runs to test code", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      JSON.stringify({ private: true, ...fields });
+    const sink = src(
+      `${EXP} const put = (el: HTMLElement, h: string) => {`,
+      "  el.innerHTML = h;",
+      "};",
+    );
+    const safe = src(
+      `${EXP} const put = (el: HTMLElement, h: string) => {`,
+      "  el.textContent = h;",
+      "};",
+    );
+    const layout = JSON.stringify({ version: 1, controlPaths: [], entries: [] });
+    const consumer = src(`${IMP} { put } from "@fin/ui";`, "put(document.body, location.hash);");
+    // Vite maps the entry the exports map names through an object browser field, and the
+    // package's own relative imports too: both bundle test/sink.ts, and no import names it.
+    for (const browser of [
+      { "./src/index.ts": "./test/sink.ts" },
+      { "./src/render.ts": "./test/sink.ts" },
+    ]) {
+      const dir = makeRepo({
+        "tools/layout.json": layout,
+        "packages/ui/package.json": manifest({
+          name: "@fin/ui",
+          exports: { ".": "./src/index.ts" },
+          browser,
+        }),
+        "packages/ui/src/index.ts": src(`${EXP} { put } from "./render.ts";`),
+        "packages/ui/src/render.ts": safe,
+        "packages/ui/test/sink.ts": sink,
+        "apps/console/src/client/main.ts": consumer,
+      });
+      const findings = checkImports(dir);
+      assert.deepEqual(
+        findings.map((f) => `${f.file} ${f.rule}`),
+        [
+          "packages/ui/package.json package-manifest",
+          "apps/console/src/client/main.ts test-file-import",
+        ],
+        JSON.stringify(browser),
+      );
+      const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+      assert.equal(run.status, 1);
+      assert.match(run.output, /^packages\/ui\/package\.json package-manifest: /m);
+    }
+    // A package.json with no name maps the imports of the files under it the same; a root entry
+    // field that names test code (Vite's jsnext:main and jsnext included) is code that runs.
+    const dir = makeRepo({
+      "tools/layout.json": layout,
+      "apps/console/src/client/package.json": manifest({
+        browser: { "./render.ts": "./e2e/sink.ts" },
+      }),
+      "packages/icons/package.json": manifest({
+        name: "@fin/icons",
+        "jsnext:main": "./test/sink.ts",
+      }),
+      "packages/motion/package.json": manifest({ name: "@fin/motion", jsnext: "./Fixtures/a.ts" }),
+      "packages/tokens/package.json": manifest({ name: "@fin/tokens", module: "./src/x.test.ts" }),
+      "packages/frame/package.json": manifest({
+        name: "@fin/frame",
+        main: "./test/index.ts",
+        exports: { ".": "./src/index.ts" },
+      }),
+      "apps/admin/src/client/main.ts": src(`${IMP} { a } from "@fin/icons";`),
+      // What may: a string browser field, an export a package's tests use, and a fixture's.
+      "packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        browser: "./src/index.ts",
+        exports: { ".": "./src/index.ts", "./testing": "./test/index.ts" },
+      }),
+      "tools/fin-review/fixtures/plan/package.json": manifest({
+        name: "@fin/ui",
+        browser: { "./src/index.ts": "./test/sink.ts" },
+        main: "./test/sink.ts",
+      }),
+    });
+    assert.deepEqual(
+      checkImports(dir)
+        .map((f) => `${f.file} ${f.rule}`)
+        .sort(),
+      [
+        "apps/admin/src/client/main.ts test-file-import",
+        "apps/console/src/client/package.json package-manifest",
+        "packages/frame/package.json package-manifest",
+        "packages/icons/package.json package-manifest",
+        "packages/motion/package.json package-manifest",
+        "packages/tokens/package.json package-manifest",
+      ],
+    );
   });
 
   test("a long export with comments and no `from` is read in linear time", {

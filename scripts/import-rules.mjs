@@ -17,8 +17,12 @@
 //     file system reads it), since a test's own imports are not held to these rules, and no file
 //     under a test/, tests/, __tests__/, e2e/ or fixtures/ directory (in any case too), which the
 //     page policy below leaves out: not by a relative path, a workspace package's subpath or a
-//     target of its exports map, nor by a module URL Vite bundles or import.meta's resolve names;
-//     and it uses no Vite glob import, which loads files no rule reads as imports;
+//     target of its exports map or entry fields, nor by a module URL Vite bundles or
+//     import.meta's resolve names; and it uses no Vite glob import, which loads files no rule
+//     reads as imports;
+//   - a package.json (tests' and fixtures' aside) has no object-form browser field, through which
+//     Vite maps the imports of the files under it where no import shows it, and no root entry
+//     field (main, module, browser, jsnext:main, jsnext) that names test code;
 //   - a module specifier names its module plainly: no surrounding white space, control character,
 //     backslash or percent-encoding (in a relative URL Node reads `%2e` as a dot and `\` as a
 //     slash, and drops a tab), and no subpath import, `#name`, which stands for a module the rules
@@ -188,22 +192,48 @@ const TRIVIA = String.raw`\s|/\*(?:[^*]|\*(?!/))*\*/|//[^\n\r\u2028\u2029]*(?![^
 const GAP = `(?:${TRIVIA})*`;
 const GAP1 = `(?:${TRIVIA})+`; // at least one, as between `new` and its name
 const QUOTE = String.raw`['"\x60]`;
-// A member access, `.` or `?.`.
-const DOT = String.raw`${GAP}\??\.${GAP}`;
+// The patterns below are written so that each character can be read one way only, so a failed
+// match backtracks through them in linear time: where two parts could both take white space or a
+// comment, one of them cannot start or end with it.
+// TypeScript's non-null assertions, `!`, which may follow any expression.
+const BANG = `(?:${GAP}!)*`;
+// A member access, `.` or `?.` (after a non-null assertion too).
+const DOT = String.raw`${BANG}${GAP}\??\.${GAP}`;
 // What follows a name reached by a string key (`el["name"]`) rather than as a member.
 const KEY_END = String.raw`(?:${QUOTE}${GAP}\])?`;
-// The opening of a call's arguments, `(` or `?.(`.
-const OPEN = String.raw`${GAP}(?:\?\.${GAP})?\(`;
-// The receiver that call, apply and bind take first, up to its comma (one level of parentheses in
-// it read too).
-const RECEIVER = String.raw`(?:[^,()]|\([^()]*\))*,`;
+// The opening of a call's arguments, `(` or `?.(` (after a non-null assertion too).
+const OPEN = String.raw`${BANG}${GAP}(?:\?\.${GAP})?\(`;
+// Text in parentheses, two levels deep: an argument list, or an argument that holds a call.
+const PARENS = String.raw`\((?:[^()]|\([^()]*\))*\)`;
+// An argument up to its comma, parenthesised text in it read too: the receiver that call, apply
+// and bind take first.
+const RECEIVER = `(?:[^,()]|${PARENS})*,`;
+// An argument up to its comma, read item by item: white space and comments, a quoted string (a
+// comma in it read too), parenthesised text, or any other character but a comma.
+const ARGUMENT = String.raw`(?:${TRIVIA}|'(?:[^'\\\n\r]|\\[^])*'|"(?:[^"\\\n\r]|\\[^])*"|\x60(?:[^\x60\\]|\\[^])*\x60|${PARENS}|[^,()\s/'"\x60]|/(?![*/]))*,`;
+// The end of a name's parentheses, `)`, after a TypeScript assertion (`as T`, `satisfies T` or
+// `!`) or none; with a comma in `stops`, the end of an argument instead.
+const closedBy = (/** @type {string} */ stops, /** @type {string} */ end) =>
+  String.raw`(?:${GAP}(?:!|(?:as|satisfies)(?![\w$]))(?:[^${stops}]|\([^()]*\))*|${GAP})${end}`;
+const CLOSED = closedBy("()", String.raw`\)`);
+// A TypeScript angle-bracket assertion before an expression, `<T>`.
+const ASSERTION = `(?:<[^<>()]*>${GAP})*`;
 // A call of the function named just before: `f(`, `f?.(`, a tagged template, or one through its
 // call, apply or bind.
-const CALLED = String.raw`(?:${OPEN}|${GAP}\x60|${DOT}(?:call|apply|bind)(?![\w$]))`;
-// Up to a call's first argument: past `(` or `?.(`, or past the receiver of call, apply or bind,
-// then past any `(` or `[` before it (a parenthesised argument; an array, which apply reads, and
-// which a timer or an attribute name reads as its text).
-const FIRST_ARG = `(?:${OPEN}|${DOT}(?:call|apply|bind)${OPEN}${RECEIVER})${GAP}(?:[[(]${GAP})*`;
+const CALLED = String.raw`(?:${OPEN}|${BANG}${GAP}\x60|${DOT}(?:call|apply|bind)(?![\w$]))`;
+// Up to a call's arguments. The name may close a parenthesis first (an indirect call, `(0, f)(`,
+// or an assertion, `(f as T)(`). Then past `(` or `?.(`; past the receiver of call, apply or bind;
+// or past bind's arguments to the call of the bound function, `f.bind(x)(`.
+const CALL = String.raw`(?:${CLOSED})?(?:${OPEN}|${DOT}(?:call|apply)${OPEN}${RECEIVER}|${DOT}bind${OPEN}(?:${RECEIVER}|(?:[^()]|${PARENS})*\)${OPEN}))`;
+// Up to an argument's text: past any `(`, `[` or `<T>` before it (a parenthesised argument; an
+// array, which apply reads, and which a timer or an attribute name reads as its text; an
+// assertion).
+const ARG_START = `${GAP}(?:(?:[[(]|<[^<>()]*>)${GAP})*`;
+const FIRST_ARG = `${CALL}${ARG_START}`;
+// Up to the arguments a function gets when Reflect's apply calls it, `Reflect.apply(f, x, [`: the
+// function named by `names`, plain, as a member or by a string key, then its receiver.
+const reflectApplied = (/** @type {string} */ names) =>
+  String.raw`(?<![\w$])Reflect${DOT}apply${OPEN}[^,()]*?(?<![\w$])(?:${names})${KEY_END}${closedBy("(),", ",")}${RECEIVER}${GAP}\[`;
 
 // The names of the loaders, built at run time like the test fixtures: a string that names a
 // loader is refused in this file's own area, so this file holds none.
@@ -276,9 +306,12 @@ const EXPORT_DECLARATIONS = new Set([
 // included, as written and again with every escape decoded (unescapeText): a reading of the code's
 // structure can be led to take code for a string or a comment, so the policy trusts none, and a
 // comment that names a sink is refused too. Every direct spelling of a sink is read: a member, an
-// optional member or a string key; a call, an optional call, a tagged template or a call through
-// call, apply or bind (and, for eval and the Function constructor, through Reflect's apply and
-// construct, or in parentheses); with white space and comments anywhere JavaScript allows them.
+// optional member or a string key; a call, an optional call, a tagged template, a call through
+// call or apply, a call of the function bind returns (or of bind's own bound arguments), a call
+// through Reflect's apply (and for the Function constructor its construct), or a call of the sink
+// in parentheses, as an indirect call (`(0, f)(...)`); with a TypeScript assertion (`as T`,
+// `satisfies T`, `!` or `<T>`) where one may stand, an argument that holds a call, and white
+// space and comments anywhere JavaScript allows them.
 // A sink reached by another name (a destructured or assigned alias) is beyond a reading of the
 // text, as BD-19 says of loading code. Tests, their helpers and fixtures (files under test/, e2e/
 // or fixtures/) are left out, since a violation fixture plants one on purpose, and code that runs
@@ -319,10 +352,16 @@ const [WRITE, WRITELN] = joined([
   ["wri", "te"],
   ["wri", "teln"],
 ]);
-const DOCUMENT_NAME = String.raw`(?<![\w$])[\w$]*(?:doc|Doc|DOC)(?:ument|UMENT)?${KEY_END}(?:${GAP}(?:\([^()]*\)|[)!]))*(?:${DOT}open${GAP}\([^()]*\))?(?:${DOT}prototype)?`;
+// (A non-null assertion before a call or a parenthesis is read with it; one before the member
+// access is DOT's, so each `!` is read one way.)
+const DOCUMENT_NAME = String.raw`(?<![\w$])[\w$]*(?:doc|Doc|DOC)(?:ument|UMENT)?${KEY_END}(?:${BANG}${GAP}(?:\([^()]*\)|\)))*(?:${DOT}open${GAP}\([^()]*\))?(?:${DOT}prototype)?`;
 const STYLE = `${QUOTE}style${QUOTE}`;
 // What sets or creates an attribute, or reaches an attribute node that can be written.
 const ATTRIBUTE_WRITERS = "setAttribute|createAttribute|getAttributeNode|getNamedItem";
+// The namespaced forms' first argument (any expression: a string, or one that holds a call), then
+// the attribute's name.
+const NAMESPACE = `${ARGUMENT}${ARG_START}${STYLE}`;
+const TIMERS = "setTimeout|setInterval";
 // The globals whose eval and Function are the page's own or a frame's.
 const GLOBAL = `(?:globalThis|window|self|top|parent|frames|opener|contentWindow|defaultView)${DOT}`;
 const CODE_FROM_STRING = "no code is built from a string (eval, the Function constructor)";
@@ -351,8 +390,10 @@ const PAGE_POLICY = [
     pattern: new RegExp(
       [
         String.raw`(?<![\w$])(?:${ATTRIBUTE_WRITERS}|toggleAttribute)${KEY_END}${FIRST_ARG}${STYLE}`,
-        String.raw`(?<![\w$])(?:${ATTRIBUTE_WRITERS})NS${KEY_END}${FIRST_ARG}(?:${QUOTE}[^'"\x60]*${QUOTE}|[^,()'"\x60]*)${GAP},${GAP}(?:[[(]${GAP})*${STYLE}`,
-        String.raw`(?<![\w$])attributes(?:${DOT}style(?![\w$])|${GAP}(?:\?\.${GAP})?\[${GAP}${STYLE})`,
+        `${reflectApplied(`${ATTRIBUTE_WRITERS}|toggleAttribute`)}${ARG_START}${STYLE}`,
+        String.raw`(?<![\w$])(?:${ATTRIBUTE_WRITERS})NS${KEY_END}${CALL}${NAMESPACE}`,
+        `${reflectApplied(`(?:${ATTRIBUTE_WRITERS})NS`)}${NAMESPACE}`,
+        String.raw`(?<![\w$])attributes(?:${DOT}style(?![\w$])|${BANG}${GAP}(?:\?\.${GAP})?\[${GAP}${STYLE})`,
       ].join("|"),
       "gi",
     ),
@@ -360,7 +401,10 @@ const PAGE_POLICY = [
   },
   {
     pattern: new RegExp(
-      String.raw`(?<![\w$])(?:setTimeout|setInterval)${KEY_END}(?:${FIRST_ARG}${QUOTE}|${GAP}\x60)`,
+      [
+        String.raw`(?<![\w$])(?:${TIMERS})${KEY_END}(?:${FIRST_ARG}${QUOTE}|${BANG}${GAP}\x60)`,
+        `${reflectApplied(TIMERS)}${ARG_START}${QUOTE}`,
+      ].join("|"),
       "g",
     ),
     message: "setTimeout and setInterval take a function, never a string of code",
@@ -372,9 +416,9 @@ const PAGE_POLICY = [
         String.raw`(?<![\w$])${GLOBAL}(?:eval|Function)${CALLED}`,
         String.raw`(?<![\w$])new${GAP1}(?:${GLOBAL})?Function\b(?!\$)`,
         // In parentheses, as an indirect call or a construction: a comma's last operand, or the
-        // whole of the parentheses.
-        String.raw`[(,]${GAP}(?:${GLOBAL})?(?:eval|Function)${GAP}\)${CALLED}`,
-        String.raw`(?<![\w$])Reflect${DOT}(?:apply|construct)${OPEN}${GAP}(?:${GLOBAL})?(?:eval|Function)(?![\w$])`,
+        // whole of the parentheses, with a TypeScript assertion before or after the name.
+        String.raw`[(,]${GAP}${ASSERTION}(?:${GLOBAL})?(?:eval|Function)(?![\w$])${CLOSED}${CALLED}`,
+        String.raw`(?<![\w$])Reflect${DOT}(?:apply|construct)${OPEN}${GAP}${ASSERTION}(?:${GLOBAL})?(?:eval|Function)(?![\w$])`,
       ].join("|"),
       "g",
     ),
@@ -1717,34 +1761,43 @@ export function checkImports(root) {
     }
   };
   const controlPaths = readControlPaths(root);
-  const packages = readWorkspacePackages(root, listed);
+  const manifests = readManifests(root, listed);
+  const packages = workspacePackages(manifests);
   /** @param {string} specifier */
   const packageTargets = (specifier) => {
     const found = packages.get(packageName(specifier));
     return found?.flatMap((pkg) => resolvePackage(pkg, specifier));
   };
-  return files.flatMap((file) =>
-    checkSource(file, readFileSync(join(root, file), "utf8"), exists, {
-      controlPaths,
-      isFile,
-      packageTargets,
-    }),
-  );
+  return [
+    ...manifests.flatMap(checkManifest),
+    ...files.flatMap((file) =>
+      checkSource(file, readFileSync(join(root, file), "utf8"), exists, {
+        controlPaths,
+        isFile,
+        packageTargets,
+      }),
+    ),
+  ];
 }
 
+/** @typedef {{ path: string, dir: string, manifest: Record<string, unknown> }} Manifest */
 /** @typedef {{ name: string, dir: string, manifest: Record<string, unknown> }} WorkspacePackage */
 
+// The fields Vite and Node read for a package's root entry when it has no exports map: Vite's
+// default main fields for the browser (browser, module, jsnext:main, jsnext), then main.
+const ENTRY_FIELDS = ["browser", "module", "jsnext:main", "jsnext", "main"];
+
 /**
- * The repository's packages by name: every package.json the repository lists with a name, but
- * those under node_modules or a test, e2e or fixtures directory (a fixture may copy a real
- * package's name). Two with one name are both kept, so a target of either is read.
+ * Every package.json the repository lists, named or not, but those under node_modules or a test,
+ * e2e or fixtures directory (a fixture may copy a real package's name, or plant a violation on
+ * purpose), and those that are no JSON object.
  * @param {string} root
  * @param {Set<string>} listed
- * @returns {Map<string, WorkspacePackage[]>}
+ * @returns {Manifest[]}
  */
-function readWorkspacePackages(root, listed) {
-  /** @type {Map<string, WorkspacePackage[]>} */
-  const packages = new Map();
+function readManifests(root, listed) {
+  /** @type {Manifest[]} */
+  const manifests = [];
   for (const path of listed) {
     if (path !== "package.json" && !path.endsWith("/package.json")) continue;
     if (/(?:^|\/)node_modules\//.test(path) || TEST_CODE_TARGET.test(path)) continue;
@@ -1755,8 +1808,22 @@ function readWorkspacePackages(root, listed) {
     } catch {
       continue;
     }
-    if (!isRecord(manifest) || typeof manifest.name !== "string") continue;
-    const dir = posix.dirname(path);
+    if (isRecord(manifest)) manifests.push({ path, dir: posix.dirname(path), manifest });
+  }
+  return manifests;
+}
+
+/**
+ * The repository's packages by name: the manifests with a name. Two with one name are both kept,
+ * so a target of either is read.
+ * @param {Manifest[]} manifests
+ * @returns {Map<string, WorkspacePackage[]>}
+ */
+function workspacePackages(manifests) {
+  /** @type {Map<string, WorkspacePackage[]>} */
+  const packages = new Map();
+  for (const { dir, manifest } of manifests) {
+    if (typeof manifest.name !== "string") continue;
     const entry = { name: manifest.name, dir, manifest };
     packages.set(manifest.name, [...(packages.get(manifest.name) ?? []), entry]);
   }
@@ -1764,12 +1831,53 @@ function readWorkspacePackages(root, listed) {
 }
 
 /**
+ * The rules a package.json is held to once, for what it does to every import in its directory,
+ * which no rule that reads one import can see. It has no object-form browser field: Vite maps
+ * through one the package's entry (whatever its exports map names), the imports of every file
+ * whose nearest package.json it is (relative and bare alike) and so a file the rules read for
+ * another; nothing in Fin needs one, and a string browser field names an entry plainly. And no
+ * root entry field (main, module, browser, jsnext:main, jsnext) names a test file or a file under
+ * test/, e2e/ or fixtures/: such an entry is code that runs. An exports map's targets are held to
+ * the test-code rule by each import that reaches them (checkSource), so a package may export a
+ * helper for its tests.
+ * @param {Manifest} manifest
+ * @returns {Finding[]}
+ */
+function checkManifest({ path, dir, manifest }) {
+  /** @type {Finding[]} */
+  const findings = [];
+  if (manifest.browser !== undefined && typeof manifest.browser !== "string") {
+    findings.push({
+      file: path,
+      rule: "package-manifest",
+      message:
+        "a package.json has no object browser field: Vite maps the package's entry and the imports of its files through it, which no import the rules read shows (exports, or a string browser field, names an entry plainly)",
+    });
+  }
+  for (const field of ENTRY_FIELDS) {
+    const value = manifest[field];
+    if (typeof value !== "string") continue;
+    const target = posix.normalize(posix.join(dir, value)).replace(/\/+$/, "");
+    if (TEST_TARGET.test(target) || TEST_CODE_TARGET.test(`${target}/`)) {
+      findings.push({
+        file: path,
+        rule: "package-manifest",
+        message: `the package's ${field} entry is code that runs: it names no test file and nothing under test/, e2e/ or fixtures/, which the page policy leaves out`,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
  * The repository paths a workspace package's specifier can resolve to, with its query and
  * fragment dropped and whole: through the package's exports map when it has one (every
  * condition's target, a pattern's `*` filled in, a folder mapping's rest appended, whichever
- * entries match), else its main fields or the path itself; and the path itself in any case, so a
- * subpath no export lists is read too. A superset of what Node or Vite loads, so the rules fail
- * closed.
+ * entries match), else every root entry field Vite or Node reads (ENTRY_FIELDS) or the path
+ * itself; the path itself in any case, so a subpath no export lists is read too; and every target
+ * of an object-form browser field, through which Vite maps any of these (checkManifest refuses
+ * such a field outright, since it also maps the package's own imports). So no target Node or Vite
+ * finds for the specifier through the manifest is missed.
  * @param {WorkspacePackage} pkg
  * @param {string} specifier
  * @returns {string[]}
@@ -1791,13 +1899,16 @@ function resolvePackage(pkg, specifier) {
     else if (Array.isArray(value)) for (const v of value) collect(v, star);
     else if (isRecord(value)) for (const v of Object.values(value)) collect(v, star);
   };
-  const { exports } = pkg.manifest;
+  const { exports, browser } = pkg.manifest;
+  if (isRecord(browser)) {
+    for (const value of Object.values(browser)) if (typeof value === "string") addTarget(value);
+  }
   for (const spelled of new Set([specifier.replace(/[?#].*$/, ""), specifier])) {
     const subpath = `.${spelled.slice(pkg.name.length)}`;
     addTarget(subpath);
     if (exports === undefined || exports === null) {
       if (subpath === ".") {
-        for (const field of ["main", "module", "browser"]) {
+        for (const field of ENTRY_FIELDS) {
           const value = pkg.manifest[field];
           if (typeof value === "string") addTarget(value);
         }
