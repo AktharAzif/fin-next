@@ -5,9 +5,15 @@
 //   - node:http, node:https, node:net, node:dns, node:cluster and node:worker_threads only in
 //     packages/server and apps/connector, and node:http and node:https in the test harness's one
 //     HTTP bridge, packages/testing/src/http/node.ts, by the steward's decision of 21 Nov (below);
-//   - @fin/testing (or a subpath, or a file of test support by a relative path) only in tests and
-//     test support, and in a manifest only under devDependencies, so the harness never reaches
-//     deployable code (the steward's decision of 21 Nov; see TEST_SUPPORT below);
+//   - @fin/testing (or a subpath, with or without a query or fragment, or a workspace package's
+//     test/ or e2e/ by that package's name, or a file of test support by a relative path) only in
+//     tests and test support; in a manifest only under devDependencies; and no manifest outside
+//     test support has an entry point (exports, imports, main, module, browser, bin) that names
+//     test support, a test file, a node_modules path or a path out of the repository, so the
+//     harness never reaches deployable code (the steward's decision of 21 Nov; see TEST_SUPPORT
+//     below);
+//   - outside tests and test support, a relative import stays inside the repository and out of
+//     node_modules, so it cannot reach a file the rules on names and paths do not see;
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
 //     packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
@@ -111,6 +117,14 @@ const NETWORK_ALLOWED_FILES = new Map([
 ]);
 // The test harness's package, which only tests and test support may load, by the same decision.
 const TESTING_PACKAGE = "@fin/testing";
+// That name in any case, compared with Unicode case folding as a case-insensitive file system
+// compares it (so `@FIN/Testing` and a long s, `ſ`, for the s are the harness too).
+const TESTING_NAME = /^@fin\/testing$/iu;
+// A workspace package's own test support reached by its name: `@fin/<name>/test/...` or
+// `@fin/<name>/e2e/...`, which a package without an `exports` map (or with a catch-all one) loads.
+const WORKSPACE_TEST_SUPPORT = /^@fin\/[^/]+\/(?:test|e2e)(?:\/|$)/iu;
+// A path segment naming an installed package's directory, in any case.
+const NODE_MODULES_SEGMENT = /(?:^|\/)node_modules(?:\/|$)/iu;
 // Test support: the files besides tests (TEST_FILE: `*.test.*`, `*.db.test.*` and `*.spec.*`) that
 // may import @fin/testing, by a package name or a relative path, and the only files a relative
 // import of such a file may come from. Exactly these, matched on the repository path:
@@ -131,6 +145,13 @@ const TEST_SUPPORT = [
 // An import's target names test support in any case, as a case-insensitive file system reads it
 // (a file counts as test support only when spelled as TEST_SUPPORT has it).
 const TEST_SUPPORT_TARGET = TEST_SUPPORT.map((pattern) => new RegExp(pattern.source, "iu"));
+// The directories that hold test support below them: the repository's root (e2e/ and
+// playwright.config.ts), an area (packages/testing) and a workspace package's root (its test/ and
+// e2e/). A manifest's pattern target whose fixed part stops at one of these can expand into test
+// support.
+const HOLDS_TEST_SUPPORT = /^(?:(?:apps|packages|tools|ops)\/(?:[^/]+\/)?)?$/iu;
+// A manifest's fields that name the files its package's name loads.
+const ENTRY_FIELDS = ["exports", "imports", "main", "module", "browser", "bin"];
 // A manifest's fields that install a package with it: @fin/testing is listed only under
 // devDependencies, which a production install leaves out.
 const RUNTIME_DEPENDENCY_FIELDS = [
@@ -288,6 +309,21 @@ export function packageName(specifier) {
  */
 export function isTestSupport(path) {
   return TEST_SUPPORT.some((pattern) => pattern.test(path));
+}
+
+/**
+ * Whether a bare specifier loads the harness or a workspace package's test support, in each
+ * spelling a resolver may read it: as written, without its query or fragment (which a bundler
+ * drops: `@fin/testing?raw`), and with its path normalised (`@fin//testing`,
+ * `@fin/<name>/../testing` and `@fin/<name>/src/../e2e/x.ts` reach what they name).
+ * @param {string} specifier
+ * @returns {boolean}
+ */
+function namesTestSupport(specifier) {
+  const plain = specifier.replace(/[?#].*$/, "");
+  return [specifier, plain, posix.normalize(plain)].some(
+    (form) => TESTING_NAME.test(packageName(form)) || WORKSPACE_TEST_SUPPORT.test(form),
+  );
 }
 
 /**
@@ -1194,19 +1230,37 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
       }
     }
     const targets = relative ? relativeTargets(file, specifier) : [];
+    const mayLoadTestSupport = isTest || isTestSupport(file);
     // The harness only in tests and test support: by its package name (in any case, as a
-    // case-insensitive file system finds it), or a file of test support by a relative path, which
-    // reaches the same code. A type-only import is refused too: deployable code needs no type of it.
+    // case-insensitive file system finds it, and with any query or fragment), a workspace
+    // package's test support by that package's name, or a file of test support by a relative path,
+    // which reaches the same code. A type-only import is refused too: deployable code needs no type
+    // of it.
     if (
-      !isTest &&
-      !isTestSupport(file) &&
-      ((bare && builtin === undefined && name.toLowerCase() === TESTING_PACKAGE) ||
+      !mayLoadTestSupport &&
+      ((bare && builtin === undefined && namesTestSupport(specifier)) ||
         targets.some((target) => TEST_SUPPORT_TARGET.some((pattern) => pattern.test(target))))
     ) {
       add(
         line,
         "testing-import",
         "only tests and test support (e2e/, a package's test/, packages/testing, playwright.config.ts) import @fin/testing or a file of test support, so the harness never reaches deployable code",
+      );
+    }
+    // A relative path stays inside the repository and out of node_modules: one that leaves the
+    // checkout and comes back by its directory's name, or walks into an installed package, reaches
+    // code (the harness included) that the rules on package names and repository paths never see.
+    if (
+      !mayLoadTestSupport &&
+      targets.some(
+        (target) =>
+          target === ".." || target.startsWith("../") || NODE_MODULES_SEGMENT.test(target),
+      )
+    ) {
+      add(
+        line,
+        "relative-escape",
+        "a relative import names a file of this repository outside node_modules; an installed package is imported by its name, so the package rules can read it",
       );
     }
     if (
@@ -1413,10 +1467,46 @@ function checkCodeNames(tokens, statements, loadsChecked, lineAt, add) {
 }
 
 /**
+ * Every path string in a manifest field that names files (an entry point, or the values of a
+ * subpath, condition, browser or bin map, at any depth).
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+function fieldPaths(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(fieldPaths);
+  if (isRecord(value)) return Object.values(value).flatMap(fieldPaths);
+  return [];
+}
+
+/**
+ * Whether an entry-point target of the manifest in `dir` lets the package's name load test
+ * support, a test file, an installed package's file or a file outside the repository. A pattern
+ * target (with `*`) is read as every path it can expand to: refused when its fixed part lies in
+ * test support or stops at a directory that holds test support.
+ * @param {string} dir the manifest's directory ("." at the root)
+ * @param {string} target
+ * @returns {boolean}
+ */
+function exposesTestSupport(dir, target) {
+  const path = posix.join(dir, target.replace(/[?#].*$/, "")).replace(/^\.(?:\/|$)/, "");
+  if (path === ".." || path.startsWith("../") || NODE_MODULES_SEGMENT.test(path)) return true;
+  if (TEST_TARGET.test(path) || TEST_SUPPORT_TARGET.some((pattern) => pattern.test(path))) {
+    return true;
+  }
+  const star = path.indexOf("*");
+  if (star < 0) return false;
+  const fixed = path.slice(0, star);
+  return HOLDS_TEST_SUPPORT.test(fixed.slice(0, fixed.lastIndexOf("/") + 1));
+}
+
+/**
  * Checks one package.json: @fin/testing is listed only under devDependencies, never in a field
  * that installs it with the package (RUNTIME_DEPENDENCY_FIELDS), so a production install of
- * deployable code never holds the harness. A manifest that does not parse is left to
- * supply-chain:check.
+ * deployable code never holds the harness; and, outside test support, no entry point
+ * (ENTRY_FIELDS) names test support, a test file, a node_modules path or a path out of the
+ * repository, so deployable code cannot load the harness by the package's name. A manifest that
+ * does not parse is left to supply-chain:check.
  * @param {string} file the repository path
  * @param {string} text the manifest's content
  * @returns {Finding[]}
@@ -1436,7 +1526,7 @@ export function checkManifest(file, text) {
   for (const field of RUNTIME_DEPENDENCY_FIELDS) {
     const deps = manifest[field];
     const names = Array.isArray(deps) ? deps : isRecord(deps) ? Object.keys(deps) : [];
-    if (!names.some((n) => typeof n === "string" && n.toLowerCase() === TESTING_PACKAGE)) continue;
+    if (!names.some((n) => typeof n === "string" && TESTING_NAME.test(n))) continue;
     const fieldAt = text.indexOf(`"${field}"`);
     const nameAt = text.toLowerCase().indexOf(`"${TESTING_PACKAGE}"`, Math.max(fieldAt, 0));
     findings.push({
@@ -1445,6 +1535,21 @@ export function checkManifest(file, text) {
       rule: "testing-dependency",
       message: `${TESTING_PACKAGE} is listed only under devDependencies, never under ${field}, so a production install never holds the harness`,
     });
+  }
+  if (isTestSupport(file)) return findings;
+  const dir = posix.dirname(file);
+  for (const field of ENTRY_FIELDS) {
+    const fieldAt = text.indexOf(`"${field}"`);
+    for (const target of new Set(fieldPaths(manifest[field]))) {
+      if (!exposesTestSupport(dir, target)) continue;
+      const targetAt = text.indexOf(JSON.stringify(target), Math.max(fieldAt, 0));
+      findings.push({
+        file,
+        line: lineAt(targetAt >= 0 ? targetAt : Math.max(fieldAt, 0)),
+        rule: "testing-export",
+        message: `a package's ${field} names no test support, test file, node_modules path or path out of the repository, so its name never loads the harness into deployable code`,
+      });
+    }
   }
   return findings;
 }

@@ -87,6 +87,19 @@ describe("imports:check", () => {
       imp("@fin/testing/playwright"),
       imp("@fin/testing/playwright/config"),
       imp("@FIN/Testing"),
+      // A query or fragment, which a bundler drops, and a long s, which case folding reads as s.
+      imp("@fin/testing?raw"),
+      imp("@fin/testing#x"),
+      imp("@fin/testing/playwright?raw"),
+      imp(`@fin/te${String.fromCodePoint(0x17f)}ting`),
+      // A path a resolver normalises to the harness.
+      imp("@fin//testing"),
+      imp("@fin/console/../testing/src/index.ts"),
+      // A workspace package's test support by that package's name.
+      imp("@fin/console/e2e/fixtures.ts"),
+      imp("@fin/identity/test/canon.ts"),
+      imp("@fin/identity/TEST/canon.ts?raw"),
+      imp("@fin/console/src/../e2e/fixtures.ts"),
       src(`${IMP} type { Clock } from "@fin/testing";`),
       src(`${EXP} * from "@fin/testing";`),
       src(`const t = await ${IMP}("@fin/testing");`),
@@ -142,9 +155,96 @@ describe("imports:check", () => {
       [],
     );
     assert.deepEqual(check("apps/console/e2e/sat/a.spec.ts", imp("../fixtures/helpers.ts")), []);
-    // Other packages, and names that only start like it, are not the harness.
+    // Other packages, and names that only start like it, are not the harness; nor is a test/
+    // directory below a package's src/.
     assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/testing-kit")), []);
     assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/server/testing/http")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/identity/src/test/helper.ts")), []);
+  });
+
+  test("outside tests and test support, a relative import stays in the repository and out of node_modules", () => {
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text));
+    for (const specifier of [
+      // pnpm's link to packages/testing, and any installed package's own file.
+      "../node_modules/@fin/testing/src/index.ts",
+      "../Node_Modules/@fin/testing/src/index.ts",
+      "../../../node_modules/clsx/dist/clsx.mjs",
+      // Out of the checkout and back in by its directory's name.
+      "../../../../src/packages/testing/src/index.ts",
+      "../../../../index.ts",
+    ]) {
+      for (const file of ["apps/api/src/main.ts", "packages/identity/src/sign-in.ts"]) {
+        assert.ok(check(file, imp(specifier)).includes("relative-escape"), `${file} ${specifier}`);
+      }
+      assert.deepEqual(check("apps/api/src/main.test.ts", imp(specifier)), [], specifier);
+      assert.deepEqual(check("apps/api/test/canon.ts", imp(specifier)), [], specifier);
+    }
+    assert.deepEqual(check("apps/api/src/main.ts", imp("../../../packages/core/src/x.ts")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("./node-modules.ts")), []);
+  });
+
+  test("no package's entry point names test support, so its name never loads the harness", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      `${JSON.stringify({ name: "@fin/identity", private: true, ...fields }, null, 2)}\n`;
+    const check = (/** @type {string} */ file, /** @type {Record<string, unknown>} */ fields) =>
+      rules(checkManifest(file, manifest(fields)));
+    for (const fields of [
+      { exports: { "./fixtures": "./test/fixtures.ts" } },
+      { exports: { "./fixtures": { import: "./e2e/fixtures.ts", default: "./src/x.ts" } } },
+      { exports: { "./fixtures/*": "./Test/fixtures/*" } },
+      // A pattern that can expand into the package's test/ or e2e/.
+      { exports: { "./*": "./*" } },
+      { exports: { "./*": "./*.ts" } },
+      { exports: { "./x": "./src/x.test.ts" } },
+      { exports: { "./x": "./node_modules/@fin/testing/src/index.ts" } },
+      { exports: { "./x": "../testing/src/index.ts" } },
+      { exports: { "./x": "../../../src/packages/testing/src/index.ts" } },
+      { exports: [["./test/a.ts"]] },
+      { imports: { "#fixtures": "./test/fixtures.ts" } },
+      { main: "test/index.ts" },
+      { module: "./e2e/index.ts" },
+      { browser: { "./src/x.ts": "./test/x.ts" } },
+      { bin: { fixtures: "./test/cli.ts" } },
+      { bin: "./e2e/cli.ts" },
+    ]) {
+      assert.deepEqual(
+        check("packages/identity/package.json", fields),
+        ["testing-export"],
+        JSON.stringify(fields),
+      );
+    }
+    // The root's e2e/ and playwright.config.ts.
+    assert.deepEqual(check("package.json", { exports: { "./*": "./*" } }), ["testing-export"]);
+    assert.deepEqual(check("package.json", { main: "playwright.config.ts" }), ["testing-export"]);
+    const findings = checkManifest(
+      "packages/identity/package.json",
+      manifest({ exports: { ".": "./src/index.ts", "./fixtures": "./test/fixtures.ts" } }),
+    );
+    assert.equal(findings[0]?.line, 6);
+    // Entry points in src/, a pattern whose fixed part stops inside src/, and a src/testing/
+    // directory (deployable code's own test helpers) are not test support.
+    for (const fields of [
+      {
+        exports: {
+          ".": "./src/index.ts",
+          "./testing": "./src/testing/index.ts",
+          "./src/*": "./src/*",
+          "./package.json": "./package.json",
+        },
+        main: "./src/index.ts",
+        bin: { fin: "./src/cli.ts" },
+        browser: { "./src/node.ts": false },
+      },
+    ]) {
+      assert.deepEqual(check("packages/identity/package.json", fields), []);
+    }
+    // The harness's own manifest, and any in test support, are test support.
+    assert.deepEqual(
+      check("packages/testing/package.json", { exports: { ".": "./src/index.ts", "./*": "./*" } }),
+      [],
+    );
+    assert.deepEqual(check("apps/api/e2e/fixture/package.json", { main: "./index.ts" }), []);
   });
 
   test("a manifest lists @fin/testing only under devDependencies", () => {
@@ -167,6 +267,15 @@ describe("imports:check", () => {
         checkManifest(
           "apps/api/package.json",
           manifest({ dependencies: { "@FIN/Testing": "workspace:*" } }),
+        ),
+      ),
+      ["testing-dependency"],
+    );
+    assert.deepEqual(
+      rules(
+        checkManifest(
+          "apps/api/package.json",
+          manifest({ dependencies: { [`@fin/te${String.fromCodePoint(0x17f)}ting`]: "*" } }),
         ),
       ),
       ["testing-dependency"],
@@ -516,6 +625,7 @@ describe("imports:check", () => {
     ]);
     assert.deepEqual(check("ops/fin/src/main.ts", imp("../../../../outside.ts")), [
       "control-path-import",
+      "relative-escape",
     ]);
     assert.deepEqual(check("ops/fin/src/main.ts", imp("./commands/deploy.ts")), []);
     assert.deepEqual(check(".github/scripts/gate.mjs", imp("../../ops/fin/src/x.ts")), []);
@@ -1027,11 +1137,30 @@ describe("imports:check", () => {
         dependencies: { "@fin/testing": "workspace:*" },
       }),
       "packages/testing/src/email/sink.ts": imp("node:http"),
+      // Refused: the harness laundered through another package's name, a query, pnpm's link and a
+      // path out of the checkout and back in.
+      "packages/identity/package.json": manifest({
+        name: "@fin/identity",
+        exports: { ".": "./src/index.ts", "./fixtures": "./test/fixtures.ts" },
+        devDependencies: { "@fin/testing": "workspace:*" },
+      }),
+      "packages/identity/test/fixtures.ts": src(`${EXP} { listen } from "@fin/testing";`),
+      "apps/api/src/by-exports.ts": imp("@fin/identity/fixtures"),
+      "apps/api/src/by-name.ts": imp("@fin/console/e2e/fixtures.ts"),
+      "apps/console/e2e/fixtures.ts": imp("@fin/testing"),
+      "apps/api/src/by-query.ts": imp("@fin/testing?x"),
+      "apps/api/src/by-link.ts": imp("../node_modules/@fin/testing/src/index.ts"),
+      "apps/api/src/by-checkout.ts": imp("../../../../src/packages/testing/src/index.ts"),
     });
     const findings = checkImports(dir);
     assert.deepEqual(findings.map((f) => `${f.file}:${f.line} ${f.rule}`).sort(), [
       "apps/api/package.json:6 testing-dependency",
+      "apps/api/src/by-checkout.ts:1 relative-escape",
+      "apps/api/src/by-link.ts:1 relative-escape",
+      "apps/api/src/by-name.ts:1 testing-import",
+      "apps/api/src/by-query.ts:1 testing-import",
       "apps/api/src/main.ts:2 testing-import",
+      "packages/identity/package.json:7 testing-export",
       "packages/testing/src/email/sink.ts:1 node-network",
     ]);
     const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
