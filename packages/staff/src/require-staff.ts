@@ -74,21 +74,6 @@ export function requestFacts(context: RequestContext): RequestFacts {
   };
 }
 
-/**
- * Reads the request's staff session through the realm (step 1), or null when there is none.
- * Must run inside `realm.run`.
- */
-export async function staffSessionOf(
-  realm: Realm,
-  request: Request,
-  context: RequestContext,
-): Promise<{ state: RealmState; tx: UnitTx } | null> {
-  return realm.run(context, async (tx, state) => {
-    await realm.api.getSession({ headers: request.headers });
-    return state.prior === null ? null : { state, tx };
-  });
-}
-
 /** Step 2: the session, its member and the verified Access identity are one person. */
 async function samePerson(
   realm: Realm,
