@@ -539,41 +539,47 @@ export const railwayDeploy: Command = {
         }
       },
       { release, minimumSchemaVersion: schema, ...unchecked },
-      async () => {
-        if (!started) return {};
-        const after = await inspectRailway(ctx, rw);
-        const problems = [...refusals(ctx, after, rolled), ...unreadRefusals(after, accepted)];
-        if (problems.length > 0) {
-          ctx.run.line("deploy.failed", "error", { release, step: "checks" });
-          throw new RefusedError(`after the deploy: ${problems.join(", ")}`);
-        }
-        for (const [service, ref] of onRelease) {
-          const instance = after.instances.get(service);
-          if (instance?.image !== ref) {
-            ctx.run.line("deploy.failed", "error", { release, step: "digest" });
-            throw new ProviderError("railway", `${service} does not report the deployed digest`, 0);
+      {
+        after: async () => {
+          if (!started) return {};
+          const after = await inspectRailway(ctx, rw);
+          const problems = [...refusals(ctx, after, rolled), ...unreadRefusals(after, accepted)];
+          if (problems.length > 0) {
+            ctx.run.line("deploy.failed", "error", { release, step: "checks" });
+            throw new RefusedError(`after the deploy: ${problems.join(", ")}`);
           }
-          // migrate runs to its end and serves nothing; migrate.done is its proof (step 7).
-          if (!tasks.has(service) && instance.latestDeployment?.status !== "SUCCESS") {
-            ctx.run.line("deploy.failed", "error", { release, step: "digest" });
-            throw new ProviderError(
-              "railway",
-              `${service}'s newest deployment is ${instance.latestDeployment?.status ?? "missing"}, not SUCCESS`,
-              0,
-            );
+          for (const [service, ref] of onRelease) {
+            const instance = after.instances.get(service);
+            if (instance?.image !== ref) {
+              ctx.run.line("deploy.failed", "error", { release, step: "digest" });
+              throw new ProviderError(
+                "railway",
+                `${service} does not report the deployed digest`,
+                0,
+              );
+            }
+            // migrate runs to its end and serves nothing; migrate.done is its proof (step 7).
+            if (!tasks.has(service) && instance.latestDeployment?.status !== "SUCCESS") {
+              ctx.run.line("deploy.failed", "error", { release, step: "digest" });
+              throw new ProviderError(
+                "railway",
+                `${service}'s newest deployment is ${instance.latestDeployment?.status ?? "missing"}, not SUCCESS`,
+                0,
+              );
+            }
           }
-        }
-        if (flagBool(ctx.args, "smoke")) await smoke(ctx);
-        ctx.run.line("deploy.done", "info", {
-          release,
-          services: onRelease.size,
-          minimumSchemaVersion: schema,
-          ...(notBuilt.length > 0 ? { notBuilt } : {}),
-        });
-        return {
-          running: Object.fromEntries(onRelease),
-          ...(notBuilt.length > 0 ? { notBuilt } : {}),
-        };
+          if (flagBool(ctx.args, "smoke")) await smoke(ctx);
+          ctx.run.line("deploy.done", "info", {
+            release,
+            services: onRelease.size,
+            minimumSchemaVersion: schema,
+            ...(notBuilt.length > 0 ? { notBuilt } : {}),
+          });
+          return {
+            running: Object.fromEntries(onRelease),
+            ...(notBuilt.length > 0 ? { notBuilt } : {}),
+          };
+        },
       },
     );
   },

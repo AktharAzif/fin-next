@@ -39,6 +39,7 @@ import {
   stopSummary,
   uploadPrepared,
 } from "../../../../tools/static-deploy/src/run.ts";
+import type { WriteTarget } from "../cloudflare/api.ts";
 import { cloudflare, railway } from "../cloudflare/common.ts";
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
@@ -220,11 +221,12 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
       if (groups.length !== 1 || groups[0] === undefined)
         throw new ConfigError(`no single permission group named ${t.permissionGroup}`);
       const groupId = groups[0].id;
-      const target = {
-        kind: "token" as const,
+      const target = (id?: string): WriteTarget => ({
+        kind: "token",
         name: t.name,
-        permissionGroups: [t.permissionGroup],
-      };
+        permissionGroups: [{ name: t.permissionGroup, id: groupId }],
+        ...(id === undefined ? {} : { id }),
+      });
 
       const changes: Change[] = [
         {
@@ -249,7 +251,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         const { id } = minted;
         minted = undefined;
         try {
-          await writer.write(target, "DELETE", `${accountPath}/tokens/${id}`);
+          await writer.write(target(id), "DELETE", `${accountPath}/tokens/${id}`);
           ctx.run.step("token", t.name, "revoke");
           ctx.out.info(`  revoked the one-run token ${t.name}`);
         } catch (error) {
@@ -265,7 +267,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         async (change) => {
           if (change.kind === "token") {
             const created = await writer.write<ApiToken>(
-              target,
+              target(),
               "POST",
               `${accountPath}/tokens`,
               staticTokenBody(
@@ -322,10 +324,12 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
           ...(rollback ? { staticRollback: true } : {}),
           ...(deploymentsUnchecked ? { deploymentsUnchecked: true } : {}),
         },
-        async () => {
-          await revoke();
-          ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });
-          return {};
+        {
+          after: async () => {
+            await revoke();
+            ctx.run.line("deploy.static_done", "info", { release, deployments: uploaded.length });
+            return {};
+          },
         },
       );
     },
