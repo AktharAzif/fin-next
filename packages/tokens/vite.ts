@@ -12,10 +12,15 @@ import type { Plugin } from "vite";
 
 const LEADING_TRIVIA = /^(?:﻿|\s|\/\*[\s\S]*?\*\/)*/;
 
-/** The stylesheet with `@layer ui-sdk;` as its first statement (comments may precede it). */
+/**
+ * The stylesheet with `@layer ui-sdk;` as its first statement (comments may precede it). A first
+ * statement that already declares the layer itself, alone, first in a list or as a block, is left
+ * alone; a longer name (`ui-sdk-extra`, `ui-sdk.inner`) is not the layer. static:check reads the
+ * built file the same way.
+ */
 export function withUiSdkLayerFirst(css: string): string {
   const body = css.replace(LEADING_TRIVIA, "");
-  if (/^@layer\s+ui-sdk\s*[;,]/.test(body)) return css;
+  if (/^@layer\s+ui-sdk\s*[;,{]/.test(body)) return css;
   if (/^@charset\b/i.test(body)) throw new Error("a stylesheet with @charset is not expected here");
   return `@layer ui-sdk;\n${css}`;
 }

@@ -15,12 +15,13 @@ describe("withUiSdkLayerFirst", () => {
   it("leaves a stylesheet that already starts with the layer alone", () => {
     expect(withUiSdkLayerFirst("/* c */ @layer ui-sdk; a{}")).toBe("/* c */ @layer ui-sdk; a{}");
     expect(withUiSdkLayerFirst("@layer ui-sdk, theme; a{}")).toBe("@layer ui-sdk, theme; a{}");
+    expect(withUiSdkLayerFirst("@layer ui-sdk{a{}}")).toBe("@layer ui-sdk{a{}}");
   });
 
   it("does not take a longer layer name for it", () => {
-    expect(withUiSdkLayerFirst("@layer ui-sdk-extra; a{}")).toBe(
-      "@layer ui-sdk;\n@layer ui-sdk-extra; a{}",
-    );
+    for (const first of ["@layer ui-sdk-extra;", "@layer ui-sdk.inner;", "@layer ui-sdkx{}"]) {
+      expect(withUiSdkLayerFirst(`${first} a{}`), first).toBe(`@layer ui-sdk;\n${first} a{}`);
+    }
   });
 
   it("refuses a stylesheet with @charset, which must stay first", () => {
