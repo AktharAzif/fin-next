@@ -18,8 +18,11 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 and the watcher's own until the duty registry exists; MC-09 comes with the credential inventory)
 and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a runbook in
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
-wake the owner) that names the alert back. MC-12 scans every file under `staging/`, the
-catalogue, this README, the runbooks and the watcher's settings.
+wake the owner) that names the alert back. MC-01 reads every telemetry writer the code uses
+(`log`, `telemetry.logUnit`, `lines.write`, `log.write({ event })`, `run.line`, raw
+`JSON.stringify` lines); its one exclusion rule, and why it cannot hide an event, is at
+`eventsInCode` in `src/check.ts`. MC-12 scans every file under `staging/`, the catalogue, this
+README, the runbooks and the watcher's settings.
 
 ## Applying
 

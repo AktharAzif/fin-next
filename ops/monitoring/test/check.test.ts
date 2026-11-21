@@ -284,6 +284,79 @@ describe("monitoring:check refuses", () => {
     ]);
   });
 
+  it("an event any telemetry writer writes, in every style the code uses (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        'rt.lines.write("edge.lines", "warn", { realm });',
+        "this.options.telemetry.logUnit(",
+        '  "edge.unit",',
+        "  { errorCode },",
+        '  "error",',
+        ");",
+        'telemetry.logLocal("edge.local", { text });',
+        'ctx.run.line("edge.run", "info", { drift: 0 });',
+        'this.line("edge.this_line", "info", {});',
+        'this.#line("edge.private", "info", {});',
+        'this.format("edge.format", { status }, "warn");',
+        "tx.context.log.write({",
+        '  level: "warn",',
+        '  fields: { event: "user.created" },',
+        '  event: "edge.object",',
+        "});",
+        'this.o.log?.log("edge.optional", {});',
+        "write(`${JSON.stringify(scrubLine({",
+        '  message: "edge.raw",',
+        '  event: "edge.raw",',
+        "}))}\\n`);",
+        'log(JSON.stringify({ event: "edge.static", release }));',
+        'out.write("edge.any_receiver");',
+        'lines.write("request", "info", {});',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("edge.lines") is not catalogued',
+      'MC-01 telemetry.logUnit("edge.unit") is not catalogued',
+      'MC-01 telemetry.logLocal("edge.local") is not catalogued',
+      'MC-01 run.line("edge.run") is not catalogued',
+      'MC-01 this.line("edge.this_line") is not catalogued',
+      'MC-01 this.#line("edge.private") is not catalogued',
+      'MC-01 this.format("edge.format") is not catalogued',
+      'MC-01 log.write({ event: "edge.object" }) is not catalogued',
+      'MC-01 log.log("edge.optional") is not catalogued',
+      'MC-01 out.write("edge.any_receiver") is not catalogued',
+      'MC-01 JSON.stringify({ event: "edge.raw" }) is not catalogued',
+      'MC-01 JSON.stringify({ event: "edge.static" }) is not catalogued',
+    ]);
+    const files = checkMonitoring(root, { scan: [] }).map((f) => f.file);
+    expect(files[0]).toBe("packages/edge/src/a.ts:1");
+    expect(files[1]).toBe("packages/edge/src/a.ts:2");
+  });
+
+  it("drops a one-word name only when no telemetry writer writes it (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "ops", "fin", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "ops", "fin", "src", "a.ts"),
+      [
+        'write("stdout", text);',
+        'write("stderr", FATAL);',
+        'const css = `  src: url("./fonts/a.woff2") format("woff2");`;',
+        'process.stdout.write("done");',
+        '// each row is the line ("l" or "r")',
+        'await recordAudit(tx, { event: "edge.audit", target });',
+        'lines.write("surprise", "warn", {});',
+        'log("oneword", {});',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("surprise") is not catalogued',
+      'MC-01 log("oneword") is not catalogued',
+    ]);
+  });
+
   it("an ID-shaped metric label (MC-06)", () => {
     const root = scratch();
     edit(root, "metrics.json", (j) => {

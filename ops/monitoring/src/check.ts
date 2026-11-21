@@ -2,8 +2,9 @@
 // the catalogue, with no network, in well under a second. It fails when:
 //   MC-00 a file is missing or malformed, an alert has an unexpanded placeholder, or a metric's
 //         type is not one of Better Stack's;
-//   MC-01 an event written in code (`log("<name>", ...)`) is missing from the catalogue, a
-//         catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0 events is missing;
+//   MC-01 an event written in code (any telemetry writer's line; see eventsInCode) is missing
+//         from the catalogue, a catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0
+//         events is missing;
 //   MC-02 a failure, security or money entry has no alert and no noAlert reason;
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
@@ -148,7 +149,6 @@ const FLOW_ID = /^F(?:\d{1,2}|-[a-z0-9-]+)$/;
 const THRESHOLD = /^@(?:any|none|thresholds\.[a-z0-9][a-z0-9-]*)$/;
 const ID_SHAPED_FIELD = /(?:Id|ID|_id)$|^(?:cfRay|dt|message|replica|release|detail|target|runId)$/;
 const NOTIFY_KEYS = ["sms", "call", "push", "critical_alert"] as const;
-const LOG_CALL = /\blog\(\s*["']([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)["']/g;
 const CODE_DIRS = ["apps", "packages", "ops", "tools"];
 const SKIP_DIRS = new Set(["node_modules", "dist", ".turbo", "coverage", "test", "fixtures"]);
 
@@ -171,7 +171,7 @@ export interface CheckOptions {
   readonly fragments?: Readonly<Record<string, readonly CatalogEntry[]>>;
   /** Extra files scanned for MC-12, relative to root (directories are walked). */
   readonly scan?: readonly string[];
-  /** Whether to scan the repository's code for log("...") calls (MC-01). */
+  /** Whether to scan the repository's code for the events its telemetry writers write (MC-01). */
   readonly scanCode?: boolean;
 }
 
@@ -187,18 +187,195 @@ function walk(root: string, dir: string, out: string[]): void {
   }
 }
 
-/** Events written in code: `log("<event>", ...)` in TypeScript outside tests. */
-export function eventsInCode(root: string): Map<string, string> {
+// MC-01's scan: the events the code writes, in TypeScript outside tests. Fin writes a telemetry
+// line in three ways, and the scan reads each:
+//   1. a writer method called with the event's name first: `log("x.y", …)` (the watcher's own),
+//      `telemetry.log|logUnit|logLocal("x.y", …)` (packages/server), `lines.write("x.y", …)` (the
+//      identity, staff and orgs line port; fin-review's local lines), `run.line("x.y", …)` and
+//      `this.line` (ops/fin's run), `this.format("x.y", …)` (the transport's own line);
+//   2. a writer method called with an object that names the event, wherever its `event` key
+//      stands in it: `log.write({ event: "x.y", … })` (the unit of work's writer);
+//   3. a raw line: an `event: "x.y"` property anywhere inside `JSON.stringify(…)` (a process that
+//      writes before its telemetry exists: config.invalid, process.mode_refused, migrate's config
+//      failure; tools/static-deploy's lines).
+// The writer methods are log, logUnit, logLocal, line, write and format (private `#` ones too); the
+// name is a string literal in the event-name shape. A call's writer is the identifier before the
+// method's dot (`rt.lines.write` is `lines`, `this.o.log.log` is `log`), or the function itself
+// for a bare call (`log("x.y")` is `log`).
+//
+// One rule drops a match, and only one: its writer is not a telemetry writer (`lines`, `log`,
+// `telemetry`, `run`, or `this`, a writer's call on itself) AND its name is one word, with no dot.
+// Both must hold. That drops ops/fin's stream writer, `write("stdout", …)` and
+// `write("stderr", …)`, and CSS's `format("woff2")` in the token generator. It cannot hide a real
+// event: every event Fin writes is `<area>.<name>`, with a dot, except spec 01 §8.9's `request`,
+// and a dotted name counts through any of the six methods whoever the writer; `request` is written
+// only through telemetry writers (`telemetry.log`, `lines.write`), and PHASE0_EVENTS makes the
+// catalogue hold it whatever the scan finds. A name built at run time (telemetry.bad_event, the
+// formatter's substitute), or a writer reached another way (a computed key, an alias), is beyond
+// a lexical scan: a review finding, as for imports:check (BD-19).
+const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)\(/g;
+const TELEMETRY_WRITERS: ReadonlySet<string> = new Set([
+  "lines",
+  "log",
+  "telemetry",
+  "run",
+  "this",
+]);
+const EVENT_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/;
+const RAW_LINE = /\bJSON\s*\.\s*stringify\s*\(/g;
+const EVENT_KEY =
+  /[{,]\s*(?:event|"event"|'event')\s*:\s*(["'`])([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\1/g;
+
+/** Where an event is written, and the call that writes it (for MC-01's message). */
+export interface CodeEvent {
+  readonly file: string;
+  readonly line: number;
+  readonly call: string;
+}
+
+/** The index of the quote that ends the string starting at `start`, or -1. */
+function stringEnd(text: string, start: number): number {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") i++;
+    else if (c === quote) return i;
+    else if (quote === "`" && c === "$" && text[i + 1] === "{") {
+      const end = closing(text, i + 1);
+      if (end < 0) return -1;
+      i = end - 1;
+    } else if (quote !== "`" && c === "\n") return -1;
+  }
+  return -1;
+}
+
+/** The index of the string's or comment's last character at `i`; undefined when none starts there. */
+function skipped(text: string, i: number): number | undefined {
+  const c = text[i];
+  if (c === '"' || c === "'" || c === "`") return stringEnd(text, i);
+  if (c === "/" && text[i + 1] === "/") {
+    const end = text.indexOf("\n", i);
+    return end < 0 ? text.length - 1 : end;
+  }
+  if (c === "/" && text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end < 0 ? -1 : end + 1;
+  }
+  return undefined;
+}
+
+/** The index just past the bracket that closes the one at `open`, or -1 when it is not closed. */
+function closing(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return -1;
+      i = skip;
+      continue;
+    }
+    const c = text[i];
+    if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/** The object literal at `open` with what its values nest emptied: only its own keys remain. */
+function ownKeys(text: string, open: number): string | undefined {
+  const end = closing(text, open);
+  if (end < 0) return undefined;
+  let out = "{";
+  for (let i = open + 1; i < end - 1; i++) {
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return undefined;
+      if (text[i] !== "/") out += text.slice(i, skip + 1);
+      i = skip;
+      continue;
+    }
+    const c = text[i] ?? "";
+    if (c === "(" || c === "{" || c === "[") {
+      const inner = closing(text, i);
+      if (inner < 0) return undefined;
+      out += `${c}${text[inner - 1] ?? ""}`;
+      i = inner - 1;
+      continue;
+    }
+    out += c;
+  }
+  return `${out}}`;
+}
+
+/** The event a call's first argument names: a string literal, or an object's own `event` key. */
+function firstArgument(text: string, from: number): { name: string; object: boolean } | undefined {
+  let i = from;
+  while (/\s/.test(text[i] ?? "")) i++;
+  const c = text[i];
+  if (c === '"' || c === "'" || c === "`") {
+    const end = stringEnd(text, i);
+    const name = end < 0 ? "" : text.slice(i + 1, end);
+    return EVENT_NAME.test(name) ? { name, object: false } : undefined;
+  }
+  if (c !== "{") return undefined;
+  const keys = ownKeys(text, i);
+  const name = keys === undefined ? undefined : [...keys.matchAll(EVENT_KEY)][0]?.[2];
+  return name === undefined ? undefined : { name, object: true };
+}
+
+/** What the method at `at` is called on: an identifier, "" for any other receiver, or undefined. */
+function receiverOf(text: string, at: number): string | undefined {
+  let i = at - 1;
+  while (/\s/.test(text[i] ?? "")) i--;
+  if (text[i] !== ".") return undefined;
+  i--;
+  if (text[i] === "?") i--;
+  while (/\s/.test(text[i] ?? "")) i--;
+  let start = i;
+  while (/[\w$#]/.test(text[start] ?? "")) start--;
+  return text.slice(start + 1, i + 1).replace(/^#/, "");
+}
+
+function lineAt(text: string, index: number): number {
+  let line = 1;
+  for (let i = text.indexOf("\n"); i >= 0 && i < index; i = text.indexOf("\n", i + 1)) line++;
+  return line;
+}
+
+/** Events written in code, each with the first place that writes it (see the rule above). */
+export function eventsInCode(root: string): Map<string, CodeEvent> {
   const files: string[] = [];
   for (const dir of CODE_DIRS) walk(root, dir, files);
-  const found = new Map<string, string>();
-  for (const file of files) {
+  const found = new Map<string, CodeEvent>();
+  const add = (event: string, at: CodeEvent) => {
+    if (!found.has(event)) found.set(event, at);
+  };
+  for (const file of files.sort()) {
     if (!/\.tsx?$/.test(file) || /\.(?:db\.)?test\.tsx?$/.test(file)) continue;
     if (file.startsWith("ops/monitoring/")) continue;
     const text = readFileSync(join(root, file), "utf8");
-    for (const match of text.matchAll(LOG_CALL)) {
-      const event = match[1] ?? "";
-      if (!found.has(event)) found.set(event, file);
+    for (const match of text.matchAll(WRITER_CALL)) {
+      const method = match[0].slice(0, -1);
+      const arg = firstArgument(text, match.index + match[0].length);
+      if (arg === undefined) continue;
+      const receiver = receiverOf(text, match.index);
+      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !arg.name.includes(".")) continue;
+      const callee = receiver === undefined ? method : `${receiver}.${method}`;
+      const shown = arg.object ? `{ event: "${arg.name}" }` : `"${arg.name}"`;
+      add(arg.name, { file, line: lineAt(text, match.index), call: `${callee}(${shown})` });
+    }
+    for (const match of text.matchAll(RAW_LINE)) {
+      const open = match.index + match[0].length - 1;
+      const end = closing(text, open);
+      if (end < 0) continue;
+      for (const key of text.slice(open, end).matchAll(EVENT_KEY)) {
+        const name = key[2] ?? "";
+        const call = `JSON.stringify({ event: "${name}" })`;
+        add(name, { file, line: lineAt(text, open + key.index), call });
+      }
     }
   }
   return found;
@@ -288,9 +465,13 @@ function checkCatalogue(
     }
   }
   if (scanCode) {
-    for (const [event, file] of eventsInCode(root)) {
+    for (const [event, at] of eventsInCode(root)) {
       if (!byEvent.has(event)) {
-        findings.push({ file, rule: "MC-01", message: `log("${event}") is not catalogued` });
+        findings.push({
+          file: `${at.file}:${at.line}`,
+          rule: "MC-01",
+          message: `${at.call} is not catalogued`,
+        });
       }
     }
   }
