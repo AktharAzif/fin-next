@@ -211,6 +211,48 @@ describe("static builds", () => {
       ["CSS escapes", "assets/a.css", "a{b:url(https:\\2f\\2f evil.example/p.png)}"],
       ["an XHTML page", "page.xhtml", '<script src="https://evil.example/x.js"></script>'],
       ["an unknown extension", "assets/a.data", 'fetch("https://evil.example/c")'],
+      // What the URL parser strips before a URL (every C0 control and the space).
+      ["a vertical tab first", "assets/a.js", 'fetch("\\v//evil.example/x")'],
+      ["a control before wss: alone", "assets/a.js", 'new WebSocket("\\x01wss:evil.example")'],
+      [
+        "a control before a user name cut by a comma",
+        "assets/a.js",
+        'fetch("\\x1fhttps://react.dev,@evil.example/p")',
+      ],
+      ["a control spelled in HTML", "index.html", '<img src="&#x0B;//evil.example/a.png">'],
+      ["a control spelled in CSS", "assets/a.css", 'a{background:url("\\b //evil.example/a.png")}'],
+      ["a raw control", "assets/a.js", `fetch("${String.fromCharCode(2)}//evil.example/x")`],
+      ["a NUL escape", "assets/a.js", 'fetch("\\0//evil.example/x")'],
+      ["a NUL hex escape", "assets/a.js", 'fetch("\\x00//evil.example/x")'],
+      ["a NUL unicode escape", "assets/a.js", 'fetch("\\u0000//evil.example/x")'],
+      ["a classic script's octal escape", "assets/a.js", 'fetch("\\37//evil.example/x")'],
+      [
+        "a control before a srcset candidate",
+        "index.html",
+        '<img srcset="/a.png 1x, &#x1;//evil.example/b.png 2x">',
+      ],
+      // Escapes and references with leading zeros past the usual widths.
+      [
+        "a braced escape with leading zeros",
+        "assets/a.js",
+        'fetch("\\u{000000002f}\\u{000000002f}evil.example/c")',
+      ],
+      [
+        "a decimal reference with leading zeros",
+        "index.html",
+        '<script src="&#0000000047;&#0000000047;evil.example/x.js"></script>',
+      ],
+      [
+        "a hex reference with leading zeros",
+        "index.html",
+        '<script src="https:&#x000000002f;&#x000000002f;evil.example/x.js"></script>',
+      ],
+      // A user name long enough to have run past the scanner's old bound.
+      [
+        "a long user name",
+        "assets/a.js",
+        `location.href="https://${"a".repeat(511)}@evil.example/c"`,
+      ],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -222,6 +264,87 @@ describe("static builds", () => {
     assert.ok(
       staticRules(t, { LICENSE: "FIN_SESSION_SECRET" }).includes("setting-name"),
       "an extensionless file",
+    );
+  });
+
+  it("reads an unquoted attribute in markup a script writes", (t) => {
+    /** @type {[string, string][]} */
+    const cases = [
+      ["an image", "e.innerHTML='<img src=//collector.evil.example/p.png>';"],
+      ["a script", 'e.innerHTML="<script src=//collector.evil.example/x.js></script>";'],
+      [
+        "a stylesheet",
+        "document.write('<link rel=stylesheet href=//collector.evil.example/a.css>');",
+      ],
+      ["a slash after the tag's name", "e.innerHTML='<img/src=//collector.evil.example/p.png>';"],
+      [
+        "a quoted value holding >",
+        "e.innerHTML='<img alt=\"a>b\" src=//collector.evil.example/p.png>';",
+      ],
+      [
+        "escaped quotes and slashes",
+        "e.innerHTML='<img alt=\\'x\\' src=\\x2f\\x2fcollector.evil.example/p.png>';",
+      ],
+      [
+        "an absolute URL cut by a comma",
+        "e.innerHTML='<a href=https://react.dev,@evil.example/>';",
+      ],
+    ];
+    for (const [what, text] of cases) {
+      const found = staticRules(t, { "assets/a.js": text });
+      assert.ok(
+        found.includes("third-party-origin") || found.includes("url-userinfo"),
+        `${what}: ${found.join()}`,
+      );
+    }
+    // A regular expression's `=/\/x\//` is in no start tag, whatever `<` stands before it.
+    for (const text of [
+      "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;}",
+      "if(a<b){x=1}y=/\\/assets\\//;",
+      "e.innerHTML='<b>x</b>';y=/\\/assets\\//;",
+      "e.innerHTML='<img src=//react.dev/a.png>';",
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("reads a large script's tags in one pass, its regular expressions left alone", {
+    timeout: 10_000,
+  }, () => {
+    const code = "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;a=>b}".repeat(30_000);
+    assert.deepEqual(urlsIn(code, { kind: "script" }), []);
+    const written = `${code}e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
+    assert.deepEqual(originsIn(written, { kind: "script" }), ["https://collector.evil.example"]);
+  });
+
+  it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {
+    const tab = String.fromCharCode(9);
+    /** @type {[string, string, string][]} */
+    const cases = [
+      [
+        "a user name past the bound",
+        "assets/a.js",
+        `location.href="https://${"a".repeat(2100)}@evil.example/c"`,
+      ],
+      [
+        "an allowed host and port, then tabs past the bound",
+        "assets/a.js",
+        `fetch("https://react.dev:443${tab.repeat(2100)}@evil.example/c")`,
+      ],
+      [
+        "a srcset that does not close",
+        "index.html",
+        `<img srcset="${"/a.png 1x, ".repeat(500)}//evil.example/b.png 2x>`,
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(found.includes("url-unread"), `${what}: ${found.join()}`);
+    }
+    assert.deepEqual(
+      staticRules(t, { "assets/a.js": `fetch("https://react.dev/${"a".repeat(3000)}")` }),
+      [],
+      "a long path is not a long host",
     );
   });
 
