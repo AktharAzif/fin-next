@@ -30,6 +30,9 @@ import { harness } from "./helpers/setup.ts";
 const RELEASE = hex(40, "a");
 const settings = loadSettings(REPO_ROOT, "staging");
 const overlay = parseOverlay(overlayFixture(), "staging");
+/** The api image's whole command line before the mode: a start command replaces ENTRYPOINT and CMD. */
+const LINE =
+  "/nodejs/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js";
 const DIGEST = (c: string) => `sha256:${hex(64, c)}`;
 const IMAGES = {
   "fin-next-api": DIGEST("3"),
@@ -391,7 +394,7 @@ describe("railway deploy", () => {
       "cloudflared-public",
     ]);
     assert.equal(h.rw.instances.get("api")?.image, ref("fin-next-api"));
-    assert.equal(h.rw.instances.get("worker")?.startCommand, "dist/main.js --worker");
+    assert.equal(h.rw.instances.get("worker")?.startCommand, `${LINE} --worker`);
     assert.equal(h.rw.instances.get("api")?.variables.FIN_RELEASE, RELEASE);
     assert.equal(h.rw.instances.get("worker")?.variables.FIN_DRAIN_SECONDS, "60");
     const done = h.records().at(-1);
@@ -509,7 +512,7 @@ describe("railway deploy", () => {
     const file = manifest(h, { migrations: ["20261121100000_audit_core.sql"] });
     assert.equal(await deploy(h, file), EXIT.ok, h.runtime.err());
     assert.equal(h.rw.updates[0]?.service, "migrate");
-    assert.equal(h.rw.instances.get("migrate")?.startCommand, "dist/main.js --migrate");
+    assert.equal(h.rw.instances.get("migrate")?.startCommand, `${LINE} --migrate`);
     const started = h.rw.migrateEnvironments[0];
     assert.match(started?.FIN_BOOTSTRAP_DATABASE_URL ?? "", /^\$\{\{postgres\.DATABASE_URL\}\}$/);
     assert.match(started?.FIN_RUN_ID ?? "", /^run_/);

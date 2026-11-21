@@ -240,7 +240,7 @@
       },
       "worker": {
         "image": "fin-next-api",
-        "startCommand": "dist/main.js --worker",
+        "startCommand": "/nodejs/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js --worker",
         "replicas": 1,
         "healthcheck": "/readyz",
         "overlapSeconds": 15,
@@ -291,7 +291,7 @@
       },
       "migrate": {
         "image": "fin-next-api",
-        "startCommand": "dist/main.js --migrate",
+        "startCommand": "/nodejs/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js --migrate",
         "replicas": 1,
         "healthcheck": null,
         "overlapSeconds": 0,
@@ -314,7 +314,7 @@
       },
       "backup-hourly": {
         "image": "fin-next-backup",
-        "startCommand": "dist/main.js --hourly",
+        "startCommand": "/usr/local/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js --hourly",
         "replicas": 1,
         "healthcheck": null,
         "overlapSeconds": 0,

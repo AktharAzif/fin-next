@@ -89,8 +89,11 @@ node ops/fin/src/main.ts railway deploy staging --release <sha> --manifest relea
    images that changed, and the manifest bound to this commit (step 2) is what names each digest.
    Any failure refuses the deploy before a change.
 7. Registers the run (the lock), `deploy.started`.
-8. When the release manifest lists migrations: runs `migrate` with the new api image
-   (`dist/main.js --migrate`), with `FIN_BOOTSTRAP_DATABASE_URL` set to the reference
+8. When the release manifest lists migrations: runs `migrate` with the new api image and its
+   start command, which gives the whole command line (`/nodejs/bin/node`, the image's Node flags,
+   `dist/main.js --migrate`: a Railway start command replaces the image's `ENTRYPOINT` and `CMD`,
+   and one of arguments only exits within seconds and logs nothing), with
+   `FIN_BOOTSTRAP_DATABASE_URL` set to the reference
    `${{postgres.DATABASE_URL}}` and `FIN_RUN_ID` for this run only (spec 01 §6.6 step 6; migrate gives
    `fin_owner` a password valid until the run's end and clears it). It reads migrate's log until
    `migrate.done` for this release (up to 15 minutes), and stops on `migrate.failed` or a failed
