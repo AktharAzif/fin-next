@@ -394,7 +394,8 @@ export const FONT_NAME_RE = /\.(?:ttf|otf|woff2?|eot)$/;
 /**
  * Images and fonts laid out as real ones are, each exempt under its name: one of each format at its
  * smallest, and the layouts encoders write (padding, compression, obfuscation, names, palettes, an
- * alpha item with its references, every property type an AVIF walk knows, comments and metadata).
+ * alpha item with its references, every property type an AVIF walk knows, comments and metadata),
+ * and each other layout the walks accept (a WOFF2 head table named by its tag).
  */
 export function exemptShapes(): Record<string, Buffer> {
   // Some writers pad a bitmap with zero bytes after its last row.
@@ -455,6 +456,8 @@ export function exemptShapes(): Record<string, Buffer> {
         box("mdcv", Buffer.alloc(24, 1)),
       ],
     }),
+    // A WOFF2 that names its head table by tag rather than by its index, which the walk reads too.
+    "head-tag.woff2": woff2Of(1, Buffer.concat([Buffer.from([0x3f]), Buffer.from("head", "latin1"), Buffer.from([54])]), headTable()),
     "comment.gif": gif([gifExtension(0xfe, Buffer.from("made by hand"))]),
     "comment.jpg": jpeg([jpegSegment(0xfe, Buffer.from("made by hand"))]),
     "exif.webp": webp([riffChunk("EXIF", Buffer.from("Exif\0\0MM\0*"))]),
@@ -491,11 +494,24 @@ function repeated(text: string, length: number): Buffer {
  * For each format whose walk once left bytes unread, a header whose length fields cover `payload`,
  * or a structure the format does not define (or the walk does not read) holding it: each starts as
  * an image or a font, and none is one. Then one shape for each other check of the walks
- * (`perGuard` and `perCondition`): each passes every check but the one its name says, so a test over
- * these fails when any one check is taken out (test/content-guards.test.ts runs that, check by check).
+ * (`perGuard`, `perCondition` and `perField`): each is refused by the check its name says, so a test
+ * over these fails when any one check is taken out (test/content-guards.test.ts runs that, check by
+ * check). `perField`'s shapes each come with a twin, the same layout with that one field restored,
+ * which is exempt (`twins`), so none of them can stand in for a check by failing two.
  */
 export function planted(payload: Buffer): Record<string, Buffer> {
-  return { ...plantedLayouts(payload), ...perGuard(payload), ...perCondition() };
+  const fields = Object.entries(perField()).map(([name, [shape]]): [string, Buffer] => [name, shape]);
+  return { ...plantedLayouts(payload), ...perGuard(payload), ...perCondition(), ...Object.fromEntries(fields) };
+}
+
+/** The names of the shapes of `planted` that each stand for one check of a walk (`perCondition` and `perField`). */
+export function oneCheckShapes(): string[] {
+  return [...Object.keys(perCondition()), ...Object.keys(perField())];
+}
+
+/** Each shape of `perField` by name, with that one field restored: an image or a font, exempt under its name. */
+export function twins(): Record<string, Buffer> {
+  return Object.fromEntries(Object.entries(perField()).map(([name, [, twin]]): [string, Buffer] => [name, twin]));
 }
 
 /** An ICC profile's header (132 bytes): `size` as its size field, and `signature` at 36 (acsp in a real one). */
@@ -804,7 +820,10 @@ export function misnamed(): Record<string, Buffer> {
 /**
  * One shape for each condition of the walks that the mutation pass (test/content-guards.test.ts)
  * found no other shape holds: with that condition taken out of content.ts, its shape passes, or the
- * walk throws or never ends on it (which fails the tests as surely). Each passes every other check.
+ * walk throws or never ends on it (which fails the tests as surely). Each passes every other check,
+ * but for the `-null-version` shapes: a full box whose flags fullBoxVersion refuses (so its version
+ * is null) laid out as the version that is not 0, which holds the check that refuses a null version;
+ * each box's own flags are held by `perField`.
  */
 function perCondition(): Record<string, Buffer> {
   const script = Buffer.from("#!/bin/sh\necho MARKER-PAYLOAD\nexit 0\n", "latin1");
@@ -914,7 +933,6 @@ function perCondition(): Record<string, Buffer> {
     "box-tail.avif": Buffer.concat([avif(), Buffer.from([0])]),
     "large-short.avif": Buffer.concat([avif(), u32be(1), Buffer.from("mdat", "latin1")]),
     "iref-empty.avif": avif(undefined, { meta: [box("iref", Buffer.from([0, 0])), box("idat", Buffer.alloc(0))] }),
-    "flags.avif": avif(undefined, { properties: [fullBox("pixi", 0, Buffer.from([1, 8]), 0x232123)] }),
     "ftyp-type.avif": patched(avif(), 4, Buffer.from("blob")),
     "ftyp-large.avif": avif(undefined, { ftypBox: Buffer.concat([u32be(1), Buffer.from("ftyp", "latin1"), u32be(0), u32be(32), Buffer.from("avif\0\0\0\0avifmif1", "latin1")]) }),
     "ftyp-short.avif": avif(undefined, { ftypBox: box("ftyp", Buffer.from("avif", "latin1")) }),
@@ -930,13 +948,13 @@ function perCondition(): Record<string, Buffer> {
     "no-iprp.avif": avif(undefined, { children: (boxes) => boxes.filter((_, index) => index !== 4) }),
     "hdlr-version.avif": patched(avif(), 44, [1]),
     "hdlr-type.avif": avif(undefined, { hdlr: Buffer.concat([u32be(0), Buffer.from("#!sh", "latin1"), Buffer.alloc(12), Buffer.from("Picture\0", "latin1")]) }),
-    "pitm-flags.avif": avif(undefined, { children: (boxes) => [boxes[0] ?? Buffer.alloc(0), fullBox("pitm", 0, u32be(1), 1), ...boxes.slice(2)] }),
+    "pitm-null-version.avif": avif(undefined, { children: (boxes) => [boxes[0] ?? Buffer.alloc(0), fullBox("pitm", 0, u32be(1), 1), ...boxes.slice(2)] }),
     "pitm-version.avif": avif(undefined, { children: (boxes) => [boxes[0] ?? Buffer.alloc(0), fullBox("pitm", 2, u32be(1)), ...boxes.slice(2)] }),
     "pitm-item.avif": avif(undefined, { pitm: u16be(7) }),
     "no-extents.avif": avif(Buffer.alloc(0), { iloc: iloc0(Buffer.concat([u16be(0x4400), u16be(0)])) }),
     "idat-uncovered.avif": avif(undefined, { meta: [box("idat", script)] }),
     // AVIF: item references, data references and entity groups.
-    "iref-flags.avif": avif(undefined, { meta: [fullBox("iref", 0, box("cdsc", Buffer.concat([u32be(1), u16be(1), u32be(1)])), 1)] }),
+    "iref-null-version.avif": avif(undefined, { meta: [fullBox("iref", 0, box("cdsc", Buffer.concat([u32be(1), u16be(1), u32be(1)])), 1)] }),
     "iref-version.avif": avif(undefined, { meta: [fullBox("iref", 2, box("cdsc", Buffer.concat([u32be(1), u16be(1), u32be(1)])))] }),
     "iref-children.avif": avif(undefined, { meta: [fullBox("iref", 0, Buffer.from([0, 0, 0]))] }),
     "iref-count.avif": avif(undefined, { meta: [fullBox("iref", 0, box("cdsc", Buffer.concat([u16be(1), u16be(0)])))] }),
@@ -952,7 +970,7 @@ function perCondition(): Record<string, Buffer> {
     "grpl-version.avif": avif(undefined, { meta: [box("grpl", fullBox("altr", 1, u32s(5, 1, 1)))] }),
     "grpl-entities.avif": avif(undefined, { meta: [box("grpl", fullBox("altr", 0, Buffer.concat([u32s(5, scriptIds32.length / 4), scriptIds32])))] }),
     // AVIF: items.
-    "iinf-flags.avif": avif(undefined, { iinf: fullBox("iinf", 0, Buffer.concat([u32be(1), infe(1, "av01", "Color\0")]), 1) }),
+    "iinf-null-version.avif": avif(undefined, { iinf: fullBox("iinf", 0, Buffer.concat([u32be(1), infe(1, "av01", "Color\0")]), 1) }),
     "iinf-version.avif": avif(undefined, { iinf: fullBox("iinf", 2, Buffer.concat([u32be(1), infe(1, "av01", "Color\0")])) }),
     "iinf-entries.avif": avif(undefined, { iinf: fullBox("iinf", 0, Buffer.concat([u16be(1), Buffer.from([0, 0, 0])])) }),
     "iinf-box.avif": avif(undefined, { items: [fullBox("blob", 2, Buffer.concat([u16be(2), u16be(0), Buffer.from("Exif\0", "latin1")]))] }),
@@ -960,7 +978,7 @@ function perCondition(): Record<string, Buffer> {
     "mime-strings.avif": avif(undefined, { items: [infe(2, "mime", "a\0b\0c\0d\0")] }),
     "item-duplicate.avif": avif(undefined, { items: [infe(1, "Exif", "\0")] }),
     // AVIF: item locations.
-    "iloc-flags.avif": avif(undefined, { iloc: inMdat(0, (o) => Buffer.concat([u16be(0x4400), u16be(1), u16be(1), u16be(0), u16be(0), u16be(1), u32s(o, 4)]), 1) }),
+    "iloc-null-version.avif": avif(undefined, { iloc: inMdat(0, (o) => Buffer.concat([u16be(0x4400), u16be(1), u16be(1), u16be(0), u16be(0), u16be(1), u32s(o, 4)]), 1) }),
     "iloc-version.avif": avif(undefined, { iloc: inMdat(3, (o) => Buffer.concat([u16be(0x4400), u32be(1), u32be(1), u16be(0), u16be(0), u16be(1), u32s(o, 4)])) }),
     "iloc-index.avif": avif(undefined, { iloc: inMdat(1, (o) => Buffer.concat([u16be(0x4408), u16be(1), u16be(1), u16be(0), u16be(0), u16be(1), u32s(0x100, 0), u32s(o, 4)])) }),
     "iloc-reserved.avif": avif(undefined, { iloc: inMdat(0, (o) => Buffer.concat([u16be(0x4401), u16be(1), u16be(1), u16be(0), u16be(1), u32s(o, 4)])) }),
@@ -989,7 +1007,7 @@ function perCondition(): Record<string, Buffer> {
     "pixi-version.avif": avif(undefined, { properties: [fullBox("pixi", 1, Buffer.from([1, 8]))] }),
     "av1C-short.avif": avif(undefined, { properties: [box("av1C", Buffer.from([0x81]))] }),
     "colr-kind.avif": avif(undefined, { properties: [box("colr", Buffer.concat([Buffer.from("#!sh", "latin1"), iccHeader(132)]))] }),
-    "ipma-flags.avif": avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u32be(1), Buffer.from([1, 0x81])]), 2) }),
+    "ipma-null-version.avif": avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u32be(1), Buffer.from([1, 0x81])]), 2) }),
     "ipma-version.avif": avif(undefined, { ipmaBox: fullBox("ipma", 2, Buffer.concat([u32be(1), u32be(1), Buffer.from([1, 0x81])])) }),
     "ipma-item.avif": avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(9), Buffer.from([1, 0x81])])) }),
     "ipma-index.avif": avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1, 0x85])])) }),
@@ -1055,6 +1073,98 @@ function perCondition(): Record<string, Buffer> {
     "eot-eudc-short.eot": eudcShort,
     "eudc-flags.eot": withU32(eot22, 112, script.readUInt32LE(0), true),
     "eudc-size.eot": withU32(eot22, 116, script.readUInt32LE(0), true),
+  };
+}
+
+/**
+ * One shape for each check the mutation pass reads past a plain refusal (each arm of a ternary, the
+ * conditions of a braced block of checks, a check of a value a position-moving read returns, the
+ * flags each full box may set), each with its twin: the same layout with that one field restored,
+ * which is exempt. A shape is refused by that field alone, so with its check taken out of
+ * content.ts it passes as an image or a font.
+ */
+function perField(): Record<string, readonly [Buffer, Buffer]> {
+  const script = Buffer.from("#!/bin/sh\necho MARKER-PAYLOAD\nexit 0\n", "latin1");
+  const u32s = (...values: number[]): Buffer => Buffer.concat(values.map((value) => u32be(value)));
+  const selfContained = fullBox("url ", 0, Buffer.alloc(0), 1);
+  const alpha = Buffer.from("urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0", "latin1");
+  const ipma = fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1, 0x81])]));
+  const head = headTable();
+  const font = ttf();
+  /** A layout built with a field set (`true`) and restored (`false`). */
+  const pair = (build: (set: boolean) => Buffer): readonly [Buffer, Buffer] => [build(true), build(false)];
+  /** Flags no full box allows (`#!s`), or none: a box laid out in full but for its flags. */
+  const flags = (build: (flags: number) => Buffer): readonly [Buffer, Buffer] => [build(0x232173), build(0)];
+  /** An iloc (version 0) for item 1's four bytes at `offset`, with `reference` as its data reference index. */
+  const iloc = (reference: Buffer, flagBits = 0) => (offset: number): Buffer =>
+    fullBox("iloc", 0, Buffer.concat([u16be(0x4400), u16be(1), u16be(1), reference, u16be(1), u32s(offset, 4)]), flagBits);
+  /** An EOT header for `rest` after it (names and font data, the font data `font`), of `version`. */
+  const eotOf = (version: number, rest: Buffer): Buffer => {
+    const header = Buffer.alloc(80);
+    header.writeUInt32LE(80 + rest.length, 0);
+    header.writeUInt32LE(font.length, 4);
+    header.writeUInt32LE(version, 8);
+    header.writeUInt16LE(0x504c, 34);
+    return Buffer.concat([header, rest]);
+  };
+  const noMagic = eot();
+  noMagic.fill(0, noMagic.length - font.length + 28 + 12, noMagic.length - font.length + 28 + 16);
+  return {
+    // Each arm of a ternary: a pitm of version 1, a URI item's strings, an a1lx with its flag set, a
+    // version 1 ipma's item and a wide ipma's property index, a bitmap palette under 16 bits a pixel.
+    "pitm-v1-tail.avif": pair((set) => avif(undefined, { children: (boxes) => [boxes[0] ?? Buffer.alloc(0), fullBox("pitm", 1, set ? Buffer.concat([u32be(1), script]) : u32be(1)), ...boxes.slice(2)] })),
+    "uri-strings.avif": pair((set) => avif(undefined, { items: [infe(2, "uri ", set ? "#!/bin/sh\0echo MARKER-PAYLOAD\0exit 0\0" : "name\0urn:example:a\0")] })),
+    "a1lx-flag-size.avif": pair((set) => avif(undefined, { properties: [box("a1lx", Buffer.concat([Buffer.from([1]), Buffer.alloc(12), set ? script : Buffer.alloc(0)]))] })),
+    "ipma-v1-item.avif": pair((set) => avif(undefined, { ipmaBox: fullBox("ipma", 1, Buffer.concat([u32be(1), u32be(set ? 9 : 1), Buffer.from([1, 0x81])])) })),
+    "ipma-wide-index.avif": pair((set) => avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1]), u16be(set ? 0x8005 : 0x8001)]), 1) })),
+    "palette-1bit.bmp": pair((set) => bmpOf({ bits: 1, used: set ? padded(script).length / 4 : 2, palette: set ? padded(script) : Buffer.alloc(8) })),
+    // A value a position-moving read returns: a data reference index that is not 0.
+    "iloc-reference.avif": pair((set) => avif(undefined, { iloc: iloc(set ? Buffer.from("#!", "latin1") : u16be(0)) })),
+    // A braced block of checks: a VP8 chunk's (with an animation frame after it, which marks an
+    // image), a WOFF2 table's tag and transformed length, each WOFF and WOFF2 metadata field set alone.
+    "vp8-unchecked.webp": pair((set) => webpOf([riffChunk("VP8 ", set ? script.subarray(0, 4) : Buffer.from([0, 0, 0, 0x9d, 0x01, 0x2a, 0, 0, 0, 0])), riffChunk("ANMF", script)])),
+    "tag-unread.woff2": pair((set) => woff2Of(2, Buffer.concat([Buffer.from([0x3f]), set ? Buffer.alloc(0) : Buffer.from("blob", "latin1"), Buffer.from([4, 0x01, 54])]), Buffer.concat([Buffer.from("#!sh", "latin1"), head]))),
+    "transform-unread.woff2": pair((set) => woff2Of(2, Buffer.from([0x01, 54, set ? 0x0a : 0xca, 4]), Buffer.concat([head, Buffer.from("#!sh", "latin1")]))),
+    "meta-offset.woff": pair((set) => withU32(woff(), 24, set ? script.readUInt32BE(0) : 0)),
+    "meta-length.woff": pair((set) => withU32(woff(), 28, set ? script.readUInt32BE(0) : 0)),
+    "meta-original.woff": pair((set) => withU32(woff(), 32, set ? script.readUInt32BE(0) : 0)),
+    "meta-offset.woff2": pair((set) => withU32(woff2(), 28, set ? script.readUInt32BE(0) : 0)),
+    "meta-length.woff2": pair((set) => withU32(woff2(), 32, set ? script.readUInt32BE(0) : 0)),
+    "meta-original.woff2": pair((set) => withU32(woff2(), 36, set ? script.readUInt32BE(0) : 0)),
+    // A WOFF2 number whose first byte says another follows (read alone, it is a whole table length).
+    "base128-continued.woff2": pair((set) => woff2Of(1, Buffer.from([0x01, set ? 0x80 | 54 : 54]), head)),
+    // EOT: the font where its names (or its root string) should be, and plain font data that is no font.
+    "names-skipped.eot": pair((set) => (set ? eotOf(0x00010000, font) : eot())),
+    "root-skipped.eot": pair((set) => eotOf(0x00020001, Buffer.concat([Buffer.alloc(16), set ? Buffer.alloc(0) : Buffer.alloc(4), font]))),
+    "plain-not-font.eot": pair((set) => (set ? noMagic : eot())),
+    // Zero bytes after the last block, as many as the format's alignment never needs.
+    "zero-tail.ico": pair((set) => Buffer.concat([ico(), Buffer.alloc(set ? 1 : 0)])),
+    "zero-tail.woff": pair((set) => {
+      const out = Buffer.concat([woff(), Buffer.alloc(set ? 4 : 0)]);
+      out.writeUInt32BE(out.length, 8);
+      return out;
+    }),
+    "zero-tail.woff2": pair((set) => {
+      const out = Buffer.concat([woff2(), Buffer.alloc(set ? 4 : 0)]);
+      out.writeUInt32BE(out.length, 8);
+      return out;
+    }),
+    // The flags of each full box, outside the ones it allows.
+    "meta-flags.avif": pair((set) => patched(avif(), 33, set ? Buffer.from("#!s", "latin1") : [0, 0, 0])),
+    "hdlr-flags.avif": pair((set) => patched(avif(), 45, set ? Buffer.from("#!s", "latin1") : [0, 0, 0])),
+    "pitm-flags.avif": flags((bits) => avif(undefined, { children: (boxes) => [boxes[0] ?? Buffer.alloc(0), fullBox("pitm", 0, u16be(1), bits), ...boxes.slice(2)] })),
+    "iref-flags.avif": flags((bits) => avif(undefined, { meta: [fullBox("iref", 0, itemReference("cdsc", 1, [1]), bits)] })),
+    "dref-flags.avif": flags((bits) => avif(undefined, { meta: [box("dinf", fullBox("dref", 0, Buffer.concat([u32be(1), selfContained]), bits))] })),
+    // Its last flag byte stays 1 (self-contained), which the walk checks on its own.
+    "url-flags.avif": flags((bits) => avif(undefined, { meta: [box("dinf", fullBox("dref", 0, Buffer.concat([u32be(1), fullBox("url ", 0, Buffer.alloc(0), (bits & ~0xff) | 1)])))] })),
+    "group-flags.avif": flags((bits) => avif(undefined, { meta: [box("grpl", fullBox("altr", 0, u32s(5, 1, 1), bits))] })),
+    "iinf-flags.avif": flags((bits) => avif(undefined, { iinf: fullBox("iinf", 0, Buffer.concat([u16be(1), infe(1, "av01", "Color\0")]), bits) })),
+    "infe-flags.avif": flags((bits) => avif(undefined, { items: [infe(2, "Exif", "\0", bits & ~1)] })),
+    "iloc-flags.avif": flags((bits) => avif(undefined, { iloc: iloc(u16be(0), bits) })),
+    "ispe-flags.avif": flags((bits) => avif(undefined, { iprp: box("iprp", Buffer.concat([box("ipco", fullBox("ispe", 0, u32s(1, 1), bits)), ipma])) })),
+    "pixi-flags.avif": flags((bits) => avif(undefined, { properties: [fullBox("pixi", 0, Buffer.from([1, 8]), bits)] })),
+    "auxC-flags.avif": flags((bits) => avif(undefined, { properties: [fullBox("auxC", 0, alpha, bits)] })),
+    "ipma-flags.avif": flags((bits) => avif(undefined, { ipmaBox: fullBox("ipma", 0, Buffer.concat([u32be(1), u16be(1), Buffer.from([1, 0x81])]), bits & ~1) })),
   };
 }
 

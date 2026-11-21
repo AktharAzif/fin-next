@@ -1,8 +1,10 @@
 // Every guard of the image and font walks is pinned by a test (spec 07 §2.5): with any one guard
-// of src/units/content.ts taken out (helpers/mutants.ts), some shape of helpers/media.ts's
-// `planted` or `textShaped` is exempt, so units.test.ts fails. The guards whose removal lets nothing
-// more through are listed below, each with the reason; the list must match exactly, so a guard
-// added without a shape, or a listed guard that comes to matter, fails here.
+// of src/units/content.ts taken out (helpers/mutants.ts: every condition of every `if`, each arm of
+// a ternary, each check a helper takes as an argument, a call that moves the walk kept), some shape
+// of helpers/media.ts's `planted` or `textShaped` is exempt, so units.test.ts fails. The guards
+// whose removal lets nothing more through are listed below, each with the reason; the list must
+// match exactly, so a guard added without a shape, or a listed guard that comes to matter, fails
+// here.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -11,6 +13,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { TOOL_ROOT } from "./helpers/cli.ts";
+import { oneCheckShapes } from "./helpers/media.ts";
 import { guardMutants } from "./helpers/mutants.ts";
 import type { Mutant } from "./helpers/mutants.ts";
 
@@ -36,11 +39,14 @@ const NO_EFFECT: Readonly<Record<string, string>> = {
   "isGif: at + 10 > bytes.length": "the code size is then read past the end, which `minimumCodeSize === undefined` refuses",
   "isGif: minimumCodeSize === undefined": "the sub-blocks after it are then read past the end, which `size === undefined` refuses",
   "isGif: label === undefined": "GIF_LABELS holds no undefined label",
+  "isGif: !subBlocks()": "the sub-blocks fail only once they run past the file's end, where the next block's type is undefined, which `kind === undefined` refuses",
+  "isGif: !subBlocks() #2": "the sub-blocks fail only once they run past the file's end, where the next block's type is undefined, which `kind === undefined` refuses",
   "isWebp: bytes.length < 20": "a chunk header takes bytes 12 to 20, so a shorter file has no image or is refused at its first chunk",
   "isWebp: end > bytes.length": "the walk then ends past the file's end, which `at === bytes.length` refuses",
   "isWebp: at === bytes.length": "each chunk ends within the file, so the loop ends exactly at its end",
   "boxes: !PRINTABLE_TAG_RE.test(type)": "every box a walk reads is then matched against types it knows, all printable",
   "boxes: large > BigInt(to - at)": "the next check refuses a size past `to`",
+  "boxes: size === 1": "a size field of 1 then stays the box's size, below its 8-byte header, which `size < header` refuses",
   "isAvif: top === null": "ftyp is then undefined, which the next check refuses",
   "isAvif: (size - 16) % 4 !== 0": "the last brand then takes 1 to 3 bytes of the next box's size, whose first byte is a NUL (not printable) for any box under 512 MiB",
   "isAvif: meta === undefined": "`metas.length !== 1` refuses a file with no meta",
@@ -63,6 +69,8 @@ const NO_EFFECT: Readonly<Record<string, string>> = {
   "ipmaLaidOut: ipma.body + 8 > ipma.end": "the walk then ends past ipma's end, which its last check refuses",
   "ipmaLaidOut: at + idSize + 1 > ipma.end": "the walk then ends past ipma's end, which its last check refuses",
   "ipmaLaidOut: at + associations * (wide ? 2 : 1) > ipma.end": "the walk then ends past ipma's end, which its last check refuses",
+  "ipmaLaidOut: at + associations * (wide ? 2 : 1) > ipma.end [when wide]": "the walk then ends past ipma's end, which its last check refuses",
+  "ipmaLaidOut: at + associations * (wide ? 2 : 1) > ipma.end [unless wide]": "the walk then ends past ipma's end, which its last check refuses",
   "isBmp: bytes.length < 26": "bitmapLayout refuses a header shorter than 12 bytes from byte 14",
   "isIco: bytes.length < 22": "one directory entry takes the file to 22 bytes, which `bytes.length < directory` refuses",
   "isIco: count < 1": "with no images the file must end at byte 6, which `bytes.length < 22` refuses",
@@ -84,6 +92,8 @@ const NO_EFFECT: Readonly<Record<string, string>> = {
   "isWoff2: streamEnd > bytes.length": "tiled refuses a stream that ends past the file",
   "isWoff2: metaOffset + metaLength > bytes.length": "tiled refuses metadata that ends past the file",
   "isEot: at <= bytes.length": "the next field, or the font data's size check, then refuses a position past the end",
+  "isEot: !field(0)":
+    "a signature field that fails leaves the position where it was, so its padding and size are then read as the EUDC flags, which must be zero, and neither can fail while both are",
   "verifiedExclusion: format !== null": "no extension's formats include null",
   // Bounds on work, not on which bytes are read: past them a font is refused before it is inflated.
   "decompressed: size > MAX_FONT_BYTES": "a bound on work: a shape would build and inflate a stream of more than 64 MiB in every run",
@@ -91,17 +101,38 @@ const NO_EFFECT: Readonly<Record<string, string>> = {
 };
 
 /**
- * The check each mutant runs, as units.test.ts asserts it: every planted shape is no format and not
- * exempt, every text-shaped file is not exempt, no bytes at all are no format, and every exempt
- * shape stays exempt as what its name says. It prints "unchanged" when all of that holds, and what
- * broke otherwise.
+ * The shapes of `oneCheckShapes` that only a walk that never ends holds (a hang names no shape), each
+ * with the guard whose removal makes it run on.
  */
-const CHECK = `import * as content from "./content.ts";
+const HANGS: Readonly<Record<string, string>> = {
+  "scan-unterminated.jpg": "isJpeg: byte === undefined, the end of the file inside a scan",
+};
+
+/**
+ * The CPU time past which a mutant's run is a walk that never ends (one run takes well under a second
+ * of it). CPU time, not wall time, which a busy machine stretches without the run doing more.
+ */
+const CPU_LIMIT_MICROSECONDS = 5_000_000;
+
+/**
+ * The check each mutant runs, as units.test.ts asserts it: every planted shape is no format and not
+ * exempt (a walk that throws on one names it), every text-shaped file is not exempt, no bytes at all
+ * are no format, and every exempt shape stays exempt as what its name says. It prints "unchanged"
+ * when all of that holds, and what broke otherwise. A watchdog thread kills it once it has used
+ * CPU_LIMIT_MICROSECONDS of CPU time.
+ */
+const CHECK = `import { Worker } from "node:worker_threads";
+import * as content from "./content.ts";
 import { FONT_NAME_RE, exemptShapes, misnamed, planted, textShaped } from "../media.ts";
+new Worker("const { cpuUsage, kill, pid } = process; setInterval(() => { const used = cpuUsage(); if (used.user + used.system > ${CPU_LIMIT_MICROSECONDS}) kill(pid, 'SIGKILL'); }, 50);", { eval: true }).unref();
 const payload = Buffer.from("\\0#!/bin/sh\\necho MARKER-PAYLOAD\\n");
 const broken = [];
 for (const [name, bytes] of Object.entries(planted(payload))) {
-  if (content.mediaFormat(bytes) !== null || content.verifiedExclusion("assets/" + name, bytes) !== null) broken.push("passes " + name);
+  try {
+    if (content.mediaFormat(bytes) !== null || content.verifiedExclusion("assets/" + name, bytes) !== null) broken.push("passes " + name);
+  } catch {
+    broken.push("throws " + name);
+  }
 }
 for (const [name, bytes] of Object.entries({ ...textShaped(), ...misnamed() })) {
   if (content.mediaFormat(bytes) === null || content.verifiedExclusion("assets/" + name, bytes) !== null) broken.push("passes " + name);
@@ -113,14 +144,17 @@ for (const [name, bytes] of Object.entries(exemptShapes())) {
 process.stdout.write(broken.length === 0 ? "unchanged" : broken.join(" "));
 `;
 
-/** What one mutant does to the shapes: "unchanged" (the guard is not pinned), what it broke, or how it failed (a crash or a hang also fails the tests). */
+/**
+ * What one mutant does to the shapes: "unchanged" (the guard is not pinned), what it broke, or how it
+ * failed (a crash or a hang also fails the tests). The wall-clock timeout only backs up the watchdog.
+ */
 function runMutant(dir: string, mutant: Mutant, index: number): Promise<string> {
   const own = join(dir, `m${index}`);
   mkdirSync(own);
   writeFileSync(join(own, "content.ts"), mutant.source);
   writeFileSync(join(own, "check.ts"), CHECK);
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(own, "check.ts")], { stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 });
+    const child = spawn(process.execPath, [join(own, "check.ts")], { stdio: ["ignore", "pipe", "ignore"], timeout: 300_000 });
     let out = "";
     child.stdout.on("data", (chunk: Buffer) => {
       out += chunk.toString("utf8");
@@ -134,7 +168,10 @@ describe("the guards of the image and font walks (spec 07 §2.5)", () => {
     const source = readFileSync(join(TOOL_ROOT, "src", "units", "content.ts"), "utf8");
     const mutants = guardMutants(source);
     const keys = new Set(mutants.map((mutant) => mutant.key));
-    // The enumerator reads the guards the findings named, so a layout it cannot read fails here.
+    // The enumerator reads the guards the findings named, so a layout it cannot read fails here: plain
+    // refusals and acceptances, each arm of a ternary in a condition or inside a guard, the conditions
+    // of a braced block of checks and of a flag, a check of what a position-moving read returns (the
+    // read kept), and each check a helper takes as an argument.
     for (const key of [
       "avifGroups: !items.has(v.getUint32(at))",
       "avifReferences: !items.has(id(at))",
@@ -143,10 +180,43 @@ describe("the guards of the image and font walks (spec 07 §2.5)", () => {
       "isWoff2: tiled(bytes, at, blocks, 4)",
       "verifiedExclusion: isUtf8(bytes)",
       "cString: at - from <= max",
+      "bitmapLayout: used > 1 << bits",
+      "bitmapLayout: used !== 0",
+      "avifMeta: pitm.end - pitm.body !== (pitmVersion === 0 ? 6 : 8) [unless pitmVersion === 0]",
+      "avifProperty: size === ((first & 1) === 1 ? 13 : 7) [when (first & 1) === 1]",
+      'avifItems: strings !== (itemType === "uri " ? 2 : 1) [when itemType === "uri "]',
+      "ipmaLaidOut: (wide ? v.getUint16(at) & 0x7fff : (bytes[at] ?? 0) & 0x7f) > properties [when wide]",
+      "avifExtents: read(2) !== 0",
+      "isWoff: metaOffset !== 0",
+      "isWoff: metaLength !== 0",
+      "isWoff: metaOriginal !== 0",
+      "isWoff2: metaOffset !== 0",
+      "isWoff2: metaLength !== 0",
+      "isWoff2: metaOriginal !== 0",
+      'isPng: type === "IDAT"',
+      "isGif: size === 0",
+      "isEot: !field(EOT_MAX_NAME)",
+      "avifMeta: fullBoxVersion(bytes, meta) [every flag of meta]",
+      "avifMeta: fullBoxVersion(bytes, hdlr) [every flag of hdlr]",
+      "avifMeta: fullBoxVersion(bytes, pitm) [every flag of pitm]",
+      "avifReferences: fullBoxVersion(bytes, iref) [every flag of iref]",
+      "avifDataReferences: fullBoxVersion(bytes, dref) [every flag of dref]",
+      "avifDataReferences: fullBoxVersion(bytes, entry, 1) [every flag of entry]",
+      "avifGroups: fullBoxVersion(bytes, group) [every flag of group]",
+      "avifItems: fullBoxVersion(bytes, iinf) [every flag of iinf]",
+      "avifItems: fullBoxVersion(bytes, infe, 1) [every flag of infe]",
+      "avifExtents: fullBoxVersion(bytes, iloc) [every flag of iloc]",
+      "avifProperty: fullBoxVersion(bytes, box) [every flag of box] #3",
+      "ipmaLaidOut: fullBoxVersion(bytes, ipma, 1) [every flag of ipma]",
+      "isEot: field(EOT_MAX_ROOT) [no bound]",
+      "isIco: tiled(bytes, directory, images, 1) [any zero padding]",
     ]) {
       assert.ok(keys.has(key), key);
     }
-    assert.ok(mutants.length >= 390, `${mutants.length} guards`);
+    assert.ok(mutants.length >= 460, `${mutants.length} guards`);
+    // A layout the reader cannot classify fails rather than being skipped.
+    assert.throws(() => guardMutants(`function isX(bytes: Uint8Array): boolean {\n  if (bytes.length > 4) bytes.reverse();\n  return true;\n}\n`), /an if whose statement the reader cannot classify/);
+    assert.throws(() => guardMutants(`function isX(bytes: Uint8Array, limit: number): boolean {\n  return bytes.length < limit;\n}\n`), /takes limit, a check the reader does not take out/);
     for (const key of Object.keys(NO_EFFECT)) assert.ok(keys.has(key), `listed as having no effect but not a guard: ${key}`);
 
     const dir = mkdtempSync(join(tmpdir(), "fin-review-guards-"));
@@ -162,12 +232,23 @@ describe("the guards of the image and font walks (spec 07 §2.5)", () => {
           if (mutant !== undefined) outcomes[index] = await runMutant(dir, mutant, index);
         }
       };
-      await Promise.all(Array.from({ length: Math.max(1, availableParallelism() - 1) }, worker));
+      // Half the machine, so the suite's other files (some of which time what they do) keep the rest.
+      await Promise.all(Array.from({ length: Math.max(1, Math.floor(availableParallelism() / 2)) }, worker));
       const unpinned = mutants.filter((_, index) => outcomes[index] === "unchanged").map((mutant) => `${mutant.line} ${mutant.key}`);
       const listed = mutants.filter((mutant) => mutant.key in NO_EFFECT).map((mutant) => `${mutant.line} ${mutant.key}`);
       const notListed = unpinned.filter((entry) => !listed.includes(entry));
       const pinned = listed.filter((entry) => !unpinned.includes(entry));
       assert.deepEqual(unpinned, listed, `guards no test pins:\n${notListed.join("\n")}\nlisted as having no effect, but pinned:\n${pinned.join("\n")}`);
+      // And the other way: each shape that stands for one check passes (or makes the walk throw) with
+      // some one guard taken out. A shape that fails two checks no single guard holds passes with
+      // none, so it fails here rather than standing in for a check it does not pin.
+      const freed = new Set(outcomes.flatMap((outcome) => [...outcome.matchAll(/\b(?:passes|throws) (\S+)/g)].map((match) => match[1] ?? "")));
+      assert.deepEqual(
+        oneCheckShapes().filter((name) => !freed.has(name) && !(name in HANGS)),
+        [],
+        "shapes no single guard holds",
+      );
+      for (const name of Object.keys(HANGS)) assert.ok(!freed.has(name) && oneCheckShapes().includes(name), `listed as held only by a hang: ${name}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

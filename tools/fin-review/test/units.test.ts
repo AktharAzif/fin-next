@@ -15,7 +15,7 @@ import { DATA_RULE, loadProcedure } from "../src/review/procedure.ts";
 import { mediaFormat, verifiedExclusion } from "../src/units/content.ts";
 import { TOOL_ROOT } from "./helpers/cli.ts";
 import { brotliCompressSync, deflateSync } from "node:zlib";
-import { FONT_NAME_RE, avif, bmp, bmp8, brotliWithMetadata, eot, exemptShapes, gif, headTable, ico, jpeg, misnamed, planted, png, pngChunk, textShaped, ttf, webp, woff, woff2 } from "./helpers/media.ts";
+import { FONT_NAME_RE, avif, bmp, bmp8, brotliWithMetadata, eot, exemptShapes, gif, headTable, ico, jpeg, misnamed, planted, png, pngChunk, textShaped, ttf, twins, webp, woff, woff2 } from "./helpers/media.ts";
 
 function declarations(count: number, lines: number): string {
   const out: string[] = ['import { x } from "./x.ts";', ""];
@@ -227,10 +227,18 @@ describe("inventory and shards", () => {
     // Shapes for every check of each walk (helpers/media.ts): taking any one check out of content.ts
     // makes one pass, except the checks test/content-guards.test.ts lists as changing nothing.
     const files = planted(Buffer.from("\0#!/bin/sh\necho MARKER-PAYLOAD\n"));
-    assert.ok(Object.keys(files).length >= 300, "no shape is dropped");
+    assert.ok(Object.keys(files).length >= 330, "no shape is dropped");
     for (const [name, bytes] of Object.entries(files)) {
       assert.equal(mediaFormat(bytes), null, name);
       assert.equal(verifiedExclusion(`assets/${name}`, bytes), null, name);
+    }
+    // Each shape that holds one field of a layout is refused for that field alone: with it restored,
+    // the same layout is exempt, so the shape cannot stand in for a check by failing two.
+    const restored = twins();
+    assert.ok(Object.keys(restored).length >= 35);
+    for (const [name, bytes] of Object.entries(restored)) {
+      assert.ok(name in files, name);
+      assert.equal(verifiedExclusion(`assets/${name}`, bytes), FONT_NAME_RE.test(name) ? "font" : "image", `${name} with its field restored`);
     }
     // On tier S with the committed exclusions, each is a binary file no lens could review, and blocks.
     const { exclusions } = loadProcedure(join(TOOL_ROOT, "..", "..", "docs", "review"));
