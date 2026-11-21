@@ -5,7 +5,7 @@
 //   - node:http, node:https, node:net, node:dns, node:cluster and node:worker_threads only in
 //     packages/server and apps/connector;
 //   - no node:* import and no server package in any src/client/**, packages/ui, packages/tokens,
-//     packages/frame or packages/app-contracts (FW-C12);
+//     packages/icons, packages/motion, packages/frame or packages/app-contracts (FW-C12);
 //   - only node:* and relative imports in ops/fin/src, tools/fin-review/src,
 //     packages/web-host/src/static, tools/static-deploy/src and scripts/, and only relative
 //     imports in ops/watcher/src (Web APIs only); their test files may also import vitest;
@@ -18,6 +18,9 @@
 //   - @ui-sdk/* only inside packages/ui, so screens take their controls from @fin/ui; the refused
 //     SDK entries and core's experimental helpers nowhere; @ui-sdk/core/testing in tests only;
 //   - no console.error(error): errors go through reportError with safeError;
+//   - the page policy, in code that runs anywhere (tests and fixtures aside): no
+//     dangerouslySetInnerHTML, innerHTML or other markup parsed from a string, no style attribute
+//     written by script, no eval, Function constructor or string timer (spec 06 §6.2, §11.5);
 //   - Node built-ins by their node: name; relative imports with their file extension, .ts or
 //     .tsx where the source is TypeScript.
 // Imports are read wherever they stand: a static import or re-export anywhere in a line or across
@@ -46,9 +49,13 @@ const BUILTINS = new Set(
 );
 const NETWORK = new Set(["http", "https", "net", "dns", "cluster", "worker_threads"]);
 const NETWORK_ALLOWED = ["packages/server/", "apps/connector/"];
+// Spec 06 §3.1: @fin/icons and @fin/motion ship to every browser through @fin/ui, @fin/frame and
+// the screens, so they are client code like the rest (FW-C12).
 const CLIENT_PACKAGES = [
   "packages/ui/",
   "packages/tokens/",
+  "packages/icons/",
+  "packages/motion/",
   "packages/frame/",
   "packages/app-contracts/",
 ];
@@ -113,8 +120,11 @@ const SDK_CORE_REFUSED_NAMES = [
 
 // One part of an import or export clause: any character but a quote, a backtick, a semicolon, a
 // parenthesis or a slash; or a whole string (a string name); or a comment. A clause never holds a
-// parenthesis or a semicolon, so a match cannot run past its statement.
-const CLAUSE_PART = String.raw`(?:[^'"\x60;()/]|\/(?![/*])|\/\/[^\n]*|\/\*[\s\S]*?\*\/|'[^'\n]*'|"[^"\n]*")`;
+// parenthesis or a semicolon, so a match cannot run past its statement. Each character can be
+// read only one way (a line comment runs to the end of its line, a block comment to its first
+// `*/`): with two ways, a long `export` statement with comments and no `from` took exponential
+// time to refuse.
+const CLAUSE_PART = String.raw`(?:[^'"\x60;()/]|\/(?![/*])|\/\/[^\n]*(?![^\n])|\/\*(?:[^*]|\*(?!\/))*\*\/|'[^'\n]*'|"[^"\n]*")`;
 // The forms a module specifier takes: a relative or absolute path, a URL with a scheme (node:,
 // data:, file:, ...), or a bare package name (no space, comma, colon, quote or bracket). Any text
 // that Node could load fits one of them; ordinary code such as `["import", "default"]` or
@@ -131,6 +141,71 @@ const LOADING_CALL =
 // the calls themselves, and the same names reached as a computed member with a string key.
 const UNREAD_LOADERS =
   /\b(?:createRequire|_linkedBinding|dlopen|_load|eval)\s*\(|\bprocess\s*\??\.\s*binding\b|\bnew\s+Function\b|\[\s*(['"`])(?:getBuiltinModule|createRequire|binding|_linkedBinding|dlopen|_load|require)\1\s*\]/g;
+
+// The page policy's refusals (spec 06 §6.2 and §11.5, FW-C18, AC-UI-01), in code that runs,
+// wherever it is: markup parsed from a string (dangerouslySetInnerHTML, innerHTML and its kin,
+// document.write), a style attribute written by script, and code built from a string (eval, the
+// Function constructor, a string handed to setTimeout or setInterval). The keyword must be code,
+// so a comment may name them; a computed member with a string key is read too. Tests, their
+// helpers and fixtures (files under test/, e2e/ or fixtures/) are left out, since a violation
+// fixture plants one on purpose; Biome's noDangerouslySetInnerHtml still covers their JSX. The
+// sink names are spelt inside strings, and no pattern below reads as a call to what it refuses,
+// so this file passes its own check.
+const TEST_CODE = /(?:^|\/)(?:test|tests|__tests__|e2e|fixtures)\//;
+const HTML_SINKS = [
+  "dangerouslySetInnerHTML",
+  "innerHTML",
+  "outerHTML",
+  "insertAdjacentHTML",
+  "createContextualFragment",
+  "setHTMLUnsafe",
+  "parseHTMLUnsafe",
+].join("|");
+const PAGE_POLICY = [
+  {
+    pattern: new RegExp(String.raw`(?<![\w$])(?:${HTML_SINKS})(?![\w$])`, "g"),
+    message: "markup is never parsed from a string (dangerouslySetInnerHTML, innerHTML and kin)",
+  },
+  {
+    pattern: /(?<![\w$])document\s*\??\.\s*write(?:ln)?\s*\(/g,
+    message: "markup is never written from a string (document.write)",
+  },
+  {
+    pattern: /(?<![\w$])setAttribute(?:NS)?\s*\(\s*(?:[^,()'"`]*,\s*)?(['"`])style\1/gi,
+    message: 'styles go through the CSSOM (React\'s style prop), never setAttribute("style")',
+  },
+  {
+    pattern: /(?<![\w$])(?:setTimeout|setInterval)\s*\(\s*['"`]/g,
+    message: "setTimeout and setInterval take a function, never a string of code",
+  },
+  {
+    // Where every import must be read, UNREAD_LOADERS refuses these already, comments included.
+    pattern: new RegExp(
+      [
+        String.raw`(?<![\w$.])eval\s*\(`,
+        String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*eval\s*\(`,
+        String.raw`(?<![\w$])new\s+Function(?![\w$])`,
+      ].join("|"),
+      "g",
+    ),
+    message: "no code is built from a string (eval, the Function constructor)",
+    refusedWhereAllImportsAreRead: true,
+  },
+  {
+    pattern: new RegExp(
+      [
+        String.raw`(?<![\w$.])(?<!new\s+)Function\s*\(`,
+        String.raw`(?<![\w$])(?:globalThis|window|self)\s*\??\.\s*Function\s*\(`,
+      ].join("|"),
+      "g",
+    ),
+    message: "no code is built from a string (eval, the Function constructor)",
+  },
+  {
+    pattern: new RegExp(String.raw`\[\s*(['"\x60])(?:${HTML_SINKS}|eval|Function)\1\s*\]`, "g"),
+    message: "a refused sink reached by a string key is refused the same",
+  },
+];
 
 /**
  * The package name of a bare specifier (`@scope/name` or `name`).
@@ -480,6 +555,18 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
             "relative-extension",
             "import the .ts source by its .ts name (rewriteRelativeImportExtensions)",
           );
+      }
+    }
+  }
+
+  if (!isTest && !TEST_CODE.test(file)) {
+    const mask = codeMask(text);
+    const lineAt = lineFinder(text);
+    for (const { pattern, message, refusedWhereAllImportsAreRead } of PAGE_POLICY) {
+      if (refusedWhereAllImportsAreRead === true && mustReadAll) continue;
+      for (const match of text.matchAll(pattern)) {
+        if (mask[match.index] !== 1) continue;
+        add(lineAt(match.index), "page-policy", `${message} (spec 06 §6.2, FW-C18)`);
       }
     }
   }
