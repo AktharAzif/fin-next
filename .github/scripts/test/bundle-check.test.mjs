@@ -570,7 +570,8 @@ describe("static builds", () => {
         "assets/a.js",
         `jsx("img",{srcSet:\`${"$"}{b}/a.png, //evil.example/b.png 2x\`})`,
       ],
-      // The first candidate, the run a quote opens, may hold anything a URL or code does.
+      // A list a srcset key opens is read whole, whatever its candidates hold: a bracket, a
+      // semicolon, a helper call or a condition, and descriptors built at run time or misspelled.
       [
         "a bracket in the first candidate",
         "assets/a.js",
@@ -596,6 +597,53 @@ describe("static builds", () => {
         "assets/a.js",
         `jsx("img",{srcSet:\`${"$"}{dark?"/d.png":"/l.png"}, //evil.example/b.png 2x\`})`,
       ],
+      [
+        "a descriptor built at run time",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`/a.png 1x, /b.png ${"$"}{x}x, //evil.example/c.png 3x\`})`,
+      ],
+      [
+        "a density built at run time after a substitution",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{base}/a.png ${"$"}{dpr}x, //cdn.evil.example/b.png 2x\`})`,
+      ],
+      [
+        "a width built at run time",
+        "assets/a.js",
+        `jsx("img",{srcSet:\`${"$"}{a} ${"$"}{w}w, //cdn.evil.example/x.png 800w\`})`,
+      ],
+      [
+        "a misspelled density",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png 2X, //evil.example/b.png 2x"})',
+      ],
+      [
+        "a misspelled width",
+        "assets/a.js",
+        'i.setAttribute("srcset","/a.png 100px, //evil.example/b.png 200w")',
+      ],
+      [
+        "a property the minifier prints with backticks",
+        "assets/a.js",
+        "i.srcset=`/a.png, //evil.example/b.png 2x`",
+      ],
+      [
+        "setAttribute as the minifier prints it",
+        "assets/a.js",
+        "i.setAttribute(`srcset`,`/a.png, //evil.example/b.png 2x`)",
+      ],
+      ["a JSON key", "assets/a.json", '{"srcSet":"/a.png, //evil.example/b.png 2x"}'],
+      // A list no key opens: a later candidate after a descriptor.
+      [
+        "a condition's branch",
+        "assets/a.js",
+        'jsx("img",{srcSet:d?"/a.png 1x, //evil.example/b.png 2x":"/l.png"})',
+      ],
+      [
+        "a constant with a descriptor built at run time",
+        "assets/a.js",
+        `const s=\`/a.png ${"$"}{d}x, //evil.example/b.png 2x\`;`,
+      ],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -604,13 +652,27 @@ describe("static builds", () => {
         `${what}: ${found.join()}`,
       );
     }
-    // No list: code, a quote right before the comma (a string's end), prose.
+    // No list: code, a quote right before the comma (a string's end), prose, and a regular
+    // expression after a comma and a string's end, as real libraries minify it (prettier 3.10.1's
+    // plugins, a pattern string) and in the backticks the minifier prints.
     for (const text of [
       'jsx("img",{srcSet:"/a.png 1x, /b.png 2x"})',
       "e.srcset=t.srcset,e.sizes=n;x=/\\/\\//.test(b);",
       "a=[1, //evil.example/x\n2]",
       'f("a", //evil.example/x\nb)',
       'x="see the docs, //evil.example/x";',
+      'if(C[0]===""){if(C.shift(),/\\n/.test(C[0])){let y=1}}',
+      `k(0,k(0,t,"'",'"'),/\\\\([^\\da-f])/gi,"$1")`,
+      'x="^([^\\\\\\\\s].*)\\\\\\\\((\\\\\\\\d+,\\\\\\\\d+)";',
+      'n=e.indexOf("x"),/\\//.test(n)&&f();',
+      "n=e.indexOf(`x`),/\\//.test(n)&&f();",
+      "let t=e.trim(),n=t.split(`\\n`),/\\r/.test(t)&&n.pop();",
+      "t=e.replace(`a`,`b`),/\\/\\/cdn\\.example\\.com\\//.test(t)&&g(t);",
+      'm=[[q("a"),/\\/v1\\//],[q("b"),/\\/v2\\//]]',
+      'routes.push(route("about"), //about page\n0)',
+      'x="a"+b,/\\n/.test(x)',
+      // React's attribute table: a srcset key whose list names no URL.
+      'r={srcSet:"srcset",imageSrcSet:"imagesrcset"};',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -811,6 +873,36 @@ describe("static builds", () => {
       [
         "a branch's string that ends as a string may start",
         'e.innerHTML="<a "+(t?"title: ":x)+(n>0?"a":"")+" href=//evil.example/>go</a>";',
+      ],
+      // The code between two strings writes a value, a `>` in it: the next string's first
+      // attribute is a new one, in the backticks the minifier prints and in two quote kinds.
+      [
+        "a value code writes, a comparison in it",
+        "e.innerHTML=`<img width=`+(w>0?w:100)+` src=//evil.example/p.png>`;",
+      ],
+      [
+        "a value code writes, an arrow function in it",
+        "e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=//evil.example/p.png>`;",
+      ],
+      [
+        "a srcset after a value code writes",
+        "e.innerHTML=`<img width=`+(w>0?w:100)+` srcset=//evil.example/p.png>`;",
+      ],
+      [
+        "a user name after a value code writes",
+        "e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=https://react.dev\\x27@evil.example/p.png>`;",
+      ],
+      [
+        "a value code writes, then the other quote kind",
+        `e.innerHTML="<img width="+(w>0?w:100)+' src=//cdn.evil.example/x.png alt="y">';`,
+      ],
+      [
+        "a link after a value code writes",
+        `e.innerHTML="<a title="+(n>0?c:x)+' href=//evil.example/x data-k="y">go</a>';`,
+      ],
+      [
+        "a value code writes, then a template literal",
+        `e.innerHTML="<img width="+(w>0?w:100)+\` src=//cdn.evil.example/x.png alt="${"$"}{a}">\`;`,
       ],
     ];
     for (const [what, text] of cases) {
@@ -1275,6 +1367,21 @@ describe("static builds", () => {
     const text = `${strings}i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
     const started = performance.now();
     assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]);
+    const took = performance.now() - started;
+    assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
+  });
+
+  it("reads a large script's srcset lists in time linear in the text", { timeout: 10_000 }, () => {
+    // Keyed template lists, each walking through substitutions, and descriptors before commas.
+    const d = "$";
+    const lists = `i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(100);
+    const commas = `x=\`${"/a.png 2x, //react.dev/b.png ".repeat(20_000)}\`;`;
+    const text = `${lists}${commas}jsx("img",{srcSet:\`${d}{f(\`a\`)} 1x, //evil.example/b.png 2x\`})`;
+    const started = performance.now();
+    assert.deepEqual(originsIn(text, { kind: "script" }), [
+      "https://react.dev",
+      "https://evil.example",
+    ]);
     const took = performance.now() - started;
     assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
   });
