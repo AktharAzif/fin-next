@@ -10,7 +10,12 @@
 // Staging's Access policy allows the company domain with One-time PIN; here an allowed domain is
 // a fixture domain, and "signing in" is a test asking for a token for an address.
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { type Handler, isLoopbackName, type Listening, listen } from "../http/node.ts";
+import {
+  type Handler,
+  isLoopbackName,
+  type Listening,
+  listen,
+} from "@fin/server/testing/node-http";
 import { decodeToken, type JsonObject, signRs256, verifyRs256 } from "./jwt.ts";
 
 export interface AccessStandInOptions {

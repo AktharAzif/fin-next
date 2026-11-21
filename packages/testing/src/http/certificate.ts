@@ -8,12 +8,10 @@
 // fields a TLS server certificate needs (RFC 5280 §4.1), with the subject alternative names the
 // browsers check.
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import type { TlsIdentity } from "@fin/server/testing/node-http";
 
-/** A certificate and its private key, both PEM. */
-export interface TlsIdentity {
-  readonly cert: string;
-  readonly key: string;
-}
+/** A certificate and its private key, both PEM: the shape the harness's https listener takes. */
+export type { TlsIdentity };
 
 export interface SelfSignedOptions {
   /** Milliseconds since the epoch the validity is counted from (default: the system clock). */

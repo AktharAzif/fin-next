@@ -19,7 +19,8 @@
     "./vite": "./src/build/vite-server.ts",
     "./testing": "./src/testing/capture.ts",
     "./testing/child": "./src/testing/child.ts",
-    "./testing/http": "./src/testing/http.ts"
+    "./testing/http": "./src/testing/http.ts",
+    "./testing/node-http": "./src/testing/node-http.ts"
   },
   "scripts": {
     "lint": "biome check .",

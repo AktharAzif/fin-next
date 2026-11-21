@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { HostRequest, RawHeaders } from "@fin/server/testing/node-http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type FakeApi, startFakeApi } from "../../test/fake-api.ts";
 import {
@@ -7,7 +8,6 @@ import {
   type RunningAccessStandIn,
   startAccessStandIn,
 } from "../access/stand-in.ts";
-import type { HostRequest, RawHeaders } from "../http/node.ts";
 import { createStaticHost, type RequestLine, type StaticHostOptions } from "./host.ts";
 
 const ROOT = join(import.meta.dirname, "../../test/fixtures/app");

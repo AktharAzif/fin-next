@@ -17,8 +17,6 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AccessGate, AccessIdentity } from "../access/stand-in.ts";
-import { isLocalPath } from "../access/stand-in.ts";
 import {
   type ForwardOptions,
   type ForwardRequest,
@@ -26,7 +24,9 @@ import {
   type HostRequest,
   headerValue,
   type RawHeaders,
-} from "../http/node.ts";
+} from "@fin/server/testing/node-http";
+import type { AccessGate, AccessIdentity } from "../access/stand-in.ts";
+import { isLocalPath } from "../access/stand-in.ts";
 import { fallbackAsset, type Manifest, readManifest, resolveAsset } from "./assets.ts";
 import {
   applyHeaderRules,

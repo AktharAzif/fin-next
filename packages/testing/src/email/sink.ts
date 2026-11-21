@@ -5,7 +5,7 @@
 // It accepts only fixture recipients (example.com, example.org, example.net and their
 // subdomains), so a misconfigured test can never believe it reached a real person. Messages stay
 // in memory for the life of the process.
-import { type Handler, type Listening, listen } from "../http/node.ts";
+import { type Handler, type Listening, listen } from "@fin/server/testing/node-http";
 
 export interface SinkMessageInput {
   readonly from: string;

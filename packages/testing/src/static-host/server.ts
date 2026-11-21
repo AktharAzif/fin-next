@@ -1,8 +1,9 @@
 // Starts a static host on loopback, over https as the zone answers, under the host name the
 // browser uses. The handler learns its own origin only once the port is bound, which matters when
 // the port is picked by the system (tests) and for `Host` defaults.
+
+import { type Listening, listen } from "@fin/server/testing/node-http";
 import { selfSignedIdentity, type TlsIdentity } from "../http/certificate.ts";
-import { type Listening, listen } from "../http/node.ts";
 import { createStaticHost, requestLine, type StaticHost, type StaticHostOptions } from "./host.ts";
 
 export interface StartStaticHostOptions extends StaticHostOptions {
