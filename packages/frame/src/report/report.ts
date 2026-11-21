@@ -2,7 +2,9 @@
 // here with IDs only, never a value a person typed. Until the reporter loads after the first paint
 // (the Sentry relay of `/api/monitoring/envelope`, installed by the lane that owns it), reports wait
 // in a queue of at most 20, oldest dropped. `window.onerror` and `unhandledrejection` go through
-// the same seam.
+// the same seam, and the browser's own print of them (the whole error) is cancelled: the console
+// hears them only reduced, as the console guard reduces everything (spec 06 §2.3 step 1).
+import { safeConsoleValue } from "./console-guard.ts";
 
 export type ReportIds = Readonly<Record<string, string>>;
 export type ReportSink = (error: unknown, ids: ReportIds) => void;
@@ -49,16 +51,59 @@ export function pendingReports(): number {
   return queue.length;
 }
 
-/** Sends `error` and `unhandledrejection` to the seam. Returns the remover. */
-export function installGlobalErrorReporting(target: Window = window): () => void {
-  const onError = (event: ErrorEvent) =>
-    reportBrowserError(event.error ?? event.message, { source: "window.onerror" });
-  const onRejection = (event: PromiseRejectionEvent) =>
+/** A reported failure as one console line for whoever has the console open: reduced, never whole. */
+export type ReportedPrinter = (source: string, error: unknown) => void;
+
+export const printReported: ReportedPrinter = (source, error) => {
+  // biome-ignore lint/suspicious/noConsole: the frame's one print of a failure it has reported, reduced by safeConsoleValue first.
+  globalThis.console.error(`${source}:`, safeConsoleValue(error));
+};
+
+/**
+ * Sends `error` and `unhandledrejection` to the seam, and cancels the browser's own print of them,
+ * which would show the error whole; `print` says it reduced instead. Returns the remover.
+ */
+export function installGlobalErrorReporting(
+  target: Pick<Window, "addEventListener" | "removeEventListener"> = window,
+  print: ReportedPrinter = printReported,
+): () => void {
+  const onError = (event: ErrorEvent) => {
+    event.preventDefault();
+    const error: unknown = event.error ?? event.message;
+    reportBrowserError(error, { source: "window.onerror" });
+    print("window.onerror", error);
+  };
+  const onRejection = (event: PromiseRejectionEvent) => {
+    event.preventDefault();
     reportBrowserError(event.reason, { source: "unhandledrejection" });
+    print("unhandledrejection", event.reason);
+  };
   target.addEventListener("error", onError);
   target.addEventListener("unhandledrejection", onRejection);
   return () => {
     target.removeEventListener("error", onError);
     target.removeEventListener("unhandledrejection", onRejection);
+  };
+}
+
+/**
+ * React's failure handlers for `createRoot` (React 19). Its defaults hand an uncaught or a
+ * recoverable error to `window.reportError`, whose print shows the error whole; these report it
+ * through the seam and print it reduced. Caught errors (a route's error boundary) keep React's
+ * default, which prints through the console guard.
+ */
+export function reactFailureHandlers(print: ReportedPrinter = printReported): {
+  onUncaughtError: (error: unknown) => void;
+  onRecoverableError: (error: unknown) => void;
+} {
+  return {
+    onUncaughtError: (error) => {
+      reportBrowserError(error, { source: "react.uncaught" });
+      print("react.uncaught", error);
+    },
+    onRecoverableError: (error) => {
+      reportBrowserError(error, { source: "react.recoverable" });
+      print("react.recoverable", error);
+    },
   };
 }

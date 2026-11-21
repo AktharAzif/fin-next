@@ -5,10 +5,12 @@
   "type": "module",
   "description": "The web apps' frames, router glue, navigation trees, route states, theme bootstrap, env.json loader and api() client (spec 06 §2, §4, §5)",
   "sideEffects": [
-    "*.css"
+    "*.css",
+    "./src/report/index.ts"
   ],
   "exports": {
     ".": "./src/index.ts",
+    "./report": "./src/report/index.ts",
     "./boot/*": "./boot/*"
   },
   "scripts": {

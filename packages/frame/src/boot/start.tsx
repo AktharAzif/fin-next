@@ -1,22 +1,30 @@
 // The entry's boot sequence (spec 06 §2.3), shared by the three apps' `src/client/main.tsx`:
-//   1. the app's stylesheet is imported first, by main.tsx itself;
+//   1. the app's stylesheet is imported first, by main.tsx itself, then `@fin/frame/report`, whose
+//      scrubbing console guard is in place before any library loads; startApp installs the guard
+//      again (a no-op once it is there) and sends uncaught errors to the report seam from here on;
 //   2. `GET /env.json` and `GET /api/viewer` start at once, in parallel;
 //   3. env.json is checked with the one schema; if it fails, or the viewer cannot be read, the page
 //      shows "Couldn't load Fin" with Try again, and nothing else renders;
 //   4. the router is created with the runtime in its context; the root route's guard decides the
 //      first navigation from the viewer (401 on an `app` route goes to `/sign-in?next=`);
-//   5. React's first render replaces the static boot skeleton;
+//   5. React's first render replaces the static boot skeleton; React's own failure handlers report
+//      through the seam rather than printing the error whole;
 //   6. the root sets `data-ready` once the first route has resolved;
-//   7. after the first paint: one reload on a failed chunk, and errors to the report seam.
+//   7. after the first paint: one reload on a failed chunk.
 // Until the first render, the static skeleton from index.html stays on screen.
 import type { AppContract, AppName, ContractOutput } from "@fin/app-contracts";
-import { CONNECTION_SENTENCE, ErrorState, toast } from "@fin/ui";
+import { CONNECTION_SENTENCE, ErrorState, ReportFailures, toast } from "@fin/ui";
 import { type AnyRouter, RouterProvider } from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "../api/client.ts";
 import { loadEnv } from "../env/env.ts";
 import { createReleaseWatch, installPreloadErrorReload } from "../release/release.ts";
-import { installGlobalErrorReporting, reportBrowserError } from "../report/report.ts";
+import { installConsoleGuard } from "../report/console-guard.ts";
+import {
+  installGlobalErrorReporting,
+  reactFailureHandlers,
+  reportBrowserError,
+} from "../report/report.ts";
 import type { FrameKind } from "../router/static-data.ts";
 import { type FinRouterContext, type FinRuntime, FinRuntimeProvider } from "../runtime/runtime.tsx";
 import { createStore } from "../runtime/store.ts";
@@ -73,6 +81,8 @@ export function showReleaseToast(): void {
 
 export async function startApp<C extends AppContract>(options: StartOptions<C>): Promise<void> {
   type Viewer = ContractOutput<C>;
+  installConsoleGuard();
+  installGlobalErrorReporting();
   const container = options.container ?? document.getElementById("root");
   if (container === null) throw new Error("index.html has no #root");
 
@@ -94,10 +104,14 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
     ),
   ]);
 
-  const reactRoot = createRoot(container);
+  const reactRoot = createRoot(container, reactFailureHandlers());
   if (!envResult.ok || !viewerResult.ok) {
     if (!viewerResult.ok) reportBrowserError(viewerResult.error, { stage: "boot.viewer" });
-    reactRoot.render(<BootFailure />);
+    reactRoot.render(
+      <ReportFailures report={reportBrowserError}>
+        <BootFailure />
+      </ReportFailures>,
+    );
     document.body.setAttribute("data-ready", "");
     return;
   }
@@ -147,6 +161,5 @@ export async function startApp<C extends AppContract>(options: StartOptions<C>):
 
   requestAnimationFrame(() => {
     installPreloadErrorReload();
-    installGlobalErrorReporting();
   });
 }
