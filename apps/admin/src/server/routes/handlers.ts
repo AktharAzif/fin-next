@@ -32,6 +32,7 @@ import {
 } from "@fin/staff";
 import type { AdminPolicy, PolicyId } from "../policy/index.ts";
 import { ADMIN_POLICIES } from "../policy/index.ts";
+import { auditHandlers } from "./audit.ts";
 import type { HandlerArgs, RouteAnswer, RouteHandler } from "./register.ts";
 
 function codeAnswer(code: IssuedCode) {
@@ -75,6 +76,7 @@ const str = (value: unknown): string => String(value);
 export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteHandler>> {
   const { realm } = deps;
   return {
+    ...auditHandlers(deps, guarded),
     "viewer.get": async ({ c, context, setCookies }: HandlerArgs) =>
       ok(
         await staffViewer(realm, c.req.raw, context as RequestContext, deps.environment, {

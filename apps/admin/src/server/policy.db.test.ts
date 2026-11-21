@@ -80,6 +80,10 @@ function sample(id: PolicyId): { path: string; body?: unknown } {
       return { path: "/api/switches" };
     case "switches.set":
       return { path: "/api/switches/signups", body: { state: "on", reasonCode: "drill" } };
+    case "audit.list":
+      return { path: "/api/audit?limit=10" };
+    case "audit.get":
+      return { path: `/api/audit/aud_01jd${"0".repeat(22)}` };
   }
 }
 
@@ -161,19 +165,28 @@ describe("every permission check (§8.3)", () => {
   const withPermission = ADMIN_POLICIES.filter((p) => p.permission !== null);
   let viewer: HostMember;
   let auditor: HostMember;
+  let staffReader: HostMember;
 
   beforeAll(async () => {
     viewer = await enrolThroughHost(h, host, unique("perm.viewer"), "viewer");
     const auditRole = await h.seedCustomRole("Auditors", ["audit.read"]);
     auditor = await enrolThroughHost(h, host, unique("perm.auditor"), auditRole);
+    const staffRole = await h.seedCustomRole("Staff readers", ["staff.read"]);
+    staffReader = await enrolThroughHost(h, host, unique("perm.staff"), staffRole);
   }, 120_000);
 
   it.each(withPermission.map((p) => p.id))(
     "%s refuses a role lacking its permission",
     async (id) => {
       const policy = withPermission.find((p) => p.id === id);
-      // Every prebuilt role reads staff, so the staff reads are tried with a custom role that does not.
-      const who = policy?.permission === "staff.read" ? auditor : viewer;
+      // Every prebuilt role reads staff and the audit log, so those reads are tried with a custom
+      // role that does not.
+      const who =
+        policy?.permission === "staff.read"
+          ? auditor
+          : policy?.permission === "audit.read"
+            ? staffReader
+            : viewer;
       const reply = await send(who.client, id);
       expect(reply.status).toBe(403);
       expect(reply.json).toMatchObject({ code: "forbidden", permission: policy?.permission });

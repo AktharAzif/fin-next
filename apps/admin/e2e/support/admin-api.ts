@@ -196,6 +196,8 @@ interface Challenge {
 }
 
 export interface AuditEvent {
+  /** An `aud_` ID in recording order (the audit log screen pages by it). */
+  readonly id: string;
   readonly event: string;
   readonly actor: string;
   readonly target: string | null;
@@ -209,6 +211,33 @@ type Jwk = { readonly [key: string]: unknown };
 const MINUTE = 60_000;
 const SESSION_COOKIE = "__Host-fin.admin_session";
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * An `aud_` ID as the real log's: 10 characters of milliseconds, then the event's place in the
+ * trail (so two events in one millisecond keep their order), then randomness.
+ */
+function auditId(ms: number, place: number): string {
+  const alphabet = CROCKFORD.toLowerCase();
+  const encode = (value: number, width: number) => {
+    let out = "";
+    let rest = value;
+    for (let i = 0; i < width; i += 1) {
+      out = (alphabet[rest % 32] as string) + out;
+      rest = Math.floor(rest / 32);
+    }
+    return out;
+  };
+  let random = "";
+  for (const byte of randomBytes(10)) random += alphabet[byte % 32];
+  return `aud_${encode(ms, 10)}${encode(place, 6)}${random}`;
+}
+
+/** What the stand-in keeps that the real log writes as lines, not audit rows (spec 02 §16.4). */
+const NOT_AUDIT_ROWS: ReadonlySet<string> = new Set([
+  "staff.access_mismatch",
+  "staff.not_listed",
+  "staff.enrolment_refused",
+]);
 
 function newId(prefix: string): string {
   return `${prefix}_${randomBytes(10).toString("hex")}`;
@@ -452,7 +481,14 @@ export class AdminApiStandIn {
     target: string | null,
     metadata: Record<string, unknown> = {},
   ) {
-    this.audit.push({ event, actor, target, metadata, at: new Date(this.now()).toISOString() });
+    this.audit.push({
+      id: auditId(this.now(), this.audit.length),
+      event,
+      actor,
+      target,
+      metadata,
+      at: new Date(this.now()).toISOString(),
+    });
   }
 
   // ── Control (test only, on its own loopback port) ──
@@ -723,6 +759,11 @@ export class AdminApiStandIn {
       return this.#needs(m, "staff.read") ?? ok({ roles: this.#roles() });
     if (key === "POST /api/staff") return this.#addStaff(context, s, m);
     if (key === "GET /api/account") return this.#account(s, m);
+    if (key === "GET /api/audit") return this.#needs(m, "audit.read") ?? this.#auditLog(url, m);
+    const auditMatch = /^\/api\/audit\/([^/]+)$/.exec(path);
+    if (auditMatch !== null && request.method === "GET") {
+      return this.#needs(m, "audit.read") ?? this.#auditEntry(auditMatch[1] as string);
+    }
     if (key === "POST /api/account/sessions/revoke-others")
       return this.#revokeOthers(context, s, m);
     const staffMatch = /^\/api\/staff\/([^/]+)(\/remove|\/enrolment-code)?$/.exec(path);
@@ -747,6 +788,97 @@ export class AdminApiStandIn {
       return problem("factor_step_required", { methods: this.#methods(context.member) });
     }
     return { session: context.session, member: context.member };
+  }
+
+  // ── The audit log (spec 02 §14.3, §14.5): the trail as the screen's contract reads it ──
+
+  #auditRow(event: AuditEvent) {
+    const kind = event.actor === "operator" || event.actor === "system" ? event.actor : "staff";
+    const actor = kind === "staff" ? (this.members.get(event.actor) ?? null) : null;
+    const label = (id: string) => this.members.get(id)?.email ?? null;
+    const { refs, ...metadata } = event.metadata as Record<string, unknown>;
+    return {
+      id: event.id,
+      event: event.event,
+      category: /^staff\.(signed|sign_in|second_factor|session)/.test(event.event)
+        ? "sign_in"
+        : /step_up|factor/.test(event.event)
+          ? "security"
+          : "staff",
+      at: event.at,
+      actor: {
+        kind,
+        id: kind === "staff" ? event.actor : null,
+        via: "admin",
+        email: actor?.email ?? null,
+        name: null,
+      },
+      target: { id: event.target ?? "", label: event.target === null ? null : label(event.target) },
+      refs: Array.isArray(refs)
+        ? refs.map((id) => ({ id: String(id), label: label(String(id)) }))
+        : [],
+      organisationId: null,
+      metadata,
+      verification: kind === "staff" ? "session" : null,
+      address: null,
+      device: null,
+    };
+  }
+
+  /** `GET /api/audit`: newest first, the views, the Action and Staff member filters, cursors. */
+  #auditLog(url: URL, reader: Member): Answer {
+    const query = url.searchParams;
+    const limit = Number(query.get("limit") ?? "50");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return problem("invalid", { fields: [{ path: "limit", code: "too_big" }] });
+    }
+    const list = (name: string) => query.get(name)?.split(",") ?? null;
+    const actions = list("action");
+    const actors = list("actor");
+    const show = query.get("show");
+    const matching = this.audit
+      .filter((event) => !NOT_AUDIT_ROWS.has(event.event))
+      .filter((event) => show !== "mine" || event.actor === reader.id)
+      .filter((event) => show !== "rejections" || event.event === "staff.customer_rejected")
+      .filter((event) => actions === null || actions.includes(event.event))
+      .filter((event) => actors === null || actors.includes(event.actor))
+      .sort((a, b) => (a.id < b.id ? 1 : -1));
+    const cursor = query.get("cursor");
+    const before = query.get("before");
+    let page: AuditEvent[];
+    let older: boolean;
+    let newer: boolean;
+    if (before !== null) {
+      const above = matching.filter((event) => event.id > before);
+      page = above.slice(Math.max(0, above.length - limit));
+      newer = above.length > limit;
+      older = matching.some((event) => event.id <= before);
+    } else {
+      const below = cursor === null ? matching : matching.filter((event) => event.id < cursor);
+      page = below.slice(0, limit);
+      older = below.length > limit;
+      newer = cursor !== null && matching.some((event) => event.id >= cursor);
+    }
+    const people =
+      this.#needs(reader, "staff.read") === null
+        ? [...this.members.values()]
+            .map((member) => ({ id: member.id, email: member.email }))
+            .sort((a, b) => a.email.localeCompare(b.email))
+        : [];
+    return ok({
+      items: page.map((event) => this.#auditRow(event)),
+      total: matching.length,
+      totalCapped: false,
+      nextCursor: older ? (page.at(-1)?.id ?? null) : null,
+      previousCursor: newer ? (page[0]?.id ?? null) : null,
+      people,
+    });
+  }
+
+  /** `GET /api/audit/:eventId`: one row of the trail, or not found. */
+  #auditEntry(id: string): Answer {
+    const event = this.audit.find((row) => row.id === id && !NOT_AUDIT_ROWS.has(row.event));
+    return event === undefined ? problem("not_found") : ok({ entry: this.#auditRow(event) });
   }
 
   #needs(member: Member, permission: string): Answer | null {

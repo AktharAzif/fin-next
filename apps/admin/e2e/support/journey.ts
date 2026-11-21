@@ -212,7 +212,19 @@ export async function emailedCodeSignIn(
   await expect(page).toHaveURL(`${ORIGIN}/sign-in/factor`);
 }
 
-/** A pending member's enrolment code, then the first factor; lands on Staff. */
+/**
+ * Fin Admin's home for a prebuilt role: the first navigation item whose screen exists (spec 06
+ * §7.2, S6-25), the Audit log until Production access is built. Where a sign-in ends.
+ */
+export const HOME = { url: `${ORIGIN}/audit`, heading: "Audit log" } as const;
+
+/** Checks the page is Fin Admin's home. */
+export async function expectHome(page: Page): Promise<void> {
+  await expect(page).toHaveURL(HOME.url);
+  await expect(page.getByRole("heading", { level: 1, name: HOME.heading })).toBeVisible();
+}
+
+/** A pending member's enrolment code, then the first factor; lands on home, then opens Staff. */
 export async function enrol(
   page: Page,
   enrolmentCode: string,
@@ -234,6 +246,8 @@ export async function enrol(
       .getByRole("textbox", { name: "Code from the app" })
       .fill(await authenticatorCode(key));
   }
+  await expectHome(page);
+  await page.getByRole("link", { name: "Staff", exact: true }).click();
   await expect(page).toHaveURL(`${ORIGIN}/staff`);
   await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
   return key;
