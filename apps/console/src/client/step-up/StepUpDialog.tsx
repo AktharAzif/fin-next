@@ -30,7 +30,7 @@ import { commonAlert, type Failure, failureOf } from "../api/failures.ts";
 import { ceremonyApi } from "../api/library.ts";
 import { rememberEmail } from "../auth/pending.ts";
 import { authenticateWithPasskey, isCeremonyError, passkeysSupported } from "../auth/webauthn.ts";
-import { reasonLine } from "./reasons.ts";
+import { reasonLine, valuesFor } from "./reasons.ts";
 
 type Mode = "code" | "backup";
 
@@ -68,8 +68,12 @@ function ProofDialog({
   prove: (intentId: string | null) => void;
   close: () => void;
 }) {
-  // The line is fixed when the dialog opens: the page's values are its own (spec 02 §15.5).
-  const line = useMemo(() => reasonLine(required.reason_key), [required.reason_key]);
+  // The line is fixed when the dialog opens, with the values of the one call in flight that asks
+  // for this reason; when that is not clear, it names nothing (spec 02 §15.5; reasons.ts).
+  const line = useMemo(
+    () => reasonLine(required.reason_key, valuesFor(required.reason_key)),
+    [required.reason_key],
+  );
   const passkey = required.methods.includes("passkey") && passkeysSupported();
   const hasCode = required.methods.includes("authenticator");
   const hasBackup = required.methods.includes("backup_code");

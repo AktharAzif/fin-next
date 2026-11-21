@@ -68,7 +68,7 @@ function NoAccessPage() {
     setBusy("accept");
     setFailed(null);
     try {
-      await withReasonValues({}, () =>
+      await withReasonValues("invitation.accept", {}, () =>
         fin.api(acceptInvitation, { invitationId: invitation.invitationId }),
       );
       const href = await destinationAfterSignIn(fin, "/");

@@ -5,12 +5,14 @@
 import {
   type DashboardPermission,
   dashboardCatalogue,
+  needsOf,
   permissionSet,
   type RoleProblem,
   sortPermissions,
   tick,
   untick,
   validateRole,
+  withNeeds,
 } from "@fin/access";
 
 export type Permission = DashboardPermission;
@@ -69,6 +71,22 @@ export function lockReason(key: Permission, actor: ReadonlySet<Permission>): str
   return null;
 }
 
+/**
+ * A duplicate's permissions: the source role's, less every one this editor may not give and every
+ * one that needs such a permission, with everything the rest need. So even a copy of a role that
+ * can do more than the editor (Super admin, with its organisation delete) is one they can save.
+ */
+export function givableCopy(
+  source: Iterable<string>,
+  actor: ReadonlySet<Permission>,
+): ReadonlySet<Permission> {
+  const givable = (key: Permission) => lockReason(key, actor) === null;
+  const kept = [...toPermissions(source)].filter(
+    (key) => givable(key) && [...needsOf(CATALOGUE, key)].every(givable),
+  );
+  return withNeeds(CATALOGUE, kept) as ReadonlySet<Permission>;
+}
+
 /** The problems a draft has, from the engine; the name and permissions in the form it is saved. */
 export function draftProblems(
   draft: Draft,
@@ -87,13 +105,19 @@ export function draftProblems(
   );
 }
 
-/** The line under Save when it cannot be pressed yet. */
+/**
+ * The line under Save when it cannot be pressed yet. Every problem without a field of its own is
+ * named here, so Save is never pressable while saving would do nothing.
+ */
 export function whySaveIsOff(problems: readonly RoleProblem[], name: string): string | null {
   const noName = name.trim() === "";
   const empty = problems.includes("empty");
   if (noName && empty) return "Name the role and tick at least one permission.";
   if (noName) return "Name the role first.";
   if (empty) return "Tick at least one permission.";
+  if (problems.includes("restricted") || problems.includes("beyond"))
+    return "Untick the permissions you can’t give first.";
+  if (problems.includes("missing_need")) return "Tick what each permission needs first.";
   return null;
 }
 

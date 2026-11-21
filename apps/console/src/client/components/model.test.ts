@@ -5,8 +5,10 @@ import { holdersText, permissionsText, roleHref, withArticle } from "../format/t
 import { reasonLine, withReasonValues } from "../step-up/reasons.ts";
 import { backupCodesText, groupKey, secretOf } from "./authenticator.tsx";
 import {
+  CATALOGUE,
   countLine,
   draftProblems,
+  givableCopy,
   groupShort,
   groupState,
   lockReason,
@@ -14,7 +16,7 @@ import {
   toPermissions,
   whySaveIsOff,
 } from "./role-editor.ts";
-import { firstGivable, roleChoices } from "./roles.tsx";
+import { canGiveAny, pickedRole, roleChoices, whyNoRole } from "./roles.tsx";
 
 describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
   it("ticks what a permission needs, and unticks what depends on it", () => {
@@ -57,6 +59,55 @@ describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
         actor,
       ),
     ).toContain("reads_as_built_in");
+  });
+
+  it("never leaves Save pressable when saving would do nothing", () => {
+    const all = toPermissions(CATALOGUE.keys);
+    // Every permission, the restricted ones included: what a copy of Super admin held.
+    const restricted = draftProblems(
+      { name: "Super admin copy", description: "", permissions: all },
+      all,
+    );
+    expect(restricted).toContain("restricted");
+    expect(whySaveIsOff(restricted, "Super admin copy")).toBe(
+      "Untick the permissions you can’t give first.",
+    );
+    const actor = toPermissions(["customers.read", "member.read"]);
+    const beyond = draftProblems(
+      { name: "Support", description: "", permissions: toPermissions(["money.read"]) },
+      actor,
+    );
+    expect(beyond).toContain("beyond");
+    expect(whySaveIsOff(beyond, "Support")).toBe("Untick the permissions you can’t give first.");
+    const missing = draftProblems(
+      { name: "Support", description: "", permissions: toPermissions(["money.transfer"]) },
+      all,
+    );
+    expect(missing).toEqual(["missing_need"]);
+    expect(whySaveIsOff(missing, "Support")).toBe("Tick what each permission needs first.");
+  });
+
+  it("duplicates only what the editor may give, so the copy can be saved", () => {
+    const all = toPermissions(CATALOGUE.keys);
+    // A Super admin duplicating Super admin: the restricted permissions stay behind.
+    const copy = givableCopy(CATALOGUE.keys, all);
+    expect(copy.has("organization.delete")).toBe(false);
+    expect(
+      draftProblems({ name: "Super admin copy", description: "", permissions: copy }, all),
+    ).toEqual([]);
+    // An Admin duplicating a role above theirs: what they lack stays behind, and so does what
+    // needs it; what is kept brings everything it needs.
+    const admin = toPermissions(["customers.read", "member.read"]);
+    const kept = givableCopy(
+      ["customers.read", "money.read", "money.transfer", "member.read"],
+      admin,
+    );
+    expect([...kept].sort()).toEqual(["customers.read", "member.read"]);
+    expect(draftProblems({ name: "Support", description: "", permissions: kept }, admin)).toEqual(
+      [],
+    );
+    // Nothing the source lacked is added, and unknown names are dropped.
+    expect([...givableCopy(["customers.read", "no.such"], admin)]).toEqual(["customers.read"]);
   });
 
   it("draws the summary's lines", () => {
@@ -111,7 +162,10 @@ describe("choosing a role ([SA-32])", () => {
       ["admin", "You don’t have this yourself."],
       ["rol_dev", "You don’t have this yourself."],
     ]);
-    expect(firstGivable(choices)).toBeNull();
+    expect(canGiveAny(choices)).toBe(false);
+    expect(whyNoRole(choices, null)).toBe("There is no role you can give.");
+    // A refused role can never be the one sent, even if it was picked somehow.
+    expect(pickedRole(choices, "super_admin")).toBeNull();
   });
 
   it("offers what the actor may give, marks the current role, and describes each", () => {
@@ -121,17 +175,33 @@ describe("choosing a role ([SA-32])", () => {
       reason: "Current",
       description: "Builds and tests the integration in Sandbox.",
     });
-    expect(firstGivable(roleChoices(roles.slice(2), { roleKey: "admin", permissions: all }))).toBe(
-      "rol_dev",
-    );
+    const fresh = roleChoices(roles.slice(2), { roleKey: "admin", permissions: all });
+    expect(canGiveAny(fresh)).toBe(true);
+    expect(pickedRole(fresh, "rol_dev")).toBe("rol_dev");
+  });
+
+  it("never starts with a role chosen, least of all the most privileged (least privilege)", () => {
+    // A Super admin may give every role, the top one first in the list.
+    const top = roleChoices(roles, { roleKey: "super_admin", permissions: CATALOGUE.keys });
+    expect(top.filter((c) => c.reason === null).map((c) => c.roleKey)).toContain("super_admin");
+    expect(pickedRole(top, null)).toBeNull();
+    expect(whyNoRole(top, null)).toBe("Choose a role first.");
+    // The person's own pick is what is sent.
+    expect(pickedRole(top, "rol_dev")).toBe("rol_dev");
+    expect(whyNoRole(top, "rol_dev")).toBeNull();
+    // A pick that is no longer offered (the list changed) is no pick.
+    expect(pickedRole(top, "rol_gone")).toBeNull();
+    expect(whyNoRole(top, "rol_gone")).toBe("Choose a role first.");
   });
 });
 
 describe("the StepUp dialog's line (spec 02 §15.5)", () => {
   it("fills the reason from the page's own values", async () => {
     expect(reasonLine("account.passkey_add")).toBe("Use your second factor to add a passkey.");
-    const line = await withReasonValues({ name: "Priya Shah", role: "Compliance" }, async () =>
-      reasonLine("member.role"),
+    const line = await withReasonValues(
+      "member.role",
+      { name: "Priya Shah", role: "Compliance" },
+      async () => reasonLine("member.role"),
     );
     expect(line).toBe("Use your second factor to change Priya Shah’s role to Compliance.");
   });
@@ -139,7 +209,8 @@ describe("the StepUp dialog's line (spec 02 §15.5)", () => {
   it("falls back when a value or the key is missing, and forgets the values after", async () => {
     expect(reasonLine("member.remove")).toBe("Use your second factor to continue.");
     expect(reasonLine("no.such.key")).toBe("Use your second factor to continue.");
-    await withReasonValues({ name: "Priya Shah" }, async () => undefined);
+    expect(reasonLine("constructor")).toBe("Use your second factor to continue.");
+    await withReasonValues("member.remove", { name: "Priya Shah" }, async () => undefined);
     expect(reasonLine("member.remove")).toBe("Use your second factor to continue.");
   });
 });

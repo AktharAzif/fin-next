@@ -55,7 +55,13 @@ import {
   SettingsTabs,
   useSignedIn,
 } from "../../components/page.tsx";
-import { firstGivable, type RoleChoice, RolePicker, roleChoices } from "../../components/roles.tsx";
+import {
+  pickedRole,
+  type RoleChoice,
+  RolePicker,
+  roleChoices,
+  whyNoRole,
+} from "../../components/roles.tsx";
 import { formatDay } from "../../format/dates.ts";
 import { withReasonValues } from "../../step-up/reasons.ts";
 
@@ -73,6 +79,8 @@ export const Route = createFileRoute("/settings/team")({
 
 const DESCRIPTION =
   "Each person’s role decides what they can do. Anyone with Production access must use a second factor.";
+
+const WAIT_FOR_CHANGE = "Wait for the other change to finish.";
 
 const SECOND_FACTOR: Readonly<
   Record<MemberRow["secondFactor"], { label: string; tone: "success" | "warning" }>
@@ -127,6 +135,8 @@ function TeamPage() {
     fin.api(rolesContract, {}, { signal }),
   );
   const [dialog, setDialog] = useState<Dialog>(null);
+  // The row whose change is running from its menu (an invitation's resend or delete), or null.
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
   const can = signedIn?.can ?? (() => false);
   const canInvite = can("member.invite");
   const canChangeRole = can("member.role");
@@ -163,12 +173,18 @@ function TeamPage() {
     invitation: InvitationRow,
     action: "resend" | "delete",
   ): Promise<void> => {
-    // The menu item shows its own progress while this runs.
+    // The menu item shows its own progress while this runs, and every other row's actions wait for
+    // it: one change at a time, so a step-up always names the change it is for.
+    if (rowBusy !== null) return;
+    setRowBusy(invitation.invitationId);
     try {
-      await withReasonValues({ email: invitation.email }, () =>
-        action === "resend"
-          ? fin.api(resendInvitation, { invitationId: invitation.invitationId })
-          : fin.api(cancelInvitation, { invitationId: invitation.invitationId }),
+      await withReasonValues(
+        action === "resend" ? "invitation.resend" : "invitation.cancel",
+        { email: invitation.email },
+        () =>
+          action === "resend"
+            ? fin.api(resendInvitation, { invitationId: invitation.invitationId })
+            : fin.api(cancelInvitation, { invitationId: invitation.invitationId }),
       );
       toast.success(
         action === "resend"
@@ -183,8 +199,14 @@ function TeamPage() {
           ? "Couldn’t send the invitation again"
           : "Couldn’t delete the invitation",
       );
+    } finally {
+      setRowBusy(null);
     }
   };
+
+  /** Another row's change is running: this row's actions wait for it. */
+  const waitFor = (rowId: string) =>
+    rowBusy !== null && rowBusy !== rowId ? { disabledReason: WAIT_FOR_CHANGE } : {};
 
   const members = (data.data?.members ?? []).filter((m) => m.roleKnown);
   const noAccess = (data.data?.members ?? []).filter((m) => !m.roleKnown);
@@ -213,6 +235,7 @@ function TeamPage() {
             size="sm"
             label={`Actions for ${member.name || member.email}`}
             icon={<DotsThreeIcon />}
+            {...waitFor(member.memberId)}
           />
         }
       >
@@ -329,6 +352,7 @@ function TeamPage() {
                 size="sm"
                 label={`Actions for the invitation to ${row.email}`}
                 icon={<DotsThreeIcon />}
+                {...waitFor(row.invitationId)}
               />
             }
           >
@@ -550,7 +574,15 @@ function InviteDialog(props: {
   const [emailError, setEmailError] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const chosen = roleKey ?? firstGivable(props.choices);
+  // No role is chosen until the person picks one (least privilege: never a default).
+  const chosen = pickedRole(props.choices, roleKey);
+  const noRole = whyNoRole(props.choices, roleKey);
+
+  const close = () => {
+    setRoleKey(null);
+    setFailed(null);
+    props.onClose();
+  };
 
   const send = async () => {
     const address = email.trim().toLowerCase();
@@ -558,12 +590,15 @@ function InviteDialog(props: {
       setEmailError("That email address doesn’t look right.");
       return;
     }
-    if (chosen === null) return;
-    setBusy(true);
     setEmailError(null);
+    if (chosen === null) {
+      setFailed(noRole);
+      return;
+    }
+    setBusy(true);
     setFailed(null);
     try {
-      await withReasonValues({ email: address }, () =>
+      await withReasonValues("member.invite", { email: address }, () =>
         fin.api(inviteMember, { email: address, roleKey: chosen }),
       );
       toast.success(`Invitation sent to ${address}`);
@@ -586,20 +621,20 @@ function InviteDialog(props: {
     <Modal
       open={props.open}
       onOpenChange={(open) => {
-        if (!open) props.onClose();
+        if (!open) close();
       }}
       busy={busy}
       title="Invite a teammate"
       description="Invites expire in 7 days."
       footer={
         <>
-          <Button variant="secondary" disabled={busy} onClick={props.onClose}>
+          <Button variant="secondary" disabled={busy} onClick={close}>
             Cancel
           </Button>
           <Button
             variant="primary"
             loading={busy}
-            {...(chosen === null ? { disabledReason: "There is no role you can give." } : {})}
+            {...(noRole === null ? {} : { disabledReason: noRole })}
             onClick={send}
           >
             Send invite
@@ -634,7 +669,10 @@ function InviteDialog(props: {
           label="Role"
           choices={props.choices}
           value={chosen}
-          onChange={setRoleKey}
+          onChange={(next) => {
+            setRoleKey(next);
+            setFailed(null);
+          }}
           disabled={busy}
         />
       </form>
@@ -710,7 +748,7 @@ function ChangeRoleDialog(props: {
     setBusy(true);
     setFailed(null);
     try {
-      await withReasonValues({ name, role: label }, () =>
+      await withReasonValues("member.role", { name, role: label }, () =>
         fin.api(changeMemberRole, {
           memberId: props.member.memberId,
           roleKey,
@@ -784,7 +822,7 @@ function RemoveDialog(props: {
     setBusy(true);
     setFailed(null);
     try {
-      await withReasonValues({ name }, () =>
+      await withReasonValues("member.remove", { name }, () =>
         fin.api(removeMember, {
           memberId: props.member.memberId,
           rollCredentials: credentials.roll,
@@ -844,7 +882,7 @@ function InvitationRoleDialog(props: {
     setBusy(true);
     setFailed(null);
     try {
-      await withReasonValues({ email: props.invitation.email }, () =>
+      await withReasonValues("invitation.change", { email: props.invitation.email }, () =>
         fin.api(changeInvitation, { invitationId: props.invitation.invitationId, roleKey }),
       );
       toast.success(`The invitation for ${props.invitation.email} was changed`);

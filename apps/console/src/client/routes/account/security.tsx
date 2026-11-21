@@ -97,7 +97,10 @@ function AccountSecurityPage() {
     await Promise.all([security.reload(), fin.viewer.reload(), activity.reload()]);
   };
 
+  // One change at a time: while one runs, every other action on the methods waits, so a step-up
+  // always names the change it is for.
   const run = async (key: string, work: () => Promise<void>, failure: string) => {
+    if (busy !== null) return;
     setBusy(key);
     try {
       await work();
@@ -116,7 +119,7 @@ function AccountSecurityPage() {
       "passkey.add",
       async () => {
         try {
-          await withReasonValues({}, () =>
+          await withReasonValues("account.passkey_add", {}, () =>
             withIntent(fin.stepUp, {
               // With a factor, this call makes the intent; without one, the first-factor rule.
               ask: async () => {
@@ -152,7 +155,7 @@ function AccountSecurityPage() {
       `passkey.remove.${passkey.id}`,
       async () => {
         try {
-          await withReasonValues({ name: passkey.name }, () =>
+          await withReasonValues("account.passkey_remove", { name: passkey.name }, () =>
             library(passkeyDelete, { id: passkey.id }),
           );
         } catch (error) {
@@ -175,7 +178,9 @@ function AccountSecurityPage() {
     run(
       "totp.enable",
       async () => {
-        const answer = await withReasonValues({}, () => library(totpEnable, {}));
+        const answer = await withReasonValues("account.totp_enable", {}, () =>
+          library(totpEnable, {}),
+        );
         setDialog({ kind: "setup", uri: answer.totpURI, codes: answer.backupCodes });
       },
       "Couldn’t start the set-up",
@@ -186,7 +191,7 @@ function AccountSecurityPage() {
       "totp.disable",
       async () => {
         try {
-          await withReasonValues({}, () => library(totpDisable, {}));
+          await withReasonValues("account.totp_disable", {}, () => library(totpDisable, {}));
         } catch (error) {
           if (codeOf(error) === "last_factor") {
             setDialog(null);
@@ -209,7 +214,9 @@ function AccountSecurityPage() {
     run(
       "codes.new",
       async () => {
-        const answer = await withReasonValues({}, () => library(backupCodesGenerate, {}));
+        const answer = await withReasonValues("account.backup_codes", {}, () =>
+          library(backupCodesGenerate, {}),
+        );
         setDialog({ kind: "codes", codes: answer.backupCodes, fresh: false });
         void refresh();
       },
@@ -254,6 +261,7 @@ function AccountSecurityPage() {
             size="sm"
             leadingIcon={<FingerprintIcon />}
             loading={busy === "passkey.add"}
+            disabled={busy !== null && busy !== "passkey.add"}
             {...(passkeysSupported()
               ? {}
               : { disabledReason: "This browser can’t add a passkey." })}
@@ -374,7 +382,7 @@ function NameSection(props: { loading: boolean; name: string; onSaved: () => Pro
     setSaving(true);
     setRefused(false);
     try {
-      await withReasonValues({}, () => fin.api(renameSelf, { name: shown.trim() }));
+      await withReasonValues("account.name", {}, () => fin.api(renameSelf, { name: shown.trim() }));
       toast.success("Name saved");
       setValue(null);
       await props.onSaved();
@@ -462,6 +470,7 @@ function MethodsTable(props: {
           variant="ghost"
           size="sm"
           loading={props.busy === `passkey.remove.${passkey.id}`}
+          disabled={props.busy !== null && props.busy !== `passkey.remove.${passkey.id}`}
           onClick={() => props.onRemove(passkey)}
         >
           Remove
@@ -474,7 +483,12 @@ function MethodsTable(props: {
       status: props.authenticator ? "On" : "Off",
       tone: props.authenticator ? ("success" as const) : ("neutral" as const),
       action: props.authenticator ? (
-        <Button variant="secondary" size="sm" onClick={props.onTurnOff}>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={props.busy !== null}
+          onClick={props.onTurnOff}
+        >
           Turn off
         </Button>
       ) : (
@@ -482,6 +496,7 @@ function MethodsTable(props: {
           variant="secondary"
           size="sm"
           loading={props.busy === "totp.enable"}
+          disabled={props.busy !== null && props.busy !== "totp.enable"}
           onClick={props.onSetUp}
         >
           Set up
@@ -496,7 +511,12 @@ function MethodsTable(props: {
             status: `${props.backupCodesLeft} of 10 left`,
             tone: props.backupCodesLeft <= 2 ? ("warning" as const) : ("success" as const),
             action: (
-              <Button variant="secondary" size="sm" onClick={props.onNewCodes}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={props.busy !== null}
+                onClick={props.onNewCodes}
+              >
                 Regenerate
               </Button>
             ),
@@ -550,10 +570,12 @@ function SessionsSection(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const others = (props.sessions ?? []).filter((session) => !session.current);
 
+  // One sign-out at a time, so a step-up always names the device it is for.
   const signOutOne = async (session: SessionRow) => {
+    if (busy !== null) return;
     setBusy(session.id);
     try {
-      await withReasonValues({ device: session.device }, () =>
+      await withReasonValues("account.session_revoke", { device: session.device }, () =>
         fin.api(revokeSession, { sessionId: session.id }),
       );
       toast.success(`Signed out ${session.device}`);
@@ -566,9 +588,12 @@ function SessionsSection(props: {
   };
 
   const signOutOthers = async () => {
+    if (busy !== null) return;
     setBusy("others");
     try {
-      await withReasonValues({}, () => fin.api(revokeOtherSessions, {}));
+      await withReasonValues("account.sessions_revoke_others", {}, () =>
+        fin.api(revokeOtherSessions, {}),
+      );
       toast.success("Signed out everywhere else");
       await props.onChanged();
     } catch (error) {
@@ -617,6 +642,7 @@ function SessionsSection(props: {
             variant="ghost"
             size="sm"
             loading={busy === session.id}
+            disabled={busy !== null && busy !== session.id}
             onClick={() => signOutOne(session)}
           >
             Sign out
@@ -634,6 +660,7 @@ function SessionsSection(props: {
           size="sm"
           leadingIcon={<SignOutIcon />}
           loading={busy === "others"}
+          disabled={busy !== null && busy !== "others"}
           {...(props.sessions !== null && others.length === 0
             ? { disabledReason: "You’re signed in on this device only." }
             : {})}
@@ -672,10 +699,12 @@ function TrustedBrowsersSection(props: {
 }) {
   const fin = useFin<ConsoleViewer>();
   const [busy, setBusy] = useState<string | null>(null);
+  // One at a time, so a step-up always names the browser it is for.
   const forget = async (browser: TrustedBrowserRow) => {
+    if (busy !== null) return;
     setBusy(browser.id);
     try {
-      await withReasonValues({ browser: browser.device }, () =>
+      await withReasonValues("account.trusted_browser_revoke", { browser: browser.device }, () =>
         fin.api(forgetTrustedBrowser, { browserId: browser.id }),
       );
       toast.success(`Fin no longer trusts ${browser.device}`);
@@ -704,6 +733,7 @@ function TrustedBrowsersSection(props: {
           variant="ghost"
           size="sm"
           loading={busy === browser.id}
+          disabled={busy !== null && busy !== browser.id}
           onClick={() => forget(browser)}
         >
           Forget this browser

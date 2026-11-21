@@ -34,7 +34,14 @@ import {
   SettingsTabs,
   useSignedIn,
 } from "../../../components/page.tsx";
-import { firstGivable, RolePicker, roleChoices, roleSummary } from "../../../components/roles.tsx";
+import {
+  canGiveAny,
+  pickedRole,
+  RolePicker,
+  roleChoices,
+  roleSummary,
+  whyNoRole,
+} from "../../../components/roles.tsx";
 import { holdersText, permissionsText, roleHref } from "../../../format/text.ts";
 import { withReasonValues } from "../../../step-up/reasons.ts";
 
@@ -244,7 +251,9 @@ function DeleteRoleDialog(props: {
   const invitations = props.role.invitations ?? 0;
   const moves = holders > 0 || invitations > 0;
   const blocked = holders > 0 && signedIn?.can("member.role") !== true;
-  const chosen = moveTo ?? firstGivable(choices);
+  // Where they move is the person's own pick: nothing is chosen for them (least privilege).
+  const chosen = pickedRole(choices, moveTo);
+  const noRole = moves ? whyNoRole(choices, moveTo) : null;
   const chosenLabel = choices.find((choice) => choice.roleKey === chosen)?.label ?? "";
 
   const description =
@@ -255,10 +264,11 @@ function DeleteRoleDialog(props: {
         : "Nobody has this role. You can’t undo this.";
 
   const remove = async () => {
+    if (moves && chosen === null) return;
     setBusy(true);
     setFailed(false);
     try {
-      await withReasonValues({ role: props.role.label }, () =>
+      await withReasonValues("role.delete", { role: props.role.label }, () =>
         fin.api(deleteRole, {
           roleId: props.role.roleId ?? props.role.roleKey,
           ...(moves && chosen !== null ? { moveTo: chosen } : {}),
@@ -298,9 +308,13 @@ function DeleteRoleDialog(props: {
             <Button
               variant="danger"
               loading={busy}
-              {...(moves && chosen === null
-                ? { disabledReason: "There is no role you can move them to." }
-                : {})}
+              {...(noRole === null
+                ? {}
+                : {
+                    disabledReason: canGiveAny(choices)
+                      ? noRole
+                      : "There is no role you can move them to.",
+                  })}
               onClick={remove}
             >
               Delete role

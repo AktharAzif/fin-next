@@ -324,7 +324,7 @@ function ProfileForm(props: { name: string; canRename: boolean; onSaved: () => P
     setError(null);
     setFailed(null);
     try {
-      await withReasonValues({ organisation: props.name }, () =>
+      await withReasonValues("org.rename", { organisation: props.name }, () =>
         fin.api(renameOrganisation, { name }),
       );
       toast.success({
@@ -418,7 +418,7 @@ function CreateOrganisationDialog(props: {
     setInvalid(false);
     setFailed(null);
     try {
-      await withReasonValues({}, () => fin.api(createOrganisation, { name: value }));
+      await withReasonValues("org.create", {}, () => fin.api(createOrganisation, { name: value }));
       toast.success({ title: "Organisation created", description: `You’re now in ${value}.` });
       setName("");
       await props.onCreated();
@@ -494,7 +494,7 @@ function DeleteOrganisationDialog(props: {
     setBusy(true);
     setFailed(null);
     try {
-      await withReasonValues({ organisation: props.name }, () =>
+      await withReasonValues("org.delete", { organisation: props.name }, () =>
         fin.api(deleteOrganisation, { confirmName: props.name }),
       );
       toast.success({ title: "Organisation deleted", description: `${props.name} was deleted.` });

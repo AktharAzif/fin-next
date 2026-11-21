@@ -44,6 +44,7 @@ import {
   countLine,
   type Draft,
   draftProblems,
+  givableCopy,
   groupShort,
   groupState,
   lockReason,
@@ -136,15 +137,26 @@ function RoleEditorPage() {
   const taken = (names.data?.roles ?? [])
     .filter((role) => !role.builtIn && role.roleKey !== (isNew ? "" : roleKey))
     .map((role) => role.label);
+  // Keyed by the role, not its version: the save's own reload brings a new version, and the editor
+  // takes it in place (keeping its "saved" state) rather than starting again.
   return (
     <Editor
-      key={`${roleKey}:${detail?.version ?? "new"}:${from ?? ""}`}
+      key={`${roleKey}:${from ?? ""}`}
       isNew={isNew}
       detail={detail}
       takenNames={taken}
       onSaved={source.reload}
     />
   );
+}
+
+/** A saved role's draft: its name, description and permissions as the server holds them. */
+function savedDraft(detail: RoleDetail | null): Draft {
+  return {
+    name: detail?.label ?? "",
+    description: detail?.description ?? "",
+    permissions: toPermissions(detail?.permissions ?? []),
+  };
 }
 
 function Editor(props: {
@@ -164,11 +176,30 @@ function Editor(props: {
   const outranked =
     !isNew && !builtIn && detail?.permissions.some((p) => !actor.has(p as Permission)) === true;
   const readOnly = builtIn || !manage || outranked;
-  const [draft, setDraft] = useState<Draft>(() => ({
-    name: isNew ? (detail === null ? "" : `${detail.label} copy`) : (detail?.label ?? ""),
-    description: detail?.description ?? "",
-    permissions: toPermissions(detail?.permissions ?? []),
-  }));
+  const [draft, setDraft] = useState<Draft>(() =>
+    isNew
+      ? {
+          name: detail === null ? "" : `${detail.label} copy`,
+          description: detail?.description ?? "",
+          // A duplicate keeps only what this editor may give, so it can always be saved.
+          permissions: givableCopy(detail?.permissions ?? [], actor),
+        }
+      : savedDraft(detail),
+  );
+  // What a duplicate could not keep, said once beside the summary.
+  const [leftOut] = useState(
+    () =>
+      isNew &&
+      detail !== null &&
+      [...toPermissions(detail.permissions)].some((key) => !draft.permissions.has(key)),
+  );
+  // The version the draft was read at. A newer one (the save's own reload) is taken in place:
+  // the draft becomes what the server now holds, and the "saved" state stays on screen.
+  const [version, setVersion] = useState(detail?.version ?? null);
+  if (!isNew && detail !== null && detail.version !== version) {
+    setVersion(detail.version);
+    setDraft(savedDraft(detail));
+  }
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   const [failed, setFailed] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
@@ -191,7 +222,7 @@ function Editor(props: {
     };
     try {
       if (isNew) {
-        const created = await withReasonValues({ role: body.name }, () =>
+        const created = await withReasonValues("role.create", { role: body.name }, () =>
           fin.api(createRole, body),
         );
         toast.success(`${body.name} was created`);
@@ -199,7 +230,7 @@ function Editor(props: {
         return;
       }
       if (detail === null || detail.roleId === null || detail.version === null) return;
-      await withReasonValues({ role: body.name }, () =>
+      await withReasonValues("role.update", { role: body.name }, () =>
         fin.api(saveRole, {
           roleId: detail.roleId as string,
           ...body,
@@ -341,6 +372,8 @@ function Editor(props: {
                   <div className="flex flex-col gap-3 pl-6">
                     {keys.map((key) => {
                       const def = CATALOGUE.permissions[key];
+                      // A locked permission can't be ticked; one already ticked can always be
+                      // unticked, so a draft can always be brought within what the editor gives.
                       const lock = readOnly ? null : lockReason(key, actor);
                       return (
                         <Checkbox
@@ -357,7 +390,9 @@ function Editor(props: {
                           }
                           description={lock ?? def.description}
                           checked={draft.permissions.has(key)}
-                          disabled={readOnly || busy || lock !== null}
+                          disabled={
+                            readOnly || busy || (lock !== null && !draft.permissions.has(key))
+                          }
                           onCheckedChange={(checked) =>
                             setDraft((d) => ({
                               ...d,
@@ -405,6 +440,11 @@ function Editor(props: {
             >
               View in audit log
             </QuietArrowLink>
+          ) : null}
+          {leftOut ? (
+            <InlineAlert tone="info" title="Some permissions aren’t in the copy.">
+              You can’t give them, so they were left out.
+            </InlineAlert>
           ) : null}
           {state === "saved" ? (
             <InlineAlert

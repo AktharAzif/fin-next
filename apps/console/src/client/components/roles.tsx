@@ -81,9 +81,27 @@ export function roleChoices(
   });
 }
 
-/** The first role an actor may give, for a form's default. */
-export function firstGivable(choices: readonly RoleChoice[]): string | null {
-  return choices.find((choice) => choice.reason === null)?.roleKey ?? null;
+/** Whether the actor may give any of the roles. */
+export function canGiveAny(choices: readonly RoleChoice[]): boolean {
+  return choices.some((choice) => choice.reason === null);
+}
+
+/**
+ * The role the person picked, while it is still one they may give; otherwise null. A picker that
+ * gives a role (an invitation, the move when a role is deleted) never starts with one chosen: the
+ * person picks it, so no form ever defaults to a role, least of all the most privileged.
+ */
+export function pickedRole(choices: readonly RoleChoice[], picked: string | null): string | null {
+  if (picked === null) return null;
+  return choices.some((choice) => choice.roleKey === picked && choice.reason === null)
+    ? picked
+    : null;
+}
+
+/** The reason a picker's action waits, or null when a role is picked. */
+export function whyNoRole(choices: readonly RoleChoice[], picked: string | null): string | null {
+  if (!canGiveAny(choices)) return "There is no role you can give.";
+  return pickedRole(choices, picked) === null ? "Choose a role first." : null;
 }
 
 export function RolePicker(props: {
