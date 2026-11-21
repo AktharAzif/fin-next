@@ -25,7 +25,7 @@ describe("parseCommit", () => {
       `tree ${"1".repeat(40)}`,
       `parent ${"2".repeat(40)}`,
       `parent ${"3".repeat(40)}`,
-      "author Fin Test <ci@example.com> 1795000000 +0530",
+      "author Fin Test <ci@example.com> 1795000000 +0100",
       "committer Someone Else <other@example.com> 1795000001 +0000",
       "gpgsig -----BEGIN PGP SIGNATURE-----",
       " committer Fake <x@example.com> 1 -0800",
@@ -39,7 +39,7 @@ describe("parseCommit", () => {
       name: "Fin Test",
       email: "ci@example.com",
       time: 1795000000,
-      offset: "+0530",
+      offset: "+0100",
     });
     assert.equal(parsed.committer?.name, "Someone Else");
     assert.equal(parsed.committer?.offset, "+0000");
@@ -65,8 +65,8 @@ describe("judge", () => {
   const merge = {
     sha: "a".repeat(40),
     parents: 2,
-    author: identity("+0530"),
-    committer: { ...GITHUB_COMMITTER, time: 1, offset: "+0530" },
+    author: identity("+0100"),
+    committer: { ...GITHUB_COMMITTER, time: 1, offset: "+0100" },
   };
 
   it("passes +0000 for both, fails any other offset for either", () => {
@@ -77,7 +77,7 @@ describe("judge", () => {
       "pass",
     );
     assert.equal(
-      judge({ ...base, author: identity("+0530"), committer: identity("+0000") }, "pull_request")
+      judge({ ...base, author: identity("+0100"), committer: identity("+0000") }, "pull_request")
         .code,
       "author_offset",
     );
@@ -115,7 +115,7 @@ describe("judge", () => {
 describe("run over a repository", () => {
   it("passes a pull request whose commits are all UTC, a merge from main included", (t) => {
     const dir = gitRepo(t);
-    const base = commit(dir, { authorOffset: "+0530", committerOffset: "+0530" });
+    const base = commit(dir, { authorOffset: "+0100", committerOffset: "+0100" });
     runGit(dir, ["checkout", "--quiet", "-b", "feature"]);
     commit(dir);
     runGit(dir, ["checkout", "--quiet", "main"]);
@@ -135,7 +135,7 @@ describe("run over a repository", () => {
     const dir = gitRepo(t);
     const base = commit(dir);
     commit(dir);
-    const bad = commit(dir, { authorOffset: "+0530" });
+    const bad = commit(dir, { authorOffset: "+0100" });
     const head = commit(dir);
     const { code, lines } = check(dir, {
       EVENT_NAME: "pull_request",
@@ -145,7 +145,7 @@ describe("run over a repository", () => {
     assert.equal(code, 1);
     assert.ok(
       lines.includes(
-        `commit-dates-utc.commit sha=${bad} author=+0530 committer=+0000 result=fail code=author_offset`,
+        `commit-dates-utc.commit sha=${bad} author=+0100 committer=+0000 result=fail code=author_offset`,
       ),
     );
     assert.ok(lines.some((l) => l.startsWith("::error title=commit-dates-utc::")));
@@ -170,7 +170,7 @@ describe("run over a repository", () => {
     const github = {
       committerName: GITHUB_COMMITTER.name,
       committerEmail: GITHUB_COMMITTER.email,
-      offset: "+0530",
+      offset: "+0100",
     };
     const after = mergeCommit(dir, "feature", github);
     const ok = check(dir, { EVENT_NAME: "push", BASE_SHA: before, HEAD_SHA: after });
@@ -195,13 +195,13 @@ describe("run over a repository", () => {
     runGit(dir, ["checkout", "--quiet", "-b", "feature"]);
     commit(dir);
     runGit(dir, ["checkout", "--quiet", "main"]);
-    const after = mergeCommit(dir, "feature", { offset: "+0530" });
+    const after = mergeCommit(dir, "feature", { offset: "+0100" });
     assert.equal(check(dir, { EVENT_NAME: "push", BASE_SHA: before, HEAD_SHA: after }).code, 1);
   });
 
   it("checks the head alone for a push that creates the branch, and for other events", (t) => {
     const dir = gitRepo(t);
-    commit(dir, { authorOffset: "+0530" });
+    commit(dir, { authorOffset: "+0100" });
     const head = commit(dir);
     for (const env of [
       { EVENT_NAME: "push", BASE_SHA: ZERO, HEAD_SHA: head },
