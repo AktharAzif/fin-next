@@ -267,6 +267,288 @@ describe("static builds", () => {
     );
   });
 
+  it("reads a URL's end as a browser does: what the URL parser strips after it is dropped", (t) => {
+    const control = String.fromCharCode(1);
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["a space", "assets/a.js", 'fetch("https://evil.example ")'],
+      ["a control escape", "assets/a.js", 'fetch("https://evil.example\\x01")'],
+      ["a NUL escape", "assets/a.js", 'new WebSocket("wss://evil.example\\x00")'],
+      ["a form feed escape", "assets/a.js", 'new Image().src="https://evil.example\\f"'],
+      ["a vertical tab escape", "assets/a.js", 'new Image().src="https://evil.example\\v"'],
+      ["a raw control", "assets/a.js", `fetch("https://evil.example${control}")`],
+      ["a protocol-relative URL", "assets/a.js", 'fetch("//evil.example ")'],
+      ["a quoted attribute", "index.html", '<iframe src="https://evil.example "></iframe>'],
+      ["a single-quoted link", "index.html", "<link rel=stylesheet href='//evil.example '>"],
+      ["a reference in an unquoted attribute", "index.html", "<img src=https://evil.example&#12;>"],
+      ["a srcset candidate", "index.html", '<img srcset="//evil.example&#1; 1x">'],
+      ["a quoted url(", "assets/a.css", 'a{background:url("https://evil.example\\1 ")}'],
+      ["an unquoted url(", "assets/a.css", "a{background:url(https://evil.example\\1 )}"],
+      ["a CSS import", "assets/a.css", '@import "//evil.example ";'],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(found.includes("third-party-origin"), `${what}: ${found.join()}`);
+    }
+  });
+
+  it("reads white space after a protocol-relative URL's slashes as the URL's own", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["a space before a user name", "assets/a.js", 'location.href="// @evil.example/c";'],
+      ["a vertical tab before a user name", "assets/a.js", 'location.href="//\\v@evil.example/c";'],
+      [
+        "a no-break space before a user name",
+        "assets/a.js",
+        'location.href="//\\xa0@evil.example/c";',
+      ],
+      [
+        "a referenced space before a user name",
+        "index.html",
+        '<a href="//&#32;@evil.example/">x</a>',
+      ],
+      ["a space before a user name in markup", "index.html", '<img src="// @evil.example/p.png">'],
+      [
+        "a space before a user name in CSS",
+        "assets/a.css",
+        'a{background:url("// @evil.example/p.png")}',
+      ],
+      [
+        "a byte order mark before the host",
+        "assets/a.js",
+        'new Image().src="//\\uFEFFevil.example/c1.png";',
+      ],
+      [
+        "a referenced byte order mark",
+        "index.html",
+        '<script src="//&#xFEFF;evil.example/c2.js"></script>',
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(
+        found.includes("third-party-origin") || found.includes("url-userinfo"),
+        `${what}: ${found.join()}`,
+      );
+    }
+    // A comment in a string names no host a browser could load.
+    assert.deepEqual(staticRules(t, { "assets/a.js": 'x="// a note";' }), []);
+  });
+
+  it("ends an unquoted value only where a browser does, not at other white space", (t) => {
+    // Characters JavaScript counts as white space that a browser keeps inside a URL's user name.
+    /** @type {[string, string, string][]} */
+    const spaces = [
+      ["a vertical tab", "\u{b}", "\\v"],
+      ["a no-break space", "\u{a0}", "\\xa0"],
+      ["a line separator", "\u{2028}", "\\u2028"],
+      ["a byte order mark", "\u{feff}", "\\ufeff"],
+      ["an ideographic space", "\u{3000}", "\\u3000"],
+    ];
+    const css = new Map([
+      ["\u{b}", "\\b "],
+      ["\u{a0}", "\\a0 "],
+      ["\u{2028}", "\\2028 "],
+      ["\u{feff}", "\\feff "],
+      ["\u{3000}", "\\3000 "],
+    ]);
+    for (const [what, c, js] of spaces) {
+      /** @type {[string, string, string][]} */
+      const cases = [
+        [
+          "an unquoted attribute",
+          "index.html",
+          `<img src=https://react.dev${c}@evil.example/p.png>`,
+        ],
+        [
+          "an unquoted protocol-relative attribute",
+          "index.html",
+          `<img src=//react.dev${c}@evil.example/p.png>`,
+        ],
+        [
+          "a written attribute",
+          "assets/a.js",
+          `e.innerHTML='<img src=https://react.dev${js}@evil.example/p.png>';`,
+        ],
+        [
+          "a written protocol-relative attribute",
+          "assets/a.js",
+          `e.innerHTML='<img src=//react.dev${js}@evil.example/p.png>';`,
+        ],
+        [
+          "a CSS escape in url(",
+          "assets/a.css",
+          `a{background:url(//react.dev${css.get(c)}@evil.example/p.png)}`,
+        ],
+        [
+          "srcset's second candidate",
+          "index.html",
+          `<img srcset="/a.png 1x, //react.dev${c}@evil.example/b.png 2x">`,
+        ],
+      ];
+      // A raw vertical tab makes CSS's url( a bad URL, which loads nothing.
+      if (c !== "\u{b}") {
+        cases.push([
+          "url( as written",
+          "assets/a.css",
+          `a{background:url(https://react.dev${c}@evil.example/p.png)}`,
+        ]);
+      }
+      for (const [where, file, text] of cases) {
+        const found = staticRules(t, { [file]: text });
+        assert.ok(found.includes("url-userinfo"), `${what} in ${where}: ${found.join()}`);
+      }
+    }
+  });
+
+  it("drops a tab or new line a reference or a CSS escape spells, wherever the URL is", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      [
+        "a CSS tab escape",
+        "assets/a.css",
+        "a{background:url(https://react.dev\\9 .evil.example/a.png)}",
+      ],
+      [
+        "a CSS new line escape",
+        "assets/a.css",
+        "a{background:url(//react.dev\\a .evil.example/a.png)}",
+      ],
+      [
+        "tab references in the host and the port",
+        "index.html",
+        "<script src=https://react.dev&Tab;.evil.example:44&Tab;3/x.js></script>",
+      ],
+      ["a new line reference", "index.html", "<img src=https://react.dev&#10;.evil.example/p.png>"],
+      [
+        "a written tab reference",
+        "assets/a.js",
+        "e.innerHTML='<img src=https://react.dev&Tab;.evil.example/p.png>';",
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(found.includes("third-party-origin"), `${what}: ${found.join()}`);
+    }
+  });
+
+  it("reads a quote in a URL both as its end and as part of it", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      // The script's own string ends at the quote: the host is what came before it.
+      ["a host then code", "assets/a.js", "e.innerHTML='<img src=https://evil.example'+t[0]+'>';"],
+      [
+        "a host then a bitwise or",
+        "assets/a.js",
+        "e.innerHTML='<img src=https://evil.example'+(a|b)+'>';",
+      ],
+      [
+        "a double-quoted string",
+        "assets/a.js",
+        'e.innerHTML="<img src=https://evil.example"+n[1]+">";',
+      ],
+      [
+        "a protocol-relative host then code",
+        "assets/a.js",
+        "e.innerHTML='<img src=//evil.example'+t[0]+'>';",
+      ],
+      // A value opened by one spelling of a quote and closed by the other.
+      [
+        "a raw quote closed by an escape",
+        "assets/a.js",
+        "e.innerHTML='<img src=\"https://evil.example\\\" alt=x>';",
+      ],
+      [
+        "a protocol-relative URL so closed",
+        "assets/a.js",
+        "e.innerHTML='<img src=\"//evil.example\\\" alt=d1>';",
+      ],
+      [
+        "an escaped quote closed raw",
+        "assets/a.js",
+        "e.innerHTML='<img src=\\x22http://evil.example\" alt=d2>';",
+      ],
+      // The quote is the value's: the user name holds it.
+      [
+        "a quote in a user name",
+        "assets/a.js",
+        "e.innerHTML='<img src=https://react.dev\"@evil.example/p.png>';",
+      ],
+      ["a lower label holding a quote", "assets/a.js", 'fetch("https://\'x.evil.example/c")'],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(
+        found.includes("third-party-origin") || found.includes("url-userinfo"),
+        `${what}: ${found.join()}`,
+      );
+    }
+    // An allowed host the script's string ends after: the rest is built at run time.
+    for (const text of [
+      "e.innerHTML='<img src=https://react.dev/'+t+'>';",
+      "e.innerHTML='<img src=https://react.dev'+t+'>';",
+      "e.innerHTML='<a href=\"https://react.dev'+x+'\">';",
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("reads every srcset candidate, and a user name past a URL's guessed end", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["an unquoted srcset", "index.html", "<img srcset=/a.png&#32;1x,&#32;//evil.example/b.png>"],
+      [
+        "a written unquoted srcset",
+        "assets/a.js",
+        "e.innerHTML='<img srcset=/a.png&#32;1x,&#32;//evil.example/b.png>';",
+      ],
+      [
+        "a srcset set from a string",
+        "assets/a.js",
+        'i.setAttribute("srcset","/a.png 1x, //evil.example/b.png 2x")',
+      ],
+      ["React's srcSet", "assets/a.js", 'jsx("img",{srcSet:"/a.png, //evil.example/b.png 2x"})'],
+      [
+        "a refresh's URL",
+        "index.html",
+        '<meta http-equiv="refresh" content="0;https://react.dev,@evil.example/">',
+      ],
+      [
+        "a srcset's absolute candidate",
+        "assets/a.js",
+        'jsx("img",{srcSet:"/a.png 1x, https://react.dev,@evil.example/b.png 2x"})',
+      ],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(
+        found.includes("third-party-origin") || found.includes("url-userinfo"),
+        `${what}: ${found.join()}`,
+      );
+    }
+    for (const text of [
+      'jsx("img",{srcSet:"/a.png 1x, /b.png 2x"})',
+      "e.srcset=t.srcset,e.sizes=n;x=/\\/\\//.test(b);",
+      "a=[1, //evil.example/x\n2]",
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("refuses a host the scanner reads but a URL parser refuses, never passing it", (t) => {
+    assert.deepEqual(staticRules(t, { "assets/a.js": 'fetch("https://evil.example^x/c")' }), [
+      "url-unparsed",
+    ]);
+    // A host built at run time, one with no letter or digit, a comment: no host to read.
+    for (const text of [
+      'x="http://["+h+"]:"+p;',
+      `fetch(\`https://${"$"}{host}^x/c\`);`,
+      'x="// note: see the docs";',
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
   it("reads an unquoted attribute in markup a script writes", (t) => {
     /** @type {[string, string][]} */
     const cases = [
@@ -288,6 +570,22 @@ describe("static builds", () => {
       [
         "an absolute URL cut by a comma",
         "e.innerHTML='<a href=https://react.dev,@evil.example/>';",
+      ],
+      // A character a reference spells is text to the tokenizer: it quotes nothing, ends no tag.
+      [
+        "a referenced quote before it",
+        "e.innerHTML='<img alt=&quot;x src=&#47;/evil.example/p.png>';",
+      ],
+      ["a referenced > as a value", "e.innerHTML='<img alt=&gt; src=&#47;/evil.example/p.png>';"],
+      ["a referenced > as a name", "e.innerHTML='<img &gt; src=&#47;/evil.example/p.png>';"],
+      [
+        "a referenced apostrophe",
+        'e.innerHTML="<img title=&apos; src=&sol;&sol;evil.example/a4.png>";',
+      ],
+      // A template literal's substitution ends no tag, whatever it holds.
+      [
+        "a > in a substitution",
+        `e.innerHTML=\`<img ${"$"}{a>b?"x":"y"} src=//evil.example/p.png>\`;`,
       ],
     ];
     for (const [what, text] of cases) {
