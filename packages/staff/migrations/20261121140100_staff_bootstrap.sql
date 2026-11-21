@@ -4,9 +4,11 @@
 -- function as fin_owner in the run's one transaction. It:
 --   - takes the staff-change lock, so it cannot race a change made in Fin Admin;
 --   - without `p_reset`: refuses while an active Admin exists (FB001), while another address is a
---     pending Admin (FB002), or when the address is already an active member (FB003); otherwise
---     inserts the member, or reactivates a removed or pending one under the same `stf_` ID, as a
---     pending Admin (`staff.member_added`);
+--     pending Admin and this one is not (FB002), or when the address is already an active member
+--     (FB003); otherwise inserts the member, or reactivates a removed or pending one under the same
+--     `stf_` ID, as a pending Admin (`staff.member_added`). An address that is already a pending
+--     Admin only gets a new code, even beside another pending Admin (after the last Admin's reset,
+--     an Admin they had added may be pending too), so no new Admin is made while one waits;
 --   - with `p_reset` (the last Admin lost every factor, §10.4): refuses unless the address is an
 --     active Admin (FB004) and the only one (FB005, another Admin resets them in Fin Admin);
 --     otherwise ends every session, removes every passkey and authenticator, makes them pending
@@ -85,8 +87,9 @@ BEGIN
     IF active_admins > 0 THEN
       RAISE EXCEPTION 'staff.bootstrap_admin: an active Admin exists' USING ERRCODE = 'FB001';
     END IF;
-    IF EXISTS (SELECT 1 FROM staff.member
-                WHERE role_key = 'admin' AND status = 'pending' AND email <> address) THEN
+    IF NOT (has_member AND m.role_key = 'admin' AND m.status = 'pending')
+       AND EXISTS (SELECT 1 FROM staff.member
+                    WHERE role_key = 'admin' AND status = 'pending' AND email <> address) THEN
       RAISE EXCEPTION 'staff.bootstrap_admin: another address is a pending Admin' USING ERRCODE = 'FB002';
     END IF;
     IF has_member AND m.status = 'active' THEN

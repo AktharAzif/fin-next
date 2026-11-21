@@ -7,8 +7,13 @@
 // active one and refuses otherwise, or, with `reset`, puts the only active Admin back to pending
 // after they lost every factor; and records `staff.member_added` (or `staff.factors_reset`),
 // `staff.enrolment_code_issued` and `staff.bootstrapped` with actor `operator`, `via: operator`.
-// The answer and the `task.done` line are IDs only.
+// The answer and the `task.done` line are IDs only. A refusal is a TaskError carrying the task's
+// own code, which `migrate` prints as `task.failed`'s `code` for the operator.
+//
+// TaskError is used only while the task runs, never while this module loads: run.ts reads the
+// registry, which lists this task, so the two modules import each other.
 import { z } from "zod";
+import { TaskError } from "../run.ts";
 import { defineTask } from "../types.ts";
 
 /** What the database refuses with, as the task's own failure codes (never a value). */
@@ -19,15 +24,6 @@ export const BOOTSTRAP_REFUSALS: Readonly<Record<string, string>> = {
   FB004: "reset_needs_active_admin",
   FB005: "another_admin_can_reset",
 };
-
-export class StaffBootstrapRefused extends Error {
-  override readonly name = "StaffBootstrapRefused";
-  readonly code: string;
-  constructor(code: string) {
-    super(`staff-bootstrap refused: ${code}`);
-    this.code = code;
-  }
-}
 
 export const staffBootstrapParams = z.strictObject({
   /** The Admin's address, which the Access application's Allow list already holds (§10.1). */
@@ -79,7 +75,9 @@ export const staffBootstrap = defineTask({
       answer = result.rows[0]?.answer as typeof answer;
     } catch (error) {
       const refusal = BOOTSTRAP_REFUSALS[sqlStateOf(error) ?? ""];
-      if (refusal !== undefined) throw new StaffBootstrapRefused(refusal);
+      if (refusal !== undefined) {
+        throw new TaskError(refusal, `staff-bootstrap refused: ${refusal}`);
+      }
       throw error;
     }
     return {

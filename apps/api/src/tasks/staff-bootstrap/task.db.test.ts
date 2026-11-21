@@ -4,7 +4,7 @@
 // its events with actor `operator`, `via: operator`; the code itself never reaches the database.
 import { createHash } from "node:crypto";
 import { createIdSource, type UnitTx } from "@fin/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // The staff area's test platform (packages/staff, L-SAT-04): P0-E's bootstrap and runner with the
 // identity and staff migrations and grants. Read by path: apps/api does not list @fin/staff.
 import {
@@ -12,12 +12,21 @@ import {
   type PlatformClient,
   type StaffPlatform,
 } from "../../../../../packages/staff/test/platform.mjs";
-import { StaffBootstrapRefused, staffBootstrap } from "./task.ts";
+import { EXIT_FAILED, runMigrateCli } from "../../migrate/main.ts";
+import { TaskError } from "../run.ts";
+import { staffBootstrap } from "./task.ts";
+
+// `migrate --task` finds a task in the registry, which lists staff-bootstrap once its one line is
+// added there (the pull request's open item); until then this file registers it, so a refusal is
+// read where the operator reads it: migrate's `task.failed` line.
+const registered = vi.hoisted(() => ({}) as Record<string, unknown>);
+vi.mock("../registry.ts", () => ({ TASKS: registered }));
 
 let platform: StaffPlatform;
 let su: PlatformClient;
 
 beforeAll(async () => {
+  registered[staffBootstrap.name] = staffBootstrap;
   platform = await createStaffPlatform("sat04task");
   su = await platform.superuser();
 }, 120_000);
@@ -54,6 +63,56 @@ async function run(params: Record<string, unknown>, runId = `run_${Date.now()}`)
   } finally {
     await owner.end();
   }
+}
+
+/** The same run through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it. */
+async function cli(params: Record<string, unknown>) {
+  let raw = "";
+  const code = await platform.withLock(() =>
+    runMigrateCli(
+      ["--task", "staff-bootstrap"],
+      {
+        FIN_ENVIRONMENT: "ci",
+        FIN_RELEASE: "test-release",
+        FIN_RUN_ID: "run_cli",
+        FIN_BOOTSTRAP_DATABASE_URL: platform.superuserUrl(),
+        FIN_TASK_PARAMS: JSON.stringify(params),
+      },
+      {
+        stdout: (text) => {
+          raw += text;
+        },
+        clock: { now: () => Date.now() },
+      },
+    ),
+  );
+  const lines = raw
+    .trim()
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { code, lines, raw };
+}
+
+async function seedMember(email: string, roleKey: string, status: "active" | "pending") {
+  const id = createIdSource({ now: () => Date.now() }).newId("stf");
+  await su.query("BEGIN");
+  await su.query("SET LOCAL session_replication_role = replica");
+  await su.query(
+    `INSERT INTO staff.member (id, email, role_key, status, added_by, factor_enrolled_at)
+     VALUES ($1, $2, $3, $4, 'operator', CASE WHEN $4 = 'active' THEN now() END)`,
+    [id, email, roleKey, status],
+  );
+  await su.query("COMMIT");
+  return id;
+}
+
+async function liveCodes(staffId: string) {
+  const result = await su.query<{ code_hash: Buffer }>(
+    "SELECT code_hash FROM staff.enrolment_code WHERE member_id = $1 AND voided_at IS NULL AND redeemed_at IS NULL",
+    [staffId],
+  );
+  return result.rows.map((r) => r.code_hash.toString("hex"));
 }
 
 async function seedActive(email: string, roleKey: string): Promise<string> {
@@ -174,7 +233,7 @@ describe("staff-bootstrap", () => {
         codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
         reasonCode: "first_admin",
       }),
-    ).rejects.toBeInstanceOf(StaffBootstrapRefused);
+    ).rejects.toBeInstanceOf(TaskError);
     await expect(
       run({
         address: "nobody@example.com",
@@ -204,6 +263,32 @@ describe("staff-bootstrap", () => {
     const after = await su.query("SELECT count(*)::integer AS n FROM audit.event");
     expect(after.rows).toEqual(before.rows);
     expect(viewer).toMatch(/^stf_/);
+  });
+
+  it("names the refusal in migrate's task.failed line, where the operator reads it", async () => {
+    // An active Admin exists (the test above): the run is refused, and the line says why.
+    const { code, lines, raw } = await cli({
+      address: "other@example.com",
+      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+      reasonCode: "first_admin",
+    });
+    expect(code).toBe(EXIT_FAILED);
+    expect(lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      task: "staff-bootstrap",
+      code: "active_admin_exists",
+    });
+    expect(raw).not.toContain("other@example.com");
+    const reset = await cli({
+      address: "first.admin@example.com",
+      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+      reset: true,
+      reasonCode: "lost_factors",
+    });
+    expect(reset.lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      code: "another_admin_can_reset",
+    });
   });
 
   it("resets the last Admin who lost every factor, with the reset's events and journal entry", async () => {
@@ -243,6 +328,64 @@ describe("staff-bootstrap", () => {
       [staffId],
     );
     expect(journal.rows.map((r) => r.kind)).toEqual(["staff_factors_reset"]);
+  });
+
+  it("reissues a pending Admin's code while a second Admin is pending too, and adds no Admin", async () => {
+    // §10.4's recovery: the only active Admin added another Admin, who has not enrolled yet, then
+    // lost every factor. The reset leaves two pending Admins and no active one, and its code is
+    // lost or runs out: the run must still reissue a code to either of them.
+    await su.query("BEGIN");
+    await su.query("SET LOCAL session_replication_role = replica");
+    await su.query(
+      "UPDATE staff.member SET status = 'active', factor_enrolled_at = now() WHERE email = 'first.admin@example.com'",
+    );
+    await su.query("COMMIT");
+    const added = await seedMember("added.admin@example.com", "admin", "pending");
+    const reset = await run({
+      address: "first.admin@example.com",
+      codeHash: codeHash("FGHJ-KMNP-QRST-VWXY"),
+      reset: true,
+      reasonCode: "lost_factors",
+    });
+    const first = String(reset.ids?.staffId);
+    await su.query("BEGIN");
+    await su.query("SET LOCAL session_replication_role = replica");
+    await su.query(
+      `UPDATE staff.enrolment_code SET issued_at = now() - interval '40 minutes',
+              expires_at = now() - interval '10 minutes'
+        WHERE member_id = $1 AND voided_at IS NULL AND redeemed_at IS NULL`,
+      [first],
+    );
+    await su.query("COMMIT");
+    const again = await run({
+      address: "first.admin@example.com",
+      codeHash: codeHash("GHJK-MNPQ-RSTV-WXYZ"),
+      reasonCode: "lost_factors",
+    });
+    expect(again.ids?.staffId).toBe(first);
+    expect(await liveCodes(first)).toEqual([codeHash("GHJK-MNPQ-RSTV-WXYZ")]);
+    const other = await run({
+      address: "added.admin@example.com",
+      codeHash: codeHash("HJKM-NPQR-STVW-XYZ0"),
+      reasonCode: "first_admin",
+    });
+    expect(other.ids?.staffId).toBe(added);
+    expect(await liveCodes(added)).toEqual([codeHash("HJKM-NPQR-STVW-XYZ0")]);
+    // Still never a third Admin while one is pending.
+    await expect(
+      run({
+        address: "third.admin@example.com",
+        codeHash: codeHash("JKMN-PQRS-TVWX-YZ01"),
+        reasonCode: "first_admin",
+      }),
+    ).rejects.toMatchObject({ code: "pending_admin_exists" });
+    const admins = await su.query<{ email: string; status: string }>(
+      "SELECT email, status FROM staff.member WHERE role_key = 'admin' AND status <> 'removed' ORDER BY email",
+    );
+    expect(admins.rows).toEqual([
+      { email: "added.admin@example.com", status: "pending" },
+      { email: "first.admin@example.com", status: "pending" },
+    ]);
   });
 
   it("is fin_owner's alone: no service login may run it", async () => {

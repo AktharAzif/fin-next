@@ -19,6 +19,13 @@ export interface StaffPlatform {
   superuser(): Promise<PlatformClient>;
   /** A fin_owner connection, as an operator task runs. */
   owner(): Promise<PlatformClient>;
+  /**
+   * The superuser URL of this database, for driving `migrate`'s own entry point (it carries the
+   * cluster's superuser password, so it never leaves the test process).
+   */
+  superuserUrl(): string;
+  /** Runs `fn` under the cluster lock every role change in tests takes (fin_owner's password). */
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
   drop(): Promise<void>;
 }
 

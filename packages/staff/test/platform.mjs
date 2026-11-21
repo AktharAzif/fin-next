@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { GRANTS_DIR, loadFragments, MIGRATIONS_DIR, parseMigration, readMigrations } from "@fin/db";
-import { createTestDatabase, testLoginPassword } from "@fin/db/testing";
+import { createTestDatabase, testLoginPassword, testSuperuserUrl } from "@fin/db/testing";
 import { grantRows } from "@fin/email";
 import { eventTypeRows as identityEventTypeRows } from "@fin/identity";
 import { staffEventTypeRows } from "../src/audit/events.ts";
@@ -168,6 +168,8 @@ export async function createStaffPlatform(prefix) {
     password: (login) => testLoginPassword(login),
     superuser: async () => wrap(await database.superuser()),
     owner: async () => wrap(await database.connect("fin_owner", "fin-test-owner")),
+    superuserUrl: () => testSuperuserUrl(database),
+    withLock: (fn) => database.withLock(fn),
     drop: () => database.drop(),
   };
 }

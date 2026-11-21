@@ -2,7 +2,8 @@
 // cross into the run, never the code; the database's refusals become the task's own codes.
 import { createIdSource, type UnitTx } from "@fin/db";
 import { describe, expect, it } from "vitest";
-import { StaffBootstrapRefused, staffBootstrap } from "./task.ts";
+import { TaskError } from "../run.ts";
+import { BOOTSTRAP_REFUSALS, staffBootstrap } from "./task.ts";
 
 const hash = "ab".repeat(32);
 const context = { runId: "run_bootstrap_1", release: "r", environment: "staging" as const };
@@ -108,8 +109,22 @@ describe("staff-bootstrap's run", () => {
       }),
       context,
     );
-    await expect(run).rejects.toBeInstanceOf(StaffBootstrapRefused);
+    // migrate's task.failed line names a TaskError's code (and an unknown error only by its name).
+    await expect(run).rejects.toBeInstanceOf(TaskError);
     await expect(run).rejects.toMatchObject({ code: "active_admin_exists" });
+    for (const [state, code] of Object.entries(BOOTSTRAP_REFUSALS)) {
+      await expect(
+        staffBootstrap.run(
+          fakeTx(Object.assign(new Error("refused"), { code: state })).tx,
+          staffBootstrap.params.parse({
+            address: "first.admin@example.com",
+            codeHash: hash,
+            reasonCode: "first_admin",
+          }),
+          context,
+        ),
+      ).rejects.toEqual(expect.objectContaining({ name: "TaskError", code }));
+    }
     const other = Object.assign(new Error("boom"), { code: "57014" });
     await expect(
       staffBootstrap.run(
