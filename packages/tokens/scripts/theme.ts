@@ -1,16 +1,51 @@
-// Builds theme.css from tokens.css (spec 06 §3.2): Tailwind 4's `@theme`, with Tailwind's own
-// scales cleared, mapping each token family the utility classes read onto the theme variable they
-// read it through; Fin's `@utility` rules; and the SDK state variants. Run by `pnpm --filter
-// @fin/tokens theme` (scripts/write-theme.ts); test/theme-file.test.ts fails when the committed
-// theme.css is not what this builds from the committed tokens.css.
+// Builds theme.css from tokens.css (spec 06 §3.2). `pnpm --filter @fin/tokens theme` runs it
+// (scripts/write-theme.ts); test/theme-file.test.ts fails unless the committed theme.css is, as a
+// whole and byte for byte, what this builds from the committed tokens.css.
 //
-// Which names are mapped follows the classes the code uses (packages/ui, packages/frame,
-// packages/icons, the apps' client code and the kit): colours as `bg-*`, `text-*`, `border-*`,
-// `ring-*` and `decoration-*`; the type roles as `text-<role>`; families and weights as `font-*`;
-// radii as `rounded-*`; shadows as `shadow-*`; the 4px grid as the spacing scale; layout sizes and
-// densities as spacing names (`h-header`, `w-sidebar`, `max-w-form`, `h-control-md`, `h-row`);
-// in-page layers as `z-*`; durations as `duration-*`. Nothing else in this file reads the token
-// values themselves: every value is a `var(--fin-*)` of a token tokens.css declares.
+// THE MAPPING RULE. It takes the names tokens.css declares on `:root, [data-theme="light"]` and on
+// `:root`, in the file's order, and maps every name under a family's prefix as this table says;
+// `<n>` is the rest of the name, kept as it is. A name under no prefix here is not mapped (the
+// other --fin-space-*, --fin-ease-*, --fin-motion-*, --fin-focus-*, --fin-divider-*: the utilities
+// and base.css read those as tokens).
+//
+//   family    reads                          strips          maps to (Tailwind theme namespace)
+//   colour    --fin-color-<n>                --fin-color-    --color-<n>
+//   font      --fin-font-<n>                 --fin-font-     --font-<n>: a family, or a weight
+//                                                            as --font-weight-<w>
+//   type      --fin-text-<role>-size         --fin-text-     --text-<role>
+//             --fin-text-<role>-line-height  and the part    --text-<role>--line-height
+//             --fin-text-<role>-tracking     after <role>    --text-<role>--letter-spacing
+//             --fin-text-<role>-weight                       --text-<role>--font-weight
+//   radius    --fin-radius-<n>               --fin-radius-   --radius-<n>
+//   shadow    --fin-shadow-<n>               --fin-shadow-   --shadow-<n> (stand-ins: below)
+//   layout    --fin-layout-<n>               --fin-layout-   --spacing-<n>
+//   density   --fin-density-<n>              --fin-density-  --spacing-<n>
+//   grid      --fin-space-unit               the whole name  --spacing
+//   z layer   --fin-z-<n>                    --fin-z-        none: `@utility z-<n>`
+//   duration  --fin-duration-<n>             --fin-duration- none: `@utility duration-<n>`
+//
+// A type role is a `-size` name; its other three names must exist, or buildTheme throws. A role's
+// `-family` is not mapped: `font-*` sets the family.
+//
+// The classes the code uses (packages/ui, packages/frame, packages/icons, the apps' client code and
+// the kit) read them as `bg-*`, `text-*`, `border-*`, `ring-*` and `decoration-*`; `text-<role>`;
+// `font-*`; `rounded-*`; `shadow-*`; the spacing scale and spacing names (`h-header`, `w-sidebar`,
+// `max-w-form`, `h-control-md`, `h-row`); `z-*`; `duration-*`.
+//
+// WHAT IT ADDS. In `@theme inline`: `--*: initial` (Tailwind's own scales cleared), the four
+// breakpoints S6-21 keeps (BREAKPOINTS), and the defaults --default-font-family (--fin-font-sans),
+// --default-mono-font-family (--fin-font-mono), --default-transition-duration (--fin-duration-fast)
+// and --default-transition-timing-function (--fin-ease-out). Outside it: a --themed-shadow-<n>
+// stand-in, per theme as tokens.css, for each shadow the export says is `none` in some theme; the
+// `fin-spinner-turn` keyframes; the `@utility` rules (the z layers and durations above, then
+// OWN_UTILITIES, each transition with its reduced-motion block written by `utility()`); and the SDK
+// state variants, `@custom-variant state-<name> (&[<attribute>])` (STATE_VARIANTS).
+//
+// THE VALUES. Every value a token is mapped to is `var(--fin-<token>)`, and a shadow stand-in is
+// `var(--fin-shadow-<n>)` or the empty shadow `0 0 #0000`: no token's value is copied into
+// theme.css. The only literals are `--*: initial`, the breakpoints' widths (a media query cannot
+// read a custom property), the empty shadow and the utilities' own constants. buildTheme throws
+// when a `var(--fin-*)` it writes names a token tokens.css does not declare.
 
 /** A rule body's custom properties, in order, values with their white space folded. */
 function declarations(body: string): Map<string, string> {
@@ -334,7 +369,7 @@ function utility(u: Utility): string {
   return `${comment(u.comment)}@utility ${u.name} {\n${lines.join("\n")}\n}\n`;
 }
 
-/** theme.css, from the text of tokens.css. Throws when a token a utility reads is missing. */
+/** theme.css, from the text of tokens.css. Throws when a token the file reads is missing. */
 export function buildTheme(tokensCss: string): string {
   const all = rules(tokensCss);
   const find = (selector: string, context = "") => {
@@ -411,9 +446,6 @@ export function buildTheme(tokensCss: string): string {
     ...OWN_UTILITIES,
   ];
   const text = utilities.map(utility).join("\n");
-  for (const match of text.matchAll(/var\((--fin-[a-z0-9-]+)/g)) {
-    if (!declared.has(match[1] ?? "")) throw new Error(`tokens.css: no ${match[1]}`);
-  }
 
   const themed = (values: Map<string, string>) =>
     standIns.map((name) => {
@@ -421,7 +453,7 @@ export function buildTheme(tokensCss: string): string {
       return `--themed-shadow-${name}: ${values.get(token) === "none" ? "0 0 #0000" : `var(${token})`};`;
     });
 
-  return [
+  const css = [
     "/*\n * @fin/tokens theme.css: generated by scripts/theme.ts from tokens.css (spec 06 §3.2). Do not\n * edit it by hand: change tokens.css or the script, then run `pnpm --filter @fin/tokens theme`.\n * test/theme-file.test.ts fails when this file is stale.\n */\n",
     block("@theme inline", theme),
     "\n/* The stand-ins for shadows the export says are `none` in a theme, per theme as tokens.css. */\n",
@@ -439,4 +471,9 @@ export function buildTheme(tokensCss: string): string {
       ([name, attribute]) => `@custom-variant state-${name} (&[${attribute}]);\n`,
     ),
   ].join("");
+  // The whole file, the theme's defaults included: every token it reads is one tokens.css declares.
+  for (const match of css.matchAll(/var\((--fin-[a-z0-9-]+)/g)) {
+    if (!declared.has(match[1] ?? "")) throw new Error(`tokens.css: no ${match[1]}`);
+  }
+  return css;
 }

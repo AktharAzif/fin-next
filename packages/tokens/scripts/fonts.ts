@@ -1,10 +1,34 @@
-// fin-font-metrics 1.0.0: builds fonts.css from the font files in fonts/ (spec 06 §3.2). Each
-// file's @font-face takes its family, weight (a variable font's whole wght axis) and style from the
-// file's own name, fvar and OS/2 tables; the metric-matched "Inter Fallback" face, which keeps the
-// layout still while Inter loads, takes size-adjust and the ascent, descent and line-gap overrides
-// from Inter's head, hhea, OS/2, cmap and hmtx tables and from Arial's published metrics. Web APIs
-// only: the WOFF2 table data is Brotli, read with DecompressionStream. `pnpm --filter @fin/tokens
-// fonts` (scripts/write-fonts.ts) writes fonts.css; test/fonts.test.ts fails when it is stale.
+// fin-font-metrics 1.0.0: builds fonts.css from the font files in fonts/ (spec 06 §3.2). `pnpm
+// --filter @fin/tokens fonts` (scripts/write-fonts.ts) writes fonts.css; test/fonts.test.ts fails
+// unless the committed fonts.css is, as a whole and byte for byte, what this builds from the
+// committed font files. Web APIs only: the WOFF2 table data is Brotli, read with
+// DecompressionStream.
+//
+// WHAT IT WRITES, and nothing else: a header comment naming the tool; one @font-face per file, in
+// file-name order; then, for each variable font (today Inter), a one-line comment naming the tool
+// and the file, and the metric-matched fallback face that keeps the layout still while it loads.
+// Every value is read from the file's own tables or is a constant written here:
+//
+//   each file's face   value                                     read from
+//   font-family        "<family>", less a trailing weight word   name table: ID 16, else ID 1
+//                      (Thin to Black); "<family> Variable" for  fvar (a wght axis)
+//                      a variable font
+//   font-style         italic, else normal                       OS/2 fsSelection bit 0
+//   font-weight        "<min> <max>" of the wght axis, else the  fvar; OS/2 usWeightClass
+//                      weight class
+//   font-display       swap                                      constant
+//   src                url("./fonts/<file>") format("woff2")     the file's name
+//
+//   the fallback face  value                                     read from
+//   font-family        "<family> Fallback"                       name table
+//   src                local("Arial"), local("Liberation Sans")  constant
+//   size-adjust        A(font) / A(Arial)                        cmap, hmtx, head; ARIAL
+//   ascent-override    ascent / unitsPerEm / size-adjust         OS/2 typo metrics when
+//   descent-override   |descent| / unitsPerEm / size-adjust      USE_TYPO_METRICS is set, else
+//   line-gap-override  lineGap / unitsPerEm / size-adjust        hhea; head
+//
+// A(f) is f's average advance of a to z in ems, weighted by LETTER_FREQUENCY; Arial's metrics are
+// the published ones in ARIAL. Each percentage is rounded to two decimals.
 
 export const TOOL = "fin-font-metrics 1.0.0";
 
@@ -358,7 +382,7 @@ const fallbackFamily = (family: string) => `${family} Fallback`;
 
 /**
  * fonts.css for the given files of fonts/ (name and bytes): a face per file, in name order, then
- * the metric-matched fallback of each variable sans face. A file that is no font throws.
+ * the metric-matched fallback of each variable face. A file that is no font throws.
  */
 export async function buildFonts(files: { name: string; bytes: Uint8Array }[]): Promise<string> {
   const faces: string[] = [];

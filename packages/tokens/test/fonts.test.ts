@@ -1,6 +1,11 @@
 // fonts.css is generated from the font files by scripts/fonts.ts (fin-font-metrics; UI-12: built,
 // not ported). It fails when the committed file is not what the tool builds from the committed
 // fonts, and checks the tool against what each file and Arial are known to hold.
+//
+// The comparison is of the whole file, byte for byte: `?raw` hands over the file's text exactly as
+// it is on disk (a byte-order mark, a carriage return and trailing white space are all kept), and
+// `toBe` compares that whole string with the whole of the tool's output, so no line of the pinned
+// file can differ from what the tool writes. `?inline` hands over each font file's exact bytes.
 import { describe, expect, it } from "vitest";
 import fira400 from "../fonts/fira-mono-latin-400-normal.woff2?inline";
 import fira500 from "../fonts/fira-mono-latin-500-normal.woff2?inline";
@@ -29,7 +34,7 @@ const FILES = [
 ];
 
 describe("fonts.css", () => {
-  it("is what fin-font-metrics builds from the files in fonts/", async () => {
+  it("is, as a whole and byte for byte, what fin-font-metrics builds from the files in fonts/", async () => {
     expect(fontsCss, "fonts.css is stale: run `pnpm --filter @fin/tokens fonts`").toBe(
       await buildFonts(FILES),
     );
