@@ -66,6 +66,14 @@ describe("OTPInput", () => {
     );
     expect(tagsWith(html, "data-slot", "otp-input-control")[0]).toMatch(/\sdisabled=""/);
     expect(text(html)).toContain("Send a new code in 0:30");
+    // The countdown is the resend control itself, disabled but focusable, so focus that was on it
+    // stays on it while it sends and counts down.
+    const resend = html.slice(html.indexOf('data-slot="fin-otp-resend"'));
+    const [button] = tagsWith(resend, "type", "button");
+    expect(attr(button, "aria-disabled")).toBe("true");
+    expect(button).not.toMatch(/\sdisabled=""/);
+    expect(attr(button, "tabindex") ?? "0").toBe("0");
+    expect(text(resend)).toContain("Send a new code in 0:30");
     expect(
       text(
         render(

@@ -218,16 +218,42 @@ test.describe("the components @kit", () => {
   test("on a phone, nothing scrolls sideways and a modal keeps 16px from each edge @phone", async ({
     page,
   }) => {
-    const overflow = await page.evaluate(
-      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-    );
-    expect(overflow).toBe(0);
-    await page.getByRole("button", { name: "Create API key" }).click();
-    const dialog = page.getByRole("dialog", { name: "Create API key" });
-    await expect(dialog).toBeVisible();
-    const viewport = page.viewportSize()?.width ?? 0;
-    expect(await layoutWidth(dialog)).toBe(Math.min(480, viewport - 32));
-    await page.keyboard.press("Escape");
+    // AC-UI-28: no horizontal scroll at 320 and 390 CSS pixels wide.
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 800 });
+      const overflow = await page.evaluate(() => {
+        const edge = document.documentElement.clientWidth;
+        // For the failure message: what reaches past the edge (a table's own scroller may).
+        const wide = [...document.querySelectorAll("body *")]
+          .filter((el) => el.getBoundingClientRect().right > edge)
+          .map((el) => el.getAttribute("data-slot") ?? el.tagName.toLowerCase());
+        return {
+          scroll: document.documentElement.scrollWidth - edge,
+          wide: [...new Set(wide)].slice(0, 8).join(", "),
+        };
+      });
+      expect(overflow.scroll, `at ${width}px: ${overflow.wide}`).toBe(0);
+      // The 8-box code input fits its column, its boxes shrunk alike and still 24px targets.
+      const emailed = section(page, "otp").locator('[data-slot="fin-otp"]').nth(1);
+      const fit = await emailed.evaluate((el) => {
+        const group = el.querySelector('[data-slot="otp-input-group"]')?.getBoundingClientRect();
+        const widths = [...el.querySelectorAll('[data-slot="otp-input-slot"]')].map((slot) =>
+          Math.round(slot.getBoundingClientRect().width * 4),
+        );
+        return {
+          inside: (group?.right ?? Number.POSITIVE_INFINITY) <= el.getBoundingClientRect().right,
+          alike: new Set(widths).size === 1,
+          target: Math.min(...widths) / 4 >= 24,
+        };
+      });
+      expect(fit, `at ${width}px`).toEqual({ inside: true, alike: true, target: true });
+      await page.getByRole("button", { name: "Create API key" }).click();
+      const dialog = page.getByRole("dialog", { name: "Create API key" });
+      await expect(dialog).toBeVisible();
+      expect(await layoutWidth(dialog)).toBe(Math.min(480, width - 32));
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+    }
   });
 
   test("buttons: pending keeps focus and announces busy; a throw is reported", async ({ page }) => {
@@ -241,6 +267,20 @@ test.describe("the components @kit", () => {
     await page.locator('[data-kit="throwing-button"]').click();
     await expect(page.locator("body")).toHaveAttribute("data-reported", "");
     await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+  });
+
+  test("a text button's failure is reported and said, as a button's is", async ({ page }) => {
+    await page.locator('[data-kit="throwing-text-button"]').click();
+    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+  });
+
+  test("a toast action's failure is reported and said", async ({ page }) => {
+    await page.locator('[data-kit="toast-undo"]').click();
+    const region = page.getByRole("region", { name: "Notifications" });
+    await region.getByRole("button", { name: "Undo" }).click();
+    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expect(region.getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
   test("disabled with a reason: focusable, described, with the reason as its tooltip", async ({
@@ -404,6 +444,78 @@ test.describe("the components @kit", () => {
     await page.keyboard.type("123456");
     await expect(page.locator('[data-kit="otp-handed"]')).toHaveText("654321,123456");
     await expect(section(page, "otp").getByText("Code accepted.")).toBeVisible();
+  });
+
+  test("OTP input: 44px boxes from 640px wide, 36px below", async ({ page }) => {
+    const width = page.viewportSize()?.width ?? 0;
+    const boxes = section(page, "otp")
+      .locator('[data-slot="fin-otp"]')
+      .first()
+      .locator('[data-slot="otp-input-slot"]');
+    await expect(boxes).toHaveCount(6);
+    for (const box of await boxes.all()) {
+      expect(await layoutWidth(box)).toBe(width >= 640 ? 44 : 36);
+      expect(await box.evaluate((el) => (el as HTMLElement).offsetHeight)).toBe(44);
+    }
+  });
+
+  test("OTP input: one that mounts expired takes no focus and scrolls nothing", async ({
+    page,
+  }) => {
+    await expect(page.getByRole("textbox", { name: "Emailed code" })).toHaveCount(1);
+    const state = await page.evaluate(() => ({
+      active: document.activeElement?.tagName,
+      scrollY: Math.round(window.scrollY),
+    }));
+    expect(state).toEqual({ active: "BODY", scrollY: 0 });
+  });
+
+  test("OTP resend: focus stays on it while it sends and counts down; start and end are said", async ({
+    page,
+  }) => {
+    // The clock goes in before the page loads, so no timer the page started is a real one.
+    await page.clock.install();
+    await page.reload();
+    await page.locator("body[data-ready]").waitFor();
+    const otp = section(page, "otp").locator('[data-slot="fin-otp"]').first();
+    const resend = otp.getByRole("button", { name: "Send a new code" });
+    await keyboardFocus(page, resend);
+    await page.keyboard.press("Enter");
+    const focused = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        return {
+          tag: el?.tagName,
+          text: el?.textContent,
+          disabled: el?.getAttribute("aria-disabled") ?? null,
+        };
+      });
+    await expect.poll(focused).toEqual({ tag: "BUTTON", text: "Sending", disabled: "true" });
+    await page.clock.runFor(400);
+    await expect
+      .poll(focused)
+      .toEqual({ tag: "BUTTON", text: "Send a new code in 0:30", disabled: "true" });
+    await page.clock.runFor(200);
+    await expect(page.locator('[data-ui-sdk-announcer=""]')).toHaveText(
+      "Code sent. You can send a new code in 30 seconds.",
+    );
+    for (let second = 0; second < 30; second += 1) await page.clock.runFor(1000);
+    await expect.poll(focused).toEqual({ tag: "BUTTON", text: "Send a new code", disabled: null });
+    await page.clock.runFor(200);
+    await expect(page.locator('[data-ui-sdk-announcer=""]')).toHaveText(
+      "You can send a new code now.",
+    );
+  });
+
+  test("OTP resend: a refused resend is reported and said, and focus stays", async ({ page }) => {
+    const otp = section(page, "otp").locator('[data-slot="fin-otp"]').nth(1);
+    const resend = otp.getByRole("button", { name: "Send a new code" });
+    await keyboardFocus(page, resend);
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("That didn’t work. Try again.")).toBeVisible();
+    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expect(resend).toBeFocused();
+    await expect(resend).not.toHaveAttribute("aria-disabled", "true");
   });
 
   test("checkbox and switch: native labels, indeterminate, keyboard", async ({ page }) => {

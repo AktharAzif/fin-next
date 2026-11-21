@@ -257,7 +257,18 @@ function OtpDemo() {
       <span data-kit="otp-handed" className="text-caption text-text-tertiary">
         {handed.join(",")}
       </span>
-      <OTPInput label="Emailed code" length={8} status="expired" />
+      {/* Mounts expired, and its resend is refused (as a rate limit would be). */}
+      <OTPInput
+        label="Emailed code"
+        length={8}
+        status="expired"
+        onResend={async () => {
+          await wait(100);
+          throw new Error("kit: resend refused");
+        }}
+        resendCooldown={60}
+        initialCooldown={0}
+      />
     </div>
   );
 }
@@ -395,7 +406,16 @@ export function Kit(props: { onReady: () => void }) {
               <Spinner />
               <Spinner size={24} />
               <span className="text-body">
-                Couldn’t load rails. <TextButton>Retry</TextButton>
+                Couldn’t load rails.{" "}
+                <TextButton
+                  data-kit="throwing-text-button"
+                  onClick={async () => {
+                    await wait(50);
+                    throw new Error("kit failure");
+                  }}
+                >
+                  Retry
+                </TextButton>
               </span>
             </Row>
           </Section>
@@ -640,6 +660,25 @@ export function Kit(props: { onReady: () => void }) {
                 }
               >
                 Toast info
+              </Button>
+              <Button
+                variant="secondary"
+                data-kit="toast-undo"
+                onClick={() =>
+                  toast({
+                    title: "Webhook deleted",
+                    action: {
+                      label: "Undo",
+                      altText: "Create the webhook again from Webhooks",
+                      onAction: async () => {
+                        await wait(50);
+                        throw new Error("kit failure");
+                      },
+                    },
+                  })
+                }
+              >
+                Toast with a failing Undo
               </Button>
             </Row>
           </Section>

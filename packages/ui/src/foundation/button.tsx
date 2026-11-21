@@ -194,17 +194,35 @@ export function IconButton(props: IconButtonProps): ReactElement {
   );
 }
 
-/** A small underlined text action inside a sentence, such as Retry or Resend code. */
+/**
+ * A small underlined text action inside a sentence, such as Retry or Resend code. Like Button, a
+ * press that throws or rejects is reported and says "That didn't work. Try again." (the SDK alone
+ * would keep the failure in its state and say nothing).
+ */
 export function TextButton(
   props: Omit<SdkButtonProps, "className" | "children"> & {
+    /** IDs (never personal data) to send with a failure report. */
+    reportIds?: Readonly<Record<string, string>>;
     className?: string;
     children: ReactNode;
   },
 ): ReactElement {
-  const { className, children, ...rest } = props;
+  const { className, children, onClick, reportIds, ...rest } = props;
+  const report = useReportFailure();
   return (
     <SdkButton
       {...rest}
+      {...(onClick === undefined
+        ? {}
+        : {
+            onClick: (event, details) =>
+              runReported(
+                () => onClick(event, details),
+                report,
+                reportIds ?? {},
+                () => toast.error(ACTION_FAILED),
+              ),
+          })}
       className={cn(
         "inline cursor-pointer rounded-xs bg-transparent p-0 text-label-sm text-text-primary underline decoration-border-strong underline-offset-4",
         "not-data-disabled:hover:decoration-text-primary focus-visible:outline-focus",

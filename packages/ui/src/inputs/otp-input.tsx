@@ -2,14 +2,20 @@
 // - 6 boxes for authenticator codes, 8 for emailed ones; autocomplete="one-time-code"; paste fills
 //   every box.
 // - A complete code is handed on once (onComplete), however often the boxes report it.
-// - After a wrong or expired code the whole code is selected again, so typing replaces it.
+// - After a wrong or expired code the whole code is selected again, so typing replaces it. That
+//   happens on a change into those statuses only: one that mounts expired leaves focus alone.
 // - The sentence under the boxes says the status; resend has a cooldown that restarts after each
-//   send and reads "Sending" while it runs.
+//   send and reads "Sending" while it runs. The resend control stays in place throughout
+//   (disabled but focusable), so keyboard focus is never dropped; the cooldown is announced when
+//   it starts and when it ends (spec 06 §9); a resend that fails is reported and says so.
+// - The boxes shrink to fit a narrow column: 8 of them fit 288px (a 320px phone, AC-UI-28).
 import { OTPInputGroup, OTPInputSlot, OTPInput as SdkOTPInput } from "@ui-sdk/react/otp-input";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { TextButton } from "../foundation/button.tsx";
 import { announce } from "../lib/announce.ts";
 import { cn } from "../lib/cn.ts";
+import { ACTION_FAILED, runReported, useReportFailure } from "../lib/failures.tsx";
+import { toast } from "../overlays/toaster.tsx";
 
 export type OTPStatus = "idle" | "verifying" | "invalid" | "expired" | "locked" | "success";
 
@@ -78,19 +84,30 @@ export function OTPInput(props: OTPInputProps) {
   const id = `otp${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
   const root = useRef<HTMLDivElement>(null);
   const handed = useRef<string | null>(null);
+  const previousStatus = useRef(status);
+  const report = useReportFailure();
   const [cooldown, setCooldown] = useState(props.initialCooldown ?? props.resendCooldown ?? 0);
   const [sending, setSending] = useState(false);
+  const resendable = props.onResend !== undefined;
 
+  // One tick a second; the end of a countdown is announced (its start is, after a resend).
   useEffect(() => {
     if (cooldown <= 0) return;
-    const timer = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    const timer = setTimeout(() => {
+      const next = Math.max(0, cooldown - 1);
+      if (next === 0 && resendable) announce("You can send a new code now.");
+      setCooldown(next);
+    }, 1000);
     return () => clearTimeout(timer);
-  }, [cooldown]);
+  }, [cooldown, resendable]);
 
-  // A wrong or expired code: select all of it, so the next digits replace it; and let the same
-  // code be handed on again if the person retypes it.
+  // A change into a wrong or expired code: select all of it, so the next digits replace it; and
+  // let the same code be handed on again if the person retypes it. Only on a change: an input
+  // that mounts in one of those statuses must not take focus from the page (or scroll to itself).
   useEffect(() => {
-    if (status !== "invalid" && status !== "expired") return;
+    const before = previousStatus.current;
+    previousStatus.current = status;
+    if (before === status || (status !== "invalid" && status !== "expired")) return;
     handed.current = null;
     const input = root.current?.querySelector("input");
     if (input instanceof HTMLInputElement) {
@@ -119,16 +136,31 @@ export function OTPInput(props: OTPInputProps) {
     .filter(Boolean)
     .join(" ");
 
+  // A failed resend is reported and says "That didn't work. Try again."; the control is offered
+  // again. A sent one starts the cooldown, and says so.
   const resend = async () => {
-    if (props.onResend === undefined) return;
+    const onResend = props.onResend;
+    if (onResend === undefined) return;
     setSending(true);
     try {
-      await props.onResend();
-      setCooldown(props.resendCooldown ?? 0);
+      await runReported(
+        () => onResend(),
+        report,
+        {},
+        () => toast.error(ACTION_FAILED),
+      );
+    } catch {
+      return;
     } finally {
       setSending(false);
     }
+    const seconds = Math.max(0, Math.ceil(props.resendCooldown ?? 0));
+    setCooldown(seconds);
+    announce(
+      seconds > 0 ? `Code sent. You can send a new code in ${seconds} seconds.` : "Code sent.",
+    );
   };
+  const waiting = cooldown > 0;
 
   return (
     <div
@@ -169,15 +201,17 @@ export function OTPInput(props: OTPInputProps) {
             handed.current = code;
             props.onComplete?.(code);
           }}
-          className="relative inline-flex"
+          className="relative inline-flex max-w-full"
         >
-          <OTPInputGroup className="flex gap-1.5 sm:gap-2">
+          {/* 36px boxes on phones and 44px from 640px, each shrinking when the column is narrower
+              than all of them: 8 boxes fit 288px. */}
+          <OTPInputGroup className="flex min-w-0 max-w-full gap-1.5 sm:gap-2">
             {Array.from({ length }, (_, index) => index).map((index) => (
               <OTPInputSlot
                 key={`slot-${index}`}
                 index={index}
                 className={cn(
-                  "grid h-11 w-9 place-items-center rounded-control sm:w-11 border border-border-input bg-surface-raised font-mono text-heading text-text-primary shadow-input",
+                  "grid h-11 w-9 min-w-0 shrink place-items-center rounded-control sm:w-11 border border-border-input bg-surface-raised font-mono text-heading text-text-primary shadow-input",
                   "transition-field data-active:border-focus-ring data-active:shadow-focus",
                   invalid && "border-border-danger shadow-invalid",
                   locked && "border-transparent bg-surface-subtle text-text-disabled shadow-none",
@@ -202,19 +236,24 @@ export function OTPInput(props: OTPInputProps) {
           {sentence}
         </p>
       )}
-      {props.onResend === undefined ? null : (
-        <p className="m-0 text-caption text-text-tertiary">
-          {sending ? (
-            "Sending"
-          ) : cooldown > 0 ? (
-            `Send a new code in ${clock(cooldown)}`
-          ) : (
-            <>
-              Didn’t get it? <TextButton onClick={resend}>Send a new code</TextButton>
-            </>
-          )}
+      {resendable ? (
+        <p data-slot="fin-otp-resend" className="m-0 text-caption text-text-tertiary">
+          {sending || waiting ? null : "Didn’t get it? "}
+          <TextButton
+            disabled={sending || waiting}
+            focusableWhenDisabled
+            {...(sending ? { "aria-busy": true } : {})}
+            onClick={resend}
+            className="data-disabled:cursor-default data-disabled:text-text-tertiary data-disabled:no-underline"
+          >
+            {sending
+              ? "Sending"
+              : waiting
+                ? `Send a new code in ${clock(cooldown)}`
+                : "Send a new code"}
+          </TextButton>
         </p>
-      )}
+      ) : null}
     </div>
   );
 }

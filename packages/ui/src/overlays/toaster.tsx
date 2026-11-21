@@ -3,11 +3,13 @@
 // - Errors stay until dismissed; the rest leave after 5 seconds (paused while hovered or focused).
 // - The tone shows as the icon only; at most one action (Undo, Retry or View), with altText.
 // - 480px, bottom centre, 24px up; F8 moves focus to the newest toast and back; no swipe.
+// - An action that throws or rejects is reported and says "That didn't work. Try again.".
 
 import { CheckCircleIcon, InfoIcon, WarningCircleIcon, XIcon } from "@fin/icons";
 import { createToaster, Toast, ToastAction, ToastClose, ToastRegion } from "@ui-sdk/react/toast";
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn.ts";
+import { ACTION_FAILED, runReported, useReportFailure } from "../lib/failures.tsx";
 
 export type ToastTone = "success" | "error" | "info";
 
@@ -88,6 +90,7 @@ const TONE_ICON: Record<string, ReactNode> = {
 
 /** The one toast region. Mount once, near the root, inside the app's providers. */
 export function Toaster() {
+  const report = useReportFailure();
   return (
     <ToastRegion
       toaster={getQueue()}
@@ -116,6 +119,14 @@ export function Toaster() {
             {item.action === undefined ? null : (
               <ToastAction
                 {...(altText === undefined ? {} : { "aria-description": altText })}
+                onAction={(event, details) =>
+                  runReported(
+                    () => item.action?.onAction?.(event, details),
+                    report,
+                    {},
+                    () => toast.error(ACTION_FAILED),
+                  )
+                }
                 className="h-control-sm shrink-0 cursor-pointer rounded-control bg-surface-raised px-3 text-label text-text-primary shadow-button hover:shadow-button-hover focus-visible:outline-focus"
               />
             )}
