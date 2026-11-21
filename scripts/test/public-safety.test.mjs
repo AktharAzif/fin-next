@@ -793,25 +793,35 @@ describe("the pre-push hook refuses the same", () => {
   test("a commit already on one of the remote's branches is not scanned again", () => {
     const dir = pushable();
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
-    // Another branch, published before this rule, holds a commit with another offset.
-    git(dir, ["checkout", "-q", "-b", "side"]);
-    addFiles(dir, { "side.md": "side\n" });
-    git(dir, ["commit", "-q", "-m", "side"], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
-    git(dir, ["push", "-q", "origin", "side"]);
+    // Other branches, published before this rule, hold commits with another offset; a lane's
+    // branch name has a slash in it.
+    for (const branch of ["side", "lane/side"]) {
+      git(dir, ["checkout", "-q", "-b", branch, base]);
+      addFiles(dir, { [`${branch.replace("/", "-")}.md`]: `${branch}\n` });
+      git(dir, ["commit", "-q", "-m", branch], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
+      git(dir, ["push", "-q", "origin", branch]);
+    }
     git(dir, ["checkout", "-q", "work"]);
     git(dir, ["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
+    git(dir, ["merge", "-q", "--no-ff", "lane/side", "-m", "merge the lane"]);
     const head = git(dir, ["rev-parse", "HEAD"]).trim();
-    /** @type {string[]} */
-    const lines = [];
-    const code = prePush({
-      root: dir,
-      remote: "origin",
-      input: `refs/heads/work ${head} refs/heads/work ${base}\n`,
-      gitleaks: "/nonexistent/gitleaks",
-      log: (line) => lines.push(line),
-    });
-    assert.equal(code, 0, lines.join("\n"));
-    assert.match(lines.join("\n"), /scanned 1 commit\(s\)/);
+    // An update of a branch the remote has, and a new branch.
+    for (const [remoteRef, remoteSha] of [
+      ["refs/heads/work", base],
+      ["refs/heads/feature", "0".repeat(40)],
+    ]) {
+      /** @type {string[]} */
+      const lines = [];
+      const code = prePush({
+        root: dir,
+        remote: "origin",
+        input: `refs/heads/work ${head} ${remoteRef} ${remoteSha}\n`,
+        gitleaks: "/nonexistent/gitleaks",
+        log: (line) => lines.push(line),
+      });
+      assert.equal(code, 0, lines.join("\n"));
+      assert.match(lines.join("\n"), /scanned 2 commit\(s\)/);
+    }
   });
 
   test("a push to main is refused", () => {
