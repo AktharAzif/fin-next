@@ -6,9 +6,9 @@
 --   - without `p_reset`: refuses while an active Admin exists (FB001), while another address is a
 --     pending Admin and this one is not (FB002), or when the address is already an active member
 --     (FB003); otherwise inserts the member, or reactivates a removed or pending one under the same
---     `stf_` ID, as a pending Admin (`staff.member_added`). An address that is already a pending
---     Admin only gets a new code, even beside another pending Admin (after the last Admin's reset,
---     an Admin they had added may be pending too), so no new Admin is made while one waits;
+--     `stf_` ID, as a pending Admin (`staff.member_added`). A run for an address that is already
+--     a pending Admin passes FB002 even beside another pending Admin (the last Admin's reset can
+--     leave one they had added): it gives that Admin a new code and makes no new Admin;
 --   - with `p_reset` (the last Admin lost every factor, §10.4): refuses unless the address is an
 --     active Admin (FB004) and the only one (FB005, another Admin resets them in Fin Admin);
 --     otherwise ends every session, removes every passkey and authenticator, makes them pending
