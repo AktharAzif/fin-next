@@ -14,6 +14,11 @@ import { emailOTP, twoFactor } from "better-auth/plugins";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { createRecordAudit, type RecordAudit } from "./audit/record.ts";
 import { expectedTrustedOrigins, type RealmSettings } from "./config.ts";
+import {
+  BACKUP_CODE_COUNT,
+  BACKUP_CODE_LENGTH,
+  generateBackupCodes,
+} from "./crypto/backup-codes.ts";
 import { KeyedHasher } from "./crypto/keyed.ts";
 import { createEmailEnqueue, type EmailEnqueue } from "./email/enqueue.ts";
 import {
@@ -278,7 +283,13 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
         totpOptions: { digits: 6, period: 30 },
         ...(developer
           ? {
-              backupCodeOptions: { amount: 10, length: 10, storeBackupCodes: "encrypted" as const },
+              backupCodeOptions: {
+                amount: BACKUP_CODE_COUNT,
+                length: BACKUP_CODE_LENGTH,
+                storeBackupCodes: "encrypted" as const,
+                // The library's draw, with a letter and a digit in every code (backup-codes.ts).
+                customBackupCodesGenerate: generateBackupCodes,
+              },
             }
           : {}),
         accountLockout: { enabled: true, maxFailedAttempts: 10, durationSeconds: 3600 },

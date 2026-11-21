@@ -65,7 +65,10 @@ const CROCKFORD_LOWER = "0-9a-hjkmnp-tv-z";
  * The secret shapes a name is checked against, and hidden on: the prefixed keys and tokens, a whole
  * JWT, a private key, an address, a web address, a run of 7 or more digits (spec 02 §8.6 refuses
  * the last three too), and the enrolment and backup codes in the forms Fin and the library print
- * them, which always mix letters and digits (T08-23: no template carries a code, spec 08 §4.1).
+ * them (T08-23: no template carries a code, spec 08 §4.1). Those shapes rely on the codes' own rule
+ * that they mix letters and digits: Fin's generators redraw any code that would not (a backup code
+ * holds a letter and a digit, an enrolment code has a group of four mixing both; packages/identity,
+ * crypto/backup-codes.ts and staff/enrolment.ts), so every code Fin issues is hidden here.
  * Left out, as names of their own: a long letters-and-digits run that mixes cases or is not a
  * code's length, a 5-5 pair without a digit, and four words of four letters with no group mixing a
  * letter and a digit ("Web3Infrastructure", "McKay-Jones", "Acme Bank Card 2025").

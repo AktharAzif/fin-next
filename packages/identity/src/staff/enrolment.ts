@@ -19,8 +19,17 @@ export const ENROLMENT_MAX_WRONG = 5;
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/** A new code: 16 characters, displayed `XXXX-XXXX-XXXX-XXXX`. */
-export function generateEnrolmentCode(): string {
+/**
+ * True when one of the code's groups of four mixes a letter and a digit, as every code Fin issues
+ * does. A code with no such group (four words, or four numbers, about one draw in 340) is also the
+ * shape of an ordinary name ("ABCD-EFGH-JKMN-PQRS", "2025-ACME-BANK-TEAM"), which the email's name
+ * fields show, so one passed into a name by mistake would be mailed (SA-29, T08-23).
+ */
+export function hasMixedGroup(code: string): boolean {
+  return code.split("-").some((group) => /\d/u.test(group) && /[A-Z]/u.test(group));
+}
+
+function drawEnrolmentCode(): string {
   const bytes = new Uint8Array(10);
   crypto.getRandomValues(bytes);
   let bits = 0;
@@ -35,6 +44,17 @@ export function generateEnrolmentCode(): string {
     }
   }
   return out.match(/.{4}/g)?.join("-") ?? out;
+}
+
+/**
+ * A new code: 16 characters, displayed `XXXX-XXXX-XXXX-XXXX`, with a group that mixes a letter and
+ * a digit (a draw without one is drawn again, which costs well under a hundredth of a bit).
+ */
+export function generateEnrolmentCode(): string {
+  for (;;) {
+    const code = drawEnrolmentCode();
+    if (hasMixedGroup(code)) return code;
+  }
 }
 
 /** Normalises typed input: case, hyphens and spaces, and Crockford's I/L to 1 and O to 0. */

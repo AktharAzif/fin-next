@@ -6,6 +6,12 @@ import { REALM_EVENTS } from "./audit/events.ts";
 import { auditPayload } from "./audit/record.ts";
 import { AuditMetadataError, personalShapeOf } from "./audit/shapes.ts";
 import { FIN_COOKIE_MAX_AGE, readCookie, serializeFinCookie } from "./cookies.ts";
+import {
+  BACKUP_CODE_COUNT,
+  generateBackupCode,
+  generateBackupCodes,
+  mixesLettersAndDigits,
+} from "./crypto/backup-codes.ts";
 import { deviceSummary } from "./device.ts";
 import { REALM_TEMPLATES } from "./email/templates.ts";
 import { ManualClock, systemClock } from "./ports/clock.ts";
@@ -14,6 +20,7 @@ import { networkKey } from "./request.ts";
 import {
   generateEnrolmentCode,
   hashEnrolmentCode,
+  hasMixedGroup,
   normaliseEnrolmentCode,
 } from "./staff/enrolment.ts";
 import { buildCatalogue, stepUpCatalogue } from "./step-up/actions/index.ts";
@@ -106,6 +113,44 @@ describe("enrolment codes ([SA-29], T-SAT-12)", () => {
     expect(normaliseEnrolmentCode("ILO0-0000-0000-0000")).toBe("1100000000000000");
     expect(normaliseEnrolmentCode("too-short")).toBeNull();
     expect(hashEnrolmentCode("A".repeat(16))).toHaveLength(32);
+  });
+
+  // A code whose groups are all letters or all digits is also an ordinary name's shape, which the
+  // email's name fields show; about one plain draw in 340 is one (SA-29, T08-23).
+  it("always have a group that mixes a letter and a digit", () => {
+    expect(hasMixedGroup("ABCD-EFGH-JKMN-PQRS")).toBe(false);
+    expect(hasMixedGroup("ABCD-1234-EFGH-5678")).toBe(false);
+    expect(hasMixedGroup("ABCD-EFGH-JK3M-NPQR")).toBe(true);
+    const codes = Array.from({ length: 20_000 }, generateEnrolmentCode);
+    expect(codes.filter((code) => !hasMixedGroup(code))).toEqual([]);
+    expect(
+      codes.every((code) => /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/.test(code)),
+    ).toBe(true);
+  });
+});
+
+describe("backup codes (spec 02 §5.4)", () => {
+  it("are 10 codes of two groups of five, as the library prints them", () => {
+    const codes = generateBackupCodes();
+    expect(codes).toHaveLength(BACKUP_CODE_COUNT);
+    for (const code of codes) expect(code).toMatch(/^[A-Za-z0-9]{5}-[A-Za-z0-9]{5}$/);
+    expect(new Set(codes).size).toBe(BACKUP_CODE_COUNT);
+  });
+
+  // A 5-5 pair of letters is also a double-barrelled name's shape, which the email's name fields
+  // show; about one plain draw in six held no digit (T08-23).
+  it("always mix letters and digits", () => {
+    expect(mixesLettersAndDigits("aBcDe-FgHiJ")).toBe(false);
+    expect(mixesLettersAndDigits("01234-56789")).toBe(false);
+    expect(mixesLettersAndDigits("a1B2c-D3e4F")).toBe(true);
+    const codes = Array.from({ length: 20_000 }, generateBackupCode);
+    expect(codes.filter((code) => !mixesLettersAndDigits(code))).toEqual([]);
+    // Every character of the alphabet still turns up in every place (the draw stays uniform but
+    // for the redraw).
+    for (let place = 0; place < 11; place += 1) {
+      if (place === 5) continue;
+      expect(new Set(codes.map((code) => code[place])).size, `place ${place}`).toBe(62);
+    }
   });
 });
 

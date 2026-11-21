@@ -3,7 +3,14 @@
 import { describe, expect, it } from "vitest";
 import { checkHeaders, HeaderRefused } from "../src/headers.ts";
 import { EMAIL_ID, newId } from "../src/ids.ts";
-import { displayText, formatTime, HIDDEN_VALUE, param, secretShapeIn } from "../src/params.ts";
+import {
+  displayText,
+  formatTime,
+  HIDDEN_VALUE,
+  nameSecretShapeIn,
+  param,
+  secretShapeIn,
+} from "../src/params.ts";
 import { normaliseAddress, recipientHasher } from "../src/recipient-key.ts";
 import { escapeHtml } from "../src/render.ts";
 import {
@@ -170,6 +177,112 @@ describe("display values", () => {
     expect(param.time.safeParse("2026-11-21T04:30:00.000Z").success).toBe(true);
     expect(param.time.safeParse("2026-11-21T10:00:00+05:30").success).toBe(false);
     expect(formatTime("2026-11-21T04:05:00.000Z")).toBe("21 Nov 2026, 04:05 UTC");
+  });
+});
+
+// Every code Fin issues, in every form Fin and the library print it, is hidden in every name field
+// (T08-23, SA-29). The codes' own rules (packages/identity: crypto/backup-codes.ts and
+// staff/enrolment.ts, each with its property test there) are what make that hold: a backup code is
+// 10 characters of a-z, 0-9 and A-Z that mix letters and digits, printed `xxxxx-xxxxx`; an
+// enrolment code is 16 Crockford characters with a group of four that mixes a letter and a digit,
+// printed `XXXX-XXXX-XXXX-XXXX`. These draw codes by exactly those rules, the fewest digits or
+// letters the rules allow included, and run each through every name field.
+describe("the codes Fin issues, passed into a name", () => {
+  const NAME_FIELDS = ["personName", "orgName", "roleLabel"] as const;
+  const LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const DIGITS = "0123456789";
+  const CROCKFORD_LETTERS = "ABCDEFGHJKMNPQRSTVWXYZ";
+
+  /** A small seeded generator (mulberry32), so a failure replays. */
+  function seeded(seed: number): (n: number) => number {
+    let a = seed >>> 0;
+    return (n) => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) % n;
+    };
+  }
+  const pick = (next: (n: number) => number, from: string) => from[next(from.length)] as string;
+
+  function expectHidden(value: string): void {
+    expect(nameSecretShapeIn(value), value).toBeTypeOf("string");
+    for (const field of NAME_FIELDS) {
+      expect(param[field].parse(value), `${field}: ${value}`).toBe(HIDDEN_VALUE);
+    }
+  }
+
+  it("hides a backup code with a single digit or a single letter, in every place", () => {
+    const next = seeded(1);
+    for (let place = 0; place < 10; place += 1) {
+      for (const [one, rest] of [
+        [DIGITS, LETTERS],
+        [LETTERS, DIGITS],
+      ] as const) {
+        const raw = Array.from({ length: 10 }, (_, i) => pick(next, i === place ? one : rest));
+        expectHidden(`${raw.slice(0, 5).join("")}-${raw.slice(5).join("")}`);
+      }
+    }
+  });
+
+  it("hides 5,000 backup codes drawn by the issuing rule", () => {
+    const next = seeded(2);
+    const alphabet = LETTERS + DIGITS;
+    let drawn = 0;
+    while (drawn < 5_000) {
+      const raw = Array.from({ length: 10 }, () => pick(next, alphabet)).join("");
+      if (!/\d/.test(raw) || !/[A-Za-z]/.test(raw)) continue;
+      drawn += 1;
+      expectHidden(`${raw.slice(0, 5)}-${raw.slice(5)}`);
+    }
+  });
+
+  /** An enrolment code's four groups in each form it is printed or typed in. */
+  function enrolmentForms(groups: readonly string[]): string[] {
+    const joined = groups.join("");
+    return [
+      groups.join("-"),
+      groups.join(" "),
+      joined,
+      groups.join("-").toLowerCase(),
+      joined.toLowerCase(),
+    ];
+  }
+
+  it("hides an enrolment code whose one mixed group has one digit or one letter, in every place", () => {
+    const next = seeded(3);
+    for (let group = 0; group < 4; group += 1) {
+      for (let place = 0; place < 4; place += 1) {
+        for (const [one, rest] of [
+          [DIGITS, CROCKFORD_LETTERS],
+          [CROCKFORD_LETTERS, DIGITS],
+        ] as const) {
+          // Every other group is all letters or all digits: no other group mixes.
+          const groups = Array.from({ length: 4 }, (_, g) => {
+            const pure = next(2) === 0 ? CROCKFORD_LETTERS : DIGITS;
+            return Array.from({ length: 4 }, (_, i) =>
+              g === group ? pick(next, i === place ? one : rest) : pick(next, pure),
+            ).join("");
+          });
+          for (const form of enrolmentForms(groups)) expectHidden(form);
+        }
+      }
+    }
+  });
+
+  it("hides 5,000 enrolment codes drawn by the issuing rule, in every form", () => {
+    const next = seeded(4);
+    const alphabet = CROCKFORD_LETTERS + DIGITS;
+    let drawn = 0;
+    while (drawn < 5_000) {
+      const groups = Array.from({ length: 4 }, () =>
+        Array.from({ length: 4 }, () => pick(next, alphabet)).join(""),
+      );
+      if (!groups.some((g) => /\d/.test(g) && /[A-Z]/.test(g))) continue;
+      drawn += 1;
+      for (const form of enrolmentForms(groups)) expectHidden(form);
+    }
   });
 });
 

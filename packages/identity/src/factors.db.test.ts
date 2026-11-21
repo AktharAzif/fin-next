@@ -16,6 +16,7 @@ import {
   totpFromUri,
 } from "../test/harness.ts";
 import { revokeTrustedBrowsers } from "./browsers.ts";
+import { mixesLettersAndDigits } from "./crypto/backup-codes.ts";
 import { hotp, totp, totpStep } from "./crypto/totp.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
@@ -78,6 +79,12 @@ describe("setting up an authenticator", () => {
     expect(enable.json?.totpURI).toMatch(/^otpauth:\/\/totp\//);
     expect(new URL(String(enable.json?.totpURI)).searchParams.get("issuer")).toBe("Fin (test)");
     expect(backupCodes).toHaveLength(10);
+    // The realm's generator: each code mixes letters and digits (crypto/backup-codes.ts), so none
+    // is also a double-barrelled name's shape that an email's name field would show (T08-23).
+    for (const code of backupCodes) {
+      expect(code).toMatch(/^[A-Za-z0-9]{5}-[A-Za-z0-9]{5}$/);
+      expect(mixesLettersAndDigits(code), code).toBe(true);
+    }
     expect(verify.status, JSON.stringify(verify.json)).toBe(200);
     expect((await sessionRow(browser))?.assurance).toBe("aal2");
     const events = (await h.events()).map((e) => e.event);
