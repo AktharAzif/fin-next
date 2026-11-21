@@ -346,16 +346,40 @@ importers:
 
   apps/console:
     dependencies:
+      '@fin/access':
+        specifier: workspace:*
+        version: link:../../packages/access
       '@fin/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@fin/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
+      '@fin/orgs':
+        specifier: workspace:*
+        version: link:../../packages/orgs
       '@fin/server':
         specifier: workspace:*
         version: link:../../packages/server
       '@fin/web-host':
         specifier: workspace:*
         version: link:../../packages/web-host
+      better-auth:
+        specifier: 'catalog:'
+        version: 1.7.25(drizzle-orm@0.45.4(kysely@0.29.9)(pg@8.23.1))(pg@8.23.1)(vitest@5.1.0(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6)))
+      hono:
+        specifier: 'catalog:'
+        version: 4.13.19
+      pg:
+        specifier: 'catalog:'
+        version: 8.23.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
     devDependencies:
+      '@biomejs/biome':
+        specifier: 'catalog:'
+        version: 2.6.8
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -524,6 +548,40 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6))
+
+  packages/orgs:
+    dependencies:
+      '@fin/access':
+        specifier: workspace:*
+        version: link:../access
+      '@fin/core':
+        specifier: workspace:*
+        version: link:../core
+      '@fin/email':
+        specifier: workspace:*
+        version: link:../email
+      '@fin/identity':
+        specifier: workspace:*
+        version: link:../identity
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 'catalog:'
+        version: 2.6.8
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      pg:
+        specifier: 'catalog:'
+        version: 8.23.1
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

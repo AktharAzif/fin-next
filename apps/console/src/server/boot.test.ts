@@ -1,21 +1,42 @@
 // The console's API half booted on a real socket: its health routes, its public /api/health
 // through the tunnel, the ingress check, and the origin gate's three refusals that FW-S2 names (a
-// cross-site POST, a POST without X-Fin-App, a text/plain POST), each 403 invalid_origin.
+// cross-site POST, a POST without X-Fin-App, a text/plain POST), each 403 invalid_origin; then the
+// realm's allowlist and the routes' first answers, which need no database: an unlisted auth path
+// is an empty 404, a signed-out viewer is 401, and a body a route's schema refuses is 400.
+import { randomBytes } from "node:crypto";
 import { bootApi, NEIGHBOUR_ADDRESS } from "@fin/web-host/testing";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { consoleService } from "./main.ts";
+import { defineConsoleService } from "./main.ts";
 
 const HOST = "console.example.net";
 const ORIGIN = `https://${HOST}`;
 let api: Awaited<ReturnType<typeof bootApi>>;
 
+/** A pool that answers the readiness probe and refuses any unit of work: no database here. */
+function probeOnlyPool(): Pool {
+  const pool = {
+    totalCount: 0,
+    idleCount: 0,
+    query: async () => ({ rows: [], rowCount: 1, command: "SELECT", fields: [] }),
+    connect: async () => {
+      throw new Error("this test has no database");
+    },
+    end: async () => undefined,
+    on: () => pool,
+  };
+  return pool as unknown as Pool;
+}
+
 beforeAll(async () => {
-  api = await bootApi(consoleService, {
+  api = await bootApi(defineConsoleService({ pool: probeOnlyPool() }), {
     service: "console",
     roles: ["console"],
     env: {
       FIN_PUBLIC_ORIGIN: ORIGIN,
       FIN_CONNECTOR_SERVICES: "cloudflared-public,cloudflared-public-b",
+      BETTER_AUTH_SECRETS: `1:${randomBytes(32).toString("base64url")}`,
+      FIN_LIMIT_KEY_1: randomBytes(32).toString("hex"),
     },
   });
 });
@@ -107,5 +128,51 @@ describe("the console's API half", () => {
       body: "{}",
     });
     expect(res.status).toBe(404);
+  });
+
+  it("answers an unlisted /api/auth path with an empty 404 and its line, and never lets an encoded one in", async () => {
+    for (const path of ["/api/auth/not-a-path", "/api/auth//ok", "/api/auth/ok"]) {
+      const res = await api.send({ host: HOST, path, method: "POST", headers: json, body: "{}" });
+      expect(res.status, path).toBe(404);
+      expect(res.body.length, path).toBe(0);
+    }
+    const blocked = api.stdout.filter((l) => l.event === "auth.endpoint_blocked");
+    expect(blocked.length).toBeGreaterThanOrEqual(3);
+    // The front door refuses a percent-encoded separator before any route (spec 01 §4.4).
+    const encoded = await api.send({
+      host: HOST,
+      path: "/api/auth/sign-in%2Femail-otp",
+      method: "POST",
+      headers: json,
+      body: "{}",
+    });
+    expect(encoded.status).toBeGreaterThanOrEqual(400);
+    expect(encoded.status).toBeLessThan(500);
+  });
+
+  it("refuses a body its route's schema refuses with 400 invalid, naming the field, never the value", async () => {
+    const res = await api.send({
+      host: HOST,
+      path: "/api/team/invitations",
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ email: "not an address", roleKey: "admin", extra: "planted-value" }),
+    });
+    expect(res.status).toBe(400);
+    const problem = res.json() as { code: string; fields: { path: string; code: string }[] };
+    expect(problem.code).toBe("invalid");
+    expect(problem.fields.map((f) => f.path).sort()).toEqual(["", "email"]);
+    expect(res.body.toString()).not.toContain("planted-value");
+  });
+
+  it("answers an ID of the wrong shape in a path with 404, as an unknown one", async () => {
+    const res = await api.send({
+      host: HOST,
+      path: "/api/team/invitations/not-an-id/resend",
+      method: "POST",
+      headers: { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-fin-app": "console" },
+    });
+    expect(res.status).toBe(404);
+    expect(res.json()).toMatchObject({ code: "not_found" });
   });
 });

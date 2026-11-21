@@ -9,14 +9,23 @@
     "lint": "biome check .",
     "typecheck": "pnpm run typecheck:server",
     "typecheck:server": "tsc -p src/server/tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
   },
   "dependencies": {
+    "@fin/access": "workspace:*",
     "@fin/core": "workspace:*",
+    "@fin/identity": "workspace:*",
+    "@fin/orgs": "workspace:*",
     "@fin/server": "workspace:*",
-    "@fin/web-host": "workspace:*"
+    "@fin/web-host": "workspace:*",
+    "better-auth": "catalog:",
+    "hono": "catalog:",
+    "pg": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
+    "@biomejs/biome": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
