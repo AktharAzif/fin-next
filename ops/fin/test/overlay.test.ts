@@ -40,6 +40,7 @@ function richOverlay(): Record<string, unknown> {
     db: {
       caFingerprint: "-----BEGIN CERTIFICATE-----\nMIIBfakefakefake\n-----END CERTIFICATE-----",
     },
+    betterstack: { teamId: 2_345_678 },
   };
 }
 
@@ -60,7 +61,8 @@ describe("the overlay", () => {
     const o = loadOverlay({ FIN_OVERLAY_FILE: writeOverlay(dir) }, "staging", m);
     assert.equal(o.zone, ZONE);
     assert.equal(hostOf(o, "admin"), `staff.${ZONE}`);
-    assert.equal(thresholdOf(o, "api-v4"), 100);
+    assert.equal(thresholdOf(o, "api-v4").reveal(), 100);
+    assert.equal(`${thresholdOf(o, "api-v4")}`, "<threshold:api-v4>");
     assert.throws(() => thresholdOf(o, "constructor"), /no thresholds.constructor/);
     for (const value of privateValues()) {
       assert.equal(m.leaks(`x ${value} y`), true, `${value} should be masked`);
@@ -81,21 +83,31 @@ describe("the overlay", () => {
     assert.equal(m.mask(`legacy.${ZONE}`), "<never-touch>");
   });
 
-  it("masks and announces the private numbers: thresholds, grace periods and the roster's timings", () => {
+  it("protects the private numbers by type, never by value, so no counter equal to one is masked", () => {
     const m = new Masker();
     registerOverlay(richOverlay(), m);
-    assert.equal(
-      m.mask("~ update rule api-v4 [threshold] 100"),
-      "~ update rule api-v4 [threshold] <overlay:thresholds.api-v4>",
-    );
+    // The thresholds, grace periods and the roster's timings are short numbers: matching them by
+    // value would mask (and so disclose them through) the tool's own counters.
     for (const n of [100, 3900, 305, 17]) {
-      assert.equal(m.leaks(`value ${n} here`), true, String(n));
-      assert.ok(m.addMaskCommands().includes(`::add-mask::${n}`), String(n));
+      assert.equal(m.leaks(`record ${n} of ${n}`), false, String(n));
+      assert.equal(m.addMaskCommands().includes(`::add-mask::${n}`), false, String(n));
     }
-    assert.deepEqual(m.maskValue({ threshold: 100, grace: { hourly: 3900 } }), {
-      threshold: "<overlay:thresholds.api-v4>",
-      grace: { hourly: "<overlay:grace.backup-hourly>" },
+    assert.deepEqual(m.maskValue({ seq: 100, steps: 17, plan: { create: 305 } }), {
+      seq: 100,
+      steps: 17,
+      plan: { create: 305 },
     });
+    // The one the code reads prints its role wherever it goes; a long number (an ID) is masked.
+    const o = parseOverlay(richOverlay(), "staging");
+    assert.equal(
+      m.mask(`~ update rule api-v4 [threshold] ${thresholdOf(o, "api-v4")}`),
+      "~ update rule api-v4 [threshold] <threshold:api-v4>",
+    );
+    assert.deepEqual(m.maskValue({ threshold: thresholdOf(o, "api-v4") }), {
+      threshold: "<threshold:api-v4>",
+    });
+    assert.equal(m.mask("team 2345678 answered"), "team <overlay:betterstack.teamId> answered");
+    assert.ok(m.addMaskCommands().includes("::add-mask::2345678"));
   });
 
   it("exempts comments and notes only at the paths the plan publishes", () => {

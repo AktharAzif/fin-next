@@ -1,13 +1,31 @@
-// The core commands: checking the overlay, the run log and the run lock.
+// The core commands: checking the overlay, the run log and the run lock, and the two recorded ways
+// past an incident (a stale lock, a run log that does not verify).
 
 import type { Command } from "../command.ts";
 import { flagString } from "../core/args.ts";
+import type { Context } from "../core/context.ts";
 import { EXIT, UsageError } from "../core/errors.ts";
 import { HOST_ROLES } from "../core/overlay.ts";
 import { type Head, parseHead } from "../core/runlog.ts";
 
-/** A lock-break reason: one line of printable text, long enough to say something. */
-const REASON = /^[^\p{Cc}]{8,300}$/u;
+/** A lock-break or log-restart reason: one line of printable text, long enough to say something. */
+const REASON = /^[^\p{Cc}\p{Zl}\p{Zp}]{8,300}$/u;
+
+/** The --reason a recorded override needs, checked; warns when it is logged unmasked. */
+function reasonOf(ctx: Context, what: string): string {
+  const reason = flagString(ctx.args, "reason")?.trim();
+  if (reason === undefined || !REASON.test(reason)) {
+    throw new UsageError(
+      `${what} needs --reason "<why>": one line, 8 to 300 characters, naming roles, never a host or an ID`,
+    );
+  }
+  if (!ctx.masked) {
+    ctx.out.warn(
+      "the overlay is not loaded (FIN_OVERLAY_FILE), so the reason is logged as typed: it must name roles, never a host or an ID",
+    );
+  }
+  return reason;
+}
 
 const overlayCheck: Command = {
   words: ["overlay", "check"],
@@ -106,17 +124,7 @@ const lockBreak: Command = {
   mutating: false,
   runbook: "pnpm-fin.md",
   async run(ctx) {
-    const reason = flagString(ctx.args, "reason")?.trim();
-    if (reason === undefined || !REASON.test(reason)) {
-      throw new UsageError(
-        'lock break needs --reason "<why>": one line, 8 to 300 characters, naming roles, never a host or an ID',
-      );
-    }
-    if (!ctx.masked) {
-      ctx.out.warn(
-        "the overlay is not loaded (FIN_OVERLAY_FILE), so the reason is logged as typed: it must name roles, never a host or an ID",
-      );
-    }
+    const reason = reasonOf(ctx, "lock break");
     const broken = ctx.log.breakLock(ctx.runtime.now(), ctx.run.id, reason, ctx.runtime.operator());
     if (broken === undefined) {
       ctx.out.info("run lock: already free");
@@ -135,4 +143,48 @@ const lockBreak: Command = {
   },
 };
 
-export const CORE_COMMANDS: readonly Command[] = [overlayCheck, logVerify, lockStatus, lockBreak];
+const logRestart: Command = {
+  words: ["log", "restart"],
+  summary: "after an incident, keep a run log that does not verify and start a new one",
+  positionals: [],
+  flags: [{ name: "reason", kind: "string", description: "why the log is restarted (required)" }],
+  overlay: false,
+  mutating: false,
+  runbook: "pnpm-fin.md",
+  async run(ctx) {
+    const reason = reasonOf(ctx, "log restart");
+    const restarted = ctx.log.restart(
+      ctx.runtime.now(),
+      ctx.run.id,
+      reason,
+      ctx.runtime.operator(),
+    );
+    if (restarted === undefined) {
+      ctx.out.info("run log: it verifies; there is nothing to restart");
+      return EXIT.ok;
+    }
+    const head = (h: Head | undefined) => (h === undefined ? null : { seq: h.seq, hash: h.hash });
+    ctx.run.line("log.restarted", "warn", {
+      problems: restarted.problems.length,
+      previousHead: head(restarted.previousHead),
+      previousHeadFile: head(restarted.previousHeadFile),
+      logSeq: restarted.appended.record.seq,
+      logHead: restarted.appended.hash,
+    });
+    for (const problem of restarted.problems) ctx.out.warn(`run log was: ${problem}`);
+    const kept = [restarted.keptLog, restarted.keptHead].filter((n) => n !== undefined);
+    ctx.out.info(
+      `run log: restarted; the old one is kept beside it${kept.length > 0 ? ` (${kept.join(", ")})` : ""}; ` +
+        `new head: record ${restarted.appended.record.seq}, sha256 ${restarted.appended.hash}`,
+    );
+    return EXIT.ok;
+  },
+};
+
+export const CORE_COMMANDS: readonly Command[] = [
+  overlayCheck,
+  logVerify,
+  logRestart,
+  lockStatus,
+  lockBreak,
+];

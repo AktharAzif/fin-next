@@ -4,8 +4,12 @@
 // private numbers (alert thresholds, grace periods, the roster's timings, [OB-13]).
 //
 // registerOverlay() registers every private value with the masker before validation, so nothing
-// the overlay holds can be printed afterwards, not even by a refusal. Every value counts, numbers
-// included. The only values left unmasked are the ones the plan itself publishes: the allow-list's
+// the overlay holds can be printed afterwards, not even by a refusal. Every value counts. A number
+// shorter than six characters (a threshold, a grace period, a timing) is the exception the masker
+// makes (core/mask.ts): matching it by value would mask, and so disclose it through, the tool's own
+// counters. Such numbers are never printed instead: none is echoed by a message, and the only ones
+// the code reads, the thresholds, are PrivateNumbers that print their role (`<threshold:api-v4>`).
+// The only values left unmasked are the ones the plan itself publishes: the allow-list's
 // host labels (console, staff, onboard, ...), the DMARC record labels, policy and note, the
 // environment's name and the comments at the places this file defines them (PUBLIC_PATHS). A
 // never-touch label is masked in its host form (`<label>.<zone>`, printed `<never-touch>`): a bare
@@ -20,6 +24,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import type { Env } from "./credentials.ts";
 import { ConfigError } from "./errors.ts";
 import { Masker } from "./mask.ts";
+import { PrivateNumber } from "./secret.ts";
 
 /** The host roles code may name (AGENTS.md §2, "Hosts by role"). */
 export const HOST_ROLES = ["console", "admin", "verify", "selfie", "docs", "api", "pg"] as const;
@@ -60,8 +65,11 @@ export interface Overlay {
   dmarc: { records: readonly string[]; policy?: DmarcPolicy; rua?: string };
   /** Static egress addresses per Railway service, once read back (spec 01 §6.5). */
   staticEgress: Readonly<Record<string, readonly string[]>>;
-  /** Numeric thresholds ([OB-13]), such as `api-v4` for the rate rule. Read with thresholdOf(). */
-  thresholds: Readonly<Record<string, number>>;
+  /**
+   * Numeric thresholds ([OB-13]), such as `api-v4` for the rate rule. Read with thresholdOf(). Each
+   * prints `<threshold:<name>>`; reveal() gives the number to the request body that carries it.
+   */
+  thresholds: Readonly<Record<string, PrivateNumber>>;
 }
 
 const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -304,7 +312,7 @@ export function parseOverlay(raw: unknown, environment: string): Overlay {
       });
     }
   }
-  const thresholds: Record<string, number> = {};
+  const thresholds: Record<string, PrivateNumber> = {};
   if (top.thresholds !== undefined) {
     const entries = named(
       rec(top.thresholds, "thresholds", problems),
@@ -315,7 +323,7 @@ export function parseOverlay(raw: unknown, environment: string): Overlay {
     for (const [name, value] of entries) {
       if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
         problems.push(`thresholds.${name} must be a positive integer`);
-      } else thresholds[name] = value;
+      } else thresholds[name] = new PrivateNumber(value, `<threshold:${name}>`);
     }
   }
 
@@ -485,8 +493,11 @@ export function hostOf(overlay: Overlay, role: HostRole): string {
   return host;
 }
 
-/** A threshold by its (public) name, or a ConfigError naming the threshold the overlay lacks. */
-export function thresholdOf(overlay: Overlay, name: string): number {
+/**
+ * A threshold by its (public) name, or a ConfigError naming the threshold the overlay lacks. It
+ * prints `<threshold:<name>>` wherever it goes; reveal() gives the number for the request body.
+ */
+export function thresholdOf(overlay: Overlay, name: string): PrivateNumber {
   const value = Object.hasOwn(overlay.thresholds, name) ? overlay.thresholds[name] : undefined;
   if (value === undefined) throw new ConfigError(`the overlay has no thresholds.${name}`);
   return value;

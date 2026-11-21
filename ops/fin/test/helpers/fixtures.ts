@@ -6,7 +6,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecResult, FetchFn, InterruptSignal, Runtime } from "../../src/core/runtime.ts";
+import type { ExecResult, FetchFn, Runtime, StopCause } from "../../src/core/runtime.ts";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -96,9 +96,11 @@ export function fakeToken(name: string): string {
 export interface FakeRuntime extends Runtime {
   out(): string;
   err(): string;
+  /** Both streams, in the order they were written (what a CI job log shows). */
+  all(): string;
   advance(ms: number): void;
-  /** Delivers a signal to the trapped handler, as the real runtime would; false when none is. */
-  interrupt(signal: InterruptSignal): Promise<boolean>;
+  /** Delivers a stop to the trapped handler, as the real runtime would; false when none is. */
+  interrupt(cause: StopCause): Promise<boolean>;
 }
 
 export interface FakeRuntimeOptions {
@@ -109,14 +111,17 @@ export interface FakeRuntimeOptions {
   start?: Date;
   /** Whether the checkout has local changes (default: clean). */
   dirty?: boolean;
+  /** How the runtime waits (default: at once, so no test waits on a clock). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
   let stdout = "";
   let stderr = "";
+  let all = "";
   let now = (options.start ?? new Date("2026-11-21T06:00:00.000Z")).getTime();
   let counter = 0;
-  let trapped: ((signal: InterruptSignal) => Promise<void>) | undefined;
+  let trapped: ((cause: StopCause) => Promise<void>) | undefined;
   return {
     env: options.env ?? {},
     repoRoot: options.repoRoot ?? REPO_ROOT,
@@ -130,12 +135,14 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
       (async () => {
         throw new Error("no network in tests");
       }),
-    sleep: async () => {},
+    sleep: options.sleep ?? (async () => {}),
     stdout: (text) => {
       stdout += text;
+      all += text;
     },
     stderr: (text) => {
       stderr += text;
+      all += text;
     },
     operator: () => "operator",
     commit: () => hex(40, "e"),
@@ -149,13 +156,14 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
     },
     out: () => stdout,
     err: () => stderr,
+    all: () => all,
     advance: (ms) => {
       now += ms;
     },
-    interrupt: async (signal) => {
+    interrupt: async (cause) => {
       const handler = trapped;
       if (handler === undefined) return false;
-      await handler(signal);
+      await handler(cause);
       return true;
     },
   };

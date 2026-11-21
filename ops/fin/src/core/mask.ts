@@ -10,9 +10,22 @@
 // Records and telemetry lines are masked value by value (maskValue) before they are serialised, so
 // masking never rewrites JSON syntax.
 //
-// GitHub masks only whole registered values, line by line, so in GitHub Actions every form is also
-// announced with `::add-mask::` before the first line is printed (addMaskCommands); the command
-// data is escaped the way the runner unescapes it.
+// GitHub masks only whole registered values, line by line, so in GitHub Actions every form of six
+// characters or more is also announced with `::add-mask::` before the first line is printed
+// (addMaskCommands); the command data is escaped the way the runner unescapes it. A shorter form is
+// not announced: the runner masks inside words, so a short value would be masked all over the job
+// log (in words and timestamps), which shows it; this masker masks it as a whole token instead.
+//
+// Numbers are not matched by value unless they are long. A short private number (a threshold, a
+// grace period, a timing) equals some of the tool's own numbers sooner or later: a log seq, a step
+// count, a plan's counts, a pid, a minute in a timestamp. Replacing those would corrupt them, and
+// the placeholder would sit where the reader can tell the number from what surrounds it, which
+// discloses the value; the runner's `::add-mask::`, which masks inside every word, would do the
+// same to every timestamp in the job log. So a number of fewer than LONG_NUMBER characters is never
+// registered: such a number is protected by its type instead (secret.ts's PrivateNumber prints its
+// role, `<threshold:api-v4>`, and only reveal() gives the number to the request that sends it). A
+// longer number (an ID) is masked only where it stands as a number of its own, and maskValue()
+// never changes a JSON number: the numbers in records and lines are the tool's own.
 
 /** Values shorter than this cannot carry private information on their own (`@`, `*`, `5`). */
 const MIN_LENGTH = 2;
@@ -20,7 +33,10 @@ const MIN_LENGTH = 2;
 const MIN_LINE_LENGTH = 3;
 /** Values shorter than this are masked only as whole tokens, so ordinary words survive. */
 const TOKEN_ONLY_BELOW = 6;
-const DIGITS = /^\d+$/;
+/** A number (as written) of at least this many characters is masked by value; a shorter one never. */
+const LONG_NUMBER = 6;
+/** A plain decimal number, as a number's text or a string holding one. */
+const NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
 
 interface Entry {
   value: string;
@@ -36,6 +52,11 @@ export function escapeCommandData(text: string): string {
   return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 }
 
+/** Whether a value is a number too short to be masked by value (see the header). */
+function shortNumber(text: string): boolean {
+  return NUMBER.test(text) && text.length < LONG_NUMBER;
+}
+
 /** The forms a value can take in output (see the header). */
 function formsOf(value: string): string[] {
   const forms = new Set<string>([value]);
@@ -49,7 +70,7 @@ function formsOf(value: string): string[] {
     forms.add(encodeURIComponent(form));
     forms.add(JSON.stringify(form).slice(1, -1));
   }
-  return [...forms].filter((form) => form.length >= MIN_LENGTH);
+  return [...forms].filter((form) => form.length >= MIN_LENGTH && !shortNumber(form));
 }
 
 export class Masker {
@@ -57,10 +78,11 @@ export class Masker {
   #pattern: RegExp | undefined;
 
   /**
-   * Registers a private value in all its forms. A number is registered as its decimal text; a
-   * short all-digit value is masked only where it stands as a number of its own (not inside a
-   * date, a time, an address or a longer number), and a registered number in a JSON value is
-   * masked by maskValue(). A form already registered keeps its first placeholder.
+   * Registers a private value in all its forms. A number, or a string holding only a number, is
+   * registered only when it has at least LONG_NUMBER characters (see the header), and is then
+   * masked only where it stands as a number of its own (not inside a word, a hash, a date, a time,
+   * a version, an address or a longer number). A form already registered keeps its first
+   * placeholder.
    */
   register(value: string | number, placeholder: string): void {
     const text = typeof value === "number" ? (Number.isFinite(value) ? String(value) : "") : value;
@@ -94,9 +116,10 @@ export class Masker {
 
   /**
    * A masked copy of a JSON value, for a record or a telemetry line: every string in it, keys
-   * included, passes through mask(); a number that is a registered value becomes its placeholder;
-   * a value with a toJSON (a Secret) becomes what it prints. Everything else and the structure are
-   * kept, so the copy always serialises to valid JSON: masking never touches JSON's own syntax.
+   * included, passes through mask(); a value with a toJSON (a Secret, a PrivateNumber) becomes
+   * what it prints. Numbers, booleans, null and the structure are kept as they are (a record's
+   * numbers are the tool's own: seqs, counts, pids), so the copy always serialises to valid JSON
+   * with the same types: masking never touches JSON's own syntax.
    */
   maskValue(value: unknown): unknown {
     let plain: unknown;
@@ -110,7 +133,6 @@ export class Masker {
 
   #walk(value: unknown): unknown {
     if (typeof value === "string") return this.mask(value);
-    if (typeof value === "number") return this.#entries.get(String(value))?.placeholder ?? value;
     if (Array.isArray(value)) return value.map((item) => this.#walk(item));
     if (value !== null && typeof value === "object") {
       const out: Record<string, unknown> = {};
@@ -127,11 +149,16 @@ export class Masker {
     return value;
   }
 
-  /** The GitHub Actions commands that register every form with the runner's own masking. */
+  /**
+   * The GitHub Actions commands that register every form with the runner's own masking. A form
+   * shorter than TOKEN_ONLY_BELOW is left out: the runner masks a value inside every word of the
+   * job log, so a short one would show up as `***` in ordinary words and timestamps across the
+   * whole log, which names it to anyone reading it. This masker still masks it, as a whole token.
+   */
   addMaskCommands(): string[] {
-    return [...this.#entries.values()].map(
-      (entry) => `::add-mask::${escapeCommandData(entry.value)}`,
-    );
+    return [...this.#entries.values()]
+      .filter((entry) => entry.value.length >= TOKEN_ONLY_BELOW)
+      .map((entry) => `::add-mask::${escapeCommandData(entry.value)}`);
   }
 
   #compile(): RegExp {
@@ -140,12 +167,12 @@ export class Masker {
       .sort((a, b) => b.value.length - a.value.length || a.value.localeCompare(b.value))
       .map((entry) => {
         const body = escapeRegExp(entry.value);
-        if (entry.value.length >= TOKEN_ONLY_BELOW) return body;
-        if (DIGITS.test(entry.value)) {
-          // A short number only where it stands on its own: not inside a word, a longer number, a
-          // date, a time, a version or an address.
+        if (NUMBER.test(entry.value)) {
+          // A number only where it stands on its own: not inside a word or a hash, a longer
+          // number, a date, a time, a version or an address.
           return `(?<![0-9A-Za-z_])(?<![0-9][.:-])${body}(?![0-9A-Za-z_])(?![.:-][0-9])`;
         }
+        if (entry.value.length >= TOKEN_ONLY_BELOW) return body;
         return `(?<![A-Za-z0-9_])${body}(?![A-Za-z0-9_])`;
       });
     this.#pattern = new RegExp(alternatives.join("|"), "gi");

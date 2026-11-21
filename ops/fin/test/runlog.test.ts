@@ -3,7 +3,7 @@ import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { parseArgs } from "../src/core/args.ts";
-import { BusyError, FinError } from "../src/core/errors.ts";
+import { BusyError, FinError, LogIntegrityError } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import { Output } from "../src/core/output.ts";
 import { Run } from "../src/core/run.ts";
@@ -126,9 +126,10 @@ describe("the run log", () => {
     assert.equal(log.records().length, 2);
   });
 
-  it("masks values in every form and keeps valid JSON whatever is registered", () => {
+  it("masks values in every form, keeps its own numbers and stays valid JSON whatever is registered", () => {
     const m = new Masker();
     m.register("12", "<overlay:oncall.escalateAfterMinutes>");
+    m.register(13, "<overlay:thresholds.api-v4>");
     m.register('Acme "Private" Holdings', "<overlay:cloudflare.accountName>");
     const log = newLog(m);
     const at = new Date();
@@ -140,11 +141,118 @@ describe("the run log", () => {
     const records = log.records();
     assert.equal(records.length, 14);
     assert.equal(records[11]?.seq, 12);
-    assert.equal(records[12]?.n, "<overlay:oncall.escalateAfterMinutes>");
+    assert.equal(records[12]?.seq, 13);
+    assert.equal(records[12]?.n, 12, "a counter equal to a private number stays a number");
+    assert.equal(log.readHead()?.seq, 14);
     assert.deepEqual(log.verify().problems, []);
     log.lock({ runId: "run_12", command: "zone apply", startedAt: "t" });
     assert.equal(log.holder()?.runId, "run_12");
     log.unlock("run_12");
+  });
+
+  it("refuses to append past records removed from the end, so the next run cannot hide them", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.step", "run.done"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n${lines[1]}\n`);
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /names record 4, but the log holds 2: records were removed\); nothing is appended/.test(
+          e.message,
+        ),
+    );
+    assert.equal(log.records().length, 2, "nothing was appended");
+    assert.match(log.verify().problems.join("; "), /names record 4, but the log holds 2/);
+  });
+
+  it("refuses to append to a deleted log, a log whose head file was deleted, or a changed last record", () => {
+    const deleted = newLog();
+    fill(deleted, ["run.registered", "run.done", "lock.broken"]);
+    rmSync(deleted.logPath);
+    deleted.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => deleted.breakLock(new Date(), "run_3", "the machine crashed", "op"),
+      LogIntegrityError,
+    );
+    assert.equal(
+      deleted.holder()?.runId,
+      "run_a",
+      "a refused lock break leaves the lock as it was",
+    );
+    assert.match(deleted.verify().problems.join("; "), /names record 3, but the log holds 0/);
+
+    const headless = newLog();
+    fill(headless, ["run.registered", "run.done"]);
+    rmSync(headless.headPath);
+    assert.throws(
+      () => headless.append(new Date(), "run_2", "run.registered", {}),
+      /the head file is missing/,
+    );
+    assert.deepEqual(headless.verify().problems, ["the head file is missing"]);
+
+    const changed = newLog();
+    fill(changed, ["run.registered", "run.done"]);
+    const lines = readFileSync(changed.logPath, "utf8").split("\n");
+    writeFileSync(
+      changed.logPath,
+      [lines[0], lines[1]?.replace("run.done", "run.dona"), ""].join("\n"),
+    );
+    assert.throws(
+      () => changed.append(new Date(), "run_2", "x", {}),
+      /record 2 is not the record the head file names/,
+    );
+
+    // A head file that names an earlier record (its write failed once) still lets the log grow.
+    const behind = newLog();
+    fill(behind, ["a", "b"]);
+    const first = sha256(readFileSync(behind.logPath, "utf8").split("\n")[0] ?? "");
+    writeFileSync(behind.headPath, JSON.stringify({ seq: 1, hash: first }));
+    assert.doesNotThrow(() => behind.append(new Date(), "run_2", "c", {}));
+    assert.deepEqual(behind.verify().problems, []);
+  });
+
+  it("restarts a log that does not verify: keeps it, and starts a new one that records the gap", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.done", "lock.broken"]);
+    const shipped = log.readHead();
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n`);
+    const restarted = log.restart(
+      new Date("2026-11-21T07:00:00Z"),
+      "run_r",
+      "the disk was restored",
+      "operator",
+    );
+    assert.ok(restarted !== undefined);
+    assert.deepEqual(restarted.previousHeadFile, shipped);
+    assert.equal(restarted.previousHead?.seq, 1);
+    assert.equal(restarted.keptLog, "runs.broken-run_r.jsonl");
+    assert.equal(restarted.keptHead, "head.broken-run_r.json");
+    assert.equal(
+      readFileSync(join(log.dir, "runs.broken-run_r.jsonl"), "utf8"),
+      `${lines[0]}\n`,
+      "kept as it was",
+    );
+    const [first, ...rest] = log.records();
+    assert.equal(rest.length, 0);
+    assert.equal(first?.event, "log.restarted");
+    assert.equal(first?.seq, 1);
+    assert.equal(first?.prev, GENESIS);
+    assert.equal(first?.reason, "the disk was restored");
+    assert.match(
+      String((first?.problems as string[] | undefined)?.[0]),
+      /names record 4, but the log holds 1/,
+    );
+    assert.deepEqual(
+      (first?.previous as { headFileHead?: unknown } | undefined)?.headFileHead,
+      shipped,
+    );
+    assert.deepEqual(log.verify().problems, []);
+    assert.doesNotThrow(() => log.append(new Date(), "run_n", "run.registered", {}));
+    assert.equal(log.restart(new Date(), "run_s", "nothing is wrong now", "operator"), undefined);
   });
 
   it("holds an exclusive lock that a second run cannot take", () => {
@@ -209,6 +317,51 @@ describe("a registered run", () => {
     run.assertWritable("PATCH setting");
     run.finish("ok");
     assert.throws(() => run.assertWritable("PATCH setting"), /outside a registered run/);
+  });
+
+  it("does not start on a run log that does not verify, and frees the lock it took", () => {
+    const { run, log } = newRun();
+    fill(log, ["a", "b", "c"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, [lines[0], lines[2], ""].join("\n"));
+    assert.throws(
+      () => run.acquire(),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not verify .*line 2/.test(e.message),
+    );
+    assert.equal(run.locked, false);
+    assert.equal(log.holder(), undefined);
+    assert.throws(() => run.register(), LogIntegrityError);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("records the stop and the change in flight in run.done, and starts no change once stopped", async () => {
+    const { run, log } = newRun();
+    run.register();
+    let release: () => void = () => {};
+    const sent = run.sending(
+      { kind: "dns", name: "console", action: "create" },
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    run.stop("SIGHUP");
+    assert.throws(
+      () => run.assertCanStart("create dns"),
+      (e: unknown) => e instanceof FinError && e.exitCode === 129,
+    );
+    run.finish("failed", { error: "interrupted by SIGHUP" });
+    await run.closed;
+    const done = log.records().at(-1);
+    assert.equal(done?.interrupted, "SIGHUP");
+    assert.deepEqual(done?.inFlight, { kind: "dns", name: "console", action: "create" });
+    assert.equal(run.lines.at(-1)?.interrupted, "SIGHUP");
+    release();
+    await sent;
+    assert.equal(run.inFlight, undefined);
   });
 
   it("refuses every write in a dry run, and registers nothing", () => {

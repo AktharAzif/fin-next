@@ -4,7 +4,10 @@
 
 export const EXIT = {
   ok: 0,
-  /** `verify` found drift, or a plan holds changes that were not applied. */
+  /**
+   * `verify` found drift, a plan holds changes that were not applied, or the run log does not
+   * verify (an incident: no run starts and nothing is appended until it does).
+   */
   drift: 1,
   /** A usage error: an unknown command, flag or environment. */
   usage: 64,
@@ -20,6 +23,12 @@ export const EXIT = {
   refused: 77,
   /** The overlay, a settings file or a credential file is missing or invalid. */
   config: 78,
+  /** A run stopped by SIGHUP (a closed terminal or a dropped session): 128 + 1. */
+  hangup: 129,
+  /** A run stopped by SIGINT (Ctrl-C): 128 + 2. */
+  interrupted: 130,
+  /** A run stopped by SIGTERM (a polite kill, a CI cancel): 128 + 15. */
+  terminated: 143,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
@@ -67,6 +76,25 @@ export class BusyError extends FinError {
   constructor(message: string) {
     super(message, EXIT.busy);
     this.name = "BusyError";
+  }
+}
+
+/**
+ * The run was stopped from outside (a signal, its output closing, an uncaught error): no further
+ * change starts. Its exit code is the stop's (130 for SIGINT, 70 for a closed output, ...).
+ */
+export class StoppedError extends FinError {
+  constructor(message: string, exitCode: ExitCode) {
+    super(message, exitCode);
+    this.name = "StoppedError";
+  }
+}
+
+/** The run log does not verify, or its end does not match its head file: nothing is appended. */
+export class LogIntegrityError extends FinError {
+  constructor(message: string) {
+    super(message, EXIT.drift);
+    this.name = "LogIntegrityError";
   }
 }
 

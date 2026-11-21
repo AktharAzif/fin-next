@@ -16,11 +16,17 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
 
    `overlay check` validates the file and prints what it holds with every private value replaced by
    a placeholder (`<zone>`, `<host:admin>`, `<overlay:cloudflare.accountId>`). Every value is
-   masked, numbers included (thresholds, grace periods, the roster's timings), except what the plan
-   publishes: the allow-list's labels, the DMARC record labels, policy and note, the environment's
-   name and the comments directly under the top level, `allowedNames`, `neverTouch` and `dmarc`. A
-   key that is not a plain name (a host or an address written as a key) is masked too and never
-   printed. The check refuses an overlay for another environment, a host that is not one label below
+   masked except what the plan publishes: the allow-list's labels, the DMARC record labels, policy
+   and note, the environment's name and the comments directly under the top level, `allowedNames`,
+   `neverTouch` and `dmarc`. A key that is not a plain name (a host or an address written as a key)
+   is masked too and never printed. Short numbers (thresholds, grace periods, the roster's timings)
+   are protected by never being printed rather than by masking: masking them would also mask the
+   tool's own counts (a log's record numbers, a plan's counts), which would show the value. A
+   threshold prints as `<threshold:<name>>` wherever a command shows one. A number of six digits or
+   more (an ID) is masked where it stands on its own. Pick private names that are not Fin's own
+   words (for example an Access team that is not called `fin-next`): a private value is masked
+   wherever it appears, Fin's own words included, and the placeholder would then show what it
+   stands for. The check refuses an overlay for another environment, a host that is not one label below
    the zone, a host whose label is not on `allowedNames.labels`, a never-touch entry that is not a
    label under the zone (it accepts `legacy`, `legacy.`, `legacy.<zone>` and `@`), and an allowed
    name that is, or sits under, a never-touch label. `cloudflare.zoneId` and `access.allowDomains`
@@ -33,11 +39,18 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    Railway project token), `FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE` and
    `FIN_BETTERSTACK_UPTIME_TOKEN_FILE`. Never paste a token on the command line or into a variable.
 3. Every command prints names and placeholders only, and the commands that do not need the overlay
-   (`log verify`, `lock status`, `lock break`) still mask with it when `FIN_OVERLAY_FILE` is set.
+   (`log verify`, `log restart`, `lock status`, `lock break`) still mask with it when
+   `FIN_OVERLAY_FILE` is set.
 4. In GitHub Actions, `pnpm fin` first announces every overlay value and credential (each line of a
-   multi-line value on its own) with `::add-mask::` on **standard error**. Standard output carries
-   masked text only, so a step may capture it (a variable, a file, a summary, a comment). Never
-   capture standard error: it holds the announced values in clear.
+   multi-line value on its own) with `::add-mask::` on **standard error**, except values shorter
+   than six characters: the runner masks inside words, so a short value would be starred all over
+   the job log, which would show it (`pnpm fin` masks those itself, as whole words). Standard output
+   carries masked text only, so a step may capture it (a variable, a file, a summary, a comment).
+   Never capture standard error: it holds the announced values in clear. Every message is printed
+   as one line: a line break, another control character or a Unicode line separator inside it is
+   printed as an escape (`\n`, `\u001b`), and a `::` that would start a workflow command (or the
+   older `##[` form) is printed with a backslash before it. So no name, argument or provider message
+   can switch the runner's command processing off.
 5. Run from a clean checkout. A run from a checkout with local changes is recorded as `dirty` in
    `run.registered` (and warned about), because the commit alone then does not say what ran.
 
@@ -59,10 +72,16 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    with nothing to change leaves no record.
 6. A plan that deletes anything is refused unless `--confirm-delete <n>` names exactly the number of
    deletions.
-7. Ctrl-C or SIGTERM while a run holds the lock closes it: `run.done` with `failed` and
-   `interrupted by <signal>`, the lock released, the lines kept and shipped, then exit 130 or 143.
-   A second Ctrl-C exits at once. Re-run with `--dry-run` to see what the interrupted run left
-   undone.
+7. While a run holds the lock, these close it: Ctrl-C (SIGINT, exit 130), SIGTERM (a CI cancel,
+   exit 143), a closed terminal or dropped SSH session (SIGHUP, exit 129), a standard output or
+   error that closes under it (a `| head` or a `| less` that quits, exit 70), and an error nothing
+   caught (exit 70, with a fixed message). No further change starts. The change in flight gets up
+   to three seconds to finish and is recorded as a step if it does. Then `run.done` is written with
+   `failed`, `interrupted` (what stopped it) and, when a change had not finished in time, `inFlight`
+   naming it (it may have been applied). The lock is released and the lines are kept and shipped.
+   All of this takes five seconds at most. A second Ctrl-C exits at once. Re-run with `--dry-run`
+   to see what the interrupted run left undone. Only SIGKILL (and a crash of the machine) leaves a
+   run open; its lock then needs `lock break` (below).
 
 ### The allow-list guard (BD-11)
 
@@ -111,6 +130,32 @@ cannot catch on its own: a consistent rewrite of the records after the last head
 machine. The chain has no key: it is a tamper signal until the year-locked ops bucket exists, not a
 substitute for it. Exit 1 is an incident: someone or something changed the log.
 
+The signal stays until someone acts on it. A mutating run does not start while the log does not
+verify (exit 1, before it reads anything; a `--dry-run` still works). Nothing is appended while the
+log's end does not match the head file, a `lock break` included. Otherwise the next record would
+chain past the gap and the log would verify again.
+
+### The run log does not verify
+
+1. Wake the owner: it is an incident. Keep the state directory as it is until they have looked
+   (copy it aside if in doubt), and compare it with the last `run.done` or `lock.broken` head in
+   Better Stack's `fin-next-staging-ops` source or the job log (`log verify --head`).
+2. Check that no run is in progress (`lock status`, and on that machine, its process).
+3. With the owner's go-ahead, start a new log:
+
+   ```sh
+   node ops/fin/src/main.ts log restart staging --reason "<what happened>"
+   ```
+
+   The broken log and head file stay beside the new one as `runs.broken-<runId>.jsonl` and
+   `head.broken-<runId>.json`, unchanged. The new log's first record, `log.restarted`, holds the
+   reason, the operator, the problems found, and both heads of the old log: the one its lines give
+   and the one its head file gave. A `log.restarted` line carries the same heads off the machine.
+   Earlier shipped heads refer to the kept file, not to the new log. The reason follows the same
+   rule as a lock break's.
+4. Then `lock break` a stale lock if there is one, and re-run the interrupted command with
+   `--dry-run` first.
+
 ### A stale lock
 
 1. `node ops/fin/src/main.ts lock status staging` shows the holder: run ID, command, start time,
@@ -130,12 +175,12 @@ Wake the owner if the run log's chain is broken, or if a lock is held by a run n
 | Code | Meaning |
 |---|---|
 | 0 | done, or a dry run with nothing to change |
-| 1 | a dry run with changes, changes held, drift found by a verify, or a run log that does not verify |
+| 1 | a dry run with changes, changes held, drift found by a verify, or a run log that does not verify (a mutating run or a lock break then refuses before it does anything) |
 | 64 | usage: an unknown command, flag or environment |
 | 65 | bad input data (a release manifest, an artefact) |
 | 69 | a provider was unreachable or answered an error |
-| 70 | internal error |
+| 70 | internal error, an uncaught error, or standard output or error closed under the command; a run holding the lock was closed as failed |
 | 75 | the run lock is held, or this run lost it |
 | 77 | refused by a safety rule; nothing more was sent |
 | 78 | the overlay, the settings or a credential file is missing or invalid |
-| 130, 143 | interrupted by SIGINT or SIGTERM; the run was closed as failed |
+| 129, 130, 143 | interrupted by SIGHUP, SIGINT or SIGTERM; the run was closed as failed |

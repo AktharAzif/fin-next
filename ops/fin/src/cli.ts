@@ -2,9 +2,11 @@
 // arguments strictly, builds its context (the overlay is masked before anything prints), takes the
 // run lock for a mutating run before the command reads anything, and runs it. Every error leaves
 // through the masker with its exit code, and is printed before the run is closed, so closing the
-// run can never hide it. Telemetry never changes the exit code. While a run holds the lock, SIGINT
-// and SIGTERM close it as failed (run.done, the lock released, the lines kept and shipped) before
-// the process exits 130 or 143.
+// run can never hide it. Telemetry never changes the exit code. While a run holds the lock, a stop
+// (SIGINT, SIGTERM, SIGHUP; with main.ts's guards, a closed standard output or error, or an uncaught
+// error) closes it as failed: no further change starts, the change in flight is given time to
+// settle and is recorded if it does, then run.done, the lock released and the lines kept and
+// shipped, before the process exits 130, 143, 129 or 70.
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
@@ -14,7 +16,7 @@ import { Context, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
 import { Masker } from "./core/mask.ts";
 import { Output } from "./core/output.ts";
-import type { Runtime } from "./core/runtime.ts";
+import { INTERRUPT_SETTLE_MS, type Runtime, stopDescription } from "./core/runtime.ts";
 import { ENVIRONMENTS, isEnvironment, loadSettings } from "./core/settings.ts";
 
 export const COMMANDS: readonly Command[] = [...CORE_COMMANDS];
@@ -56,12 +58,21 @@ function report(out: Output, error: unknown): number {
   return EXIT.internal;
 }
 
-/** While the run holds the lock, an interrupt closes it before the process exits. */
-function trapInterrupts(ctx: Context, runtime: Runtime, out: Output): () => void {
-  return runtime.trap(async (signal) => {
-    out.error(`interrupted (${signal}): closing the run`);
+/**
+ * While the run holds the lock, a stop closes it before the process exits: the run is marked
+ * stopped so no further change starts; a change in flight gets up to INTERRUPT_SETTLE_MS to settle
+ * (applyPlan then records it and closes the run); a run still open after that is closed here, its
+ * run.done naming the change in flight. An uncaught error does not wait.
+ */
+function trapStops(ctx: Context, runtime: Runtime, out: Output): () => void {
+  return runtime.trap(async (cause) => {
+    out.error(`${stopDescription(cause)}: closing the run`);
+    ctx.run.stop(cause);
     if (ctx.run.registered && !ctx.run.finished) {
-      ctx.run.finish("failed", { error: `interrupted by ${signal}` });
+      if (ctx.run.inFlight !== undefined && cause !== "uncaught-error") {
+        await Promise.race([ctx.run.closed, runtime.sleep(INTERRUPT_SETTLE_MS)]);
+      }
+      if (!ctx.run.finished) ctx.run.finish("failed", { error: stopDescription(cause) });
     } else ctx.run.close();
     await ctx.run.flushLines();
   });
@@ -122,7 +133,7 @@ export async function runCli(
     if (command.mutating) {
       // Before the command reads any provider state, so its plan cannot go stale under another run.
       ctx.run.acquire();
-      if (ctx.run.locked) untrap = trapInterrupts(ctx, runtime, out);
+      if (ctx.run.locked) untrap = trapStops(ctx, runtime, out);
     }
     return await command.run(ctx);
   } catch (error) {

@@ -21,6 +21,13 @@
 // rewrite of everything after the last head that left the machine. The chain is unkeyed: it is an
 // interim tamper signal, not the year-locked bucket it stands in for.
 //
+// A signal is kept until someone acts on it. append() refuses while the log's end does not match
+// the head file (records removed, the log or the head file deleted), since appending would chain
+// past the gap and rewrite the head file to match, and the log would verify again; a run refuses
+// to start while the log does not verify at all (run.ts). The way on is `pnpm fin log restart <env>
+// --reason "..."` (restart()): it keeps the broken files beside the log under new names and starts a
+// new log whose first record, `log.restarted`, names the problems and the heads it found.
+//
 // Every record's fields pass through the masker before they are written (value by value, so the
 // JSON stays valid whatever is registered): the log holds roles and placeholders, never a zone, a
 // host or an ID, so it can move to the ops bucket unchanged once the vault exists.
@@ -39,7 +46,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { BusyError, ConfigError, EXIT, FinError } from "./errors.ts";
+import { BusyError, ConfigError, EXIT, FinError, LogIntegrityError } from "./errors.ts";
 import type { Masker } from "./mask.ts";
 
 export const GENESIS = "genesis";
@@ -86,6 +93,35 @@ export interface LockHolder {
 }
 
 export type ReleaseOutcome = "released" | "free" | "held-by-another";
+
+export interface Restarted {
+  /** The new log's first record, `log.restarted`. */
+  appended: Appended;
+  /** What verify() found in the log that was set aside. */
+  problems: readonly string[];
+  /** The names the broken log and head file are kept under, beside the new log. */
+  keptLog: string | undefined;
+  keptHead: string | undefined;
+  /** The set-aside log's head as its lines give it, and as its head file gave it. */
+  previousHead: Head | undefined;
+  previousHeadFile: Head | undefined;
+}
+
+/** Where an anchor (the head file's head, or one given) disagrees with the log's lines. */
+function anchorProblem(
+  anchor: Head,
+  hashOf: (seq: number) => string | undefined,
+  count: number,
+  source: string,
+): string | undefined {
+  if (anchor.seq > count) {
+    return `${source} names record ${anchor.seq}, but the log holds ${count}: records were removed`;
+  }
+  if (hashOf(anchor.seq) !== anchor.hash) {
+    return `record ${anchor.seq} is not the record ${source} names: the log was changed`;
+  }
+  return undefined;
+}
 
 export function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -188,12 +224,40 @@ export class RunLog {
   }
 
   /**
+   * What is wrong between the log's lines and the head file, if anything: the head file must name
+   * a record the log holds, with that record's hash (the log may run past it, when writing the
+   * head file failed once), and must exist once the log has a record.
+   */
+  #headProblem(lines: readonly string[]): string | undefined {
+    if (!existsSync(this.headPath)) {
+      return lines.length > 0 ? "the head file is missing" : undefined;
+    }
+    const head = this.readHead();
+    if (head === undefined) return "the head file is not a valid head";
+    const hashOf = (seq: number) => {
+      const line = lines[seq - 1];
+      return line === undefined ? undefined : sha256(line);
+    };
+    return anchorProblem(head, hashOf, lines.length, "the head file");
+  }
+
+  /**
    * Appends one record, chained to the line before it and synced to disk, then moves the head
    * file to it. Every field but the chain's own (seq, prev, at, runId, event) is masked first.
+   * Refuses (LogIntegrityError, exit 1) while the log's end does not match the head file, so an
+   * append never hides records removed from the end, or a log or head file that was deleted.
    */
   append(at: Date, runId: string, event: string, fields: Record<string, unknown>): Appended {
     this.#ensureDir();
     const lines = this.#lines();
+    const problem = this.#headProblem(lines);
+    if (problem !== undefined) {
+      throw new LogIntegrityError(
+        `the run log does not match its head file (${problem}); nothing is appended. ` +
+          `This is an incident: check it with pnpm fin log verify <env>, then see the runbook ` +
+          `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
+      );
+    }
     const last = lines.at(-1);
     const record: RunRecord = {
       seq: lines.length + 1,
@@ -275,17 +339,9 @@ export class RunLog {
     const head = last === undefined ? undefined : { seq: count, hash: last };
 
     const check = (anchor: Head, source: string) => {
-      if (anchor.seq > count) {
-        problems.push(
-          `${source} names record ${anchor.seq}, but the log holds ${count}: records were removed`,
-        );
-      } else if (hashes[anchor.seq - 1] !== anchor.hash) {
-        problems.push(
-          `record ${anchor.seq} is not the record ${source} names: the log was changed`,
-        );
-      } else if (anchor.seq < count) {
-        notes.push(`${source} names record ${anchor.seq} of ${count}`);
-      }
+      const problem = anchorProblem(anchor, (seq) => hashes[seq - 1], count, source);
+      if (problem !== undefined) problems.push(problem);
+      else if (anchor.seq < count) notes.push(`${source} names record ${anchor.seq} of ${count}`);
     };
     if (existsSync(this.headPath)) {
       const file = this.readHead();
@@ -296,6 +352,45 @@ export class RunLog {
     }
     if (expected !== undefined) check(expected, "the head given");
     return { count, head, problems, notes };
+  }
+
+  /**
+   * Starts a new log after an incident, when the log does not verify (undefined when it does:
+   * nothing to restart). The broken log and head file are kept beside the new one, renamed with
+   * this run's ID; the new log's first record, `log.restarted`, carries the reason, the operator,
+   * the problems found and both heads of the log set aside, so the gap is itself on the record.
+   */
+  restart(at: Date, runId: string, reason: string, operator: string): Restarted | undefined {
+    const before = this.verify();
+    if (before.problems.length === 0) return undefined;
+    const previousHeadFile = this.readHead();
+    const keep = (path: string, name: string): string | undefined => {
+      if (!existsSync(path)) return undefined;
+      renameSync(path, join(this.dir, name));
+      return name;
+    };
+    const keptLog = keep(this.logPath, `runs.broken-${runId}.jsonl`);
+    const keptHead = keep(this.headPath, `head.broken-${runId}.json`);
+    const appended = this.append(at, runId, "log.restarted", {
+      reason,
+      operator,
+      problems: before.problems,
+      previous: {
+        log: keptLog ?? null,
+        headFile: keptHead ?? null,
+        records: before.count,
+        head: before.head ?? null,
+        headFileHead: previousHeadFile ?? null,
+      },
+    });
+    return {
+      appended,
+      problems: before.problems,
+      keptLog,
+      keptHead,
+      previousHead: before.head,
+      previousHeadFile,
+    };
   }
 
   /** The current holder of the lock, if any. */

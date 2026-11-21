@@ -116,6 +116,12 @@ export class Context {
    * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Returns the
    * exit code: 0 when everything planned was applied (or, in a dry run, when nothing differs), 1
    * when a dry run shows changes or some changes were held. A run applies one plan.
+   *
+   * Before each change it checks that the run may still send (Run.assertCanStart: not stopped by a
+   * signal or a closed output, still registered and open, still holding the lock), so no change
+   * starts after a stop or after run.done, whatever the change's own writer checks. The change being
+   * sent is marked in flight, so a stop that closes the run before it settles names it in run.done;
+   * one that settles is recorded, and the run is then closed as failed with what stopped it.
    */
   async applyPlan(
     title: string,
@@ -139,15 +145,22 @@ export class Context {
     await this.run.flushLines();
     try {
       for (const change of todo) {
-        await apply(change);
-        this.run.step(
-          change.kind,
-          change.name,
-          change.action,
-          change.fields ? { fields: change.fields } : {},
-        );
-        this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
+        this.run.assertCanStart(`${change.action} ${change.kind}`);
+        await this.run.sending(change, () => apply(change));
+        try {
+          this.run.step(
+            change.kind,
+            change.name,
+            change.action,
+            change.fields ? { fields: change.fields } : {},
+          );
+        } finally {
+          // The change went out whether or not its record could be written.
+          this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
+        }
       }
+      // A stop that came while the last change was in flight: that change is recorded above.
+      this.run.assertNotStopped();
     } catch (error) {
       this.run.finish(resultOf(error), {
         plan: summary,

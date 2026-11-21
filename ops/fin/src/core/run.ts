@@ -5,7 +5,14 @@
 // change it sends, and `run.done` with the result at the end, whatever happened: a failure, a
 // refusal or an interrupt. A dry run takes no lock and writes no record, and nothing can be sent in
 // one: the provider writers ask assertWritable() first, which also checks that this run still holds
-// the lock. A run registers once: it applies one plan.
+// the lock. A run registers once: it applies one plan. A run does not start on a run log that does
+// not verify (acquire() checks it once it holds the lock): that is an incident to look at first.
+//
+// A stop from outside (a signal, a closed output, an uncaught error) marks the run stopped (stop())
+// instead of closing it at once: no further change starts (assertCanStart()), the change in flight
+// may settle and is recorded if it does, and only then is run.done written and the lock released.
+// When the change has not settled in time, the trap closes the run without it, and run.done names it
+// (`inFlight`), since it may have been applied.
 //
 // Each record also becomes a telemetry line in spec 08 §7.2's envelope (service `ops`), written
 // beside the run log as it happens, printed in GitHub Actions (the job log is the record there),
@@ -19,15 +26,25 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ParsedArgs } from "./args.ts";
 import { hasCredential, readCredential } from "./credentials.ts";
-import { BusyError, EXIT, FinError } from "./errors.ts";
+import { BusyError, EXIT, FinError, LogIntegrityError, StoppedError } from "./errors.ts";
 import { send } from "./http.ts";
 import type { Masker } from "./mask.ts";
 import type { Output } from "./output.ts";
 import type { Appended, RunLog } from "./runlog.ts";
-import { newRunId, type Runtime } from "./runtime.ts";
+import { newRunId, type Runtime, STOP_EXIT, type StopCause, stopDescription } from "./runtime.ts";
 import type { Secret } from "./secret.ts";
 
 export type RunResult = "ok" | "failed" | "refused";
+
+/** The change a run is sending, while it is in flight. */
+export interface InFlight {
+  kind: string;
+  name: string;
+  action: string;
+}
+
+/** How many of the log's problems a refusal names (the rest are counted). */
+const PROBLEMS_SHOWN = 3;
 
 export interface RunOptions {
   command: string;
@@ -69,6 +86,9 @@ export class Run {
   #registered = false;
   #finished = false;
   #steps = 0;
+  #stopped: StopCause | undefined;
+  #inFlight: InFlight | undefined;
+  readonly #closed = Promise.withResolvers<void>();
 
   constructor(runtime: Runtime, log: RunLog, out: Output, options: RunOptions) {
     this.#runtime = runtime;
@@ -99,9 +119,25 @@ export class Run {
     return this.#lines;
   }
 
+  /** What stopped the run from outside, once something did. */
+  get stopped(): StopCause | undefined {
+    return this.#stopped;
+  }
+
+  /** The change being sent, while one is in flight. */
+  get inFlight(): InFlight | undefined {
+    return this.#inFlight;
+  }
+
+  /** Settles once the run is closed (run.done written, or nothing to write, and the lock freed). */
+  get closed(): Promise<void> {
+    return this.#closed.promise;
+  }
+
   /**
-   * Takes the run lock (a BusyError, exit 75, when another run holds it). The CLI calls it before
-   * a mutating command reads anything. A dry run takes none.
+   * Takes the run lock (a BusyError, exit 75, when another run holds it), then checks the run log:
+   * a run does not start while it does not verify (a LogIntegrityError, exit 1, and the lock is
+   * released). The CLI calls it before a mutating command reads anything. A dry run takes none.
    */
   acquire(): void {
     if (this.dryRun || this.#locked || this.#finished) return;
@@ -111,11 +147,67 @@ export class Run {
       startedAt: this.#runtime.now().toISOString(),
     });
     this.#locked = true;
+    let problems: string[];
+    try {
+      problems = this.#log.verify().problems;
+    } catch {
+      problems = ["the run log cannot be read"];
+    }
+    if (problems.length > 0) {
+      this.#release();
+      const shown = problems.slice(0, PROBLEMS_SHOWN).join("; ");
+      const more =
+        problems.length > PROBLEMS_SHOWN ? `; and ${problems.length - PROBLEMS_SHOWN} more` : "";
+      throw new LogIntegrityError(
+        `the run log does not verify (${shown}${more}), so no run starts. This is an incident: ` +
+          `check it with pnpm fin log verify <env>, then see the runbook ` +
+          `(pnpm fin log restart <env> --reason "<why>" starts a new log and keeps this one)`,
+      );
+    }
+  }
+
+  /**
+   * Marks the run as stopped from outside. Nothing is closed here: no further change starts, the
+   * change in flight may settle, and whoever closes the run records the stop in run.done.
+   */
+  stop(cause: StopCause): void {
+    this.#stopped ??= cause;
+  }
+
+  /** Throws a StoppedError (the stop's exit code) once something stopped the run. */
+  assertNotStopped(): void {
+    if (this.#stopped !== undefined) {
+      throw new StoppedError(
+        `${stopDescription(this.#stopped)}: nothing more is sent`,
+        STOP_EXIT[this.#stopped],
+      );
+    }
+  }
+
+  /**
+   * Checked before each change of a plan starts: refuses once the run was stopped, outside a
+   * registered run, in a dry run, after run.done and once the lock is lost, whatever the change's
+   * own writer remembers to check.
+   */
+  assertCanStart(what: string): void {
+    this.assertNotStopped();
+    this.assertWritable(what);
+  }
+
+  /** Sends one change, marked in flight while it runs (a stop records it if it does not settle). */
+  async sending(change: InFlight, send: () => Promise<void>): Promise<void> {
+    this.#inFlight = { kind: change.kind, name: change.name, action: change.action };
+    try {
+      await send();
+    } finally {
+      this.#inFlight = undefined;
+    }
   }
 
   /** Writes `run.registered`, taking the lock if the run has not. A dry run writes nothing. */
   register(fields: Record<string, unknown> = {}): void {
     if (this.dryRun) return;
+    this.assertNotStopped();
     if (this.#finished) {
       throw new FinError(
         "this run has finished: a run registers once and applies one plan, so nothing more is sent",
@@ -257,45 +349,64 @@ export class Run {
   /**
    * Writes `run.done` and releases the lock. Safe to call once; later calls do nothing. It never
    * throws: a run log it cannot write, or a lock another run took meanwhile, is a warning, so the
-   * error that stopped the run is never hidden.
+   * error that stopped the run is never hidden. A run stopped from outside records what stopped it
+   * (`interrupted`), and the change still in flight, if any (`inFlight`: it may have been applied).
    */
   finish(result: RunResult, fields: Record<string, unknown> = {}): void {
     if (this.#finished) return;
     this.#finished = true;
-    if (this.#registered) {
-      let lockLost = false;
-      try {
-        lockLost = this.#log.holder()?.runId !== this.id;
-      } catch {
-        lockLost = true;
-      }
-      const level = result === "ok" ? "info" : "error";
-      try {
-        const appended = this.#log.append(this.#runtime.now(), this.id, "run.done", {
-          command: this.command,
-          result,
-          steps: this.#steps,
-          ...(lockLost ? { lockLost: true } : {}),
-          ...fields,
-        });
-        this.line("run.done", level, {
-          command: this.command,
-          result,
-          steps: this.#steps,
-          logSeq: appended.record.seq,
-          logHead: appended.hash,
-        });
-      } catch {
-        this.#out.warn("run.done could not be written to the run log; this output is its record");
-        this.line("run.done", level, {
-          command: this.command,
-          result,
-          steps: this.#steps,
-          logWriteFailed: true,
-        });
-      }
+    try {
+      if (this.#registered) this.#writeDone(result, fields);
+    } catch {
+      this.#out.warn("run.done could not be recorded; this output is its record");
+    } finally {
+      this.#release();
+      this.#closed.resolve();
     }
-    this.#release();
+  }
+
+  #writeDone(result: RunResult, fields: Record<string, unknown>): void {
+    let lockLost = false;
+    try {
+      lockLost = this.#log.holder()?.runId !== this.id;
+    } catch {
+      lockLost = true;
+    }
+    const level = result === "ok" ? "info" : "error";
+    const stop = {
+      ...(this.#stopped === undefined ? {} : { interrupted: this.#stopped }),
+      ...(this.#inFlight === undefined ? {} : { inFlight: { ...this.#inFlight } }),
+    };
+    try {
+      const appended = this.#log.append(this.#runtime.now(), this.id, "run.done", {
+        command: this.command,
+        result,
+        steps: this.#steps,
+        ...(lockLost ? { lockLost: true } : {}),
+        ...stop,
+        ...fields,
+      });
+      this.line("run.done", level, {
+        command: this.command,
+        result,
+        steps: this.#steps,
+        ...stop,
+        logSeq: appended.record.seq,
+        logHead: appended.hash,
+      });
+    } catch (error) {
+      const why = error instanceof FinError ? ` (${error.message})` : "";
+      this.#out.warn(
+        `run.done could not be written to the run log${why}; this output is its record`,
+      );
+      this.line("run.done", level, {
+        command: this.command,
+        result,
+        steps: this.#steps,
+        ...stop,
+        logWriteFailed: true,
+      });
+    }
   }
 
   /**
@@ -309,6 +420,7 @@ export class Run {
     }
     this.#finished = true;
     this.#release();
+    this.#closed.resolve();
   }
 
   #release(): void {

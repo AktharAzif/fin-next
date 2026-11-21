@@ -16,13 +16,32 @@ import { Masker } from "../src/core/mask.ts";
 import { RunLog } from "../src/core/runlog.ts";
 import {
   commandEnv,
+  type FakeRuntime,
   fakeRuntime,
+  overlayFixture,
   privateValues,
   REPO_ROOT,
   tempDir,
+  writeOverlay,
   ZONE,
   ZONE_ID,
 } from "./helpers/fixtures.ts";
+import { jobLog } from "./helpers/runner.ts";
+
+/**
+ * Everything a command left readable: its output (but the add-mask commands, which carry the
+ * values for the runner on standard error) and the files in the state directory.
+ */
+function readable(stateDir: string, r: FakeRuntime): string {
+  const files = existsSync(stateDir)
+    ? readdirSync(stateDir).map((name) => readFileSync(join(stateDir, name), "utf8"))
+    : [];
+  const err = r
+    .err()
+    .split("\n")
+    .filter((line) => !line.startsWith("::add-mask::"));
+  return [r.out(), ...err, ...files].join("\n");
+}
 
 describe("the CLI", () => {
   it("prints usage with no arguments (exit 64) and on help (exit 0)", async () => {
@@ -50,6 +69,105 @@ describe("the CLI", () => {
     assert.match(r.out(), /host admin: <host:admin>/);
     assert.match(r.out(), /zone <zone>/);
     for (const value of privateValues()) assert.equal(r.out().includes(value), false, value);
+  });
+
+  it("prints its own counts as they are when they equal a private number", async () => {
+    const overlay = { ...overlayFixture(), thresholds: { "api-v4": 11, "errors-5xx": 2 } };
+    const dir = tempDir();
+    const env = { FIN_OVERLAY_FILE: writeOverlay(dir, overlay), FIN_STATE_DIR: join(dir, "state") };
+    const r = fakeRuntime({ env: { ...env, GITHUB_ACTIONS: "true" } });
+    assert.equal(await runCli(["overlay", "check", "staging"], r), EXIT.ok);
+    // The allow-list's 11 labels are published in the plan: a masked count would name the threshold.
+    assert.match(r.out(), /allow-list: 11 labels, 2 spike-only, 3 fallback-only; never-touch: 5/);
+    assert.doesNotMatch(r.out(), /<overlay:thresholds/);
+    assert.doesNotMatch(r.err(), /^::add-mask::(?:11|2)$/m);
+    const log = new RunLog(join(env.FIN_STATE_DIR, "staging"), new Masker());
+    for (let i = 0; i < 11; i++) log.append(new Date(), "run_1", "run.step", {});
+    const r2 = fakeRuntime({ env });
+    assert.equal(await runCli(["log", "verify", "staging"], r2), EXIT.ok);
+    assert.match(
+      r2.out(),
+      /run log: 11 record\(s\), chain intact; head: record 11, sha256 [0-9a-f]{64}$/m,
+    );
+  });
+
+  it("keeps a run log that does not verify and starts a new one, only with a reason", async () => {
+    const { env } = commandEnv({ GITHUB_ACTIONS: "true" });
+    const stateDir = join(env.FIN_STATE_DIR ?? "", "staging");
+    const log = new RunLog(stateDir, new Masker());
+    for (const event of ["run.registered", "run.step", "run.done"])
+      log.append(new Date(), "run_1", event, {});
+    const shipped = log.readHead();
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n`);
+    const r = fakeRuntime({ env });
+    // A lock break would append past the gap: it is refused like a run.
+    log.lock({ runId: "run_stale", command: "routes apply", startedAt: "t" });
+    assert.equal(
+      await runCli(["lock", "break", "staging", "--reason", "the run's machine crashed"], r),
+      EXIT.drift,
+    );
+    assert.match(
+      r.err(),
+      /does not match its head file \(the head file names record 3, but the log holds 1/,
+    );
+    assert.equal(log.holder()?.runId, "run_stale");
+    assert.equal(await runCli(["log", "restart", "staging"], r), EXIT.usage);
+    const reason = `the disk under the state dir for ${ZONE} was restored`;
+    assert.equal(await runCli(["log", "restart", "staging", "--reason", reason], r), EXIT.ok);
+    assert.match(
+      r.out(),
+      /run log: restarted; the old one is kept beside it \(runs\.broken-run_[0-9a-z]+\.jsonl, head\.broken-run_[0-9a-z]+\.json\)/,
+    );
+    const [first] = log.records();
+    assert.equal(first?.event, "log.restarted");
+    assert.equal(first?.reason, "the disk under the state dir for <zone> was restored");
+    assert.deepEqual(
+      (first?.previous as { headFileHead?: unknown } | undefined)?.headFileHead,
+      shipped,
+    );
+    const line = JSON.parse(
+      readFileSync(join(stateDir, "lines.jsonl"), "utf8").trim().split("\n").at(-1) ?? "{}",
+    );
+    assert.equal(line.event, "log.restarted");
+    assert.equal(line.level, "warn");
+    assert.deepEqual(line.previousHeadFile, shipped);
+    assert.deepEqual({ seq: line.logSeq, hash: line.logHead }, log.readHead());
+    assert.equal(await runCli(["log", "verify", "staging"], fakeRuntime({ env })), EXIT.ok);
+    assert.equal(
+      await runCli(["lock", "break", "staging", "--reason", "the run's machine crashed"], r),
+      EXIT.ok,
+    );
+    assert.equal(log.holder(), undefined);
+    const r3 = fakeRuntime({ env });
+    assert.equal(
+      await runCli(["log", "restart", "staging", "--reason", "checking twice is harmless"], r3),
+      EXIT.ok,
+    );
+    assert.match(r3.out(), /it verifies; there is nothing to restart/);
+    for (const value of privateValues())
+      assert.equal(readable(stateDir, r).includes(value), false, value);
+  });
+
+  it("keeps a crafted argument or lock file from turning the runner's command processing off", async () => {
+    const { env } = commandEnv({ GITHUB_ACTIONS: "true" });
+    const stateDir = join(env.FIN_STATE_DIR ?? "", "staging");
+    const r = fakeRuntime({ env });
+    assert.equal(await runCli(["lock", "status", "staging\n::stop-commands::zz"], r), EXIT.usage);
+    const log = new RunLog(stateDir, new Masker());
+    log.lock({
+      runId: "run_x\n::stop-commands::yy",
+      command: "##[stop-commands]ww",
+      startedAt: "t",
+    });
+    assert.equal(await runCli(["lock", "status", "staging"], r), EXIT.ok);
+    assert.equal(await runCli(["overlay", "check", "staging"], r), EXIT.ok);
+    const view = jobLog(r.all());
+    assert.equal(view.stopped, false);
+    assert.ok(view.masks.length > 0);
+    for (const value of privateValues()) {
+      assert.equal(view.text.toLowerCase().includes(value.toLowerCase()), false, value);
+    }
   });
 
   it("fails closed (exit 78) without an overlay", async () => {
