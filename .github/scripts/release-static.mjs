@@ -1,31 +1,44 @@
 #!/usr/bin/env node
 // The static half of release.yml and its manifest (spec 01 §5.5, §7.4; ARCHITECTURE §11.7;
 // EXECUTION EX-28; FW-C13; orchestrator decision BD-05). A control path. Subcommands, run in order
-// by release.yml's static and manifest jobs, each reading what the one before wrote under release/:
+// by release.yml's static-build, static and manifest jobs, each reading what the one before wrote
+// under release/:
 //
-//   build     builds every static app tools/layout.json names (console, admin, verify with its
-//             two outputs verify and selfie, docs) whose folder is on main, through Turborepo with
-//             --force (a release restores no cache); stages each output in release/static/<key>/
-//             and moves every source map out into release/source-maps/<key>/; refuses a build
-//             that holds _headers or env.json (rendered at deploy, SF-05) or a link
+//   build     (static-build, the only job that runs the dependencies' code, and holds no token,
+//             OIDC permission or attestation right) builds every static app tools/layout.json
+//             names (console, admin, verify with its two outputs verify and selfie, docs) whose
+//             folder is on main, through Turborepo with --force (a release restores no cache);
+//             stages each output in release/static/<key>/ and moves every source map out into
+//             release/source-maps/<key>/; refuses a build no artefact may be (artefactProblems:
+//             _headers or env.json, which the deploy renders, SF-05; a Worker control file; a
+//             path the deploy and a browser would read two ways; an asset over 25 MiB), or a link
+//   take      (static, from here on no dependency code runs) admits what the build job staged,
+//             downloaded into release-staged/: static/, source-maps/ and meta/static-build.json
+//             only, no link, copied into release/ before anything else is downloaded there
 //   previous  finds the previous release: the newest earlier run of release.yml for a push to
 //             main of this repository that left a release-<sha> manifest artefact
-//   merge     FW-C13: carries the previous release's own hashed assets/ into each output (this
-//             release's files win), then checks that every one of them is present, and computes
-//             each output's asset manifest hash (tools/static-deploy's, SP-26)
+//   merge     takes nothing the build job staged on trust (stagedKeys), then FW-C13: carries the
+//             previous release's own hashed assets/ into each output (this release's files win),
+//             checks that every one of them is present and that the output is still one the
+//             deploy takes, and computes each output's asset manifest hash (tools/static-deploy's,
+//             SP-26); sets the step outputs the uploads read
 //   record    adds each uploaded artefact's SHA-256 and writes the checksums file actions/attest
 //             signs
-//   manifest  writes release-manifest.json: the commit, each image's digest, each static
-//             artefact's name, SHA-256 and asset manifest hash, the source-map artefact, the
-//             migrations and the minimum schema version
+//   manifest  writes release-manifest.json: the commit, each image's digest from exactly one
+//             record per release image (readImageRecords), each static artefact's name, SHA-256
+//             and asset manifest hash, the source-map artefact, the migrations and the minimum
+//             schema version
 //
 // Only the previous release's *own* assets travel (the ones its build produced, which its
-// manifest lists), so an artefact holds two releases' assets at most, never a growing pile.
+// manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
+// same path rule (artefactPathProblem) admits a release's own assets and the previous release's
+// list, so no name one release accepts can break the release after it.
 // Node built-ins only. Every line it prints is `release.<what> key=value ...`.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -38,15 +51,73 @@ import { dirname, extname, join, posix, relative, sep } from "node:path";
 import { addSummary, annotate, clean, isMain, isRecord, isSha, say, setOutput } from "./lib/ci.mjs";
 
 export const RELEASE = "release";
+/** The release images, one matrix entry each of release.yml's images job (release-image.sh). */
+export const RELEASE_IMAGES = ["console", "admin", "verify", "edge", "api", "connector"];
 const KEY = /^[a-z]+$/;
-const ASSET_PATH = /^\/assets\/(?:[A-Za-z0-9._@+-]+\/)*[A-Za-z0-9._@+-]+$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const IMAGE = /^fin-next-[a-z0-9-]+$/;
 /** The files the deploy renders into a copy of the build, which no build may hold (SF-05). */
 export const RENDERED_FILES = new Set(["/_headers", "/env.json"]);
+/**
+ * File names no static artefact holds, at any depth and in any case: the two the deploy renders,
+ * and the Worker control files tools/static-deploy refuses (an assets-only deployment runs no
+ * Worker code).
+ */
+export const REFUSED_NAMES = new Set([
+  "_headers",
+  "env.json",
+  "_worker.js",
+  "_routes.json",
+  "_redirects",
+]);
+/** tools/static-deploy's limits: Cloudflare's 25 MiB per asset, 20,000 files per artefact. */
+export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const MAX_ARTEFACT_FILES = 20_000;
 /** packages/db's migration file names (DA-04). */
 const MIGRATION = /^\d{14}_[a-z][a-z0-9-]*_[a-z0-9][a-z0-9_]*\.sql$/;
+
+/**
+ * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy,
+ * Cloudflare and a browser all read one way: absolute, with no empty, `.` or `..` segment, no
+ * backslash, no `%` (read again as an escape), `?` or `#` (they end a URL's path), no control or
+ * invisible format character, and at most 1,024 characters. Spaces, brackets and letters beyond
+ * ASCII are kept, as the bundler keeps them in an asset's name (`logo (1)-Bq3x.svg`).
+ * @param {unknown} path
+ * @returns {string | null}
+ */
+export function artefactPathProblem(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) return "is not an absolute URL path";
+  if (path.length > 1024) return "is longer than 1,024 characters";
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\%?#]/u.test(path)) {
+    return "holds a control or format character, a backslash, %, ? or #";
+  }
+  if (
+    path
+      .slice(1)
+      .split("/")
+      .some((s) => s === "" || s === "." || s === "..")
+  ) {
+    return "has an empty, . or .. segment";
+  }
+  return null;
+}
+
+/**
+ * Whether a file name is a source map, in any case.
+ * @param {string} path
+ */
+export function isSourceMap(path) {
+  return path.toLowerCase().endsWith(".map");
+}
+
+/**
+ * Whether a file name is one no artefact holds (REFUSED_NAMES), in any case.
+ * @param {string} path
+ */
+export function isRefusedName(path) {
+  return REFUSED_NAMES.has((path.split("/").pop() ?? "").toLowerCase());
+}
 
 /**
  * @typedef {{ app: string, name: string, key: string, dir: string, mapsDir: string }} StaticOutput
@@ -169,26 +240,60 @@ function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
+/**
+ * What keeps a set of files from being a static artefact the deploy takes (tools/static-deploy's
+ * artefact.ts, and SF-05): a file no artefact holds (REFUSED_NAMES), a path artefactPathProblem
+ * refuses, a source map (unless `maps`, while a build's maps still sit beside it), a file over the
+ * size limit, or more files than a deployment takes. Each problem names its file, never its
+ * content.
+ * @param {FileEntry[]} files
+ * @param {{ maps: boolean }} options
+ * @returns {string[]}
+ */
+export function artefactProblems(files, { maps }) {
+  /** @type {string[]} */
+  const problems = [];
+  const served = files.filter((f) => !isSourceMap(f.path));
+  if (served.length > MAX_ARTEFACT_FILES) {
+    problems.push(`${served.length} files, more than the ${MAX_ARTEFACT_FILES} a deployment takes`);
+  }
+  for (const f of files) {
+    const name = (f.path.split("/").pop() ?? "").toLowerCase();
+    if (RENDERED_FILES.has(`/${name}`)) {
+      problems.push(`${clean(f.path)}: the deploy renders it, never the build (SF-05)`);
+    } else if (REFUSED_NAMES.has(name)) {
+      problems.push(`${clean(f.path)}: an assets-only deployment holds no Worker control file`);
+    }
+    const pathProblem = artefactPathProblem(f.path);
+    if (pathProblem !== null) problems.push(`${clean(f.path)}: the path ${pathProblem}`);
+    if (!maps && isSourceMap(f.path)) {
+      problems.push(`${clean(f.path)}: a source map never reaches a deployment`);
+    }
+    if (lstatSync(f.abs).size > MAX_FILE_BYTES) {
+      problems.push(`${clean(f.path)}: over the 25 MiB asset limit`);
+    }
+  }
+  return problems;
+}
+
 // ---- build --------------------------------------------------------------------------------
 
 /**
- * Copies one built output into the release folder, moving source maps aside.
+ * Copies one built output into the release folder, moving source maps aside. The build is
+ * refused first when it is not an artefact the deploy would take (artefactProblems).
  * @param {{ from: string, mapsFrom: string, to: string, mapsTo: string }} paths
  * @returns {{ files: number, maps: number }}
  */
 export function stageOutput({ from, mapsFrom, to, mapsTo }) {
   const files = walkFiles(from);
   if (!files.some((f) => f.path === "/index.html")) throw new Error("the build has no index.html");
-  for (const f of files) {
-    if (RENDERED_FILES.has(f.path)) {
-      throw new Error(`the build holds ${f.path}; the deploy renders it (SF-05)`);
-    }
-  }
+  const problems = artefactProblems(files, { maps: true });
+  if (problems.length > 0) throw new Error(`the build is refused: ${problems.join("; ")}`);
   rmSync(to, { recursive: true, force: true });
   let maps = 0;
   for (const f of files) {
-    const target = f.path.endsWith(".map") ? join(mapsTo, f.path) : join(to, f.path);
-    if (f.path.endsWith(".map")) maps++;
+    const target = isSourceMap(f.path) ? join(mapsTo, f.path) : join(to, f.path);
+    if (isSourceMap(f.path)) maps++;
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(f.abs, target);
   }
@@ -198,7 +303,7 @@ export function stageOutput({ from, mapsFrom, to, mapsTo }) {
     copyFileSync(f.abs, target);
     maps++;
   }
-  return { files: files.filter((f) => !f.path.endsWith(".map")).length, maps };
+  return { files: files.filter((f) => !isSourceMap(f.path)).length, maps };
 }
 
 /**
@@ -358,10 +463,12 @@ export function previousOwnAssets(manifest, key, previousDir) {
     listed ??
     walkFiles(join(previousDir, "assets")).map((f) => posix.join("/assets", f.path.slice(1)));
   for (const path of paths) {
+    // The same rule this release's own paths passed (merge), so no name a release accepted
+    // breaks the one after it; only what could leave assets/ or read two ways is refused.
     if (
       typeof path !== "string" ||
-      !ASSET_PATH.test(path) ||
-      path.split("/").some((segment) => segment === "." || segment === "..")
+      !path.startsWith("/assets/") ||
+      artefactPathProblem(path) !== null
     ) {
       throw new Error(`the previous release names an asset path that is refused: ${clean(path)}`);
     }
@@ -403,21 +510,80 @@ export function carryAssets({ dir, previousDir, previousAssets }) {
   return { own: own.sort(), carried: carried.sort(), kept: kept.sort() };
 }
 
+/** Where the static job downloads what the build job staged, before `take` admits it. */
+export const STAGED = "release-staged";
+
+/**
+ * Takes what the build job staged (downloaded into <root>/release-staged) into <root>/release:
+ * only static/, source-maps/ and meta/static-build.json, with no link anywhere, and before any
+ * previous release is downloaded, so a build can stage nothing that passes for the previous
+ * release's files. The build job ran the dependencies' code, so nothing it staged is trusted.
+ * @param {{ root: string }} ctx
+ */
+export function take({ root }) {
+  const from = join(root, STAGED);
+  const to = join(root, RELEASE);
+  if (existsSync(to)) throw new Error("release/ exists already; take runs first");
+  const names = existsSync(from) ? readdirSync(from).sort() : [];
+  for (const name of names) {
+    if (name !== "static" && name !== "source-maps" && name !== "meta") {
+      throw new Error(`the staged outputs hold ${clean(name)}, which no stage writes`);
+    }
+  }
+  const files = walkFiles(from); // refuses a link or another kind of entry anywhere
+  const meta = files.filter((f) => f.path.startsWith("/meta/")).map((f) => f.path);
+  if (meta.join(",") !== "/meta/static-build.json") {
+    throw new Error("the staged outputs' meta/ holds other than static-build.json");
+  }
+  cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
+  say(`release.static.take files=${files.length}`);
+  return files.length;
+}
+
+/**
+ * The staged outputs merge takes from the build job, each refused unless it is an artefact the
+ * deploy would take: the keys static-build.json says were built, which are exactly the folders
+ * under release/static/, each with its index.html and no file artefactProblems refuses. The
+ * build job ran the dependencies' code, so nothing it staged is taken on trust.
+ * @param {string} root
+ * @param {unknown} meta static-build.json
+ * @returns {string[]} the built keys
+ */
+export function stagedKeys(root, meta) {
+  const built = isRecord(meta) && isRecord(meta.built) ? Object.keys(meta.built) : [];
+  const dir = join(root, RELEASE, "static");
+  const folders = existsSync(dir) ? readdirSync(dir).sort() : [];
+  if ([...built].sort().join(",") !== folders.join(",")) {
+    throw new Error("the staged outputs are not the ones static-build.json says were built");
+  }
+  for (const key of built) {
+    if (!KEY.test(key)) throw new Error("a staged output key is not lower-case letters");
+    const files = walkFiles(join(dir, key));
+    if (!files.some((f) => f.path === "/index.html")) {
+      throw new Error(`the staged ${key} output has no index.html`);
+    }
+    const problems = artefactProblems(files, { maps: false });
+    if (problems.length > 0)
+      throw new Error(`the staged ${key} output is refused: ${problems.join("; ")}`);
+  }
+  walkFiles(join(root, RELEASE, "source-maps")); // refuses a link among the maps
+  return built;
+}
+
 /**
  * @param {{ root: string, env: NodeJS.ProcessEnv }} ctx
  */
 export function merge(ctx) {
   const { root, env } = ctx;
   const meta = readJson(join(root, RELEASE, "meta", "static-build.json"));
-  const built = isRecord(meta) && isRecord(meta.built) ? meta.built : {};
+  const built = stagedKeys(root, meta);
   const previousSha = isSha(env.PREVIOUS_SHA) ? env.PREVIOUS_SHA : null;
   const manifestFile = join(root, RELEASE, "previous", "manifest", "release-manifest.json");
   const previousManifest =
     previousSha !== null && existsSync(manifestFile) ? readJson(manifestFile) : null;
   /** @type {Record<string, unknown>} */
   const keys = {};
-  for (const key of Object.keys(built)) {
-    if (!KEY.test(key)) throw new Error("a staged output key is not lower-case letters");
+  for (const key of built) {
     const dir = join(root, RELEASE, "static", key);
     const candidate =
       previousSha === null
@@ -434,23 +600,34 @@ export function merge(ctx) {
       annotate(
         "warning",
         `static ${key}`,
-        `${path} differs from the previous release's; kept this one`,
+        `${clean(path)} differs from the previous release's; kept this one`,
       );
     }
-    const files = walkFiles(dir).length;
+    // With the previous release's assets in, the output is still one the deploy takes.
+    const merged = walkFiles(dir);
+    const problems = artefactProblems(merged, { maps: false });
+    if (problems.length > 0) {
+      throw new Error(`the merged ${key} output is refused: ${problems.join("; ")}`);
+    }
     const hash = assetManifestHash(dir);
     keys[key] = {
-      files,
+      files: merged.length,
       ownAssets: carry.own,
       carried: carry.carried,
       carriedFrom: previousDir === null ? null : previousSha,
       assetManifestHash: hash,
     };
+    setOutput(key, "true", env);
     say(
-      `release.static.merge key=${key} files=${files} own=${carry.own.length} carried=${carry.carried.length} from=${previousDir === null ? "none" : previousSha}`,
+      `release.static.merge key=${key} files=${merged.length} own=${carry.own.length} carried=${carry.carried.length} from=${previousDir === null ? "none" : previousSha}`,
     );
   }
   const skipped = isRecord(meta) && Array.isArray(meta.skipped) ? meta.skipped : [];
+  for (const s of skipped) {
+    if (isRecord(s) && typeof s.key === "string" && KEY.test(s.key)) setOutput(s.key, "false", env);
+  }
+  const maps = walkFiles(join(root, RELEASE, "source-maps")).length;
+  setOutput("maps", maps > 0 ? "true" : "false", env);
   writeFile(join(root, RELEASE, "meta", "static-merged.json"), JSON.stringify({ keys, skipped }));
   return keys;
 }
@@ -509,33 +686,58 @@ export function record(ctx) {
 // ---- manifest -----------------------------------------------------------------------------
 
 /**
- * The images the images job built, from its records (one JSON file per image).
+ * The images the images job built, from the records the manifest job downloaded: one folder per
+ * record artefact, `image-record-<image>-<sha>/fin-next-<image>.json` (download-artifact's layout
+ * without merge-multiple), exactly one for each of RELEASE_IMAGES and nothing else, each record
+ * naming its own image, and a built image's reference this repository's own GHCR package,
+ * `ghcr.io/<owner>/fin-next-<image>`. These digests are what the attested manifest names, so a
+ * missing, extra or second record, or a reference elsewhere, refuses the release.
  * @param {string} dir
+ * @param {{ sha: string, owner: string }} run this run's commit and the repository's owner
  */
-export function readImageRecords(dir) {
+export function readImageRecords(dir, { sha, owner }) {
+  if (!isSha(sha)) throw new Error("GITHUB_SHA is not a commit SHA");
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) {
+    throw new Error("GITHUB_REPOSITORY_OWNER is not an account name");
+  }
   /** @type {Record<string, string>} */
   const images = {};
   /** @type {Record<string, string>} */
   const refs = {};
   /** @type {{ image: string, why: string }[]} */
   const skipped = [];
-  for (const f of walkFiles(dir)) {
-    if (!f.path.endsWith(".json")) continue;
-    const rec = readJson(f.abs);
-    if (!isRecord(rec) || typeof rec.image !== "string" || !IMAGE.test(rec.image)) {
-      throw new Error(`${f.path} is not an image record`);
+  const expected = RELEASE_IMAGES.map((image) => `image-record-${image}-${sha}`).sort();
+  const folders = existsSync(dir) ? readdirSync(dir).sort() : [];
+  if (folders.join("\n") !== expected.join("\n")) {
+    throw new Error(
+      `the image records are not exactly one artefact per release image (${RELEASE_IMAGES.join(", ")})`,
+    );
+  }
+  const namespace = `ghcr.io/${owner.toLowerCase()}/`;
+  for (const image of RELEASE_IMAGES) {
+    const name = `fin-next-${image}`;
+    const files = walkFiles(join(dir, `image-record-${image}-${sha}`));
+    const only = files[0];
+    if (files.length !== 1 || only === undefined || only.path !== `/${name}.json`) {
+      throw new Error(`the record artefact of ${name} holds other than ${name}.json`);
+    }
+    const rec = readJson(only.abs);
+    if (!isRecord(rec) || rec.image !== name || !IMAGE.test(name)) {
+      throw new Error(`${name}.json is not ${name}'s record`);
     }
     if (rec.built === true) {
       if (typeof rec.digest !== "string" || !DIGEST.test(rec.digest)) {
-        throw new Error(`${rec.image}: the record's digest is not sha256:<hex>`);
+        throw new Error(`${name}: the record's digest is not sha256:<hex>`);
       }
-      if (typeof rec.ref !== "string" || !rec.ref.startsWith("ghcr.io/")) {
-        throw new Error(`${rec.image}: the record's reference is not on ghcr.io`);
+      if (rec.ref !== `${namespace}${name}`) {
+        throw new Error(`${name}: the record's reference is not ${namespace}${name}`);
       }
-      images[rec.image] = rec.digest;
-      refs[rec.image] = `${rec.ref}@${rec.digest}`;
+      images[name] = rec.digest;
+      refs[name] = `${rec.ref}@${rec.digest}`;
+    } else if (rec.built === false) {
+      skipped.push({ image: name, why: clean(rec.why ?? "not built", 200) });
     } else {
-      skipped.push({ image: rec.image, why: clean(rec.why ?? "not built", 200) });
+      throw new Error(`${name}: the record says neither built nor skipped`);
     }
   }
   return { images, refs, skipped };
@@ -596,6 +798,25 @@ export function manifestProblems(manifest) {
   ) {
     problems.push("migrations is not a list of names");
   }
+  // imageRefs (ours, not the deploy parser's): each image's reference is its own GHCR package at
+  // the digest `images` names, and no reference stands without its image.
+  if (manifest.imageRefs !== undefined) {
+    const refs = isRecord(manifest.imageRefs) ? manifest.imageRefs : null;
+    if (refs === null) problems.push("imageRefs is not an object");
+    const names = new Set([...Object.keys(images ?? {}), ...Object.keys(refs ?? {})]);
+    for (const name of names) {
+      const ref = refs?.[name];
+      const digest = images?.[name];
+      if (
+        typeof ref !== "string" ||
+        typeof digest !== "string" ||
+        !/^ghcr\.io\/[a-z0-9-]+\/fin-next-[a-z0-9-]+@sha256:[0-9a-f]{64}$/.test(ref) ||
+        !ref.endsWith(`/${name}@${digest}`)
+      ) {
+        problems.push(`imageRefs.${name}`);
+      }
+    }
+  }
   return problems;
 }
 
@@ -606,7 +827,10 @@ export function writeManifest(ctx) {
   const { root, env } = ctx;
   const sha = env.GITHUB_SHA ?? "";
   if (!isSha(sha)) throw new Error("GITHUB_SHA is not a commit SHA");
-  const images = readImageRecords(join(root, RELEASE, "images"));
+  const images = readImageRecords(join(root, RELEASE, "images"), {
+    sha,
+    owner: env.GITHUB_REPOSITORY_OWNER ?? "",
+  });
   const staticFile = join(root, RELEASE, "meta", "static.json");
   const staticMeta = existsSync(staticFile) ? readJson(staticFile) : {};
   const { migrations, minimumSchemaVersion } = readMigrations(root);
@@ -691,6 +915,9 @@ export async function main(command, env, root) {
       say(`release.previous run=${found?.runId ?? "none"} sha=${found?.sha ?? "none"}`);
       return 0;
     }
+    case "take":
+      take({ root });
+      return 0;
     case "merge":
       merge({ root, env });
       return 0;
@@ -701,7 +928,7 @@ export async function main(command, env, root) {
       writeManifest({ root, env });
       return 0;
     default:
-      say("usage: release-static.mjs build|previous|merge|record|manifest");
+      say("usage: release-static.mjs build|take|previous|merge|record|manifest");
       return 64;
   }
 }

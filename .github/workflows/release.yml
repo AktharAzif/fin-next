@@ -3,16 +3,28 @@
 #
 # This workflow builds and records; it deploys nothing and holds no deploy credential (BD-05). The
 # operator deploys staging from the release manifest it leaves:
-#   images    each release image ops/docker's Dockerfiles define, built by BuildKit with no cache and
-#             SOURCE_DATE_EPOCH, pushed to ghcr.io/<owner>/fin-next-<name> by digest with the OCI
-#             source label, attested with actions/attest (a missing Dockerfile skips with a notice)
-#   static    each static app's client build with no cache, the previous release's own assets/
-#             merged in (FW-C13), uploaded as static-<key>-<sha> (90 days) and attested; source
-#             maps stripped into source-maps-<sha>
-#   manifest  release-manifest.json (commit, image digests, static artefact SHA-256s, migrations)
-#             as the artefact release-<sha>, attested
-# No job restores or saves a cache (ARCHITECTURE §11.3). Runs never cancel one another: one waits for
-# the one before it, so each release finds the last one as its previous release.
+#   images        each release image ops/docker's Dockerfiles define, built by BuildKit with no
+#                 cache and SOURCE_DATE_EPOCH, pushed to ghcr.io/<owner>/fin-next-<name> by digest
+#                 with the OCI source label, attested with actions/attest (a missing Dockerfile
+#                 skips with a notice); the dependencies' code runs inside BuildKit, not on the host
+#   static-build  each static app's client build with no cache, staged with its source maps moved
+#                 aside, uploaded for the next job as static-staged-<sha> (1 day). The only job that
+#                 runs the dependencies' code on the runner, so it holds no token, no OIDC
+#                 permission and no attestation right
+#   static        runs no install and no dependency code: takes the staged outputs on no trust
+#                 (release-static.mjs merge refuses anything a deployment would), carries the
+#                 previous release's own assets/ in (FW-C13), scans each artefact (bundle-check:
+#                 secret shapes, public-safety, setting names, server-only markers, maps, origins;
+#                 and gitleaks), and only then uploads static-<key>-<sha> (90 days), the source
+#                 maps as source-maps-<sha>, and attests them
+#   manifest      release-manifest.json (commit, image digests from exactly one record per image,
+#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested
+# No job restores or saves a cache (ARCHITECTURE §11.3). A run never cancels the one in progress,
+# but GitHub keeps one pending run per concurrency group: when a third release queues behind a
+# running one, the pending one is cancelled and that commit gets no release (no images, artefacts
+# or manifest, so it cannot be deployed or rolled back to). The next release still finds the last
+# one that finished as its previous release, so FW-C13's carry holds; the gap is recorded in the
+# pull request that added this workflow.
 name: release
 
 on:
@@ -82,9 +94,46 @@ jobs:
           CI_CACHE: miss
         run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
 
-  static:
+  static-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Install (no cache)
+        run: pnpm install --frozen-lockfile
+      - name: Build the static apps (no cache) and stage them
+        run: node .github/scripts/release-static.mjs build
+      - name: Hand the staged outputs to the static job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-staged-${{ github.sha }}
+          path: release/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: static-build
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  static:
+    needs: static-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read # find the previous release's run and download its artefacts (FW-C13)
@@ -100,13 +149,15 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - name: Install pnpm (release asset, by checksum)
-        run: .github/scripts/install-pnpm.sh
-      - name: Install (no cache)
-        run: pnpm install --frozen-lockfile
-      - name: Build the static apps (no cache)
-        id: build
-        run: node .github/scripts/release-static.mjs build
+      - name: Install gitleaks (release asset, by checksum)
+        run: .github/scripts/install-tools.sh gitleaks
+      - name: Download the staged outputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: static-staged-${{ github.sha }}
+          path: release-staged
+      - name: Take only what a stage writes (before any previous release is downloaded)
+        run: node .github/scripts/release-static.mjs take
       - name: Find the previous release
         id: previous
         env:
@@ -128,13 +179,18 @@ jobs:
           path: release/previous/manifest
           run-id: ${{ steps.previous.outputs.run_id }}
           github-token: ${{ github.token }}
-      - name: Carry the previous release's assets in (FW-C13)
+      - name: Check the staged outputs and carry the previous release's assets in (FW-C13)
+        id: merge
         env:
           PREVIOUS_SHA: ${{ steps.previous.outputs.sha }}
         run: node .github/scripts/release-static.mjs merge
+      - name: Scan each artefact (secret shapes, public-safety, setting names, server-only markers, maps, origins)
+        run: node .github/scripts/bundle-check.mjs --artefacts release/static
+      - name: gitleaks (each artefact)
+        run: .github/scripts/gitleaks-static.sh release/static
       - name: Upload static-console
         id: up-console
-        if: steps.build.outputs.console == 'true'
+        if: steps.merge.outputs.console == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: static-console-${{ github.sha }}
@@ -144,7 +200,7 @@ jobs:
           include-hidden-files: true
       - name: Upload static-admin
         id: up-admin
-        if: steps.build.outputs.admin == 'true'
+        if: steps.merge.outputs.admin == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: static-admin-${{ github.sha }}
@@ -154,7 +210,7 @@ jobs:
           include-hidden-files: true
       - name: Upload static-verify
         id: up-verify
-        if: steps.build.outputs.verify == 'true'
+        if: steps.merge.outputs.verify == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: static-verify-${{ github.sha }}
@@ -164,7 +220,7 @@ jobs:
           include-hidden-files: true
       - name: Upload static-selfie
         id: up-selfie
-        if: steps.build.outputs.selfie == 'true'
+        if: steps.merge.outputs.selfie == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: static-selfie-${{ github.sha }}
@@ -174,7 +230,7 @@ jobs:
           include-hidden-files: true
       - name: Upload static-docs
         id: up-docs
-        if: steps.build.outputs.docs == 'true'
+        if: steps.merge.outputs.docs == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: static-docs-${{ github.sha }}
@@ -184,7 +240,7 @@ jobs:
           include-hidden-files: true
       - name: Upload the browser source maps
         id: up-maps
-        if: steps.build.outputs.maps == 'true'
+        if: steps.merge.outputs.maps == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source-maps-${{ github.sha }}
@@ -194,7 +250,7 @@ jobs:
       - name: Record the artefacts' SHA-256s
         id: record
         env:
-          MAPS: ${{ steps.build.outputs.maps }}
+          MAPS: ${{ steps.merge.outputs.maps }}
           DIGEST_CONSOLE: ${{ steps.up-console.outputs.artifact-digest }}
           DIGEST_ADMIN: ${{ steps.up-admin.outputs.artifact-digest }}
           DIGEST_VERIFY: ${{ steps.up-verify.outputs.artifact-digest }}
@@ -239,12 +295,13 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+      # Each record in its own folder, named by its artefact (no merge-multiple, which would let a
+      # second record overwrite the first): the manifest step refuses anything but one per image.
       - name: Download the image records
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: image-record-*-${{ github.sha }}
           path: release/images
-          merge-multiple: true
       - name: Download the static record
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

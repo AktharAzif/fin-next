@@ -2,34 +2,59 @@
 // asset manifest hash the deploy compares, the previous-release lookup and the manifest.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, symlinkSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  artefactPathProblem,
   assetHash,
   assetManifestHash,
   build,
   carryAssets,
   digestHex,
   findPreviousRelease,
+  MAX_FILE_BYTES,
   manifestProblems,
   merge,
   previousOwnAssets,
+  RELEASE_IMAGES,
   readImageRecords,
   readMigrations,
   record,
+  STAGED,
   stageOutput,
   staticOutputs,
+  take,
   writeManifest,
 } from "../release-static.mjs";
+import { child, parseOutline } from "../workflow-rules.mjs";
 import { tempDir, writeTree } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const SHA = "1".repeat(40);
 const PREV = "2".repeat(40);
 const REPO = "owner/fin-next";
+const OWNER = "owner";
 const HEX = (/** @type {string} */ c) => c.repeat(64);
+
+/**
+ * The image records as the manifest job downloads them: one artefact folder per release image,
+ * each holding its one record. Images not named are skipped.
+ * @param {string} dir release/images
+ * @param {string} sha
+ * @param {Record<string, Record<string, unknown>>} [built] image to the record's fields
+ */
+function imageRecords(dir, sha, built = {}) {
+  /** @type {Record<string, string>} */
+  const files = {};
+  for (const image of RELEASE_IMAGES) {
+    const name = `fin-next-${image}`;
+    const fields = built[image] ?? { built: false, why: `ops/docker is not on main yet` };
+    files[`image-record-${image}-${sha}/${name}.json`] = JSON.stringify({ image: name, ...fields });
+  }
+  writeTree(dir, files);
+}
 
 describe("staticOutputs", () => {
   it("reads this repository's layout: console, admin, verify and selfie, docs", () => {
@@ -127,6 +152,89 @@ describe("stageOutput", () => {
     symlinkSync("/etc/hosts", join(linked, "b", "hosts"));
     assert.throws(() => stageOutput({ ...paths, from: join(linked, "b") }), /is a link/);
   });
+
+  it("refuses what the deploy refuses, in any case and at any depth, and moves a map in any case", (t) => {
+    /** @type {[string, RegExp][]} */
+    const refused = [
+      ["_worker.js", /no Worker control file/],
+      ["assets/_Routes.json", /no Worker control file/],
+      ["_redirects", /no Worker control file/],
+      ["ENV.JSON", /deploy renders it/],
+      ["assets/_headers", /deploy renders it/],
+      ["assets/a%2e.js", /the path holds/],
+      [`assets/a${String.fromCharCode(0x200b)}.js`, /the path holds/],
+    ];
+    for (const [file, why] of refused) {
+      const root = tempDir(t);
+      writeTree(root, { "b/index.html": "", [`b/${file}`]: "x" });
+      const paths = {
+        from: join(root, "b"),
+        mapsFrom: join(root, "m"),
+        to: join(root, "o"),
+        mapsTo: join(root, "om"),
+      };
+      assert.throws(() => stageOutput(paths), why, file);
+    }
+    const root = tempDir(t);
+    writeTree(root, {
+      "b/index.html": "",
+      "b/assets/A.JS.MAP": "{}",
+      "b/assets/logo (1)-Bq3x.svg": "<svg/>",
+    });
+    const staged = stageOutput({
+      from: join(root, "b"),
+      mapsFrom: join(root, "m"),
+      to: join(root, "o"),
+      mapsTo: join(root, "om"),
+    });
+    assert.deepEqual(staged, { files: 2, maps: 1 });
+    assert.ok(existsSync(join(root, "om", "assets", "A.JS.MAP")));
+    assert.ok(existsSync(join(root, "o", "assets", "logo (1)-Bq3x.svg")));
+  });
+
+  it("refuses an asset over the deploy's 25 MiB limit", (t) => {
+    const root = tempDir(t);
+    writeTree(root, { "b/index.html": "", "b/assets/big.bin": "" });
+    truncateSync(join(root, "b", "assets", "big.bin"), MAX_FILE_BYTES + 1);
+    const paths = {
+      from: join(root, "b"),
+      mapsFrom: join(root, "m"),
+      to: join(root, "o"),
+      mapsTo: join(root, "om"),
+    };
+    assert.throws(() => stageOutput(paths), /over the 25 MiB asset limit/);
+  });
+});
+
+describe("artefactPathProblem", () => {
+  it("keeps the names a bundler emits and refuses what reads two ways or leaves the folder", () => {
+    for (const ok of [
+      "/index.html",
+      "/assets/logo (1)-Bq3x.svg",
+      "/assets/~a!b_c@d+e.js",
+      "/assets/ü-1.css",
+    ]) {
+      assert.equal(artefactPathProblem(ok), null, ok);
+    }
+    for (const bad of [
+      "assets/a.js",
+      "/assets/../a.js",
+      "/assets/./a.js",
+      "/assets//a.js",
+      "/assets/",
+      "/assets/a\\b.js",
+      "/assets/a%2e.js",
+      "/assets/a?.js",
+      "/assets/a#.js",
+      "/assets/a\u0000.js",
+      `/assets/a${String.fromCharCode(0x2028)}.js`,
+      `/assets/a${String.fromCharCode(0x202e)}.js`,
+      `/${"a".repeat(1024)}`,
+      7,
+    ]) {
+      assert.notEqual(artefactPathProblem(bad), null, String(bad));
+    }
+  });
 });
 
 describe("FW-C13: carrying the previous release's assets", () => {
@@ -211,19 +319,71 @@ describe("FW-C13: carrying the previous release's assets", () => {
     ]);
   });
 
-  it("refuses an asset path from a manifest that could leave assets/", (t) => {
+  it("refuses an asset path from a manifest that could leave assets/ or read two ways", (t) => {
     const prev = tempDir(t);
     for (const bad of [
       "/assets/../../etc/passwd",
       "/index.html",
       "assets/a.js",
       "/assets/./a.js",
-      "/assets/a b.js",
+      "/assets//a.js",
+      "/assets/a%2f..%2fb.js",
+      "/assets/a\\b.js",
+      "/assets/a\u0000.js",
       7,
     ]) {
       const manifest = { static: { console: { ownAssets: [bad] } } };
       assert.throws(() => previousOwnAssets(manifest, "console", prev), /refused/, String(bad));
     }
+    const named = { static: { console: { ownAssets: ["/assets/logo (1)-Bq3x.svg"] } } };
+    assert.deepEqual(previousOwnAssets(named, "console", prev), ["/assets/logo (1)-Bq3x.svg"]);
+  });
+
+  it("carries an asset whose name a bundler keeps (spaces, brackets) into the next release", (t) => {
+    const root = tempDir(t);
+    const layout = JSON.stringify({
+      entries: [{ kind: "app", path: "apps/console", name: "@fin/console", static: "console" }],
+    });
+    const release = (/** @type {string} */ sha, /** @type {Record<string, string>} */ files) => {
+      rmSync(join(root, "release"), { recursive: true, force: true });
+      rmSync(join(root, "apps"), { recursive: true, force: true });
+      writeTree(root, {
+        "tools/layout.json": layout,
+        "apps/console/package.json": JSON.stringify({ scripts: { build: "vite build" } }),
+        "apps/console/dist/static/index.html": `<p>${sha}`,
+        ...Object.fromEntries(
+          Object.entries(files).map(([p, c]) => [`apps/console/dist/static/${p}`, c]),
+        ),
+      });
+      const env = { GITHUB_OUTPUT: join(root, `out-${sha}.txt`), GITHUB_SHA: sha };
+      build({ root, env, runBuild: () => {} });
+      return env;
+    };
+    // Release A builds an asset named as Vite names `logo (1).svg`.
+    const a = release(PREV, { "assets/app-1.js": "one", "assets/logo (1)-Bq3x.svg": "<svg/>" });
+    const first = /** @type {any} */ (merge({ root, env: a }));
+    assert.deepEqual(first.console.ownAssets, ["/assets/app-1.js", "/assets/logo (1)-Bq3x.svg"]);
+    const manifestA = { static: { console: { ownAssets: first.console.ownAssets } } };
+    const artefactA = join(root, "keep", `static-console-${PREV}`);
+    writeTree(root, {
+      [`keep/static-console-${PREV}/index.html`]: "<p>a",
+      [`keep/static-console-${PREV}/assets/app-1.js`]: "one",
+      [`keep/static-console-${PREV}/assets/logo (1)-Bq3x.svg`]: "<svg/>",
+    });
+    // Release B, the next one, carries both of A's assets in.
+    const b = release(SHA, { "assets/app-2.js": "two" });
+    writeTree(root, {
+      "release/previous/manifest/release-manifest.json": JSON.stringify(manifestA),
+      [`release/previous/static/static-console-${PREV}/index.html`]: readFileSync(
+        join(artefactA, "index.html"),
+        "utf8",
+      ),
+      [`release/previous/static/static-console-${PREV}/assets/app-1.js`]: "one",
+      [`release/previous/static/static-console-${PREV}/assets/logo (1)-Bq3x.svg`]: "<svg/>",
+    });
+    const second = /** @type {any} */ (merge({ root, env: { ...b, PREVIOUS_SHA: PREV } }));
+    assert.deepEqual(second.console.carried, ["/assets/app-1.js", "/assets/logo (1)-Bq3x.svg"]);
+    assert.deepEqual(second.console.ownAssets, ["/assets/app-2.js"]);
   });
 });
 
@@ -330,6 +490,7 @@ describe("build, merge, record and manifest end to end", () => {
       GITHUB_SHA: SHA,
       GITHUB_RUN_ID: "42",
       GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_REPOSITORY_OWNER: "Owner",
     };
     /** @type {string[][]} */
     const builds = [];
@@ -355,13 +516,22 @@ describe("build, merge, record and manifest end to end", () => {
         static: { console: { ownAssets: ["/assets/app-1.js"] } },
       }),
     });
-    const merged = merge({ root, env: { ...env, PREVIOUS_SHA: PREV } });
+    const mergeOutput = join(root, "merge-out.txt");
+    const merged = merge({
+      root,
+      env: { ...env, GITHUB_OUTPUT: mergeOutput, PREVIOUS_SHA: PREV },
+    });
     assert.deepEqual(/** @type {any} */ (merged.console).carried, ["/assets/app-1.js"]);
     assert.deepEqual(/** @type {any} */ (merged.console).ownAssets, ["/assets/app-2.js"]);
     assert.equal(/** @type {any} */ (merged.console).carriedFrom, PREV);
     assert.equal(/** @type {any} */ (merged.verify).carriedFrom, null);
     assert.ok(existsSync(join(root, "release", "static", "console", "assets", "app-1.js")));
     assert.ok(!existsSync(join(root, "release", "static", "console", "assets", "app-0.js")));
+    // merge, in the job that uploads, says what to upload: the build job's outputs stay there.
+    assert.equal(
+      readFileSync(mergeOutput, "utf8"),
+      "console=true\nverify=true\nselfie=true\ndocs=false\nmaps=true\n",
+    );
 
     record({
       root,
@@ -380,18 +550,9 @@ describe("build, merge, record and manifest end to end", () => {
     assert.match(checksums, new RegExp(`^${HEX("d")}  source-maps-${SHA}$`, "m"));
     assert.match(readFileSync(outputFile, "utf8"), /^attest=true$/m);
 
-    writeTree(root, {
-      "release/images/fin-next-api.json": JSON.stringify({
-        image: "fin-next-api",
-        built: true,
-        ref: "ghcr.io/owner/fin-next-api",
-        digest: `sha256:${HEX("e")}`,
-      }),
-      "release/images/fin-next-edge.json": JSON.stringify({
-        image: "fin-next-edge",
-        built: false,
-        why: "ops/docker/app.Dockerfile is not on main yet",
-      }),
+    imageRecords(join(root, "release", "images"), SHA, {
+      api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("e")}` },
+      edge: { built: false, why: "ops/docker/app.Dockerfile is not on main yet" },
     });
     const manifest = writeManifest({ root, env, now: () => new Date("2026-11-21T12:00:00Z") });
     const onDisk = JSON.parse(
@@ -415,9 +576,14 @@ describe("build, merge, record and manifest end to end", () => {
       "20261121101100_audit_journal.sql",
     ]);
     assert.equal(onDisk.minimumSchemaVersion, "20261121101100_audit_journal.sql");
-    assert.deepEqual(onDisk.skipped.images, [
+    assert.deepEqual(
+      onDisk.skipped.images.map((/** @type {any} */ s) => s.image),
+      RELEASE_IMAGES.filter((i) => i !== "api").map((i) => `fin-next-${i}`),
+    );
+    assert.deepEqual(
+      onDisk.skipped.images.find((/** @type {any} */ s) => s.image === "fin-next-edge"),
       { image: "fin-next-edge", why: "ops/docker/app.Dockerfile is not on main yet" },
-    ]);
+    );
     assert.deepEqual(onDisk.run, { id: 42, attempt: 1, workflow: ".github/workflows/release.yml" });
     assert.deepEqual(manifestProblems(onDisk), []);
   });
@@ -429,7 +595,11 @@ describe("build, merge, record and manifest end to end", () => {
         entries: [{ kind: "app", path: "apps/console", name: "@fin/console", static: "console" }],
       }),
     });
-    const env = { GITHUB_OUTPUT: join(root, "out.txt"), GITHUB_SHA: SHA };
+    const env = {
+      GITHUB_OUTPUT: join(root, "out.txt"),
+      GITHUB_SHA: SHA,
+      GITHUB_REPOSITORY_OWNER: OWNER,
+    };
     let ran = false;
     build({
       root,
@@ -442,6 +612,7 @@ describe("build, merge, record and manifest end to end", () => {
     merge({ root, env });
     record({ root, env });
     assert.match(readFileSync(join(root, "out.txt"), "utf8"), /^attest=false$/m);
+    imageRecords(join(root, "release", "images"), SHA);
     const manifest = writeManifest({ root, env });
     assert.deepEqual(manifest.images, {});
     assert.deepEqual(manifest.static, {});
@@ -459,6 +630,55 @@ describe("build, merge, record and manifest end to end", () => {
       /no artefact digest for verify/,
     );
   });
+
+  it("merge takes nothing the build job staged on trust", (t) => {
+    /** @type {[string, (root: string) => void, RegExp][]} */
+    const cases = [
+      [
+        "an output static-build.json does not name",
+        (root) => writeTree(root, { "release/static/admin/index.html": "<p>" }),
+        /not the ones static-build.json says/,
+      ],
+      [
+        "a built output that is missing",
+        (root) => rmSync(join(root, "release", "static", "selfie"), { recursive: true }),
+        /not the ones static-build.json says/,
+      ],
+      [
+        "a Worker control file",
+        (root) => writeTree(root, { "release/static/console/_worker.js": "export default {}" }),
+        /no Worker control file/,
+      ],
+      [
+        "a source map left in an output",
+        (root) => writeTree(root, { "release/static/console/assets/app-2.js.map": "{}" }),
+        /source map never reaches a deployment/,
+      ],
+      [
+        "a path the release refuses",
+        (root) => writeTree(root, { "release/static/console/assets/a%2e.js": "x" }),
+        /the path holds/,
+      ],
+      [
+        "an output without its index.html",
+        (root) => rmSync(join(root, "release", "static", "verify", "index.html")),
+        /has no index.html/,
+      ],
+      [
+        "a link among the source maps",
+        (root) =>
+          symlinkSync("/etc/hosts", join(root, "release", "source-maps", "console", "hosts.map")),
+        /is a link/,
+      ],
+    ];
+    for (const [what, plant, why] of cases) {
+      const root = repo(t);
+      const env = { GITHUB_OUTPUT: join(root, "out.txt"), GITHUB_SHA: SHA };
+      build({ root, env, runBuild: () => {} });
+      plant(root);
+      assert.throws(() => merge({ root, env }), why, what);
+    }
+  });
 });
 
 describe("the manifest's pieces", () => {
@@ -468,28 +688,107 @@ describe("the manifest's pieces", () => {
     for (const bad of [undefined, "", "sha256:xyz", HEX("A")]) assert.equal(digestHex(bad), null);
   });
 
-  it("refuses a malformed image record", (t) => {
+  it("reads exactly one record per release image, in this repository's own package", (t) => {
     const dir = tempDir(t);
-    writeTree(dir, {
-      "a.json": JSON.stringify({
-        image: "fin-next-api",
-        built: true,
-        ref: "ghcr.io/o/fin-next-api",
-        digest: "sha256:abc",
-      }),
+    imageRecords(dir, SHA, {
+      api: { built: true, ref: "ghcr.io/owner/fin-next-api", digest: `sha256:${HEX("a")}` },
     });
-    assert.throws(() => readImageRecords(dir), /not sha256/);
-    writeTree(dir, { "a.json": JSON.stringify({ image: "other", built: false }) });
-    assert.throws(() => readImageRecords(dir), /not an image record/);
-    writeTree(dir, {
-      "a.json": JSON.stringify({
-        image: "fin-next-api",
-        built: true,
-        ref: "docker.io/x",
-        digest: `sha256:${HEX("a")}`,
-      }),
+    const read = readImageRecords(dir, { sha: SHA, owner: "Owner" });
+    assert.deepEqual(read.images, { "fin-next-api": `sha256:${HEX("a")}` });
+    assert.deepEqual(read.refs, {
+      "fin-next-api": `ghcr.io/owner/fin-next-api@sha256:${HEX("a")}`,
     });
-    assert.throws(() => readImageRecords(dir), /not on ghcr.io/);
+    assert.equal(read.skipped.length, RELEASE_IMAGES.length - 1);
+  });
+
+  it("refuses a malformed, foreign, missing, extra or second image record", (t) => {
+    const good = {
+      built: true,
+      ref: "ghcr.io/owner/fin-next-api",
+      digest: `sha256:${HEX("a")}`,
+    };
+    /** @type {[string, (dir: string) => void, RegExp][]} */
+    const cases = [
+      [
+        "a digest that is not sha256",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, digest: "sha256:abc" } }),
+        /not sha256/,
+      ],
+      [
+        "a reference in another account's namespace",
+        (dir) =>
+          imageRecords(dir, SHA, { api: { ...good, ref: "ghcr.io/another-account/anything" } }),
+        /is not ghcr\.io\/owner\/fin-next-api/,
+      ],
+      [
+        "a reference to another of this account's packages",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, ref: "ghcr.io/owner/fin-next-edge" } }),
+        /is not ghcr\.io\/owner\/fin-next-api/,
+      ],
+      [
+        "a reference off GHCR",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, ref: "docker.io/x" } }),
+        /is not ghcr/,
+      ],
+      [
+        "a record naming another image",
+        (dir) => imageRecords(dir, SHA, { api: { ...good, image: "fin-next-edge" } }),
+        /is not fin-next-api's record/,
+      ],
+      [
+        "a record neither built nor skipped",
+        (dir) => imageRecords(dir, SHA, { api: { built: "yes" } }),
+        /neither built/,
+      ],
+      [
+        "an extra record artefact",
+        (dir) => {
+          imageRecords(dir, SHA, { api: good });
+          writeTree(dir, { [`image-record-zz-${SHA}/fin-next-zz.json`]: "{}" });
+        },
+        /not exactly one artefact per release image/,
+      ],
+      [
+        "a missing record",
+        (dir) => {
+          imageRecords(dir, SHA, { api: good });
+          rmSync(join(dir, `image-record-edge-${SHA}`), { recursive: true });
+        },
+        /not exactly one artefact per release image/,
+      ],
+      [
+        "a record of another commit",
+        (dir) => {
+          imageRecords(dir, SHA, { api: good });
+          rmSync(join(dir, `image-record-api-${SHA}`), { recursive: true });
+          writeTree(dir, {
+            [`image-record-api-${PREV}/fin-next-api.json`]: JSON.stringify({
+              image: "fin-next-api",
+              ...good,
+            }),
+          });
+        },
+        /not exactly one artefact per release image/,
+      ],
+      [
+        "a second file in a record artefact",
+        (dir) => {
+          imageRecords(dir, SHA, { api: good });
+          writeTree(dir, {
+            [`image-record-api-${SHA}/zz.json`]: JSON.stringify({ image: "fin-next-api", ...good }),
+          });
+        },
+        /holds other than fin-next-api\.json/,
+      ],
+    ];
+    for (const [what, plant, why] of cases) {
+      const dir = join(tempDir(t), "images");
+      plant(dir);
+      assert.throws(() => readImageRecords(dir, { sha: SHA, owner: OWNER }), why, what);
+    }
+    const dir = join(tempDir(t), "images");
+    imageRecords(dir, SHA);
+    assert.throws(() => readImageRecords(dir, { sha: SHA, owner: "bad/owner" }), /account name/);
   });
 
   it("lists migrations in name order and ignores other files", (t) => {
@@ -529,5 +828,161 @@ describe("the manifest's pieces", () => {
       }).length > 0,
     );
     assert.ok(manifestProblems({ ...good, migrations: [1] }).length > 0);
+  });
+
+  it("checks each image reference against its image and digest", () => {
+    const base = {
+      commit: SHA,
+      images: { "fin-next-api": `sha256:${HEX("a")}` },
+      static: {},
+      migrations: [],
+    };
+    const ref = `ghcr.io/owner/fin-next-api@sha256:${HEX("a")}`;
+    assert.deepEqual(manifestProblems({ ...base, imageRefs: { "fin-next-api": ref } }), []);
+    for (const imageRefs of [
+      {},
+      { "fin-next-api": `ghcr.io/owner/fin-next-api@sha256:${HEX("b")}` },
+      { "fin-next-api": `ghcr.io/owner/fin-next-edge@sha256:${HEX("a")}` },
+      { "fin-next-api": `docker.io/owner/fin-next-api@sha256:${HEX("a")}` },
+      { "fin-next-api": ref, "fin-next-edge": `ghcr.io/owner/fin-next-edge@sha256:${HEX("c")}` },
+      "not an object",
+    ]) {
+      assert.ok(manifestProblems({ ...base, imageRefs }).length > 0, JSON.stringify(imageRefs));
+    }
+  });
+
+  it("names the six images release.yml's matrix builds", () => {
+    const text = readFileSync(join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+    const matrix = /^\s+image: \[([^\]]*)\]$/m
+      .exec(text)?.[1]
+      ?.split(",")
+      .map((s) => s.trim());
+    assert.deepEqual(matrix, RELEASE_IMAGES);
+  });
+});
+
+describe("take: what the build job staged, and nothing else", () => {
+  it("copies static/, source-maps/ and meta/static-build.json into release/", (t) => {
+    const root = tempDir(t);
+    writeTree(root, {
+      [`${STAGED}/static/console/index.html`]: "<p>",
+      [`${STAGED}/source-maps/console/assets/a.js.map`]: "{}",
+      [`${STAGED}/meta/static-build.json`]: "{}",
+    });
+    assert.equal(take({ root }), 3);
+    assert.ok(existsSync(join(root, "release", "static", "console", "index.html")));
+    assert.ok(existsSync(join(root, "release", "meta", "static-build.json")));
+  });
+
+  it("refuses an entry no stage writes, a second meta file, a link, or a release/ already there", (t) => {
+    /** @type {[string, (root: string) => void, RegExp][]} */
+    const cases = [
+      [
+        "a previous release planted among the staged outputs",
+        (root) =>
+          writeTree(root, {
+            [`${STAGED}/previous/manifest/release-manifest.json`]: "{}",
+          }),
+        /hold previous, which no stage writes/,
+      ],
+      [
+        "a second meta file",
+        (root) => writeTree(root, { [`${STAGED}/meta/static.json`]: "{}" }),
+        /meta\/ holds other than static-build.json/,
+      ],
+      [
+        "a link",
+        (root) => symlinkSync("/etc/hosts", join(root, STAGED, "static", "console", "hosts")),
+        /is a link/,
+      ],
+      [
+        "a release/ already there",
+        (root) => writeTree(root, { "release/x": "" }),
+        /exists already/,
+      ],
+    ];
+    for (const [what, plant, why] of cases) {
+      const root = tempDir(t);
+      writeTree(root, {
+        [`${STAGED}/static/console/index.html`]: "<p>",
+        [`${STAGED}/meta/static-build.json`]: "{}",
+      });
+      plant(root);
+      assert.throws(() => take({ root }), why, what);
+    }
+  });
+});
+
+describe("release.yml", () => {
+  const text = readFileSync(join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const { root } = parseOutline("release.yml", text);
+  const jobs = child(root, "jobs");
+  /** @param {string} name */
+  const job = (name) => {
+    const node = jobs === undefined ? undefined : child(jobs, name);
+    assert.ok(node !== undefined, `release.yml has the job ${name}`);
+    return node;
+  };
+  /** @param {string} name */
+  const stepTexts = (name) =>
+    (child(job(name), "steps")?.children ?? []).map((s) =>
+      [child(s, "uses")?.value, child(s, "run")?.value, child(s, "env")?.raw]
+        .filter((v) => v !== undefined)
+        .join(" "),
+    );
+  /** @param {string} name */
+  const permissions = (name) =>
+    (child(job(name), "permissions")?.children ?? []).map((c) => `${c.key}: ${c.value}`);
+
+  it("builds the static apps in a job that holds no token, OIDC permission or attestation right", () => {
+    assert.deepEqual(permissions("static-build"), ["contents: read"]);
+    const steps = stepTexts("static-build");
+    assert.ok(steps.some((s) => s.includes("pnpm install --frozen-lockfile")));
+    assert.ok(steps.some((s) => s.includes("release-static.mjs build")));
+    const yaml = text.slice(text.indexOf("  static-build:"), text.indexOf("\n  static:\n"));
+    assert.doesNotMatch(yaml, /github\.token|secrets\.|GH_TOKEN|id-token|attestations/);
+  });
+
+  it("attests only in jobs that run no install, no build and no dependency code", () => {
+    for (const name of ["static", "manifest"]) {
+      assert.ok(permissions(name).includes("id-token: write"), name);
+      for (const step of stepTexts(name)) {
+        assert.doesNotMatch(
+          step,
+          /pnpm|install-pnpm|turbo|npm |npx|release-static\.mjs build/,
+          `${name}: ${step}`,
+        );
+      }
+    }
+  });
+
+  it("scans every artefact after the merge and before any upload or attestation", () => {
+    const steps = stepTexts("static");
+    const at = (/** @type {RegExp} */ pattern) => steps.findIndex((s) => pattern.test(s));
+    const take = at(/release-static\.mjs take/);
+    const previous = at(/release-static\.mjs previous/);
+    const merge = at(/release-static\.mjs merge/);
+    const scan = at(/bundle-check\.mjs --artefacts release\/static/);
+    const gitleaks = at(/gitleaks-static\.sh release\/static/);
+    const firstUpload = at(/actions\/upload-artifact@/);
+    const attest = at(/actions\/attest@/);
+    assert.ok(take >= 0 && take < previous && previous < merge, "take, previous, then merge");
+    assert.ok(merge < scan && merge < gitleaks, "the scans read the merged artefacts");
+    assert.ok(scan < firstUpload && gitleaks < firstUpload && firstUpload < attest);
+  });
+
+  it("downloads each image record into its own folder, never merged into one", () => {
+    const download = (child(job("manifest"), "steps")?.children ?? []).find((s) =>
+      (child(s, "with") ?? s).children.some(
+        (c) => c.key === "pattern" && c.value.startsWith("image-record-"),
+      ),
+    );
+    assert.ok(download !== undefined);
+    assert.equal(
+      download === undefined
+        ? "?"
+        : child(/** @type {any} */ (child(download, "with")), "merge-multiple"),
+      undefined,
+    );
   });
 });

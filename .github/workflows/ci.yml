@@ -251,6 +251,8 @@ jobs:
           package-manager-cache: false
       - name: The Node the checks need (fails before a check can exit 0 unchecked)
         run: node .github/scripts/node-check.mjs
+      - name: Install gitleaks (release asset, by checksum)
+        run: .github/scripts/install-tools.sh gitleaks
       - name: Install pnpm (release asset, by checksum)
         run: .github/scripts/install-pnpm.sh
       - name: Find the pnpm store
@@ -283,8 +285,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build (both server targets' bundles and the static builds)
         run: pnpm build
-      - name: Bundle checks (seams, source maps, third-party origins)
+      - name: Bundle checks (seams; in static builds secret shapes, public-safety, setting names, server-only markers, maps, origins)
         run: node .github/scripts/bundle-check.mjs
+      - name: gitleaks (the static builds, which .gitignore hides from the tree scan)
+        run: .github/scripts/gitleaks-static.sh apps/*/dist/static
       - name: Static build checks (index.html, static.json)
         run: node scripts/static-check.mjs
       - name: Save Turborepo's cache (main only)

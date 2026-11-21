@@ -1,12 +1,21 @@
-// The build job's bundle checks: seams in server bundles; maps, rendered files and third-party
-// origins in static builds.
+// The build job's bundle checks: seams in server bundles; secret shapes, server-only markers,
+// setting names, maps, refused files and third-party origins in static builds and staged release
+// artefacts. Token-, address- and ID-shaped values are built at run time, so this file holds none.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { checkBundles, checkServer, checkStatic, mapSources, originsIn } from "../bundle-check.mjs";
+import {
+  checkArtefacts,
+  checkBundles,
+  checkServer,
+  checkStatic,
+  mapSources,
+  originsIn,
+  urlsIn,
+} from "../bundle-check.mjs";
 import { tempDir, writeTree } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../bundle-check.mjs", import.meta.url));
@@ -19,6 +28,15 @@ function dirWith(t, files) {
   const dir = tempDir(t);
   writeTree(dir, files);
   return dir;
+}
+
+/**
+ * The rules a static build with these files breaks.
+ * @param {import("node:test").TestContext} t
+ * @param {Record<string, string>} files
+ */
+function staticRules(t, files) {
+  return checkStatic("x", dirWith(t, files)).map((f) => f.rule);
 }
 
 describe("server bundles", () => {
@@ -67,8 +85,9 @@ describe("static builds", () => {
     const dir = dirWith(t, {
       "index.html": '<!doctype html><script type="module" src="/assets/index-abc.js"></script>',
       "assets/index-abc.js":
-        'const ns="http://www.w3.org/2000/svg";const e="https://react.dev/errors/1";new URL(p,"http://localhost");',
+        'const ns="http://www.w3.org/2000/svg";const e="https://react.dev/errors/1";new URL(p,"http://localhost");a.replace(/\\/\\/+/g,"/");b.match(/\\/assets\\/(.*)/);',
       "assets/index-abc.css": "@layer ui-sdk;",
+      "assets/logo (1)-Bq3x.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
     });
     assert.deepEqual(checkStatic("apps/console/dist/static", dir), []);
   });
@@ -81,19 +100,112 @@ describe("static builds", () => {
       ["assets/a.js", 'fetch("https://api.example.com/v1")'],
     ];
     for (const [file, text] of cases) {
-      const dir = dirWith(t, { [file]: text });
-      const findings = checkStatic("x", dir);
-      assert.equal(findings[0]?.rule, "third-party-origin", file);
+      assert.deepEqual(staticRules(t, { [file]: text }), ["third-party-origin"], file);
     }
   });
 
-  it("refuses a left source map, a sourceMappingURL and the rendered files", (t) => {
-    const rules = (/** @type {Record<string, string>} */ files) =>
-      checkStatic("x", dirWith(t, files)).map((f) => f.rule);
-    assert.deepEqual(rules({ "assets/a.js.map": "{}" }), ["source-map"]);
-    assert.deepEqual(rules({ "assets/a.js": "x\n//# sourceMappingURL=a.js.map" }), ["source-map"]);
-    assert.deepEqual(rules({ _headers: "/*\n  X: y" }), ["rendered-file"]);
-    assert.deepEqual(rules({ "env.json": "{}" }), ["rendered-file"]);
+  it("refuses an origin however a build spells it", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      [
+        "a protocol-relative script",
+        "index.html",
+        '<script src="//cdn.evil.example/x.js"></script>',
+      ],
+      [
+        "an unquoted protocol-relative attribute",
+        "index.html",
+        "<img src=//cdn.evil.example/a.png>",
+      ],
+      ["a protocol-relative CSS import", "assets/a.css", "@import url(//fonts.example/css);"],
+      ["an upper-case scheme", "assets/a.js", 'fetch("HTTPS://tracker.example/p")'],
+      ["a WebSocket", "assets/a.js", 'new WebSocket("wss://collector.example.net/s")'],
+      ["a plain WebSocket", "assets/a.js", 'new WebSocket("ws://collector.example.net/s")'],
+      ["JSON-escaped slashes", "assets/a.json", '{"u":"https:\\/\\/tracker.example/p"}'],
+      ["unicode-escaped slashes", "assets/a.js", 'fetch("https:\\u002f\\u002ftracker.example/p")'],
+      ["a port", "assets/a.js", 'fetch("http://localhost:3000/x")'],
+    ];
+    for (const [what, file, text] of cases) {
+      assert.ok(staticRules(t, { [file]: text }).includes("third-party-origin"), what);
+    }
+  });
+
+  it("refuses a URL whose user name makes an allowed host the one it seems to name", (t) => {
+    const found = staticRules(t, {
+      "assets/a.js": 'fetch("https://react.dev@collector.evil.example.net/beacon")',
+    });
+    assert.ok(found.includes("url-userinfo") && found.includes("third-party-origin"), found.join());
+    assert.deepEqual(
+      urlsIn("https://react.dev@collector.evil.example.net/x").map((u) => u.origin),
+      ["https://collector.evil.example.net"],
+    );
+  });
+
+  it("refuses secret shapes and whatever public-safety refuses, in any built file", (t) => {
+    const token = ["whsec", "_", "QmFzZTY0U2VjcmV0VmFsdWVGb3JUZXN0aW5n"].join("");
+    const address = ["ops-lead", "corp.example.co"].join("@");
+    const uuid = ["0f3a9c1e", "2b4d", "4e6f", "8a0c", "1e2f3a4b5c6d"].join("-");
+    const home = ["", "Users", "someone", "fin"].join("/");
+    const ip = [10, 1, 2, 3].join(".");
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["a signing secret", "assets/a.js", `const s="${token}";`],
+      ["a staff address", "assets/a.js", `const a="${address}";`],
+      ["an ID-shaped string", "assets/a.json", `{"id":"${uuid}"}`],
+      ["a local path", "assets/a.js", `const p="${home}/src/x.ts";`],
+      ["a private address", "index.html", `<p>${ip}</p>`],
+      ["a secret inside an image", "assets/a.png", `\u0089PNG\u0000\u0000${token}\u0000`],
+    ];
+    for (const [what, file, text] of cases) {
+      const found = staticRules(t, { [file]: text });
+      assert.ok(
+        found.some((r) => r.startsWith("public-safety:")),
+        `${what}: ${found.join()}`,
+      );
+    }
+    const run = checkStatic("x", dirWith(t, { "assets/a.js": `const s="${token}";` }));
+    assert.ok(
+      run.every((f) => !f.message.includes(token)),
+      "a finding never prints the value",
+    );
+  });
+
+  it("refuses a server setting's name, server-only code and the test harness", (t) => {
+    /** @type {[string, string, string][]} */
+    const cases = [
+      ["a server setting's name", 'const k="FIN_DB_PASSWORD";', "setting-name"],
+      ["a node: import", 'import{readFileSync as r}from"node:fs";', "server-only"],
+      ["a dynamic node: import", 'await import("node:crypto")', "server-only"],
+      ["Vite's stand-in for a Node module", 'var e="__vite-browser-external";', "server-only"],
+      ["the unreplaced build target", "if(__FIN_BUILD_TARGET__==='test'){}", "seam"],
+      ["the test harness", 'import"@fin/testing/sink";import{a}from"@fin/testing";', "seam"],
+    ];
+    for (const [what, text, rule] of cases) {
+      assert.ok(staticRules(t, { "assets/a.js": text }).includes(rule), what);
+    }
+    assert.deepEqual(
+      staticRules(t, { "assets/a.js": 'const k="__FIN_X";const f="fin_x";const n="NODE_ENV";' }),
+      [],
+    );
+  });
+
+  it("refuses a left source map, a sourceMappingURL, and what a deployment refuses", (t) => {
+    assert.deepEqual(staticRules(t, { "assets/a.js.map": "{}" }), ["source-map"]);
+    assert.deepEqual(staticRules(t, { "assets/A.JS.MAP": "{}" }), ["source-map"]);
+    assert.deepEqual(staticRules(t, { "assets/a.js": "x\n//# sourceMappingURL=a.js.map" }), [
+      "source-map",
+    ]);
+    for (const file of [
+      "_headers",
+      "env.json",
+      "ENV.JSON",
+      "_worker.js",
+      "_routes.json",
+      "_redirects",
+    ]) {
+      assert.deepEqual(staticRules(t, { [file]: "x" }), ["artefact"], file);
+    }
+    assert.deepEqual(staticRules(t, { "assets/a%2e.js": "x" }), ["artefact"]);
   });
 
   it("refuses a link instead of following it", (t) => {
@@ -107,6 +219,7 @@ describe("static builds", () => {
       originsIn("HTTPS://A.Example.com/x https://a.example.com/y http://b.example.org:8080/"),
       ["https://a.example.com", "http://b.example.org:8080"],
     );
+    assert.deepEqual(originsIn(`\`https://$${"{host}"}/x\` https:// //`), []);
   });
 });
 
@@ -127,5 +240,45 @@ describe("checkBundles over apps/", () => {
     const run = spawnSync(process.execPath, [SCRIPT, "--root", root], { encoding: "utf8" });
     assert.equal(run.status, 1);
     assert.match(run.stdout, /bundle-check\.result result=fail server=1 static=1 findings=1/);
+  });
+});
+
+describe("staged release artefacts (--artefacts)", () => {
+  it("checks every staged artefact, carried assets included, and refuses a stray entry", (t) => {
+    const dir = tempDir(t);
+    writeTree(dir, {
+      "console/index.html": "<p>",
+      "console/assets/app-2.js": "ok",
+      "verify/index.html": "<p>",
+      "verify/assets/app-1.js": 'const k="FIN_EMAIL_TOKEN";',
+    });
+    const result = checkArtefacts(dir);
+    assert.equal(result.static, 2);
+    assert.deepEqual(
+      result.findings.map((f) => `${f.file}:${f.rule}`),
+      ["artefact verify/assets/app-1.js:setting-name"],
+    );
+    writeTree(dir, { "stray.txt": "x" });
+    assert.ok(checkArtefacts(dir).findings.some((f) => f.file === "artefact stray.txt"));
+    const run = spawnSync(process.execPath, [SCRIPT, "--artefacts", dir], { encoding: "utf8" });
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /bundle-check\.result result=fail server=0 static=2 findings=2/);
+  });
+
+  it("applies the overlay's refuse list when FIN_OVERLAY_FILE names one", (t) => {
+    const dir = tempDir(t);
+    const zone = ["zone-under", "test", "example"].join(".");
+    writeTree(dir, {
+      "overlay.json": JSON.stringify({ refuseList: [zone] }),
+      "staged/console/index.html": `<p>${zone}</p>`,
+    });
+    const env = { PATH: process.env.PATH, FIN_OVERLAY_FILE: join(dir, "overlay.json") };
+    const run = spawnSync(process.execPath, [SCRIPT, "--artefacts", join(dir, "staged")], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.match(run.stdout, /public-safety:refuse-list/);
+    assert.doesNotMatch(run.stdout, new RegExp(zone.replaceAll(".", "\\.")));
   });
 });
