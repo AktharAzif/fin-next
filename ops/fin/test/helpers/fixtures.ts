@@ -6,7 +6,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecResult, FetchFn, Runtime } from "../../src/core/runtime.ts";
+import type { ExecResult, FetchFn, InterruptSignal, Runtime } from "../../src/core/runtime.ts";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -66,7 +66,7 @@ export function overlayFixture() {
       fallbackOnly: ["console-api", "staff-api", "onboard-api"],
     },
     neverTouch: { _comment: "fixture", labels: ["@", "_dmarc", "www", "legacy", "app"] },
-    dmarc: { records: ["_dmarc.auth", "_dmarc.notify"], policy: "p=none", note: "fixture" },
+    dmarc: { records: ["_dmarc.auth", "_dmarc.notify"], policy: "p=reject", note: "fixture" },
     staticEgress: { worker: ["203.0.113.10", "203.0.113.11"] },
     thresholds: { "api-v4": 100 },
   };
@@ -97,6 +97,8 @@ export interface FakeRuntime extends Runtime {
   out(): string;
   err(): string;
   advance(ms: number): void;
+  /** Delivers a signal to the trapped handler, as the real runtime would; false when none is. */
+  interrupt(signal: InterruptSignal): Promise<boolean>;
 }
 
 export interface FakeRuntimeOptions {
@@ -105,6 +107,8 @@ export interface FakeRuntimeOptions {
   exec?: (program: string, args: readonly string[]) => ExecResult;
   repoRoot?: string;
   start?: Date;
+  /** Whether the checkout has local changes (default: clean). */
+  dirty?: boolean;
 }
 
 export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
@@ -112,6 +116,7 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
   let stderr = "";
   let now = (options.start ?? new Date("2026-11-21T06:00:00.000Z")).getTime();
   let counter = 0;
+  let trapped: ((signal: InterruptSignal) => Promise<void>) | undefined;
   return {
     env: options.env ?? {},
     repoRoot: options.repoRoot ?? REPO_ROOT,
@@ -134,11 +139,24 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
     },
     operator: () => "operator",
     commit: () => hex(40, "e"),
+    dirty: () => options.dirty ?? false,
     exec: options.exec ?? (() => ({ status: 127, stdout: "", stderr: "not available in tests" })),
+    trap: (handler) => {
+      trapped = handler;
+      return () => {
+        if (trapped === handler) trapped = undefined;
+      };
+    },
     out: () => stdout,
     err: () => stderr,
     advance: (ms) => {
       now += ms;
+    },
+    interrupt: async (signal) => {
+      const handler = trapped;
+      if (handler === undefined) return false;
+      await handler(signal);
+      return true;
     },
   };
 }

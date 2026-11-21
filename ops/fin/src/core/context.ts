@@ -4,12 +4,13 @@
 import { join } from "node:path";
 import { flagBool, flagInt, type ParsedArgs } from "./args.ts";
 import { type CredentialVariable, readCredential } from "./credentials.ts";
+import { ConfigError, EXIT, FinError } from "./errors.ts";
 import { Guard } from "./guard.ts";
 import type { Masker } from "./mask.ts";
 import type { Output } from "./output.ts";
-import { loadOverlay, type Overlay } from "./overlay.ts";
+import { loadOverlay, type Overlay, registerOverlayFile } from "./overlay.ts";
 import { type Change, checkDeletes, formatPlan, pending, summarize } from "./plan.ts";
-import { Run } from "./run.ts";
+import { Run, type RunResult } from "./run.ts";
 import { RunLog } from "./runlog.ts";
 import { type Runtime, stateDir } from "./runtime.ts";
 import type { Secret } from "./secret.ts";
@@ -27,6 +28,11 @@ export interface ContextOptions {
   needsOverlay: boolean;
 }
 
+/** The result a run.done records for an error: a safety rule's refusal, or a failure. */
+export function resultOf(error: unknown): RunResult {
+  return error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed";
+}
+
 export class Context {
   readonly runtime: Runtime;
   readonly environment: Environment;
@@ -36,6 +42,11 @@ export class Context {
   readonly args: ParsedArgs;
   readonly log: RunLog;
   readonly run: Run;
+  /**
+   * Whether the overlay's values are registered with the masker. A command that needs the overlay
+   * always has them; any other command has them when FIN_OVERLAY_FILE names a usable file.
+   */
+  readonly masked: boolean;
   readonly #overlay: Overlay | undefined;
   #guard: Guard | undefined;
   readonly #credentials = new Map<CredentialVariable, Secret>();
@@ -47,15 +58,28 @@ export class Context {
     this.masker = options.masker;
     this.out = options.out;
     this.args = options.args;
-    // The overlay is read (and every value masked) before anything else happens.
-    this.#overlay = options.needsOverlay
-      ? loadOverlay(options.runtime.env, options.environment, options.masker)
-      : undefined;
+    // The overlay is read (and every value masked) before anything else happens. A command that
+    // does not need it still masks with it when it is there, since what it prints or logs (a
+    // reason, an error) may name a private value.
+    if (options.needsOverlay) {
+      this.#overlay = loadOverlay(options.runtime.env, options.environment, options.masker);
+      this.masked = true;
+      const policy = this.#overlay.dmarc.policy;
+      if (policy !== undefined && policy !== options.settings.email.dmarcPolicy) {
+        throw new ConfigError(
+          `the overlay's dmarc.policy differs from email.dmarcPolicy in ops/environments/${options.environment}.json, which holds the policy ([BD-17])`,
+        );
+      }
+    } else {
+      this.#overlay = undefined;
+      this.masked = registerOverlayFile(options.runtime.env, options.masker).registered;
+    }
     this.log = new RunLog(join(stateDir(options.runtime.env), options.environment), options.masker);
     this.run = new Run(options.runtime, this.log, options.out, {
       command: options.command,
       environment: options.environment,
       dryRun: options.mutating ? flagBool(options.args, "dry-run") : true,
+      args: options.args,
     });
   }
 
@@ -88,8 +112,10 @@ export class Context {
 
   /**
    * Prints a plan, and unless this is a dry run applies its pending changes in order inside a
-   * registered run. Returns the exit code: 0 when everything planned was applied (or, in a dry
-   * run, when nothing differs), 1 when a dry run shows changes or some changes were held.
+   * registered run: run.registered (shipped at once) before the first change, one run.step per
+   * change, and run.done with `ok`, `refused` (a safety rule stopped it) or `failed`. Returns the
+   * exit code: 0 when everything planned was applied (or, in a dry run, when nothing differs), 1
+   * when a dry run shows changes or some changes were held. A run applies one plan.
    */
   async applyPlan(
     title: string,
@@ -110,6 +136,7 @@ export class Context {
     }
     checkDeletes(changes, flagInt(this.args, "confirm-delete"));
     this.run.register({ plan: summary, ...fields });
+    await this.run.flushLines();
     try {
       for (const change of todo) {
         await apply(change);
@@ -121,14 +148,14 @@ export class Context {
         );
         this.out.info(`  done: ${change.action} ${change.kind} ${change.name}`);
       }
-      this.run.finish("ok", { plan: summary, ...fields });
     } catch (error) {
-      this.run.finish("failed", {
+      this.run.finish(resultOf(error), {
         plan: summary,
         error: error instanceof Error ? error.message : "failed",
       });
       throw error;
     }
+    this.run.finish("ok", { plan: summary, ...fields });
     return summary.held === 0 ? 0 : 1;
   }
 }

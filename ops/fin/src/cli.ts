@@ -1,12 +1,16 @@
 // `pnpm fin <group> <command> <env> [arguments] [--flags]`: finds the command, parses its
-// arguments strictly, builds its context (the overlay is masked before anything prints) and runs
-// it. Every error leaves through the masker with its exit code.
+// arguments strictly, builds its context (the overlay is masked before anything prints), takes the
+// run lock for a mutating run before the command reads anything, and runs it. Every error leaves
+// through the masker with its exit code, and is printed before the run is closed, so closing the
+// run can never hide it. Telemetry never changes the exit code. While a run holds the lock, SIGINT
+// and SIGTERM close it as failed (run.done, the lock released, the lines kept and shipped) before
+// the process exits 130 or 143.
 
 import type { Command } from "./command.ts";
 import { MUTATING_FLAGS } from "./command.ts";
 import { CORE_COMMANDS } from "./commands/core.ts";
 import { parseArgs } from "./core/args.ts";
-import { Context } from "./core/context.ts";
+import { Context, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
 import { Masker } from "./core/mask.ts";
 import { Output } from "./core/output.ts";
@@ -41,7 +45,29 @@ function commandHelp(c: Command): string {
   return lines.join("\n");
 }
 
-/** Runs one invocation and returns its exit code. */
+/** Prints an error, masked, and returns its exit code. */
+function report(out: Output, error: unknown): number {
+  if (error instanceof FinError) {
+    out.error(error.message);
+    return error.exitCode;
+  }
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : "an unknown error";
+  out.error(`internal error: ${message}`);
+  return EXIT.internal;
+}
+
+/** While the run holds the lock, an interrupt closes it before the process exits. */
+function trapInterrupts(ctx: Context, runtime: Runtime, out: Output): () => void {
+  return runtime.trap(async (signal) => {
+    out.error(`interrupted (${signal}): closing the run`);
+    if (ctx.run.registered && !ctx.run.finished) {
+      ctx.run.finish("failed", { error: `interrupted by ${signal}` });
+    } else ctx.run.close();
+    await ctx.run.flushLines();
+  });
+}
+
+/** Runs one invocation and returns its exit code. It never rejects. */
 export async function runCli(
   argv: readonly string[],
   runtime: Runtime,
@@ -66,6 +92,7 @@ export async function runCli(
     return EXIT.ok;
   }
   let ctx: Context | undefined;
+  let untrap: (() => void) | undefined;
   try {
     const environment = rest[0];
     if (environment === undefined || environment.startsWith("--")) {
@@ -92,24 +119,37 @@ export async function runCli(
       mutating: command.mutating,
       needsOverlay: command.overlay,
     });
+    if (command.mutating) {
+      // Before the command reads any provider state, so its plan cannot go stale under another run.
+      ctx.run.acquire();
+      if (ctx.run.locked) untrap = trapInterrupts(ctx, runtime, out);
+    }
     return await command.run(ctx);
   } catch (error) {
-    if (ctx?.run.registered) {
-      ctx.run.finish(
-        error instanceof FinError && error.exitCode === EXIT.refused ? "refused" : "failed",
-        {
+    const code = report(out, error);
+    if (ctx?.run.registered && !ctx.run.finished) {
+      try {
+        ctx.run.finish(resultOf(error), {
           error: error instanceof Error ? error.message : "failed",
-        },
-      );
+        });
+      } catch {
+        out.warn("the run could not be closed in the run log");
+      }
     }
-    if (error instanceof FinError) {
-      out.error(error.message);
-      return error.exitCode;
-    }
-    const message = error instanceof Error ? `${error.name}: ${error.message}` : "an unknown error";
-    out.error(`internal error: ${message}`);
-    return EXIT.internal;
+    return code;
   } finally {
-    if (ctx !== undefined) await ctx.run.flushLines();
+    untrap?.();
+    if (ctx !== undefined) {
+      try {
+        ctx.run.close();
+      } catch {
+        out.warn("the run could not be closed");
+      }
+      try {
+        await ctx.run.flushLines();
+      } catch {
+        // Telemetry never changes the exit code; flushLines warns itself.
+      }
+    }
   }
 }
