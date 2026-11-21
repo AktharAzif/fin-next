@@ -10,7 +10,7 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.engine.json",
-    "test": "vitest run"
+    "test": "vitest run --config ../../vitest.config.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
