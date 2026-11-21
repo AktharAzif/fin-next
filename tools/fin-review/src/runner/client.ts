@@ -1,6 +1,46 @@
-// The pinned Claude Code (spec 07 §4.1, S7-28): config/client.json and version comparison.
+// The pinned Claude Code (spec 07 §4.1, S7-28): config/client.json, version comparison, and the one
+// file a run uses. claudePath is usually a link that an updater re-points while other sessions run,
+// so a run resolves it once to the file it names, checks that file's version, starts every session
+// from that file, and refuses an attempt when the file is no longer the one it checked.
 
+import { realpathSync, statSync } from "node:fs";
+import { ConfigError } from "../errors.ts";
 import { isJsonObject } from "../json.ts";
+
+const RESOLVED_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
+
+/** The file a run starts every session from, and what it was when its version was checked. */
+export interface PinnedClient {
+  readonly path: string;
+  readonly fingerprint: string;
+}
+
+/** Device, inode, size and times of `path`: any update replaces or rewrites it. Null when it cannot be read. */
+export function clientFingerprint(path: string): string | null {
+  try {
+    const stats = statSync(path, { bigint: true });
+    if (!stats.isFile()) return null;
+    return [stats.dev, stats.ino, stats.size, stats.mtimeNs, stats.ctimeNs].join(":");
+  } catch {
+    return null;
+  }
+}
+
+/** Resolves `claudePath` (links followed) to the file it names now. Throws ConfigError. */
+export function pinClient(claudePath: string): PinnedClient {
+  let path: string;
+  try {
+    path = realpathSync.native(claudePath);
+  } catch {
+    throw new ConfigError("$FIN_REVIEW_HOME/config.json", ["claudePath does not name a file that exists"]);
+  }
+  if (!RESOLVED_PATH_RE.test(path) || path.split("/").includes("..")) {
+    throw new ConfigError("$FIN_REVIEW_HOME/config.json", ["claudePath resolves to a path of characters the engine refuses"]);
+  }
+  const fingerprint = clientFingerprint(path);
+  if (fingerprint === null) throw new ConfigError("$FIN_REVIEW_HOME/config.json", ["claudePath does not name a regular file"]);
+  return { path, fingerprint };
+}
 
 export interface ClientConfig {
   /** The exact version every session must run. */

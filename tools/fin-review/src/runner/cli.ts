@@ -15,6 +15,7 @@ import type { RunOutcome } from "../exec.ts";
 import { EFFORTS } from "../options.ts";
 import type { ModelsConfig } from "../options.ts";
 import { runWithRetries } from "./check.ts";
+import { clientFingerprint } from "./client.ts";
 import { sessionEnv } from "./env.ts";
 import { ALLOWED_TOOLS, DENIED_TOOLS, buildSettings, isWithin, writeSessionFiles } from "./settings.ts";
 import type { OutputCheck, SessionResult, SessionRunner, SessionSpec } from "./types.ts";
@@ -67,7 +68,8 @@ const SESSION_ID_RE = /^[a-z0-9][a-z0-9.-]{0,119}$/;
 const MODEL_ID_RE = /^claude-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const KILL_GRACE_MS = 10_000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
-const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
+/** The largest prompt a session is started with; the run checks its plans against it before any session. */
+export const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
 const MAX_ARG_BYTES = 512 * 1024;
 
 export interface SessionFiles {
@@ -146,8 +148,10 @@ export function effectiveFast(spec: SessionSpec, models: ModelsConfig): boolean 
 }
 
 export interface CliRunnerOptions {
-  /** The pinned Claude Code, absolute. */
+  /** The pinned Claude Code, absolute and resolved: the file whose version was checked (pinClient). */
   readonly claudePath: string;
+  /** That file's fingerprint when its version was checked; an attempt refuses to start on any other. */
+  readonly claudeFingerprint: string;
   readonly engineEnv: Readonly<Record<string, string | undefined>>;
   /** The real home directory, resolved. */
   readonly home: string;
@@ -179,6 +183,8 @@ function checkSpec(spec: SessionSpec, o: CliRunnerOptions): void {
  */
 export async function startAttempt(spec: SessionSpec, attempt: number, o: CliRunnerOptions, signal: AbortSignal): Promise<RunOutcome> {
   checkSpec(spec, o);
+  // An updater may have rewritten or replaced the file since its version was checked.
+  if (clientFingerprint(o.claudePath) !== o.claudeFingerprint) return { kind: "start", message: "the pinned Claude Code changed during the run" };
   const settings = buildSettings({
     modelId: spec.modelId,
     fastMode: effectiveFast(spec, o.models),

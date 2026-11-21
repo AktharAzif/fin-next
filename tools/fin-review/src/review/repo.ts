@@ -7,9 +7,9 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { ProgramError } from "../errors.ts";
-import { runProgram } from "../exec.ts";
+import { canonicalPath, runProgram } from "../exec.ts";
 import { diffRaw, gitEnv, isSha, parseLsTreeZ } from "../git.ts";
 import type { DiffEntry } from "../git.ts";
 
@@ -94,6 +94,20 @@ async function git(call: GitCall): Promise<{ code: number; stdout: Buffer }> {
     throw new ProgramError("git", `git ${what} failed (${result.code === null ? "signal" : `exit ${result.code}`})${first === "" ? "" : `: ${first}`}`, result.code, "");
   }
   return { code: result.code, stdout: result.stdout };
+}
+
+/**
+ * The top folder of the git checkout holding `dir`, in the disk's own spelling, or null when there
+ * is none. Like every git call here it runs with the fixed prefix and the environment less GIT_*, and
+ * git is never taken from a PATH folder in or below `dir` (src/exec.ts).
+ */
+export async function repositoryTop(dir: string, env: Readonly<Record<string, string | undefined>>): Promise<string | null> {
+  try {
+    const top = (await git({ cwd: dir, args: ["rev-parse", "--show-toplevel"], env })).stdout.toString("utf8").replace(/\n$/, "");
+    return isAbsolute(top) ? canonicalPath(top) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The origin URL of the repository at `repoDir`. Throws RemoteError when it has none or it is unusable. */

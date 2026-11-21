@@ -205,9 +205,11 @@ token, no signed receipts, no spool, sealing, ledger or CI runs. fin-review runs
 sessions on the build machine, as today's merge gate.
 
 - **The session environment** is built from nothing, as §4.3 says, except that sessions run under
-  the current user's Claude Code login: `HOME` is the engine's own, and `CLAUDE_CONFIG_DIR` is passed
-  on when the engine has it (a scratch home or config directory would drop the login).
-  `CLAUDE_CODE_OAUTH_TOKEN` is passed on when the engine has one (the spec's local credential). The
+  the current user's Claude Code login: `HOME` is the engine's own (a scratch home would drop the
+  login). `CLAUDE_CONFIG_DIR` is never passed: `config/env-refusals.json` refuses it, so the engine
+  does not start with it set, and a session's configuration is always `$HOME/.claude`, which the
+  home's sibling denies cover. `CLAUDE_CODE_OAUTH_TOKEN` is passed on when the engine has one (the
+  spec's local credential). The
   rest is fixed: `PATH=/usr/bin:/bin`, `LANG=C.UTF-8`, `TMPDIR` a fresh empty
   `$FIN_REVIEW_HOME/scratch/<run>-<session>-a<attempt>/tmp` per attempt (deleted after it),
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `DISABLE_AUTOUPDATER=1`. Nothing else reaches a
@@ -221,8 +223,28 @@ sessions on the build machine, as today's merge gate.
   the tree itself. They are replaced, as §4.2 allows, by explicit denies of every entry beside the
   path from the home to the tree, level by level, and likewise inside `$FIN_REVIEW_HOME` (other
   runs' trees, `runs/`, `state/`, `scratch/`, `ledger/` and the mirrors in `repos/`).
-- **Refusal of settings files** (§4.3's second half, the doctor's D3) comes with the full doctor;
-  this slice refuses the engine's own environment only.
+- **Refusal of settings files** (§4.3's second half): before any session, `pr`, `commit` and the
+  doctor's D3 read every settings file the pinned client could read for a session, and refuse
+  (exit 78, `settings_refused`, file and key names only) one that sets a key
+  `config/env-refusals.json` refuses, any `env` block, or a widened permission, or that cannot be
+  read or parsed: the user settings `$HOME/.claude/settings.json`, and the managed settings,
+  `managed-settings.json` and every `.json` in `managed-settings.d/` under
+  `/Library/Application Support/ClaudeCode` (macOS) or `/etc/claude-code` (Linux), the paths 2.1.328
+  itself names. `--setting-sources ""` already keeps user settings out of a session; this is the
+  second layer, and the only one for the managed settings. A machine whose user settings carry a
+  gateway's `env` block therefore cannot run gating reviews as that user.
+- **The pinned client**: `claudePath` (default `~/.local/bin/claude`) is usually a link an updater
+  re-points. A run resolves it once to the file it names, checks that file's version against the
+  pin, starts every session from that file, and refuses an attempt when the file is no longer the
+  one it checked (its device, inode, size or times changed).
+- **Programs and folders**: `git` and `gh` come only from absolute PATH folders outside the
+  repository under review and the engine's checkout, whatever folder a call runs in, and every git
+  call runs with the same fixed prefix and an environment less `GIT_*`. `$FIN_REVIEW_HOME` is refused
+  inside the repository under review or the engine's repository however it is spelled (decided on
+  the disk, links and case included), by `doctor` too, before anything under it is read. Its
+  `config.json` (default `~/.fin-review/config.json`) is the one file for `claudePath`,
+  `maxSessions` and the machine's option defaults, which are validated whether or not the variable
+  is set.
 - **No receipts**: `pr` reads no coverage from a receipt chain, so it reviews every unit of the
   patch; `commit`'s last reviewed head is `--since` and its local run record, not a signed receipt;
   the open blockers every run carries come from the same local records.
@@ -234,14 +256,18 @@ sessions on the build machine, as today's merge gate.
 
 ## The doctor
 
-`doctor` runs D1 (the version equals the pin), D2 (every runner flag is in `--help`, and the CLI
-accepts every schema), D4 (no refused variable in the engine's environment) and, with `--live`, D5:
-one locked session per model at effort `high` with a 0.50 USD budget, asked "Reply with the word
-ready.", whose `modelUsage` must name only that model ID. It writes `$FIN_REVIEW_HOME/state/doctor.json`
-and exits 0 when every check it ran passed, else 78.
+`doctor` runs D1 (the version of the file `claudePath` names equals the pin), D2 (every runner flag
+is in `--help`, and the CLI accepts every schema), D3 (no settings file a session could read sets a
+refused key, as above), D4 (no refused variable in the engine's environment; the doctor reports it
+here instead of being refused at the start) and, with `--live`, D5: one locked session per model at
+effort `high` with a 0.50 USD budget, asked "Reply with the word ready.", whose `modelUsage` must
+name only that model ID. D5 never starts when another check failed. It writes
+`$FIN_REVIEW_HOME/state/doctor.json` and exits 0 when every check it ran passed, else 78.
 
 **Result on 21 Nov 2026 (build machine, Claude Code 2.1.328)**, run as
-`env -i HOME=... PATH=... CLAUDE_CONFIG_DIR=... node tools/fin-review/src/main.ts doctor --live`:
+`env -i HOME=... PATH=... CLAUDE_CONFIG_DIR=... node tools/fin-review/src/main.ts doctor --live`,
+before D3 existed and before `CLAUDE_CONFIG_DIR` was refused (both now end such a run with 78 on
+that machine, whose user settings carry the gateway's `env` block):
 
 | Check | Result |
 |---|---|
@@ -254,9 +280,8 @@ D5 fails because the machine's only Claude Code login for that user is an `env` 
 settings that sets a loopback `ANTHROPIC_BASE_URL` and an `ANTHROPIC_AUTH_TOKEN`: another endpoint and
 another credential, both refused by [RV-19], and kept out of locked sessions by `--setting-sources ""`
 and `--restricted`. Until the owner gives fin-review a first-party login (a `claude setup-token`
-token exported as `CLAUDE_CODE_OAUTH_TOKEN` in the shell that runs the engine, or `claude auth login`
-in the configuration directory it uses), no locked session can start on this machine, and every
-`pr` or `commit` run ends `could_not_check` (exit 2). Before the field names of a successful result
+token exported as `CLAUDE_CODE_OAUTH_TOKEN` in the shell that runs the engine) and runs it as a user
+whose `~/.claude/settings.json` holds no refused key, no gating run can start on this machine. Before the field names of a successful result
 were known from the doctor, two probe sessions outside the engine (through the agent's own login, on
 21 Nov 2026) recorded them: `type`, `subtype`, `is_error`, `result`, `stop_reason`,
 `terminal_reason`, `api_error_status`, `total_cost_usd`, `usage`, `modelUsage` (keyed by the exact

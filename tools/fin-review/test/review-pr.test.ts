@@ -3,7 +3,7 @@
 // validation, the sceptics, the outputs in the run directory and the exit codes.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { loadCommittedModels } from "../src/options.ts";
@@ -416,6 +416,102 @@ describe("pr over the fixture repository with fake sessions", () => {
     assert.equal(unchecked.code, 78, unchecked.stdout + unchecked.stderr);
     assert.match(unchecked.stderr, /engine_not_default: main has no tools\/fin-review, so there is no engine copy to run/);
     assert.equal(calls(real).length, 0);
+  });
+
+  it("refuses (78) a settings file a session could read that sets a refused key, cannot be parsed, or is a drop-in that does", async () => {
+    fx.pr(17, { "docs/plan/README.md": "# plan\n\nSettings.\n" });
+    const userSettings = join(fx.userHome, ".claude", "settings.json");
+    const dropIn = join(fx.managedDir, "managed-settings.d", "10-org.json");
+    const managed = join(fx.managedDir, "managed-settings.json");
+    mkdirSync(join(fx.userHome, ".claude"), { recursive: true });
+    mkdirSync(join(fx.managedDir, "managed-settings.d"), { recursive: true });
+    try {
+      writeFileSync(userSettings, JSON.stringify({ theme: "dark", env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:9", ANTHROPIC_AUTH_TOKEN: "secret-value" }, model: "x" }));
+      const h = harness(fx, script(), random);
+      const run = await runFixtureCli(fx, ["pr", "--pr", "17"], h.services);
+      assert.equal(run.code, 78, run.stdout + run.stderr);
+      assert.match(run.stderr, /^fin-review: refused: settings_refused: .*\/\.claude\/settings\.json: sets refused keys: env\.ANTHROPIC_BASE_URL, env\.ANTHROPIC_AUTH_TOKEN, model$/m);
+      assert.ok(!run.stderr.includes("secret-value") && !run.stderr.includes("127.0.0.1"), "values are never printed");
+      assert.equal(calls(h).length, 0);
+      writeFileSync(userSettings, JSON.stringify({ theme: "dark", verbose: true }));
+      writeFileSync(dropIn, JSON.stringify({ apiKeyHelper: "/bin/true" }));
+      const managedRun = await runFixtureCli(fx, ["pr", "--pr", "17"], harness(fx, script(), random).services);
+      assert.equal(managedRun.code, 78);
+      assert.match(managedRun.stderr, /settings_refused: .*managed-settings\.d\/10-org\.json: sets refused keys: apiKeyHelper/);
+      rmSync(dropIn);
+      writeFileSync(managed, "{ not json");
+      const broken = await runFixtureCli(fx, ["pr", "--pr", "17"], harness(fx, script(), random).services);
+      assert.equal(broken.code, 78);
+      assert.match(broken.stderr, /settings_refused: .*managed-settings\.json: not valid JSON/);
+      rmSync(managed);
+      const allowed = await runFixtureCli(fx, ["pr", "--pr", "17"], harness(fx, script(), random).services);
+      assert.equal(allowed.code, 0, allowed.stdout + allowed.stderr);
+    } finally {
+      rmSync(join(fx.userHome, ".claude"), { recursive: true, force: true });
+      rmSync(fx.managedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a FIN_REVIEW_HOME inside the repository however it is spelled, before reading anything under it", async () => {
+    const h = harness(fx, script(), random);
+    // A link to the repository, and (on a disk that ignores case) another spelling of it.
+    const alias = join(fx.dir, "alias");
+    symlinkSync(fx.local.dir, alias);
+    const spellings = [join(alias, ".fr")];
+    const upper = join(fx.local.dir.slice(0, fx.local.dir.lastIndexOf("/")), "LOCAL");
+    if (existsSync(upper) && !readdirSync(fx.dir).includes("LOCAL")) spellings.push(join(upper, ".fr"));
+    for (const home of spellings) {
+      const run = await runFixtureCli(fx, ["pr", "--pr", "1"], h.services, { ...fx.env, FIN_REVIEW_HOME: home });
+      assert.equal(run.code, 78, home);
+      assert.match(run.stderr, /must not lie inside the repository/);
+    }
+    assert.ok(!existsSync(join(fx.local.dir, ".fr")), "a refused home is never created");
+    // The machine's configuration under a refused home is never read: the place is refused first.
+    mkdirSync(join(fx.local.dir, ".fr2"));
+    writeFileSync(join(fx.local.dir, ".fr2", "config.json"), "{ not json");
+    const unread = await runFixtureCli(fx, ["pr", "--pr", "1"], h.services, { ...fx.env, FIN_REVIEW_HOME: join(fx.local.dir, ".fr2") });
+    assert.equal(unread.code, 78);
+    assert.match(unread.stderr, /must not lie inside the repository/);
+    assert.ok(!unread.stderr.includes("not valid JSON"));
+    rmSync(join(fx.local.dir, ".fr2"), { recursive: true, force: true });
+    assert.equal(calls(h).length, 0);
+  });
+
+  it("never runs a git planted in the repository under review, whatever PATH holds", async () => {
+    fx.pr(18, { "docs/plan/README.md": "# plan\n\nPlanted.\n" });
+    const marker = join(fx.dir, "planted-git-ran");
+    writeFileSync(join(fx.local.dir, "git"), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexec /usr/bin/git "$@"\n`, { mode: 0o755 });
+    try {
+      const path = process.env["PATH"] ?? "/usr/bin:/bin";
+      for (const prefix of [":", ".:", `${fx.local.dir}:`]) {
+        const run = await runFixtureCli(fx, ["pr", "--pr", "18"], harness(fx, script(), random).services, { ...fx.env, PATH: `${prefix}${path}` });
+        assert.equal(run.code, 0, `${prefix} ${run.stdout}${run.stderr}`);
+        assert.ok(!existsSync(marker), `the planted git ran with PATH=${prefix}...`);
+      }
+    } finally {
+      rmSync(join(fx.local.dir, "git"), { force: true });
+    }
+  });
+
+  it("starts every session from the file claudePath names when its version is checked", async () => {
+    fx.pr(19, { "docs/plan/README.md": "# plan\n\nPinned.\n" });
+    const seen: string[] = [];
+    const h = harness(fx, script(), random);
+    const versions: string[] = [];
+    const run = await runFixtureCli(fx, ["pr", "--pr", "19"], {
+      ...h.services,
+      clientVersion: async (path) => {
+        versions.push(path);
+        return "2.1.328";
+      },
+      makeRunner: (options) => {
+        seen.push(`${options.claudePath} ${options.claudeFingerprint === "" ? "unpinned" : "pinned"}`);
+        return h.services.makeRunner?.(options) ?? new FakeRunner(script(), h.clock);
+      },
+    });
+    assert.equal(run.code, 0, run.stdout + run.stderr);
+    assert.deepEqual(versions, [fx.claudeFile], "the version is read from the resolved file, not the link");
+    assert.deepEqual(seen, [`${fx.claudeFile} pinned`]);
   });
 
   it("refuses a Claude Code other than the pin (78)", async () => {

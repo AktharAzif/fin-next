@@ -3,13 +3,14 @@
 // sees it (T-RV-09).
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { EFFORTS, MODEL_NAMES, loadCommittedModels } from "../src/options.ts";
 import type { ReviewOptions } from "../src/options.ts";
 import { ROLES, sessionModel } from "../src/roles.ts";
 import { CliRunner, FORBIDDEN_FLAGS, REPLACED_FLAGS, RUNNER_FLAGS, buildArgs, cliSchema, effectiveFast } from "../src/runner/cli.ts";
+import { clientFingerprint, pinClient } from "../src/runner/client.ts";
 import { SESSION_ENV_NAMES, sessionEnv } from "../src/runner/env.ts";
 import { DENIED_TOOLS, buildSettings } from "../src/runner/settings.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
@@ -192,12 +193,11 @@ describe("the settings file (spec 07 §4.2)", () => {
 });
 
 describe("the session environment (spec 07 §4.3, trimmed Phase 0)", () => {
-  it("holds only the allowlisted names, keeps HOME and CLAUDE_CONFIG_DIR, and drops everything else", () => {
+  it("holds only the allowlisted names, keeps HOME, and drops everything else", () => {
     const env = sessionEnv(
       {
         HOME: "/h",
         PATH: "/opt/bin:/usr/bin",
-        CLAUDE_CONFIG_DIR: "/h/.claude-alt",
         GITHUB_TOKEN: "ghp_x",
         ACTIONS_ID_TOKEN_REQUEST_TOKEN: "x",
         ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.com",
@@ -212,11 +212,26 @@ describe("the session environment (spec 07 §4.3, trimmed Phase 0)", () => {
       HOME: "/h",
       LANG: "C.UTF-8",
       TMPDIR: "/h/.fin-review/scratch/s/tmp",
-      CLAUDE_CONFIG_DIR: "/h/.claude-alt",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_AUTOUPDATER: "1",
     });
     for (const name of Object.keys(env)) assert.ok(SESSION_ENV_NAMES.includes(name));
+  });
+
+  it("never gives a session another configuration directory: CLAUDE_CONFIG_DIR is refused, and $HOME/.claude is denied", () => {
+    assert.ok(!SESSION_ENV_NAMES.includes("CLAUDE_CONFIG_DIR"));
+    assert.throws(() => sessionEnv({ HOME: "/h", CLAUDE_CONFIG_DIR: "/opt/claude-config" }, "/t"), /CLAUDE_CONFIG_DIR/);
+    const listing: Record<string, Array<{ name: string; isDirectory: boolean }>> = {
+      "/h": [
+        { name: ".claude", isDirectory: true },
+        { name: ".fin-review", isDirectory: true },
+      ],
+      "/h/.fin-review": [{ name: "trees", isDirectory: true }],
+      "/h/.fin-review/trees": [{ name: "r", isDirectory: true }],
+    };
+    const listDir = (dir: string) => listing[dir] ?? [];
+    const settings = buildSettings({ modelId: MODELS.opus, fastMode: false, home: "/h", finReviewHome: "/h/.fin-review", treeDir: "/h/.fin-review/trees/r", extraDenied: [], listDir });
+    assert.ok(settings.permissions.deny.includes("Read(//h/.claude/**)"), settings.permissions.deny.join("\n"));
   });
 
   it("passes CLAUDE_CODE_OAUTH_TOKEN when the engine has one, and refuses a malformed one", () => {
@@ -267,9 +282,10 @@ process.stdin.on("end", () => {
   });
   after(() => tmp.cleanup());
 
-  function runner(engineEnv: Record<string, string>): CliRunner {
+  function runner(engineEnv: Record<string, string>, fingerprint: string = clientFingerprint(claudePath) ?? ""): CliRunner {
     return new CliRunner({
       claudePath,
+      claudeFingerprint: fingerprint,
       engineEnv,
       home: userHome,
       finReviewHome: home,
@@ -334,5 +350,32 @@ process.stdin.on("end", () => {
   it("refuses a session ID it would not place in a path, and a tree outside FIN_REVIEW_HOME", async () => {
     await assert.rejects(runner({ HOME: userHome }).run(spec({ id: "../x" }), new AbortController().signal), TypeError);
     await assert.rejects(runner({ HOME: userHome }).run(spec({ treeDir: "/tmp" }), new AbortController().signal), TypeError);
+  });
+
+  it("starts no attempt once the pinned file is no longer the one whose version was checked", async () => {
+    writeFileSync(record, "[]");
+    const treeDir = join(home, "trees", "run1");
+    const result = await runner({ HOME: userHome }, "0:0:0:0:0").run(spec({ id: "swapped-s0", treeDir, schema: SCHEMA }), new AbortController().signal);
+    assert.equal(result.state, "failed");
+    assert.equal(result.failure, "exit");
+    assert.match(result.failureDetail ?? "", /the pinned Claude Code changed during the run/);
+    assert.deepEqual(JSON.parse(readFileSync(record, "utf8")), [], "the program was never started");
+  });
+
+  it("pins the file a link names: a re-pointed link does not change the file a run starts", () => {
+    const versions = join(userHome, "versions");
+    mkdirSync(versions, { recursive: true });
+    writeFileSync(join(versions, "9.9.1"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(versions, "9.9.2"), "#!/bin/sh\n", { mode: 0o755 });
+    const link = join(userHome, "bin", "claude-link");
+    symlinkSync(join(versions, "9.9.1"), link);
+    const pinned = pinClient(link);
+    assert.equal(pinned.path, join(versions, "9.9.1"));
+    rmSync(link);
+    symlinkSync(join(versions, "9.9.2"), link);
+    assert.equal(clientFingerprint(pinned.path), pinned.fingerprint, "the pinned file itself is unchanged");
+    writeFileSync(join(versions, "9.9.1"), "#!/bin/sh\necho rewritten\n", { mode: 0o755 });
+    assert.notEqual(clientFingerprint(pinned.path), pinned.fingerprint, "a rewrite is seen");
+    assert.throws(() => pinClient(join(userHome, "bin", "no-such-claude")), /claudePath does not name a file that exists/);
   });
 });

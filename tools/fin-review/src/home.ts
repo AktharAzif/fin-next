@@ -4,8 +4,9 @@
 // not read here; any other key is refused so a typo is never silently ignored.
 
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { ConfigError } from "./errors.ts";
+import { canonicalPath, isInsideOnDisk } from "./exec.ts";
 import { isJsonObject, readJsonFile } from "./json.ts";
 import { MAX_CONFIG_BYTES } from "./options.ts";
 
@@ -37,23 +38,41 @@ export function finReviewHome(env: Readonly<Record<string, string | undefined>>)
   return join(home, ".fin-review");
 }
 
-/** `path` with its deepest existing ancestor resolved (symbolic links followed), before it exists. */
-export function resolveFuture(path: string): string {
-  const rest: string[] = [];
+/** The deepest folder of `path` that exists (itself when it does), in the disk's own spelling. */
+function deepestExisting(path: string): string {
   let current = path;
   while (!existsSync(current)) {
     const parent = dirname(current);
     if (parent === current) break;
-    rest.unshift(basename(current));
     current = parent;
   }
-  return join(realpathSync(current), ...rest);
+  return canonicalPath(current);
 }
 
-/** Creates $FIN_REVIEW_HOME (0700) when missing and returns its resolved path. */
+/**
+ * True when `path`, which may not exist yet, would lie in or below the existing folder `root`,
+ * decided on the disk as the program lookup decides it: by canonical paths (links resolved, the
+ * disk's own spelling where it ignores case), then by device and inode up the folders. So neither
+ * another spelling nor a link hides a home inside a repository.
+ */
+export function wouldLieInside(path: string, root: string): boolean {
+  return isInsideOnDisk(deepestExisting(path), root);
+}
+
+/** Creates $FIN_REVIEW_HOME (0700) when missing and returns its resolved path, in the disk's own spelling. */
 export function ensureHome(home: string): string {
   mkdirSync(home, { recursive: true, mode: 0o700 });
-  return realpathSync(home);
+  return realpathSync.native(home);
+}
+
+/**
+ * Refuses (ConfigError) a $FIN_REVIEW_HOME in or below any of `roots` (the repository under review,
+ * the engine's repository): its runs, mirrors and trees must never land in a working copy.
+ */
+export function guardHome(home: string, roots: readonly string[]): void {
+  for (const root of roots) {
+    if (wouldLieInside(home, root)) throw new ConfigError("$FIN_REVIEW_HOME", ["must not lie inside the repository under review or the engine's repository"]);
+  }
 }
 
 /** Reads the machine settings; a missing file gives the defaults. */

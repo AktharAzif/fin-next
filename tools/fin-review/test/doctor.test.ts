@@ -1,7 +1,7 @@
 // The minimal doctor (spec 07 §4.7: D1, D2, D4, D5; T-RV-44's failure paths) with fakes.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { DOCTOR_PROMPT, missingFlags } from "../src/doctor.ts";
@@ -11,6 +11,7 @@ import { loadCommittedModels } from "../src/options.ts";
 import { RUNNER_FLAGS } from "../src/runner/cli.ts";
 import { fakeResultJson } from "../src/runner/fake.ts";
 import type { SessionSpec } from "../src/runner/types.ts";
+import { TOOL_ROOT } from "./helpers/cli.ts";
 import { countingRandom, fakeClock, readJson, reviewFixture, runFixtureCli } from "./helpers/review-fixture.ts";
 import type { ReviewFixture } from "./helpers/review-fixture.ts";
 
@@ -128,6 +129,44 @@ describe("doctor", () => {
     const run = await runFixtureCli(fx, ["doctor"], strict);
     assert.equal(run.code, 78);
     assert.match(run.stdout, /^D2 fail: --json-schema refuses sceptic$/m);
+  });
+
+  it("D3 fails for a settings file a session could read that sets a refused key, and then D5 never starts", async () => {
+    mkdirSync(join(fx.userHome, ".claude"), { recursive: true });
+    writeFileSync(join(fx.userHome, ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "secret-value" } }));
+    try {
+      const s = services();
+      const run = await runFixtureCli(fx, ["doctor", "--live"], s);
+      assert.equal(run.code, 78, run.stdout + run.stderr);
+      assert.match(run.stdout, /^D3 fail: .*\/\.claude\/settings\.json: sets refused keys: env\.ANTHROPIC_AUTH_TOKEN$/m);
+      assert.match(run.stdout, /^D5 skipped: not started/m);
+      assert.equal(s.started.length, 0);
+      assert.ok(!run.stdout.includes("secret-value"));
+    } finally {
+      rmSync(join(fx.userHome, ".claude"), { recursive: true, force: true });
+    }
+    assert.match((await runFixtureCli(fx, ["doctor"], services())).stdout, /^D3 pass: /m);
+  });
+
+  it("D1 fails when claudePath names no file, and the run starts nothing", async () => {
+    writeFileSync(join(fx.home, "config.json"), JSON.stringify({ claudePath: join(fx.userHome, "no-such-claude") }));
+    try {
+      const s = services();
+      const run = await runFixtureCli(fx, ["doctor", "--live"], s);
+      assert.equal(run.code, 78);
+      assert.match(run.stdout, /^D1 fail: claudePath does not name a file that exists$/m);
+      assert.equal(s.started.length, 0);
+    } finally {
+      rmSync(join(fx.home, "config.json"), { force: true });
+    }
+  });
+
+  it("refuses a FIN_REVIEW_HOME inside the engine's repository and creates nothing there", async () => {
+    const inside = join(TOOL_ROOT, "..", "..", `.fr-doctor-test-${process.pid}`);
+    const run = await runFixtureCli(fx, ["doctor"], services(), { ...fx.env, FIN_REVIEW_HOME: inside });
+    assert.equal(run.code, 78);
+    assert.match(run.stderr, /must not lie inside the repository under review or the engine's repository/);
+    assert.ok(!existsSync(inside));
   });
 
   it("refuses an unknown option (64)", async () => {

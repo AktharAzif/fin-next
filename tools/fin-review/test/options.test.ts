@@ -521,6 +521,25 @@ describe("T-RV-02 at the CLI", () => {
     }
   });
 
+  it("with FIN_REVIEW_HOME unset, ~/.fin-review/config.json's options are applied and validated like any other", async () => {
+    const user = tempDir("user-home");
+    try {
+      mkdirSync(join(user.dir, ".fin-review"));
+      writeFileSync(join(user.dir, ".fin-review", "config.json"), JSON.stringify({ options: { model: "fable", attackModel: "fable", effort: "max" } }));
+      const applied = await cli(["options"], { env: { HOME: user.dir } });
+      assert.equal(applied.code, 0, applied.stderr);
+      assert.deepEqual(JSON.parse(applied.stdout).options, { ...defaults, model: "fable", attackModel: "fable", effort: "max" });
+      for (const options of [{ model: "sonnet" }, { effort: "low" }, { model: "fable", attackModel: "opus" }]) {
+        writeFileSync(join(user.dir, ".fin-review", "config.json"), JSON.stringify({ options }));
+        const refused = await cli(["options"], { env: { HOME: user.dir } });
+        assert.equal(refused.code, 78, JSON.stringify(options));
+        assert.match(refused.stderr, /^fin-review: config: \$FIN_REVIEW_HOME\/config\.json: (?:model_not_allowed|effort_below_high|fable_overall_opus_attack): /);
+      }
+    } finally {
+      user.cleanup();
+    }
+  });
+
   it("machine options lay over the committed defaults, and CLI flags over both", async () => {
     const home = tempDir("home-layer");
     try {

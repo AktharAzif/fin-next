@@ -8,7 +8,7 @@ import { performance } from "node:perf_hooks";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
-import { resolveProgram, runProgram } from "../src/exec.ts";
+import { pathOutside, resolveProgram, runProgram } from "../src/exec.ts";
 import { gitEnv, isSha, mergeBases, parseCatFileBatch, parseLsTreeZ, parseRawDiffZ, promisorRemote, readBlobs } from "../src/git.ts";
 import { FixtureRepo, fixtureEnv, runGit, tempDir } from "./helpers/git-fixture.ts";
 
@@ -377,6 +377,18 @@ describe("runProgram", () => {
       const git = resolveProgram("git", { PATH: process.env["PATH"] ?? "" }, tmp.dir);
       assert.ok(git !== null && git.endsWith("git"));
       assert.equal(resolveProgram("git", { PATH: "" }, tmp.dir), null);
+    });
+
+    it("a PATH for a repository's programs keeps only absolute folders outside it, however they are spelled", { skip: !POSIX }, () => {
+      const tree = join(tmp.dir, "tree");
+      const bin = join(tmp.dir, "bin");
+      const linked = join(tmp.dir, "tree-link");
+      symlinkSync(tree, linked);
+      const value = ["", ".", "relative/bin", tree, join(tree, "node_modules", ".bin"), join(linked, "node_modules", ".bin"), bin, "/usr/bin"].join(":");
+      assert.equal(pathOutside(value, [tree]), `${bin}:/usr/bin`);
+      // The planted program is then found nowhere, even from a working directory outside the tree.
+      assert.equal(resolveProgram("planted", { PATH: pathOutside(`${tree}:${join(tree, "node_modules", ".bin")}`, [tree]) }, tmp.dir), null);
+      assert.equal(pathOutside(value, []), [tree, join(tree, "node_modules", ".bin"), join(linked, "node_modules", ".bin"), bin, "/usr/bin"].join(":"));
     });
   });
 });

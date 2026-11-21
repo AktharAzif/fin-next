@@ -181,6 +181,20 @@ export function isInsideOnDisk(dir: string, root: string): boolean {
   return insideTree(dir, treeOf(root));
 }
 
+/**
+ * `pathValue` (a PATH) with every entry dropped that is not an absolute folder or lies in or below
+ * one of `roots`, decided on the disk. A command that reads a repository gives its programs this
+ * PATH, so a program committed to that repository never stands in for git or gh, whatever folder a
+ * call runs in.
+ */
+export function pathOutside(pathValue: string, roots: readonly string[]): string {
+  const trees = roots.map(treeOf);
+  return pathValue
+    .split(delimiter)
+    .filter((dir) => dir !== "" && isAbsolute(dir) && !trees.some((tree) => insideTree(dir, tree)))
+    .join(delimiter);
+}
+
 function isExecutableFile(path: string): boolean {
   try {
     if (!statSync(path).isFile()) return false;

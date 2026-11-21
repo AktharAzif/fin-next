@@ -18,6 +18,7 @@ import { escapeText } from "./display.ts";
 import { checkEnvironment } from "./env-refusals.ts";
 import { ConfigError, DataError, EXIT, ProgramError } from "./errors.ts";
 import { ZERO_SHA, isSha } from "./git.ts";
+import { finReviewHome } from "./home.ts";
 import { readJsonFile } from "./json.ts";
 import { MAX_CONFIG_BYTES, OPTION_FLAGS, displayValue, modelIdOf, parseMachineOptions, parseReviewOptions } from "./options.ts";
 import type { OptionError, OptionKey, ReviewOptions } from "./options.ts";
@@ -287,13 +288,14 @@ async function dispatch(ctx: CliContext): Promise<number> {
 
 // ---- options ----------------------------------------------------------------------------------
 
-/** The machine's local defaults from $FIN_REVIEW_HOME/config.json, when that is set. */
+/** The machine's local option defaults from $FIN_REVIEW_HOME/config.json (by default ~/.fin-review/config.json). */
 export function machineDefaults(ctx: CliContext, config: EngineConfig): ReviewOptions {
-  const home = ctx.env["FIN_REVIEW_HOME"];
-  if (home === undefined || home === "") return config.defaults;
-  if (!isAbsolute(home) || home.includes("\0")) {
-    throw new ConfigError("$FIN_REVIEW_HOME", ["must be an absolute path"]);
-  }
+  // The same file the review modes read claudePath and maxSessions from: $FIN_REVIEW_HOME, or
+  // ~/.fin-review when it is unset, so its options are always applied and always validated.
+  const set = ctx.env["FIN_REVIEW_HOME"];
+  const userHome = ctx.env["HOME"];
+  if ((set === undefined || set === "") && (userHome === undefined || !isAbsolute(userHome))) return config.defaults;
+  const home = finReviewHome(ctx.env);
   const file = "$FIN_REVIEW_HOME/config.json";
   const read = readJsonFile(join(home, "config.json"), MAX_CONFIG_BYTES);
   if (!read.ok) {

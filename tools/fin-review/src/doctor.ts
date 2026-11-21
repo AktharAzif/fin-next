@@ -1,19 +1,21 @@
-// `doctor` (spec 07 §4.7), the minimal doctor of slice 1 (S7-25): D1 the pinned version, D2 every
-// flag the runner passes is in the pinned CLI's --help, D4 no refused variable in the engine's
+// `doctor` (spec 07 §4.7), the minimal doctor of slice 1 (S7-25): D1 the pinned version (of the file
+// claudePath names now), D2 every flag the runner passes is in the pinned CLI's --help, D3 no
+// settings file a session could read sets a refused key, D4 no refused variable in the engine's
 // environment, and with --live D5: one locked session per allowed model answering "ready", with
 // modelUsage naming only that model ID, at effort high and a 0.50 USD budget. Writes
-// $FIN_REVIEW_HOME/state/doctor.json; exits 0 when every check it ran passed, else 78.
+// $FIN_REVIEW_HOME/state/doctor.json (never inside the engine's repository); exits 0 when every check
+// it ran passed, else 78.
 
 import { mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { realpathSync } from "node:fs";
 import type { CliContext } from "./cli.ts";
 import { compactUtc, systemClock, systemRandom } from "./clock.ts";
 import type { Clock, RandomSource } from "./clock.ts";
 import type { EngineConfig } from "./config.ts";
-import { EXIT } from "./errors.ts";
-import { runProgram } from "./exec.ts";
-import { ensureHome, finReviewHome, loadMachineConfig } from "./home.ts";
+import { escapeText } from "./display.ts";
+import { ConfigError, EXIT } from "./errors.ts";
+import { canonicalPath, runProgram } from "./exec.ts";
+import { ensureHome, finReviewHome, guardHome, loadMachineConfig } from "./home.ts";
 import { LENSES } from "./review/lenses.ts";
 import { ATTACK, GENERIC_PROFILE, checklistIds, loadProcedure, sessionSchema } from "./review/procedure.ts";
 import type { Procedure } from "./review/procedure.ts";
@@ -22,15 +24,17 @@ import { doctorSessions } from "./roles.ts";
 import { checkAttempt } from "./runner/check.ts";
 import { REPLACED_FLAGS, RUNNER_FLAGS, cliSchema, startAttempt } from "./runner/cli.ts";
 import type { CliRunnerOptions } from "./runner/cli.ts";
-import { compareVersions, parseVersionOutput } from "./runner/client.ts";
+import { compareVersions, parseVersionOutput, pinClient } from "./runner/client.ts";
+import type { PinnedClient } from "./runner/client.ts";
 import { engineHome, environmentRefusals, SESSION_PATH } from "./runner/env.ts";
+import { managedSettingsDir, settingsRefusals } from "./runner/settings-files.ts";
 import type { RunOutcome } from "./exec.ts";
 import type { SessionSpec } from "./runner/types.ts";
 
 export type CheckResult = "pass" | "fail" | "skipped";
 
 export interface DoctorCheck {
-  readonly id: "D1" | "D2" | "D4" | "D5";
+  readonly id: "D1" | "D2" | "D3" | "D4" | "D5";
   readonly result: CheckResult;
   readonly detail: string;
   readonly data?: unknown;
@@ -44,6 +48,8 @@ export interface DoctorServices {
   readonly runClaude?: (claudePath: string, args: readonly string[]) => Promise<ClaudeRun>;
   /** Starts one D5 session attempt; default: the CLI runner's. */
   readonly startSession?: (spec: SessionSpec, options: CliRunnerOptions) => Promise<RunOutcome>;
+  /** The managed-settings folder the pinned Claude Code reads (D3); default: the operating system's. */
+  readonly managedSettingsDir?: string;
 }
 
 export interface ClaudeRun {
@@ -98,22 +104,37 @@ function isReady(output: unknown): boolean {
 export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boolean, services?: DoctorServices): Promise<number> {
   const clock = services?.clock ?? systemClock;
   const random = services?.random ?? systemRandom;
-  const home = ensureHome(finReviewHome(ctx.env));
+  const engineRoot = canonicalPath(resolve(ctx.configDir, "..", "..", ".."));
+  const homePath = finReviewHome(ctx.env);
+  guardHome(homePath, [engineRoot]);
+  const home = ensureHome(homePath);
   const machine = loadMachineConfig(home, ctx.env);
   const runClaude = services?.runClaude ?? ((path: string, args: readonly string[]) => defaultRunClaude(path, args, ctx.env));
   const checks: DoctorCheck[] = [];
-  const procedure = loadProcedure(join(resolve(ctx.configDir, "..", "..", ".."), "docs", "review"));
+  const procedure = loadProcedure(join(engineRoot, "docs", "review"));
 
-  // D1: the version equals the pin and is at least the minimum.
+  // D1: the version of the file claudePath names now equals the pin and is at least the minimum.
+  let pinned: PinnedClient | null = null;
+  let pinProblem = "";
+  try {
+    pinned = pinClient(machine.claudePath);
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    pinProblem = error.details.join("; ");
+  }
+  const claudePath = pinned?.path ?? machine.claudePath;
   let clientVersion: string | null = null;
   try {
-    const out = await runClaude(machine.claudePath, ["--version"]);
-    clientVersion = out.code === 0 ? parseVersionOutput(out.stdout) : null;
+    if (pinned !== null) {
+      const out = await runClaude(claudePath, ["--version"]);
+      clientVersion = out.code === 0 ? parseVersionOutput(out.stdout) : null;
+    }
   } catch {
     clientVersion = null;
   }
   const pin = config.client;
-  if (clientVersion === null) checks.push({ id: "D1", result: "fail", detail: "claude --version could not be read from claudePath" });
+  if (pinned === null) checks.push({ id: "D1", result: "fail", detail: pinProblem });
+  else if (clientVersion === null) checks.push({ id: "D1", result: "fail", detail: "claude --version could not be read from claudePath" });
   else if (clientVersion !== pin.claudeCode || compareVersions(clientVersion, pin.minimum) < 0) {
     checks.push({ id: "D1", result: "fail", detail: `claude is ${clientVersion}; the pin is ${pin.claudeCode} (minimum ${pin.minimum})` });
   } else checks.push({ id: "D1", result: "pass", detail: `claude ${clientVersion} equals the pin (minimum ${pin.minimum})` });
@@ -122,7 +143,8 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
   // engine passes to --json-schema (it checks the schema before it reads a prompt, so no model is
   // called: an empty stdin ends the run at "Input must be provided").
   try {
-    const out = await runClaude(machine.claudePath, ["--help"]);
+    if (pinned === null) throw new Error("claudePath names no file");
+    const out = await runClaude(claudePath, ["--help"]);
     if (out.code !== 0) checks.push({ id: "D2", result: "fail", detail: "claude --help failed" });
     else {
       const missing = missingFlags(out.stdout, RUNNER_FLAGS);
@@ -132,7 +154,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
       const refusedSchemas: string[] = [];
       if (missing.length === 0) {
         for (const { name, schema } of schemas) {
-          const probe = await runClaude(machine.claudePath, ["-p", "--output-format", "json", "--json-schema", cliSchema(schema)]);
+          const probe = await runClaude(claudePath, ["-p", "--output-format", "json", "--json-schema", cliSchema(schema)]);
           const text = `${probe.stdout}\n${probe.stderr}`;
           if (BAD_SCHEMA_RE.test(text) || !NO_INPUT_RE.test(text)) refusedSchemas.push(name);
         }
@@ -154,6 +176,15 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
     checks.push({ id: "D2", result: "fail", detail: "claude --help could not be run" });
   }
 
+  // D3: no settings file a session could read sets a refused key (file paths and key names only).
+  const realHome = canonicalPath(engineHome(ctx.env));
+  const refusedSettings = settingsRefusals(realHome, services?.managedSettingsDir ?? managedSettingsDir(), config.envRefusals);
+  checks.push(
+    refusedSettings.length === 0
+      ? { id: "D3", result: "pass", detail: "no settings file a session could read sets a refused key" }
+      : { id: "D3", result: "fail", detail: refusedSettings.map((item) => `${escapeText(item.file)}: ${item.problem}`).join("; "), data: refusedSettings },
+  );
+
   // D4: no refused variable in the engine's environment (names only, never values).
   const found = environmentRefusals(ctx.env, config.envRefusals);
   checks.push(
@@ -164,7 +195,7 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
 
   // D5: each allowed model answers in a locked session, and only that model is used.
   if (!live) checks.push({ id: "D5", result: "skipped", detail: "run doctor --live to start one locked session per model" });
-  else if (checks.some((check) => check.result !== "pass")) checks.push({ id: "D5", result: "skipped", detail: "not started: D1, D2 or D4 failed" });
+  else if (pinned === null || checks.some((check) => check.result !== "pass")) checks.push({ id: "D5", result: "skipped", detail: "not started: D1, D2, D3 or D4 failed" });
   else {
     const runId = `doctor-${compactUtc(clock.now()).toLowerCase()}-${random(4).toString("hex")}`;
     const runDir = join(home, "state", "doctor-sessions", runId);
@@ -172,9 +203,10 @@ export async function runDoctor(ctx: CliContext, config: EngineConfig, live: boo
     mkdirSync(treeDir, { recursive: true, mode: 0o700 });
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     const options: CliRunnerOptions = {
-      claudePath: machine.claudePath,
+      claudePath: pinned.path,
+      claudeFingerprint: pinned.fingerprint,
       engineEnv: ctx.env,
-      home: realpathSync(engineHome(ctx.env)),
+      home: realHome,
       finReviewHome: home,
       runDir,
       runId,

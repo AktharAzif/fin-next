@@ -2,7 +2,7 @@
 // clone-like repository whose origin is it, a $FIN_REVIEW_HOME and a HOME, all in a temporary
 // directory; plus a frozen clock and fake-session helpers. No network.
 
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Clock, RandomSource } from "../../src/clock.ts";
 import type { PullFacts } from "../../src/gh.ts";
@@ -86,6 +86,10 @@ export interface ReviewFixture {
   readonly local: FixtureRepo;
   readonly home: string;
   readonly userHome: string;
+  /** The pinned client's file, which `${userHome}/.local/bin/claude` links to (as the installer lays it out). */
+  readonly claudeFile: string;
+  /** An empty managed-settings folder, so no test reads the machine's own. */
+  readonly managedDir: string;
   readonly base: string;
   readonly env: Record<string, string>;
   /** Commits `changes` on `parent` (default: the base) and points refs/pull/<n>/head at it. */
@@ -108,6 +112,14 @@ export function reviewFixture(): ReviewFixture {
   const home = join(tmp.dir, "fin-review-home");
   const userHome = join(tmp.dir, "user-home");
   mkdirSync(userHome, { recursive: true });
+  // The client as its installer lays it out: a versioned file, and the default claudePath linking to it.
+  const versions = join(userHome, ".local", "share", "claude", "versions");
+  mkdirSync(versions, { recursive: true });
+  mkdirSync(join(userHome, ".local", "bin"), { recursive: true });
+  const claudeFile = join(versions, "2.1.328");
+  writeFileSync(claudeFile, "#!/bin/sh\necho '2.1.328 (Claude Code)'\n", { mode: 0o755 });
+  symlinkSync(claudeFile, join(userHome, ".local", "bin", "claude"));
+  const managedDir = join(tmp.dir, "managed-settings");
   const env = { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: userHome, FIN_REVIEW_HOME: home };
   const bases = new Map<number, string>();
   return {
@@ -116,6 +128,8 @@ export function reviewFixture(): ReviewFixture {
     local,
     home,
     userHome,
+    claudeFile: realpathSync.native(claudeFile),
+    managedDir,
     base,
     env,
     pr: (n, changes, parent = base) => {
@@ -193,7 +207,7 @@ export async function runFixtureCli(fx: ReviewFixture, argv: string[], services:
     stderr: (text) => {
       stderr += text;
     },
-    services,
+    services: { managedSettingsDir: fx.managedDir, ...services },
   });
   return { code, stdout, stderr };
 }

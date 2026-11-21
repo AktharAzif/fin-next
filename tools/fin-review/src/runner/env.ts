@@ -2,9 +2,12 @@
 // engine's own environment.
 //
 // Trimmed Phase 0 (docs/review/README.md): there is no fin-review OS user and no token of its own,
-// so a session runs under the current user's Claude Code login. HOME and CLAUDE_CONFIG_DIR are
-// therefore the engine's own (a scratch home would drop the login), and CLAUDE_CODE_OAUTH_TOKEN is
-// passed on when the engine has one. Everything else is fixed here; nothing else reaches a session.
+// so a session runs under the current user's Claude Code login. HOME is therefore the engine's own
+// (a scratch home would drop the login), and CLAUDE_CODE_OAUTH_TOKEN is passed on when the engine
+// has one. CLAUDE_CONFIG_DIR never is: config/env-refusals.json refuses it, so a session's
+// configuration is always $HOME/.claude, inside the home whose other entries the settings deny, and
+// whose settings.json the engine checks before any session. Everything else is fixed here; nothing
+// else reaches a session.
 
 import { checkEnvironment } from "../env-refusals.ts";
 import { ConfigError } from "../errors.ts";
@@ -16,7 +19,6 @@ export const SESSION_ENV_NAMES: readonly string[] = [
   "HOME",
   "LANG",
   "TMPDIR",
-  "CLAUDE_CONFIG_DIR",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
   "DISABLE_AUTOUPDATER",
@@ -50,10 +52,8 @@ export function sessionEnv(engineEnv: Readonly<Record<string, string | undefined
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     DISABLE_AUTOUPDATER: "1",
   };
-  const configDir = engineEnv["CLAUDE_CONFIG_DIR"];
-  if (configDir !== undefined && configDir !== "") {
-    if (!ABSOLUTE_RE.test(configDir)) throw new ConfigError("CLAUDE_CONFIG_DIR", ["must be an absolute path"]);
-    env["CLAUDE_CONFIG_DIR"] = configDir;
+  if (engineEnv["CLAUDE_CONFIG_DIR"] !== undefined) {
+    throw new ConfigError("CLAUDE_CONFIG_DIR", ["is refused (config/env-refusals.json): a session's configuration is $HOME/.claude"]);
   }
   const token = engineEnv["CLAUDE_CODE_OAUTH_TOKEN"];
   if (token !== undefined && token !== "") {
