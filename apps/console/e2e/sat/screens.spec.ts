@@ -932,7 +932,7 @@ test.describe("roles", () => {
   });
 
   test("@journey an edited role saves with its intent and says it is saved", async ({ page }) => {
-    const api = developerRoleServer();
+    const { api } = developerRoleServer();
     await api.install(page);
     await gotoReady(page, "/settings/roles/rol_dev");
     await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
@@ -980,7 +980,7 @@ test.describe("roles", () => {
     page,
   }) => {
     const reload = Promise.withResolvers<void>();
-    const api = developerRoleServer({ nth: 1, until: reload.promise });
+    const { api } = developerRoleServer({ nth: 1, until: reload.promise });
     await api.install(page);
     await gotoReady(page, "/settings/roles/rol_dev");
     await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
@@ -1010,6 +1010,53 @@ test.describe("roles", () => {
     expect(saves[2]?.body).toMatchObject({ description: "Builds the integration.", version: 2 });
     expect(sentPermissions(saves[2])).toEqual(["apiKey.read", "member.read", "webhooks.read"]);
   });
+
+  test("@journey @security a change made while the save reloads never saves over someone else's", async ({
+    page,
+  }) => {
+    const reload = Promise.withResolvers<void>();
+    // Another admin takes webhooks.read away while this editor's reload is on its way.
+    const { api, role } = developerRoleServer({
+      nth: 1,
+      until: reload.promise,
+      meanwhile: (held) => {
+        held.permissions = held.permissions.filter((key) => key !== "webhooks.read");
+        held.version += 1;
+      },
+    });
+    await api.install(page);
+    await gotoReady(page, "/settings/roles/rol_dev");
+    await expect(page.getByRole("heading", { level: 1, name: "Developer" })).toBeVisible();
+    await page.getByRole("textbox", { name: /^Description/ }).fill("Builds the integration.");
+    await page.getByRole("button", { name: "Save" }).click();
+    await enterCode(page, "Authenticator code", "123456");
+    const summary = page.getByRole("complementary", { name: "Summary" });
+    const saved = summary.getByText("Saved. Changes apply on each person’s next request.");
+    await expect(saved).toBeVisible();
+    // The save made version 2; its reload is held while version 3 is made and a box is unticked.
+    await expect.poll(() => api.calls("GET /api/roles/:roleKey").length).toBe(2);
+    const customers = page.getByRole("checkbox", { name: /^See customers/ });
+    await customers.click();
+    await expect(saved).toBeHidden();
+    reload.resolve();
+    await expect(summary.getByText("4 people have this role.")).toBeVisible();
+    await expect(customers).not.toBeChecked();
+
+    // The draft was never rebuilt from version 3, so it is saved on version 2 and refused.
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(
+      summary.getByText(
+        "Someone else changed this role meanwhile. Reload the page to see their changes.",
+      ),
+    ).toBeVisible();
+    await expect(saved).toBeHidden();
+    const saves = api.calls("PUT /api/roles/:roleId");
+    expect(saves).toHaveLength(3);
+    expect(saves[2]?.body).toMatchObject({ description: "Builds the integration.", version: 2 });
+    // The other admin's change stands.
+    expect(role.version).toBe(3);
+    expect([...role.permissions].sort()).toEqual(["apiKey.read", "customers.read", "member.read"]);
+  });
 });
 
 /** The permissions a role save sent, sorted. */
@@ -1018,21 +1065,37 @@ function sentPermissions(request: Recorded | undefined): string[] {
   return [...(body?.permissions ?? [])].sort();
 }
 
+/** Developer's role as the stand-in server holds it. */
+interface HeldRole {
+  description: string;
+  permissions: string[];
+  version: number;
+}
+
 /**
- * Developer's role as a server holds it: a save (after one step-up) replaces it and moves its
- * version on. Each version has its own holders count, so a spec sees when a reload is drawn.
- * `hold` keeps the nth GET of the role waiting until `until` settles.
+ * Developer's role as a server holds it: a save (after one step-up) at the role's version replaces
+ * it, moves its version on and answers with the new version; a save at any other version is refused
+ * with `409 conflict`. Each version has its own holders count, so a spec sees when a reload is
+ * drawn. `hold` keeps the nth GET of the role waiting until `until` settles; its `meanwhile` is
+ * another admin's change, made as that GET arrives.
  */
-function developerRoleServer(hold?: { nth: number; until: Promise<void> }): ApiDouble {
-  const role = {
+function developerRoleServer(hold?: {
+  nth: number;
+  until: Promise<void>;
+  meanwhile?: (role: HeldRole) => void;
+}): { api: ApiDouble; role: HeldRole } {
+  const role: HeldRole = {
     description: DEVELOPER_ROLE.description,
     permissions: [...DEVELOPER_ROLE.permissions],
     version: 1,
   };
-  return signedIn()
+  const api = signedIn()
     .on("GET /api/roles", ok({ roles: [...BUILT_IN_ROLES, DEVELOPER_ROLE] }))
     .on("GET /api/roles/:roleKey", async (_request, nth) => {
-      if (hold !== undefined && nth === hold.nth) await hold.until;
+      if (hold !== undefined && nth === hold.nth) {
+        hold.meanwhile?.(role);
+        await hold.until;
+      }
       return ok({
         roleKey: "rol_dev",
         roleId: "rol_dev",
@@ -1046,13 +1109,15 @@ function developerRoleServer(hold?: { nth: number; until: Promise<void> }): ApiD
     })
     .on("PUT /api/roles/:roleId", (request, nth) => {
       if (nth === 0) return stepUpRequired("role.update", { intentId: "sti_save" });
-      const body = request.body as { description: string; permissions: string[] };
+      const body = request.body as { description: string; permissions: string[]; version: number };
+      if (body.version !== role.version) return problem(409, "conflict");
       role.description = body.description;
       role.permissions = body.permissions;
       role.version += 1;
-      return ok({});
+      return ok({ version: role.version });
     })
     .on("POST /api/auth/two-factor/verify-totp", ok({}));
+  return { api, role };
 }
 
 test.describe("the audit log", () => {

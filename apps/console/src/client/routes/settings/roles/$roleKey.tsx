@@ -193,14 +193,22 @@ function Editor(props: {
       detail !== null &&
       [...toPermissions(detail.permissions)].some((key) => !draft.permissions.has(key)),
   );
-  // The version the draft was read at. A newer one (the save's own reload) is taken in place. While
-  // nothing has changed since the save, the draft becomes what the server now holds and "saved"
-  // stays on screen; a change made while the reload was on its way is kept, unsaved, on top of it.
-  const [version, setVersion] = useState(detail?.version ?? null);
+  // The version the draft builds on, which a save sends: the one it was read at, then the one this
+  // editor's own save made (the save's answer). It moves on to a version a reload brought only with
+  // the draft rebuilt from that version, so a save never claims a version whose contents the draft
+  // did not take in: a change someone else made meanwhile is refused as a conflict, not undone.
+  const [base, setBase] = useState(detail?.version ?? null);
+  // The newest version drawn. A newer one (the save's own reload) is taken in place: while nothing
+  // has changed since the save, the draft becomes what the server now holds and "saved" stays on
+  // screen; a change made while the reload was on its way is kept, unsaved, on its own base.
+  const [drawn, setDrawn] = useState(detail?.version ?? null);
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
-  if (!isNew && detail !== null && detail.version !== version) {
-    setVersion(detail.version);
-    if (state === "saved") setDraft(savedDraft(detail));
+  if (!isNew && detail !== null && detail.version !== drawn) {
+    setDrawn(detail.version);
+    if (state === "saved") {
+      setDraft(savedDraft(detail));
+      setBase(detail.version);
+    }
   }
   const [failed, setFailed] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
@@ -235,14 +243,13 @@ function Editor(props: {
         await navigate({ href: roleHref(created.roleId), replace: true });
         return;
       }
-      if (detail === null || detail.roleId === null || detail.version === null) return;
-      await withReasonValues("role.update", { role: body.name }, () =>
-        fin.api(saveRole, {
-          roleId: detail.roleId as string,
-          ...body,
-          version: detail.version as number,
-        }),
+      if (detail === null || detail.roleId === null || base === null) return;
+      const roleId = detail.roleId;
+      const saved = await withReasonValues("role.update", { role: body.name }, () =>
+        fin.api(saveRole, { roleId, ...body, version: base }),
       );
+      // The save made this version from this draft: the next save builds on it.
+      setBase(saved.version);
       setState("saved");
       await props.onSaved();
     } catch (error) {

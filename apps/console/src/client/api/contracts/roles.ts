@@ -66,13 +66,18 @@ export const createRole = defineContract({
   output: z.looseObject({ roleId: z.string().min(1) }),
 });
 
+/**
+ * Saves a custom role at the version the draft was built on (a stale one is `409 conflict`). The
+ * answer is the version the save made: the editor's next save builds on it, never on a version a
+ * reload brought in while the draft held changes of its own.
+ */
 export const saveRole = defineContract({
   name: "roles.save",
   method: "PUT",
   path: "/roles/:roleId",
   organization: true,
   input: z.object({ roleId: z.string().min(1), ...draft, version: z.number().int().nonnegative() }),
-  output: z.unknown(),
+  output: z.looseObject({ version: z.number().int().nonnegative() }),
 });
 
 export const deleteRole = defineContract({
