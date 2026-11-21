@@ -11,7 +11,9 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  totpFromUri,
 } from "../test/harness.ts";
+import { totp } from "./crypto/totp.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 import { revokeOtherSessions, revokeSession } from "./sessions.ts";
@@ -129,6 +131,26 @@ describe("staff codes (§10.5)", () => {
     expect((await h.outbox(email)).map((m) => m.template)).toEqual(["staff/staff-sign-in-code"]);
   });
 
+  it("write the gate the new session is at on the request line (§18.1)", async () => {
+    const pendingEmail = unique("line.pending");
+    await addMember(pendingEmail, "viewer", "pending");
+    const before = h.lines.named("request").length;
+    await staffCode(h, staffBrowser(h, pendingEmail), pendingEmail);
+    expect(h.lines.named("request").slice(before).at(-1)).toMatchObject({
+      authPath: "/sign-in/email-otp",
+      assurance: "aal1",
+      gate: "pending",
+    });
+    const { email } = await enrolledMember("line.enrolled");
+    const again = h.lines.named("request").length;
+    await staffCode(h, staffBrowser(h, email), email);
+    expect(h.lines.named("request").slice(again).at(-1)).toMatchObject({
+      authPath: "/sign-in/email-otp",
+      assurance: "aal1",
+      gate: "factor_step",
+    });
+  });
+
   it("never sign in a removed member", async () => {
     const email = unique("removed");
     await addMember(email, "viewer", "removed");
@@ -232,6 +254,65 @@ describe("enrolment ([SA-29], §6.5)", () => {
   });
 });
 
+describe("finishing an authenticator as the first factor (§6.5, §10.3)", () => {
+  it("enrols the member inside the enrolment window", async () => {
+    const email = unique("totp.enrol");
+    const memberId = await addMember(email, "viewer", "pending");
+    const browser = staffBrowser(h, email);
+    await staffCode(h, browser, email);
+    const issued = await issue(memberId);
+    await redeem(browser, memberId, issued.code);
+    const enable = await browser.post("/api/auth/two-factor/enable", {});
+    const secret = totpFromUri(String(enable.json?.totpURI)).secret;
+    const finished = await browser.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(finished.status, JSON.stringify(finished.json)).toBe(200);
+    expect(await sessionOf(browser)).toMatchObject({ assurance: "aal2" });
+    const member = await h.admin.query<{ status: string }>(
+      "SELECT status FROM staff.member WHERE id = $1",
+      [memberId],
+    );
+    expect(member.rows[0]?.status).toBe("active");
+    expect(
+      (await h.events({ event: "staff.factor_enrolled" })).some((e) => e.target_id === memberId),
+    ).toBe(true);
+  });
+
+  it("happens only inside the enrolment window", async () => {
+    const email = unique("totp.window");
+    const memberId = await addMember(email, "viewer", "pending");
+    const browser = staffBrowser(h, email);
+    await staffCode(h, browser, email);
+    const issued = await issue(memberId);
+    await redeem(browser, memberId, issued.code);
+    const enable = await browser.post("/api/auth/two-factor/enable", {});
+    expect(enable.status, JSON.stringify(enable.json)).toBe(200);
+    const secret = totpFromUri(String(enable.json?.totpURI)).secret;
+    // The window closes before the code is entered.
+    await seed(
+      h.admin,
+      "UPDATE staff.session SET enrolment_open_until = now() - interval '1 second' WHERE token = $1",
+      [browser.sessionToken()],
+    );
+    const late = await browser.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(late.status).toBe(403);
+    expect(late.json).toMatchObject({ code: "forbidden", reason: "enrolment_code_required" });
+    expect(h.lines.named("staff.enrolment_refused").at(-1)).toEqual({
+      staffId: memberId,
+      reason: "no_window",
+    });
+    expect(await sessionOf(browser)).toMatchObject({ assurance: "aal1" });
+    const member = await h.admin.query<{ status: string }>(
+      "SELECT status FROM staff.member WHERE id = $1",
+      [memberId],
+    );
+    expect(member.rows[0]?.status).toBe("pending");
+  });
+});
+
 /** A member enrolled with a passkey, signed in at aal2 in their own browser. */
 async function enrolledMember(label: string) {
   const email = unique(label);
@@ -266,7 +347,11 @@ describe("a working staff member", () => {
 
   it("adds and removes a further factor only with intents", async () => {
     const { browser, authenticator } = await enrolledMember("further");
-    const asked = await browser.get("/api/auth/passkey/generate-register-options");
+    // The options GET makes no intent (§2.3); the POST that adds the factor does.
+    const options = await browser.get("/api/auth/passkey/generate-register-options");
+    expect(options.json).toMatchObject({ code: "step_up_required", reason_key: "add_factor" });
+    expect(options.json?.intent_id).toBeUndefined();
+    const asked = await browser.post("/api/auth/passkey/verify-registration", {});
     expect(asked.json).toMatchObject({ code: "step_up_required", reason_key: "add_factor" });
     const intent = String(asked.json?.intent_id);
     expect(
@@ -329,7 +414,7 @@ describe("a working staff member", () => {
   it("is signed out after five refused ceremonies at a step-up (§7.7)", async () => {
     const victim = await enrolledMember("victim");
     const other = await enrolledMember("other");
-    const asked = await victim.browser.get("/api/auth/passkey/generate-register-options");
+    const asked = await victim.browser.post("/api/auth/passkey/verify-registration", {});
     const intent = String(asked.json?.intent_id);
     for (let i = 0; i < 5; i += 1) {
       const refused = await passkeyCeremony(victim.browser, other.authenticator, {
@@ -341,6 +426,32 @@ describe("a working staff member", () => {
     expect((await h.events({ event: "staff.step_up_locked" })).length).toBe(1);
     const after = await victim.browser.get("/api/auth/passkey/generate-register-options");
     expect(after.json).toMatchObject({ code: "unauthenticated", reason: "too_many_tries" });
+  });
+
+  it("never lets the factor step finish an authenticator whose set-up was left unfinished", async () => {
+    const { email, browser, authenticator } = await enrolledMember("unfinished");
+    const asked = await browser.post("/api/auth/two-factor/enable", {});
+    const intent = String(asked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+    ).toBe(200);
+    const enabled = await browser.post(
+      "/api/auth/two-factor/enable",
+      {},
+      { "fin-step-up-intent": intent },
+    );
+    expect(enabled.status, JSON.stringify(enabled.json)).toBe(200);
+    const secret = totpFromUri(String(enabled.json?.totpURI)).secret;
+    // A second sign-in by code from another browser of the same Access identity: aal1.
+    const other = staffBrowser(h, email);
+    const { signedIn } = await staffCode(h, other, email);
+    expect(signedIn?.status).toBe(200);
+    const right = await other.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(right.status).toBe(400);
+    expect(right.json).toMatchObject({ code: "TOTP_NOT_ENABLED" });
+    expect(await sessionOf(other)).toMatchObject({ assurance: "aal1" });
   });
 
   it("signs out one other session and every other session", async () => {
@@ -394,6 +505,28 @@ describe("the Access identity (§10.5, AC-SAT-12)", () => {
     expect(
       (await h.events({ event: "staff.sign_in_failed" })).some(
         (e) => e.metadata.reason === "access_mismatch",
+      ),
+    ).toBe(true);
+  });
+
+  it("must keep the subject the session was made under, even with the same address", async () => {
+    const { email, memberId, browser } = await enrolledMember("subject");
+    const session = await sessionOf(browser);
+    expect(session?.assurance).toBe("aal2");
+    const mismatchesBefore = h.lines.named("staff.access_mismatch").length;
+    // The same address under another Access identity (a re-created or second IdP account).
+    browser.options.access = { email, sub: "sub-of-another-access-identity" };
+    const refused = await browser.get("/api/auth/get-session");
+    expect(refused.status).toBe(403);
+    expect(refused.json).toMatchObject({ code: "access_mismatch" });
+    const gone = await h.admin.query("SELECT 1 FROM staff.session WHERE id = $1", [session?.id]);
+    expect(gone.rowCount).toBe(0);
+    expect(h.lines.named("staff.access_mismatch").slice(mismatchesBefore)).toEqual([
+      { staffId: memberId },
+    ]);
+    expect(
+      (await h.events({ event: "staff.sign_in_failed" })).some(
+        (e) => e.target_id === memberId && e.metadata.reason === "access_mismatch",
       ),
     ).toBe(true);
   });

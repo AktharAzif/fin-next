@@ -21,6 +21,14 @@ export interface AuthContextView {
   secret: string;
   secretConfig: unknown;
   authCookies: { sessionToken: { name: string } };
+  /** The full name of one of the library's cookies (the realm's prefix applied). */
+  createAuthCookie(name: string): { name: string };
+  internalAdapter: {
+    /** A verification row by its identifier, read without consuming it. */
+    findVerificationValue(
+      identifier: string,
+    ): Promise<{ value: string; expiresAt: Date | string } | null>;
+  };
   returned?: unknown;
   newSession?: { session: LibrarySession; user: LibraryUser } | null;
 }

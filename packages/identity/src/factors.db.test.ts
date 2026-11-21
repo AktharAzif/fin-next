@@ -10,10 +10,13 @@ import {
   codeSignIn,
   createHarness,
   type Harness,
+  passkeyCeremony,
+  registerPasskey,
   setUpAuthenticator,
   totpFromUri,
 } from "../test/harness.ts";
-import { hotp, totpStep } from "./crypto/totp.ts";
+import { revokeTrustedBrowsers } from "./browsers.ts";
+import { hotp, totp, totpStep } from "./crypto/totp.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 
@@ -251,7 +254,7 @@ describe("revoking trusted browsers (§6.6)", () => {
     expect(trusted.status, JSON.stringify(trusted.json)).toBe(200);
     const id = (await h.events({ event: "browser.trusted" })).at(-1)?.target_id;
     // A passkey added from the working session is a factor change.
-    const add = await browser.get("/api/auth/passkey/generate-register-options");
+    const add = await browser.post("/api/auth/passkey/verify-registration", {});
     const intent = String(add.json?.intent_id);
     await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
     await browser.post(
@@ -338,6 +341,208 @@ describe("the last factor (§6.7)", () => {
       await userId(email),
     ]);
     expect(left.rowCount).toBe(0);
+  });
+});
+
+/** A person with a passkey who began an authenticator set-up with an intent and stopped. */
+async function personWithUnfinishedAuthenticator(label: string) {
+  const email = `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
+  const owner = h.browser();
+  await codeSignIn(h, owner, email);
+  const authenticator = h.authenticator();
+  const { verify } = await registerPasskey(owner, authenticator);
+  expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+  const asked = await owner.post("/api/auth/two-factor/enable", {});
+  expect(asked.json).toMatchObject({ code: "step_up_required" });
+  const intent = String(asked.json?.intent_id);
+  const proved = await passkeyCeremony(owner, authenticator, { "fin-step-up-intent": intent });
+  expect(proved.status, JSON.stringify(proved.json)).toBe(200);
+  const enabled = await owner.post(
+    "/api/auth/two-factor/enable",
+    {},
+    { "fin-step-up-intent": intent },
+  );
+  expect(enabled.status, JSON.stringify(enabled.json)).toBe(200);
+  return {
+    email,
+    owner,
+    secret: totpFromUri(String(enabled.json?.totpURI)).secret,
+    backupCodes: (enabled.json?.backupCodes as string[] | undefined) ?? [],
+  };
+}
+
+describe("an authenticator whose set-up is not finished (§5.4, §6.1)", () => {
+  it("is no factor at the factor step: its code and its backup codes pass nothing", async () => {
+    const { email, secret, backupCodes } = await personWithUnfinishedAuthenticator("unfinished");
+    const id = await userId(email);
+    // Someone holding only the mailbox signs in by code: aal1, at the factor step (a passkey).
+    const other = h.browser();
+    expect((await codeSignIn(h, other, email)).status).toBe(200);
+    expect((await sessionRow(other))?.assurance).toBe("aal1");
+    const right = await other.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(right.status).toBe(400);
+    expect(right.json).toMatchObject({ code: "TOTP_NOT_ENABLED" });
+    const backup = await other.post("/api/auth/two-factor/verify-backup-code", {
+      code: backupCodes[0],
+    });
+    expect(backup.status).toBe(400);
+    expect(backup.json).toMatchObject({ code: "BACKUP_CODES_NOT_ENABLED" });
+    expect((await sessionRow(other))?.assurance).toBe("aal1");
+    const gated = await other.post("/api/auth/two-factor/generate-backup-codes", {});
+    expect(gated.json).toMatchObject({ code: "factor_step_required" });
+    const row = await h.admin.query("SELECT verified FROM identity.two_factor WHERE user_id = $1", [
+      id,
+    ]);
+    expect(row.rows).toEqual([{ verified: false }]);
+    expect(
+      (await h.events({ event: "two_factor.enabled" })).filter((e) => e.ref_ids.includes(id)),
+    ).toHaveLength(0);
+  });
+
+  it("counts wrong codes while it is being finished toward the person's lockout", async () => {
+    const { email, owner, secret } = await personWithUnfinishedAuthenticator("unfinished.lock");
+    const id = await userId(email);
+    for (let i = 0; i < 10; i += 1) {
+      const wrong = await owner.post("/api/auth/two-factor/verify-totp", { code: "000000" });
+      expect(wrong.status).toBe(401);
+    }
+    const locked = await owner.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(locked.status).toBe(429);
+    expect(locked.json).toMatchObject({ code: "ACCOUNT_TEMPORARILY_LOCKED" });
+    expect((await h.events({ event: "sign_in.locked" })).some((e) => e.target_id === id)).toBe(
+      true,
+    );
+    // Finishing a set-up is neither the factor step nor a step-up: neither failure is written.
+    for (const event of ["sign_in.second_factor_failed", "step_up.failed"]) {
+      const written = (await h.events({ event })).filter(
+        (e) => e.target_id === id || e.ref_ids.includes(id),
+      );
+      expect(written, event).toHaveLength(0);
+    }
+  });
+
+  it("is finished by the working session that began it", async () => {
+    const { email, owner, secret } = await personWithUnfinishedAuthenticator("unfinished.own");
+    const id = await userId(email);
+    const finished = await owner.post("/api/auth/two-factor/verify-totp", {
+      code: totp(secret, new Date()),
+    });
+    expect(finished.status, JSON.stringify(finished.json)).toBe(200);
+    const row = await h.admin.query("SELECT verified FROM identity.two_factor WHERE user_id = $1", [
+      id,
+    ]);
+    expect(row.rows).toEqual([{ verified: true }]);
+    expect(
+      (await h.events({ event: "two_factor.enabled" })).some((e) => e.ref_ids.includes(id)),
+    ).toBe(true);
+  });
+});
+
+describe("a TOTP step is accepted once ([SA-35])", () => {
+  it("even when several sessions send the same code at the same moment", async () => {
+    const { email, first, secret } = await personWithAuthenticator("concurrent");
+    // Three factor-step sessions of the person, each on its own network.
+    await first.post("/api/auth/sign-out");
+    const sessions = [first, h.browser(), h.browser()];
+    for (const browser of sessions) expect((await codeSignIn(h, browser, email)).status).toBe(200);
+    // Open a connection for each first, so the three requests really run side by side.
+    await Promise.all(sessions.map((browser) => browser.get("/api/auth/get-session")));
+    const code = hotp(secret, totpStep(new Date()) + 1n);
+    const answers = await Promise.all(
+      sessions.map((browser) => browser.post("/api/auth/two-factor/verify-totp", { code })),
+    );
+    expect(answers.map((a) => a.status).sort()).toEqual([200, 401, 401]);
+    const assurances = await Promise.all(
+      sessions.map(async (b) => (await sessionRow(b))?.assurance),
+    );
+    expect(assurances.filter((a) => a === "aal2")).toHaveLength(1);
+  });
+});
+
+describe("a trusted-browser session (§6.6, S2-40)", () => {
+  it("stops being a working session once its row is revoked or expires", async () => {
+    const email = `trust.ends.${Math.random().toString(36).slice(2, 8)}@example.com`;
+    const browser = h.browser();
+    await codeSignIn(h, browser, email);
+    const { secret } = await setUpAuthenticator(browser);
+    const trustAgain = async () => {
+      await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
+      await browser.post("/api/auth/sign-out");
+      await codeSignIn(h, browser, email);
+      const trusted = await browser.post("/api/auth/two-factor/verify-totp", {
+        code: hotp(secret, totpStep(new Date())),
+        trustDevice: true,
+      });
+      expect(trusted.status, JSON.stringify(trusted.json)).toBe(200);
+      await browser.post("/api/auth/sign-out");
+      await codeSignIn(h, browser, email);
+      const row = await sessionRow(browser);
+      expect(row?.trusted_browser_id).not.toBeNull();
+      const working = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+      expect(working.json).toMatchObject({ code: "step_up_required" });
+      return row?.trusted_browser_id as string;
+    };
+    const id = await userId(email);
+
+    // "Forget this browser": the session it made is at the factor step from its next request.
+    await trustAgain();
+    await h.realm.run(browser.context(), async (tx) => {
+      for (const revoked of await revokeTrustedBrowsers(tx, id, "by_person", new Date())) {
+        await h.realm.runtime.audit(tx, {
+          event: "browser.trust_revoked",
+          actor: { kind: "user", id, via: "console" },
+          target: revoked,
+          refs: [id],
+          subjectUserId: id,
+          metadata: { reason: "by_person" },
+        });
+      }
+    });
+    const revoked = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+    expect(revoked.status).toBe(403);
+    expect(revoked.json).toMatchObject({ code: "factor_step_required" });
+
+    // A row past its 30 days counts for nothing either, before the sweep deletes it.
+    const second = await trustAgain();
+    await seed(
+      h.admin,
+      `UPDATE identity.trusted_browser SET created_at = now() - interval '31 days',
+              expires_at = now() - interval '1 day' WHERE id = $1`,
+      [second],
+    );
+    const expired = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+    expect(expired.status).toBe(403);
+    expect(expired.json).toMatchObject({ code: "factor_step_required" });
+  });
+});
+
+describe("a replaced session keeps the organisation it was in (§11.3)", () => {
+  it("when finishing an authenticator replaces it", async () => {
+    const browser = h.browser();
+    const email = `org.totp.${Math.random().toString(36).slice(2, 8)}@example.com`;
+    await codeSignIn(h, browser, email);
+    const org = newId("org", systemClock);
+    await seed(
+      h.admin,
+      "INSERT INTO identity.organization (id, name, created_by) VALUES ($1, 'Acme', $2)",
+      [org, await userId(email)],
+    );
+    await seed(
+      h.admin,
+      "UPDATE identity.session SET current_organization_id = $2 WHERE token = $1",
+      [browser.sessionToken(), org],
+    );
+    const { verify } = await setUpAuthenticator(browser);
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+    const after = await h.admin.query(
+      "SELECT created_via, current_organization_id FROM identity.session WHERE token = $1",
+      [browser.sessionToken()],
+    );
+    expect(after.rows).toEqual([{ created_via: "replacement", current_organization_id: org }]);
   });
 });
 

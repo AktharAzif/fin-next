@@ -16,7 +16,12 @@ import { createRecordAudit, type RecordAudit } from "./audit/record.ts";
 import { expectedTrustedOrigins, type RealmSettings } from "./config.ts";
 import { KeyedHasher } from "./crypto/keyed.ts";
 import { createEmailEnqueue, type EmailEnqueue } from "./email/enqueue.ts";
-import { authPathOf, createEndpointPolicy, type EndpointPolicy } from "./endpoint-policy.ts";
+import {
+  authPathOf,
+  createEndpointPolicy,
+  type EndpointPolicy,
+  type EndpointRule,
+} from "./endpoint-policy.ts";
 import { AuthRefusal, problemResponse } from "./errors.ts";
 import { afterHook } from "./hooks/after.ts";
 import { beforeHook } from "./hooks/before.ts";
@@ -295,6 +300,21 @@ function emptyNotFound(): Response {
   return new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
 }
 
+/**
+ * Whether a GET to a library path came from a page on another site or a sibling host (§2.3,
+ * [SA-44]). The origin gate skips GETs, yet each library GET counts the library's per-address
+ * limit, and some write a challenge or refresh the session, so a page elsewhere could spend the
+ * victim's allowance from the victim's own browser. `Sec-Fetch-Site`, when the browser sends it,
+ * must be `same-origin` (the app's own page) or `none` (opened directly); under the split host
+ * the API is `same-site` to its page. A provider's callback is cross-site by design.
+ */
+function crossSiteGet(request: Request, rule: EndpointRule, settings: RealmSettings): boolean {
+  if (request.method !== "GET" || rule.path === "/callback/:id") return false;
+  const site = request.headers.get("sec-fetch-site");
+  if (site === null || site === "same-origin" || site === "none") return false;
+  return !(site === "same-site" && settings.apiOrigin !== null);
+}
+
 export function createRealm(deps: RealmDeps): Realm {
   const { settings } = deps;
   for (const origin of expectedTrustedOrigins(settings)) {
@@ -374,6 +394,20 @@ export function createRealm(deps: RealmDeps): Realm {
     }
     state.rule = rule;
     state.line.authPath = rule.path;
+    if (crossSiteGet(request, rule, settings)) {
+      // Refused before any unit of work or limit, as the origin gate refuses an unsafe method.
+      deps.lines.write("csrf.refused", "warn", {
+        reason: "fetch_site",
+        route: `${BASE_PATH}${rule.path}`,
+      });
+      state.line.outcome = "refused";
+      state.line.reason = "origin_gate.fetch_site";
+      const refused = problemResponse(rt.docsOrigin, "invalid_origin", context.requestId, {
+        reason: "fetch_site",
+      });
+      finishLine(rt, state, refused.status);
+      return refused;
+    }
     let response: Response;
     try {
       const answer = await rt.db.unit(

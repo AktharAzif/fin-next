@@ -8,6 +8,7 @@ import { createTrustedBrowser, markTrustedBrowserUsed, touchKnownBrowser } from 
 import { markCodeUsed } from "../codes.ts";
 import { finCookieAttributes, finCookieName } from "../cookies.ts";
 import { randomToken } from "../crypto/keyed.ts";
+import { assertionVerified } from "../crypto/webauthn.ts";
 import { AuthRefusal } from "../errors.ts";
 import { personGate, trustedBrowserEligible } from "../gate.ts";
 import type { UnitTx } from "../ports/db.ts";
@@ -23,10 +24,18 @@ import {
   resetStepUpFailures,
 } from "../step-up/intents.ts";
 import type { ProofMethod } from "../step-up/types.ts";
-import { endSession, personById, raiseAssurance, setSessionExpiry, TABLES } from "../store.ts";
+import {
+  endSession,
+  factorFacts,
+  personById,
+  raiseAssurance,
+  setSessionExpiry,
+  TABLES,
+} from "../store.ts";
 import { bodyOf, type HookContext, headersOf, tokenCookie } from "./context.ts";
 import {
   audit,
+  countFactorLockout,
   device,
   factorLockKey,
   lockStepUp,
@@ -203,7 +212,9 @@ async function codeSignedIn(
       refs: [userId],
       metadata: {},
     });
-    state.line.gate = "factor_step";
+    // A member with no factor yet is pending (enrolment); one with a factor is at the factor step.
+    state.line.gate =
+      (await factorFacts(tx, "staff", userId)).count === 0 ? "pending" : "factor_step";
     return;
   }
   const signIn = state.signIn;
@@ -417,6 +428,8 @@ async function passkeySignedIn(
   if (prior !== null) {
     await moveToReplacement(tx, realm, prior.session.id, newSessionId);
     await endSession(tx, realm, prior.session.id, now);
+  } else {
+    state.line.gate = "ok";
   }
   const proofId = await recordProof(tx, rt.clock, realm, {
     userId,
@@ -446,23 +459,60 @@ async function passkeyFailed(
 ): Promise<void> {
   if (state.prior !== null && state.gate === "ok") {
     await recordFactorFailure(rt, tx, state, "passkey");
-    return;
+  } else {
+    const response = bodyOf(ctx).response as { id?: unknown } | undefined;
+    const realm = state.realm;
+    const owner =
+      typeof response?.id === "string"
+        ? await tx.query<{ user_id: string }>(
+            `SELECT user_id FROM ${TABLES[realm].passkey} WHERE credential_id = $1`,
+            [response.id],
+          )
+        : null;
+    const userId = owner?.rows[0]?.user_id;
+    if (userId !== undefined) {
+      await audit(rt, tx, state, {
+        event: realm === "developer" ? "sign_in.failed" : "staff.sign_in_failed",
+        personId: userId,
+        target: userId,
+        metadata: { method: "passkey", reason: "passkey_failed" },
+      });
+    }
   }
-  const response = bodyOf(ctx).response as { id?: unknown } | undefined;
-  if (typeof response?.id !== "string") return;
-  const realm = state.realm;
-  const owner = await tx.query<{ user_id: string }>(
-    `SELECT user_id FROM ${TABLES[realm].passkey} WHERE credential_id = $1`,
-    [response.id],
-  );
-  const userId = owner.rows[0]?.user_id;
-  if (userId === undefined) return;
-  await audit(rt, tx, state, {
-    event: realm === "developer" ? "sign_in.failed" : "staff.sign_in_failed",
-    personId: userId,
-    target: userId,
-    metadata: { method: "passkey", reason: "passkey_failed" },
+  await passkeyCounterRefused(rt, ctx, tx, state);
+}
+
+/**
+ * The library refused an assertion whose signature counter did not move forward (§5.3). When the
+ * assertion verifies against the credential's stored key, over the challenge this browser holds,
+ * the credential really signed it (a clone, or a broken authenticator): the person is told, and
+ * the answer says why. An assertion that does not verify is anyone's, and keeps the library's own
+ * answer, as any failed ceremony does.
+ */
+async function passkeyCounterRefused(
+  rt: RealmRuntime,
+  ctx: HookContext,
+  tx: UnitTx,
+  state: RequestState,
+): Promise<void> {
+  const noted = state.passkeyCounter;
+  if (noted === null) return;
+  const verified = assertionVerified({
+    publicKey: noted.publicKey,
+    response: bodyOf(ctx).response,
+    expectedChallenge: noted.expectedChallenge,
+    expectedOrigin: rt.settings.publicOrigin,
+    rpId: rt.settings.rpId,
   });
+  if (!verified) return;
+  if (state.realm === "developer") {
+    await notify(rt, tx, "identity/sign-in-methods-changed", noted.email, {
+      userId: noted.userId,
+      kind: "passkey_refused",
+      time: nowIso(rt),
+    });
+  }
+  throw new AuthRefusal("forbidden", "passkey.counter_regressed", { reason: "passkey_refused" });
 }
 
 async function factorFailed(
@@ -471,7 +521,12 @@ async function factorFailed(
   state: RequestState,
   method: "totp" | "backup_code",
 ): Promise<void> {
-  if (state.finishingAuthenticator) return;
+  if (state.finishingAuthenticator) {
+    // A wrong code while finishing a set-up counts toward the person's lockout like any other
+    // (§5.4). It is neither the factor step nor a step-up, so it writes neither failure event.
+    await countFactorLockout(rt, tx, state);
+    return;
+  }
   await recordFactorFailure(rt, tx, state, method);
 }
 
@@ -509,15 +564,8 @@ async function factorPassed(
   const userId = prior.person.id;
   const replacement = ctx.context.newSession?.session.id ?? null;
   const sessionId = replacement ?? prior.session.id;
+  // The code's TOTP step was claimed in the before-hook, before the library checked the code.
   await rt.limits.clearFailures(tx, factorLockKey(state, userId));
-  if (method === "totp" && state.totpStep !== null) {
-    await tx.query(
-      `INSERT INTO ${TABLES[realm].totpStep} (user_id, last_step, updated_at) VALUES ($1, $2, $3)
-       ON CONFLICT (user_id) DO UPDATE SET last_step = GREATEST(${TABLES[realm].totpStep}.last_step, EXCLUDED.last_step),
-         updated_at = EXCLUDED.updated_at`,
-      [userId, state.totpStep.toString(), now],
-    );
-  }
   state.line.assurance = "aal2";
 
   if (state.finishingAuthenticator && method === "totp") {

@@ -20,8 +20,15 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
 ```
 
 - `realm.handler(request, context)` answers `/api/auth/*`: the exact allowlist first (404 with an
-  empty body for anything unlisted or blocked, before any limit), then one unit of work around the
-  library, read in full and committed before a byte is sent.
+  empty body for anything unlisted or blocked, before any limit), then a GET that another site
+  sent (`Sec-Fetch-Site` other than `same-origin` or `none`) gets `403 invalid_origin`, then one
+  unit of work around the library, read in full and committed before a byte is sent.
+- No GET counts a Fin budget or makes a step-up intent (§2.3). To add a further passkey, the client
+  sends `POST /api/auth/passkey/verify-registration` with `{}` and no `Fin-Step-Up-Intent`, which
+  answers `403 step_up_required` with the intent; after the StepUp ceremony it sends
+  `GET /passkey/generate-register-options` (which only checks the intent) and then
+  `POST /passkey/verify-registration` with the response, both with the header. The GET without
+  the header answers `step_up_required` with no `intent_id`.
 - `realm.run(context, fn)` runs a Fin route's work as part of a realm request (one unit of work,
   the request state bound); `requirePerson()` is the guard for person-scope routes, `signUp()` the
   core of `POST /api/sign-up`, `revokeSession()` and `revokeOtherSessions()` the cores of Account

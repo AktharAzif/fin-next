@@ -57,12 +57,28 @@ export interface RequestState {
   createdUserId: string | null;
   /** The template a code email uses: `confirm-email` while a sign-up request waits. */
   codeTemplate: "sign-in-code" | "confirm-email";
-  /** The two-factor row was unverified before this request (set-up being finished). */
+  /**
+   * Set by `signUp()` once it has counted the code request's own limits (`code_send` per network
+   * and per address) for both of its branches, so the code it then asks for is not counted twice.
+   */
+  codeSendCounted: boolean;
+  /**
+   * This request finishes an unverified authenticator's set-up, from a session that may enrol
+   * (§5.4): never true at the factor step.
+   */
   finishingAuthenticator: boolean;
-  /** TOTP replay protection: the step this request's code matched. */
-  totpStep: bigint | null;
   /** The two-factor row `/two-factor/disable` removes, read before the library deletes it. */
   removedTwoFactorId: string | null;
+  /**
+   * A passkey assertion whose signature counter is not above the stored one, with the challenge
+   * it answers; the after-hook tells the person only once the assertion is verified (§5.3).
+   */
+  passkeyCounter: {
+    userId: string;
+    email: string;
+    publicKey: string;
+    expectedChallenge: string;
+  } | null;
   readonly line: Record<string, LineValue>;
 }
 
@@ -79,10 +95,12 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     signIn: null,
     createdUserId: null,
     codeTemplate: "sign-in-code",
+    codeSendCounted: false,
     finishingAuthenticator: false,
-    totpStep: null,
     removedTwoFactorId: null,
-    line: { realm },
+    passkeyCounter: null,
+    // §18.1: `none` until a live session is read or made.
+    line: { realm, assurance: "none" },
   };
 }
 

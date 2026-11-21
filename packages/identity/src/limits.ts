@@ -64,8 +64,10 @@ export type CountedBucket = keyof typeof LIMITS;
 
 export interface ConsumeResult {
   allowed: boolean;
-  /** Seconds until the tightest refusing window ends (0 when allowed). */
+  /** Seconds until the last refusing window ends (0 when allowed). */
   retryAfter: number;
+  /** When the last refusing window ends (null when allowed): a pause lasts until then. */
+  resetAt: Date | null;
 }
 
 export class LimitStoreError extends Error {
@@ -124,8 +126,7 @@ export function createLimitStore(deps: { clock: Clock; lines: LineSink }): Limit
     subject: string,
   ): Promise<ConsumeResult> {
     const now = deps.clock.now();
-    let retryAfter = 0;
-    let allowed = true;
+    let resetAt: Date | null = null;
     for (const window of windows) {
       const start = windowStart(now, window.ms);
       let count: number;
@@ -141,13 +142,14 @@ export function createLimitStore(deps: { clock: Clock; lines: LineSink }): Limit
         return fail(bucket, error);
       }
       if (count > window.max) {
-        allowed = false;
-        const ends = Math.ceil((start.getTime() + window.ms - now.getTime()) / 1000);
-        retryAfter = Math.max(retryAfter, ends);
+        const ends = new Date(start.getTime() + window.ms);
+        if (resetAt === null || ends.getTime() > resetAt.getTime()) resetAt = ends;
       }
     }
-    if (!allowed) deps.lines.write("limits.refused", "info", { bucket });
-    return { allowed, retryAfter };
+    if (resetAt === null) return { allowed: true, retryAfter: 0, resetAt: null };
+    deps.lines.write("limits.refused", "info", { bucket });
+    const retryAfter = Math.ceil((resetAt.getTime() - now.getTime()) / 1000);
+    return { allowed: false, retryAfter, resetAt };
   }
   return {
     consume: (db, bucket, subject) => consumeWindows(db, bucket, LIMITS[bucket], subject),

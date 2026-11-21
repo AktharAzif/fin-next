@@ -4,6 +4,7 @@
 import { FACTOR_STEP_LIFETIME_MS } from "../gate.ts";
 import { DAY, HOUR } from "../ports/clock.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
+import type { SessionRow } from "../store.ts";
 
 const ABSOLUTE_MS = { developer: 7 * DAY, staff: 12 * HOUR } as const;
 const IDLE_MS = { developer: DAY, staff: HOUR } as const;
@@ -19,6 +20,19 @@ function earlier(a: Date, b: Date): Date {
 
 function clip(value: unknown, max: number): string | null {
   return typeof value === "string" && value !== "" ? value.slice(0, max) : null;
+}
+
+/**
+ * What a developer session's replacement carries over from the session it replaces (§11.3): the
+ * mailbox proof, the organisation the viewer is in, and the trusted browser while its row is still
+ * live. A new session (`null`) starts with none of them.
+ */
+function inherited(old: SessionRow | null): Data {
+  return {
+    mailboxProvedAt: old?.mailboxProvedAt ?? null,
+    currentOrganizationId: old?.currentOrganizationId ?? null,
+    trustedBrowserId: old?.trustedBrowserLive === true ? old.trustedBrowserId : null,
+  };
 }
 
 export function databaseHooks(rt: RealmRuntime) {
@@ -78,8 +92,7 @@ export function databaseHooks(rt: RealmRuntime) {
         expiresAt: earlier(new Date(now.getTime() + IDLE_MS[realm]), absolute),
       };
       if (realm === "developer") {
-        fields.mailboxProvedAt = replaces ? prior.session.mailboxProvedAt : null;
-        fields.trustedBrowserId = replaces ? prior.session.trustedBrowserId : null;
+        Object.assign(fields, replaces ? inherited(prior.session) : inherited(null));
       } else {
         const access = state.context.access;
         if (access === null || access === undefined)
@@ -93,9 +106,12 @@ export function databaseHooks(rt: RealmRuntime) {
       prior.person.id === userId
     ) {
       // The plugin replaces the session when an authenticator is finished or turned off; the
-      // replacement keeps everything of the old one, its absolute limit included (S2-12).
+      // replacement keeps everything of the old one, its absolute limit included (S2-12). Only
+      // finishing a set-up from a session that may enrol raises it (the before-hook refuses the
+      // factor step's attempt); anything else keeps the old session's assurance.
+      const raises = path === "/two-factor/verify-totp" && state.finishingAuthenticator;
       fields = {
-        assurance: path === "/two-factor/verify-totp" ? "aal2" : prior.session.assurance,
+        assurance: raises ? "aal2" : prior.session.assurance,
         createdVia: "replacement",
         absoluteExpiresAt: prior.session.absoluteExpiresAt,
         expiresAt: earlier(
@@ -105,8 +121,7 @@ export function databaseHooks(rt: RealmRuntime) {
         stepUpFailures: prior.session.stepUpFailures,
       };
       if (realm === "developer") {
-        fields.mailboxProvedAt = prior.session.mailboxProvedAt;
-        fields.trustedBrowserId = prior.session.trustedBrowserId;
+        Object.assign(fields, inherited(prior.session));
       } else {
         fields.accessSub = prior.session.accessSub;
         fields.enrolmentOpenUntil = prior.session.enrolmentOpenUntil;

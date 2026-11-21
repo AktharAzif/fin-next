@@ -3,7 +3,8 @@
 // UNLOGGED counters; the limiter fails closed when the database refuses it.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, type TestDatabase, testRole } from "../test/db.ts";
-import { createHarness, type Harness } from "../test/harness.ts";
+import { codeSignIn, createHarness, type Harness } from "../test/harness.ts";
+import { HOUR, ManualClock } from "./ports/clock.ts";
 
 let database: TestDatabase;
 let h: Harness;
@@ -39,8 +40,11 @@ describe("the per-recipient allowance", () => {
 
   it("keeps a paused address paused after the counters are emptied", async () => {
     const email = unique("paused");
+    // A browser known for the address (it signed in), so the whole allowance is its to use.
     const browser = h.browser();
-    for (let i = 0; i < 5; i += 1) expect((await send(email, browser)).status).toBe(200);
+    expect((await codeSignIn(h, browser, email)).status).toBe(200);
+    await browser.post("/api/auth/sign-out");
+    for (let i = 0; i < 4; i += 1) expect((await send(email, browser)).status).toBe(200);
     expect((await h.outbox(email)).length).toBe(5);
     // The sixth uses up the allowance, which is recorded in the logged table.
     expect((await send(email, browser)).json).toEqual({ success: true });
@@ -53,6 +57,32 @@ describe("the per-recipient allowance", () => {
     await h.admin.query("TRUNCATE ops.rate_window");
     expect((await send(email, browser)).json).toEqual({ success: true });
     expect((await h.outbox(email)).length).toBe(5);
+  });
+
+  it("pauses the address only until the window that refused ends", async () => {
+    // 10:20 UTC today on the realm's clock: the hour ends at 11:00, the day at midnight.
+    const start = new Date();
+    start.setUTCHours(10, 20, 0, 0);
+    const clock = new ManualClock(start);
+    const realm = await createHarness(database, "developer", { clock });
+    const email = unique("hourly");
+    const browser = realm.browser();
+    expect((await codeSignIn(realm, browser, email)).status).toBe(200);
+    await browser.post("/api/auth/sign-out");
+    for (let i = 0; i < 4; i += 1) expect((await send(email, browser)).status).toBe(200);
+    // The sixth in the hour is refused by the hourly window (5), not the daily one (12).
+    expect((await send(email, browser)).json).toEqual({ success: true });
+    expect((await realm.outbox(email)).length).toBe(5);
+    const lock = await h.admin.query<{ locked_until: Date }>(
+      "SELECT locked_until FROM ops.lockout WHERE key = $1",
+      [`code_email:${realm.realm.runtime.hasher.bucket("email", email)}`],
+    );
+    const endOfHour = new Date(Math.floor(start.getTime() / HOUR) * HOUR + HOUR);
+    expect(lock.rows[0]?.locked_until.toISOString()).toBe(endOfHour.toISOString());
+    // In the next hour the address gets its codes again.
+    clock.set(new Date(endOfHour.getTime() + 60_000));
+    expect((await send(email, browser)).json).toEqual({ success: true });
+    expect((await realm.outbox(email)).length).toBe(6);
   });
 
   it("counts a network's code requests and answers 429 past them", async () => {

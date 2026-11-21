@@ -20,6 +20,7 @@ export type AuthProblemCode =
   | "unavailable"
   | "access_required"
   | "access_mismatch"
+  | "invalid_origin"
   | "internal";
 
 const STATUS: Readonly<Record<AuthProblemCode, number>> = {
@@ -39,6 +40,7 @@ const STATUS: Readonly<Record<AuthProblemCode, number>> = {
   unavailable: 503,
   access_required: 401,
   access_mismatch: 403,
+  invalid_origin: 403,
   internal: 500,
 };
 
@@ -59,6 +61,7 @@ const TITLE: Readonly<Record<AuthProblemCode, string>> = {
   unavailable: "Try again in a moment.",
   access_required: "Sign in through Access.",
   access_mismatch: "You're signed in as someone else.",
+  invalid_origin: "This request came from another site.",
   internal: "Something went wrong.",
 };
 

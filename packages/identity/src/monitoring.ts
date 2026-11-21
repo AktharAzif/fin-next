@@ -23,6 +23,8 @@ export const IDENTITY_LINES = {
     ],
   },
   "auth.endpoint_blocked": { kind: "security", alerts: ["auth-endpoint-unlisted"] },
+  // Spec 01 §8.9's line (the origin gate's), written here for a library GET another site sent.
+  "csrf.refused": { kind: "security", alerts: ["csrf-refused-jump"] },
   "auth.gate_refused": {
     kind: "security",
     alerts: { none: "an expected refusal; panelled by state (§18.3), not alerted" },

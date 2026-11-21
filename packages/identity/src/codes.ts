@@ -8,7 +8,6 @@ import { isKnownBrowserForEmail } from "./browsers.ts";
 import type { KeyedHasher } from "./crypto/keyed.ts";
 import { constantTimeEqual } from "./crypto/keyed.ts";
 import type { LimitStore } from "./limits.ts";
-import { LIMITS, windowStart } from "./limits.ts";
 import type { Clock } from "./ports/clock.ts";
 import { MINUTE } from "./ports/clock.ts";
 import type { Queryable } from "./ports/db.ts";
@@ -65,7 +64,8 @@ function sameBrowser(hasher: KeyedHasher, live: LiveCodeRequest, token: string |
 
 export type CodeRequestOutcome =
   | { send: true; requestId: string }
-  | { send: false; reason: "supersede_refused" | "unknown_share_used" | "allowance_used" };
+  | { send: false; reason: "supersede_refused" | "unknown_share_used" | "allowance_used" }
+  | { send: false; reason: "rate_limited"; retryAfter: number };
 
 export interface CodeRequestDeps {
   clock: Clock;
@@ -74,9 +74,21 @@ export interface CodeRequestDeps {
   lines: LineSink;
 }
 
+/** The per-address `code_send` subject: browsers known for the address count apart (S2-38). */
+export function codeSendSubject(hasher: KeyedHasher, email: string, known: boolean): string {
+  return `${hasher.bucket("email", email.toLowerCase())}:${known ? "known" : "other"}`;
+}
+
 /**
  * Decides whether a code may be sent for `email` to the browser holding `browserToken`, and
- * records the request. The caller answers the same way whatever this returns.
+ * records the request. The caller answers the same way whatever this returns, but for
+ * `rate_limited` (the address's request limit, §5.6), which is its 429.
+ *
+ * A browser is known for the address when its `known_browser` cookie names a known browser of the
+ * account; a browser asking again for the live code it asked for keeps that request's standing, so
+ * a stranger who asks twice is still a stranger: it never draws on what S2-38 keeps for known
+ * browsers (the allowance past the strangers' share, the address's own request limit) and never
+ * makes its code one an unknown browser of the owner cannot supersede.
  */
 export async function requestCode(
   db: Queryable,
@@ -86,6 +98,8 @@ export async function requestCode(
     browserToken: string;
     knownBrowserToken: string | null;
     userId: string | null;
+    /** Count the address's `code_send` here (false when signUp() already counted it). */
+    countRequest: boolean;
   },
 ): Promise<CodeRequestOutcome> {
   const now = deps.clock.now();
@@ -94,7 +108,19 @@ export async function requestCode(
   const live = await liveCodeRequest(db, deps.hasher, email, now, { lock: true });
   const askedBefore = live !== null && sameBrowser(deps.hasher, live, input.browserToken);
   const known =
-    askedBefore || (await isKnownBrowserForEmail(db, deps.hasher, email, input.knownBrowserToken));
+    (askedBefore && live.browserKnown) ||
+    (await isKnownBrowserForEmail(db, deps.hasher, email, input.knownBrowserToken));
+
+  if (input.countRequest) {
+    const requests = await deps.limits.consume(
+      db,
+      "code_send",
+      codeSendSubject(deps.hasher, email, known),
+    );
+    if (!requests.allowed) {
+      return { send: false, reason: "rate_limited", retryAfter: requests.retryAfter };
+    }
+  }
 
   const contest = (reason: "supersede_refused" | "unknown_share_used"): CodeRequestOutcome => {
     deps.lines.write("auth.code_contested", "warn", {
@@ -118,11 +144,9 @@ export async function requestCode(
   }
   const allowance = await deps.limits.consume(db, "code_email", subject);
   if (!allowance.allowed) {
-    const tightest = LIMITS.code_email[LIMITS.code_email.length - 1];
-    if (tightest !== undefined) {
-      const until = new Date(windowStart(now, tightest.ms).getTime() + tightest.ms);
-      await deps.limits.lock(db, lockKey, "code_email", until);
-    }
+    // Paused until the window that refused ends: the hour's, or the day's once its 12 are used.
+    const until = allowance.resetAt ?? new Date(now.getTime() + allowance.retryAfter * 1000);
+    await deps.limits.lock(db, lockKey, "code_email", until);
     return { send: false, reason: "allowance_used" };
   }
 

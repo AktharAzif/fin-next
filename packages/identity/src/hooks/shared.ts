@@ -76,13 +76,58 @@ export const LIB_ERRORS = {
       code: "ACCOUNT_TEMPORARILY_LOCKED",
       message: "Account temporarily locked due to too many failed attempts",
     }),
+  /** The library's answer for an authenticator that is not a factor (its own sign-in branch's). */
+  totpNotEnabled: () =>
+    APIError.from("BAD_REQUEST", { code: "TOTP_NOT_ENABLED", message: "TOTP not enabled" }),
+  backupCodesNotEnabled: () =>
+    APIError.from("BAD_REQUEST", {
+      code: "BACKUP_CODES_NOT_ENABLED",
+      message: "Backup codes aren't enabled",
+    }),
 };
 
 /**
- * A wrong second-factor code (or a refused replay): counts toward the person's lockout (10 wrong
- * codes, one hour, kept in the logged table because the library's own lockout covers only its
- * password challenge on 1.7.25), writes the failure event, and at a step-up counts toward ending
- * the session (§5.4, §7.7).
+ * Counts one wrong code toward the person's lockout: 10 wrong codes lock the authenticator for an
+ * hour, kept in the logged table because the library's own lockout covers only its password
+ * challenge on 1.7.25 (§5.4). The lock writes `sign_in.locked` and one `account-locked` a day.
+ */
+export async function countFactorLockout(
+  rt: RealmRuntime,
+  tx: UnitTx,
+  state: RequestState,
+): Promise<void> {
+  const prior = state.prior;
+  if (prior === null) return;
+  const personId = prior.person.id;
+  const now = rt.clock.now();
+  const failure = await rt.limits.recordFailure(
+    tx,
+    factorLockKey(state, personId),
+    "factor_code",
+    FACTOR_LOCK_THRESHOLD,
+    FACTOR_LOCK_MS,
+  );
+  if (!failure.justLocked || failure.lockedUntil === null || state.realm !== "developer") return;
+  await audit(rt, tx, state, {
+    event: "sign_in.locked",
+    personId,
+    target: personId,
+    refs: [prior.session.id],
+    metadata: { until: failure.lockedUntil.toISOString() },
+  });
+  const daily = `account_locked_email:${personId}`;
+  if ((await rt.limits.lockedUntil(tx, daily)) === null) {
+    await rt.limits.lock(tx, daily, "account_locked_email", new Date(now.getTime() + DAY));
+    await notify(rt, tx, "identity/account-locked", prior.person.email, {
+      userId: personId,
+      until: failure.lockedUntil.toISOString(),
+    });
+  }
+}
+
+/**
+ * A wrong second-factor code (or a refused replay): counts toward the person's lockout, writes the
+ * failure event, and at a step-up counts toward ending the session (§5.4, §7.7).
  */
 export async function recordFactorFailure(
   rt: RealmRuntime,
@@ -94,33 +139,7 @@ export async function recordFactorFailure(
   if (prior === null) return;
   const personId = prior.person.id;
   const sessionId = prior.session.id;
-  const now = rt.clock.now();
-  if (method !== "passkey") {
-    const failure = await rt.limits.recordFailure(
-      tx,
-      factorLockKey(state, personId),
-      "factor_code",
-      FACTOR_LOCK_THRESHOLD,
-      FACTOR_LOCK_MS,
-    );
-    if (failure.justLocked && failure.lockedUntil !== null && state.realm === "developer") {
-      await audit(rt, tx, state, {
-        event: "sign_in.locked",
-        personId,
-        target: personId,
-        refs: [sessionId],
-        metadata: { until: failure.lockedUntil.toISOString() },
-      });
-      const daily = `account_locked_email:${personId}`;
-      if ((await rt.limits.lockedUntil(tx, daily)) === null) {
-        await rt.limits.lock(tx, daily, "account_locked_email", new Date(now.getTime() + DAY));
-        await notify(rt, tx, "identity/account-locked", prior.person.email, {
-          userId: personId,
-          until: failure.lockedUntil.toISOString(),
-        });
-      }
-    }
-  }
+  if (method !== "passkey") await countFactorLockout(rt, tx, state);
   if (state.gate !== "ok") {
     if (state.realm === "developer") {
       await audit(rt, tx, state, {

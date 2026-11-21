@@ -213,8 +213,10 @@ describe("one line per auth request (§18.1)", () => {
     expect(lines[0]).toMatchObject({
       realm: "developer",
       authPath: "/email-otp/send-verification-otp",
+      assurance: "none",
       status: 200,
     });
+    expect(lines[0]?.gate).toBeUndefined();
     expect(lines[1]).toMatchObject({
       realm: "developer",
       authPath: "/sign-in/email-otp",

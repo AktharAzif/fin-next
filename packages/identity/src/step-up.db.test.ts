@@ -125,7 +125,7 @@ describe("an intent on a library path (account.backup_codes)", () => {
     expect(otherAction.json).toMatchObject({ code: "step_up_invalid", reason: "other_action" });
 
     // Other parameters: an intent to remove one passkey cannot remove another.
-    const add = await browser.get("/api/auth/passkey/generate-register-options");
+    const add = await browser.post("/api/auth/passkey/verify-registration", {});
     const addIntent = String(add.json?.intent_id);
     await prove(browser, secret, addIntent);
     const { verify } = await registerPasskey(browser, authenticator, {
@@ -213,6 +213,22 @@ describe("a window (§7.3) through requirePerson", () => {
     const proof = await prove(browser, secret, null);
     expect(proof.status).toBe(200);
     await expect(guard()).resolves.toMatchObject({ gate: "ok" });
+  });
+
+  it("never makes an intent for a GET (§2.3)", async () => {
+    const { browser } = await personWithAuthenticator("get.route");
+    const before = await h.admin.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM ops.step_up_intent",
+    );
+    await expect(
+      requirePerson(h.realm, browser.request("GET", "/api/account/sessions"), browser.context(), {
+        stepUp: { kind: "intent", action: "account.sessions_revoke_others", body: {} },
+      }),
+    ).rejects.toThrow(/a GET never may/);
+    const after = await h.admin.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM ops.step_up_intent",
+    );
+    expect(after.rows[0]?.n).toBe(before.rows[0]?.n);
   });
 
   it("answers second_factor_required for a person with no factor", async () => {

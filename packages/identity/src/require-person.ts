@@ -62,6 +62,13 @@ export async function requirePerson(
   context: RequestContext,
   options: RequirePersonOptions,
 ): Promise<PersonActor> {
+  if (options.stepUp.kind === "intent" && (request.method === "GET" || request.method === "HEAD")) {
+    // A GET never makes or spends an intent: a page on a sibling host can send one with the
+    // session cookie (§2.3, [SA-44]). The route policy's test refuses such a route; so does this.
+    throw new Error(
+      `requirePerson: ${options.stepUp.action} takes an intent, which a GET never may`,
+    );
+  }
   return realm.run(context, async (tx, state) => {
     await realm.api.getSession({ headers: request.headers });
     const prior = state.prior;

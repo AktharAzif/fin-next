@@ -58,13 +58,18 @@ export function trustedBrowserEligible(facts: PersonGateFacts): boolean {
 }
 
 /**
- * The developer gate (§6.2). A trusted-browser session counts as working only while its person
- * is still eligible: once privileged anywhere or a member of an organisation with Production
- * access, it is at the factor step from its next request (S2-40).
+ * The developer gate (§6.2). A trusted-browser session counts as working only while its row is
+ * live (not revoked, not past its 30 days) and its person still eligible: once the row is revoked
+ * (a factor change, "forget this browser", sign-out everywhere else) or the person is privileged
+ * anywhere or a member of an organisation with Production access, the session is at the factor
+ * step from its next request (§6.6, S2-40).
  */
 export function developerGate(session: SessionRow, facts: PersonGateFacts): DeveloperGate {
   if (session.assurance === "aal1" && facts.factorCount > 0) {
-    const trusted = session.trustedBrowserId !== null && trustedBrowserEligible(facts);
+    const trusted =
+      session.trustedBrowserId !== null &&
+      session.trustedBrowserLive &&
+      trustedBrowserEligible(facts);
     if (!trusted) return "factor_step";
   }
   if (facts.factorCount === 0 && facts.privilegedAnywhere) return "hold";
@@ -81,17 +86,23 @@ export type StaffGate = "pending" | "factor_step" | "ok";
 export type StaffGateResult = { state: StaffGate } | { refused: "removed" | "access_mismatch" };
 
 /**
- * The staff gate (§6.4): a removed member or a session whose member is not the Access identity
- * is refused outright; `aal1` is pending (no factor) or the factor step; `ok` needs `aal2`.
+ * The staff gate (§6.4, §10.5): a removed member, or a session presented under another Access
+ * identity than the one it was made under (its `sub`, or its member's address), is refused
+ * outright; `aal1` is pending (no factor) or the factor step; `ok` needs `aal2`.
  */
 export function staffGate(
   session: SessionRow,
   member: PersonRow,
   factors: FactorFacts,
-  accessEmail: string | null,
+  access: { email: string; sub: string } | null,
 ): StaffGateResult {
   if (member.status === "removed") return { refused: "removed" };
-  if (accessEmail === null || member.email !== accessEmail.toLowerCase()) {
+  if (
+    access === null ||
+    session.accessSub === null ||
+    session.accessSub !== access.sub ||
+    member.email !== access.email.toLowerCase()
+  ) {
     return { refused: "access_mismatch" };
   }
   if (session.assurance === "aal2" && factors.count > 0 && member.status === "active") {

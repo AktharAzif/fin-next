@@ -35,6 +35,13 @@ export interface SessionRow {
   createdAt: Date;
   mailboxProvedAt: Date | null;
   trustedBrowserId: string | null;
+  /**
+   * Whether `trustedBrowserId` names a row that is still unrevoked and unexpired, read with the
+   * session: a revoked or lapsed row leaves the column set until the sweep deletes it (§6.6).
+   */
+  trustedBrowserLive: boolean;
+  /** The organisation the viewer is in (navigation only, never a permission). */
+  currentOrganizationId: string | null;
   stepUpFailures: number;
   /** Staff realm only. */
   accessSub: string | null;
@@ -62,17 +69,23 @@ interface RawSession {
   created_at: Date;
   mailbox_proved_at?: Date | null;
   trusted_browser_id?: string | null;
+  trusted_browser_live?: boolean;
+  current_organization_id?: string | null;
   step_up_failures: number;
   access_sub?: string | null;
   enrolment_open_until?: Date | null;
 }
 
+/** The session's columns; `$2` is the time a trusted-browser row must still be live at. */
 function sessionColumns(realm: RealmName): string {
   const common =
-    "id, user_id, token, expires_at, absolute_expires_at, assurance, created_via, created_at, step_up_failures";
+    "s.id, s.user_id, s.token, s.expires_at, s.absolute_expires_at, s.assurance, s.created_via, s.created_at, s.step_up_failures";
   return realm === "developer"
-    ? `${common}, mailbox_proved_at, trusted_browser_id`
-    : `${common}, access_sub, enrolment_open_until`;
+    ? `${common}, s.mailbox_proved_at, s.trusted_browser_id, s.current_organization_id,
+       EXISTS (SELECT 1 FROM identity.trusted_browser tb
+                WHERE tb.id = s.trusted_browser_id AND tb.user_id = s.user_id
+                  AND tb.revoked_at IS NULL AND tb.expires_at > $2) AS trusted_browser_live`
+    : `${common}, s.access_sub, s.enrolment_open_until`;
 }
 
 function toSession(row: RawSession): SessionRow {
@@ -87,37 +100,46 @@ function toSession(row: RawSession): SessionRow {
     createdAt: row.created_at,
     mailboxProvedAt: row.mailbox_proved_at ?? null,
     trustedBrowserId: row.trusted_browser_id ?? null,
+    trustedBrowserLive: row.trusted_browser_live === true,
+    currentOrganizationId: row.current_organization_id ?? null,
     stepUpFailures: Number(row.step_up_failures),
     accessSub: row.access_sub ?? null,
     enrolmentOpenUntil: row.enrolment_open_until ?? null,
   };
 }
 
-/** The session a token names, whether or not it is still live. */
-export async function sessionByToken(
+async function sessionWhere(
   db: Queryable,
   realm: RealmName,
-  token: string,
+  column: "token" | "id",
+  value: string,
+  now: Date,
 ): Promise<SessionRow | null> {
   const result = await db.query<RawSession>(
-    `SELECT ${sessionColumns(realm)} FROM ${TABLES[realm].session} WHERE token = $1`,
-    [token],
+    `SELECT ${sessionColumns(realm)} FROM ${TABLES[realm].session} s WHERE s.${column} = $1`,
+    realm === "developer" ? [value, now] : [value],
   );
   const row = result.rows[0];
   return row === undefined ? null : toSession(row);
 }
 
-export async function sessionById(
+/** The session a token names, whether or not it is still live. */
+export function sessionByToken(
+  db: Queryable,
+  realm: RealmName,
+  token: string,
+  now: Date,
+): Promise<SessionRow | null> {
+  return sessionWhere(db, realm, "token", token, now);
+}
+
+export function sessionById(
   db: Queryable,
   realm: RealmName,
   id: string,
+  now: Date,
 ): Promise<SessionRow | null> {
-  const result = await db.query<RawSession>(
-    `SELECT ${sessionColumns(realm)} FROM ${TABLES[realm].session} WHERE id = $1`,
-    [id],
-  );
-  const row = result.rows[0];
-  return row === undefined ? null : toSession(row);
+  return sessionWhere(db, realm, "id", id, now);
 }
 
 export function isLive(session: SessionRow, now: Date): boolean {

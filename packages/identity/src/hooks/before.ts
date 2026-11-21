@@ -43,7 +43,13 @@ import {
   TABLES,
 } from "../store.ts";
 import { bodyOf, type HookContext, headersOf, tokenCookie } from "./context.ts";
-import { audit, factorLockKey, LIB_ERRORS, recordFactorFailure } from "./shared.ts";
+import {
+  audit,
+  countFactorLockout,
+  factorLockKey,
+  LIB_ERRORS,
+  recordFactorFailure,
+} from "./shared.ts";
 
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,253}\.[^\s@]{2,63}$/;
 
@@ -102,7 +108,7 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
     bodyOf(ctx).name = deviceSummary(state.context.userAgent);
   }
   if (ctx.path === "/passkey/verify-authentication") {
-    await passkeyCounterCheck(rt, ctx, state, tx);
+    await notePasskeyCounter(rt, ctx, state, tx);
   }
   return undefined;
 }
@@ -122,7 +128,7 @@ async function loadPrior(
     ctx.context.secret,
   );
   if (typeof token !== "string" || token === "") return;
-  const session = await sessionByToken(tx, realm, token);
+  const session = await sessionByToken(tx, realm, token, now);
   if (session === null) {
     state.line.unauthenticated = "signed_out";
     return;
@@ -145,7 +151,7 @@ async function loadPrior(
     state.prior = { session, person, factors, facts };
     state.gate = gate;
   } else {
-    const result = staffGate(session, person, factors, state.context.access?.email ?? null);
+    const result = staffGate(session, person, factors, state.context.access ?? null);
     if ("refused" in result) {
       await endSession(tx, realm, session.id, now);
       if (result.refused === "access_mismatch") {
@@ -198,6 +204,12 @@ function refuseGate(rt: RealmRuntime, state: RequestState): never {
     case "ok":
       throw new AuthRefusal("forbidden", "gate.ok");
   }
+}
+
+/** A path the router mounts for GET only (a GET changes nothing Fin counts or keeps, §2.3). */
+function isGetPath(state: RequestState): boolean {
+  const methods = state.rule?.methods ?? [];
+  return methods.length > 0 && methods.every((m) => m === "GET");
 }
 
 function targetOf(path: string, body: Record<string, unknown>, personId: string): string {
@@ -272,6 +284,17 @@ async function stepUpRule(
   };
   state.line.stepUp = "intent";
   const headerId = intentIdFrom(headersOf(ctx));
+  if (headerId === null && isGetPath(state)) {
+    // A GET never makes an intent or spends a budget: a page on a sibling host can send one with
+    // the session cookie (§2.3, [SA-44]). The intent is made by the action's gated POST
+    // (`/passkey/verify-registration` sent without the header) and this GET only checks it.
+    state.line.stepUpOutcome = "required";
+    throw new AuthRefusal("step_up_required", "step_up.required", {
+      step_up_kind: "intent",
+      methods: factorMethods(realm, prior.factors),
+      reason_key: action.reasonKey,
+    });
+  }
   if (headerId === null) {
     const created = await createIntent(tx, rt, { ...binding, reasonKey: action.reasonKey });
     state.line.stepUpOutcome = "required";
@@ -317,6 +340,9 @@ async function finLimits(
       // The library's own limiter counts the default bucket (100 per 10 s per address).
       return;
     case "code_send":
+      // signUp() counted this code request's network allowance before it asked for the code.
+      if (state.codeSendCounted) return;
+      return consumeBucket(rt, tx, rule.limit, network);
     case "code_sign_in":
     case "factor_code":
     case "password_sign_in":
@@ -382,9 +408,10 @@ async function developerCodeSend(
   const body = bodyOf(ctx);
   if (body.type !== "sign-in") throw new AuthRefusal("invalid", "body.type", { fields: ["type"] });
   const email = normaliseEmail(ctx);
-  // A malformed address gets the library's own refusal, the same for every address.
-  if (!EMAIL.test(email)) return undefined;
-  await consumeBucket(rt, tx, "code_send", rt.hasher.bucket("email", email));
+  // An address Fin does not accept is refused here, never left to the library: its own check
+  // lets through addresses Fin's rule refuses (a local part over 64 characters), and a code sent
+  // to one would skip every per-address rule below (the same refusal as signUp()'s).
+  if (!EMAIL.test(email)) throw new AuthRefusal("invalid", "body.email", { fields: ["email"] });
   const cookie = finCookieName("developer", "code_browser");
   const browserToken = tokenCookie(ctx, cookie) ?? randomToken();
   ctx.setCookie(cookie, browserToken, { ...finCookieAttributes("developer", "code_browser") });
@@ -401,7 +428,11 @@ async function developerCodeSend(
     browserToken,
     knownBrowserToken: tokenCookie(ctx, finCookieName("developer", "known_browser")),
     userId: person?.id ?? null,
+    countRequest: !state.codeSendCounted,
   });
+  if (!outcome.send && outcome.reason === "rate_limited") {
+    throw new AuthRefusal("rate_limited", "limits.code_send", { retry_after: outcome.retryAfter });
+  }
   if (!outcome.send) {
     state.line.reason = `codes.${outcome.reason}`;
     return { success: true };
@@ -423,6 +454,20 @@ async function developerCodeSignIn(
     browserToken: tokenCookie(ctx, finCookieName("developer", "code_browser")),
     accountExists: person !== null,
   });
+  if (attempt.allowed && attempt.requestId === null) {
+    // Every code Fin lets the library send has a live request (§5.2): with none, no code can be
+    // right, and the tries, the browser binding and the account rule would all be skipped.
+    if (person !== null) {
+      await audit(rt, tx, state, {
+        event: "sign_in.failed",
+        personId: person.id,
+        target: person.id,
+        metadata: { method: "email_otp", reason: "wrong_code" },
+      });
+    }
+    state.line.reason = "codes.no_live_request";
+    throw LIB_ERRORS.invalidOtp();
+  }
   if (!attempt.allowed) {
     if (person !== null) {
       await audit(rt, tx, state, {
@@ -558,7 +603,34 @@ async function totpSecretBytes(ctx: HookContext, encrypted: string): Promise<Uin
   return new TextEncoder().encode(secret);
 }
 
-/** The lockout (10 wrong codes, one hour) and TOTP replay across sign-in and step-up ([SA-35]). */
+/**
+ * May this session finish an authenticator's set-up (§5.4, §6.3, §6.4)? Only a session that may
+ * enrol: a developer's working session or hold, a working staff session, or a pending member's
+ * session inside its enrolment window (outside it, the enrolment paths' own refusal). Never a
+ * session at the factor step: it has shown no factor, and finishing would raise it to aal2 with a
+ * secret its own session never saw.
+ */
+function mayFinishSetUp(rt: RealmRuntime, state: RequestState): boolean {
+  const prior = state.prior;
+  if (prior === null) return false;
+  if (rt.settings.realm === "developer") return state.gate === "ok" || state.gate === "hold";
+  if (state.gate !== "pending") return state.gate === "ok";
+  const window = prior.session.enrolmentOpenUntil;
+  if (window !== null && window.getTime() > rt.clock.now().getTime()) return true;
+  rt.lines.write("staff.enrolment_refused", "warn", {
+    staffId: prior.person.id,
+    reason: "no_window",
+  });
+  throw new AuthRefusal("forbidden", "staff.enrolment_window", {
+    reason: "enrolment_code_required",
+  });
+}
+
+/**
+ * The second-factor codes (§5.4, [SA-35]): the lockout (10 wrong codes, one hour); an
+ * authenticator that is missing or unfinished is no factor; and a TOTP step is accepted once,
+ * across sign-in and step-up, claimed atomically so that requests sent together cannot all pass.
+ */
 async function factorCodeChecks(
   rt: RealmRuntime,
   ctx: HookContext,
@@ -572,33 +644,49 @@ async function factorCodeChecks(
     state.line.reason = "factor.locked";
     throw LIB_ERRORS.locked();
   }
-  state.finishingAuthenticator = prior.factors.authenticatorPending;
-  if (ctx.path !== "/two-factor/verify-totp") return;
+  const isTotp = ctx.path === "/two-factor/verify-totp";
+  if (!prior.factors.authenticator) {
+    // Nothing to check a code against, or a set-up only a session that may enrol may finish: the
+    // library's own answers, before it runs, so that nothing is counted for a code that cannot pass.
+    if (!isTotp || !prior.factors.authenticatorPending || !mayFinishSetUp(rt, state)) {
+      state.line.reason = "factor.not_enrolled";
+      throw isTotp ? LIB_ERRORS.totpNotEnabled() : LIB_ERRORS.backupCodesNotEnabled();
+    }
+    state.finishingAuthenticator = true;
+  }
+  if (!isTotp) return;
   const code = typeof bodyOf(ctx).code === "string" ? (bodyOf(ctx).code as string) : "";
-  const row = await tx.query<{ secret: string; last_step: string | null }>(
-    `SELECT t.secret, s.last_step::text AS last_step FROM ${TABLES[realm].twoFactor} t
-       LEFT JOIN ${TABLES[realm].totpStep} s ON s.user_id = t.user_id
-      WHERE t.user_id = $1`,
+  const row = await tx.query<{ secret: string }>(
+    `SELECT secret FROM ${TABLES[realm].twoFactor} WHERE user_id = $1`,
     [prior.person.id],
   );
   const found = row.rows[0];
   if (found === undefined) return;
+  const now = rt.clock.now();
   let step: bigint | null = null;
   try {
-    step = matchingStep(await totpSecretBytes(ctx, found.secret), code, rt.clock.now(), {
-      window: 1,
-    });
+    step = matchingStep(await totpSecretBytes(ctx, found.secret), code, now, { window: 1 });
   } catch {
     rt.lines.write("auth.secret_unreadable", "error", { realm, kind: "totp" });
     throw new AuthRefusal("internal", "auth.secret_unreadable");
   }
-  if (step !== null && found.last_step !== null && step <= BigInt(found.last_step)) {
+  if (step === null) return; // a wrong code: the library refuses it and the after-hook counts it
+  // Claim the step in one statement: a request that finds it claimed, by an earlier request or
+  // by one committing now (whose row lock this waits on), is a replay.
+  const claimed = await tx.query(
+    `INSERT INTO ${TABLES[realm].totpStep} AS s (user_id, last_step, updated_at) VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE SET last_step = EXCLUDED.last_step, updated_at = EXCLUDED.updated_at
+       WHERE s.last_step < EXCLUDED.last_step
+     RETURNING 1`,
+    [prior.person.id, step.toString(), now],
+  );
+  if (claimed.rowCount === 0) {
     // The same step twice: refused as a wrong code would be, and counted as one.
     state.line.reason = "factor.replayed";
-    await recordFactorFailure(rt, tx, state, "totp");
+    if (state.finishingAuthenticator) await countFactorLockout(rt, tx, state);
+    else await recordFactorFailure(rt, tx, state, "totp");
     throw LIB_ERRORS.invalidCode();
   }
-  state.totpStep = step;
 }
 
 /** The last factor stays for staff and privileged developers (§6.7); removals are serialised. */
@@ -636,11 +724,35 @@ async function lastFactorRule(
   }
 }
 
+/** The passkey plugin's challenge cookie (its default `advanced.webAuthnChallengeCookie`). */
+const PASSKEY_CHALLENGE_COOKIE = "better-auth-passkey";
+
+/** The challenge this browser's live passkey ceremony answers, read without consuming it. */
+async function passkeyChallenge(ctx: HookContext, now: Date): Promise<string | null> {
+  const cookie = ctx.context.createAuthCookie(PASSKEY_CHALLENGE_COOKIE).name;
+  const token = await ctx.getSignedCookie(cookie, ctx.context.secret);
+  if (typeof token !== "string" || token === "") return null;
+  const found = await ctx.context.internalAdapter.findVerificationValue(token);
+  if (found === null || new Date(found.expiresAt).getTime() <= now.getTime()) return null;
+  try {
+    const data = JSON.parse(found.value) as { type?: unknown; expectedChallenge?: unknown };
+    return data.type === "authentication" && typeof data.expectedChallenge === "string"
+      ? data.expectedChallenge
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * A signature counter that goes backwards is refused (§5.3, [SA-35]); the library refuses it too,
- * but only Fin can tell the person why (`sign-in-methods-changed`, kind `passkey_refused`).
+ * A signature counter that goes backwards is refused (§5.3, [SA-35]); the library refuses it, and
+ * only Fin can tell the person why (`sign-in-methods-changed`, kind `passkey_refused`). The library
+ * checks the counter before the signature, so its refusal says nothing about who sent the
+ * assertion, and a credential ID is no secret: this only notes the assertion, the credential's key
+ * and the challenge the browser holds. The after-hook acts on it only once the assertion verifies
+ * against the stored key; an assertion that does not changes nothing and answers as any failure.
  */
-async function passkeyCounterCheck(
+async function notePasskeyCounter(
   rt: RealmRuntime,
   ctx: HookContext,
   state: RequestState,
@@ -652,36 +764,30 @@ async function passkeyCounterCheck(
   const credentialId = typeof response?.id === "string" ? response.id : null;
   const authData = response?.response?.authenticatorData;
   if (credentialId === null || typeof authData !== "string") return;
-  let counter: number;
-  try {
-    const bytes = Buffer.from(authData, "base64url");
-    if (bytes.byteLength < 37) return;
-    counter = bytes.readUInt32BE(33);
-  } catch {
-    return;
-  }
+  const bytes = Buffer.from(authData, "base64url");
+  if (bytes.byteLength < 37) return;
+  const counter = bytes.readUInt32BE(33);
   const realm = rt.settings.realm;
-  const stored = await tx.query<{ counter: number; user_id: string; email: string }>(
-    `SELECT p.counter, p.user_id, u.email FROM ${TABLES[realm].passkey} p
+  const stored = await tx.query<{
+    counter: number;
+    user_id: string;
+    email: string;
+    public_key: string;
+  }>(
+    `SELECT p.counter, p.user_id, u.email, p.public_key FROM ${TABLES[realm].passkey} p
        JOIN ${TABLES[realm].user} u ON u.id = p.user_id WHERE p.credential_id = $1`,
     [credentialId],
   );
   const row = stored.rows[0];
   if (row === undefined) return;
   const previous = Number(row.counter);
-  if ((counter !== 0 || previous !== 0) && counter <= previous) {
-    state.line.reason = "passkey.counter_regressed";
-    if (realm === "developer") {
-      await rt.email(tx, {
-        template: "identity/sign-in-methods-changed",
-        to: row.email,
-        params: {
-          userId: row.user_id,
-          kind: "passkey_refused",
-          time: rt.clock.now().toISOString(),
-        },
-      });
-    }
-    throw new AuthRefusal("forbidden", "passkey.counter_regressed", { reason: "passkey_refused" });
-  }
+  if ((counter === 0 && previous === 0) || counter > previous) return;
+  const expectedChallenge = await passkeyChallenge(ctx, rt.clock.now());
+  if (expectedChallenge === null) return;
+  state.passkeyCounter = {
+    userId: row.user_id,
+    email: row.email,
+    publicKey: row.public_key,
+    expectedChallenge,
+  };
 }

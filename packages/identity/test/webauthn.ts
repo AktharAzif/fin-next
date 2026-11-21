@@ -13,9 +13,9 @@ function cborHead(major: number, length: number): Buffer {
   return out;
 }
 
-type Cbor = number | string | Uint8Array | Cbor[] | Map<number | string, Cbor>;
+export type Cbor = number | string | Uint8Array | Cbor[] | Map<number | string, Cbor>;
 
-function cbor(value: Cbor): Buffer {
+export function cbor(value: Cbor): Buffer {
   if (typeof value === "number") {
     return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
   }
@@ -38,6 +38,8 @@ const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes
 export interface Credential {
   id: Buffer;
   privateKey: KeyObject;
+  /** The credential's public key as a COSE_Key, the bytes the library stores (base64). */
+  cosePublicKey: Buffer;
   counter: number;
   userHandle: string;
 }
@@ -63,7 +65,6 @@ export class SoftAuthenticator {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
     const id = Buffer.from(crypto.getRandomValues(new Uint8Array(16)));
-    this.credentials.push({ id, privateKey, counter: 0, userHandle: options.user.id });
     const cose = new Map<number, Cbor>([
       [1, 2],
       [3, -7],
@@ -71,6 +72,13 @@ export class SoftAuthenticator {
       [-2, Buffer.from(jwk.x, "base64url")],
       [-3, Buffer.from(jwk.y, "base64url")],
     ]);
+    this.credentials.push({
+      id,
+      privateKey,
+      cosePublicKey: cbor(cose),
+      counter: 0,
+      userHandle: options.user.id,
+    });
     const idLength = Buffer.alloc(2);
     idLength.writeUInt16BE(id.length);
     const authData = Buffer.concat([

@@ -2,6 +2,11 @@
 // The answer is always `202 { status: "code_sent" }` with the same cookies, whether the address
 // is unknown (a sign-up request is kept and a code sent) or already registered (the
 // `already-registered` notice goes instead). The route (L-SAT-06) runs it after the origin gate.
+//
+// "The same" is checked to the byte (T-SAT-32): both branches count the same limits before they
+// part, and every cookie in the answer is written by serializeFinCookie() here, never copied from
+// the library's own serializer, whose attribute order differs.
+import { codeSendSubject } from "./codes.ts";
 import { finCookieName, readCookie, serializeFinCookie } from "./cookies.ts";
 import { randomToken } from "./crypto/keyed.ts";
 import { AuthRefusal } from "./errors.ts";
@@ -21,6 +26,15 @@ export interface SignUpAnswer {
   setCookies: string[];
 }
 
+/** The cookie header with one cookie set to `value` (added, or replacing the one sent). */
+function withCookie(cookieHeader: string | null, name: string, value: string): string {
+  const others = (cookieHeader ?? "")
+    .split(";")
+    .map((c) => c.trim())
+    .filter((c) => c !== "" && !c.startsWith(`${name}=`));
+  return [...others, `${name}=${value}`].join("; ");
+}
+
 export async function signUp(
   realm: Realm,
   request: Request,
@@ -37,10 +51,15 @@ export async function signUp(
     const fields = [...(name.ok ? [] : ["name"]), ...(EMAIL.test(email) ? [] : ["email"])];
     if (!name.ok || fields.length > 0) throw new AuthRefusal("invalid", "body.invalid", { fields });
 
-    // Velocity per network and per address ([SA-40]): the same refusal for every address.
+    // Velocity per network and per address ([SA-40]), then the code request's own limits
+    // (`code_send` per network and per address, §5.6), counted here for both branches so that a
+    // used-up allowance refuses a registered and an unknown address alike. The code asked for
+    // below is therefore not counted again.
     for (const [bucket, subject] of [
       ["sign_up_network", rt.hasher.bucket("network", state.network)],
       ["sign_up_address", rt.hasher.bucket("email", email)],
+      ["code_send", rt.hasher.bucket("network", state.network)],
+      ["code_send", codeSendSubject(rt.hasher, email, false)],
     ] as const) {
       const result = await rt.limits.consume(tx, bucket, subject);
       if (!result.allowed) {
@@ -49,35 +68,23 @@ export async function signUp(
         });
       }
     }
+    state.codeSendCounted = true;
 
     const cookieHeader = request.headers.get("cookie");
-    const existingSignUpToken = readCookie(
-      cookieHeader,
-      finCookieName("developer", "sign_up_browser"),
-    );
-    const signUpToken =
-      existingSignUpToken !== null && TOKEN.test(existingSignUpToken)
-        ? existingSignUpToken
-        : randomToken();
-    const setCookies = [serializeFinCookie("developer", "sign_up_browser", signUpToken)];
+    const existing = (cookie: "sign_up_browser" | "code_browser"): string => {
+      const value = readCookie(cookieHeader, finCookieName("developer", cookie));
+      return value !== null && TOKEN.test(value) ? value : randomToken();
+    };
+    const signUpToken = existing("sign_up_browser");
+    const codeToken = existing("code_browser");
+    const setCookies = [
+      serializeFinCookie("developer", "sign_up_browser", signUpToken),
+      serializeFinCookie("developer", "code_browser", codeToken),
+    ];
 
     const person = await personByEmail(tx, "developer", email);
     if (person !== null) {
       await rt.email(tx, { template: "identity/already-registered", to: email, params: {} });
-      // The same cookies as a code request sets, so the two answers cannot be told apart.
-      const existingCodeToken = readCookie(
-        cookieHeader,
-        finCookieName("developer", "code_browser"),
-      );
-      setCookies.push(
-        serializeFinCookie(
-          "developer",
-          "code_browser",
-          existingCodeToken !== null && TOKEN.test(existingCodeToken)
-            ? existingCodeToken
-            : randomToken(),
-        ),
-      );
       return { status: 202, body: { status: "code_sent" }, setCookies };
     }
 
@@ -94,24 +101,34 @@ export async function signUp(
         new Date(now.getTime() + DAY),
       ],
     );
-    // The code goes through the library, from this browser, with the sign-up cookie it now holds.
+    // The code goes through the library, from this browser, holding the two tokens the answer
+    // sets: the hook binds the code to `codeToken` and finds the sign-up request by `signUpToken`.
     const headers = new Headers(request.headers);
-    const others = (cookieHeader ?? "")
-      .split(";")
-      .map((c) => c.trim())
-      .filter(
-        (c) => c !== "" && !c.startsWith(`${finCookieName("developer", "sign_up_browser")}=`),
-      );
     headers.set(
       "cookie",
-      [...others, `${finCookieName("developer", "sign_up_browser")}=${signUpToken}`].join("; "),
+      withCookie(
+        withCookie(cookieHeader, finCookieName("developer", "sign_up_browser"), signUpToken),
+        finCookieName("developer", "code_browser"),
+        codeToken,
+      ),
     );
     const sent = (await realm.api.sendVerificationOTP({
       body: { email, type: "sign-in" },
       headers,
       returnHeaders: true,
     })) as { headers: Headers | null };
-    for (const cookie of sent.headers?.getSetCookie() ?? []) setCookies.push(cookie);
+    // The hook sets only the code-browser cookie, to the token given; anything else would make
+    // this answer differ from the registered one (or bind the code to a token the browser never
+    // gets), so it fails closed.
+    const codeCookie = `${finCookieName("developer", "code_browser")}=`;
+    for (const cookie of sent.headers?.getSetCookie() ?? []) {
+      const value = cookie.startsWith(codeCookie)
+        ? cookie.slice(codeCookie.length).split(";")[0]
+        : null;
+      if (value !== codeToken) {
+        throw new Error("identity: the code request set a cookie signUp() does not answer with");
+      }
+    }
     return { status: 202, body: { status: "code_sent" }, setCookies };
   });
 }

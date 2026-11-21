@@ -69,6 +69,57 @@ describe.each(["developer", "staff"] as const)("the %s realm's allowlist", (real
     expect(realm.policy.rules.filter((r) => r.class === "session")).toEqual([]);
   });
 
+  it("counts no Fin budget on a GET (§2.3, [SA-44]): only the library's flood limit", () => {
+    for (const rule of realm.policy.rules) {
+      if (rule.class === "blocked" || !rule.methods.includes("GET")) continue;
+      expect(rule.limit, rule.path).toBe("default");
+    }
+  });
+
+  it.each([
+    ["/api/auth/get-session", "same-site"],
+    ["/api/auth/get-session", "cross-site"],
+    ["/api/auth/passkey/generate-authenticate-options", "cross-site"],
+    ["/api/auth/passkey/generate-register-options", "same-site"],
+  ])("refuses GET %s from a %s page before any unit of work or limit", async (path, site) => {
+    const before = pool.connects;
+    const response = await realm.handler(
+      new Request(`${realm.settings.publicOrigin}${path}`, {
+        method: "GET",
+        headers: { "sec-fetch-site": site, "sec-fetch-mode": "no-cors" },
+      }),
+      { requestId: newId("req", systemClock), clientIp: "203.0.113.5", userAgent: null },
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "invalid_origin", reason: "fetch_site" });
+    expect(pool.connects).toBe(before);
+    expect(lines.named("csrf.refused").at(-1)).toEqual({
+      reason: "fetch_site",
+      route: path,
+    });
+    expect(lines.named("request").at(-1)).toMatchObject({
+      outcome: "refused",
+      reason: "origin_gate.fetch_site",
+      status: 403,
+    });
+  });
+
+  it.each(["same-origin", "none", null])(
+    "lets a GET with Sec-Fetch-Site %s through to the library",
+    async (site) => {
+      const before = pool.connects;
+      await realm.handler(
+        new Request(`${realm.settings.publicOrigin}/api/auth/get-session`, {
+          method: "GET",
+          headers: site === null ? {} : { "sec-fetch-site": site },
+        }),
+        { requestId: newId("req", systemClock), clientIp: "203.0.113.5", userAgent: null },
+      );
+      // It reached the unit of work (the database here refuses every use).
+      expect(pool.connects).toBeGreaterThan(before);
+    },
+  );
+
   it("gives every reachable path at least one gate state and every blocked one none", () => {
     for (const rule of realm.policy.rules) {
       if (rule.class === "blocked") expect(rule.reach, rule.path).toEqual([]);

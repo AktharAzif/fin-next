@@ -4,6 +4,9 @@
 // after `/api/auth`, before the router and before any limit is counted. Anything unlisted or
 // blocked answers 404 with an empty body. Moving a path out of `blocked` needs the owner's
 // approval (AGENTS.md); T-SAT-01 fails when the installed router's set differs from this file.
+// A GET counts no Fin budget and makes no intent (§2.3, [SA-44]: a sibling page can send one with
+// the session cookie), so every GET's bucket is `default`, the library's flood limit, and the
+// realm refuses a GET that another site sent before even that is counted.
 import type { RealmName } from "./config.ts";
 import type { LimitBucket } from "./limits.ts";
 
@@ -104,7 +107,14 @@ function developerRules(features: PolicyFeatures): EndpointRule[] {
       "code_sign_in",
       "makes an account for an unknown address only in the asking browser",
     ),
-    rule("/passkey/generate-authenticate-options", ["GET"], "public", ANY, "passkey_options", ""),
+    rule(
+      "/passkey/generate-authenticate-options",
+      ["GET"],
+      "public",
+      ANY,
+      "default",
+      "a GET counts no Fin budget (§2.3); passkey_options counts at verify-authentication",
+    ),
     rule(
       "/passkey/verify-authentication",
       ["POST"],
@@ -134,8 +144,8 @@ function developerRules(features: PolicyFeatures): EndpointRule[] {
       ["GET"],
       "step_up_self",
       ["hold", "ok"],
-      "method_add",
-      "the first factor under the first-factor rule, later ones with an intent (§7.6)",
+      "default",
+      "the first factor under the first-factor rule, later ones with an intent (§7.6) that this GET only checks: verify-registration makes it and counts method_add (§2.3)",
     ),
     rule(
       "/passkey/verify-registration",
@@ -206,7 +216,14 @@ function staffRules(features: PolicyFeatures): EndpointRule[] {
       "staff_code_sign_in",
       "disableSignUp; an aal1 session that lives 10 minutes",
     ),
-    rule("/passkey/generate-authenticate-options", ["GET"], "public", ANY, "passkey_options", ""),
+    rule(
+      "/passkey/generate-authenticate-options",
+      ["GET"],
+      "public",
+      ANY,
+      "default",
+      "a GET counts no Fin budget (§2.3); passkey_options counts at verify-authentication",
+    ),
     rule(
       "/passkey/verify-authentication",
       ["POST"],
@@ -228,8 +245,8 @@ function staffRules(features: PolicyFeatures): EndpointRule[] {
       ["GET"],
       "step_up_self",
       ["pending", "ok"],
-      "method_add",
-      "pending inside the enrolment window; working with an intent (§10.3)",
+      "default",
+      "pending inside the enrolment window; working with an intent (§10.3) that this GET only checks (§2.3)",
     ),
     rule(
       "/passkey/verify-registration",

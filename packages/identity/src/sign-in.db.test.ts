@@ -154,6 +154,49 @@ describe("one live code per address (§5.2, S2-38)", () => {
     expect(signedIn.status).toBe(200);
   });
 
+  it("keeps a stranger who asks again in the strangers' share", async () => {
+    const owner = h.browser();
+    const email = unique("asks.again");
+    await codeSignIn(h, owner, email); // the owner's browser is now known for the address
+    await owner.post("/api/auth/sign-out");
+    const before = (await h.outbox(email)).length;
+    const stranger = h.browser();
+    for (let i = 0; i < 4; i += 1) expect((await sendCode(stranger, email)).status).toBe(200);
+    // Asking again does not make a browser known: it uses only what is left of the strangers'
+    // 3 an hour (the owner's first code, from a browser not yet known, used one).
+    expect((await h.outbox(email)).length - before).toBe(2);
+    const rows = await h.admin.query<{ browser_known: boolean }>(
+      "SELECT browser_known FROM identity.email_code_request WHERE email_hash = $1",
+      [h.realm.runtime.hasher.hash("email", email)],
+    );
+    expect(rows.rows.map((r) => r.browser_known)).toEqual([false, false, false]);
+    // The owner's known browser still gets its code, supersedes the stranger's and signs in.
+    expect((await sendCode(owner, email)).status).toBe(200);
+    expect((await h.outbox(email)).length - before).toBe(3);
+    const code = (await h.latestCode(email)) as string;
+    const signedIn = await post(owner, "/api/auth/sign-in/email-otp", { email, otp: code });
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+
+  it("never lets strangers' requests refuse the owner's known browser", async () => {
+    const owner = h.browser();
+    const email = unique("flooded");
+    await codeSignIn(h, owner, email);
+    await owner.post("/api/auth/sign-out");
+    // Browsers not known for the address share 6 requests in 10 minutes (the owner's first code,
+    // asked before its browser was known, was one of them)...
+    for (let i = 0; i < 5; i += 1) expect((await sendCode(h.browser(), email)).status).toBe(200);
+    expect((await sendCode(h.browser(), email)).status).toBe(429);
+    // ...and a known browser has its own.
+    const mine = await sendCode(owner, email);
+    expect(mine.status).toBe(200);
+    const signedIn = await post(owner, "/api/auth/sign-in/email-otp", {
+      email,
+      otp: (await h.latestCode(email)) as string,
+    });
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+
   it("keeps the rest of the allowance for known browsers once strangers used their share", async () => {
     const email = unique("share");
     for (let i = 0; i < 3; i += 1) expect((await sendCode(h.browser(), email)).status).toBe(200);
@@ -213,6 +256,38 @@ describe("tries per code (§5.2)", () => {
   });
 });
 
+describe("an address Fin does not accept (§5.2)", () => {
+  it("is refused as invalid, whatever the library's own check would let through", async () => {
+    const email = `${"a".repeat(65)}@example.com`;
+    const browser = h.browser();
+    const sent = await sendCode(browser, email);
+    expect(sent.status).toBe(400);
+    expect(sent.json).toMatchObject({ code: "invalid", fields: ["email"] });
+    expect(await h.outbox(email)).toEqual([]);
+    expect(await h.latestCode(email)).toBeNull();
+  });
+
+  it("signs in nobody with a code Fin holds no live request for, and answers as a wrong code", async () => {
+    const browser = h.browser();
+    const email = unique("no.request");
+    await sendCode(browser, email);
+    const code = (await h.latestCode(email)) as string;
+    // Fin's request for the code is gone (it lapsed a moment before the library's own copy).
+    await seed(
+      h.admin,
+      `UPDATE identity.email_code_request SET created_at = now() - interval '20 minutes',
+              expires_at = now() - interval '1 second' WHERE email_hash = ANY($1)`,
+      [h.realm.runtime.hasher.hashes("email", email)],
+    );
+    const errorsBefore = h.lines.named("auth.unhandled_error").length;
+    const refused = await post(browser, "/api/auth/sign-in/email-otp", { email, otp: code });
+    expect(refused.status).toBe(400);
+    expect(refused.json).toMatchObject({ code: "INVALID_OTP" });
+    expect(await userOf(email)).toBeNull();
+    expect(h.lines.named("auth.unhandled_error").length).toBe(errorsBefore);
+  });
+});
+
 describe("a new sign-in from a browser the account has not used (§5.5)", () => {
   it("queues new-sign-in, and not again from the same browser", async () => {
     const email = unique("notice");
@@ -266,8 +341,10 @@ describe("the same answers for registered and unknown addresses (T-SAT-32, AC-SA
     const b = await run(fresh, browser);
     expect(a.status).toBe(202);
     expect(a.body).toEqual(b.body);
-    const names = (cookies: string[]) => cookies.map((c) => c.slice(0, c.indexOf("="))).sort();
-    expect(names(a.setCookies)).toEqual(names(b.setCookies));
+    // Every byte of every Set-Cookie but the tokens themselves, in order.
+    const masked = (cookies: string[]) => cookies.map((c) => c.replace(/=[^;]*/, "=<token>"));
+    expect(masked(a.setCookies)).toEqual(masked(b.setCookies));
+    expect(masked(a.setCookies)).toHaveLength(2);
     expect((await h.outbox(registered)).at(-1)?.template).toBe("identity/already-registered");
     expect((await h.outbox(fresh)).at(-1)?.template).toBe("identity/confirm-email");
     expect(await userOf(fresh)).toBeNull();
@@ -282,6 +359,35 @@ describe("the same answers for registered and unknown addresses (T-SAT-32, AC-SA
     });
     expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
     expect((await userOf(fresh))?.name).toBe("Ada Lovelace");
+  });
+
+  it("answers sign-up the same way once the network's code requests are used up", async () => {
+    const registered = unique("spent.registered");
+    await codeSignIn(h, h.browser(), registered);
+    const ip = `2001:db8:${Math.floor(Math.random() * 0xffff).toString(16)}::7`;
+    const spender = h.browser({ ip });
+    for (let i = 0; i < 6; i += 1) {
+      expect((await sendCode(spender, unique("spent.other"))).status).toBe(200);
+    }
+    const run = (email: string) => {
+      const b = h.browser({ ip });
+      return signUp(
+        h.realm,
+        b.request("POST", "/api/sign-up", { name: "Ada Lovelace", email }),
+        b.context(),
+        { name: "Ada Lovelace", email },
+      ).then(
+        (answer) => ({ status: answer.status, code: null as string | null }),
+        (error: { status?: number; code?: string }) => ({
+          status: error.status ?? 0,
+          code: error.code ?? null,
+        }),
+      );
+    };
+    const a = await run(registered);
+    const b = await run(unique("spent.fresh"));
+    expect(a).toEqual({ status: 429, code: "rate_limited" });
+    expect(b).toEqual(a);
   });
 
   it("refuses a bad name with the field's sentence and no address in the answer", async () => {
