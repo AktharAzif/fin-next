@@ -1,6 +1,8 @@
 # Better Stack differs from ops/monitoring
 
-Alert: `monitoring-drift` (the daily dry run, `run.done` `result=drift`).
+Alert: `monitoring-drift` (notify only: a `monitoring.apply` line with `drift` true, or an
+`outcome` other than `dry-run`, `unchanged` or `applied`: the daily dry run's drift, a read-back
+that differs, a refused, stopped or failed run).
 
 The command behind this runbook is `pnpm fin monitoring apply staging` (spec 08 §7.11). Until the
 root `package.json` gains a `fin` script, run it as `node ops/fin/src/main.ts monitoring apply
@@ -17,20 +19,28 @@ outside the files, an `ai_sre` member) reports drift too. A silenced alert is as
 one.
 
 A real run whose read-back differs is the same thing seen at once: Better Stack did not keep what
-the run sent (it answered the write, but reading it back shows something else), or someone changed
-it meanwhile. The run exits 1 and its `run.done` is `failed`, with `readBack.mismatched` naming
-each object (`<kind>:<name>`).
+the run sent (it answered the write, but reading it back shows something else, a part it fixes at
+creation such as a source's `data_region` or a metric's `type` included), or someone changed it
+meanwhile. The run exits 1, its `monitoring.apply` line has `outcome` `mismatch`, and its
+`run.done` is `failed`, with `readBack.mismatched` naming each object (`<kind>:<name>`). A dry run
+registers no run and writes no `run.done`: every run's `monitoring.apply` line is what this alert
+reads. A refused (`refused`), stopped (`stopped`) or failed apply (`error`) fires it too: the daily
+dry run that cannot run hides any drift.
 
 ## First check
 
-1. Run the dry run by hand and read the difference (it prints names, roles and the parts that
+1. The `outcome`, `drift`, `refusals` and `readBackMismatched` on the `monitoring.apply` line.
+   Then run the dry run by hand and read the difference (it prints names, roles and the parts that
    differ, never an ID, a hostname or one of the overlay's numbers: a changed threshold prints
-   `value (not shown) -> <threshold:<name>>`).
+   `value (not shown) -> <threshold:<name>>`, and a number Better Stack echoes in a refusal prints
+   as its placeholder too).
 2. For a paused alert, its `paused_reason` (the dry run's note) and whether its query fails.
 3. After a read-back that differs: the lines under `read back:` name each object and the parts that
-   differ (`alert clock-skew: differs in value`, `heartbeat watcher: missing`). Run the dry run
-   again a minute later: a difference that is gone was a read Better Stack had not caught up with;
-   one that stays is Better Stack refusing a field, or someone changing it.
+   differ (`alert auth-endpoint-unlisted: differs in value`, `heartbeat watcher: missing`). Run the
+   dry run again a minute later: a difference that is gone was a read Better Stack had not caught
+   up with; one that stays is Better Stack refusing a field, or someone changing it. A part Better
+   Stack fixes at creation (`differs in data_region, which Better Stack fixes at creation`) never
+   goes by itself: the object is recreated by hand after review.
 
 ## Containment
 
@@ -65,15 +75,20 @@ and talks to it over an IPC channel:
   (`@thresholds.<key>`, `@grace.<key>`) has no value in the overlay; the refusal names each key.
 - A dry run reads and never writes: pnpm fin refuses any write a dry run asks for. A real run takes
   the run lock first, writes `run.registered` (with the plan's counts) only once the plan has passed
-  every rule and before the first write, one `run.step` per write Better Stack made, and `run.done`
-  with the counts and the read-back. A refused plan, or one with nothing to change, registers
-  nothing.
+  every rule and before the first write, one `run.step` per write Better Stack made (recorded before
+  the apply hears the answer), and `run.done` with the counts and the read-back. A refused plan, or
+  one with nothing to change, registers nothing. If a write's `run.step` cannot be recorded (the
+  run log does not verify, the disk is full), pnpm fin sends nothing more, the run ends `failed`
+  and exits with that error's code (1 for a run log that does not verify): see `pnpm-fin.md` on the
+  run log before running again.
 - Staging stays quiet: every alert, monitor and heartbeat must route to `staging-quiet`, and no
   other policy may be defined (monitoring:check's RT-01 first, then the plan's MA-06); anything that
   calls, texts or pushes is refused.
 - After a run that wrote anything, everything is read back and compared with the files, as a dry
   run would: `read back: <n> object(s) compared, every one as the files say`, or exit 1 with each
-  differing object named.
+  differing object named, a part Better Stack fixes at creation included. A source or an Errors
+  application the files do not name is never deleted: the read-back says so and the run's `drift`
+  is true (exit 0), as it is for a real run with nothing to write while such a difference stands.
 - Every run, a dry run included, writes one `monitoring.apply` line (names and counts only:
   `outcome`, `drift`, the counts, `readBackCompared`, `readBackMismatched`) to `lines.jsonl`,
   shipped to the `ops` source when `FIN_OPS_INGEST_HOST` and `FIN_OPS_INGEST_TOKEN_FILE` are set.
@@ -102,11 +117,14 @@ The `ops` source does not exist before this run, so `FIN_OPS_INGEST_*` stay unse
 stay in `lines.jsonl` beside the run log.
 
 1. **Write the overlay keys.** In an editor, the file staying `chmod 600`, add
-   `thresholds.auth-endpoint-unlisted` (the identity alert's threshold, spec 02 §18.2) under
-   `"thresholds"` with its number. Then run the dry run (step 2) and read every `refused: MA-10 the
-   run's settings have no value for <key>` line: add each key the same way, `thresholds.<name>`
-   under `"thresholds"` (a ratio such as `5xx-rate-api` is a fraction, everything else a whole
-   number) and `grace.<name>` under `"grace"` (whole seconds), until no MA-10 line is left. Then:
+   `thresholds.auth-endpoint-unlisted` (the threshold of `auth-endpoint-unlisted` in
+   `alerts/identity.json`, spec 02 §18.2) under `"thresholds"` with its number: MA-10 refuses the
+   dry run and the apply alike while it has no value. Then run the dry run (step 2) and read every
+   `refused: MA-10 the run's settings have no value for <key>` line: add each key the same way
+   (today's alerts add `thresholds.csrf-refused-jump`, `thresholds.step-up-failing`,
+   `thresholds.step-up-locked` and `thresholds.staff-enrolment-refused`), `thresholds.<name>` under
+   `"thresholds"` (a ratio such as `5xx-rate-api` is a fraction, everything else a whole number) and
+   `grace.<name>` under `"grace"` (whole seconds), until no MA-10 line is left. Then:
 
    ```sh
    node ops/fin/src/main.ts overlay check staging
@@ -139,7 +157,13 @@ stay in `lines.jsonl` beside the run log.
 
    It prints the same plan, then one `created ...` line per object. It proves the writes happened
    inside a registered run: `run.registered` before the first write, one `run.step` for each write
-   Better Stack made, and `run.done` at the end.
+   Better Stack made, and `run.done` at the end. Check that the `created alert` lines include the
+   alerts the steward's ruling of 22 Nov turns on tonight: `admin-staff-refused`,
+   `admin-access-mismatch`, `staff-changed`, `staff-enrolled`, `staff-enrolment-refused`,
+   `access-keys-unavailable`, `audit-guard`, `secret-unreadable`, `rate-limiter-failing`,
+   `csrf-refused-jump`, `email-delivery-stalled`, `sign-in-failing`, `second-factor-step-failing`,
+   `step-up-failing`, `step-up-locked` and `auth-endpoint-unlisted`. What stays owed is listed with
+   its reason in `ops/monitoring/catalog/owed.ts`.
 
 4. **Read-back.** The apply ends by reading everything back and comparing it with the files:
    `read back: <n> object(s) compared, every one as the files say` and exit 0. That proves Better

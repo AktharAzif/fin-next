@@ -1,5 +1,5 @@
 {
-  "$comment": "Phase 0's audit alerts (spec 08 §3.14, §7.8 group D). The sources are the services whose logins record audit events (spec 08 §3.4), and migrate for the operator tasks. audit-not-written's series is the service, the SQLSTATE and the audit event, so a refusal that stands never hides a later, different one (MC-04); each label is held to a closed set (the rule's sources, a five-character SQLSTATE, and the audit events the code defines: the names in packages/audit's generated AUDIT_EVENTS and the events each area's own recorder writes), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. The rest of group D comes with the guard alert and the chain, anchor and journal duties that write their lines.",
+  "$comment": "Phase 0's audit alerts (spec 08 §3.14, §7.8 group D). The sources are the services whose logins record audit events (spec 08 §3.4), and migrate for the operator tasks. audit-not-written's series is the service, the SQLSTATE and the audit event, so a refusal that stands never hides a later, different one (MC-04); each label is held to a closed set (the rule's sources, a five-character SQLSTATE, and the audit events the code defines: the names in packages/audit's generated AUDIT_EVENTS and the events each area's own recorder writes), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. audit-guard pages on any database.audit_guard (the unit of work's FA010 refusal, spec 08 §3.14), one incident per service, the label held to the same sources. The rest of group D comes with the chain, anchor and journal duties that write their lines.",
   "alerts": [
     {
       "name": "audit-not-written",
@@ -102,6 +102,33 @@
         "check": "The sqlstate on audit.write_failed: FA002 is a fragment's roles missing a login, FA004 a metadata shape, FA011 a head changed outside the code (wake the owner); the auditEvent and the release. A line without auditEvent lost the event's name (one passed as `event` is dropped by the envelope): the request line with its requestId names the action by its route, or for a library path (route /api/auth/* or none) the auth.unhandled_error line with that requestId names it by its authPath. Such a line, like an auditEvent the code does not define, carries the event label other, and lines on other share one incident per service and sqlstate: while one stands, a later refusal with the same sqlstate whose event is other too (a foreign-event FA002 among them) joins it and sends no email, so read every line of an open other incident.",
         "flow": "F15",
         "runbook": "docs/runbooks/audit-not-written.md"
+      }
+    },
+    {
+      "name": "audit-guard",
+      "group": "D",
+      "severity": "P",
+      "sources": ["api", "worker", "payments", "console", "admin", "migrate"],
+      "seriesBy": [
+        {
+          "field": "service",
+          "oneOf": ["api", "worker", "payments", "console", "admin", "migrate"]
+        }
+      ],
+      "query": { "count": { "events": ["database.audit_guard"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The database refused a commit (FA010): a write to a critical table came without its audit event, so the action was rolled back. Refusals: {{value}}.",
+      "metadata": {
+        "check": "The table on database.audit_guard, and the request or job.run line with the same requestId or runId: which route or duty wrote to that table without recording its event; the release.",
+        "flow": "F15",
+        "runbook": "docs/runbooks/audit-guard.md"
       }
     }
   ]

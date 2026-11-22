@@ -35,9 +35,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the unit of work (packages/db, and identity's own), when a commit is refused with FA010: a write to a critical table came without its event",
     fields: { table: "string" },
-    alerts: [],
-    // It lands with its runbook, docs/runbooks/audit-guard.md.
-    owed: ["audit-guard"],
+    alerts: ["audit-guard"],
   },
   {
     event: "switch.tripped",

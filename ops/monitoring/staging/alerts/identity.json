@@ -1,5 +1,5 @@
 {
-  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`.",
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), L-SAT-09's by the steward's rulings of 22 Nov: auth-endpoint-unlisted, then secret-unreadable, rate-limiter-failing, csrf-refused-jump, and the sign-in and step-up rates (sign-in-failing, second-factor-step-failing, step-up-failing, step-up-locked), each over a line the code writes where the realms run (console's developer realm, admin's staff realm; the origin gate and the endpoint allowlist on verify too). The API halves write auth.endpoint_blocked (verify with realm none); its query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. sign-in-failing and second-factor-step-failing split auth.unhandled_error by authPath: the factor-step and enrolment paths are second-factor-step-failing's, every other value (a missing one included) sign-in-failing's, so no unhandled error is left out. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`. The rest of the area's alerts are owed in catalog/owed.ts, each with why.",
   "alerts": [
     {
       "name": "auth-endpoint-unlisted",
@@ -26,6 +26,209 @@
         "check": "The realm and release on the lines; the request lines with the same requestId and their cfRay; whether the count began with a release.",
         "flow": "F3",
         "runbook": "docs/runbooks/auth-endpoint-unlisted.md"
+      }
+    },
+    {
+      "name": "secret-unreadable",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["auth.secret_unreadable"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A stored secret (an authenticator key or backup codes) that no configured BETTER_AUTH_SECRETS version opens: the person cannot finish their factor step. Lines: {{value}}.",
+      "metadata": {
+        "check": "The realm and kind on auth.secret_unreadable; the BETTER_AUTH_SECRETS versions the service holds (names only) against the last rotation; the release.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/secret-unreadable.md"
+      }
+    },
+    {
+      "name": "rate-limiter-failing",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["limits.store_failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The auth limiter could not read or write its store and failed closed: sign-ins and codes are refused with 503. Failures: {{value}}.",
+      "metadata": {
+        "check": "The bucket on limits.store_failed; database-unreachable and pool-exhausted for the same service; the database's own state.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/rate-limiter-failing.md"
+      }
+    },
+    {
+      "name": "csrf-refused-jump",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin", "verify"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin", "verify"] }],
+      "query": { "count": { "events": ["csrf.refused"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.csrf-refused-jump",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The origin gate refused unsafe requests above its pre-deploy baseline in 15 minutes: the app's configured origin and what its pages send (Origin, Sec-Fetch-Site, X-Fin-App) drifted apart, or someone is sending requests from another site. Refusals: {{value}}.",
+      "metadata": {
+        "check": "The reason and route on csrf.refused; FIN_PUBLIC_ORIGIN on the service against the host its pages are served on; the X-Fin-App the client sends; whether the count began with a release.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/csrf-refused-jump.md"
+      }
+    },
+    {
+      "name": "sign-in-failing",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": {
+        "count": {
+          "events": ["auth.unhandled_error"],
+          "where": [
+            {
+              "field": "authPath",
+              "notIn": [
+                "/two-factor/verify-totp",
+                "/two-factor/verify-backup-code",
+                "/two-factor/verify-otp",
+                "/two-factor/send-otp",
+                "/two-factor/enable",
+                "/two-factor/get-totp-uri",
+                "/two-factor/generate-backup-codes",
+                "/passkey/generate-authenticate-options",
+                "/passkey/verify-authentication",
+                "/passkey/generate-register-options",
+                "/passkey/verify-registration"
+              ]
+            }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The auth library answered 500 on a sign-in or session path (an error no refusal names): people may not be able to sign in. Errors: {{value}}.",
+      "metadata": {
+        "check": "The authPath and errorId on auth.unhandled_error, and the error.unexpected line with the same errorId in the service's Errors application; the last deploy.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/sign-in-failing.md"
+      }
+    },
+    {
+      "name": "second-factor-step-failing",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": {
+        "count": {
+          "events": ["auth.unhandled_error"],
+          "where": [
+            {
+              "field": "authPath",
+              "in": [
+                "/two-factor/verify-totp",
+                "/two-factor/verify-backup-code",
+                "/two-factor/verify-otp",
+                "/two-factor/send-otp",
+                "/two-factor/enable",
+                "/two-factor/get-totp-uri",
+                "/two-factor/generate-backup-codes",
+                "/passkey/generate-authenticate-options",
+                "/passkey/verify-authentication",
+                "/passkey/generate-register-options",
+                "/passkey/verify-registration"
+              ]
+            }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The auth library answered 500 on a factor-step or enrolment path: people may not be able to finish their second factor or add one. Errors: {{value}}.",
+      "metadata": {
+        "check": "The authPath and errorId on auth.unhandled_error, and the error.unexpected line with the same errorId in the service's Errors application; the last deploy.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/sign-in-failing.md"
+      }
+    },
+    {
+      "name": "step-up-failing",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": {
+        "count": {
+          "events": ["step_up.refused"],
+          "where": [{ "field": "reason", "eq": "digest" }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.step-up-failing",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Step-up intents refused because the request's fields did not match the intent's digest, above the threshold in 15 minutes: the client and the server bind different fields for an action. Refusals: {{value}}.",
+      "metadata": {
+        "check": "The realm and action on step_up.refused with reason digest; the route policy's bind list for that action against what the client sends; the last deploy of the pages and of the API half.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/step-up.md"
+      }
+    },
+    {
+      "name": "step-up-locked",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["step_up.locked"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.step-up-locked",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Sessions ended by the fifth failed step-up, above the threshold in 15 minutes: someone may be guessing a factor in a stolen session. Locks: {{value}}.",
+      "metadata": {
+        "check": "The realm on step_up.locked; the people of those sessions, from the audit log's step_up.locked events and their requestIds.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/step-up.md"
       }
     }
   ]

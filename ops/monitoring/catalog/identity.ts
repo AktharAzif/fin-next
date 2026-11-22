@@ -2,10 +2,9 @@
 // (`lines.write`) for both realms, and by the orgs and staff packages and the console's API half
 // where they run identity's gates. packages/identity/src/monitoring.ts keeps the same list beside
 // the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
-// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
-// identity area's alert fragment (alerts/identity.json), which so far holds only web-host.ts's
-// auth-endpoint-unlisted; until the rest land each failure or security entry names the alerts it is
-// owed (`owed`, listed in owed.ts with their lane and date), or why none.
+// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines are in the
+// identity area's alert fragment (alerts/identity.json); sign-in-code-contested is still owed
+// (`owed`, listed in owed.ts with its lane, date and why).
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -37,8 +36,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the TOTP check and the console's viewer, when no configured secret version opens a stored secret",
     fields: { realm: "string", kind: "string" },
-    alerts: [],
-    owed: ["secret-unreadable"],
+    alerts: ["secret-unreadable"],
   },
   {
     event: "auth.unhandled_error",
@@ -47,10 +45,9 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the realm's error handler, beside error.unexpected with the same errorId, for an error no refusal names (500)",
     fields: { realm: "string", authPath: "string", errorId: "string" },
-    alerts: [],
-    owed: ["sign-in-failing"],
-    noAlert:
-      "Meanwhile the error reaches the service's Errors application through error.unexpected",
+    // Split by authPath: the factor-step and enrolment paths are second-factor-step-failing's,
+    // every other value, a missing one included, sign-in-failing's.
+    alerts: ["sign-in-failing", "second-factor-step-failing"],
   },
   {
     event: "auth.library_log",
@@ -68,9 +65,8 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the step-up intents and ceremonies (identity, and the orgs and staff guards), for an intent or a ceremony that cannot serve (spec 02 §7.5)",
     fields: { realm: "string", action: "string", reason: "string" },
-    alerts: [],
     // step-up-failing watches reason digest above its threshold (spec 02 §18.2).
-    owed: ["step-up-failing"],
+    alerts: ["step-up-failing"],
   },
   {
     event: "step_up.locked",
@@ -78,8 +74,7 @@ export const entries: readonly CatalogEntry[] = [
     level: "warn",
     writtenBy: "the step-up counter, when the fifth failure ends the session (spec 02 §7.7)",
     fields: { realm: "string" },
-    alerts: [],
-    owed: ["step-up-locked"],
+    alerts: ["step-up-locked"],
   },
   {
     event: "limits.refused",
@@ -96,7 +91,6 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the auth limiter, when its store cannot be read or written; it fails closed, so the request is refused (503)",
     fields: { bucket: "string" },
-    alerts: [],
-    owed: ["rate-limiter-failing"],
+    alerts: ["rate-limiter-failing"],
   },
 ];

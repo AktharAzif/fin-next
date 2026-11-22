@@ -48,31 +48,10 @@ export interface OwedAlert {
 const SUNDAY = "2026-11-22";
 
 export const OWED_ALERTS: readonly OwedAlert[] = [
-  // The steward's ruling of 22 Nov, option (b): the alerts the code names.
-  {
-    name: "sign-in-failing",
-    severity: "P",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "second-factor-step-failing",
-    severity: "P",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "step-up-failing",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
+  // The steward's ruling of 22 Nov, option (b): the alerts the code names. The later ruling of
+  // 22 Nov (L-SAT-09 carries every owed alert due today, in its build order) made rules of
+  // secret-unreadable, rate-limiter-failing, csrf-refused-jump, audit-guard and the sign-in and
+  // step-up rates; what is left here is owed for the reason in its note.
   {
     name: "sign-in-code-contested",
     severity: "N",
@@ -80,38 +59,14 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
-  },
-  {
-    name: "step-up-locked",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "secret-unreadable",
-    severity: "P",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "rate-limiter-failing",
-    severity: "P",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "csrf-refused-jump",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
+    note:
+      "Owed, not defined: spec 02 §18.2 fires it for one userId above its threshold, so its series " +
+      "is the userId, a label every line chooses (an ID, unbounded), which this repository's rules " +
+      "refuse (each series label is held to a closed set); a count over every account would be " +
+      "sign-in-failures-spike's job, not this one. It needs a per-account count the alert can read " +
+      "without an ID label (a metric of counts by account, or a writer that marks the account's " +
+      "own threshold crossed), which the identity lane decides; spec 02 §18.3's panel shows the " +
+      "lines meanwhile.",
   },
   {
     name: "admin-without-second-factor",
@@ -155,14 +110,6 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "start_incident, window @thresholds.duty-stalled-access-drift: spec 02 §18.2 says 2 hours, " +
       "ARCHITECTURE §4.6 and spec 08 §7.8 three cadences, 3 hours, and the higher text binds), " +
       "runbook docs/runbooks/duty-stalled.md.",
-  },
-  {
-    name: "audit-guard",
-    severity: "P",
-    fragment: "audit",
-    lane: "P0-F",
-    due: SUNDAY,
-    spec: "spec 08 §3.14",
   },
   // Named as owed by the catalogue, in the same fragments or their areas' own: owed, with these
   // lanes and dates, by the steward's later ruling of 22 Nov, and not built now.
@@ -218,6 +165,33 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
+    note:
+      "Not built on 22 Nov: it comes after the ruling's build order (the Fin Admin access alerts, " +
+      "then audit-guard, secret-unreadable, rate-limiter-failing, csrf-refused-jump and the email " +
+      "delivery stall, then the sign-in and step-up rates). Its rule needs the exact route " +
+      "templates of the team and role routes as console's request line names them (the query " +
+      "language matches values, not prefixes), held by a test against console's route policy " +
+      "(apps/console/src/server/policy/orgs.ts). Meanwhile a 5xx on those routes is " +
+      "5xx-rate-console and 5xx-count-console.",
+  },
+  // Defined in alerts/platform.json until its read event was found to have no writer: an alert
+  // that reads a field or event nobody writes can never fire, so it is owed, not defined. Its lane
+  // (the platform fragment's) follows the lane rule above; the steward confirms or changes it.
+  {
+    name: "github-settings-changed",
+    severity: "P",
+    fragment: "platform",
+    lane: "P0-F",
+    due: SUNDAY,
+    spec: "spec 08 §7.8 group J",
+    note:
+      "Owed, not defined, because nothing writes what it read: a run.done of the command " +
+      "`github verify` with result drift, and pnpm fin has no such command (none of the command " +
+      "lists ops/fin/src/cli.ts joins names one) while a run's result is ok, failed or refused " +
+      "only (RunResult in " +
+      "ops/fin/src/core/run.ts). The pull request that adds pnpm fin github verify puts the rule " +
+      "back in alerts/platform.json over the line it writes (runbook " +
+      "docs/runbooks/github-settings-changed.md) and removes it here.",
   },
   // Defined in alerts/platform.json until its field was found to have no writer: an alert that
   // reads a field nobody writes can never fire, so it is owed, not defined. Its lane (the

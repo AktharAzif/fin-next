@@ -43,14 +43,11 @@ export const entries: readonly CatalogEntry[] = [
       errorId: "string",
     },
     alerts: ["5xx-rate-{service}", "5xx-count-{service}"],
-    // Spec 02 §18.2's, over the auth paths, Fin Admin's requests and the team and role routes.
-    owed: [
-      "sign-in-failing",
-      "second-factor-step-failing",
-      "step-up-failing",
-      "admin-without-second-factor",
-      "team-change-failing",
-    ],
+    // Spec 02 §18.2's over Fin Admin's requests and the team and role routes. The sign-in,
+    // factor-step and step-up alerts read identity's own lines (auth.unhandled_error, which names
+    // the library path, and step_up.refused), since the host's one request line for /api/auth/*
+    // carries no path; a 5xx anywhere on a service is 5xx-rate-<service> and 5xx-count-<service>.
+    owed: ["admin-without-second-factor", "team-change-failing"],
   },
   {
     event: "process.start",
@@ -254,9 +251,9 @@ export const entries: readonly CatalogEntry[] = [
       "origin_gate.app_header",
       "origin_gate.content_type",
     ],
-    alerts: [],
-    // A jump above the pre-deploy baseline; single refusals are expected traffic.
-    owed: ["csrf-refused-jump"],
+    // Above the pre-deploy baseline (@thresholds.csrf-refused-jump); single refusals are expected
+    // traffic.
+    alerts: ["csrf-refused-jump"],
   },
   {
     event: "api.outside_request",
@@ -409,9 +406,15 @@ export const entries: readonly CatalogEntry[] = [
       auditUnsequencedS: "number",
       oldestUnsequencedS: "number",
       runs: "number",
+      // The email delivery check's (apps/api/src/worker/email/delivery-check.ts): a failed run's
+      // code (`pg_<SQLSTATE>` or `pg_<errno>`, `error` without one), and whether its run could be
+      // recorded in ops.duty_state.
+      code: "string",
+      dutyState: "string",
+      dutyStateCode: "string",
     },
     reasons: ["leased", "disabled", "no_work", "switch"],
-    alerts: ["wal-archiving-stalled", "email-outbox-age"],
+    alerts: ["wal-archiving-stalled", "email-outbox-age", "email-delivery-stalled"],
   },
   {
     event: "provider.call",
@@ -540,9 +543,13 @@ export const entries: readonly CatalogEntry[] = [
     event: "run.done",
     kind: "unit",
     level: "info",
-    writtenBy: "pnpm fin, at the end of every run (result drift when a verify finds a difference)",
+    writtenBy:
+      "pnpm fin, at the end of every registered run, with the result ok, failed or refused (RunResult in ops/fin/src/core/run.ts; a dry run registers nothing, so writes none)",
     fields: { command: "string", result: "string", durationMs: "number" },
-    alerts: ["github-settings-changed", "monitoring-drift"],
+    alerts: [],
+    // github-settings-changed reads a run.done of `pnpm fin github verify` with result drift: that
+    // command is not in the tree and no run writes drift, so it is owed (owed.ts says why).
+    owed: ["github-settings-changed"],
   },
   {
     event: "rotation.redeployed",
@@ -555,7 +562,9 @@ export const entries: readonly CatalogEntry[] = [
   },
   {
     event: "monitoring.apply",
-    kind: "unit",
+    // A unit line and a failure at once: a run that found drift, read back different, was refused,
+    // stopped or failed says so here only (a dry run writes no run.done; run.done says only failed).
+    kind: ["unit", "failure"],
     level: "info",
     writtenBy:
       "pnpm fin monitoring apply, once per run, a dry run included: how it ended, its counts and the objects its read-back found different, by kind and name (warn for drift or a refusal, error for a stopped run, a read-back that differs or a failed apply process)",
@@ -573,6 +582,8 @@ export const entries: readonly CatalogEntry[] = [
       readBackCompared: "number",
       readBackMismatched: "string[]",
     },
-    alerts: [],
+    // drift true, or an outcome other than dry-run, unchanged or applied (`error` when the apply
+    // process gave no result): test/monitoring-drift.test.ts reads the fields the command writes.
+    alerts: ["monitoring-drift"],
   },
 ];

@@ -454,45 +454,16 @@
       }
     },
     {
-      "name": "github-settings-changed",
-      "group": "J",
-      "severity": "P",
-      "sources": ["ops"],
-      "query": {
-        "count": {
-          "events": ["run.done"],
-          "where": [
-            { "field": "command", "eq": "github verify" },
-            { "field": "result", "eq": "drift" }
-          ]
-        }
-      },
-      "operator": "higher_than",
-      "threshold": "@any",
-      "check_period": 300,
-      "query_period": 300,
-      "confirmation_period": 0,
-      "recovery_period": 86400,
-      "on_missing_data": "dont_fire",
-      "policy": "staging-quiet",
-      "incident_cause": "pnpm fin github verify found the repository settings, the ruleset or an environment different from the files.",
-      "metadata": {
-        "check": "The owner's GitHub security log for who changed what.",
-        "flow": "F17",
-        "runbook": "docs/runbooks/github-settings-changed.md"
-      }
-    },
-    {
       "name": "monitoring-drift",
       "group": "J",
       "severity": "N",
       "sources": ["ops"],
       "query": {
         "count": {
-          "events": ["run.done"],
-          "where": [
-            { "field": "command", "in": ["monitoring apply", "verify"] },
-            { "field": "result", "eq": "drift" }
+          "events": ["monitoring.apply"],
+          "whereAny": [
+            { "field": "drift", "eq": true },
+            { "field": "outcome", "notIn": ["dry-run", "unchanged", "applied"] }
           ]
         }
       },
@@ -504,9 +475,9 @@
       "recovery_period": 86400,
       "on_missing_data": "dont_fire",
       "policy": "staging-quiet",
-      "incident_cause": "Better Stack differs from ops/monitoring (the daily dry run), or Better Stack paused an alert itself.",
+      "incident_cause": "A pnpm fin monitoring apply found Better Stack different from ops/monitoring (the daily dry run's drift, Better Stack pausing an alert itself), read back different after its writes, was refused, stopped partway, or failed.",
       "metadata": {
-        "check": "pnpm fin monitoring apply staging --dry-run; each alert's paused_reason.",
+        "check": "The outcome, drift and readBackMismatched on the monitoring.apply line; pnpm fin monitoring apply staging --dry-run; each alert's paused_reason.",
         "flow": "F20",
         "runbook": "docs/runbooks/monitoring-drift.md"
       }

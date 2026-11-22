@@ -139,6 +139,39 @@
         "flow": "F10",
         "runbook": "docs/runbooks/email.md"
       }
+    },
+    {
+      "name": "email-delivery-stalled",
+      "group": "G",
+      "severity": "P",
+      "sources": ["worker"],
+      "query": {
+        "count": {
+          "events": ["job.run"],
+          "where": [
+            { "field": "job", "eq": "email-delivery-check" },
+            { "field": "trigger", "notEq": "sent" }
+          ],
+          "whereAny": [
+            { "field": "result", "eq": "failed" },
+            { "field": "dutyState", "eq": "failed" }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The email delivery check could not queue its email, or could not record its run: most often a lock held on a relation email.enqueue() reads (55P03 after its lock timeout, which holds up every sign-in code too) or a database connection that timed out. Runs: {{value}}.",
+      "metadata": {
+        "check": "The code on the delivery check's job.run (pg_55P03 a lock timeout; a connection error or timeout otherwise) and its dutyState and dutyStateCode; the sessions holding email.template_grant, pg_authid, pg_db_role_setting or ops.duty_state; email-outbox-age and database-unreachable.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email-delivery-stalled.md"
+      }
     }
   ]
 }

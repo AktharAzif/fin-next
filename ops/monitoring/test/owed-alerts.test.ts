@@ -21,19 +21,13 @@ afterEach(() => {
 /**
  * The ruling's fifteen, less those that have become rules (admin-access-mismatch,
  * admin-staff-refused, staff-enrolled and staff-enrolment-refused, in alerts/staff.json and
- * staff-alerts.test.ts): the alerts the code names that no fragment defines yet, due Sunday.
+ * staff-alerts.test.ts; audit-guard, csrf-refused-jump, rate-limiter-failing, secret-unreadable
+ * and the sign-in and step-up rates, by the later ruling of 22 Nov, in sat09-alerts.test.ts): the
+ * alerts the code names that no fragment defines yet, each with why in its note.
  */
 const RULED: readonly string[] = [
   "admin-without-second-factor",
-  "audit-guard",
-  "csrf-refused-jump",
-  "rate-limiter-failing",
-  "second-factor-step-failing",
-  "secret-unreadable",
   "sign-in-code-contested",
-  "sign-in-failing",
-  "step-up-failing",
-  "step-up-locked",
   "duty-stalled-access-drift",
 ];
 
@@ -56,6 +50,9 @@ const BY_LANE_RULE: Readonly<Record<string, { lane: string; due: string }>> = {
   "team-change-failing": { lane: "L-SAT-09", due: "2026-11-22" },
   // Its rule read clockSkewMs, which no process writes (alert-fields.test.ts).
   "clock-skew": { lane: "P0-F", due: "2026-11-22" },
+  // Its rule read a run.done of `pnpm fin github verify` with result drift: no such command, and
+  // no run writes drift (sat09-alerts.test.ts).
+  "github-settings-changed": { lane: "P0-F", due: "2026-11-22" },
 };
 
 /** A copy of the staging files, the watcher's settings and the runbooks, to plant one fault in. */
