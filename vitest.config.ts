@@ -85,6 +85,9 @@ export default defineConfig(({ mode }) => {
   // Vitest refuses an empty projects list, so until a package has tests the root runs nothing.
   // The root never collects files itself: scripts/ uses node:test (`pnpm run test:root`).
   return {
-    test: projects.length > 0 ? { projects, ...(db ? { reporters: ["verbose"], slowTestThreshold: 0 } : {}) } : { include: [], passWithNoTests: true },
+    test:
+      projects.length > 0
+        ? { projects, ...(db ? { reporters: ["verbose"], slowTestThreshold: 0 } : {}) }
+        : { include: [], passWithNoTests: true },
   };
 });

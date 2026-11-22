@@ -17,6 +17,7 @@ import {
   type UnitTx,
 } from "@fin/identity";
 import type { Pool } from "pg";
+import { afterEach, beforeEach, expect } from "vitest";
 import { CredentialRegistry } from "../src/credentials.ts";
 import { createRole } from "../src/custom-roles.ts";
 import {
@@ -276,7 +277,7 @@ export interface SignedIn {
 }
 
 /** Asks a code and signs in with it, from this browser (an unknown address makes the account). */
-export async function codeSignIn(h: Harness, browser: Browser, email: string): Promise<Answer> {
+async function codeSignInBody(h: Harness, browser: Browser, email: string): Promise<Answer> {
   const sent = await browser.auth("/email-otp/send-verification-otp", { email, type: "sign-in" });
   if (sent.status !== 200) throw new Error(`code request answered ${sent.status}`);
   const code = await h.latestCode(email);
@@ -285,7 +286,7 @@ export async function codeSignIn(h: Harness, browser: Browser, email: string): P
 }
 
 /** Sets up and finishes an authenticator in this browser's session (the first factor). */
-export async function setUpAuthenticator(browser: Browser): Promise<Uint8Array> {
+async function setUpAuthenticatorBody(browser: Browser): Promise<Uint8Array> {
   const enable = await browser.auth("/two-factor/enable", {});
   if (enable.status !== 200) throw new Error(`enable answered ${enable.status}`);
   const uri = String(enable.json?.totpURI);
@@ -300,7 +301,7 @@ export async function setUpAuthenticator(browser: Browser): Promise<Uint8Array> 
 }
 
 /** A person signed in by code, with an authenticator when `factor` is true. */
-export async function person(
+async function personBody(
   h: Harness,
   label: string,
   options: { factor?: boolean; email?: string } = {},
@@ -321,7 +322,7 @@ export async function person(
  * Proves an intent with a right authenticator code. Each TOTP step is accepted once ([SA-35]); these
  * tests are not about replay, so the person's last accepted step is forgotten first.
  */
-export async function prove(h: Harness, who: SignedIn, intentId: string): Promise<Answer> {
+async function proveBody(h: Harness, who: SignedIn, intentId: string): Promise<Answer> {
   if (who.secret === null) throw new Error("this person has no authenticator");
   await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
   return who.browser.auth(
@@ -336,7 +337,7 @@ export type Outcome<T> =
   | { ok: false; error: unknown };
 
 /** Runs an action as the console's routes do: one unit of work, the guard, then the action. */
-export async function asPerson<T>(
+async function asPersonBody<T>(
   h: Harness,
   who: SignedIn,
   init: { method?: string; path?: string; body?: unknown; headers?: Record<string, string> },
@@ -365,7 +366,7 @@ export async function asPerson<T>(
 }
 
 /** The same with `requireActor` for an organisation named in `Fin-Organization`. */
-export async function asActor<T>(
+async function asActorBody<T>(
   h: Harness,
   who: SignedIn,
   orgId: string | null,
@@ -394,7 +395,7 @@ export async function asActor<T>(
  * `step_up_required` with an intent, the person proves it, and the same request is sent once more
  * with `Fin-Step-Up-Intent`.
  */
-export async function withIntent<T>(
+async function withIntentBody<T>(
   h: Harness,
   who: SignedIn,
   attempt: (headers: Record<string, string>) => Promise<Outcome<T>>,
@@ -432,7 +433,7 @@ export function extensionsOf(outcome: Outcome<unknown>): Record<string, unknown>
 }
 
 /** A person with an authenticator who owns a first organisation as its Super admin. */
-export async function ownerWithOrganization(
+async function ownerWithOrganizationBody(
   h: Harness,
   label: string,
 ): Promise<{ who: SignedIn; orgId: string; name: string; memberId: string }> {
@@ -454,7 +455,7 @@ export async function ownerWithOrganization(
 }
 
 /** Invites an address with an intent, as the actor. */
-export function inviteAs(
+function inviteAsBody(
   h: Harness,
   actor: SignedIn,
   orgId: string,
@@ -478,7 +479,7 @@ export function inviteAs(
 }
 
 /** Accepts an invitation as the invitee (an intent once they have a factor). */
-export function acceptAs(
+function acceptAsBody(
   h: Harness,
   invitee: SignedIn,
   invitationId: string,
@@ -495,7 +496,7 @@ export function acceptAs(
 }
 
 /** A member of the organisation in the role given, invited by the owner and accepted. */
-export async function memberOf(
+async function memberOfBody(
   h: Harness,
   owner: SignedIn,
   orgId: string,
@@ -522,7 +523,7 @@ export async function memberOf(
  * row, no member.invited or member.joined event and no member-joined email is written; a test that
  * reads any of those uses `memberOf`.
  */
-export async function seededMemberOf(
+async function seededMemberOfBody(
   h: Harness,
   inviter: SignedIn,
   orgId: string,
@@ -552,7 +553,7 @@ export async function seededMemberOf(
  * given as `roleAs` would be given them, a set the editor accepts. No role.created event is
  * written; a test that reads it uses `roleAs`.
  */
-export async function seededRole(
+async function seededRoleBody(
   h: Harness,
   creator: SignedIn,
   orgId: string,
@@ -584,7 +585,7 @@ export async function seededRole(
  * backends' caches. Without this the file's first test carried all of it, whatever it was about.
  * Nothing a test asserts reads this person, their organisation, their invitation or their mail.
  */
-export async function warmUp(h: Harness): Promise<void> {
+async function warmUpBody(h: Harness): Promise<void> {
   const { who, orgId } = await ownerWithOrganization(h, "warm_up");
   const invited = await inviteAs(h, who, orgId, unique("warm_up_invitee"), "admin");
   if (!invited.ok) throw invited.error;
@@ -593,7 +594,7 @@ export async function warmUp(h: Harness): Promise<void> {
 }
 
 /** Makes a custom role in the organisation with an intent, as the actor. */
-export async function roleAs(
+async function roleAsBody(
   h: Harness,
   actor: SignedIn,
   orgId: string,
@@ -628,7 +629,7 @@ export const ACT = {
   },
 } as const satisfies Record<string, ActorOptions>;
 
-export function changeRoleAs(
+function changeRoleAsBody(
   h: Harness,
   actor: SignedIn,
   orgId: string,
@@ -648,7 +649,7 @@ export function changeRoleAs(
   );
 }
 
-export function removeAs(
+function removeAsBody(
   h: Harness,
   actor: SignedIn,
   orgId: string,
@@ -661,3 +662,98 @@ export function removeAs(
     ),
   );
 }
+
+// Measurement only (a throwaway branch, never merged): each db test's time split by the harness
+// step it was spent in, one line per test; nested steps are counted inside their callers too.
+interface Tally {
+  ms: number;
+  n: number;
+}
+
+const tallies = new Map<string, Tally>();
+let depth = 0;
+let outer = 0;
+let started = 0;
+
+async function timed<T>(name: string, run: () => Promise<T>): Promise<T> {
+  const top = depth === 0;
+  depth += 1;
+  const t0 = performance.now();
+  try {
+    return await run();
+  } finally {
+    const ms = performance.now() - t0;
+    depth -= 1;
+    const tally = tallies.get(name) ?? { ms: 0, n: 0 };
+    tally.ms += ms;
+    tally.n += 1;
+    tallies.set(name, tally);
+    if (top) outer += ms;
+  }
+}
+
+function timedAs<A extends unknown[], R>(
+  name: string,
+  run: (...args: A) => Promise<R>,
+): (...args: A) => Promise<R> {
+  return (...args) => timed(name, () => run(...args));
+}
+
+function resetTallies(): void {
+  tallies.clear();
+  depth = 0;
+  outer = 0;
+}
+
+function report(label: string, total: number): void {
+  const parts = [...tallies.entries()]
+    .sort((a, b) => b[1].ms - a[1].ms)
+    .map(([name, t]) => `${name}=${Math.round(t.ms)}/${t.n}`)
+    .join(" ");
+  const sums = `total=${Math.round(total)} own=${Math.round(total - outer)}`;
+  // biome-ignore lint/suspicious/noConsole: a throwaway measurement line, never merged
+  console.log(`[steps] ${label} | ${sums} | ${parts}`);
+  resetTallies();
+}
+
+function fileOf(): string {
+  return expect.getState().testPath?.split("/").at(-1) ?? "?";
+}
+
+beforeEach(() => {
+  resetTallies();
+  started = performance.now();
+});
+
+afterEach(() => {
+  if (!(expect.getState().testPath ?? "").includes("packages/orgs/")) return;
+  report(`${fileOf()} > ${expect.getState().currentTestName}`, performance.now() - started);
+});
+
+export async function warmUp(h: Harness): Promise<void> {
+  resetTallies();
+  const t0 = performance.now();
+  await warmUpBody(h);
+  report(`${fileOf()} > warmUp`, performance.now() - t0);
+}
+
+const asPersonTimed = timedAs("asPerson", asPersonBody);
+const asActorTimed = timedAs("asActor", asActorBody);
+const withIntentTimed = timedAs("withIntent", withIntentBody);
+
+export const codeSignIn = timedAs("codeSignIn", codeSignInBody);
+export const setUpAuthenticator = timedAs("setUpAuthenticator", setUpAuthenticatorBody);
+export const person = timedAs("person", personBody);
+export const prove = timedAs("prove", proveBody);
+export const asPerson = asPersonTimed as unknown as typeof asPersonBody;
+export const asActor = asActorTimed as unknown as typeof asActorBody;
+export const withIntent = withIntentTimed as unknown as typeof withIntentBody;
+export const ownerWithOrganization = timedAs("ownerWithOrganization", ownerWithOrganizationBody);
+export const inviteAs = timedAs("inviteAs", inviteAsBody);
+export const acceptAs = timedAs("acceptAs", acceptAsBody);
+export const memberOf = timedAs("memberOf", memberOfBody);
+export const seededMemberOf = timedAs("seededMemberOf", seededMemberOfBody);
+export const seededRole = timedAs("seededRole", seededRoleBody);
+export const roleAs = timedAs("roleAs", roleAsBody);
+export const changeRoleAs = timedAs("changeRoleAs", changeRoleAsBody);
+export const removeAs = timedAs("removeAs", removeAsBody);
