@@ -1,0 +1,25 @@
+{
+  "name": "@fin/core",
+  "private": true,
+  "type": "module",
+  "description": "Fin's IDs, the injected Clock, error types, safeError and the scrubbers. Web APIs only.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./clock": "./src/clock.ts",
+    "./errors": "./src/errors.ts",
+    "./ids": "./src/ids.ts",
+    "./safe-error": "./src/safe-error.ts",
+    "./scrub": "./src/scrub.ts",
+    "./scrub-shapes": "./src/scrub-shapes.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

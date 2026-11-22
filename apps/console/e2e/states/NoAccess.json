@@ -1,0 +1,35 @@
+{
+  "board": "NoAccess",
+  "canvas": "fin-dashboard",
+  "route": "/no-access",
+  "states": {
+    "one": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "several": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "none": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "invitation": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signingOut": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signOutFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

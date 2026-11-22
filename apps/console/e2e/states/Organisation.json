@@ -1,0 +1,94 @@
+{
+  "board": "Organisation",
+  "canvas": "fin-dashboard",
+  "route": "/settings/organisation",
+  "states": {
+    "default": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@phone @visual the signed-out card and Settings fit, with no sideways scroll"
+    },
+    "edited": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "saving": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "saved": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "invalidName": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "sameName": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "saveFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "switchFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "admin": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "readOnly": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "approved": {
+      "status": "pending",
+      "day": "sun",
+      "note": "Production approval comes with Sunday's go-live"
+    },
+    "create": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an organisation is created with the factor"
+    },
+    "createBusy": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security an organisation is created with the factor"
+    },
+    "createFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "delete": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteTyped": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteStepUp": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "failed": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}
