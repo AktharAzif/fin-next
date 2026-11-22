@@ -5,7 +5,7 @@
 // elsewhere; the same answers for registered and unknown addresses (T-SAT-32); and every cookie
 // the realm sets is host-only __Host-, Secure, HttpOnly, Path=/, the session Strict (T-SAT-04).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Answer,
   type Browser,
@@ -14,6 +14,7 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  warmUp,
 } from "../test/harness.ts";
 import { ADDRESS_LOCK_SLOTS, addressLockSlot, codeLinkAsking, lockAddress } from "./codes.ts";
 import { signUp } from "./sign-up.ts";
@@ -27,9 +28,14 @@ beforeAll(async () => {
   h = await createHarness(database, "developer");
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 
@@ -172,6 +178,10 @@ describe("one live code per address (§5.2, S2-38)", () => {
     }
   });
 
+  // Genuinely heavy, so each case has a timeout of its own: six runs of two addresses, each run
+  // six overlapping sign-ups, code requests and tries that queue on the same locks (the race it
+  // is about, which needs the runs), after a code sign-in for the registered address. Alone a
+  // case takes 1.2 to 2.0 s; in the full db run on 4 CPUs, 2.7 s to past the 5 s default.
   it.each([
     ["from one network", true],
     ["each from its own network", false],
@@ -225,6 +235,7 @@ describe("one live code per address (§5.2, S2-38)", () => {
         }
       }
     },
+    20_000,
   );
 
   it("holds the address's lock as a row only the console's role may lock, never an advisory lock", async () => {

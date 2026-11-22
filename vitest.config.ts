@@ -123,6 +123,14 @@ function runsVitest(dir: string, script: string): boolean {
 
 const exclude = ["**/node_modules/**", "**/dist/**", "**/e2e/**"];
 
+// Under the Bun canary (DECISIONS CI-10), and only there, every file loads the canary's setup,
+// which skips by exact name the tests in its one list of exclusions, each with its reason
+// (packages/testing/src/bun-canary/exclusions.ts). On Node nothing is added.
+const BUN_CANARY_SETUP =
+  typeof process.versions.bun === "string"
+    ? [join(root, "packages/testing/src/bun-canary/setup.ts")]
+    : [];
+
 export default defineConfig(({ mode }) => {
   const db = mode === "db";
   if (db && (process.env.FIN_TEST_DATABASE_URL ?? "") === "") {
@@ -149,6 +157,7 @@ export default defineConfig(({ mode }) => {
       exclude: db ? exclude : [...exclude, "**/*.db.test.ts"],
       pool: db ? "forks" : "threads",
       css: { include: [/\.css\?raw$/] },
+      ...(BUN_CANARY_SETUP.length > 0 ? { setupFiles: BUN_CANARY_SETUP } : {}),
     },
   }));
 

@@ -11,6 +11,7 @@ import { base32Decode, totp } from "@fin/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   SoftAuthenticator,
   type StaffHarness,
   unique,
@@ -27,7 +28,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 function secretOf(uri: string): Uint8Array {
   return base32Decode(new URL(uri).searchParams.get("secret") ?? "");
@@ -96,9 +97,17 @@ describe("Fin Admin, end to end through the API half", () => {
   let firstId: string;
   let secondId: string;
   let secondCode: string;
+  let boot: { staffId: string; code: string };
+
+  // The operator's bootstrap runs in a hook, never in a test: its fin_owner login takes the
+  // cluster-wide lock that every other test file's bootstrap and migrations hold in turn, so beside
+  // them the wait is seconds (past 5 s in the full db run) for a statement of about 0.1 s alone.
+  // Its session ends there, so the file holds no fin_owner connection while the journey runs.
+  beforeAll(async () => {
+    boot = await bootstrap(adminEmail);
+  }, 120_000);
 
   it("bootstraps the first Admin, who signs in by code and is held at enrolment", async () => {
-    const boot = await bootstrap(adminEmail);
     firstId = boot.staffId;
     first = host.client(adminEmail);
     const signedOut = await first.get("/api/viewer");

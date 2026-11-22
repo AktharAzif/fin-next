@@ -18,6 +18,18 @@ import { grantRows } from "@fin/email";
 import { eventTypeRows as identityEventTypeRows } from "@fin/identity";
 import { staffEventTypeRows } from "../src/audit/events.ts";
 
+/**
+ * The allowance of the `afterAll` hook that drops a platform (`drop()`, or the staff harness's
+ * `close()`), which every test file passes. DROP DATABASE forces an immediate checkpoint of the
+ * whole cluster and waits for it: every dirty buffer written, and every file written since the last
+ * checkpoint synced, in the full db run the databases every other file has just made, thousands of
+ * files. Alone that takes 0.1 to 1.6 s. In the full db run on 4 CPUs Postgres logged forced
+ * checkpoints of up to 27 s, and a drop that arrives during one waits for it and then for its
+ * own: past Vitest's 10 s hook default, nothing else in the hook being slow. On CI the database is
+ * not dropped at all (@fin/db/testing leaves it to the server).
+ */
+export const DROP_TIMEOUT_MS = 120_000;
+
 export function eventTypes() {
   return [
     ...identityEventTypeRows().map((row) => ({

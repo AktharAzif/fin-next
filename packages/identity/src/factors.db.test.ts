@@ -4,7 +4,7 @@
 // accepted once; 10 wrong codes lock the person out for an hour; a trusted browser gives an aal1
 // working session that writes no proof; the last factor stays for a privileged developer.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Browser,
   codeSignIn,
@@ -14,6 +14,7 @@ import {
   registerPasskey,
   setUpAuthenticator,
   totpFromUri,
+  warmUp,
 } from "../test/harness.ts";
 import { revokeTrustedBrowsers } from "./browsers.ts";
 import { mixesLettersAndDigits } from "./crypto/backup-codes.ts";
@@ -29,9 +30,14 @@ beforeAll(async () => {
   h = await createHarness(database, "developer");
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 async function sessionRow(browser: Browser) {
   const result = await h.admin.query<{
@@ -87,7 +93,11 @@ describe("setting up an authenticator", () => {
     }
     expect(verify.status, JSON.stringify(verify.json)).toBe(200);
     expect((await sessionRow(browser))?.assurance).toBe("aal2");
-    const events = (await h.events()).map((e) => e.event);
+    // This person's events: the warm-up's person (beforeAll) set up an authenticator of its own.
+    const id = await userId(email);
+    const events = (await h.events())
+      .filter((e) => e.target_id === id || e.ref_ids.includes(id))
+      .map((e) => e.event);
     expect(events).toContain("two_factor.setup_started");
     expect(events).toContain("two_factor.enabled");
     const notices = (await h.outbox(email)).map(

@@ -2,7 +2,7 @@
 // action's transaction, and only then; a rolled-back action leaves none; and a meta-test fails when
 // an event of the fragment has no case here (the realm-written ones are listed apart).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
@@ -16,7 +16,9 @@ import {
   person,
   removeAs,
   roleAs,
+  seededMemberOf,
   unique,
+  warmUp,
   withIntent,
 } from "../test/harness.ts";
 import { ORGS_EVENTS, type OrgsEventName, REALM_WRITTEN_EVENTS } from "./audit/events.ts";
@@ -37,9 +39,14 @@ beforeAll(async () => {
   h = await createHarness(database);
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const INVITE = { permission: "member.invite", lock: true } as const;
 const MANAGE = { permission: "role.manage", lock: true } as const;
@@ -163,14 +170,14 @@ const CASES: Record<Exclude<OrgsEventName, (typeof REALM_WRITTEN_EVENTS)[number]
   },
   "member.role_changed": async () => {
     const { who, orgId } = await ownerWithOrganization(h, "role_changed");
-    const admin = await memberOf(h, who, orgId, "changed", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "changed", "admin");
     const out = await changeRoleAs(h, who, orgId, admin.memberId, "super_admin");
     if (!out.ok) throw out.error;
     return orgId;
   },
   "member.removed": async () => {
     const { who, orgId } = await ownerWithOrganization(h, "removed");
-    const admin = await memberOf(h, who, orgId, "leaver", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "leaver", "admin");
     const out = await removeAs(h, who, orgId, admin.memberId);
     if (!out.ok) throw out.error;
     return orgId;
@@ -274,7 +281,7 @@ describe("the organisation-scope events", () => {
 describe("a rolled-back action", () => {
   it("leaves no event: a removal whose notice cannot be queued keeps the member and writes nothing", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "rollback");
-    const admin = await memberOf(h, who, orgId, "kept", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "kept", "admin");
     const before = (await h.events({ organizationId: orgId })).length;
     const grant = await h.admin.query<{ role: string; category: string }>(
       "DELETE FROM email.template_grant WHERE template = 'orgs/member-removed' RETURNING role, category",

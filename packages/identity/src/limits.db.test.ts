@@ -2,8 +2,8 @@
 // code allowance holds under 20 concurrent requests; a pause outlives a restart that empties the
 // UNLOGGED counters; the limiter fails closed when the database refuses it.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase, testRole } from "../test/db.ts";
-import { codeSignIn, createHarness, type Harness } from "../test/harness.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase, testRole } from "../test/db.ts";
+import { codeSignIn, createHarness, type Harness, warmUp } from "../test/harness.ts";
 import { HOUR, ManualClock } from "./ports/clock.ts";
 
 let database: TestDatabase;
@@ -14,9 +14,14 @@ beforeAll(async () => {
   h = await createHarness(database, "developer");
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 const send = (email: string, browser = h.browser()) =>

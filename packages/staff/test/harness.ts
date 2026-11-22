@@ -27,6 +27,7 @@ import type { UnitTx } from "../src/ports.ts";
 import { requireStaff } from "../src/require-staff.ts";
 import { createStaffPlatform, type PlatformClient, type StaffPlatform } from "./platform.mjs";
 
+export { DROP_TIMEOUT_MS } from "./platform.mjs";
 export { SoftAuthenticator };
 
 export const ADMIN_ORIGIN = "https://admin.example.com";

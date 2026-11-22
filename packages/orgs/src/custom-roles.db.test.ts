@@ -3,7 +3,7 @@
 // not read as a built-in; edited only with the current version, never one the editor holds or one
 // that outranks them; deleted with every holder and invitation moved; at most 30.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   acceptAs,
   asActor,
@@ -13,12 +13,13 @@ import {
   extensionsOf,
   type Harness,
   inviteAs,
-  memberOf,
   ownerWithOrganization,
   person,
-  roleAs,
   type SignedIn,
+  seededMemberOf,
+  seededRole,
   unique,
+  warmUp,
   withIntent,
 } from "../test/harness.ts";
 import { createRole, deleteRole, getRole, listRoles, updateRole } from "./custom-roles.ts";
@@ -31,9 +32,14 @@ beforeAll(async () => {
   h = await createHarness(database);
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const MANAGE = { permission: "role.manage", lock: true } as const;
 
@@ -120,8 +126,11 @@ describe("creating a custom role", () => {
 
   it("never gives more than the editor holds", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "giver");
-    const managers = await roleAs(h, who, orgId, "Role managers", ["member.read", "role.manage"]);
-    const manager = await memberOf(h, who, orgId, "manager", managers);
+    const managers = await seededRole(h, who, orgId, "Role managers", [
+      "member.read",
+      "role.manage",
+    ]);
+    const manager = await seededMemberOf(h, who, orgId, "manager", managers);
     const beyond = await create(manager.who, orgId, "Inviters", ["member.read", "member.invite"]);
     expect([codeOf(beyond), extensionsOf(beyond).problem]).toEqual(["giving_refused", "beyond"]);
     expect((await create(manager.who, orgId, "Readers", ["member.read"])).ok).toBe(true);
@@ -149,8 +158,8 @@ describe("creating a custom role", () => {
 describe("editing a custom role", () => {
   it("needs the current version, tells its holders, and journals a lowering", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "editor");
-    const roleId = await roleAs(h, who, orgId, "Support", ["member.read", "auditLog.read"]);
-    const holder = await memberOf(h, who, orgId, "holder", roleId);
+    const roleId = await seededRole(h, who, orgId, "Support", ["member.read", "auditLog.read"]);
+    const holder = await seededMemberOf(h, who, orgId, "holder", roleId);
     const stale = await update(who, orgId, roleId, {
       name: "Support",
       description: "",
@@ -196,8 +205,8 @@ describe("editing a custom role", () => {
 
   it("puts a holder without a factor on hold when a privileged permission is added", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "hold");
-    const roleId = await roleAs(h, who, orgId, "Readers", ["member.read"]);
-    const holder = await memberOf(h, who, orgId, "unheld", roleId, { factor: false });
+    const roleId = await seededRole(h, who, orgId, "Readers", ["member.read"]);
+    const holder = await seededMemberOf(h, who, orgId, "unheld", roleId, { factor: false });
     const before = await asPerson(
       h,
       holder.who,
@@ -225,13 +234,13 @@ describe("editing a custom role", () => {
 
   it("refuses the editor's own role and a role that holds more than the editor", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "self");
-    const managers = await roleAs(h, who, orgId, "Managers", ["member.read", "role.manage"]);
-    const bigger = await roleAs(h, who, orgId, "Bigger", [
+    const managers = await seededRole(h, who, orgId, "Managers", ["member.read", "role.manage"]);
+    const bigger = await seededRole(h, who, orgId, "Bigger", [
       "member.read",
       "role.manage",
       "auditLog.read",
     ]);
-    const manager = await memberOf(h, who, orgId, "self_manager", managers);
+    const manager = await seededMemberOf(h, who, orgId, "self_manager", managers);
     const own = await update(manager.who, orgId, managers, {
       name: "Managers",
       description: "",
@@ -252,8 +261,8 @@ describe("editing a custom role", () => {
 describe("deleting a custom role", () => {
   it("moves every holder and pending invitation, each with its event, and needs a move when held", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter");
-    const roleId = await roleAs(h, who, orgId, "Leaving", ["member.read"]);
-    const holder = await memberOf(h, who, orgId, "moved", roleId);
+    const roleId = await seededRole(h, who, orgId, "Leaving", ["member.read"]);
+    const holder = await seededMemberOf(h, who, orgId, "moved", roleId);
     const pending = await inviteAs(h, who, orgId, unique("pending"), roleId);
     expect(pending.ok).toBe(true);
     const unmoved = await remove(who, orgId, roleId);
@@ -288,9 +297,9 @@ describe("deleting a custom role", () => {
 
   it("withdraws, never leaves unusable, the invitations whose inviter cannot give the new role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_inviters");
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
-    const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
-    const low = await memberOf(h, who, orgId, "low", inviters);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
+    const inviters = await seededRole(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
+    const low = await seededMemberOf(h, who, orgId, "low", inviters);
     const fromLow = await inviteAs(h, low.who, orgId, unique("from_low"), readers);
     const fromOwnerEmail = unique("from_owner");
     const fromOwner = await inviteAs(h, who, orgId, fromOwnerEmail, readers);
@@ -320,9 +329,9 @@ describe("deleting a custom role", () => {
 
   it("withdraws the invitations of holders moved to a role that can no longer give them", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_holders");
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
-    const leads = await roleAs(h, who, orgId, "Leads", ["member.read", "member.invite"]);
-    const lead = await memberOf(h, who, orgId, "lead", leads);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
+    const leads = await seededRole(h, who, orgId, "Leads", ["member.read", "member.invite"]);
+    const lead = await seededMemberOf(h, who, orgId, "lead", leads);
     const sent = await inviteAs(h, lead.who, orgId, unique("lead_sent"), readers);
     const sentId = sent.ok ? sent.value.invitationId : "";
     expect((await remove(who, orgId, leads, readers)).ok).toBe(true);
@@ -335,11 +344,15 @@ describe("deleting a custom role", () => {
 });
 
 describe("an edit that leaves an inviter unable to give an invitation", () => {
+  // Genuinely heavy, so a timeout of its own: three invitations and three role edits, each with an
+  // intent and a proof, which are what it is about, for an owner and an inviter each signed in
+  // with an authenticator (the roles and the membership are seeded). On GitHub's runner it takes
+  // 0.3 s alone and 2.2 s in the full db run.
   it("withdraws it, whether the inviter's role lost a permission or the offered role gained one", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "edit_inviters");
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
-    const leads = await roleAs(h, who, orgId, "Leads", ["member.read", "member.invite"]);
-    const lead = await memberOf(h, who, orgId, "edit_lead", leads);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
+    const leads = await seededRole(h, who, orgId, "Leads", ["member.read", "member.invite"]);
+    const lead = await seededMemberOf(h, who, orgId, "edit_lead", leads);
     const first = await inviteAs(h, lead.who, orgId, unique("edit_first"), readers);
     const firstId = first.ok ? first.value.invitationId : "";
     const statusOf = async (id: string) =>
@@ -365,7 +378,7 @@ describe("an edit that leaves an inviter unable to give an invitation", () => {
       cancel_reason: "inviter_demoted",
     });
     // The inviter's own role loses the permission to invite.
-    const viewers = await roleAs(h, who, orgId, "Viewers", ["member.read"]);
+    const viewers = await seededRole(h, who, orgId, "Viewers", ["member.read"]);
     const second = await inviteAs(h, lead.who, orgId, unique("edit_second"), viewers);
     const secondId = second.ok ? second.value.invitationId : "";
     expect(await statusOf(secondId)).toEqual({ status: "pending", cancel_reason: null });
@@ -397,5 +410,5 @@ describe("an edit that leaves an inviter unable to give an invitation", () => {
       ).ok,
     ).toBe(true);
     expect(await statusOf(ownersId)).toEqual({ status: "pending", cancel_reason: null });
-  });
+  }, 20_000);
 });

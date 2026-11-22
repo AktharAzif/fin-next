@@ -53,6 +53,18 @@ export { registerEventTypes, type TestEventType, testId } from "./events.ts";
 
 const CLUSTER_LOCK = 0x46494e30; // "FIN0": the one advisory lock every role change in tests takes.
 
+/**
+ * Whether a file's database is left to the server rather than dropped: on CI (`CI=true`), whose
+ * Postgres is a service container thrown away with the job. DROP DATABASE forces an immediate
+ * checkpoint of the whole cluster and waits for it, syncing every file written since the last one
+ * (in the full db run, every other file's fresh database): there that is pure cost, and in the full
+ * db run those checkpoints, one per file, stalled every other file's commits while they synced.
+ * Elsewhere the database is dropped, and the hook that drops it allows for that wait.
+ */
+function leftToServer(): boolean {
+  return process.env.CI === "true";
+}
+
 /** The replicas every test bootstrap sizes connection limits for (see the header). */
 export const TEST_REPLICAS = 4;
 
@@ -193,6 +205,7 @@ export interface TestDatabase {
   withLock<T>(fn: () => Promise<T>): Promise<T>;
   /** Runs the migrations again as fin_owner, with the given options. */
   migrate(options?: Partial<RunOptions>): Promise<void>;
+  /** Ends the pools and drops the database (on CI, leaves it to the server). */
   drop(): Promise<void>;
 }
 
@@ -369,6 +382,7 @@ export async function createTestDatabase(
     migrate,
     async drop() {
       await Promise.all(pools.map((pool) => pool.end().catch(() => {})));
+      if (leftToServer()) return;
       const dropper = await connectClient({
         ...cluster,
         tls: LOOPBACK_TLS,

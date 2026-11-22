@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // identity and staff migrations and grants. Read by path: apps/api does not list @fin/staff.
 import {
   createStaffPlatform,
+  DROP_TIMEOUT_MS,
   type PlatformClient,
   type StaffPlatform,
 } from "../../../../../packages/staff/test/platform.mjs";
@@ -25,8 +26,21 @@ const registry = (q: unknown) => syncEventTypes(q as Queryable, "test-release");
 // `migrate --task staff-bootstrap` below finds the task in the real registry and runs it through the
 // real runner, as the image does: a refusal is read where the operator reads it, migrate's
 // `task.failed` line, never `task_unknown`, and a run that succeeds ends with `task.done`.
+//
+// Every wait for the cluster-wide lock is in a hook, never in a test. Logging in as fin_owner and
+// running migrate's entry point both take that lock (each sets fin_owner's password), and every
+// other test file's bootstrap and migrations hold it in turn, so in the full db run the wait is
+// seconds to a minute on a loaded machine, while the work itself takes well under a second. The
+// hooks allow 120 s for it, as the platform's own does.
+//
+// fin_owner's CONNECTION LIMIT is 6 for the whole cluster (AUXILIARY_BUDGET in packages/db), shared
+// with every other file. This file holds at most two at once: the task tests' one session below
+// (only while "staff-bootstrap" runs), or migrate's own run (its owner session and its pool's one),
+// never both.
 let platform: StaffPlatform;
 let su: PlatformClient;
+/** The task tests' fin_owner session, held from their describe's start to its end. */
+let owner: PlatformClient;
 
 beforeAll(async () => {
   platform = await createStaffPlatform("sat04task", { registry });
@@ -36,64 +50,77 @@ beforeAll(async () => {
 afterAll(async () => {
   await su?.end();
   await platform?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const codeHash = (code: string) =>
   createHash("sha256").update(code.replace(/-/g, "").toUpperCase(), "utf8").digest("hex");
 
 /** One task run: fin_owner, one transaction, committed only when the task returns. */
 async function run(params: Record<string, unknown>, runId = `run_${Date.now()}`) {
-  const owner = await platform.owner();
+  await owner.query("BEGIN");
+  const tx = {
+    ids: createIdSource({ now: () => Date.now() }),
+    query: (text: string, values?: readonly unknown[]) => owner.query(text, values),
+  } as unknown as UnitTx;
   try {
-    await owner.query("BEGIN");
-    const tx = {
-      ids: createIdSource({ now: () => Date.now() }),
-      query: (text: string, values?: readonly unknown[]) => owner.query(text, values),
-    } as unknown as UnitTx;
-    try {
-      const result = await staffBootstrap.run(tx, staffBootstrap.params.parse(params), {
-        runId,
-        release: "test-release",
-        environment: "ci",
-      });
-      await owner.query("COMMIT");
-      return result;
-    } catch (error) {
-      await owner.query("ROLLBACK");
-      throw error;
-    }
-  } finally {
-    await owner.end();
+    const result = await staffBootstrap.run(tx, staffBootstrap.params.parse(params), {
+      runId,
+      release: "test-release",
+      environment: "ci",
+    });
+    await owner.query("COMMIT");
+    return result;
+  } catch (error) {
+    await owner.query("ROLLBACK");
+    throw error;
   }
 }
 
-/** The same run through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it. */
-async function cli(params: Record<string, unknown>, on: StaffPlatform = platform) {
-  let raw = "";
-  const code = await on.withLock(() =>
-    runMigrateCli(
-      ["--task", "staff-bootstrap"],
-      {
-        FIN_ENVIRONMENT: "ci",
-        FIN_RELEASE: "test-release",
-        FIN_RUN_ID: "run_cli",
-        FIN_BOOTSTRAP_DATABASE_URL: on.superuserUrl(),
-        FIN_TASK_PARAMS: JSON.stringify(params),
-      },
-      {
-        stdout: (text) => {
-          raw += text;
+/** What one run of migrate's entry point returned and wrote. */
+interface CliRun {
+  code: number;
+  lines: Record<string, unknown>[];
+  raw: string;
+}
+
+/**
+ * The same runs through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it,
+ * one after another under one hold of the cluster-wide lock, in their order. Called only from
+ * hooks (above).
+ */
+async function cli<const T extends readonly Record<string, unknown>[]>(
+  on: StaffPlatform,
+  ...runs: T
+): Promise<{ [K in keyof T]: CliRun }> {
+  return on.withLock(async () => {
+    const done: CliRun[] = [];
+    for (const params of runs) {
+      let raw = "";
+      const code = await runMigrateCli(
+        ["--task", "staff-bootstrap"],
+        {
+          FIN_ENVIRONMENT: "ci",
+          FIN_RELEASE: "test-release",
+          FIN_RUN_ID: "run_cli",
+          FIN_BOOTSTRAP_DATABASE_URL: on.superuserUrl(),
+          FIN_TASK_PARAMS: JSON.stringify(params),
         },
-        clock: { now: () => Date.now() },
-      },
-    ),
-  );
-  const lines = raw
-    .trim()
-    .split("\n")
-    .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { code, lines, raw };
+        {
+          stdout: (text) => {
+            raw += text;
+          },
+          clock: { now: () => Date.now() },
+        },
+      );
+      const lines = raw
+        .trim()
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      done.push({ code, lines, raw });
+    }
+    return done as { [K in keyof T]: CliRun };
+  });
 }
 
 async function seedMember(email: string, roleKey: string, status: "active" | "pending") {
@@ -147,6 +174,14 @@ async function eventsFor(target: string) {
 }
 
 describe("staff-bootstrap", () => {
+  beforeAll(async () => {
+    owner = await platform.owner();
+  }, 120_000);
+
+  afterAll(async () => {
+    await owner?.end();
+  });
+
   it("makes the first Admin pending, with one live code, and records it as the operator", async () => {
     const result = await run(
       {
@@ -267,32 +302,6 @@ describe("staff-bootstrap", () => {
     expect(viewer).toMatch(/^stf_/);
   });
 
-  it("names the refusal in migrate's task.failed line, where the operator reads it", async () => {
-    // An active Admin exists (the test above): the run is refused, and the line says why.
-    const { code, lines, raw } = await cli({
-      address: "other@example.com",
-      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-      reasonCode: "first_admin",
-    });
-    expect(code).toBe(EXIT_FAILED);
-    expect(lines.at(-1)).toMatchObject({
-      event: "task.failed",
-      task: "staff-bootstrap",
-      code: "active_admin_exists",
-    });
-    expect(raw).not.toContain("other@example.com");
-    const reset = await cli({
-      address: "first.admin@example.com",
-      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-      reset: true,
-      reasonCode: "lost_factors",
-    });
-    expect(reset.lines.at(-1)).toMatchObject({
-      event: "task.failed",
-      code: "another_admin_can_reset",
-    });
-  });
-
   it("resets the last Admin who lost every factor, with the reset's events and journal entry", async () => {
     await su.query("BEGIN");
     await su.query("SET LOCAL session_replication_role = replica");
@@ -400,28 +409,76 @@ describe("staff-bootstrap", () => {
   });
 });
 
+describe("migrate --task staff-bootstrap while Admins are active", () => {
+  // Two active Admins, seeded here (the task tests above have closed their fin_owner session): a
+  // run is refused while an Admin is active, and a reset of one while another can reset them.
+  let refused: CliRun;
+  let reset: CliRun;
+
+  beforeAll(async () => {
+    await seedActive("refusal.first@example.com", "admin");
+    await seedActive("refusal.second@example.com", "admin");
+    [refused, reset] = await cli(
+      platform,
+      {
+        address: "other@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reasonCode: "first_admin",
+      },
+      {
+        address: "refusal.first@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reset: true,
+        reasonCode: "lost_factors",
+      },
+    );
+  }, 120_000);
+
+  it("names the refusal in migrate's task.failed line, where the operator reads it", () => {
+    const { code, lines, raw } = refused;
+    expect(code).toBe(EXIT_FAILED);
+    expect(lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      task: "staff-bootstrap",
+      code: "active_admin_exists",
+    });
+    expect(raw).not.toContain("other@example.com");
+    expect(reset.lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      code: "another_admin_can_reset",
+    });
+  });
+});
+
 describe("migrate --task staff-bootstrap on a new environment", () => {
   // Its own database with no Admin yet, so the run must succeed end to end: the registry, the
   // runner, the task, the runner's own `operator.task_completed`, and the commit.
+  const hash = codeHash("KMNP-QRST-VWXY-Z012");
   let fresh: StaffPlatform;
   let freshSu: PlatformClient;
+  let made: CliRun;
 
   beforeAll(async () => {
     fresh = await createStaffPlatform("sat04cli", { registry });
     freshSu = await fresh.superuser();
   }, 120_000);
 
+  // A hook of its own, so the run's wait for the lock has the whole allowance.
+  beforeAll(async () => {
+    [made] = await cli(fresh, {
+      address: "Cli.Admin@Example.com",
+      codeHash: hash,
+      reasonCode: "first_admin",
+    });
+  }, 120_000);
+
   afterAll(async () => {
     await freshSu?.end();
     await fresh?.drop();
-  });
+  }, DROP_TIMEOUT_MS);
 
   it("makes the first Admin, records it as the operator and says so with IDs only", async () => {
-    const hash = codeHash("KMNP-QRST-VWXY-Z012");
-    const { code, lines, raw } = await cli(
-      { address: "Cli.Admin@Example.com", codeHash: hash, reasonCode: "first_admin" },
-      fresh,
-    );
+    const { code, lines, raw } = made;
     expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
     expect(code).toBe(EXIT_OK);
     const done = lines.at(-1);

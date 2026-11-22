@@ -3,7 +3,12 @@
 // an organisation row and never reads the audit trail but through its two reads; `fin_readonly`
 // reads no token hash; `fin_api` reads the views and nothing else of this area.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type ServiceRole, type TestDatabase } from "../test/db.ts";
+import {
+  createTestDatabase,
+  DROP_TIMEOUT_MS,
+  type ServiceRole,
+  type TestDatabase,
+} from "../test/db.ts";
 import { createHarness, type Harness, ownerWithOrganization } from "../test/harness.ts";
 
 let database: TestDatabase;
@@ -18,7 +23,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 async function stateAs(role: ServiceRole, text: string, values: unknown[] = []): Promise<string> {
   const pool = database.login(role, { max: 1 });

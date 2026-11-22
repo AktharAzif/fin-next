@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   refusalOf,
   type StaffHarness,
   stepped,
@@ -14,21 +15,33 @@ import {
 import { requireStaff } from "./require-staff.ts";
 import { listSwitches, setSwitch } from "./switches.ts";
 
+type Member = Awaited<ReturnType<StaffHarness["enrolled"]>>;
+
 let h: StaffHarness;
+
+/** The file's people, made once in its setup: the one Admin, an Operator, a Compliance member. */
+let adminEmail: string;
+let operator: Member;
+let compliance: Member;
 
 beforeAll(async () => {
   h = await createStaffHarness("sat04switch");
+  // The tests are about the switches, not how a member is made, and none needs fresh people: each
+  // comes through the whole journey (a code sign-in, the enrolment code, a passkey registered),
+  // here, once. The file's first realm requests, which pay a fresh process's cold paths and the
+  // database's new connections, are paid here too, not by whichever test runs first.
+  adminEmail = unique("switch.admin");
+  await h.enrolled(adminEmail, "admin");
+  operator = await h.enrolled(unique("switch.operator"), "operator");
+  compliance = await h.enrolled(unique("switch.compliance"), "compliance");
 }, 120_000);
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("the kill switches", () => {
   it("are set and cleared by an Operator with an intent, recorded, journalled and told to every Admin", async () => {
-    const adminEmail = unique("switch.admin");
-    await h.enrolled(adminEmail, "admin");
-    const operator = await h.enrolled(unique("switch.operator"), "operator");
     const set = (state: "on" | "off", reasonCode: string) =>
       stepped(
         h,
@@ -76,8 +89,7 @@ describe("the kill switches", () => {
   });
 
   it("refuses an unchanged state, an unknown switch, and anyone without switches.manage", async () => {
-    const operator = await h.enrolled(unique("switch.operator.two"), "operator");
-    const attempt = (who: typeof operator, name: string, state: "on" | "off") =>
+    const attempt = (who: Member, name: string, state: "on" | "off") =>
       refusalOf(
         h.route(
           who.browser,
@@ -97,7 +109,6 @@ describe("the kill switches", () => {
       extensions: { reason: "unchanged" },
     });
     expect(await attempt(operator, "no_such_switch", "on")).toMatchObject({ code: "not_found" });
-    const compliance = await h.enrolled(unique("switch.compliance"), "compliance");
     expect(await attempt(compliance, "signups", "on")).toMatchObject({
       code: "forbidden",
       extensions: { permission: "switches.manage" },

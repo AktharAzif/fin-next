@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type Browser,
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   refusalOf,
   type SoftAuthenticator,
   type StaffHarness,
@@ -52,7 +53,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 const add = (who: Member, email: string, roleKey: string) =>
   stepped(

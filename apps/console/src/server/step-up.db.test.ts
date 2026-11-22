@@ -16,6 +16,7 @@ import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createTestDatabase,
+  DROP_TIMEOUT_MS,
   seed,
   type TestDatabase,
   totpCode,
@@ -56,7 +57,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api?.stop();
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 async function signIn(email: string): Promise<Client> {
   const client = new Client(api);
@@ -469,6 +470,14 @@ describe("the step-up matrix, from the policy", () => {
     expect(Object.keys(WINDOW_SAMPLES).sort()).toEqual(WINDOW_ROUTES.map((p) => p.id).sort());
   });
 
+  // Genuinely heavy, so a timeout of their own: each intent route builds its own fresh fixture
+  // through the front door before its first check (a person signed in with a code and given an
+  // authenticator, a second session raised by a proof, and for the organisation routes the
+  // organisation, roles, invitations and members the route varies, each made with a proof), then
+  // sends the ten or so requests of the matrix: 15 to 38 requests in all, memberRole the most, each
+  // a unit of work of 10 to 25 queries. Nothing waits: the requests are over 90% of each case's
+  // time. On GitHub's runner a case takes 0.1 to 0.3 s alone and 0.6 to 2.8 s in the full db run,
+  // where every package's db files share its 4 vCPUs (memberRole: 0.3 s alone, 1.7 and 2.8 s full).
   for (const policy of INTENT_ROUTES) {
     it(`${policy.id}: refuses every intent but its own, then passes once`, async () => {
       await database.admin.query("DELETE FROM ops.rate_window");
@@ -539,7 +548,7 @@ describe("the step-up matrix, from the policy", () => {
       const again = await send(s, policy, s.who, s.request, header);
       expect(again.status).toBeGreaterThanOrEqual(400);
       if (again.json.code === "step_up_invalid") expect(again.json.reason).toBe("used");
-    }, 120_000);
+    }, 20_000);
   }
 
   for (const policy of WINDOW_ROUTES) {
@@ -561,6 +570,6 @@ describe("the step-up matrix, from the policy", () => {
       await prove(p.client);
       const again = await send(s, policy, p.client, sample);
       expect(again.status, JSON.stringify(again.json)).toBeLessThan(300);
-    }, 60_000);
+    });
   }
 });

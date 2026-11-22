@@ -3,7 +3,7 @@
 // issue new tokens, so an old link stops working; an inviter who is demoted or removed has their
 // invitations withdrawn; the giving and outrank rules hold.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   acceptAs,
   asActor,
@@ -14,12 +14,13 @@ import {
   extensionsOf,
   type Harness,
   inviteAs,
-  memberOf,
   ownerWithOrganization,
   person,
   removeAs,
-  roleAs,
+  seededMemberOf,
+  seededRole,
   unique,
+  warmUp,
   withIntent,
 } from "../test/harness.ts";
 import {
@@ -42,9 +43,14 @@ beforeAll(async () => {
   h = await createHarness(database);
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const INVITE = { permission: "member.invite", lock: true } as const;
 
@@ -218,7 +224,7 @@ describe("an invitation", () => {
 
   it("is outranked: an Admin may neither offer nor cancel the Super admin role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_outrank");
-    const admin = await memberOf(h, who, orgId, "admin", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "admin", "admin");
     const offered = await inviteAs(h, admin.who, orgId, unique("top"), "super_admin");
     expect(codeOf(offered)).toBe("giving_refused");
     expect(extensionsOf(offered)).toMatchObject({ problem: "top_only" });
@@ -252,11 +258,15 @@ describe("an invitation", () => {
     expect(event?.metadata).toEqual({ reason: "cancelled" });
   });
 
+  // Genuinely heavy, so a timeout of its own: four invitations, each with an intent and a proof,
+  // and two refused, which are what it is about, by three people each signed in with an
+  // authenticator (the custom role and the two memberships are seeded). On GitHub's runner it
+  // takes 0.29 s alone and 1.4 s in the full db run.
   it("is replaced only by someone it does not outrank (§8.5, as a cancellation)", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_replace_rank");
-    const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
-    const low = await memberOf(h, who, orgId, "low_inviter", inviters);
-    const admin = await memberOf(h, who, orgId, "replace_admin", "admin");
+    const inviters = await seededRole(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
+    const low = await seededMemberOf(h, who, orgId, "low_inviter", inviters);
+    const admin = await seededMemberOf(h, who, orgId, "replace_admin", "admin");
     const email = unique("victim");
     const top = await inviteAs(h, who, orgId, email, "super_admin");
     const topId = top.ok ? top.value.invitationId : "";
@@ -300,11 +310,11 @@ describe("an invitation", () => {
     // The Super admin may replace it.
     expect((await inviteAs(h, who, orgId, email, "admin")).ok).toBe(true);
     expect(await statusOf(topId)).toBe("cancelled");
-  });
+  }, 20_000);
 
   it("is accepted after another member changed its role, under the member who changed it", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_changer");
-    const admin = await memberOf(h, who, orgId, "first_inviter", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "first_inviter", "admin");
     const email = unique("raised");
     const sent = await inviteAs(h, admin.who, orgId, email, "admin");
     const id = sent.ok ? sent.value.invitationId : "";
@@ -339,13 +349,17 @@ describe("an invitation", () => {
     expect(member.rows[0]?.invited_by).toBe(who.userId);
   });
 
+  // Genuinely heavy, so a timeout of its own: two invitations, a demotion and a removal, each with
+  // an intent and a proof, which are what it is about, by three people each signed in with an
+  // authenticator (the custom role and the two memberships are seeded). On GitHub's runner it
+  // takes 0.29 s alone and 1.4 s in the full db run.
   it("is withdrawn when its inviter is demoted below it, or removed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_withdraw");
-    const admin = await memberOf(h, who, orgId, "inviter", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "inviter", "admin");
     const sent = await inviteAs(h, admin.who, orgId, unique("pending"), "admin");
     const sentId = sent.ok ? sent.value.invitationId : "";
     // Demoted to a role that can no longer invite: the invitation goes (inviter_demoted).
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
     expect((await changeRoleAs(h, who, orgId, admin.memberId, readers)).ok).toBe(true);
     const demoted = await h.admin.query<{ status: string; cancel_reason: string }>(
       "SELECT status, cancel_reason FROM identity.invitation WHERE id = $1",
@@ -353,7 +367,7 @@ describe("an invitation", () => {
     );
     expect(demoted.rows[0]).toEqual({ status: "cancelled", cancel_reason: "inviter_demoted" });
 
-    const second = await memberOf(h, who, orgId, "inviter2", "admin");
+    const second = await seededMemberOf(h, who, orgId, "inviter2", "admin");
     const again = await inviteAs(h, second.who, orgId, unique("pending2"), "admin");
     const againId = again.ok ? again.value.invitationId : "";
     expect((await removeAs(h, who, orgId, second.memberId)).ok).toBe(true);
@@ -366,7 +380,7 @@ describe("an invitation", () => {
       await h.events({ event: "member.invitation_cancelled", organizationId: orgId })
     ).map((e) => e.metadata.reason);
     expect(reasons).toEqual(expect.arrayContaining(["inviter_demoted", "inviter_removed"]));
-  });
+  }, 20_000);
 
   it("allows at most 25 pending per organisation", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_limit");

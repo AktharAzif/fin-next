@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   type StaffHarness,
   unique,
 } from "../../../../packages/staff/test/index.ts";
@@ -44,7 +45,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 /** A request each route accepts as input, so that only the guard can refuse it. */
 function sample(id: PolicyId): { path: string; body?: unknown } {

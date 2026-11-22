@@ -3,7 +3,13 @@
 // re-reads the installed source before a bump merges ([SA-35], [SA-02]).
 import { getSchema } from "better-auth/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase, testRole } from "../test/db.ts";
+import {
+  createTestDatabase,
+  DROP_TIMEOUT_MS,
+  seed,
+  type TestDatabase,
+  testRole,
+} from "../test/db.ts";
 import { codeSignIn, createHarness, type Harness, setUpAuthenticator } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
 import { OutsideUnitError } from "./ports/pg-database.ts";
@@ -21,7 +27,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 

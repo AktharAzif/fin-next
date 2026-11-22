@@ -4,7 +4,7 @@
 // minutes of a proof and not after; two concurrent re-sends make exactly one action; five wrong
 // codes end the session.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Browser,
   codeSignIn,
@@ -13,6 +13,7 @@ import {
   passkeyCeremony,
   registerPasskey,
   setUpAuthenticator,
+  warmUp,
 } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
 import { requirePerson } from "./require-person.ts";
@@ -26,9 +27,14 @@ beforeAll(async () => {
   h = await createHarness(database, "developer");
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 async function personWithAuthenticator(label: string) {

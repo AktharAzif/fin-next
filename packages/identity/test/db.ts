@@ -208,12 +208,38 @@ export async function ensureTemplate(): Promise<void> {
   }
 }
 
+/**
+ * The allowance of the `afterAll` hook that calls `drop()`, which every test file passes. DROP
+ * DATABASE forces an immediate checkpoint of the whole cluster and waits for it: every dirty buffer
+ * written, and every file written since the last checkpoint synced, in the full db run the copies
+ * every other file's CREATE DATABASE ... TEMPLATE has just made, thousands of files. Alone that
+ * takes 0.1 to 1.6 s. In the full db run on 4 CPUs Postgres logged forced checkpoints of up to
+ * 27 s, and a drop that arrives during one waits for it and then for its own: past Vitest's
+ * 10 s hook default, nothing else in the hook being slow. On CI the database is not dropped at all
+ * (leftToServer).
+ */
+export const DROP_TIMEOUT_MS = 120_000;
+
+/**
+ * Whether a file's database is left to the server rather than dropped: on CI (`CI=true`), whose
+ * Postgres is a service container thrown away with the job. There each drop's forced checkpoint is
+ * pure cost, and in the full db run those checkpoints, one per file, stalled every other file's
+ * commits while they synced.
+ */
+function leftToServer(): boolean {
+  return process.env.CI === "true";
+}
+
 export interface TestDatabase {
   readonly name: string;
   /** A pool connected as the superuser: for fixtures and assertions, never for the code under test. */
   readonly admin: Pool;
   /** A pool connected as a service's own login (`l_sat_02_fin_console_a` and so on). */
   login(role: ServiceRole, options?: { max?: number }): Pool;
+  /**
+   * Ends the pools and drops the database (on CI, leaves it to the server): call it in an
+   * `afterAll` given DROP_TIMEOUT_MS.
+   */
   drop(): Promise<void>;
 }
 
@@ -250,6 +276,7 @@ export async function createTestDatabase(label: string): Promise<TestDatabase> {
     },
     async drop() {
       await Promise.all(pools.map((p) => p.end().catch(() => undefined)));
+      if (leftToServer()) return;
       const cleanup = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
       await cleanup.connect();
       try {

@@ -3,7 +3,7 @@
 // from the session's own row; `target` and `targetKind` match only the organisation's own rows; an
 // ID from another organisation returns no rows and no label; the person's activity is theirs alone.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
@@ -16,6 +16,9 @@ import {
   person,
   removeAs,
   roleAs,
+  seededMemberOf,
+  seededRole,
+  warmUp,
 } from "../test/harness.ts";
 import { type AuditLogQuery, organisationLog, personActivity } from "./audit-log.ts";
 
@@ -27,9 +30,14 @@ beforeAll(async () => {
   h = await createHarness(database);
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const QUERY: AuditLogQuery = { range: "all", tz: "UTC", page: 1, size: 100 };
 
@@ -79,8 +87,8 @@ describe("the organisation's audit log", () => {
 
   it("is refused to a member whose role cannot read it, in the route and in the database", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_refused");
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
-    const reader = await memberOf(h, who, orgId, "reader", readers);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
+    const reader = await seededMemberOf(h, who, orgId, "reader", readers);
     expect(codeOf(await log(reader.who, orgId))).toBe("forbidden");
     // The database refuses on its own, whatever the caller asserts (the door's re-check).
     const direct = await asPerson(

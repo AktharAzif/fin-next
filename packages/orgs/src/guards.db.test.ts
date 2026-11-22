@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import { createHarness, type Harness, ownerWithOrganization, person } from "../test/harness.ts";
 import { ORGS_GUARDS } from "./guards.ts";
 
@@ -19,7 +19,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 /** The trigger name audit.install_guard gives a registration's operation. */
 function triggerName(op: string, keyColumn: string, events: readonly string[]): string {

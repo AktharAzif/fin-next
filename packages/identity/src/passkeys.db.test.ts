@@ -4,7 +4,7 @@
 // refused; a challenge works once; a counter that goes backwards is refused and the person told.
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Browser,
   codeSignIn,
@@ -12,6 +12,7 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  warmUp,
 } from "../test/harness.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
@@ -24,9 +25,14 @@ beforeAll(async () => {
   h = await createHarness(database, "developer");
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 

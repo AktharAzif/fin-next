@@ -3,7 +3,7 @@
 // unproved, used, expired, of another session, for another action or another organisation, or for
 // other parameters; it passes once; two concurrent re-sends with one intent make exactly one action.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   codeOf,
@@ -15,6 +15,7 @@ import {
   prove,
   type SignedIn,
   unique,
+  warmUp,
 } from "../test/harness.ts";
 import { inviteMember } from "./invitations.ts";
 
@@ -26,9 +27,14 @@ beforeAll(async () => {
   h = await createHarness(database);
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 function invite(who: SignedIn, orgId: string, email: string, headers: Record<string, string> = {}) {
   return asActor(

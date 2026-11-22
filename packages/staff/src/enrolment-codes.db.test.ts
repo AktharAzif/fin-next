@@ -3,7 +3,7 @@
 // one live code per member, alive 30 minutes, once; its event carries the request's address.
 import { redeemEnrolmentCode } from "@fin/identity";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaffHarness, type StaffHarness, unique } from "../test/harness.ts";
+import { createStaffHarness, DROP_TIMEOUT_MS, type StaffHarness, unique } from "../test/harness.ts";
 import { ENROLMENT_CODE_LIFETIME_MS, issueEnrolmentCode } from "./enrolment-codes.ts";
 
 let h: StaffHarness;
@@ -14,7 +14,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 const request = {
   requestId: "req_01jd0000000000000000000000",

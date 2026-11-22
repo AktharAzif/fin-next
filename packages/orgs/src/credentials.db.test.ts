@@ -5,16 +5,17 @@
 // keeps working for the hour.
 import type { UnitTx } from "@fin/identity";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   changeRoleAs,
   createHarness,
   type Harness,
-  memberOf,
   ownerWithOrganization,
   removeAs,
-  roleAs,
+  seededMemberOf,
+  seededRole,
+  warmUp,
 } from "../test/harness.ts";
 import { CredentialRegistry, type CredentialSource } from "./credentials.ts";
 import { memberCredentials } from "./members.ts";
@@ -47,22 +48,27 @@ beforeAll(async () => {
   h = await createHarness(database, { credentials });
 });
 
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
+});
+
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("a removal", () => {
   it("rolls at once what the actor may roll, the rest with an hour's overlap, in the same unit", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");
     // A role that may invite and remove people and roll only Sandbox keys.
-    const removers = await roleAs(h, who, orgId, "Removers", [
+    const removers = await seededRole(h, who, orgId, "Removers", [
       "member.read",
       "member.invite",
       "apiKey.read",
       "apiKey.sandbox",
     ]);
-    const remover = await memberOf(h, who, orgId, "remover", removers);
-    const leaver = await memberOf(h, who, orgId, "leaver", removers);
+    const remover = await seededMemberOf(h, who, orgId, "remover", removers);
+    const leaver = await seededMemberOf(h, who, orgId, "leaver", removers);
     const listing = await asActor(
       h,
       remover.who,
@@ -101,7 +107,7 @@ describe("a removal", () => {
 
   it("rolls nothing when asked not to, and still counts what was listed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_keep");
-    const leaver = await memberOf(h, who, orgId, "keeper", "admin");
+    const leaver = await seededMemberOf(h, who, orgId, "keeper", "admin");
     rolls.length = 0;
     const out = await removeAs(h, who, orgId, leaver.memberId, false);
     expect(out.ok).toBe(true);
@@ -114,8 +120,8 @@ describe("a removal", () => {
 describe("a demotion", () => {
   it("rolls the demoted member's credentials at once when the actor may roll them", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_demote");
-    const admin = await memberOf(h, who, orgId, "demoted", "admin");
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const admin = await seededMemberOf(h, who, orgId, "demoted", "admin");
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
     rolls.length = 0;
     expect((await changeRoleAs(h, who, orgId, admin.memberId, readers)).ok).toBe(true);
     expect(rolls.map((r) => r.overlap)).toEqual(["now"]);
