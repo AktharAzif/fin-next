@@ -294,6 +294,19 @@ describe("Tabs and TabLinks", () => {
     const list = classes(links.match(/<ul\b[^>]*>/)?.[0]);
     expect(list).toContain("overflow-x-auto");
     expect(list.filter((name) => /^-m/.test(name))).toEqual([]);
+    // With no variant the links take the page's row: no side padding, the markup of `page` itself.
+    expect(list.filter((name) => /^p[xlrse]?-/.test(name))).toEqual([]);
+    expect(links).toBe(
+      render(
+        <TabLinks label="Customer" variant="page">
+          <TabLink href="/customers/c1" current>
+            Overview
+          </TabLink>
+        </TabLinks>,
+      ),
+    );
+    // Each item is a flex box, so its link is a flex item and no inherited line height adds to it.
+    expect(classes(links.match(/<li\b[^>]*>/)?.[0])).toContain("flex");
   });
 
   it("in a drawer the row and its panels sit 24px in, for tabs and for tab links", () => {
@@ -456,6 +469,63 @@ describe("Tabs and TabLinks", () => {
     const none = render(tree(null));
     expect(tagsWith(none, "aria-selected", "true")).toHaveLength(0);
     expect(tagsWith(none, "role", "tabpanel")).toHaveLength(0);
+  });
+
+  it("a kept panel stays in the page, hidden, while its tab isn't chosen; any other panel leaves", () => {
+    const tree = (chosen: string) => (
+      <Tabs defaultValue={chosen}>
+        <TabsList aria-label="Comment">
+          <Tab value="reply">Reply</Tab>
+          <Tab value="formatting">Formatting</Tab>
+          <Tab value="preview">Preview</Tab>
+        </TabsList>
+        <TabPanel value="reply" keepMounted>
+          Reply draft
+        </TabPanel>
+        <TabPanel value="formatting">Formatting notes</TabPanel>
+        <TabPanel value="preview">Preview text</TabPanel>
+      </Tabs>
+    );
+    const away = render(tree("formatting"));
+    const panels = tagsWith(away, "role", "tabpanel");
+    expect(panels).toHaveLength(2);
+    expect(text(away)).toContain("Reply draft");
+    expect(text(away)).not.toContain("Preview text");
+    // The plain hidden attribute takes the panel's box and its Tab stop away (until-found keeps
+    // both); the chosen panel carries none.
+    const [kept, chosen] = panels;
+    expect(attr(kept, "hidden")).toBe("");
+    expect(attr(chosen, "hidden")).toBeUndefined();
+    // Chosen again, the kept panel shows like any other.
+    const back = tagsWith(render(tree("reply")), "role", "tabpanel");
+    expect(back).toHaveLength(1);
+    expect(attr(back[0], "hidden")).toBeUndefined();
+  });
+
+  it("a part run out with a negative side margin takes max-w-none, which lifts its cap", () => {
+    const html = render(
+      <>
+        <Tabs variant="drawer" defaultValue="overview" className="-mx-6 max-w-none">
+          <TabsList aria-label="Customer" className="-mx-6 max-w-none">
+            <Tab value="overview">Overview</Tab>
+          </TabsList>
+        </Tabs>
+        <TabLinks label="Settings" className="-mx-6 max-w-none">
+          <TabLink href="/settings/team">Team</TabLink>
+        </TabLinks>
+      </>,
+    );
+    const parts = {
+      root: tagsWith(html, "data-slot", "tabs")[0],
+      list: tagsWith(html, "role", "tablist")[0],
+      nav: html.match(/<nav\b[^>]*>/)?.[0],
+    };
+    for (const [part, tag] of Object.entries(parts)) {
+      expect(classes(tag), part).toEqual(
+        expect.arrayContaining(["-mx-6", "max-w-none", "min-w-0"]),
+      );
+      expect(classes(tag), part).not.toContain("max-w-full");
+    }
   });
 
   it("hands the SDK only its named options, and onValueChange the SDK's details: cancel() keeps", () => {

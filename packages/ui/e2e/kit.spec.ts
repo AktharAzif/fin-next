@@ -565,6 +565,18 @@ test.describe("the components @kit", () => {
       });
     expect(await linkPaint("Organisation")).toEqual({ colour: token.primary, mark: token.primary });
     expect(await linkPaint("Team")).toEqual({ colour: token.secondary, mark: none });
+    // With no variant the links take the page's row as well: the first starts on the nav's edge,
+    // its label 8px in.
+    const linkStart = await settings.evaluate((nav) => {
+      const first = nav.querySelector("a") as HTMLElement;
+      const range = document.createRange();
+      range.selectNodeContents(first);
+      const edge = nav.getBoundingClientRect().left;
+      return [first.getBoundingClientRect().left, range.getBoundingClientRect().left].map(
+        (left) => Math.round(left - edge) + 0,
+      );
+    });
+    expect(linkStart).toEqual([0, 8]);
   });
 
   test("tabs in a drawer: labels 24px in; a row too wide scrolls in itself, not the page", async ({
@@ -752,6 +764,80 @@ test.describe("the components @kit", () => {
     await expect(customer.getByRole("tabpanel")).toHaveText("The money.");
     // A change from outside does not pull focus into the tabs (AC-UI-27: a tab change never moves it).
     await expect(money).not.toBeFocused();
+  });
+
+  test("tabs run out over a padded box with max-w-none: each rule spans the box, labels 24px in", async ({
+    page,
+  }) => {
+    const reach = await page.locator('[data-kit="tabs-bleed"]').evaluate((box) => {
+      const outer = box.getBoundingClientRect();
+      const px = (n: number) => Math.round(n) + 0;
+      // The tablists and the nav draw the rules; each first label starts on the box's content edge.
+      const rules = [...box.querySelectorAll('[role="tablist"], nav')].map((rule) => {
+        const row = rule.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(rule.querySelector('[role="tab"], a') as Element);
+        return {
+          edges: [px(row.left - outer.left), px(outer.right - row.right)],
+          rule: getComputedStyle(rule).borderBottomWidth,
+          label: px(range.getBoundingClientRect().left - outer.left),
+        };
+      });
+      return {
+        rules,
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    const across = { edges: [0, 0], rule: "1px", label: 24 };
+    expect(reach).toEqual({ rules: [across, across, across], page: 0 });
+  });
+
+  test("tab links keep their 40px row under display text's line height", async ({ page }) => {
+    const row = await page.locator('[data-kit="tab-links-display"] nav').evaluate((nav) => ({
+      // The case is real: the items inherit a 32px font on a 40px line.
+      inherited: [getComputedStyle(nav).fontSize, getComputedStyle(nav).lineHeight],
+      nav: Math.round(nav.getBoundingClientRect().height) + 0,
+      items: [...nav.querySelectorAll("li")].map(
+        (item) => Math.round(item.getBoundingClientRect().height) + 0,
+      ),
+    }));
+    expect(row).toEqual({ inherited: ["32px", "40px"], nav: 41, items: [40, 40] });
+  });
+
+  test("tabs: a kept panel keeps its draft while hidden, with no box and no Tab stop", async ({
+    page,
+  }) => {
+    const kept = page.locator('[data-kit="tabs-kept"]');
+    const note = kept.getByRole("textbox", { name: "Internal note" });
+    await note.fill("Called about the refund.");
+    const history = kept.getByRole("tab", { name: "History" });
+    await history.click();
+    const shown = kept.getByRole("tabpanel", { name: "History" });
+    await expect(shown).toHaveText("No earlier notes.");
+    // Once out, the kept panel carries the plain hidden attribute (until-found would keep its box).
+    await expect(kept.getByRole("tabpanel", { name: "Note", includeHidden: true })).toHaveAttribute(
+      "hidden",
+      "",
+    );
+    const layout = await kept.evaluate((box) => {
+      const [gone, on] = [...box.querySelectorAll('[role="tabpanel"]')].map((panel) =>
+        panel.getBoundingClientRect(),
+      );
+      const row = (box.querySelector('[role="tablist"]') as HTMLElement).getBoundingClientRect();
+      return {
+        box: [gone?.width, gone?.height],
+        // The panel on show starts on the rule: no empty strip above it.
+        under: Math.round((on?.top ?? 0) - row.bottom) + 0,
+      };
+    });
+    expect(layout).toEqual({ box: [0, 0], under: 0 });
+    // From the chosen tab, Tab lands on the panel on show, never on the hidden field before it.
+    await keyboardFocus(page, history);
+    await page.keyboard.press("Tab");
+    await expect(shown).toBeFocused();
+    // Back on its tab, the draft is still there.
+    await kept.getByRole("tab", { name: "Note" }).click();
+    await expect(note).toHaveValue("Called about the refund.");
   });
 
   test("toasts: three at most, the oldest non-error evicted, errors stay; F8 reaches them", async ({

@@ -785,6 +785,62 @@ export function Kit(props: { onReady: () => void }) {
               <TabPanel value="overview">The overview.</TabPanel>
               <TabPanel value="documents">The documents.</TabPanel>
             </Tabs>
+            {/* Tabs run out over a padded box's sides, as a drawer lays them: max-w-none on each. */}
+            <div
+              data-kit="tabs-bleed"
+              className="w-full max-w-drawer-s rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <Tabs variant="drawer" defaultValue="overview" className="-mx-6 -mt-5 max-w-none">
+                <TabsList aria-label="Customer drawer, run out">
+                  <Tab value="overview">Overview</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+              </Tabs>
+              <Tabs defaultValue="overview" className="mt-6">
+                <TabsList aria-label="Customer, row run out" className="-mx-6 max-w-none px-4">
+                  <Tab value="overview">Overview</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+              </Tabs>
+              <TabLinks
+                label="Sections, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none"
+              >
+                <TabLink href="#bleed-overview" current>
+                  Overview
+                </TabLink>
+                <TabLink href="#bleed-team">Team</TabLink>
+              </TabLinks>
+            </div>
+            {/* Tab links under display text, whose line height each item must not take on. */}
+            <div data-kit="tab-links-display" className="text-display">
+              <TabLinks label="Sections under display text">
+                <TabLink href="#display-overview" current>
+                  Overview
+                </TabLink>
+                <TabLink href="#display-team">Team</TabLink>
+              </TabLinks>
+            </div>
+            {/* A kept panel holds a draft while the other tab is on show. */}
+            <div data-kit="tabs-kept">
+              <Tabs defaultValue="note">
+                <TabsList aria-label="Customer note">
+                  <Tab value="note">Note</Tab>
+                  <Tab value="history">History</Tab>
+                </TabsList>
+                <TabPanel value="note" keepMounted>
+                  <Field label="Internal note">
+                    <Input placeholder="Only staff see this note" />
+                  </Field>
+                </TabPanel>
+                <TabPanel value="history">No earlier notes.</TabPanel>
+              </Tabs>
+            </div>
           </Section>
 
           <Section name="states" title="EmptyState and ErrorState">

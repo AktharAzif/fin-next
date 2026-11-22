@@ -15,11 +15,13 @@
 //
 // In both, a row too wide for its box (several tabs on a phone) scrolls sideways inside itself
 // instead of widening the page, whether the parent is a block, a grid or a flex box, stretching
-// the tabs or not (a wrapper of the caller's own in between needs `min-w-0 max-w-full` too). Given
-// a height, the tabs keep their row whole and leave the panels what is left. Tabs and panels draw
-// their focus ring inside their own box, where no edge can clip it. A count follows a label only
-// for work that waits for someone ("To settle 3"); with nothing waiting there is no count at all,
-// never a 0.
+// the tabs or not (a wrapper of the caller's own in between needs `min-w-0 max-w-full` too). That
+// cap is the parent's content box, and no margin widens it: a part the caller runs out over the
+// parent's side padding with a negative margin (a drawer's `-mx-6`) takes `max-w-none` beside the
+// margin, or it stops short of the far edge. Given a height, the tabs keep their row whole and
+// leave the panels what is left. Tabs and panels draw their focus ring inside their own box, where
+// no edge can clip it. A count follows a label only for work that waits for someone ("To settle
+// 3"); with nothing waiting there is no count at all, never a 0.
 //
 // TabLinks draw the same row as a named <nav> holding a list of ordinary links, for tabs that are
 // addresses of their own (Settings' sections, a customer's `?tab=`). They are not a tablist: every
@@ -112,6 +114,7 @@ const ROOT_OPTIONS = [
 export type TabsProps = Pick<ComponentProps<typeof SdkTabs>, (typeof ROOT_OPTIONS)[number]> & {
   /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
   variant?: Layout;
+  /** Classes for the root; a negative side margin goes with `max-w-none` (see the header). */
   className?: string;
   children: ReactNode;
 };
@@ -143,7 +146,10 @@ type TabsListName =
   | { "aria-labelledby": string; "aria-label"?: never };
 
 export type TabsListProps = TabsListName & {
-  /** Classes for the tablist itself, the row over its rule (its margins and placement). */
+  /**
+   * Classes for the tablist itself, the row over its rule (its margins and placement); a negative
+   * side margin goes with `max-w-none` (see the header).
+   */
   className?: string;
   children: ReactNode;
 };
@@ -249,6 +255,7 @@ export type TabLinksProps = {
   variant?: Layout;
   /** The app's router link (a component or a tag name) for every TabLink inside; <a> by default. */
   linkAs?: ElementType<TabLinkTargetProps>;
+  /** Classes for the <nav>, the row's box; a negative side margin goes with `max-w-none`. */
   className?: string;
   children: ReactNode;
 };
@@ -272,7 +279,12 @@ export type TabLinkProps = {
   children: ReactNode;
 };
 
-/** One link in TabLinks, as one item of its list. */
+/**
+ * One link in TabLinks, as one item of its list. The item is a flex box, so the link is a flex
+ * item in it, as a Tab is in the tablist, and the row stays 40px tall whatever line height it
+ * inherits (in a block item the link would sit on a line of that height). The item is as wide as
+ * its link, which never shrinks.
+ */
 export function TabLink({ href, current, className, children }: TabLinkProps) {
   const Link = useContext(LinkContext);
   const classes = cn(ITEM, MARK, "hover:text-text-primary", current && TAB_CHOSEN, className);
@@ -280,7 +292,7 @@ export function TabLink({ href, current, className, children }: TabLinkProps) {
     ? { href, className: classes, "aria-current": "page", children }
     : { href, className: classes, children };
   return (
-    <li className="flex shrink-0">
+    <li className="flex">
       <Link {...target} />
     </li>
   );
