@@ -91,7 +91,7 @@ export class Client {
 /** The newest code emailed to an address. */
 export async function latestCode(admin: Pool, email: string): Promise<string> {
   const result = await admin.query<{ code: string }>(
-    `SELECT params ->> 'code' AS code FROM email.outbox
+    `SELECT params ->> 'code' AS code FROM email_private.outbox
       WHERE recipient = $1 AND params ? 'code' ORDER BY created_at DESC, id DESC LIMIT 1`,
     [email],
   );

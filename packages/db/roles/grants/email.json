@@ -1,12 +1,25 @@
 {
-  "$comment": "The email area's grants (spec 01 §6.10; ARCHITECTURE §9.4). Rows reach the outbox only through email.enqueue(); only the worker claims, updates and deletes them. L-SAT-05 extends this fragment.",
+  "$comment": "The email area's grants (spec 01 §6.10; ARCHITECTURE §9.4). The outbox is in email_private, which only the worker and email.enqueue()'s owner may use, so no other login can name or lock it. Rows reach the outbox only through email.enqueue(), which runs as fin_email_enqueue (NOLOGIN): INSERT on the outbox and SELECT on the template grants, nothing more. Only the worker claims, updates and deletes rows. email.enqueue() reads email.template_grant, which stays in email where every sending service can name it, and joins pg_catalog.pg_roles, which any login can name, so another login can still hold up every caller's enqueue(), the worker's delivery check included, with two sessions on either. L-SAT-05 extends this fragment.",
   "area": "email",
   "grants": [
     {
       "on": "schema",
       "name": "email",
       "privileges": ["USAGE"],
-      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+      "to": [
+        "fin_api",
+        "fin_worker",
+        "fin_payments",
+        "fin_console",
+        "fin_admin",
+        "fin_email_enqueue"
+      ]
+    },
+    {
+      "on": "schema",
+      "name": "email_private",
+      "privileges": ["USAGE"],
+      "to": ["fin_worker", "fin_email_enqueue"]
     },
     {
       "on": "function",
@@ -16,7 +29,19 @@
     },
     {
       "on": "table",
-      "name": "email.outbox",
+      "name": "email.template_grant",
+      "privileges": ["SELECT"],
+      "to": ["fin_email_enqueue"]
+    },
+    {
+      "on": "table",
+      "name": "email_private.outbox",
+      "privileges": ["INSERT"],
+      "to": ["fin_email_enqueue"]
+    },
+    {
+      "on": "table",
+      "name": "email_private.outbox",
       "privileges": ["SELECT", "UPDATE", "DELETE"],
       "to": ["fin_worker"]
     }

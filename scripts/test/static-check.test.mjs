@@ -56,10 +56,13 @@ const built = (/** @type {string} */ base, /** @type {Record<string, string>} */
 
 describe("static:check", () => {
   test("passes with a notice while no app has a static build", () => {
-    const { findings, notices } = checkStatic(repo({}));
+    // A fixture root with no built app, so the test holds whatever this checkout has built; the
+    // static:check step in `pnpm check` is what reads the repository's own built pages.
+    const root = repo({});
+    const { findings, notices } = checkStatic(root);
     assert.deepEqual(findings, []);
     assert.equal(notices.length, 1);
-    const run = runScript("scripts/static-check.mjs", ["--root", REPO_ROOT]);
+    const run = runScript("scripts/static-check.mjs", ["--root", root]);
     assert.equal(run.status, 0);
     assert.match(run.output, /notice: no app has a static build yet/);
   });

@@ -31,6 +31,20 @@ export interface TaskDefinition<P> {
   run(tx: UnitTx, params: P, context: TaskContext): Promise<TaskResult>;
 }
 
+/**
+ * A refusal with its own code, which `migrate` prints as `task.failed`'s `code`. It lives here, with
+ * the contract and away from the runner, so a task's module imports it without importing the
+ * registry that lists the task.
+ */
+export class TaskError extends Error {
+  override readonly name = "TaskError";
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 export function defineTask<P>(task: TaskDefinition<P>): TaskDefinition<P> {
   if (!/^[a-z][a-z0-9-]{1,62}$/.test(task.name)) throw new TypeError(`task name ${task.name}`);
   return task;

@@ -4,13 +4,12 @@
 // adopting only the superuser's tables it made itself (the record and ops.environment).
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bootstrap, type Environment } from "./bootstrap.ts";
-import { loadFragments } from "./grants.ts";
-import { BOOTSTRAP_DIR, GRANTS_DIR } from "./migrations.ts";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
 import {
   createTestDatabase,
   type TestDatabase,
+  testDbAssets,
   testReplicas,
   testVerifiers,
 } from "./testing/index.ts";
@@ -269,6 +268,7 @@ describe("AC-P0-39: fin_owner cannot remove or change the record", () => {
 
 /** Runs the bootstrap again on a test database; resolves "ok" or the refusal's message. */
 async function bootstrapAgain(target: TestDatabase, environment: Environment): Promise<string> {
+  const assets = testDbAssets();
   return target.withLock(async () => {
     const again = await target.superuser();
     try {
@@ -276,8 +276,8 @@ async function bootstrapAgain(target: TestDatabase, environment: Environment): P
         verifiers: testVerifiers(),
         replicas: testReplicas(),
         environment,
-        bootstrapDir: BOOTSTRAP_DIR,
-        fragments: loadFragments(GRANTS_DIR),
+        files: assets.bootstrap,
+        fragments: assets.fragments,
       });
       return "ok";
     } catch (error) {

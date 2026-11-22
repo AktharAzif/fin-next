@@ -1,8 +1,8 @@
 // The organisation-scope audit events (spec 02 §16.3; spec 08 §3.4's `orgs.ts` fragment, the
-// canonical names). They are written in defineEvents' shape (packages/audit, spec 08 §3.2) and move
-// to packages/audit/src/events/orgs.ts verbatim once this lane may write there; until then the
-// console's adapter (record.ts) checks them before `audit.record()`, and the template database and
-// the registry sync read `eventTypeRows()`.
+// canonical names). They are written in defineEvents' shape (packages/audit, spec 08 §3.2): the
+// console's adapter (record.ts) checks them before `audit.record()`, and the template database
+// reads `eventTypeRows()`. packages/audit/src/events/orgs.ts is what `migrate` syncs to
+// audit.event_type, and fragment.test.ts holds it equal to these.
 //
 // Metadata is flat and strict: IDs, role and permission keys, counts, enums and booleans. Never a
 // name, an address, a token or typed text (spec 02 §16.1, ARCHITECTURE §8.2): a name shown on the

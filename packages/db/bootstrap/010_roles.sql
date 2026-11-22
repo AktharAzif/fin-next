@@ -68,19 +68,34 @@ BEGIN
   GRANT pg_read_all_data TO fin_backup WITH INHERIT TRUE, SET FALSE;
   GRANT pg_monitor TO fin_probe WITH INHERIT TRUE, SET FALSE;
 
-  -- "Members of exactly their group": remove any other membership a login or the owner has.
+  -- email.enqueue()'s owner. The function is SECURITY DEFINER and reaches email_private, the schema
+  -- only the worker may use besides it; its owner cannot log in, is a member of nothing, and is granted
+  -- only what the function needs (roles/grants/email.json). fin_owner is its one member: it moves the
+  -- function to this owner in the migration (which needs SET), and replaces and grants on it later
+  -- (which needs INHERIT).
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'fin_email_enqueue') THEN
+    CREATE ROLE fin_email_enqueue;
+  END IF;
+  ALTER ROLE fin_email_enqueue WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+    NOBYPASSRLS NOINHERIT PASSWORD NULL;
+  GRANT fin_email_enqueue TO fin_owner WITH INHERIT TRUE, SET TRUE;
+
+  -- "Members of exactly their group": remove any other membership a login or the owner has, and any
+  -- in or of enqueue's owner but fin_owner's.
   FOR extra IN
     SELECT member.rolname AS member_name, granted.rolname AS granted_name
     FROM pg_catalog.pg_auth_members m
     JOIN pg_catalog.pg_roles member ON member.oid = m.member
     JOIN pg_catalog.pg_roles granted ON granted.oid = m.roleid
-    WHERE member.rolname = 'fin_owner'
+    WHERE (member.rolname = 'fin_owner' AND granted.rolname <> 'fin_email_enqueue')
        OR (member.rolname ~ '^fin_(edge|api|worker|payments|console|admin)_[ab]$'
            AND granted.rolname <> regexp_replace(member.rolname, '_[ab]$', ''))
        OR (member.rolname = 'fin_backup' AND granted.rolname <> 'pg_read_all_data')
        OR (member.rolname = 'fin_probe' AND granted.rolname <> 'pg_monitor')
        OR member.rolname = 'fin_readonly'
        OR member.rolname = ANY (groups)
+       OR member.rolname = 'fin_email_enqueue'
+       OR (granted.rolname = 'fin_email_enqueue' AND member.rolname <> 'fin_owner')
   LOOP
     EXECUTE format('REVOKE %I FROM %I CASCADE', extra.granted_name, extra.member_name);
   END LOOP;
@@ -91,12 +106,14 @@ BEGIN
 END
 $roles$;
 
--- The schemas, one per area (DECISIONS DA-01), owned by fin_owner, with nothing for PUBLIC.
+-- The schemas, one per area (DECISIONS DA-01), owned by fin_owner, with nothing for PUBLIC; and
+-- email_private, the worker's outbox and sender tables, which only the worker and enqueue's owner may
+-- use (the grant fragments say so), so no other login can name, and so lock, a table in it.
 DO $schemas$
 DECLARE
   s text;
 BEGIN
-  FOREACH s IN ARRAY ARRAY['identity', 'staff', 'keys', 'kyc', 'money', 'events', 'email', 'audit', 'ops'] LOOP
+  FOREACH s IN ARRAY ARRAY['identity', 'staff', 'keys', 'kyc', 'money', 'events', 'email', 'email_private', 'audit', 'ops'] LOOP
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION fin_owner', s);
     EXECUTE format('ALTER SCHEMA %I OWNER TO fin_owner', s);
     EXECUTE format('REVOKE CREATE, USAGE ON SCHEMA %I FROM PUBLIC', s);

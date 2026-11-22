@@ -39,5 +39,21 @@ export interface EventTypeRow {
   retired: boolean;
 }
 
-export function createStaffPlatform(prefix: string): Promise<StaffPlatform>;
+/** The migration run's own connection, as fin_owner, as `migrate`'s registry sync receives it. */
+export interface RunQueryable {
+  query(text: string, values?: readonly unknown[]): Promise<{ rows: object[] }>;
+}
+
+export interface StaffPlatformOptions {
+  /**
+   * Registers the audit event types in the migration run's transaction, in place of this file's
+   * own rows: `migrate`'s registry sync, so the database holds what `migrate --migrate` writes.
+   */
+  registry?: (q: RunQueryable) => Promise<unknown>;
+}
+
+export function createStaffPlatform(
+  prefix: string,
+  options?: StaffPlatformOptions,
+): Promise<StaffPlatform>;
 export function eventTypes(): EventTypeRow[];

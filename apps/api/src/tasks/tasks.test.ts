@@ -1,8 +1,9 @@
-import { createIdSource, type UnitTx } from "@fin/db";
-import { describe, expect, it } from "vitest";
+import { createIdSource, type FinDatabase, type UnitTx } from "@fin/db";
+import { describe, expect, it, vi } from "vitest";
 import { auditNote } from "./audit-note.ts";
 import { TASKS } from "./registry.ts";
-import { parseTaskParams, TaskError } from "./run.ts";
+import { parseTaskParams, runTask, TaskError } from "./run.ts";
+import { staffBootstrap } from "./staff-bootstrap/task.ts";
 import { StartEpochRefused, startEpoch } from "./start-epoch.ts";
 
 function fakeTx(): { tx: UnitTx; queries: string[]; values: (readonly unknown[])[] } {
@@ -22,9 +23,67 @@ function fakeTx(): { tx: UnitTx; queries: string[]; values: (readonly unknown[])
 
 const context = { runId: "run_1", release: "r", environment: "staging" as const };
 
+/** A database that must not be reached: a refused run opens no unit of work. */
+function untouchedDb(): { db: FinDatabase; unit: ReturnType<typeof vi.fn> } {
+  const unit = vi.fn(async () => {
+    throw new Error("the run opened a unit of work");
+  });
+  return { db: { unit } as unknown as FinDatabase, unit };
+}
+
+const runContext = {
+  ...context,
+  unit: {} as Parameters<typeof runTask>[3]["unit"],
+  log: { write: () => {} },
+};
+
+async function refusal(name: string, params: unknown): Promise<string | undefined> {
+  const { db, unit } = untouchedDb();
+  const error = await runTask(db, name, params, runContext).then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(error, name).toBeInstanceOf(TaskError);
+  expect(unit).not.toHaveBeenCalled();
+  return (error as TaskError).code;
+}
+
 describe("the task registry", () => {
   it("knows Phase 0's tasks by name", () => {
-    expect(Object.keys(TASKS).sort()).toEqual(["audit-note", "audit-start-epoch"]);
+    expect(Object.keys(TASKS).sort()).toEqual([
+      "audit-note",
+      "audit-start-epoch",
+      "staff-bootstrap",
+    ]);
+    expect(TASKS["staff-bootstrap"]).toBe(staffBootstrap);
+  });
+
+  it("resolves staff-bootstrap, so its parameters are read rather than the name refused", async () => {
+    expect(await refusal("staff-bootstrap", { address: "first.admin@example.com" })).toBe(
+      "task_params",
+    );
+    // The enrolment code itself is never a parameter.
+    expect(
+      await refusal("staff-bootstrap", {
+        address: "first.admin@example.com",
+        codeHash: "ab".repeat(32),
+        reasonCode: "first_admin",
+        code: "ABCD-EFGH-JKMN-PQRS",
+      }),
+    ).toBe("task_params");
+  });
+
+  it("refuses a task it does not list, an inherited property's name included", async () => {
+    for (const name of ["drop-everything", "staff-bootstraps", "constructor"]) {
+      expect(await refusal(name, {})).toBe("task_unknown");
+    }
+  });
+
+  it("loads a task's module on its own, before the registry or the runner", async () => {
+    vi.resetModules();
+    const task = await import("./staff-bootstrap/task.ts");
+    const registry = await import("./registry.ts");
+    expect(registry.TASKS["staff-bootstrap"]).toBe(task.staffBootstrap);
   });
 
   it("reads FIN_TASK_PARAMS as JSON, an empty value as no parameters", () => {

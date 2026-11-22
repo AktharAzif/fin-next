@@ -35,7 +35,7 @@ export const IDENTITY_LINES = {
   "auth.library_log": {
     kind: "info",
     alerts: {
-      none: "the library's own warnings, level only; errors surface as auth.unhandled_error",
+      none: "the library's own warnings, libraryLevel only; errors surface as auth.unhandled_error",
     },
   },
   "step_up.refused": { kind: "security", alerts: ["step-up-failing"] },

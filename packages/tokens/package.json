@@ -12,7 +12,7 @@
     "./theme.css": "./theme.css",
     "./base.css": "./base.css",
     "./fonts.css": "./fonts.css",
-    "./fonts/*": "./fonts/*",
+    "./fonts/*.woff2": "./fonts/*.woff2",
     "./export-pin/tokens.json": "./export-pin/tokens.json",
     "./vite": "./vite.ts"
   },

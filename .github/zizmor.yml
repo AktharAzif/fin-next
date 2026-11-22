@@ -1,0 +1,8 @@
+# zizmor's settings (spec 01 §5.3: the static job runs the offline audits, nightly.yml the online
+# ones). A control path. Every change here weakens or tunes an audit, so each carries its reason.
+rules:
+  dependabot-cooldown:
+    config:
+      # Dependabot's cooldown matches the workspace's minimumReleaseAge of 4,320 minutes (spec 01
+      # §3.7, §4.2): a release becomes installable after three days, so Dependabot proposes it then.
+      days: 3

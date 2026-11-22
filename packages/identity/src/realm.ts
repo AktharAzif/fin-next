@@ -247,10 +247,12 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
     onAPIError: { throw: true, errorURL: `${settings.publicOrigin}/sign-in` },
     logger: {
       level: "warn",
+      // The library's level is `libraryLevel`: a field named `level` shares the envelope's name,
+      // and the process telemetry drops it. The message and its arguments are never written.
       log: (level: string) => {
         rt.lines.write("auth.library_log", level === "error" ? "error" : "warn", {
           realm: settings.realm,
-          level,
+          libraryLevel: level,
         });
       },
     },

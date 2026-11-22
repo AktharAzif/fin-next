@@ -1,0 +1,18 @@
+{
+  "$comment": "Fin Admin's audit log (spec 02 §14.3, §14.5, §16.4): fin_admin reads the staff-scope rows only through the two SECURITY DEFINER reads of migrations/*_staff_audit_log.sql, which re-check the staff session, its Access sub, the member and audit.read. No role holds a privilege on audit.event here; staff.audit_reader and staff.audit_matches have no grant (only the two reads, running as their owner, call them).",
+  "area": "staff-audit",
+  "grants": [
+    {
+      "on": "function",
+      "name": "staff.audit_log(text, text, boolean, text[], text[], text[], timestamptz, timestamptz, text, text, integer)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "function",
+      "name": "staff.audit_entry(text, text, text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_admin"]
+    }
+  ]
+}

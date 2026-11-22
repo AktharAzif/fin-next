@@ -1,7 +1,8 @@
 // The operator tasks `migrate --task <name>` runs. Each lane adds its own task file here (staff-bootstrap
 // is L-SAT-04's, journal-replay and auth-reencrypt come later); this list is the one place the image
-// knows them, so a bundled build includes exactly these.
+// knows them, so a bundled build includes exactly these. A name missing here is `task_unknown`.
 import { auditNote } from "./audit-note.ts";
+import { staffBootstrap } from "./staff-bootstrap/task.ts";
 import { startEpoch } from "./start-epoch.ts";
 import type { TaskDefinition } from "./types.ts";
 
@@ -9,4 +10,5 @@ import type { TaskDefinition } from "./types.ts";
 export const TASKS: Readonly<Record<string, TaskDefinition<any>>> = Object.freeze({
   [auditNote.name]: auditNote,
   [startEpoch.name]: startEpoch,
+  [staffBootstrap.name]: staffBootstrap,
 });

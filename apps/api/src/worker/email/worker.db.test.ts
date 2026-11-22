@@ -1,10 +1,17 @@
 // The worker's email side on a real Postgres 18: the delivery check's once-per-release and daily
 // rule (S0-09), and the whole path from `email.enqueue()` through NOTIFY, the loop and the sender to
 // the transport and the heartbeat, as the worker's own login.
-import { enqueue, newId } from "@fin/email";
+import {
+  type ClientLike,
+  enqueue,
+  newId,
+  type PoolLike,
+  recipientHasher,
+  Sender,
+} from "@fin/email";
 import { FakeTransport, LineRecorder } from "@fin/email/testing";
 import { HAS_DATABASE, openTestDatabase, type TestDatabase } from "@fin/email/testing/db";
-import pg from "pg";
+import pg, { type PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { EmailWorkerConfig } from "./config.ts";
 import { DAY_MS, runDeliveryCheck } from "./delivery-check.ts";
@@ -30,9 +37,11 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
 
   beforeEach(async () => {
     await db.admin.query(
-      "TRUNCATE email.outbox, email.recipient_window, email.daily_budget, email.delivery_check, ops.duty_state",
+      "TRUNCATE email_private.outbox, email_private.recipient_window, email_private.daily_budget, email_private.delivery_check, ops.duty_state",
     );
-    await db.admin.query("UPDATE email.send_bucket SET tokens = 0, refilled_at = '-infinity'");
+    await db.admin.query(
+      "UPDATE email_private.send_bucket SET tokens = 0, refilled_at = '-infinity'",
+    );
     offset = 2_000;
   });
 
@@ -67,7 +76,7 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
       recipient: string;
       enqueued_by: string;
       priority: number;
-    }>("SELECT template, recipient, enqueued_by, priority FROM email.outbox");
+    }>("SELECT template, recipient, enqueued_by, priority FROM email_private.outbox");
     expect(rows.rows).toHaveLength(3);
     for (const r of rows.rows) {
       expect(r).toEqual({
@@ -93,27 +102,27 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
   });
 
   it("puts back the turn's row after a restore emptied the table, and still agrees", async () => {
-    await db.admin.query("TRUNCATE email.delivery_check_turn");
+    await db.admin.query("TRUNCATE email_private.delivery_check_turn");
     const results = await Promise.all([check(RELEASE_A), check(RELEASE_A), check(RELEASE_A)]);
     expect(results.filter((r) => r.result === "queued")).toHaveLength(1);
     expect(results.filter((r) => r.result === "failed")).toEqual([]);
-    const turn = await db.admin.query("SELECT name FROM email.delivery_check_turn");
+    const turn = await db.admin.query("SELECT name FROM email_private.delivery_check_turn");
     expect(turn.rows).toEqual([{ name: "delivery-check" }]);
   });
 
-  it("cannot be held up by another login: no advisory lock, and only the worker may take the turn", async () => {
+  it("is not held up by another login's advisory lock, and only the worker may take the turn", async () => {
     const other = await db.as.fin_console.connect();
     try {
       // What any login could do to an advisory lock, and what it may not do to the worker's tables.
       await other.query("SELECT pg_advisory_lock(hashtext('fin:email-delivery-check'))");
       await other.query("BEGIN");
       await expect(
-        other.query("LOCK TABLE email.delivery_check IN ACCESS SHARE MODE"),
+        other.query("LOCK TABLE email_private.delivery_check IN ACCESS SHARE MODE"),
       ).rejects.toMatchObject({ code: "42501" });
       await other.query("ROLLBACK");
       await other.query("BEGIN");
       await expect(
-        other.query("SELECT 1 FROM email.delivery_check_turn FOR UPDATE"),
+        other.query("SELECT 1 FROM email_private.delivery_check_turn FOR UPDATE"),
       ).rejects.toMatchObject({ code: "42501" });
       await other.query("ROLLBACK");
       const outcome = await Promise.race([
@@ -127,48 +136,307 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     }
   });
 
-  it("cannot be held up by the table locks another login takes when it only prepares a statement", async () => {
-    // Postgres locks a statement's tables when it parses it and checks privileges only when it runs,
-    // so any login with USAGE on the schema can hold ROW EXCLUSIVE (and lesser) locks on every email
-    // table by preparing an INSERT, a DELETE or a SELECT ... FOR UPDATE in a transaction it keeps open.
-    const tables = await db.admin.query<{ name: string }>(
-      "SELECT tablename AS name FROM pg_tables WHERE schemaname = 'email' ORDER BY tablename",
+  // Postgres takes a statement's table lock before it checks the statement's privileges: a PREPARE
+  // locks its tables when it is parsed, and CREATE RULE or CREATE TRIGGER queues its lock (ACCESS
+  // EXCLUSIVE, SHARE ROW EXCLUSIVE) before its ownership check fails. So a login that could name the
+  // worker's tables could hold the check and the sender up with two sessions: one keeps a lock in an
+  // open transaction, the other queues DDL behind it, and the worker's own locks queue behind the
+  // DDL. No other login may use the schema the worker's tables are in, so it cannot name them.
+  // These tests cover the tables in that schema only. The relations outside it that a run still
+  // locks, which another login can name and so hold, are pinned by "locks no relation outside
+  // email_private but ..." below.
+  const OTHERS = ["fin_console", "fin_admin", "fin_api", "fin_payments"] as const;
+  const PRIVATE = "email_private";
+  const WORKER_TABLES = [
+    "outbox",
+    "delivery_check",
+    "delivery_check_turn",
+    "send_bucket",
+    "daily_budget",
+    "recipient_window",
+  ].map((table) => `${PRIVATE}.${table}`);
+  const DDL = {
+    rule: (table: string) => `CREATE RULE r AS ON INSERT TO ${table} DO NOTHING`,
+    trigger: (table: string) =>
+      `CREATE TRIGGER t BEFORE UPDATE ON ${table} FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()`,
+  };
+  /**
+   * What session A prepares so session B's DDL queues behind it: any statement for CREATE RULE's
+   * ACCESS EXCLUSIVE; for CREATE TRIGGER's SHARE ROW EXCLUSIVE, one that takes ROW EXCLUSIVE.
+   */
+  const HOLD = {
+    rule: (table: string) => `PREPARE p AS SELECT 1 FROM ${table}`,
+    trigger: (table: string) => `PREPARE p AS DELETE FROM ${table}`,
+  };
+  const DENIED = { code: "42501", message: `permission denied for schema ${PRIVATE}` };
+
+  /** How a statement ended: "ok", or its SQLSTATE and message. */
+  const outcomeOf = (query: Promise<unknown>) =>
+    query.then(
+      () => "ok" as const,
+      (error: { code?: string; message?: string }) => ({
+        code: error.code,
+        message: error.message,
+      }),
     );
-    const holders = await Promise.all(
-      (["fin_console", "fin_admin", "fin_api", "fin_payments"] as const).map((role) =>
-        db.as[role].connect(),
-      ),
-    );
-    try {
-      for (const holder of holders) {
-        await holder.query("BEGIN");
-        let i = 0;
-        for (const { name } of tables.rows) {
-          await holder.query(`PREPARE p${i++} AS INSERT INTO email.${name} DEFAULT VALUES`);
-          await holder.query(`PREPARE p${i++} AS DELETE FROM email.${name}`);
-          await holder.query(`PREPARE p${i++} AS SELECT 1 FROM email.${name} FOR UPDATE`);
-        }
-      }
-      const held = await db.admin.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-          WHERE c.relname = 'delivery_check' AND l.mode = 'RowExclusiveLock' AND l.granted`,
+
+  /** Waits until `done` has settled or the backend `pid` waits on a lock, whichever comes first. */
+  async function settledOrWaiting(pid: number, done: Promise<unknown>): Promise<void> {
+    let settled = false;
+    void done.then(() => {
+      settled = true;
+    });
+    const until = Date.now() + 2000;
+    while (!settled && Date.now() < until) {
+      const waiting = await db.admin.query(
+        "SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted",
+        [pid],
       );
-      expect(held.rows[0]?.n).toBe(holders.length);
-      const outcome = await Promise.race([
-        check(RELEASE_A),
-        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 3000)),
+      if (waiting.rows.length > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  const backendPid = async (client: PoolClient) =>
+    (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid ?? 0;
+
+  /** The sender as the worker runs it, over a fake transport. */
+  const sender = (pool: PoolLike = db.as.fin_worker) =>
+    new Sender({
+      db: pool,
+      port: new FakeTransport(),
+      clock,
+      log: new LineRecorder(),
+      holder: "worker-a:1",
+      environment: "staging",
+      from: { auth: { address: "account-security@auth.example.com", name: "Fin" } },
+      links: { console: "https://console.example.com" },
+      hashRecipient: recipientHasher({ version: 1, secret: new Uint8Array(32).fill(5) }),
+      random: () => 0.5,
+      newEntityRef: () => "ref",
+    });
+
+  /** `work`'s result, or "blocked" when it has not finished within `ms`. */
+  async function within<T>(work: Promise<T>, ms: number): Promise<T | "blocked"> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<"blocked">((resolve) => {
+          timer = setTimeout(() => resolve("blocked"), ms);
+        }),
       ]);
-      expect(outcome).toMatchObject({ result: "queued", trigger: "release" });
-      // And a second replica still agrees with the first while those locks are held.
-      expect(await check(RELEASE_A)).toMatchObject({ result: "skipped" });
     } finally {
-      for (const holder of holders) {
-        await holder.query("ROLLBACK").catch(() => undefined);
-        await holder.query("DEALLOCATE ALL").catch(() => undefined);
-        holder.release();
+      clearTimeout(timer);
+    }
+  }
+
+  it("keeps another login's PREPARE, and a CREATE RULE or CREATE TRIGGER queued behind it, off every table in email_private", async () => {
+    let run = 0;
+    for (const role of OTHERS) {
+      const a = await db.as[role].connect();
+      const b = await db.as[role].connect();
+      try {
+        const bPid = await backendPid(b);
+        for (const table of WORKER_TABLES) {
+          for (const kind of ["rule", "trigger"] as const) {
+            let queued: ReturnType<typeof outcomeOf> | undefined;
+            let sending: Promise<unknown> | undefined;
+            try {
+              // A sign-in code waits in the outbox too, so the sender also counts its recipient.
+              await enqueue(db.as.fin_console, {
+                id: newId("eml", clock),
+                template: "identity/sign-in-code",
+                recipientKind: "address",
+                recipient: `person${run}@example.com`,
+                params: { code: "24682468" },
+              });
+              // Session A keeps a lock in an open transaction; session B queues DDL behind it.
+              await a.query("BEGIN");
+              const prepared = await outcomeOf(a.query(HOLD[kind](table)));
+              queued = outcomeOf(b.query(DDL[kind](table)));
+              await settledOrWaiting(bPid, queued);
+              // The delivery check queues its email, and the sender sends both (the outbox, the
+              // token bucket, the daily budget, the recipient window), none of it waiting on
+              // another login's lock.
+              const release = (run++).toString(16).padStart(40, "c");
+              const outcome = await check(release);
+              sending = sender().runOnce();
+              const sent = await within(sending, 3000);
+              expect({ role, table, kind, check: outcome.result, sent }).toMatchObject({
+                role,
+                table,
+                kind,
+                check: "queued",
+                sent: { sent: 2 },
+              });
+              expect(prepared).toEqual(DENIED);
+              expect(await queued).toEqual(DENIED);
+            } finally {
+              await a.query("ROLLBACK").catch(() => undefined);
+              await a.query("DEALLOCATE ALL").catch(() => undefined);
+              await queued;
+              await sending?.catch(() => undefined);
+            }
+          }
+        }
+      } finally {
+        a.release(true);
+        b.release(true);
       }
     }
-  }, 15_000);
+  }, 120_000);
+
+  // The caller's open transaction also holds ACCESS SHARE on email.template_grant. A second session
+  // of the same login that queues DDL on that table does hold the check up; the next test pins it.
+  it("is not held up by a caller that keeps its transaction open after email.enqueue(), and the caller cannot queue DDL on the outbox", async () => {
+    const probe = "test/enqueue-probe";
+    for (const role of OTHERS) {
+      await db.admin.query(
+        `INSERT INTO email.template_grant (template, role, category, priority, carries_secret)
+         VALUES ($1, $2, 'notice', 3, false)`,
+        [probe, db.roleName(role)],
+      );
+    }
+    let run = 0;
+    try {
+      for (const role of OTHERS) {
+        const caller = await db.as[role].connect();
+        const other = await db.as[role].connect();
+        try {
+          await caller.query("BEGIN");
+          const id = newId("eml", clock);
+          await caller.query("SELECT email.enqueue($1::jsonb)", [
+            JSON.stringify({ id, template: probe, recipient: "person@example.com", params: {} }),
+          ]);
+          // The caller holds ROW EXCLUSIVE on the outbox until its transaction ends.
+          const held = await db.admin.query<{ mode: string }>(
+            `SELECT mode FROM pg_locks
+              WHERE pid = $1 AND relation = 'email_private.outbox'::regclass AND granted`,
+            [await backendPid(caller)],
+          );
+          expect(held.rows).toContainEqual({ mode: "RowExclusiveLock" });
+          // It cannot queue DDL on the outbox behind its own lock, either.
+          expect(await outcomeOf(other.query(DDL.rule("email_private.outbox")))).toEqual(DENIED);
+          const release = (run++).toString(16).padStart(40, "d");
+          expect(await check(release)).toMatchObject({ result: "queued", trigger: "release" });
+          await caller.query("COMMIT");
+          const row = await db.admin.query(
+            "SELECT enqueued_by FROM email_private.outbox WHERE id = $1",
+            [id],
+          );
+          expect(row.rows).toEqual([{ enqueued_by: db.loginName(role) }]);
+        } finally {
+          await caller.query("ROLLBACK").catch(() => undefined);
+          caller.release();
+          other.release();
+        }
+      }
+    } finally {
+      await db.admin.query("DELETE FROM email.template_grant WHERE template = $1", [probe]);
+    }
+  });
+
+  /** The relations (indexes left out) the backend `pid` holds a lock on, schema-qualified. */
+  async function lockedRelations(pid: number): Promise<string[]> {
+    const locked = await db.admin.query<{ name: string }>(
+      `SELECT DISTINCT n.nspname || '.' || c.relname AS name
+         FROM pg_locks l
+         JOIN pg_class c ON c.oid = l.relation
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE l.pid = $1 AND l.locktype = 'relation' AND c.relkind <> 'i'`,
+      [pid],
+    );
+    return locked.rows.map((row) => row.name);
+  }
+
+  /**
+   * The worker's pool, adding to `into` every relation its statements lock. A transaction's locks
+   * are read just before it ends; a statement run on the pool itself gets a transaction of its own,
+   * so that its locks can be read too.
+   */
+  function recordingPool(into: Set<string>): PoolLike {
+    const open = async () => {
+      const client: ClientLike = await db.as.fin_worker.connect();
+      const self = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      return { client, pid: self.rows[0]?.pid ?? 0 };
+    };
+    const record = async (pid: number) => {
+      for (const name of await lockedRelations(pid)) into.add(name);
+    };
+    return {
+      async query<R>(text: string, values?: unknown[]) {
+        const { client, pid } = await open();
+        try {
+          await client.query("BEGIN");
+          const result = await client.query<R>(text, values);
+          await record(pid);
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
+        }
+      },
+      async connect() {
+        const { client, pid } = await open();
+        return {
+          async query<R>(text: string, values?: unknown[]) {
+            if (text === "COMMIT" || text === "ROLLBACK") await record(pid);
+            return client.query<R>(text, values);
+          },
+          release: (error?: Error | boolean) => client.release(error),
+        };
+      },
+    };
+  }
+
+  // The tests above keep other logins off the tables in email_private. A run still locks the
+  // relations below outside that schema, and another login can name each of them, so two sessions
+  // can still hold the check (and every caller's email.enqueue()) up through them. delivery-check.ts
+  // says how. The steward's ruling keeps email.template_grant in `email`. A change to either list
+  // fails here, so the comments that name the list are kept true.
+  it("locks no relation outside email_private but those delivery-check.ts names", async () => {
+    const checked = new Set<string>();
+    expect(
+      await runDeliveryCheck({
+        db: recordingPool(checked),
+        clock,
+        release: RELEASE_A,
+        seedInbox: "seed@example.net",
+        log: new LineRecorder(),
+      }),
+    ).toMatchObject({ result: "queued", trigger: "release" });
+    await enqueue(db.as.fin_console, {
+      id: newId("eml", clock),
+      template: "identity/sign-in-code",
+      recipientKind: "address",
+      recipient: "person@example.com",
+      params: { code: "24682468" },
+    });
+    const sent = new Set<string>();
+    expect(await sender(recordingPool(sent)).runOnce()).toMatchObject({ sent: 2 });
+
+    const outside = (names: Set<string>) =>
+      [...names].filter((name) => !name.startsWith(`${PRIVATE}.`)).sort();
+    // email.enqueue() reads the template grants and joins pg_roles, a view on pg_authid and
+    // pg_db_role_setting; the run's second transaction records it in ops.duty_state.
+    expect(outside(checked)).toEqual([
+      "email.template_grant",
+      "ops.duty_state",
+      "pg_catalog.pg_authid",
+      "pg_catalog.pg_db_role_setting",
+      "pg_catalog.pg_roles",
+    ]);
+    // Sending (with no digest due, whose flush calls email.enqueue()) stays inside email_private.
+    expect(outside(sent)).toEqual([]);
+    // Every table in email_private either one locks is one the two-session test tries.
+    const inside = [...checked, ...sent].filter((name) => name.startsWith(`${PRIVATE}.`));
+    expect(inside.length).toBeGreaterThan(0);
+    for (const name of inside) expect(WORKER_TABLES).toContain(name);
+  });
 
   it("records each run in ops.duty_state: the last success, and failures in a row", async () => {
     await check(RELEASE_A);
@@ -336,7 +604,7 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
         return port.of("identity/sign-in-code").length === 1;
       });
       expect(port.of("identity/sign-in-code")[0]?.to).toBe("person@example.com");
-      const left = await db.admin.query("SELECT 1 FROM email.outbox");
+      const left = await db.admin.query("SELECT 1 FROM email_private.outbox");
       expect(left.rows).toEqual([]);
       expect(
         log

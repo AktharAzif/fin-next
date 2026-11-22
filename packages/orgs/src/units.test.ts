@@ -148,7 +148,7 @@ describe("the audit log's window and devices", () => {
   it("reads today in the viewer's time zone, the ranges, and explicit bounds", () => {
     const now = new Date("2026-11-21T03:30:00Z");
     expect(startOfDay(now, "UTC").toISOString()).toBe("2026-11-21T00:00:00.000Z");
-    expect(startOfDay(now, "Asia/Kolkata").toISOString()).toBe("2026-11-20T18:30:00.000Z");
+    expect(startOfDay(now, "Asia/Kathmandu").toISOString()).toBe("2026-11-20T18:15:00.000Z");
     expect(windowOf({ range: "7d", tz: "UTC", page: 1, size: 25 }, now).from?.toISOString()).toBe(
       "2026-11-14T03:30:00.000Z",
     );

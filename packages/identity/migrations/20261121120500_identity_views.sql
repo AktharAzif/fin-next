@@ -3,8 +3,8 @@
 -- organization_view) follow L-SAT-03's _orgs_tables; person_gate() and
 -- revoke_trusted_browsers() are PL/pgSQL so they bind to the organisation tables only when they
 -- run, and fail closed until those tables exist.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 -- A time-ordered ID made in the database (ARCHITECTURE §6.2's shape), for rows the database
 -- writes by itself (the audit events of revoke_trusted_browsers).

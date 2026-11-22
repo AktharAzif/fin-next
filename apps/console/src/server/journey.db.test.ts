@@ -112,7 +112,7 @@ describe("the console's API, end to end", () => {
 
     // The invitee opens the link (the token from the fragment, in a body), then signs in.
     const mail = await database.admin.query<{ token: string }>(
-      `SELECT params ->> 'token' AS token FROM email.outbox
+      `SELECT params ->> 'token' AS token FROM email_private.outbox
         WHERE recipient = $1 AND template = 'orgs/invitation'`,
       [inviteeEmail],
     );
@@ -230,7 +230,7 @@ describe("the console's API, end to end", () => {
 
     // The notices, each queued in its action's transaction.
     const outbox = await database.admin.query<{ template: string; recipient: string }>(
-      "SELECT template, recipient FROM email.outbox WHERE template LIKE 'orgs/%' ORDER BY created_at, id",
+      "SELECT template, recipient FROM email_private.outbox WHERE template LIKE 'orgs/%' ORDER BY created_at, id",
     );
     const sentTo = outbox.rows.map((r) => `${r.template} ${r.recipient}`);
     expect(sentTo).toEqual(
