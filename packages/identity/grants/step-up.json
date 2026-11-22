@@ -1,0 +1,31 @@
+{
+  "$comment": "Step-up intents (spec 02 §13.4, §13.7). The services that make and consume intents write them; api reads them for its door checks; the worker sweeps them.",
+  "area": "step-up",
+  "grants": [
+    {
+      "role": "fin_console",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "tables": ["ops.step_up_intent"]
+    },
+    {
+      "role": "fin_admin",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "tables": ["ops.step_up_intent"]
+    },
+    {
+      "role": "fin_api",
+      "privileges": ["SELECT"],
+      "tables": ["ops.step_up_intent"]
+    },
+    {
+      "role": "fin_worker",
+      "privileges": ["EXECUTE"],
+      "functions": ["ops.sweep_step_up()"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "tables": ["ops.step_up_intent"]
+    }
+  ]
+}
