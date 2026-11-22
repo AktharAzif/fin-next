@@ -22,8 +22,8 @@ the owners.
 1. The owner's decisions of 21 Nov 2026, which DECISIONS.md records, override every other text: the
    overnight ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning,
    which spec 01 §1.2 lists (§0.3 names what each changes here). The decisions taken while the owner
-   was away, the build's [BD-01] to [BD-17] among them (BD-15 is withdrawn), are register entries
-   (item 2), for the owner's review.
+   was away, the build's [BD-01] to [BD-29] among them (BD-15 and BD-25 are withdrawn), are
+   register entries (item 2), for the owner's review.
 2. DECISIONS.md, appendix C included.
 3. ARCHITECTURE.md.
 4. EXECUTION.md.
@@ -129,6 +129,7 @@ while the owner was away") lists the steward's and the build's for the owner's r
 | fin-review runs locally as the merge gate until CI has an Anthropic credential | The owner, about 08:49 ("fine for now") | §2.3, §2.4 |
 | Fin Admin's first staff admin on staging is the owner's staff address, never written here | The owner, about 08:49. Keeping its two TOTP secrets (Fin Admin's and Access's own factor) on the build machine and the staging-only mailbox rule are the steward's | §2.5 (TM-L14); §6.1 (L4) |
 | The build's [BD-02], [BD-05], [BD-07], [BD-11], [BD-13], [BD-14], [BD-16] and [BD-17] | The build, under the owner's away-time authority, for the owner's review | §2.3, §2.4, §6.1, §6.2, §6.4, §6.6, §7.5, §7.8 and §8.5 |
+| The build's [BD-24]: staging's Better Stack sources and Errors applications are in `us_west`, the only region the organisation offers, and staging's DSN check takes the `us_west` shape | The build, under the owner's away-time authority, for the owner's review; it departs from the owner's [OB-02], so that review covers it too | §7.1, §7.5 |
 
 S-01 (SP-25) passed on 21 Nov (`docs/plan/spikes.md`), so §7.6's monitors follow its result and
 the per-app API hosts stay only as the documented fallback.
@@ -1132,7 +1133,7 @@ runbook. "Deploys" counts the Railway deploys one routine rotation needs.
 | `sumsub-webhook-secret` | `SUMSUB_WEBHOOK_SECRETS` | api | JSON array of active secrets | 180 days | `rotate-sumsub.md` (webhook section) | 2 |
 | `masspay-key` | `MASSPAY_API_KEY` | payments | issued by MassPay | 180 days, or MassPay's terms | `rotate-masspay.md` (spec 04 §18.3) | 1 or 2 (SP-13) |
 | `masspay-webhook-secret` | `MASSPAY_WEBHOOK_SECRETS` | payments | JSON array | 180 days | `rotate-masspay.md` | 2 |
-| `email-token` | `FIN_EMAIL_TOKEN` | worker | Cloudflare `cfat_` token, Email Sending Edit, IP-filtered | 180 days or less | `rotate-email-token.md` | 1 |
+| `email-token` | `FIN_EMAIL_TOKEN` | worker | Cloudflare `cfat_` token, Email Sending Edit (Cloudflare's token page names this group Email Sending Write: [BD-28]; `docs/plan/spikes.md`, run 5), IP-filtered | 180 days or less | `rotate-email-token.md` | 1 |
 | `vault-token` | `FIN_VAULT_AUDIT_*` (worker), `FIN_VAULT_BACKUPS_*` (backup) | as named | R2 token scoped to one bucket | 180 days, staggered | `rotate-r2.md` | 1 |
 | `telemetry-token` | `FIN_TELEMETRY_TOKEN` | every Fin service, its own source | issued by Better Stack | on suspicion | `rotate-betterstack.md` | 1 |
 | `errors-dsn` | `FIN_ERRORS_DSN` (server), `FIN_BROWSER_ERRORS_DSN` (each app's API service, for its relay) | each service its own | issued by Better Stack | on suspicion | `rotate-betterstack.md` | 1 |
@@ -1192,7 +1193,7 @@ are what each file says.
 | `sumsub-token` | 1. the owner creates a new token in Sumsub with the same permissions and IP allowlist; 2. set it on the holder, deploy; 3. a read with the new token; 4. disable the old token in Sumsub | no `sumsub-failing`; `provider.call` OK | re-enable the old token | disable the old token at Sumsub at once if leaked; Sumsub calls fail until Railway returns |
 | `sumsub-webhook-secret` | 1. add the new secret to `SUMSUB_WEBHOOK_SECRETS` on api, deploy; 2. change it in Sumsub; 3. after 24 hours remove the old one, deploy | no `sumsub.webhook_refused` | keep both | the poll covers missed events (spec 03 §7.3) |
 | `masspay-key`, `masspay-webhook-secret` | spec 04 §18.3; overlap as SP-13 records | `provider.call` OK; no `money.webhook_refused` | as spec 04 | trip `live_money` first; the status sweep covers events |
-| `email-token` | 1. `pnpm fin email token <env>` mints a new token (Email Sending Edit, IP filter to worker's egress, expiry 180 days or less); 2. set `FIN_EMAIL_TOKEN`, deploy worker; 3. the delivery check sends (`email.sent` with `ops/delivery-check`); 4. revoke the old token | the seed inbox receives the check | redeploy with the old token until it is revoked | if leaked, revoke at once: email stops until Railway returns |
+| `email-token` | 1. `pnpm fin email token <env>` mints a new token (Email Sending Edit, the group Cloudflare's token page names Email Sending Write ([BD-28]; `docs/plan/spikes.md`, run 5), IP filter to worker's egress, expiry 180 days or less); 2. set `FIN_EMAIL_TOKEN`, deploy worker; 3. the delivery check sends (`email.sent` with `ops/delivery-check`); 4. revoke the old token | the seed inbox receives the check | redeploy with the old token until it is revoked | if leaked, revoke at once: email stops until Railway returns |
 | `vault-token` | 1. mint a new token scoped to the one bucket; 2. set it, deploy the holder; 3. the next anchor or dump lands; 4. revoke the old | `audit.anchor` rows grow; the next `backup-hourly` pings | keep the old until verified | revoke on a leak; anchors and dumps stop until Railway returns (`audit-anchor-failing` pages) |
 | `telemetry-token`, `errors-dsn` | 1. `pnpm fin monitoring rotate-source <env> <service>` makes a new source or application token (if Better Stack cannot regenerate one, a new source with the same settings; UNVERIFIED, SP-06); 2. set it, deploy; 3. lines arrive; 4. revoke or pause the old | `no-logs-<service>` clear | the old token until revoked | lines stay on stdout only |
 | `heartbeat-url` | 1. create a new heartbeat with the same settings; 2. set the variable, deploy; 3. it pings; 4. pause the old one with a recorded reason ([OB-16]) | the new heartbeat is up | the old is only paused | wait |
@@ -1270,9 +1271,9 @@ are what each file says.
 ### 7.1 Shape
 
 ARCHITECTURE §10.1 and spec 01 §8.1 to §8.2 hold: one organisation, teams `fin-staging` and
-`fin-production`, data region `europe`, two-factor enforced, every AI feature off, no MCP connection
-and no standing agent token ([OB-02], [OB-10]). Production repeats staging's objects under
-`fin-production` (H-06) with paging policies. Names:
+`fin-production`, data region `europe` (staging: `us_west`, [BD-24]), two-factor enforced, every AI
+feature off, no MCP connection and no standing agent token ([OB-02], [OB-10]). Production repeats
+staging's objects under `fin-production` (H-06) with paging policies. Names:
 
 | Object | Name |
 |---|---|
@@ -1482,9 +1483,9 @@ export function reportError(error: unknown, ids: {
 Options: `sendDefaultPii: false`, `release`, `environment`, `beforeSend: scrubEvent`,
 `beforeBreadcrumb: scrubBreadcrumb`, no tracing, `tracePropagationTargets: []`, no context lines,
 `withIsolationScope` per unit. `FIN_ERRORS_DSN` must match the regex SP-06 records in
-`packages/server/src/report-dsn.ts` (Better Stack's shape for region `europe`); any other value exits
-78. Node runs with `--enable-source-maps`, so server frames arrive mapped. `console.error(error)` is
-a lint error.
+`packages/server/src/report-dsn.ts` (Better Stack's shape for region `europe`; staging: `us_west`,
+[BD-24]); any other value exits 78. Node runs with `--enable-source-maps`, so server frames arrive
+mapped. `console.error(error)` is a lint error.
 
 **`scrubEvent`** keeps the exception type, a message only for `FinError`, frames (file, line, column,
 function) and the tags of the IDs above; it drops `request` (cookies, headers, query, data), `user`,

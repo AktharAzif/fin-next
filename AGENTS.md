@@ -122,10 +122,11 @@ The bar that never moves (EXECUTION §1.6, NB-01 to NB-15) applies to every chan
   parameter properties), `verbatimModuleSyntax`, and relative imports that name the `.ts` or `.tsx`
   file. No `paths` aliases, never `preserveSymlinks`.
 - Portability: no `bun:*`, `Bun.*` or `drizzle-orm/bun-sql`; `node:http`, `node:https`, `node:net`,
-  `node:dns`, `node:cluster` and `node:worker_threads` only in `packages/server` and
-  `apps/connector`; no `node:*` and no server package in client code; `ops/fin`, `tools/fin-review`,
-  `tools/static-deploy` and `packages/web-host/src/static` use Node built-ins only, and the watcher
-  Web APIs only (spec 01 §4.6).
+  `node:dns`, `node:cluster` and `node:worker_threads` only in `packages/server`, `apps/connector`
+  and one test-support file, `packages/testing/src/http/node.ts` (`@fin/testing` is a devDependency
+  only, imported only from tests and test support); no `node:*` and no server package in client
+  code; `ops/fin`, `tools/fin-review`, `tools/static-deploy` and `packages/web-host/src/static` use
+  Node built-ins only, and the watcher Web APIs only (spec 01 §4.6).
 - **What `imports:check` guarantees** (BD-19). It refuses the imports these rules forbid and, in
   the Node-side areas and the control paths, the plain spellings of loading or running code
   (static and dynamic `import`, `require` and `require.resolve`, `createRequire`, `eval`,

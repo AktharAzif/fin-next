@@ -23,6 +23,10 @@
 //     files under the control paths (type-only imports aside; a test may also import vitest and
 //     any file of the repository, since a test does not change what the code does when it runs),
 //     so an owner-approved file imports only owner-approved files (CI-14);
+//   - a test file under scripts/ or a control path may also import exactly the two specifiers
+//     the shared tokenizer's oracle reads TypeScript's parser through, typescript/unstable/sync
+//     and typescript/unstable/ast (an unstable, test-only API, scripts/test/js-tokens.oracle.
+//     test.mjs), and nothing else from typescript: not its main entry, no other subpath;
 //   - code that runs imports no test file (a target is matched in any case, as a case-insensitive
 //     file system reads it), since a test's own imports are not held to these rules;
 //   - a module specifier names its module plainly: no surrounding white space, control character,
@@ -179,6 +183,10 @@ const BUILTINS_ONLY = [
   "scripts/",
 ];
 const RELATIVE_ONLY = ["ops/watcher/src/"];
+// What a test file under scripts/ or a control path may import besides built-ins, relative files
+// and vitest: the oracle of the shared tokenizer's differential, TypeScript's unstable parser API,
+// by exactly these specifiers.
+const ORACLE_SPECIFIERS = new Set(["typescript/unstable/sync", "typescript/unstable/ast"]);
 const SERVER_PACKAGES = [
   "@fin/server",
   "@fin/web-host",
@@ -1276,15 +1284,17 @@ export function checkSource(file, text, fileExists = () => false, options = {}) 
       );
     }
     const testRunner = isTest && name === "vitest";
+    const oracle =
+      isTest && (file.startsWith("scripts/") || controlled) && ORACLE_SPECIFIERS.has(specifier);
     if (relativeOnly && !relative) {
       add(line, "relative-only", "the watcher uses Web APIs and relative imports only");
-    } else if (builtinsOnly && !relative && builtin === undefined && !testRunner) {
+    } else if (builtinsOnly && !relative && builtin === undefined && !testRunner && !oracle) {
       add(
         line,
         "builtins-only",
         "this code runs with no install: node:* and relative imports only",
       );
-    } else if (controlled && bare && builtin === undefined && !testRunner && !typeOnly) {
+    } else if (controlled && bare && builtin === undefined && !testRunner && !typeOnly && !oracle) {
       add(
         line,
         "control-path-import",

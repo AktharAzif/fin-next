@@ -9,6 +9,7 @@
 /pnpm-workspace.yaml              @aktharazif
 /scripts/check-supply-chain.mjs   @aktharazif
 /scripts/public-safety.mjs        @aktharazif
+/scripts/js-tokens.mjs            @aktharazif
 /tools/fin-review/                @aktharazif
 /tools/layout.json                @aktharazif
 /docs/review/                     @aktharazif
