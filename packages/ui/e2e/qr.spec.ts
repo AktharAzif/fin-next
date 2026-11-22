@@ -5,7 +5,8 @@
 // every module whole pixels of one shade, the dark share exactly the symbol's, and the pixels scan
 // back to the value; at 1.25x, module edges grey but the mean darkness the symbol's, and the module
 // centres scan. A value no code holds shows the failed tile, with no "Try again", reported
-// once. No policy violation of the page's own, no request to another origin, no console error.
+// once, and the report holds the encoder's sentence and the component's ID, nothing of the value.
+// No policy violation of the page's own, no request to another origin, no console error.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import {
   KIT_QR_LABEL,
@@ -53,6 +54,28 @@ test.afterEach(async ({ page, browserName }) => {
 const part = (page: Page, name: string) => page.locator(`[data-kit="${name}"]`);
 const tiles = (scope: Locator) => scope.locator('[data-slot="qr-code"]');
 const scripts = () => record.served.filter((path) => path.endsWith(".js"));
+
+/** The report a refusal makes, as the kit keeps it (kit/reports.ts). */
+const REFUSAL_REPORT = {
+  name: "QrCapacityError",
+  message: "The text is too long for a QR code.",
+  cause: null,
+  fields: {},
+  ids: { component: "qr-code" },
+};
+
+/**
+ * The section's reports are exactly one refusal's: the encoder's sentence and the component's ID,
+ * with nothing of the value in any part of it (its key, its scheme, its address, its padding).
+ */
+async function expectOneRefusalReport(reports: Locator): Promise<void> {
+  await expect(reports).toHaveAttribute("data-reports", "1");
+  const log = (await reports.getAttribute("data-report-log")) ?? "";
+  expect(JSON.parse(log)).toEqual([REFUSAL_REPORT]);
+  for (const piece of [KIT_QR_SECRET, "otpauth", "example.com", "7".repeat(16)]) {
+    expect(log, "a piece of the value in the report").not.toContain(piece);
+  }
+}
 
 /**
  * Screenshots a ready tile and reads it back pixel by pixel: every pixel of every module is the
@@ -241,24 +264,28 @@ test.describe("QrCode @kit", () => {
     await expectPaintedExactly(page, tile, KIT_QR_VALUE);
   });
 
-  test("a value no code holds: the failed tile says so, with no Try again, reported once", async ({
+  test("a value no code holds: the failed tile says so, with no Try again, reported once with the component's ID only", async ({
     page,
   }) => {
     const reports = part(page, "qr-reports");
     await expect(reports).toHaveAttribute("data-reports", "0");
+    await expect(reports).toHaveAttribute("data-report-log", "[]");
     await part(page, "qr-too-long").getByRole("button", { name: "Draw a value too long" }).click();
     const tile = tiles(part(page, "qr-too-long"));
     await expect(tile).toHaveAttribute("data-state", "failed");
     await expect(tile).toHaveText(FAILED);
     await expect(tile.getByRole("button")).toHaveCount(0);
-    await expect(reports).toHaveAttribute("data-reports", "1");
+    await expectOneRefusalReport(reports);
     // The page around it draws again; the refusal is not reported again.
     const again = part(page, "qr-too-long").getByRole("button", { name: /Draw the page again/ });
     await again.click();
     await again.click();
     await expect(again).toHaveText("Draw the page again (2)");
-    await expect(reports).toHaveAttribute("data-reports", "1");
-    expect(await page.content()).not.toContain(KIT_QR_TOO_LONG);
+    await expectOneRefusalReport(reports);
+    const html = await page.content();
+    for (const piece of [KIT_QR_TOO_LONG, KIT_QR_SECRET, "otpauth"]) {
+      expect(html).not.toContain(piece);
+    }
   });
 
   test("the failed tile, drawn still", async ({ page }) => {

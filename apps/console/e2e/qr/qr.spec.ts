@@ -4,9 +4,13 @@
 // beside the key for manual entry, both in the render that shows the answer. Nothing is fetched
 // between the answer and its drawing, so no chunk that fails to load can make the frame reload the
 // page (FW-C13's reload on a failed chunk) and lose the answer: each journey refuses every script
-// asked for after the answer, and checks there was none, one answer, and no reload. The app runs on
-// the harness's static host under the production page policy (the fixtures fail a test on any
-// violation or off-site request); `/api/*` is the scripted stand-in.
+// asked for after the answer, and checks there was none, one answer, and no reload. Nothing the
+// page sends to `/api/*` carries the key or the URI. (The frame keeps a failure report in memory
+// until the monitoring lane's relay is installed, so a journey cannot read the report a refusal
+// makes; the kit spec and the unit tests read it. The relay's envelopes go to `/api/*`, and this
+// check will cover them.) The app runs on the harness's static host under the production page
+// policy (the fixtures fail a test on any violation or off-site request); `/api/*` is the scripted
+// stand-in.
 import { expect, gotoReady, test } from "@fin/testing/playwright";
 import type { Page, Route } from "@playwright/test";
 import { readDrawnQr, scanDrawnQr } from "../../../../packages/ui/test/qr/drawn.ts";
@@ -74,6 +78,20 @@ class SetUpWatch {
     expect(api.calls(ENABLE)).toHaveLength(1);
     expect(this.documents).toBe(1);
     expect(await page.evaluate(() => window.sessionStorage.getItem("fin-reloaded"))).toBeNull();
+  }
+}
+
+/**
+ * Nothing the page sent to `/api/*` (its method, path, query, headers or body) carries the key or
+ * the URI: only the code from the app goes back.
+ */
+function expectKeyNeverSent(api: ApiDouble): void {
+  const sent = JSON.stringify(
+    api.requests.map((r) => [r.method, r.path, r.search.toString(), r.headers, r.body]),
+  );
+  expect(api.requests.length).toBeGreaterThan(0);
+  for (const piece of [SECRET, GROUPED, "otpauth"]) {
+    expect(sent, "the key or the URI in a request").not.toContain(piece);
   }
 }
 
@@ -147,6 +165,7 @@ test.describe("the authenticator's QR code", () => {
     ).toBeVisible();
     expect(api.calls("POST /api/auth/two-factor/verify-totp")[0]?.body).toEqual({ code: "123456" });
     await watch.expectOneAnswer(page, api);
+    expectKeyNeverSent(api);
   });
 
   test("@journey @phone Account security's set-up dialog draws the same QR code, stays open, and keeps its one key", async ({
@@ -187,6 +206,7 @@ test.describe("the authenticator's QR code", () => {
     await watch.expectOneAnswer(page, api);
     await expect(dialog).toBeVisible();
     await expect(dialog.getByTestId("authenticator-key")).toHaveText(GROUPED);
+    expectKeyNeverSent(api);
   });
 
   test("@journey a URI no QR code can hold: the tile says so, and the key still sets the app up", async ({
@@ -213,5 +233,6 @@ test.describe("the authenticator's QR code", () => {
       page.getByRole("heading", { level: 1, name: "Save your backup codes" }),
     ).toBeVisible();
     await watch.expectOneAnswer(page, api);
+    expectKeyNeverSent(api);
   });
 });

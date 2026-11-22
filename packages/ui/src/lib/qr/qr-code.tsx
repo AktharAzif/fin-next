@@ -9,14 +9,14 @@
 // fractional one (a zoomed page) a module's edges are painted grey, no darker than they are. A
 // viewBox that scales a module to a fraction of a pixel, drawn with crispEdges, was rounded
 // unevenly: too dark in WebKit to scan once the code was large. A value the encoder refuses shows
-// why on the tile, with no "Try again", since a second try draws the same; it is reported once,
-// with the component's ID and never the value. Nothing here makes an
-// image URL or parses markup. The value (an otpauth: URI carries the shared secret) goes only into
-// the drawing: never into an attribute, a label or a failure report. Screens import it from
-// `@fin/ui/qr`, as the shell comes from `@fin/ui/shell`.
+// why on the tile, with no "Try again", since a second try draws the same; it is reported once
+// (reportRefusal), with the encoder's error and the component's ID and never the value. Nothing
+// here makes an image URL or parses markup. The value (an otpauth: URI carries the shared secret)
+// goes only into the drawing: never into an attribute, a label or a failure report. Screens import
+// it from `@fin/ui/qr`, as the shell comes from `@fin/ui/shell`.
 import { type ReactElement, useEffect, useMemo, useRef } from "react";
 import { cn } from "../cn.ts";
-import { useReportFailure } from "../failures.tsx";
+import { type FailureReporter, useReportFailure } from "../failures.tsx";
 import { encodeQr, type QrLevel, type QrMatrix } from "./encode.ts";
 
 export type { QrLevel, QrMatrix } from "./encode.ts";
@@ -159,28 +159,52 @@ export interface QrCodeProps {
   className?: string;
 }
 
-type Drawn = { readonly matrix: QrMatrix } | { readonly error: unknown };
+/** What encoding a value gave: its symbol, or the encoder's refusal. */
+export type QrDrawn = { readonly matrix: QrMatrix } | { readonly error: unknown };
+
+/** Encodes `value` at `level`, keeping a refusal rather than throwing it. */
+export function drawQr(value: string, level: QrLevel): QrDrawn {
+  try {
+    return { matrix: encodeQr(value, { level }) };
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** A value and level that QrCode drew. */
+export interface QrDraw {
+  readonly value: string;
+  readonly level: QrLevel;
+}
+
+/**
+ * Reports a refusal through the app's reporter (spec 06 §2.6): the encoder's error, which names
+ * the problem and never holds the text, with the component's ID, never the value. Once for each
+ * value and level, however often the screen around it draws again: `last` is the draw reported
+ * before, and the draw reported by now is returned, for the next draw to compare with.
+ */
+export function reportRefusal(
+  drawn: QrDrawn,
+  draw: QrDraw,
+  last: QrDraw | null,
+  report: FailureReporter,
+): QrDraw | null {
+  if (!("error" in drawn)) return last;
+  if (last !== null && last.value === draw.value && last.level === draw.level) return last;
+  report(drawn.error, REPORT_IDS);
+  return draw;
+}
 
 /** A QR code of `value`, drawn as SVG elements in the same render. */
 export function QrCode(props: QrCodeProps): ReactElement {
   const { value, level = "M" } = props;
   const report = useReportFailure();
-  const drawn = useMemo((): Drawn => {
-    try {
-      return { matrix: encodeQr(value, { level }) };
-    } catch (error) {
-      return { error };
-    }
-  }, [value, level]);
+  const drawn = useMemo(() => drawQr(value, level), [value, level]);
 
   // A value the encoder refuses is reported once, however often the screen around it draws again.
-  const reported = useRef<{ readonly value: string; readonly level: QrLevel } | null>(null);
+  const reported = useRef<QrDraw | null>(null);
   useEffect(() => {
-    if (!("error" in drawn)) return;
-    const last = reported.current;
-    if (last !== null && last.value === value && last.level === level) return;
-    reported.current = { value, level };
-    report(drawn.error, REPORT_IDS);
+    reported.current = reportRefusal(drawn, { value, level }, reported.current, report);
   }, [drawn, value, level, report]);
 
   return (

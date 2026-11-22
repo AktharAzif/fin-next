@@ -2,16 +2,22 @@
 // else (no image, no image URL, no style attribute, no markup from a string), each module whole
 // CSS pixels at a whole-pixel offset, it scans back to the value, and the value appears nowhere
 // but in the drawing. The code is drawn in the first render: the encoder comes with the component.
-import { describe, expect, it } from "vitest";
-import { encodeQr, MAX_TEXT_LENGTH, type QrMatrix } from "../../src/lib/qr/encode.ts";
+// A refusal's report (reportRefusal, which QrCode's effect calls) holds the encoder's sentence and
+// the component's ID only, once for each value and level; the kit spec reads the report a mounted
+// QrCode makes in three engines.
+import { describe, expect, it, vi } from "vitest";
+import type { FailureReporter } from "../../src/lib/failures.tsx";
+import { encodeQr, MAX_TEXT_LENGTH, type QrLevel, type QrMatrix } from "../../src/lib/qr/encode.ts";
 import {
   darkRuns,
+  drawQr,
   QR_MIN_MODULE_PX,
   QR_QUIET_MODULES,
   QR_TILE_PX,
   QrCode,
   QrCodeView,
   qrGeometry,
+  reportRefusal,
 } from "../../src/lib/qr/qr-code.tsx";
 import { attr, classes, render, tagsWith, text } from "../html.ts";
 import { decodeQr } from "./decode.ts";
@@ -214,5 +220,111 @@ describe("QrCode", () => {
   it("takes a caller's class on the tile", () => {
     const html = render(<QrCode value={URI} label={LABEL} className="self-start" />);
     expect(classes(tagsWith(html, "data-slot", "qr-code")[0])).toContain("self-start");
+  });
+});
+
+describe("a refusal's report", () => {
+  const IDS = { component: "qr-code" };
+  const TOO_LONG = `${URI}&pad=${"7".repeat(MAX_TEXT_LENGTH)}`;
+  // Byte mode: about 2,480 bytes, past version 40-M's 2,331 but within 40-L's 2,953.
+  const TOO_MANY_BYTES = `${URI}&pad=${"a".repeat(2400)}`;
+  /** Values no code holds, each carrying the key, with what the encoder says of each. */
+  const REFUSED: readonly {
+    why: string;
+    value: string;
+    level: QrLevel;
+    name: string;
+    message: string;
+  }[] = [
+    {
+      why: "longer than any symbol holds",
+      value: TOO_LONG,
+      level: "M",
+      name: "QrCapacityError",
+      message: "The text is too long for a QR code.",
+    },
+    {
+      why: "past what its mode holds at the level",
+      value: TOO_MANY_BYTES,
+      level: "M",
+      name: "QrCapacityError",
+      message: "The text is too long for a QR code.",
+    },
+    {
+      why: "not well-formed Unicode",
+      value: `${URI}\ud800`,
+      level: "M",
+      name: "RangeError",
+      message: "The text is not well-formed Unicode.",
+    },
+  ];
+
+  for (const { why, value, level, name, message } of REFUSED) {
+    it(`reports a value ${why} with the encoder's sentence and the component's ID only`, () => {
+      const drawn = drawQr(value, level);
+      expect("error" in drawn).toBe(true);
+      const report = vi.fn<FailureReporter>();
+      expect(reportRefusal(drawn, { value, level }, null, report)).toEqual({ value, level });
+      expect(report).toHaveBeenCalledOnce();
+      const [error, ids] = report.mock.calls[0] ?? [];
+      expect(ids).toEqual(IDS);
+      expect(error).toBeInstanceOf(RangeError);
+      const thrown = error as Error;
+      // Nothing rides on the error beside its sentence: no cause, no field of its own.
+      expect({
+        name: thrown.name,
+        message: thrown.message,
+        cause: thrown.cause,
+        fields: Object.keys(thrown).filter((key) => key !== "name"),
+      }).toEqual({ name, message, cause: undefined, fields: [] });
+      // A stack's header holds the name and the message as they were when it was made; its frames
+      // are file paths.
+      const header = String(thrown.stack).split(/\n\s+at /)[0];
+      const carried = JSON.stringify([thrown.name, thrown.message, header, ids]);
+      for (const part of [SECRET, "otpauth", "example.com", "7777777", "aaaaaaa"]) {
+        expect(carried).not.toContain(part);
+      }
+    });
+  }
+
+  it("reports a refusal once, however often the same value is drawn again", () => {
+    const report = vi.fn<FailureReporter>();
+    let last = reportRefusal(drawQr(TOO_LONG, "M"), { value: TOO_LONG, level: "M" }, null, report);
+    for (let i = 0; i < 3; i++) {
+      last = reportRefusal(drawQr(TOO_LONG, "M"), { value: TOO_LONG, level: "M" }, last, report);
+    }
+    expect(report).toHaveBeenCalledOnce();
+    expect(last).toEqual({ value: TOO_LONG, level: "M" });
+  });
+
+  it("reports again for another value, or the same at another level", () => {
+    const report = vi.fn<FailureReporter>();
+    let last = reportRefusal(drawQr(TOO_LONG, "M"), { value: TOO_LONG, level: "M" }, null, report);
+    last = reportRefusal(
+      drawQr(TOO_MANY_BYTES, "M"),
+      { value: TOO_MANY_BYTES, level: "M" },
+      last,
+      report,
+    );
+    last = reportRefusal(
+      drawQr(TOO_MANY_BYTES, "H"),
+      { value: TOO_MANY_BYTES, level: "H" },
+      last,
+      report,
+    );
+    expect(report).toHaveBeenCalledTimes(3);
+    for (const [, ids] of report.mock.calls) expect(ids).toEqual(IDS);
+    // At level L the same bytes fit: drawn, and nothing reported.
+    expect("matrix" in drawQr(TOO_MANY_BYTES, "L")).toBe(true);
+  });
+
+  it("reports nothing for a value it draws, and keeps the draw it reported last", () => {
+    const report = vi.fn<FailureReporter>();
+    expect(reportRefusal(drawQr(URI, "M"), { value: URI, level: "M" }, null, report)).toBeNull();
+    const before = { value: TOO_LONG, level: "M" } as const;
+    expect(reportRefusal(drawQr(URI, "M"), { value: URI, level: "M" }, before, report)).toBe(
+      before,
+    );
+    expect(report).not.toHaveBeenCalled();
   });
 });

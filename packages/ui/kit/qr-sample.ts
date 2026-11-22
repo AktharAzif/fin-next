@@ -28,5 +28,8 @@ function realmShaped(n: number): string {
  */
 export const KIT_QR_SIZES: readonly string[] = [realmShaped(4), realmShaped(104), realmShaped(240)];
 
-/** More text than any QR code holds: the tile says it could not draw it. */
-export const KIT_QR_TOO_LONG = "7".repeat(7090);
+/**
+ * More text than any QR code holds, carrying the sample key as a set-up's URI would: the tile says
+ * it could not draw it, and its report holds nothing of it.
+ */
+export const KIT_QR_TOO_LONG = `${KIT_QR_VALUE}&pad=${"7".repeat(7090)}`;

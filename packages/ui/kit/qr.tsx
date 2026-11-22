@@ -1,11 +1,14 @@
 // The kit's QR code section (UR-13): the failed tile drawn still, a live QrCode, codes of other
 // sizes, and a value no code holds. Each mounts on a press, so the spec can watch what a draw
-// fetches (nothing) and what it reports. The section counts its own failure reports in
-// data-reports, so the spec can tell one report from several.
+// fetches (nothing) and what it reports. The section keeps its own failure reports: how many in
+// data-reports, so the spec can tell one report from several, and what each carried in
+// data-report-log (kit/reports.ts), so the spec can check a report holds the component's ID and
+// nothing of the value.
 import { useCallback, useState } from "react";
-import { Button, FailureReporterProvider } from "../src/index.ts";
+import { Button, type FailureReporter, FailureReporterProvider } from "../src/index.ts";
 import { QrCode, QrCodeView } from "../src/lib/qr/qr-code.tsx";
 import { KIT_QR_LABEL, KIT_QR_SIZES, KIT_QR_TOO_LONG, KIT_QR_VALUE } from "./qr-sample.ts";
+import { type KitReport, keepReport } from "./reports.ts";
 
 export function QrSection() {
   const [still, setStill] = useState(false);
@@ -13,11 +16,19 @@ export function QrSection() {
   const [sizes, setSizes] = useState(false);
   const [tooLong, setTooLong] = useState(false);
   const [draws, setDraws] = useState(0);
-  const [reports, setReports] = useState(0);
-  const report = useCallback(() => setReports((n) => n + 1), []);
+  const [reports, setReports] = useState<readonly KitReport[]>([]);
+  const report = useCallback<FailureReporter>(
+    (error, ids) => setReports((kept) => [...kept, keepReport(error, ids)]),
+    [],
+  );
   return (
     <FailureReporterProvider report={report}>
-      <div className="flex flex-col gap-4" data-kit="qr-reports" data-reports={reports}>
+      <div
+        className="flex flex-col gap-4"
+        data-kit="qr-reports"
+        data-reports={reports.length}
+        data-report-log={JSON.stringify(reports)}
+      >
         <div className="flex flex-wrap items-center gap-4" data-kit="qr-still">
           {still ? (
             <QrCodeView state={{ kind: "failed" }} label={KIT_QR_LABEL} />
