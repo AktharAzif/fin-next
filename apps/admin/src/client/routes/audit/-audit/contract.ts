@@ -5,12 +5,13 @@
 // so the two halves cannot drift apart unseen. They move to packages/app-contracts/src/staff/ with
 // the staff lane's other contracts (spec 06 §11.3).
 import { defineContract, z } from "@fin/app-contracts";
+import { AUDIT_ID } from "./ids.ts";
 
 /** An object a row names: its ID, and its current label where it is a staff object that exists. */
 export const auditObject = z.object({ id: z.string().min(1), label: z.string().nullable() });
 
 export const auditEntry = z.object({
-  id: z.string().regex(/^aud_[0-9a-hjkmnp-tv-z]{26}$/),
+  id: z.string().regex(AUDIT_ID),
   event: z.string().min(1),
   category: z.string(),
   at: z.string(),
@@ -42,9 +43,15 @@ export const auditPageAnswer = z.object({
   items: z.array(auditEntry),
   total: z.number().int().nonnegative(),
   totalCapped: z.boolean(),
-  /** The older page's cursor, or null when nothing older matches. */
+  /**
+   * The older page's cursor, or null when nothing older matches. On a page with no rows past the
+   * newest end, the way back to the rows.
+   */
   nextCursor: z.string().nullable(),
-  /** The newer page's cursor, or null on the first page. */
+  /**
+   * The newer page's cursor, or null on the first page. On a page with no rows past the oldest
+   * end, the way back to the rows.
+   */
   previousCursor: z.string().nullable(),
   /** The Staff member filter's choices; empty for a reader without `staff.read`. */
   people: z.array(auditPerson),

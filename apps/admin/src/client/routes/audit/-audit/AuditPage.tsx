@@ -5,17 +5,14 @@
 // draws the no-permission state without it; the server refuses regardless).
 import type { StaffViewer } from "@fin/app-contracts";
 import { RouterLink, useFin } from "@fin/frame";
-import { CaretLeftIcon, CaretRightIcon, ClockCounterClockwiseIcon } from "@fin/icons";
-import {
-  Button,
-  EmptyState,
-  IconButton,
-  PageHeader,
-  Skeleton,
-  Table,
-  type TableColumn,
-} from "@fin/ui";
+import { ClockCounterClockwiseIcon } from "@fin/icons";
+import { Button, EmptyState, PageHeader, Skeleton, Table, type TableColumn } from "@fin/ui";
 import { useState } from "react";
+import {
+  CursorPager,
+  type ListNoun,
+  totalLine as listTotalLine,
+} from "../../../components/list/CursorPager.tsx";
 import { AuditDrawer } from "./AuditDrawer.tsx";
 import type { AuditEntry, AuditPerson } from "./contract.ts";
 import { AuditToolbar, filterChips } from "./filters.tsx";
@@ -24,6 +21,7 @@ import type { AuditData } from "./load.ts";
 import {
   type AuditSearch,
   emptyKind,
+  firstPage,
   hrefOf,
   paged,
   withFilter,
@@ -32,7 +30,7 @@ import {
 import { reasonOf, targetText, whoOf, wordsOf } from "./words.ts";
 
 export const AUDIT_DESCRIPTION = "Everything Fin’s staff have done here, newest first.";
-const NOUN = { singular: "staff action", plural: "staff actions" } as const;
+const NOUN: ListNoun = { singular: "staff action", plural: "staff actions" };
 
 /** The ID as the What column shows it: whole when short, else its ends. */
 export function shortId(id: string): string {
@@ -138,50 +136,7 @@ export function AuditSkeleton() {
 
 /** "1,234 staff actions", or "10,000 or more staff actions" past the count's cap. */
 export function totalLine(total: number, capped: boolean): string {
-  if (capped) return `${total.toLocaleString("en-GB")} or more staff actions`;
-  return `${total.toLocaleString("en-GB")} ${total === 1 ? "staff action" : "staff actions"}`;
-}
-
-function Pager({
-  total,
-  capped,
-  previous,
-  next,
-  onPage,
-}: {
-  total: number;
-  capped: boolean;
-  previous: string | null;
-  next: string | null;
-  onPage: (page: { cursor: string } | { before: string }) => void;
-}) {
-  return (
-    <nav aria-label="Pagination" className="flex h-table-footer items-center justify-between gap-4">
-      <p className="m-0 text-caption text-text-tertiary">{totalLine(total, capped)}</p>
-      <div className="flex items-center gap-1">
-        <IconButton
-          size="sm"
-          variant="secondary"
-          label="Newer staff actions"
-          icon={<CaretLeftIcon />}
-          disabled={previous === null}
-          onClick={() => {
-            if (previous !== null) onPage({ before: previous });
-          }}
-        />
-        <IconButton
-          size="sm"
-          variant="secondary"
-          label="Older staff actions"
-          icon={<CaretRightIcon />}
-          disabled={next === null}
-          onClick={() => {
-            if (next !== null) onPage({ cursor: next });
-          }}
-        />
-      </div>
-    </nav>
-  );
+  return listTotalLine(total, capped, NOUN);
 }
 
 /** The addresses this page knows by staff ID: the filter's people and the rows' actors. */
@@ -283,7 +238,18 @@ export function AuditPage({
   const page = data.page;
   const kind = emptyKind(search);
   const empty =
-    kind === "firstUse" ? (
+    kind === "pageEmpty" ? (
+      <EmptyState
+        variant="no-results"
+        title="No staff actions on this page"
+        description="This page is past the end of the list."
+        action={
+          <Button size="sm" onClick={() => go(firstPage(search))}>
+            Show the newest staff actions
+          </Button>
+        }
+      />
+    ) : kind === "firstUse" ? (
       <EmptyState
         variant="first-use"
         icon={<ClockCounterClockwiseIcon />}
@@ -316,8 +282,11 @@ export function AuditPage({
         onClearFilters={() => go(withoutFilters(search))}
       />
     );
-  // The first-use state has nothing to filter: no toolbar, as the board draws it.
-  const firstUse = rows.length === 0 && kind === "firstUse" && search.cursor === undefined;
+  // The first-use state has nothing to filter: no toolbar, as the board draws it. A page reached
+  // by a cursor is never the first use (emptyKind).
+  const firstUse = rows.length === 0 && kind === "firstUse";
+  // The pager goes with the rows, and stays on a page past the end while it leads back.
+  const pager = rows.length > 0 || page.previousCursor !== null || page.nextCursor !== null;
 
   const close = () => {
     if (openedHere && typeof window !== "undefined") {
@@ -349,12 +318,13 @@ export function AuditPage({
         empty={empty}
         {...(firstUse ? {} : { toolbar })}
       />
-      {rows.length === 0 ? null : (
-        <Pager
+      {!pager ? null : (
+        <CursorPager
           total={page.total}
           capped={page.totalCapped}
           previous={page.previousCursor}
           next={page.nextCursor}
+          noun={NOUN}
           onPage={(cursor) => go(paged(search, cursor), true)}
         />
       )}

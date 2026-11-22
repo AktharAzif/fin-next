@@ -4,12 +4,18 @@
 // for every staff-scope event and for reasons and changes, the UTC times, the loader's three
 // outcomes, the contract, and the skeleton and the drawer's details.
 import type { StaffViewer } from "@fin/app-contracts";
-import { ApiError } from "@fin/frame";
+import { ApiError, type FinRuntime, FinRuntimeProvider } from "@fin/frame";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { EntryDetails } from "./AuditDrawer.tsx";
-import { AuditSkeleton, rowLabel, shortId, totalLine } from "./AuditPage.tsx";
-import { type AuditEntry, auditPageAnswer, getAuditEntry, listAudit } from "./contract.ts";
+import { AuditPage, AuditSkeleton, rowLabel, shortId, totalLine } from "./AuditPage.tsx";
+import {
+  type AuditEntry,
+  type AuditPageAnswer,
+  auditPageAnswer,
+  getAuditEntry,
+  listAudit,
+} from "./contract.ts";
 import { dateLabel, filterChips, listLink, personLabel } from "./filters.tsx";
 import { formatDay, formatWhen, formatWhenLong } from "./format.ts";
 import { loadAudit } from "./load.ts";
@@ -17,6 +23,7 @@ import {
   type AuditSearch,
   apiQuery,
   emptyKind,
+  firstPage,
   hrefOf,
   listDeps,
   paged,
@@ -83,6 +90,28 @@ describe("the search in the URL", () => {
     expect(readAuditSearch({ show: "everything", view: "aud_x", date: "yesterday" })).toEqual({});
   });
 
+  it("keeps only IDs in exactly the shape the API takes, so it never sends one the API refuses", () => {
+    const good = id("stf", 1);
+    const org = id("org", 2);
+    // Too short, too long, and the right length with letters Crockford base32 leaves out.
+    const wrong = (prefix: string) => [
+      `${prefix}_aaaaaaaa`,
+      `${prefix}_${"a".repeat(27)}`,
+      `${prefix}_${"u".repeat(26)}`,
+      `${prefix}_01jd${"i".repeat(22)}`,
+      `${prefix}_01JD${"0".repeat(22)}`,
+    ];
+    for (const value of wrong("stf")) expect(readAuditSearch({ actor: value })).toEqual({});
+    for (const value of wrong("org")) expect(readAuditSearch({ org: value })).toEqual({});
+    // One wrong item beside a right one: the wrong one is dropped, the right one kept.
+    expect(readAuditSearch({ actor: `${good},stf_${"u".repeat(26)}` })).toEqual({ actor: good });
+    expect(readAuditSearch({ org: `org_${"l".repeat(26)},${org}` })).toEqual({ org });
+    expect(apiQuery(readAuditSearch({ actor: `stf_aaaaaaaa,${good}` }))).toEqual({
+      limit: 50,
+      actor: good,
+    });
+  });
+
   it("reads custom days in order, and drops a day that is not one", () => {
     expect(readAuditSearch({ from: "2026-11-21", to: "2026-11-01" })).toEqual({
       from: "2026-11-01",
@@ -136,6 +165,17 @@ describe("the search in the URL", () => {
     expect(emptyKind({ show: "rejections" })).toBe("viewEmpty");
     expect(emptyKind({ show: "mine", action: "switch.set" })).toBe("noResults");
     expect(emptyKind({ from: "2026-11-01" })).toBe("noResults");
+  });
+
+  it("never draws the first use for a page reached by a cursor, which is past the end", () => {
+    expect(emptyKind({ cursor: id("aud", 1) })).toBe("pageEmpty");
+    expect(emptyKind({ before: id("aud", 1) })).toBe("pageEmpty");
+    expect(emptyKind({ show: "mine", cursor: id("aud", 1) })).toBe("pageEmpty");
+    expect(emptyKind({ date: "7d", before: id("aud", 1) })).toBe("pageEmpty");
+    // Its way back keeps the view and the filters, and drops the page and the open entry.
+    expect(
+      firstPage({ show: "mine", date: "7d", cursor: id("aud", 1), view: id("aud", 2) }),
+    ).toEqual({ show: "mine", date: "7d" });
   });
 
   it("links a row to its entry on this page, and Copy link to the list at its top", () => {
@@ -480,5 +520,70 @@ describe("static parts", () => {
     expect(html).toContain("Nothing changed, or this action is from before Fin kept what changed.");
     expect(html).toContain("No reason asked");
     expect(html).toContain("None");
+  });
+
+  it("draws no chip for an entry that proves nothing about its actor", () => {
+    const html = renderToStaticMarkup(
+      <EntryDetails
+        entry={entry({
+          event: "staff.sign_in_failed",
+          metadata: { method: "email_otp", reason: "access_mismatch" },
+          verification: null,
+        })}
+      />,
+    );
+    expect(html).not.toContain("Verified with");
+    expect(html).not.toContain("Signed-in session");
+  });
+});
+
+describe("a page past the end of the list", () => {
+  const viewer: StaffViewer = {
+    state: "ok",
+    staff: { id: id("stf", 1), email: NADIA, roleKey: "admin", roleLabel: "Admin" },
+    permissions: ["audit.read", "staff.read"],
+    environment: "staging",
+  };
+  const runtime = { viewer: { get: () => viewer } } as unknown as FinRuntime;
+
+  function draw(search: AuditSearch, page: Partial<AuditPageAnswer>): string {
+    const answer: AuditPageAnswer = {
+      items: [],
+      total: 0,
+      totalCapped: false,
+      nextCursor: null,
+      previousCursor: null,
+      people: [],
+      ...page,
+    };
+    return renderToStaticMarkup(
+      <FinRuntimeProvider runtime={runtime}>
+        <AuditPage
+          data={{ kind: "ready", page: answer }}
+          search={search}
+          go={() => undefined}
+          onReload={async () => undefined}
+        />
+      </FinRuntimeProvider>,
+    );
+  }
+
+  it("says so and leads back, never claiming that nothing was ever done", () => {
+    const newest = `aud_${"z".repeat(26)}`;
+    const html = draw({ before: newest }, { total: 8, nextCursor: newest });
+    expect(html).toContain("No staff actions on this page");
+    expect(html).toContain("Show the newest staff actions");
+    expect(html).not.toContain("No staff actions yet");
+    // The toolbar and the pager stay, with the real count.
+    expect(html).toContain("Copy link");
+    expect(html).toContain('aria-label="Pagination"');
+    expect(html).toContain("8 staff actions");
+  });
+
+  it("keeps the first use for a log with nothing in it, with no toolbar and no pager", () => {
+    const html = draw({}, {});
+    expect(html).toContain("No staff actions yet");
+    expect(html).not.toContain("Copy link");
+    expect(html).not.toContain('aria-label="Pagination"');
   });
 });

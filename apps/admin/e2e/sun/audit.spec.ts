@@ -444,6 +444,36 @@ test("@journey older and newer pages follow the cursors", async ({ page }) => {
   expect(requests.at(-1)?.get("before")).toBe(aud(4));
 });
 
+test("@journey a link past the end of the list says so and leads back, never that nothing was done", async ({
+  page,
+}) => {
+  const requests = listRequests(page);
+  // An ID newer than every row: a stale or hand-edited link. The answer carries the real count
+  // and the way back (the API's own rule for a page with no rows).
+  const past = aud(99);
+  await stub(page, (query) =>
+    query.get("before") === past ? pageOf([], { total: 8, nextCursor: past }) : pageOf(ROWS),
+  );
+  await throughAccess(page, NADIA.email, `/audit?before=${past}`);
+  await expect(inApp(page).getByText("No staff actions on this page")).toBeVisible();
+  await expect(inApp(page).getByText("No staff actions yet")).toHaveCount(0);
+  const pager = page.getByRole("navigation", { name: "Pagination" });
+  await expect(pager).toContainText("8 staff actions");
+  expect(requests.at(-1)?.get("before")).toBe(past);
+
+  // The pager leads back to the rows.
+  await page.getByRole("button", { name: "Older staff actions" }).click();
+  await expect(page).toHaveURL(`${ORIGIN}/audit?cursor=${past}`);
+  await expect(rows(page)).toHaveCount(8);
+
+  // So does the empty state, to the newest rows.
+  await page.goto(`/audit?before=${past}`);
+  await page.getByRole("button", { name: "Show the newest staff actions" }).click();
+  await expect(page).toHaveURL(`${ORIGIN}/audit`);
+  await expect(rows(page)).toHaveCount(8);
+  expect(requests.at(-1)?.get("before")).toBeNull();
+});
+
 test("@journey a role without audit.read has no Audit log and cannot open it", async ({ page }) => {
   const requests = listRequests(page);
   await stub(page, () => pageOf(ROWS), ["staff.read"]);

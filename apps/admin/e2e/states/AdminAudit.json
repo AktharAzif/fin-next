@@ -91,6 +91,14 @@
       "spec": "apps/admin/e2e/sun/audit.spec.ts",
       "test": "@journey older and newer pages follow the cursors"
     },
+    "pageEmpty": {
+      "status": "new",
+      "uiRequest": "UR-23",
+      "drawn": false,
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sun/audit.spec.ts",
+      "test": "@journey a link past the end of the list says so and leads back, never that nothing was done"
+    },
     "noPermission": {
       "status": "new",
       "uiRequest": "UR-19",

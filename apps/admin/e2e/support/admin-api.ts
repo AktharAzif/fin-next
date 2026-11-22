@@ -239,9 +239,20 @@ const NOT_AUDIT_ROWS: ReadonlySet<string> = new Set([
   "staff.enrolment_refused",
 ]);
 
+/**
+ * An ID in the real shape (`<prefix>_` and 26 characters of lower-case Crockford base32), so the
+ * screens' URL readers, which take exactly that shape, keep what the stand-in hands out.
+ */
 function newId(prefix: string): string {
-  return `${prefix}_${randomBytes(10).toString("hex")}`;
+  const alphabet = CROCKFORD.toLowerCase();
+  let rest = "";
+  // 256 is a multiple of 32, so each character is uniform.
+  for (const byte of randomBytes(26)) rest += alphabet[byte % 32];
+  return `${prefix}_${rest}`;
 }
+
+/** The real API's ID shape, for the query checks the audit routes make. */
+const idShape = (prefix: string) => new RegExp(`^${prefix}_[0-9a-hjkmnp-tv-z]{26}$`);
 
 function digits(n: number): string {
   let out = "";
@@ -819,10 +830,22 @@ export class AdminApiStandIn {
         : [],
       organisationId: null,
       metadata,
-      verification: kind === "staff" ? "session" : null,
+      verification: this.#verification(event.event, kind, metadata),
       address: null,
       device: null,
     };
+  }
+
+  /**
+   * The chip as the real read gives it (@fin/staff's verificationOf): none for the operator, the
+   * system or a failed sign-in; a sign-in's or a passed step-up's method; else the session.
+   */
+  #verification(event: string, kind: string, metadata: Record<string, unknown>): string | null {
+    if (kind !== "staff" || event === "staff.sign_in_failed") return null;
+    const method = String(metadata.method);
+    const proved = event === "staff.signed_in" || event === "staff.step_up_passed";
+    const chips = ["passkey", "totp", "backup_code", "email_otp", "password", "google"];
+    return proved && chips.includes(method) ? method : "session";
   }
 
   /** `GET /api/audit`: newest first, the views, the Action and Staff member filters, cursors. */
@@ -836,6 +859,25 @@ export class AdminApiStandIn {
     const actions = list("action");
     const actors = list("actor");
     const show = query.get("show");
+    // The ID shapes the real route takes: an ID it would refuse is refused here too, so a screen
+    // that sends one fails its journey rather than passing against the stand-in only.
+    const single = (name: string) => {
+      const value = query.get(name);
+      return value === null ? null : [value];
+    };
+    const shapes: [string, string[] | null, RegExp][] = [
+      ["actor", actors, idShape("stf")],
+      ["org", list("org"), idShape("org")],
+      ["cursor", single("cursor"), idShape("aud")],
+      ["before", single("before"), idShape("aud")],
+    ];
+    for (const [field, values, shape] of shapes) {
+      const bad = values?.findIndex((value) => !shape.test(value)) ?? -1;
+      if (bad !== -1) {
+        const path = field === "actor" || field === "org" ? `${field}.${bad}` : field;
+        return problem("invalid", { fields: [{ path, code: "invalid_format" }] });
+      }
+    }
     const matching = this.audit
       .filter((event) => !NOT_AUDIT_ROWS.has(event.event))
       .filter((event) => show !== "mine" || event.actor === reader.id)
@@ -865,12 +907,13 @@ export class AdminApiStandIn {
             .map((member) => ({ id: member.id, email: member.email }))
             .sort((a, b) => a.email.localeCompare(b.email))
         : [];
+    // As the real read: a page with no rows leads back by its own cursor.
     return ok({
       items: page.map((event) => this.#auditRow(event)),
       total: matching.length,
       totalCapped: false,
-      nextCursor: older ? (page.at(-1)?.id ?? null) : null,
-      previousCursor: newer ? (page[0]?.id ?? null) : null,
+      nextCursor: older ? (page.at(-1)?.id ?? before) : null,
+      previousCursor: newer ? (page[0]?.id ?? cursor) : null,
       people,
     });
   }
