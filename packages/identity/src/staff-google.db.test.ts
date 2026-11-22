@@ -116,7 +116,8 @@ interface RoundTrip {
 /**
  * Starts a staff Google sign-in in this browser, lets the fixture answer, follows the callback.
  * `edit` changes the authorization request on its way through the browser, as a client may;
- * `tamper` plants a fault in the provider's token answer.
+ * `tamper` plants a fault in the provider's token answer; `addToCallback` is appended to the
+ * callback's query, as a client may.
  */
 async function roundTrip(
   browser: Browser,
@@ -124,6 +125,7 @@ async function roundTrip(
   options: {
     edit?: (params: URLSearchParams) => void;
     tamper?: Tamper;
+    addToCallback?: string;
     callbackFrom?: Browser;
   } = {},
 ): Promise<RoundTrip> {
@@ -143,7 +145,7 @@ async function roundTrip(
   options.edit?.(sent.searchParams);
   const fromProvider = await fetch(sent, { redirect: "manual" });
   const back = new URL(String(fromProvider.headers.get("location")));
-  const callbackPath = `${back.pathname}${back.search}`;
+  const callbackPath = `${back.pathname}${back.search}${options.addToCallback ?? ""}`;
   const callback = await (options.callbackFrom ?? browser).get(callbackPath, crossSite);
   const location = callback.headers.get("location");
   if (location === null) {
@@ -437,6 +439,40 @@ describe("the round trip itself", () => {
     );
     expect(fixture.exchanges.length).toBe(exchanges);
     expect(await sessionsOf(memberId)).toBe(1);
+  });
+
+  it("decides a callback whose error is empty by the staff checks, never the library's own path", async () => {
+    // The library refuses a callback for its `error` only when that is not empty; with an empty
+    // one it goes on to the code, so the staff realm's checks must still decide it.
+    const outsider = unique("google.emptyerror.outsider");
+    const outsiderBrowser = staffBrowser(outsider);
+    const notListed = h.lines.named("staff.not_listed").length;
+    const refused = await roundTrip(outsiderBrowser, googleAccount(outsider), {
+      addToCallback: "&error=",
+    });
+    expect(refused.location.href).toBe(`${ADMIN}/sign-in?error=account_refused`);
+    expect(outsiderBrowser.sessionToken()).toBeNull();
+    expect(h.lines.named("staff.not_listed").length).toBe(notListed + 1);
+    expect(h.lines.named("auth.google_refused").at(-1)).toEqual({
+      realm: "staff",
+      reason: "not_listed",
+    });
+
+    // A member whose address is the Access identity gets Fin's own staff session, at the factor
+    // step, as on any callback; the library never answers with its account path.
+    const { email, memberId } = await enrolledMember("google.emptyerror.member");
+    const browser = staffBrowser(email);
+    const trip = await roundTrip(browser, googleAccount(email), { addToCallback: "&error=" });
+    expect(trip.location.href).toBe(`${ADMIN}/sign-in`);
+    expect(await sessionOf(browser)).toMatchObject({
+      user_id: memberId,
+      assurance: "aal1",
+      created_via: "google",
+      access_sub: `sub-${email}`,
+    });
+    expect(h.lines.named("request").at(-1)).toMatchObject({ gate: "factor_step" });
+    const accounts = await h.admin.query("SELECT 1 FROM staff.account");
+    expect(accounts.rowCount).toBe(0);
   });
 
   it("needs the Access identity at the start and at the callback", async () => {

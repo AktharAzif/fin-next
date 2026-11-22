@@ -139,7 +139,9 @@ export async function staffGoogleCallbackBefore(
   if (
     prefetched === null ||
     prefetched.kind !== "token" ||
-    query.error !== undefined ||
+    // The library refuses a callback for its `error` only when that is not empty; with an empty
+    // one it goes on to the code as if there were none, so the staff checks below decide it.
+    (query.error !== undefined && query.error !== "") ||
     query.code !== prefetched.code
   ) {
     return undefined;
