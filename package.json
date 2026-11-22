@@ -26,7 +26,7 @@
     "lint": "TURBO_TELEMETRY_DISABLED=1 turbo run lint lint:root",
     "typecheck": "TURBO_TELEMETRY_DISABLED=1 turbo run typecheck typecheck:root",
     "test": "TURBO_TELEMETRY_DISABLED=1 turbo run test test:root",
-    "test:db": "TURBO_TELEMETRY_DISABLED=1 turbo run test:db",
+    "test:db": "TURBO_TELEMETRY_DISABLED=1 turbo run test:db --continue",
     "lint:root": "biome ci --error-on-warnings .",
     "typecheck:root": "tsc -p tsconfig.json",
     "test:root": "node --test \"scripts/test/*.test.mjs\""
