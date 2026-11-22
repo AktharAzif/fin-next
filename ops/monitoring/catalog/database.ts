@@ -1,6 +1,7 @@
 // The database area's security events that Phase 0's alerts/database.json watches (spec 08 §7.2's
-// own lines). P0-E owns the area and adds the rest of the fragment (audit and probe events) with
-// the code that writes them; this file holds only what the Phase 0 alerts name.
+// own lines). The audit lines, the guard's database.audit_guard included, are in audit.ts beside
+// alerts/audit.json; the probe's readings are fields of job.run (platform.ts). This file holds only
+// what the Phase 0 database alerts name.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [

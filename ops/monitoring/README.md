@@ -6,7 +6,7 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | Path | What |
 |---|---|
 | `staging/*.json` | sources, Errors applications, logs-to-metrics, monitors, heartbeats, the `staging-quiet` policy |
-| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `email`, `database`) |
+| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`) |
 | `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it (listed in `catalog/index.ts`) |
 | `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
 | `src/apply.ts` | `pnpm fin monitoring apply <env>`: exports `monitoringApply(ctx)` and `command` for ops/fin's dispatcher |
@@ -14,9 +14,12 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 ## monitoring:check
 
 `pnpm --filter @fin/ops-monitoring monitoring:check`. It also runs inside this package's tests, so
-`pnpm check` fails on any finding. Rules MC-00 to MC-14 (MC-05 covers spec 01 §8.5's heartbeats
-and the watcher's own until the duty registry exists; MC-09 comes with the credential inventory)
-and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a runbook in
+`pnpm check` fails on any finding. Those tests read files outside the package (the code tree, the
+runbooks, the flows' atlas, the watcher's settings, the audit writers), which Turborepo's hash
+never sees, so `turbo.json` here turns their cache off and they run on every `pnpm check`. Rules
+MC-00 to MC-14 (MC-05 covers spec 01 §8.5's heartbeats and the watcher's own until the duty
+registry exists; MC-09 comes with the credential inventory) and RT-01 to RT-03 are listed at the
+top of `src/check.ts`. Every alert names a runbook in
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
 wake the owner) that names the alert back. MC-12 scans every file under `staging/`, the
 catalogue, this README, the runbooks and the watcher's settings.

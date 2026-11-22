@@ -6,10 +6,20 @@
 //
 // Every literal comes from a reviewed file and is checked against a narrow alphabet, and every
 // number from the overlay is checked to be finite, so nothing can break out of the SQL.
-import type { AlertDef, AlertQuery, Condition } from "./config.ts";
+import type { AlertDef, AlertQuery, Condition, SeriesField } from "./config.ts";
 
 const LITERAL = /^[A-Za-z0-9 ._:/-]{1,64}$/;
 const FIELD = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/** The one label a bounded series field gives every value outside its set, a missing one too. */
+export const OTHER_LABEL = "other";
+
+/**
+ * The `sqlstate` shape: five digits or capital letters, as the SQL standard and Postgres write a
+ * SQLSTATE. Spelt without a `{5}`, so the only braces in the SQL stay Better Stack's `{{...}}`.
+ * `other` never has it.
+ */
+const SQLSTATE_PATTERN = "^[0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]$";
 
 export class QueryError extends Error {
   override readonly name = "QueryError";
@@ -94,20 +104,56 @@ export function queryFields(query: AlertQuery): string[] {
   return [];
 }
 
-/** The fields an alert's series is made of, when it groups (one incident per series). */
-export function seriesFields(alert: AlertDef): readonly string[] | undefined {
+/** An alert's series as written, each field plain or bounded, when it groups. */
+function seriesSpec(alert: AlertDef): readonly (string | SeriesField)[] | undefined {
   if (alert.seriesBy !== undefined) {
     return typeof alert.seriesBy === "string" ? [alert.seriesBy] : alert.seriesBy;
   }
   return alert.sources.length > 1 ? ["service"] : undefined;
 }
 
+/** The fields an alert's series is made of, when it groups (one incident per series). */
+export function seriesFields(alert: AlertDef): readonly string[] | undefined {
+  return seriesSpec(alert)?.map((f) =>
+    typeof f === "object" && f !== null ? String(f.field) : String(f),
+  );
+}
+
+/**
+ * A bounded field's label: its value when it is one of `oneOf` or has the shape, else
+ * OTHER_LABEL. A value of `oneOf` is never OTHER_LABEL and never holds the `/` that joins labels,
+ * so no value can pass for another series.
+ */
+function boundedLabel(f: SeriesField): string {
+  if (typeof f !== "object" || f === null || typeof f.field !== "string") {
+    throw new QueryError("a series field that is neither a name nor { field, oneOf or shape }");
+  }
+  const value = str(f.field);
+  if ((f.oneOf === undefined) === (f.shape === undefined)) {
+    throw new QueryError(`series field ${f.field} must set exactly one of oneOf and shape`);
+  }
+  if (f.oneOf !== undefined) {
+    if (!Array.isArray(f.oneOf) || f.oneOf.length === 0) {
+      throw new QueryError(`series field ${f.field}: oneOf must list at least one value`);
+    }
+    for (const v of f.oneOf) {
+      if (typeof v !== "string" || v === OTHER_LABEL || v.includes("/")) {
+        throw new QueryError(`series field ${f.field}: a oneOf value that is not a label`);
+      }
+    }
+    return `if(${value} IN (${f.oneOf.map(literal).join(", ")}), ${value}, '${OTHER_LABEL}')`;
+  }
+  if (f.shape !== "sqlstate") throw new QueryError(`series field ${f.field}: unknown shape`);
+  return `if(match(${value}, '${SQLSTATE_PATTERN}'), ${value}, '${OTHER_LABEL}')`;
+}
+
 /** The series column: one field, or several joined with `/` so each combination is a series. */
-function seriesExpression(fields: readonly string[]): string {
-  const [only] = fields;
+function seriesExpression(fields: readonly (string | SeriesField)[]): string {
+  const labels = fields.map((f) => (typeof f === "string" ? str(f) : boundedLabel(f)));
+  const [only] = labels;
   if (only === undefined) throw new QueryError("seriesBy names no field");
-  if (fields.length === 1) return str(only);
-  return `concat(${fields.map(str).join(", '/', ")})`;
+  if (labels.length === 1) return only;
+  return `concat(${labels.join(", '/', ")})`;
 }
 
 /**
@@ -140,7 +186,7 @@ export function renderSql(alert: AlertDef, numbers: Readonly<Record<string, numb
   } else {
     throw new QueryError("unknown query kind");
   }
-  const series = seriesFields(alert);
+  const series = seriesSpec(alert);
   const select = series === undefined ? "" : `, ${seriesExpression(series)} AS series`;
   const group = series === undefined ? "time" : "time, series";
   return `SELECT {{time}} AS time${select}, ${value} AS value FROM {{source}} WHERE ${where.join(" AND ")} GROUP BY ${group}`;

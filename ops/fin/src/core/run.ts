@@ -58,11 +58,38 @@ export interface Line {
   level: "info" | "warn" | "error";
   service: "ops";
   environment: string;
+  /** The commit of the checkout pnpm fin runs from, not the release a deploy sends. */
   release: string;
   replica: string;
   runId: string;
   [field: string]: unknown;
 }
+
+/**
+ * The envelope's field names (spec 08 §7.2), the optional ones included: a line's own fields never
+ * take one, so a reader never mistakes a command's field for the envelope's. A deploy names the
+ * release it sends `deployedRelease` and the service a step rolls `targetService`.
+ */
+export const ENVELOPE_FIELDS = [
+  "dt",
+  "message",
+  "event",
+  "level",
+  "service",
+  "environment",
+  "release",
+  "replica",
+  "requestId",
+  "runId",
+  "truncated",
+] as const;
+
+const ENVELOPE = new Set<string>(ENVELOPE_FIELDS);
+
+/** A line's own fields: any name but the envelope's, which the type refuses. */
+export type LineFields = Record<string, unknown> & {
+  readonly [K in (typeof ENVELOPE_FIELDS)[number]]?: never;
+};
 
 const INGEST_HOST = /^[a-z0-9.-]+$/;
 
@@ -303,10 +330,11 @@ export class Run {
 
   /**
    * Writes a telemetry line (spec 08 §7.2's envelope): masked value by value, kept beside the run
-   * log at once, printed in GitHub Actions, and queued for shipping. The envelope's fields cannot
-   * be overridden by `fields`.
+   * log at once, printed in GitHub Actions, and queued for shipping. `fields` never names an
+   * envelope field (LineFields refuses one); one that does anyway is left out, with a warning, so
+   * the envelope's fields cannot be overridden and the field is not lost unseen.
    */
-  line(event: string, level: Line["level"], fields: Record<string, unknown> = {}): void {
+  line(event: string, level: Line["level"], fields: LineFields = {}): void {
     const line: Line = {
       dt: this.#runtime.now().toISOString(),
       message: event,
@@ -321,7 +349,12 @@ export class Run {
     const masked = this.#masker.maskValue(fields);
     if (typeof masked === "object" && masked !== null && !Array.isArray(masked)) {
       for (const [key, value] of Object.entries(masked)) {
-        if (Object.hasOwn(line, key)) continue;
+        if (ENVELOPE.has(key)) {
+          this.#out.warn(
+            `the ${event} line names the envelope's own field ${key}; that field is left out`,
+          );
+          continue;
+        }
         Object.defineProperty(line, key, {
           value,
           enumerable: true,

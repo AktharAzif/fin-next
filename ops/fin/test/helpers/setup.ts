@@ -16,6 +16,13 @@ import {
 } from "./fixtures.ts";
 import { FakeCloudflare, FakeRailway, providers } from "./providers.ts";
 
+function jsonLines(text: string): Array<Record<string, unknown>> {
+  return text
+    .split("\n")
+    .filter((l) => l !== "")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
 export interface Harness {
   cf: FakeCloudflare;
   rw: FakeRailway;
@@ -32,14 +39,6 @@ export interface Harness {
   records(): Array<Record<string, unknown>>;
   /** The telemetry lines kept beside the run log (lines.jsonl), in order. */
   lines(): Array<Record<string, unknown>>;
-}
-
-/** One JSON record per line. */
-function parsed(text: string): Array<Record<string, unknown>> {
-  return text
-    .split("\n")
-    .filter((l) => l !== "")
-    .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
 /**
@@ -106,8 +105,8 @@ export function harness(
         );
       }
     },
-    records: () => parsed(read("runs.jsonl")),
-    lines: () => parsed(read("lines.jsonl")),
+    records: () => jsonLines(read("runs.jsonl")),
+    lines: () => jsonLines(read("lines.jsonl")),
   };
   return h;
 }

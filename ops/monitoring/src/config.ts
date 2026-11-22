@@ -180,6 +180,19 @@ export type AlertQuery =
       };
     };
 
+/**
+ * A series field whose label the query holds to a closed set: the line's value when it is one of
+ * `oneOf`, or has the `shape` named, and otherwise the one fixed label `other` (a missing field
+ * and a value of another type included). No line, a forged one included, can then choose a label
+ * or add one, and every line still counts. Exactly one of `oneOf` and `shape` is set; the shape
+ * `sqlstate` is five digits or capital letters.
+ */
+export interface SeriesField {
+  readonly field: string;
+  readonly oneOf?: readonly string[];
+  readonly shape?: "sqlstate";
+}
+
 /** An alert after `forEach` expansion: every `{var}` replaced. */
 export interface AlertDef {
   readonly name: string;
@@ -191,9 +204,10 @@ export interface AlertDef {
   readonly sources: readonly string[];
   /**
    * The field, or the fields joined, that make an alert's series: one incident per series. With
-   * none, an alert over several sources has one series per service.
+   * none, an alert over several sources has one series per service. A field may be held to a
+   * closed set of labels (SeriesField).
    */
-  readonly seriesBy?: string | readonly string[];
+  readonly seriesBy?: string | readonly (string | SeriesField)[];
   readonly query: AlertQuery;
   readonly operator: string;
   readonly threshold: string;
