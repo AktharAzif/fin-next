@@ -1,7 +1,8 @@
 // Custom roles (spec 02 §8.4, [SA-11], [SA-32]): made through the engine's editor validation, never
 // beyond the editor's own permissions, never restricted, every need held, a unique name that does
-// not read as a built-in (nor one the database's name index holds); edited only with the current
-// version, never one the editor holds or one that outranks them; deleted with every holder and
+// not read as a built-in (nor one the database's name index holds, nor one it cannot store);
+// edited only with the current version and, when a save adds a permission, the holders it was
+// shown, never one the editor holds or one that outranks them; deleted with every holder and
 // invitation moved; at most 30; every change counted against the person's edit allowance.
 import type { UnitTx } from "@fin/identity";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -70,12 +71,18 @@ function create(
   );
 }
 
-function update(
-  who: SignedIn,
-  orgId: string,
-  roleId: string,
-  body: { name: string; description: string; permissions: string[]; version: number },
-) {
+interface SaveBody {
+  name: string;
+  description: string;
+  permissions: string[];
+  version: number;
+  /** The holders the save names; by default those the list shows now. */
+  holders?: string[];
+}
+
+/** Saves a role with an intent, naming the holders the list shows now unless told others. */
+async function update(who: SignedIn, orgId: string, roleId: string, input: SaveBody) {
+  const body = { ...input, holders: input.holders ?? (await shown(who, orgId, roleId)) };
   return withIntent(h, who, (headers) =>
     asActor(
       h,
@@ -132,6 +139,9 @@ describe("creating a custom role", () => {
     const refusals: [string, string[], string, string][] = [
       ["Super Admin", ["member.read"], "invalid", "reads_as_built_in"],
       ["visit example.com", ["member.read"], "invalid", "name"],
+      // A character the database refuses in any text: the name rule's refusal, never an internal
+      // error from asking the name index about it.
+      ["Night\u0000shift", ["member.read"], "invalid", "name"],
       ["Nothing", [], "invalid", "empty"],
       ["Deleters", ["organization.delete"], "invalid", "restricted"],
       ["Needy", ["member.invite"], "invalid", "missing_need"],
@@ -211,9 +221,9 @@ describe("creating a custom role", () => {
         h,
         who,
         orgId,
-        { method: "PUT", body: { ...draft, version: 1 } },
+        { method: "PUT", body: { ...draft, version: 1, holders: [] } },
         { ...MANAGE, stepUp: { kind: "intent", action: "role.update" } },
-        (tx, a) => updateRole(h.orgs, tx, a, other, { ...draft, version: 1 }),
+        (tx, a) => updateRole(h.orgs, tx, a, other, { ...draft, version: 1, holders: [] }),
       ),
     ];
     for (const out of firstTries) {
@@ -294,8 +304,8 @@ describe("the edit allowance (§8.4: 30 an hour and 100 a day per person)", () =
         label: "save",
         method: "PUT",
         action: "role.update",
-        body: { ...draft, version: 1 },
-        run: (tx, a) => updateRole(h.orgs, tx, a, kept, { ...draft, version: 1 }),
+        body: { ...draft, version: 1, holders: [] },
+        run: (tx, a) => updateRole(h.orgs, tx, a, kept, { ...draft, version: 1, holders: [] }),
       },
       {
         label: "delete",
@@ -445,6 +455,105 @@ describe("editing a custom role", () => {
       version: 1,
     });
     expect(codeOf(up)).toBe("outranked");
+  });
+
+  it("refuses a rename to a name the database cannot store as the name rule does, before any factor is asked", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "unstorable");
+    const roleId = await roleAs(h, who, orgId, "Plain role", ["member.read"]);
+    const body = {
+      name: "Plain\u0000role",
+      description: "",
+      permissions: ["member.read"],
+      version: 1,
+      holders: [],
+    };
+    const out = await asActor(
+      h,
+      who,
+      orgId,
+      { method: "PUT", body },
+      { ...MANAGE, stepUp: { kind: "intent", action: "role.update" } },
+      (tx, a) => updateRole(h.orgs, tx, a, roleId, body),
+    );
+    expect(codeOf(out)).toBe("invalid");
+    expect(extensionsOf(out)).toEqual({ fields: [{ path: "name", code: "name" }] });
+  });
+
+  it("raises only the holders the actor was shown: someone who joins the role after the proof is a conflict, and the intent binds them", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "saver_shown");
+    const leads = await roleAs(h, who, orgId, "Leads", [
+      "member.read",
+      "member.invite",
+      "webhooks.read",
+    ]);
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read", "webhooks.read"]);
+    const lead = await memberOf(h, who, orgId, "raised_lead", leads);
+    const first = await memberOf(h, who, orgId, "raised_first", readers);
+    // The lead, who may invite to Readers, has invited someone who has not answered yet.
+    const laterEmail = unique("raised_later");
+    const invited = await inviteAs(h, lead.who, orgId, laterEmail, readers);
+    if (!invited.ok) throw invited.error;
+    const holders = await shown(who, orgId, readers);
+    expect(holders).toEqual([first.memberId]);
+    const raised = ["member.read", "webhooks.read", "apiKey.read", "customers.read"];
+    const asked = { name: "Readers", description: "", permissions: raised, version: 1, holders };
+    const attempt = (body: typeof asked, headers = {}) =>
+      asActor(
+        h,
+        who,
+        orgId,
+        { method: "PUT", body, headers },
+        { ...MANAGE, stepUp: { kind: "intent", action: "role.update" } },
+        (tx, a) => updateRole(h.orgs, tx, a, readers, body),
+      );
+    const firstTry = await attempt(asked);
+    const intent = firstTry.ok ? null : intentIdOf(firstTry.error);
+    expect(intent).not.toBeNull();
+    expect((await prove(h, who, intent as string)).status).toBe(200);
+
+    // Meanwhile the invitation is accepted: its inviter may give Readers, but never what the save
+    // adds, and the save would withdraw it were it still pending.
+    const later = await person(h, "raised_later", { email: laterEmail });
+    const joined = await acceptAs(h, later, invited.value.invitationId);
+    if (!joined.ok) throw joined.error;
+
+    // The proved re-send: the role's holders are not those shown, so nobody is raised.
+    const header = { "fin-step-up-intent": intent as string };
+    const refused = await attempt(asked, header);
+    expect([codeOf(refused), extensionsOf(refused)]).toEqual(["conflict", {}]);
+    // Naming the holders there are now does not fit the intent proved for the one shown.
+    const now = await shown(who, orgId, readers);
+    expect(now.sort()).toEqual([first.memberId, joined.value.memberId].sort());
+    const other = await attempt({ ...asked, holders: now }, header);
+    expect([codeOf(other), extensionsOf(other).reason]).toEqual(["step_up_invalid", "digest"]);
+    const role = await h.admin.query<{ version: number }>(
+      "SELECT version FROM identity.role WHERE id = $1",
+      [readers],
+    );
+    expect(Number(role.rows[0]?.version)).toBe(1);
+    const spent = await h.admin.query(
+      "SELECT 1 FROM ops.step_up_intent WHERE id = $1 AND consumed_at IS NULL",
+      [intent],
+    );
+    expect(spent.rowCount).toBe(1);
+
+    // A save that adds nothing raises nobody: the holders it names are not compared, so a stale
+    // list never holds up taking a permission away.
+    const lowering = await attempt({ ...asked, permissions: ["member.read"] });
+    expect(codeOf(lowering)).toBe("step_up_required");
+    // Naming holders the role does not have is the same conflict, before any factor is asked.
+    for (const named of [[], [first.memberId], [first.memberId, lead.memberId]]) {
+      const out = await attempt({ ...asked, holders: named });
+      expect(codeOf(out), JSON.stringify(named)).toBe("conflict");
+    }
+    // Shown both, the actor proves a factor for both, and both are raised.
+    const done = await update(who, orgId, readers, {
+      name: "Readers",
+      description: "",
+      permissions: raised,
+      version: 1,
+    });
+    expect(done.ok && done.value).toEqual({ roleId: readers, version: 2 });
   });
 });
 

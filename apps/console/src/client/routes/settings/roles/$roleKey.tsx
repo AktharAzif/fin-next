@@ -245,8 +245,10 @@ function Editor(props: {
       }
       if (detail === null || detail.roleId === null || base === null) return;
       const roleId = detail.roleId;
+      // The holders the editor counts: a save that adds a permission raises exactly those.
+      const holders = [...(detail.holderIds ?? [])];
       const saved = await withReasonValues("role.update", { role: body.name }, () =>
-        fin.api(saveRole, { roleId, ...body, version: base }),
+        fin.api(saveRole, { roleId, ...body, version: base, holders }),
       );
       // The save made this version from this draft: the next save builds on it.
       setBase(saved.version);

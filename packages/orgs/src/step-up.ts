@@ -99,11 +99,14 @@ export const ORGS_ACTIONS = [
     realm: "developer",
     kind: "intent",
     reasonKey: "change_role_permissions",
+    // The holders the actor was shown as well (beyond §7.6), so a proved save that adds a
+    // permission raises nobody given the role after the actor looked (recorded in the PR).
     bind: [
       { name: "name", kind: "string" },
       { name: "description", kind: "string" },
       { name: "permissions", kind: "keys" },
       { name: "version", kind: "value" },
+      { name: "holders", kind: "keys" },
     ],
   },
   {

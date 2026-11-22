@@ -247,10 +247,12 @@ const SAMPLES: Record<RouteId, Sample> = {
   },
   roleUpdate: {
     path: () => `/api/roles/${f.limitedRoleId}`,
+    // The role's one holder, as the editor shows it, so only the guard can refuse the save.
     body: () => ({
       name: "Webhook readers",
       permissions: ["webhooks.read", "member.read"],
       version: f.roleVersion,
+      holders: [f.limitedMemberId],
     }),
   },
   roleDelete: {

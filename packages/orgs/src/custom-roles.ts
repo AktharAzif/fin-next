@@ -144,7 +144,10 @@ const NAME_INDEX = "role_name_once";
  * Whether another role of the organisation has `name` the way the `role_name_once` index compares
  * names: `lower(name)` in the database's collation, which can fold letters the editor's own
  * comparison keeps apart (a capital I with a dot above, under a libc collation). Read inside the
- * team-change lock with the organisation's roles locked, so no name is written in between.
+ * team-change lock with the organisation's roles locked, so no name is written in between. A name
+ * the editor's name rule refuses is never stored, so no role holds it, and it is never sent: the
+ * database refuses some text outright (U+0000), which would answer an internal error where the
+ * editor answers `400` on the name.
  */
 async function nameTakenInStore(
   tx: UnitTx,
@@ -152,6 +155,7 @@ async function nameTakenInStore(
   name: string,
   exceptRoleId: string | null,
 ): Promise<boolean> {
+  if (!checkName("roleName", name).ok) return false;
   const result = await tx.query(
     `SELECT 1 FROM identity.role
       WHERE organization_id = $1 AND lower(name) = lower($2) AND ($3::text IS NULL OR id <> $3)
@@ -321,13 +325,27 @@ function checkEditing(me: LockedActor, role: RoleLookup): void {
 /**
  * `PUT /api/roles/:roleId` (§8.4): `role.manage`, an intent; never a role the editor holds or one
  * that allows something the editor lacks; an optimistic `version` (a stale save is `409 conflict`).
+ *
+ * `holders` are the members the actor was shown as holding the role (`holderIds`), and the intent
+ * binds them. A save that adds a permission raises every holder, so when the members holding the
+ * role now are not exactly those (someone invited to it accepted meanwhile, say), the answer is
+ * `409 conflict` and nothing changes: a proved save never raises someone given the role after the
+ * actor looked, as a deletion never moves them (the owner's decision for deletions, carried to
+ * saves; recorded in the pull request). A save that adds nothing raises nobody, so its holders are
+ * bound but never compared, and a stale list never holds up taking a permission away.
  */
 export async function updateRole(
   orgs: Orgs,
   tx: UnitTx,
   actor: OrgActor,
   roleId: string,
-  body: { name: string; description: string; permissions: readonly string[]; version: number },
+  body: {
+    name: string;
+    description: string;
+    permissions: readonly string[];
+    version: number;
+    holders: readonly string[];
+  },
 ): Promise<{ roleId: string; version: number }> {
   const orgId = actor.organization.id;
   const { me } = await lockTeam(tx, actor, [], "role.manage");
@@ -343,15 +361,26 @@ export async function updateRole(
     [...me.roles.values()].filter((r) => r.id !== roleId),
     await nameTakenInStore(tx, orgId, name, roleId),
   );
+  const before = [...permissionsFor(role)];
+  const after = knownPermissions(body.permissions);
+  const { added, removed } = permissionDiff(CATALOGUE, before, after);
+  const holders = await holdersOf(tx, orgId, roleId);
+  const heldNow = holders.map((holder) => holder.memberId);
+  if (added.length > 0 && !sameMembers(heldNow, body.holders)) {
+    throw new OrgRefusal("conflict", "role.holders_changed");
+  }
   await actor.confirm({
-    body: { name, description, permissions: [...body.permissions], version: body.version },
+    body: {
+      name,
+      description,
+      permissions: [...body.permissions],
+      version: body.version,
+      holders: [...body.holders],
+    },
     target: roleId,
     organizationId: orgId,
   });
   await orgs.limits.count(tx, "role_edit", actor.person.id);
-  const before = [...permissionsFor(role)];
-  const after = knownPermissions(body.permissions);
-  const { added, removed } = permissionDiff(CATALOGUE, before, after);
   const now = orgs.clock.now();
   const updated = await writeName(() =>
     tx.query(
@@ -367,7 +396,6 @@ export async function updateRole(
     `INSERT INTO identity.role_permission (role_id, permission) SELECT $1, unnest($2::text[])`,
     [roleId, after],
   );
-  const holders = await holdersOf(tx, orgId, roleId);
   await orgs.audit(tx, {
     event: "role.updated",
     actor: actor.actor,

@@ -1002,7 +1002,12 @@ test.describe("roles", () => {
     await expect(field).toHaveValue("Builds the integration.");
     const saves = api.calls("PUT /api/roles/:roleId");
     expect(saves).toHaveLength(2);
-    expect(saves[1]?.body).toMatchObject({ description: "Builds the integration.", version: 1 });
+    // The save names the holders the editor was shown, which a save adding a permission raises.
+    expect(saves[1]?.body).toMatchObject({
+      description: "Builds the integration.",
+      version: 1,
+      holders: DEVELOPER_ROLE.holderIds,
+    });
     expect(saves[1]?.headers["fin-step-up-intent"]).toBe("sti_save");
 
     // A permission changed after the save is not saved yet: the line goes, and Save sends it.
@@ -1155,6 +1160,7 @@ function developerRoleServer(hold?: {
         permissions: role.permissions,
         version: role.version,
         holders: role.version + 1,
+        holderIds: DEVELOPER_ROLE.holderIds,
       });
     })
     .on("PUT /api/roles/:roleId", (request, nth) => {

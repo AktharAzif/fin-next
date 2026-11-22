@@ -93,6 +93,32 @@ describe("the console's API, end to end", () => {
     expect(role.done.status).toBe(201);
     const roleId = String(role.done.json.roleId);
 
+    // A role name holding a character the database cannot store is refused as the name rule
+    // refuses it, on the name, before any intent is made, never as an internal error (§8.6).
+    const intents = async () => {
+      const result = await database.admin.query<{ n: number }>(
+        "SELECT count(*)::integer AS n FROM ops.step_up_intent",
+      );
+      return Number(result.rows[0]?.n);
+    };
+    const intentsBefore = await intents();
+    const unstorable = { name: "Night\u0000shift", description: "", permissions: ["member.read"] };
+    for (const reply of [
+      await owner.org(orgId, "POST", "/api/roles", unstorable),
+      await owner.org(orgId, "PUT", `/api/roles/${roleId}`, {
+        ...unstorable,
+        version: 1,
+        holders: [],
+      }),
+    ]) {
+      expect(reply.status, JSON.stringify(reply.json)).toBe(400);
+      expect(reply.json).toMatchObject({
+        code: "invalid",
+        fields: [{ path: "name", code: "name" }],
+      });
+    }
+    expect(await intents()).toBe(intentsBefore);
+
     // The invitation, with an intent bound to the address and the role (§7.6, §9.3).
     const invite = await steppedUp(database.admin, owner, (headers) =>
       owner.org(

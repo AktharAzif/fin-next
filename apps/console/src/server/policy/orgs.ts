@@ -38,6 +38,9 @@ const auditLogQuery = z.strictObject({
   ...paging,
 });
 
+/** The members a role change names as the role's holders it showed, by member ID (`[]` for none). */
+const shownHolders = z.array(z.string().regex(/^mem_[0-9a-hjkmnp-tv-z]{26}$/)).max(1000);
+
 export const ORGS_ROUTES = [
   route({
     id: "viewerOrganization",
@@ -425,7 +428,9 @@ export const ORGS_ROUTES = [
     permission: "role.manage",
     stepUp: "intent",
     action: "role.update",
-    bind: ["name", "description", "permissions", "version"],
+    // The holders the actor was shown (the role's `holderIds`), bound beyond §7.6: a save that adds
+    // a permission while the role's holders are not those is `409 conflict` (recorded in the PR).
+    bind: ["name", "description", "permissions", "version", "holders"],
     assurance: "aal2_or_working",
     lock: true,
     params: { roleId: "rol" },
@@ -434,6 +439,7 @@ export const ORGS_ROUTES = [
       description: typedName.default(""),
       permissions: permissionKeys,
       version: z.int().min(1).max(1_000_000),
+      holders: shownHolders,
     }),
     query: "none",
     limits: ["step_up_intents", "role_edit"],
@@ -454,10 +460,7 @@ export const ORGS_ROUTES = [
     assurance: "aal2_or_working",
     lock: true,
     params: { roleId: "rol" },
-    body: z.strictObject({
-      moveTo: roleKey.optional(),
-      holders: z.array(z.string().regex(/^mem_[0-9a-hjkmnp-tv-z]{26}$/)).max(1000),
-    }),
+    body: z.strictObject({ moveTo: roleKey.optional(), holders: shownHolders }),
     query: "none",
     limits: ["step_up_intents", "role_edit"],
     audit: [

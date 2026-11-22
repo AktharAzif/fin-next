@@ -401,11 +401,13 @@ const SCENARIOS: Record<string, () => Promise<Scenario>> = {
     const o = await owner("role_editor");
     const first = await roleIn(o, "First", ["member.read"]);
     const second = await roleIn(o, "Second", ["member.read"]);
+    // Nobody holds either role, so the holders a save names are none.
     const body = {
       name: "First renamed",
       description: "",
       permissions: ["member.read"],
       version: 1,
+      holders: [],
     };
     return {
       who: o.client,
@@ -415,6 +417,8 @@ const SCENARIOS: Record<string, () => Promise<Scenario>> = {
         name: { body: { ...body, name: "First again" } },
         description: { body: { ...body, description: "Reads the team" } },
         permissions: { body: { ...body, permissions: ["member.read", "auditLog.read"] } },
+        // A save that adds nothing never compares its holders, so any list reaches the digest.
+        holders: { body: { ...body, holders: ["mem_01jd0000000000000000000000"] } },
         target: { path: `/api/roles/${second}` },
       },
       unreachable: {

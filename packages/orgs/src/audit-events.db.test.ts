@@ -210,11 +210,13 @@ const CASES: Record<Exclude<OrgsEventName, (typeof REALM_WRITTEN_EVENTS)[number]
   "role.updated": async () => {
     const { who, orgId } = await ownerWithOrganization(h, "role_updated");
     const roleId = await roleAs(h, who, orgId, "Support", ["member.read"]);
+    // Nobody holds the role, so the holders the save names are none.
     const body = {
       name: "Support",
       description: "",
       permissions: ["member.read", "auditLog.read"],
       version: 1,
+      holders: [],
     };
     const out = await withIntent(h, who, (headers) =>
       asActor(

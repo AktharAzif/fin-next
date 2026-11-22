@@ -422,6 +422,7 @@ export const HANDLERS = {
       description: string;
       permissions: string[];
       version: number;
+      holders: string[];
     };
     return ok(
       await actor(input, deps, (tx, a) =>
