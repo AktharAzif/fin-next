@@ -14,17 +14,19 @@
 //       scripts/public-safety.mjs's own rules (and the overlay's refuse list when FIN_OVERLAY_FILE
 //       names one); and, in every file a browser reads as text (STATIC_TEXT_FILES) and every
 //       other file that is not binary (an unknown extension, or none): no server setting's name
-//       (`FIN_*`: a build takes public settings only, and env.json's fields are not named so; a
-//       sample's shell variable, `$FIN_API`, and the bare names the plan's samples use,
-//       SAMPLE_NAMES, are no setting's); no
+//       (`FIN_*`: a build takes public settings only, and env.json's fields are not named so; the
+//       samples' shell variables the plan names, SAMPLE_NAMES, are no setting's); no
 //       server-only marker (a `node:` module import, or Vite's stand-in for one,
 //       `__vite-browser-external`); no test seam marker;
 //     - in the same files, no third-party origin: every http, https, ws or wss URL and every
 //       protocol-relative one where a URL starts (after a quote, an unquoted attribute's `=` in
 //       markup or in a start tag a script writes, CSS's url(, a refresh's time, a template
 //       literal's substitution, or as a srcset candidate; and after any C0 control or space, which
-//       the URL parser strips first), and in a script every `://` after a scheme written at run
-//       time (`${s}://host`), has an origin on ALLOWED_ORIGINS, the namespace and message
+//       the URL parser strips first), and in a script every `://` in a string's text that no
+//       scheme the text fixes stands before (`${s}://host`, `"{scheme}://host"`, `"%s://host"`),
+//       and every host a script joins to a scheme from literals or chooses among them
+//       (`"https://"+"host"`, `` `https://${p?`a.host`:`b.host`}` ``), has an origin on
+//       ALLOWED_ORIGINS, the namespace and message
 //       URLs the pinned libraries carry, none of which is fetched; and no URL with a user name or
 //       password, whose host is not the one it seems to name. Each URL is read as a browser reads
 //       it, in every reading of the text a browser may apply (readings: JavaScript's and JSON's
@@ -46,9 +48,13 @@
 //       but a URL parser refuses, is refused, never read as its first part names or passed as a
 //       host built at run time. With no scheme in the text, such a host loads nothing and is no
 //       finding, and backslashes alone or a scheme written at run time name a host only where it
-//       has a dot or is an IP address (a pattern's `\\n` names none). A host a script builds at
-//       run time (`"https://" + host`, `https://${host}`) is not read here: the page's own policy
-//       refuses it in the browser;
+//       has a dot or is an IP address (a pattern's `\\n` names none). Where only a guess says a
+//       URL starts (after a `}` that may close a substitution, a refresh whose time a script
+//       writes, `://` after a scheme written at run time), two slashes count only as the source
+//       text wrote them: a regular expression's escaped `/\/` is code. A host a script builds at
+//       run time from a name or a call (`"https://" + host`, `https://${host}`) is not read
+//       here: the page's own policy refuses it in the browser. The work is linear in the text,
+//       counted, not timed (scanWork);
 //     - no source map (`*.map` in any case, or a `sourceMappingURL` comment pointing at one);
 //     - nothing a deployment refuses (release-static.mjs's artefactProblems: `_headers` or
 //       `env.json`, which the deploy renders, SF-05; a Worker control file; a path read two ways;
@@ -105,10 +111,9 @@ const SETTING_NAME = /\bFIN_[A-Z0-9]+(?:_[A-Z0-9]+)*\b/g;
 /**
  * The names the plan gives a customer's own shell variables in the docs' and the console's
  * samples (spec 05 §8.2 and §8.8: `$FIN_API_URL`, `$FIN_KEY`), which no server setting is ever
- * named, so a build may name them bare too (a Node sample's `process.env.FIN_KEY`, the console's
- * `Copy as FIN_KEY=`). Any name right after a `$` is a sample's shell variable, the customer's own
- * (the console's `curl "$FIN_API/v4/whoami"`): a server configuration bundled in names its
- * settings bare. A setting's name written bare (`FIN_KEY_SALT`, `FIN_API`) is still refused.
+ * named, so a build may name them. Any other name is refused wherever it stands, after a `$`
+ * included (a sample's `$FIN_API` is no name the plan gives one): a setting's longer name
+ * (`FIN_KEY_SALT`) and a shorter one (`FIN_API`) alike.
  */
 export const SAMPLE_NAMES = new Set(["FIN_API_URL", "FIN_KEY"]);
 
@@ -157,6 +162,24 @@ const STATIC_TEXT_FILES = new Set([
 /** Script and data files: their strings are read through JavaScript's escapes. */
 const SCRIPT_FILES = new Set([".js", ".mjs", ".cjs", ".json", ".webmanifest"]);
 const MAX_FILES = 50_000;
+
+/**
+ * The scanner's work, counted as the characters its passes and read-backs visit (a search the
+ * runtime makes over the text counts as the characters it passes), so a test bounds it by a
+ * multiple of the text's length with no clock (scanWork): load slows a run, never adds to its
+ * count. `limit` stops a run that passes its bound at once (scanWork's), instead of letting a
+ * read-back that has lost its linear bound run on for minutes.
+ */
+const work = { visits: 0, limit: Infinity };
+
+/**
+ * Counts work done.
+ * @param {number} visits
+ */
+function spend(visits) {
+  work.visits += visits;
+  if (work.visits > work.limit) throw new Error(`the scan's work passed its bound, ${work.limit}`);
+}
 
 // ---- reading a URL as a browser does ---------------------------------------------------------
 
@@ -247,32 +270,41 @@ const fromJsCode = (code) =>
  * parser, which reads the value after them, reads it as itself. JavaScript's escapes are read
  * before the markup a script writes is tokenized, so they spell that markup's structure (`\x3e`
  * is a `>` there); only the quotes they spell are marked, as part of the script's own string.
- * @typedef {{ text: string, spelled: Uint8Array | null }} Reading
+ * Which characters they spelled is kept apart (`escaped[i] === 1`), for the one question that
+ * needs the source text as written: whether two slashes are a URL's or a regular expression's
+ * (`/\/\/cdn\.example\//` reads as `///cdn.example//`; a regular expression never starts with
+ * two raw slashes).
+ * @typedef {{ text: string, spelled: Uint8Array | null, escaped?: Uint8Array | null }} Reading
  */
 
 /**
  * A text with the escapes a pattern finds read, and which characters they spelled. Over a reading
  * that is itself spelled (CSS's escapes in a style attribute, after HTML's references), a
- * character the earlier reading spelled stays spelled where it is copied unchanged.
+ * character the earlier reading spelled stays spelled where it is copied unchanged, and one a
+ * JavaScript escape spelled stays escaped (Reading's `escaped`).
  * @param {string | Reading} input
  * @param {RegExp} pattern a global pattern
  * @param {(m: RegExpExecArray) => string} decode an escape's text, or the match unchanged
  * @returns {Reading}
  */
 function readEscapes(input, pattern, decode) {
-  const { text, spelled: before } =
-    typeof input === "string" ? { text: input, spelled: null } : input;
-  // An escape is two characters or more and spells two code units at most.
-  const spelled = new Uint8Array(text.length);
+  const {
+    text,
+    spelled: before,
+    escaped: beforeEscaped = null,
+  } = typeof input === "string" ? { text: input, spelled: null, escaped: null } : input;
+  // An escape is two characters or more and spells two code units at most. A mark the earlier
+  // reading has is copied; a new one is made once a character needs it.
+  /** @type {Uint8Array | null} */
+  let spelled = before === null ? null : new Uint8Array(text.length);
+  const escaped = beforeEscaped === null ? null : new Uint8Array(text.length);
   let out = "";
   let last = 0;
-  let any = false;
   /** @param {number} from @param {number} to */
   const copy = (from, to) => {
-    if (before !== null && from < to) {
-      const part = before.subarray(from, to);
-      spelled.set(part, out.length);
-      if (part.includes(1)) any = true;
+    if (from < to) {
+      if (before !== null) spelled?.set(before.subarray(from, to), out.length);
+      if (beforeEscaped !== null) escaped?.set(beforeEscaped.subarray(from, to), out.length);
     }
     out += text.slice(from, to);
   };
@@ -284,15 +316,20 @@ function readEscapes(input, pattern, decode) {
       copy(at, at + c.length);
     } else {
       if (c !== "") {
+        if (spelled === null) spelled = new Uint8Array(text.length);
         spelled.fill(1, out.length, out.length + c.length);
-        any = true;
       }
       out += c;
     }
     last = at + m[0].length;
   }
   copy(last, text.length);
-  return { text: out, spelled: any ? spelled.subarray(0, out.length) : null };
+  spend(text.length);
+  return {
+    text: out,
+    spelled: spelled === null ? null : spelled.subarray(0, out.length),
+    escaped: escaped === null ? null : escaped.subarray(0, out.length),
+  };
 }
 
 const JS_ESCAPE =
@@ -307,13 +344,49 @@ const HTML_REFERENCE = /&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]{1
  * @param {string} text
  */
 export function decodeJsEscapes(text) {
-  return text.replace(JS_ESCAPE, (_m, braced, u4, x2, octal, other) => {
-    const hex = braced ?? u4 ?? x2;
-    if (hex !== undefined) return marked(fromJsCode(Number.parseInt(hex, 16)));
-    if (octal !== undefined) return marked(fromJsCode(Number.parseInt(octal, 8)));
-    if (/^(?:\r\n|[\n\r\u{2028}\u{2029}])$/u.test(other)) return "";
-    return marked(JS_ESCAPES.get(other) ?? other);
-  });
+  return readJsEscapes(text).text;
+}
+
+/**
+ * A text with a JavaScript or JSON string's escapes read (decodeJsEscapes), and which characters
+ * they spelled (`escaped`), found as the escapes are replaced: each escape's text starts where its
+ * match did, less what the escapes before it took away.
+ * @param {string} text
+ * @returns {Reading}
+ */
+function readJsEscapes(text) {
+  /** Where each escape's text starts and ends in the text read, in pairs. */
+  /** @type {number[]} */
+  const spans = [];
+  let shift = 0;
+  const out = text.replace(
+    JS_ESCAPE,
+    (
+      /** @type {string} */ m,
+      /** @type {string | undefined} */ braced,
+      /** @type {string | undefined} */ u4,
+      /** @type {string | undefined} */ x2,
+      /** @type {string | undefined} */ octal,
+      /** @type {string} */ other,
+      /** @type {number} */ offset,
+    ) => {
+      const hex = braced ?? u4 ?? x2;
+      let c = "";
+      if (hex !== undefined) c = marked(fromJsCode(Number.parseInt(hex, 16)));
+      else if (octal !== undefined) c = marked(fromJsCode(Number.parseInt(octal, 8)));
+      else if (!/^(?:\r\n|[\n\r\u{2028}\u{2029}])$/u.test(other)) {
+        c = marked(JS_ESCAPES.get(other) ?? other);
+      }
+      if (c !== "") spans.push(offset - shift, offset - shift + c.length);
+      shift += m.length - c.length;
+      return c;
+    },
+  );
+  spend(text.length);
+  if (spans.length === 0) return { text: out, spelled: null, escaped: null };
+  const escaped = new Uint8Array(out.length);
+  for (let k = 0; k < spans.length; k += 2) escaped.fill(1, spans[k] ?? 0, spans[k + 1] ?? 0);
+  return { text: out, spelled: null, escaped };
 }
 
 /**
@@ -341,7 +414,7 @@ export function decodeCssEscapes(text) {
 /**
  * A text with HTML's character references read, and which characters they spelled
  * (decodeHtmlReferences).
- * @param {string} text
+ * @param {string | Reading} text
  * @returns {Reading}
  */
 function readHtmlReferences(text) {
@@ -371,6 +444,20 @@ export function decodeHtmlReferences(text) {
 const isSpelled = (reading, i) => reading.spelled !== null && reading.spelled[i] === 1;
 
 /**
+ * Whether a reading holds two slashes at an index as the source text wrote them: no reference,
+ * CSS escape or JavaScript escape spelled either (a regular expression's `/\/` reads as `//`).
+ * @param {Reading} reading
+ * @param {number} i
+ */
+const rawSlashes = (reading, i) => {
+  for (const k of [i, i + 1]) {
+    if (reading.text[k] !== "/" || isSpelled(reading, k)) return false;
+    if (reading.escaped != null && reading.escaped[k] === 1) return false;
+  }
+  return true;
+};
+
+/**
  * Every reading of a text a browser may apply to the strings in it: a script's or JSON's through
  * JavaScript's escapes, and after them HTML's references (markup a script writes), CSS's escapes
  * (CSS a script holds: `element.style`, `insertRule`, a stylesheet a string fills) and both in
@@ -396,21 +483,21 @@ export function readings(text, kind) {
     if (!same) all.push(r);
   };
   if (kind === "script") {
-    const js = decodeJsEscapes(text);
+    const js = readJsEscapes(text);
     const html = readHtmlReferences(js);
-    add({ text: js, spelled: null });
+    add(js);
     add(html);
     add(readCssEscapes(js));
     add(readCssEscapes(html));
   } else if (kind === "style") {
     add(readCssEscapes(text));
   } else {
-    const js = decodeJsEscapes(text);
+    const js = readJsEscapes(text);
     const html = readHtmlReferences(text);
     const jsHtml = readHtmlReferences(js);
     add({ text, spelled: null });
     add(html);
-    add({ text: js, spelled: null });
+    add(js);
     add(jsHtml);
     add(readCssEscapes(text));
     add(readCssEscapes(html));
@@ -475,10 +562,14 @@ const cssBadUrl = (c) => {
 };
 /**
  * Where a URL is, which decides where its text ends (`guessed`: a refresh's or a substitution's
- * context contextsBefore adds, in which a host no URL parser takes is no finding).
+ * context contextsBefore adds, in which a host no URL parser takes is no finding; `raw`: two
+ * slashes start a URL there only as the source text wrote them, never as a regular expression's
+ * escapes spell them; `network`: a host there counts only where a browser reaches it on the
+ * network, networkHost).
  * @typedef {({ kind: "quoted", end: string, spelled: boolean }
  *   | { kind: "srcset", end: number }
- *   | { kind: "attribute" | "css" | "none" }) & { guessed?: boolean }} UrlContext
+ *   | { kind: "attribute" | "css" | "none" })
+ *   & { guessed?: boolean, raw?: boolean, network?: boolean }} UrlContext
  */
 
 /**
@@ -486,12 +577,15 @@ const cssBadUrl = (c) => {
  * (letters, digits and hyphens), then white space or `/`, or a raw quote, which may end the
  * script's string with the tag going on in the next (`"<img"+" src=..."`), or a template
  * literal's substitution, which may write the white space and more (`` `<a${c} href=...>` ``) or
- * the name itself (`` `<${t} href=...>` ``). A `<` before a substitution is as often a message's
+ * the name itself (`` `<${t} href=...>` ``); or `<` alone right before a raw quote, where the
+ * code the string is joined to writes the name (`` `<`+t+` href=...>` ``, which the minifier
+ * prints from `"<" + tag + ...`). A `<` before a substitution is as often a message's
  * (`` `${a}<${b}` ``, `` `<${name}> must be used inside` ``), so a tag a substitution ends or names
- * opens only where its literal goes on as markup (markupAfter), and is read only as far as its
- * template literal goes (attributeEquals): the code after the literal is no tag's.
+ * opens only where its literal goes on as markup (markupAfter), and is read by the template
+ * literal's piece reading (attributeEquals): the code after the literal is no tag's.
  */
-const TAG_OPEN = /<(?:[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /"'`]|(?:[A-Za-z][A-Za-z0-9-]*)?(?=\$\{))/g;
+const TAG_OPEN =
+  /<(?:[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /"'`]|(?:[A-Za-z][A-Za-z0-9-]*)?(?=\$\{)|(?=["'`]))/g;
 /** What ends a name in TAG_OPEN's first form; the form a substitution follows ends in none. */
 const NAME_END = /[\t\n\f\r /"'`]$/;
 /** How far after a substitution that ends a tag's name markupAfter looks: a bound on its work. */
@@ -499,25 +593,47 @@ const MAX_NAME_GAP = 256;
 
 /**
  * Whether the text after a substitution that ends a start tag's name, or writes it, goes on as
- * that tag's markup: past a `}` that may close the substitution, an attribute's `=` stands before
- * any raw `>` or quote, within MAX_NAME_GAP (`` `<a${c} href=...>` ``). A message goes on
- * otherwise (`` `${a}<${b}` ``, `` `<${o}> must be used inside` ``), and so does a plain string's
- * `"<${"` (its quote comes first).
+ * that tag's markup: past a `}` that may close the substitution, before any raw `>`, `"` or `'`
+ * and within MAX_NAME_GAP, an attribute's `=` (`` `<a${c} href=...>` ``), the literal's end, where
+ * the tag may go on in the next string (`` `<a${c}`+` href=...>` ``), or another substitution,
+ * which may write the attributes (`` `<a${c}${h?` href=...`:``}>` ``). A message goes on otherwise
+ * (`` `<${o}> must be used inside` ``), and so does a plain string's `"<${"` (its quote comes
+ * first).
  * @param {Reading} reading
  * @param {number[]} closes each `}` that may close the substitution
  */
 function markupAfter(reading, closes) {
   const { text } = reading;
+  let visited = 0;
+  let markup = false;
   for (const close of closes) {
     const end = Math.min(text.length, close + 1 + MAX_NAME_GAP);
-    for (let k = close + 1; k < end; k++) {
+    let k = close + 1;
+    for (; k < end && !markup; k++) {
       if (isSpelled(reading, k)) continue;
       const c = text[k];
-      if (c === "=") return true;
-      if (c === ">" || c === '"' || c === "'" || c === "`") break;
+      if (c === "=" || c === "`" || (c === "$" && text[k + 1] === "{")) markup = true;
+      else if (c === ">" || c === '"' || c === "'") break;
     }
+    visited += k - close;
+    if (markup) break;
   }
-  return false;
+  spend(visited);
+  return markup;
+}
+
+/**
+ * Whether a `<` right before a raw quote ends a string the code joins a tag's name to: past white
+ * space after the quote, a `+` (`` `<`+t+` href=...>` ``).
+ * @param {Reading} reading
+ * @param {number} quote
+ */
+function nameJoined(reading, quote) {
+  const { text } = reading;
+  if (isSpelled(reading, quote)) return false;
+  let k = quote + 1;
+  while (ASCII_SPACE.has(text[k] ?? "")) k++;
+  return text[k] === "+" && text[k + 1] !== "+";
 }
 // The HTML tokenizer's states inside a start tag, as bits, so every tag open at once is followed
 // in one pass: before an attribute's name, in it, after it, before its value, in a double- or
@@ -580,11 +696,13 @@ const MAX_SUBSTITUTION = 4096;
  * template literal or a regular expression may pair with the wrong one (`${a?"{":""}`,
  * `${s.split("}")}`, `${a.replace(/{/g,"")}`), so lexSubstitution also reads it as JavaScript.
  * Both `}`s are kept, so neither reading is lost where the other is wrong. A brace a reference or
- * an escape spelled is text in a string, never code's.
+ * an escape spelled is text in a string, never code's. The `}`s that surely close one go in
+ * `sure`: those counting pairs with no quote, backtick or `/` between, and those the lexer pairs.
  * @param {Reading} reading
+ * @param {Set<number>} [sure]
  * @returns {Map<number, number[]>}
  */
-function substitutions(reading) {
+function substitutions(reading, sure = new Set()) {
   const { text } = reading;
   /** @type {Map<number, number[]>} */
   const spans = new Map();
@@ -607,9 +725,11 @@ function substitutions(reading) {
       if (start !== undefined && start >= 0) {
         spans.get(start)?.push(i);
         if (lastUnsure > start) unsure.push(start);
+        else sure.add(i);
       }
     }
   }
+  spend(text.length);
   for (const start of open) if (start >= 0) unsure.push(start);
   unsure.sort((a, b) => a - b);
   // Each run is bounded by MAX_SUBSTITUTION, and all of them by a budget linear in the text: past
@@ -619,7 +739,10 @@ function substitutions(reading) {
   const done = new Set();
   for (const start of unsure) {
     if (budget <= 0) break;
-    if (!done.has(start)) budget -= lexSubstitution(reading, start, spans, done);
+    if (done.has(start)) continue;
+    const run = lexSubstitution(reading, start, spans, done, sure);
+    budget -= run;
+    spend(run);
   }
   return spans;
 }
@@ -645,8 +768,9 @@ const REGEX_KEYWORD =
  * @param {number} start
  * @param {Map<number, number[]>} spans
  * @param {Set<number>} done the starts paired, or given up on, so far
+ * @param {Set<number>} sure the `}`s that surely close a substitution, which the run adds to
  */
-function lexSubstitution(reading, start, spans, done) {
+function lexSubstitution(reading, start, spans, done, sure) {
   const { text } = reading;
   const limit = Math.min(text.length, start + MAX_SUBSTITUTION);
   /** A substitution's start, BRACE or TEMPLATE, innermost last. */
@@ -697,6 +821,7 @@ function lexSubstitution(reading, start, spans, done) {
       if (top >= 0) {
         const ends = spans.get(top);
         if (ends !== undefined && !ends.includes(i)) ends.push(i);
+        sure.add(i);
         done.add(top);
         if (top === start) return i - start;
       }
@@ -754,7 +879,8 @@ const MAX_PIECE_GAP = 1024;
 
 /**
  * Whether a raw quote at an index may open a string that goes on with markup an earlier string
- * began: the character before it, past ASCII white space, is one PIECE_AFTER holds, or `+=`'s.
+ * began: the character before it, past ASCII white space, is one PIECE_AFTER holds, `+=`'s, or a
+ * substitution's `${` (a template literal nested in one: `` `<a${c}${`href=...`}>` ``).
  * @param {string} text
  * @param {number} at
  */
@@ -762,7 +888,9 @@ function pieceStart(text, at) {
   let k = at - 1;
   while (ASCII_SPACE.has(text[k] ?? "")) k--;
   const c = text[k] ?? "";
-  return PIECE_AFTER.has(c) || (c === "=" && text[k - 1] === "+");
+  return (
+    PIECE_AFTER.has(c) || (c === "=" && text[k - 1] === "+") || (c === "{" && text[k - 1] === "$")
+  );
 }
 
 /**
@@ -840,9 +968,12 @@ function nextRaw(reading, c, from) {
  *   literal reading only.
  * A tag a substitution ends or names (`` `<a${c} href=...>` ``, `` `<${t} href=...>` ``) opens
  * only where its literal goes on as markup (markupAfter), and is read by the template literal's
- * piece reading alone, never the literal one, so it ends at the literal's closing backtick: `<`
- * before a substitution is as often a comparison in a message (`` `expected ${a}<${b}` ``), and
- * the code after it is no tag's.
+ * piece reading alone, never the literal one: `<` before a substitution is as often a comparison
+ * in a message (`` `expected ${a}<${b}` ``), and the code after the literal is no tag's. Like
+ * every piece, it holds its states at its closing backtick, so a later string (a concatenation,
+ * a `+=`, a list's next item, a template literal nested in a substitution) goes on with the tag
+ * (`` `<a${c}`+` href=...>` ``, `` `<a${c}${h?` href=...`:``}>` ``). So does a tag whose name the
+ * code joins to a string that ends in `<` (`` `<`+t+` href=...>` ``): that string's quote holds it.
  * @param {Reading} reading
  * @param {() => Map<number, number[]>} spansOf the reading's substitutions
  * @returns {Set<number>}
@@ -855,18 +986,29 @@ function attributeEquals(reading, spansOf) {
   // at the `${` that ends its name (or stands for it).
   /** @type {number[]} */
   const found = [];
-  // The opens whose tag a substitution ends or names: read only to the template literal's end.
+  // The opens whose tag a substitution ends or names: read only by the template literal's piece
+  // reading. And the `<`s whose string the code joins a name to, by index of their quote's kind.
   /** @type {Set<number>} */
   const written = new Set();
+  /** @type {Map<number, number>} */
+  const joined = new Map();
   for (const m of text.matchAll(TAG_OPEN)) {
     const at = m.index ?? 0;
     const last = at + m[0].length - 1;
     let raw = true;
     for (let k = at; k <= last && raw; k++) raw = !isSpelled(reading, k);
     if (!raw) continue;
+    const quote = SCRIPT_QUOTES.indexOf(m[0] === "<" ? (text[at + 1] ?? "") : "");
+    if (quote !== -1) {
+      if (nameJoined(reading, at + 1)) joined.set(at, quote);
+      continue;
+    }
     found.push(last);
     if (!NAME_END.test(m[0])) written.add(last);
   }
+  spend(text.length);
+  for (const at of joined.keys()) found.push(at);
+  found.sort((a, b) => a - b);
   if (found.length === 0) return equals;
   const spans = spansOf();
   // Such a tag opens only where its literal goes on as markup (markupAfter).
@@ -905,12 +1047,18 @@ function attributeEquals(reading, spansOf) {
     if (at === undefined || at < from) {
       at = nextRaw(reading, c, from);
       ahead.set(c, at);
+      spend(Math.min(at, text.length) - from);
     }
     return at;
   };
   let live = 0;
   let next = 0;
+  let steps = 0;
   for (let i = 0; i < text.length; i++) {
+    if (++steps === 65_536) {
+      spend(steps);
+      steps = 0;
+    }
     if ((live | (piece[0] ?? 0) | (piece[1] ?? 0) | (piece[2] ?? 0)) === 0) {
       // Nothing is open: on to the next place a state may start.
       let target = Math.min(ends[0] ?? Infinity, opens[next] ?? Infinity);
@@ -948,8 +1096,9 @@ function attributeEquals(reading, spansOf) {
       if (!pieceOpen[k]) continue;
       const states = piece[k] ?? 0;
       if (k === quote) {
-        // The piece's closing quote: its states go on in the next string.
-        held |= states;
+        // The piece's closing quote: its states go on in the next string, within MAX_PIECE_GAP
+        // of this quote, as the literal reading's do.
+        if (states !== 0) hold(states, i);
         piece[k] = 0;
         pieceOpen[k] = false;
       } else {
@@ -983,10 +1132,16 @@ function attributeEquals(reading, spansOf) {
     }
     if (i <= unsureUntil && c === "}" && !data) live |= afterSubstitution(unsureLive);
     while (next < opens.length && (opens[next] ?? 0) <= i) {
+      const kind = joined.get(i);
       if (opens[next] === i && written.has(i)) {
-        // A tag a substitution ends or names: the template literal's text only.
+        // A tag a substitution ends or names: the template literal's piece reading.
         piece[2] = (piece[2] ?? 0) | BEFORE_NAME;
         pieceOpen[2] = true;
+      } else if (opens[next] === i && kind !== undefined) {
+        // A name the code joins to the string the `<` ends: that quote kind's piece reading,
+        // whose closing quote, next, holds the tag for the next string.
+        piece[kind] = (piece[kind] ?? 0) | BEFORE_NAME;
+        pieceOpen[kind] = true;
       } else if (opens[next] === i) {
         live |= BEFORE_NAME;
         // A tag's name may end the script's string (`"<img"+" src=...>"`, `` [`<a`,...] ``).
@@ -995,6 +1150,7 @@ function attributeEquals(reading, spansOf) {
       next++;
     }
   }
+  spend(steps);
   return equals;
 }
 
@@ -1014,6 +1170,7 @@ function contextBefore(reading, index, kind, inTag) {
   const { text } = reading;
   let i = index - 1;
   while (i >= 0 && stripped(text[i] ?? "")) i--;
+  spend(index - i);
   const c = text[i] ?? "";
   const spelled = isSpelled(reading, i);
   if (QUOTES.has(c)) return { kind: "quoted", end: c, spelled };
@@ -1033,26 +1190,59 @@ const TIME = /[0-9.]/;
 const VALUE_START = new Set(["=", ...QUOTES]);
 
 /**
+ * What scanReading knows of a script's text, for the questions a time written at run time asks:
+ * whether a `}` may close a substitution (`closes`: one counting or the lexer pairs with a `${`,
+ * or any raw `}` near a `${` neither pairs), whether it surely does (`surely`: one the lexer pairs,
+ * or counting where no quote, backtick or `/` stands between, so a plain string's `"${"` never
+ * starts one), and whether a refresh key stands near an index (`refreshNear`).
+ * @typedef {{ closes: (brace: number) => boolean, surely: (brace: number) => boolean,
+ *   refreshNear: (at: number) => boolean }} ScriptFacts
+ */
+
+/**
+ * Where a refresh's value starts, and how it is written (refreshStart): `named` when `url=`
+ * stands before the URL, `written` when a script writes its time at run time.
+ * @typedef {{ at: number, named: boolean, written: boolean }} RefreshStart
+ */
+
+/** How far before a refresh written at run time a refresh key (`refresh`) counts as its own. */
+const REFRESH_REACH = 256;
+
+/**
  * Where the value starts whose refresh URL (HTML's shared declarative refresh steps) starts at
- * an index, or -1: the value's start, ASCII white space, a time of digits and dots (a digit in
+ * an index, or null: the value's start, ASCII white space, a time of digits and dots (a digit in
  * it: prose's `'a'.` is no time), `;`, `,` or white space, white space, an optional `url=`, then
  * what the URL parser strips first (a C0 control or a space). In a script, a time written at run
- * time is read too, with `url=` or without it as a browser reads it (`` `${n}; //host/x` ``): a
- * substitution's `}` right before the separator (`` `${n}; url=...` ``), whose literal is a
- * template literal (the `}` is returned), or the quote that opens the string right before it
- * (`n+"; url=..."`: the code before the string wrote the time). A comment's `; // note` reads a
- * host that starts with white space, which no host does. Read back from the URL with no
- * bound: each run it passes holds no URL's start (a scheme's letter or a slash), so the runs read
- * back from two URLs never overlap and the work stays linear.
+ * time is read too (`written`), with `url=` or without it as a browser reads it
+ * (`` `${n}; //host/x` ``): a substitution's `}` right before the separator
+ * (`` `${n}; url=...` ``) or before the time's digits (`` `${n}0; //host/x` ``), whose literal
+ * is a template literal (the `}` is returned), or
+ * the quote that opens the string right before it (`n+"; url=..."`: the code before the string
+ * wrote the time); and `url=` right after the quote that opens a string, the time and its
+ * separator written apart (`[n,"url=//host/x"].join(";")`). Without `url=`, the `}` must surely
+ * close a substitution (ScriptFacts' `surely`). A comment's `; // note` reads a host that starts
+ * with white space, which no host does. Read back from the URL with no bound: each run it passes
+ * holds no URL's start (a scheme's letter or a slash), so the runs read back from two URLs never
+ * overlap and the work stays linear.
  * @param {Reading} reading
  * @param {number} index
- * @param {((brace: number) => boolean) | null} closesSubstitution in a script, whether the `}`
- *   at an index ends a `${`; null elsewhere
+ * @param {ScriptFacts | null} script what a script's text knows; null elsewhere
+ * @returns {RefreshStart | null}
  */
-function refreshStart(reading, index, closesSubstitution) {
+function refreshStart(reading, index, script) {
   const { text } = reading;
   const space = (/** @type {number} */ k) => ASCII_SPACE.has(text[k] ?? "");
+  const scriptQuote = (/** @type {number} */ k) =>
+    SCRIPT_QUOTES.includes(text[k] ?? "") && !isSpelled(reading, k) && opensString(text, k);
   let i = index - 1;
+  /**
+   * The answer, with the work of reading back to it counted.
+   * @param {RefreshStart | null} start
+   */
+  const done = (start) => {
+    spend(index - Math.max(i, 0));
+    return start;
+  };
   while (i >= 0 && stripped(text[i] ?? "")) i--;
   const gap = i < index - 1;
   let sep = false;
@@ -1060,11 +1250,12 @@ function refreshStart(reading, index, closesSubstitution) {
   if (named) {
     i--;
     while (i >= 0 && space(i)) i--;
-    if (i < 2 || text.slice(i - 2, i + 1).toLowerCase() !== "url") return -1;
+    if (i < 2 || text.slice(i - 2, i + 1).toLowerCase() !== "url") return done(null);
     i -= 3;
     const before = i;
     while (i >= 0 && space(i)) i--;
     sep = i < before;
+    if (script !== null && scriptQuote(i)) return done({ at: i, named, written: true });
   } else {
     sep = gap;
   }
@@ -1074,20 +1265,22 @@ function refreshStart(reading, index, closesSubstitution) {
     sep = true;
   }
   // A time ends at the separator: white space right after it, or `;` or `,`.
-  if (!sep || !(space(i + 1) || text[i + 1] === ";" || text[i + 1] === ",")) return -1;
-  if (closesSubstitution !== null && !isSpelled(reading, i)) {
-    const c = text[i] ?? "";
-    if (c === "}" && closesSubstitution(i)) return i;
-    if ((c === '"' || c === "'" || c === "`") && opensString(text, i)) return i;
+  if (!sep || !(space(i + 1) || text[i + 1] === ";" || text[i + 1] === ",")) return done(null);
+  /** @param {number} k */
+  const substitution = (k) =>
+    text[k] === "}" && (named ? script?.closes(k) : script?.surely(k)) === true;
+  if (script !== null && (substitution(i) || scriptQuote(i))) {
+    return done({ at: i, named, written: true });
   }
   let digit = false;
   while (i >= 0 && TIME.test(text[i] ?? "")) {
     if (text[i] !== ".") digit = true;
     i--;
   }
-  if (!digit) return -1;
+  if (!digit) return done(null);
+  if (script !== null && substitution(i)) return done({ at: i, named, written: true });
   while (i >= 0 && space(i)) i--;
-  return VALUE_START.has(text[i] ?? "") ? i : -1;
+  return done(VALUE_START.has(text[i] ?? "") ? { at: i, named, written: false } : null);
 }
 
 /**
@@ -1100,22 +1293,28 @@ function refreshStart(reading, index, closesSubstitution) {
  * literal's backtick; and a refresh's URL (`content="0;https://host/"`), which runs to the end of
  * the value (to the template literal's backtick where a substitution wrote the time). The last
  * two are guessed: a host read in them that no URL parser takes is no finding (the first
- * context's reading still is).
+ * context's reading still is). Where a script writes them (the text after a substitution, a
+ * refresh whose time it writes), two slashes start a URL only as the source text wrote them
+ * (`raw`): a regular expression's escaped `/\//` after a `}` or a string's end is code, never a
+ * value. A refresh it writes with no `url=` names only a host a browser reaches on the network
+ * (`network`), unless a refresh key stands near: a code generator's `";//eslint-disable-line"`
+ * names no refresh's host.
  * @param {Reading} reading
  * @param {number} index where the URL starts
  * @param {string} kind "script", "style" or "markup"
  * @param {(eq: number) => boolean} inTag whether the `=` at an index is an attribute's in a tag
  * @param {(comma: number) => boolean} inList whether the comma at an index ends a candidate of a
  *   srcset list a script's string holds (srcsetListBefore)
- * @param {(brace: number) => boolean} closesSubstitution whether the `}` at an index ends a `${`
+ * @param {ScriptFacts | null} script what a script's text knows; null elsewhere
  * @returns {UrlContext[]}
  */
-function contextsBefore(reading, index, kind, inTag, inList, closesSubstitution) {
+function contextsBefore(reading, index, kind, inTag, inList, script) {
   const { text } = reading;
   /** @type {UrlContext[]} */
   const all = [contextBefore(reading, index, kind, inTag)];
   let before = index - 1;
   while (before >= 0 && stripped(text[before] ?? "")) before--;
+  spend(index - before);
   if (
     all[0]?.kind === "none" &&
     text[before] === "," &&
@@ -1123,20 +1322,25 @@ function contextsBefore(reading, index, kind, inTag, inList, closesSubstitution)
   ) {
     all.push({ kind: "srcset", end: text.length });
   }
-  if (kind === "script" && text[before] === "}" && closesSubstitution(before)) {
-    all.push({ kind: "quoted", end: "`", spelled: false, guessed: true });
+  if (script !== null && text[before] === "}" && script.closes(before)) {
+    all.push({ kind: "quoted", end: "`", spelled: false, guessed: true, raw: true });
   }
-  const at = refreshStart(reading, index, kind === "script" ? closesSubstitution : null);
-  if (at !== -1) {
+  const start = refreshStart(reading, index, script);
+  if (start !== null) {
+    const { at, named, written } = start;
     const c = text[at] ?? "";
     const spelled = isSpelled(reading, at);
+    /** @type {{ guessed: true, raw?: boolean, network?: boolean }} */
+    const how = written
+      ? { guessed: true, raw: true, network: !named && script?.refreshNear(at) !== true }
+      : { guessed: true };
     if (QUOTES.has(c)) {
-      all.push({ kind: "quoted", end: c, spelled, guessed: true });
+      all.push({ kind: "quoted", end: c, spelled, ...how });
     } else if (c === "}" && !spelled) {
       // A time a substitution wrote: the value is a template literal's.
-      all.push({ kind: "quoted", end: "`", spelled: false, guessed: true });
+      all.push({ kind: "quoted", end: "`", spelled: false, ...how });
     } else if (!spelled && (kind === "markup" || (kind === "script" && inTag(at)))) {
-      all.push({ kind: "attribute", guessed: true });
+      all.push({ kind: "attribute", ...how });
     }
   }
   return all;
@@ -1174,7 +1378,8 @@ function userNamePast(reading, from, start, authority, built) {
     }
   };
   let on = authority;
-  for (let i = from; i < text.length && i - start < MAX_AUTHORITY; i++) {
+  let i = from;
+  for (; i < text.length && i - start < MAX_AUTHORITY; i++) {
     const c = text[i] ?? "";
     if (c === "\t" || c === "\n" || c === "\r") {
       if (isSpelled(reading, i)) continue;
@@ -1185,6 +1390,7 @@ function userNamePast(reading, from, start, authority, built) {
     if (c === ">" && !isSpelled(reading, i)) keep(on);
     on += UNMARKED.get(c) ?? c;
   }
+  spend(i - from + 1);
   keep(on);
   return reads;
 }
@@ -1217,8 +1423,10 @@ function readAuthority(reading, start, context, script) {
   let authority = "";
   let crossed = context.guessed === true;
   let built = false;
-  for (let i = start; i < stop; i++) {
+  let i = start;
+  for (; i < stop; i++) {
     if (i - start >= MAX_AUTHORITY) {
+      spend(i - start);
       reads.push({ authority, cut: true, crossed, built });
       return reads;
     }
@@ -1256,6 +1464,7 @@ function readAuthority(reading, start, context, script) {
     }
     authority += UNMARKED.get(c) ?? c;
   }
+  spend(i - start + 1);
   reads.push({ authority, cut: false, crossed, built });
   return reads;
 }
@@ -1291,14 +1500,17 @@ const networkHost = (hostname) => hostname.includes(".") || hostname.startsWith(
  * or backslashes start a pattern as often as a URL (a line comment's `//[^\n]*`, a string
  * escape's `\\(?:u...)`). Backslashes alone, and a scheme written at run time, name a host only
  * where it is one a browser reaches on the network (networkHost): a pattern's `\\n`, a bytea
- * escape's `\\x` and `${name}://inspect` name none. The URL parser drops the C0 controls and
- * spaces at a URL's end as it does those at its start, so they are dropped here too.
+ * escape's `\\x` and `${name}://inspect` name none; nor does a context that asks for one
+ * (`network`: a refresh a script writes with no refresh key near, a code generator's
+ * `";//eslint-disable-line"`). The URL parser drops the C0 controls and spaces at a URL's end as
+ * it does those at its start, so they are dropped here too.
  * @param {string} scheme
  * @param {AuthorityRead} read
  * @param {UrlStart} start
+ * @param {boolean} [network] whether the context counts only a host networkHost accepts
  * @returns {FoundUrl | null}
  */
-function foundUrl(scheme, { authority, cut, crossed, built }, start) {
+function foundUrl(scheme, { authority, cut, crossed, built }, start, network = false) {
   let end = authority.length;
   while (end > 0 && stripped(authority[end - 1] ?? "")) end--;
   const read = authority.slice(0, end);
@@ -1326,9 +1538,8 @@ function foundUrl(scheme, { authority, cut, crossed, built }, start) {
       !/^\s/u.test(read);
     return { url: at, origin: null, userinfo: false, unread: cut, unparsed };
   }
-  if ((start === "backslashes" || start === "run-time") && !cut && !networkHost(url.hostname)) {
-    return null;
-  }
+  const needsNetwork = network || start === "backslashes" || start === "run-time";
+  if (needsNetwork && !cut && !networkHost(url.hostname)) return null;
   // Read past a quote that ends the script's string, the host's last label holds the quote and the
   // code after it (`https://react.dev'+t+'`): a host built at run time. No top-level domain holds
   // a quote, so a host whose last label does is none a browser could load either way.
@@ -1368,6 +1579,7 @@ function srcsetStarts(text, from, end) {
     while (i < end && !ASCII_SPACE.has(text[i] ?? "")) i++;
     if (text[i - 1] !== ",") while (i < end && text[i] !== ",") i++;
   }
+  spend(end - from);
   return starts;
 }
 
@@ -1392,9 +1604,11 @@ function descriptorBefore(text, comma) {
   while (end >= 0 && ASCII_SPACE.has(text[end] ?? "")) end--;
   let start = end;
   while (start >= 0 && !ASCII_SPACE.has(text[start] ?? "") && !QUOTES.has(text[start] ?? "")) {
-    if (text[start] === ",") return false;
+    if (text[start] === ",") break;
     start--;
   }
+  spend(comma - start);
+  if (text[start] === ",") return false;
   const run = text.slice(start + 1, end + 1).replace(CANDIDATE_SUBSTITUTION, "1");
   return start < end && ASCII_SPACE.has(text[start] ?? "") && DESCRIPTOR.test(run);
 }
@@ -1414,6 +1628,7 @@ const STRING_AFTER = new Set([..."(,:=[{?&|+"]);
 function opensString(text, quote) {
   let k = quote - 1;
   while (k >= 0 && ASCII_SPACE.has(text[k] ?? "")) k--;
+  spend(quote - k);
   if (k < 0) return true;
   const c = text[k] ?? "";
   if (STRING_AFTER.has(c) || (c === ">" && text[k - 1] === "=")) return true;
@@ -1483,6 +1698,7 @@ function srcsetListBefore(text, comma, known) {
       }
       url = text.slice(i + 1, end + 1);
     }
+    spend(at - i);
     const start = text[i] ?? "";
     if (!shape) break;
     if (url === "") {
@@ -1519,6 +1735,186 @@ function firstFrom(list, at) {
 }
 
 /**
+ * The last value before `at` in a list of indexes, least first, or -1.
+ * @param {number[]} list
+ * @param {number} at
+ */
+function lastBefore(list, at) {
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((list[mid] ?? Infinity) < at) lo = mid + 1;
+    else hi = mid;
+  }
+  return list[lo - 1] ?? -1;
+}
+
+/** How many literals joined one after another a URL is read through (scanReading's joins). */
+const MAX_JOINS = 4;
+
+/**
+ * Whether the text fixes a whole scheme before a colon in a string (from the string's start, or
+ * after white space or punctuation): a letter, then letters, digits, `+`, `-` or `.`, as the URL
+ * parser reads one (`git+https`, `chrome`, `mysql`). A scheme written at run time, in part or
+ * whole, is none: after a substitution's `}` (`${p}s`), a placeholder's `%`, `{` or `$` (`%s`,
+ * `$SCHEME`), or nothing at all (`{scheme}`, `"://"`).
+ * @param {string} text
+ * @param {number} colon
+ * @param {number} opener where the string's text starts: its quote, or a substitution's `}`
+ */
+function fixedScheme(text, colon, opener) {
+  let k = colon - 1;
+  while (k > opener && /[A-Za-z0-9+.-]/.test(text[k] ?? "")) k--;
+  spend(colon - k);
+  return /^[A-Za-z]/.test(text.slice(k + 1, colon)) && !"}%{$".includes(text[k] ?? "");
+}
+
+/**
+ * The literal string a raw quote at an index starts, before `limit`, as its text's start and its
+ * closing quote, or null: a template literal with a substitution is no literal.
+ * @param {Reading} reading
+ * @param {number} at
+ * @param {number} limit
+ * @returns {[number, number] | null}
+ */
+function literalAt(reading, at, limit) {
+  const { text } = reading;
+  const quote = text[at] ?? "";
+  if (!SCRIPT_QUOTES.includes(quote) || isSpelled(reading, at)) return null;
+  for (let k = at + 1; k < limit; k++) {
+    if (isSpelled(reading, k)) continue;
+    const c = text[k];
+    if (c === quote || (quote === "`" && c === "$" && text[k + 1] === "{")) {
+      spend(k - at);
+      return c === quote ? [at + 1, k] : null;
+    }
+  }
+  spend(limit - at);
+  return null;
+}
+
+/**
+ * The bracket that closes the one at an index, before `limit`, past nested brackets and literals,
+ * or -1.
+ * @param {Reading} reading
+ * @param {number} open
+ * @param {number} limit
+ */
+function closingBracket(reading, open, limit) {
+  const { text } = reading;
+  let depth = 0;
+  let k = open;
+  let close = -1;
+  for (; k < limit; k++) {
+    if (isSpelled(reading, k)) continue;
+    const c = text[k] ?? "";
+    if (SCRIPT_QUOTES.includes(c)) {
+      const literal = literalAt(reading, k, limit);
+      if (literal === null) break;
+      k = literal[1];
+    } else if ("([{".includes(c)) {
+      depth++;
+    } else if (")]}".includes(c) && --depth === 0) {
+      if (c === ")") close = k;
+      break;
+    }
+  }
+  spend(k - open);
+  return close;
+}
+
+/**
+ * The literals an expression from `from` to `to` (a substitution's, or brackets') chooses its
+ * value from, each as its text's start and its closing quote, or null where it may take any other
+ * value: a literal, alone, in brackets, as a condition's branch (`c?"a":"b"`, nested) or after
+ * `||` or `??` (`"a"||"b"`). A condition may hold anything but a `:` or `,` of its own; a value
+ * that is a name, a call or anything else is one built at run time.
+ * @param {Reading} reading
+ * @param {number} from
+ * @param {number} to
+ * @returns {[number, number][] | null}
+ */
+function literalChoice(reading, from, to) {
+  const { text } = reading;
+  /** @param {number} k */
+  const space = (k) => {
+    let j = k;
+    while (j < to && ASCII_SPACE.has(text[j] ?? "")) j++;
+    return j;
+  };
+  /**
+   * The top-level `?` of a condition that starts at an index, or -1.
+   * @param {number} p
+   */
+  const conditionEnd = (p) => {
+    let depth = 0;
+    let k = p;
+    let mark = -1;
+    for (; k < to; k++) {
+      if (isSpelled(reading, k)) continue;
+      const c = text[k] ?? "";
+      if (SCRIPT_QUOTES.includes(c)) {
+        const literal = literalAt(reading, k, to);
+        if (literal === null) break;
+        k = literal[1];
+      } else if ("([{".includes(c)) {
+        depth++;
+      } else if (")]}".includes(c)) {
+        if (depth === 0) break;
+        depth--;
+      } else if (depth === 0 && c === "?" && text[k + 1] === "?") {
+        k++;
+      } else if (depth === 0 && c === "?" && text[k + 1] !== ".") {
+        mark = k;
+        break;
+      } else if (depth === 0 && (c === ":" || c === "," || c === ";")) {
+        break;
+      }
+    }
+    spend(k - p);
+    return mark;
+  };
+  /**
+   * @param {number} p
+   * @param {number} depth
+   * @returns {{ values: [number, number][], end: number } | null}
+   */
+  const value = (p, depth) => {
+    if (depth > 8) return null;
+    const at = space(p);
+    const literal = literalAt(reading, at, to);
+    /** @type {{ values: [number, number][], end: number } | null} */
+    let r = null;
+    if (literal !== null) {
+      r = { values: [literal], end: literal[1] + 1 };
+    } else if (text[at] === "(") {
+      const inner = value(at + 1, depth + 1);
+      const close = inner === null ? -1 : space(inner.end);
+      if (inner === null || text[close] !== ")") return null;
+      r = { values: inner.values, end: close + 1 };
+    } else {
+      const mark = conditionEnd(at);
+      const yes = mark === -1 ? null : value(mark + 1, depth + 1);
+      const colon = yes === null ? -1 : space(yes.end);
+      if (yes === null || text[colon] !== ":") return null;
+      const no = value(colon + 1, depth + 1);
+      if (no === null) return null;
+      r = { values: [...yes.values, ...no.values], end: no.end };
+    }
+    for (;;) {
+      const op = space(r.end);
+      if (!text.startsWith("||", op) && !text.startsWith("??", op)) return r;
+      const more = value(op + 2, depth + 1);
+      if (more === null) return null;
+      r = { values: [...r.values, ...more.values], end: more.end };
+    }
+  };
+  const r = value(from, 0);
+  return r !== null && space(r.end) === to ? r.values : null;
+}
+
+/**
  * Where a template literal whose text starts at `from` closes, within MAX_SRCSET: the next raw
  * backtick past each substitution in it (the `}` the lexer pairs it with, where it ran, else the
  * counted one), or -1 when none closes it within the bound (a `}` or the backtick past it), so a
@@ -1531,6 +1927,7 @@ function firstFrom(list, at) {
  */
 function templateEnd(from, spans, starts, ticks) {
   for (let i = from; i - from <= MAX_SRCSET; ) {
+    spend(1);
     const tick = firstFrom(ticks, i);
     const start = firstFrom(starts, i);
     const close = start < tick ? spans.get(start)?.at(-1) : undefined;
@@ -1562,16 +1959,109 @@ function scanReading(reading, kind, found) {
    * @param {UrlStart} how
    */
   const read = (scheme, start, context, how) => {
-    for (const r of readAuthority(reading, start, context, kind === "script")) {
+    const reads = readAuthority(reading, start, context, kind === "script");
+    if (how === "scheme" || how === "run-time") reads.push(...joinedReads(start, context, 0));
+    for (const r of reads) {
       const authority = context.kind === "srcset" ? r.authority.replace(/,+$/, "") : r.authority;
-      keep(foundUrl(scheme, { ...r, authority }, how));
+      keep(foundUrl(scheme, { ...r, authority }, how, context.network === true));
     }
   };
   /** @type {Map<number, number[]> | null} */
   let spans = null;
+  /** The `}`s that surely close a substitution (substitutions). */
+  /** @type {Set<number>} */
+  const sureEnds = new Set();
   const spansOf = () => {
-    spans ??= substitutions(reading);
+    spans ??= substitutions(reading, sureEnds);
     return spans;
+  };
+  /**
+   * The authorities a script joins to a URL's scheme from literals (`"https://"+"host/x"`,
+   * `` `https://`+`host` ``), or chooses from literals in a substitution or brackets right after
+   * it (`` `https://${p?`app.host`:`staging.host`}/x` ``, `` `https://`+(p?`a.host`:`b.host`) ``),
+   * each literal as a host (with the text after the choice where the literal names only the
+   * host's start), read as past the literal's end (`crossed`). A plain identifier, a call or
+   * anything else between them is a host built at run time: the page's own policy refuses it.
+   * Joins are followed up to MAX_JOINS deep, each over at most MAX_SUBSTITUTION characters.
+   * @param {number} start where the authority starts
+   * @param {UrlContext} context
+   * @param {number} depth
+   * @returns {AuthorityRead[]}
+   */
+  const joinedReads = (start, context, depth) => {
+    /** @type {AuthorityRead[]} */
+    const reads = [];
+    if (kind !== "script" || depth >= MAX_JOINS) return reads;
+    /**
+     * @param {[number, number][]} values each literal's text, from its start to its closing quote
+     * @param {() => string[]} after the authorities the text after the choice goes on with
+     */
+    const choose = (values, after) => {
+      /** @type {string[] | null} */
+      let goesOn = null;
+      for (const [from, to] of values) {
+        let value = "";
+        for (let k = from; k < to; k++) {
+          const c = text[k] ?? "";
+          if (c !== "\t" && c !== "\n" && c !== "\r") value += UNMARKED.get(c) ?? c;
+        }
+        spend(to - from);
+        const cut = value.search(/[/\\?#]/);
+        if (cut === -1 && goesOn === null) goesOn = after();
+        const rests = cut === -1 ? (goesOn ?? []) : [""];
+        for (const rest of rests) {
+          const authority = cut === -1 ? value + rest : value.slice(0, cut);
+          reads.push({ authority, cut: false, crossed: true, built: false });
+        }
+      }
+    };
+    const space = (/** @type {number} */ k) => {
+      let j = k;
+      while (ASCII_SPACE.has(text[j] ?? "")) j++;
+      return j;
+    };
+    /** @param {number} k */
+    const rawQuote = (k) => SCRIPT_QUOTES.includes(text[k] ?? "") && !isSpelled(reading, k);
+    if (text[start] === "$" && text[start + 1] === "{" && !isSpelled(reading, start + 1)) {
+      const close = spansOf().get(start)?.at(-1);
+      if (close === undefined || close - start > MAX_SUBSTITUTION) return reads;
+      const values = literalChoice(reading, start + 2, close);
+      if (values !== null) {
+        choose(values, () =>
+          readAuthority(reading, close + 1, context, true).map((r) => r.authority),
+        );
+      }
+      return reads;
+    }
+    if (context.kind !== "quoted" || text[start] !== context.end) return reads;
+    if (isSpelled(reading, start) !== context.spelled) return reads;
+    let k = space(start + 1);
+    if (text[k] !== "+" || text[k + 1] === "+") return reads;
+    k = space(k + 1);
+    if (rawQuote(k)) {
+      // The next literal goes on with the URL: its slashes, then its authority.
+      SLASH_RUN.lastIndex = k + 1;
+      const from = k + 1 + (SLASH_RUN.exec(text)?.[0].length ?? 0);
+      /** @type {UrlContext} */
+      const next = { kind: "quoted", end: text[k] ?? "", spelled: false };
+      for (const r of readAuthority(reading, from, next, true)) reads.push({ ...r, crossed: true });
+      reads.push(...joinedReads(from, next, depth + 1));
+    } else if (text[k] === "(") {
+      const close = closingBracket(reading, k, Math.min(text.length, k + MAX_SUBSTITUTION));
+      const values = close === -1 ? null : literalChoice(reading, k + 1, close);
+      if (values !== null) {
+        choose(values, () => {
+          let j = space(close + 1);
+          if (text[j] !== "+") return [""];
+          j = space(j + 1);
+          if (!rawQuote(j)) return [""];
+          /** @type {UrlContext} */
+          const next = { kind: "quoted", end: text[j] ?? "", spelled: false };
+          return readAuthority(reading, j + 1, next, true).map((r) => r.authority);
+        });
+      }
+    }
+    return reads;
   };
   /** @type {Set<number> | null} */
   let equals = null;
@@ -1610,14 +2100,63 @@ function scanReading(reading, kind, found) {
     const start = unknownStarts[lo - 1];
     return start !== undefined && brace - start <= MAX_SUBSTITUTION;
   };
+  /** Where a refresh key stands, least first (ScriptFacts' `refreshNear`). */
+  /** @type {number[] | null} */
+  let refreshKeys = null;
+  /** @type {ScriptFacts | null} */
+  const script =
+    kind === "script"
+      ? {
+          closes: closesSubstitution,
+          surely: (brace) => {
+            spansOf();
+            return !isSpelled(reading, brace) && sureEnds.has(brace);
+          },
+          refreshNear: (at) => {
+            if (refreshKeys === null) {
+              refreshKeys = [...text.matchAll(/refresh/gi)].map((m) => m.index ?? 0);
+              spend(text.length);
+            }
+            const key = lastBefore(refreshKeys, at);
+            return key !== -1 && at - key <= REFRESH_REACH;
+          },
+        }
+      : null;
   /** @type {Map<number, boolean>} */
   const listEnds = new Map();
   /** @param {number} comma */
   const inList = (comma) => srcsetListBefore(text, comma, listEnds);
   /** @param {number} start */
-  const contexts = (start) =>
-    contextsBefore(reading, start, kind, inTag, inList, closesSubstitution);
-  // The colons SCHEME reads: the slashes after one are its scheme's.
+  const contexts = (start) => contextsBefore(reading, start, kind, inTag, inList, script);
+  /** The raw quotes, and the `}`s counting or the lexer pairs with a `${`, least first. */
+  /** @type {number[] | null} */
+  let rawQuotes = null;
+  /** @type {number[] | null} */
+  let pairedEnds = null;
+  /**
+   * The string a script's colon is in, judged by the nearest raw quote or paired `}` before it:
+   * the quote's index where it opens a string (opensString), the `}`'s where it closes a
+   * substitution (template literal text), or -1 where the colon is code's (`"key":`, `c?"a":`).
+   * @param {number} colon
+   */
+  const stringOf = (colon) => {
+    if (rawQuotes === null) {
+      rawQuotes = [];
+      for (let k = 0; k < text.length; k++) {
+        const c = text[k];
+        if ((c === '"' || c === "'" || c === "`") && !isSpelled(reading, k)) rawQuotes.push(k);
+      }
+      spend(text.length);
+    }
+    pairedEnds ??= [...new Set([...spansOf().values()].flat())].sort((a, b) => a - b);
+    const quote = lastBefore(rawQuotes, colon);
+    const brace = lastBefore(pairedEnds, colon);
+    if (brace > quote) return brace;
+    return quote !== -1 && opensString(text, quote) ? quote : -1;
+  };
+  // The colons SCHEME reads: the slashes after one are its scheme's. Each pattern's search below
+  // is one pass over the text.
+  spend(3 * text.length);
   /** @type {Set<number>} */
   const schemeColons = new Set();
   for (const m of text.matchAll(SCHEME)) {
@@ -1642,18 +2181,29 @@ function scanReading(reading, kind, found) {
     // White space after the slashes is the URL's own: its host's, or a user name's before an `@`.
     const host = start + run.length;
     if (before === ":") {
-      // A scheme's slashes; or, in a script, after a scheme written at run time, where the colon
-      // starts a string or follows a substitution (`` `${s}://host` ``, `s+"://host"`,
-      // `` `http${s?"s":""}://host` ``), whose host is read as https.
-      if (kind !== "script" || schemeColons.has(start - 1)) continue;
-      for (const context of contexts(start - 1)) {
-        if (context.kind === "quoted") read("https", host, context, "run-time");
-      }
+      // A scheme's slashes; or, in a script, `://` in a string's or a template literal's text
+      // after a scheme written at run time or not at all (`` `${s}://host` ``, `s+"://host"`,
+      // `` `http${s?"s":""}://host` ``, `` `${p}s://host` ``, `"{scheme}://host"`, `"%s://host"`),
+      // whose host is read as https. Only two raw slashes: a regular expression never starts with
+      // them (`"key":/\/\/cdn\.example\//`), and only in a string, whose quote opens it; and not
+      // after a scheme the text fixes, whose URL is that scheme's and loads no web page
+      // (`git+https://`, `chrome://`, `socks5://`, `mysql://`).
+      if (kind !== "script" || schemeColons.has(start - 1) || !rawSlashes(reading, start)) continue;
+      const at = stringOf(start - 1);
+      if (at === -1 || fixedScheme(text, start - 1, at)) continue;
+      /** @type {UrlContext} */
+      const context =
+        text[at] === "}"
+          ? { kind: "quoted", end: "`", spelled: false, guessed: true }
+          : { kind: "quoted", end: text[at] ?? "", spelled: false };
+      read("https", host, context, "run-time");
       continue;
     }
     const how = run.includes("/") ? "slashes" : "backslashes";
     for (const context of contexts(start)) {
-      if (context.kind !== "none") read("https", host, context, how);
+      if (context.kind === "none") continue;
+      if (context.raw === true && !rawSlashes(reading, start)) continue;
+      read("https", host, context, how);
     }
   }
   /** @type {number[] | null} */
@@ -1676,6 +2226,7 @@ function scanReading(reading, kind, found) {
         if ((ASCII_SPACE.has(c) || c === ">") && !isSpelled(reading, close)) break;
         close++;
       }
+      spend(close - from);
       if (close - from > MAX_SRCSET) close = -1;
     } else if (open === "`" && !isSpelled(reading, from - 1)) {
       // A template literal: it closes past each substitution in it (`${asset(`a.png`)}`), within
@@ -1686,6 +2237,7 @@ function scanReading(reading, kind, found) {
         for (let k = nextRaw(reading, "`", 0); k !== Infinity; k = nextRaw(reading, "`", k + 1)) {
           ticks.push(k);
         }
+        spend(text.length);
       }
       close = templateEnd(from, spansOf(), substitutionStarts, ticks);
     } else {
@@ -1694,10 +2246,14 @@ function scanReading(reading, kind, found) {
       while (close !== -1 && isSpelled(reading, close) !== spelled) {
         close = text.indexOf(open, close + 1);
       }
+      spend((close === -1 ? text.length : close) - from);
     }
     const end = close === -1 ? Math.min(text.length, from + MAX_SRCSET) : close;
     if (end < text.length && close === -1) {
+      // Refused whole (url-unread), so its candidates are not read: each list read is one that
+      // closes within the bound, and lists that run on past it cost no more than finding so.
       keep({ url: `srcset@${from}`, origin: null, userinfo: false, unread: true, unparsed: false });
+      continue;
     }
     for (const start of srcsetStarts(text, from, end)) {
       // What the URL parser strips first: a C0 control (white space has split the candidate).
@@ -1736,6 +2292,25 @@ export function urlsIn(text, options = {}) {
   const found = new Map();
   for (const reading of readings(text, kind)) scanReading(reading, kind, found);
   return [...found.values()];
+}
+
+/**
+ * urlsIn's URLs and the work it did (`visits`: the characters its passes and read-backs
+ * visited), stopped with an error once the work passes `limit`: a test's bound on the work, which
+ * load cannot trip, in place of a clock's.
+ * @param {string} text
+ * @param {{ kind?: string, limit?: number }} [options] as urlsIn's, and the bound
+ * @returns {{ urls: FoundUrl[], visits: number }}
+ */
+export function scanWork(text, options = {}) {
+  const from = work.visits;
+  work.limit = from + (options.limit ?? Infinity);
+  try {
+    const urls = urlsIn(text, options);
+    return { urls, visits: work.visits - from };
+  } finally {
+    work.limit = Infinity;
+  }
 }
 
 /**
@@ -1906,10 +2481,8 @@ function textFindings(at, file, bytes) {
     for (const marker of SERVER_MARKERS) {
       if (marker.pattern.test(text)) add("server-only", marker.what);
     }
-    for (const m of text.matchAll(SETTING_NAME)) {
-      const name = m[0];
-      // A name a shell expands is a sample's shell variable (`curl "$FIN_API/v4/whoami"`).
-      if (SAMPLE_NAMES.has(name) || text[(m.index ?? 0) - 1] === "$") continue;
+    for (const name of new Set([...text.matchAll(SETTING_NAME)].map((m) => m[0]))) {
+      if (SAMPLE_NAMES.has(name)) continue;
       add(
         "setting-name",
         `names the server setting ${clean(name, 60)} (FW-C12: a build takes public settings only)`,

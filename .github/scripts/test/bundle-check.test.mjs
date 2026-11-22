@@ -14,11 +14,38 @@ import {
   checkStatic,
   mapSources,
   originsIn,
+  scanWork,
   urlsIn,
 } from "../bundle-check.mjs";
-import { assertLinearTime, tempDir, writeTree } from "./helpers.mjs";
+import { tempDir, writeTree } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../bundle-check.mjs", import.meta.url));
+
+/**
+ * How many characters the scanner may visit per character of a large input: every pass and
+ * read-back it makes, in every reading, stays within a fixed multiple of the text's length. The
+ * adversarial inputs below take under 20, and real bundles (four readings of a script, a few
+ * passes each) about 30; a read-back that loses its linear bound takes thousands.
+ */
+const WORK_PER_CHARACTER = 64;
+/**
+ * The longest a work-count test may run: only a hang, never load, comes near it. The work's bound
+ * is counted, not timed (linearWork).
+ */
+const HANG = { timeout: 600_000 };
+
+/**
+ * The origins the scanner names in a large text, asserting its work there is linear: at most
+ * WORK_PER_CHARACTER characters visited per character of the text, counted by the scanner
+ * (scanWork), which stops a run that passes the bound at once. Load slows a run, never adds to
+ * its count, so no clock decides.
+ * @param {string} text
+ * @param {string} kind
+ */
+function linearOrigins(text, kind) {
+  const { urls } = scanWork(text, { kind, limit: WORK_PER_CHARACTER * text.length });
+  return [...new Set(urls.flatMap((u) => (u.origin === null ? [] : [u.origin])))];
+}
 
 /**
  * @param {import("node:test").TestContext} t
@@ -135,6 +162,12 @@ describe("static builds", () => {
       ["JSON-escaped slashes", "assets/a.json", '{"u":"https:\\/\\/tracker.example/p"}'],
       ["unicode-escaped slashes", "assets/a.js", 'fetch("https:\\u002f\\u002ftracker.example/p")'],
       ["a port", "assets/a.js", 'fetch("http://localhost:3000/x")'],
+      // Every value that loads or navigates: a button's form action and a video's poster too.
+      ["a button's formaction", "index.html", "<button formaction=//evil.example/x>go</button>"],
+      ["a video's poster", "index.html", '<video poster="//evil.example/p.png"></video>'],
+      ["a written poster", "assets/a.js", "e.innerHTML='<video poster=//evil.example/p.png>';"],
+      ["a formAction prop", "assets/a.js", 'jsx("button",{formAction:"//evil.example/x"})'],
+      ["a poster property", "assets/a.js", "v.poster=`//evil.example/p.png`"],
     ];
     for (const [what, file, text] of cases) {
       assert.ok(staticRules(t, { [file]: text }).includes("third-party-origin"), what);
@@ -755,6 +788,12 @@ describe("static builds", () => {
       'f("(",a,b,/\\//)',
       'x="a,b".split(","),/\\//.test(x)',
       'x="Hello, world, and more, //evil.example/x";',
+      // Code in a string, a bracket in it: no candidate holds one where no key opens the list.
+      'x="f(x), //note";',
+      `x=\`${"$"}{name}(${"$"}{args}), //eslint-disable-line\`;`,
+      'x="f(x), //cdn.example.org/a";',
+      'x="see (the docs), //evil.example/x";',
+      'a=f(y),/\\//.test(z);x="q",g(h),/\\/a\\//.test(b);',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -804,6 +843,15 @@ describe("static builds", () => {
       const found = staticRules(t, { "assets/a.js": text });
       assert.deepEqual(found, ["third-party-origin"], `${what}: ${found.join()}`);
     }
+    // So in a srcset: a candidate of backslashes alone names a host only where it has a dot.
+    assert.deepEqual(
+      staticRules(t, { "index.html": `<img srcset="${bs(2)}evil${bs(1)}x.png 2x">` }),
+      [],
+    );
+    assert.deepEqual(
+      staticRules(t, { "index.html": `<img srcset="${bs(2)}evil.example${bs(1)}x.png 2x">` }),
+      ["third-party-origin"],
+    );
   });
 
   it("reads an unquoted attribute in markup a script writes", (t) => {
@@ -1083,6 +1131,75 @@ describe("static builds", () => {
     }
   });
 
+  it("reads a written tag on in a later string or a literal nested in a substitution", (t) => {
+    const d = "$";
+    // A tag whose name a substitution ends or writes, or the code joins to a `<`, goes on past
+    // its literal's backtick: in a concatenation, a `+=`, a list's next item, a condition's
+    // branch, a literal nested in a substitution. The build's minifier (rolldown) prints these
+    // from honest source: an optional attribute, a tag whose name is a variable.
+    for (const text of [
+      `e.innerHTML=\`<a${d}{t}\`+n(e)+\` href=//evil.example/x>go</a>\``,
+      `let r=\`<a${d}{t}\`;n&&(r+=\` data-x=${d}{n}\`),r+=\` href=//evil.example/x>go</a>\`,e.innerHTML=r`,
+      `[\`<a${d}{c}\`,\` href=//evil.example/x>\`].join("")`,
+      `e.innerHTML=\`<a${d}{c}\`+" href=//evil.example/x>go</a>"`,
+      `e.innerHTML=\`<${d}{t} class=${d}{n}${d}{r?\` href=//evil.example/x\`:\`\`}>go</${d}{t}>\``,
+      `e.innerHTML=\`<${d}{t} class=x \`+(n?\`href=//evil.example/x\`:\`\`)+\`>go</${d}{t}>\``,
+      `e.innerHTML=\`<${d}{t} title=\`+n+\` href=//evil.example/x>go</${d}{t}>\``,
+      `e.innerHTML=\`<form${d}{c} ${d}{a?\`action=//evil.example/s\`:\`\`}>\`;`,
+      `e.innerHTML=\`<img${d}{c} ${d}{u?\`src=//evil.example/x.png\`:\`\`}>\`;`,
+      `let n=\`<${d}{t} \`;n+=\`href=//evil.example/x>\`;`,
+      `[\`<${d}{t}\`,\`href=//evil.example/x>\`].join(\` \`)`,
+      `e.innerHTML=\`<a${d}{c}${d}{h?\` href=//evil.example/x\`:\`\`}>go</a>\`;`,
+      `e.innerHTML=\`<form${d}{c}${d}{p?\` action=//evil.example/x\`:\`\`}>\`;`,
+      `e.innerHTML=\`<${d}{t}\`+(h?\` href=//evil.example/x\`:\`\`)+\`>\`;`,
+      `e.innerHTML=[\`<a${d}{c}\`,\` href=//evil.example/x>\`].join(\`\`);`,
+      `let h=\`<a${d}{c}\`;h+=\` href=//evil.example/x>\`;`,
+      `e.innerHTML=\`<img${d}{c}${d}{s?\` src=//evil.example/x.png\`:\`\`}>\`;`,
+      `e.innerHTML=\`<a${d}{t} \`+(n?\`href=//evil.example/y\`:\`\`)+\`>go</a>\``,
+      `e.innerHTML=\`<a${d}{t} title=\`+n+\` href=//evil.example/w>go</a>\``,
+      `e.innerHTML=\`<a${d}{t} ${d}{n?\`href=//evil.example/v\`:\`\`}>go</a>\``,
+      `e.innerHTML=\`<${d}{t} \`+(n?\`src=//evil.example/z.png\`:\`\`)+\`>\``,
+      `e.innerHTML=\`<a${d}{c}${d}{\`href=//evil.example/x\`}>go</a>\`;`,
+      "e.innerHTML=`<`+t+` href=//evil.example/x>go`;",
+      'e.innerHTML="<"+t+" href=//evil.example/x>go";',
+    ]) {
+      assert.deepEqual(staticOrigins(t, { "assets/a.js": text }), ["https://evil.example"], text);
+    }
+    // The grid: every way a written tag opens, every way the next string follows it, and every
+    // attribute that loads or navigates.
+    const b = "`";
+    const opens = [
+      `${b}<a${d}{c}`,
+      `${b}<a${d}{c} `,
+      `${b}<${d}{t}`,
+      `${b}<${d}{t} `,
+      `${b}<a${d}{c} title=x `,
+      `${b}<${d}{t} title=${d}{n} `,
+      `${b}<${b}+t+${b}`,
+      `${b}<${b}+t+${b} `,
+    ];
+    /** @type {((open: string, attribute: string) => string)[]} */
+    const goesOn = [
+      (o, a) => `e.innerHTML=${o}${b}+${b} ${a}>${b};`,
+      (o, a) => `e.innerHTML=${o}${b}+n+${b} ${a}>${b};`,
+      (o, a) => `e.innerHTML=${o}${b}+(n?${b} ${a}${b}:${b}${b})+${b}>${b};`,
+      (o, a) => `e.innerHTML=${o}${d}{n?${b} ${a}${b}:${b}${b}}>${b};`,
+      (o, a) => `e.innerHTML=${o}${d}{${b} ${a}${b}}>${b};`,
+      (o, a) => `let h=${o}${b};h+=${b} ${a}>${b};`,
+      (o, a) => `e.innerHTML=[${o}${b},${b} ${a}>${b}].join(${b}${b});`,
+      (o, a) => `e.innerHTML=${o}${b}+" ${a}>";`,
+    ];
+    const attributes = ["href", "action", "formaction", "src", "poster", "srcset"];
+    for (const open of opens) {
+      for (const goOn of goesOn) {
+        for (const name of attributes) {
+          const text = goOn(open, `${name}=//evil.example/x`);
+          assert.ok(originsIn(text, { kind: "script" }).includes("https://evil.example"), text);
+        }
+      }
+    }
+  });
+
   it("reads CSS a script holds, and a style attribute's references, through CSS's escapes", (t) => {
     /** @type {[string, string, string, string][]} */
     const cases = [
@@ -1352,6 +1469,26 @@ describe("static builds", () => {
         'x=n+"; //evil.example/x";',
         "https://evil.example",
       ],
+      // A time a substitution starts and the text goes on, and url= a list joins to its time.
+      [
+        "a time's digits after a substitution",
+        "assets/a.js",
+        `m.content=\`${"$"}{n}0; //evil.example/x\`;`,
+        "https://evil.example",
+      ],
+      [
+        "url= joined to a time written apart",
+        "assets/a.js",
+        'm.content=[n,"url=//evil.example/x"].join(";");',
+        "https://evil.example",
+      ],
+      // A single label where a refresh key stands near: the value is a refresh's.
+      [
+        "a single label after a refresh key",
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",content:\`${"$"}{n}; //intranet/x\`})`,
+        "https://intranet",
+      ],
     ];
     for (const [what, file, text, origin] of cases) {
       const found = staticOrigins(t, { [file]: text });
@@ -1366,24 +1503,46 @@ describe("static builds", () => {
       // After a time written at run time, a comment's note names no host, nor does a host built
       // at run time.
       ["assets/a.js", `x=\`${"$"}{a}; // note\`;y=n+"; // note";z=\`${"$"}{code};//${"$"}{c}\`;`],
+      // A code generator's comments with no refresh key near: a single label names no host on
+      // the network.
+      ["assets/a.js", 'x=code+";//eslint-disable-line";'],
+      ["assets/a.js", `x=\`${"$"}{code};//eslint-disable-line\`;`],
+      ["assets/a.js", 'x=code+"; //@ts-ignore";'],
+      ["assets/a.js", `x=\`let a=${"$"}{v};//TODO\`;`],
+      ["assets/a.js", 'x=";//@ts-ignore";y=x+"; //istanbul ignore next";'],
+      // A regular expression after a string's closing quote and `,` or `;`, or after a `}`: its
+      // escaped slashes are code's, never two raw ones; nor does a plain string's `"${"` close a
+      // substitution before a comment.
+      ["assets/a.js", `o={k:"${"$"}{"},/\\/\\/x\\.y/.test(d)`],
+      ["assets/a.js", 'a=":",/\\n/.test(b)&&c();'],
+      ["assets/a.js", 'x+="(";/\\//.test(y)&&z();'],
+      ["assets/a.js", 'k="=",/\\\\/.test(q)&&r();'],
+      ["assets/a.js", 'p=e?"?":"&",/\\//.test(u)&&v();'],
+      ["assets/a.js", 'w="+",/\\r/.test(t)&&a();'],
+      ["assets/a.js", 'a.type="new";/\\//.test(y)&&z();'],
+      ["assets/a.js", 'm="in";/\\/\\/cdn\\.example\\.com/.test(u)&&w();'],
+      ["assets/a.js", `x="${"$"}{";f(function(){a()},/\\//.test(b));`],
+      ["assets/a.js", `f({a:"${"$"}{"}, //cdn.example.com\n)`],
     ];
     for (const [file, text] of passes) {
       assert.deepEqual(staticRules(t, { [file]: text }), [], text);
     }
   });
 
-  it("looks for a refresh before each URL in time linear in the text", () => {
+  it("looks for a refresh before each URL with work linear in the text", HANG, () => {
     // Quoted path data: a digit run and white space before each `//`, as an icon set has.
     const piece = `<path d="${"1".repeat(120)}${" ".repeat(120)}x//a"/>`;
-    assertLinearTime(
-      "an icon set's path data",
-      (scale) => `<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(750 * scale)}</svg>`,
-      (svg) =>
-        assert.deepEqual(
-          urlsIn(svg).map((u) => u.origin),
-          ["http://www.w3.org"],
-        ),
-    );
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(3_000)}</svg>`;
+    assert.deepEqual(linearOrigins(svg, "markup"), ["http://www.w3.org"]);
+    // A refresh a script writes before each of many URLs, with no `url=` and with it.
+    const d = "$";
+    for (const text of [
+      'x=n+"; //a.b";'.repeat(50_000),
+      `x=\`${d}{n}0; url=//a.b\`;`.repeat(40_000),
+      'm=[n,"url=//a.b"].join(";");'.repeat(30_000),
+    ]) {
+      assert.deepEqual(linearOrigins(text, "script"), ["https://a.b"], text.slice(0, 30));
+    }
   });
 
   it("reads a fixed host a template literal's substitution follows, and one it precedes", (t) => {
@@ -1619,81 +1778,166 @@ describe("static builds", () => {
     }
   });
 
-  it("reads a large script's tags in one pass, its regular expressions left alone", () => {
-    const loop = "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;a=>b}";
-    const tag = `e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
-    assertLinearTime(
-      "a loop's comparisons and regular expressions",
-      (scale) => loop.repeat(7_500 * scale),
-      (code) => assert.deepEqual(urlsIn(code, { kind: "script" }), []),
-    );
-    assertLinearTime(
-      "a tag written after them",
-      (scale) => `${loop.repeat(7_500 * scale)}${tag}`,
-      (code) =>
-        assert.deepEqual(originsIn(code, { kind: "script" }), ["https://collector.evil.example"]),
-    );
-  });
-
-  it("pairs a large script's substitutions in time linear in the text", () => {
-    // Each `${` in a plain string starts a lexer run that reads out of step, up to its bound.
+  it("reads `://` in a script's strings, and a host joined from literals or chosen among them", (t) => {
     const d = "$";
-    const strings = `"${d}{" '${d}{' x=/${d}{/g;`;
-    const tail = `i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
-    assertLinearTime(
-      "dollar-braces in plain strings and regular expressions",
-      (scale) => `${strings.repeat(10_000 * scale)}${tail}`,
-      (text) => assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]),
-    );
-  });
-
-  it("reads a large script's srcset lists in time linear in the text", () => {
-    // Keyed template lists, each walking through substitutions, and descriptors before commas.
-    const d = "$";
-    const last = `jsx("img",{srcSet:\`${d}{f(\`a\`)} 1x, //evil.example/b.png 2x\`})`;
-    assertLinearTime(
-      "keyed lists and descriptors before commas",
-      (scale) =>
-        `${`i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(25 * scale)}x=\`${"/a.png 2x, //react.dev/b.png ".repeat(5_000 * scale)}\`;${last}`,
-      (text) =>
-        assert.deepEqual(originsIn(text, { kind: "script" }), [
-          "https://react.dev",
-          "https://evil.example",
-        ]),
-    );
-    // Keyed template lists whose substitutions close far away, nested in each other or closing
-    // one by one: each list is read up to MAX_SRCSET, and one that closes past it is refused
-    // (url-unread).
-    /** @type {[string, (scale: number) => string][]} */
-    const far = [
+    /** @type {[string, string, string[]][]} */
+    const cases = [
+      // `://` and a host in a string's text, whatever writes the scheme before it.
       [
-        "lists nested in each other",
-        (scale) => `${`i.srcset=\`${d}{`.repeat(2_500 * scale)}x${"}".repeat(2_500 * scale)}\``,
+        "a placeholder",
+        'a.href="{scheme}://evil.example/x".replace("{scheme}",s);',
+        ["https://evil.example"],
+      ],
+      ["a formatter", 'a.href=fmt("%s://evil.example/x",s);', ["https://evil.example"]],
+      ["a scheme's start", `a.href=\`${d}{p}s://evil.example/x\`;`, ["https://evil.example"]],
+      ["a variable's name", 'a.href="$SCHEME://evil.example/x";', ["https://evil.example"]],
+      // A URL split into literals the script joins.
+      ["split at the scheme", 'fetch("https://"+"evil.example/x")', ["https://evil.example"]],
+      ["the same in backticks", "fetch(`https://`+`evil.example/x`)", ["https://evil.example"]],
+      ["split in the slashes", 'fetch("https:/"+"/evil.example/x")', ["https://evil.example"]],
+      ["a run-time scheme, then", 'fetch(s+"://"+"evil.example/x")', ["https://evil.example"]],
+      // Hosts chosen among literals right after a fixed scheme.
+      [
+        "a condition in a substitution",
+        `window.location.href=\`https://${d}{e?\`app.evil.example\`:\`staging.evil.example\`}/login\``,
+        ["https://app.evil.example", "https://staging.evil.example"],
       ],
       [
-        "lists around a long text",
-        (scale) =>
-          `${`srcset:\`${d}{`.repeat(1_500 * scale)}${"a".repeat(37_500 * scale)}${"}".repeat(1_500 * scale)}\``,
+        "a condition in brackets",
+        "window.location.href=`https://`+(e?`app.evil.example`:`staging.evil.example`)+`/login`",
+        ["https://app.evil.example", "https://staging.evil.example"],
       ],
       [
-        "lists closing one by one",
-        (scale) => `${`i.srcset=\`${d}{`.repeat(2_500 * scale)}0${"}`".repeat(2_500 * scale)}`,
+        "a host's start chosen, the rest after it",
+        `location.href=\`https://${d}{p?"":"staging."}evil.example/x\`;`,
+        ["https://evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "a host's start chosen in brackets, the rest joined",
+        'location.href="https://"+(p?"":"www.")+"evil.example/x";',
+        ["https://evil.example", "https://www.evil.example"],
+      ],
+      [
+        "nested conditions and a default",
+        `fetch(\`https://${d}{a?"a.evil.example":b?"b.evil.example":"c.evil.example"||"d.evil.example"}/x\`)`,
+        [
+          "https://a.evil.example",
+          "https://b.evil.example",
+          "https://c.evil.example",
+          "https://d.evil.example",
+        ],
       ],
     ];
-    for (const [what, make] of far) {
-      assertLinearTime(what, make, (text) =>
-        assert.ok(
-          urlsIn(text, { kind: "script" }).some((u) => u.unread),
-          `${what}: not refused`,
-        ),
+    for (const [what, text, origins] of cases) {
+      assert.deepEqual(staticOrigins(t, { "assets/a.js": text }), origins, what);
+    }
+    // A regular expression after a quoted key, a condition's branch or a case label, as the build's
+    // minifier (rolldown) prints it: its escaped slashes are code, not `://`, and a colon after a
+    // string's closing quote is code's. A host a name, a call or anything but literals chooses is
+    // built at run time (the page's policy refuses it), and a single label after a run-time
+    // scheme names no host on the network.
+    for (const text of [
+      'const e={"text/html":/\\/index\\.html$/,"application/json":/\\/data\\.json$/,"image/svg+xml":/\\/icons\\.svg$/}',
+      'const e=e=>e?`strict`:/\\/app\\.css$/,t={"a-b":/\\\\d+\\.\\d+/}',
+      'switch(a){case"x":/\\/a.b/.test(c)&&f();break}',
+      "const r=e?``:/\\/\\/cdn.jsdelivr.net/;",
+      'export const R={"cdn-host":/\\/\\/cdn\\.example\\.org\\//};',
+      "function f(e,t){return e?`a`:/\\/\\/cdn\\.example\\.org\\//.test(t)}",
+      'const P={"you-tube":/\\/\\/www\\.youtube\\.com\\/embed\\//};',
+      'switch(x){case"a":/\\/\\/a\\.b\\.c\\//.test(y)&&f()}',
+      'a=e?"":/\\//.test(t);',
+      'switch(k){case"x":/\\//.test(y)&&z();break}',
+      `a=e?\`${d}{b}\`:/\\//.test(t);`,
+      'a=e?"":/\\/\\/cdn\\.example\\.com\\//.test(t);',
+      'x={"a:":/\\/\\/cdn\\.example\\.com\\//};',
+      'x={"a"://cdn.example.com/docs say so\n1};',
+      'u="https://"+host;v="https://"+(a||b);w="https://"+f("x.example");',
+      `u=\`https://${d}{f(\`x.example\`)}/a\`;v=\`https://${d}{a?b:\`x.example\`}/a\`;`,
+      `u="{scheme}://intranet/x";v=\`${d}{p}s://localhost:8080/\`;`,
+      // A scheme the text fixes, not a web one: its URL loads no web page.
+      'u="git+https://github.example/x/y.git";v="mongodb://db.example.com:27017/d";',
+      `w=\`socks5://proxy.example.com:${d}{p}\`;x="see chrome://policy.";y='a xhttps://evil.example';`,
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("reads a large script's tags in one pass, its regular expressions left alone", HANG, () => {
+    const loop = "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;a=>b}".repeat(30_000);
+    assert.deepEqual(linearOrigins(loop, "script"), []);
+    const tag = `e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
+    assert.deepEqual(linearOrigins(`${loop}${tag}`, "script"), ["https://collector.evil.example"]);
+    // Many written tags, each held for the strings after it, before the tag whose URL has the
+    // pass read them all: in backticks alone, where the next of each other quote kind is found
+    // once, not again at each tag; and beside strings in each quote kind.
+    const d = "$";
+    const written = `e.innerHTML=\`<a${d}{c}\`+\` x=1\`+(n?\`<\`+t+\` y=2\`:\`\`);`;
+    for (const each of [written, `${written}f("a",'b');`]) {
+      assert.deepEqual(linearOrigins(`${each.repeat(20_000)}${tag}`, "script"), [
+        "https://collector.evil.example",
+      ]);
+    }
+  });
+
+  it("pairs a large script's substitutions with work linear in the text", HANG, () => {
+    // Each `${` in a plain string starts a lexer run that reads out of step, up to its bound.
+    const d = "$";
+    const strings = `"${d}{" '${d}{' x=/${d}{/g;`.repeat(40_000);
+    const tail = `i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
+    assert.deepEqual(linearOrigins(`${strings}${tail}`, "script"), ["https://evil.example"]);
+  });
+
+  it(
+    "reads a large script's schemes written at run time and joined hosts with linear work",
+    HANG,
+    () => {
+      // `://` after a scheme written at run time, each in a string the nearest quote opens, and
+      // hosts joined to a scheme from literals or chosen among them.
+      const d = "$";
+      for (const [text, origins] of /** @type {[string, string[]][]} */ ([
+        ['a="{s}://x.y"+b;'.repeat(50_000), ["https://x.y"]],
+        [`a=\`${d}{p}://x.y\`;b={"k":/\\/\\/z\\.w\\//};`.repeat(40_000), ["https://x.y"]],
+        ['u="https://"+(a?"x.y":"z.w")+"/p";'.repeat(30_000), ["https://x.y", "https://z.w"]],
+        [
+          `u=\`https://${d}{a?\`x.y\`:b?\`z.w\`:\`q.r\`}/p\`;`.repeat(30_000),
+          ["https://x.y", "https://z.w", "https://q.r"],
+        ],
+      ])) {
+        assert.deepEqual(linearOrigins(text, "script"), origins, text.slice(0, 30));
+      }
+    },
+  );
+
+  it("reads a large script's srcset lists with work linear in the text", HANG, () => {
+    // Keyed template lists, each walking through substitutions, and descriptors before commas.
+    const d = "$";
+    const lists = `i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(100);
+    const commas = `x=\`${"/a.png 2x, //react.dev/b.png ".repeat(20_000)}\`;`;
+    const last = `jsx("img",{srcSet:\`${d}{f(\`a\`)} 1x, //evil.example/b.png 2x\`})`;
+    assert.deepEqual(linearOrigins(`${lists}${commas}${last}`, "script"), [
+      "https://react.dev",
+      "https://evil.example",
+    ]);
+    // Keyed template lists whose substitutions close far away, side by side, nested in each
+    // other or closing one by one: a list is read up to MAX_SRCSET, and one that closes past it
+    // is refused (url-unread) without its candidates being read.
+    for (const far of [
+      `${`i.srcset=\`${d}{`.repeat(10_000)}x${"}".repeat(10_000)}\``,
+      `${`srcset:\`${d}{`.repeat(6_000)}${"a".repeat(150_000)}${"}".repeat(6_000)}\``,
+      `${`i.srcset=\`${d}{`.repeat(10_000)}0${"}`".repeat(10_000)}`,
+    ]) {
+      const { urls } = scanWork(far, { kind: "script", limit: WORK_PER_CHARACTER * far.length });
+      assert.ok(
+        urls.some((u) => u.unread),
+        `${far.slice(0, 20)}: not refused`,
       );
     }
-    // A list no key opens, read back over many commas.
-    assertLinearTime(
-      "a list over many commas",
-      (scale) => `x="${"/a.png, ".repeat(50_000 * scale)}//evil.example/b.png 2x";`,
-      (text) => assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]),
-    );
+    // A list no key opens, read back over many commas from each of many URLs in it: each piece
+    // is read back once (the answers kept for the commas passed), never again from a later URL.
+    const list = `x="${"/a.png, //react.dev/b.png, ".repeat(25_000)}//evil.example/b.png 2x";`;
+    assert.deepEqual(linearOrigins(list, "script"), ["https://react.dev", "https://evil.example"]);
+    const plain = `x="${"/a.png, ".repeat(200_000)}//evil.example/b.png 2x";`;
+    assert.deepEqual(linearOrigins(plain, "script"), ["https://evil.example"]);
   });
 
   it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {
@@ -1844,12 +2088,18 @@ describe("static builds", () => {
       staticRules(t, { "assets/a.js": `const s=${JSON.stringify(sample)},c="Copy as FIN_KEY=";` }),
       [],
     );
-    // Any name a shell expands is a sample's shell variable: the console's key page as the build
-    // prints it (its Try it sample, its copy button's text and what it copies).
-    const keysPage =
-      '(0,Z.jsx)(w,{variant:`block`,label:`Try it`,value:`curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`});' +
+    // The console's key page as the build prints it (its Try it sample, its copy button's text
+    // and what it copies) passes with the plan's names; a sample that names any other, after a
+    // `$` included, is refused: `$FIN_API` is no name the plan gives a shell variable.
+    const keysPage = (/** @type {string} */ api) =>
+      `(0,Z.jsx)(w,{variant:\`block\`,label:\`Try it\`,value:\`curl "$${api}/v4/whoami" -H "Authorization: Bearer $FIN_KEY"\`});` +
       `function ve(e){return\`FIN_KEY=${"$"}{e}\`}const c=\`Copy as FIN_KEY=…\`;`;
-    assert.deepEqual(staticRules(t, { "assets/keys.js": keysPage }), []);
+    assert.deepEqual(staticRules(t, { "assets/keys.js": keysPage("FIN_API_URL") }), []);
+    assert.deepEqual(staticRules(t, { "assets/keys.js": keysPage("FIN_API") }), ["setting-name"]);
+    assert.deepEqual(
+      staticRules(t, { "guides/a/index.html": '<pre><code>curl "$FIN_API/v4/x"</code></pre>' }),
+      ["setting-name"],
+    );
     for (const name of ["FIN_KEY_SALT", "FIN_API_ORIGIN", "FIN_API", "FIN_KEYS"]) {
       assert.deepEqual(
         staticRules(t, { "assets/a.js": `const k="${name}";` }),
