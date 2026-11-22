@@ -93,6 +93,21 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
 
+/**
+ * Where a desired alert, monitor or heartbeat routes, as the reference its body holds
+ * (`policy:staging-quiet`), or "" when it holds none; undefined for a kind that routes nowhere.
+ */
+export function routeOf(object: DesiredObject): string | undefined {
+  let target: unknown;
+  if (object.kind === "alert") {
+    const escalation = object.body.escalation_target;
+    target = isRecord(escalation) ? escalation.policy_id : undefined;
+  } else if (object.kind === "monitor" || object.kind === "heartbeat") {
+    target = object.body.policy_id;
+  } else return undefined;
+  return isRef(target) ? target.$ref : "";
+}
+
 /** Reads everything the plan compares. */
 export async function readRemote(
   clients: Clients,
@@ -502,14 +517,27 @@ function partChanges(
   out.push({ field, path, from, to: from === to ? differs : to });
 }
 
+/**
+ * The changes from view `a` to view `b`. A field `hidden` names holds a private number: a change
+ * to it prints the placeholder for the files' side and "(not shown)" for Better Stack's, never
+ * either value.
+ */
 function diffViews(
   a: Record<string, unknown>,
   b: Record<string, unknown>,
   nameOf: NameOf,
   mask: Mask,
+  hidden: Readonly<Record<string, string>> = {},
 ): Change[] {
   const changes: Change[] = [];
   for (const field of Object.keys(b)) {
+    const placeholder = Object.hasOwn(hidden, field) ? hidden[field] : undefined;
+    if (placeholder !== undefined) {
+      if (!sameValue(a[field], b[field])) {
+        changes.push({ field, path: field, from: "(not shown)", to: placeholder });
+      }
+      continue;
+    }
     partChanges(
       field,
       field,
@@ -530,6 +558,12 @@ export interface PlanOptions {
   readonly today: string;
   /** A dry run deletes and pauses nothing, so MA-03's cap is a note for it, not a refusal. */
   readonly dryRun?: boolean;
+  /**
+   * The one policy every alert, monitor and heartbeat must route to, and the only policy the
+   * files may define (staging's `staging-quiet`, spec 08 §7.9): anything else is refused (MA-06).
+   * monitoring:check refuses the same files first (RT-01); this holds whatever reaches the plan.
+   */
+  readonly quietPolicy?: string;
   /**
    * The run's mask, applied to each whole changed value before it is cut to fit a line (the
    * apply's own `out` masks the joined text again). Without it, nothing is masked here.
@@ -624,6 +658,22 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
     if (loud.length > 0)
       refusals.push(`MA-06 ${object.kind} ${object.key} asks for ${loud.join(", ")}`);
   }
+  // MA-06: in staging everything routes to the quiet policy, and no other policy is defined.
+  const quiet = options.quietPolicy;
+  if (quiet !== undefined) {
+    for (const object of desired.objects) {
+      if (object.kind === "policy" && object.key !== quiet) {
+        refusals.push(`MA-06 policy ${object.key} is defined; ${quiet} is the only policy here`);
+      }
+      const route = routeOf(object);
+      if (route !== undefined && route !== `policy:${quiet}`) {
+        const to = route.startsWith("policy:") ? route.slice("policy:".length) : "no policy";
+        refusals.push(
+          `MA-06 ${object.kind} ${object.key} routes to ${to || "no policy"}; everything here routes to ${quiet}`,
+        );
+      }
+    }
+  }
 
   // IDs known now: everything that exists remotely; and back from an ID to its name, for output.
   const ids = new Map<string, string>();
@@ -678,7 +728,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
           delete have[field];
         }
       }
-      const changes = diffViews(have, want, nameOf, options.mask ?? ((t) => t));
+      const changes = diffViews(have, want, nameOf, options.mask ?? ((t) => t), object.private);
       // MA-06: a managed object someone made loud is put back by this update; say so.
       const loud = LOUD.filter((c) => existing.attributes[c] === true && want[c] === false);
       if (loud.length > 0) {

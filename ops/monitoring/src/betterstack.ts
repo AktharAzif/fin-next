@@ -10,6 +10,10 @@
 // Nothing here prints. Errors carry the method, the path, the status and Better Stack's own error
 // strings, never a request body, a header or a token. A call that gets no answer (a dropped
 // connection, the timeout) is a BetterStackError too, with status 0; a read is tried twice.
+//
+// A client made without a token sends no Authorization header: its fetch authenticates each call
+// itself. That is how `pnpm fin monitoring apply` runs this code (apply-cli.ts): pnpm fin holds the
+// team tokens and adds the right one to each call it forwards, so they never reach this process.
 
 export const HOSTS = {
   telemetry: "https://telemetry.betterstack.com",
@@ -131,15 +135,16 @@ function toResource(value: unknown): Resource {
 }
 
 export class BetterStackClient {
-  readonly #token: string;
+  /** The team token, or undefined when the fetch authenticates every call itself. */
+  readonly #token: string | undefined;
   readonly #fetch: Fetch;
   readonly #base: string;
 
-  constructor(product: Product, token: string, fetchImpl: Fetch = fetch) {
-    if (token.trim() === "" || /\s/.test(token.trim())) {
+  constructor(product: Product, token: string | undefined, fetchImpl: Fetch = fetch) {
+    if (token !== undefined && (token.trim() === "" || /\s/.test(token.trim()))) {
       throw new BetterStackError(`the ${product} token is empty or malformed`, 0);
     }
-    this.#token = token.trim();
+    this.#token = token?.trim();
     this.#fetch = fetchImpl;
     this.#base = HOSTS[product];
   }
@@ -164,7 +169,7 @@ export class BetterStackClient {
         return await this.#fetch(url, {
           method,
           headers: {
-            Authorization: `Bearer ${this.#token}`,
+            ...(this.#token === undefined ? {} : { Authorization: `Bearer ${this.#token}` }),
             Accept: "application/json",
             ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           },

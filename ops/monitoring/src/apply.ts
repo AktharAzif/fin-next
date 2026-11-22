@@ -1,8 +1,11 @@
 // `pnpm fin monitoring apply <env> [--dry-run] [--confirm-delete <count>]
 //   [--assert-empty-team <team>] [--split-sources] [--redeliver]`
 //
-// ops/fin's dispatcher loads `monitoringApply` and calls it with a MonitoringContext (the hook is
-// recorded in the pull request). It applies ops/monitoring/<env>/ through Better Stack's APIs,
+// `pnpm fin monitoring apply` runs this through apply-cli.ts, ops/monitoring's own entry point,
+// as a child process: ops/fin may not import ops/monitoring (CI-14), so pnpm fin holds the run
+// (the lock, run.registered before the first write, a run.step per write, run.done), the team
+// tokens and the overlay, and forwards each Better Stack call this code makes (MonitoringContext's
+// `fetchAuthenticates` and `hooks`). It applies ops/monitoring/<env>/ through Better Stack's APIs,
 // idempotent by name (OB-05, spec 08 §7.11):
 //   - monitoring:check runs first, and any finding refuses the run;
 //   - the dry-run difference is always printed before anything changes (MA-01);
@@ -10,15 +13,20 @@
 //   - more than 3 deletions and pauses together need --confirm-delete <count> equal to their
 //     number (MA-03; a dry run, which deletes nothing, only notes it and still reports drift);
 //   - a heartbeat the files drop is paused with a reason, never deleted (MA-04);
-//   - no object without a policy, and nothing in staging that calls, texts or pushes (MA-05,
-//     MA-06); no ai_sre member (MA-08); every overlay key the files name has a value (MA-10);
-//   - two remote objects with one name refuse the run, since it works by name.
-// Tokens come from files named by FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE and
-// FIN_BETTERSTACK_UPTIME_TOKEN_FILE; the monitor header from FIN_MONITOR_HEADER_FILE. IDs, ingest
-// hosts, DSNs and heartbeat URLs are resolved at run time; the new ones are handed to
+//   - no object without a policy, and nothing in staging that calls, texts or pushes, or routes
+//     to any policy but staging-quiet (MA-05, MA-06); no ai_sre member (MA-08); every overlay key
+//     the files name has a value (MA-10);
+//   - two remote objects with one name refuse the run, since it works by name;
+//   - after a run that wrote anything, everything is read back and compared with the files again:
+//     any object that differs fails the run (`readBack`), named with the parts that differ, never
+//     a value.
+// Called directly, the tokens come from files named by FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE and
+// FIN_BETTERSTACK_UPTIME_TOKEN_FILE, and the monitor header from FIN_MONITOR_HEADER_FILE. IDs,
+// ingest hosts, DSNs and heartbeat URLs are resolved at run time; the new ones are handed to
 // `ctx.deliver` (the services' sealed variables) and never printed. Everything printed passes
 // one mask: the hostnames, the zones and the monitor header's value, Better Stack's own error
-// text included.
+// text included. The overlay's numbers (thresholds, windows, grace periods) are never printed: a
+// change to one shows its placeholder (`<threshold:clock-skew>`).
 import { readFileSync, statSync } from "node:fs";
 import {
   BetterStackClient,
@@ -35,6 +43,8 @@ import {
   type Clients,
   formatPlan,
   makePlan,
+  type Plan,
+  type PlanOptions,
   type RemoteObject,
   readRemote,
   resolveRefs,
@@ -73,10 +83,62 @@ export interface MonitoringContext {
   readonly mask?: (text: string) => string;
   /** Sets one sealed variable on one service. Absent: the run lists what it could not deliver. */
   readonly deliver?: (secret: SecretDelivery) => Promise<void>;
+  /**
+   * Whether `fetch` authenticates every call itself (pnpm fin forwards each call and adds the team
+   * token, apply-cli.ts): no token file is read then, and no token reaches this code.
+   */
+  readonly fetchAuthenticates?: boolean;
+  /** The secret monitor header's value, from the caller; when absent, FIN_MONITOR_HEADER_FILE. */
+  readonly monitorHeader?: string;
+  /** The caller's run (pnpm fin's registered run), told before and around every write. */
+  readonly hooks?: RunHooks;
+}
+
+/** What a run's plan will do, by count (run.registered records it). */
+export interface PlanCounts {
+  readonly create: number;
+  readonly update: number;
+  readonly delete: number;
+  readonly pause: number;
+  readonly manual: number;
+  readonly unchanged: number;
+}
+
+/** One write, by what it changes: never a value. */
+export interface WriteChange {
+  readonly op: "create" | "update" | "delete" | "pause";
+  readonly kind: string;
+  readonly key: string;
+}
+
+export interface RunHooks {
+  /**
+   * Called once, after the plan is printed and has passed every rule, before the first write; not
+   * in a dry run and not when nothing is to be written. A throw stops the run with nothing written.
+   */
+  beforeWrites(plan: PlanCounts): Promise<void>;
+  /** Called around each write: `send` makes the write's one call. */
+  writing<T>(change: WriteChange, send: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * How a run ended: a dry run; a real run with nothing to write; every write made and read back as
+ * the files say; refused before anything was written (monitoring:check, a rule); stopped partway
+ * by Better Stack (a refusal, a call with no answer, a read-back it could not make); or written,
+ * but read back different from the files.
+ */
+export type Outcome = "dry-run" | "unchanged" | "applied" | "refused" | "stopped" | "mismatch";
+
+/** The read-back after the writes: how many objects were compared, and which ones differ. */
+export interface ReadBack {
+  readonly compared: number;
+  /** `<kind>:<name>` of each object that differs from the files, or a refusal's rule. */
+  readonly mismatched: readonly string[];
 }
 
 export interface ApplyResult {
   readonly exitCode: number;
+  readonly outcome: Outcome;
   readonly dryRun: boolean;
   readonly created: number;
   readonly updated: number;
@@ -90,6 +152,10 @@ export interface ApplyResult {
    * A real run that applied everything leaves no drift.
    */
   readonly drift: boolean;
+  /** How many refusals stopped the run before it wrote anything. */
+  readonly refusals: number;
+  /** After a run that wrote anything and was not stopped. */
+  readonly readBack?: ReadBack;
 }
 
 export class UsageError extends Error {
@@ -310,6 +376,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   const out = (text: string) => ctx.stdout.write(`${mask(text)}\n`);
   const result = {
     exitCode: 1,
+    outcome: "refused" as Outcome,
     dryRun: flags.dryRun,
     created: 0,
     updated: 0,
@@ -318,6 +385,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     delivered: 0,
     undelivered: [] as string[],
     drift: false,
+    refusals: 0,
   };
   // MA-02: the team is the environment's, never a string from the files being applied.
   const team = `fin-${ctx.env}`;
@@ -329,14 +397,23 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     out(
       `${formatFindings(findings)}\nmonitoring apply: refused, monitoring:check has ${findings.length} finding(s)`,
     );
-    return result;
+    return { ...result, refusals: findings.length };
   }
   const { config } = loadEnv(ctx.root, ctx.env);
   if (config === undefined) throw new UsageError(`no files for ${ctx.env}`);
 
-  const telemetryToken = readSecretFile(environ, "FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE");
-  const uptimeToken = readSecretFile(environ, "FIN_BETTERSTACK_UPTIME_TOKEN_FILE");
-  if ((environ.FIN_MONITOR_HEADER_FILE ?? "") !== "") {
+  // With a forwarding fetch, the caller adds the tokens: none is read here.
+  const telemetryToken =
+    ctx.fetchAuthenticates === true
+      ? undefined
+      : readSecretFile(environ, "FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE");
+  const uptimeToken =
+    ctx.fetchAuthenticates === true
+      ? undefined
+      : readSecretFile(environ, "FIN_BETTERSTACK_UPTIME_TOKEN_FILE");
+  if (ctx.monitorHeader !== undefined) {
+    monitorHeader = ctx.monitorHeader;
+  } else if ((environ.FIN_MONITOR_HEADER_FILE ?? "") !== "") {
     monitorHeader = readSecretFile(environ, "FIN_MONITOR_HEADER_FILE");
   } else if (!flags.dryRun && config.monitors.monitors.length > 0) {
     throw new UsageError(
@@ -375,18 +452,23 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   try {
     remote = await readRemote(clients, desired, config.sources.namePrefix);
   } catch (error) {
-    if (refusedBy(error)) return result;
+    if (refusedBy(error)) return { ...result, outcome: "stopped" };
     throw error;
   }
   const today = (ctx.now?.() ?? new Date()).toISOString().slice(0, 10);
-  const plan = makePlan(desired, remote, {
+  const planOptions: PlanOptions = {
     team,
     ...(flags.assertEmptyTeam === undefined ? {} : { assertEmptyTeam: flags.assertEmptyTeam }),
-    ...(flags.confirmDelete === undefined ? {} : { confirmDelete: flags.confirmDelete }),
     headerValues: monitorHeader !== undefined,
     today,
-    dryRun: flags.dryRun,
     mask,
+    // MA-06: everything in staging routes to the one quiet policy.
+    ...(ctx.env === "staging" ? { quietPolicy: STAGING_QUIET } : {}),
+  };
+  const plan = makePlan(desired, remote, {
+    ...planOptions,
+    ...(flags.confirmDelete === undefined ? {} : { confirmDelete: flags.confirmDelete }),
+    dryRun: flags.dryRun,
   });
 
   // MA-01: the difference is printed before anything changes.
@@ -396,12 +478,18 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     out("  note: the monitor header's value was not read, so it was not compared");
   if (plan.refusals.length > 0) {
     out(plan.refusals.map((r) => `refused: ${r}`).join("\n"));
-    return { ...result, drift: plan.drift };
+    return { ...result, drift: plan.drift, refusals: plan.refusals.length };
   }
   if (flags.dryRun) {
     out(`dry run: nothing changed${plan.drift ? " (differences found)" : ""}`);
-    return { ...result, drift: plan.drift, exitCode: 0 };
+    return { ...result, outcome: "dry-run", drift: plan.drift, exitCode: 0 };
   }
+  const counts = countPlan(plan);
+  const writeCount = counts.create + counts.update + counts.delete + counts.pause;
+  // The caller's run registers before the first write; nothing is written if it cannot.
+  if (writeCount > 0) await ctx.hooks?.beforeWrites(counts);
+  const write = <T>(change: WriteChange, send: () => Promise<T>): Promise<T> =>
+    ctx.hooks === undefined ? send() : ctx.hooks.writing(change, send);
 
   // Apply, parents first. Anything that stops the writes (a refusal, a call with no answer, a
   // fault in the run itself) still leaves whatever was created before it with its secrets
@@ -459,23 +547,25 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       .filter((a) => a.op === "create" || a.op === "update")
       .sort((a, b) => byKind(a) - byKind(b));
     for (const action of writes) {
+      const { kind, key } = action.object;
       if (action.op === "create") {
         const path = pathFor(action.object, ids);
         const body = sendable(action.object, ids, false);
         creating = action.object;
-        const resource = await clientFor(clients, action.object.kind).create(path, body);
+        const resource = await write({ op: "create", kind, key }, () =>
+          clientFor(clients, kind).create(path, body),
+        );
         creating = undefined;
-        ids.set(`${action.object.kind}:${action.object.key}`, resource.id);
+        ids.set(`${kind}:${key}`, resource.id);
         createdResources.push({ object: action.object, resource });
         result.created += 1;
-        out(`created ${action.object.kind} ${action.object.key}`);
+        out(`created ${kind} ${key}`);
       } else if (action.op === "update") {
-        await clientFor(clients, action.object.kind).update(
-          itemPath(action.remote),
-          sendable(action.object, ids, true),
-        );
+        const path = itemPath(action.remote);
+        const body = sendable(action.object, ids, true);
+        await write({ op: "update", kind, key }, () => clientFor(clients, kind).update(path, body));
         result.updated += 1;
-        out(`updated ${action.object.kind} ${action.object.key}`);
+        out(`updated ${kind} ${key}`);
       }
     }
     // Deletions: alerts before their explorations, then the rest.
@@ -483,13 +573,19 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       .filter((a): a is Extract<Action, { op: "delete" }> => a.op === "delete")
       .sort((a, b) => (a.remote.kind === "alert" ? -1 : b.remote.kind === "alert" ? 1 : 0));
     for (const action of deletions) {
-      await clientFor(clients, action.remote.kind).remove(itemPath(action.remote));
+      const { kind, key } = action.remote;
+      await write({ op: "delete", kind, key }, () =>
+        clientFor(clients, kind).remove(itemPath(action.remote)),
+      );
       result.deleted += 1;
       out(`deleted ${action.remote.kind} ${action.remote.key}`);
     }
     for (const action of plan.actions) {
       if (action.op !== "pause") continue;
-      await clients.uptime.update(itemPath(action.remote), { paused: true });
+      const { kind, key } = action.remote;
+      await write({ op: "pause", kind, key }, () =>
+        clients.uptime.update(itemPath(action.remote), { paused: true }),
+      );
       result.paused += 1;
       out(`paused ${action.remote.kind} ${action.remote.key}: ${action.reason}`);
     }
@@ -537,21 +633,88 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   }
   await deliverAll(ctx, toDeliver, result);
   if (result.undelivered.length > 0) {
-    out(
-      `not delivered (set these sealed variables with a registered pnpm fin monitoring apply ${ctx.env} --redeliver):\n  ${result.undelivered.join("\n  ")}`,
-    );
+    const how =
+      ctx.deliver === undefined
+        ? `this run sets no service variable; Better Stack keeps each value, and a pnpm fin monitoring apply ${ctx.env} --redeliver that delivers reads them again`
+        : `set these sealed variables with a registered pnpm fin monitoring apply ${ctx.env} --redeliver`;
+    out(`not delivered (${how}):\n  ${result.undelivered.join("\n  ")}`);
   }
   out(
     `${failed ? "stopped after" : "applied"}: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted, ${result.paused} paused, ${result.delivered} secret(s) delivered`,
   );
   if (fault !== undefined) throw fault.error;
-  return { ...result, drift: failed, exitCode: failed ? 1 : 0 };
+  if (failed) return { ...result, outcome: "stopped", drift: true, exitCode: 1 };
+  if (writeCount === 0) return { ...result, outcome: "unchanged", exitCode: 0 };
+
+  // Read everything back and compare it with the files again, as a dry run would: what this run
+  // wrote, and what it left alone, must now be exactly what the files say.
+  let after: Awaited<ReturnType<typeof readRemote>>;
+  try {
+    after = await readRemote(clients, desired, config.sources.namePrefix);
+  } catch (error) {
+    if (!refusedBy(error)) throw error;
+    out("read back: Better Stack could not be read after the writes, so nothing was compared");
+    return { ...result, outcome: "stopped", drift: true, exitCode: 1 };
+  }
+  const { lines, ...readBack } = compareBack(
+    desired,
+    makePlan(desired, after, { ...planOptions, dryRun: true }),
+  );
+  if (readBack.mismatched.length === 0) {
+    out(`read back: ${readBack.compared} object(s) compared, every one as the files say`);
+    return { ...result, outcome: "applied", exitCode: 0, readBack };
+  }
+  out(
+    `read back: ${lines.length} difference(s) from the files after the writes, ${readBack.compared} object(s) compared:\n  ${lines.join("\n  ")}`,
+  );
+  return { ...result, outcome: "mismatch", drift: true, exitCode: 1, readBack };
 }
 
-/** The command ops/fin's dispatcher registers. */
-export const command = {
-  name: "monitoring apply",
-  usage:
-    "pnpm fin monitoring apply <env> [--dry-run] [--confirm-delete <count>] [--assert-empty-team <team>] [--split-sources] [--redeliver]",
-  run: monitoringApply,
-} as const;
+/** The quiet policy every staging alert, monitor and heartbeat routes to (spec 08 §7.9). */
+export const STAGING_QUIET = "staging-quiet";
+
+/** A plan's actions by count. */
+export function countPlan(plan: Plan): PlanCounts {
+  const count = (op: Action["op"]) => plan.actions.filter((a) => a.op === op).length;
+  return {
+    create: count("create"),
+    update: count("update"),
+    delete: count("delete"),
+    pause: count("pause"),
+    manual: count("manual"),
+    unchanged: plan.unchanged,
+  };
+}
+
+/**
+ * What a plan made after the writes says: every action it still holds (but `manual`, which no run
+ * makes) and every refusal is a difference. Each is named by kind, name and the parts that differ,
+ * never a value.
+ */
+export function compareBack(
+  desired: { readonly objects: readonly DesiredObject[] },
+  plan: Plan,
+): ReadBack & { readonly lines: readonly string[] } {
+  const mismatched: string[] = [];
+  const lines: string[] = [];
+  for (const action of plan.actions) {
+    if (action.op === "manual") continue;
+    const object = action.op === "create" || action.op === "update" ? action.object : action.remote;
+    mismatched.push(`${object.kind}:${object.key}`);
+    const what =
+      action.op === "create"
+        ? "missing"
+        : action.op === "update"
+          ? `differs in ${[...new Set(action.changes.map((c) => c.path))].join(", ")}`
+          : action.op === "delete"
+            ? "still there, though the files dropped it"
+            : "not paused, though the files dropped it";
+    lines.push(`${object.kind} ${object.key}: ${what}`);
+  }
+  for (const refusal of plan.refusals) {
+    // A rule's refusal by its rule; the one refusal without a rule is two objects with one name.
+    mismatched.push(`refused:${/^MA-\d{2}\b/.exec(refusal)?.[0] ?? "duplicate-name"}`);
+    lines.push(`refused: ${refusal}`);
+  }
+  return { compared: desired.objects.length, mismatched, lines };
+}

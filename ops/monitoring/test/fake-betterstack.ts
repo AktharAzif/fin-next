@@ -59,10 +59,24 @@ export class FakeBetterStack {
     return list;
   }
 
+  /**
+   * A new ID, past every ID the store holds: a test may copy another fake's store into this one,
+   * and Better Stack never gives two objects one ID.
+   */
+  #newId(): string {
+    for (const list of this.store.values()) {
+      for (const item of list) {
+        const n = Number(item.id);
+        if (Number.isInteger(n) && n >= this.#next) this.#next = n + 1;
+      }
+    }
+    return String(this.#next++);
+  }
+
   /** Adds an object as if someone had made it in Better Stack's UI. */
   seed(collection: string, attributes: Attrs): Item {
     const item = {
-      id: String(this.#next++),
+      id: this.#newId(),
       attributes: { team_name: this.#options.team ?? "fin-staging", ...attributes },
     };
     this.items(collection).push(item);
@@ -121,7 +135,7 @@ export class FakeBetterStack {
         : json({ data: { id: item.id, attributes: item.attributes } });
     }
     if (method === "POST") {
-      const newId = String(this.#next++);
+      const newId = this.#newId();
       const attributes: Attrs = {
         ...(body as Attrs),
         team_name: this.#options.team ?? "fin-staging",
