@@ -205,7 +205,7 @@ describe("MC-15 refuses", () => {
       level: "error",
       fields: {},
       alerts: [],
-      owed: ["thing-failing", "sign-in-failing"],
+      owed: ["thing-failing", "sign-in-code-contested"],
       writtenBy: "test",
     };
     const other: CatalogEntry = {
@@ -315,7 +315,7 @@ describe("MC-15 refuses", () => {
       level: "warn",
       fields: {},
       alerts: [],
-      owed: ["sign-in-failing"],
+      owed: ["sign-in-code-contested"],
       writtenBy: "test",
     };
     const platform = [...(fragments.platform ?? []), extra];
