@@ -28,12 +28,13 @@ import {
   type RealmState,
   requireActor,
 } from "../src/guard.ts";
+import { newId } from "../src/ids.ts";
 import { acceptInvitation, inviteMember } from "../src/invitations.ts";
 import { changeMemberRole, removeMember } from "../src/members.ts";
 import { createFirstOrganization } from "../src/organizations.ts";
 import { createOrgs, type Orgs } from "../src/orgs.ts";
 import { ORGS_ACTIONS } from "../src/step-up.ts";
-import type { TestDatabase } from "./db.ts";
+import { seed, type TestDatabase } from "./db.ts";
 
 export const ORIGIN = "https://console.example.com";
 export const DOCS_ORIGIN = "https://developer.example.com";
@@ -509,6 +510,86 @@ export async function memberOf(
   const joined = await acceptAs(h, who, invited.value.invitationId);
   if (!joined.ok) throw joined.error;
   return { who, memberId: joined.value.memberId };
+}
+
+/**
+ * A member of the organisation in the role given, for a test whose subject is not how they joined:
+ * a person signed in by code, with an authenticator unless `factor` is false (as `memberOf`), whose
+ * membership is then written as the acceptance writes it (`inviter` as the one who invited them,
+ * their session's current organisation set), as a fixture with the triggers off. It skips the
+ * invitation with its intent and proof and the acceptance (with its own, once the person has a
+ * factor): six of `memberOf`'s ten realm units for a person with an authenticator. No invitation
+ * row, no member.invited or member.joined event and no member-joined email is written; a test that
+ * reads any of those uses `memberOf`.
+ */
+export async function seededMemberOf(
+  h: Harness,
+  inviter: SignedIn,
+  orgId: string,
+  label: string,
+  roleKey: string,
+  options: { factor?: boolean } = {},
+): Promise<{ who: SignedIn; memberId: string }> {
+  const who = await person(h, label, { factor: options.factor ?? true });
+  const memberId = newId("mem", systemClock);
+  await seed(
+    h.admin,
+    `WITH joined AS (
+       INSERT INTO identity.member (id, organization_id, user_id, role_key, invited_by)
+       VALUES ($1, $2, $3, $4, $5)
+     )
+     UPDATE identity.session SET current_organization_id = $2, updated_at = now()
+      WHERE user_id = $3`,
+    [memberId, orgId, who.userId, roleKey, inviter.userId],
+  );
+  return { who, memberId };
+}
+
+/**
+ * A custom role in the organisation, for a test whose subject is not the role's making: its row at
+ * version 1 and its permissions, as `createRole` writes them, as a fixture with the triggers off.
+ * It skips the intent, its proof and the re-send: `roleAs`'s three realm units. The permissions are
+ * given as `roleAs` would be given them, a set the editor accepts. No role.created event is
+ * written; a test that reads it uses `roleAs`.
+ */
+export async function seededRole(
+  h: Harness,
+  creator: SignedIn,
+  orgId: string,
+  name: string,
+  permissions: string[],
+): Promise<string> {
+  const roleId = newId("rol", systemClock);
+  await seed(
+    h.admin,
+    `WITH made AS (
+       INSERT INTO identity.role (id, organization_id, name, description, created_by, version)
+       VALUES ($1, $2, $3, '', $4, 1)
+       RETURNING id
+     )
+     INSERT INTO identity.role_permission (role_id, permission)
+     SELECT made.id, unnest($5::text[]) FROM made`,
+    [roleId, orgId, name, creator.userId, permissions],
+  );
+  return roleId;
+}
+
+/**
+ * Starts the realm and this area's actions before a file's first test, in a `beforeAll` of its own
+ * after the one that makes the harness (as @fin/identity's harness does): a person signed in by
+ * code and given an authenticator, their first organisation, and one invitation with its intent
+ * and proof, all from an address and a browser of their own. A test process's first realm
+ * requests pay once for what every later request reuses: the library's context, the code each
+ * path runs (compiled on its first call), and the pools' first connections with their server
+ * backends' caches. Without this the file's first test carried all of it, whatever it was about.
+ * Nothing a test asserts reads this person, their organisation, their invitation or their mail.
+ */
+export async function warmUp(h: Harness): Promise<void> {
+  const { who, orgId } = await ownerWithOrganization(h, "warm_up");
+  const invited = await inviteAs(h, who, orgId, unique("warm_up_invitee"), "admin");
+  if (!invited.ok) throw invited.error;
+  await h.events({ organizationId: orgId });
+  await h.outbox(who.email);
 }
 
 /** Makes a custom role in the organisation with an intent, as the actor. */
