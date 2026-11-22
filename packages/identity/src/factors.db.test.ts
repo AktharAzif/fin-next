@@ -93,7 +93,11 @@ describe("setting up an authenticator", () => {
     }
     expect(verify.status, JSON.stringify(verify.json)).toBe(200);
     expect((await sessionRow(browser))?.assurance).toBe("aal2");
-    const events = (await h.events()).map((e) => e.event);
+    // This person's events: the warm-up's person (beforeAll) set up an authenticator of its own.
+    const id = await userId(email);
+    const events = (await h.events())
+      .filter((e) => e.target_id === id || e.ref_ids.includes(id))
+      .map((e) => e.event);
     expect(events).toContain("two_factor.setup_started");
     expect(events).toContain("two_factor.enabled");
     const notices = (await h.outbox(email)).map(

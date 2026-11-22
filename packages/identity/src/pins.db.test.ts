@@ -10,13 +10,7 @@ import {
   type TestDatabase,
   testRole,
 } from "../test/db.ts";
-import {
-  codeSignIn,
-  createHarness,
-  type Harness,
-  setUpAuthenticator,
-  warmUp,
-} from "../test/harness.ts";
+import { codeSignIn, createHarness, type Harness, setUpAuthenticator } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
 import { OutsideUnitError } from "./ports/pg-database.ts";
 import { developerSchema, staffSchema } from "./schema/tables.ts";
@@ -29,11 +23,6 @@ beforeAll(async () => {
   database = await createTestDatabase("pins");
   h = await createHarness(database, "developer");
   staff = await createHarness(database, "staff");
-});
-
-// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
-beforeAll(async () => {
-  await warmUp(h);
 });
 
 afterAll(async () => {
