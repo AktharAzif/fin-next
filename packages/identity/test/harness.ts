@@ -13,6 +13,7 @@ import { createPgDatabase, type PgFinDatabase } from "../src/ports/pg-database.t
 import { createRealm, type Realm, type RealmDeps } from "../src/realm.ts";
 import type { RequestContext } from "../src/request.ts";
 import type { TestDatabase } from "./db.ts";
+import { mark, report, timedRequest } from "./split.ts";
 import { SoftAuthenticator } from "./webauthn.ts";
 
 export const ORIGIN: Readonly<Record<RealmName, string>> = {
@@ -143,9 +144,8 @@ export class Browser {
     body?: unknown,
     headers: Record<string, string> = {},
   ): Promise<Answer> {
-    const response = await this.#h.realm.handler(
-      this.request(method, path, body, headers),
-      this.context(),
+    const response = await timedRequest(method, path, () =>
+      this.#h.realm.handler(this.request(method, path, body, headers), this.context()),
     );
     const setCookies = this.absorb(response);
     const text = await response.text();
@@ -263,6 +263,7 @@ export async function codeSignIn(h: Harness, browser: Browser, email: string): P
  */
 export async function warmUp(h: Harness): Promise<void> {
   if (h.realm.settings.realm !== "developer") throw new Error("warmUp starts a developer realm");
+  const started = mark();
   const browser = h.browser();
   const email = `warm.up.${randomBytes(4).toString("hex")}@example.com`;
   const signedIn = await codeSignIn(h, browser, email);
@@ -271,6 +272,7 @@ export async function warmUp(h: Harness): Promise<void> {
   if (verify.status !== 200) throw new Error(`the warm-up set-up answered ${verify.status}`);
   await h.events();
   await h.outbox(email);
+  report("(warm-up)", started);
 }
 
 /** The secret bytes of an `otpauth://` URI, and a code for now. */

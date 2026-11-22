@@ -11,6 +11,7 @@ import pg, { type Client, type Pool, type PoolConfig } from "pg";
 import { eventTypeRows } from "../src/audit/events.ts";
 import { REALM_TEMPLATES } from "../src/email/templates.ts";
 import { type GrantFragment, readFragments, renderGrants } from "./grants.ts";
+import "./split.ts";
 
 export const ROLE_PREFIX = "l_sat_02_";
 export const SERVICE_ROLES = [
