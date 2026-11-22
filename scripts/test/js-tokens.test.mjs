@@ -172,6 +172,15 @@ describe("js-tokens: regular expression or division, by the keyword before it", 
     assert.deepEqual(regexes("let r = /re/;"), ["/re/"]);
   });
 
+  test("of outside a for head is an identifier, and divides", () => {
+    assert.deepEqual(regexes("x = of / 2 / 3;"), []);
+    assert.deepEqual(regexes("of / total > 1 ? f(/re/) : of / total;"), ["/re/"]);
+    assert.deepEqual(regexes("x = a\nof / 2 / 3;"), []);
+    assert.deepEqual(regexes("for (const of of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for ([a, b] of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (x.y of /re/.exec(s)) {}"), ["/re/"]);
+  });
+
   test("a++ / 2 divides; a prefix ++ before a regular expression does not", () => {
     assert.deepEqual(regexes("x = a++ / 2 / 3;"), []);
     assert.deepEqual(regexes("x = a-- / 2 / 3;"), []);

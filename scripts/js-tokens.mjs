@@ -33,8 +33,9 @@
 // .js, .mjs and .cjs allow JSX; .ts, .mts and .cts allow `<T>x` type assertions instead. Whether
 // a `/` starts a regular expression is decided by the significant token before it: after an
 // identifier, a number, a string, a template's end, `)`, `]` or `}` it divides, except after the
-// keywords that take an operand (return, typeof, instanceof, in, of, new, delete, void, throw,
-// case, do, else, yield, await, extends, default, break, continue); a `)` is judged by what it
+// keywords that take an operand (return, typeof, instanceof, in, new, delete, void, throw, case,
+// do, else, yield, await, extends, default, break, continue, and `of` after a for head's binding:
+// anywhere else `of` is an identifier, as TypeScript reads it); a `)` is judged by what it
 // closes (the condition of if, while, for or with is followed by a statement) and a `}` by whether
 // it closes a block or an expression (an object literal, a function or class expression, a
 // template substitution); a postfix `++`, `--` or TypeScript's non-null `!` leaves an expression
@@ -151,7 +152,6 @@ const OPERAND_WORDS = new Set([
   "typeof",
   "instanceof",
   "in",
-  "of",
   "new",
   "delete",
   "void",
@@ -1588,6 +1588,14 @@ export function tokenize(text, file) {
         forPending = true;
         settle(EXPR, "for", "");
         return;
+      case "of":
+        // A keyword only after a for head's binding or target (`for (const x of …)`); anywhere
+        // else an identifier (`of / total`), after which a `/` divides.
+        if (state === END && f.kind === F_PAREN && (f.flags & P_FOR) !== 0) {
+          settle(EXPR, value, "");
+          return;
+        }
+        break;
       case "as":
       case "satisfies":
         if (state === END && !newline) {
