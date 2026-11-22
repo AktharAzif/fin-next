@@ -2,7 +2,7 @@
 // enqueue's allowlist and stamps, claiming and leasing, priorities, retries and backoff, the
 // never-dropped rule and the digest, the token bucket, budgets and the recipient backstop. The
 // sender runs as the worker's own login, so the grants are proven too.
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   findTemplate,
   rolesFor,
@@ -45,17 +45,27 @@ async function failureOf(promise: Promise<unknown>): Promise<Error> {
   throw new Error("expected a rejection");
 }
 
+/**
+ * How far the test clock starts ahead of the database's. `email.enqueue()` stamps a row due at the
+ * database's statement time, and the sender claims only rows due by the test clock, which stands
+ * still: a row queued after the database's clock has passed the test clock's start is not due, and
+ * the sender claims nothing. The lead must outlast the longest test here, so it is above every
+ * timeout in this file (Vitest's 5 s default, 30 s at most), and far below the shortest code's
+ * life (10 minutes), so no code ages past it before a test moves the clock.
+ */
+const CLOCK_LEAD_MS = 60_000;
+
 function startClock(): Clock {
-  // Just ahead of the database's own clock (rows are due at statement time). It stands still until a
-  // test moves it, so the claims of one test share one hourly window wherever the hour is; it never
-  // jumps far ahead, which would age a code past its life (rows are stamped with the database's time).
-  let t = Date.now() + 2_000;
+  // Ahead of the database's own clock by CLOCK_LEAD_MS. It stands still until a test moves it, so
+  // the claims of one test share one hourly window wherever the hour is.
+  let t = Date.now() + CLOCK_LEAD_MS;
   return { now: () => t, advance: (ms) => (t += ms) };
 }
 
 describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
   let db: TestDatabase;
   let clock: Clock;
+  let clockStart: number;
   let port: FakeTransport;
   let log: LineRecorder;
 
@@ -76,8 +86,19 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
        ON CONFLICT (name) DO UPDATE SET tokens = 0, refilled_at = '-infinity'`,
     );
     clock = startClock();
+    clockStart = clock.now();
     port = new FakeTransport();
     log = new LineRecorder();
+  });
+
+  afterEach(async () => {
+    // Every row the test queued was stamped before the clock's start, so it was due at the clock's
+    // time: a test that outran CLOCK_LEAD_MS fails here, by name, not as a claim that finds nothing.
+    const r = await db.admin.query<{ behind: boolean }>(
+      "SELECT statement_timestamp() < $1::timestamptz AS behind",
+      [new Date(clockStart).toISOString()],
+    );
+    expect(r.rows[0]?.behind, "the database's clock passed the test clock's start").toBe(true);
   });
 
   function sender(
@@ -1075,23 +1096,23 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         [new Date(clock.now()).toISOString().slice(0, 10)],
       );
       const s = sender(limits);
-      for (const [i, org] of orgIds(4).entries()) {
-        for (let j = 0; j < 3; j++) await orgNotice(org, `holder${i}-${j}@example.com`);
-      }
+      // Each group is queued side by side, on the pool's logins at once rather than one row after
+      // another: one pass claims all of it, so the order of queueing is nothing the sender sees.
+      await Promise.all(
+        orgIds(4).flatMap((org, i) =>
+          [0, 1, 2].map((j) => orgNotice(org, `holder${i}-${j}@example.com`)),
+        ),
+      );
       await drain(s);
-      for (let i = 0; i < 8; i++) {
-        await queue(
-          "fin_console",
-          "identity/sign-in-code",
-          { code: "12345678" },
-          `c${i}@example.com`,
-        );
-      }
+      await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          queue("fin_console", "identity/sign-in-code", { code: "12345678" }, `c${i}@example.com`),
+        ),
+      );
       await drain(s);
       expect(port.of("identity/sign-in-code").length).toBeGreaterThan(0);
       // Sign-in alerts for two other people are still sent that day.
-      await notice("first@example.com");
-      await notice("second@example.com");
+      await Promise.all([notice("first@example.com"), notice("second@example.com")]);
       await drain(s);
       expect(port.of("identity/new-sign-in")).toHaveLength(2);
     });
