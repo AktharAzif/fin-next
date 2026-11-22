@@ -8,8 +8,11 @@ import { fileURLToPath } from "node:url";
 /** The repository this test suite belongs to. */
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+// Commits are made in UTC, as G-09 asks of every commit (the pre-push check refuses another
+// offset); a test that needs another offset sets the date itself.
 const GIT_ENV = {
   ...process.env,
+  TZ: "UTC",
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_AUTHOR_NAME: "Fin Test",
@@ -22,15 +25,16 @@ const GIT_ENV = {
  * Runs git in a throwaway repository, isolated from the user's and the system's git settings.
  * @param {string} dir
  * @param {string[]} args
+ * @param {Record<string, string>} [env] more environment, such as GIT_AUTHOR_DATE
  * @returns {string}
  */
-export function git(dir, args) {
+export function git(dir, args, env = {}) {
   return execFileSync(
     "git",
     ["-C", dir, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args],
     {
       encoding: "utf8",
-      env: GIT_ENV,
+      env: { ...GIT_ENV, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );

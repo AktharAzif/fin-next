@@ -1,0 +1,204 @@
+// The console's API half booted on a real socket: its health routes, its public /api/health
+// through the tunnel, the ingress check, and the origin gate's three refusals that FW-S2 names (a
+// cross-site POST, a POST without X-Fin-App, a text/plain POST), each 403 invalid_origin; then the
+// realm's allowlist and the routes' first answers, which need no database: an unlisted auth path
+// is an empty 404, a signed-out viewer is 401, and a body a route's schema refuses is 400.
+import { randomBytes } from "node:crypto";
+import { bootApi, NEIGHBOUR_ADDRESS } from "@fin/web-host/testing";
+import type { Pool } from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { defineConsoleService } from "./main.ts";
+
+const HOST = "console.example.net";
+const ORIGIN = `https://${HOST}`;
+let api: Awaited<ReturnType<typeof bootApi>>;
+
+/** A pool that answers the readiness probe and refuses any unit of work: no database here. */
+function probeOnlyPool(): Pool {
+  const pool = {
+    totalCount: 0,
+    idleCount: 0,
+    query: async () => ({ rows: [], rowCount: 1, command: "SELECT", fields: [] }),
+    connect: async () => {
+      throw new Error("this test has no database");
+    },
+    end: async () => undefined,
+    on: () => pool,
+  };
+  return pool as unknown as Pool;
+}
+
+beforeAll(async () => {
+  api = await bootApi(defineConsoleService({ pool: probeOnlyPool() }), {
+    service: "console",
+    roles: ["console"],
+    env: {
+      FIN_PUBLIC_ORIGIN: ORIGIN,
+      FIN_CONNECTOR_SERVICES: "cloudflared-public,cloudflared-public-b",
+      BETTER_AUTH_SECRETS: `1:${randomBytes(32).toString("base64url")}`,
+      FIN_LIMIT_KEY_1: randomBytes(32).toString("hex"),
+    },
+  });
+});
+
+afterAll(async () => {
+  await api.stop();
+  expect(api.exits).toEqual([0]);
+});
+
+const json = {
+  origin: ORIGIN,
+  "sec-fetch-site": "same-origin",
+  "x-fin-app": "console",
+  "content-type": "application/json",
+};
+
+describe("the console's API half", () => {
+  it("answers /healthz and /readyz to a private caller, and 404 through the tunnel", async () => {
+    expect(
+      (
+        await api.send({ host: "[::1]", path: "/healthz", from: NEIGHBOUR_ADDRESS, proof: null })
+      ).json(),
+    ).toEqual({ status: "ok" });
+    expect(
+      (await api.send({ host: "[::1]", path: "/readyz", from: NEIGHBOUR_ADDRESS, proof: null }))
+        .status,
+    ).toBe(200);
+    expect((await api.send({ host: HOST, path: "/readyz" })).status).toBe(404);
+    expect(
+      (await api.send({ host: HOST, path: "/healthz", from: NEIGHBOUR_ADDRESS, proof: null }))
+        .status,
+    ).toBe(404);
+  });
+
+  it("answers GET /api/health through the tunnel with the API headers", async () => {
+    const res = await api.send({ host: HOST, path: "/api/health" });
+    expect(res.status).toBe(200);
+    expect(res.json()).toEqual({ status: "ok" });
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["fin-release"]).toMatch(/^[0-9a-f]{40}$/);
+    expect(Object.keys(res.headers).filter((k) => k.startsWith("access-control-"))).toEqual([]);
+  });
+
+  it("refuses a neighbour with the proof: 403 and ingress.untrusted_peer", async () => {
+    const res = await api.send({ host: HOST, path: "/api/health", from: NEIGHBOUR_ADDRESS });
+    expect(res.status).toBe(403);
+    expect(
+      api.stdout.some((l) => l.event === "ingress.untrusted_peer" && l.reason === "peer_unknown"),
+    ).toBe(true);
+  });
+
+  it("gives 403 invalid_origin to a cross-site POST, a POST without X-Fin-App and a text/plain POST", async () => {
+    const cases: [Record<string, string>, string][] = [
+      [
+        { ...json, origin: "https://evil.example.com", "sec-fetch-site": "cross-site" },
+        "origin_mismatch",
+      ],
+      [
+        { origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": "application/json" },
+        "app_header",
+      ],
+      [{ ...json, "content-type": "text/plain;charset=UTF-8" }, "content_type"],
+    ];
+    for (const [headers, reason] of cases) {
+      const res = await api.send({
+        host: HOST,
+        path: "/api/auth/sign-in/email-otp",
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(res.status, reason).toBe(403);
+      expect(res.json()).toMatchObject({
+        type: "https://docs.example.net/errors/invalid_origin",
+        code: "invalid_origin",
+        reason,
+      });
+    }
+    const refused = api.stdout.filter((l) => l.event === "csrf.refused").map((l) => l.reason);
+    expect(refused).toEqual(cases.map(([, reason]) => reason));
+  });
+
+  it("lets a body-less POST or DELETE with no content type through the gate, and refuses a body without JSON", async () => {
+    const { "content-type": _json, ...bare } = json;
+    for (const method of ["POST", "DELETE"]) {
+      const res = await api.send({ host: HOST, path: "/api/nothing-here", method, headers: bare });
+      expect(res.status, method).toBe(404);
+    }
+    const refusalsBefore = api.stdout.filter((l) => l.event === "csrf.refused").length;
+    const refused: { headers: Record<string, string>; body?: string }[] = [
+      { headers: { ...bare, "content-length": "0", "content-type": "text/plain" } },
+      { headers: { ...bare, "transfer-encoding": "chunked" }, body: "{}" },
+      { headers: bare, body: "{}" },
+    ];
+    for (const { headers, body } of refused) {
+      const res = await api.send({
+        host: HOST,
+        path: "/api/nothing-here",
+        method: "POST",
+        headers,
+        ...(body !== undefined ? { body } : {}),
+      });
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      expect(res.json()).toMatchObject({ code: "invalid_origin", reason: "content_type" });
+    }
+    expect(api.stdout.filter((l) => l.event === "csrf.refused").length - refusalsBefore).toBe(3);
+  });
+
+  it("lets a well-formed same-origin JSON POST through the gate to the router", async () => {
+    const res = await api.send({
+      host: HOST,
+      path: "/api/nothing-here",
+      method: "POST",
+      headers: json,
+      body: "{}",
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("answers an unlisted /api/auth path with an empty 404 and its line, and never lets an encoded one in", async () => {
+    for (const path of ["/api/auth/not-a-path", "/api/auth//ok", "/api/auth/ok"]) {
+      const res = await api.send({ host: HOST, path, method: "POST", headers: json, body: "{}" });
+      expect(res.status, path).toBe(404);
+      expect(res.body.length, path).toBe(0);
+    }
+    const blocked = api.stdout.filter((l) => l.event === "auth.endpoint_blocked");
+    expect(blocked.length).toBeGreaterThanOrEqual(3);
+    // The front door refuses a percent-encoded separator before any route (spec 01 §4.4).
+    const encoded = await api.send({
+      host: HOST,
+      path: "/api/auth/sign-in%2Femail-otp",
+      method: "POST",
+      headers: json,
+      body: "{}",
+    });
+    expect(encoded.status).toBeGreaterThanOrEqual(400);
+    expect(encoded.status).toBeLessThan(500);
+  });
+
+  it("refuses a body its route's schema refuses with 400 invalid, naming the field, never the value", async () => {
+    const res = await api.send({
+      host: HOST,
+      path: "/api/team/invitations",
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ email: "not an address", roleKey: "admin", extra: "planted-value" }),
+    });
+    expect(res.status).toBe(400);
+    const problem = res.json() as { code: string; fields: { path: string; code: string }[] };
+    expect(problem.code).toBe("invalid");
+    expect(problem.fields.map((f) => f.path).sort()).toEqual(["", "email"]);
+    expect(res.body.toString()).not.toContain("planted-value");
+  });
+
+  it("answers an ID of the wrong shape in a path with 404, as an unknown one", async () => {
+    const res = await api.send({
+      host: HOST,
+      path: "/api/team/invitations/not-an-id/resend",
+      method: "POST",
+      headers: { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-fin-app": "console" },
+    });
+    expect(res.status).toBe(404);
+    expect(res.json()).toMatchObject({ code: "not_found" });
+  });
+});

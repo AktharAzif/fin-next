@@ -1,0 +1,4 @@
+# The event index is generated from the fragments by `pnpm --filter @fin/audit gen` (spec 08 §3.2, EX-07),
+# written beside itself and renamed into place.
+src/events/_index.gen.ts
+src/events/_index.gen.ts.*.tmp
