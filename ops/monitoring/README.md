@@ -9,7 +9,7 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`, `identity`, `staff`, `ops`) |
 | `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it or are owed for it (listed in `catalog/index.ts`) |
 | `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due; production's first deploy waits for a gate that refuses while any is listed (its header) |
-| `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
+| `src/check.ts` | `monitoring:check`: no network, well under a second |
 | `src/apply.ts` | `pnpm fin monitoring apply <env>`: exports `monitoringApply(ctx)` and `command` for ops/fin's dispatcher |
 
 ## monitoring:check
@@ -28,13 +28,16 @@ read whole is a finding: an import, a `this.` member, a helper's or a callback's
 value only partly literal, a name built at run time. So is a name out of the event-name shape
 (`step-up-locked`, `deployFailed`, a sentence), which would ship as `telemetry.bad_event`. Only a
 forwarding adapter's first parameter, a parameter list and, through `this` or a bare call, a
-message (an empty string, or one with a space) give no name. The scan reads code only, once a
-lexer has blanked the comments, strings and regular expressions; a file the lexer cannot read to
-its end (a template, comment, string or regular expression left open, or brackets that do not
-pair) is a finding, never a skip.
-The rule in full, its one exclusion and why that cannot hide an event, and what a lexical scan
-cannot see (a writer under another name, a name computed at run time, a raw line's `event` that is
-not a literal) are at `eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
+message (an empty string, or one with white space) give no name. The scan reads each file's tokens
+from the shared tokenizer (`scripts/js-tokens.mjs`): its rules match token sequences and literal
+values (a string's decoded value, a template's static parts), never the raw text, so a comment, a
+string, a regular expression or JSX text is never read as code. A file the tokenizer cannot read
+(a string, template, comment or regular expression left open, brackets or JSX tags that do not
+pair, an HTML-like comment, a conflict marker) is a finding that names the file and the place,
+never a skip.
+The rule in full, its one exclusion and why that cannot hide an event, and what the tokens alone
+cannot decide (a writer under another name, a name computed at run time, a raw line's `event` that
+is not a literal) are at `eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
 (a line list's `alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the
 catalogue (an entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text)
 gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due date, and

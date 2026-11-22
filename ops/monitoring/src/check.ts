@@ -2,9 +2,11 @@
 // the catalogue, with no network, in well under a second. It fails when:
 //   MC-00 a file is missing or malformed, an alert has an unexpanded placeholder, or a metric's
 //         type is not one of Better Stack's;
-//   MC-01 an event written in code (any telemetry writer's line; see eventsInCode) is missing
-//         from the catalogue, a telemetry writer is passed a name the scan cannot read, a
-//         catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0 events is missing;
+//   MC-01 an event written in code (any telemetry writer's line, read from the file's tokens; see
+//         eventsInCode) is missing from the catalogue, a telemetry writer is passed a name the
+//         scan cannot read or one out of the event-name shape, the tokenizer cannot read a file
+//         of the code, a catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0
+//         events is missing;
 //   MC-02 a failure, security or money entry has no alert, no owed alert and no noAlert reason;
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
@@ -41,6 +43,7 @@
 //   RT-03 any staging object asks for a call, an SMS, a push or a critical alert itself.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { type Token, TokenizeError, tokenize } from "../../../scripts/js-tokens.mjs";
 import { fragments as defaultFragments } from "../catalog/index.ts";
 import { OWED_ALERTS, type OwedAlert } from "../catalog/owed.ts";
 import { type CatalogEntry, ENVELOPE_FIELDS, kindsOf } from "../catalog/types.ts";
@@ -198,8 +201,11 @@ function walk(root: string, dir: string, out: string[]): void {
   }
 }
 
-// MC-01's scan: the events the code writes, in TypeScript outside tests. Fin writes a telemetry
-// line in three ways, and the scan reads each:
+// MC-01's scan: the events the code writes, in TypeScript outside tests. It reads each file as the
+// shared tokenizer (scripts/js-tokens.mjs) gives it: its rules match token sequences and literal
+// values (a string's decoded value, a template's static parts), never the raw text, so a comment, a
+// string, a regular expression or JSX text is never read as code, and code is never read as one of
+// them. Fin writes a telemetry line in three ways, and the scan reads each:
 //   1. a writer method called with the event's name first: `log("x.y", …)` (the watcher's own),
 //      `telemetry.log|logUnit|logLocal("x.y", …)` (packages/server), `lines.write("x.y", …)` (the
 //      identity, staff and orgs line port; fin-review's local lines), `run.line("x.y", …)` and
@@ -208,12 +214,11 @@ function walk(root: string, dir: string, out: string[]): void {
 //      stands in it: `log.write({ event: "x.y", … })` (the unit of work's writer);
 //   3. a raw line: an `event: "x.y"` property anywhere inside `JSON.stringify(…)` (a process that
 //      writes before its telemetry exists: config.invalid, process.mode_refused, migrate's config
-//      failure; tools/static-deploy's lines).
-// The writer methods are log, logUnit, logLocal, line, write and format (private `#` ones too). A
-// call's writer is the identifier before the method's dot (`rt.lines.write` is `lines`,
-// `this.o.log.log` is `log`, `deps.lines!.write` is `lines`), or the function itself for a bare
-// call (`log("x.y")` is `log`). An optional call (`o.log?.("x.y")`) is a call; text in a comment or
-// a string is not.
+//      failure; tools/static-deploy's lines), its value a string literal.
+// The writer methods are log, logUnit, logLocal, line, write and format (private `#` ones too), a
+// name followed by `(` or `?.(`. A call's writer is the name before the method's dot (`rt.lines.
+// write` is `lines`, `this.o.log.log` is `log`, `deps.lines!.write` is `lines`), or the function
+// itself for a bare call (`log("x.y")` is `log`). A name is read decoded (`lines` is `lines`).
 //
 // A telemetry writer is one of `lines`, `log`, `telemetry`, `run`, or `this` (a writer's call on
 // itself), or a method the file itself declares as an adapter: a function, method or property
@@ -237,62 +242,57 @@ function walk(root: string, dir: string, out: string[]): void {
 //     and each must have the event-name shape (lower case, dotted: `<area>.<name>`). A message
 //     gives no name, but only through `this` or a bare call (ops/fin's printer,
 //     `this.#line("warning: ", text)`; tools/static-deploy's `log(…)`): a string that is empty or
-//     holds a space or an escaped newline or tab (a name never does). Through a member call (on
-//     `lines`, `log`, `telemetry`, `run`, or an adapter's receiver) a message is a finding, and so
-//     is, through any writer, a string of another shape (`"step-up-locked"`, `"deployFailed"`,
-//     `"edge.sign-in"`) or names beside messages;
+//     holds white space, a newline or a tab written as an escape included (a name never does).
+//     Through a member call (on `lines`, `log`, `telemetry`, `run`, or an adapter's receiver) a
+//     message is a finding, and so is, through any writer, a string of another shape
+//     (`"step-up-locked"`, `"deployFailed"`, `"edge.sign-in"`) or names beside messages;
 //   - an object literal gives its own `event` key's value, read as above, where a message too is
 //     a finding; no `event` key, a spread after it, or a value that is not a literal, is a finding;
 //   - a variable, or its `.event` (`lines.write(event, …)`, `log.write(line)`,
 //     `telemetry.log(line.event, …)`), is read from the declaration that binds it where the call
 //     stands: searched in the whole file, above or below the call, by its scope (a block, a
-//     function's parameters, the module), never in a comment. It is read when it is a `const`, or
-//     a `let` or `var` the file never assigns again, whose value is read as above (an object
-//     whose `event` is never assigned again), or a `for (const x of [...])` over strings; a value
-//     that is no event name, a message included, is a finding. A parameter gives no name only as
-//     a forwarding adapter's: the first parameter of a function, method or property named as a
-//     writer method (`write: (event, level, fields) => telemetry.log(event, …)`,
-//     packages/server's `log(event, …) { this.format(event, …) }`), whose callers' names the scan
-//     reads where they call it. Any other binding is a finding: an import, a `this.` or `#`
-//     member, any other parameter (a helper's, a callback's, one with a default), a destructured
-//     or `for … in` one, `let x;`, a `let` assigned again, an object whose `event` is assigned
-//     again, any member but `.event`, or a name the file never binds;
+//     function's parameters, the module). Every declarator of a declaration binds, and so does
+//     every name a pattern binds (a renamed one, `{ name: event }`, included). A binding is read
+//     when it is a `const`, or a `let` or `var` the file never assigns again, whose value is read as
+//     above (an object whose `event` is never assigned again), or a `for (const x of [...])` over
+//     strings; a value that is no event name, a message included, is a finding. Assigning again is
+//     `=`, a compound assignment, `++` or `--`, a destructuring assignment that holds the name, or a
+//     `for … of` or `for … in` head that does. A parameter gives no name only as a forwarding
+//     adapter's: the first parameter of a function, method or property named as a writer method
+//     (`write: (event, level, fields) => telemetry.log(event, …)`, packages/server's `log(event, …)
+//     { this.format(event, …) }`), with no default and never assigned again in the function, whose
+//     callers' names the scan reads where they call it. Any other binding is a finding: an import,
+//     a `this.` or `#` member, any other parameter (a helper's, a callback's, one with a default),
+//     a destructured or `for … in` one, `let x;`, a `let` assigned again, an object whose `event`
+//     is assigned again, any member but `.event`, or a name the file never binds;
 //   - anything else is a name built at run time (`` `switch.${state}` ``, `"switch." + state`, a
 //     call, `name ?? "x.y"`, a ternary with a branch that is not a string) and is a finding, but
 //     for a message through `this` or a bare call: a template, or a `+` join with no alternatives
-//     in it, whose literal part (outside every `${…}`) holds a space;
+//     in it, whose static part (a template's text outside every `${…}`) holds white space;
 //   - a parameter list (`log(event: string, …)`, a method's own) is a declaration, not a call.
+// Which `(` opens a function's parameters is read from the tokens around it: after `function` or a
+// function's name, or after a method's name that starts a member (after `{`, `}`, `,`, `;`, `*` or a
+// modifier such as `async`, `get` or `static`), with a `{` body after it; anywhere else, with an
+// arrow's `=>` after it (a return type may stand before either). A `(` after any other name, a
+// member's (`x.write(`) included, is a call's, and `if`, `for`, `while`, `switch` and `catch` heads
+// are no function's.
 //
-// The scan reads code only: a lexer first blanks the comments, strings, templates (but their
-// `${…}`) and regular expressions. A `/` starts a regular expression where an operand is due: at
-// the start, after an operator or a punctuator (`=>`, `>`, `>=` and `>>` among them), after a `}`
-// (a block's end, `} /re/.test(s)`: an object is never divided) unless a `>` follows the `/`
-// (JSX's `{x} />`), after a keyword such as `return` or `typeof` (`of` only in a `for` head), after
-// a prefix `!`, `++` or `--`, and after the `)` of an `if`, `while`, `for` or `with` head. After an
-// identifier (a member named as a keyword, `stats.in`, `counts.new` or `this.#delete`, and `of`
-// outside a `for` head, included), a literal, a `)` or a `]`, or a postfix `!`, `++` or `--` (one
-// that follows an identifier, a `)` or a `]`), it is a division. What stands before a word or a
-// `(` is read in the code, past spaces and comments: a comment's closing full stop is no member's
-// dot (`// A sentence.` above `return /re/`), nor its last word a head's keyword (`// … with` above
-// `(a + b) / c`). The lexer fails closed: when it reaches the end of the file inside a template or
-// a block comment, or the end of a line inside a string or a regular expression, or the blanked
-// code's brackets do not pair, the file is an MC-01 finding that names it and the place, and none
-// of its calls is read (a misread could blank a writer call and hide it).
+// A file the tokenizer cannot read (a string, template, comment, regular expression or JSX element
+// left open, brackets or JSX tags that do not pair, an invalid escape or number, an HTML-like
+// comment, a conflict marker, a character that cannot stand in code) is an MC-01 finding that names
+// the file and the place, and none of its calls is read: every file the scan reads is tokenized,
+// and none is skipped because it cannot be read.
 //
-// What a lexical scan cannot see is a review finding, as for imports:check (BD-19): a writer
+// What the tokens alone cannot decide is a review finding, as for imports:check (BD-19): a writer
 // reached under a name that is no writer method's (an alias such as `const emit = lines.write`, a
-// receiver that is no identifier such as `getLines().write`, a computed key such as
-// `lines[method](…)`), and an adapter that another file declares, called there through a receiver
-// that is no telemetry writer's; a name computed at run time that no literal in the file holds
-// whole (a concatenation of variables, a computed key, a call's result: through a telemetry
-// writer such a call is a finding, but what it computes, and the same through any other writer,
-// is the reviewer's to read); an object changed through another reference or by a destructuring
-// assignment; a raw line's `event` that is not a string literal (JSON.stringify builds other
-// things than lines, so it is not a finding); and JSX text (the lexer reads it as code: a quote, a
-// backtick, or a `/` after a `{…}` child, in it starts a string, a template or a regular
-// expression, which fails closed when it does not close, and when it does, blanks what it spans,
-// as `{done} / {total}</b>` does up to the `/` of `</b>`).
-const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)(?:\?\.)?\(/g;
+// receiver that is no name such as `getLines().write`, a computed key such as `lines[method](…)`),
+// and an adapter that another file declares, called there through a receiver that is no telemetry
+// writer's; a name computed at run time that no literal in the file holds whole (a concatenation
+// of variables, a computed key, a call's result: through a telemetry writer such a call is a
+// finding, but what it computes, and the same through any other writer, is the reviewer's to
+// read); an object changed through another reference or by a destructuring assignment; and a raw
+// line's `event` that is not a string literal (JSON.stringify builds other things than lines, so
+// it is not a finding).
 const WRITER_METHODS: ReadonlySet<string> = new Set([
   "log",
   "logUnit",
@@ -309,9 +309,67 @@ const TELEMETRY_WRITERS: ReadonlySet<string> = new Set([
   "this",
 ]);
 const EVENT_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/;
-const RAW_LINE = /\bJSON\s*\.\s*stringify\s*\(/g;
-const EVENT_KEY =
-  /[{,]\s*(?:event|"event"|'event')\s*:\s*(["'`])([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\1/g;
+/** Text a message holds and a name never does: white space (a newline or tab, decoded, included). */
+const MESSAGE_TEXT = /\s/;
+const OPENERS: ReadonlySet<string> = new Set(["(", "[", "{"]);
+const CLOSERS: ReadonlySet<string> = new Set([")", "]", "}"]);
+const ASSIGNMENTS: ReadonlySet<string> = new Set([
+  "=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "**=",
+  "<<=",
+  ">>=",
+  ">>>=",
+  "&=",
+  "|=",
+  "^=",
+  "&&=",
+  "||=",
+  "??=",
+]);
+/** Keywords after which a `(` is an expression's: a call's arguments or an arrow's parameters. */
+const EXPRESSION_WORDS: ReadonlySet<string> = new Set([
+  "async",
+  "await",
+  "case",
+  "delete",
+  "do",
+  "else",
+  "extends",
+  "function",
+  "in",
+  "instanceof",
+  "new",
+  "of",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+/** The statements whose head is a `(`: no function's parameters. */
+const CONTROL_WORDS: ReadonlySet<string> = new Set(["catch", "for", "if", "switch", "while"]);
+/** The modifiers that may stand before a method's name. */
+const MEMBER_MODIFIERS: ReadonlySet<string> = new Set([
+  "abstract",
+  "accessor",
+  "async",
+  "declare",
+  "get",
+  "override",
+  "private",
+  "protected",
+  "public",
+  "readonly",
+  "set",
+  "static",
+]);
+/** The punctuators after which a `{` in a return type opens a type literal, not the body. */
+const TYPE_LITERAL_AFTER: ReadonlySet<string> = new Set([":", "|", "&", "<", ",", "("]);
 
 /** Where an event is written, and the call that writes it (for MC-01's message). */
 export interface CodeEvent {
@@ -320,445 +378,128 @@ export interface CodeEvent {
   readonly call: string;
 }
 
-/** The index of the quote that ends the string starting at `start`, or -1. */
-function stringEnd(text: string, start: number): number {
-  const quote = text[start];
-  for (let i = start + 1; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\\") i++;
-    else if (c === quote) return i;
-    else if (quote === "`" && c === "$" && text[i + 1] === "{") {
-      const end = closing(text, i + 1);
-      if (end < 0) return -1;
-      i = end - 1;
-    } else if (quote !== "`" && c === "\n") return -1;
-  }
-  return -1;
-}
-
-/** The index of the string's or comment's last character at `i`; undefined when none starts there. */
-function skipped(text: string, i: number): number | undefined {
-  const c = text[i];
-  if (c === '"' || c === "'" || c === "`") return stringEnd(text, i);
-  if (c === "/" && text[i + 1] === "/") {
-    const end = text.indexOf("\n", i);
-    return end < 0 ? text.length - 1 : end;
-  }
-  if (c === "/" && text[i + 1] === "*") {
-    const end = text.indexOf("*/", i + 2);
-    return end < 0 ? -1 : end + 1;
-  }
-  return undefined;
-}
-
-/** The index just past the bracket that closes the one at `open`, or -1 when it is not closed. */
-function closing(text: string, open: number): number {
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    const skip = skipped(text, i);
-    if (skip !== undefined) {
-      if (skip < 0) return -1;
-      i = skip;
-      continue;
-    }
-    const c = text[i];
-    if (c === "(" || c === "{" || c === "[") depth++;
-    else if (c === ")" || c === "}" || c === "]") {
-      depth--;
-      if (depth === 0) return i + 1;
-    }
-  }
-  return -1;
-}
-
-/** The object literal at `open` with what its values nest emptied: only its own keys remain. */
-function ownKeys(text: string, open: number): string | undefined {
-  const end = closing(text, open);
-  if (end < 0) return undefined;
-  let out = "{";
-  for (let i = open + 1; i < end - 1; i++) {
-    const skip = skipped(text, i);
-    if (skip !== undefined) {
-      if (skip < 0) return undefined;
-      if (text[i] !== "/") out += text.slice(i, skip + 1);
-      i = skip;
-      continue;
-    }
-    const c = text[i] ?? "";
-    if (c === "(" || c === "{" || c === "[") {
-      const inner = closing(text, i);
-      if (inner < 0) return undefined;
-      out += `${c}${text[inner - 1] ?? ""}`;
-      i = inner - 1;
-      continue;
-    }
-    out += c;
-  }
-  return `${out}}`;
-}
-
-/**
- * Another writer's call: the event its first argument names, a string literal or an object's own
- * literal `event` key (see the rule above).
- */
-function firstArgument(text: string, from: number): { name: string; object: boolean } | undefined {
-  let i = from;
-  while (/\s/.test(text[i] ?? "")) i++;
-  const c = text[i];
-  if (c === '"' || c === "'" || c === "`") {
-    const end = stringEnd(text, i);
-    const name = end < 0 ? "" : text.slice(i + 1, end);
-    return EVENT_NAME.test(name) ? { name, object: false } : undefined;
-  }
-  if (c !== "{") return undefined;
-  const keys = ownKeys(text, i);
-  const name = keys === undefined ? undefined : [...keys.matchAll(EVENT_KEY)][0]?.[2];
-  return name === undefined ? undefined : { name, object: true };
-}
-
-/** What the method at `at` is called on: an identifier, "" for any other receiver, or undefined. */
-function receiverOf(text: string, at: number): string | undefined {
-  let i = at - 1;
-  while (/\s/.test(text[i] ?? "")) i--;
-  if (text[i] !== ".") return undefined;
-  i--;
-  if (text[i] === "?" || text[i] === "!") i--;
-  while (/\s/.test(text[i] ?? "")) i--;
-  let start = i;
-  while (/[\w$#]/.test(text[start] ?? "")) start--;
-  return text.slice(start + 1, i + 1).replace(/^#/, "");
-}
-
-function lineAt(text: string, index: number): number {
-  let line = 1;
-  for (let i = text.indexOf("\n"); i >= 0 && i < index; i = text.indexOf("\n", i + 1)) line++;
-  return line;
-}
-
-/** A file as the telemetry writers' reader sees it (see the rule above). */
+/** A file as the telemetry writers' reader sees it: the tokens of its code (see the rule above). */
 interface Source {
   readonly file: string;
   readonly text: string;
-  /** The text with comments blanked to spaces, and strings and regular expressions to `"`. */
-  readonly code: string;
-  /** Each bracket's index in `code`, and the index just past the bracket that closes it. */
+  /** The code's tokens in order: comments and a hashbang left out. Every range is of these. */
+  readonly tokens: readonly Token[];
+  /** Each `(`, `[`, `{` and template head, and the token that closes it. */
   readonly pairs: ReadonlyMap<number, number>;
-  /** Where and why the lexer could not read the file; nothing in it is read then. */
-  readonly failure?: LexFailure;
+  /** Each closing token, and the token it closes. */
+  readonly openers: ReadonlyMap<number, number>;
+  /** Each token's innermost enclosing opener, or -1 at the top level. */
+  readonly parents: readonly number[];
+  /** The writer calls, found once when first needed. */
+  calls?: readonly WriterCall[];
   /** The functions, found once when first needed. */
   functions?: readonly CodeFunction[];
   /** The writer methods the file declares as adapters, found once when first needed. */
   adapters?: ReadonlySet<string>;
+  /** Each name's bindings, found once per name. */
+  readonly bindings: Map<string, readonly Binding[]>;
+  /** Whether each binding's name is assigned again (or its object changed), found once. */
+  readonly changed: Map<Binding, boolean>;
 }
 
-/** Where the lexer stopped (an index into the text), and what it met there. */
-interface LexFailure {
+/** A writer method's call: its name, the `(` of its arguments, and its writer. */
+interface WriterCall {
+  /** The method's token. */
   readonly at: number;
-  readonly why: string;
+  /** The `(` that opens its arguments. */
+  readonly open: number;
+  /** The method's name, without a private name's `#`. */
+  readonly method: string;
+  /** The method as written: `line` or `#line`. */
+  readonly spelled: string;
+  /** The name before the method's dot, "" for any other receiver, or undefined for a bare call. */
+  readonly receiver: string | undefined;
 }
 
-/** A function, method or arrow: its name (or ""), its parameters and its body, as [start, end). */
+/** A function, method or arrow: its name (or ""), its parameters and its body, as token ranges. */
 interface CodeFunction {
   readonly name: string;
+  /** Its parameters: `(…)` with the brackets, or an arrow's one parameter. */
   readonly params: readonly [number, number];
   readonly body: readonly [number, number];
 }
 
-/**
- * The comments the lexer has met so far: each one's last character that is not a space, to its
- * first. The code before a word or a bracket is read past them, never in them (a comment's closing
- * full stop is no member's dot, nor its last word a keyword).
- */
-type Comments = ReadonlyMap<number, number>;
-
-/** The index of the last code character at or before `i`: spaces and comments skipped, or -1. */
-function codeBefore(text: string, i: number, comments: Comments): number {
-  let k = i;
-  for (;;) {
-    while (k >= 0 && /\s/.test(text[k] ?? "")) k--;
-    const start = comments.get(k);
-    if (start === undefined) return k;
-    k = start - 1;
-  }
+/** Whether the token is the punctuator `value`, outside JSX markup. */
+function isPunct(token: Token | undefined, value: string): boolean {
+  return token?.kind === "punct" && token.value === value && token.jsx !== true;
 }
 
-/** The index of the first character of the identifier that ends at `end` (`end + 1` when none). */
-function wordStart(text: string, end: number): number {
-  let k = end;
-  while (k >= 0 && /[\w$]/.test(text[k] ?? "")) k--;
-  return k + 1;
+/** A name's token; a literal's: a string, or a template literal with no substitution. */
+type NameToken = Token & { readonly kind: "name" };
+type LiteralToken = Token & { readonly kind: "string" | "template" };
+
+/** Whether the token is a name (an identifier or a keyword) outside JSX markup, `value` if given. */
+function isName(token: Token | undefined, value?: string): token is NameToken {
+  return (
+    token?.kind === "name" && token.jsx !== true && (value === undefined || token.value === value)
+  );
 }
 
-/**
- * Whether the word that starts at `start` is a member's name: after `.`, `?.` or `#` (`stats.in`,
- * `counts.new`, `this.#delete`), spaces and comments between (`stats.` at a line's end, `in` on the
- * next), but not after a spread's `...` (`...new Set(x)`).
- */
-function memberName(text: string, start: number, comments: Comments): boolean {
-  if (text[start - 1] === "#") return true;
-  const dot = codeBefore(text, start - 1, comments);
-  return text[dot] === "." && text[dot - 1] !== ".";
+/** Whether the token is a literal value: a string, or a template literal with no substitution. */
+function isLiteral(token: Token | undefined): token is LiteralToken {
+  return (token?.kind === "string" || token?.kind === "template") && token.jsx !== true;
 }
 
-/**
- * Whether the identifier that ends at `end` is a keyword after which an operand is due. A member's
- * name is none, and `of` is a keyword only in a `for` head (`forHead`: the innermost open `(`
- * starts one).
- */
-function keywordEndsAt(text: string, end: number, forHead: boolean, comments: Comments): boolean {
-  const start = wordStart(text, end);
-  if (memberName(text, start, comments)) return false;
-  const word = text.slice(start, end + 1);
-  if (word === "of") return forHead;
-  return /^(?:return|typeof|case|do|else|in|void|yield|await|delete|throw|new)$/.test(word);
+/** Whether the token is a closer: `)`, `]`, `}`, or a template's middle or tail. */
+function isCloser(token: Token | undefined): boolean {
+  return (
+    (token?.kind === "punct" && CLOSERS.has(token.value)) ||
+    token?.kind === "template-middle" ||
+    token?.kind === "template-tail"
+  );
 }
 
-/**
- * Whether an operand ends at `end` (spaces before it skipped): an identifier that is no keyword, a
- * `)` other than a control statement's head's, or a `]`. A `!`, `++` or `--` after one is postfix.
- */
-function operandEndsAt(
-  text: string,
-  end: number,
-  heads: ReadonlySet<number>,
-  forHead: boolean,
-  comments: Comments,
-): boolean {
-  let k = end;
-  while (k >= 0 && /[ \t]/.test(text[k] ?? "")) k--;
-  const c = text[k] ?? "";
-  if (c === ")") return !heads.has(k);
-  if (c === "]") return true;
-  return /[\w$]/.test(c) && !keywordEndsAt(text, k, forHead, comments);
+/** Whether the token at `i` is a member's name: after `.` or `?.`. */
+function isMember(src: Source, i: number): boolean {
+  return isPunct(src.tokens[i - 1], ".") || isPunct(src.tokens[i - 1], "?.");
 }
 
-/**
- * Whether the `/` at `at`, after the code character at `prev`, starts a regular expression, not a
- * division (see the rule above). `heads` holds each `)` that closes an `if`, `while`, `for` or
- * `with` head; `forHead` is whether the innermost open `(` starts a `for` head.
- */
-function regexStarts(
-  text: string,
-  at: number,
-  prev: number,
-  heads: ReadonlySet<number>,
-  forHead: boolean,
-  comments: Comments,
-): boolean {
-  if (prev < 0) return true;
-  const c = text[prev] ?? "";
-  if (c === ")") return heads.has(prev);
-  // `i++ / 2`, `x! / 2`: a postfix operator ends an operand. `++/re/.lastIndex`, `!/re/.test(s)`.
-  if ((c === "+" || c === "-") && text[prev - 1] === c) {
-    return !operandEndsAt(text, prev - 2, heads, forHead, comments);
-  }
-  if (c === "!") return !operandEndsAt(text, prev - 1, heads, forHead, comments);
-  // After a block's `}` a regular expression may start a statement (`} /re/.test(s)`), and an
-  // object is never divided; but JSX's `{x} />` closes a tag.
-  if (c === "}") return text[at + 1] !== ">";
-  // `=>`, `>`, `>=` and `>>` end with `>` or `=`: an operand follows.
-  if ("(,=:[&|?{;+-*%~^>".includes(c)) return true;
-  return /[\w$]/.test(c) && keywordEndsAt(text, prev, forHead, comments);
+/** Whether the token is a declaration's keyword, `const`, `let` or `var`. */
+function isDeclaration(token: Token | undefined): boolean {
+  return isName(token, "const") || isName(token, "let") || isName(token, "var");
 }
 
-/** The statement whose head the `(` at `open` starts: `if`, `while`, `for`, `with`, or "". */
-function controlHead(text: string, open: number, comments: Comments): string {
-  let end = codeBefore(text, open - 1, comments);
-  let start = wordStart(text, end);
-  let word = text.slice(start, end + 1);
-  if (word === "await") {
-    // `for await (…)`.
-    end = codeBefore(text, start - 1, comments);
-    start = wordStart(text, end);
-    word = text.slice(start, end + 1) === "for" ? "for" : "";
-  }
-  if (!/^(?:if|while|for|with)$/.test(word) || memberName(text, start, comments)) return "";
-  return word;
+/** A key named `event`: the name, or a string whose value is "event". */
+function isEventKey(token: Token | undefined): boolean {
+  return isName(token, "event") || (token?.kind === "string" && token.value === "event");
 }
 
-/** The index of a regular expression's last character (its last flag), or -1 when it is none. */
-function regexEnd(text: string, start: number): number {
-  let inClass = false;
-  for (let i = start + 1; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\\") i++;
-    else if (c === "\n") return -1;
-    else if (inClass) inClass = c !== "]";
-    else if (c === "[") inClass = true;
-    else if (c === "/") {
-      let end = i;
-      while (/[a-z]/i.test(text[end + 1] ?? "")) end++;
-      return end;
-    }
-  }
-  return -1;
-}
-
-/**
- * The text with comments, strings and regular expressions blanked; a template's `${…}` stays. A
- * comment, string, template or regular expression the lexer cannot close is a failure (see the
- * rule above): the code returned then is not to be read.
- */
-function lexCode(text: string): { code: string; failure?: LexFailure } {
-  const special = /[/"'`{}()]/g;
-  const parts: string[] = [];
-  let emitted = 0;
-  const blank = (from: number, to: number, fill: string) => {
-    parts.push(text.slice(emitted, from), text.slice(from, to + 1).replace(/[^\n]/g, fill));
-    emitted = to + 1;
-  };
-  const comments = new Map<number, number>();
-  const comment = (from: number, to: number) => {
-    let last = to;
-    while (last > from && /\s/.test(text[last] ?? "")) last--;
-    comments.set(last, from);
-    blank(from, to, " ");
-  };
-  // The brace depth at which each open `${` closes, back into its template.
-  const templates: number[] = [];
-  let depth = 0;
-  // The control statement whose head each open `(` starts (or ""), and each `)` that closed one.
-  const parens: string[] = [];
-  const heads = new Set<number>();
-  // The last code character that is not a space, before what the scan has reached.
-  let prev = -1;
-  let i = 0;
-  for (let match = special.exec(text); match !== null; match = special.exec(text)) {
-    const at = match.index;
-    for (let k = at - 1; k >= i; k--) {
-      if (!/\s/.test(text[k] ?? "")) {
-        prev = k;
-        break;
-      }
-    }
-    const c = text[at];
-    let end = -1;
-    if (c === "/" && text[at + 1] === "/") {
-      const newline = text.indexOf("\n", at);
-      end = newline < 0 ? text.length - 1 : newline - 1;
-      comment(at, end);
-    } else if (c === "/" && text[at + 1] === "*") {
-      const close = text.indexOf("*/", at + 2);
-      if (close < 0) return { code: text, failure: { at, why: "a block comment never closes" } };
-      end = close + 1;
-      comment(at, end);
-    } else if (c === '"' || c === "'") {
-      end = stringEnd(text, at);
-      if (end < 0) {
-        return { code: text, failure: { at, why: "a string does not close on its line" } };
-      }
-      blank(at, end, '"');
-    } else if (c === "`" || (c === "}" && templates.at(-1) === depth)) {
-      if (c === "}") templates.pop();
-      let j = at + 1;
-      while (j < text.length && text[j] !== "`" && !(text[j] === "$" && text[j + 1] === "{")) {
-        j += text[j] === "\\" ? 2 : 1;
-      }
-      if (j >= text.length) {
-        return { code: text, failure: { at, why: "a template literal never closes" } };
-      }
-      if (text[j] === "`") end = j;
-      else {
-        end = j + 1;
-        templates.push(depth);
-      }
-      blank(at, end, '"');
-    } else if (c === "/" && regexStarts(text, at, prev, heads, parens.at(-1) === "for", comments)) {
-      end = regexEnd(text, at);
-      if (end < 0) {
-        return {
-          code: text,
-          failure: { at, why: "a regular expression does not close on its line" },
-        };
-      }
-      blank(at, end, '"');
-    } else if (c === "(") parens.push(controlHead(text, at, comments));
-    else if (c === ")") {
-      if ((parens.pop() ?? "") !== "") heads.add(at);
-    } else if (c === "{") depth++;
-    else if (c === "}") depth--;
-    // A comment leaves `prev` as it was; a string or an expression is an operand that ends at `end`.
-    if (end < 0) prev = at;
-    else if (!(c === "/" && (text[at + 1] === "/" || text[at + 1] === "*"))) prev = end;
-    i = end >= 0 ? end + 1 : at + 1;
-    special.lastIndex = i;
-  }
-  parts.push(text.slice(emitted));
-  return { code: parts.join("") };
-}
-
-const CLOSER_OF: Readonly<Record<string, string>> = { "(": ")", "[": "]", "{": "}" };
-
-/**
- * Each bracket's index in `code`, and the index just past the bracket that closes it; a failure
- * where a bracket closes none, closes one of another kind, or is never closed.
- */
-function bracketPairs(code: string): { pairs: Map<number, number>; failure?: LexFailure } {
-  const pairs = new Map<number, number>();
-  const open: number[] = [];
-  const brackets = /[()[\]{}]/g;
-  for (let match = brackets.exec(code); match !== null; match = brackets.exec(code)) {
-    const c = match[0];
-    if (c === "(" || c === "{" || c === "[") open.push(match.index);
-    else {
-      const at = open.pop();
-      if (at === undefined || CLOSER_OF[code[at] ?? ""] !== c) {
-        const why =
-          at === undefined
-            ? `a \`${c}\` closes no bracket`
-            : `a \`${c}\` closes the \`${code[at]}\` of line ${lineAt(code, at)}`;
-        return { pairs, failure: { at: match.index, why } };
-      }
-      pairs.set(at, match.index + 1);
-    }
-  }
-  const unclosed = open.at(-1);
-  if (unclosed !== undefined) {
-    return { pairs, failure: { at: unclosed, why: `a \`${code[unclosed]}\` never closes` } };
-  }
-  return { pairs };
-}
-
+/** The tokens of a file's code, and how its brackets pair (the tokenizer refuses any that do not). */
 function sourceOf(file: string, text: string): Source {
-  const lexed = lexCode(text);
-  const paired =
-    lexed.failure === undefined ? bracketPairs(lexed.code) : { pairs: new Map<number, number>() };
-  const failure = lexed.failure ?? paired.failure;
-  return {
-    file,
-    text,
-    code: lexed.code,
-    pairs: paired.pairs,
-    ...(failure === undefined ? {} : { failure }),
-  };
-}
-
-function skipSpace(code: string, i: number): number {
-  let k = i;
-  while (/\s/.test(code[k] ?? "")) k++;
-  return k;
-}
-
-/** [start, end) without the blank code at either end. */
-function trimmed(src: Source, start: number, end: number): [number, number] {
-  let s = start;
-  let e = end;
-  while (s < e && /\s/.test(src.code[s] ?? "")) s++;
-  while (e > s && /\s/.test(src.code[e - 1] ?? "")) e--;
-  return [s, e];
-}
-
-/** The end of the expression at `from`: the first `,` or `;`, or an unmatched closer. */
-function codeEnd(src: Source, from: number): number {
-  for (let i = from; i < src.code.length; i++) {
-    const c = src.code[i];
-    if (c === "(" || c === "{" || c === "[") {
-      const close = src.pairs.get(i);
-      if (close === undefined) return src.code.length;
-      i = close - 1;
-    } else if (c === "," || c === ";" || c === ")" || c === "}" || c === "]") return i;
+  const tokens = tokenize(text, file).filter(
+    (t) => t.kind !== "line-comment" && t.kind !== "block-comment" && t.kind !== "hashbang",
+  );
+  const pairs = new Map<number, number>();
+  const openers = new Map<number, number>();
+  const parents: number[] = [];
+  const open: number[] = [];
+  for (const [i, t] of tokens.entries()) {
+    const bracket = t.kind === "punct" ? t.value : "";
+    if (CLOSERS.has(bracket) || t.kind === "template-tail") {
+      const at = open.pop() ?? -1;
+      pairs.set(at, i);
+      openers.set(i, at);
+    }
+    parents.push(open.at(-1) ?? -1);
+    if (OPENERS.has(bracket) || t.kind === "template-head") open.push(i);
   }
-  return src.code.length;
+  return { file, text, tokens, pairs, openers, parents, bindings: new Map(), changed: new Map() };
+}
+
+/** The end of the expression at `from`: the first `,` or `;` outside brackets, or a closer. */
+function exprEnd(src: Source, from: number): number {
+  const { tokens, pairs } = src;
+  for (let i = from; i < tokens.length; i++) {
+    const close = pairs.get(i);
+    if (close !== undefined) i = close;
+    else if (isPunct(tokens[i], ",") || isPunct(tokens[i], ";") || isCloser(tokens[i])) return i;
+  }
+  return tokens.length;
 }
 
 /** [start, end) split at each `,` that stands outside any bracket. */
@@ -766,9 +507,9 @@ function commaParts(src: Source, start: number, end: number): [number, number][]
   const parts: [number, number][] = [];
   let from = start;
   for (let i = start; i < end; i++) {
-    const c = src.code[i];
-    if (c === "(" || c === "{" || c === "[") i = (src.pairs.get(i) ?? end) - 1;
-    else if (c === ",") {
+    const close = src.pairs.get(i);
+    if (close !== undefined) i = close;
+    else if (isPunct(src.tokens[i], ",")) {
       parts.push([from, i]);
       from = i + 1;
     }
@@ -777,167 +518,329 @@ function commaParts(src: Source, start: number, end: number): [number, number][]
   return parts;
 }
 
-/** The innermost bracket pair around `at`, as [open, end), or the whole file. */
+/** The innermost bracket pair around the token at `at`, as [open, end), or the whole file. */
 function enclosing(src: Source, at: number): [number, number] {
-  let best: [number, number] = [0, src.code.length];
-  for (const [open, end] of src.pairs) {
-    if (open < at && at < end && open >= best[0] && end <= best[1]) best = [open, end];
-  }
-  return best;
+  const open = src.parents[at] ?? -1;
+  return open < 0 ? [0, src.tokens.length] : [open, (src.pairs.get(open) ?? at) + 1];
 }
 
-/** A function body after the parameter list that ends just before `after`, or undefined. */
-function bodyAfter(src: Source, after: number): [number, number] | undefined {
-  const { code } = src;
-  let k = skipSpace(code, after);
-  if (code[k] === ":") {
-    // A return type, to the body's `{` or the arrow's `=>`; a `{` after `:`, `|`, `&`, `<`, `,`
-    // or `(` is a type literal.
-    for (k = skipSpace(code, k + 1); k < code.length; k = skipSpace(code, k + 1)) {
-      const c = code[k];
-      if (c === "=" && code[k + 1] === ">") break;
-      if (c === "{") {
-        let j = k - 1;
-        while (/\s/.test(code[j] ?? "")) j--;
-        if (!":|&<,(".includes(code[j] ?? "")) break;
-        k = (src.pairs.get(k) ?? code.length) - 1;
-      } else if (c === "(" || c === "[") k = (src.pairs.get(k) ?? code.length) - 1;
-      else if (c === ";" || c === "," || c === ")" || c === "}" || c === "]" || c === "=") {
+/** The index of the first `:` outside brackets in [start, end), or undefined. */
+function colonIn(src: Source, start: number, end: number): number | undefined {
+  for (let i = start; i < end; i++) {
+    const close = src.pairs.get(i);
+    if (close !== undefined) i = close;
+    else if (isPunct(src.tokens[i], ":")) return i;
+  }
+  return undefined;
+}
+
+/** The end of the type that starts at `from`: the first `=`, `,`, `;` or closer outside it. */
+function typeEnd(src: Source, from: number): number {
+  const { tokens, pairs } = src;
+  let angles = 0;
+  for (let i = from; i < tokens.length; i++) {
+    const close = pairs.get(i);
+    const t = tokens[i];
+    if (close !== undefined) i = close;
+    else if (isPunct(t, "<")) angles++;
+    else if (t?.kind === "punct" && /^>+$/.test(t.value)) angles -= t.value.length;
+    else if (isCloser(t) || isPunct(t, ";") || isPunct(t, "=")) return i;
+    else if (isPunct(t, ",") && angles <= 0) return i;
+  }
+  return tokens.length;
+}
+
+/** The names a binding target at `k` binds: a name, or every name a `{…}` or `[…]` pattern holds. */
+function targetNames(src: Source, k: number, out: Set<string> = new Set()): Set<string> {
+  const t = src.tokens;
+  const token = t[k];
+  if (isName(token)) {
+    out.add(token.value);
+    return out;
+  }
+  const close = src.pairs.get(k);
+  const array = isPunct(token, "[");
+  if (close === undefined || !(array || isPunct(token, "{"))) return out;
+  for (const [ps, pe] of commaParts(src, k + 1, close)) {
+    if (ps >= pe) continue;
+    if (isPunct(t[ps], "...")) targetNames(src, ps + 1, out);
+    else if (array) targetNames(src, ps, out);
+    else targetNames(src, (colonIn(src, ps, pe) ?? ps - 1) + 1, out);
+  }
+  return out;
+}
+
+/** The first token before the `(` at `open`, past type parameters or arguments (`f<T>(`). */
+function beforeTypeParameters(src: Source, open: number): number {
+  const t = src.tokens;
+  const last = open - 1;
+  if (!isPunct(t[last], ">")) return last;
+  let angles = 0;
+  for (let i = last; i >= 0; i--) {
+    const opener = src.openers.get(i);
+    const token = t[i];
+    if (opener !== undefined) i = opener;
+    else if (token?.kind === "punct" && /^>+$/.test(token.value)) angles += token.value.length;
+    else if (isPunct(token, "<") && --angles === 0) return i - 1;
+    else if (isPunct(token, ";") || (token?.kind === "punct" && OPENERS.has(token.value))) break;
+  }
+  return last;
+}
+
+/** A function's body after its parameters (and return type), from `from`: a `{` block or `=>`. */
+function bodyAfter(
+  src: Source,
+  from: number,
+): { arrow: boolean; body: [number, number] } | undefined {
+  const t = src.tokens;
+  let k = from;
+  if (isPunct(t[k], ":")) {
+    for (k++; k < t.length && !isPunct(t[k], "=>"); k++) {
+      const close = src.pairs.get(k);
+      const before = t[k - 1];
+      if (
+        isPunct(t[k], "{") &&
+        !(before?.kind === "punct" && TYPE_LITERAL_AFTER.has(before.value))
+      ) {
+        break;
+      }
+      if (close !== undefined) k = close;
+      else if (isCloser(t[k]) || isPunct(t[k], ";") || isPunct(t[k], ",") || isPunct(t[k], "=")) {
         return undefined;
       }
     }
   }
-  if (code.startsWith("=>", k)) {
-    const from = skipSpace(code, k + 2);
-    const end = code[from] === "{" ? src.pairs.get(from) : codeEnd(src, from);
-    return end === undefined ? undefined : [from, end];
+  if (isPunct(t[k], "=>")) {
+    const start = k + 1;
+    const end = isPunct(t[start], "{") ? (src.pairs.get(start) ?? start) + 1 : exprEnd(src, start);
+    return { arrow: true, body: [start, end] };
   }
-  if (code[k] !== "{") return undefined;
-  const end = src.pairs.get(k);
-  return end === undefined ? undefined : [k, end];
+  const close = isPunct(t[k], "{") ? src.pairs.get(k) : undefined;
+  return close === undefined ? undefined : { arrow: false, body: [k, close + 1] };
 }
 
-/** The name a function is given by what stands before its parameters: `log(`, `write: (`. */
-function functionName(before: string): string {
-  const method = /#?([A-Za-z_$][\w$]*)\s*(?:<[^<>()]*>)?\s*$/.exec(before)?.[1];
-  if (method !== undefined && !/^(?:function|async|return|await|yield|typeof|new)$/.test(method)) {
-    return method;
+/** The name a function is given by what stands before it: `const line = (`, `write: (`, `x = async`. */
+function assignedName(src: Source, last: number): string {
+  const t = src.tokens;
+  let k = last;
+  if (isName(t[k], "async")) k--;
+  if (isPunct(t[k], "*")) k--;
+  if (isName(t[k], "function")) k--;
+  if (isName(t[k], "async")) k--;
+  if (!isPunct(t[k], "=") && !isPunct(t[k], ":")) return "";
+  let j = k - 1;
+  if (isPunct(t[k], "=")) {
+    // `name: Type = (`: the name stands before the type's `:`.
+    for (let i = j; i >= 0; i--) {
+      const opener = src.openers.get(i);
+      const token = t[i];
+      if (opener !== undefined) i = opener;
+      else if (isPunct(token, ":")) {
+        j = i - 1;
+        break;
+      } else if (
+        isPunct(token, ";") ||
+        isPunct(token, "=") ||
+        isPunct(token, ",") ||
+        (token?.kind === "punct" && OPENERS.has(token.value)) ||
+        isDeclaration(token)
+      ) {
+        break;
+      }
+    }
   }
-  return (
-    /#?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;{}()]*?)?[:=]\s*(?:async\s*)?(?:function\s*\*?\s*)?(?:<[^<>()]*>)?\s*$/.exec(
-      before,
-    )?.[1] ?? ""
-  );
+  if (isPunct(t[j], "?") || isPunct(t[j], "!")) j--;
+  const name = t[j];
+  if (isName(name)) return name.value;
+  return name?.kind === "private-name" ? name.value.slice(1) : "";
 }
 
-/** Every function, method and arrow in the file (control statements' parentheses are none). */
+/**
+ * The function whose parameters the `(` at `open` opens (see the rule above): its name and body,
+ * or undefined for a call's arguments, a head's condition or a parenthesized expression.
+ */
+function functionAt(src: Source, open: number): CodeFunction | undefined {
+  const t = src.tokens;
+  const close = src.pairs.get(open) ?? open;
+  const k = beforeTypeParameters(src, open);
+  const before = t[k];
+  const found = bodyAfter(src, close + 1);
+  if (found === undefined) return undefined;
+  const params: [number, number] = [open, close + 1];
+  const keyed =
+    before?.kind === "private-name" ||
+    before?.kind === "string" ||
+    before?.kind === "number" ||
+    isPunct(before, "]") ||
+    (isName(before) && !EXPRESSION_WORDS.has(before.value));
+  if (keyed) {
+    // A name before `(`: a call's callee, unless it names a function or starts a member.
+    if (found.arrow || (isName(before) && CONTROL_WORDS.has(before.value))) return undefined;
+    const key = isPunct(before, "]") ? (src.openers.get(k) ?? k) : k;
+    const prev = t[key - 1];
+    const starts =
+      prev === undefined ||
+      isName(prev, "function") ||
+      isPunct(prev, "*") ||
+      isPunct(prev, "{") ||
+      isPunct(prev, "}") ||
+      isPunct(prev, ",") ||
+      isPunct(prev, ";") ||
+      (isName(prev) && MEMBER_MODIFIERS.has(prev.value));
+    if (!starts) return undefined;
+    const name =
+      before?.kind === "private-name" ? before.value.slice(1) : isName(before) ? before.value : "";
+    return { name, params, body: found.body };
+  }
+  // `function (` and `function* (`: an anonymous function's, with a block body.
+  const fn = isName(before, "function") || (isPunct(before, "*") && isName(t[k - 1], "function"));
+  if (fn === found.arrow) return undefined;
+  return { name: assignedName(src, k), params, body: found.body };
+}
+
+/** Every function, method and arrow in the file (see the rule above). */
 function functionsOf(src: Source): readonly CodeFunction[] {
   if (src.functions !== undefined) return src.functions;
-  const { code } = src;
+  const t = src.tokens;
   const found: CodeFunction[] = [];
-  for (const [open, end] of src.pairs) {
-    if (code[open] !== "(") continue;
-    const body = bodyAfter(src, end);
-    if (body === undefined) continue;
-    const before = code.slice(Math.max(0, open - 120), open);
-    if (/(?:^|[^\w$.])(?:if|for|while|switch|with)(?:\s+await)?\s*$/.test(before)) continue;
-    found.push({ name: functionName(before), params: [open, end], body });
+  for (const open of src.pairs.keys()) {
+    if (!isPunct(t[open], "(")) continue;
+    const fn = functionAt(src, open);
+    if (fn !== undefined) found.push(fn);
   }
-  for (const match of code.matchAll(/(?<![\w$.#])([A-Za-z_$][\w$]*)\s*=>/g)) {
-    const param = match[1] ?? "";
-    const body = bodyAfter(src, match.index + param.length);
+  // An arrow's one parameter: `x => …`, `async x => …`.
+  for (let i = 0; i < t.length; i++) {
+    if (!isName(t[i]) || !isPunct(t[i + 1], "=>") || isMember(src, i)) continue;
+    const body = bodyAfter(src, i + 1);
     if (body === undefined) continue;
-    const before = code.slice(Math.max(0, match.index - 120), match.index).replace(/async\s*$/, "");
-    found.push({
-      name: functionName(before),
-      params: [match.index, match.index + param.length],
-      body,
-    });
+    found.push({ name: assignedName(src, i - 1), params: [i, i + 1], body: body.body });
   }
   src.functions = found;
   return found;
 }
 
-/** Whether the parameters' code binds `name`: as a parameter, in a pattern, or after `...`. */
-function bindsParameter(params: string, name: string): boolean {
-  const id = name.replaceAll("$", "\\$");
-  return new RegExp(`(?:^|[({[,]|\\.\\.\\.)\\s*${id}(?![\\w$])`).test(params);
+/** A function's parameters, each as [start, end). */
+function parametersOf(src: Source, fn: CodeFunction): [number, number][] {
+  const [open, end] = fn.params;
+  return isPunct(src.tokens[open], "(") ? commaParts(src, open + 1, end - 1) : [[open, end]];
+}
+
+/** The names a parameter binds: its target's, after a rest parameter's `...`. */
+function parameterNames(src: Source, [start, end]: [number, number]): Set<string> {
+  if (start >= end) return new Set();
+  return targetNames(src, isPunct(src.tokens[start], "...") ? start + 1 : start);
 }
 
 /** What a name is bound to where a call stands (see the rule above). */
 interface Binding {
   /** A `const`, `let` or `var` with a value, a `for … of` list, an adapter's parameter, or other. */
   readonly kind: "value" | "list" | "adapter" | "other";
-  readonly scope: [number, number];
-  /** Where the name is bound. */
+  readonly scope: readonly [number, number];
+  /** Where the name is bound: its token, or an adapter's parameters' first token. */
   readonly at: number;
-  /** The value's code, or the list's, as [start, end). */
-  readonly value?: [number, number];
+  /** The value's tokens, or the list's, as [start, end). */
+  readonly value?: readonly [number, number];
   /** A `let` or `var`. */
   readonly mutable?: boolean;
+  /** An adapter's body, where its parameter is never assigned again. */
+  readonly body?: readonly [number, number];
+}
+
+/** A declaration's scope: its block, or a loop's head and body for the loop's own. */
+function scopeOf(src: Source, [open, end]: [number, number]): [number, number] {
+  const t = src.tokens;
+  if (!isPunct(t[open], "(") || !forHead(src, open)) return [open, end];
+  const body = isPunct(t[end], "{") ? (src.pairs.get(end) ?? end) + 1 : exprEnd(src, end);
+  return [open, body];
+}
+
+/** Whether the `(` at `open` opens a `for` head (`for (`, `for await (`). */
+function forHead(src: Source, open: number): boolean {
+  const t = src.tokens;
+  return isName(t[open - 1], "for") || (isName(t[open - 1], "await") && isName(t[open - 2], "for"));
 }
 
 /** Every binding of `name` in the file: declarations, imports and parameters. */
-function bindingsOf(src: Source, name: string): Binding[] {
-  const { code } = src;
-  const id = name.replaceAll("$", "\\$");
+function bindingsOf(src: Source, name: string): readonly Binding[] {
+  const known = src.bindings.get(name);
+  if (known !== undefined) return known;
+  const t = src.tokens;
   const out: Binding[] = [];
-  /** A declaration's scope: its block, or a loop's head and body for the loop's own. */
-  const scopeOf = ([open, close]: [number, number]): [number, number] => {
-    const before = code.slice(Math.max(0, open - 16), open);
-    if (code[open] !== "(" || !/(?:^|[^\w$.])for(?:\s+await)?\s*$/.test(before)) {
-      return [open, close];
+  src.bindings.set(name, out);
+  for (let i = 0; i < t.length; i++) {
+    // `let` with no binding after it is an identifier; `as const` declares nothing.
+    const first = t[i + 1];
+    const binds = isName(first) || isPunct(first, "{") || isPunct(first, "[");
+    if (!isDeclaration(t[i]) || !binds || isMember(src, i) || isName(t[i - 1], "as")) continue;
+    const around = enclosing(src, i);
+    const scope = scopeOf(src, around);
+    const inParens = (src.parents[i] ?? -1) >= 0 && isPunct(t[around[0]], "(");
+    const mutable = !isName(t[i], "const");
+    // Each declarator: a name or a pattern, a definite `!`, a type, and a value.
+    for (let k = i + 1; k < t.length; ) {
+      const pattern = !isName(t[k]);
+      if (pattern && !isPunct(t[k], "{") && !isPunct(t[k], "[")) break;
+      const bound = targetNames(src, k).has(name);
+      let next = pattern ? (src.pairs.get(k) ?? k) + 1 : k + 1;
+      if (isPunct(t[next], "!")) next++;
+      if (isPunct(t[next], ":")) next = typeEnd(src, next + 1);
+      let end = next;
+      if (isPunct(t[next], "=")) {
+        end = exprEnd(src, next + 1);
+        if (bound && !pattern) {
+          out.push({ kind: "value", scope, at: k, value: [next + 1, end], mutable });
+        } else if (bound) out.push({ kind: "other", scope, at: k });
+      } else if (bound && !pattern && isName(t[next], "of") && inParens) {
+        out.push({ kind: "list", scope, at: k, value: [next + 1, around[1] - 1], mutable });
+      } else if (bound) out.push({ kind: "other", scope, at: k });
+      if (!isPunct(t[end], ",")) break;
+      k = end + 1;
     }
-    const from = skipSpace(code, close);
-    return [open, code[from] === "{" ? (src.pairs.get(from) ?? code.length) : codeEnd(src, from)];
-  };
-  for (const match of code.matchAll(/(?<![\w$.#])(const|let|var)\s+/g)) {
-    const at = match.index + match[0].length;
-    const c = code[at];
-    if (c === "{" || c === "[") {
-      const pattern = code.slice(at, src.pairs.get(at) ?? at);
-      if (new RegExp(`(?<![\\w$.#])${id}(?![\\w$]|\\s*:)`).test(pattern)) {
-        out.push({ kind: "other", scope: scopeOf(enclosing(src, match.index)), at });
-      }
-      continue;
-    }
-    if (!code.startsWith(name, at) || /[\w$]/.test(code[at + name.length] ?? "")) continue;
-    const [open, close] = enclosing(src, match.index);
-    const scope = scopeOf([open, close]);
-    let k = skipSpace(code, at + name.length);
-    if (code[k] === "!") k = skipSpace(code, k + 1);
-    if (code[k] === ":") {
-      for (k++; k < code.length; k++) {
-        const t = code[k];
-        if (t === "(" || t === "{" || t === "[") k = (src.pairs.get(k) ?? code.length) - 1;
-        else if (t === "=" && code[k + 1] === ">") k++;
-        else if (t === "=" || t === ";" || t === "," || t === ")" || t === "}" || t === "]") break;
-      }
-    }
-    const mutable = match[1] !== "const";
-    if (code[k] === "=" && code[k + 1] !== "=") {
-      out.push({ kind: "value", scope, at, value: [k + 1, codeEnd(src, k + 1)], mutable });
-    } else if (/^of(?![\w$])/.test(code.slice(k, k + 3)) && code[open] === "(") {
-      out.push({ kind: "list", scope, at, value: [k + 2, close - 1], mutable });
-    } else out.push({ kind: "other", scope, at });
   }
-  for (const match of code.matchAll(/(?<![\w$.])import\s+([^;]*?)\bfrom\s*"/g)) {
-    if (new RegExp(`(?<![\\w$.])${id}(?![\\w$])(?!\\s+as\\s)`).test(match[1] ?? "")) {
-      out.push({ kind: "other", scope: [0, code.length], at: match.index });
-    }
+  for (let i = 0; i < t.length; i++) {
+    if (isName(t[i], "import") && !isMember(src, i)) out.push(...importBindings(src, i, name));
   }
   for (const fn of functionsOf(src)) {
-    const [open, end] = fn.params;
-    const inner = code[open] === "(" ? code.slice(open + 1, end - 1) : code.slice(open, end);
-    if (!bindsParameter(inner, name)) continue;
-    const first = code[open] === "(" ? commaParts(src, open + 1, end - 1)[0] : [open, end];
+    const params = parametersOf(src, fn);
+    if (!params.some((p) => parameterNames(src, p).has(name))) continue;
+    const first = params[0];
     const adapter =
       WRITER_METHODS.has(fn.name) &&
       first !== undefined &&
-      bindsParameter(code.slice(first[0], first[1]), name);
-    out.push({ kind: adapter ? "adapter" : "other", scope: [open, fn.body[1]], at: open });
+      parameterNames(src, first).has(name) &&
+      !src.tokens.slice(first[0], first[1]).some((tok) => isPunct(tok, "="));
+    const scope: [number, number] = [fn.params[0], fn.body[1]];
+    out.push(
+      adapter
+        ? { kind: "adapter", scope, at: fn.params[0], body: fn.body }
+        : { kind: "other", scope, at: fn.params[0] },
+    );
   }
   return out;
+}
+
+/**
+ * The bindings of `name` the import statement at `at` makes: its clause, to `from` and the module's
+ * string, binds a default import, a namespace's name and each named import (a name renamed `as`
+ * binds its new name). `import(…)`, `import.meta` and a bare `import "x"` bind nothing.
+ */
+function importBindings(src: Source, at: number, name: string): Binding[] {
+  const t = src.tokens;
+  const found: number[] = [];
+  const binds = (k: number) => isName(t[k], name) && !isName(t[k + 1], "as");
+  let k = at + 1;
+  if (isName(t[k], "type") && !isName(t[k + 1], "from") && !isPunct(t[k + 1], ",")) k++;
+  for (; k < t.length && !isName(t[k], "from"); k++) {
+    const close = isPunct(t[k], "{") ? src.pairs.get(k) : undefined;
+    if (close !== undefined) {
+      for (let j = k + 1; j < close; j++) if (binds(j)) found.push(j);
+      k = close;
+    } else if (isName(t[k])) {
+      if (binds(k)) found.push(k);
+    } else if (!isPunct(t[k], "*") && !isPunct(t[k], ",")) return [];
+  }
+  if (t[k + 1]?.kind !== "string") return [];
+  return found.map((j) => ({ kind: "other", scope: [0, t.length], at: j }));
 }
 
 /** The binding of `name` whose scope holds `at` most closely, or undefined when none does. */
@@ -957,28 +860,93 @@ function bindingOf(src: Source, name: string, at: number): Binding | undefined {
   return best;
 }
 
-/** Whether code in `scope` changes `name` other than where `at` declares it. */
-function assignedAgain(src: Source, name: string, scope: [number, number], at: number): boolean {
-  const id = name.replaceAll("$", "\\$");
-  const assignment = new RegExp(
-    `(?<![\\w$.#])${id}\\s*(?:[-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=(?![=>])` +
-      `|(?<![\\w$.#])${id}\\s*(?:\\+\\+|--)|(?:\\+\\+|--)\\s*${id}(?![\\w$])`,
-    "g",
-  );
-  for (const m of src.code.slice(scope[0], scope[1]).matchAll(assignment)) {
-    if (scope[0] + m.index !== at) return true;
+/** Whether the token is an assignment operator: `=` or a compound one. */
+function isAssignment(token: Token | undefined): boolean {
+  return token?.kind === "punct" && token.jsx !== true && ASSIGNMENTS.has(token.value);
+}
+
+/**
+ * Whether the name at `i` is a target of a destructuring assignment (`({ name } = o)`, `[name] =
+ * o`) or of a `for … of` or `for … in` head (`for (name of o)`, `for ([name] of o)`).
+ */
+function assignedTarget(src: Source, i: number): boolean {
+  const t = src.tokens;
+  const loop = (open: number, after: Token | undefined) =>
+    isPunct(t[open], "(") && forHead(src, open) && (isName(after, "of") || isName(after, "in"));
+  if (loop(i - 1, t[i + 1])) return true;
+  if (isPunct(t[i + 1], ":")) return false;
+  // The `{…}` or `[…]` around it, read as a pattern, and each pattern around that one: a nested
+  // pattern stands after an outer one's `[`, `,`, `:` or `...`.
+  const pattern = (open: number) => isPunct(t[open], "{") || isPunct(t[open], "[");
+  let outer = src.parents[i] ?? -1;
+  if (outer < 0 || !pattern(outer)) return false;
+  for (let up = src.parents[outer] ?? -1; up >= 0 && pattern(up); up = src.parents[up] ?? -1) {
+    const before = t[outer - 1];
+    const nested = [",", ":", "...", "["].some((p) => isPunct(before, p));
+    if (!nested) break;
+    outer = up;
+  }
+  if (isDeclaration(t[outer - 1])) return false;
+  const after = t[(src.pairs.get(outer) ?? outer) + 1];
+  return isPunct(after, "=") || loop(outer - 1, after);
+}
+
+/** Whether code in `scope` assigns `name` again, other than where the token `at` declares it. */
+function assignedAgain(
+  src: Source,
+  name: string,
+  scope: readonly [number, number],
+  at: number,
+): boolean {
+  const t = src.tokens;
+  for (let i = scope[0]; i < scope[1]; i++) {
+    if (i === at || !isName(t[i], name) || isMember(src, i)) continue;
+    const steps = (token: Token | undefined) => isPunct(token, "++") || isPunct(token, "--");
+    if (isAssignment(t[i + 1]) || steps(t[i + 1]) || steps(t[i - 1]) || assignedTarget(src, i)) {
+      return true;
+    }
   }
   return false;
 }
 
 /** Whether code in `scope` changes the object `name` holds: its `event`, a computed key, or all. */
-function objectChanged(src: Source, name: string, scope: [number, number]): boolean {
-  const id = name.replaceAll("$", "\\$");
-  return new RegExp(
-    `(?<![\\w$.#])${id}\\s*[?!]?\\.\\s*event\\s*(?:[-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=(?![=>])` +
-      `|(?<![\\w$.#])${id}\\s*!?\\s*\\[[^\\]]*\\]\\s*=(?![=>])` +
-      `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}(?![\\w$])|\\bdelete\\s+${id}\\s*[?!]?[.[]`,
-  ).test(src.code.slice(scope[0], scope[1]));
+function objectChanged(src: Source, name: string, scope: readonly [number, number]): boolean {
+  const t = src.tokens;
+  for (let i = scope[0]; i < scope[1]; i++) {
+    if (!isName(t[i], name) || isMember(src, i)) continue;
+    const k = isPunct(t[i + 1], "!") ? i + 2 : i + 1;
+    const dot = isPunct(t[k], ".") || isPunct(t[k], "?.");
+    const key = isPunct(t[k], "[") ? src.pairs.get(k) : undefined;
+    if (
+      (dot && isName(t[k + 1], "event") && isAssignment(t[k + 2])) ||
+      (key !== undefined && isAssignment(t[key + 1])) ||
+      (isName(t[i - 1], "delete") && (dot || key !== undefined)) ||
+      (isPunct(t[i - 1], "(") &&
+        isName(t[i - 2], "assign") &&
+        isPunct(t[i - 3], ".") &&
+        isName(t[i - 4], "Object"))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether code changes what the binding of `name` holds, found once per binding: an adapter's
+ * parameter assigned again in its body; a `let` or `var` assigned again in its scope; an object
+ * whose `event` is assigned, or changed whole, there.
+ */
+function changedAgain(src: Source, name: string, binding: Binding): boolean {
+  const known = src.changed.get(binding);
+  if (known !== undefined) return known;
+  const changed =
+    binding.kind === "adapter"
+      ? binding.body !== undefined && assignedAgain(src, name, binding.body, -1)
+      : (binding.mutable === true && assignedAgain(src, name, binding.scope, binding.at)) ||
+        objectChanged(src, name, binding.scope);
+  src.changed.set(binding, changed);
+  return changed;
 }
 
 /** A forwarding adapter's first parameter, by where it is bound (-1 for a parameter list). */
@@ -996,9 +964,6 @@ function isAdapter(read: Reading): read is AdapterParameter {
   return typeof read === "object" && !Array.isArray(read);
 }
 
-/** Text a message holds and a name never does: a space, or an escaped newline or tab. */
-const MESSAGE_TEXT = /\s|\\[nrt]/;
-
 /** Names from strings: each in the event-name shape, or messages only, or out of the shape. */
 function classify(values: readonly string[]): Reading {
   if (values.every((v) => EVENT_NAME.test(v))) return [...values];
@@ -1008,18 +973,16 @@ function classify(values: readonly string[]): Reading {
 
 /** The `?` and `:` of a ternary standing outside any bracket in [start, end), or undefined. */
 function ternaryIn(src: Source, start: number, end: number): [number, number] | undefined {
-  const { code } = src;
   let question = -1;
   let nested = 0;
   for (let i = start; i < end; i++) {
-    const c = code[i];
-    if (c === "(" || c === "{" || c === "[") i = (src.pairs.get(i) ?? end) - 1;
-    else if (c === "?") {
-      if (code[i + 1] === "?" || code[i - 1] === "?") continue;
-      if (code[i + 1] === "." && !/\d/.test(code[i + 2] ?? "")) continue;
+    const close = src.pairs.get(i);
+    const t = src.tokens[i];
+    if (close !== undefined) i = close;
+    else if (isPunct(t, "?")) {
       if (question < 0) question = i;
       else nested++;
-    } else if (c === ":" && question >= 0) {
+    } else if (isPunct(t, ":") && question >= 0) {
       if (nested === 0) return [question, i];
       nested--;
     }
@@ -1029,13 +992,11 @@ function ternaryIn(src: Source, start: number, end: number): [number, number] | 
 
 /** The first `||`, `??` or `&&` standing outside any bracket in [start, end), or undefined. */
 function logicalIn(src: Source, start: number, end: number): number | undefined {
-  const { code } = src;
-  for (let i = start; i < end - 1; i++) {
-    const c = code[i];
-    if (c === "(" || c === "{" || c === "[") i = (src.pairs.get(i) ?? end) - 1;
-    else if ((c === "|" || c === "&" || c === "?") && code[i + 1] === c && code[i + 2] !== "=") {
-      return i;
-    }
+  for (let i = start; i < end; i++) {
+    const close = src.pairs.get(i);
+    const t = src.tokens[i];
+    if (close !== undefined) i = close;
+    else if (isPunct(t, "||") || isPunct(t, "??") || isPunct(t, "&&")) return i;
   }
   return undefined;
 }
@@ -1045,114 +1006,121 @@ function logicalIn(src: Source, start: number, end: number): number | undefined 
  * joined by a ternary (its branches), `||`, `??` or `&&`.
  */
 function stringLeaves(src: Source, start: number, end: number): string[] | undefined {
-  const [s, e] = trimmed(src, start, end);
-  if (s >= e) return undefined;
-  if (src.code[s] === "(" && src.pairs.get(s) === e) return stringLeaves(src, s + 1, e - 1);
-  const ternary = ternaryIn(src, s, e);
+  const t = src.tokens;
+  if (start >= end) return undefined;
+  if (isPunct(t[start], "(") && src.pairs.get(start) === end - 1) {
+    return stringLeaves(src, start + 1, end - 1);
+  }
+  const ternary = ternaryIn(src, start, end);
   if (ternary !== undefined) {
     const yes = stringLeaves(src, ternary[0] + 1, ternary[1]);
-    const no = stringLeaves(src, ternary[1] + 1, e);
+    const no = stringLeaves(src, ternary[1] + 1, end);
     return yes === undefined || no === undefined ? undefined : [...yes, ...no];
   }
-  const logical = logicalIn(src, s, e);
+  const logical = logicalIn(src, start, end);
   if (logical !== undefined) {
-    const left = stringLeaves(src, s, logical);
-    const right = stringLeaves(src, logical + 2, e);
+    const left = stringLeaves(src, start, logical);
+    const right = stringLeaves(src, logical + 1, end);
     return left === undefined || right === undefined ? undefined : [...left, ...right];
   }
-  const quote = src.text[s];
-  if ((quote !== '"' && quote !== "'" && quote !== "`") || stringEnd(src.text, s) !== e - 1) {
-    return undefined;
-  }
-  const value = src.text.slice(s + 1, e - 1);
-  return quote === "`" && value.includes("${") ? undefined : [value];
+  const token = t[start];
+  return end === start + 1 && isLiteral(token) ? [token.value] : undefined;
 }
 
-/** A string literal's text between its quotes, each `${…}` (to its matching `}`) read as `x`. */
-function literalText(text: string, s: number, e: number): string {
-  let out = "";
-  for (let i = s + 1; i < e - 1; i++) {
-    const c = text[i] ?? "";
-    if (c === "\\") {
-      out += text.slice(i, i + 2);
-      i++;
-    } else if (text[s] === "`" && c === "$" && text[i + 1] === "{") {
-      const close = closing(text, i + 1);
-      if (close < 0) return out;
-      out += "x";
-      i = close - 1;
-    } else out += c;
+/** A literal operand's static text: a string's, or each piece of a template (none of its `${…}`). */
+function staticParts(src: Source, start: number, end: number): string[] | undefined {
+  const t = src.tokens;
+  const token = t[start];
+  if (end === start + 1 && isLiteral(token)) return [token.value];
+  if (token?.kind !== "template-head" || src.pairs.get(start) !== end - 1) return undefined;
+  const parts = [token.value];
+  for (let i = start + 1; i < end; i++) {
+    const piece = t[i];
+    const close = src.pairs.get(i);
+    if (close !== undefined) i = close;
+    else if (piece?.kind === "template-middle" || piece?.kind === "template-tail") {
+      parts.push(piece.value);
+    }
   }
-  return out;
+  return parts;
 }
 
 /** A message, or a name built at run time (see the rule above). */
 function builtOrMessage(src: Source, start: number, end: number): Reading {
-  const { code, text } = src;
   if (ternaryIn(src, start, end) !== undefined) return "unread";
   let from = start;
   let spaced = false;
   for (let i = start; i <= end; i++) {
     if (i < end) {
-      const c = code[i];
-      if (c === "(" || c === "{" || c === "[") {
-        i = (src.pairs.get(i) ?? end) - 1;
+      const close = src.pairs.get(i);
+      const t = src.tokens[i];
+      if (close !== undefined) {
+        i = close;
         continue;
       }
-      const optional = c === "?" && code[i + 1] === "." && !/\d/.test(code[i + 2] ?? "");
-      if ((c === "?" && !optional) || ((c === "|" || c === "&") && code[i + 1] === c)) {
+      if (isPunct(t, "?") || isPunct(t, "??") || isPunct(t, "||") || isPunct(t, "&&")) {
         return "unread";
       }
-      if (c !== "+" || code[i + 1] === "+" || code[i + 1] === "=" || code[i - 1] === "+") continue;
+      if (!isPunct(t, "+")) continue;
     }
-    const [s, e] = trimmed(src, from, i);
-    const quote = text[s];
-    if ((quote === '"' || quote === "'" || quote === "`") && stringEnd(text, s) === e - 1) {
-      if (MESSAGE_TEXT.test(literalText(text, s, e))) spaced = true;
-    }
+    if (staticParts(src, from, i)?.some((part) => MESSAGE_TEXT.test(part))) spaced = true;
     from = i + 1;
   }
   return spaced ? "message" : "unread";
 }
 
-const PATH = /^([A-Za-z_$][\w$]*)((?:\s*[?!]?\.\s*#?[A-Za-z_$][\w$]*)*)$/;
+/** A name and its members (`line`, `line.event`, `x!.y`, `a?.#b`), or undefined. */
+function pathAt(
+  src: Source,
+  start: number,
+  end: number,
+): { root: string; members: string[] } | undefined {
+  const t = src.tokens;
+  const root = t[start];
+  if (!isName(root)) return undefined;
+  const members: string[] = [];
+  for (let i = start + 1; i < end; i += 2) {
+    if (isPunct(t[i], "!")) i++;
+    const member = t[i + 1];
+    if (!(isPunct(t[i], ".") || isPunct(t[i], "?.")) || i + 1 >= end) return undefined;
+    if (isName(member) || member?.kind === "private-name") members.push(member.value);
+    else return undefined;
+  }
+  return { root: root.value, members };
+}
 
 /** What an expression gives as a line's name, read as the rule above says. */
 function readValue(src: Source, start: number, end: number, depth: number): Reading {
-  const [s, e0] = trimmed(src, start, end);
-  const asConst = /\s+as\s+const$/.exec(src.code.slice(s, e0));
-  const e = asConst === null ? e0 : e0 - asConst[0].length;
-  if (s >= e || depth > 8) return "unread";
-  if (src.code[s] === "(" && src.pairs.get(s) === e) return readValue(src, s + 1, e - 1, depth + 1);
-  if (src.code[s] === "{" && src.pairs.get(s) === e) return readObject(src, s, e, depth);
-  const leaves = stringLeaves(src, s, e);
-  if (leaves !== undefined) return classify(leaves);
-  const path = PATH.exec(src.code.slice(s, e));
-  if (path !== null) {
-    const members = (path[2] ?? "")
-      .split(/[?!]?\./)
-      .map((m) => m.trim())
-      .filter((m) => m !== "");
-    return readPath(src, path[1] ?? "", members, s, depth);
+  const t = src.tokens;
+  const asConst = end - start >= 3 && isName(t[end - 2], "as") && isName(t[end - 1], "const");
+  const e = asConst ? end - 2 : end;
+  if (start >= e || depth > 8) return "unread";
+  if (isPunct(t[start], "(") && src.pairs.get(start) === e - 1) {
+    return readValue(src, start + 1, e - 1, depth + 1);
   }
-  return builtOrMessage(src, s, e);
+  if (isPunct(t[start], "{") && src.pairs.get(start) === e - 1) {
+    return readObject(src, start, e, depth);
+  }
+  const leaves = stringLeaves(src, start, e);
+  if (leaves !== undefined) return classify(leaves);
+  const path = pathAt(src, start, e);
+  if (path !== undefined) return readPath(src, path.root, path.members, start, depth);
+  return builtOrMessage(src, start, e);
 }
 
 /** An object literal's own `event`: its value read as a name, or unread. */
 function readObject(src: Source, start: number, end: number, depth: number): Reading {
+  const t = src.tokens;
   let event: { at: number; value: [number, number] | undefined } | undefined;
   let spreadAfter = false;
   for (const [ps, pe] of commaParts(src, start + 1, end - 1)) {
-    const [s, e] = trimmed(src, ps, pe);
-    if (s >= e) continue;
-    if (src.code.startsWith("...", s)) {
+    if (ps >= pe) continue;
+    if (isPunct(t[ps], "...")) {
       if (event !== undefined) spreadAfter = true;
       continue;
     }
-    const property = src.text.slice(s, e);
-    const key = /^(?:event|"event"|'event')\s*:/.exec(property);
-    if (key !== null) event = { at: s, value: [s + key[0].length, e] };
-    else if (property === "event") event = { at: s, value: undefined };
+    if (isEventKey(t[ps]) && isPunct(t[ps + 1], ":")) event = { at: ps, value: [ps + 2, pe] };
+    else if (pe === ps + 1 && isName(t[ps], "event")) event = { at: ps, value: undefined };
     else continue;
     spreadAfter = false;
   }
@@ -1185,26 +1153,24 @@ function readBinding(
   at: number,
   depth: number,
 ): Reading {
+  const t = src.tokens;
   if (root === "this" || depth > 8) return "unread";
   const binding = bindingOf(src, root, at);
   if (binding?.kind === "adapter") {
-    // An adapter forwards its parameter whole, or a line's `.event`; another member is no name.
+    // An adapter forwards its parameter whole, or a line's `.event`, as its caller passed it:
+    // another member, or a parameter it assigns again, is no name.
     const forwarded = members.length === 0 || (members.length === 1 && members[0] === "event");
-    return forwarded ? { adapter: binding.at } : "unread";
+    return forwarded && !changedAgain(src, root, binding) ? { adapter: binding.at } : "unread";
   }
-  if (binding?.value === undefined) return "unread";
-  if (binding.mutable === true && assignedAgain(src, root, binding.scope, binding.at)) {
-    return "unread";
-  }
-  if (objectChanged(src, root, binding.scope)) return "unread";
-  const [s, e] = trimmed(src, binding.value[0], binding.value[1]);
+  if (binding?.value === undefined || changedAgain(src, root, binding)) return "unread";
+  const [s, e] = binding.value;
   if (binding.kind === "list") {
-    const asConst = /\s+as\s+const$/.exec(src.code.slice(s, e));
-    const end = asConst === null ? e : e - asConst[0].length;
-    if (members.length > 0 || src.code[s] !== "[" || src.pairs.get(s) !== end) return "unread";
+    const asConst = e - s >= 3 && isName(t[e - 2], "as") && isName(t[e - 1], "const");
+    const end = asConst ? e - 2 : e;
+    if (members.length > 0 || !isPunct(t[s], "[") || src.pairs.get(s) !== end - 1) return "unread";
     const values: string[] = [];
     for (const [ps, pe] of commaParts(src, s + 1, end - 1)) {
-      if (trimmed(src, ps, pe)[0] >= pe) continue;
+      if (ps >= pe) continue;
       const leaves = stringLeaves(src, ps, pe);
       if (leaves === undefined) return "unread";
       values.push(...leaves);
@@ -1212,30 +1178,64 @@ function readBinding(
     return classify(values);
   }
   if (members.length === 0) return readValue(src, s, e, depth + 1);
-  if (members.length > 1 || members[0] !== "event" || src.code[s] !== "{") return "unread";
-  return readObject(src, s, src.pairs.get(s) ?? e, depth + 1);
+  const close = isPunct(t[s], "{") ? src.pairs.get(s) : undefined;
+  if (members.length > 1 || members[0] !== "event" || close === undefined) return "unread";
+  return readObject(src, s, close + 1, depth + 1);
 }
 
 /** A telemetry writer's call: the names its first argument gives (see the rule above). */
 function readCall(src: Source, open: number): Reading {
-  const from = open + 1;
-  const end = codeEnd(src, from);
-  const [s, e] = trimmed(src, from, end);
+  const t = src.tokens;
+  const s = open + 1;
+  const e = exprEnd(src, s);
   if (s >= e) return "message";
   // A parameter list, not a call: a typed parameter (`log(event: string, …)`, a signature's), a
   // typed pattern (`write({ event }: Line)`), or a function's own (`write(event, level) {`).
-  const pattern = src.code[s] === "{" ? src.pairs.get(s) : undefined;
-  if (
-    /^[A-Za-z_$][\w$]*\s*\??:/.test(src.code.slice(s, s + 200)) ||
-    (pattern !== undefined && src.code[skipSpace(src.code, pattern)] === ":")
-  ) {
+  const pattern = isPunct(t[s], "{") ? src.pairs.get(s) : undefined;
+  const typed = isPunct(t[s + 1], ":") || (isPunct(t[s + 1], "?") && isPunct(t[s + 2], ":"));
+  if ((isName(t[s]) && typed) || (pattern !== undefined && isPunct(t[pattern + 1], ":"))) {
     return { adapter: -1 };
   }
-  if (/^JSON\s*\.\s*stringify\s*\(/.test(src.code.slice(s, e))) return "message";
+  if (
+    isName(t[s], "JSON") &&
+    isPunct(t[s + 1], ".") &&
+    isName(t[s + 2], "stringify") &&
+    isPunct(t[s + 3], "(")
+  ) {
+    return "message";
+  }
   const leaves = stringLeaves(src, s, e);
   if (leaves !== undefined) return classify(leaves);
   if (functionsOf(src).some((fn) => fn.params[0] === open)) return { adapter: -1 };
   return readValue(src, s, e, 0);
+}
+
+/** What the method at `at` is called on: a name, "" for any other receiver, or undefined. */
+function receiverOf(src: Source, at: number): string | undefined {
+  const t = src.tokens;
+  if (!isMember(src, at)) return undefined;
+  const k = isPunct(t[at - 2], "!") ? at - 3 : at - 2;
+  const receiver = t[k];
+  if (isName(receiver)) return receiver.value;
+  return receiver?.kind === "private-name" ? receiver.value.slice(1) : "";
+}
+
+/** Every writer method's call in the file: a writer method's name, then `(` or `?.(`. */
+function writerCalls(src: Source): readonly WriterCall[] {
+  if (src.calls !== undefined) return src.calls;
+  const t = src.tokens;
+  const calls: WriterCall[] = [];
+  for (let i = 0; i < t.length; i++) {
+    const token = t[i];
+    const named = isName(token) || token?.kind === "private-name";
+    const method = token?.kind === "private-name" ? token.value.slice(1) : (token?.value ?? "");
+    if (!named || !WRITER_METHODS.has(method)) continue;
+    const open = isPunct(t[i + 1], "?.") ? i + 2 : i + 1;
+    if (!isPunct(t[open], "(")) continue;
+    calls.push({ at: i, open, method, spelled: token.value, receiver: receiverOf(src, i) });
+  }
+  src.calls = calls;
+  return calls;
 }
 
 /**
@@ -1249,16 +1249,11 @@ function adaptersOf(src: Source): ReadonlySet<string> {
   src.adapters = found;
   const named = functionsOf(src).filter((fn) => WRITER_METHODS.has(fn.name));
   if (named.length === 0) return found;
-  const calls = [...src.text.matchAll(WRITER_CALL)].filter(
-    (m) => src.code[m.index] === src.text[m.index],
-  );
   for (let grew = true; grew; ) {
     grew = false;
-    for (const m of calls) {
-      const method = m[1] ?? "";
-      const receiver = receiverOf(src.text, m.index);
-      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !found.has(method)) continue;
-      const read = readCall(src, m.index + m[0].length - 1);
+    for (const call of writerCalls(src)) {
+      if (!TELEMETRY_WRITERS.has(call.receiver ?? call.method) && !found.has(call.method)) continue;
+      const read = readCall(src, call.open);
       if (!isAdapter(read)) continue;
       for (const fn of named) {
         if (fn.params[0] === read.adapter && !found.has(fn.name)) {
@@ -1271,7 +1266,7 @@ function adaptersOf(src: Source): ReadonlySet<string> {
   return found;
 }
 
-/** A writer call MC-01 refuses, or a file it cannot lex: where, and the finding's message. */
+/** A writer call MC-01 refuses, or a file it cannot tokenize: where, and the finding's message. */
 interface Refusal {
   readonly file: string;
   readonly line: number;
@@ -1280,7 +1275,7 @@ interface Refusal {
 
 /**
  * What eventsInCode reads: the events, and the writer calls whose name it cannot read or that is
- * out of the event-name shape, and the files it cannot lex, in the order the files hold them.
+ * out of the event-name shape, and the files it cannot tokenize, in the order the files hold them.
  */
 function scanWriters(code: readonly CodeFile[]): {
   found: Map<string, CodeEvent>;
@@ -1292,40 +1287,47 @@ function scanWriters(code: readonly CodeFile[]): {
     if (!found.has(event)) found.set(event, at);
   };
   for (const { file, text } of code) {
-    let src: Source | undefined;
-    const source = () => {
-      src ??= sourceOf(file, text);
-      return src;
-    };
-    for (const match of text.matchAll(WRITER_CALL)) {
-      const s0 = source();
-      if (s0.failure !== undefined) break;
-      if (s0.code[match.index] !== text[match.index]) continue;
-      const method = match[0].replace(/(?:\?\.)?\($/, "");
-      const from = match.index + match[0].length;
-      const receiver = receiverOf(text, match.index);
-      const callee = receiver === undefined ? method : `${receiver}.${method}`;
-      const line = lineAt(text, match.index);
-      const [s, e] = trimmed(s0, from, codeEnd(s0, from));
-      const whole = text.slice(s, e).replace(/\s+/g, " ");
+    let src: Source;
+    try {
+      src = sourceOf(file, text);
+    } catch (error) {
+      if (!(error instanceof TokenizeError)) throw error;
+      refused.push({
+        file,
+        line: error.line,
+        message: `the tokenizer cannot read the file from column ${error.column} of this line (${error.reason}), so MC-01 reads none of its writer calls: a misread could hide one`,
+      });
+      continue;
+    }
+    const t = src.tokens;
+    for (const writer of writerCalls(src)) {
+      const { receiver } = writer;
+      const callee = receiver === undefined ? writer.spelled : `${receiver}.${writer.spelled}`;
+      const line = t[writer.at]?.line ?? 0;
+      const s = writer.open + 1;
+      const e = exprEnd(src, s);
+      const whole = s < e ? text.slice(t[s]?.start, t[e - 1]?.end).replace(/\s+/g, " ") : "";
       const shown = whole.length > 60 ? `${whole.slice(0, 57)}…` : whole;
-      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !adaptersOf(s0).has(match[1] ?? "")) {
+      if (
+        !TELEMETRY_WRITERS.has(receiver ?? writer.method) &&
+        !adaptersOf(src).has(writer.method)
+      ) {
         // Each name the first argument's strings give, whole (`"x.y"`, `a ? "x.y" : "x.z"`), or
         // an object's literal `event`.
-        const leaves = stringLeaves(s0, s, e);
+        const leaves = stringLeaves(src, s, e);
         for (const name of leaves ?? []) {
           if (!EVENT_NAME.test(name) || !name.includes(".")) continue;
           const call =
             leaves?.length === 1 ? `${callee}("${name}")` : `${callee}(${shown}: "${name}")`;
           add(name, { file, line, call });
         }
-        const arg = leaves === undefined ? firstArgument(text, from) : undefined;
-        if (arg?.object === true && arg.name.includes(".")) {
-          add(arg.name, { file, line, call: `${callee}({ event: "${arg.name}" })` });
+        const object = leaves === undefined ? literalEvent(src, s) : undefined;
+        if (object?.includes(".") === true) {
+          add(object, { file, line, call: `${callee}({ event: "${object}" })` });
         }
         continue;
       }
-      let read = readCall(s0, from - 1);
+      let read = readCall(src, writer.open);
       if (isAdapter(read)) continue;
       if (read === "message") {
         // A message only through `this` or a bare call: through a member call it is a line.
@@ -1348,8 +1350,8 @@ function scanWriters(code: readonly CodeFile[]): {
         });
         continue;
       }
-      const literal = stringLeaves(s0, s, e)?.length === 1;
-      const object = s0.code[s] === "{";
+      const literal = stringLeaves(src, s, e)?.length === 1;
+      const object = isPunct(t[s], "{");
       for (const name of read) {
         const call = literal
           ? `${callee}("${name}")`
@@ -1359,29 +1361,52 @@ function scanWriters(code: readonly CodeFile[]): {
         add(name, { file, line, call });
       }
     }
-    for (const match of text.matchAll(RAW_LINE)) {
-      const s0 = source();
-      if (s0.failure !== undefined) break;
-      if (s0.code[match.index] !== text[match.index]) continue;
-      const open = match.index + match[0].length - 1;
-      const end = closing(text, open);
-      if (end < 0) continue;
-      for (const key of text.slice(open, end).matchAll(EVENT_KEY)) {
-        const name = key[2] ?? "";
-        const call = `JSON.stringify({ event: "${name}" })`;
-        add(name, { file, line: lineAt(text, open + key.index), call });
-      }
-    }
-    const failure = (src as Source | undefined)?.failure;
-    if (failure !== undefined) {
-      refused.push({
+    for (const event of rawLines(src)) {
+      add(event.name, {
         file,
-        line: lineAt(text, failure.at),
-        message: `the lexer cannot read the file from here (${failure.why}), so MC-01 reads none of its writer calls: a misread could hide one`,
+        line: event.line,
+        call: `JSON.stringify({ event: "${event.name}" })`,
       });
     }
   }
   return { found, refused };
+}
+
+/** Another writer's object argument at `at`: its own `event` key's literal name, or undefined. */
+function literalEvent(src: Source, at: number): string | undefined {
+  const t = src.tokens;
+  const close = isPunct(t[at], "{") ? src.pairs.get(at) : undefined;
+  if (close === undefined) return undefined;
+  for (const [ps] of commaParts(src, at + 1, close)) {
+    const value = t[ps + 2];
+    if (isEventKey(t[ps]) && isPunct(t[ps + 1], ":") && isLiteral(value)) {
+      if (EVENT_NAME.test(value.value)) return value.value;
+    }
+  }
+  return undefined;
+}
+
+/** The raw lines' events: each `event: "x.y"` property inside a `JSON.stringify(…)` call. */
+function rawLines(src: Source): { name: string; line: number }[] {
+  const t = src.tokens;
+  const out: { name: string; line: number }[] = [];
+  for (let i = 0; i < t.length; i++) {
+    const stringify =
+      isName(t[i], "JSON") &&
+      !isMember(src, i) &&
+      isPunct(t[i + 1], ".") &&
+      isName(t[i + 2], "stringify") &&
+      isPunct(t[i + 3], "(");
+    if (!stringify) continue;
+    const close = src.pairs.get(i + 3) ?? i;
+    for (let k = i + 4; k < close; k++) {
+      const value = t[k + 2];
+      const key = isPunct(t[k - 1], "{") || isPunct(t[k - 1], ",");
+      if (!key || !isEventKey(t[k]) || !isPunct(t[k + 1], ":") || !isLiteral(value)) continue;
+      if (EVENT_NAME.test(value.value)) out.push({ name: value.value, line: t[k]?.line ?? 0 });
+    }
+  }
+  return out;
 }
 
 /** Events written in code, each with the first place that writes it (see the rule above). */
@@ -1441,6 +1466,64 @@ const ALERT_WORD = /(?<![\w./@#-])[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+(?![\w/
 export interface CodeAlert {
   readonly file: string;
   readonly line: number;
+}
+
+// MC-15 reads the text itself, comments and strings included (prose names an alert there).
+/** The index of the quote that ends the string starting at `start`, or -1. */
+function stringEnd(text: string, start: number): number {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") i++;
+    else if (c === quote) return i;
+    else if (quote === "`" && c === "$" && text[i + 1] === "{") {
+      const end = closing(text, i + 1);
+      if (end < 0) return -1;
+      i = end - 1;
+    } else if (quote !== "`" && c === "\n") return -1;
+  }
+  return -1;
+}
+
+/** The index of the string's or comment's last character at `i`; undefined when none starts there. */
+function skipped(text: string, i: number): number | undefined {
+  const c = text[i];
+  if (c === '"' || c === "'" || c === "`") return stringEnd(text, i);
+  if (c === "/" && text[i + 1] === "/") {
+    const end = text.indexOf("\n", i);
+    return end < 0 ? text.length - 1 : end;
+  }
+  if (c === "/" && text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end < 0 ? -1 : end + 1;
+  }
+  return undefined;
+}
+
+/** The index just past the bracket that closes the one at `open`, or -1 when it is not closed. */
+function closing(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return -1;
+      i = skip;
+      continue;
+    }
+    const c = text[i];
+    if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function lineAt(text: string, index: number): number {
+  let line = 1;
+  for (let i = text.indexOf("\n"); i >= 0 && i < index; i = text.indexOf("\n", i + 1)) line++;
+  return line;
 }
 
 /** The strings at the top level of the array at `open` (none for a template with `${`). */

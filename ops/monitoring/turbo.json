@@ -1,0 +1,8 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": { "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/js-tokens.mjs"] },
+    "typecheck": { "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/js-tokens.mjs"] }
+  }
+}
