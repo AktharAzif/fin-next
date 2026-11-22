@@ -483,7 +483,9 @@ describe("monitoring apply: applying", () => {
     expect(writes(next.bs)).toEqual([]);
   });
 
-  it("reports drift from a dry run that Better Stack's own state refuses", async () => {
+  describe("reports drift from a dry run that Better Stack's own state refuses", () => {
+    // One test for each case: each runs the whole apply three times, and the three together took
+    // about 0.2 s alone and went over the test timeout inside a loaded `pnpm check`.
     const cases: [string, (bs: FakeBetterStack) => void, string][] = [
       [
         "a loud alert outside the files",
@@ -503,11 +505,13 @@ describe("monitoring apply: applying", () => {
       ],
     ];
     for (const [what, change, refusal] of cases) {
-      const { next } = await applied(["--dry-run"]);
-      change(next.bs);
-      const result = await monitoringApply(next.ctx);
-      expect(result, what).toMatchObject({ exitCode: 1, drift: true });
-      expect(next.text(), what).toContain(refusal);
+      it(what, async () => {
+        const { next } = await applied(["--dry-run"]);
+        change(next.bs);
+        const result = await monitoringApply(next.ctx);
+        expect(result, what).toMatchObject({ exitCode: 1, drift: true });
+        expect(next.text(), what).toContain(refusal);
+      });
     }
   });
 
