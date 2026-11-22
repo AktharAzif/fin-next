@@ -43,7 +43,7 @@ export const entries: readonly CatalogEntry[] = [
     kind: "failure",
     level: "error",
     writtenBy:
-      "pnpm fin, just before run.done, when a run's cleanup left something undone: what to undo by hand, and whether the cleanup failed",
+      "pnpm fin, just before run.done, when a run's cleanup has not undone what the run must not leave (a token made for one run, the superuser reference on migrate): what to undo by hand, and whether the cleanup failed",
     fields: {
       command: "string",
       leftover: "string",
@@ -52,7 +52,7 @@ export const entries: readonly CatalogEntry[] = [
     },
     alerts: [],
     noAlert:
-      "Written by a run an operator or a release workflow is watching, which prints the same at its end, and kept in the run log and run.done; staging defines no alert on pnpm fin's own failures (deploy.failed has none either)",
+      "Written by a run an operator or a release workflow is watching, which prints the same at its end, and kept in the run log and run.done; staging defines no alert on pnpm fin's own failures (deploy.failed has none either). What it names is bounded and caught again without it: the token made for one run expires within the hour, and a superuser reference left on migrate refuses the next railway deploy and is reported by railway verify's superuser reference check; run.done in the run log records the same instruction",
   },
   {
     event: "lock.broken",
