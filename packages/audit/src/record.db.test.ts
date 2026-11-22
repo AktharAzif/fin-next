@@ -183,19 +183,52 @@ async function attempt(role: AuditRole, event: AuditEventName): Promise<string> 
   }
 }
 
+// The registry's rows from `table` in eventTypeRows()'s code-point order. A bare ORDER BY name sorts by
+// the column's collation, the database's default: glibc's en_US.utf8 (CI's postgres:18.7-trixie)
+// ignores punctuation at the first level and puts backup_codes.regenerated before backup_code.used,
+// while macOS's libc does not, so only "C" gives the same order on every server.
+const registryRows = (table: string) =>
+  `SELECT name, area, category, scope, roles, journal_kind, retired FROM ${table} ORDER BY name COLLATE "C"`;
+
 describe("T08-02: the registry in the database", () => {
   it("equals the compiled AUDIT_EVENTS after migrating a fresh database", async () => {
-    // Byte order on both sides (eventTypeRows sorts by code unit): the cluster's default collation
-    // depends on the host, and CI's image (en_US.utf8) would order some names the other way round.
-    const rows = await su.query(
-      'SELECT name, area, category, scope, roles, journal_kind, retired FROM audit.event_type ORDER BY name COLLATE "C"',
-    );
+    // Code-point order on both sides (eventTypeRows sorts by code unit, registryRows by COLLATE "C").
+    const rows = await su.query(registryRows("audit.event_type"));
     expect(rows.rows).toEqual(eventTypeRows());
     // The journal kind an event declares is the registry's, synced with it (§3.10).
     expect(
       (await su.query("SELECT journal_kind FROM audit.event_type WHERE name = 'switch.tripped'"))
         .rows,
     ).toEqual([{ journal_kind: "switch_set" }]);
+  });
+
+  it("reads the registry back in that order under a collation that ignores punctuation, as glibc's does", async () => {
+    // The registry copied into a column of an ICU collation that ignores punctuation at the first
+    // level (alternate=shifted), so this runs the same on every server, whatever its default
+    // collation: without COLLATE "C" in registryRows, the last expectation fails as CI's run did.
+    await su.query("BEGIN");
+    try {
+      await su.query(
+        "CREATE COLLATION pg_temp.ignores_punctuation (provider = icu, locale = 'und-u-ka-shifted')",
+      );
+      await su.query(
+        `CREATE TEMP TABLE event_type_shifted AS
+         SELECT name COLLATE pg_temp.ignores_punctuation AS name, area, category, scope, roles,
+                journal_kind, retired
+         FROM audit.event_type`,
+      );
+      // The collation does reorder the registry's own names (backup_codes.regenerated first), so a
+      // bare ORDER BY name here differs from the code's order, as it did on CI.
+      const bare = await su.query<{ name: string }>(
+        "SELECT name FROM pg_temp.event_type_shifted ORDER BY name",
+      );
+      expect(bare.rows.map((row) => row.name)).not.toEqual(eventTypeRows().map((row) => row.name));
+      expect((await su.query(registryRows("pg_temp.event_type_shifted"))).rows).toEqual(
+        eventTypeRows(),
+      );
+    } finally {
+      await su.query("ROLLBACK");
+    }
   });
 
   it("changes nothing on a second sync, and never deletes a row it does not know", async () => {

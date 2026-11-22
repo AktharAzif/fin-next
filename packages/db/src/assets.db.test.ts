@@ -75,7 +75,7 @@ describe("every package's files, from an empty database", () => {
     expect(first.applied).toEqual(names);
     expect(names).toEqual([...names].sort());
     const recorded = await su.query<{ name: string; checksum: Buffer; release: string }>(
-      "SELECT name, checksum, release FROM ops.schema_migrations ORDER BY name",
+      'SELECT name, checksum, release FROM ops.schema_migrations ORDER BY name COLLATE "C"',
     );
     expect(recorded.rows.map((r) => r.name)).toEqual(names);
     for (const [i, row] of recorded.rows.entries()) {

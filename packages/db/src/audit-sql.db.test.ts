@@ -642,7 +642,7 @@ describe("immutability (T08-05, AC-P0-11: no role can update or delete audit row
 
   it("records each audit table's shape by name, so the record still holds after a logical restore", async () => {
     const recorded = await su.query<{ table_name: string }>(
-      "SELECT table_name FROM ops_guard.protected_table ORDER BY 1",
+      'SELECT table_name FROM ops_guard.protected_table ORDER BY table_name COLLATE "C"',
     );
     expect(recorded.rows.map((r) => r.table_name)).toEqual([
       "audit.anchor",
