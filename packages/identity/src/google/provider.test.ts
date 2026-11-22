@@ -82,7 +82,7 @@ function setup(
   // Which key signs the provider's next token, and which keys its JWKS lists.
   const keys: { signer: SigningKey; listed: SigningKey[] } = { signer: K1, listed: [K1] };
   const now = () => Math.floor(clock.now().getTime() / 1000);
-  const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fakeFetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = String(input);
     if (url === settings.endpoints.token) {
       calls.token += 1;
