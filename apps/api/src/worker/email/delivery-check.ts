@@ -30,14 +30,18 @@
 // cannot see those locks, which a lookup lets go at once, and no schema closes this
 // (packages/email/README.md).
 // The wait is bounded all the same, so a stuck replica costs one failed run, never a pooled
-// connection held for long. The check is queued in the same transaction as its record. Each run then
-// records its result in `ops.duty_state` (spec 01 §6.10), the duty's last success that `fin_probe`
-// and the alerts read.
+// connection held for long. A run that stalls so, on a lock wait that ran out (55P03) or on a
+// connection the pool could not open or hand out in time, also writes the sender's
+// `email.delivery_stalled` line (step `check`, or `check_state` for its record in
+// `ops.duty_state`), which the `email-delivery-stalled` alert counts. The check is queued in the
+// same transaction as its record. Each run then records its result in `ops.duty_state` (spec 01
+// §6.10), the duty's last success that `fin_probe` and the alerts read.
 import {
   type EmailLog,
   enqueue,
   inTransaction,
   newId,
+  noteStall,
   type PoolLike,
   type Queryable,
 } from "@fin/email";
@@ -109,9 +113,10 @@ export async function runDeliveryCheck(o: DeliveryCheckOptions): Promise<Deliver
       return { result: "queued", trigger, checkId } as const;
     });
   } catch (error) {
+    noteStall(o.log, "check", error);
     outcome = { result: "failed", code: codeOf(error) };
   }
-  const recorded = await recordDutyState(o.db, o.clock.now(), outcome.result !== "failed");
+  const recorded = await recordDutyState(o.db, o.clock.now(), outcome.result !== "failed", o.log);
   const durationMs = o.clock.now() - started;
   // The duty's state row could not be written: the run stands, and the line says so.
   const state = recorded === "ok" ? {} : { dutyState: "failed", dutyStateCode: recorded };
@@ -166,9 +171,15 @@ function codeOf(error: unknown): string {
 /**
  * Records a run in `ops.duty_state` (scheduler `worker`, duty `email-delivery-check`): the attempt,
  * the result, the last success, and the failures in a row. Its own short transaction, after the
- * check's, so a failed check is still recorded. Returns "ok" or the failure's code; never throws.
+ * check's, so a failed check is still recorded. Returns "ok" or the failure's code, and writes
+ * `email.delivery_stalled` for a stall; never throws.
  */
-export async function recordDutyState(db: PoolLike, now: number, ok: boolean): Promise<string> {
+export async function recordDutyState(
+  db: PoolLike,
+  now: number,
+  ok: boolean,
+  log: EmailLog,
+): Promise<string> {
   try {
     await inTransaction(db, async (tx: Queryable) => {
       await tx.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
@@ -187,6 +198,7 @@ export async function recordDutyState(db: PoolLike, now: number, ok: boolean): P
     });
     return "ok";
   } catch (error) {
+    noteStall(log, "check_state", error);
     return codeOf(error);
   }
 }

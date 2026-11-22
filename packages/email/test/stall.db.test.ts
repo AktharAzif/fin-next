@@ -2,7 +2,7 @@
 // running as the worker's own login: a lock wait that runs out (SQLSTATE 55P03, after the login's
 // lock timeout, as the bootstrap's role default sets it for every service login) and a pool that
 // cannot hand out a connection in time each write one `email.delivery_stalled` line with the step
-// and the code, and the row's ID for a row, never the error's words; the error goes on as before.
+// and the reason, and the row's ID for a row, never the error's words; the error goes on as before.
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { newId } from "../src/ids.ts";
@@ -87,7 +87,7 @@ describe.skipIf(!HAS_DATABASE)("a stall on the delivery path, on Postgres 18", (
       {
         event: "email.delivery_stalled",
         level: "error",
-        fields: { step: "claim", code: "pg_55P03" },
+        fields: { step: "claim", reason: "lock_timeout" },
       },
     ]);
   });
@@ -107,7 +107,7 @@ describe.skipIf(!HAS_DATABASE)("a stall on the delivery path, on Postgres 18", (
       {
         event: "email.delivery_stalled",
         level: "error",
-        fields: { step: "row", code: "pg_55P03", emailId: id },
+        fields: { step: "row", reason: "lock_timeout", emailId: id },
       },
     ]);
     expect(log.named("email.send_failed").map((l) => l.fields.code)).toEqual(["sender_error"]);
@@ -130,7 +130,7 @@ describe.skipIf(!HAS_DATABASE)("a stall on the delivery path, on Postgres 18", (
         {
           event: "email.delivery_stalled",
           level: "error",
-          fields: { step: "claim", code: "connect_timeout" },
+          fields: { step: "claim", reason: "connect_timeout" },
         },
       ]);
       expect(log.text()).not.toContain("timeout exceeded");

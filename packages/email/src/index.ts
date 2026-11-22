@@ -85,8 +85,12 @@ export {
   type BatchResult,
   type EmailLog,
   type Level,
+  noteStall,
   type RecipientResolver,
   Sender,
   type SenderOptions,
   type SentInfo,
+  type StallReason,
+  type StallStep,
+  stallOf,
 } from "./sender/sender.ts";

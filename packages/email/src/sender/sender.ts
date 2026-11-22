@@ -20,9 +20,11 @@
 // `email.enqueue()` in one transaction. Lines carry the template, class, code and IDs, never an
 // address, a subject or a parameter value.
 // A step of the delivery path that stalls on the database, a lock wait that ran out (55P03) or a
-// connection not had in time, writes one `email.delivery_stalled` line with the step and the code
+// connection not had in time, writes one `email.delivery_stalled` line with the step and the reason
 // (and the row's ID for a row), which the `email-delivery-stalled` alert counts; the error then goes
-// on as before, to the loop's failed `job.run` or the row's `email.send_failed`.
+// on as before, to the loop's failed `job.run` or the row's `email.send_failed`. The worker's
+// delivery check writes the same line through `noteStall`. The kind is a `reason`, never a `code`:
+// the telemetry withholds every field named `code` (spec 08 §5.4).
 
 import { describe, findTemplate, TEMPLATES } from "../catalogue.ts";
 import {
@@ -157,11 +159,15 @@ function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-/** Where on the delivery path a stall happened: the claims, one row, the digests, the age, the sweep. */
-export type StallStep = "claim" | "row" | "digest" | "age" | "sweep";
+/**
+ * Where on the delivery path a stall happened: the sender's claims, one row, the digests, the age
+ * and the sweep; the worker's delivery check (`check`) and its record in `ops.duty_state`
+ * (`check_state`).
+ */
+export type StallStep = "claim" | "row" | "digest" | "age" | "sweep" | "check" | "check_state";
 
-/** A stall's code: a lock wait that ran out, or a connection not had in time. */
-export type StallCode = "pg_55P03" | "connect_timeout";
+/** A stall's reason: a lock wait that ran out (SQLSTATE 55P03), or a connection not had in time. */
+export type StallReason = "lock_timeout" | "connect_timeout";
 
 /**
  * The fixed messages `pg` and `pg-pool` give a connection they could not open or hand out in time.
@@ -182,12 +188,26 @@ const CONNECT_TIMEOUTS: readonly string[] = [
  * (lock_not_available, after the login's lock timeout) or a connection timeout. Anything else is no
  * stall.
  */
-export function stallOf(error: unknown): StallCode | undefined {
+export function stallOf(error: unknown): StallReason | undefined {
   if (typeof error !== "object" || error === null) return undefined;
-  if ((error as { code?: unknown }).code === "55P03") return "pg_55P03";
+  if ((error as { code?: unknown }).code === "55P03") return "lock_timeout";
   return error instanceof Error && CONNECT_TIMEOUTS.includes(error.message)
     ? "connect_timeout"
     : undefined;
+}
+
+/**
+ * Writes `email.delivery_stalled` when what was thrown is a stall: the step and the reason, and the
+ * row's ID for a row's step. Never the error's message. Anything else writes nothing.
+ */
+export function noteStall(log: EmailLog, step: StallStep, error: unknown, emailId?: string): void {
+  const reason = stallOf(error);
+  if (reason === undefined) return;
+  log.log(
+    "email.delivery_stalled",
+    { step, reason, ...(emailId === undefined ? {} : { emailId }) },
+    "error",
+  );
 }
 
 function organisationOf(params: unknown): string | undefined {
@@ -269,26 +289,12 @@ export class Sender {
     await this.step("sweep", () => sweep(this.o.db, this.o.clock.now()));
   }
 
-  /**
-   * Writes `email.delivery_stalled` when what was thrown is a stall: the step and the code, and the
-   * row's ID for a row's step. Never the error's message.
-   */
-  private noteStall(step: StallStep, error: unknown, emailId?: string): void {
-    const code = stallOf(error);
-    if (code === undefined) return;
-    this.o.log.log(
-      "email.delivery_stalled",
-      { step, code, ...(emailId === undefined ? {} : { emailId }) },
-      "error",
-    );
-  }
-
   /** Runs one database step of the delivery path; a stall is noted before the error goes on. */
   private async step<T>(step: StallStep, work: () => Promise<T>): Promise<T> {
     try {
       return await work();
     } catch (error) {
-      this.noteStall(step, error);
+      noteStall(this.o.log, step, error);
       throw error;
     }
   }
@@ -299,7 +305,7 @@ export class Sender {
     } catch (error) {
       // A database error mid-row: the lease expires and the row is claimed again. The loop's
       // `job.run` carries the failure; nothing about the row or its recipient is logged.
-      this.noteStall("row", error, row.id);
+      noteStall(this.o.log, "row", error, row.id);
       this.o.log.log(
         "email.send_failed",
         {

@@ -1,10 +1,13 @@
 // The email fragment's email-delivery-stalled (spec 08 §7.8 group G; a name no text of the plan
 // gives, proposed for the steward to confirm): a staging rule in alerts/email.json that notifies on
-// any email.delivery_stalled, the line worker's sender writes when a database step of its delivery
-// path stalls on a lock wait that ran out (55P03) or a connection not had in time, one incident per
-// code with the label held to the two codes the sender writes, routed to staging-quiet only, with
-// group G's runbook, email.md, naming it. The sender is read as text: ops/monitoring imports no
-// other package (packages/email's stall.test.ts and stall.db.test.ts prove the line is written).
+// any email.delivery_stalled, the line worker's sender and delivery check write when a database
+// step of the delivery path stalls on a lock wait that ran out (55P03) or a connection not had in
+// time, one incident per reason with the label held to the two reasons the line carries, routed to
+// staging-quiet only, with group G's runbook, email.md, naming it. The series field is `reason`, a
+// name the telemetry keeps (never `code`, which spec 08 §5.4 withholds), so its value reaches
+// Better Stack. The writers are read as text: ops/monitoring imports no other package
+// (packages/email's stall tests and apps/api's worker tests prove the line is written, and that it
+// survives the scrubber).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -19,8 +22,11 @@ const NAME = "email-delivery-stalled";
 const EVENT = "email.delivery_stalled";
 const RUNBOOK = "docs/runbooks/email.md";
 const SENDER = ["packages", "email", "src", "sender", "sender.ts"];
-/** The codes the sender writes: a connection not had in time, a lock wait that ran out. */
-const CODES = ["connect_timeout", "pg_55P03"];
+const CHECK = ["apps", "api", "src", "worker", "email", "delivery-check.ts"];
+/** The reasons the line carries: a connection not had in time, a lock wait that ran out. */
+const REASONS = ["connect_timeout", "lock_timeout"];
+/** The sender's steps, then the delivery check's. */
+const STEPS = ["claim", "row", "digest", "age", "sweep", "check", "check_state"];
 
 const { config, findings } = loadEnv(ROOT, "staging");
 const rule = (): AlertDef | undefined => config?.alerts.find((a) => a.name === NAME);
@@ -55,12 +61,12 @@ describe("email-delivery-stalled", () => {
     expect(alert?.window).toBeUndefined();
   });
 
-  it("reads worker, one incident per code, the label held to the codes the sender writes", () => {
+  it("reads worker, one incident per reason, the label held to the reasons the line carries", () => {
     const alert = rule();
     expect(alert?.sources).toEqual(["worker"]);
-    expect(alert?.seriesBy).toEqual([{ field: "code", oneOf: CODES }]);
+    expect(alert?.seriesBy).toEqual([{ field: "reason", oneOf: REASONS }]);
     expect(alert === undefined ? "" : renderSql(alert)).toBe(
-      `SELECT {{time}} AS time, if(JSONExtractString(raw, 'code') IN ('connect_timeout', 'pg_55P03'), JSONExtractString(raw, 'code'), 'other') AS series, count(*) AS value FROM {{source}} WHERE time BETWEEN {{start_time}} AND {{end_time}} AND JSONExtractString(raw, 'event') = '${EVENT}' GROUP BY time, series`,
+      `SELECT {{time}} AS time, if(JSONExtractString(raw, 'reason') IN ('connect_timeout', 'lock_timeout'), JSONExtractString(raw, 'reason'), 'other') AS series, count(*) AS value FROM {{source}} WHERE time BETWEEN {{start_time}} AND {{end_time}} AND JSONExtractString(raw, 'event') = '${EVENT}' GROUP BY time, series`,
     );
   });
 
@@ -71,38 +77,45 @@ describe("email-delivery-stalled", () => {
       expect(alert?.[key], key).toBeUndefined();
     }
     expect(alert?.incident_cause ?? "").toMatch(/55P03/);
-    expect(alert?.metadata?.check ?? "").toMatch(/job\.run/);
+    expect(alert?.metadata?.check ?? "").toMatch(/step and reason/);
+    expect(alert?.metadata?.check ?? "").toMatch(/email-send or email-delivery-check/);
   });
 
   it("is named by its event's catalogue entry, and is not owed", () => {
     expect(entry()?.alerts).toEqual([NAME]);
     expect(entry()?.owed ?? []).toEqual([]);
     expect(entry()?.kind).toBe("failure");
-    expect(entry()?.fields).toEqual({ step: "string", code: "string", emailId: "string" });
+    expect(entry()?.fields).toEqual({ step: "string", reason: "string", emailId: "string" });
     expect(OWED_ALERTS.map((a) => a.name)).not.toContain(NAME);
   });
 
-  it("is named, with its line, its codes and its steps, by group G's runbook", () => {
+  it("is named, with its line, its reasons and its steps, by group G's runbook", () => {
     const text = read(RUNBOOK);
     expect(text).toContain(`\`${NAME}\``);
     expect(text).toContain(`\`${EVENT}\``);
-    for (const code of CODES) expect(text).toContain(`\`code: ${code}\``);
-    for (const step of ["claim", "row", "digest", "age", "sweep"]) {
-      expect(text).toContain(`\`${step}\``);
-    }
+    for (const reason of REASONS) expect(text).toContain(`\`reason: ${reason}\``);
+    for (const step of STEPS) expect(text).toContain(`\`${step}\``);
+    // The runbook never sends the operator to the stall's kind under `code`, which is withheld,
+    // and never says a stall at every step pages as email-outbox-age.
+    expect(text).not.toMatch(/`code: (?:pg_55P03|connect_timeout)`|`step` and `code`/);
+    expect(text).not.toContain("a stall that goes on also pages as `email-outbox-age`");
+    expect(text).toMatch(/`email-outbox-age`\s+stays silent/);
     const lines = text.split("\n").map((l) => l.trim());
     for (const heading of RUNBOOK_HEADINGS) expect(lines, heading).toContain(heading);
   });
 
-  it("is written by worker's sender with the step and the code, the codes the rule's", () => {
+  it("is written by worker's sender and delivery check with the step and the reason", () => {
     const sender = read(...SENDER);
     expect(sender).toContain(`"${EVENT}",`);
-    expect(sender).toContain("{ step, code, ...(emailId === undefined ? {} : { emailId }) }");
-    expect(sender).toContain('export type StallCode = "pg_55P03" | "connect_timeout";');
+    expect(sender).toContain("{ step, reason, ...(emailId === undefined ? {} : { emailId }) }");
+    expect(sender).toContain('export type StallReason = "lock_timeout" | "connect_timeout";');
     expect(sender).toContain(
-      'export type StallStep = "claim" | "row" | "digest" | "age" | "sweep";',
+      'export type StallStep = "claim" | "row" | "digest" | "age" | "sweep" | "check" | "check_state";',
     );
-    // The sender runs in worker only.
+    const check = read(...CHECK);
+    expect(check).toContain('noteStall(o.log, "check", error);');
+    expect(check).toContain('noteStall(log, "check_state", error);');
+    // The sender and the check run in worker only.
     expect(read("apps", "api", "src", "worker", "main.ts")).toContain("startEmailWorker(");
   });
 });

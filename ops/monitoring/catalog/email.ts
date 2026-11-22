@@ -51,8 +51,8 @@ export const entries: readonly CatalogEntry[] = [
     kind: "failure",
     level: "error",
     writtenBy:
-      "worker's sender, when a database step of the delivery path (step: claim, row, digest, age or sweep) stalls: a lock wait that ran out (code pg_55P03, SQLSTATE 55P03 after the login's lock timeout) or a connection the pool could not open or hand out in time (code connect_timeout); with the row's emailId for a row. Never the error's words. The error then goes on as before, to the loop's failed job.run or the row's email.send_failed",
-    fields: { step: "string", code: "string", emailId: "string" },
+      "worker's sender, when a database step of the delivery path (step: claim, row, digest, age or sweep) stalls, and worker's delivery check, when its run (step check) or its record in ops.duty_state (step check_state) does: a lock wait that ran out (reason lock_timeout, SQLSTATE 55P03 after the login's or the check's lock timeout) or a connection the pool could not open or hand out in time (reason connect_timeout); with the row's emailId for a row. The kind is a reason, never a code, which the telemetry withholds. Never the error's words. The error then goes on as before, to the loop's or the check's failed job.run or the row's email.send_failed",
+    fields: { step: "string", reason: "string", emailId: "string" },
     alerts: ["email-delivery-stalled"],
   },
 ];

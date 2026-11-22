@@ -3,7 +3,10 @@
 // the code MC-01 scans that names the event as a quoted string outside a comment; a field is
 // written there, outside a comment, as a key or a shorthand property. The fields no such file
 // writes in this tree are listed by name below, each with the reason, and a new one fails here
-// until it is written, listed, or its alert owed (catalog/owed.ts).
+// until it is written, listed, or its alert owed (catalog/owed.ts). Nor does an alert read a field
+// whose name the telemetry withholds (spec 08 §5.4): every value under such a name reaches Better
+// Stack as "[withheld]", so the alert could never see it.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ENVELOPE_FIELDS } from "../catalog/types.ts";
@@ -74,4 +77,27 @@ describe("the staging alerts' fields", () => {
     expect(written(["process.health"], "clockSkewMs")).toBe(false);
     expect(config?.alerts.some((a) => a.name === "clock-skew")).toBe(false);
   });
+
+  it("are never a name the telemetry withholds", () => {
+    const names = withheldNames();
+    // The list was read: spec 08 §5.4's names are in it.
+    for (const name of ["code", "email", "token", "message"]) {
+      expect(names.has(name), name).toBe(true);
+    }
+    const refused = readFields()
+      .filter(({ field }) => names.has(field.toLowerCase().replace(/[_-]/g, "")))
+      .map(({ key }) => key);
+    expect(refused).toEqual([]);
+  });
 });
+
+/**
+ * The field names @fin/core's scrubber withholds (WITHHELD_FIELDS in packages/core's
+ * scrub-shapes.ts), read as text: ops/monitoring imports no other package. A name is compared as
+ * the scrubber compares it, lower case with `_` and `-` removed.
+ */
+function withheldNames(): Set<string> {
+  const text = readFileSync(join(ROOT, "packages", "core", "src", "scrub-shapes.ts"), "utf8");
+  const list = /WITHHELD_FIELDS\b[^=]*=\s*new Set\(\[([^\]]*)\]\)/.exec(text)?.[1] ?? "";
+  return new Set([...list.matchAll(/"([^"]+)"/g)].map((match) => match[1] ?? ""));
+}

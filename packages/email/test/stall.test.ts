@@ -1,13 +1,14 @@
 // A stall on the delivery path (the `email-delivery-stalled` alert): a lock wait that ran out
 // (SQLSTATE 55P03) or a connection `pg` could not open or hand out in time writes one
-// `email.delivery_stalled` line, with the step and the code (and the row's ID for a row) and nothing
-// of the error's message, and the error goes on as before. Any other error writes none. The
-// connection timeouts are built as `pg` and `pg-pool` build them; stall.db.test.ts makes a real lock
-// wait and a real pool timeout on Postgres 18.
+// `email.delivery_stalled` line, with the step and the reason (and the row's ID for a row) and
+// nothing of the error's message, and the error goes on as before. Any other error writes none. The
+// kind is a `reason`, never a `code`, which the telemetry withholds (apps/api's stall-line.test.ts
+// sends the line through it). The connection timeouts are built as `pg` and `pg-pool` build them;
+// stall.db.test.ts makes a real lock wait and a real pool timeout on Postgres 18.
 import { describe, expect, it } from "vitest";
 import type { PoolLike, QueryResultLike } from "../src/outbox/db.ts";
 import { recipientHasher } from "../src/recipient-key.ts";
-import { Sender, stallOf } from "../src/sender/sender.ts";
+import { noteStall, Sender, stallOf } from "../src/sender/sender.ts";
 import { FakeTransport, LineRecorder } from "../src/testing/index.ts";
 
 const EMAIL_ID = "eml_01jd0000000000000000000000";
@@ -67,7 +68,7 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 
 describe("stallOf", () => {
   it("names a lock wait that ran out and each connection timeout pg gives", () => {
-    expect(stallOf(lockTimeout())).toBe("pg_55P03");
+    expect(stallOf(lockTimeout())).toBe("lock_timeout");
     expect(stallOf(new Error(POOL_BUSY))).toBe("connect_timeout");
     expect(stallOf(new Error(CONNECT_SLOW, { cause: new Error("Connection terminated") }))).toBe(
       "connect_timeout",
@@ -93,12 +94,12 @@ describe("stallOf", () => {
 
 describe("a stall on the delivery path", () => {
   const cases: readonly [string, () => unknown, string][] = [
-    ["a lock wait that ran out", lockTimeout, "pg_55P03"],
+    ["a lock wait that ran out", lockTimeout, "lock_timeout"],
     ["no pooled connection in time", () => new Error(POOL_BUSY), "connect_timeout"],
     ["a new connection not made in time", () => new Error(CONNECT_SLOW), "connect_timeout"],
   ];
 
-  for (const [what, make, code] of cases) {
+  for (const [what, make, reason] of cases) {
     it(`writes one line for ${what} at each step the loop runs, and the error goes on`, async () => {
       const steps: readonly [string, (s: Sender) => Promise<unknown>][] = [
         ["claim", (s) => s.runOnce()],
@@ -111,7 +112,7 @@ describe("a stall on the delivery path", () => {
         const error = make();
         expect(await rejection(run(sender(failing(error), log))), step).toBe(error);
         expect(log.lines, step).toEqual([
-          { event: "email.delivery_stalled", level: "error", fields: { step, code } },
+          { event: "email.delivery_stalled", level: "error", fields: { step, reason } },
         ]);
       }
     });
@@ -150,7 +151,7 @@ describe("a stall on the delivery path", () => {
       {
         event: "email.delivery_stalled",
         level: "error",
-        fields: { step: "row", code: "pg_55P03", emailId: EMAIL_ID },
+        fields: { step: "row", reason: "lock_timeout", emailId: EMAIL_ID },
       },
     ]);
     expect(log.named("email.send_failed").map((l) => l.fields.code)).toEqual(["sender_error"]);
@@ -168,5 +169,28 @@ describe("a stall on the delivery path", () => {
       expect(await rejection(sender(failing(error), log).flushDigests())).toBe(error);
       expect(log.lines).toEqual([]);
     }
+  });
+});
+
+describe("noteStall", () => {
+  it("writes the line for the step it is given, the delivery check's included, and only for a stall", () => {
+    const log = new LineRecorder();
+    noteStall(log, "check", lockTimeout());
+    noteStall(log, "check_state", new Error(POOL_BUSY));
+    noteStall(log, "check", Object.assign(new Error("permission denied"), { code: "42501" }));
+    expect(log.lines).toEqual([
+      {
+        event: "email.delivery_stalled",
+        level: "error",
+        fields: { step: "check", reason: "lock_timeout" },
+      },
+      {
+        event: "email.delivery_stalled",
+        level: "error",
+        fields: { step: "check_state", reason: "connect_timeout" },
+      },
+    ]);
+    // The kind is never written under `code`, a name the telemetry withholds.
+    for (const line of log.lines) expect(Object.keys(line.fields)).not.toContain("code");
   });
 });

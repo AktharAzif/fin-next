@@ -490,7 +490,42 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
       fields: { result: "failed", dutyState: "failed", dutyStateCode: "pg_42501" },
     });
     expect(await dutyState()).toEqual([]);
+    // A refusal is no stall.
+    expect(log.named("email.delivery_stalled")).toEqual([]);
   });
+
+  // The turn held past the check's own lock timeout (LOCK_TIMEOUT, 5 s): the run fails with 55P03
+  // and writes email.delivery_stalled (step `check`), which email-delivery-stalled counts. Its
+  // record in ops.duty_state, which is not held, still goes in.
+  it("writes email.delivery_stalled when its turn is held past its lock timeout", async () => {
+    await db.admin.query(
+      "INSERT INTO email_private.delivery_check_turn (name) VALUES ('delivery-check') ON CONFLICT DO NOTHING",
+    );
+    const log = new LineRecorder();
+    const holder = await db.admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(
+        "SELECT name FROM email_private.delivery_check_turn WHERE name = 'delivery-check' FOR UPDATE",
+      );
+      expect(await check(RELEASE_A, log)).toEqual({ result: "failed", code: "pg_55P03" });
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    expect(log.named("email.delivery_stalled")).toEqual([
+      {
+        event: "email.delivery_stalled",
+        level: "error",
+        fields: { step: "check", reason: "lock_timeout" },
+      },
+    ]);
+    expect(log.named("job.run")).toMatchObject([
+      { level: "error", fields: { job: "email-delivery-check", result: "failed" } },
+    ]);
+    expect(await dutyState()).toMatchObject([{ last_result: "failed", consecutive_failures: 1 }]);
+    expect(log.text()).not.toContain("lock timeout");
+  }, 20_000);
 
   it("writes the adapter's provider.call line for each Cloudflare call", async () => {
     const log = new LineRecorder();
