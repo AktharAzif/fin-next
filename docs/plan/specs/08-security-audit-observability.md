@@ -493,7 +493,7 @@ export async function recordAudit<E extends AuditEventName>(tx: UnitTx, input: {
   `AuditMetadataError` before any SQL.
 - It writes the journal entry the event declares (§3.10) in the same transaction.
 - It must run inside the action's transaction (`UnitTx`); a call outside one is a type error. On any
-  `FA` error the transaction rolls back, the unit writes `audit.write_failed` (`event`, `sqlstate`),
+  `FA` error the transaction rolls back, the unit writes `audit.write_failed` (`auditEvent`, `sqlstate`),
   and the action fails with a 500 that carries only the request ID.
 - A library-driven event that Better Auth's hooks cannot place in the write's transaction follows
   spec 02 §3.5.
@@ -1381,7 +1381,7 @@ monitored by implementing its port; the conformance suites check the line is wri
 | `error.unexpected` | failure | `errorId`, `errorName`, `code`, `route` or `job` | `reportError`, beside every unexpected error |
 | `telemetry.ship_failed` | failure (stdout only) | `status`, `linesLost` | the transport |
 | `telemetry.recovered` | failure | `failedSends`, `linesLost`, `statuses` | the first successful batch after a failure |
-| `audit.write_failed` | failure | `event`, `sqlstate` | `recordAudit` |
+| `audit.write_failed` | failure | `auditEvent`, `sqlstate` | `recordAudit` |
 | `database.audit_guard` | security | `table` | the unit of work on `FA010` |
 | `database.privileged_login` | security | `role`, `registered` | the worker's matcher |
 | `database.grants_drift` | security | `role`, `missing`, `extra` (counts) | the hourly drift check |
