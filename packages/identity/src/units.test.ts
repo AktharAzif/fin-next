@@ -4,7 +4,14 @@
 import { describe, expect, it } from "vitest";
 import { REALM_EVENTS } from "./audit/events.ts";
 import { auditPayload } from "./audit/record.ts";
-import { AuditMetadataError, assertNoPersonalShapes, personalShapeOf } from "./audit/shapes.ts";
+import {
+  AuditMetadataError,
+  assertNoPersonalShapes,
+  hasEmailShape,
+  hasUrlWithQuery,
+  isSpace,
+  personalShapeOf,
+} from "./audit/shapes.ts";
 import { FIN_COOKIE_MAX_AGE, readCookie, serializeFinCookie } from "./cookies.ts";
 import {
   BACKUP_CODE_COUNT,
@@ -26,14 +33,20 @@ import {
 import { buildCatalogue, stepUpCatalogue } from "./step-up/actions/index.ts";
 
 /**
- * The regular expressions `run` runs, counted without a clock: the UTF-16 length of each one's
- * input. A run on more than the 400 units 200 characters can take is refused before it starts, so
- * a pattern that could backtrack polynomially on a long value fails the test at once instead of
- * hanging it.
+ * The work `run` does, counted without a clock: each UTF-16 unit it reads with charCodeAt, and the
+ * input length of each regular expression it runs. A pattern run on more than the 400 units 200
+ * characters can take is refused before it starts, so a pattern that could backtrack polynomially
+ * on a long value fails the test at once instead of hanging it.
  */
-function countPatternRuns<T>(run: () => T): { result: T; runs: number[] } {
+function countWork<T>(run: () => T): { result: T; runs: number[]; reads: number } {
+  const { charCodeAt } = String.prototype;
   const { exec } = RegExp.prototype;
   const runs: number[] = [];
+  let reads = 0;
+  String.prototype.charCodeAt = function (this: string, index: number): number {
+    reads += 1;
+    return charCodeAt.call(this, index);
+  };
   RegExp.prototype.exec = function (this: RegExp, input: string): RegExpExecArray | null {
     const length = String(input).length;
     if (length > 400) throw new Error(`a regular expression ran on ${length} characters`);
@@ -42,8 +55,9 @@ function countPatternRuns<T>(run: () => T): { result: T; runs: number[] } {
   };
   try {
     const result = run();
-    return { result, runs };
+    return { result, runs, reads };
   } finally {
+    String.prototype.charCodeAt = charCodeAt;
     RegExp.prototype.exec = exec;
   }
 }
@@ -290,11 +304,93 @@ describe("audit payloads", () => {
     expect(personalShapeOf(value)).toBe(shape);
   });
 
+  it.each([
+    ["see https://x.example.com/a?b=c", "url_query"],
+    ["HTTP://X?", "url_query"],
+    ["a://?", "url_query"],
+    ["+a1.b-c+d://host/p?q", "url_query"],
+    ["x.a://h?", "url_query"],
+    ["a://b a://c?", "url_query"],
+    ["a://b#?", null],
+    ["a://b ?", null],
+    ["1a://h?", null],
+    ["_a://h?", null],
+    ["a:/h?", null],
+    ["a:://h?", null],
+    ["://h?", null],
+    ["\u017f://h?", null],
+  ])("reads %s as a URL with a query only when it is one", (value, shape) => {
+    expect(personalShapeOf(value)).toBe(shape);
+  });
+
+  it("reads white space exactly as \\s does, for every UTF-16 unit", () => {
+    for (let code = 0; code < 0x10000; code += 1) {
+      const unit = String.fromCharCode(code);
+      if (isSpace(code) !== /\s/.test(unit)) expect.fail(`U+${code.toString(16)}`);
+    }
+  });
+
+  it("scans for an email address's shape reading each unit once (many repetitions of '!')", () => {
+    // The shapes an unanchored [^\s@]+@ is quadratic on, and long runs after an "@": no pattern
+    // runs, and each scan reads every UTF-16 unit exactly once.
+    for (const text of [
+      "!".repeat(100_000),
+      `a@${"b".repeat(100_000)}`,
+      `a@b.${"@".repeat(100_000)}`,
+      "a@".repeat(50_000),
+      `${"a.".repeat(50_000)}@`,
+    ]) {
+      expect(countWork(() => hasEmailShape(text))).toEqual({
+        result: false,
+        runs: [],
+        reads: text.length,
+      });
+    }
+    // A shape found stops the scan where it is complete.
+    const found = `${"!".repeat(100_000)} a@b.c${"!".repeat(100_000)}`;
+    expect(countWork(() => hasEmailShape(found))).toEqual({
+      result: true,
+      runs: [],
+      reads: 100_006,
+    });
+  });
+
+  it("scans for a URL with a query reading each unit once", () => {
+    // The shapes `\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*\?` is quadratic on: a run of scheme units with
+    // no "://", and many "://" with no "?". No pattern runs; each unit is read exactly once.
+    for (const text of [
+      "a.".repeat(50_000),
+      "a://".repeat(25_000),
+      `a://${"b".repeat(100_000)}#?`,
+      "+".repeat(100_000),
+    ]) {
+      expect(countWork(() => hasUrlWithQuery(text))).toEqual({
+        result: false,
+        runs: [],
+        reads: text.length,
+      });
+    }
+    const found = `${"a://".repeat(25_000)}?${"a".repeat(100_000)}`;
+    expect(countWork(() => hasUrlWithQuery(found))).toEqual({
+      result: true,
+      runs: [],
+      reads: 100_001,
+    });
+  });
+
+  it("finds email and URL shapes by those scans, never by a pattern, in personalShapeOf", () => {
+    // Both scans read the whole value when neither shape is in it; the patterns left run too.
+    const value = "!".repeat(200);
+    const { result, reads } = countWork(() => personalShapeOf(value));
+    expect(result).toBeNull();
+    expect(reads).toBe(2 * value.length);
+  });
+
   it("refuses a string longer than the database stores before any pattern runs", () => {
     // The shape an unanchored [^\s@]+@ is quadratic on: a long run with no "@" (here, of "!").
     const long = "!".repeat(100_000);
     let error: unknown;
-    const { runs } = countPatternRuns(() => {
+    const { runs } = countWork(() => {
       try {
         assertNoPersonalShapes({ note: long });
       } catch (caught) {
@@ -309,7 +405,7 @@ describe("audit payloads", () => {
 
   it("runs every pattern on at most the 200 characters a metadata string holds", () => {
     for (const value of ["!".repeat(200), "a.".repeat(100), "a://".repeat(50), "1".repeat(8)]) {
-      const { result, runs } = countPatternRuns(() => personalShapeOf(value));
+      const { result, runs } = countWork(() => personalShapeOf(value));
       expect(result, value).toBeNull();
       expect(runs.length, value).toBeGreaterThan(0);
       expect(Math.max(...runs), value).toBeLessThanOrEqual(200);
@@ -321,7 +417,7 @@ describe("audit payloads", () => {
   it("counts characters as Postgres does, so 200 astral characters still fit", () => {
     // Each is two UTF-16 units: 400 units, 200 characters.
     const astral = "\u{1F600}".repeat(200);
-    const { result, runs } = countPatternRuns(() => personalShapeOf(astral));
+    const { result, runs } = countWork(() => personalShapeOf(astral));
     expect(result).toBeNull();
     expect(Math.max(...runs)).toBeLessThanOrEqual(400);
     expect(() => assertNoPersonalShapes({ note: astral })).not.toThrow();
