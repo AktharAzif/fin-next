@@ -25,22 +25,20 @@
       "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
     },
     "qrLoading": {
-      "status": "covered",
-      "day": "sat",
-      "spec": "apps/console/e2e/qr/qr.spec.ts",
-      "test": "@journey the placeholder shows while the QR code's chunk loads; the key is there at once"
+      "status": "unreachable",
+      "reason": "The encoder comes with the screen's own chunk, so the QR code is drawn in the same render as the key and no tile waits for a fetch; the wait for the route and for /two-factor/enable is the board's loading state. A lazily fetched encoder let a failed chunk reload the page and lose the one-time key (UR-13)."
     },
     "qrFailed": {
       "status": "covered",
       "day": "sat",
       "spec": "apps/console/e2e/qr/qr.spec.ts",
-      "test": "@journey a QR code that cannot load offers Try again; the key still sets the app up"
+      "test": "@journey a URI no QR code can hold: the tile says so, and the key still sets the app up"
     },
     "keyCopied": {
       "status": "covered",
       "day": "sat",
       "spec": "apps/console/e2e/qr/qr.spec.ts",
-      "test": "@journey @csp the set-up draws the QR code, which scans to the URI, with the key kept"
+      "test": "@journey @csp the set-up draws the QR code with the key from one answer, fetching nothing after it"
     },
     "typing": {
       "status": "covered",

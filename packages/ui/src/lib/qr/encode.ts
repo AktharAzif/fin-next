@@ -2,9 +2,10 @@
 // fresh from ISO/IEC 18004:2015. One segment in the most compact mode that holds the whole text
 // (numeric, alphanumeric, or bytes of UTF-8), the smallest version that fits it at the asked level,
 // Reed-Solomon blocks interleaved, the function patterns, the codewords placed in the standard's
-// zigzag, and the mask with the lowest penalty. The screens load this file on demand (qr-code.tsx);
-// what it returns is drawn as SVG elements, never as an image. An error never carries the text,
-// which may hold a secret.
+// zigzag, and the mask with the lowest penalty. QrCode (qr-code.tsx) imports it with itself; what
+// it returns is drawn as SVG elements, never as an image. A text no symbol can hold is refused from
+// its length before any work, and a text that is not well-formed Unicode is refused rather than
+// drawn as another text. An error never carries the text, which may hold a secret.
 import { errorCorrection } from "./reed-solomon.ts";
 import {
   alignmentCentres,
@@ -46,6 +47,12 @@ export class QrCapacityError extends RangeError {
   override name = "QrCapacityError";
 }
 
+/**
+ * The most characters any symbol holds: version 40-L in numeric mode (Table 7). A longer text is
+ * refused from its length alone, before it is read.
+ */
+export const MAX_TEXT_LENGTH = 7089;
+
 interface Mode {
   readonly indicator: number;
   /** The character count indicator's length for versions 1-9, 10-26 and 27-40 (Table 3). */
@@ -56,6 +63,10 @@ const NUMERIC: Mode = { indicator: 0b0001, countBits: [10, 12, 14] };
 const ALPHANUMERIC: Mode = { indicator: 0b0010, countBits: [9, 11, 13] };
 const BYTE: Mode = { indicator: 0b0100, countBits: [8, 16, 16] };
 const ALPHANUMERIC_SET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+const NUMERIC_TEXT = /^[0-9]*$/;
+const ALPHANUMERIC_TEXT = /^[0-9A-Z $%*+\-./:]*$/;
+/** A surrogate that is not half of a pair: in a `u` pattern a pair reads as one code point. */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 
 function push(bits: number[], value: number, length: number): void {
   for (let i = length - 1; i >= 0; i--) bits.push((value >>> i) & 1);
@@ -65,36 +76,64 @@ function countBits(mode: Mode, version: number): number {
   return mode.countBits[version <= 9 ? 0 : version <= 26 ? 1 : 2];
 }
 
-/** The text as one segment: its mode, its character count and its data bits (§7.4.3 to §7.4.5). */
-function segment(text: string): { mode: Mode; count: number; bits: number[] } {
+/** The bytes of UTF-8 a well-formed text takes, counted without encoding it. */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      bytes += 4; // a pair: one code point past U+FFFF
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/** The most compact mode that holds the whole text, and its count: characters, or bytes (§7.4). */
+function modeOf(text: string): { mode: Mode; count: number } {
+  if (NUMERIC_TEXT.test(text)) return { mode: NUMERIC, count: text.length };
+  if (ALPHANUMERIC_TEXT.test(text)) return { mode: ALPHANUMERIC, count: text.length };
+  return { mode: BYTE, count: utf8Length(text) };
+}
+
+/** The data bits a segment of `count` takes in `mode`, worked out from the count (§7.4.3 to §7.4.5). */
+function dataBitLength(mode: Mode, count: number): number {
+  if (mode === NUMERIC) return 10 * Math.floor(count / 3) + ([0, 4, 7][count % 3] ?? 0);
+  if (mode === ALPHANUMERIC) return 11 * Math.floor(count / 2) + 6 * (count % 2);
+  return 8 * count;
+}
+
+/** The text's data bits in its mode, once it is known to fit (§7.4.3 to §7.4.5). */
+function segmentBits(text: string, mode: Mode): number[] {
   const bits: number[] = [];
-  if (/^[0-9]*$/.test(text)) {
+  if (mode === NUMERIC) {
     for (let i = 0; i < text.length; i += 3) {
       const group = text.slice(i, i + 3);
       push(bits, Number(group), group.length * 3 + 1);
     }
-    return { mode: NUMERIC, count: text.length, bits };
-  }
-  if ([...text].every((ch) => ALPHANUMERIC_SET.includes(ch))) {
+  } else if (mode === ALPHANUMERIC) {
     for (let i = 0; i < text.length; i += 2) {
       const first = ALPHANUMERIC_SET.indexOf(text.charAt(i));
       if (i + 1 < text.length)
         push(bits, first * 45 + ALPHANUMERIC_SET.indexOf(text.charAt(i + 1)), 11);
       else push(bits, first, 6);
     }
-    return { mode: ALPHANUMERIC, count: text.length, bits };
+  } else {
+    for (const byte of new TextEncoder().encode(text)) push(bits, byte, 8);
   }
-  const bytes = new TextEncoder().encode(text);
-  for (const byte of bytes) push(bits, byte, 8);
-  return { mode: BYTE, count: bytes.length, bits };
+  return bits;
+}
+
+interface Segment {
+  readonly mode: Mode;
+  readonly count: number;
+  readonly bits: readonly number[];
 }
 
 /** The data codewords: header, data, terminator, zero bits to a byte, then 0xEC and 0x11 (§7.4.10). */
-function dataCodewordsFor(
-  seg: ReturnType<typeof segment>,
-  version: number,
-  capacity: number,
-): number[] {
+function dataCodewordsFor(seg: Segment, version: number, capacity: number): number[] {
   const bits: number[] = [];
   push(bits, seg.mode.indicator, 4);
   push(bits, seg.count, countBits(seg.mode, version));
@@ -372,11 +411,18 @@ export function encodeQr(text: string, options: QrOptions = {}): QrMatrix {
   let version = options.minVersion ?? MIN_VERSION;
   if (!Number.isInteger(version) || version < MIN_VERSION || version > MAX_VERSION)
     throw new RangeError("The version is 1 to 40.");
-  const seg = segment(text);
-  while (4 + countBits(seg.mode, version) + seg.bits.length > dataCodewords(version, level) * 8) {
+  // Refused before the text is read past its length: no symbol holds more characters than this.
+  if (text.length > MAX_TEXT_LENGTH)
+    throw new QrCapacityError("The text is too long for a QR code.");
+  // A lone surrogate would be encoded as U+FFFD, a code of another text: refused instead.
+  if (LONE_SURROGATE.test(text)) throw new RangeError("The text is not well-formed Unicode.");
+  const { mode, count } = modeOf(text);
+  const length = dataBitLength(mode, count);
+  while (4 + countBits(mode, version) + length > dataCodewords(version, level) * 8) {
     version++;
     if (version > MAX_VERSION) throw new QrCapacityError("The text is too long for a QR code.");
   }
+  const seg: Segment = { mode, count, bits: segmentBits(text, mode) };
   const data = dataCodewordsFor(seg, version, dataCodewords(version, level));
   const grid = functionPatterns(version);
   placeCodewords(grid, interleave(data, version, level));

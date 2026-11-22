@@ -1,10 +1,11 @@
 // lib/qr: the encoder against the published vectors, libqrencode's reference symbols for every
 // version and level, and round trips through the test's own reader (decode.ts).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   darkSharePenalty,
   encodeQr,
   formatBits,
+  MAX_TEXT_LENGTH,
   penalty,
   QrCapacityError,
   type QrLevel,
@@ -297,6 +298,62 @@ describe("refusals", () => {
     expect(error).toBeInstanceOf(RangeError);
     expect(String((error as Error).message)).not.toContain("otpauth");
     expect((error as Error).message.length).toBeLessThan(80);
+  });
+
+  it("refuses a text longer than any symbol holds from its length, before reading it", () => {
+    const encode = vi.spyOn(TextEncoder.prototype, "encode");
+    try {
+      // Version 40-L holds 7,089 digits, the most of any mode; one more is refused at once.
+      expect(encodeQr("7".repeat(MAX_TEXT_LENGTH), { level: "L" }).version).toBe(40);
+      expect(() => encodeQr("7".repeat(MAX_TEXT_LENGTH + 1), { level: "L" })).toThrow(
+        QrCapacityError,
+      );
+      expect(() => encodeQr("a".repeat(MAX_TEXT_LENGTH + 1), { level: "L" })).toThrow(
+        QrCapacityError,
+      );
+      expect(() => encodeQr("a".repeat(5_000_000))).toThrow(QrCapacityError);
+      // Within that length, a text too long for its mode is refused from its bit count, unread.
+      expect(() => encodeQr("a".repeat(2954), { level: "L" })).toThrow(QrCapacityError);
+      expect(() => encodeQr("é".repeat(1477), { level: "L" })).toThrow(QrCapacityError);
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
+  it("counts the UTF-8 bytes of one- to four-byte characters as the symbol holds them", () => {
+    // Version 1-M holds 14 bytes, version 2-M 26: each text below is 14 bytes, or 15.
+    for (const [text, bytes] of [
+      ["abcdefghijklmn", 14],
+      ["ééééééé", 14],
+      ["€€€€ab", 14],
+      ["😀😀😀ab", 14],
+      ["ééééééé.", 15],
+      ["€€€€abc", 15],
+      ["😀😀😀abc", 15],
+      ["ab😀😀😀c", 15],
+    ] as const) {
+      expect(new TextEncoder().encode(text).length, text).toBe(bytes);
+      const matrix = encodeQr(text, { level: "M" });
+      expect(matrix.version, text).toBe(bytes <= 14 ? 1 : 2);
+      expect(decodeQr(matrix.size, matrix.modules).text, text).toBe(text);
+    }
+  });
+
+  it("refuses text that is not well-formed Unicode rather than drawing another text", () => {
+    for (const text of ["A\ud800B", "key=\udc00", "\udc00\ud800", "\ud83d", "x\ude00"]) {
+      let error: unknown;
+      try {
+        encodeQr(text);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, JSON.stringify(text)).toBeInstanceOf(RangeError);
+      expect((error as Error).message).toBe("The text is not well-formed Unicode.");
+    }
+    // A pair is one code point, and well formed.
+    const matrix = encodeQr("A😀B");
+    expect(decodeQr(matrix.size, matrix.modules).text).toBe("A😀B");
   });
 
   it("refuses an unknown level, mask or version", () => {
