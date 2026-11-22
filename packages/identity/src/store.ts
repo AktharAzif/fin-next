@@ -11,6 +11,7 @@ export const TABLES = {
     twoFactor: "identity.two_factor",
     assurance: "identity.assurance",
     totpStep: "identity.totp_step",
+    verification: "identity.verification",
   },
   staff: {
     user: "staff.member",
@@ -19,6 +20,7 @@ export const TABLES = {
     twoFactor: "staff.two_factor",
     assurance: "staff.assurance",
     totpStep: "staff.totp_step",
+    verification: "staff.verification",
   },
 } as const satisfies Record<RealmName, Record<string, string>>;
 
@@ -192,6 +194,58 @@ export async function personByEmail(
   );
   const id = result.rows[0]?.id;
   return id === undefined ? null : personById(db, realm, id);
+}
+
+/**
+ * Takes the person's ceremony lock until the unit ends: their row of the realm's TOTP step table
+ * (`identity.totp_step`, `staff.totp_step`), made when missing with no step accepted, and locked
+ * `FOR UPDATE`. Every sign-in and factor ceremony of the person takes it before it reads anything
+ * of theirs (the before-hook), and so does every change that removes their factors or ends their
+ * sessions, before it locks their row (the last-factor rule, a staff reset, removal or role
+ * change). So (spec 02 §5.3, §5.4, §6.7, §10.4, §11.4):
+ *   - a change and a ceremony never overlap: whichever waits reads what the other committed, so no
+ *     sign-in that began before a change finishes after it on what the change removed;
+ *   - the person's ceremonies run one at a time, so what one reads before its check (the wrong
+ *     codes so far, a passkey's signature counter, the factors the first-factor rule counts) is
+ *     what the one before it committed;
+ *   - the lock is exclusive, so its waiters queue in the order they came: a change waits only for
+ *     the ceremonies queued before it, never for one that comes after, so no stream of ceremonies,
+ *     however many overlap, can keep it out; and its wait is bounded by the logins'
+ *     `lock_timeout`, after which it fails rather than wait on.
+ * A row lock needs UPDATE on the table, which only the realm's own login holds, so no other login
+ * can take the lock or hold it open. The person's own routes (their name, an organisation) never
+ * take it, so they never wait on a ceremony that waits to write their session.
+ */
+export async function holdCeremonyLock(
+  db: Queryable,
+  realm: RealmName,
+  personId: string,
+  now: Date,
+): Promise<void> {
+  const table = TABLES[realm].totpStep;
+  await db.query(
+    `INSERT INTO ${table} (user_id, last_step, updated_at) VALUES ($1, 0, $2)
+     ON CONFLICT (user_id) DO NOTHING`,
+    [personId, now],
+  );
+  const held = await db.query(`SELECT 1 FROM ${table} WHERE user_id = $1 FOR UPDATE`, [personId]);
+  if (held.rowCount !== 1) throw new Error("identity: a person's ceremony lock row is missing");
+}
+
+/**
+ * Voids the emailed sign-in codes the library holds for an address (its `sign-in-otp-<address>`
+ * verification rows, kept plain), so that no code sent before can sign anyone in after. Returns how
+ * many were voided.
+ */
+export async function voidSignInCodes(
+  db: Queryable,
+  realm: RealmName,
+  email: string,
+): Promise<number> {
+  const result = await db.query(`DELETE FROM ${TABLES[realm].verification} WHERE identifier = $1`, [
+    `sign-in-otp-${email.toLowerCase()}`,
+  ]);
+  return result.rowCount;
 }
 
 export interface FactorFacts {

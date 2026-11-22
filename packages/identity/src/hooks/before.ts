@@ -1,8 +1,9 @@
-// `hooks.before` (spec 02 §3.5): in this order, a ceremony's hold on its person's row, the realm's
-// gate for the path, the step-up rule for `step_up_self` paths, Fin's limits, the body allowlist
+// `hooks.before` (spec 02 §3.5): in this order, a ceremony's lock on its person, the realm's gate
+// for the path, the step-up rule for `step_up_self` paths, Fin's limits, the body allowlist
 // (stripping `trustDevice` and `rememberMe`), and each path's own rules: emailed codes bound to the
 // asking browser, the staff Access binding, the sign-ups switch, TOTP replay and lockout, and the
-// last-factor rule. A passkey assertion, which needs no session, counts its limit before its hold.
+// last-factor rule. A passkey assertion or a code sign-in, which needs no session, counts its limit
+// before its lock.
 import { symmetricDecrypt } from "better-auth/crypto";
 import { trustedBrowserOf } from "../browsers.ts";
 import { attemptCode, requestCode } from "../codes.ts";
@@ -37,6 +38,7 @@ import {
 import {
   endSession,
   factorFacts,
+  holdCeremonyLock,
   isLive,
   personByEmail,
   personById,
@@ -85,12 +87,14 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   state.rule = rule;
   state.line.authPath = rule.path;
 
-  // Anyone may send a passkey assertion naming any credential, so its network's allowance is
-  // counted before it can hold anyone's row. Every gate state reaches it and no step-up rule
-  // applies to it, so counting it first changes no answer the order of §3.5 would give.
-  const countedFirst = ctx.path === "/passkey/verify-authentication";
+  // Anyone may send a passkey assertion naming any credential, or a code naming any address, so
+  // its allowance (its network's, or for a staff code its Access identity's) is counted before it
+  // can take anyone's lock. Every gate state reaches both and no step-up rule applies to either, so
+  // counting first changes no answer the order of §3.5 would give.
+  const countedFirst =
+    ctx.path === "/passkey/verify-authentication" || ctx.path === "/sign-in/email-otp";
   if (countedFirst) await finLimits(rt, ctx, state, tx, rule);
-  await holdPerson(rt, ctx, tx);
+  await holdCeremonies(rt, ctx, state, tx);
   await loadPrior(rt, ctx, state, tx);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
   await stepUpRule(rt, ctx, state, tx);
@@ -121,69 +125,112 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
 }
 
 /**
- * The library paths whose ceremony reads a person's credentials and then writes a session, a proof
- * or a factor for them (§5.3, §5.4, §6.5, §7.4).
+ * The library paths that make a session for a person, or prove, add or remove one of their factors
+ * (§5.1 to §5.4, §5.7, §6.5, §6.7, §7.4): each takes its person's ceremony lock first.
  */
 export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
+  "/sign-in/email-otp",
+  "/sign-in/email",
   "/passkey/verify-authentication",
   "/passkey/verify-registration",
+  "/passkey/delete-passkey",
   "/two-factor/verify-totp",
   "/two-factor/verify-backup-code",
   "/two-factor/enable",
+  "/two-factor/disable",
+  "/two-factor/generate-backup-codes",
 ]);
 
 /**
- * A ceremony holds its person's row `FOR KEY SHARE`, from before anything reads their session or
- * credentials to its commit. Every change that removes a person's factors, or ends their sessions
- * because their access changed, locks the same row first `FOR UPDATE`, the one mode that conflicts
- * with the hold: a staff reset, removal or role change inside the staff-change lock (§10.8), the
- * operator's bootstrap reset (§10.6), and the last-factor rule's removals (§6.7). So the two never
- * overlap: either the change waits for the ceremony to commit and then ends what it made, or the
- * ceremony waits for the change and then reads the person as the change left them, the credential
- * gone and the session ended (§11.4). Taken first, it also keeps either from waiting on a row the
- * other holds (a passkey's counter, a session).
+ * A ceremony takes its person's ceremony lock (store.ts) before anything reads their session,
+ * credentials or counts, and holds it to its commit; it then holds their row `FOR KEY SHARE`. Every
+ * change that removes the person's factors or ends their sessions takes the same lock first and
+ * then locks their row `FOR UPDATE`: the last-factor rule (§6.7, below) and a staff reset, removal
+ * or role change (@fin/staff's lock.ts, inside the staff-change lock, §10.8). The operator's
+ * bootstrap reset (§10.6) locks the row only, which conflicts with the share, so it waits for the
+ * one ceremony that holds the row. So a change and a ceremony never overlap: either the change
+ * waits for the ceremony to commit and then ends what it made, or the ceremony waits for the change
+ * and then reads the person as the change left them, the credential gone, the session ended and
+ * the emailed code void (§11.4). And the person's ceremonies run one at a time, in the order they
+ * asked (store.ts says what each of these gives).
  *
- * Nothing else waits on the hold: neither another ceremony of the person, nor a foreign-key check,
- * nor the person's own routes, which read and renew their session first and only then write their
- * row (the name, §14.2) or serialise on it `FOR NO KEY UPDATE` (an organisation's creation, §9.1).
- * Those must never wait on the hold, because the ceremony writes that session (it renews it, or
- * replaces it on a step-up) while it holds the row. A staff change never locks its actor's own row
- * (`@fin/staff`'s lock.ts). A ceremony that writes the row itself later (a sign-in's time, an
- * enrolment) does so under its own hold, without queueing behind a change that waits for it.
+ * The row is held in the one mode that never makes the person's own routes wait: they read and
+ * renew their session first (§11.2) and only then write their row (the name, §14.2) or lock it
+ * `FOR NO KEY UPDATE` (an organisation's creation, §9.1), while a ceremony writes that session (it
+ * renews it, or replaces it on a step-up) while it holds the row; nor do they take the ceremony
+ * lock. A staff change never locks its actor's own row or ceremony lock (lock.ts).
  *
- * Every ceremony but one names its person by the session it runs in, which only that person's
- * browser holds. A passkey assertion needs no session and names its person by a credential ID,
- * which is no secret: it is counted first (`beforeHook`) and holds the row only when this browser
- * holds an authentication challenge, without which the library refuses it before it reads any
- * credential. (Signing out everywhere else removes no credential, so a ceremony that commits after
- * it is a new sign-in like any other.)
+ * The person is the one the library will act for: the session's, for a ceremony that runs in one;
+ * the address's, for a sign-in by email (an account this request creates needs no lock); and the
+ * credential's, for a passkey assertion. A credential ID is a string (WebAuthn's base64url), and
+ * any other JSON value is refused here, before the library, which would look it up all the same.
+ * A sign-in by code or by passkey needs no session and names an address or a credential, neither
+ * of them secret: each is counted first (`beforeHook`), and an assertion takes the lock only when
+ * this browser holds an authentication challenge, without which the library refuses it before it
+ * reads any credential. Whatever the path, the session hook makes a session only for the person
+ * whose lock this request holds (database.ts), so a path that cannot name its person here
+ * (Google's callback, were it built) makes none.
  */
-async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
+async function holdCeremonies(
+  rt: RealmRuntime,
+  ctx: HookContext,
+  state: RequestState,
+  tx: UnitTx,
+): Promise<void> {
   if (!CEREMONY_PATHS.has(ctx.path)) return;
-  const tables = TABLES[rt.settings.realm];
+  const realm = rt.settings.realm;
+  const tables = TABLES[realm];
+  let found: { rows: { id: string }[] };
   if (ctx.path === "/passkey/verify-authentication") {
-    const response = bodyOf(ctx).response as { id?: unknown } | undefined;
-    if (typeof response?.id !== "string") return;
+    const credentialId = assertedCredential(ctx);
     if (!(await holdsAuthenticationChallenge(ctx))) return;
-    await tx.query(
-      `SELECT 1 FROM ${tables.user}
-        WHERE id = (SELECT user_id FROM ${tables.passkey} WHERE credential_id = $1)
-          FOR KEY SHARE`,
-      [response.id],
+    found = await tx.query<{ id: string }>(
+      `SELECT user_id AS id FROM ${tables.passkey} WHERE credential_id = $1`,
+      [credentialId],
     );
-    return;
+  } else if (ctx.path === "/sign-in/email-otp" || ctx.path === "/sign-in/email") {
+    // The address as the path's own rules normalise it before the library reads it.
+    const email = bodyOf(ctx).email;
+    if (typeof email !== "string") return;
+    found = await tx.query<{ id: string }>(`SELECT id FROM ${tables.user} WHERE email = $1`, [
+      email.trim().toLowerCase(),
+    ]);
+  } else {
+    const token = await ctx.getSignedCookie(
+      ctx.context.authCookies.sessionToken.name,
+      ctx.context.secret,
+    );
+    if (typeof token !== "string" || token === "") return;
+    found = await tx.query<{ id: string }>(
+      `SELECT user_id AS id FROM ${tables.session} WHERE token = $1`,
+      [token],
+    );
   }
-  const token = await ctx.getSignedCookie(
-    ctx.context.authCookies.sessionToken.name,
-    ctx.context.secret,
-  );
-  if (typeof token !== "string" || token === "") return;
-  await tx.query(
-    `SELECT 1 FROM ${tables.user}
-      WHERE id = (SELECT user_id FROM ${tables.session} WHERE token = $1)
-        FOR KEY SHARE`,
-    [token],
-  );
+  const personId = found.rows[0]?.id;
+  if (personId === undefined) return;
+  await holdCeremonyLock(tx, realm, personId, rt.clock.now());
+  await tx.query(`SELECT 1 FROM ${tables.user} WHERE id = $1 FOR KEY SHARE`, [personId]);
+  state.heldPerson = personId;
+}
+
+/** The credential an assertion names: a non-empty string, or the request is refused (400). */
+function assertedCredential(ctx: HookContext): string {
+  const response = bodyOf(ctx).response;
+  const id =
+    typeof response === "object" && response !== null
+      ? (response as { id?: unknown }).id
+      : undefined;
+  if (typeof id !== "string" || id === "") {
+    throw new AuthRefusal("invalid", "passkey.credential_id", { fields: ["response.id"] });
+  }
+  return id;
+}
+
+/** Fails closed when a check that relies on the person's ceremony lock runs without it. */
+function requireHeld(state: RequestState, personId: string): void {
+  if (state.heldPerson !== personId) {
+    throw new AuthRefusal("internal", "ceremony.not_held");
+  }
 }
 
 async function loadPrior(
@@ -710,6 +757,9 @@ function mayFinishSetUp(rt: RealmRuntime, state: RequestState): boolean {
  * The second-factor codes (§5.4, [SA-35]): the lockout (10 wrong codes, one hour); an
  * authenticator that is missing or unfinished is no factor; and a TOTP step is accepted once,
  * across sign-in and step-up, claimed atomically so that requests sent together cannot all pass.
+ * The person's ceremony lock is held (`holdCeremonies`), so the person's code checks run one at a
+ * time, each after the one before has committed its count: requests sent together, from however
+ * many networks or sessions, cannot test more codes than the lockout allows.
  */
 async function factorCodeChecks(
   rt: RealmRuntime,
@@ -720,6 +770,7 @@ async function factorCodeChecks(
   const prior = state.prior;
   if (prior === null) return;
   const realm = rt.settings.realm;
+  requireHeld(state, prior.person.id);
   if ((await rt.limits.lockedUntil(tx, factorLockKey(state, prior.person.id))) !== null) {
     state.line.reason = "factor.locked";
     throw LIB_ERRORS.locked();
@@ -769,7 +820,11 @@ async function factorCodeChecks(
   }
 }
 
-/** The last factor stays for staff and privileged developers (§6.7); removals are serialised. */
+/**
+ * The last factor stays for staff and privileged developers (§6.7); removals are serialised. The
+ * person's ceremony lock is held (`holdCeremonies`), so no ceremony of theirs is running, and the
+ * row is then locked `FOR UPDATE`, which the operator's bootstrap reset also takes.
+ */
 async function lastFactorRule(
   rt: RealmRuntime,
   ctx: HookContext,
@@ -779,6 +834,7 @@ async function lastFactorRule(
   const prior = state.prior;
   if (prior === null) return;
   const realm = rt.settings.realm;
+  requireHeld(state, prior.person.id);
   await personById(tx, realm, prior.person.id, { lock: true });
   const factors = await factorFacts(tx, realm, prior.person.id);
   let removing = 0;
@@ -835,7 +891,7 @@ async function challengeRow(ctx: HookContext): Promise<ChallengeRow | null> {
 /**
  * Whether this browser holds a passkey authentication challenge: the library refuses an assertion
  * without one before it reads any credential. An expired one counts too, since only the library
- * decides that, so this never skips a hold an assertion the library accepts would need.
+ * decides that, so this never skips a lock an assertion the library accepts would need.
  */
 async function holdsAuthenticationChallenge(ctx: HookContext): Promise<boolean> {
   return (await challengeRow(ctx))?.type === "authentication";
@@ -857,6 +913,9 @@ async function passkeyChallenge(ctx: HookContext, now: Date): Promise<string | n
  * assertion, and a credential ID is no secret: this only notes the assertion, the credential's key
  * and the challenge the browser holds. The after-hook acts on it only once the assertion verifies
  * against the stored key; an assertion that does not changes nothing and answers as any failure.
+ * The credential's owner's ceremony lock is held (`holdCeremonies`), so the counter read here, and
+ * by the library after it, is the one their last assertion committed: two assertions of one
+ * credential sent together cannot both pass.
  */
 async function notePasskeyCounter(
   rt: RealmRuntime,

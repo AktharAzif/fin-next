@@ -1,7 +1,8 @@
 // The authenticator, backup codes and the factor step (spec 02 §5.4, §6.1, §6.6, §6.7;
 // T-SAT-27, T-SAT-28): set-up raises the session; a code sign-in of a person with a factor is
 // aal1 and reaches only the factor step; a right code raises it and writes a proof; a TOTP step is
-// accepted once; 10 wrong codes lock the person out for an hour; a trusted browser gives an aal1
+// accepted once; 10 wrong codes lock the person out for an hour, however many networks send them
+// at once; a trusted browser gives an aal1
 // working session that writes no proof; the last factor stays for a privileged developer.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
@@ -467,6 +468,52 @@ describe("a TOTP step is accepted once ([SA-35])", () => {
       sessions.map(async (b) => (await sessionRow(b))?.assurance),
     );
     expect(assurances.filter((a) => a === "aal2")).toHaveLength(1);
+  });
+});
+
+describe("wrong codes sent together ([SA-35], §5.4)", () => {
+  it("test no more codes than the lockout allows, however many networks send them", async () => {
+    const { email, secret } = await personWithAuthenticator("burst");
+    const id = await userId(email);
+    // One factor-step session, its cookies copied into 24 browsers, each on a network of its own.
+    const signedIn = h.browser();
+    expect((await codeSignIn(h, signedIn, email)).status).toBe(200);
+    const browsers = Array.from({ length: 24 }, () => {
+      const browser = h.browser();
+      for (const [name, value] of signedIn.jar) browser.jar.set(name, value);
+      return browser;
+    });
+    // Codes that are wrong at any step the check accepts.
+    const now = totpStep(new Date());
+    const right = new Set([-2n, -1n, 0n, 1n, 2n].map((d) => hotp(secret, now + d)));
+    const wrong: string[] = [];
+    for (let n = 100_000; wrong.length < browsers.length; n += 7919) {
+      const code = String(n % 1_000_000).padStart(6, "0");
+      if (!right.has(code)) wrong.push(code);
+    }
+    const failedBefore = (await h.events({ event: "sign_in.second_factor_failed" })).filter(
+      (e) => e.target_id === id,
+    ).length;
+
+    const answers = await Promise.all(
+      browsers.map((browser, i) =>
+        browser.post("/api/auth/two-factor/verify-totp", { code: wrong[i] }),
+      ),
+    );
+
+    const tally: Record<string, number> = {};
+    for (const answer of answers) {
+      const key = `${answer.status}:${String(answer.json?.code)}`;
+      tally[key] = (tally[key] ?? 0) + 1;
+    }
+    expect(tally).toEqual({ "401:INVALID_CODE": 10, "429:ACCOUNT_TEMPORARILY_LOCKED": 14 });
+    const failed = (await h.events({ event: "sign_in.second_factor_failed" })).filter(
+      (e) => e.target_id === id,
+    );
+    expect(failed.length - failedBefore).toBe(10);
+    expect(
+      (await h.events({ event: "sign_in.locked" })).filter((e) => e.target_id === id),
+    ).toHaveLength(1);
   });
 });
 

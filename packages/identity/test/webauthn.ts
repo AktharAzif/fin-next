@@ -60,11 +60,17 @@ export class SoftAuthenticator {
     );
   }
 
-  /** Answers `generate-register-options` like `navigator.credentials.create`. */
-  register(options: { challenge: string; user: { id: string } }): Record<string, unknown> {
+  /**
+   * Answers `generate-register-options` like `navigator.credentials.create`; `id` chooses the
+   * credential ID, which an authenticator picks itself (16 random bytes otherwise).
+   */
+  register(
+    options: { challenge: string; user: { id: string } },
+    choose: { id?: Buffer } = {},
+  ): Record<string, unknown> {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
-    const id = Buffer.from(crypto.getRandomValues(new Uint8Array(16)));
+    const id = choose.id ?? Buffer.from(crypto.getRandomValues(new Uint8Array(16)));
     const cose = new Map<number, Cbor>([
       [1, 2],
       [3, -7],

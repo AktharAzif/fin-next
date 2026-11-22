@@ -38,6 +38,11 @@ export interface RequestState {
   rule: EndpointRule | null;
   /** The live session the request arrived with. */
   prior: Prior | null;
+  /**
+   * The person whose ceremony lock (store.ts) this request took before it read anything of theirs:
+   * the only person a session may be made for here, besides one this request created.
+   */
+  heldPerson: string | null;
   gate: GateState;
   /** A validated intent for a step_up_self path, consumed after the library succeeds. */
   intent: { id: string; binding: IntentBinding } | null;
@@ -89,6 +94,7 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     network: networkKey(context.clientIp),
     rule: null,
     prior: null,
+    heldPerson: null,
     gate: "signed_out",
     intent: null,
     trustDevice: false,

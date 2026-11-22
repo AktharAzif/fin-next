@@ -38,7 +38,13 @@ function inherited(old: SessionRow | null): Data {
 export function databaseHooks(rt: RealmRuntime) {
   const realm = rt.settings.realm;
 
-  /** Fin's fields for a new session, by the path that made it; any other path fails closed. */
+  /**
+   * Fin's fields for a new session, by the path that made it; any other path fails closed. A
+   * session is made only for the person whose ceremony lock this request took before the library
+   * ran (the before-hook's `holdCeremonies`), or for an account this request created: so no
+   * sign-in that a factor reset or removal could not wait for, or that named its person one way to
+   * Fin and another to the library, ever makes one.
+   */
   async function sessionCreate(session: Data, ctx: HookEndpoint | null): Promise<{ data: Data }> {
     const state = requestState(rt);
     const now = rt.clock.now();
@@ -130,6 +136,9 @@ export function databaseHooks(rt: RealmRuntime) {
       throw new Error(
         `identity: a session may not be created from ${path === "" ? "a server call" : path}`,
       );
+    }
+    if (userId === "" || (state.heldPerson !== userId && state.createdUserId !== userId)) {
+      throw new Error("identity: a session may be made only for the person this request holds");
     }
     return { data: { ...session, ...base, ...fields } };
   }

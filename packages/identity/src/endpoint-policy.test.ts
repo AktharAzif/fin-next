@@ -1,8 +1,9 @@
 // T-SAT-01 ([SA-09], AC-SAT-02): per realm, the installed router's path set equals the policy;
 // unlisted, double-slash and encoded paths, and blocked ones, answer 404 before any unit of work
 // or limit; `/change-email` and the staff backup-code paths answer 404; `step_up_org` and
-// `session` are empty. Every path that proves or adds a factor holds its person's row first (the
-// before-hook's ceremony list), and the list names no path a realm cannot reach.
+// `session` are empty. Every path that signs in, or proves, adds or removes a factor takes its
+// person's ceremony lock first (the before-hook's ceremony list), and the list names no path a
+// realm cannot reach.
 import { describe, expect, it } from "vitest";
 import { untouchableDatabase } from "../test/fake-db.ts";
 import { DOCS_ORIGIN, testEnv } from "../test/harness.ts";
@@ -177,13 +178,12 @@ describe.each(["developer", "staff"] as const)("the %s realm's allowlist", (real
   );
 });
 
-describe("the ceremonies that hold their person's row first (§6.7, §10.8, §11.4)", () => {
+describe("the paths that take their person's ceremony lock first (§6.7, §10.8, §11.4)", () => {
   const ALL = { passwords: true, google: true };
-  /** Factor paths that are no ceremony, and why each needs no hold of its own. */
-  const NOT_CEREMONIES: Readonly<Record<string, string>> = {
-    "/passkey/delete-passkey": "the last-factor rule locks the person's row FOR UPDATE (§6.7)",
-    "/two-factor/disable": "the last-factor rule locks the person's row FOR UPDATE (§6.7)",
-    "/two-factor/generate-backup-codes": "rewrites the authenticator's own row, nothing else",
+  /** Sign-in and factor paths that take no lock, and why each needs none. */
+  const UNLOCKED: Readonly<Record<string, string>> = {
+    "/sign-in/social":
+      "only starts Google's redirect; the session hook makes no session for a person this request did not lock",
   };
   const reachablePosts = (realm: RealmName) =>
     createEndpointPolicy(realm, ALL)
@@ -196,11 +196,11 @@ describe("the ceremonies that hold their person's row first (§6.7, §10.8, §11
   });
 
   it.each(["developer", "staff"] as const)(
-    "cover every %s path that proves or adds a passkey or an authenticator",
+    "cover every %s path that signs in, or proves, adds or removes a passkey or an authenticator",
     (realm) => {
       for (const path of reachablePosts(realm)) {
-        if (!/^\/(passkey|two-factor)\//.test(path)) continue;
-        expect(CEREMONY_PATHS.has(path) || path in NOT_CEREMONIES, path).toBe(true);
+        if (!/^\/(passkey|two-factor|sign-in)\//.test(path)) continue;
+        expect(CEREMONY_PATHS.has(path) || path in UNLOCKED, path).toBe(true);
       }
     },
   );

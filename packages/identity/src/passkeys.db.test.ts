@@ -2,22 +2,31 @@
 // first-factor rule raises the session; a passkey sign-in is aal2 at once; a passkey step-up
 // replaces the session without lengthening it and moves its proofs; another person's passkey is
 // refused; a challenge works once; a counter that goes backwards is refused and the person told; a
-// sign-in in flight while its passkey is removed finds it gone, and neither waits on the other; an
-// assertion holds its person's row only once its network's allowance is counted and its browser
-// holds a challenge, and never in a way that keeps the person's own sign-in waiting.
-import { createHash } from "node:crypto";
+// sign-in in flight while its passkey is removed finds it gone, whatever form its credential ID
+// takes, and a credential ID that is not a string is refused; an assertion takes its person's
+// ceremony lock only once its network's allowance is counted and its browser holds a challenge;
+// a person's assertions run one at a time, so of two clones sent together one passes; and no
+// number of forged assertions in flight keeps a removal out.
+import { createHash, randomInt } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
-  type Browser,
+  Browser,
   codeSignIn,
   createHarness,
+  DOCS_ORIGIN,
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  testEnv,
 } from "../test/harness.ts";
+import { readRealmSettings } from "./config.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
+import { MemoryLineSink } from "./ports/log.ts";
+import { createPgDatabase } from "./ports/pg-database.ts";
+import { createRealm } from "./realm.ts";
 
 let database: TestDatabase;
 let h: Harness;
@@ -53,6 +62,36 @@ async function personWithPasskey(label: string) {
   const authenticator = h.authenticator();
   const { verify } = await registerPasskey(browser, authenticator);
   return { email, browser, authenticator, verify };
+}
+
+/**
+ * A person whose passkey's credential ID (which the authenticator picks) is 16 decimal digits in
+ * base64url, so JSON can name it as a number too; returns that ID.
+ */
+async function personWithDigitPasskey(label: string) {
+  const email = unique(label);
+  const browser = h.browser();
+  await codeSignIn(h, browser, email);
+  const authenticator = h.authenticator();
+  // A leading 1 to 8 keeps the number below 2^53, so it survives JSON exactly.
+  let digits = String(1 + randomInt(8));
+  while (digits.length < 16) digits += String(randomInt(10));
+  const options = await browser.get("/api/auth/passkey/generate-register-options");
+  const response = authenticator.register(
+    options.json as { challenge: string; user: { id: string } },
+    { id: Buffer.from(digits, "base64url") },
+  );
+  expect(response.id).toBe(digits);
+  const verify = await browser.post("/api/auth/passkey/verify-registration", { response });
+  expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+  return { email, browser, authenticator, digits };
+}
+
+/** An assertion naming its credential by `form`: as sent, or with the ID as a JSON number. */
+function inForm(response: Record<string, unknown>, form: "string" | "number") {
+  return form === "string"
+    ? response
+    : { ...response, id: Number(response.id), rawId: Number(response.rawId) };
 }
 
 describe("the first passkey", () => {
@@ -235,9 +274,22 @@ describe("removing a passkey (§7.6 account.passkey_remove)", () => {
   });
 });
 
-/** Waits until `n` backends of this test's database wait for a lock another transaction holds. */
-async function lockWaiters(n: number): Promise<void> {
+/**
+ * Waits until `n` backends of this test's database wait for a lock another transaction holds, or
+ * until `settles` (when given) has settled, whichever comes first.
+ */
+async function lockWaiters(n: number, settles?: Promise<unknown>): Promise<void> {
+  let settled = false;
+  settles?.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
   for (let tries = 0; tries < 1000; tries += 1) {
+    if (settled) return;
     const waiting = await h.admin.query<{ n: number }>(
       `SELECT count(*)::integer AS n FROM pg_stat_activity
         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
@@ -248,52 +300,93 @@ async function lockWaiters(n: number): Promise<void> {
   throw new Error(`${n} backends never waited for a lock`);
 }
 
+async function userIdOf(email: string): Promise<string> {
+  const result = await h.admin.query<{ id: string }>(
+    'SELECT id FROM identity."user" WHERE email = $1',
+    [email],
+  );
+  return String(result.rows[0]?.id);
+}
+
 describe("a passkey sign-in while that passkey is removed (§5.3, §6.7)", () => {
-  it("finds the passkey gone and makes no session, and the removal goes through", async () => {
-    const { browser, authenticator } = await personWithPasskey("removed.inflight");
-    const owned = await h.admin.query<{ id: string }>(
-      "SELECT p.id FROM identity.passkey p JOIN identity.session s ON s.user_id = p.user_id WHERE s.token = $1",
-      [browser.sessionToken()],
-    );
-    const id = String(owned.rows[0]?.id);
-    const asked = await browser.post("/api/auth/passkey/delete-passkey", { id });
-    const intent = String(asked.json?.intent_id);
-    expect(
-      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
-    ).toBe(200);
-    // Whoever holds the lost device makes an assertion with the passkey in another browser.
+  it.each(["string", "number"] as const)(
+    "makes no session when it names the credential as a %s, and the removal goes through",
+    async (form) => {
+      const { browser, authenticator, email } = await personWithDigitPasskey(`removed.${form}`);
+      const userId = await userIdOf(email);
+      const owned = await h.admin.query<{ id: string }>(
+        "SELECT id FROM identity.passkey WHERE user_id = $1",
+        [userId],
+      );
+      const id = String(owned.rows[0]?.id);
+      const asked = await browser.post("/api/auth/passkey/delete-passkey", { id });
+      const intent = String(asked.json?.intent_id);
+      expect(
+        (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+      ).toBe(200);
+      // Whoever holds the lost device makes an assertion with the passkey in another browser.
+      const device = h.browser();
+      const challenge = await device.get("/api/auth/passkey/generate-authenticate-options");
+      const response = inForm(authenticator.authenticate(String(challenge.json?.challenge)), form);
+      // The removal is held after it has deleted the passkey, before it commits: another
+      // transaction holds the row of the intent it spends last.
+      const holder = await h.admin.connect();
+      try {
+        await holder.query("BEGIN");
+        await holder.query("SELECT 1 FROM ops.step_up_intent WHERE id = $1 FOR UPDATE", [intent]);
+        const removing = browser.post(
+          "/api/auth/passkey/delete-passkey",
+          { id },
+          { "fin-step-up-intent": intent },
+        );
+        removing.catch(() => undefined);
+        await lockWaiters(1);
+        const signingIn = device.post("/api/auth/passkey/verify-authentication", { response });
+        signingIn.catch(() => undefined);
+        await lockWaiters(2, signingIn);
+        await holder.query("ROLLBACK");
+        const [removed, signedIn] = await Promise.all([removing, signingIn]);
+
+        expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+        // A string waits for the removal and then finds no passkey; any other JSON value is
+        // refused before anything of the person is read.
+        expect(signedIn.status).toBe(form === "string" ? 401 : 400);
+        expect(device.sessionToken()).toBeNull();
+      } finally {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        holder.release();
+      }
+      expect(
+        (await h.admin.query("SELECT 1 FROM identity.passkey WHERE id = $1", [id])).rowCount,
+      ).toBe(0);
+      expect(
+        (
+          await h.admin.query(
+            "SELECT 1 FROM identity.session WHERE user_id = $1 AND created_via = 'passkey'",
+            [userId],
+          )
+        ).rowCount,
+      ).toBe(0);
+    },
+  );
+});
+
+describe("a credential ID that is not a string (§5.3)", () => {
+  it("is refused before the library looks it up, while the same assertion as a string signs in", async () => {
+    const { authenticator } = await personWithDigitPasskey("numeric");
     const device = h.browser();
     const challenge = await device.get("/api/auth/passkey/generate-authenticate-options");
     const response = authenticator.authenticate(String(challenge.json?.challenge));
-    // The removal is held after it has deleted the passkey, before it commits: another transaction
-    // holds the row of the intent it spends last.
-    const holder = await h.admin.connect();
-    try {
-      await holder.query("BEGIN");
-      await holder.query("SELECT 1 FROM ops.step_up_intent WHERE id = $1 FOR UPDATE", [intent]);
-      const removing = browser.post(
-        "/api/auth/passkey/delete-passkey",
-        { id },
-        { "fin-step-up-intent": intent },
-      );
-      removing.catch(() => undefined);
-      await lockWaiters(1);
-      const signingIn = device.post("/api/auth/passkey/verify-authentication", { response });
-      signingIn.catch(() => undefined);
-      await lockWaiters(2);
-      await holder.query("ROLLBACK");
-      const [removed, signedIn] = await Promise.all([removing, signingIn]);
-
-      expect(removed.status, JSON.stringify(removed.json)).toBe(200);
-      expect(signedIn.status).toBe(401);
+    for (const id of [Number(response.id), [response.id], { id: response.id }, ""]) {
+      const refused = await device.post("/api/auth/passkey/verify-authentication", {
+        response: { ...response, id, rawId: id },
+      });
+      expect(refused.status, JSON.stringify(id)).toBe(400);
+      expect(refused.json).toMatchObject({ code: "invalid", fields: ["response.id"] });
       expect(device.sessionToken()).toBeNull();
-    } finally {
-      await holder.query("ROLLBACK").catch(() => undefined);
-      holder.release();
     }
-    expect(
-      (await h.admin.query("SELECT 1 FROM identity.passkey WHERE id = $1", [id])).rowCount,
-    ).toBe(0);
+    const signedIn = await device.post("/api/auth/passkey/verify-authentication", { response });
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
   });
 });
 
@@ -307,19 +400,19 @@ function promptly<T>(answer: Promise<T>): Promise<T> {
 }
 
 describe("a passkey assertion before the library checks it (§5.3, §5.6)", () => {
-  it("holds no row with no challenge, or past its network's allowance, and answers at once while a change holds the person's row", async () => {
+  it("takes no lock with no challenge, or past its network's allowance, and answers at once while a change holds the person", async () => {
     const { authenticator, email } = await personWithPasskey("unproven");
-    const owner = await h.admin.query<{ id: string }>(
-      'SELECT id FROM identity."user" WHERE email = $1',
-      [email],
-    );
-    // A change to the person's factors holds their row, as a removal does.
+    const owner = await userIdOf(email);
+    // A change to the person's factors holds their ceremony lock and their row, as a removal does.
     const holder = await h.admin.connect();
     try {
       await holder.query("BEGIN");
-      await holder.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR UPDATE', [
-        owner.rows[0]?.id,
-      ]);
+      await holder.query(
+        "INSERT INTO identity.totp_step (user_id, last_step) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+        [owner],
+      );
+      await holder.query("SELECT 1 FROM identity.totp_step WHERE user_id = $1 FOR UPDATE", [owner]);
+      await holder.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR UPDATE', [owner]);
       // The credential's own signature, from a browser that holds no challenge.
       const cold = await promptly(
         h.browser().post("/api/auth/passkey/verify-authentication", {
@@ -351,44 +444,153 @@ describe("a passkey assertion before the library checks it (§5.3, §5.6)", () =
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
     }
-    // The credential still signs in once nothing holds its owner's row.
+    // The credential still signs in once nothing holds its owner.
     expect((await passkeyCeremony(h.browser(), authenticator)).status).toBe(200);
   });
 
-  it("never holds up the person's own sign-in while another assertion naming them is in flight", async () => {
-    const { authenticator } = await personWithPasskey("unqueued");
-    // Another browser's assertion naming the credential, held up inside the library (another
-    // transaction holds its challenge), so it holds the person's row meanwhile.
-    const other = h.browser();
-    const challenge = await other.get("/api/auth/passkey/generate-authenticate-options");
-    const asserted = authenticator.authenticate(String(challenge.json?.challenge));
-    const row = await h.admin.query<{ id: string }>(
-      "SELECT id FROM identity.verification ORDER BY id DESC LIMIT 1",
-    );
+  it("runs a person's assertions one at a time: of two clones sent together, exactly one passes (§5.3, [SA-35])", async () => {
+    const { authenticator, email } = await personWithPasskey("clone");
+    const owner = await userIdOf(email);
+    // Two browsers' challenges, answered by the one credential with the same counter, as a cloned
+    // authenticator would answer them.
+    const browsers = [h.browser(), h.browser()];
+    const responses: Record<string, unknown>[] = [];
+    for (const browser of browsers) {
+      const challenge = await browser.get("/api/auth/passkey/generate-authenticate-options");
+      responses.push(authenticator.authenticate(String(challenge.json?.challenge), { counter: 5 }));
+    }
+    // Another transaction holds the passkey's row for a moment, so whichever assertion runs first
+    // stops at its counter's write, after it has read the counter.
     const blocker = await h.admin.connect();
     try {
       await blocker.query("BEGIN");
-      await blocker.query("SELECT 1 FROM identity.verification WHERE id = $1 FOR UPDATE", [
-        row.rows[0]?.id,
-      ]);
-      const inFlight = other.post("/api/auth/passkey/verify-authentication", {
-        response: asserted,
-      });
-      inFlight.catch(() => undefined);
-      await lockWaiters(1);
-      // The person signs in from their own browser meanwhile, and is not kept waiting.
-      const own = await promptly(passkeyCeremony(h.browser(), authenticator));
-      expect(own.status, JSON.stringify(own.json)).toBe(200);
+      await blocker.query("SELECT 1 FROM identity.passkey WHERE user_id = $1 FOR UPDATE", [owner]);
+      const sent = browsers.map((browser, i) =>
+        browser.post("/api/auth/passkey/verify-authentication", { response: responses[i] }),
+      );
+      for (const answer of sent) answer.catch(() => undefined);
+      await lockWaiters(2);
       await blocker.query("ROLLBACK");
-      // The held assertion's counter is behind the one just used, so it is refused.
-      expect((await inFlight).status).not.toBe(200);
+      const answers = await Promise.all(sent);
+
+      // The second reads the counter the first wrote, and is refused as a clone.
+      expect(answers.map((a) => a.status).sort()).toEqual([200, 403]);
+      expect(answers.find((a) => a.status === 403)?.json).toMatchObject({
+        code: "forbidden",
+        reason: "passkey_refused",
+      });
     } finally {
       await blocker.query("ROLLBACK").catch(() => undefined);
       blocker.release();
     }
+    const signedIn = await h.admin.query(
+      "SELECT 1 FROM identity.session WHERE user_id = $1 AND created_via = 'passkey'",
+      [owner],
+    );
+    expect(signedIn.rowCount).toBe(1);
   });
 });
 
+/**
+ * A pool whose clients wait about `ms` (from none to twice that) before each statement, as a
+ * loaded server's would.
+ */
+function slowPool(pool: Pool, ms: number): Pool {
+  const slow = (client: PoolClient): PoolClient =>
+    new Proxy(client, {
+      get(target, key) {
+        if (key === "query") {
+          return async (...args: unknown[]) => {
+            await new Promise((resolve) => setTimeout(resolve, Math.random() * 2 * ms));
+            return (target.query as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  return { connect: async () => slow(await pool.connect()) } as unknown as Pool;
+}
+
+describe("forged assertions naming a credential (§5.3, §6.7)", () => {
+  it("never keep its removal out, however many are in flight", async () => {
+    const { browser, authenticator, email } = await personWithPasskey("flooded");
+    const owner = await userIdOf(email);
+    const owned = await h.admin.query<{ id: string }>(
+      "SELECT id FROM identity.passkey WHERE user_id = $1",
+      [owner],
+    );
+    const id = String(owned.rows[0]?.id);
+    const asked = await browser.post("/api/auth/passkey/delete-passkey", { id });
+    const intent = String(asked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+    ).toBe(200);
+    const credentialId = authenticator.credentials[0]?.id.toString("base64url") ?? "";
+    // Browsers on networks of their own, each with a challenge of its own, keep unsigned
+    // assertions naming the credential in flight. They ask for their challenges through one realm
+    // and send their assertions through another with the same secrets, whose statements run
+    // slowly, as on a loaded server, so that the assertions' transactions overlap without pause.
+    const env = testEnv("developer");
+    const lines = new MemoryLineSink();
+    const realmOn = (pool: Pool) =>
+      createRealm({
+        settings: readRealmSettings("developer", env),
+        db: createPgDatabase({ pool, clock: systemClock, release: "test", lines }),
+        clock: systemClock,
+        lines,
+        docsOrigin: DOCS_ORIGIN,
+      });
+    const askingPool = database.login("fin_console", { max: 4 });
+    const assertingPool = database.login("fin_console", { max: 10 });
+    const asking = realmOn(askingPool);
+    const asserting = realmOn(slowPool(assertingPool, 5));
+    const deadline = Date.now() + 15_000;
+    let stop = false;
+    let sent = 0;
+    const loop = async () => {
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * 100));
+      while (!stop && Date.now() < deadline) {
+        const asker = new Browser({ realm: asking });
+        const challenge = await asker.get("/api/auth/passkey/generate-authenticate-options");
+        const sender = new Browser({ realm: asserting });
+        for (const [name, value] of asker.jar) sender.jar.set(name, value);
+        await sender.post("/api/auth/passkey/verify-authentication", {
+          response: forgedAssertion(credentialId, String(challenge.json?.challenge), 1000 + sent),
+        });
+        sent += 1;
+      }
+    };
+    const loops = Array.from({ length: 20 }, () => loop());
+    try {
+      while (sent < 40 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const started = Date.now();
+      const removed = await browser.post(
+        "/api/auth/passkey/delete-passkey",
+        { id },
+        { "fin-step-up-intent": intent },
+      );
+      const waited = Date.now() - started;
+      const flooding = Date.now() < deadline;
+
+      // It waited only for the assertions queued before it, inside the logins' 5 s lock_timeout,
+      // while the flood went on.
+      expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+      expect(flooding).toBe(true);
+      expect(waited).toBeLessThan(5000);
+    } finally {
+      stop = true;
+      await Promise.allSettled(loops);
+      await askingPool.end();
+      await assertingPool.end();
+    }
+    expect(
+      (await h.admin.query("SELECT 1 FROM identity.passkey WHERE id = $1", [id])).rowCount,
+    ).toBe(0);
+  }, 60_000);
+});
 describe("a passkey step-up (§11.3)", () => {
   it("replaces the session, keeps its absolute limit and moves its proofs", async () => {
     const { browser, authenticator } = await personWithPasskey("stepup");

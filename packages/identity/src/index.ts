@@ -68,3 +68,4 @@ export { issueEnrolmentCode, redeemEnrolmentCode } from "./staff/enrolment.ts";
 export { canonicalJson, paramsDigest } from "./step-up/digest.ts";
 export { hasFreshProof } from "./step-up/intents.ts";
 export type { StepUpAction } from "./step-up/types.ts";
+export { holdCeremonyLock, voidSignInCodes } from "./store.ts";
