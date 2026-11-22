@@ -1,13 +1,17 @@
 // The git output parsers, the git calls and the program runner (spec 07 §2.1's process rules).
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -17,7 +21,7 @@ import { performance } from "node:perf_hooks";
 import { after, before, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
-import { resolveProgram, runProgram } from "../src/exec.ts";
+import { resolveProgram, runProgram, STALL_MS, stallFreeTimeout } from "../src/exec.ts";
 import {
   gitEnv,
   isSha,
@@ -406,6 +410,102 @@ describe("runProgram", () => {
       ProgramError,
       "a relative path would resolve against the working directory",
     );
+  });
+
+  describe("the timeout", () => {
+    let tmp: ReturnType<typeof tempDir>;
+    before(() => {
+      tmp = tempDir("timeout");
+    });
+    after(() => tmp.cleanup());
+
+    /** The times stallFreeTimeout checks at, from 0, with each check run `late(n)` ms late. */
+    function checkTimes(timeoutMs: number, late: (n: number) => number = () => 0): number[] {
+      const timeout = stallFreeTimeout(timeoutMs);
+      const times: number[] = [];
+      let now = 0;
+      for (let delay = timeout(now); delay !== null; delay = timeout(now)) {
+        now += delay + late(times.length);
+        times.push(now);
+        assert.ok(times.length < 1000, "the timeout never ended");
+      }
+      return times;
+    }
+
+    it("counts the time between checks that run on time, checking at least every STALL_MS", () => {
+      assert.equal(STALL_MS, 1000);
+      assert.deepEqual(checkTimes(200), [200]);
+      assert.deepEqual(
+        checkTimes(3500),
+        [1000, 2000, 3000, 3500],
+        "every check at most STALL_MS after the last",
+      );
+      assert.equal(checkTimes(30_000).at(-1), 30_000);
+      // A check less than STALL_MS late still counts its whole interval.
+      assert.deepEqual(checkTimes(3000, (n) => (n === 0 ? 999 : 0)), [1999, 2999, 3000]);
+    });
+
+    it("counts nothing for an interval whose check ran STALL_MS or more late", () => {
+      // The engine's own work held the event loop for 35 s from the start: the whole timeout
+      // follows it.
+      const stalledFirst = checkTimes(30_000, (n) => (n === 0 ? 35_000 : 0));
+      assert.deepEqual(stalledFirst.slice(0, 2), [36_000, 37_000]);
+      assert.equal(stalledFirst.at(-1), 66_000);
+      // A stall over the end leaves one more interval in which the program's end can be read.
+      const stalledLast = checkTimes(3000, (n) => (n === 2 ? 30_000 : 0));
+      assert.deepEqual(stalledLast, [1000, 2000, 33_000, 34_000]);
+      // Exactly STALL_MS late is a stall.
+      assert.deepEqual(checkTimes(1000, (n) => (n === 0 ? 1000 : 0)), [2000, 3000]);
+    });
+
+    it("does not time out a program that ended while the engine's own work held the event loop", {
+      skip: !POSIX,
+    }, async () => {
+      // The program opens the FIFO's writing end, says it is up and ends, which closes that end.
+      // The test holds the event loop from the call until it has read the program's end there,
+      // and past the point where the call's first check is STALL_MS late, so the program ended
+      // in the stall with its exit and output still unread when the loop is free again.
+      const fifo = join(tmp.dir, "stall.fifo");
+      const made = spawnSync("mkfifo", [fifo], { shell: false });
+      assert.equal(made.status, 0, made.stderr.toString("utf8"));
+      const reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        const script = `const fs = require("node:fs"); const fd = fs.openSync(${JSON.stringify(fifo)}, "w"); fs.writeSync(fd, "up"); process.stdout.write("done");`;
+        const timeoutMs = 200;
+        const call = runProgram(node, ["-e", script], { ...base, timeoutMs });
+        const called = performance.now();
+        const chunk = Buffer.alloc(16);
+        let up = false;
+        let ended = false;
+        while (!ended || performance.now() - called < timeoutMs + STALL_MS + 100) {
+          assert.ok(performance.now() - called < 120_000, "the program never ended");
+          if (ended) continue;
+          try {
+            if (readSync(reader, chunk) > 0) up = true;
+            else if (up) ended = true; // end of file once up: the program has closed its end
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error;
+          }
+        }
+        const result = await call;
+        assert.deepEqual([result.code, result.stdout.toString("utf8")], [0, "done"]);
+      } finally {
+        closeSync(reader);
+      }
+    });
+
+    it("still times out a hung program after the engine's own work held the event loop", async () => {
+      const timeoutMs = 200;
+      const call = runProgram(node, ["-e", "setInterval(() => {}, 1000)"], { ...base, timeoutMs });
+      const called = performance.now();
+      // Holds the event loop past the point where the call's first check is STALL_MS late.
+      while (performance.now() - called < timeoutMs + STALL_MS + 100) {
+        // the engine's own work
+      }
+      const timedOut = (error: unknown) =>
+        error instanceof ProgramError && /timed out/.test(error.message);
+      await assert.rejects(call, timedOut);
+    });
   });
 
   describe("a grandchild that holds the output pipes", () => {
