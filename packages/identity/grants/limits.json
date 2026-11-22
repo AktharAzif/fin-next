@@ -1,0 +1,30 @@
+{
+  "$comment": "The auth limiter (spec 02 §5.6, §13.7): counting on P0-E's ops.rate_window and the logged ops.lockout. ops.json (P0-E) grants INSERT and UPDATE on ops.rate_window; the limiter also reads it.",
+  "area": "limits",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "ops",
+      "privileges": ["USAGE"],
+      "to": ["fin_console", "fin_admin", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "ops.rate_window",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "ops.lockout",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "ops.lockout",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    }
+  ]
+}

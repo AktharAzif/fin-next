@@ -1,0 +1,76 @@
+{
+  "$comment": "The audit area's grants (spec 01 §6.10, spec 08 §3). No service role holds INSERT, UPDATE or DELETE on any audit table: rows arrive only through audit.record() and the sequencer, anchoring and journal functions.",
+  "area": "audit",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "audit",
+      "privileges": ["USAGE"],
+      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin", "fin_probe"]
+    },
+    {
+      "on": "function",
+      "name": "audit.record(jsonb)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "function",
+      "name": "audit.record_journal(jsonb)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api", "fin_worker", "fin_payments", "fin_console", "fin_admin"]
+    },
+    {
+      "on": "function",
+      "name": "audit.sequence(integer)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "function",
+      "name": "audit.unsequenced_age()",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_probe"]
+    },
+    {
+      "on": "function",
+      "name": "audit.record_anchor(text, integer, bigint, bytea, text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "function",
+      "name": "audit.record_anchor_conflict(text, integer, bigint, text, bytea, bytea)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "function",
+      "name": "audit.mark_journal_shipped(text, text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_worker"]
+    },
+    { "on": "table", "name": "audit.event", "privileges": ["SELECT"], "to": ["fin_worker"] },
+    { "on": "table", "name": "audit.event_type", "privileges": ["SELECT"], "to": ["fin_worker"] },
+    { "on": "table", "name": "audit.head", "privileges": ["SELECT"], "to": ["fin_worker"] },
+    {
+      "on": "table",
+      "name": "audit.journal_entry",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "audit.journal_shipped",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    },
+    { "on": "table", "name": "audit.anchor", "privileges": ["SELECT"], "to": ["fin_worker"] },
+    {
+      "on": "table",
+      "name": "audit.anchor_conflict",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    }
+  ]
+}

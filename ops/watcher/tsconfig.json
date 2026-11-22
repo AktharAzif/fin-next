@@ -1,0 +1,9 @@
+{
+  "$comment": "The Worker's own source: Web APIs only (the webworker library), no Node types, no Workers-only types.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2024", "webworker"],
+    "types": []
+  },
+  "include": ["src/**/*.ts"]
+}

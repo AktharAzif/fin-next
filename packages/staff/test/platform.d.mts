@@ -1,0 +1,59 @@
+// Types of platform.mjs (see its header for why it is JavaScript). Plain shapes only: nothing here
+// names a `pg` type, so a program that imports @fin/identity can use it.
+
+export interface PlatformClient {
+  query<R extends object = Record<string, unknown>>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<{ rows: R[]; rowCount: number }>;
+  end(): Promise<void>;
+}
+
+export interface StaffPlatform {
+  readonly name: string;
+  readonly host: string;
+  readonly port: number;
+  /** A login's test password (derived from its name, as @fin/db's test bootstrap sets it). */
+  password(login: string): string;
+  /** A superuser connection: fixtures and assertions only, never the code under test. */
+  superuser(): Promise<PlatformClient>;
+  /** A fin_owner connection, as an operator task runs. */
+  owner(): Promise<PlatformClient>;
+  /**
+   * The superuser URL of this database, for driving `migrate`'s own entry point (it carries the
+   * cluster's superuser password, so it never leaves the test process).
+   */
+  superuserUrl(): string;
+  /** Runs `fn` under the cluster lock every role change in tests takes (fin_owner's password). */
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
+  drop(): Promise<void>;
+}
+
+export interface EventTypeRow {
+  name: string;
+  area: string;
+  category: string;
+  scope: string;
+  roles: string[];
+  journal_kind: string | null;
+  retired: boolean;
+}
+
+/** The migration run's own connection, as fin_owner, as `migrate`'s registry sync receives it. */
+export interface RunQueryable {
+  query(text: string, values?: readonly unknown[]): Promise<{ rows: object[] }>;
+}
+
+export interface StaffPlatformOptions {
+  /**
+   * Registers the audit event types in the migration run's transaction, in place of this file's
+   * own rows: `migrate`'s registry sync, so the database holds what `migrate --migrate` writes.
+   */
+  registry?: (q: RunQueryable) => Promise<unknown>;
+}
+
+export function createStaffPlatform(
+  prefix: string,
+  options?: StaffPlatformOptions,
+): Promise<StaffPlatform>;
+export function eventTypes(): EventTypeRow[];

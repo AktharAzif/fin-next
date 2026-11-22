@@ -1,0 +1,51 @@
+{
+  "board": "AdminAccount",
+  "canvas": "fin-admin",
+  "route": "/account",
+  "states": {
+    "default": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "addingPasskey": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "passkeyAdded": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "passkeyFailed": { "status": "pending", "day": "sun-spill" },
+    "removeConfirm": { "status": "pending", "day": "sun-spill" },
+    "removed": { "status": "pending", "day": "sun-spill" },
+    "refused": { "status": "pending", "day": "sun-spill" },
+    "noAuthenticator": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
+    },
+    "addAuthenticator": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
+    },
+    "addAuthenticatorShort": { "status": "pending", "day": "sun-spill" },
+    "authenticatorAdded": {
+      "status": "covered",
+      "day": "sun-spill",
+      "spec": "apps/admin/e2e/sat/staff-factor-step.spec.ts",
+      "test": "@journey a member with both factors is offered the passkey first, and the lockout stops codes but signs nobody out"
+    },
+    "signedOutElsewhere": { "status": "pending", "day": "sun-spill" },
+    "loading": { "status": "pending", "day": "sun-spill" },
+    "failed": { "status": "pending", "day": "sun-spill" }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@fin/email",
+  "private": true,
+  "type": "module",
+  "description": "Fin's email: EmailPort and the Cloudflare adapter, the template classes and templates, the outbox store and the one sender (ARCHITECTURE §9; spec 08 §4).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts",
+    "./testing/db": "./src/testing/db.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "pg": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@fin/identity",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@better-auth/core": "catalog:",
+    "@better-auth/drizzle-adapter": "catalog:",
+    "@better-auth/passkey": "catalog:",
+    "better-auth": "catalog:",
+    "drizzle-orm": "catalog:",
+    "pg": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/server": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

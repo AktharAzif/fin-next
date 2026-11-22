@@ -1,0 +1,21 @@
+{
+  "board": "Home",
+  "canvas": "fin-dashboard",
+  "route": "/",
+  "states": {
+    "default": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/shell.spec.ts",
+      "test": "@csp Home loads in AppFrame under the production page policy"
+    },
+    "noName": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

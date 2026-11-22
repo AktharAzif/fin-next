@@ -1,0 +1,15 @@
+# The `app` profile as spec 01 §7.4 shows it rendered, used by the harness's own tests.
+/*
+  Cache-Control: no-cache
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; report-to csp
+  Reporting-Endpoints: csp="/api/monitoring/csp"
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin
+  Permissions-Policy: accelerometer=(), autoplay=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), publickey-credentials-get=(self), publickey-credentials-create=(self)
+  X-Robots-Tag: noindex, nofollow
+/assets/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable

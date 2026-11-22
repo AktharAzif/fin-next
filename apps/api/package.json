@@ -1,0 +1,37 @@
+{
+  "name": "@fin/api",
+  "private": true,
+  "type": "module",
+  "description": "Fin's private API service and its worker. L-SAT-05 adds the worker's email loop and the delivery check (src/worker/email/).",
+  "scripts": {
+    "build": "pnpm run build:server",
+    "prebuild:server": "node ../../packages/audit/src/gen.ts",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
+    "lint": "biome check .",
+    "typecheck": "node ../../packages/audit/src/gen.ts && tsc -p tsconfig.json && tsc -p src/worker/email/tsconfig.json",
+    "pretest": "node ../../packages/audit/src/gen.ts",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "pretest:db": "node ../../packages/audit/src/gen.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@fin/audit": "workspace:*",
+    "@fin/core": "workspace:*",
+    "@fin/crypto": "workspace:*",
+    "@fin/db": "workspace:*",
+    "@fin/email": "workspace:*",
+    "@fin/server": "workspace:*",
+    "hono": "catalog:",
+    "pg": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/web-host": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}
