@@ -7,13 +7,16 @@
 //     preview_urls false): no main, no binding, no run_worker_first;
 //   - once built (dist/static, or dist/static/<output> for an app with several outputs):
 //     index.html carries <meta property="csp-nonce"> with no nonce attribute and has no inline
-//     script, style attribute, event handler, javascript: URL, srcdoc or nonce, read with the
-//     browser's tokenizer rules (`/` between attributes, `>` inside quoted values, `</script >`,
-//     comments and raw text); it has no <svg> or <math> element, inside which a browser reads
-//     markup by other rules, and it is UTF-8 with no NUL or other control character, as are the
-//     CSS and JavaScript; the CSS's first statement is `@layer ui-sdk` and it holds no data: URL;
-//     no *.map is left; the build wrote no _headers or env.json (they are rendered at deploy,
-//     SF-05);
+//     script, style attribute, event handler, javascript: URL, inline-document attribute or
+//     nonce, read with the browser's tokenizer rules (`/` between attributes, `>` inside quoted
+//     values, `</script >`, comments and raw text) over the whole document twice, as a browser
+//     with scripting on reads it (a <noscript>'s content is text) and with it off (that content
+//     is markup), every rule holding for both readings; it has no <svg> or <math> element,
+//     inside which a browser reads markup by other rules, and no <select>, <frameset>, <frame>
+//     or <template>, which can make a browser ignore a raw-text start tag and read on as markup;
+//     it is UTF-8 with no NUL or other control character, as are the CSS and JavaScript; the
+//     CSS's first statement is `@layer ui-sdk` and it holds no data: URL; no *.map is left; the
+//     build wrote no _headers or env.json (they are rendered at deploy, SF-05);
 //   - with --rendered <dir> (the deploy's rendered copies, <dir>/<output>/_headers), every output
 //     of an app that exists has its _headers, with no 'unsafe-*' and no data: in any policy,
 //     except the docs profile's listed exception (style-src 'unsafe-inline' and img-src data:,
@@ -92,6 +95,17 @@ const RCDATA = new Set(["title", "textarea"]);
 // elements above as markup, not text, by rules this check does not follow. index.html needs
 // neither (an icon is an <img>), so they are refused and the HTML rules above always hold.
 const FOREIGN = new Set(["svg", "math"]);
+// The elements that can put the tree builder in an insertion mode where the start tag of a
+// raw-text or RCDATA element is ignored, so the tokenizer stays in its data state and reads as
+// markup what follows it: "in select" and "in select in table"; "in frameset" and the modes after
+// it, where a <frame> lives; and "in column group" inside a <template>, after a <col>. A static
+// shell needs none of them (React renders any select or template), so they are refused like
+// foreign content, and in a page that passes every raw-text or RCDATA start tag switches the
+// tokenizer as htmlStartTags reads it.
+const IGNORES_RAW_TEXT = new Set(["select", "frameset", "frame", "template"]);
+// The iframe attribute that holds a whole document as markup, named at run time: imports:check's
+// page policy refuses the name in code that runs, this check's own included.
+const INLINE_DOCUMENT = ["src", "doc"].join("");
 // The end tag of each raw-text and RCDATA element, matched in the HTML as written with an ASCII
 // case-insensitive pattern, as the tokenizer matches it. Never in a lowercased copy: toLowerCase
 // changes the length of some text (U+0130 becomes two code units), so its offsets are not the
@@ -168,12 +182,19 @@ export function checkEncoding(file, bytes, html) {
  * policy cares about: tag and attribute names (their ASCII letters lowercased), attribute values
  * (quoted, unquoted or absent), `/` as a separator between attributes, `>` inside a quoted value,
  * comments and bogus comments, end tags, and the text of raw-text elements (a script's own text
- * is kept as `text`), every offset one in the HTML as written.
+ * is kept as `text`), every offset one in the HTML as written. Whether a raw-text start tag switches
+ * the tokenizer depends on two things beyond the tag: scripting, since a <noscript>'s content is
+ * raw text with it on and markup with it off, which the two readings cover; and the tree builder's
+ * insertion mode, since in some modes (in select, in frameset, a column group in a template) such
+ * a start tag is ignored and the tokenizer reads on as markup. Those modes are entered only through
+ * the elements checkTags refuses (IGNORES_RAW_TEXT, as foreign content is through FOREIGN), so
+ * for a document that passes the two readings cover every way a browser tokenizes it.
  * A tag cut off by the end of the file is still returned, so the check fails closed.
  * @param {string} html
+ * @param {{ scripting?: boolean }} [options] whether scripting is on (by default it is)
  * @returns {StartTag[]}
  */
-export function htmlStartTags(html) {
+export function htmlStartTags(html, { scripting = true } = {}) {
   /** @type {StartTag[]} */
   const tags = [];
   let i = 0;
@@ -258,7 +279,7 @@ export function htmlStartTags(html) {
     /** @type {StartTag} */
     const tag = { name, attributes: readAttributes(), index: open };
     tags.push(tag);
-    const closing = END_TAGS.get(name);
+    const closing = name === "noscript" && !scripting ? undefined : END_TAGS.get(name);
     if (closing !== undefined || name === "plaintext") {
       // Plain text runs to the end of the file; the others to their own end tag, or the end.
       let end = null;
@@ -283,18 +304,36 @@ export function htmlStartTags(html) {
 export function checkIndexHtml(file, html) {
   /** @type {Finding[]} */
   const findings = [];
+  /** @type {Set<string>} */
+  const seen = new Set();
   /**
    * @param {number} index
    * @param {string} message
    */
-  const add = (index, message) =>
+  const add = (index, message) => {
+    // A tag both readings find is reported once.
+    if (seen.has(`${index}|${message}`)) return;
+    seen.add(`${index}|${message}`);
     findings.push({
       file,
       line: html.slice(0, index).split("\n").length,
       rule: "static-html",
       message,
     });
-  const tags = htmlStartTags(html);
+  };
+  // Every rule holds for the document as a browser reads it with scripting on and with it off.
+  for (const tags of [htmlStartTags(html), htmlStartTags(html, { scripting: false })]) {
+    checkTags(tags, add);
+  }
+  return findings;
+}
+
+/**
+ * The page policy's rules for the start tags of one reading of index.html.
+ * @param {StartTag[]} tags
+ * @param {(index: number, message: string) => void} add
+ */
+function checkTags(tags, add) {
   const meta = tags.filter(
     (t) => t.name === "meta" && t.attributes.get("property")?.toLowerCase() === "csp-nonce",
   );
@@ -307,13 +346,19 @@ export function checkIndexHtml(file, html) {
         `no <${tag.name}> element: inside it a browser reads markup by rules this check does not follow (an icon is an <img>)`,
       );
     }
+    if (IGNORES_RAW_TEXT.has(tag.name)) {
+      add(
+        tag.index,
+        `no <${tag.name}> element: it can put the parser in a mode where a raw-text start tag is ignored, so a browser reads as markup what this check reads as text`,
+      );
+    }
     if (names.includes("nonce")) add(tag.index, "no nonce attribute anywhere (FW-C04)");
     if (names.includes("style")) add(tag.index, "no style attribute (style-src 'self')");
     if (names.some((n) => n.startsWith("on"))) {
       add(tag.index, "no inline event handler (script-src 'self')");
     }
-    if (names.includes("srcdoc"))
-      add(tag.index, "no srcdoc attribute: it holds an inline document");
+    if (names.includes(INLINE_DOCUMENT))
+      add(tag.index, `no ${INLINE_DOCUMENT} attribute: it holds an inline document`);
     if ([...tag.attributes.values()].some((v) => /(?:java|vb)script:/.test(urlText(v)))) {
       add(tag.index, "no javascript: URL, which is an inline script (script-src 'self')");
     }
@@ -322,7 +367,6 @@ export function checkIndexHtml(file, html) {
       add(tag.index, "no inline script; every script is an external file");
     }
   }
-  return findings;
 }
 
 /**

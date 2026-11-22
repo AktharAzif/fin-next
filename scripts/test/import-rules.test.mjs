@@ -172,6 +172,17 @@ describe("imports:check", () => {
     assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(`const s = ${BUN_SERVE}({});`))), [
       "no-bun",
     ]);
+    // An optional member, a string key, the global's own member.
+    const bun = BUN_SERVE.split(".")[0] ?? "";
+    for (const line of [
+      `const s = ${bun}?.serve({});`,
+      `const s = ${bun} . serve({});`,
+      `const s = ${bun}["serve"]({});`,
+      `const s = globalThis.${bun}.serve({});`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["no-bun"], line);
+    }
+    assert.deepEqual(checkSource("apps/api/src/a.ts", src("const bundle = x.Bunch;")), []);
   });
 
   test("dynamic import() and require() are read too", () => {
@@ -227,14 +238,16 @@ describe("imports:check", () => {
       ["new Func", "tion"],
       ["ev", "al"],
     ].map((parts) => parts.join(parts[0] === "process" ? "." : ""));
-    for (const line of [
-      `const r = ${createRequire}(${IMP}.meta.url);`,
-      `const b = ${binding}('fs');`,
-      `const f = ${fn}('return 1');`,
-      `const v = ${evaluate}('1');`,
-    ]) {
+    // Elsewhere the import rules allow them; eval and the Function constructor are still refused
+    // everywhere, by the page policy (spec 06 §11.5), but reported once where both rules apply.
+    for (const [line, elsewhere] of /** @type {[string, string[]][]} */ ([
+      [`const r = ${createRequire}(${IMP}.meta.url);`, []],
+      [`const b = ${binding}('fs');`, []],
+      [`const f = ${fn}('return 1');`, ["page-policy"]],
+      [`const v = ${evaluate}('1');`, ["page-policy"]],
+    ])) {
       assert.deepEqual(rules(checkSource("ops/fin/src/a.ts", src(line))), ["dynamic-import"], line);
-      assert.deepEqual(checkSource("apps/api/src/a.ts", src(line)), [], line);
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), elsewhere, line);
     }
   });
 
@@ -421,6 +434,16 @@ describe("imports:check", () => {
       ),
       ["console-error"],
     );
+    // An optional call, an optional member, a string key.
+    const consoleName = CONSOLE_ERROR.split(".")[0] ?? "";
+    for (const line of [
+      `${CONSOLE_ERROR}?.(error);`,
+      `${consoleName}?.error(err);`,
+      `${consoleName} . error ( e );`,
+      `${consoleName}["error"](error);`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["console-error"], line);
+    }
     assert.deepEqual(checkSource("apps/api/src/a.ts", src(`${CONSOLE_ERROR}("starting");`)), []);
   });
 
@@ -448,6 +471,609 @@ describe("imports:check", () => {
       ],
     );
     assert.deepEqual(imports[4]?.names, ["as", "f", "f g"]);
+  });
+
+  test("@fin/icons and @fin/motion are client code: no node:* import and no server package", () => {
+    for (const file of [
+      "packages/icons/src/svg-node.ts",
+      "packages/icons/test/icons.test.tsx",
+      "packages/motion/src/index.tsx",
+      "packages/motion/test/motion.test.tsx",
+    ]) {
+      assert.deepEqual(rules(checkSource(file, imp("node:fs"))), ["client-node"], file);
+      assert.deepEqual(rules(checkSource(file, imp("@fin/db"))), ["client-server-package"], file);
+    }
+    assert.deepEqual(checkSource("packages/motion/src/index.tsx", imp("react")), []);
+  });
+
+  test("the page policy: markup or code from a string, or a style attribute, fails anywhere code runs", () => {
+    const planted = [
+      "el.innerHTML = html;",
+      "el.outerHTML = html;",
+      'el.insertAdjacentHTML("beforeend", html);',
+      "const part = document.createRange().createContextualFragment(html);",
+      "el.setHTMLUnsafe(html);",
+      "const doc = Document.parseHTMLUnsafe(html);",
+      "document.write(html);",
+      "document.writeln(html);",
+      'el["innerHTML"] = html;',
+      "<div dangerouslySetInnerHTML={{ __html: html }} />",
+      "const props = { dangerouslySetInnerHTML: { __html: html } };",
+      'el.setAttribute("style", "color: red");',
+      "el.setAttribute('STYLE', css);",
+      'el.setAttributeNS(null, "style", css);',
+      'setTimeout("tick()", 1);',
+      "window.setInterval(`tick()`, 10);",
+    ];
+    for (const file of [
+      "packages/icons/src/x.tsx",
+      "packages/ui/src/x.tsx",
+      "apps/console/src/client/a.tsx",
+      "apps/api/src/a.ts",
+      "scripts/x.mjs",
+    ]) {
+      for (const line of planted) {
+        assert.deepEqual(rules(checkSource(file, src(line))), ["page-policy"], `${file}: ${line}`);
+      }
+    }
+    // Function called without new: the page policy, except where the name rules refuse the name.
+    for (const line of ['const g = Function("return 1");', 'const h = window.Function("1");']) {
+      for (const file of ["packages/ui/src/x.tsx", "apps/console/src/client/a.tsx"]) {
+        assert.deepEqual(rules(checkSource(file, src(line))), ["page-policy"], `${file}: ${line}`);
+      }
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      assert.deepEqual(rules(checkSource("scripts/x.mjs", src(line))), ["dynamic-import"], line);
+    }
+    // eval and new Function: the page policy where the import rules allow them, else theirs.
+    for (const line of [
+      'eval("1");',
+      'globalThis.eval("1");',
+      'const f = new Function("x");',
+      'const i = globalThis["eval"]("1");',
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      assert.deepEqual(rules(checkSource("packages/ui/src/x.ts", src(line))), ["dynamic-import"]);
+    }
+  });
+
+  test("the page policy reads the whole text, and leaves tests, their helpers and fixtures alone", () => {
+    // A comment or a string that names a sink is refused too: no reading of the code's structure
+    // decides what the policy sees.
+    for (const line of [
+      "// rendered with createElement, never through markup strings or innerHTML",
+      "/* eval(x), new Function(y) and setTimeout('z') are refused */",
+      'const word = "innerHTML";',
+      "const re = /el\\.innerHTML/;",
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+    }
+    for (const line of [
+      "el.textContent = text;",
+      "el.style.setProperty('color', 'red');",
+      "el.setAttribute('data-style', 'x');",
+      "el.setAttribute('aria-label', 'Close');",
+      "setTimeout(() => tick(), 10);",
+      "const delay = setTimeout(tick, 10);",
+      "await page.evaluate(() => 1);",
+      "await page.waitForFunction(() => true);",
+      "const fn: Function = () => {};",
+      "const value = retrieval(x);",
+    ]) {
+      assert.deepEqual(checkSource("apps/api/src/a.ts", src(line)), [], line);
+    }
+    const violations = src('probe.setAttribute("style", "color: red");', "el.innerHTML = html;");
+    for (const file of [
+      "packages/ui/e2e/kit.spec.ts",
+      "packages/ui/test/rules.test.ts",
+      "packages/ui/test/html.ts",
+      "packages/testing/test/fixtures/app/assets/app.js",
+      "apps/console/e2e/fixtures/csp.ts",
+    ]) {
+      assert.deepEqual(checkSource(file, violations), [], file);
+    }
+  });
+
+  test("a regular expression, JSX text or an HTML-like comment before a sink hides nothing", () => {
+    const BT = "`";
+    // Each opens what a reader of the code's structure could take for a string, a template or a
+    // comment running past the line, though JavaScript reads it otherwise.
+    const openers = [
+      `const TICK = /${BT}/g;`,
+      "const QUOTE = /'/;",
+      'const DOUBLE = /"/;',
+      `const SLASH_STAR = /${BS}/*/;`,
+      `const CLASS = /[${BT}'"]/;`,
+      `export default /${BT}/;`,
+      `const text = <p>a ${BT} b</p>;`,
+      "const text = <p>It's /* here</p>;",
+      `const attr = <p title="a${BS}">x</p>;`,
+      `x = 1 <!-- ${BT}`,
+    ];
+    const violations = [
+      "el.innerHTML = s;",
+      'el.setAttribute("style", "color: red");',
+      "document.write(s);",
+      'setTimeout("tick()", 1);',
+      'const f = Function("return 1");',
+      'el["outerHTML"] = s;',
+    ];
+    for (const opener of openers) {
+      for (const file of ["packages/ui/src/code-span.tsx", "apps/console/src/client/re.tsx"]) {
+        const text = src(opener, ...violations, `const closing = /${BT}/;`);
+        const lines = checkSource(file, text)
+          .filter((f) => f.rule === "page-policy")
+          .map((f) => f.line);
+        assert.deepEqual([...new Set(lines)], [2, 3, 4, 5, 6, 7], `${file}: ${opener}`);
+      }
+    }
+    // A test file's fixtures are skipped, but a regular expression is not a string or a comment.
+    const imports = [`${IMP} clsx from "clsx";`, `${IMP} { createServer } from "node:http";`];
+    for (const opener of openers.slice(0, 6)) {
+      assert.deepEqual(
+        rules(checkSource("packages/ui/src/q.test.ts", src(opener, ...imports))),
+        ["client-node", "node-network", "refused-package"],
+        opener,
+      );
+    }
+    // The lexer does not read JSX, so a JSX test file is read whole, like code that runs.
+    for (const opener of openers) {
+      for (const file of ["packages/ui/src/q.test.tsx", "packages/ui/e2e/q.spec.jsx"]) {
+        assert.deepEqual(
+          rules(checkSource(file, src(opener, ...imports))),
+          ["client-node", "node-network", "refused-package"],
+          `${file}: ${opener}`,
+        );
+      }
+    }
+    // A fixture in a test file that is not JSX is still skipped.
+    const fixture = src(`const sample = ${BT}${imports.join("\n")}${BT};`);
+    assert.deepEqual(checkSource("packages/ui/src/q.test.ts", fixture), []);
+    assert.deepEqual(rules(checkSource("packages/ui/src/q.test.tsx", fixture)), [
+      "client-node",
+      "node-network",
+      "refused-package",
+    ]);
+  });
+
+  test("an escape in a name or a string hides no sink", () => {
+    for (const line of [
+      `el.inner${BS}u0048TML = s;`,
+      `el.inner${BS}u{48}TML = s;`,
+      `el["inner${BS}x48TML"] = s;`,
+      `el["inner${BS}HTML"] = s;`,
+      `el["inner${BS}110TML"] = s;`,
+      `el["inner${BS}\nHTML"] = s;`,
+      `el.setAttribute("st${BS}yle", css);`,
+      `docu${BS}u006dent.write(s);`,
+      `set${BS}u0054imeout("tick()", 1);`,
+      `const f = Fun${BS}u0063tion("return 1");`,
+      `window["ev${BS}al"]("1");`,
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      const client = checkSource("apps/console/src/client/a.ts", src("const a = 1;", line));
+      assert.ok(
+        client.some((f) => f.line === 2 && /page-policy|dynamic-import/.test(f.rule)),
+        line,
+      );
+    }
+    // The decoded text keeps every line's number, a line continuation's too.
+    const findings = checkSource(
+      "apps/api/src/a.ts",
+      src("const a = 1;", `el["inner${BS}`, `HTML"] = s;`, `el.inner${BS}u0048TML = s;`),
+    );
+    assert.deepEqual([...new Set(findings.map((f) => f.line))], [2, 4]);
+    assert.deepEqual(rules(findings), ["page-policy"]);
+  });
+
+  test("code that runs imports no test file and nothing under a test directory", () => {
+    for (const specifier of [
+      "./fixtures/markup.ts",
+      "../test/helpers.ts",
+      "./e2e/page.ts",
+      "./__tests__/x.ts",
+      "../tests/x.ts",
+      "./Fixtures/markup.ts",
+      "./TEST/helpers.ts",
+      "./x.TEST.ts",
+      "./x.Spec.tsx",
+    ]) {
+      assert.deepEqual(
+        rules(checkSource("apps/console/src/client/a.ts", imp(specifier))),
+        ["test-file-import"],
+        specifier,
+      );
+      assert.deepEqual(
+        rules(checkSource("apps/api/src/a.ts", imp(specifier))),
+        ["test-file-import"],
+        specifier,
+      );
+    }
+    // Tests, their helpers and fixtures may import one another; a package named test is no path.
+    assert.deepEqual(checkSource("packages/ui/test/helpers.ts", imp("./fixtures/a.ts")), []);
+    assert.deepEqual(checkSource("packages/ui/src/a.test.ts", imp("../test/helpers.ts")), []);
+    assert.deepEqual(checkSource("playwright.config.ts", imp("@playwright/test")), []);
+    assert.deepEqual(checkSource("apps/console/src/client/a.ts", imp("./testing.ts")), []);
+    assert.deepEqual(checkSource("apps/console/src/client/a.ts", imp("./latest/x.ts")), []);
+  });
+
+  test("every direct spelling of a markup, style-attribute or timer sink fails", () => {
+    const BT = "`";
+    const planted = [
+      // A document's write and writeln: an optional call, a comment, any name of a document, a
+      // string key, call or apply, its prototype.
+      "document.write?.(s);",
+      "document.write /* c */ (s);",
+      "document.write // c\n  (s);",
+      "el.ownerDocument.write(html);",
+      "f.contentDocument?.write(html);",
+      "doc.write(html);",
+      'document["write"](html);',
+      "document.write.call(document, html);",
+      "Document.prototype.write.apply(document, [html]);",
+      'window["document"].write(html);',
+      "document.open().write(html);",
+      "(el.ownerDocument as Document).write(html);",
+      "node.writeln(html);",
+      // A style attribute: an optional call, a comment, a string key, call or apply, an array, the
+      // namespaced form, an attribute node.
+      'el.setAttribute?.("style", s);',
+      'el.setAttribute(/* c */ "style", s);',
+      'el["setAttribute"]("style", css);',
+      'el.setAttribute.call(el, "style", css);',
+      'Element.prototype.setAttribute.apply(el, ["style", css]);',
+      'el.setAttribute(["style"], css);',
+      'el.setAttributeNS(null, /* c */ "style", css);',
+      "el.attributes.style.value = css;",
+      'el.getAttributeNode("style").value = css;',
+      'const a = document.createAttribute("style");',
+      // A string of code for a timer: an optional call, a comment, call or apply, a tagged
+      // template, a string key, parentheses.
+      'setTimeout?.("alert(1)");',
+      'setTimeout(/* c */ "alert(1)");',
+      'setInterval?.("tick()", 1);',
+      'setTimeout.call(window, "tick()", 1);',
+      'setInterval.apply(window, ["tick()", 1]);',
+      `setTimeout${BT}tick()${BT};`,
+      'window["setTimeout"]("tick()");',
+      'setTimeout(("tick()"), 1);',
+      // The function bind returns, called; an argument that holds a call; the sink in
+      // parentheses, after a TypeScript assertion; Reflect's apply.
+      'setTimeout.bind(window)("tick()", 1);',
+      'setInterval.bind(null)("tick()", 1);',
+      'setTimeout.bind(window)?.("tick()", 1);',
+      'setTimeout.bind(window, "tick()")(1);',
+      'el.setAttribute.bind(el)("style", css);',
+      'el.toggleAttribute.bind(el)("style");',
+      'el.setAttributeNS(getNs(), "style", css);',
+      'el.setAttributeNS(ns(a()), "style", css);',
+      'el.setAttributeNS(ns /* a, b */, "style", css);',
+      'el.setAttributeNS("a,b", "style", css);',
+      'el.setAttributeNS.bind(el)(null, "style", css);',
+      'el.setAttributeNS.apply(el, [ns, "style", css]);',
+      '(setTimeout as any)("tick()", 1);',
+      '(0, setTimeout)("tick()", 1);',
+      'setTimeout!("tick()");',
+      'setTimeout(<any>"tick()");',
+      'setTimeout(("tick()" as string), 1);',
+      '(el.setAttribute as any)("style", css);',
+      'el!.setAttribute!("style", css);',
+      'el.setAttribute(<string>"style", css);',
+      'Reflect.apply(setTimeout, window, ["tick()", 1]);',
+      'Reflect.apply(window.setInterval as any, null, ["tick()", 1]);',
+      'Reflect.apply(el.setAttribute, el, ["style", css]);',
+      'Reflect.apply(el["setAttribute"], el, ["style", css]);',
+      'Reflect.apply(el.setAttributeNS, el, [null, "style", css]);',
+      "doc!.write(html);",
+      "getDoc!()!.write(html);",
+      // Markup an iframe holds as its whole document, in any case, and the other parsers.
+      "iframe.srcdoc = s;",
+      '<iframe title="p" srcDoc={s} />',
+      'el.setAttribute("SRCDOC", s);',
+      'const d = new DOMParser().parseFromString(s, "text/html");',
+      "el.setHTML(s);",
+      'document.execCommand("insertHTML", false, s);',
+    ];
+    for (const file of [
+      "packages/ui/src/a.tsx",
+      "packages/frame/src/kit/gallery.tsx",
+      "apps/console/src/client/x.ts",
+      "apps/api/src/a.ts",
+    ]) {
+      for (const line of planted) {
+        assert.deepEqual(rules(checkSource(file, src(line))), ["page-policy"], `${file}: ${line}`);
+      }
+    }
+    // Code from a string: the page policy, or where it applies the loader rule on the same line.
+    for (const line of [
+      "eval?.(s);",
+      'Function?.("x");',
+      'new (Function)("x");',
+      'new /* c */ Function("x");',
+      "(0, eval)(s);",
+      `Function${BT}alert(1)${BT}${BT};`,
+      'Function.call(null, "x");',
+      "eval.call(null, s);",
+      "Reflect.apply(eval, null, [s]);",
+      'Reflect.construct(Function, ["x"]);',
+      'globalThis.Function?.("x");',
+      'new window.Function("x");',
+      "top.eval(s);",
+      // A TypeScript assertion in the parentheses or after the name.
+      "(eval as any)(s);",
+      "(0, eval as typeof eval)(s);",
+      "(eval!)(s);",
+      "(eval satisfies typeof eval)(s);",
+      "(eval as (typeof eval))(s);",
+      "(<any>eval)(s);",
+      "(window.eval as any)(s);",
+      "(eval)!(s);",
+      "eval!(s);",
+      'Function!("x");',
+      'new (Function as any)("x");',
+      "Reflect.apply(<any>eval, null, [s]);",
+      "window!.eval(s);",
+    ]) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      for (const file of ["packages/ui/src/a.tsx", "apps/console/src/client/x.ts"]) {
+        const found = rules(checkSource(file, src(line)));
+        assert.ok(
+          found.length === 1 && ["page-policy", "dynamic-import"].includes(found[0] ?? ""),
+          `${file}: ${line}: ${found}`,
+        );
+      }
+    }
+    // Writes to streams, CSSOM styles, timers and types are no sink.
+    for (const line of [
+      'process.stdout.write("x");',
+      "stream.write(chunk);",
+      "res.write(body);",
+      "const docs = [];\ndocs.write;",
+      "el.setAttribute('data-style', x);",
+      "el.style.cssText = css;",
+      "setTimeout(() => tick(), 1);",
+      "setTimeout(tick, 1);",
+      "Function.prototype.toString.call(f);",
+      "const f: Function = g;",
+      "const fn = (cb: Function) => cb;",
+      "const t = setTimeout.bind(window);",
+      "setTimeout.bind(window)(() => tick(), 1);",
+      "el.setAttribute.bind(el)('data-style', x);",
+      "el.setAttributeNS(getNs(), 'data-style', css);",
+      'el.setAttributeNS("a", "b", "style");',
+      "Reflect.apply(setTimeout, window, [tick, 1]);",
+      'Reflect.apply(el.setAttribute, el, ["data-x", "style"]);',
+      "const g = (cb as Function)(x);",
+      "(evaluate as any)(s);",
+      "const ok = evaluate!(s);",
+      "clearTimeout(t as ReturnType<typeof setTimeout>);",
+      "if (x !== eval) y();",
+    ]) {
+      assert.deepEqual(checkSource("apps/console/src/client/x.ts", src(line)), [], line);
+    }
+  });
+
+  test("the page policy reads a long run of white space, comments or assertions in linear time", {
+    timeout: 20_000,
+  }, () => {
+    const n = 20_000;
+    for (const text of [
+      `el.setAttributeNS(${" ".repeat(n)}`,
+      `el.setAttributeNS(${"/* c */".repeat(n / 4)}`,
+      `el.setAttributeNS(${'"a" '.repeat(n / 4)}`,
+      `setTimeout as any${" ".repeat(n)}`,
+      `(eval as any${" ".repeat(n)}`,
+      `Reflect.apply(setTimeout as any${"/* c */".repeat(n / 4)}`,
+      `doc${"!".repeat(n)}`,
+      `doc${" ! ".repeat(n / 2)}`,
+      `setTimeout${"/* c */!".repeat(n / 4)}`,
+    ]) {
+      const start = performance.now();
+      checkSource("apps/console/src/client/x.ts", src(text));
+      const took = performance.now() - start;
+      assert.ok(took < 2_000, `${text.slice(0, 30)}: ${Math.round(took)} ms`);
+    }
+  });
+
+  test("code that runs uses no glob import, and a module URL reaches no test code", () => {
+    const META = `${IMP}.meta`;
+    for (const file of [
+      "packages/frame/src/kit/gallery.tsx",
+      "packages/ui/src/a.tsx",
+      "apps/console/src/client/x.ts",
+    ]) {
+      for (const [line, expected] of /** @type {[string, string[]][]} */ ([
+        [`const boards = ${META}.glob("../fixtures/*.tsx", { eager: true });`, ["glob-import"]],
+        [`const tests = ${META}.glob("./*.test.ts", { eager: true });`, ["glob-import"]],
+        [`const all = ${META} . glob(["./a/*.ts", "./b/*.ts"]);`, ["glob-import"]],
+        [
+          `new Worker(new URL("../test/worker.ts", ${META}.url), { type: "module" });`,
+          ["test-file-import"],
+        ],
+        [`new Worker(new URL("./x.test.ts", ${META}.url));`, ["test-file-import"]],
+        [`const u = new URL(/* c */ "../Fixtures/a.png", ${META}.url);`, ["test-file-import"]],
+        [`const u = ${META}.resolve("./e2e/page.ts");`, ["test-file-import"]],
+        [`new Worker(new URL(name, ${META}.url));`, ["dynamic-import"]],
+        [`new Worker(new URL(\`./w/\${name}.ts\`, ${META}.url));`, ["dynamic-import"]],
+        [`const u = ${META}.resolve(name);`, ["dynamic-import"]],
+        [`new URL("./te${BS}x73t/w.ts", ${META}.url);`, ["dynamic-import", "test-file-import"]],
+        [`${IMP} { put } from "@fin/ui/test/sink.ts";`, ["test-file-import"]],
+        [`const m = await ${IMP}("@fin/ui/fixtures/sink.ts");`, ["test-file-import"]],
+      ])) {
+        assert.deepEqual(rules(checkSource(file, src(line))), expected, `${file}: ${line}`);
+      }
+    }
+    // Where not every import must be read, a URL of an expression is beyond the check, but a
+    // glob or a literal that names test code is refused the same.
+    for (const [line, expected] of /** @type {[string, string[]][]} */ ([
+      [`const boards = ${META}.glob("./*.ts");`, ["glob-import"]],
+      [`const u = new URL("./fixtures/a.json", ${META}.url);`, ["test-file-import"]],
+      [`const u = new URL(name, ${META}.url);`, []],
+    ])) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), expected, line);
+    }
+    // Tests and their helpers may glob; a URL that names no test code, or another origin, passes.
+    for (const [file, line] of [
+      ["packages/ui/test/rules.test.ts", `const s = ${META}.glob("../src/**/*.tsx");`],
+      ["packages/ui/e2e/serve.ts", `const d = new URL("../dist/kit/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `new Worker(new URL("./worker.ts", ${META}.url));`],
+      ["tools/fin-review/src/main.ts", `const c = new URL("../config/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `const u = ${META}.resolve("./a.ts");`],
+      ["apps/console/src/client/x.ts", `const u = new URL("https://example.com/", ${META}.url);`],
+      ["apps/console/src/client/x.ts", `${IMP} { a } from "@fin/ui/testing-guide.ts";`],
+    ]) {
+      assert.deepEqual(checkSource(file ?? "", src(line ?? "")), [], `${file}: ${line}`);
+    }
+  });
+
+  test("a workspace package's exports map is read, so code that runs reaches no test code through it", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      JSON.stringify({ private: true, ...fields });
+    const dir = makeRepo({
+      "tools/layout.json": JSON.stringify({ version: 1, controlPaths: [], entries: [] }),
+      "packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        exports: {
+          ".": "./src/index.ts",
+          "./testing": "./test/index.ts",
+          "./kit/*": { types: "./src/kit/*.ts", default: "./fixtures/*.ts" },
+          "./checks": { import: "./src/checks.test.ts" },
+        },
+      }),
+      "packages/ui/src/index.ts": src(`${EXP} const a = 1;`),
+      "packages/ui/test/index.ts": src(
+        `${EXP} const put = (el: HTMLElement, h: string) => {`,
+        "  el.innerHTML = h;",
+        "};",
+      ),
+      "packages/staff/package.json": manifest({ name: "@fin/staff" }),
+      "packages/frame/src/render.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      "packages/frame/src/kit.ts": src(`${IMP} { b } from "@fin/ui/kit/board";`),
+      "packages/frame/src/checks.ts": src(`${IMP} { c } from "@fin/ui/checks";`),
+      "apps/api/src/a.ts": src(`${IMP} { h } from "@fin/staff/test/harness.ts";`),
+      // What may: the package's own entry, a test's and a helper's import of the harness.
+      "packages/frame/src/ok.ts": src(`${IMP} { a } from "@fin/ui";`),
+      "packages/frame/test/harness.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      "apps/admin/src/server/policy.db.test.ts": src(`${IMP} { put } from "@fin/ui/testing";`),
+      // A fixture that copies a package's name changes nothing.
+      "tools/fin-review/fixtures/plan/packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        exports: "./test/index.ts",
+      }),
+    });
+    const findings = checkImports(dir);
+    assert.deepEqual(rules(findings), ["test-file-import"]);
+    assert.deepEqual([...new Set(findings.map((f) => f.file))].sort(), [
+      "apps/api/src/a.ts",
+      "packages/frame/src/checks.ts",
+      "packages/frame/src/kit.ts",
+      "packages/frame/src/render.ts",
+    ]);
+    const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /^packages\/frame\/src\/render\.ts:1 test-file-import: /m);
+  });
+
+  test("a package.json's browser map and entry fields send no code that runs to test code", () => {
+    const manifest = (/** @type {Record<string, unknown>} */ fields) =>
+      JSON.stringify({ private: true, ...fields });
+    const sink = src(
+      `${EXP} const put = (el: HTMLElement, h: string) => {`,
+      "  el.innerHTML = h;",
+      "};",
+    );
+    const safe = src(
+      `${EXP} const put = (el: HTMLElement, h: string) => {`,
+      "  el.textContent = h;",
+      "};",
+    );
+    const layout = JSON.stringify({ version: 1, controlPaths: [], entries: [] });
+    const consumer = src(`${IMP} { put } from "@fin/ui";`, "put(document.body, location.hash);");
+    // Vite maps the entry the exports map names through an object browser field, and the
+    // package's own relative imports too: both bundle test/sink.ts, and no import names it.
+    for (const browser of [
+      { "./src/index.ts": "./test/sink.ts" },
+      { "./src/render.ts": "./test/sink.ts" },
+    ]) {
+      const dir = makeRepo({
+        "tools/layout.json": layout,
+        "packages/ui/package.json": manifest({
+          name: "@fin/ui",
+          exports: { ".": "./src/index.ts" },
+          browser,
+        }),
+        "packages/ui/src/index.ts": src(`${EXP} { put } from "./render.ts";`),
+        "packages/ui/src/render.ts": safe,
+        "packages/ui/test/sink.ts": sink,
+        "apps/console/src/client/main.ts": consumer,
+      });
+      const findings = checkImports(dir);
+      assert.deepEqual(
+        findings.map((f) => `${f.file} ${f.rule}`),
+        [
+          "packages/ui/package.json package-manifest",
+          "apps/console/src/client/main.ts test-file-import",
+        ],
+        JSON.stringify(browser),
+      );
+      const run = runScript("scripts/import-rules.mjs", ["--root", dir]);
+      assert.equal(run.status, 1);
+      assert.match(run.output, /^packages\/ui\/package\.json package-manifest: /m);
+    }
+    // A package.json with no name maps the imports of the files under it the same; a root entry
+    // field that names test code (Vite's jsnext:main and jsnext included) is code that runs.
+    const dir = makeRepo({
+      "tools/layout.json": layout,
+      "apps/console/src/client/package.json": manifest({
+        browser: { "./render.ts": "./e2e/sink.ts" },
+      }),
+      "packages/icons/package.json": manifest({
+        name: "@fin/icons",
+        "jsnext:main": "./test/sink.ts",
+      }),
+      "packages/motion/package.json": manifest({ name: "@fin/motion", jsnext: "./Fixtures/a.ts" }),
+      "packages/tokens/package.json": manifest({ name: "@fin/tokens", module: "./src/x.test.ts" }),
+      "packages/frame/package.json": manifest({
+        name: "@fin/frame",
+        main: "./test/index.ts",
+        exports: { ".": "./src/index.ts" },
+      }),
+      "apps/admin/src/client/main.ts": src(`${IMP} { a } from "@fin/icons";`),
+      // What may: a string browser field, an export a package's tests use, and a fixture's.
+      "packages/ui/package.json": manifest({
+        name: "@fin/ui",
+        browser: "./src/index.ts",
+        exports: { ".": "./src/index.ts", "./testing": "./test/index.ts" },
+      }),
+      "tools/fin-review/fixtures/plan/package.json": manifest({
+        name: "@fin/ui",
+        browser: { "./src/index.ts": "./test/sink.ts" },
+        main: "./test/sink.ts",
+      }),
+    });
+    assert.deepEqual(
+      checkImports(dir)
+        .map((f) => `${f.file} ${f.rule}`)
+        .sort(),
+      [
+        "apps/admin/src/client/main.ts test-file-import",
+        "apps/console/src/client/package.json package-manifest",
+        "packages/frame/package.json package-manifest",
+        "packages/icons/package.json package-manifest",
+        "packages/motion/package.json package-manifest",
+        "packages/tokens/package.json package-manifest",
+      ],
+    );
+  });
+
+  test("a long export with comments and no `from` is read in linear time", {
+    timeout: 10_000,
+  }, () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `  // note ${i}: a few words\n  "${i}",`);
+    const text = `${EXP} const NOTES = [\n${lines.join("\n")}\n];\n`;
+    const start = performance.now();
+    assert.deepEqual(checkSource("packages/tokens/test/notes.ts", text), []);
+    assert.deepEqual(findImports(text).imports, []);
+    assert.ok(performance.now() - start < 2_000, "the clause reader backtracks");
   });
 
   test("an import with a comment between any of its parts is read", () => {
@@ -660,8 +1286,11 @@ describe("imports:check", () => {
         line,
       );
     }
-    // Outside those areas only getBuiltinModule's rule applies, and node:module's names are free.
-    assert.deepEqual(checkSource("apps/api/src/a.ts", src("const r = (0, eval)(code);")), []);
+    // Outside those areas only getBuiltinModule's rule applies, and node:module's names are free;
+    // an indirect eval is still the page policy's.
+    assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src("const r = (0, eval)(code);"))), [
+      "page-policy",
+    ]);
     assert.deepEqual(checkSource("apps/api/src/a.ts", src(lines[1] ?? "")), []);
     // node:module's listing names, and type-only imports, are fine.
     assert.deepEqual(

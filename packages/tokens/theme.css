@@ -1,0 +1,448 @@
+/*
+ * @fin/tokens theme.css: Tailwind 4's theme, made of Fin's tokens only (spec 06 §3.2).
+ *
+ * `--*: initial` clears every scale Tailwind ships (colours, spacing names, radius, shadows, fonts,
+ * type sizes, easing, breakpoints), so a default such as bg-red-500, text-sm or rounded-lg draws
+ * nothing. What is left resolves to a --fin-* variable, read where the utility is used (`inline`),
+ * so a subtree with its own data-theme or data-density gets its own values.
+ *
+ * Each app's stylesheet imports this after tokens.css; see the README of @fin/tokens for the order.
+ */
+
+@theme {
+  --*: initial;
+}
+
+@theme inline {
+  /* Four breakpoints, named as Tailwind names them (S6-21). */
+  --breakpoint-sm: 40rem;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+  --breakpoint-xl: 80rem;
+
+  /* A 4px grid: p-3 is 12px, gap-4 16px, mt-16 64px. */
+  --spacing: var(--fin-space-unit);
+
+  /* Named sizes, for h-*, w-*, size-*, min-h-*, inset and the like. */
+  --spacing-control-sm: var(--fin-density-control-sm);
+  --spacing-control-md: var(--fin-density-control-md);
+  --spacing-control-lg: var(--fin-density-control-lg);
+  --spacing-row: var(--fin-density-row);
+  --spacing-row-2line: var(--fin-density-row-2line);
+  --spacing-target-min: var(--fin-layout-target-min);
+  --spacing-header: var(--fin-layout-header);
+  --spacing-sidebar: var(--fin-layout-sidebar);
+  --spacing-sidebar-collapsed: var(--fin-layout-sidebar-collapsed);
+  --spacing-gutter: var(--fin-layout-gutter);
+  --spacing-gutter-wide: var(--fin-layout-gutter-wide);
+  --spacing-table-header: var(--fin-layout-table-header);
+  --spacing-table-footer: var(--fin-layout-table-footer);
+  --spacing-modal-padding: var(--fin-layout-modal-padding);
+  --spacing-toast-offset: var(--fin-layout-toast-offset);
+
+  /* Named widths, for w-*, max-w-* and min-w-*. */
+  --container-form: var(--fin-layout-form);
+  --container-modal: var(--fin-layout-modal);
+  --container-toast: var(--fin-layout-toast);
+  --container-layout-drawer-s: var(--fin-layout-drawer-s);
+  --container-layout-drawer-m: var(--fin-layout-drawer-m);
+  --container-layout-drawer-l: var(--fin-layout-drawer-l);
+  --container-layout-sidebar: var(--fin-layout-sidebar);
+  --container-layout-sidebar-collapsed: var(--fin-layout-sidebar-collapsed);
+
+  /* Colours: the semantic tokens only (bg-surface, text-text-secondary, border-border-input). */
+  --color-bg: var(--fin-color-bg);
+  --color-surface: var(--fin-color-surface);
+  --color-surface-raised: var(--fin-color-surface-raised);
+  --color-surface-subtle: var(--fin-color-surface-subtle);
+  --color-surface-inverse: var(--fin-color-surface-inverse);
+  --color-fill-hover: var(--fin-color-fill-hover);
+  --color-fill-selected: var(--fin-color-fill-selected);
+  --color-selection: var(--fin-color-selection);
+  --color-text-primary: var(--fin-color-text-primary);
+  --color-text-secondary: var(--fin-color-text-secondary);
+  --color-text-tertiary: var(--fin-color-text-tertiary);
+  --color-text-inverse: var(--fin-color-text-inverse);
+  --color-text-disabled: var(--fin-color-text-disabled);
+  --color-action-primary: var(--fin-color-action-primary);
+  --color-action-primary-hover: var(--fin-color-action-primary-hover);
+  --color-on-action-primary: var(--fin-color-on-action-primary);
+  --color-focus-ring: var(--fin-color-focus-ring);
+  --color-border: var(--fin-color-border);
+  --color-border-strong: var(--fin-color-border-strong);
+  --color-border-input: var(--fin-color-border-input);
+  --color-border-input-hover: var(--fin-color-border-input-hover);
+  --color-border-danger: var(--fin-color-border-danger);
+  --color-danger-solid: var(--fin-color-danger-solid);
+  --color-danger-solid-hover: var(--fin-color-danger-solid-hover);
+  --color-on-danger-solid: var(--fin-color-on-danger-solid);
+  --color-overlay: var(--fin-color-overlay);
+  --color-status-success-fg: var(--fin-color-status-success-fg);
+  --color-status-success-bg: var(--fin-color-status-success-bg);
+  --color-status-warning-fg: var(--fin-color-status-warning-fg);
+  --color-status-warning-bg: var(--fin-color-status-warning-bg);
+  --color-status-danger-fg: var(--fin-color-status-danger-fg);
+  --color-status-danger-bg: var(--fin-color-status-danger-bg);
+  --color-status-info-fg: var(--fin-color-status-info-fg);
+  --color-status-info-bg: var(--fin-color-status-info-bg);
+  --color-status-neutral-fg: var(--fin-color-status-neutral-fg);
+  --color-status-neutral-bg: var(--fin-color-status-neutral-bg);
+  --color-badge-red-fg: var(--fin-color-badge-red-fg);
+  --color-badge-red-bg: var(--fin-color-badge-red-bg);
+  --color-badge-blue-fg: var(--fin-color-badge-blue-fg);
+  --color-badge-blue-bg: var(--fin-color-badge-blue-bg);
+  --color-badge-green-fg: var(--fin-color-badge-green-fg);
+  --color-badge-green-bg: var(--fin-color-badge-green-bg);
+  --color-badge-yellow-fg: var(--fin-color-badge-yellow-fg);
+  --color-badge-yellow-bg: var(--fin-color-badge-yellow-bg);
+  --color-badge-purple-fg: var(--fin-color-badge-purple-fg);
+  --color-badge-purple-bg: var(--fin-color-badge-purple-bg);
+  --color-badge-pink-fg: var(--fin-color-badge-pink-fg);
+  --color-badge-pink-bg: var(--fin-color-badge-pink-bg);
+  --color-badge-orange-fg: var(--fin-color-badge-orange-fg);
+  --color-badge-orange-bg: var(--fin-color-badge-orange-bg);
+  --color-badge-cyan-fg: var(--fin-color-badge-cyan-fg);
+  --color-badge-cyan-bg: var(--fin-color-badge-cyan-bg);
+  --color-badge-indigo-fg: var(--fin-color-badge-indigo-fg);
+  --color-badge-indigo-bg: var(--fin-color-badge-indigo-bg);
+  --color-badge-violet-fg: var(--fin-color-badge-violet-fg);
+  --color-badge-violet-bg: var(--fin-color-badge-violet-bg);
+  --color-badge-rose-fg: var(--fin-color-badge-rose-fg);
+  --color-badge-rose-bg: var(--fin-color-badge-rose-bg);
+  --color-badge-amber-fg: var(--fin-color-badge-amber-fg);
+  --color-badge-amber-bg: var(--fin-color-badge-amber-bg);
+  --color-badge-lime-fg: var(--fin-color-badge-lime-fg);
+  --color-badge-lime-bg: var(--fin-color-badge-lime-bg);
+  --color-badge-emerald-fg: var(--fin-color-badge-emerald-fg);
+  --color-badge-emerald-bg: var(--fin-color-badge-emerald-bg);
+  --color-badge-sky-fg: var(--fin-color-badge-sky-fg);
+  --color-badge-sky-bg: var(--fin-color-badge-sky-bg);
+  --color-badge-fuchsia-fg: var(--fin-color-badge-fuchsia-fg);
+  --color-badge-fuchsia-bg: var(--fin-color-badge-fuchsia-bg);
+
+  /* Shadows give surfaces their edge (shadow-ring), controls their depth and fields their focus. */
+  --shadow-ring: var(--fin-shadow-ring);
+  --shadow-ring-hover: var(--fin-shadow-ring-hover);
+  --shadow-popover: var(--fin-shadow-popover);
+  --shadow-overlay: var(--fin-shadow-overlay);
+  --shadow-button: var(--fin-shadow-button);
+  --shadow-button-hover: var(--fin-shadow-button-hover);
+  --shadow-input: var(--themed-shadow-input);
+  --shadow-focus: var(--fin-shadow-focus);
+  --shadow-invalid: var(--fin-shadow-invalid);
+  --shadow-invalid-focus: var(--fin-shadow-invalid-focus);
+
+  /* Radius: square-leaning; nothing above 8px except dots and avatars. */
+  --radius-none: var(--fin-radius-none);
+  --radius-xs: var(--fin-radius-xs);
+  --radius-sm: var(--fin-radius-sm);
+  --radius-control: var(--fin-radius-control);
+  --radius-badge: var(--fin-radius-badge);
+  --radius-md: var(--fin-radius-md);
+  --radius-full: var(--fin-radius-full);
+
+  /* Families and the two weights (600 and 700 don't exist). */
+  --font-sans: var(--fin-font-sans);
+  --font-display: var(--fin-font-display);
+  --font-mono: var(--fin-font-mono);
+  --font-weight-regular: var(--fin-font-weight-regular);
+  --font-weight-medium: var(--fin-font-weight-medium);
+
+  /* Type roles: text-title, text-body, text-caption... each sets size, line height, tracking, weight. */
+  --text-display: var(--fin-text-display-size);
+  --text-display--line-height: var(--fin-text-display-line-height);
+  --text-display--letter-spacing: var(--fin-text-display-tracking);
+  --text-display--font-weight: var(--fin-text-display-weight);
+  --text-amount-lg: var(--fin-text-amount-lg-size);
+  --text-amount-lg--line-height: var(--fin-text-amount-lg-line-height);
+  --text-amount-lg--letter-spacing: var(--fin-text-amount-lg-tracking);
+  --text-amount-lg--font-weight: var(--fin-text-amount-lg-weight);
+  --text-title: var(--fin-text-title-size);
+  --text-title--line-height: var(--fin-text-title-line-height);
+  --text-title--letter-spacing: var(--fin-text-title-tracking);
+  --text-title--font-weight: var(--fin-text-title-weight);
+  --text-heading: var(--fin-text-heading-size);
+  --text-heading--line-height: var(--fin-text-heading-line-height);
+  --text-heading--letter-spacing: var(--fin-text-heading-tracking);
+  --text-heading--font-weight: var(--fin-text-heading-weight);
+  --text-body-lg: var(--fin-text-body-lg-size);
+  --text-body-lg--line-height: var(--fin-text-body-lg-line-height);
+  --text-body-lg--letter-spacing: var(--fin-text-body-lg-tracking);
+  --text-body-lg--font-weight: var(--fin-text-body-lg-weight);
+  --text-body: var(--fin-text-body-size);
+  --text-body--line-height: var(--fin-text-body-line-height);
+  --text-body--letter-spacing: var(--fin-text-body-tracking);
+  --text-body--font-weight: var(--fin-text-body-weight);
+  --text-label: var(--fin-text-label-size);
+  --text-label--line-height: var(--fin-text-label-line-height);
+  --text-label--letter-spacing: var(--fin-text-label-tracking);
+  --text-label--font-weight: var(--fin-text-label-weight);
+  --text-label-sm: var(--fin-text-label-sm-size);
+  --text-label-sm--line-height: var(--fin-text-label-sm-line-height);
+  --text-label-sm--letter-spacing: var(--fin-text-label-sm-tracking);
+  --text-label-sm--font-weight: var(--fin-text-label-sm-weight);
+  --text-caption: var(--fin-text-caption-size);
+  --text-caption--line-height: var(--fin-text-caption-line-height);
+  --text-caption--letter-spacing: var(--fin-text-caption-tracking);
+  --text-caption--font-weight: var(--fin-text-caption-weight);
+  --text-mono: var(--fin-text-mono-size);
+  --text-mono--line-height: var(--fin-text-mono-line-height);
+  --text-mono--letter-spacing: var(--fin-text-mono-tracking);
+  --text-mono--font-weight: var(--fin-text-mono-weight);
+
+  /* Easing, for ease-out and the like. Durations are the duration-* utilities below. */
+  --ease-out: var(--fin-ease-out);
+  --ease-in: var(--fin-ease-in);
+  --ease-in-out: var(--fin-ease-in-out);
+
+  /* What Tailwind's preflight and transition utilities fall back to. */
+  --default-font-family: var(--fin-font-sans);
+  --default-mono-font-family: var(--fin-font-mono);
+  --default-transition-duration: var(--fin-duration-fast);
+  --default-transition-timing-function: var(--fin-ease-out);
+}
+
+/* Tailwind draws a shadow utility as one list (inset shadow, inset ring, ring offset, ring, then
+   the shadow), and a `none` anywhere in that list voids the whole box-shadow, rings included. The
+   export's input shadow is `none` in dark, so shadow-input reads this stand-in: the export's value
+   where it is a shadow, and an empty shadow (Tailwind's own `0 0 #0000`) where the export says
+   none. The theme selectors are tokens.css's, and the tokens test checks the stand-in against the
+   export in each theme, so a new export value fails it until this changes too. */
+:root,
+[data-theme="light"] {
+  --themed-shadow-input: var(--fin-shadow-input);
+}
+[data-theme="dark"] {
+  --themed-shadow-input: 0 0 #0000;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --themed-shadow-input: 0 0 #0000;
+  }
+}
+
+/* The UI SDK's state attributes, as variants (state-open:opacity-100, state-checked:bg-...). */
+@custom-variant state-open (&[data-open]);
+@custom-variant state-closed (&[data-closed]);
+@custom-variant state-instant (&[data-instant]);
+@custom-variant state-active (&[data-selected]);
+@custom-variant state-checked (&[data-checked]);
+@custom-variant state-starting (&[data-starting-style]);
+@custom-variant state-ending (&[data-ending-style]);
+@custom-variant state-highlighted (&[data-highlighted]);
+@custom-variant state-disabled (&[data-disabled]);
+@custom-variant state-invalid (&[data-invalid]);
+@custom-variant state-pending (&[data-pending]);
+
+/* Focus: 2px of focus-ring, 2px outside; tabs draw it inside. Never thicker, never coloured. */
+@utility outline-focus {
+  outline: var(--fin-focus-width) solid var(--fin-color-focus-ring);
+  outline-offset: var(--fin-focus-offset);
+}
+@utility outline-focus-inset {
+  outline: var(--fin-focus-width) solid var(--fin-color-focus-ring);
+  outline-offset: calc(var(--fin-focus-width) * -1);
+}
+
+/* Reduced motion, for every utility below that transitions a transform or a size: nothing moves,
+   turns, scales or grows (spec 06 §5.1, AC-UI-13), so under prefers-reduced-motion: reduce each
+   keeps only its colour and opacity transitions. A value that still changes there (a toast's
+   place in the stack, a switch's thumb) then changes at once. The tokens also make the press and
+   pop scales 1 and the overlay offsets 0, so those values do not change at all. */
+
+/* Presses: scale to 0.97 over 140ms (1 under reduced motion, from the token). */
+@utility transition-press {
+  transition-property: scale, color, background-color, border-color, box-shadow, opacity;
+  transition-duration: var(--fin-duration-fast);
+  transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: color, background-color, border-color, box-shadow, opacity;
+  }
+}
+@utility scale-press {
+  scale: var(--fin-motion-press-scale);
+}
+
+/* Durations, named; transitions name their properties (never transition-all). */
+@utility duration-fast {
+  transition-duration: var(--fin-duration-fast);
+}
+@utility duration-base {
+  transition-duration: var(--fin-duration-base);
+}
+@utility duration-slow {
+  transition-duration: var(--fin-duration-slow);
+}
+@utility duration-fast-exit {
+  transition-duration: var(--fin-duration-fast-exit);
+}
+@utility duration-base-exit {
+  transition-duration: var(--fin-duration-base-exit);
+}
+@utility duration-slow-exit {
+  transition-duration: var(--fin-duration-slow-exit);
+}
+
+/* In-page layers. Overlays render in the browser's top layer, above all of these. */
+@utility z-sticky {
+  z-index: var(--fin-z-sticky);
+}
+@utility z-header {
+  z-index: var(--fin-z-header);
+}
+@utility z-scrim {
+  z-index: var(--fin-z-scrim);
+}
+@utility z-drawer {
+  z-index: var(--fin-z-drawer);
+}
+@utility z-modal {
+  z-index: var(--fin-z-modal);
+}
+@utility z-popover {
+  z-index: var(--fin-z-popover);
+}
+@utility z-toast {
+  z-index: var(--fin-z-toast);
+}
+@utility z-tooltip {
+  z-index: var(--fin-z-tooltip);
+}
+
+/* The dotted rule (1 on, 5 off) for key-value leaders, the money route and the quote rail. */
+@utility divider-dotted-x {
+  height: var(--fin-divider-width);
+  background-image: linear-gradient(
+    to right,
+    currentColor var(--fin-divider-dotted-dash),
+    transparent var(--fin-divider-dotted-dash)
+  );
+  background-size: calc(var(--fin-divider-dotted-dash) + var(--fin-divider-dotted-gap))
+    var(--fin-divider-width);
+  background-repeat: repeat-x;
+}
+
+/* Overlays animate themselves (spec 06 §3.3): entries on data-starting-style, exits on
+   data-ending-style at 0.75 of the entry. Under reduced motion only the fade is left, at 140ms. */
+@utility transition-popup {
+  transition-property: opacity, scale, translate;
+  transition-duration: var(--fin-duration-base);
+  transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
+}
+@utility transition-tooltip {
+  transition-property: opacity, scale;
+  transition-duration: var(--fin-duration-fast);
+  transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
+}
+@utility transition-dialog {
+  transition-property: opacity, scale, translate, display, overlay;
+  transition-behavior: allow-discrete;
+  transition-duration: var(--fin-duration-slow);
+  transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity, display, overlay;
+  }
+}
+@utility transition-fade {
+  transition-property: opacity;
+  transition-duration: var(--fin-duration-fast);
+  transition-timing-function: var(--fin-ease-out);
+}
+@utility scale-pop {
+  scale: var(--fin-motion-pop-scale);
+}
+@utility translate-toast-in {
+  translate: 0 var(--fin-motion-toast-offset);
+}
+@utility animate-spin-fin {
+  animation: fin-spinner-turn var(--fin-motion-spin) linear infinite;
+}
+@keyframes fin-spinner-turn {
+  to {
+    rotate: 360deg;
+  }
+}
+@utility animate-copied {
+  transition-property: opacity, scale;
+  transition-duration: var(--fin-motion-swap);
+  transition-timing-function: var(--fin-ease-in-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
+}
+
+/* Fields colour their own edge and halo on focus and when invalid. */
+@utility transition-field {
+  transition-property: border-color, box-shadow, background-color, color;
+  transition-duration: var(--fin-duration-fast);
+  transition-timing-function: var(--fin-ease-out);
+}
+
+/* The toast stack (Toaster): at most three toasts, bottom centre, 24px up, 480px wide. The SDK
+   measures each toast and sets the --toast-* variables these rules read. */
+@utility fin-toast-region {
+  position: fixed;
+  inset: auto 0 var(--fin-layout-toast-offset) 0;
+  translate: none;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  width: min(var(--fin-layout-toast), calc(100% - 2 * var(--fin-space-16)));
+  height: var(--toast-front-height);
+  &[data-expanded] {
+    height: calc(var(--toast-stack-height) + (var(--toast-count) - 1) * var(--fin-space-8));
+  }
+}
+@utility fin-toast {
+  --toast-y: calc(var(--toast-index) * -1 * var(--fin-space-8));
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: calc(100 - var(--toast-index));
+  height: var(--toast-height);
+  overflow: hidden;
+  translate: 0 var(--toast-y);
+  scale: calc(1 - var(--toast-index) * 0.04);
+  transition-property: translate, scale, opacity, height;
+  transition-duration: var(--fin-duration-base);
+  transition-timing-function: var(--fin-ease-out);
+  @media (prefers-reduced-motion: reduce) {
+    transition-property: opacity;
+  }
+  &:not([data-front], [data-expanded]) {
+    height: var(--toast-front-height);
+  }
+  &[data-expanded] {
+    --toast-y: calc(-1 * (var(--toast-offset) + var(--toast-index) * var(--fin-space-8)));
+    scale: 1;
+  }
+  &[data-starting-style][data-front] {
+    --toast-y: var(--fin-motion-toast-offset);
+  }
+  &:is([data-starting-style]:not([data-front]), [data-ending-style]) {
+    opacity: 0;
+  }
+  &[data-ending-style] {
+    scale: var(--fin-motion-pop-scale);
+    transition-duration: var(--fin-duration-base-exit);
+  }
+}
+
+/* The SDK's popup variables, read on the popup itself (SDK issue #525). */
+@utility origin-popup {
+  transform-origin: var(--transform-origin);
+}
+@utility min-w-anchor {
+  min-width: var(--anchor-width);
+}
+@utility max-h-available {
+  max-height: var(--available-height);
+}

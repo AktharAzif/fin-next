@@ -310,6 +310,52 @@ describe("supply-chain:check", () => {
     assert.deepEqual(rules(checkUses("w.yml", "      - uses: ./tools/setup\n")), [
       "action-unpinned",
     ]);
+    // The path is read segment by segment, as the runner joins it to the workspace.
+    for (const ref of [
+      "./.github/../packages/evil",
+      "'./.github/../packages/evil'",
+      '"./.github/actions/../../packages/evil"',
+      "./.github/./../tools/setup",
+      "./.github//actions/setup",
+      "./.github/...",
+      "./.github\\..\\packages\\evil",
+      "./.GITHUB/actions/setup",
+      "./.github",
+      "./.github/",
+    ]) {
+      assert.deepEqual(
+        rules(checkUses("w.yml", `      - uses: ${ref}\n`)),
+        ["action-unpinned"],
+        ref,
+      );
+    }
+    for (const ref of [
+      "./.github/actions/setup",
+      "./.github/actions/setup/",
+      "./.github/a.b/c-d",
+    ]) {
+      assert.deepEqual(checkUses("w.yml", `      - uses: ${ref}\n`), [], ref);
+    }
+    // So is a pinned action's repository and path: the pin names the repository it covers.
+    for (const ref of [
+      `actions/checkout/../../evil/repo@${SHA}`,
+      `actions/../evil@${SHA}`,
+      `actions/checkout//x@${SHA}`,
+      `../actions@${SHA}`,
+    ]) {
+      assert.deepEqual(
+        rules(checkUses("w.yml", `      - uses: ${ref} # v6.0.1\n`)),
+        ["action-unpinned"],
+        ref,
+      );
+    }
+    for (const ref of [
+      `actions/checkout@${SHA}`,
+      `org/.github/.github/workflows/ci.yml@${SHA}`,
+      `github/codeql-action/init@${SHA}`,
+    ]) {
+      assert.deepEqual(checkUses("w.yml", `      - uses: ${ref} # v6.0.1\n`), [], ref);
+    }
     const dir = fixture({
       "tools/setup/action.yml":
         "runs:\n  using: composite\n  steps:\n    - uses: actions/cache@v4\n",
