@@ -31,7 +31,7 @@ import {
   type TlsSettings,
   withOwnerSession,
 } from "@fin/db";
-import { grantInsertSql } from "@fin/email";
+import { grantSyncSql } from "@fin/email";
 import { z } from "zod";
 import { parseTaskParams, runTask, TaskError } from "../tasks/run.ts";
 import { stdoutLines } from "./lines.ts";
@@ -188,13 +188,15 @@ async function bootstrapMode(
 /**
  * What `--migrate` runs after the files and the grants, in the run's transaction as fin_owner: the
  * audit registry sync (spec 08 §3.2) and `email.enqueue()`'s per-role allowlist, generated from the
- * template catalogue's folders (spec 08 §4.4, [DA-14]). Both only add and update rows, so a release
- * never takes away a newer one's. Tests that need the schema `migrate` builds pass it as theirs.
+ * template catalogue's folders (spec 08 §4.4, [DA-14]). The registry sync only adds and updates rows;
+ * the allowlist is made exact for every template this release knows, so a role whose rule is narrowed
+ * loses the template. Neither touches what only a newer release knows. Tests that need the schema
+ * `migrate` builds pass it as theirs.
  */
 export function afterMigrations(release: string): (q: Queryable) => Promise<void> {
   return async (q) => {
     await syncEventTypes(q, release);
-    await q.query(grantInsertSql());
+    await q.query(grantSyncSql());
   };
 }
 

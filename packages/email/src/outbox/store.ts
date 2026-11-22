@@ -1,5 +1,5 @@
 // Every statement the sender runs on the outbox and its tables (spec 01 §6.10 plus
-// `migrations/20261121194000_email_sender.sql`). They are all in `email_private`, which only the
+// `migrations/20261121121000_email_sender.sql`). They are all in `email_private`, which only the
 // worker and email.enqueue()'s owner may use, so no other login can name, and so lock, any of them;
 // other services reach the outbox only through `email.enqueue()`. The one exception is `enqueue()`
 // here (the digest flush's): `email.enqueue()` reads `email.template_grant` and `pg_catalog.pg_roles`,

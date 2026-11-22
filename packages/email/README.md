@@ -60,7 +60,7 @@ This is how Postgres works, not something particular to email.
 | `src/outbox/` | The database seam and every statement the sender runs (all on `email_private`); `enqueue()` checks the params against the template before the row is written, so a notice that could never be sent fails the caller's transaction |
 | `src/sender/` | The sender: claims, leases, limits, the digest, the bucket, budgets and retries |
 | `src/testing/` | A fake transport, a line recorder and the integration-test database helper |
-| `migrations/20261121194000_email_sender.sql` | This lane's extension of the outbox (its tables in `email_private`, `email.enqueue()` replaced), which `migrate` applies after P0-E's `<ts>_email_outbox.sql` (the database files' rule, `packages/db/src/assets.ts`) |
+| `migrations/20261121121000_email_sender.sql` | This lane's extension of the outbox (its tables in `email_private`, `email.enqueue()` replaced), which `migrate` applies after P0-E's `<ts>_email_outbox.sql` (the database files' rule, `packages/db/src/assets.ts`) |
 | `grants/email-sender.json` | Its grants, beside P0-E's `email` fragment (`packages/db/roles/grants/email.json`), which holds the two schemas, `email.enqueue()` and the outbox; the template grants are not here but in `src/catalogue.ts`, which `migrate` syncs into `email.template_grant` after every run |
 | `test/fixture/outbox-base.sql` | A test-only stand-in for P0-E's `<ts>_email_outbox.sql` (spec 01 §6.10), with its seeded `ops/delivery-check` grant, the two schemas the bootstrap makes, and the one `ops` table the delivery check writes (`ops.duty_state`) |
 
@@ -73,6 +73,9 @@ This is how Postgres works, not something particular to email.
    the next `migrate` run writes its rows to `email.template_grant` (no migration is needed). A
    worker still on an older release keeps a row whose template or params it does not know and
    tries it again every 5 minutes, so a newer replica sends it; it never deletes it at once.
+   Narrowing a role's rule needs no migration either: the next run deletes the role's rows for the
+   templates the catalogue holds. Taking a template out of `TEMPLATES` leaves its rows, since a
+   release still running beside the new one may queue it; a later migration deletes them.
 3. `pnpm --filter @fin/email test` renders it with its `sample` and checks the rules (T08-20,
    T08-23); the integration test proves `email.enqueue()` allows it only for its roles (T08-22).
 

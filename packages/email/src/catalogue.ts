@@ -2,9 +2,10 @@
 //
 // The allowlist is generated from the folders: a role may queue a template only when the template's
 // folder (or the template itself) is listed for it below, so no service can queue a look-alike
-// sign-in code or "key revoked" notice. `grantRows()` is what `email.template_grant` holds: `migrate`
-// loads exactly these rows after every run (grantInsertSql, from apps/api's afterMigrations), and a
-// test proves the database refuses the rest (T08-22).
+// sign-in code or "key revoked" notice. `grantRows()` is what `email.template_grant` holds for every
+// template in `TEMPLATES`: after every run `migrate` writes these rows and deletes any other role's
+// row for those templates (grantSyncSql, from apps/api's afterMigrations), and a test proves the
+// database refuses the rest (T08-22).
 import { CLASS_RULES, type EmailClass, type Template, type TemplateArea } from "./classes.ts";
 import { accountLocked } from "./templates/identity/account-locked.ts";
 import { accountRecoveryFinished } from "./templates/identity/account-recovery-finished.ts";
@@ -133,19 +134,32 @@ export function describe(templateId: string): string | undefined {
 }
 
 /**
- * The SQL that loads `grantRows()`, with each group role mapped (tests prefix them). It upserts, so it
- * loads over rows an earlier migration seeded (P0-E's `ops/delivery-check`) and sets each row's class,
- * priority and secret flag to the catalogue's.
+ * The one statement that makes `email.template_grant` hold exactly `grantRows()` for every template
+ * in `TEMPLATES`, with each group role mapped (tests prefix them). It upserts, so it loads over rows
+ * an earlier migration seeded (P0-E's `ops/delivery-check`) and sets each row's class, priority and
+ * secret flag to the catalogue's. It deletes every other role's row for those templates, so a role
+ * whose rule is narrowed loses the template. A row for a template this release does not know is left
+ * alone: it is a newer release's, and old and new run side by side (spec 01 §6.9). A template taken
+ * out of the catalogue keeps its rows until a migration deletes them.
  */
-export function grantInsertSql(roleName: (role: SenderRole) => string = (r) => r): string {
+export function grantSyncSql(roleName: (role: SenderRole) => string = (r) => r): string {
   const values = grantRows().map(
     (g) =>
       `  ('${g.template}', '${roleName(g.role)}', '${g.category}', ${g.priority}, ${g.carriesSecret})`,
   );
+  const known = TEMPLATES.map((t) => `'${t.id}'`).join(", ");
   return [
-    "INSERT INTO email.template_grant (template, role, category, priority, carries_secret) VALUES",
+    "WITH want (template, role, category, priority, carries_secret) AS (VALUES",
     values.join(",\n"),
-    "ON CONFLICT (template, role) DO UPDATE SET category = EXCLUDED.category,",
-    "  priority = EXCLUDED.priority, carries_secret = EXCLUDED.carries_secret;",
+    "), upserted AS (",
+    "  INSERT INTO email.template_grant (template, role, category, priority, carries_secret)",
+    "  SELECT template, role, category, priority, carries_secret FROM want",
+    "  ON CONFLICT (template, role) DO UPDATE SET category = EXCLUDED.category,",
+    "    priority = EXCLUDED.priority, carries_secret = EXCLUDED.carries_secret",
+    "  RETURNING 1",
+    ")",
+    "DELETE FROM email.template_grant t",
+    ` WHERE t.template IN (${known})`,
+    "   AND (t.template, t.role) NOT IN (SELECT template, role FROM want);",
   ].join("\n");
 }
