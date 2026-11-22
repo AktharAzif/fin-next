@@ -442,7 +442,10 @@ describe("runProgram", () => {
       );
       assert.equal(checkTimes(30_000).at(-1), 30_000);
       // A check less than STALL_MS late still counts its whole interval.
-      assert.deepEqual(checkTimes(3000, (n) => (n === 0 ? 999 : 0)), [1999, 2999, 3000]);
+      assert.deepEqual(
+        checkTimes(3000, (n) => (n === 0 ? 999 : 0)),
+        [1999, 2999, 3000],
+      );
     });
 
     it("counts nothing for an interval whose check ran STALL_MS or more late", () => {
@@ -455,7 +458,10 @@ describe("runProgram", () => {
       const stalledLast = checkTimes(3000, (n) => (n === 2 ? 30_000 : 0));
       assert.deepEqual(stalledLast, [1000, 2000, 33_000, 34_000]);
       // Exactly STALL_MS late is a stall.
-      assert.deepEqual(checkTimes(1000, (n) => (n === 0 ? 1000 : 0)), [2000, 3000]);
+      assert.deepEqual(
+        checkTimes(1000, (n) => (n === 0 ? 1000 : 0)),
+        [2000, 3000],
+      );
     });
 
     it("does not time out a program that ended while the engine's own work held the event loop", {
