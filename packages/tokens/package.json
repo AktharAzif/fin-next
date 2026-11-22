@@ -1,0 +1,32 @@
+{
+  "name": "@fin/tokens",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fin's design tokens as CSS custom properties, the Tailwind theme, the base styles and the fonts (spec 06 §3.2)",
+  "sideEffects": [
+    "*.css"
+  ],
+  "exports": {
+    "./tokens.css": "./tokens.css",
+    "./theme.css": "./theme.css",
+    "./base.css": "./base.css",
+    "./fonts.css": "./fonts.css",
+    "./fonts/*.woff2": "./fonts/*.woff2",
+    "./export-pin/tokens.json": "./export-pin/tokens.json",
+    "./vite": "./vite.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "theme": "node scripts/write-theme.ts < tokens.css > theme.css.tmp && mv theme.css.tmp theme.css",
+    "fonts": "tar --format=ustar -cf - fonts/*.woff2 | node scripts/write-fonts.ts > fonts.css.tmp && mv fonts.css.tmp fonts.css"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

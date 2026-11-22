@@ -1,0 +1,84 @@
+{
+  "board": "TwoFactor",
+  "canvas": "fin-dashboard",
+  "route": "/sign-in/two-factor",
+  "states": {
+    "authenticator": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the factor step: a wrong authenticator code, then the right one"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the factor step: a wrong authenticator code, then the right one"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the factor step: a wrong authenticator code, then the right one"
+    },
+    "wrongCode": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the factor step: a wrong authenticator code, then the right one"
+    },
+    "turningOn": {
+      "status": "superseded",
+      "decision": "S2-06",
+      "reason": "an authenticator being set up is not offered at the factor step"
+    },
+    "passkeyBusy": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noPasskey": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyRemoved": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyOnly": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyOnlyBusy": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyOnlyNoPasskey": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "usedUp": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "timedOut": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "paused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

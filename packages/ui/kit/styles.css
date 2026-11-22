@@ -1,0 +1,10 @@
+/* The kit's stylesheet, in the order every app's stylesheet uses (spec 06 §3.2). */
+@layer ui-sdk;
+@import "tailwindcss";
+@import "@fin/tokens/tokens.css";
+@import "@fin/tokens/theme.css";
+@import "@fin/tokens/base.css";
+@import "@fin/tokens/fonts.css";
+@import "@fin/motion/fin-motion.css";
+@source "./";
+@source "../src";

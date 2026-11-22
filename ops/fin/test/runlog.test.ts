@@ -1,0 +1,802 @@
+import assert from "node:assert/strict";
+import fs, { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { ENVELOPE_FIELDS as CATALOG_ENVELOPE_FIELDS } from "../../monitoring/catalog/types.ts";
+import { parseArgs } from "../src/core/args.ts";
+import { BusyError, FinError, LogIntegrityError } from "../src/core/errors.ts";
+import { Masker } from "../src/core/mask.ts";
+import { Output } from "../src/core/output.ts";
+import { ENVELOPE_FIELDS, Run } from "../src/core/run.ts";
+import { GENESIS, parseHead, RunLog, sha256 } from "../src/core/runlog.ts";
+import {
+  type FakeRuntimeOptions,
+  fakeRuntime,
+  fakeToken,
+  hex,
+  tempDir,
+  writePrivate,
+  ZONE,
+} from "./helpers/fixtures.ts";
+
+function newLog(masker = new Masker()): RunLog {
+  return new RunLog(join(tempDir(), "state", "staging"), masker);
+}
+
+function fill(log: RunLog, events: readonly string[]): void {
+  const at = new Date("2026-11-21T06:00:00Z");
+  for (const event of events) log.append(at, "run_1", event, { detail: event });
+}
+
+describe("the run log", () => {
+  it("appends masked records chained by hash, and verifies the chain", () => {
+    const m = new Masker();
+    m.register(ZONE, "<zone>");
+    const log = newLog(m);
+    const at = new Date("2026-11-21T06:00:00Z");
+    log.append(at, "run_1", "run.registered", { host: `console.${ZONE}` });
+    const { record, hash } = log.append(at, "run_1", "run.done", { result: "ok" });
+    const records = log.records();
+    assert.equal(records.length, 2);
+    assert.equal(records[0]?.prev, GENESIS);
+    assert.equal(records[1]?.seq, 2);
+    assert.equal(record.seq, 2);
+    assert.equal(readFileSync(log.logPath, "utf8").includes(ZONE), false);
+    assert.equal(records[0]?.host, "console.<zone>");
+    assert.deepEqual(log.readHead(), { seq: 2, hash });
+    const result = log.verify();
+    assert.deepEqual(result.problems, []);
+    assert.equal(result.count, 2);
+    assert.deepEqual(result.head, { seq: 2, hash });
+  });
+
+  it("never lets a field overwrite the chain's own fields", () => {
+    const log = newLog();
+    log.append(new Date(), "run_1", "run.step", { seq: 99, prev: "x", event: "forged" });
+    const record = log.records()[0];
+    assert.equal(record?.seq, 1);
+    assert.equal(record?.prev, GENESIS);
+    assert.equal(record?.event, "run.step");
+    assert.deepEqual(log.verify().problems, []);
+  });
+
+  it("detects an edited or removed line", () => {
+    const log = newLog();
+    fill(log, ["a", "b", "c"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, [lines[0], lines[2], ""].join("\n"));
+    assert.ok(log.verify().problems.length > 0);
+    writeFileSync(
+      log.logPath,
+      [lines[0], lines[1]?.replace('"b"', '"x"'), lines[2], ""].join("\n"),
+    );
+    assert.ok(log.verify().problems.some((p) => p.includes("line 3")));
+  });
+
+  it("detects records removed from the end, and an emptied or deleted log", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.done", "lock.broken"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n`);
+    assert.match(log.verify().problems.join("; "), /names record 4, but the log holds 1/);
+    writeFileSync(log.logPath, "");
+    assert.match(log.verify().problems.join("; "), /names record 4, but the log holds 0/);
+    rmSync(log.logPath);
+    assert.match(log.verify().problems.join("; "), /records were removed/);
+  });
+
+  it("detects a removed head file", () => {
+    const log = newLog();
+    fill(log, ["a"]);
+    rmSync(log.headPath);
+    assert.deepEqual(log.verify().problems, ["the head file is missing"]);
+  });
+
+  it("checks a head that left the machine, which catches a log and head file rewritten together", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.done"]);
+    const shipped = log.readHead();
+    assert.ok(shipped !== undefined);
+    assert.deepEqual(log.verify(shipped).problems, []);
+    // Rewrite the whole log with a consistent chain and head file: only the shipped head tells.
+    rmSync(log.logPath);
+    rmSync(log.headPath);
+    fill(
+      log,
+      ["run.registered", "run.step", "run.done"].map((e) => `${e}-forged`),
+    );
+    assert.deepEqual(log.verify().problems, []);
+    assert.match(
+      log.verify(shipped).problems.join("; "),
+      /record 3 is not the record the head given names/,
+    );
+    rmSync(log.logPath);
+    rmSync(log.headPath);
+    assert.match(log.verify(shipped).problems.join("; "), /names record 3, but the log holds 0/);
+    assert.deepEqual(parseHead(`3:${shipped.hash}`), shipped);
+    assert.equal(parseHead("3:abc"), undefined);
+    assert.equal(parseHead(`0:${shipped.hash}`), undefined);
+  });
+
+  it("reports a line that is not JSON instead of failing, and reading skips it", () => {
+    const log = newLog();
+    fill(log, ["a", "b"]);
+    appendFileSync(log.logPath, "this line was tampered\n");
+    const result = log.verify();
+    assert.equal(result.count, 3);
+    assert.ok(result.problems.includes("line 3 is not a JSON record"));
+    assert.equal(log.records().length, 2);
+  });
+
+  it("masks values in every form, keeps its own numbers and stays valid JSON whatever is registered", () => {
+    const m = new Masker();
+    m.register("12", "<overlay:oncall.escalateAfterMinutes>");
+    m.register(13, "<overlay:thresholds.api-v4>");
+    m.register('Acme "Private" Holdings', "<overlay:cloudflare.accountName>");
+    const log = newLog(m);
+    const at = new Date();
+    for (let i = 0; i < 14; i++) {
+      log.append(at, "run_1", "run.step", { n: i, error: 'failed for Acme "Private" Holdings' });
+    }
+    const text = readFileSync(log.logPath, "utf8");
+    assert.equal(text.includes("Private"), false);
+    const records = log.records();
+    assert.equal(records.length, 14);
+    assert.equal(records[11]?.seq, 12);
+    assert.equal(records[12]?.seq, 13);
+    assert.equal(records[12]?.n, 12, "a counter equal to a private number stays a number");
+    assert.equal(log.readHead()?.seq, 14);
+    assert.deepEqual(log.verify().problems, []);
+    log.lock({ runId: "run_12", command: "zone apply", startedAt: "t" });
+    assert.equal(log.holder()?.runId, "run_12");
+    log.unlock("run_12");
+  });
+
+  it("refuses to append past records removed from the end, so the next run cannot hide them", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.step", "run.done"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n${lines[1]}\n`);
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /names record 4, but the log holds 2: records were removed\); nothing is appended/.test(
+          e.message,
+        ),
+    );
+    assert.equal(log.records().length, 2, "nothing was appended");
+    assert.match(log.verify().problems.join("; "), /names record 4, but the log holds 2/);
+  });
+
+  it("refuses to append to a deleted log, a log whose head file was deleted, or a changed last record", () => {
+    const deleted = newLog();
+    fill(deleted, ["run.registered", "run.done", "lock.broken"]);
+    rmSync(deleted.logPath);
+    deleted.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => deleted.breakLock(new Date(), "run_3", "the machine crashed", "op"),
+      LogIntegrityError,
+    );
+    assert.equal(
+      deleted.holder()?.runId,
+      "run_a",
+      "a refused lock break leaves the lock as it was",
+    );
+    assert.match(deleted.verify().problems.join("; "), /names record 3, but the log holds 0/);
+
+    const headless = newLog();
+    fill(headless, ["run.registered", "run.done"]);
+    rmSync(headless.headPath);
+    assert.throws(
+      () => headless.append(new Date(), "run_2", "run.registered", {}),
+      /the head file is missing/,
+    );
+    assert.deepEqual(headless.verify().problems, ["the head file is missing"]);
+
+    const changed = newLog();
+    fill(changed, ["run.registered", "run.done"]);
+    const lines = readFileSync(changed.logPath, "utf8").split("\n");
+    writeFileSync(
+      changed.logPath,
+      [lines[0], lines[1]?.replace("run.done", "run.dona"), ""].join("\n"),
+    );
+    assert.throws(
+      () => changed.append(new Date(), "run_2", "x", {}),
+      /record 2 is not the record the head file names/,
+    );
+
+    // A head file that names an earlier record (its write failed once) still lets the log grow.
+    const behind = newLog();
+    fill(behind, ["a", "b"]);
+    const first = sha256(readFileSync(behind.logPath, "utf8").split("\n")[0] ?? "");
+    writeFileSync(behind.headPath, JSON.stringify({ seq: 1, hash: first }));
+    assert.doesNotThrow(() => behind.append(new Date(), "run_2", "c", {}));
+    assert.deepEqual(behind.verify().problems, []);
+  });
+
+  it("never appends onto a torn last line, so no record is glued onto it and lost", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step"]);
+    // A crash or a short write during the next append: part of a line, with no newline.
+    appendFileSync(log.logPath, '{"seq":3,"prev":"abc","at":"2026');
+    const before = readFileSync(log.logPath, "utf8");
+    const head = log.readHead();
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not end with a newline.*nothing is appended/.test(e.message),
+    );
+    assert.equal(readFileSync(log.logPath, "utf8"), before, "nothing was written");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+    assert.deepEqual(log.verify().problems, [
+      "line 3 is not a JSON record",
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
+
+    // A complete last line that is not the next record (not JSON, the wrong seq, or not chained).
+    for (const last of [
+      "this line was tampered",
+      JSON.stringify({ seq: 9, prev: GENESIS, at: "t", runId: "r", event: "x" }),
+      JSON.stringify({ seq: 3, prev: GENESIS, at: "t", runId: "r", event: "x" }),
+    ]) {
+      const other = newLog();
+      fill(other, ["run.registered", "run.step"]);
+      appendFileSync(other.logPath, `${last}\n`);
+      assert.throws(
+        () => other.append(new Date(), "run_2", "run.done", {}),
+        (e: unknown) => e instanceof LogIntegrityError && /nothing is appended/.test(e.message),
+        last,
+      );
+      assert.equal(other.records().filter((r) => r.event === "run.done").length, 0, last);
+    }
+  });
+
+  it("reports a whole last record that lost only its newline, so append, verify, a lock break and restart agree", () => {
+    const UNENDED = "the last line does not end with a newline (line 3 is incomplete)";
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "lock.broken"]);
+    // A write cut short by one byte, a crash between the bytes, or an editor that drops the end.
+    const whole = readFileSync(log.logPath, "utf8");
+    writeFileSync(log.logPath, whole.slice(0, -1));
+    const before = readFileSync(log.logPath, "utf8");
+    const head = log.readHead();
+    const result = log.verify();
+    assert.deepEqual(result.problems, [UNENDED]);
+    assert.equal(result.count, 3);
+    assert.deepEqual(result.head, head, "the last record itself is whole and chained");
+
+    assert.throws(
+      () => log.append(new Date(), "run_2", "run.registered", {}),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        e.message.includes(UNENDED) &&
+        /nothing is appended/.test(e.message),
+    );
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.message.includes(`does not verify (${UNENDED}), so the lock is not broken`),
+    );
+    assert.equal(log.holder()?.runId, "run_a");
+    assert.equal(readFileSync(log.logPath, "utf8"), before, "nothing was written");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+
+    const restarted = log.restart(new Date(), "run_r", "the disk filled up mid-write", "op");
+    assert.ok(restarted !== undefined, "restart is the way on");
+    assert.deepEqual(restarted.problems, [UNENDED]);
+    assert.deepEqual(restarted.previousHead, head);
+    assert.equal(readFileSync(join(log.dir, "runs.broken-run_r.jsonl"), "utf8"), before);
+    assert.deepEqual(log.verify().problems, []);
+    assert.equal(log.records()[0]?.event, "log.restarted");
+    assert.doesNotThrow(() => log.breakLock(new Date(), "run_b", "the machine crashed", "op"));
+    assert.equal(log.holder(), undefined);
+    assert.deepEqual(log.verify().problems, []);
+  });
+
+  it("never verifies a log that refuses an append, wherever the last write was cut, so restart is always the way on", () => {
+    const source = newLog();
+    fill(source, ["run.registered", "run.step"]);
+    const headBefore = readFileSync(source.headPath, "utf8");
+    fill(source, ["lock.broken"]);
+    const headAfter = readFileSync(source.headPath, "utf8");
+    const whole = readFileSync(source.logPath, "utf8");
+    const secondEnds = whole.indexOf("\n", whole.indexOf("\n") + 1) + 1;
+    function cutAndCheck(log: RunLog, length: number): void {
+      const problems = log.verify().problems;
+      let refused: unknown;
+      try {
+        log.append(new Date(), "run_2", "run.registered", {});
+      } catch (error) {
+        refused = error;
+      }
+      if (refused === undefined) {
+        assert.deepEqual(problems, [], `length ${length}: appended, so it verified`);
+        assert.deepEqual(log.verify().problems, [], `length ${length}: still verifies`);
+      } else {
+        assert.ok(refused instanceof LogIntegrityError, `length ${length}`);
+        assert.ok(problems.length > 0, `length ${length}: refused, so it does not verify`);
+        assert.ok(log.restart(new Date(), "run_r", "a write was cut", "op") !== undefined);
+        assert.deepEqual(log.verify().problems, [], `length ${length}: restarted`);
+      }
+    }
+
+    // Every length from the end of record 2 to the whole log: the third write cut at every byte,
+    // with the head file as it was before that write (the usual case) and after it.
+    for (let length = secondEnds; length <= whole.length; length++) {
+      for (const headFile of [headBefore, headAfter]) {
+        const log = newLog();
+        mkdirSync(log.dir, { recursive: true });
+        writeFileSync(log.logPath, whole.slice(0, length));
+        writeFileSync(log.headPath, headFile);
+        cutAndCheck(log, length);
+      }
+    }
+  });
+
+  it("leaves a log that verify reports when its own append is cut short before the newline", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step"]);
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    const head = log.readHead();
+    // The disk fills up: the first write stores all but the last byte, the retry fails.
+    const original = fs.writeSync;
+    let calls = 0;
+    const cut = (fd: number, buffer: Buffer, offset: number, length: number): number => {
+      calls++;
+      if (calls === 1) return original(fd, buffer, offset, length - 1);
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+    (fs as { writeSync: unknown }).writeSync = cut;
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+        (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOSPC",
+      );
+    } finally {
+      fs.writeSync = original;
+      syncBuiltinESMExports();
+    }
+    assert.equal(calls, 2);
+    assert.equal(log.holder()?.runId, "run_a", "the lock is still held");
+    assert.deepEqual(log.readHead(), head, "the head file did not move");
+    assert.equal(log.records().at(-1)?.event, "lock.broken", "a whole record without its newline");
+    assert.deepEqual(log.verify().problems, [
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
+    assert.throws(
+      () => log.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) => e instanceof LogIntegrityError && /so the lock is not broken/.test(e.message),
+    );
+    assert.ok(log.restart(new Date(), "run_r", "the disk filled up mid-write", "op") !== undefined);
+    assert.doesNotThrow(() => log.breakLock(new Date(), "run_b", "the machine crashed", "op"));
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("refuses to break a lock while the log does not verify anywhere, and leaves the lock and the log as they were", () => {
+    const torn = newLog();
+    fill(torn, ["run.registered", "run.step"]);
+    appendFileSync(torn.logPath, '{"seq":3,"prev":"abc","at":"2026');
+    torn.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    const tornBefore = readFileSync(torn.logPath, "utf8");
+    assert.throws(
+      () => torn.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        /does not verify \(line 3 is not a JSON record; the last line does not end with a newline \(line 3 is incomplete\)\), so the lock is not broken/.test(
+          e.message,
+        ),
+    );
+    assert.equal(torn.holder()?.runId, "run_a");
+    assert.equal(readFileSync(torn.logPath, "utf8"), tornBefore);
+    assert.deepEqual(torn.verify().problems, [
+      "line 3 is not a JSON record",
+      "the last line does not end with a newline (line 3 is incomplete)",
+    ]);
+
+    // A middle line changed while the head file still matches the last record.
+    const edited = newLog();
+    fill(edited, ["run.registered", "run.step", "run.done"]);
+    const lines = readFileSync(edited.logPath, "utf8").split("\n");
+    writeFileSync(
+      edited.logPath,
+      [lines[0]?.replace("run.registered", "run.registerex"), lines[1], lines[2], ""].join("\n"),
+    );
+    assert.deepEqual(edited.verify().problems, ["line 2 does not chain to the line before"]);
+    edited.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => edited.breakLock(new Date(), "run_b", "the machine crashed", "op"),
+      (e: unknown) => e instanceof LogIntegrityError && /line 2 does not chain/.test(e.message),
+    );
+    assert.equal(edited.holder()?.runId, "run_a");
+    assert.equal(edited.records().length, 3, "nothing was appended");
+  });
+
+  it("restarts a log that does not verify: keeps it, and starts a new one that records the gap", () => {
+    const log = newLog();
+    fill(log, ["run.registered", "run.step", "run.done", "lock.broken"]);
+    const shipped = log.readHead();
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, `${lines[0]}\n`);
+    const restarted = log.restart(
+      new Date("2026-11-21T07:00:00Z"),
+      "run_r",
+      "the disk was restored",
+      "operator",
+    );
+    assert.ok(restarted !== undefined);
+    assert.deepEqual(restarted.previousHeadFile, shipped);
+    assert.equal(restarted.previousHead?.seq, 1);
+    assert.equal(restarted.keptLog, "runs.broken-run_r.jsonl");
+    assert.equal(restarted.keptHead, "head.broken-run_r.json");
+    assert.equal(
+      readFileSync(join(log.dir, "runs.broken-run_r.jsonl"), "utf8"),
+      `${lines[0]}\n`,
+      "kept as it was",
+    );
+    const [first, ...rest] = log.records();
+    assert.equal(rest.length, 0);
+    assert.equal(first?.event, "log.restarted");
+    assert.equal(first?.seq, 1);
+    assert.equal(first?.prev, GENESIS);
+    assert.equal(first?.reason, "the disk was restored");
+    assert.match(
+      String((first?.problems as string[] | undefined)?.[0]),
+      /names record 4, but the log holds 1/,
+    );
+    assert.deepEqual(
+      (first?.previous as { headFileHead?: unknown } | undefined)?.headFileHead,
+      shipped,
+    );
+    assert.deepEqual(log.verify().problems, []);
+    assert.doesNotThrow(() => log.append(new Date(), "run_n", "run.registered", {}));
+    assert.equal(log.restart(new Date(), "run_s", "nothing is wrong now", "operator"), undefined);
+  });
+
+  it("holds an exclusive lock that a second run cannot take", () => {
+    const log = newLog();
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    assert.throws(
+      () => log.lock({ runId: "run_b", command: "routes apply", startedAt: "t" }),
+      (e: unknown) => {
+        assert.ok(e instanceof BusyError);
+        assert.match(e.message, /held by run_a \(zone apply/);
+        return true;
+      },
+    );
+    assert.throws(() => log.unlock("run_b"), /held by run_a/);
+    assert.equal(log.release("run_b"), "held-by-another");
+    assert.equal(log.holder()?.runId, "run_a");
+    assert.equal(log.release("run_a"), "released");
+    assert.equal(log.release("run_a"), "free");
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("breaks a stale lock only with a logged reason", () => {
+    const log = newLog();
+    log.lock({ runId: "run_a", command: "zone apply", startedAt: "t" });
+    const broken = log.breakLock(new Date(), "run_c", "machine crashed mid-run", "operator");
+    assert.equal(broken?.holder.runId, "run_a");
+    assert.equal(broken?.appended.record.seq, 1);
+    assert.equal(log.holder(), undefined);
+    const record = log.records().at(-1);
+    assert.equal(record?.event, "lock.broken");
+    assert.equal(record?.reason, "machine crashed mid-run");
+    assert.equal(sha256(readFileSync(log.logPath, "utf8").trim()), broken?.appended.hash);
+  });
+});
+
+describe("a registered run", () => {
+  function newRun(dryRun = false, options: FakeRuntimeOptions = {}, argv: string[] = []) {
+    const runtime = fakeRuntime(options);
+    const m = new Masker();
+    const log = newLog(m);
+    const args = parseArgs(argv, {
+      positionals: [],
+      flags: [
+        { name: "spike", kind: "boolean", description: "" },
+        { name: "confirm-delete", kind: "integer", description: "" },
+        { name: "manifest", kind: "string", description: "" },
+      ],
+    });
+    const run = new Run(runtime, log, new Output(runtime, m), {
+      command: "zone apply",
+      environment: "staging",
+      dryRun,
+      args,
+    });
+    return { runtime, log, run, masker: m };
+  }
+
+  it("refuses a write before registration and after it finishes", () => {
+    const { run } = newRun();
+    assert.throws(() => run.assertWritable("PATCH setting"), /outside a registered run/);
+    run.register();
+    run.assertWritable("PATCH setting");
+    run.finish("ok");
+    assert.throws(() => run.assertWritable("PATCH setting"), /outside a registered run/);
+  });
+
+  it("does not start on a run log that does not verify, and frees the lock it took", () => {
+    const { run, log } = newRun();
+    fill(log, ["a", "b", "c"]);
+    const lines = readFileSync(log.logPath, "utf8").split("\n");
+    writeFileSync(log.logPath, [lines[0], lines[2], ""].join("\n"));
+    assert.throws(
+      () => run.acquire(),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not verify .*line 2/.test(e.message),
+    );
+    assert.equal(run.locked, false);
+    assert.equal(log.holder(), undefined);
+    assert.throws(() => run.register(), LogIntegrityError);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("does not start on a run log whose whole last record lost its newline, and frees the lock it took", () => {
+    const { run, log } = newRun();
+    fill(log, ["a", "b", "c"]);
+    writeFileSync(log.logPath, readFileSync(log.logPath, "utf8").slice(0, -1));
+    assert.throws(
+      () => run.acquire(),
+      (e: unknown) =>
+        e instanceof LogIntegrityError &&
+        e.exitCode === 1 &&
+        /does not verify \(the last line does not end with a newline \(line 3 is incomplete\)\), so no run starts/.test(
+          e.message,
+        ),
+    );
+    assert.equal(run.locked, false);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("records the stop and the change in flight in run.done, and starts no change once stopped", async () => {
+    const { run, log } = newRun();
+    run.register();
+    let release: () => void = () => {};
+    const sent = run.sending(
+      { kind: "dns", name: "console", action: "create" },
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    run.stop("SIGHUP");
+    assert.throws(
+      () => run.assertCanStart("create dns"),
+      (e: unknown) => e instanceof FinError && e.exitCode === 129,
+    );
+    run.finish("failed", { error: "interrupted by SIGHUP" });
+    await run.closed;
+    const done = log.records().at(-1);
+    assert.equal(done?.interrupted, "SIGHUP");
+    assert.deepEqual(done?.inFlight, { kind: "dns", name: "console", action: "create" });
+    assert.equal(run.lines.at(-1)?.interrupted, "SIGHUP");
+    release();
+    await sent;
+    assert.equal(run.inFlight, undefined);
+  });
+
+  it("refuses every write in a dry run, and registers nothing", () => {
+    const { run, log } = newRun(true);
+    run.acquire();
+    run.register();
+    assert.equal(run.registered, false);
+    assert.throws(() => run.assertWritable("POST dns"), /dry run sends nothing/);
+    assert.equal(log.records().length, 0);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("writes registered, step and done records, then releases the lock", () => {
+    const { run, log } = newRun();
+    run.register({ plan: { create: 1 } });
+    assert.equal(log.holder()?.runId, run.id);
+    run.step("dns", "console", "create");
+    run.finish("ok");
+    assert.deepEqual(
+      log.records().map((r) => r.event),
+      ["run.registered", "run.step", "run.done"],
+    );
+    const done = log.records().at(-1);
+    assert.equal(done?.result, "ok");
+    assert.equal(done?.steps, 1);
+    assert.equal(log.holder(), undefined);
+    assert.match(run.id, /^run_[0-9a-hjkmnp-tv-z]{26}$/);
+    assert.deepEqual(
+      run.lines.map((l) => l.event),
+      ["run.registered", "run.done"],
+    );
+    assert.equal(run.lines[0]?.service, "ops");
+    const head = log.readHead();
+    assert.equal(run.lines[1]?.logSeq, head?.seq);
+    assert.equal(run.lines[1]?.logHead, head?.hash);
+  });
+
+  it("records the arguments, the safety overrides and a dirty checkout with the registration", () => {
+    const { run, log, runtime } = newRun(false, { dirty: true }, [
+      "--spike",
+      "--confirm-delete",
+      "2",
+      "--manifest",
+      "release/manifest.json",
+    ]);
+    run.register();
+    const registered = log.records()[0];
+    assert.deepEqual(registered?.args, {
+      positionals: [],
+      flags: { spike: true, "confirm-delete": 2, manifest: "release/manifest.json" },
+    });
+    assert.equal(registered?.dirty, true);
+    assert.deepEqual(run.lines[0]?.flags, { spike: true, "confirm-delete": 2, manifest: true });
+    assert.equal(run.lines[0]?.dirty, true);
+    assert.match(runtime.err(), /local changes/);
+    run.finish("ok");
+  });
+
+  it("writes the lines beside the log as they happen", () => {
+    const { run, log } = newRun();
+    run.register();
+    const file = join(log.dir, "lines.jsonl");
+    assert.equal(readFileSync(file, "utf8").trim().split("\n").length, 1);
+    run.finish("failed", { error: "x" });
+    const lines = readFileSync(file, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(JSON.parse(lines[1] ?? "{}").level, "error");
+  });
+
+  it("registers once: a run that finished refuses to register again", () => {
+    const { run, log } = newRun();
+    run.register();
+    run.finish("ok");
+    assert.throws(
+      () => run.register(),
+      (e: unknown) => e instanceof FinError && /registers once/.test(e.message),
+    );
+    assert.equal(log.records().length, 2);
+    assert.equal(log.holder(), undefined);
+  });
+
+  it("stops writing once another run holds the lock, and leaves that run's lock alone", () => {
+    const { run, log, runtime } = newRun();
+    run.register();
+    log.breakLock(new Date(), "run_breaker", "the machine was thought gone", "operator");
+    log.lock({ runId: "run_b", command: "routes apply", startedAt: "t" });
+    assert.throws(
+      () => run.assertWritable("POST dns"),
+      (e: unknown) =>
+        e instanceof BusyError && /no longer holds the run lock \(run_b/.test(e.message),
+    );
+    assert.doesNotThrow(() => run.finish("failed", { error: "lock lost" }));
+    assert.equal(log.holder()?.runId, "run_b");
+    const done = log.records().at(-1);
+    assert.equal(done?.event, "run.done");
+    assert.equal(done?.lockLost, true);
+    assert.match(runtime.err(), /another run holds the run lock now/);
+  });
+
+  it("masks a registered ID held as a JSON number in its records and its lines", () => {
+    const { run, log, masker } = newRun();
+    masker.register(2_345_678, "<overlay:betterstack.teamId>");
+    run.register({ team: 2_345_678, teamText: "2345678", count: 3 });
+    run.line("probe", "info", { team: 2_345_678, nested: [{ id: 2_345_678 }], short: 12 });
+    run.finish("ok");
+    const registered = log.records()[0];
+    assert.equal(registered?.team, "<overlay:betterstack.teamId>");
+    assert.equal(registered?.teamText, "<overlay:betterstack.teamId>");
+    assert.equal(registered?.count, 3);
+    const probe = run.lines.find((l) => l.event === "probe");
+    assert.equal(probe?.team, "<overlay:betterstack.teamId>");
+    assert.deepEqual(probe?.nested, [{ id: "<overlay:betterstack.teamId>" }]);
+    assert.equal(probe?.short, 12);
+    for (const file of [log.logPath, join(log.dir, "lines.jsonl")]) {
+      assert.equal(readFileSync(file, "utf8").includes("2345678"), false, file);
+    }
+  });
+
+  it("keeps the envelope's fields: a field named like one is refused by the type, and left out with a warning", () => {
+    const { run, log, runtime } = newRun();
+    run.register();
+    run.line("probe", "info", {
+      // @ts-expect-error: the envelope's release is the checkout's commit, not a line's to set
+      release: hex(40, "a"),
+      // @ts-expect-error: the envelope's service is ops
+      service: "api",
+      // @ts-expect-error: an optional envelope field is the envelope's too
+      requestId: "req_probe",
+      deployedRelease: hex(40, "a"),
+      targetService: "api",
+    });
+    run.finish("ok");
+    const kept = readFileSync(join(log.dir, "lines.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    for (const probe of [run.lines.find((l) => l.event === "probe"), kept[1]]) {
+      assert.equal(probe?.event, "probe");
+      assert.equal(probe?.release, hex(40, "e"), "the checkout's commit");
+      assert.equal(probe?.service, "ops");
+      assert.equal(Object.hasOwn(probe ?? {}, "requestId"), false);
+      assert.equal(probe?.deployedRelease, hex(40, "a"));
+      assert.equal(probe?.targetService, "api");
+    }
+    for (const field of ["release", "service", "requestId"]) {
+      assert.match(
+        runtime.err(),
+        new RegExp(
+          `the probe line names the envelope's own field ${field}; that field is left out`,
+        ),
+      );
+    }
+  });
+
+  it("names the same envelope fields as the monitoring catalogue", () => {
+    assert.deepEqual([...ENVELOPE_FIELDS], [...CATALOG_ENVELOPE_FIELDS]);
+  });
+
+  it("starts a telemetry line on a line of its own after a torn one in lines.jsonl", () => {
+    const { run, log } = newRun();
+    run.register();
+    const file = join(log.dir, "lines.jsonl");
+    appendFileSync(file, '{"dt":"2026-11-21T06:00:00.000Z","mess');
+    run.finish("ok");
+    const lines = readFileSync(file, "utf8").split("\n");
+    assert.equal(lines.at(-1), "", "the file ends with a newline");
+    const done = JSON.parse(lines.at(-2) ?? "{}") as { event?: string };
+    assert.equal(done.event, "run.done", "the new line is whole and readable");
+  });
+
+  it("closes a run whose log cannot be written without throwing", () => {
+    const { run, log } = newRun();
+    run.register();
+    rmSync(log.dir, { recursive: true, force: true });
+    writeFileSync(log.dir, "not a directory");
+    assert.doesNotThrow(() => run.finish("failed", { error: "x" }));
+    assert.equal(run.finished, true);
+  });
+
+  it("ships the lines with the ingest token, and only warns when shipping cannot happen", async () => {
+    const dir = tempDir();
+    const token = fakeToken("ingest");
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetch = async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response("{}", { status: calls.length === 1 ? 202 : 503 });
+    };
+    const env = {
+      FIN_OPS_INGEST_HOST: "ingest.example.com",
+      FIN_OPS_INGEST_TOKEN_FILE: writePrivate(dir, "ingest", token),
+    };
+    const { run, runtime } = newRun(false, { env, fetch });
+    run.register();
+    await run.flushLines();
+    assert.equal(calls.length, 1);
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    assert.equal(headers.authorization, `Bearer ${token}`);
+    assert.equal(calls[0]?.url, "https://ingest.example.com/");
+    assert.equal(JSON.parse(String(calls[0]?.init.body))[0].event, "run.registered");
+    run.finish("ok");
+    await run.flushLines();
+    assert.equal(calls.length, 2);
+    assert.match(runtime.err(), /answered 503; they stay local/);
+    assert.equal(runtime.err().includes(token), false);
+
+    const open = join(dir, "open-token");
+    writeFileSync(open, token, { mode: 0o644 });
+    const bad = newRun(false, { env: { ...env, FIN_OPS_INGEST_TOKEN_FILE: open }, fetch });
+    bad.run.register();
+    bad.run.finish("ok");
+    await assert.doesNotReject(bad.run.flushLines());
+    assert.match(bad.runtime.err(), /others can read.*the lines stay local/);
+    assert.equal(calls.length, 2);
+  });
+});

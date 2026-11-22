@@ -2,7 +2,7 @@
 // built at run time, so this file itself stays clean, and every test that runs the command checks
 // that its output never repeats the value it found.
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -394,6 +394,81 @@ describe("public-safety over a repository", () => {
     assert.deepEqual(scanTree(dir, []), []);
   });
 
+  test("a tracked file is read as git stores it, and its working tree copy where it differs", () => {
+    const dir = makeRepo({
+      "staged.md": `mail ${PLANTED.staffAddress}\n`,
+      "edited.md": "fine\n",
+      "deleted.md": `key ${PLANTED.token}\n`,
+      "same.md": `host ${PLANTED.privateIp}\n`,
+    });
+    writeFileSync(join(dir, "staged.md"), "clean now, but not staged\n");
+    writeFileSync(join(dir, "edited.md"), `fine\nhost ${PLANTED.privateIp}\n`);
+    rmSync(join(dir, "deleted.md"));
+    const found = scanTree(dir, []).map((f) => `${f.file}:${f.line} ${f.rule} ${f.message}`);
+    assert.equal(found.length, 4, found.join("\n"));
+    assert.match(found[0] ?? "", /^deleted\.md:1 token .*\(in the copy git has staged\)$/);
+    assert.match(found[1] ?? "", /^edited\.md:2 private-ip .*\(in the working tree, not staged\)$/);
+    assert.match(found[2] ?? "", /^same\.md:1 private-ip .*address$/);
+    assert.match(found[3] ?? "", /^staged\.md:1 email-address .*\(in the copy git has staged\)$/);
+  });
+
+  test("a working-tree-encoding attribute does not hide what git publishes", (t) => {
+    // IBM037 (EBCDIC) for the characters of `staff: <address>`, as a checkout would write it.
+    const ebcdic = (/** @type {string} */ text) =>
+      Buffer.from(
+        [...text].map((c) => {
+          const code = c.charCodeAt(0);
+          if (c >= "a" && c <= "i") return 0x81 + code - 0x61;
+          if (c >= "j" && c <= "r") return 0x91 + code - 0x6a;
+          if (c >= "s" && c <= "z") return 0xa2 + code - 0x73;
+          if (c >= "0" && c <= "9") return 0xf0 + code - 0x30;
+          return { " ": 0x40, ".": 0x4b, "-": 0x60, ":": 0x7a, "@": 0x7c, "\n": 0x25 }[c] ?? 0x6f;
+        }),
+      );
+    const dir = makeRepo({ ".gitattributes": "leak.txt working-tree-encoding=IBM037\n" });
+    writeFileSync(join(dir, "leak.txt"), ebcdic(`staff: ${PLANTED.staffAddress}\n`));
+    try {
+      git(dir, ["add", "-A"]);
+    } catch {
+      t.skip("this git cannot convert IBM037");
+      return;
+    }
+    assert.equal(git(dir, ["show", ":leak.txt"]), `staff: ${PLANTED.staffAddress}\n`);
+    const run = runScript("scripts/public-safety.mjs", ["--root", dir]);
+    assert.equal(run.status, 1, run.output);
+    assert.match(run.output, /^leak\.txt:1 email-address: /m);
+    assert.ok(!run.output.includes(PLANTED.staffAddress), "the output repeats a value");
+  });
+
+  test("a byte-order mark or text after the first page hides nothing in the tree or a commit", () => {
+    const payload = `mail ${PLANTED.staffAddress}\nhost console.${ZONE}\n`;
+    const files = {
+      "ff-fe.txt": Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(payload)]),
+      "fe-ff.txt": Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(payload)]),
+      "utf32-mark.txt": Buffer.concat([Buffer.from([0xff, 0xfe, 0, 0]), Buffer.from(payload)]),
+      "late16.txt": Buffer.concat([
+        Buffer.from(`${"x".repeat(9090)}\n`),
+        Buffer.from(payload, "utf16le"),
+      ]),
+      "late16be.txt": Buffer.concat([
+        Buffer.from(`${"y".repeat(8193)}\n`),
+        encode(payload, "utf16be", false),
+      ]),
+    };
+    const dir = makeRepo({ "a.md": "fine\n" });
+    for (const [name, bytes] of Object.entries(files)) writeFileSync(join(dir, name), bytes);
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "encoded"]);
+    const head = git(dir, ["rev-parse", "HEAD"]).trim();
+    const perFile = (/** @type {{ file: string, rule: string }[]} */ findings) =>
+      Object.keys(files).map((name) =>
+        rules(findings.filter((f) => f.file.split(" ")[0] === name)).join(","),
+      );
+    const expected = Object.keys(files).map(() => "email-address,refuse-list");
+    assert.deepEqual(perFile(scanTree(dir, [ZONE])), expected);
+    assert.deepEqual(perFile(scanCommits(dir, [head], [ZONE])), expected);
+  });
+
   test("an unreadable overlay makes the command exit 2", () => {
     const run = runScript("scripts/public-safety.mjs", ["--root", makeRepo({})], {
       env: { FIN_OVERLAY_FILE: "/nonexistent/o.json" },
@@ -430,6 +505,42 @@ describe("public-safety over a repository", () => {
     git(dir, ["commit", "-q", "-m", "link"]);
     const commits = git(dir, ["rev-list", "HEAD"]).split("\n").filter(Boolean);
     assert.deepEqual(rules(scanCommits(dir, commits, [])), ["email-address", "local-path"]);
+  });
+
+  test("commit mode refuses an author or committer date whose offset is not +0000", () => {
+    // Offsets no build machine of this project uses; the finding never repeats one.
+    const EAST = "2026-11-21T10:00:00+0100";
+    const WEST = "2026-11-21T10:00:00-0300";
+    const dir = makeRepo({ "a.md": "x\n" });
+    const commit = (/** @type {string} */ name, /** @type {Record<string, string>} */ env) => {
+      addFiles(dir, { "a.md": `${name}\n` });
+      git(dir, ["commit", "-q", "-m", name], env);
+      return git(dir, ["rev-parse", "HEAD"]).trim();
+    };
+    const utc = commit("utc", {});
+    const author = commit("author", { GIT_AUTHOR_DATE: EAST });
+    const committer = commit("committer", { GIT_COMMITTER_DATE: WEST });
+    const both = commit("both", { GIT_AUTHOR_DATE: WEST, GIT_COMMITTER_DATE: EAST });
+    const explicitUtc = commit("explicit", {
+      GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0000",
+      GIT_COMMITTER_DATE: "2026-11-21T10:00:00Z",
+    });
+    const found = scanCommits(dir, [utc, author, committer, both, explicitUtc], []);
+    assert.deepEqual(
+      found.map((f) => `${f.file} ${f.rule}`),
+      [
+        `commit ${author.slice(0, 12)} (author date) commit-date`,
+        `commit ${committer.slice(0, 12)} (committer date) commit-date`,
+        `commit ${both.slice(0, 12)} (author date) commit-date`,
+        `commit ${both.slice(0, 12)} (committer date) commit-date`,
+      ],
+    );
+    const run = runScript("scripts/public-safety.mjs", ["--root", dir, "--range", "HEAD"]);
+    assert.equal(run.status, 1);
+    assert.match(run.output, /\(author date\) commit-date: the author date carries a UTC offset/);
+    for (const offset of ["+0100", "-0300", "+01:00", "-03:00"]) {
+      assert.ok(!run.output.includes(offset), "the output repeats an offset");
+    }
   });
 
   test("only the two noreply trailer addresses pass in a message", () => {
@@ -474,6 +585,30 @@ describe("public-safety over a repository", () => {
       `a.txt (commit ${merge}):2 email-address`,
       `b.md (commit ${merge}):1 token`,
     ]);
+  });
+
+  test("a refused value typed while resolving a merge is found, though no other commit has it", () => {
+    const dir = makeRepo({ "a.txt": "base\n" }, { commit: "base" });
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "a.txt": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "a.txt": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"]));
+    addFiles(dir, { "a.txt": `resolved for console.${ZONE}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const commits = git(dir, ["rev-list", `${base}..HEAD`])
+      .split("\n")
+      .filter(Boolean);
+    const merge = commits[0]?.slice(0, 12);
+    assert.deepEqual(
+      scanCommits(dir, commits, [ZONE]).map((f) => `${f.file}:${f.line} ${f.rule}`),
+      [`a.txt (commit ${merge}):1 refuse-list`],
+    );
+    // The same commits without the merge hold nothing refused.
+    assert.deepEqual(scanCommits(dir, commits.slice(1), [ZONE]), []);
   });
 });
 
@@ -557,6 +692,24 @@ describe("the pre-push hook refuses the same", () => {
     assert.match(output, /scanned 3 commit\(s\)/);
   });
 
+  test("a merge whose resolution adds a refused value is refused, and the value not printed", () => {
+    const dir = pushable();
+    git(dir, ["checkout", "-q", "-b", "side"]);
+    addFiles(dir, { "README.md": "side\n" });
+    git(dir, ["commit", "-q", "-m", "side"]);
+    git(dir, ["checkout", "-q", "work"]);
+    addFiles(dir, { "README.md": "main\n" });
+    git(dir, ["commit", "-q", "-m", "main"]);
+    assert.throws(() => git(dir, ["merge", "-q", "side", "-m", "merge"]));
+    addFiles(dir, { "README.md": `resolved for console.${ZONE}\n` });
+    git(dir, ["commit", "-q", "-m", "merge"]);
+    const overlay = overlayFile({ refuseList: [ZONE] });
+    const { code, output } = push(dir, "refs/heads/feature", { overlay });
+    assert.equal(code, 1);
+    assert.match(output, /^README\.md \(commit [0-9a-f]{12}\):1 refuse-list: /m);
+    assert.ok(!output.toLowerCase().includes(ZONE.toLowerCase()), "the hook repeats a value");
+  });
+
   test("an annotated tag's message and a pushed ref's name are scanned", () => {
     const dir = pushable();
     git(dir, [
@@ -612,6 +765,63 @@ describe("the pre-push hook refuses the same", () => {
     const { code, output } = push(dir, "refs/heads/feature");
     assert.equal(code, 0);
     assert.match(output, /scanned 0 commit\(s\)/);
+  });
+
+  test("a new commit or tag dated with another offset is refused, and the offset not printed", () => {
+    const dir = pushable();
+    addFiles(dir, { "b.md": "fine\n" });
+    git(dir, ["commit", "-q", "-m", "b"], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
+    const dated = push(dir, "refs/heads/feature");
+    assert.equal(dated.code, 1);
+    assert.match(dated.output, /^commit [0-9a-f]{12} \(author date\) commit-date: /m);
+    git(dir, ["-c", "tag.gpgsign=false", "tag", "-a", "v2", "-m", "release", "HEAD~1"], {
+      GIT_COMMITTER_DATE: "2026-11-21T10:00:00-0300",
+    });
+    const tag = git(dir, ["rev-parse", "v2"]).trim();
+    const tagged = push(dir, "refs/tags/v2", { localRef: "refs/tags/v2", sha: tag });
+    assert.equal(tagged.code, 1);
+    assert.match(tagged.output, /^pushed ref #1 \(tag date\) commit-date: /m);
+    assert.match(tagged.output, /scanned 0 commit\(s\)/);
+    git(dir, ["-c", "tag.gpgsign=false", "tag", "-a", "v3", "-m", "release", "HEAD~1"]);
+    const utc = git(dir, ["rev-parse", "v3"]).trim();
+    assert.equal(push(dir, "refs/tags/v3", { localRef: "refs/tags/v3", sha: utc }).code, 0);
+    for (const output of [dated.output, tagged.output]) {
+      assert.ok(!/[+-]0[13]00/.test(output), "the hook repeats an offset");
+    }
+  });
+
+  test("a commit already on one of the remote's branches is not scanned again", () => {
+    const dir = pushable();
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    // Other branches, published before this rule, hold commits with another offset; a lane's
+    // branch name has a slash in it.
+    for (const branch of ["side", "lane/side"]) {
+      git(dir, ["checkout", "-q", "-b", branch, base]);
+      addFiles(dir, { [`${branch.replace("/", "-")}.md`]: `${branch}\n` });
+      git(dir, ["commit", "-q", "-m", branch], { GIT_AUTHOR_DATE: "2026-11-21T10:00:00+0100" });
+      git(dir, ["push", "-q", "origin", branch]);
+    }
+    git(dir, ["checkout", "-q", "work"]);
+    git(dir, ["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
+    git(dir, ["merge", "-q", "--no-ff", "lane/side", "-m", "merge the lane"]);
+    const head = git(dir, ["rev-parse", "HEAD"]).trim();
+    // An update of a branch the remote has, and a new branch.
+    for (const [remoteRef, remoteSha] of [
+      ["refs/heads/work", base],
+      ["refs/heads/feature", "0".repeat(40)],
+    ]) {
+      /** @type {string[]} */
+      const lines = [];
+      const code = prePush({
+        root: dir,
+        remote: "origin",
+        input: `refs/heads/work ${head} ${remoteRef} ${remoteSha}\n`,
+        gitleaks: "/nonexistent/gitleaks",
+        log: (line) => lines.push(line),
+      });
+      assert.equal(code, 0, lines.join("\n"));
+      assert.match(lines.join("\n"), /scanned 2 commit\(s\)/);
+    }
   });
 
   test("a push to main is refused", () => {

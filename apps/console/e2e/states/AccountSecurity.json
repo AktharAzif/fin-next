@@ -1,0 +1,120 @@
+{
+  "board": "AccountSecurity",
+  "canvas": "fin-dashboard",
+  "route": "/account/security",
+  "states": {
+    "default": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the methods and sessions, and signing out everywhere else with the factor"
+    },
+    "noSecondFactor": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a failed load says so, and Try again loads it"
+    },
+    "noName": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a failed load says so, and Try again loads it"
+    },
+    "googleError": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "passkeyAdded": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyCancelled": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "removePasskey": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "setupPassword": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "setupScan": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security the authenticator is set up from Account security with the factor"
+    },
+    "setupScanWrong": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "setupCodes": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security the authenticator is set up from Account security with the factor"
+    },
+    "turnOff": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "newCodesConfirm": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "newCodes": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "changePassword": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "changePasswordWrong": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "passwordChanged": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "signedOutEverywhere": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the methods and sessions, and signing out everywhere else with the factor"
+    },
+    "activityEmpty": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the methods and sessions, and signing out everywhere else with the factor"
+    },
+    "loading": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the methods and sessions, and signing out everywhere else with the factor"
+    },
+    "failed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a failed load says so, and Try again loads it"
+    },
+    "trustedBrowsers": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "reason": "the trusted-browsers card ([SA-31]); L-SAT-10 draws it"
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "board": "Authenticator",
+  "canvas": "fin-dashboard",
+  "route": "/welcome/authenticator",
+  "states": {
+    "password": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "wrongPassword": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "checking": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "scan": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
+    },
+    "qrLoading": {
+      "status": "pending",
+      "day": "h02",
+      "note": "no QR encoder in @fin/ui yet (UR-13); the key is drawn for manual entry"
+    },
+    "qrFailed": {
+      "status": "pending",
+      "day": "h02",
+      "note": "no QR encoder in @fin/ui yet (UR-13)"
+    },
+    "keyCopied": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
+    },
+    "wrongCode": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "codes": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
+    },
+    "codesCopied": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "codesSaved": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the authenticator set-up shows the key, takes the code, then the codes once"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

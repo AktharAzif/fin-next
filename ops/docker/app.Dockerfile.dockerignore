@@ -1,0 +1,14 @@
+# BuildKit reads <Dockerfile>.dockerignore beside the Dockerfile. Nothing local, secret or built
+# reaches the build context.
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/playwright-report
+**/test-results
+**/blob-report
+.git
+.env*
+**/*.local.*
+**/*.age
+**/overlay*.json
