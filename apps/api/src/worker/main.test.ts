@@ -270,7 +270,7 @@ describe("a worker whose database cannot be reached", () => {
         result: "skipped",
         skipReason: "not_configured",
       });
-      expect(await running.health.sample()).toMatchObject({ dbOk: false });
+      expect(await running.health.sample()).toMatchObject({ dbOk: false, clockSkewMs: null });
       expect(port.sent).toEqual([]);
     } finally {
       await running.shutdown.begin("SIGTERM");

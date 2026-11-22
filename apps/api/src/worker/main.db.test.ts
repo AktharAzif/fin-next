@@ -125,7 +125,9 @@ describe("the api image started with --worker", () => {
       await waitFor(() =>
         stdout.some((l) => l.event === "job.run" && l.job === "db-probe" && l.result === "ok"),
       );
-      expect(await running.health.sample()).toMatchObject({ dbOk: true, poolWaiting: 0 });
+      const health = await running.health.sample();
+      expect(health).toMatchObject({ dbOk: true, poolWaiting: 0, clockSkewMs: expect.any(Number) });
+      expect(Math.abs(Number(health.clockSkewMs))).toBeLessThan(1_000);
       const roles = await db.superuser();
       try {
         const sessions = await roles.query<{ usename: string; application_name: string }>(

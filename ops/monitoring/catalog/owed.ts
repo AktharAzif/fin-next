@@ -195,7 +195,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "(access-drift.db.test.ts), but no process runs the duty yet: the worker " +
       "(apps/api/src/worker/main.ts) runs the email loop, the delivery check and the database " +
       "probe only, and apps/api does not depend on @fin/staff. An alert over a line no process " +
-      "writes can never fire, so it stays owed, as clock-skew does, until the worker schedules " +
+      "writes can never fire, so it stays owed until the worker schedules " +
       "the duty with FIN_ACCESS_READ_TOKEN; the rule is then any access.drift on worker, P, " +
       "runbook docs/runbooks/admin-access-drift.md.",
   },
@@ -243,17 +243,5 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
-  },
-  // Defined in alerts/platform.json until its field was found to have no writer: an alert that
-  // reads a field nobody writes can never fire, so it is owed, not defined. Its lane (the
-  // platform fragment's) and date follow the lane rule above; the steward confirms or changes them.
-  {
-    name: "clock-skew",
-    severity: "N",
-    fragment: "platform",
-    lane: "P0-F",
-    due: SUNDAY,
-    spec: "spec 01 §8.7, DECISIONS CF-72",
-    note: "No process writes clockSkewMs: process.health carries what a service's health hook gives (packages/server's BuiltService.health), and none gives the offset from the database's now() yet (P0-D's health line, with P0-E's pool and probe). The pull request that makes a process write it puts the rule back in alerts/platform.json (threshold @thresholds.clock-skew, runbook docs/runbooks/clock-skew.md) and removes it here.",
   },
 ];

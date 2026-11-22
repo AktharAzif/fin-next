@@ -127,11 +127,11 @@ export const entries: readonly CatalogEntry[] = [
       listenConnected: "boolean",
       dbOk: "boolean",
       doorOk: "boolean",
-      // The plan's (CF-72), written by no process yet: clock-skew is owed until one writes it.
+      // CF-72: the process's clock less the database's clock_timestamp(), from the health hooks
+      // of worker, console and admin (packages/server's sampleDatabaseClock); null when unread.
       clockSkewMs: "number",
     },
-    alerts: ["pool-exhausted", "database-unreachable"],
-    owed: ["clock-skew"],
+    alerts: ["clock-skew", "pool-exhausted", "database-unreachable"],
   },
   {
     event: "shutdown.started",

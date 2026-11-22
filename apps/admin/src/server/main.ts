@@ -85,6 +85,9 @@ export const adminService: ServiceDefinition = {
     });
     const deps = createStaffDeps({ realm, clock, lines, environment: settings.environment });
     const built = buildApiService("admin", ctx, adminHooks(deps, docsOrigin));
-    return { ...built, health: async () => database.stats() };
+    return {
+      ...built,
+      health: async () => ({ ...database.stats(), ...(await database.sampleClock(ctx.clock)) }),
+    };
   },
 };

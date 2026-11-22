@@ -37,6 +37,7 @@ import {
   type RequestOptions,
   requestUnit,
 } from "@fin/server/http";
+import { sampleDatabaseClock } from "@fin/server/process-health";
 import { Hono } from "hono";
 import { dropEdgeHeaders, outsideRequest } from "../doors/outside.ts";
 import {
@@ -312,6 +313,8 @@ export async function buildWorker(
     fetch: workerFetch(ctx, docsOrigin),
     health: async () => ({
       dbOk: await dbOk(),
+      // The process's clock against the database's, on a client held for that one query.
+      clockSkewMs: (await sampleDatabaseClock(pool, ctx.clock)).clockSkewMs,
       poolTotal: pool.totalCount,
       poolIdle: pool.idleCount,
       poolWaiting: pool.waitingCount,

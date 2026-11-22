@@ -15,6 +15,7 @@ import type { BuiltService, ServiceContext, ServiceDefinition } from "@fin/serve
 import { loadDocsOrigin, loadIngressConfig } from "@fin/server/config";
 import type { FinContext } from "@fin/server/http";
 import { ConnectorPeers } from "@fin/server/ingress";
+import { sampleDatabaseClock } from "@fin/server/process-health";
 import type { Telemetry } from "@fin/server/telemetry";
 import { type AuthHook, createApiHost } from "@fin/web-host";
 import type { Pool } from "pg";
@@ -128,7 +129,12 @@ export async function buildConsole(
   return {
     fetch: host.fetch,
     peers,
-    health: async () => ({ dbPoolTotal: pool.totalCount, dbPoolIdle: pool.idleCount }),
+    // dbOk and the process's clock against the database's, on a client held for that one query.
+    health: async () => ({
+      ...(await sampleDatabaseClock(pool, ctx.clock)),
+      dbPoolTotal: pool.totalCount,
+      dbPoolIdle: pool.idleCount,
+    }),
     realm,
     orgs,
   };

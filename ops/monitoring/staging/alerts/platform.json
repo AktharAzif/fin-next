@@ -148,6 +148,29 @@
       }
     },
     {
+      "name": "clock-skew",
+      "group": "A",
+      "severity": "N",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin", "verify", "backup"],
+      "query": {
+        "max": { "event": "process.health", "field": "clockSkewMs", "abs": true }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.clock-skew",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 120,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A process and the database disagree on the time by {{value}} ms.",
+      "metadata": {
+        "check": "Which replicas skew (one host or all); Railway's status.",
+        "flow": "F20",
+        "runbook": "docs/runbooks/clock-skew.md"
+      }
+    },
+    {
       "name": "dns-lookup-failing",
       "group": "A",
       "severity": "N",

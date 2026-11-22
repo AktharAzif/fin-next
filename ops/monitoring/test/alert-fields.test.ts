@@ -19,7 +19,6 @@ const NO_WRITER = (writer: string) => `no process writes the event yet: ${writer
 
 /** `<alert>/<field>`: a field its alert reads that no file naming the alert's events writes here. */
 const UNWRITTEN: Readonly<Record<string, string>> = {
-  "database-unreachable/dbOk": HEALTH_HOOK,
   "pool-exhausted/poolWaiting": HEALTH_HOOK,
   "privileged-login/registered": NO_WRITER("P0-E's matcher of ops.privileged_login"),
   "privileged-login/role": NO_WRITER("P0-E's matcher of ops.privileged_login"),
@@ -70,8 +69,8 @@ describe("the staging alerts' fields", () => {
     expect(Object.keys(UNWRITTEN).filter((key) => !read.has(key))).toEqual([]);
   });
 
-  it("leave clock-skew owed while no process writes clockSkewMs", () => {
-    expect(written(["process.health"], "clockSkewMs")).toBe(false);
-    expect(config?.alerts.some((a) => a.name === "clock-skew")).toBe(false);
+  it("include clock-skew's clockSkewMs, which packages/server's process.health sampler writes", () => {
+    expect(written(["process.health"], "clockSkewMs")).toBe(true);
+    expect(config?.alerts.some((a) => a.name === "clock-skew")).toBe(true);
   });
 });

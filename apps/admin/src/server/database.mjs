@@ -8,6 +8,7 @@
 // through its declaration only. It goes when the two declarations become one.
 import { createPool, poolSettingsFromEnv } from "@fin/db";
 import { createPgDatabase } from "@fin/identity";
+import { sampleDatabaseClock } from "@fin/server/process-health";
 
 export function openAdminDatabase({ env, clock, release, lines }) {
   const pool = createPool(poolSettingsFromEnv(env, "admin"), {
@@ -22,5 +23,7 @@ export function openAdminDatabase({ env, clock, release, lines }) {
       poolIdle: pool.idleCount,
       poolWaiting: pool.waitingCount,
     }),
+    // dbOk and the process's clock against the database's, on a client held for that one query.
+    sampleClock: (processClock) => sampleDatabaseClock(pool, processClock),
   };
 }

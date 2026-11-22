@@ -55,7 +55,7 @@ export interface BuiltService {
   fetch: FetchHandler;
   /** Started before the server listens; readiness waits for its first resolution. */
   peers?: ConnectorPeers;
-  /** Fields `process.health` adds (the pool, dbOk, clockSkewMs) once they exist. */
+  /** Fields `process.health` adds: the pool, and dbOk and clockSkewMs (sampleDatabaseClock). */
   health?: () => Promise<Fields>;
 }
 
