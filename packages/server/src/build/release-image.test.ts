@@ -7,7 +7,11 @@
 // gives the build step and the script it runs, and refuses a script that is not exactly `vite
 // build --config <file>` (a second config file, another step, a pre or post script), a RUN with
 // another step or without the scan, and a release stage that copies anything else from the
-// repository. The scan itself finds each of CI's bundle-check harness rules in a planted output
+// repository, however Docker lets the copy name its stage (by index, in quotes, with an escape,
+// after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). It reads
+// the Dockerfile's lines as Docker's parser does, and refuses what Docker would read otherwise
+// (a parser directive, a heredoc, a character outside ASCII). The scan itself finds each of CI's
+// bundle-check harness rules in a planted output
 // (the fin:test-seam marker, a module comment naming packages/testing, as bundle-check's
 // `//#region` and as this build's Vite writes it, `// <path>`, an import of the harness's package,
 // packages/testing in a map's sources, inline or beside the file), refuses a link and a missing or
@@ -27,6 +31,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  builderFlags,
   type ImageBuild,
   imageBuilds,
   RELEASE_STAGE,
@@ -106,6 +111,9 @@ const APP_RUN_BUILD = `FIN_BUILD_TARGET=release pnpm --filter "@fin/\${APP}" run
 const APP_RUN_SCAN = `node ${SCAN_SCRIPT} "apps/\${APP}/dist/server"`;
 const APP_RUN_CHECK = `test -f "apps/\${APP}/dist/server/main.js"`;
 const APP_COPY = `COPY --from=build-release /src/apps/\${APP}/dist/server/ /app/dist/\n`;
+// connector.Dockerfile's release stage's copies: cloudflared from its image's stage, and the output.
+const CONNECTOR_CLOUDFLARED = "COPY --from=cloudflared ";
+const CONNECTOR_COPY = "COPY --from=build /src/apps/connector/dist/server/ /app/dist/\n";
 
 describe("the Dockerfiles' release builds", () => {
   const images = imageBuilds(REPOSITORY);
@@ -212,6 +220,21 @@ describe("the Dockerfiles' release builds", () => {
     },
     30_000,
   );
+});
+
+describe("builderFlags", () => {
+  it.each([
+    ["--from=deps /a /b", ["--from=deps"], "/a /b"],
+    ['--link --from="build" /a /b', ["--link", "--from=build"], "/a /b"],
+    ["--from='de ps' /a", ["--from=de ps"], "/a"],
+    ["--from=de\\ps\t /a", ["--from=deps"], "/a"],
+    ['--from="" /a', ["--from="], "/a"],
+    ["/a --from=deps /b", [], "/a --from=deps /b"],
+    ["--link -- --from=deps /b", ["--link"], " --from=deps /b"],
+    ["-x --from=deps /b", [], "-x --from=deps /b"],
+  ])("reads %j as Docker's parser does", (text, flags, rest) => {
+    expect(builderFlags(text)).toEqual({ flags, rest });
+  });
 });
 
 describe("viteBuildConfig", () => {
@@ -397,6 +420,168 @@ describe("a changed release build is refused, or followed", () => {
     expect(images.builds.map((build) => build.label)).not.toContain(
       dockerfile === APP_DOCKERFILE ? api : dockerfile,
     );
+  });
+
+  it("a stage named by its index, in quotes or in capitals is the stage read", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        replace(files, APP_DOCKERFILE, APP_COPY, APP_COPY.replace("build-release", "1"));
+        replace(files, CONNECTOR_DOCKERFILE, CONNECTOR_CLOUDFLARED, "COPY --from=0 ");
+        replace(
+          files,
+          CONNECTOR_DOCKERFILE,
+          CONNECTOR_COPY,
+          CONNECTOR_COPY.replace("build", '"BUILD"'),
+        );
+      }),
+    );
+    expect(images.refusals).toEqual([]);
+    const labels = images.builds.map((build) => build.label);
+    expect(labels).toContain(api);
+    expect(labels).toContain(CONNECTOR_DOCKERFILE);
+  });
+});
+
+// Each Dockerfile's release stage changed in a way Docker reads one way, which the reader must read
+// the same way or refuse: a stage named by its index, in quotes, with an escape or after another
+// flag; a --from Docker reads as a source or as the build context; a parent stage's ONBUILD,
+// command or copy from a later stage; and the lines Docker joins or splits otherwise than a plain
+// reading would (a heredoc, a parser directive, a blank line or a form feed in a continuation, a
+// line that is no comment to Docker).
+describe.each([
+  { dockerfile: APP_DOCKERFILE, label: `${APP_DOCKERFILE}, APP=api`, copy: APP_COPY, deps: 0 },
+  { dockerfile: CONNECTOR_DOCKERFILE, label: CONNECTOR_DOCKERFILE, copy: CONNECTOR_COPY, deps: 1 },
+])("$dockerfile's release stage, read as Docker reads it", ({ dockerfile, label, copy, deps }) => {
+  /** `text` with `from`, which it must hold once, replaced by `to`. */
+  const swap = (text: string, from: string, to: string): string => {
+    if (text.split(from).length !== 2) throw new Error(`${dockerfile} does not hold ${from} once`);
+    return text.replace(from, () => to);
+  };
+  const testing = (flags: string) => `COPY ${flags} /src/packages/testing/ /app/testing/\n`;
+  /** `lines` after the release stage's copy of the output. */
+  const second = (lines: string) => (text: string) => swap(text, copy, `${copy}${lines}`);
+  /** The release stage built on `runtime`, a stage of `lines` on the release stage's own image. */
+  const parent = (lines: string) => (text: string) =>
+    swap(text, " AS release\n", ` AS runtime\n${lines}FROM runtime AS release\n`);
+  const twice = `its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`;
+  const builtOn = `its ${RELEASE_STAGE} stage is built on runtime, which holds the repository`;
+  const context = new RegExp(
+    `^its ${RELEASE_STAGE} stage copies from the build context on line \\d+$`,
+  );
+
+  it.each<[string, (text: string) => string, string | RegExp]>([
+    ["a second copy that names a stage by its index", second(testing(`--from=${deps}`)), twice],
+    [
+      "a second copy that names a stage by a signed index",
+      second(testing(`--from=+0${deps}`)),
+      twice,
+    ],
+    ["a second copy that names a stage in quotes", second(testing('--from="deps"')), twice],
+    ["a second copy that names a stage in capitals", second(testing("--from='DePs'")), twice],
+    ["a second copy that names a stage with an escape", second(testing("--from=de\\ps")), twice],
+    [
+      "a second copy whose --from follows another flag",
+      second(testing("--link --from=deps")),
+      twice,
+    ],
+    [
+      "a parent stage's ONBUILD",
+      parent(`ONBUILD ${testing("--from=deps")}`),
+      /^ONBUILD on line \d+ gives instructions to the stages built on its own, which the test does not read$/,
+    ],
+    [
+      "a parent stage that mounts the repository by a later flag",
+      parent("RUN --network=none --mount=type=bind,from=deps,target=/r cp -r /r/packages /app/\n"),
+      builtOn,
+    ],
+    ["a parent stage that runs a command", parent("RUN wget https://example.org/x.js\n"), builtOn],
+    [
+      "a parent stage that copies from a stage after it",
+      (text) =>
+        swap(
+          text,
+          " AS release\n",
+          ` AS runtime\n${testing("--from=late")}FROM deps AS late\nFROM runtime AS release\n`,
+        ),
+      builtOn,
+    ],
+    [
+      "a copy whose empty --from is the build context",
+      second('COPY --from="" packages/testing/ /app/testing/\n'),
+      context,
+    ],
+    [
+      "a --from after a source, which Docker reads as a source",
+      second("COPY packages/testing/ --from=deps* /app/testing/\n"),
+      context,
+    ],
+    [
+      "a copy from an image not pinned by digest",
+      second(testing("--from=node:26")),
+      /^COPY on line \d+ copies from "node:26", which is neither a stage of the file nor an image pinned by digest$/,
+    ],
+    [
+      "a copy from a stage index the file does not have",
+      second(testing("--from=9")),
+      /^COPY on line \d+ copies from "9", which is neither a stage of the file nor an image pinned by digest$/,
+    ],
+    [
+      "a copy whose --from is a variable",
+      second(testing("--from=$APP")),
+      /^COPY on line \d+ gives --from as "\$APP", which the test does not read$/,
+    ],
+    [
+      "a copy that gives --from twice",
+      second(testing(`--from=deps --from=${deps}`)),
+      /^COPY on line \d+ gives --from 2 times$/,
+    ],
+    [
+      "a heredoc, whose lines Docker reads as a file's text",
+      second(`COPY <<EOF /app/notes.txt\nFROM scratch AS notes\nEOF\n${testing("--from=deps")}`),
+      /^line \d+ holds a heredoc \(`<<`\), which the test does not read$/,
+    ],
+    [
+      "a blank line in a continued instruction, which Docker skips",
+      second(`CMD ["x"] \\\n\nFROM scratch AS notes\n${testing("--from=deps")}`),
+      twice,
+    ],
+    [
+      "a form feed after a line's last escape, which Docker does not continue",
+      second(`CMD ["x"] \\\f\n${testing("--from=deps")}`),
+      twice,
+    ],
+    [
+      "a line that ends in an escaped escape",
+      second(`CMD ["x"] \\\\\n${testing("--from=deps")}`),
+      /^line \d+ ends in an escaped escape, which the test does not read$/,
+    ],
+    [
+      "a line that begins with a byte-order mark, which Docker reads as no comment",
+      second(`CMD ["x"] \\\n\uFEFF# a note\n${testing("--from=deps")}`),
+      /^line \d+ holds a character outside ASCII, which the test does not read$/,
+    ],
+    [
+      "an escape directive",
+      (text) => `# escape=\`\n${text}`,
+      /^line 1 is a parser directive, which changes how Docker reads the file$/,
+    ],
+    [
+      "a syntax directive among the first comments",
+      (text) => `# A note.\n\n  #SYNTAX = example.org/frontend\n${text}`,
+      /^line 3 is a parser directive, which changes how Docker reads the file$/,
+    ],
+  ])("refuses %s", (_name, change, refusal) => {
+    const images = imageBuilds(
+      plantRepository((files) => files.set(dockerfile, change(files.get(dockerfile) ?? ""))),
+    );
+    const prefix = `${dockerfile}: `;
+    const refusals = images.refusals
+      .filter((each) => each.startsWith(prefix))
+      .map((each) => each.slice(prefix.length));
+    expect(refusals).toContainEqual(
+      typeof refusal === "string" ? refusal : expect.stringMatching(refusal),
+    );
+    expect(images.builds.map((build) => build.label)).not.toContain(label);
   });
 });
 

@@ -3,7 +3,10 @@
 // image's pins (src/build/release-image.test.ts). The real-bundle tests build what this returns, so
 // they build what each image's build runs, not a config file they assume:
 //   - each ops/docker/*.Dockerfile's `release` stage (the target the release workflow builds) and
-//     the one stage of the Dockerfile's own, built from the repository, whose output it copies;
+//     the one stage of the Dockerfile's own, built from the repository, whose output it copies,
+//     with the file's lines, each instruction's flags and each COPY's --from read as Docker reads
+//     them (a stage by index or by name in any case and quoting, an image only by digest), and a
+//     parent stage that runs a command or copies from the repository refused, as ONBUILD is;
 //     that stage's one RUN, read as a list of steps joined by `&&` (so any step's failure fails
 //     the RUN): `test` checks, exactly one `[NAME=value ...] pnpm --filter <package> run
 //     <script>`, and right after it the output scan, `node ops/docker/harness-scan.mjs <dir>`,
@@ -84,28 +87,52 @@ function fail(message: string): never {
   throw new Unreadable(message);
 }
 
+// The blanks Docker's parser trims a line by and splits an instruction's flags at, in ASCII (a line
+// outside ASCII is refused, so Docker's other blanks never reach the reader).
+const BLANK = /[\t\n\v\f\r ]/;
+// A parser directive Docker or its frontend may read among the file's first comments.
+const DIRECTIVE = /^[\t\n\v\f\r ]*#[\t\n\v\f\r ]*(?:syntax|escape|check)[\t\n\v\f\r ]*=/i;
+
 /**
- * The instructions of a Dockerfile: comment lines dropped (inside a continued instruction too), and
- * a line that ends in a backslash joined to the next one, as Docker joins them.
+ * The instructions of a Dockerfile, as Docker's parser reads them: comment and blank lines dropped
+ * (inside a continued instruction too), and a line that ends in a backslash, then spaces or tabs
+ * only, joined to the next one. What Docker would read otherwise is refused: a parser directive
+ * (which can change the escape character or the frontend), a heredoc (whose lines are a file's
+ * text, not instructions), a line that ends in an escaped escape, and a character outside ASCII
+ * (whose blanks Docker and the reader tell apart differently).
  */
 export function dockerInstructions(text: string): Instruction[] {
   const instructions: Instruction[] = [];
   let parts: string[] = [];
   let start = 0;
-  const lines = text.split("\n");
-  for (const [index, raw] of lines.entries()) {
-    const line = raw.replace(/\r$/, "");
-    if (/^\s*#/.test(line) || (parts.length === 0 && line.trim() === "")) continue;
-    if (parts.length === 0) start = index + 1;
-    const continued = /\\\s*$/.test(line);
-    parts.push(continued ? line.replace(/\\\s*$/, "") : line);
-    if (continued && index < lines.length - 1) continue;
+  const end = () => {
     const joined = parts.join("").trim();
     parts = [];
     const match = /^([A-Za-z]+)(?:\s+([\s\S]*))?$/.exec(joined);
     if (match?.[1] === undefined) fail(`line ${start} is no instruction`);
     instructions.push({ keyword: match[1].toUpperCase(), text: match[2] ?? "", line: start });
+  };
+  for (const [index, raw] of text.split("\n").entries()) {
+    const line = raw.replace(/\r$/, "");
+    if (instructions.length === 0 && parts.length === 0 && DIRECTIVE.test(line)) {
+      fail(`line ${index + 1} is a parser directive, which changes how Docker reads the file`);
+    }
+    if (/^[\t\n\v\f\r ]*(?:#|$)/.test(line)) continue;
+    if (/[\u0080-\uffff]/.test(line)) {
+      fail(`line ${index + 1} holds a character outside ASCII, which the test does not read`);
+    }
+    if (/\\\\[ \t]*$/.test(line)) {
+      fail(`line ${index + 1} ends in an escaped escape, which the test does not read`);
+    }
+    if (line.includes("<<")) {
+      fail(`line ${index + 1} holds a heredoc (\`<<\`), which the test does not read`);
+    }
+    if (parts.length === 0) start = index + 1;
+    const continued = /\\[ \t]*$/.test(line);
+    parts.push(continued ? line.replace(/\\[ \t]*$/, "") : line);
+    if (!continued) end();
   }
+  if (parts.length > 0) end();
   return instructions;
 }
 
@@ -218,18 +245,95 @@ interface Stage {
   parent: Stage | undefined;
   instructions: Instruction[];
   /**
-   * Whether it holds the repository: it copies from the build context, or from or on a stage that
-   * holds it.
+   * Whether it holds the repository, or may: it adds or copies from the build context, runs a
+   * command (which can mount the repository or fetch it), or copies from or is built on a stage
+   * that holds it.
    */
   repository: boolean;
 }
 
-const fromStage = (instruction: Instruction): string | undefined =>
-  /(?:^|\s)--from=(\S+)/.exec(instruction.text)?.[1]?.toLowerCase();
+/**
+ * The flags an instruction's text begins with, as Docker's parser reads them (each word that
+ * begins with `--`, its quotes removed and a backslash keeping the character after it, up to the
+ * first word that does not begin so or a `--` alone), and the text after them.
+ */
+export function builderFlags(text: string): { flags: string[]; rest: string } {
+  const flags: string[] = [];
+  let at = 0;
+  for (;;) {
+    while (BLANK.test(text[at] ?? "")) at++;
+    if (!text.startsWith("--", at)) return { flags, rest: text.slice(at) };
+    let word = "";
+    let quote: string | undefined;
+    let quoted = false;
+    for (; at < text.length; at++) {
+      let char = text[at] ?? "";
+      if (quote === undefined && BLANK.test(char)) break;
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      if (quote === undefined && (char === "'" || char === '"')) {
+        quote = char;
+        quoted = true;
+        continue;
+      }
+      if (char === "\\") {
+        at++;
+        if (at === text.length) break;
+        char = text[at] ?? "";
+      }
+      word += char;
+    }
+    if (word === "--") return { flags, rest: text.slice(at) };
+    if (quoted || word !== "") flags.push(word);
+  }
+}
+
+// An image named with its digest, whose content the name fixes.
+const PINNED = /@sha256:[0-9a-f]{64}$/;
+
+/**
+ * What a COPY copies from, as Docker resolves its --from: the build context (undefined, without
+ * one or with an empty one), the stage at that index or of that name (in any case), or an image
+ * pinned by its digest. Anything else, a --from given twice and one Docker would expand further,
+ * is refused.
+ */
+function copySource(copy: Instruction, stages: readonly Stage[]): Stage | "image" | undefined {
+  const values = builderFlags(copy.text)
+    .flags.filter((flag) => flag === "--from" || flag.startsWith("--from="))
+    .map((flag) => flag.slice("--from=".length));
+  if (values.length > 1) fail(`COPY on line ${copy.line} gives --from ${values.length} times`);
+  const [value] = values;
+  if (value === undefined || value === "") return undefined;
+  if (!/^[\w.:/@+-]+$/.test(value)) {
+    fail(
+      `COPY on line ${copy.line} gives --from as ${JSON.stringify(value)}, which the test does not read`,
+    );
+  }
+  const index = /^[+-]?\d+$/.test(value) ? Number(value) : undefined;
+  const stage =
+    index === undefined
+      ? stages.find((each) => each.name === value.toLowerCase())
+      : index >= 0 && index < stages.length
+        ? stages[index]
+        : undefined;
+  if (stage !== undefined) return stage;
+  if (index === undefined && PINNED.test(value)) return "image";
+  fail(
+    `COPY on line ${copy.line} copies from ${JSON.stringify(value)}, which is neither a stage of the file nor an image pinned by digest`,
+  );
+}
 
 function stagesOf(instructions: readonly Instruction[]): Stage[] {
   const stages: Stage[] = [];
+  const bases: { base: string; line: number }[] = [];
   for (const instruction of instructions) {
+    if (instruction.keyword === "ONBUILD") {
+      fail(
+        `ONBUILD on line ${instruction.line} gives instructions to the stages built on its own, which the test does not read`,
+      );
+    }
     if (instruction.keyword === "FROM") {
       const words = dockerWords(instruction.text, {}).filter((w) => !w.startsWith("--platform="));
       const [base, as, name] = words;
@@ -239,13 +343,13 @@ function stagesOf(instructions: readonly Instruction[]): Stage[] {
       ) {
         fail(`FROM on line ${instruction.line} is not \`FROM <image> [AS <name>]\``);
       }
-      const parent = stages.find((stage) => stage.name === base.toLowerCase());
       stages.push({
         name: (name ?? String(stages.length)).toLowerCase(),
-        parent,
+        parent: undefined,
         instructions: [],
-        repository: parent?.repository ?? false,
+        repository: false,
       });
+      bases.push({ base: base.toLowerCase(), line: instruction.line });
       continue;
     }
     const stage = stages.at(-1);
@@ -254,14 +358,34 @@ function stagesOf(instructions: readonly Instruction[]): Stage[] {
       fail(`${instruction.keyword} on line ${instruction.line} comes before any FROM`);
     }
     stage.instructions.push(instruction);
-    const from = fromStage(instruction);
-    if (
-      instruction.keyword === "ADD" ||
-      (instruction.keyword === "COPY" &&
-        (from === undefined || stages.some((each) => each.name === from && each.repository))) ||
-      (instruction.keyword === "RUN" && /^\s*--mount/.test(instruction.text))
-    ) {
-      stage.repository = true;
+  }
+  for (const [index, stage] of stages.entries()) {
+    const { base, line } = bases[index] ?? { base: "", line: 0 };
+    const parent = stages.findIndex((each) => each.name === base);
+    if (parent >= index) {
+      fail(`FROM on line ${line} names the stage ${base}, which is not before it`);
+    }
+    stage.parent = stages[parent];
+  }
+  // A copy may name a stage after its own, so what each stage holds is settled over all of them.
+  const sources = new Map<Instruction, Stage | "image" | undefined>();
+  for (const stage of stages) {
+    for (const instruction of stage.instructions) {
+      if (instruction.keyword === "COPY") sources.set(instruction, copySource(instruction, stages));
+    }
+  }
+  const holds = (instruction: Instruction): boolean => {
+    if (instruction.keyword === "ADD" || instruction.keyword === "RUN") return true;
+    if (instruction.keyword !== "COPY") return false;
+    const source = sources.get(instruction);
+    return source === undefined || (source !== "image" && source.repository);
+  };
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const stage of stages) {
+      if (stage.repository) continue;
+      stage.repository = stage.parent?.repository === true || stage.instructions.some(holds);
+      changed ||= stage.repository;
     }
   }
   return stages;
@@ -443,26 +567,25 @@ function readRelease(repository: string, dockerfile: string): Release {
       `its ${RELEASE_STAGE} stage is built on ${release.parent.name}, which holds the repository`,
     );
   }
-  const copies: Instruction[] = [];
+  const copies: { copy: Instruction; build: Stage }[] = [];
   for (const instruction of release.instructions) {
     if (instruction.keyword === "RUN" || instruction.keyword === "ADD") {
       fail(`its ${RELEASE_STAGE} stage has ${instruction.keyword} on line ${instruction.line}`);
     }
     if (instruction.keyword !== "COPY") continue;
-    const from = fromStage(instruction);
-    if (from === undefined) {
+    const source = copySource(instruction, stages);
+    if (source === undefined) {
       fail(`its ${RELEASE_STAGE} stage copies from the build context on line ${instruction.line}`);
     }
-    if (stages.some((stage) => stage.name === from && stage.repository)) copies.push(instruction);
+    if (source !== "image" && source.repository) copies.push({ copy: instruction, build: source });
   }
-  const [copy, ...more] = copies;
-  if (copy === undefined || more.length > 0) {
+  const [first, ...more] = copies;
+  if (first === undefined || more.length > 0) {
     fail(
       `its ${RELEASE_STAGE} stage copies ${copies.length} times from stages that hold the repository, not once`,
     );
   }
-  const build = stages.find((stage) => stage.name === fromStage(copy));
-  if (build === undefined) fail(`the stage its ${RELEASE_STAGE} stage copies from is missing`);
+  const { copy, build } = first;
   for (const instruction of build.instructions) {
     if (!["ARG", "ENV", "WORKDIR", "SHELL", "RUN"].includes(instruction.keyword)) {
       fail(`its build stage ${build.name} has ${instruction.keyword} on line ${instruction.line}`);
@@ -485,9 +608,9 @@ function readRelease(repository: string, dockerfile: string): Release {
 /** The directory the release stage copies, with the build argument set to `value`. */
 function copiedDirectory(release: Release, value: string | undefined): string {
   const { env } = settingOf(release.release, release.copy, release.arg, value);
-  const words = dockerWords(release.copy.text, env).filter((word) => !word.startsWith("--"));
-  const [source, destination, ...rest] = words;
-  if (source === undefined || destination === undefined || rest.length > 0) {
+  const words = dockerWords(builderFlags(release.copy.text).rest, env);
+  const [source, destination, ...more] = words;
+  if (source === undefined || destination === undefined || more.length > 0) {
     fail(`its ${RELEASE_STAGE} stage's COPY on line ${release.copy.line} is not one source`);
   }
   if (!posix.isAbsolute(source)) {
