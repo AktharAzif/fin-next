@@ -311,8 +311,7 @@ export const entries: readonly CatalogEntry[] = [
       "packages/server's line formatter, in place of an event name that is not a bounded code (a writer's bug), with the writer's level and fields; a name built at run time, so MC-01's scan cannot see it",
     fields: {},
     alerts: [],
-    noAlert:
-      "A writer's bug, not an incident: the line still ships with its fields, and MC-01 already makes the catalogue hold every name the code writes as a literal",
+    noAlert: "A writer's bug, not an incident: the line still ships with its fields",
   },
   {
     event: "error.unexpected",
