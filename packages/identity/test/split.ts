@@ -5,7 +5,7 @@
 // time with at least one of its kind in flight, so overlapping work counts once.
 import { performance } from "node:perf_hooks";
 import pg from "pg";
-import { afterEach, beforeAll, beforeEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 
 class Busy {
   inflight = 0;
@@ -151,9 +151,13 @@ export function mark(): Mark {
 
 const ms = (value: number) => String(Math.round(value));
 
-let currentFile = "unknown";
+/** The calling test file, from the stack (a warm-up runs in a beforeAll, before any test). */
+function callerFile(): string {
+  const found = /src\/[\w.-]+\.test\.ts/.exec(new Error().stack ?? "");
+  return found?.[0] ?? "unknown";
+}
 
-export function report(name: string, from: Mark): void {
+export function report(name: string, from: Mark, file: string = callerFile()): void {
   const to = mark();
   const cpu = process.cpuUsage(from.cpu);
   const loop = performance.eventLoopUtilization(to.loop, from.loop);
@@ -179,12 +183,8 @@ export function report(name: string, from: Mark): void {
     `paths=${paths}`,
   ];
   // biome-ignore lint/suspicious/noConsole: measurement only, one line per test for the db log
-  console.log(`F3SPLIT ${currentFile} > ${name} | ${fields.join(" ")}`);
+  console.log(`F3SPLIT ${file} > ${name} | ${fields.join(" ")}`);
 }
-
-beforeAll((_context, suite) => {
-  currentFile = suite.fullName;
-});
 
 let started: Mark | null = null;
 
@@ -192,10 +192,12 @@ beforeEach(() => {
   started = mark();
 });
 
-afterEach((context) => {
+// Vitest 5 parses a hook's first argument for fixtures: it must be a destructuring pattern.
+afterEach(({ task }) => {
   if (started === null) return;
-  const full = context.task.fullName;
-  const prefix = `${context.task.file.fullName} > `;
-  report(full.startsWith(prefix) ? full.slice(prefix.length) : full, started);
+  const file = task.file.fullName;
+  const prefix = `${file} > `;
+  const full = task.fullName;
+  report(full.startsWith(prefix) ? full.slice(prefix.length) : full, started, file);
   started = null;
 });

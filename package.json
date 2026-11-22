@@ -26,7 +26,7 @@
     "lint": "TURBO_TELEMETRY_DISABLED=1 turbo run lint lint:root",
     "typecheck": "TURBO_TELEMETRY_DISABLED=1 turbo run typecheck typecheck:root",
     "test": "TURBO_TELEMETRY_DISABLED=1 turbo run test test:root",
-    "test:db": "TURBO_TELEMETRY_DISABLED=1 turbo run test:db --continue; s=$?; for f in factors sign-in sessions step-up passkeys limits staff pins; do echo F3ALONE $f; pnpm --filter @fin/identity exec vitest run --config ../../vitest.config.ts --mode db src/$f.db.test.ts; done; exit $s",
+    "test:db": "TURBO_TELEMETRY_DISABLED=1 turbo run test:db --continue; s=$?; echo F3FULL 2; TURBO_TELEMETRY_DISABLED=1 turbo run test:db --continue; for f in factors sign-in sessions step-up passkeys limits staff pins; do echo F3ALONE $f; pnpm --filter @fin/identity exec vitest run --config ../../vitest.config.ts --mode db src/$f.db.test.ts; done; exit $s",
     "lint:root": "biome ci --error-on-warnings .",
     "typecheck:root": "tsc -p tsconfig.json",
     "test:root": "node --test \"scripts/test/*.test.mjs\""
