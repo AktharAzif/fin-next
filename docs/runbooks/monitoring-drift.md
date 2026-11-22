@@ -86,9 +86,10 @@ and talks to it over an IPC channel:
   calls, texts or pushes is refused.
 - After a run that wrote anything, everything is read back and compared with the files, as a dry
   run would: `read back: <n> object(s) compared, every one as the files say`, or exit 1 with each
-  differing object named, a part Better Stack fixes at creation included. A source or an Errors
-  application the files do not name is never deleted: the read-back says so and the run's `drift`
-  is true (exit 0), as it is for a real run with nothing to write while such a difference stands.
+  differing object named, a part Better Stack fixes at creation included. Such a part that already
+  differed before the run, and a source or an Errors application the files do not name (never
+  deleted), are no work of the run's: the read-back names them and the run's `drift` is true (exit
+  0), as it is for a real run with nothing to write while such a difference stands.
 - Every run, a dry run included, writes one `monitoring.apply` line (names and counts only:
   `outcome`, `drift`, the counts, `readBackCompared`, `readBackMismatched`) to `lines.jsonl`,
   shipped to the `ops` source when `FIN_OPS_INGEST_HOST` and `FIN_OPS_INGEST_TOKEN_FILE` are set.

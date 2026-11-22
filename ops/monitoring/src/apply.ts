@@ -674,11 +674,12 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     return { ...result, outcome: "stopped", drift: true, exitCode: 1 };
   }
   const afterPlan = makePlan(desired, after, { ...planOptions, dryRun: true });
-  const { lines, ...readBack } = compareBack(desired, afterPlan);
+  const { lines, standing, ...readBack } = compareBack(desired, afterPlan, plan);
   if (readBack.mismatched.length === 0 && afterPlan.drift) {
-    // Only what no run changes is left: a source or an Errors application the files do not name.
+    // Only what no run changes is left: a part Better Stack fixes at creation that differed
+    // before this run, or a source or an Errors application the files do not name.
     out(
-      `read back: ${readBack.compared} object(s) compared, each as the files say, but Better Stack also holds what the files do not name (drift):\n  ${afterPlan.notes.join("\n  ")}`,
+      `read back: ${readBack.compared} object(s) compared, each as this run sent it, but what no run changes still differs from the files (drift):\n  ${[...standing, ...afterPlan.notes].join("\n  ")}`,
     );
     return { ...result, outcome: "applied", drift: true, exitCode: 0, readBack };
   }
@@ -711,14 +712,20 @@ export function countPlan(plan: Plan): PlanCounts {
 /**
  * What a plan made after the writes says: every action it still holds and every refusal is a
  * difference, a `manual` one included: a part Better Stack fixes at creation that differs (a
- * source's data_region, a metric's type) is not as the files say, whether this run created the
- * object or found it so, and only a recreation by hand fixes it. Each object is named once, by
- * kind and name, with the parts that differ, never a value.
+ * source's data_region, a metric's type) on an object this run created, or one that was not so
+ * before the run, is not what the run sent. The same part already differing in the plan made
+ * before the writes (`before`) is no work of this run's: it is `standing` drift, which only a
+ * recreation by hand fixes, and the run reports it without failing. Each object is named once,
+ * by kind and name, with the parts that differ, never a value.
  */
 export function compareBack(
   desired: { readonly objects: readonly DesiredObject[] },
   plan: Plan,
-): ReadBack & { readonly lines: readonly string[] } {
+  before?: Plan,
+): ReadBack & { readonly lines: readonly string[]; readonly standing: readonly string[] } {
+  const fixed = (a: Action) => (a.op === "manual" ? `${a.kind}:${a.key}:${a.path}` : "");
+  const stood = new Set((before?.actions ?? []).filter((a) => a.op === "manual").map(fixed));
+  const standing: string[] = [];
   const found = new Map<string, { readonly label: string; readonly what: string[] }>();
   const differs = (kind: string, key: string, what: string) => {
     const id = `${kind}:${key}`;
@@ -727,6 +734,12 @@ export function compareBack(
     found.set(id, entry);
   };
   for (const action of plan.actions) {
+    if (action.op === "manual" && stood.has(fixed(action))) {
+      standing.push(
+        `${action.kind} ${action.key}: differs in ${action.path}, which Better Stack fixes at creation, as before this run (recreate it by hand after review)`,
+      );
+      continue;
+    }
     switch (action.op) {
       case "create":
         differs(action.object.kind, action.object.key, "missing");
@@ -760,7 +773,7 @@ export function compareBack(
     mismatched.push(`refused:${/^MA-\d{2}\b/.exec(refusal)?.[0] ?? "duplicate-name"}`);
     lines.push(`refused: ${refusal}`);
   }
-  return { compared: desired.objects.length, mismatched, lines };
+  return { compared: desired.objects.length, mismatched, lines, standing };
 }
 
 /** A private number a write carries (a threshold, a window, a grace period) and its placeholder. */

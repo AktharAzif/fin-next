@@ -591,6 +591,14 @@ describe("monitoring apply: applying", () => {
       "alert process-crash was paused (query failing); the apply resumes it",
     );
     expect(second.text()).toContain("! source fin-next-staging-api: data_region is us_east");
+    // The region differed before this run, which cannot change it: the read-back says so, and the
+    // run's drift stands, but what the run sent is as the files say.
+    expect(result).toMatchObject({ outcome: "applied", drift: true });
+    expect(result.readBack?.mismatched).toEqual([]);
+    expect(second.text()).toContain(
+      "source fin-next-staging-api: differs in data_region, which Better Stack fixes at creation, as before this run",
+    );
+    expect(second.text()).not.toContain("every one as the files say");
     expect(alert?.attributes.paused).toBe(false);
     const patches = writes(second.bs).filter((r) => r.method === "PATCH");
     expect(patches.some((p) => p.path.includes("/sources/"))).toBe(false);
