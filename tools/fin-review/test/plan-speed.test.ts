@@ -52,7 +52,8 @@ const LIMIT_MS = process.env["CI"] === "true" ? 6000 : 3000;
  * A run's bound, which only a hang reaches: the plan takes about 250 ms alone and took over 4
  * seconds inside a loaded `pnpm check`, and a part that takes it to the limit alone was seen to
  * take ten times its CPU time on one run under load, and over 40 seconds of wall time; a
- * quadratic part takes the 4,000-file tree to about four times the limit.
+ * quadratic part that took the 2,000-file tree over the limit took up to 23 seconds of CPU, and
+ * about 30 of wall time, on the 4,000-file tree under load.
  */
 const HANG_MS = 300_000;
 /** The tree the limit is for. */
@@ -63,7 +64,11 @@ const BIG_TREE = 4000;
 /**
  * Net growth from 250 files to 4,000 above which a plan over the limit fails. Net of the start, a
  * part linear in the tree grows about 19 times (the minimal tree's own 41 entries are taken off
- * both sizes: 3,959 against 209) and a quadratic part about 263 times.
+ * both sizes: 3,959 against 209) and a quadratic part about 263 times. Under an uncached check's
+ * load (1-minute loads of 27 to 97 on the CI box), every run single-threaded and a process of its
+ * own, a planted linear part that takes each case over the limit grew 15.2 to 19.8 times (11
+ * cases) and a planted quadratic part 149 to 251 times (8 cases). 48 leaves linear 2.4 times its
+ * growth and fails quadratic by 3.1 times.
  */
 const MAX_GROWTH = 48;
 /** How many runs of each tree a slow plan's times are the fastest of. */
@@ -108,11 +113,20 @@ interface Shape {
 describe("T-RV-20's speed rule", () => {
   it("fails a plan over the limit that grew as a quadratic part does, and passes one that grew linearly", () => {
     // [CPU ms of the first run at 2,000 files, then the fastest for the start, at 250 files and at
-    // 4,000, limit, fails]: the plan as it is, linear and quadratic parts modelled at the limit,
-    // then the rule's edges.
+    // 4,000, limit, fails]: the plan as it is, linear and quadratic parts planted to take each case
+    // over the limit (measured under an uncached check's load, the times as the test printed them,
+    // to the millisecond), the same parts modelled at the limit, then the rule's edges.
     const cases: [number, number, number, number, number, boolean][] = [
       [53, 30, 37, 80, 3000, false], // the plan as it is, under the limit at 2,000 files
-      [3060, 2754, 2826, 3150, 3000, false], // every size slowed alike: 5.5
+      [4186, 161, 591, 7927, 3000, false], // a linear part, the wide change (measured): 18.1
+      [4198, 163, 555, 7953, 3000, false], // a linear part, 300 links on main (measured): 19.9
+      [4306, 101, 560, 7476, 3000, false], // a linear part, 1,000 files added (measured): 16.1
+      [4284, 135, 619, 7513, 3000, false], // a linear part, 300 links added (measured): 15.2
+      [4033, 51, 99, 12270, 3000, true], // a quadratic part, the wide change (measured): 254.6
+      [3162, 38, 97, 10365, 3000, true], // a quadratic part, 300 links on main (measured): 175.0
+      [5115, 44, 171, 18964, 3000, true], // a quadratic part, 1,000 files added (measured): 149.0
+      [3048, 33, 88, 11967, 3000, true], // a quadratic part, 300 links added (measured): 217.0
+      [3060, 2754, 2826, 3150, 3000, false], // every size slowed alike (the floor counts): 1.2
       [3000, 218, 515, 5831, 3000, false], // a linear part at the limit (modelled): 18.9
       [3000, 160, 222, 11200, 3000, true], // a quadratic part at the limit, behind 20 ms: 178
       [6000, 300, 422, 22500, 6000, true], // the same at CI's limit, behind a 300 ms start: 182
