@@ -1,9 +1,11 @@
 // AdminAudit's state in the URL (spec 06 S6-03): the quick view (`show`), the filters (`actor`,
 // `action`, `org`, `date`, or custom `from` and `to` days), the page's cursor (`cursor` for older,
 // `before` for newer) and the open entry (`view=<aud_…>`). Lists are comma-separated IDs or event
-// names, as the API takes them. A hand-edited value that is not one of these is dropped, never
-// sent: the list then reads as if it were not there.
+// names, as the API takes them. A hand-edited value that is not one of these, in exactly the
+// shape the API takes, is dropped, never sent: the list then reads as if it were not there. A list
+// keeps its first items, as many as the API takes (by count and by length), and no more.
 import type { AuditListInput } from "./contract.ts";
+import { AUDIT_ID, ORG_ID, STAFF_ID } from "./ids.ts";
 
 export const AUDIT_PAGE_SIZE = 50;
 
@@ -38,15 +40,13 @@ export interface AuditSearch {
   view?: string;
 }
 
-const AUD = /^aud_[0-9a-hjkmnp-tv-z]{26}$/;
-// The shapes only: the API half checks each ID exactly, and refuses one it does not take.
-const STF = /^stf_[0-9a-z]{8,64}$/;
-const ORG = /^org_[0-9a-z]{8,64}$/;
 const EVENT = /^[a-z][a-z_]*(\.[a-z][a-z_]*){1,2}$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** At most this many of each list, as the API takes them. */
 const MAX = { actor: 20, action: 50, org: 20 } as const;
+/** The longest a list may run, commas included, as the API takes it. */
+const LIST_CHARS = 2_000;
 
 function realDay(value: unknown): string | undefined {
   if (typeof value !== "string" || !DAY.test(value)) return undefined;
@@ -58,22 +58,39 @@ function idOf(value: unknown, shape: RegExp): string | undefined {
   return typeof value === "string" && shape.test(value) ? value : undefined;
 }
 
+/**
+ * The items a list keeps, in order and without repeats: as many as the API takes, and only while
+ * the list stays within the API's length; undefined when none is left.
+ */
+function fit(items: readonly string[], max: number): string | undefined {
+  const kept: string[] = [];
+  let length = -1;
+  for (const item of new Set(items)) {
+    if (kept.length === max || length + 1 + item.length > LIST_CHARS) break;
+    kept.push(item);
+    length += 1 + item.length;
+  }
+  return kept.length === 0 ? undefined : kept.join(",");
+}
+
 /** A comma list of one shape, without repeats or wrong items; undefined when nothing is left. */
 function listOf(value: unknown, shape: RegExp, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
-  const items = [...new Set(value.split(",").filter((item) => shape.test(item)))].slice(0, max);
-  return items.length === 0 ? undefined : items.join(",");
+  return fit(
+    value.split(",").filter((item) => shape.test(item)),
+    max,
+  );
 }
 
 /** The route's `validateSearch`. */
 export function readAuditSearch(raw: Record<string, unknown>): AuditSearch {
   const search: AuditSearch = {};
   if (raw.show === "mine" || raw.show === "rejections") search.show = raw.show;
-  const actor = listOf(raw.actor, STF, MAX.actor);
+  const actor = listOf(raw.actor, STAFF_ID, MAX.actor);
   if (actor !== undefined) search.actor = actor;
   const action = listOf(raw.action, EVENT, MAX.action);
   if (action !== undefined) search.action = action;
-  const org = listOf(raw.org, ORG, MAX.org);
+  const org = listOf(raw.org, ORG_ID, MAX.org);
   if (org !== undefined) search.org = org;
   if ((DATE_PRESETS as readonly unknown[]).includes(raw.date)) {
     search.date = raw.date as DatePreset;
@@ -88,11 +105,11 @@ export function readAuditSearch(raw: Record<string, unknown>): AuditSearch {
       if (to !== undefined) search.to = to;
     }
   }
-  const cursor = idOf(raw.cursor, AUD);
-  const before = idOf(raw.before, AUD);
+  const cursor = idOf(raw.cursor, AUDIT_ID);
+  const before = idOf(raw.before, AUDIT_ID);
   if (cursor !== undefined) search.cursor = cursor;
   else if (before !== undefined) search.before = before;
-  const view = idOf(raw.view, AUD);
+  const view = idOf(raw.view, AUDIT_ID);
   if (view !== undefined) search.view = view;
   return search;
 }
@@ -135,8 +152,16 @@ export function hasFilters(search: AuditSearch): boolean {
   );
 }
 
-/** Which empty state an empty answer draws (the board's empty, rejections and noResults). */
-export function emptyKind(search: AuditSearch): "firstUse" | "viewEmpty" | "noResults" {
+/**
+ * Which empty state an empty answer draws (the board's empty, rejections and noResults). A page
+ * reached by a cursor is never the first use, whatever it holds: it is a page past the end of the
+ * list (a stale or hand-edited link, or rows that left a rolling date window), which offers the
+ * way back.
+ */
+export function emptyKind(
+  search: AuditSearch,
+): "firstUse" | "viewEmpty" | "noResults" | "pageEmpty" {
+  if (search.cursor !== undefined || search.before !== undefined) return "pageEmpty";
   if (hasFilters(search)) return "noResults";
   if (search.show !== undefined) return "viewEmpty";
   return "firstUse";
@@ -169,8 +194,8 @@ export function toggled(
   const current = items(search[key]);
   const next = current.includes(value)
     ? current.filter((item) => item !== value)
-    : [...current, value].slice(0, MAX[key]);
-  return withFilter(search, { [key]: next.length === 0 ? undefined : next.join(",") });
+    : [...current, value];
+  return withFilter(search, { [key]: fit(next, MAX[key]) });
 }
 
 /** A search with no filter, keeping its quick view ("Clear filters"). */
@@ -183,6 +208,11 @@ export function withoutFilters(search: AuditSearch): AuditSearch {
     from: undefined,
     to: undefined,
   });
+}
+
+/** The same list from its newest row: no cursor and no open entry. */
+export function firstPage(search: AuditSearch): AuditSearch {
+  return withFilter(search, {});
 }
 
 /** A search that opens another page of the same list. */

@@ -115,6 +115,31 @@ describe("GET /api/audit", () => {
     expect(back.items.map((i) => i.id)).toEqual(first.items.map((i) => i.id));
   });
 
+  it("answers a page past either end with the real count and the way back, never as an empty log", async () => {
+    const all = auditPageAnswer.parse((await admin.client.get("/api/audit?limit=100")).json);
+    const newest = `aud_${"z".repeat(26)}`;
+    const oldest = `aud_${"0".repeat(26)}`;
+    const pastNewest = auditPageAnswer.parse(
+      (await admin.client.get(`/api/audit?limit=50&before=${newest}`)).json,
+    );
+    expect(pastNewest).toMatchObject({
+      items: [],
+      total: all.total,
+      nextCursor: newest,
+      previousCursor: null,
+    });
+    const pastOldest = auditPageAnswer.parse(
+      (await admin.client.get(`/api/audit?limit=50&cursor=${oldest}`)).json,
+    );
+    expect(pastOldest).toMatchObject({
+      items: [],
+      total: all.total,
+      nextCursor: null,
+      previousCursor: oldest,
+    });
+    expect(all.total).toBeGreaterThan(0);
+  });
+
   it("filters by comma-separated actions and actors, and by the two views", async () => {
     const reply = await admin.client.get(
       `/api/audit?action=staff.signed_in,staff.factor_enrolled&actor=${auditor.staffId},${admin.staffId}`,

@@ -1,24 +1,20 @@
-// An entry of the audit log (the board's drawer; INV §4.14's panel): the whole record, with no
-// full page behind it. Details (who, the action and its key, the target, the organisation, when,
-// the reason), how the actor was verified and the address and device of the request ([BC-03]),
-// then "What changed". Opened from a row (`view=<aud_…>`), it steps through the page's rows
-// ("‹ 4 of 50 ›"); opened from a link to a row not on the page, it reads that one entry and shows
-// its loading, failed and not-found states.
+// An entry of the audit log (the board's drawer; INV §4.14's panel) in Fin Admin's shared side
+// drawer (components/list, S6-33): the whole record, with no full page behind it. Details (who,
+// the action and its key, the target, the organisation, when, the reason), how the actor was
+// verified and the address and device of the request ([BC-03]), then "What changed". Opened from a
+// row (`view=<aud_…>`), it steps through the page's rows ("‹ 4 of 50 ›"); opened from a link to a
+// row not on the page, it reads that one entry and shows its loading, failed and not-found states.
 //
-// @pendingDesign UR-24: the Drawer (S) and DetailList of @fin/ui; until the kit has them, the
-// board's side sheet is @fin/ui's Modal drawn at the drawer's width on the right, and the details
-// a definition list composed from tokens.
+// @pendingDesign UR-24: the DetailList of @fin/ui; until the kit has it, the details are a
+// definition list composed from tokens.
 import type { StaffViewer } from "@fin/app-contracts";
 import { isApiError, useFin } from "@fin/frame";
-import { CaretLeftIcon, CaretRightIcon } from "@fin/icons";
-import { Badge, CopyField, ErrorState, IconButton, Modal, SkeletonSection } from "@fin/ui";
+import { Badge, CopyField, ErrorState, SkeletonSection } from "@fin/ui";
 import { type ReactNode, useEffect, useState } from "react";
+import { SideDrawer } from "../../../components/list/SideDrawer.tsx";
 import { type AuditEntry, getAuditEntry } from "./contract.ts";
 import { formatWhenLong } from "./format.ts";
 import { changesOf, reasonOf, verificationWords, whoOf, wordsOf } from "./words.ts";
-
-/** The side sheet: the drawer's S width, full height, on the right; full width on phones. */
-const SHEET = "inset-x-auto right-0 m-0 h-full max-h-full w-full max-w-drawer-s rounded-none gap-6";
 
 const NOTHING_CHANGED = "Nothing changed, or this action is from before Fin kept what changed.";
 
@@ -201,45 +197,23 @@ export function AuditDrawer({
   }
 
   return (
-    <Modal
-      open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
+    <SideDrawer
       title={title}
       description="Staff action"
-      className={SHEET}
+      noun="staff action"
+      step={
+        index === -1
+          ? undefined
+          : {
+              index,
+              count: rows.length,
+              onPrevious: previous === undefined ? undefined : () => onStep(previous.id),
+              onNext: next === undefined ? undefined : () => onStep(next.id),
+            }
+      }
+      onClose={onClose}
     >
-      {index === -1 ? null : (
-        <div className="flex items-center gap-1">
-          <IconButton
-            label="Previous staff action"
-            size="sm"
-            icon={<CaretLeftIcon />}
-            {...(previous === undefined
-              ? { disabledReason: "This is the first staff action on this page." }
-              : {})}
-            onClick={() => {
-              if (previous !== undefined) onStep(previous.id);
-            }}
-          />
-          <span className="text-caption text-text-tertiary tabular-nums">
-            {`${index + 1} of ${rows.length}`}
-          </span>
-          <IconButton
-            label="Next staff action"
-            size="sm"
-            icon={<CaretRightIcon />}
-            {...(next === undefined
-              ? { disabledReason: "This is the last staff action on this page." }
-              : {})}
-            onClick={() => {
-              if (next !== undefined) onStep(next.id);
-            }}
-          />
-        </div>
-      )}
       {body}
-    </Modal>
+    </SideDrawer>
   );
 }

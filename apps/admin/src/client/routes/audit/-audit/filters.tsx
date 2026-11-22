@@ -1,26 +1,23 @@
-// AdminAudit's toolbar (the board's TableToolbar): the quick views (All, My actions, Rejections
-// this week), one menu per filter (Staff member, Action, Date; Organisation as a chip only), the
-// active filters as removable chips with "Clear filters", and "Copy link". Every choice goes into
-// the URL, so Back undoes it and a copied link opens the same list.
-//
-// @pendingDesign UR-23: FilterChips, FilterMenu, TableToolbar and DateRangePicker are not in
-// @fin/ui yet; they are composed here from its Button, DropdownMenu, Modal and Field, and swap for
-// the kit's when it has them. Each menu choice toggles one value and closes the menu.
-import { CaretDownIcon, CheckIcon, CopyIcon, XIcon } from "@fin/icons";
+// AdminAudit's toolbar (the board's TableToolbar) on Fin Admin's shared list layout
+// (components/list, S6-33): the quick views (All, My actions, Rejections this week), one menu per
+// filter (Staff member, Action, Date; Organisation as a chip only), the active filters as
+// removable chips with "Clear filters", and "Copy link". What is the audit log's own lives here:
+// what each chip says, the menus' choices and the link's address. Every choice goes into the URL,
+// so Back undoes it and a copied link opens the same list.
 import {
-  Button,
   DropdownMenu,
-  Field,
-  Input,
   MenuGroup,
   MenuItem,
   MenuRadioGroup,
   MenuRadioItem,
   MenuSeparator,
-  Modal,
-  toast,
 } from "@fin/ui";
 import { type ReactNode, useState } from "react";
+import { CopyLinkButton } from "../../../components/list/CopyLink.tsx";
+import { DateRangeDialog } from "../../../components/list/DateRangeDialog.tsx";
+import { type FilterChip, FilterChips } from "../../../components/list/FilterChips.tsx";
+import { filterTrigger, Picked } from "../../../components/list/FilterMenu.tsx";
+import { QuickViews, type QuickView as View } from "../../../components/list/QuickViews.tsx";
 import type { AuditPerson } from "./contract.ts";
 import { formatDay } from "./format.ts";
 import {
@@ -36,12 +33,6 @@ import {
   withoutFilters,
 } from "./search.ts";
 import { ACTION_GROUPS, wordsOf } from "./words.ts";
-
-export interface FilterChip {
-  id: "actor" | "action" | "org" | "date";
-  label: string;
-  onRemove: () => void;
-}
 
 /** "Date: Last 30 days", "Date: 1 Nov 2026 – 3 Nov 2026", "Date: from 1 Nov 2026". */
 export function dateLabel(search: AuditSearch): string | null {
@@ -109,97 +100,16 @@ export function filterChips(
   return chips;
 }
 
-const VIEWS: readonly { value: QuickView | undefined; label: string }[] = [
+const VIEWS: readonly View<QuickView>[] = [
   { value: undefined, label: "All" },
   { value: "mine", label: "My actions" },
   { value: "rejections", label: "Rejections this week" },
 ];
 
-function Picked({ on }: { on: boolean }) {
-  return on ? <CheckIcon /> : <span aria-hidden="true" className="inline-block size-4" />;
-}
-
-/**
- * One filter's trigger: its name, and how many values it holds. The Button element itself, never
- * a component around it: the menu gives its trigger the props that open it.
- */
-function trigger(label: string, count: number) {
-  return (
-    <Button variant="secondary" size="sm" trailingIcon={<CaretDownIcon />}>
-      {count === 0 ? label : `${label} (${count})`}
-    </Button>
-  );
-}
-
 /** The link to this list as it is filtered: no open entry and no page, so it opens at the top. */
 export function listLink(origin: string, search: AuditSearch): string {
   const { view: _view, cursor: _cursor, before: _before, ...filters } = search;
   return `${origin}${hrefOf(filters)}`;
-}
-
-function CustomDates({
-  open,
-  search,
-  onClose,
-  go,
-}: {
-  open: boolean;
-  search: AuditSearch;
-  onClose: () => void;
-  go: (next: AuditSearch) => void;
-}) {
-  const [from, setFrom] = useState(search.from ?? "");
-  const [to, setTo] = useState(search.to ?? "");
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <Modal
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) onClose();
-      }}
-      title="Custom dates"
-      description="Days in UTC. Both days are included."
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => {
-              if (from === "" && to === "") {
-                setError("Choose a first day, a last day, or both.");
-                return;
-              }
-              if (from !== "" && to !== "" && from > to) {
-                setError("The last day can’t be before the first.");
-                return;
-              }
-              go(
-                withFilter(search, {
-                  date: undefined,
-                  from: from === "" ? undefined : from,
-                  to: to === "" ? undefined : to,
-                }),
-              );
-              onClose();
-            }}
-          >
-            Show these days
-          </Button>
-        </>
-      }
-    >
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="First day" optional>
-          <Input type="date" value={from} onValueChange={(value) => setFrom(String(value))} />
-        </Field>
-        <Field label="Last day" optional {...(error === null ? {} : { error })}>
-          <Input type="date" value={to} onValueChange={(value) => setTo(String(value))} />
-        </Field>
-      </div>
-    </Modal>
-  );
 }
 
 export function AuditToolbar({
@@ -230,47 +140,15 @@ export function AuditToolbar({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <fieldset className="m-0 flex flex-wrap items-center gap-2 border-0 p-0">
-          <legend className="sr-only">Views</legend>
-          {VIEWS.map((view) => {
-            const pressed = search.show === view.value;
-            return (
-              <Button
-                key={view.label}
-                variant={pressed ? "primary" : "secondary"}
-                size="sm"
-                aria-pressed={pressed}
-                onClick={() => go(withFilter(search, { show: view.value }))}
-              >
-                {view.label}
-              </Button>
-            );
-          })}
-        </fieldset>
-        <Button
-          variant="ghost"
-          size="sm"
-          leadingIcon={<CopyIcon />}
-          onClick={async () => {
-            try {
-              if (typeof navigator === "undefined" || navigator.clipboard === undefined) {
-                throw new Error("no clipboard");
-              }
-              await navigator.clipboard.writeText(listLink(origin, search));
-              toast.success({ title: "Link copied" });
-            } catch {
-              toast.error({
-                title: "Couldn’t copy the link",
-                description: "Copy it from the address bar instead.",
-              });
-            }
-          }}
-        >
-          Copy link
-        </Button>
+        <QuickViews
+          views={VIEWS}
+          value={search.show}
+          onChoose={(show) => go(withFilter(search, { show }))}
+        />
+        <CopyLinkButton href={listLink(origin, search)} />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <DropdownMenu trigger={trigger("Staff member", actors.length)} className="w-72">
+        <DropdownMenu trigger={filterTrigger("Staff member", actors.length)} className="w-72">
           <MenuItem
             icon={<Picked on={actors.length === 0} />}
             onSelect={() => go(withFilter(search, { actor: undefined }))}
@@ -298,7 +176,7 @@ export function AuditToolbar({
               </MenuItem>
             ))}
         </DropdownMenu>
-        <DropdownMenu trigger={trigger("Action", actions.length)} className="w-80">
+        <DropdownMenu trigger={filterTrigger("Action", actions.length)} className="w-80">
           <MenuItem
             icon={<Picked on={actions.length === 0} />}
             onSelect={() => go(withFilter(search, { action: undefined }))}
@@ -319,7 +197,7 @@ export function AuditToolbar({
             </MenuGroup>
           ))}
         </DropdownMenu>
-        <DropdownMenu trigger={trigger("Date", datePreset === "any" ? 0 : 1)}>
+        <DropdownMenu trigger={filterTrigger("Date", datePreset === "any" ? 0 : 1)}>
           <MenuRadioGroup
             label="Date (UTC)"
             value={datePreset}
@@ -351,26 +229,17 @@ export function AuditToolbar({
             </MenuRadioItem>
           </MenuRadioGroup>
         </DropdownMenu>
-        {chips.map((chip) => (
-          <button
-            key={chip.id}
-            type="button"
-            onClick={chip.onRemove}
-            aria-label={`Remove filter: ${chip.label}`}
-            className="inline-flex h-7 max-w-full cursor-pointer items-center gap-1.5 rounded-control bg-fill-selected px-3 text-label-sm text-text-secondary hover:text-text-primary focus-visible:outline-focus"
-          >
-            <span className="truncate">{chip.label}</span>
-            <XIcon size={12} />
-          </button>
-        ))}
-        {chips.length === 0 ? null : (
-          <Button variant="ghost" size="sm" onClick={() => go(withoutFilters(search))}>
-            Clear filters
-          </Button>
-        )}
+        <FilterChips chips={chips} onClear={() => go(withoutFilters(search))} />
       </div>
       {custom ? (
-        <CustomDates open search={search} onClose={() => setCustom(false)} go={go} />
+        <DateRangeDialog
+          open
+          initial={{ from: search.from, to: search.to }}
+          onClose={() => setCustom(false)}
+          onApply={(range) =>
+            go(withFilter(search, { date: undefined, from: range.from, to: range.to }))
+          }
+        />
       ) : null}
     </div>
   );
