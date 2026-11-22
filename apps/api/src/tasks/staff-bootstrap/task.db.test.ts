@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // identity and staff migrations and grants. Read by path: apps/api does not list @fin/staff.
 import {
   createStaffPlatform,
+  DROP_TIMEOUT_MS,
   type PlatformClient,
   type StaffPlatform,
 } from "../../../../../packages/staff/test/platform.mjs";
@@ -49,7 +50,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await su?.end();
   await platform?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const codeHash = (code: string) =>
   createHash("sha256").update(code.replace(/-/g, "").toUpperCase(), "utf8").digest("hex");
@@ -473,7 +474,7 @@ describe("migrate --task staff-bootstrap on a new environment", () => {
   afterAll(async () => {
     await freshSu?.end();
     await fresh?.drop();
-  });
+  }, DROP_TIMEOUT_MS);
 
   it("makes the first Admin, records it as the operator and says so with IDs only", async () => {
     const { code, lines, raw } = made;

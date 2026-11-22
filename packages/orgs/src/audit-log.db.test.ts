@@ -3,7 +3,7 @@
 // from the session's own row; `target` and `targetKind` match only the organisation's own rows; an
 // ID from another organisation returns no rows and no label; the person's activity is theirs alone.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const QUERY: AuditLogQuery = { range: "all", tz: "UTC", page: 1, size: 100 };
 

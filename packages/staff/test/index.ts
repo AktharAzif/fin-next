@@ -17,6 +17,7 @@ export {
 } from "./harness.ts";
 export {
   createStaffPlatform,
+  DROP_TIMEOUT_MS,
   eventTypes,
   type PlatformClient,
   type StaffPlatform,

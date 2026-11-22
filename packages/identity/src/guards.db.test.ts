@@ -5,7 +5,13 @@
 // raise an assurance or change an address quietly.
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase, testRole } from "../test/db.ts";
+import {
+  createTestDatabase,
+  DROP_TIMEOUT_MS,
+  seed,
+  type TestDatabase,
+  testRole,
+} from "../test/db.ts";
 import { eventTypeRows } from "./audit/events.ts";
 import { REALM_GUARDS } from "./guards.ts";
 import { systemClock } from "./ports/clock.ts";
@@ -23,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const id = (prefix: Parameters<typeof newId>[0]) => newId(prefix, systemClock);
 

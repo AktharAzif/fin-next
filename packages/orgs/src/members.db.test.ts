@@ -2,7 +2,7 @@
 // giving, self and last-holder rules inside the team-change lock, and two concurrent demotions of
 // the last two Super admins, of which exactly one passes.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   changeRoleAs,
@@ -28,9 +28,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("a role change", () => {
+  // Genuinely heavy, so a timeout of its own: a member invited with a proof, signed in, given an
+  // authenticator and accepted with a proof, a custom role made with a proof, then two role changes
+  // with proofs. Alone it takes 1.4 s; in the full db run on 4 CPUs, 3.1 s.
   it("writes member.role_changed, tells the person and every Super admin, and lowers into the journal", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");
     const admin = await memberOf(h, who, orgId, "admin", "admin");
@@ -56,8 +59,12 @@ describe("a role change", () => {
     expect((await changeRoleAs(h, who, orgId, admin.memberId, "admin")).ok).toBe(true);
     const raised = (await h.events({ event: "member.role_changed", organizationId: orgId })).at(-1);
     expect(raised?.metadata).toMatchObject({ lowered: false });
-  });
+  }, 20_000);
 
+  // Genuinely heavy, so a timeout of its own: four members, each invited with a proof, signed in,
+  // given an authenticator and accepted with a proof, two custom roles made with proofs, then ten
+  // role changes and removals. Alone it takes 1.6 to 2.2 s; in the full db run on 4 CPUs, 3.3 s
+  // to past the 5 s default.
   it("refuses giving beyond one's role, the top role from anyone else, one's own role, and the same role", async () => {
     const { who, orgId, memberId: ownerMember } = await ownerWithOrganization(h, "owner_rules");
     const admin = await memberOf(h, who, orgId, "admin_rules", "admin");
@@ -93,7 +100,7 @@ describe("a role change", () => {
     const plain = await memberOf(h, who, orgId, "plain", readers);
     const up = await changeRoleAs(h, changer.who, orgId, plain.memberId, "admin");
     expect([codeOf(up), extensionsOf(up).problem]).toEqual(["giving_refused", "beyond"]);
-  });
+  }, 20_000);
 
   it("checks every rule before asking for a factor (S2-31)", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_order");

@@ -3,7 +3,7 @@
 // the Access policies pages with the counts only.
 import { MemoryLineSink } from "@fin/identity";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaffHarness, type StaffHarness, unique } from "../test/harness.ts";
+import { createStaffHarness, DROP_TIMEOUT_MS, type StaffHarness, unique } from "../test/harness.ts";
 import { runAccessDriftCheck, staffAccessList } from "./access-drift.ts";
 
 let h: StaffHarness;
@@ -14,7 +14,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("the Access drift check", () => {
   it("compares the Allow list with the active and pending members, as the worker reads them", async () => {

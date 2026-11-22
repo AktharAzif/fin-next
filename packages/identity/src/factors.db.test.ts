@@ -4,7 +4,7 @@
 // accepted once; 10 wrong codes lock the person out for an hour; a trusted browser gives an aal1
 // working session that writes no proof; the last factor stays for a privileged developer.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Browser,
   codeSignIn,
@@ -31,7 +31,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 async function sessionRow(browser: Browser) {
   const result = await h.admin.query<{

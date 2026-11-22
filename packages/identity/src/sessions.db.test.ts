@@ -2,7 +2,7 @@
 // session at the factor step dies after 10 minutes; sign-out ends the session with its event;
 // signing out one other session and every other session; the sweeps delete what they should.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Browser,
   codeSignIn,
@@ -26,7 +26,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const unique = (label: string) => `${label}.${Math.random().toString(36).slice(2, 8)}@example.com`;
 

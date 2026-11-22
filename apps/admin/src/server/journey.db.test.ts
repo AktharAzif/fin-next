@@ -11,6 +11,7 @@ import { base32Decode, totp } from "@fin/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   SoftAuthenticator,
   type StaffHarness,
   unique,
@@ -27,7 +28,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 function secretOf(uri: string): Uint8Array {
   return base32Decode(new URL(uri).searchParams.get("secret") ?? "");

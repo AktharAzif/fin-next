@@ -2,7 +2,7 @@
 // action's transaction, and only then; a rolled-back action leaves none; and a meta-test fails when
 // an event of the fragment has no case here (the realm-written ones are listed apart).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
@@ -39,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const INVITE = { permission: "member.invite", lock: true } as const;
 const MANAGE = { permission: "role.manage", lock: true } as const;

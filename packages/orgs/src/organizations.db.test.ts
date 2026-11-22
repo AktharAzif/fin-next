@@ -2,7 +2,7 @@
 // hold; at most 10 as Super admin; the `Fin-Organization` rules (missing 400, not a member and deleted
 // both 404); deletion refused while approved, and its one transaction.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   asPerson,
@@ -34,7 +34,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("the first organisation's name (§5.9)", () => {
   it("is built from a work domain, else the first name, else a fallback", () => {
@@ -93,6 +93,9 @@ describe("POST /api/orgs/first", () => {
 });
 
 describe("POST /api/orgs", () => {
+  // Genuinely heavy, so a timeout of its own: one person makes ten organisations, the limit it is
+  // about, each with its own intent and proof. Alone it takes 1.0 to 1.8 s; in the full db run on
+  // 4 CPUs, up to 4.4 s.
   it("needs a factor and an intent, makes a Super admin, and allows at most 10 as Super admin", async () => {
     const who = await person(h, "creator");
     const create = (name: string, headers: Record<string, string>) =>
@@ -120,7 +123,7 @@ describe("POST /api/orgs", () => {
     const eleventh = await create("Team Eleven", {});
     expect(codeOf(eleventh)).toBe("limit_reached");
     expect(extensionsOf(eleventh)).toMatchObject({ limit: 10 });
-  });
+  }, 20_000);
 
   it("refuses a person with no factor, before asking for one", async () => {
     const who = await person(h, "nofactor", { factor: false });

@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
+  DROP_TIMEOUT_MS,
   refusalOf,
   type StaffHarness,
   stepped,
@@ -21,7 +22,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 describe("the kill switches", () => {
   it("are set and cleared by an Operator with an intent, recorded, journalled and told to every Admin", async () => {

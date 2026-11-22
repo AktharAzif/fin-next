@@ -3,7 +3,7 @@
 // unproved, used, expired, of another session, for another action or another organisation, or for
 // other parameters; it passes once; two concurrent re-sends with one intent make exactly one action.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase } from "../test/db.ts";
 import {
   asActor,
   codeOf,
@@ -28,7 +28,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 function invite(who: SignedIn, orgId: string, email: string, headers: Record<string, string> = {}) {
   return asActor(

@@ -15,6 +15,7 @@ import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createTestDatabase,
+  DROP_TIMEOUT_MS,
   seed,
   type TestDatabase,
   totpCode,
@@ -180,7 +181,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api?.stop();
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 interface Sample {
   path: () => string;

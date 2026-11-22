@@ -8,7 +8,11 @@
 import { randomBytes } from "node:crypto";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase } from "../../../../packages/orgs/test/index.ts";
+import {
+  createTestDatabase,
+  DROP_TIMEOUT_MS,
+  type TestDatabase,
+} from "../../../../packages/orgs/test/index.ts";
 import {
   type Booted,
   Client,
@@ -40,13 +44,17 @@ beforeAll(async () => {
 afterAll(async () => {
   await api?.stop();
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const tag = randomBytes(3).toString("hex");
 const ownerEmail = `owner.${tag}@example.com`;
 const inviteeEmail = `invitee.${tag}@example.com`;
 
 describe("the console's API, end to end", () => {
+  // Genuinely heavy, so a timeout of its own: the whole journey is one test, about 40 requests over
+  // a real socket through the front door, with two code sign-ins, a factor enrolment and four
+  // stepped-up actions with their proofs. Alone it takes 1.2 to 1.4 s; in the full db run on 4
+  // CPUs, 4.0 s to past the 5 s default.
   it("signs up, enrols a factor, creates an organisation, invites, accepts, changes a role and removes a member", async () => {
     const owner = new Client(api);
 
@@ -247,5 +255,5 @@ describe("the console's API, end to end", () => {
     // The request lines carry no address, name or token (spec 02 §18).
     const leaked = api.stdout.filter((l) => JSON.stringify(l).includes(inviteeEmail));
     expect(leaked).toEqual([]);
-  });
+  }, 20_000);
 });

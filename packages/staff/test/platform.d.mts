@@ -52,6 +52,9 @@ export interface StaffPlatformOptions {
   registry?: (q: RunQueryable) => Promise<unknown>;
 }
 
+/** The allowance of the `afterAll` hook that drops a platform (see platform.mjs). */
+export const DROP_TIMEOUT_MS: number;
+
 export function createStaffPlatform(
   prefix: string,
   options?: StaffPlatformOptions,

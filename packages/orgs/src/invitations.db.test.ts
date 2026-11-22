@@ -3,7 +3,7 @@
 // issue new tokens, so an old link stops working; an inviter who is demoted or removed has their
 // invitations withdrawn; the giving and outrank rules hold.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   acceptAs,
   asActor,
@@ -44,7 +44,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const INVITE = { permission: "member.invite", lock: true } as const;
 
@@ -252,6 +252,9 @@ describe("an invitation", () => {
     expect(event?.metadata).toEqual({ reason: "cancelled" });
   });
 
+  // Genuinely heavy, so a timeout of its own: a custom role and two members, each invited with a
+  // proof, signed in, given an authenticator and accepted with a proof, then four invitations with
+  // proofs. Alone it takes 1.4 to 1.5 s; in the full db run on 4 CPUs, 3.5 to 4.3 s.
   it("is replaced only by someone it does not outrank (§8.5, as a cancellation)", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_replace_rank");
     const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
@@ -300,8 +303,12 @@ describe("an invitation", () => {
     // The Super admin may replace it.
     expect((await inviteAs(h, who, orgId, email, "admin")).ok).toBe(true);
     expect(await statusOf(topId)).toBe("cancelled");
-  });
+  }, 20_000);
 
+  // Genuinely heavy, so a timeout of its own: a member invited, signed in, given an authenticator
+  // and accepted, an invitation and its change, then the invitee signed in, given an authenticator
+  // and accepting, each step with a proof. Alone it takes 1.1 s; in the full db run on 4 CPUs,
+  // 2.6 s.
   it("is accepted after another member changed its role, under the member who changed it", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_changer");
     const admin = await memberOf(h, who, orgId, "first_inviter", "admin");
@@ -337,8 +344,11 @@ describe("an invitation", () => {
       [orgId, invitee.userId],
     );
     expect(member.rows[0]?.invited_by).toBe(who.userId);
-  });
+  }, 20_000);
 
+  // Genuinely heavy, so a timeout of its own: two members, each invited, signed in, given an
+  // authenticator and accepted, two invitations, a custom role, a demotion and a removal, each with
+  // a proof. Alone it takes 1.3 s; in the full db run on 4 CPUs, 3.7 to 3.8 s.
   it("is withdrawn when its inviter is demoted below it, or removed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_withdraw");
     const admin = await memberOf(h, who, orgId, "inviter", "admin");
@@ -366,7 +376,7 @@ describe("an invitation", () => {
       await h.events({ event: "member.invitation_cancelled", organizationId: orgId })
     ).map((e) => e.metadata.reason);
     expect(reasons).toEqual(expect.arrayContaining(["inviter_demoted", "inviter_removed"]));
-  });
+  }, 20_000);
 
   it("allows at most 25 pending per organisation", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_limit");

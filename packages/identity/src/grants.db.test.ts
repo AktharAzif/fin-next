@@ -3,7 +3,12 @@
 // sweeps run only as fin_worker; email.enqueue() refuses a template outside the role's folder.
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type ServiceRole, type TestDatabase } from "../test/db.ts";
+import {
+  createTestDatabase,
+  DROP_TIMEOUT_MS,
+  type ServiceRole,
+  type TestDatabase,
+} from "../test/db.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 
@@ -25,7 +30,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 async function sqlstate(
   role: ServiceRole,

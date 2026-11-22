@@ -3,7 +3,7 @@
 // commit without its event.
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaffHarness, type StaffHarness, unique } from "../test/harness.ts";
+import { createStaffHarness, DROP_TIMEOUT_MS, type StaffHarness, unique } from "../test/harness.ts";
 
 let h: StaffHarness;
 let admin: Pool;
@@ -21,7 +21,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await h?.close();
-});
+}, DROP_TIMEOUT_MS);
 
 const refused = (run: Promise<unknown>) => expect(run).rejects.toMatchObject({ code: "42501" });
 

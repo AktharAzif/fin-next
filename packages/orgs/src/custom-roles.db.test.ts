@@ -3,7 +3,7 @@
 // not read as a built-in; edited only with the current version, never one the editor holds or one
 // that outranks them; deleted with every holder and invitation moved; at most 30.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
+import { createTestDatabase, DROP_TIMEOUT_MS, seed, type TestDatabase } from "../test/db.ts";
 import {
   acceptAs,
   asActor,
@@ -33,7 +33,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database?.drop();
-});
+}, DROP_TIMEOUT_MS);
 
 const MANAGE = { permission: "role.manage", lock: true } as const;
 
@@ -286,6 +286,9 @@ describe("deleting a custom role", () => {
     expect(list.ok && list.value.roles.map((r) => r.roleKey)).toEqual(["super_admin", "admin"]);
   });
 
+  // Genuinely heavy, so a timeout of its own: two custom roles, a member and two invitations, each
+  // with a proof, the deletion with its proof, then the invitee signed in and accepting with a
+  // proof. Alone it takes 1.3 s; in the full db run on 4 CPUs, 2.8 s.
   it("withdraws, never leaves unusable, the invitations whose inviter cannot give the new role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_inviters");
     const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
@@ -316,7 +319,7 @@ describe("deleting a custom role", () => {
     const invitee = await person(h, "from_owner", { email: fromOwnerEmail });
     const joined = await acceptAs(h, invitee, ownerId);
     expect(joined.ok && joined.value.roleKey).toBe("admin");
-  });
+  }, 20_000);
 
   it("withdraws the invitations of holders moved to a role that can no longer give them", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_holders");
@@ -335,6 +338,10 @@ describe("deleting a custom role", () => {
 });
 
 describe("an edit that leaves an inviter unable to give an invitation", () => {
+  // Genuinely heavy, so a timeout of its own: three custom roles, a member invited, signed in,
+  // given an authenticator and accepted, three invitations and three role edits, each with a
+  // proof. Alone it takes 0.9 to 1.7 s; in the full db run on 4 CPUs, 3.7 s to past the 5 s
+  // default.
   it("withdraws it, whether the inviter's role lost a permission or the offered role gained one", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "edit_inviters");
     const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
@@ -397,5 +404,5 @@ describe("an edit that leaves an inviter unable to give an invitation", () => {
       ).ok,
     ).toBe(true);
     expect(await statusOf(ownersId)).toEqual({ status: "pending", cancel_reason: null });
-  });
+  }, 20_000);
 });

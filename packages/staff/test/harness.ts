@@ -28,6 +28,7 @@ import { requireStaff } from "../src/require-staff.ts";
 import { createStaffPlatform, type PlatformClient, type StaffPlatform } from "./platform.mjs";
 
 export { SoftAuthenticator };
+export { DROP_TIMEOUT_MS } from "./platform.mjs";
 
 export const ADMIN_ORIGIN = "https://admin.example.com";
 export const DOCS_ORIGIN = "https://developer.example.com";
