@@ -37,9 +37,13 @@ RUN pnpm fetch --frozen-lockfile
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
-# ---- the database's files: every package's bootstrap, migrations and grants, by assets.ts's rule
+# ---- the database's files: every package's bootstrap, migrations and grants, by assets.ts's rule.
+# The release stage copies them beside the bundle (release-allowlist.json names the copy), so the
+# stage's last step scans them for the test harness's markers as the bundle is scanned
+# (harness-scan.mjs): every copy the release stage takes is scanned. packages/server's tests pin it.
 FROM deps AS db-assets
 RUN node packages/db/src/assets-cli.ts stage /out/db-assets
+RUN node ops/docker/harness-scan.mjs /out/db-assets
 
 # ---- the two bundles
 # The release bundle's output is scanned for the test harness's markers right after its build, in

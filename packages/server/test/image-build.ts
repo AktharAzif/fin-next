@@ -3,7 +3,10 @@
 // image's pins (src/build/release-image.test.ts). The real-bundle tests build what this returns, so
 // they build what each image's build runs, not a config file they assume:
 //   - each ops/docker/*.Dockerfile's `release` stage (the target the release workflow builds) and
-//     the one stage of the Dockerfile's own, built from the repository, whose output it copies,
+//     the one stage of the Dockerfile's own, built from the repository, whose output it copies
+//     (beside it, the release stage may take only the copies ops/docker/release-allowlist.json
+//     names, word for word, each from a stage whose last step is the output scan over exactly what
+//     it copies; any other copy from a stage that holds the repository is a second bundle copy),
 //     with the file's lines, each instruction's flags and each COPY's --from read as Docker reads
 //     them (a stage by index or by name in any case and quoting, an image only by digest), and a
 //     parent stage that runs a command or copies from the repository refused, as ONBUILD is; a
@@ -17,9 +20,12 @@
 //     the stage's build argument (the app: each app under apps/ is tried as its value, since the
 //     release workflow may pass any of them) and the step's own assignments (FIN_BUILD_TARGET);
 //   - the workspace package the filter selects (pnpm-workspace.yaml's packages) and its script,
-//     which must be exactly `vite build --config <file>`, with no `pre` or `post` script of its
-//     name (pnpm runs both around it); the config file is that path from the package's directory,
-//     where pnpm runs the script.
+//     which must be exactly `vite build --config <file>`, with no `post` script of its name and no
+//     `pre` script but one that is byte for byte a command the allowlist names (pnpm runs both
+//     around it; the real-bundle tests replay that pre-script before the build); the config file
+//     is that path from the package's directory, where pnpm runs the script.
+// The allowlist is data in one file under ops/docker, a control path, each entry with its reason; a
+// file that is missing or holds anything but its exact shape refuses every build.
 // Anything it cannot read so is refused, by a message naming the Dockerfile, the app and what it
 // could not read: a changed script, a second config file or another step fails the tests rather
 // than leaving them a build they did not see. A filter that selects no package, or a package with
@@ -42,6 +48,40 @@ export const DOCKER_DIRECTORY = "ops/docker";
 /** The stage the release workflow builds and ships (`--target release`). */
 export const RELEASE_STAGE = "release";
 
+/**
+ * What a release image's build may take beside its one server bundle, as data in one place under
+ * ops/docker (a control path): the copies its release stage may take and the pre-scripts pnpm may
+ * run before its build script, each with its reason.
+ */
+export const ALLOWLIST_FILE = "ops/docker/release-allowlist.json";
+
+/**
+ * A copy a release stage may take beside its bundle: a COPY from the stage `stage` (one that holds
+ * the repository) of exactly `source` to exactly `destination`, with --from its only flag.
+ */
+export interface AllowedCopy {
+  stage: string;
+  source: string;
+  destination: string;
+  reason: string;
+}
+
+/**
+ * A pre-script pnpm may run before an image's build script: its command, byte for byte, and the
+ * file it writes, as a repository path.
+ */
+export interface AllowedPreScript {
+  command: string;
+  writes: string;
+  reason: string;
+}
+
+/** The allowlist file's entries. */
+export interface Allowlist {
+  copies: AllowedCopy[];
+  preScripts: AllowedPreScript[];
+}
+
 /** An instruction of a Dockerfile: its keyword in capitals, its text, and the line it starts on. */
 export interface Instruction {
   keyword: string;
@@ -63,6 +103,11 @@ export interface ImageBuild {
   command: string;
   /** The config file the script names, as an absolute path. */
   configFile: string;
+  /**
+   * The pre-script pnpm runs before the script (`pre<script>`), byte for byte a command the
+   * allowlist names, with the file it writes; undefined when the package has none.
+   */
+  preScript: { command: string; writes: string } | undefined;
   /**
    * The environment the Dockerfile gives the build step: its stages' ENV, the build argument and
    * the step's own assignments.
@@ -505,6 +550,83 @@ function readJson(file: string): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
+/** Whether `path` is made of plain characters only, with no `.` or `..` segment. */
+const plainPath = (path: string): boolean =>
+  /^[\w.@+/-]+$/.test(path) && !path.split("/").some((part) => part === "." || part === "..");
+
+/**
+ * The allowlist (ALLOWLIST_FILE) in `repository`: an object of exactly `about`, `copies` and
+ * `preScripts`; each copy an object of exactly a stage's name (in lower case), an absolute source
+ * and destination and a reason; each pre-script an object of exactly a command, the repository path
+ * of the file it writes and a reason; every value a string with text. Anything else, a missing file
+ * included, is refused, which refuses every build.
+ */
+export function readAllowlist(repository: string): Allowlist {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(join(repository, ALLOWLIST_FILE), "utf8"));
+  } catch {
+    fail("it is missing or is not JSON");
+  }
+  const fields = (item: unknown, keys: readonly string[], what: string) => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      fail(`${what} is not an object`);
+    }
+    const found = Object.keys(item).sort();
+    if (JSON.stringify(found) !== JSON.stringify([...keys].sort())) {
+      fail(`${what} holds ${found.join(", ") || "nothing"}, not exactly ${keys.join(", ")}`);
+    }
+    return item as Record<string, unknown>;
+  };
+  const text = (item: Record<string, unknown>, key: string, what: string): string => {
+    const field = item[key];
+    if (typeof field !== "string" || field.trim() === "") {
+      fail(`${what}'s ${key} is not a string with text`);
+    }
+    return field;
+  };
+  const list = (item: Record<string, unknown>, key: string): unknown[] => {
+    const field = item[key];
+    if (!Array.isArray(field)) fail(`its ${key} is not a list`);
+    return field;
+  };
+  const top = fields(value, ["about", "copies", "preScripts"], "it");
+  text(top, "about", "it");
+  const copies = list(top, "copies").map((item, index): AllowedCopy => {
+    const what = `copy ${index + 1}`;
+    const entry = fields(item, ["stage", "source", "destination", "reason"], what);
+    const copy = {
+      stage: text(entry, "stage", what),
+      source: text(entry, "source", what),
+      destination: text(entry, "destination", what),
+      reason: text(entry, "reason", what),
+    };
+    if (!STAGE_NAME.test(copy.stage)) {
+      fail(`${what}'s stage, ${JSON.stringify(copy.stage)}, is not a stage's name in lower case`);
+    }
+    for (const path of [copy.source, copy.destination]) {
+      if (!posix.isAbsolute(path) || !plainPath(path)) {
+        fail(`${what}'s ${JSON.stringify(path)} is not an absolute path in plain characters`);
+      }
+    }
+    return copy;
+  });
+  const preScripts = list(top, "preScripts").map((item, index): AllowedPreScript => {
+    const what = `pre-script ${index + 1}`;
+    const entry = fields(item, ["command", "writes", "reason"], what);
+    const pre = {
+      command: text(entry, "command", what),
+      writes: text(entry, "writes", what),
+      reason: text(entry, "reason", what),
+    };
+    if (posix.isAbsolute(pre.writes) || !plainPath(pre.writes)) {
+      fail(`${what}'s writes, ${JSON.stringify(pre.writes)}, is not a repository path`);
+    }
+    return pre;
+  });
+  return { copies, preScripts };
+}
+
 /** A workspace package: its repository path and its manifest's name. */
 interface WorkspacePackage {
   path: string;
@@ -549,16 +671,21 @@ function checkPnpmSettings(repository: string, pkg: string): void {
 
 /**
  * The config file of the script `script` among `scripts`: the script must be exactly `vite build
- * --config <file>`, the file a relative path in plain characters, and there may be no `pre` or
- * `post` script of its name, which pnpm runs around it.
+ * --config <file>`, the file a relative path in plain characters, and there may be no `post` script
+ * of its name and no `pre` script but one that is byte for byte one of `preScripts` (the commands
+ * the allowlist names), which pnpm runs around it.
  */
 export function viteBuildConfig(
   scripts: Readonly<Record<string, unknown>>,
   script: string,
+  preScripts: readonly string[] = [],
 ): string {
-  for (const hook of [`pre${script}`, `post${script}`]) {
-    if (hook in scripts) fail(`the package has a ${hook} script, which pnpm runs with ${script}`);
+  const pre = `pre${script}`;
+  if (pre in scripts && !preScripts.some((command) => command === scripts[pre])) {
+    fail(`the package has a ${pre} script, which pnpm runs with ${script}`);
   }
+  const post = `post${script}`;
+  if (post in scripts) fail(`the package has a ${post} script, which pnpm runs with ${script}`);
   const command = scripts[script];
   const words = typeof command === "string" ? command.trim().split(/\s+/) : [];
   const [vite, build, flag, file] = words;
@@ -588,8 +715,76 @@ interface Release {
   arg: string | undefined;
 }
 
-/** Reads the release stage and its build stage of the Dockerfile at the repository path given. */
-function readRelease(repository: string, dockerfile: string): Release {
+/**
+ * The allowlist's copy that `copy`, from `source` (a stage that holds the repository), is: --from
+ * its only flag, and its words exactly the entry's source and destination, with nothing expanded.
+ * Otherwise undefined, and the copy counts as a copy of the bundle.
+ */
+function allowedCopy(
+  copy: Instruction,
+  source: Stage,
+  allowlist: Allowlist,
+): AllowedCopy | undefined {
+  const { flags, rest } = builderFlags(copy.text);
+  if (flags.length !== 1) return undefined;
+  let words: string[];
+  try {
+    words = dockerWords(rest, {});
+  } catch (error) {
+    if (error instanceof Unreadable) return undefined;
+    throw error;
+  }
+  const [from, to, ...more] = words;
+  if (more.length > 0) return undefined;
+  return allowlist.copies.find(
+    (entry) => entry.stage === source.name && entry.source === from && entry.destination === to,
+  );
+}
+
+/**
+ * Refuses an allowlisted copy unless its stage scans what it copies: the stage gives no instruction
+ * but ARG, ENV, WORKDIR, SHELL and RUN, each RUN a plain shell command, and its last instruction is
+ * a RUN, in a shell the test reads, whose last step is exactly the image's output scan over the
+ * copy's source. So nothing the stage does comes after the scan, and the scan's failure fails the
+ * image's build.
+ */
+function checkScanned(stage: Stage, entry: AllowedCopy): void {
+  const which = `its stage ${stage.name}, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy ${entry.source} from,`;
+  for (const instruction of stage.instructions) {
+    if (!["ARG", "ENV", "WORKDIR", "SHELL", "RUN"].includes(instruction.keyword)) {
+      fail(`${which} has ${instruction.keyword} on line ${instruction.line}`);
+    }
+    if (instruction.keyword === "RUN" && /^\s*(?:\[|--)/.test(instruction.text)) {
+      fail(`${which} has a RUN on line ${instruction.line} that is not a plain shell command`);
+    }
+  }
+  const directory = posix.resolve(entry.source);
+  const last = stage.instructions.at(-1);
+  const refusal = `${which} does not end in a RUN whose last step is \`node ${SCAN_SCRIPT} ${directory}\``;
+  if (last?.keyword !== "RUN") fail(refusal);
+  const { env, workdir, shell } = settingOf(stage, last, undefined, undefined);
+  if (!SHELLS.some((known) => JSON.stringify(known) === JSON.stringify(shell))) {
+    fail(`${which} runs its RUN in ${JSON.stringify(shell)}, not a shell the test reads`);
+  }
+  const scan = shellSteps(last.text, env).at(-1) ?? [];
+  const [node, script, scanned, ...more] = scan;
+  if (
+    node !== "node" ||
+    script !== SCAN_SCRIPT ||
+    scanned === undefined ||
+    more.length > 0 ||
+    posix.resolve(workdir, scanned) !== directory
+  ) {
+    fail(refusal);
+  }
+}
+
+/**
+ * Reads the release stage and its build stage of the Dockerfile at the repository path given: the
+ * one copy of the bundle, from a stage that holds the repository, and beside it only the copies
+ * `allowlist` names, each from a stage that scans it.
+ */
+function readRelease(repository: string, dockerfile: string, allowlist: Allowlist): Release {
   const stages = stagesOf(dockerInstructions(readFileSync(join(repository, dockerfile), "utf8")));
   const release = stages.find((stage) => stage.name === RELEASE_STAGE);
   if (release === undefined) fail(`it has no \`${RELEASE_STAGE}\` stage`);
@@ -608,7 +803,10 @@ function readRelease(repository: string, dockerfile: string): Release {
     if (source === undefined) {
       fail(`its ${RELEASE_STAGE} stage copies from the build context on line ${instruction.line}`);
     }
-    if (source !== "image" && source.repository) copies.push({ copy: instruction, build: source });
+    if (source === "image" || !source.repository) continue;
+    const allowed = allowedCopy(instruction, source, allowlist);
+    if (allowed === undefined) copies.push({ copy: instruction, build: source });
+    else checkScanned(source, allowed);
   }
   const [first, ...more] = copies;
   if (first === undefined || more.length > 0) {
@@ -666,13 +864,15 @@ interface BuildStep {
 /**
  * Reads one Dockerfile's release build with the build argument set to `value`: the build step, the
  * scan right after it over the directory the release stage copies, and the package and script pnpm
- * runs. Returns the build, or why it is skipped (pnpm builds nothing, so the image does not build).
+ * runs, with the pre-script `allowlist` lets pnpm run before it. Returns the build, or why it is
+ * skipped (pnpm builds nothing, so the image does not build).
  */
 function evaluate(
   repository: string,
   release: Release,
   value: string | undefined,
   packages: readonly WorkspacePackage[],
+  allowlist: Allowlist,
 ): ImageBuild | { skipped: string } {
   const { env, workdir, shell } = settingOf(release.build, release.run, release.arg, value);
   if (!SHELLS.some((known) => JSON.stringify(known) === JSON.stringify(shell))) {
@@ -745,7 +945,12 @@ function evaluate(
       : {};
   if (!(script in scripts)) return { skipped: `${chosen.path} has no ${script} script` };
   checkPnpmSettings(repository, chosen.path);
-  const config = viteBuildConfig(scripts, script);
+  const config = viteBuildConfig(
+    scripts,
+    script,
+    allowlist.preScripts.map((entry) => entry.command),
+  );
+  const pre = allowlist.preScripts.find((entry) => entry.command === scripts[`pre${script}`]);
   return {
     label: labelOf(release, value),
     dockerfile: release.dockerfile,
@@ -754,6 +959,7 @@ function evaluate(
     script,
     command: String(scripts[script]),
     configFile: resolve(directory, config),
+    preScript: pre === undefined ? undefined : { command: pre.command, writes: pre.writes },
     environment: { ...env, ...build.assignments },
     output,
     shell,
@@ -791,10 +997,19 @@ export function runHarnessScan(
 
 /**
  * Every release server build the Dockerfiles under ops/docker run, for each app their build
- * argument may name, with each refusal and each pairing that builds nothing.
+ * argument may name, with each refusal and each pairing that builds nothing. An allowlist that
+ * cannot be read refuses every build.
  */
 export function imageBuilds(repository: string): ImageBuilds {
   const result: ImageBuilds = { builds: [], refusals: [], skipped: [] };
+  let allowlist: Allowlist;
+  try {
+    allowlist = readAllowlist(repository);
+  } catch (error) {
+    if (!(error instanceof Unreadable)) throw error;
+    result.refusals.push(`${ALLOWLIST_FILE}: ${error.message}`);
+    return result;
+  }
   const packages = workspacePackages(repository);
   const dockerfiles = globSync("*.Dockerfile", { cwd: join(repository, DOCKER_DIRECTORY) })
     .map((name) => `${DOCKER_DIRECTORY}/${name}`)
@@ -802,7 +1017,7 @@ export function imageBuilds(repository: string): ImageBuilds {
   for (const dockerfile of dockerfiles) {
     let release: Release;
     try {
-      release = readRelease(repository, dockerfile);
+      release = readRelease(repository, dockerfile, allowlist);
     } catch (error) {
       if (!(error instanceof Unreadable)) throw error;
       result.refusals.push(`${dockerfile}: ${error.message}`);
@@ -811,7 +1026,7 @@ export function imageBuilds(repository: string): ImageBuilds {
     const values = release.arg === undefined ? [undefined] : appNames(repository);
     for (const value of values) {
       try {
-        const build = evaluate(repository, release, value, packages);
+        const build = evaluate(repository, release, value, packages, allowlist);
         if ("skipped" in build) result.skipped.push(`${labelOf(release, value)}: ${build.skipped}`);
         else result.builds.push(build);
       } catch (error) {

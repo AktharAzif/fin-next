@@ -12,7 +12,10 @@
 // read by test/image-build.ts, which refuses a script or a step it cannot read) carries the guard,
 // in its main bundle and in every worker's, and still builds, with no module of the harness in its
 // graph and no file of it in its output, as the build itself reports them, and the image's output
-// scan passes over that output. Each is built as the release image's build runs it: in a Node
+// scan passes over that output; an image whose script pnpm runs a pre-script before (the api's
+// generator of the audit event index, byte for byte the command ops/docker/release-allowlist.json
+// allows) has it replayed first, as pnpm runs it in the image, and its bundle is shown to use the
+// file that replay wrote. Each is built as the release image's build runs it: in a Node
 // process of its own with no exec arguments, from the package's directory, in the environment the
 // Dockerfile gives the step (so NODE_ENV is unset and Vite resolves a production build) and with
 // Vite's default config loader (test/release-build.ts). An app whose build:server names another
@@ -32,6 +35,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -41,7 +45,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { build, type Plugin } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type ImageBuild, imageBuilds, runHarnessScan } from "../../test/image-build.ts";
+import {
+  ALLOWLIST_FILE,
+  type ImageBuild,
+  imageBuilds,
+  runHarnessScan,
+} from "../../test/image-build.ts";
 import type {
   RecordedBundle,
   RecordedOutput,
@@ -455,6 +464,53 @@ const IMAGES = imageBuilds(REPOSITORY);
 type Target = Pick<ImageBuild, "configFile" | "directory" | "environment">;
 
 /**
+ * Replays the pre-script pnpm runs before an image's build script (`build.preScript`, byte for byte
+ * a command ops/docker/release-allowlist.json allows), as pnpm runs a script in the image's build:
+ * by `sh -c`, from the package's directory, in the environment the Dockerfile gives the build step
+ * (its stages' ENV, the app's build argument and FIN_BUILD_TARGET=release), with this Node first on
+ * PATH and HOME from here. It must succeed, and it must write the file the allowlist says it
+ * writes: that file, when it exists, is first made stale (one newline added at its end, written
+ * beside it and renamed into place as the generator writes it, so a reader at the same time sees a
+ * whole file that means the same), and a replay that leaves it stale fails and puts it back as it
+ * was. Returns the file, by its real path, and its text right after the replay: the text the
+ * pre-script generated.
+ */
+function replayPreScript(build: ImageBuild): { file: string; text: string } {
+  const pre = build.preScript;
+  if (pre === undefined) throw new Error(`${build.label} runs no pre-script`);
+  const path = join(REPOSITORY, pre.writes);
+  const put = (text: string) => {
+    const beside = `${path}.${process.pid}.tmp`;
+    writeFileSync(beside, text);
+    renameSync(beside, path);
+  };
+  const original = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  const stale = original === undefined ? undefined : `${original}\n`;
+  if (stale !== undefined) put(stale);
+  let text: string | undefined;
+  try {
+    execFileSync("/bin/sh", ["-c", pre.command], {
+      cwd: build.directory,
+      env: {
+        PATH: [dirname(process.execPath), process.env.PATH ?? ""].join(":"),
+        HOME: process.env.HOME ?? "",
+        ...build.environment,
+      },
+      stdio: "pipe",
+    });
+    text = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  } finally {
+    if (original !== undefined && (text === undefined || text === stale)) put(original);
+  }
+  if (text === undefined || text === stale) {
+    throw new Error(
+      `${build.label}: its pre-script \`${pre.command}\` did not write ${pre.writes}`,
+    );
+  }
+  return { file: realpathSync.native(path), text };
+}
+
+/**
  * The environment app.Dockerfile gives its release build step, as test/image-build.ts reads it for
  * the first app it builds (the ENV of its stages, the app's build argument and the step's
  * FIN_BUILD_TARGET=release, with no NODE_ENV), for a planted app's build.
@@ -635,10 +691,11 @@ function serverTestTask(): { cache: boolean } {
 describe("the real server bundles", () => {
   // A real bundle can reach @fin/audit (the api's does: main.ts, then migrate/main.ts), whose index
   // loads the event index that packages/audit/src/gen.ts writes and git ignores. The real build
-  // writes it first (the api's prebuild:server); these tests call Vite without that pre-script, so
-  // they run the same generator before any build, and pass from a clean clone in any task order.
-  // The generator renames a finished file into place, so a package script running it at the same
-  // time is safe.
+  // writes it first (the api's prebuild:server); these tests call Vite without pnpm, so they run
+  // the same generator before any build, and pass from a clean clone in any task order, and each
+  // build whose image runs a pre-script replays it as the image does (replayPreScript). The
+  // generator renames a finished file into place, so a package script running it at the same time
+  // is safe.
   beforeAll(() => {
     execFileSync(process.execPath, [join(REPOSITORY, "packages/audit/src/gen.ts")], {
       stdio: "pipe",
@@ -657,12 +714,20 @@ describe("the real server bundles", () => {
   it.each(IMAGES.builds.map((build) => [build.label, build] as const))(
     "%s carries the guard in every bundle of a release build, still builds, and passes the scan",
     async (_label, build) => {
+      // The pre-script pnpm runs before the image's build script, replayed first as the image runs
+      // it, which must write its file again (replayPreScript).
+      const generated = build.preScript === undefined ? undefined : replayPreScript(build);
       const inspection = await inspect(build);
       expect(problems(inspection)).toEqual([]);
       expect(existsSync(join(inspection.outDir, "main.js"))).toBe(true);
       const main = inspection.bundles.find((bundle) => !bundle.worker);
       expect(main?.modules).toContain(inspection.entry);
       expect(runHarnessScan(REPOSITORY, inspection.outDir).status).toBe(0);
+      if (generated !== undefined) {
+        // The bundle used the file the replayed pre-script wrote, still as it wrote it.
+        expect(main?.modules).toContain(generated.file);
+        expect(readFileSync(generated.file, "utf8")).toBe(generated.text);
+      }
     },
     60_000,
   );
@@ -1024,14 +1089,15 @@ describe("a release build that lost the guard fails the real-bundle check", () =
 });
 
 /**
- * A planted repository holding the real Dockerfiles and pnpm-workspace.yaml, and one app, apps/api,
- * planted from `files` as plantApp plants one, so test/image-build.ts reads the image's build of it
- * as it reads a real app's.
+ * A planted repository holding the real Dockerfiles, their allowlist and pnpm-workspace.yaml, and
+ * one app, apps/api, planted from `files` as plantApp plants one, so test/image-build.ts reads the
+ * image's build of it as it reads a real app's.
  */
 function plantRepository(files: Readonly<Record<string, Source>>): string {
   const repository = temporary();
   const copied = [
     "pnpm-workspace.yaml",
+    ALLOWLIST_FILE,
     ...globSync("ops/docker/*.Dockerfile", { cwd: REPOSITORY }),
   ];
   for (const path of copied) {

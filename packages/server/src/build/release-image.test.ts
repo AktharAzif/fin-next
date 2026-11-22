@@ -8,7 +8,14 @@
 // build --config <file>` (a second config file, another step, a pre or post script), a RUN with
 // another step or without the scan, and a release stage that copies anything else from the
 // repository, however Docker lets the copy name its stage (by index, in quotes, with an escape,
-// after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). It reads
+// after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). The one
+// thing a release stage may take beside its bundle is a copy ops/docker/release-allowlist.json
+// names word for word (today the database's files, from app.Dockerfile's db-assets stage), whose
+// stage must end in the scan over exactly what it copies; an unlisted copy, the listed one changed,
+// or its stage's scan left out, moved or pointed elsewhere is refused, and so is an allowlist of
+// any other shape. A `pre` script is read only when it is byte for byte a command the allowlist
+// names (the api's generator of the audit event index); that command edited by one byte, any other
+// pre-script and every `post` script are refused. It reads
 // the Dockerfile's lines as Docker's parser does, and refuses what Docker would read otherwise
 // (a parser directive, a heredoc however its lines are continued), a Dockerfile holding any
 // character but printable ASCII, tabs and newlines, and one that names two stages alike (Docker
@@ -33,10 +40,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  ALLOWLIST_FILE,
   builderFlags,
   type ImageBuild,
   imageBuilds,
   RELEASE_STAGE,
+  readAllowlist,
   runHarnessScan,
   SCAN_SCRIPT,
   shellSteps,
@@ -67,10 +76,14 @@ function writeFiles(root: string, files: ReadonlyMap<string, string>): void {
   }
 }
 
-/** The files test/image-build.ts reads: the Dockerfiles, the workspace and each app's manifest. */
+/**
+ * The files test/image-build.ts reads: the Dockerfiles, their allowlist, the workspace and each
+ * app's manifest.
+ */
 function repositoryFiles(): Map<string, string> {
   const paths = [
     "pnpm-workspace.yaml",
+    ALLOWLIST_FILE,
     ...globSync("ops/docker/*.Dockerfile", { cwd: REPOSITORY }),
     ...globSync("apps/*/package.json", { cwd: REPOSITORY }),
   ];
@@ -113,6 +126,12 @@ const APP_RUN_BUILD = `FIN_BUILD_TARGET=release pnpm --filter "@fin/\${APP}" run
 const APP_RUN_SCAN = `node ${SCAN_SCRIPT} "apps/\${APP}/dist/server"`;
 const APP_RUN_CHECK = `test -f "apps/\${APP}/dist/server/main.js"`;
 const APP_COPY = `COPY --from=build-release /src/apps/\${APP}/dist/server/ /app/dist/\n`;
+// app.Dockerfile's allowlisted copy beside the bundle (ops/docker/release-allowlist.json), which its
+// test and release stages both take, and the db-assets stage's scan of what it copies.
+const APP_DB_COPY = "COPY --from=db-assets /out/db-assets/ /app/db-assets/\n";
+const APP_DB_SCAN = `RUN node ${SCAN_SCRIPT} /out/db-assets\n`;
+// The generator the api's build:server runs first, which the allowlist names as its one pre-script.
+const AUDIT_GEN = "node ../../packages/audit/src/gen.ts";
 // connector.Dockerfile's release stage's copies: cloudflared from its image's stage, and the output.
 const CONNECTOR_CLOUDFLARED = "COPY --from=cloudflared ";
 const CONNECTOR_COPY = "COPY --from=build /src/apps/connector/dist/server/ /app/dist/\n";
@@ -147,6 +166,10 @@ describe("the Dockerfiles' release builds", () => {
       "build:server",
       "vite build --config vite.server.config.ts",
     ]);
+    expect(api?.preScript).toEqual({
+      command: AUDIT_GEN,
+      writes: "packages/audit/src/events/_index.gen.ts",
+    });
     const connector = byLabel.get(CONNECTOR_DOCKERFILE);
     expect(connector?.environment).toEqual({
       TURBO_TELEMETRY_DISABLED: "1",
@@ -154,6 +177,7 @@ describe("the Dockerfiles' release builds", () => {
       FIN_BUILD_TARGET: "release",
     });
     expect([connector?.script, connector?.package]).toEqual(["build", "apps/connector"]);
+    expect(connector?.preScript).toBeUndefined();
     expect(images.skipped).toContain(
       `${APP_DOCKERFILE}, APP=connector: apps/connector has no build:server script`,
     );
@@ -269,6 +293,31 @@ describe("viteBuildConfig", () => {
       viteBuildConfig({ b: "vite build --config vite.server.config.ts", [hook]: "true" }, "b"),
     ).toThrow(`the package has a ${hook} script, which pnpm runs with b`);
   });
+
+  it("reads a pre script that is byte for byte an allowed command", () => {
+    const scripts = { b: "vite build --config vite.server.config.ts", preb: AUDIT_GEN };
+    expect(viteBuildConfig(scripts, "b", [AUDIT_GEN])).toBe("vite.server.config.ts");
+  });
+
+  it.each([
+    ["another command", "true"],
+    ["the allowed command with a byte added", `${AUDIT_GEN} `],
+    ["the allowed command with a byte removed", AUDIT_GEN.slice(0, -1)],
+    ["the allowed command with a byte changed", AUDIT_GEN.replace("gen.ts", "gen.js")],
+    ["a command that is no string", 1],
+  ])("refuses a pre script that is %s", (_name, command) => {
+    const scripts = { b: "vite build --config vite.server.config.ts", preb: command };
+    expect(() => viteBuildConfig(scripts, "b", [AUDIT_GEN])).toThrow(
+      "the package has a preb script, which pnpm runs with b",
+    );
+  });
+
+  it("refuses the allowed command as a post script", () => {
+    const scripts = { b: "vite build --config vite.server.config.ts", postb: AUDIT_GEN };
+    expect(() => viteBuildConfig(scripts, "b", [AUDIT_GEN])).toThrow(
+      "the package has a postb script, which pnpm runs with b",
+    );
+  });
 });
 
 describe("a changed release build is refused, or followed", () => {
@@ -291,6 +340,53 @@ describe("a changed release build is refused, or followed", () => {
     );
     expect(images.refusals).toEqual([
       `${api}: the package has a ${hook} script, which pnpm runs with build:server`,
+    ]);
+  });
+
+  // The api's prebuild:server is read only because it is byte for byte the allowlisted generator:
+  // the same command edited by any one byte, or with a step or a flag added, is refused.
+  it.each([
+    ["a space added at its end", `${AUDIT_GEN} `],
+    ["a space added at its start", ` ${AUDIT_GEN}`],
+    ["a tab for a space", AUDIT_GEN.replace(" ", "\t")],
+    ["two spaces for one", AUDIT_GEN.replace(" ", "  ")],
+    ["a letter in capitals", `N${AUDIT_GEN.slice(1)}`],
+    ["a byte removed", AUDIT_GEN.slice(0, -1)],
+    ["a byte added to the file's name", `${AUDIT_GEN}x`],
+    ["a byte changed in the file's name", AUDIT_GEN.replace("gen.ts", "gen.js")],
+    ["another directory", AUDIT_GEN.replace("../../", "../")],
+    ["a step after it", `${AUDIT_GEN} && node strip.mjs`],
+    ["a flag added", AUDIT_GEN.replace("node ", "node --import ./strip.mjs ")],
+  ])("the api's allowlisted prebuild:server with %s is refused", (_name, command) => {
+    expect(command).not.toBe(AUDIT_GEN);
+    const images = imageBuilds(
+      plantRepository((files) => setScripts(files, "api", { "prebuild:server": command })),
+    );
+    expect(images.refusals).toEqual([
+      `${api}: the package has a prebuild:server script, which pnpm runs with build:server`,
+    ]);
+    expect(images.builds.map((build) => build.label)).not.toContain(api);
+  });
+
+  it("the allowlisted generator as an app's postbuild:server is refused", () => {
+    const images = imageBuilds(
+      plantRepository((files) => setScripts(files, "api", { "postbuild:server": AUDIT_GEN })),
+    );
+    expect(images.refusals).toEqual([
+      `${api}: the package has a postbuild:server script, which pnpm runs with build:server`,
+    ]);
+  });
+
+  it("the api's prebuild:server is refused once the allowlist no longer names it", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        const allowlist = JSON.parse(files.get(ALLOWLIST_FILE) ?? "{}") as { preScripts: [] };
+        allowlist.preScripts = [];
+        files.set(ALLOWLIST_FILE, JSON.stringify(allowlist));
+      }),
+    );
+    expect(images.refusals).toEqual([
+      `${api}: the package has a prebuild:server script, which pnpm runs with build:server`,
     ]);
   });
 
@@ -427,7 +523,8 @@ describe("a changed release build is refused, or followed", () => {
   it("a stage named by its index, in quotes or in capitals is the stage read", () => {
     const images = imageBuilds(
       plantRepository((files) => {
-        replace(files, APP_DOCKERFILE, APP_COPY, APP_COPY.replace("build-release", "1"));
+        // build-release is app.Dockerfile's third stage (index 2), after deps and db-assets.
+        replace(files, APP_DOCKERFILE, APP_COPY, APP_COPY.replace("build-release", "2"));
         replace(files, CONNECTOR_DOCKERFILE, CONNECTOR_CLOUDFLARED, "COPY --from=0 ");
         replace(
           files,
@@ -441,6 +538,214 @@ describe("a changed release build is refused, or followed", () => {
     const labels = images.builds.map((build) => build.label);
     expect(labels).toContain(api);
     expect(labels).toContain(CONNECTOR_DOCKERFILE);
+  });
+});
+
+// The one copy app.Dockerfile's release stage takes beside its bundle, the database's files, is read
+// only because ops/docker/release-allowlist.json names it word for word, and only while the
+// db-assets stage it comes from ends in the image's output scan over exactly what it copies, so
+// every copy the release stage takes is scanned. A second copy the allowlist does not name, the
+// listed one changed in any word or flag, the stage's scan left out, moved, ignored or pointed
+// elsewhere, and an allowlist of any other shape are refused.
+describe("the release stage's allowlisted copies", () => {
+  const api = `${APP_DOCKERFILE}, APP=api`;
+  const twice = `${APP_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`;
+  const stage = `${APP_DOCKERFILE}: its stage db-assets, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy /out/db-assets/ from,`;
+  const unscanned = `${stage} does not end in a RUN whose last step is \`node ${SCAN_SCRIPT} /out/db-assets\``;
+  /** app.Dockerfile with its release stage's allowlisted copy replaced by `to`. */
+  const releaseCopy = (to: string) => (files: Map<string, string>) =>
+    replace(files, APP_DOCKERFILE, `${APP_COPY}${APP_DB_COPY}`, `${APP_COPY}${to}`);
+  /** app.Dockerfile with its db-assets stage's scan replaced by `to`. */
+  const dbScan = (to: string) => (files: Map<string, string>) =>
+    replace(files, APP_DOCKERFILE, APP_DB_SCAN, to);
+  /** The allowlist, changed by `change`. */
+  const allowlist =
+    (change: (value: Record<string, unknown>) => void) => (files: Map<string, string>) => {
+      const value = JSON.parse(files.get(ALLOWLIST_FILE) ?? "{}") as Record<string, unknown>;
+      change(value);
+      files.set(ALLOWLIST_FILE, JSON.stringify(value));
+    };
+  /** The allowlist's first copy, changed by `change`. */
+  const firstCopy = (change: (copy: Record<string, unknown>) => void) =>
+    allowlist((value) => {
+      const [copy] = value.copies as Record<string, unknown>[];
+      if (copy !== undefined) change(copy);
+    });
+
+  it("names the database's files and the audit index's generator alone, each with its reason", () => {
+    const { copies, preScripts } = readAllowlist(REPOSITORY);
+    expect(copies.map((copy) => [copy.stage, copy.source, copy.destination])).toEqual([
+      ["db-assets", "/out/db-assets/", "/app/db-assets/"],
+    ]);
+    expect(preScripts.map((pre) => [pre.command, pre.writes])).toEqual([
+      [AUDIT_GEN, "packages/audit/src/events/_index.gen.ts"],
+    ]);
+    for (const { reason } of [...copies, ...preScripts]) expect(reason.length).toBeGreaterThan(20);
+  });
+
+  it("lets the image's db-assets stage's scan pass over the database's files it stages", () => {
+    const out = join(temporary(), "db-assets");
+    const staged = spawnSync(
+      process.execPath,
+      [join(REPOSITORY, "packages/db/src/assets-cli.ts"), "stage", out],
+      { cwd: REPOSITORY, encoding: "utf8", env: { PATH: dirname(process.execPath) } },
+    );
+    expect(staged.status).toBe(0);
+    const scan = runHarnessScan(REPOSITORY, out);
+    expect([scan.status, scan.stderr]).toEqual([0, ""]);
+    expect(scan.stdout).toContain("no harness marker");
+  }, 30_000);
+
+  it.each<[string, (files: Map<string, string>) => void, string | RegExp]>([
+    [
+      "a second, unlisted copy from a stage that holds the repository",
+      releaseCopy(`${APP_DB_COPY}COPY --from=deps /src/packages/db/ /app/db/\n`),
+      twice,
+    ],
+    [
+      "a second, unlisted copy from the allowlisted stage",
+      releaseCopy(`${APP_DB_COPY}COPY --from=db-assets /src/packages/testing/ /app/testing/\n`),
+      twice,
+    ],
+    [
+      "the listed copy to another destination",
+      releaseCopy("COPY --from=db-assets /out/db-assets/ /app/dist/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy from another source",
+      releaseCopy("COPY --from=db-assets /src/ /app/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy from another stage",
+      releaseCopy("COPY --from=deps /out/db-assets/ /app/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy with another flag",
+      releaseCopy("COPY --from=db-assets --chmod=444 /out/db-assets/ /app/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy with a second source",
+      releaseCopy("COPY --from=db-assets /out/db-assets/ /src/ /app/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy through a variable",
+      releaseCopy("COPY --from=db-assets $FIN_DB_ASSETS_DIR /app/db-assets/\n"),
+      twice,
+    ],
+    [
+      "the listed copy once the allowlist no longer names it",
+      allowlist((value) => {
+        value.copies = [];
+      }),
+      twice,
+    ],
+    ["the db-assets stage's scan left out", dbScan(""), unscanned],
+    [
+      "the db-assets stage's scan over another directory",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out\n`),
+      unscanned,
+    ],
+    [
+      "the db-assets stage's scan over a directory inside the copy",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets/packages\n`),
+      unscanned,
+    ],
+    [
+      "a step after the db-assets stage's scan",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets && cp -r packages/testing /out/db-assets/\n`),
+      unscanned,
+    ],
+    [
+      "a RUN after the db-assets stage's scan",
+      dbScan(`${APP_DB_SCAN}RUN cp -r packages/testing /out/db-assets/\n`),
+      unscanned,
+    ],
+    [
+      "an ENV after the db-assets stage's scan",
+      dbScan(`${APP_DB_SCAN}ENV NOTE=after\n`),
+      unscanned,
+    ],
+    [
+      "a copy into the db-assets stage after its scan",
+      dbScan(`${APP_DB_SCAN}COPY packages/testing/ /out/db-assets/testing/\n`),
+      new RegExp(`^${stage} has COPY on line \\d+$`),
+    ],
+    [
+      "the db-assets stage's scan's failure ignored",
+      dbScan(`RUN node ${SCAN_SCRIPT} /out/db-assets || true\n`),
+      new RegExp(
+        `^${APP_DOCKERFILE}: \`node .*\` holds \`\\|\`, which the test does not read as a word$`,
+      ),
+    ],
+    [
+      "the db-assets stage's scan run with a mount over the copy",
+      dbScan(
+        `RUN --mount=type=bind,from=deps,source=/src/packages/db,target=/out/db-assets node ${SCAN_SCRIPT} /out/db-assets\n`,
+      ),
+      new RegExp(`^${stage} has a RUN on line \\d+ that is not a plain shell command$`),
+    ],
+    [
+      "the db-assets stage's scan in exec form",
+      dbScan(`RUN ["node", "${SCAN_SCRIPT}", "/out/db-assets"]\n`),
+      new RegExp(`^${stage} has a RUN on line \\d+ that is not a plain shell command$`),
+    ],
+    [
+      "an allowlist that is missing",
+      (files) => files.delete(ALLOWLIST_FILE),
+      `${ALLOWLIST_FILE}: it is missing or is not JSON`,
+    ],
+    [
+      "an allowlist that is not JSON",
+      (files) => files.set(ALLOWLIST_FILE, "{"),
+      `${ALLOWLIST_FILE}: it is missing or is not JSON`,
+    ],
+    [
+      "an allowlist with a field it does not know",
+      allowlist((value) => {
+        value.more = [];
+      }),
+      `${ALLOWLIST_FILE}: it holds about, copies, more, preScripts, not exactly about, copies, preScripts`,
+    ],
+    [
+      "an allowlisted copy without its reason",
+      firstCopy((copy) => {
+        delete copy.reason;
+      }),
+      `${ALLOWLIST_FILE}: copy 1 holds destination, source, stage, not exactly stage, source, destination, reason`,
+    ],
+    [
+      "an allowlisted copy whose reason is empty",
+      firstCopy((copy) => {
+        copy.reason = " ";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's reason is not a string with text`,
+    ],
+    [
+      "an allowlisted copy from a relative source",
+      firstCopy((copy) => {
+        copy.source = "out/db-assets/";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's "out/db-assets/" is not an absolute path in plain characters`,
+    ],
+    [
+      "an allowlisted pre-script that writes outside the repository",
+      allowlist((value) => {
+        const [pre] = value.preScripts as Record<string, unknown>[];
+        if (pre !== undefined) pre.writes = "../outside.ts";
+      }),
+      `${ALLOWLIST_FILE}: pre-script 1's writes, "../outside.ts", is not a repository path`,
+    ],
+  ])("refuses %s", (_name, change, refusal) => {
+    const images = imageBuilds(plantRepository(change));
+    expect(images.refusals).toContainEqual(
+      typeof refusal === "string" ? refusal : expect.stringMatching(refusal),
+    );
+    expect(images.builds.map((build) => build.label)).not.toContain(api);
   });
 });
 

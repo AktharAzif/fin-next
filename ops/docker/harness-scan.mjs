@@ -3,7 +3,9 @@
 // target holds packages/testing). app.Dockerfile's build-release stage and connector.Dockerfile's
 // build stage run it right after the server bundle's release build, in the same RUN, over the
 // directory the image's release stage copies to /app/dist/; any finding exits non-zero, which fails
-// that RUN and so the image's build. The harness guard (packages/server/src/build/harness-guard.ts)
+// that RUN and so the image's build. app.Dockerfile's db-assets stage runs it as its last step over
+// the database's files, the one other copy its release stage takes (release-allowlist.json), so
+// every copy the release stage takes is scanned. The harness guard (packages/server/src/build/harness-guard.ts)
 // refuses the harness while the bundle is built; this reads what the build actually left for the
 // image, so a build that ran without the guard (a changed script or config) still cannot ship it
 // with its markers in place.
