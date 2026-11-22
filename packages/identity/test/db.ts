@@ -77,23 +77,33 @@ function serverConfig(url: URL, database: string): PoolConfig {
   };
 }
 
-/** Each login role's password, derived once per process: scrypt is slow by design. */
-const loginPasswords = new Map<string, string>();
+/** Every login role's password, by service role, once derived in this process. */
+let loginPasswords: ReadonlyMap<string, string> | undefined;
 
 /**
- * A login role's password, derived from the server's own so it is never stored or printed: scrypt
- * (a password KDF) salted with the role's name, so the server's password cannot be guessed back
- * from it cheaply. Every worker derives the same value, since they share one server.
+ * Every login role's password, derived from the server's own so it is never stored or printed:
+ * scrypt (a password KDF) salted with this harness's role prefix, so the server's password cannot
+ * be guessed back from them cheaply. scrypt is slow by design, so it runs once per process, for
+ * every role at once (one key, 32 bytes per role), and before any advisory lock is taken, so no
+ * worker waits on another's derivation. Every worker derives the same values, since they share one
+ * server.
  */
-function loginPassword(url: URL, role: string): string {
-  const name = `${ROLE_PREFIX}${role}`;
-  let password = loginPasswords.get(name);
-  if (password === undefined) {
+function derivePasswords(url: URL): ReadonlyMap<string, string> {
+  if (loginPasswords === undefined) {
     const secret =
       url.password !== "" ? decodeURIComponent(url.password) : (process.env.PGPASSWORD ?? "");
-    password = scryptSync(secret, name, 32).toString("hex");
-    loginPasswords.set(name, password);
+    const key = scryptSync(secret, ROLE_PREFIX, 32 * SERVICE_ROLES.length);
+    loginPasswords = new Map(
+      SERVICE_ROLES.map((role, i) => [role, key.subarray(32 * i, 32 * (i + 1)).toString("hex")]),
+    );
   }
+  return loginPasswords;
+}
+
+/** A login role's password (see derivePasswords). */
+function loginPassword(url: URL, role: string): string {
+  const password = derivePasswords(url).get(role);
+  if (password === undefined) throw new Error(`no test login role for ${role}`);
   return password;
 }
 
@@ -177,6 +187,8 @@ async function buildTemplate(url: URL, admin: Client, print: string): Promise<vo
 export async function ensureTemplate(): Promise<void> {
   const url = testDatabaseUrl();
   if (url === null) throw new Error("FIN_TEST_DATABASE_URL is not set");
+  // The passwords first, outside the lock: the derivation is the slow part of ensureRoles.
+  derivePasswords(url);
   const admin = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
   await admin.connect();
   try {

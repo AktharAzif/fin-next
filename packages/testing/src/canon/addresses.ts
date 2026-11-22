@@ -30,14 +30,17 @@ const sha256Hex = (text: string) => createHash("sha256").update(text).digest("he
  * SHA-256 of all of it, so two scopes that differ anywhere (a run ID, a test, a retry) stay apart.
  */
 function cleanScope(scope: string): string {
-  // One pass, no pattern: letters and digits are kept, and each run of anything else between two
-  // of them becomes one hyphen (a run at either end becomes none).
+  // One pass, no pattern, one read of each UTF-16 unit: ASCII letters and digits are kept, and each
+  // run of anything else between two of them becomes one hyphen (a run at either end becomes none).
+  // A unit outside ASCII (a surrogate half included) is never a letter or digit here.
+  const lower = scope.toLowerCase();
   let clean = "";
   let gap = false;
-  for (const char of scope.toLowerCase()) {
-    if ((char >= "a" && char <= "z") || (char >= "0" && char <= "9")) {
+  for (let i = 0; i < lower.length; i += 1) {
+    const code = lower.charCodeAt(i);
+    if ((code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)) {
       if (gap && clean !== "") clean += "-";
-      clean += char;
+      clean += String.fromCharCode(code);
       gap = false;
     } else {
       gap = true;
