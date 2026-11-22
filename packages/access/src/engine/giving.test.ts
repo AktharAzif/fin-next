@@ -427,6 +427,8 @@ function step(rng: Seeded, world: World, applied: Map<string, number>, at: strin
   expect(broken, at).toEqual([]);
 }
 
+// Heavy by design: 40 worlds of 150 steps for each seed, every invariant checked after each step.
+// About 0.1 to 0.3 s alone; it took over 4 s inside a loaded `pnpm check`, so it has 20.
 describe.each(catalogues)("a model team under the rules of [SA-32] (%s)", (_realm, cat) => {
   const worlds = propertyRuns(40);
   for (const seed of propertySeeds()) {
@@ -443,6 +445,6 @@ describe.each(catalogues)("a model team under the rules of [SA-32] (%s)", (_real
       for (const kind of kinds) {
         expect(applied.get(kind) ?? 0, `no ${kind} was ever applied`).toBeGreaterThan(0);
       }
-    });
+    }, 20_000);
   }
 });
