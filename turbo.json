@@ -15,41 +15,13 @@
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "outputs": [] },
-    "test": { "outputs": [] },
-    "@fin/server#test": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/apps/*/package.json",
-        "$TURBO_ROOT$/apps/*/vite.server.config.ts",
-        "$TURBO_ROOT$/apps/*/src/**",
-        "$TURBO_ROOT$/packages/audit/src/**",
-        "!$TURBO_ROOT$/packages/audit/src/events/_index.gen.ts*",
-        "$TURBO_ROOT$/packages/testing/package.json",
-        "$TURBO_ROOT$/packages/testing/src/**"
-      ],
-      "outputs": []
-    },
-    "@fin/db#test": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/ops/docker/app.Dockerfile",
-        "$TURBO_ROOT$/ops/docker/app.Dockerfile.dockerignore",
-        "$TURBO_ROOT$/packages/*/bootstrap/**",
-        "$TURBO_ROOT$/packages/*/migrations/**",
-        "$TURBO_ROOT$/packages/*/grants/**"
-      ],
-      "outputs": []
-    },
-    "@fin/api#test": {
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/ops/docker/app.Dockerfile"],
-      "outputs": []
-    },
+    "test": { "cache": false },
     "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
     "//#lint:root": { "cache": false },
     "//#typecheck:root": {
       "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
       "outputs": []
     },
-    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+    "//#test:root": { "cache": false }
   }
 }
