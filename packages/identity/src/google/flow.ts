@@ -5,26 +5,37 @@ import type { GoogleClaims, IdTokenRefusal, IdTokenResult } from "./id-token.ts"
 /** Why a Google sign-in failed on Fin's side or the provider's (`auth.google_failed`). */
 export type GoogleFailure = "token_exchange" | "jwks" | IdTokenRefusal;
 
+interface Exchanged {
+  readonly code: string;
+  readonly codeVerifier: string;
+  /** The step-up intent a link carries in the OAuth state's server context. */
+  readonly linkIntentId: string | null;
+}
+
 /** What the realm learned about a callback before its unit of work opened. */
 export type Prefetched =
-  | {
-      readonly code: string;
-      readonly codeVerifier: string;
+  /** The provider answered an ID token, verified (or refused) against this sign-in. */
+  | (Exchanged & {
+      readonly kind: "token";
       readonly nonce: string;
       readonly idToken: string;
       readonly result: IdTokenResult;
-      /** The step-up intent a link carries in the OAuth state's server context. */
-      readonly linkIntentId: string | null;
-    }
-  | {
-      readonly code: string;
-      readonly codeVerifier: string;
-      readonly failure: GoogleFailure;
-      readonly linkIntentId: string | null;
-    };
+    })
+  /** Fin or the provider failed: the exchange, the keys (lined as `auth.google_failed`). */
+  | (Exchanged & { readonly kind: "failed"; readonly failure: GoogleFailure })
+  /**
+   * The provider refused the code (`invalid_grant`: made up, used, expired or not this sign-in's):
+   * the client's doing, a refusal and not a failure.
+   */
+  | (Exchanged & { readonly kind: "refused" });
 
 export interface GoogleFlow {
   prefetched: Prefetched | null;
+  /**
+   * Set when another callback already claimed this state's exchange, with the state's error page.
+   * The callback's before-hook answers it, so the library never consumes the state the claim holds.
+   */
+  spentState: { errorURL: string | null } | null;
   /** The claims of the token the library accepted in this request. */
   claims: GoogleClaims | null;
   /** The Google accounts (by subject) the library is making in this request, and for whom. */
@@ -40,6 +51,7 @@ export interface GoogleFlow {
 export function newGoogleFlow(): GoogleFlow {
   return {
     prefetched: null,
+    spentState: null,
     claims: null,
     creatingAccounts: [],
     creatingUser: false,

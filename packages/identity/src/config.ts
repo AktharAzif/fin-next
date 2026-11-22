@@ -183,6 +183,13 @@ export function readRealmSettings(
     if (error instanceof GoogleConfigError) throw new RealmConfigError(error.message);
     throw error;
   }
+  if (google !== null && apiUrl !== null) {
+    // The client's redirect URI is on FIN_PUBLIC_ORIGIN, while the library would build its
+    // callback on the API host: every Google start would fail. One origin only (S-01).
+    throw new RealmConfigError(
+      "FIN_FEATURE_GOOGLE is on with FIN_API_ORIGIN set; Google runs only on the app's own origin",
+    );
+  }
   const features = { passwords: false, google: google !== null };
   return {
     realm,

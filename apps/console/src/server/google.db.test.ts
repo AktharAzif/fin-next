@@ -136,6 +136,40 @@ describe("a Google round trip through the front door", () => {
     expect(first.status, JSON.stringify(first.json)).toBe(201);
   });
 
+  it("exchanges a code only for the state's own signed cookie, and never on the route's pattern", async () => {
+    const starter = new Client(on);
+    const start = await starter.call("POST", "/api/auth/sign-in/social", {
+      provider: "google",
+      callbackURL: "/sign-in?via=google",
+      disableRedirect: true,
+    });
+    expect(start.status, JSON.stringify(start.json)).toBe(200);
+    const state = String(new URL(String(start.json.url)).searchParams.get("state"));
+    const exchanges = fixture.exchanges.length;
+    const crossSite = { "sec-fetch-site": "cross-site" };
+
+    // A browser that sends the state under a signature the realm never made gets no exchange.
+    const stranger = new Client(on);
+    stranger.jar.set("__Host-fin.state", encodeURIComponent(`${state}.forged-signature`));
+    const forged = await stranger.call(
+      "GET",
+      `/api/auth/callback/google?code=junk&state=${state}`,
+      undefined,
+      crossSite,
+    );
+    expect(forged.status).toBe(302);
+    expect(fixture.exchanges.length).toBe(exchanges);
+
+    // The route's pattern is not a path (§4.1): 404 at the allowlist, whatever it carries.
+    for (const path of ["/api/auth/callback/:id", "/api/auth/callback/%3Aid"]) {
+      const literal = await starter.call("GET", `${path}?code=junk&state=${state}`, undefined, {
+        ...crossSite,
+      });
+      expect(literal.status, path).toBe(404);
+    }
+    expect(fixture.exchanges.length).toBe(exchanges);
+  });
+
   it("answers 404 on every Google path when Google is off", async () => {
     const browser = new Client(off);
     const start = await browser.call("POST", "/api/auth/sign-in/social", {

@@ -7,20 +7,21 @@
 //
 // No outbound call happens inside a unit of work (ARCHITECTURE principle 14: a request never holds
 // a pooled database client across outbound I/O). So the realm calls `prefetch()` for
-// `GET /callback/google` before it opens the request's unit: it reads the code's verifier and
-// nonce from the OAuth state in a short unit of its own, exchanges the code and verifies the ID
-// token with no client held, and leaves the outcome in the request state. Inside the unit the
-// library's `validateAuthorizationCode` and `getUserInfo` only read that outcome, and refuse
-// anything that does not match the code, the verifier and the nonce the library itself parsed.
+// `GET /callback/google` before it opens the request's unit, and the prefetch exchanges a code
+// only for the browser that started the sign-in, once (state.ts): the state cookie must carry the
+// state under the realm's signature, and then, in a short unit of its own, the network's exchange
+// allowance is counted (§5.6) and the stored state, unexpired, is claimed for this request. It
+// exchanges the code and verifies the ID token with no client held, and leaves the outcome in the
+// request state. Inside the unit the library's `validateAuthorizationCode` and `getUserInfo` only
+// read that outcome, and refuse anything that does not match the code, the verifier and the nonce
+// the library itself parsed.
 import { createHash, type KeyObject } from "node:crypto";
 import type { Clock } from "../ports/clock.ts";
 import type { LineSink } from "../ports/log.ts";
 import type { GoogleFailure, GoogleFlow } from "./flow.ts";
 import { keysFromJwks, verifyIdToken } from "./id-token.ts";
 import type { GoogleSettings } from "./settings.ts";
-
-/** The key under which `/link-social` puts its step-up intent in the OAuth state. */
-export const LINK_INTENT_KEY = "finStepUpIntent";
+import { type StateClaim, verifiedCookieValue } from "./state.ts";
 
 const SCOPES = "openid email profile";
 const FETCH_TIMEOUT_MS = 8000;
@@ -29,61 +30,6 @@ const JWKS_MIN_REFETCH_MS = 60 * 1000;
 const STATE = /^[A-Za-z0-9_-]{16,128}$/;
 const CODE = /^[\x21-\x7e]{1,2048}$/;
 
-/** The OAuth state the library keeps in a verification row (only the fields Fin reads). */
-interface StoredState {
-  codeVerifier: string;
-  idTokenNonce: string;
-  /** Server context only (never the client's `additionalData`): the link's intent. */
-  linkIntentId: string | null;
-}
-
-const INTENT_ID = /^sti_[0-9a-hjkmnp-tv-z]{26}$/;
-
-function storedState(value: string | null): StoredState | null {
-  if (value === null) return null;
-  try {
-    const data = JSON.parse(value) as Record<string, unknown>;
-    if (typeof data.codeVerifier !== "string" || typeof data.idTokenNonce !== "string") {
-      return null;
-    }
-    const server = data.serverContext;
-    const intent =
-      typeof server === "object" && server !== null
-        ? (server as Record<string, unknown>)[LINK_INTENT_KEY]
-        : undefined;
-    return {
-      codeVerifier: data.codeVerifier,
-      idTokenNonce: data.idTokenNonce,
-      linkIntentId: typeof intent === "string" && INTENT_ID.test(intent) ? intent : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** The library's verification identifier for an OAuth state (pinned by the realm's tests). */
-export function stateIdentifier(state: string): string {
-  return `auth-state:${state}`;
-}
-
-/** The value part of a signed cookie (`<value>.<signature>`, URL-encoded), or null. */
-function signedCookieValue(cookieHeader: string | null, name: string): string | null {
-  if (cookieHeader === null) return null;
-  for (const part of cookieHeader.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1 || part.slice(0, eq).trim() !== name) continue;
-    let raw: string;
-    try {
-      raw = decodeURIComponent(part.slice(eq + 1).trim());
-    } catch {
-      return null;
-    }
-    const dot = raw.lastIndexOf(".");
-    return dot <= 0 ? null : raw.slice(0, dot);
-  }
-  return null;
-}
-
 export interface GoogleSignInDeps {
   readonly settings: GoogleSettings;
   readonly clock: Clock;
@@ -91,9 +37,16 @@ export interface GoogleSignInDeps {
   readonly realm: "developer";
   /** The state cookie's full name (`__Host-fin.state`). */
   readonly stateCookie: string;
+  /** The secret the library signs the state cookie with: the realm's newest. */
+  readonly stateSecret: string;
   /** The request's Google flow (bound with the realm's request state). */
   readonly flow: () => GoogleFlow;
   readonly fetch?: typeof fetch;
+}
+
+/** A callback the realm answers itself, before its unit of work: the exchange limit refused it. */
+export interface PrefetchRefusal {
+  readonly retryAfter: number;
 }
 
 export interface GoogleSignIn {
@@ -101,12 +54,31 @@ export interface GoogleSignIn {
   readonly provider: Record<string, unknown>;
   /**
    * Exchanges a callback's code and verifies its ID token, before the request's unit of work
-   * opens. `readState` reads the library's verification row in a short unit of its own.
+   * opens. `claim` counts the network's exchange allowance and claims the state, in a short unit
+   * of its own. Answers the refusal the realm sends instead of running the library, or null.
    */
   prefetch(
     request: Request,
-    readState: (identifier: string) => Promise<string | null>,
-  ): Promise<void>;
+    claim: (state: string) => Promise<StateClaim>,
+  ): Promise<PrefetchRefusal | null>;
+}
+
+/** What the token endpoint answered. */
+type Exchange =
+  | { readonly kind: "token"; readonly idToken: string }
+  | { readonly kind: "refused" }
+  | { readonly kind: "failed" };
+
+/** The `error` of a token endpoint's error answer (RFC 6749 §5.2), or null. */
+async function tokenError(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null) return null;
+    const error = (body as Record<string, unknown>).error;
+    return typeof error === "string" ? error : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
@@ -146,8 +118,12 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
     return keys.get(kid) ?? null;
   }
 
-  /** POSTs the code to the token endpoint; the ID token, or null on any failure. */
-  async function exchange(code: string, codeVerifier: string): Promise<string | null> {
+  /**
+   * POSTs the code to the token endpoint. Only `invalid_grant` is the client's doing (a code made
+   * up, used, expired or issued for another sign-in): a refusal. Any other error, an unreadable
+   * answer or a timeout is a failure on Fin's side or the provider's.
+   */
+  async function exchange(code: string, codeVerifier: string): Promise<Exchange> {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -167,40 +143,70 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
         redirect: "manual",
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
-      if (response.status !== 200) return null;
-      const answer = (await response.json()) as Record<string, unknown>;
-      return typeof answer.id_token === "string" ? answer.id_token : null;
+      if (response.status === 200) {
+        const answer: unknown = await response.json();
+        const idToken =
+          typeof answer === "object" && answer !== null
+            ? (answer as Record<string, unknown>).id_token
+            : undefined;
+        return typeof idToken === "string" ? { kind: "token", idToken } : { kind: "failed" };
+      }
+      if (response.status === 400 && (await tokenError(response)) === "invalid_grant") {
+        return { kind: "refused" };
+      }
+      return { kind: "failed" };
     } catch {
-      return null;
+      return { kind: "failed" };
     }
   }
 
   async function prefetch(
     request: Request,
-    readState: (identifier: string) => Promise<string | null>,
-  ): Promise<void> {
+    claim: (state: string) => Promise<StateClaim>,
+  ): Promise<PrefetchRefusal | null> {
     const flow = deps.flow();
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
-    if (code === null || state === null || !CODE.test(code) || !STATE.test(state)) return;
-    // Only a browser that holds this sign-in's state cookie gets an exchange; the library checks
-    // the cookie's signature itself, and refuses the callback whatever happens here.
-    if (signedCookieValue(request.headers.get("cookie"), deps.stateCookie) !== state) return;
-    // The library checks the state's expiry itself when it parses it in the unit.
-    const stored = storedState(await readState(stateIdentifier(state)));
-    if (stored === null) return;
+    if (code === null || state === null || !CODE.test(code) || !STATE.test(state)) return null;
+    // Only the browser that started this sign-in gets an exchange: its state cookie must carry
+    // this state under the realm's own signature. Anything else never reaches the database here;
+    // the library refuses it in the unit (`state_mismatch`).
+    const cookie = request.headers.get("cookie");
+    if (verifiedCookieValue(cookie, deps.stateCookie, deps.stateSecret) !== state) return null;
+    const claimed = await claim(state);
+    switch (claimed.kind) {
+      case "limited":
+        return { retryAfter: claimed.retryAfter };
+      case "none":
+        // Unknown or expired: nothing to exchange, and the library refuses it in the unit.
+        return null;
+      case "spent":
+        // Another callback holds this state's one exchange; the callback's before-hook refuses
+        // this one before the library could consume the state under it.
+        flow.spentState = { errorURL: claimed.stored.errorURL };
+        return null;
+      case "claimed":
+        break;
+    }
+    const stored = claimed.stored;
     const base = {
       code,
       codeVerifier: stored.codeVerifier,
       linkIntentId: stored.linkIntentId,
     };
-    const idToken = await exchange(code, stored.codeVerifier);
-    if (idToken === null) {
-      failed("token_exchange");
-      flow.prefetched = { ...base, failure: "token_exchange" };
-      return;
+    const exchanged = await exchange(code, stored.codeVerifier);
+    if (exchanged.kind === "refused") {
+      // The after-hook lines the refusal (`auth.google_refused`, `invalid_code`).
+      flow.prefetched = { ...base, kind: "refused" };
+      return null;
     }
+    if (exchanged.kind === "failed") {
+      failed("token_exchange");
+      flow.prefetched = { ...base, kind: "failed", failure: "token_exchange" };
+      return null;
+    }
+    const idToken = exchanged.idToken;
     let unavailable = false;
     const result = await verifyIdToken(
       idToken,
@@ -221,12 +227,13 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
     );
     if (unavailable) {
       failed("jwks");
-      flow.prefetched = { ...base, failure: "jwks" };
-      return;
+      flow.prefetched = { ...base, kind: "failed", failure: "jwks" };
+      return null;
     }
     // An address Google has not verified is a refusal of the person's account, not a failure.
     if (!result.ok && result.reason !== "email_unverified") failed(result.reason);
-    flow.prefetched = { ...base, nonce: stored.idTokenNonce, idToken, result };
+    flow.prefetched = { ...base, kind: "token", nonce: stored.idTokenNonce, idToken, result };
+    return null;
   }
 
   const provider = {
@@ -289,7 +296,7 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
         prefetched.code !== input.code ||
         prefetched.codeVerifier !== input.codeVerifier ||
         input.redirectURI !== settings.redirectUri ||
-        !("idToken" in prefetched)
+        prefetched.kind !== "token"
       ) {
         return null;
       }
@@ -301,7 +308,7 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
       const prefetched = flow.prefetched;
       if (
         prefetched === null ||
-        !("idToken" in prefetched) ||
+        prefetched.kind !== "token" ||
         tokens.idToken !== prefetched.idToken ||
         tokens.expectedIdTokenNonce === undefined ||
         tokens.expectedIdTokenNonce !== prefetched.nonce ||

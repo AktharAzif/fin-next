@@ -3,7 +3,9 @@
 //   - before `/sign-in/social` and `/link-social`: Google only, and the redirect targets of §2.3;
 //     a link also puts its validated step-up intent in the OAuth state's server context;
 //   - before `/unlink-account`: only the person's own Google account may be unlinked;
-//   - before `/callback/:id`: a link's intent is checked before the library links anything;
+//   - before `/callback/:id`: a callback whose state another callback already exchanged is sent
+//     back refused before the library touches the state, and a link's intent is checked before
+//     the library links anything;
 //   - `databaseHooks`: a Google session is `aal1` with `createdVia: google`, and proves the
 //     mailbox only when Google verified the account's own address this time; a person is made from
 //     a Google profile only with a verified address and while sign-ups are open; a Google account
@@ -27,8 +29,8 @@ import type { RealmRuntime } from "../runtime.ts";
 import { consumeIntent, readIntent } from "../step-up/intents.ts";
 import { personById } from "../store.ts";
 import type { GoogleFlow } from "./flow.ts";
-import { LINK_INTENT_KEY } from "./provider.ts";
 import { GOOGLE_RETURN_PAGES, type GoogleRedirectField, googleReturnUrl } from "./redirect.ts";
+import { LINK_INTENT_KEY } from "./state.ts";
 
 export const GOOGLE_PATHS = new Set(["/sign-in/social", "/link-social", "/unlink-account"]);
 export const CALLBACK_PATH = "/callback/:id";
@@ -141,8 +143,29 @@ export async function googleBefore(
 }
 
 /**
- * The callback, before the library: a link whose intent can no longer be used is sent back to
- * Account security with `error=step_up_invalid` before anything is linked.
+ * Where a refused callback goes when the realm answers it itself: the state's error page when Fin's
+ * redirect rule allowed it (an absolute URL on the public origin), else the sign-in page.
+ */
+function refusedCallbackTarget(rt: RealmRuntime, errorURL: string | null, error: string): string {
+  const origin = rt.settings.publicOrigin;
+  let target = new URL(`${origin}${GOOGLE_RETURN_PAGES.signIn[0]}`);
+  if (errorURL?.startsWith(`${origin}/`)) {
+    try {
+      const parsed = new URL(errorURL);
+      if (parsed.origin === origin) target = parsed;
+    } catch {
+      // The sign-in page, then.
+    }
+  }
+  target.searchParams.set("error", error);
+  return target.href;
+}
+
+/**
+ * The callback, before the library: one whose state another callback already exchanged is sent
+ * back with `error=state_mismatch` before the library could consume the state the other one holds
+ * (one state buys one exchange, state.ts); a link whose intent can no longer be used is sent back
+ * to Account security with `error=step_up_invalid` before anything is linked.
  */
 export async function googleCallbackBefore(
   rt: RealmRuntime,
@@ -150,6 +173,15 @@ export async function googleCallbackBefore(
   state: RequestState,
   tx: UnitTx,
 ): Promise<unknown> {
+  const redirect = (url: string): unknown =>
+    (ctx as unknown as { redirect(url: string): unknown }).redirect(url);
+  const spent = state.google.spentState;
+  if (spent !== null) {
+    rt.lines.write("auth.google_refused", "warn", { realm: "developer", reason: "state_used" });
+    state.line.outcome = "refused";
+    state.line.reason = "google.state_used";
+    throw redirect(refusedCallbackTarget(rt, spent.errorURL, "state_mismatch"));
+  }
   const prefetched = state.google.prefetched;
   const intentId = prefetched?.linkIntentId ?? null;
   if (intentId === null) return undefined;
@@ -170,8 +202,7 @@ export async function googleCallbackBefore(
     reason: intent === null ? "other_session" : intent.consumedAt !== null ? "used" : "expired",
   });
   state.line.reason = "google.step_up_invalid";
-  const target = `${rt.settings.publicOrigin}${GOOGLE_RETURN_PAGES.link[0]}?error=step_up_invalid`;
-  throw (ctx as unknown as { redirect(url: string): unknown }).redirect(target);
+  throw redirect(`${rt.settings.publicOrigin}${GOOGLE_RETURN_PAGES.link[0]}?error=step_up_invalid`);
 }
 
 type Data = Record<string, unknown>;
@@ -350,20 +381,20 @@ export async function googleCallbackAfter(
     // On its way back to the page with `?error=`. A failure on Fin's side or the provider's (the
     // exchange, the keys, a token that did not verify) was lined when it was prefetched, and the
     // page says `google_failed`; an address Google has not verified says `email_unverified`;
-    // anything else is the library's own refusal, lined here.
+    // anything else (a code the provider refused among them) is a refusal, lined here.
     const prefetched = state.google.prefetched;
-    // Only where the library refused because Fin's provider answered nothing (a code that came
-    // back twice at once fails its second exchange, yet is refused for its spent state).
+    // Only where the library refused because Fin's provider answered nothing.
     const fromProvider = error === "invalid_code" || error === "unable_to_get_user_info";
     const failed =
       fromProvider &&
       prefetched !== null &&
-      ("failure" in prefetched ||
-        (!prefetched.result.ok && prefetched.result.reason !== "email_unverified"));
+      (prefetched.kind === "failed" ||
+        (prefetched.kind === "token" &&
+          !prefetched.result.ok &&
+          prefetched.result.reason !== "email_unverified"));
     const unverified =
       fromProvider &&
-      prefetched !== null &&
-      "result" in prefetched &&
+      prefetched?.kind === "token" &&
       !prefetched.result.ok &&
       prefetched.result.reason === "email_unverified";
     state.google.redirectError = failed ? "google_failed" : unverified ? "email_unverified" : null;

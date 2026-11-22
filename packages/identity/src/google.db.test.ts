@@ -1,11 +1,15 @@
 // Google sign-in end to end on Postgres 18 (spec 02 §5.8, §4.2, §6.1, §6.3, §7.6, §13.8, §16.2,
 // §17.2; stretch 5): the developer realm against the fixture OpenID provider on a real socket.
-// Proves the state (bound to the browser's cookie, single use), PKCE (S256, the verifier at the
-// token endpoint), the nonce (minted per sign-in, checked in the ID token), the exact redirect
-// URI, verified addresses only, linking only from Account security with an intent and only to the
-// same address, the audit events in the action's transaction (the guard refuses the account row
-// without them), the security notices, and 404 for every Google path while Google is off.
-import { randomBytes } from "node:crypto";
+// Proves the state (bound to the browser's signed cookie, unexpired, one exchange however many
+// callbacks come), PKCE (S256, the verifier at the token endpoint), the nonce (minted per sign-in,
+// checked in the ID token), the exact redirect URI, the network's exchange allowance, a refused
+// code read as the client's refusal, verified addresses only (and the mailbox proved only for the
+// account's own address), linking only from Account security with an intent and only to the same
+// address, unlinking with an intent from a session of any age, the audit events in the action's
+// transaction (the guard refuses the account row without them), the security notices, and 404 for
+// every Google path while Google is off.
+import { createHmac, randomBytes } from "node:crypto";
+import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type FixtureAccount,
@@ -25,6 +29,9 @@ import {
   setUpAuthenticator,
 } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
+import { claimState, STATE_CLAIM_KEY } from "./google/state.ts";
+import { ManualClock } from "./ports/clock.ts";
+import type { Queryable } from "./ports/db.ts";
 
 const CLIENT_ID = "fin-console-test.apps.example.com";
 const REDIRECT_URI = `${ORIGIN.developer}/api/auth/callback/google`;
@@ -142,6 +149,43 @@ async function linesOf(event: string): Promise<Record<string, unknown>[]> {
   return h.lines.named(event).map((fields) => ({ ...fields }));
 }
 
+const crossSite = { "sec-fetch-site": "cross-site" };
+
+/** Starts a Google sign-in in this browser: the provider's address, and the state it carries. */
+async function startGoogle(
+  browser: Browser,
+): Promise<{ authorize: string; state: string; callbackOf(code: string): string }> {
+  const start = await browser.post("/api/auth/sign-in/social", {
+    provider: "google",
+    callbackURL: "/sign-in?via=google",
+    disableRedirect: true,
+  });
+  if (start.status !== 200) throw new Error(`/sign-in/social answered ${start.status}`);
+  const authorize = String(start.json?.url);
+  const state = String(new URL(authorize).searchParams.get("state"));
+  return {
+    authorize,
+    state,
+    callbackOf: (code) =>
+      `/api/auth/callback/google?code=${encodeURIComponent(code)}&state=${state}`,
+  };
+}
+
+/** The callback (path and query) the provider sends the browser back to, for this choice. */
+async function providerBack(authorize: string, choice: FixtureAccount | "deny"): Promise<string> {
+  fixture.chooseNext(choice);
+  const answer = await fetch(authorize, { redirect: "manual" });
+  const back = new URL(String(answer.headers.get("location")));
+  return `${back.pathname}${back.search}`;
+}
+
+/** The `error` a callback's redirect carries back to the page (null when it succeeded). */
+function errorOf(answer: Answer): string | null {
+  const location = answer.headers.get("location");
+  if (location === null) throw new Error(`no redirect: ${answer.status}`);
+  return new URL(location).searchParams.get("error");
+}
+
 describe("Google off (the default)", () => {
   it("answers 404 with an empty body on every Google path, before the router", async () => {
     const off = await createHarness(database, "developer");
@@ -150,6 +194,7 @@ describe("Google off (the default)", () => {
     for (const [method, path] of [
       ["POST", "/api/auth/sign-in/social"],
       ["GET", "/api/auth/callback/google"],
+      ["GET", "/api/auth/callback/:id"],
       ["POST", "/api/auth/link-social"],
       ["POST", "/api/auth/unlink-account"],
     ] as const) {
@@ -161,7 +206,7 @@ describe("Google off (the default)", () => {
       expect(answer.status, `${method} ${path}`).toBe(404);
       expect(answer.json).toBeNull();
     }
-    expect(off.lines.lines.filter((l) => l.event === "auth.endpoint_blocked")).toHaveLength(4);
+    expect(off.lines.lines.filter((l) => l.event === "auth.endpoint_blocked")).toHaveLength(5);
   });
 });
 
@@ -327,6 +372,39 @@ describe("a Google sign-up", () => {
   });
 });
 
+describe("the mailbox proof of a Google session (§5.8, §6.3)", () => {
+  it("is given only when Google verified the account's own address this time", async () => {
+    const maya = account("moved");
+    const first = h.browser();
+    await roundTrip(first, maya);
+    expect((await sessionOf(first.sessionToken()))?.mailbox_proved_at).not.toBeNull();
+
+    // The same Google account (its subject) comes back with another verified address.
+    const browser = h.browser();
+    const trip = await roundTrip(browser, {
+      ...maya,
+      email: `moved.elsewhere.${tag()}@example.com`,
+    });
+    expect(trip.location?.searchParams.get("error")).toBeNull();
+    const session = await sessionOf(browser.sessionToken());
+    expect(session).toMatchObject({ created_via: "google", assurance: "aal1" });
+    expect(session?.mailbox_proved_at).toBeNull();
+    const person = await h.admin.query<{ email: string }>(
+      `SELECT email FROM identity."user" WHERE id = $1`,
+      [session?.user_id],
+    );
+    expect(person.rows[0]?.email).toBe(maya.email);
+
+    // So that session cannot add a first factor under the first-factor rule (§6.3).
+    const enable = await browser.post("/api/auth/two-factor/enable", {});
+    expect(enable.status).toBe(403);
+    expect(enable.json).toMatchObject({ code: "fresh_session_required" });
+    const options = await browser.get("/api/auth/passkey/generate-register-options");
+    expect(options.status).toBe(403);
+    expect(options.json).toMatchObject({ code: "fresh_session_required" });
+  });
+});
+
 describe("what a Google sign-in refuses", () => {
   it("an address that has a Fin account Google is not linked to (no implicit linking)", async () => {
     const email = `coded.${tag()}@example.com`;
@@ -413,6 +491,198 @@ describe("what a Google sign-in refuses", () => {
     expect(fixture.exchanges.length).toBe(exchanges);
   });
 
+  it("a state cookie the realm did not sign: no exchange, and the browser that started it still finishes", async () => {
+    const starter = h.browser();
+    const { authorize, state } = await startGoogle(starter);
+    const callbackPath = await providerBack(authorize, account("forged"));
+    const exchanges = fixture.exchanges.length;
+    const otherSecret = randomBytes(32).toString("base64url");
+    for (const forged of [
+      `${state}.forged-signature`,
+      `${state}.${createHmac("sha256", otherSecret).update(state).digest("base64")}`,
+      state,
+    ]) {
+      const stranger = h.browser();
+      stranger.jar.set("__Host-fin.state", encodeURIComponent(forged));
+      const answer = await stranger.get(callbackPath, crossSite);
+      expect(errorOf(answer)).toBe("state_mismatch");
+      expect(stranger.sessionToken()).toBeNull();
+    }
+    expect(fixture.exchanges.length).toBe(exchanges);
+    // The state is still the starter's, and its code unspent: its own callback signs in.
+    const own = await starter.get(callbackPath, crossSite);
+    expect(errorOf(own)).toBeNull();
+    expect(starter.sessionToken()).not.toBeNull();
+    expect(fixture.exchanges.length).toBe(exchanges + 1);
+  });
+
+  it.each([
+    [
+      "its row",
+      "UPDATE identity.verification SET expires_at = now() - interval '1 second' WHERE identifier = $1",
+    ],
+    [
+      "its stored expiry",
+      `UPDATE identity.verification
+          SET value = jsonb_set(value::jsonb, '{expiresAt}',
+                to_jsonb((extract(epoch FROM now()) * 1000)::bigint - 1000))::text
+        WHERE identifier = $1`,
+    ],
+  ])("an expired state (%s): no exchange, no session", async (_label, expire) => {
+    const browser = h.browser();
+    const { authorize, state } = await startGoogle(browser);
+    const callbackPath = await providerBack(authorize, account("late"));
+    await h.admin.query(expire, [`auth-state:${state}`]);
+    const exchanges = fixture.exchanges.length;
+    const answer = await browser.get(callbackPath, crossSite);
+    expect(answer.status).toBe(302);
+    expect(errorOf(answer)).not.toBeNull();
+    expect(fixture.exchanges.length).toBe(exchanges);
+    expect(browser.sessionToken()).toBeNull();
+  });
+
+  it("one state buys one exchange, even for two callbacks at once", async () => {
+    const starter = h.browser();
+    const { authorize } = await startGoogle(starter);
+    // Two codes for the one state (two accounts at the provider), in two jars holding its cookie.
+    const people = [account("twin"), account("twin")];
+    const paths = [
+      await providerBack(authorize, people[0] as FixtureAccount),
+      await providerBack(authorize, people[1] as FixtureAccount),
+    ];
+    const jars = [h.browser(), h.browser()];
+    for (const jar of jars) for (const [name, value] of starter.jar) jar.jar.set(name, value);
+    const exchanges = fixture.exchanges.length;
+    const answers = await Promise.all(jars.map((jar, i) => jar.get(String(paths[i]), crossSite)));
+    expect(fixture.exchanges.length).toBe(exchanges + 1);
+    expect(answers.map(errorOf).sort()).toEqual([null, "state_mismatch"].sort());
+    expect(jars.filter((jar) => jar.sessionToken() !== null)).toHaveLength(1);
+    const made = await h.admin.query(`SELECT 1 FROM identity."user" WHERE email = ANY($1)`, [
+      people.map((p) => p.email),
+    ]);
+    expect(made.rowCount).toBe(1);
+  });
+
+  it("claims a state under its row's lock: a second claim waits for the first, then finds it spent", async () => {
+    const { state } = await startGoogle(h.browser());
+    const pool = database.login("fin_console", { max: 2 });
+    const first = await pool.connect();
+    const second = await pool.connect();
+    const asUnit = (client: PoolClient): Queryable => ({
+      async query<R extends object>(text: string, values?: readonly unknown[]) {
+        const result = await client.query(text, values === undefined ? [] : [...values]);
+        return { rows: result.rows as R[], rowCount: result.rowCount ?? 0 };
+      },
+    });
+    try {
+      await first.query("BEGIN");
+      await second.query("BEGIN");
+      expect((await claimState(asUnit(first), state, new Date(), "req_first")).kind).toBe(
+        "claimed",
+      );
+      const pid = (await second.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]
+        ?.pid;
+      const waiting = claimState(asUnit(second), state, new Date(), "req_second");
+      // The second claim blocks on the row the first one holds, until the first commits.
+      let blocked = false;
+      for (let i = 0; i < 200 && !blocked; i += 1) {
+        const activity = await h.admin.query<{ wait_event_type: string | null }>(
+          "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+          [pid],
+        );
+        blocked = activity.rows[0]?.wait_event_type === "Lock";
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      await first.query("COMMIT");
+      expect((await waiting).kind).toBe("spent");
+      await second.query("COMMIT");
+    } finally {
+      first.release();
+      second.release();
+      await pool.end();
+    }
+    const row = await h.admin.query<{ value: string }>(
+      "SELECT value FROM identity.verification WHERE identifier = $1",
+      [`auth-state:${state}`],
+    );
+    expect(JSON.parse(String(row.rows[0]?.value))[STATE_CLAIM_KEY]).toBe("req_first");
+  });
+
+  it("refuses a callback whose state another callback has claimed, before the library consumes it", async () => {
+    const browser = h.browser();
+    const { authorize, state } = await startGoogle(browser);
+    const callbackPath = await providerBack(authorize, account("claimed"));
+    // Another callback of this state holds its one exchange.
+    await h.admin.query(
+      `UPDATE identity.verification
+          SET value = jsonb_set(value::jsonb, ARRAY[$2], to_jsonb('req_other'::text))::text
+        WHERE identifier = $1`,
+      [`auth-state:${state}`, STATE_CLAIM_KEY],
+    );
+    const exchanges = fixture.exchanges.length;
+    const answer = await browser.get(callbackPath, crossSite);
+    expect(answer.status).toBe(302);
+    expect(answer.headers.get("location")).toBe(`${ORIGIN.developer}/sign-in?error=state_mismatch`);
+    expect(fixture.exchanges.length).toBe(exchanges);
+    expect(browser.sessionToken()).toBeNull();
+    expect((await linesOf("auth.google_refused")).at(-1)).toEqual({
+      realm: "developer",
+      reason: "state_used",
+    });
+    expect((await linesOf("request")).at(-1)).toMatchObject({
+      outcome: "refused",
+      reason: "google.state_used",
+      status: 302,
+    });
+    // The state is left to the callback that claimed it.
+    const row = await h.admin.query("SELECT 1 FROM identity.verification WHERE identifier = $1", [
+      `auth-state:${state}`,
+    ]);
+    expect(row.rowCount).toBe(1);
+  });
+
+  it("a code the provider refuses: a refusal of the client, not a failure of Fin or Google", async () => {
+    const browser = h.browser();
+    const { callbackOf } = await startGoogle(browser);
+    const failures = h.lines.named("auth.google_failed").length;
+    const exchanges = fixture.exchanges.length;
+    const answer = await browser.get(callbackOf("not-a-code"), crossSite);
+    expect(fixture.exchanges.slice(exchanges)).toEqual([
+      expect.objectContaining({ outcome: "refused", error: "invalid_grant" }),
+    ]);
+    expect(errorOf(answer)).toBe("invalid_code");
+    expect(browser.sessionToken()).toBeNull();
+    expect(h.lines.named("auth.google_failed").length).toBe(failures);
+    expect((await linesOf("auth.google_refused")).at(-1)).toEqual({
+      realm: "developer",
+      reason: "invalid_code",
+    });
+    expect((await linesOf("request")).at(-1)).toMatchObject({
+      outcome: "refused",
+      reason: "google.invalid_code",
+      status: 302,
+    });
+  });
+
+  it("answers the callback route's pattern 404, even with a live state, its cookie and a code", async () => {
+    const browser = h.browser();
+    const { authorize } = await startGoogle(browser);
+    const callbackPath = await providerBack(authorize, account("pattern"));
+    const exchanges = fixture.exchanges.length;
+    const literal = await browser.get(
+      callbackPath.replace("/callback/google", "/callback/:id"),
+      crossSite,
+    );
+    expect(literal.status).toBe(404);
+    expect(literal.json).toBeNull();
+    expect(fixture.exchanges.length).toBe(exchanges);
+    // The state is untouched: the real callback still finishes.
+    const real = await browser.get(callbackPath, crossSite);
+    expect(errorOf(real)).toBeNull();
+    expect(browser.sessionToken()).not.toBeNull();
+  });
+
   it("a callback replayed after it was used (the state works once)", async () => {
     const browser = h.browser();
     const person = account("replay");
@@ -464,6 +734,48 @@ describe("what a Google sign-in refuses", () => {
     expect(url.searchParams.get("scope")).toBe("openid email profile");
     expect(url.searchParams.get("login_hint")).toBeNull();
     expect(url.searchParams.get("access_type")).toBeNull();
+  });
+});
+
+describe("the network's code exchange allowance (§5.6)", () => {
+  it("counts each exchange a network causes, and past 30 a minute refuses before any exchange", async () => {
+    // A clock that stands still keeps every request in one window of the allowance.
+    const limited = await createHarness(database, "developer", {
+      env: googleEnv(),
+      clock: new ManualClock(new Date()),
+    });
+    const ip = `2001:db8:${tag().slice(0, 4)}::5`;
+    const junkCallback = async (from: string) => {
+      const browser = limited.browser({ ip: from });
+      const start = await browser.post("/api/auth/sign-in/social", {
+        provider: "google",
+        callbackURL: "/sign-in",
+        disableRedirect: true,
+      });
+      const state = new URL(String(start.json?.url)).searchParams.get("state");
+      return browser.get(`/api/auth/callback/google?code=junk-${tag()}&state=${state}`, crossSite);
+    };
+    const exchanges = fixture.exchanges.length;
+    for (let i = 0; i < 30; i += 1) {
+      expect((await junkCallback(ip)).status, `callback ${i + 1}`).toBe(302);
+    }
+    expect(fixture.exchanges.length).toBe(exchanges + 30);
+
+    const refused = await junkCallback(ip);
+    expect(refused.status).toBe(429);
+    expect(refused.json).toMatchObject({ code: "rate_limited" });
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(fixture.exchanges.length).toBe(exchanges + 30);
+    expect(limited.lines.named("limits.refused").at(-1)).toEqual({ bucket: "google_exchange" });
+    expect(limited.lines.named("request").at(-1)).toMatchObject({
+      outcome: "refused",
+      reason: "limits.google_exchange",
+      status: 429,
+    });
+
+    // Another network keeps its own allowance.
+    expect((await junkCallback(`2001:db8:${tag().slice(0, 4)}::6`)).status).toBe(302);
+    expect(fixture.exchanges.length).toBe(exchanges + 31);
   });
 });
 
@@ -671,6 +983,47 @@ describe("unlinking Google", () => {
       template: "identity/sign-in-methods-changed",
       params: { kind: "google_unlinked" },
     });
+  });
+
+  it("unlinks from a session older than a day once the step-up passes (the intent is the proof)", async () => {
+    const person = await personWithFactor("aged");
+    const linkId = await linkIntent(person);
+    await roundTrip(person.browser, account("aged", { email: person.email }), {
+      start: "/link-social",
+      headers: { "fin-step-up-intent": linkId },
+    });
+    const row = await h.admin.query<{ id: string }>(
+      `SELECT id FROM identity.account WHERE user_id = $1 AND provider_id = 'google'`,
+      [person.userId],
+    );
+    const accountId = String(row.rows[0]?.id);
+    // Two days old, and still live: 24 hours idle and 7 days at most (§11.1).
+    await h.admin.query(
+      "UPDATE identity.session SET created_at = now() - interval '2 days' WHERE token = $1",
+      [person.browser.sessionToken()],
+    );
+    expect((await person.browser.get("/api/auth/get-session")).json).not.toBeNull();
+
+    const asked = await person.browser.post("/api/auth/unlink-account", { accountId });
+    expect(asked.json).toMatchObject({ code: "step_up_required", reason_key: "unlink_google" });
+    const unlinkIntent = String(asked.json?.intent_id);
+    await person.prove(unlinkIntent);
+    const done = await person.browser.post(
+      "/api/auth/unlink-account",
+      { accountId },
+      { "fin-step-up-intent": unlinkIntent },
+    );
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    const left = await h.admin.query(`SELECT 1 FROM identity.account WHERE id = $1`, [accountId]);
+    expect(left.rowCount).toBe(0);
+    const intent = await h.admin.query<{ consumed_at: Date | null }>(
+      "SELECT consumed_at FROM ops.step_up_intent WHERE id = $1",
+      [unlinkIntent],
+    );
+    expect(intent.rows[0]?.consumed_at).not.toBeNull();
+    expect(
+      (await h.events({ event: "account.unlinked" })).find((e) => e.target_id === accountId),
+    ).toMatchObject({ step_up_ref: unlinkIntent });
   });
 });
 

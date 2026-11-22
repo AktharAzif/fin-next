@@ -120,6 +120,20 @@ describe("the realm's settings with Google", () => {
     expect(on.features.google).toBe(true);
     expect(on.google?.redirectUri).toBe("https://console.example.com/api/auth/callback/google");
   });
+
+  it("refuse Google under the split-host fallback, whose callback would not be the registered one", () => {
+    const split = { FIN_API_ORIGIN: "https://console-api.example.com" };
+    expect(() =>
+      readRealmSettings("developer", testEnv("developer", { ...client(), ...split })),
+    ).toThrow(RealmConfigError);
+    expect(() =>
+      readRealmSettings("developer", testEnv("developer", { ...client(), ...split })),
+    ).toThrow(/FIN_FEATURE_GOOGLE is on with FIN_API_ORIGIN set/);
+    // The split host alone, and Google alone, still start.
+    expect(readRealmSettings("developer", testEnv("developer", split)).apiOrigin).toBe(
+      split.FIN_API_ORIGIN,
+    );
+  });
 });
 
 /** The paths the installed router mounts, as T-SAT-01 reads them. */
@@ -166,22 +180,28 @@ describe("the developer realm with Google on", () => {
     expect(realm.policy.match("/callback/google", "GET")?.path).toBe("/callback/:id");
     expect(realm.policy.match("/callback/google", "POST")).toBeNull();
     expect(realm.policy.match("/callback/github", "GET")).toBeNull();
-    expect(realm.policy.match("/callback/:id", "GET")?.path).toBe("/callback/:id");
+    // The route's pattern is never a path a request may use (§4.1: only /callback/google).
+    expect(realm.policy.match("/callback/:id", "GET")).toBeNull();
+    expect(realm.policy.match("/reset-password/:token", "GET")).toBeNull();
     // The token paths stay blocked: no Google token is handed out.
     for (const path of ["/get-access-token", "/refresh-token", "/account-info"]) {
       expect(rule(path)?.class, path).toBe("blocked");
     }
   });
 
-  it("answers an unlisted callback 404 before any unit of work", async () => {
-    const before = fake.pool.connects;
-    const answer = await realm.handler(
-      new Request("https://console.example.com/api/auth/callback/github?code=x&state=y"),
-      { requestId: "req_test", clientIp: null, userAgent: null },
-    );
-    expect(answer.status).toBe(404);
-    expect(fake.pool.connects).toBe(before);
-  });
+  it.each(["/callback/github", "/callback/:id", "/callback/%3Aid", "/callback/Google"])(
+    "answers an unlisted callback (%s) 404 before any unit of work",
+    async (path) => {
+      const before = fake.pool.connects;
+      const answer = await realm.handler(
+        new Request(`https://console.example.com/api/auth${path}?code=x&state=y`),
+        { requestId: "req_test", clientIp: null, userAgent: null },
+      );
+      expect(answer.status).toBe(404);
+      expect(await answer.text()).toBe("");
+      expect(fake.pool.connects).toBe(before);
+    },
+  );
 
   it("refuses a bad redirect target with 400 before any unit of work", async () => {
     const before = fake.pool.connects;

@@ -39,10 +39,15 @@ export const IDENTITY_LINES = {
     },
   },
   // Google sign-in (stretch 5, §5.8, §18.2's stretch alert). A failure on Fin's side or the
-  // provider's: the code exchange, the provider's keys, or an ID token that does not verify.
+  // provider's: the token endpoint failing (any answer but a refused code, or none), the
+  // provider's keys, or an ID token that does not verify. Nothing a client sends can write it: a
+  // callback reaches the token endpoint only with its browser's signed state cookie, once per
+  // state, within the network's allowance.
   "auth.google_failed": { kind: "failure", alerts: ["google-sign-in-failing"] },
   // A round trip that came back refused: the person cancelled, the address has an account not
-  // linked to Google, sign-ups are paused, or a link did not match the account.
+  // linked to Google, sign-ups are paused, a link did not match the account, the provider refused
+  // the code (`invalid_code`), or a second callback came for a state already exchanged
+  // (`state_used`).
   "auth.google_refused": {
     kind: "security",
     alerts: {

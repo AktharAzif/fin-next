@@ -87,7 +87,8 @@ function testIssuer(raw: string): string {
 /**
  * Whether Google is on, and its client. Returns null when it is off. Refuses a start that would
  * half-enable it: the switch on without the client, the fixture issuer outside development and
- * test, or the staff realm (its Workspace client and checks are not built, §5.8).
+ * test, or the staff realm (its Workspace client and checks are not built, §5.8). The realm's
+ * settings also refuse it under the split-host fallback (config.ts).
  */
 export function readGoogleSettings(
   realm: RealmName,
