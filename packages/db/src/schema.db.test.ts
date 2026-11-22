@@ -188,7 +188,7 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
 
   it("seeds the six kill switches off, with no whole-API switch", async () => {
     const result = await su.query<{ name: string; state: string }>(
-      "SELECT name, state FROM ops.kill_switch ORDER BY name",
+      'SELECT name, state FROM ops.kill_switch ORDER BY name COLLATE "C"',
     );
     expect(result.rows).toEqual([
       { name: "hosted_verify", state: "off" },
@@ -201,10 +201,9 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
   });
 
   it("seeds both scheduler leases, epoch 1's head, ops.noop and the delivery-check grant", async () => {
-    expect((await su.query("SELECT name FROM ops.scheduler_lease ORDER BY name")).rows).toEqual([
-      { name: "payments" },
-      { name: "worker" },
-    ]);
+    expect(
+      (await su.query('SELECT name FROM ops.scheduler_lease ORDER BY name COLLATE "C"')).rows,
+    ).toEqual([{ name: "payments" }, { name: "worker" }]);
     const head = await su.query<{ epoch: number; seq: string; current: boolean; zero: boolean }>(
       "SELECT epoch, seq, current, hash = decode(repeat('00', 32), 'hex') AS zero FROM audit.head",
     );
@@ -253,7 +252,7 @@ describe("AC-P0-39: exactly spec 01 §6.10's objects", () => {
   it("records every applied file with its checksum and release", async () => {
     const files = readMigrations(MIGRATIONS_DIR);
     const result = await su.query<{ name: string; checksum: Buffer; release: string }>(
-      "SELECT name, checksum, release FROM ops.schema_migrations ORDER BY name",
+      'SELECT name, checksum, release FROM ops.schema_migrations ORDER BY name COLLATE "C"',
     );
     expect(result.rows.map((r) => r.name)).toEqual(files.map((f) => f.name));
     for (const [i, row] of result.rows.entries()) {

@@ -175,6 +175,11 @@ CREATE TABLE IF NOT EXISTS ops.schema_migrations (
   applied_at timestamptz NOT NULL
 )`;
 
+// The newest name in code-point order, the order the files are read and applied in (readMigrationFiles,
+// migrationsNotAfterMain): "C", never the database's default collation, which may order names apart
+// from the code (glibc's en_US.utf8 ignores the underscores).
+const SELECT_NEWEST = 'SELECT max(name COLLATE "C") AS name FROM ops.schema_migrations';
+
 export interface RunOptions {
   files: readonly MigrationFile[];
   release: string;
@@ -260,9 +265,7 @@ export async function runMigrations(client: PgClient, options: RunOptions): Prom
     const grantStatements = await applyGrants(q, options.fragments);
     if (options.after !== undefined) await options.after(q);
 
-    const newest = await client.query<{ name: string | null }>(
-      "SELECT max(name) AS name FROM ops.schema_migrations",
-    );
+    const newest = await client.query<{ name: string | null }>(SELECT_NEWEST);
     inTransaction = false;
     await commitTransaction(client);
     return {
@@ -279,9 +282,7 @@ export async function runMigrations(client: PgClient, options: RunOptions): Prom
 
 /** The newest applied migration, for `/readyz`'s minimum schema version (ARCHITECTURE §6.4). */
 export async function schemaVersion(q: Queryable): Promise<string | null> {
-  const result = await q.query<{ name: string | null }>(
-    "SELECT max(name) AS name FROM ops.schema_migrations",
-  );
+  const result = await q.query<{ name: string | null }>(SELECT_NEWEST);
   return result.rows[0]?.name ?? null;
 }
 
