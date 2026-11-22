@@ -6,11 +6,13 @@ import { AuthRefusal } from "../errors.ts";
 import type { UnitTx } from "../ports/db.ts";
 import { newId } from "../ports/ids.ts";
 import type { RealmRuntime } from "../runtime.ts";
+import { hashWhenAdmitted } from "./flows.ts";
 import { assertNewPassword } from "./policy.ts";
 
 /**
  * The hash to keep for a sign-up's password, or null when none was given. Hashed for a registered
- * address too (and thrown away), so both branches of sign-up take the same time (T-SAT-32).
+ * address too (and thrown away), so both branches of sign-up take the same time (T-SAT-32); only
+ * for a sign-up the hasher admitted (signUp()).
  */
 export async function signUpPasswordHash(
   rt: RealmRuntime,
@@ -24,7 +26,7 @@ export async function signUpPasswordHash(
       problem: "password_not_offered",
     });
   }
-  return rt.passwords.hash(assertNewPassword(password, "password", { email }));
+  return hashWhenAdmitted(rt, assertNewPassword(password, "password", { email }));
 }
 
 /**

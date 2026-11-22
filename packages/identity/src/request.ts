@@ -86,6 +86,11 @@ export interface RequestState {
    * after Fin's own step-up rule passed (passwords/flows.ts, `waivePasswordRecheck`).
    */
   passwordWaiver: { path: string; nonce: string } | null;
+  /**
+   * The hasher admitted this request before its unit opened (passwords/hasher.ts): only such a
+   * request may hash or check a password (passwords/flows.ts, `requireAdmission`).
+   */
+  hashAdmitted: boolean;
   readonly line: Record<string, LineValue>;
 }
 
@@ -126,6 +131,7 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     passkeyCounter: null,
     password: null,
     passwordWaiver: null,
+    hashAdmitted: false,
     // §18.1: `none` until a live session is read or made.
     line: { realm, assurance: "none" },
   };

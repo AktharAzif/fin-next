@@ -4,14 +4,15 @@
 // runs in the request's unit of work, so every row, event and notice below commits together or
 // not at all.
 //
-// - **Sign-in.** It takes the address's lock first (codes.ts), the one a reset takes, so a sign-in
-//   and a reset of one address take turns: a sign-in that read the old password never commits a
-//   session after the reset that ended them all, and each try sees the count and the pause the try
-//   before it left. It never waits for that lock: a sign-in that finds it held (another sign-in of
-//   the address being checked, a reset, a code) is answered `503` at once, so one address's tries
-//   never queue on it, each holding a database client (passwords/hasher.ts). Then the address's
-//   pause (passwords/pause.ts), for browsers its account does not know. A right password makes an
-//   `aal1` session that never proves the mailbox,
+// - **Sign-in.** It takes the address's password turn first (codes.ts), the one a reset takes, so
+//   a sign-in and a reset of one address take turns: a sign-in that read the old password never
+//   commits a session after the reset that ended them all, and each try sees the count and the
+//   pause the try before it left. It never waits for its turn: a sign-in that finds it held
+//   (another sign-in of the address being checked, a reset) is answered `503` at once, so one
+//   address's tries never queue on it, each holding a database client (passwords/hasher.ts). The
+//   turn is not the address's code lock, so no code request or try waits on a sign-in's check.
+//   Then the address's pause (passwords/pause.ts), for browsers its account does not know. A right
+//   password makes an `aal1` session that never proves the mailbox,
 //   so a password alone never enrols a first factor (§6.3); a person with a factor is at the factor
 //   step, exactly as after a code sign-in (§6.2), unless a live trusted browser of theirs holds the
 //   session (§6.6). That session is kept: the library's two-factor plugin would replace it with its
@@ -26,7 +27,8 @@
 //   pause), the authenticator lockout and the address's pauses lift, and
 //   `sign-in-methods-changed` (kind `password_reset`) tells them. The same answer for every address.
 // - **Load.** Each path that may hash is admitted by the hasher before its unit of work opens
-//   (PASSWORD_HASHING_PATHS, passwords/hasher.ts).
+//   (PASSWORD_HASHING_PATHS, passwords/hasher.ts), and a hash or a check for a request that was
+//   not admitted fails closed (hashWhenAdmitted(), verifyWithWaiver()).
 // - **Change.** With a step-up intent (`account.password_change`, §7.6) and the current password.
 // - **Factor changes.** The library re-asks a person with a password for it before an
 //   authenticator or backup-code change; Fin's step-up stands in for that (see RECHECKED_PATHS).
@@ -36,7 +38,13 @@ import {
   markTrustedBrowserUsed,
   trustedBrowserOf,
 } from "../browsers.ts";
-import { attemptCode, markCodeUsed, requestCode, tryLockAddress } from "../codes.ts";
+import {
+  attemptCode,
+  lockPasswordTurn,
+  markCodeUsed,
+  requestCode,
+  tryLockPasswordTurn,
+} from "../codes.ts";
 import { finCookieAttributes, finCookieName } from "../cookies.ts";
 import { constantTimeEqual, randomToken } from "../crypto/keyed.ts";
 import { AuthRefusal } from "../errors.ts";
@@ -81,7 +89,8 @@ export function isPasswordPath(path: string): boolean {
  * The library paths whose requests may hash a password inside their unit of work: the realm has
  * each admitted by the hasher before the unit opens (passwords/hasher.ts). Fin's sign-up with a
  * password is admitted the same way (sign-up.ts). The two-factor paths' password re-check never
- * hashes: Fin's stand-in answers it (RECHECKED_PATHS).
+ * hashes: Fin's stand-in answers it (RECHECKED_PATHS). A path missing here that hashes fails
+ * closed at its first hash (requireAdmission()).
  */
 export const PASSWORD_HASHING_PATHS: ReadonlySet<string> = new Set([
   "/sign-in/email",
@@ -134,8 +143,27 @@ export async function waivePasswordRecheck(
 }
 
 /**
+ * Refuses a hash or a check for a request the hasher did not admit before its unit opened (the
+ * realm's handler for PASSWORD_HASHING_PATHS, signUp() for a password): such a request would hold
+ * its database client across the hash outside the bound admission keeps (passwords/hasher.ts). It
+ * fails closed, so a library path that starts to hash without being admitted shows at once.
+ */
+function requireAdmission(rt: RealmRuntime): void {
+  if (rt.requests.getStore()?.hashAdmitted !== true) {
+    throw new Error("identity: a password was hashed by a request the hasher did not admit");
+  }
+}
+
+/** The library's `password.hash`, and signUp()'s: argon2id, for an admitted request only. */
+export async function hashWhenAdmitted(rt: RealmRuntime, password: string): Promise<string> {
+  requireAdmission(rt);
+  return rt.passwords.hash(password);
+}
+
+/**
  * The library's `password.verify`: the stand-in, when this request holds one for its own path
- * (used up by the first check), and argon2id against the stored hash otherwise.
+ * (used up by the first check), and argon2id against the stored hash otherwise, for an admitted
+ * request only.
  */
 export async function verifyWithWaiver(
   rt: RealmRuntime,
@@ -149,6 +177,7 @@ export async function verifyWithWaiver(
     const expected = Buffer.from(waiver.nonce, "utf8");
     return state.rule?.path === waiver.path && constantTimeEqual(sent, expected);
   }
+  requireAdmission(rt);
   return rt.passwords.verify(input);
 }
 
@@ -185,6 +214,24 @@ async function personOf(tx: UnitTx, email: string): Promise<PasswordRequest["per
   return person === null ? null : { id: person.id, email: person.email };
 }
 
+/**
+ * A reset's turn with the address's sign-ins (lockPasswordTurn() in codes.ts), which the
+ * before-hook takes ahead of the network's limit: a reset waits here while a sign-in of the address
+ * checks its password, holding meanwhile no row that a request which never hashes also takes (its
+ * network's `code_sign_in` count, the address's code lock), so none of those queues behind the
+ * check. Waiting is right for a reset, which a stream of sign-ins must not keep out: sign-ins
+ * never wait for the turn, so the reset has it next. An address Fin does not accept takes no
+ * turn; resetBefore() refuses it.
+ */
+export async function passwordTurn(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
+  if (ctx.path !== "/email-otp/reset-password") return;
+  if (rt.settings.realm !== "developer" || !rt.settings.features.passwords) return;
+  const body = bodyOf(ctx);
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  if (!EMAIL.test(email)) return;
+  await lockPasswordTurn(tx, rt, email);
+}
+
 /** The before-hook's part: an answer to give instead of the library's, or undefined to go on. */
 export async function passwordBefore(
   rt: RealmRuntime,
@@ -218,15 +265,16 @@ async function signInBefore(
   if (typeof bodyOf(ctx).password !== "string") {
     throw new AuthRefusal("invalid", "body.password", { fields: ["password"] });
   }
-  // The address's lock, held until commit, after the network's `password_sign_in` limit and
-  // before anything about the address is read (lockAddress's order). A reset holds it from its
-  // code's try to its commit, so this sign-in never reads the password a reset is replacing, and a
-  // reset waits for this sign-in and ends the session it made; and a wrong try's count and pause
-  // commit before the next try of the address reads them, so tries sent together cannot pass the
-  // pause together. Taken without waiting: held by another unit, the answer is 503 at once (the
-  // same for every address, before anything about it is read), and nothing queues on the lock
-  // holding a client while each sign-in ahead is checked in turn.
-  if (!(await tryLockAddress(tx, rt, email))) throw rt.passwords.busy("address_busy");
+  // The address's password turn, held until commit, after the network's `password_sign_in` limit
+  // and before anything about the address is read. A reset holds it from before its code's try to
+  // its commit, so this sign-in never reads the password a reset is replacing, and a reset waits
+  // for this sign-in and ends the session it made; and a wrong try's count and pause commit before
+  // the next try of the address reads them, so tries sent together cannot pass the pause together.
+  // Taken without waiting: held by another unit, the answer is 503 at once (the same for every
+  // address, before anything about it is read), and nothing queues on the turn holding a client
+  // while each sign-in ahead is checked in turn. It is not the address's code lock: a code request
+  // or try of the address never waits on this sign-in's check.
+  if (!(await tryLockPasswordTurn(tx, rt, email))) throw rt.passwords.busy("address_busy");
   const person = await personOf(tx, email);
   const request = newRequest(email, person);
   // Read for every address alike, so the pause and its answer say nothing about who has an account.
@@ -531,13 +579,13 @@ async function passwordReset(
   if (person === null) return;
   const now = rt.clock.now();
   if (request.codeRequestId !== null) await markCodeUsed(tx, request.codeRequestId, now);
-  // The authenticator lockout first, then the sessions: the order the factor step, a step-up and a
-  // wrong code take them in (hooks/after.ts and hooks/shared.ts touch the lockout before the
-  // session), so this person's factor step in another browser and this reset never wait on each
-  // other in a circle. Finishing an authenticator's set-up is the one path the other way round
-  // (the library replaces its session before the after-hook clears the lockout): should it run in
-  // another browser in the very instant this reset ends the sessions, Postgres refuses one of the
-  // two as a deadlock, and that request can be sent again (as lockAddress's residual).
+  // The authenticator lockout first, then the sessions: the order of every unit that takes both.
+  // A factor code (the factor step, a step-up, finishing an authenticator's set-up) holds the
+  // person's lockout row from its before-hook on (holdLockout() in hooks/before.ts), before the
+  // library reads and refreshes its session, and touches the lockout again only after that; a
+  // wrong code's lockout and a step-up's ending of its session come after the row too. So this
+  // reset and the person's factor code in another browser never wait on each other in a circle:
+  // whichever has the row first finishes, and the other goes on after it.
   await liftFactorLockout(tx, rt, factorLockKey(state, person.id));
   // Every session ends here, not in the library (revokeSessionsOnPasswordReset is off): the ones
   // this delete returns are exactly the ones ended, each with its event. A session another unit is

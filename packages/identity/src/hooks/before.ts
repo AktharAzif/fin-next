@@ -1,5 +1,6 @@
 // `hooks.before` (spec 02 §3.5): in this order, the realm's gate for the path, the step-up rule
-// for `step_up_self` paths, Fin's limits, the body allowlist (stripping `trustDevice` and
+// for `step_up_self` paths, a password reset's turn with the address's sign-ins
+// (passwords/flows.ts), Fin's limits, the body allowlist (stripping `trustDevice` and
 // `rememberMe`), and each path's own rules: emailed codes bound to the asking browser, the staff
 // Access binding, the sign-ups switch, TOTP replay and lockout, and the last-factor rule.
 import { symmetricDecrypt } from "better-auth/crypto";
@@ -25,6 +26,7 @@ import {
   isPasswordPath,
   PASSWORD_BODY_FIELDS,
   passwordBefore,
+  passwordTurn,
   waivePasswordRecheck,
 } from "../passwords/flows.ts";
 import type { UnitTx } from "../ports/db.ts";
@@ -94,6 +96,7 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   await loadPrior(rt, ctx, state, tx);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
   await stepUpRule(rt, ctx, state, tx);
+  if (realm === "developer") await passwordTurn(rt, ctx, tx);
   await finLimits(rt, ctx, state, tx, rule);
   stripBody(ctx, state);
   await waivePasswordRecheck(rt, ctx, state, tx);
@@ -662,7 +665,18 @@ async function factorCodeChecks(
   const prior = state.prior;
   if (prior === null) return;
   const realm = rt.settings.realm;
-  if ((await rt.limits.lockedUntil(tx, factorLockKey(state, prior.person.id))) !== null) {
+  // The person's lockout row is held from here to the end of the unit, before the library reads
+  // the session: its read refreshes the session row on nearly every request (always at the factor
+  // step), and the after-hook clears or counts the lockout only then. So every unit that takes
+  // both takes the lockout first, as a password reset does (passwords/flows.ts), and the two never
+  // wait on each other in a circle. The row is made when there is none, or there is nothing to
+  // hold.
+  const lockedUntil = await rt.limits.holdLockout(
+    tx,
+    factorLockKey(state, prior.person.id),
+    "factor_code",
+  );
+  if (lockedUntil !== null) {
     state.line.reason = "factor.locked";
     throw LIB_ERRORS.locked();
   }

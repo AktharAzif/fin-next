@@ -1,12 +1,23 @@
 // Limits in Postgres ([DA-16], spec 02 §5.6). Counting is one atomic statement on
 // `ops.rate_window` (UNLOGGED, fixed windows); lockouts and pauses that must survive a restart
 // live in the logged `ops.lockout`. The limiter fails closed: a store error refuses the request
-// with 503 and writes `limits.store_failed`. Keys never carry an address or a token in clear:
-// callers pass keyed hashes (crypto/keyed.ts).
+// with 503 and writes `limits.store_failed`. A statement Postgres refused because it waited on
+// another unit in a circle (a deadlock) or could not be serialised is no store failure: it is
+// thrown as it came, and the unit rolls back as for any other statement (isConflict()). Keys never
+// carry an address or a token in clear: callers pass keyed hashes (crypto/keyed.ts).
 import type { Clock } from "./ports/clock.ts";
 import { DAY, HOUR, MINUTE, SECOND } from "./ports/clock.ts";
-import type { Queryable } from "./ports/db.ts";
+import { type Queryable, sqlState } from "./ports/db.ts";
 import type { LineSink } from "./ports/log.ts";
+
+/**
+ * A deadlock (40P01) or a serialization failure (40001): two units in each other's way, not a
+ * store that failed, so never `limits.store_failed` (which pages, spec 02 §18.2).
+ */
+export function isConflict(error: unknown): boolean {
+  const state = sqlState(error);
+  return state === "40P01" || state === "40001";
+}
 
 export interface LimitWindow {
   /** Window length in milliseconds. */
@@ -96,6 +107,12 @@ export interface LimitStore {
   /** The time a live lockout ends, or null. */
   lockedUntil(db: Queryable, key: string): Promise<Date | null>;
   /**
+   * lockedUntil() that also holds the key's row until the unit ends, making it (no failures, not
+   * locked) when there is none: for a path that must take the row before any other row it may
+   * wait on (the factor codes, hooks/before.ts), so that it and a reset never wait in a circle.
+   */
+  holdLockout(db: Queryable, key: string, kind: string): Promise<Date | null>;
+  /**
    * Counts one failure toward a lockout kept in the logged table; at `threshold` failures the key
    * is locked for `lockMs`. A lapsed lockout starts counting again from one.
    */
@@ -116,6 +133,7 @@ export function windowStart(at: Date, ms: number): Date {
 
 export function createLimitStore(deps: { clock: Clock; lines: LineSink }): LimitStore {
   const fail = (bucket: string, error: unknown): never => {
+    if (isConflict(error)) throw error;
     deps.lines.write("limits.store_failed", "error", { bucket });
     throw new LimitStoreError(bucket, { cause: error });
   };
@@ -193,6 +211,22 @@ export function createLimitStore(deps: { clock: Clock; lines: LineSink }): Limit
         );
         const until = result.rows[0]?.locked_until ?? null;
         return until !== null && until.getTime() > deps.clock.now().getTime() ? until : null;
+      } catch (error) {
+        return fail("lockout", error);
+      }
+    },
+    async holdLockout(db, key, kind) {
+      const now = deps.clock.now();
+      try {
+        // A no-op update of a row that exists still locks it; one that does not is made unlocked.
+        const result = await db.query<{ locked_until: Date | null }>(
+          `INSERT INTO ops.lockout (key, kind, count, locked_until, updated_at) VALUES ($1, $2, 0, NULL, $3)
+           ON CONFLICT (key) DO UPDATE SET updated_at = ops.lockout.updated_at
+           RETURNING locked_until`,
+          [key, kind, now],
+        );
+        const until = result.rows[0]?.locked_until ?? null;
+        return until !== null && until.getTime() > now.getTime() ? until : null;
       } catch (error) {
         return fail("lockout", error);
       }

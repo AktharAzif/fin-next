@@ -48,15 +48,14 @@ export async function signUp(
 ): Promise<SignUpAnswer> {
   if (realm.settings.realm !== "developer") throw new Error("signUp is the developer realm's");
   const rt = realm.runtime;
-  // A password is hashed inside the unit, after the sign-up limits and the address's lock that
-  // other sign-ups of the address or the network wait on, each holding a client: so a sign-up with
-  // one is admitted before its unit opens, and answered 503 when the admitted ones hold every
-  // client hashing may hold (passwords/hasher.ts). The same for every address.
+  // A password is hashed inside the unit, holding its client: so a sign-up with one is admitted
+  // before its unit opens, and answered 503 when the admitted ones hold every client hashing may
+  // hold (passwords/hasher.ts). The same for every address.
   const hashes =
     input.password !== undefined && input.password !== null && rt.settings.features.passwords;
   const admitted = hashes ? rt.passwords.admit() : null;
   try {
-    return await signUpUnit(realm, request, context, input);
+    return await signUpUnit(realm, request, context, input, admitted !== null);
   } finally {
     admitted?.();
   }
@@ -67,9 +66,11 @@ async function signUpUnit(
   request: Request,
   context: RequestContext,
   input: { name: unknown; email: unknown; password?: unknown },
+  hashAdmitted: boolean,
 ): Promise<SignUpAnswer> {
   const rt = realm.runtime;
   return realm.run(context, async (tx, state) => {
+    state.hashAdmitted = hashAdmitted;
     if ((await rt.killSwitch(tx, "signups")) === "on")
       throw new AuthRefusal("paused", "switch.signups");
     const name = checkName("personName", typeof input.name === "string" ? input.name : "");
@@ -77,8 +78,10 @@ async function signUpUnit(
     const fields = [...(name.ok ? [] : ["name"]), ...(EMAIL.test(email) ? [] : ["email"])];
     if (!name.ok || fields.length > 0) throw new AuthRefusal("invalid", "body.invalid", { fields });
     // The password rule before any limit is counted, so a refused password costs no allowance;
-    // the hash after them, for a registered and an unknown address alike (§5.7).
-    if (input.password !== undefined && input.password !== null) {
+    // the hash before any limit's row is taken (below), for a registered and an unknown address
+    // alike (§5.7).
+    const password = input.password !== undefined && input.password !== null;
+    if (password) {
       if (!rt.settings.features.passwords) {
         throw new AuthRefusal("invalid", "passwords.off", {
           fields: ["password"],
@@ -95,13 +98,31 @@ async function signUpUnit(
     // sign-up's own limits (`sign_up_address` is taken by sign-up alone), then the network's code
     // limit, then the address's lock, then the address's code requests, so a sign-up, a code
     // request and a code try never wait on each other in a circle.
-    for (const [bucket, subject] of [
+    const counted = [
       ["sign_up_network", rt.hasher.bucket("network", state.network)],
       ["sign_up_address", rt.hasher.bucket("email", email)],
       ["code_send", rt.hasher.bucket("network", state.network)],
       ["lock", null],
       ["code_send", codeSendSubject(rt.hasher, email, false)],
-    ] as const) {
+    ] as const;
+    // Each of those is a row the unit holds to its end once taken, which code requests from the
+    // network and sign-ups of the address wait on, each holding a client the hasher never
+    // admitted: so a password is hashed before any is taken. That a limit is used up is read
+    // first, taking no row, so that a sign-up it refuses still costs no hash; sign-ups sent
+    // together may all read room and hash, and those past the limit are refused after their
+    // hash, within what admission lets in.
+    let passwordHash: string | null = null;
+    if (password) {
+      let room = true;
+      for (const [bucket, subject] of counted) {
+        if (subject !== null && (await rt.limits.remaining(tx, bucket, subject)) === 0) {
+          room = false;
+          break;
+        }
+      }
+      if (room) passwordHash = await signUpPasswordHash(rt, input.password, email);
+    }
+    for (const [bucket, subject] of counted) {
       if (subject === null) {
         await lockAddress(tx, rt, email);
         continue;
@@ -114,7 +135,11 @@ async function signUpUnit(
       }
     }
     state.codeSendCounted = true;
-    const passwordHash = await signUpPasswordHash(rt, input.password, email);
+    // A limit read as used up whose window ended before it was counted: hashed now, holding the
+    // rows, as at a window's edge only.
+    if (password && passwordHash === null) {
+      passwordHash = await signUpPasswordHash(rt, input.password, email);
+    }
 
     const cookieHeader = request.headers.get("cookie");
     const sent = (cookie: "sign_up_browser" | "code_browser" | "known_browser"): string | null => {

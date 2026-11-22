@@ -75,9 +75,11 @@ export interface LiveCodeRequest {
  * password sign-in); then this lock; then the address's code limits (`code_send` for the address,
  * the strangers' share and the allowance of code emails, and their pause), its requests, and its
  * password counts and pauses (passwords/pause.ts). Nothing per address comes before this lock but
- * `sign_up_address`, which no unit takes after it, and no unit takes two addresses' locks, so a
- * shared slot adds no circle either. A password sign-in never waits for this lock at all
- * (tryLockAddress()). One row can come first: the gate deletes the request's own session when its
+ * `sign_up_address`, which no unit takes after it, and a password reset's turn (lockPasswordTurn(),
+ * the address's other slot, which no unit takes after this lock); no unit takes two addresses'
+ * locks, so a shared slot adds no circle either (but for two resets whose addresses' two slots
+ * cross, one chance in 2^32 for a pair). A password sign-in never takes this lock: it takes its
+ * turn instead. One row can come first: the gate deletes the request's own session when its
  * factor step has lapsed, before the path's own rules run. Should a reset of that same person,
  * holding this lock, then come to end that session, the two wait on each other; Postgres refuses
  * one of them as a deadlock, and that request can be sent again.
@@ -95,19 +97,41 @@ export async function lockAddress(
 }
 
 /**
- * lockAddress() without the wait, for a password sign-in (passwords/flows.ts): true when this unit
- * now holds the address's lock until it ends, false when another unit holds it. A sign-in holds its
- * database client from the start of its unit to its end and holds this lock across its password
- * check, so one that waited here would queue behind every other sign-in of the address, each check
- * in turn, holding clients the hasher never counts; it is answered `503` instead. Only a locked
- * slot is skipped: a missing one still fails the unit.
+ * The address's password turn (passwords/flows.ts), held until the unit ends: password sign-ins
+ * and resets of one address take turns on it, so a sign-in never reads a password a reset is
+ * replacing, and each try sees the count and the pause the one before it left. It is a row lock on
+ * another slot of the same table (passwordLockSlot()), never this address's code lock: a sign-in
+ * holds its turn across its password check, so a code request, codeless request or code try of the
+ * address, which never hashes, never waits on that check holding a database client the hasher
+ * never admitted (passwords/hasher.ts). A reset waits for its turn here, before any row a request
+ * that never hashes may wait on (hooks/before.ts takes it ahead of the network's limit), and only
+ * then takes the address's code lock; a sign-in never waits (tryLockPasswordTurn()).
  */
-export async function tryLockAddress(
+export async function lockPasswordTurn(
+  db: Queryable,
+  deps: { hasher: KeyedHasher },
+  email: string,
+): Promise<void> {
+  const locked = await db.query(
+    "SELECT slot FROM identity.email_code_lock WHERE slot = $1 FOR UPDATE",
+    [passwordLockSlot(deps.hasher, email)],
+  );
+  if (locked.rowCount !== 1) throw new Error("identity.email_code_lock is missing an address slot");
+}
+
+/**
+ * lockPasswordTurn() without the wait, for a password sign-in: true when this unit now holds the
+ * address's turn until it ends, false when another unit holds it. A sign-in holds its database
+ * client from the start of its unit to its end and holds its turn across its password check, so
+ * one that waited here would queue behind every other sign-in of the address, each check in turn;
+ * it is answered `503` instead. Only a locked slot is skipped: a missing one still fails the unit.
+ */
+export async function tryLockPasswordTurn(
   db: Queryable,
   deps: { hasher: KeyedHasher },
   email: string,
 ): Promise<boolean> {
-  const slot = addressLockSlot(deps.hasher, email);
+  const slot = passwordLockSlot(deps.hasher, email);
   const locked = await db.query(
     "SELECT slot FROM identity.email_code_lock WHERE slot = $1 FOR UPDATE SKIP LOCKED",
     [slot],
@@ -124,6 +148,15 @@ export const ADDRESS_LOCK_SLOTS = 65_536;
 /** The address's slot: the first two bytes of its keyed hash under the newest key. */
 export function addressLockSlot(hasher: KeyedHasher, email: string): number {
   return hasher.hash("email", email.toLowerCase()).readUInt16BE(0);
+}
+
+/**
+ * The address's password slot: the next two bytes of the same hash, so it is a slot apart from the
+ * address's code lock but for one address in 65,536 (whose sign-ins then also take turns with its
+ * codes, as two addresses sharing a slot do).
+ */
+export function passwordLockSlot(hasher: KeyedHasher, email: string): number {
+  return hasher.hash("email", email.toLowerCase()).readUInt16BE(2);
 }
 
 /**

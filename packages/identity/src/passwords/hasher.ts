@@ -6,14 +6,23 @@
 //
 // Load shedding (ARCHITECTURE §3.5), in two steps:
 //   - Admission. A request that may hash (a password sign-in, reset or change, a sign-up with a
-//     password) is admitted before its unit of work opens, and stays admitted until the unit ends.
-//     All that time it holds one of the database pool's clients (the hash runs inside the unit,
-//     S2-04), also while it waits on a row another request holds across its hash: its network's
-//     counters, its address's sign-up allowance, its address's lock. So at most `concurrency +
-//     queueLimit` requests are admitted at once, and the rest are answered `503 unavailable` with
+//     password) is admitted before its unit of work opens, and stays admitted until the unit ends;
+//     a hash for a request that was not admitted fails closed (passwords/flows.ts). All that time
+//     it holds one of the database pool's clients (the hash runs inside the unit, S2-04), also
+//     while it waits on a row another admitted request holds across its hash (its network's
+//     password count, its address's password turn). So at most `concurrency + queueLimit`
+//     requests are admitted at once, and the rest are answered `503 unavailable` with
 //     `Retry-After` before they take a client.
 //   - Slots. Among the admitted, a few hashes run at once and the others wait for a slot, for at
 //     most a second; past that wait (or a full queue), they too are answered 503.
+// The bound holds for the pool only because an admitted request holds across its hash no row that
+// a request which is never admitted waits on: a sign-up hashes before it takes its limits and the
+// address's code lock (sign-up.ts); a sign-in holds its address's password turn, never its code
+// lock (codes.ts); a reset waits for that turn before its network's code count (hooks/before.ts).
+// What is left: a change holds the person's own rows (their session, their `method_add` count),
+// which only that person's requests take; and a reset whose code was right holds its network's
+// `code_sign_in` count and its address's code lock across its one hash, which only someone with
+// the code emailed to the address can make happen.
 // The sizes are what the process can spare (hashSlots()): two hashes per vCPU, but never
 //   - more than libuv's thread pool less two threads, where `crypto.argon2` runs, so a sign-in
 //     flood cannot starve the DNS lookups that `pg` and `fetch` need;

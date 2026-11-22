@@ -12,11 +12,21 @@ import { COMMON_PASSWORD_SOURCES, COMMON_PASSWORDS } from "../common-passwords.t
 import { DEFAULT_THREAD_POOL_SIZE, parseThreadPoolSize, readRealmSettings } from "../config.ts";
 import { createEndpointPolicy } from "../endpoint-policy.ts";
 import { AuthRefusal } from "../errors.ts";
+import { LimitStoreError } from "../limits.ts";
 import { systemClock } from "../ports/clock.ts";
+import type { UnitTx } from "../ports/db.ts";
 import { MemoryLineSink } from "../ports/log.ts";
 import { createPgDatabase } from "../ports/pg-database.ts";
 import { createRealm } from "../realm.ts";
+import { newRequestState } from "../request.ts";
+import {
+  hashWhenAdmitted,
+  PASSWORD_BODY_FIELDS,
+  PASSWORD_HASHING_PATHS,
+  verifyWithWaiver,
+} from "./flows.ts";
 import { CLIENTS_KEPT_FREE, createPasswordHasher, hashSlots, THREADS_KEPT_FREE } from "./hasher.ts";
+import { passwordPausedUntil } from "./pause.ts";
 import {
   assertNewPassword,
   comparable,
@@ -48,6 +58,8 @@ function heldWork() {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const GOOD_PASSWORD = "harbour light forty two";
 
 describe("the password hasher", () => {
   it("makes argon2id PHC strings with SA-07's parameters, salted per hash", async () => {
@@ -476,6 +488,80 @@ describe("the realm with passwords on", () => {
     ]) {
       expect(policy.match(path, "POST")?.class, path).toBe("blocked");
     }
+  });
+
+  it("admits exactly the library paths that hash, each reachable only with passwords on", () => {
+    // Of the paths Fin lets through, the library's handlers hash or check a password at these: a
+    // sign-in (an address with no account is hashed all the same), a reset (the new password) and
+    // a change (the current one, then the new). The reset request only emails a code, and the
+    // two-factor paths' re-check is Fin's stand-in, which never hashes (RECHECKED_PATHS).
+    expect([...PASSWORD_HASHING_PATHS].sort()).toEqual([
+      "/change-password",
+      "/email-otp/reset-password",
+      "/sign-in/email",
+    ]);
+    const others = Object.keys(PASSWORD_BODY_FIELDS).filter((p) => !PASSWORD_HASHING_PATHS.has(p));
+    expect(others).toEqual(["/email-otp/request-password-reset"]);
+    const on = createEndpointPolicy("developer", { passwords: true, google: false });
+    const off = createEndpointPolicy("developer", { passwords: false, google: false });
+    for (const path of PASSWORD_HASHING_PATHS) {
+      expect(on.match(path, "POST")?.class, path).not.toBe("blocked");
+      expect(off.match(path, "POST")?.class, path).toBe("blocked");
+    }
+  });
+
+  it("hashes and checks only for a request the hasher admitted, and fails closed otherwise", async () => {
+    const realm = build("developer", { FIN_FEATURE_PASSWORDS: "on" });
+    const rt = realm.runtime;
+    // What the library is given: Fin's own hash and check, refused outside an admitted request.
+    const library = (await realm.auth.$context) as unknown as {
+      password: {
+        hash(password: string): Promise<string>;
+        verify(input: { hash: string; password: string }): Promise<boolean>;
+      };
+    };
+    const hash = await rt.passwords.hash(GOOD_PASSWORD);
+    const check = { hash, password: GOOD_PASSWORD };
+    const refused = /did not admit/;
+    await expect(library.password.hash(GOOD_PASSWORD)).rejects.toThrow(refused);
+    await expect(library.password.verify(check)).rejects.toThrow(refused);
+    const state = newRequestState("developer", {
+      requestId: "req_01jd0000000000000000000000",
+      clientIp: null,
+      userAgent: null,
+    });
+    await rt.requests.run(state, async () => {
+      await expect(hashWhenAdmitted(rt, GOOD_PASSWORD)).rejects.toThrow(refused);
+      await expect(verifyWithWaiver(rt, check)).rejects.toThrow(refused);
+      state.hashAdmitted = true;
+      expect(parsePasswordHash(await library.password.hash(GOOD_PASSWORD)).memoryKiB).toBe(19_456);
+      expect(await library.password.verify(check)).toBe(true);
+    });
+  });
+
+  it("throws a deadlock on the pause's generation as it came, and refuses a store failure closed", async () => {
+    const realm = build("developer", { FIN_FEATURE_PASSWORDS: "on" });
+    const rt = realm.runtime;
+    const lines = rt.lines as MemoryLineSink;
+    const [email, network] = ["ada@example.com", "v4:192.0.2.1"];
+    const tx = (code: string) => {
+      const error = Object.assign(new Error(`refused with ${code}`), { code });
+      return {
+        error,
+        tx: {
+          query: async () => {
+            throw error;
+          },
+        } as unknown as UnitTx,
+      };
+    };
+    const conflict = tx("40P01");
+    await expect(passwordPausedUntil(conflict.tx, rt, email, network)).rejects.toBe(conflict.error);
+    expect(lines.named("limits.store_failed")).toEqual([]);
+    const failed = tx("42501");
+    const refused = passwordPausedUntil(failed.tx, rt, email, network);
+    await expect(refused).rejects.toBeInstanceOf(LimitStoreError);
+    expect(lines.named("limits.store_failed")).toEqual([{ bucket: "password_generation" }]);
   });
 
   it("never has passwords in the staff realm", () => {

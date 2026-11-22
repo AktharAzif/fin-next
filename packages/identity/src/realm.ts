@@ -33,7 +33,7 @@ import { beforeHook } from "./hooks/before.ts";
 import type { HookContext } from "./hooks/context.ts";
 import { databaseHooks } from "./hooks/database.ts";
 import { createLimitStore, type LimitStore, LimitStoreError } from "./limits.ts";
-import { PASSWORD_HASHING_PATHS, verifyWithWaiver } from "./passwords/flows.ts";
+import { hashWhenAdmitted, PASSWORD_HASHING_PATHS, verifyWithWaiver } from "./passwords/flows.ts";
 import { createPasswordHasher, type PasswordHasher } from "./passwords/hasher.ts";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "./passwords/policy.ts";
 import type { Clock } from "./ports/clock.ts";
@@ -239,7 +239,7 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
             autoSignIn: false,
             revokeSessionsOnPasswordReset: false,
             password: {
-              hash: (password: string) => rt.passwords.hash(password),
+              hash: (password: string) => hashWhenAdmitted(rt, password),
               verify: (input: { hash: string; password: string }) => verifyWithWaiver(rt, input),
             },
           }
@@ -465,6 +465,7 @@ export function createRealm(deps: RealmDeps): Realm {
     if (PASSWORD_HASHING_PATHS.has(rule.path)) {
       try {
         admitted = rt.passwords.admit();
+        state.hashAdmitted = true;
       } catch (error) {
         if (!(error instanceof AuthRefusal)) throw error;
         const refused = problem(state, error);

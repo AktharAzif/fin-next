@@ -20,7 +20,7 @@
 // removes the old counts as it removes every count; an old pause row stays, ended, as every
 // lockout row does.
 import { audit, notify } from "../hooks/shared.ts";
-import { LimitStoreError, type LimitWindow } from "../limits.ts";
+import { isConflict, LimitStoreError, type LimitWindow } from "../limits.ts";
 import { DAY, HOUR, MINUTE } from "../ports/clock.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
@@ -52,7 +52,10 @@ function generationKey(address: string): string {
   return `password_generation:${address}`;
 }
 
-/** Reads or moves the generation the way the limiter treats its own tables: a failure is a 503. */
+/**
+ * Reads or moves the generation the way the limiter treats its own tables: a failure is a 503,
+ * and a deadlock or a serialization failure is thrown as it came (isConflict()).
+ */
 async function generationQuery(
   tx: UnitTx,
   rt: RealmRuntime,
@@ -63,6 +66,7 @@ async function generationQuery(
     const result = await tx.query<{ count: number }>(text, values);
     return Number(result.rows[0]?.count ?? 0);
   } catch (error) {
+    if (isConflict(error)) throw error;
     rt.lines.write("limits.store_failed", "error", { bucket: "password_generation" });
     throw new LimitStoreError("password_generation", { cause: error });
   }
