@@ -147,6 +147,20 @@ export function neverTouchLabel(entry: string, zone: string): string | undefined
   return LABEL.test(name) ? name : undefined;
 }
 
+/**
+ * The base label of a never-touch entry written as a wildcard (`*.<label>`, normalised like any
+ * entry), or undefined when the entry is not one. A never-touch label already covers itself and
+ * every name under it, and read as one literal name `*.<label>` would protect nothing below the
+ * label, so parseOverlay() refuses the wildcard and names the fix: write the base label. A wildcard
+ * over the apex (`*.<zone>`) has no base label to write and is refused as not a label.
+ */
+export function neverTouchWildcardBase(entry: string, zone: string): string | undefined {
+  const name = entry.trim().toLowerCase();
+  if (!name.startsWith("*.")) return undefined;
+  const base = neverTouchLabel(name.slice(2), zone);
+  return base === "@" ? undefined : base;
+}
+
 /** Whether a label is a never-touch label or sits under one (the apex `@` covers only itself). */
 export function underNeverTouch(label: string, never: readonly string[]): boolean {
   return never.some((n) => n !== "@" && (label === n || label.endsWith(`.${n}`)));
@@ -255,7 +269,8 @@ function named(
  * Validates a parsed overlay for an environment. Problems name the key, never the value, and name
  * a map's key only when it is a plain name. Besides the shapes, it checks that the file is
  * consistent with itself: every host sits one label below the zone, every host label is on the
- * allow-list, and no allowed name is, or sits under, a never-touch label.
+ * allow-list, and no allowed name is, or sits under, a never-touch label. A never-touch entry
+ * written as a wildcard (`*.<label>`) is refused with its fix: write the base label.
  */
 export function parseOverlay(raw: unknown, environment: string): Overlay {
   const problems: string[] = [];
@@ -330,12 +345,23 @@ export function parseOverlay(raw: unknown, environment: string): Overlay {
   const neverTouch: string[] = [];
   if (!Array.isArray(never.labels)) problems.push("neverTouch.labels must be an array of strings");
   else {
+    const wildcards: Array<[number, string]> = [];
     never.labels.forEach((entry: unknown, i: number) => {
       const label = typeof entry === "string" ? neverTouchLabel(entry, zone) : undefined;
-      if (label === undefined)
-        problems.push(`neverTouch.labels[${i}] is not a label under the zone, or @`);
-      else if (!neverTouch.includes(label)) neverTouch.push(label);
+      const base = typeof entry === "string" ? neverTouchWildcardBase(entry, zone) : undefined;
+      if (label !== undefined) {
+        if (!neverTouch.includes(label)) neverTouch.push(label);
+      } else if (base !== undefined) wildcards.push([i, base]);
+      else problems.push(`neverTouch.labels[${i}] is not a label under the zone, or @`);
     });
+    // Every wildcard is refused (it fails closed): the message names the fix, never the label.
+    for (const [i, base] of wildcards) {
+      problems.push(
+        underNeverTouch(base, neverTouch)
+          ? `neverTouch.labels[${i}] is a wildcard (*.<label>) that a listed never-touch label already covers: remove it, since a never-touch label covers itself and every name under it`
+          : `neverTouch.labels[${i}] is a wildcard (*.<label>), which would protect nothing below its label: write the base label instead (the entry without its leading *.), since a never-touch label covers itself and every name under it`,
+      );
+    }
   }
 
   let policy: DmarcPolicy | undefined;

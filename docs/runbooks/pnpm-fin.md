@@ -29,8 +29,10 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    wherever it appears, Fin's own words included, and the placeholder would then show what it
    stands for. The check refuses an overlay for another environment, a host that is not one label below
    the zone, a host whose label is not on `allowedNames.labels`, a never-touch entry that is not a
-   label under the zone (it accepts `legacy`, `legacy.`, `legacy.<zone>` and `@`), and an allowed
-   name that is, or sits under, a never-touch label. `cloudflare.zoneId` and `access.allowDomains`
+   label under the zone (it accepts `legacy`, `legacy.`, `legacy.<zone>` and `@`), a never-touch
+   entry written as a wildcard (`*.legacy`: a never-touch label already covers itself and every
+   name under it, so write `legacy` instead; read as one name, `*.legacy` would protect nothing
+   below it), and an allowed name that is, or sits under, a never-touch label. `cloudflare.zoneId` and `access.allowDomains`
    are optional: the zone's ID is checked against Cloudflare at run time (below), and the domains
    serve the owner's staging decision that Access admits the company domain with a one-time PIN.
    `dmarc.policy`, when present, must equal `email.dmarcPolicy` in `ops/environments/staging.json`,
@@ -94,6 +96,14 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    what the interrupted run left undone. Only SIGKILL (and a crash of Node or of the machine)
    leaves a run open; its lock then needs `lock break` (below).
 
+   However a run closes, what its cleanup has not undone is recorded as well as printed, since the
+   output may have had no reader (a closed terminal): `run.done` carries `leftover`, what to do by
+   hand, and, when the cleanup failed, `cleanupFailed` and its `cleanupError`, masked like every
+   field. A `run.leftover` line (level `error`) with the same fields is written just before
+   `run.done`'s line, so it is kept in `lines.jsonl` and shipped with it. After a stop nobody saw,
+   read the last `run.done` in `runs.jsonl` (`pnpm fin log verify <env>` first) or look for
+   `run.leftover` in the `ops` source.
+
 ### The allow-list guard (BD-11)
 
 Every Cloudflare write that names a host is checked before it is sent: the name must be under the
@@ -103,6 +113,44 @@ under a `neverTouch` label are refused. Workers route paths are exactly `/*` or 
 are written only through the per-rule endpoints and only when their `ref` starts with `fin_next_`.
 Zone writes go only to the zone ID the guard checked against Cloudflare's own answer. A refusal
 exits 77 and sends nothing.
+
+### Railway variable writes: no deploy nobody asked for
+
+The steward's ruling of 22 Nov. Every Railway variable write of every command keeps these:
+
+1. **Provisioning and configuration** writes commit with `skipDeploys: true` and start nothing: the
+   service takes them at its next deployment (`railway deploy`).
+2. **Rotations** (a secret a running service holds: `email token` replacing a token, `tunnel
+   create` making a tunnel anew, `zone apply` making a new ingress proof) commit with
+   `skipDeploys: true`, then redeploy each service that has a deployment as a step of the plan
+   of its own (`~ update redeploy <service> [<variables>]`, a `run.step` and a
+   `rotation.redeployed` line naming the services), wait for `SUCCESS` and read back. The rotation
+   is done only then, and only then is an old secret revoked or a rule written that sends the new
+   one. Only a service with no deployment holds nothing: it takes the value at its next
+   deployment, and nothing is deployed for it. A newest deployment of any status counts as holding
+   the old value, `REMOVED` and `REMOVING` included: Railway marks an aborted deployment `REMOVED`
+   while the one before it keeps serving, and no read the tooling has confirmed says whether
+   anything still runs (`activeDeployments` is in neither Railway's API documentation nor SP-03).
+   The plan says so for such a service, and its redeploy starts it again if it was taken down by
+   hand. A redeploy is refused when the service is set to an image its newest deployment does not
+   run (it would roll that image), and, when that deployment did not end `SUCCESS` (a `railway
+   deploy` that failed at the service leaves it set to the failed release's image; an aborted one
+   ended `REMOVED`) or Railway does not say which image it runs, unless the service is set to the
+   digest the registered deploys recorded for it. The refusal names the service and the command to
+   run first (`pnpm fin railway deploy <env>` for the release it should run), and revokes and
+   sends nothing. A rotation is decided by what the service holds (`email token` reads `worker`'s
+   variables, not only Cloudflare's list), and one left unfinished stays visible to the next run
+   (`tunnel create` registers as a rotation, and a later run redeploys until one passes).
+3. **Removals**: nothing deletes a variable, since Railway's `variableDelete` takes no
+   `skipDeploys` and would start a deployment. A value no deployment may carry is overwritten with
+   `inert` (`skipDeploys: true`) and waits for removal: `run.done` records it as
+   `awaitingRemoval`, and `railway verify` lists it (`waits for removal`). It is removed only by a
+   planned deployment that does not take it.
+4. **Read-back**: every commit also sets the plain `FIN_VARIABLES_RUN` to `<run ID>:<n>`. A read
+   proves a write only once it shows that marker, each sealed name (with a null value) and each
+   plain value as written, read again every 2 seconds for 10 seconds at most; a read that only
+   lacks what the write replaced proves nothing, since a read from before the write lacks it too.
+   A deployment that should take a write starts only once a read shows it.
 
 ## The run log and the run lock (interim, until the R2 vault exists)
 

@@ -23,8 +23,8 @@
 // token: `pnpm fin` mints a one-run token with the operator token (CR-05), holding Workers Scripts
 // Write on this account only and expiring within the hour, uses it for the uploads, and revokes it
 // when the run ends, whether the uploads passed or failed or a signal stopped the run (the plan's
-// cleanup, which the stop's trap runs too); a run closed at once before it could says to revoke it
-// by hand.
+// cleanup, which the stop's trap runs too); a run closed at once before it could, or one whose
+// revocation failed, says to revoke it by hand, and its run.done records that (`leftover`).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -251,7 +251,12 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
       let token: Secret | undefined;
       /** The revocation: it runs once, on every way the run ends (the plan's cleanup). */
       let revocation: Promise<void> | undefined;
-      let revocationSettled = false;
+      /**
+       * Whether no one-run token is left: revoked, or its mint answered none. Until then (the
+       * revocation pending, or failed), a run closed at once says to revoke it by hand, and
+       * run.done records it (the plan's leftover).
+       */
+      let tokenGone = false;
       const revokeByHand = `revoke it by hand now (it expires within ${t.expiryMinutes} minutes)`;
       const uploaded: string[] = [];
       const revoke = (): Promise<void> => {
@@ -262,6 +267,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
             // A mint still in flight when the run stops is waited for, so its token is revoked too.
             ({ id } = await mint);
           } catch {
+            tokenGone = true;
             return;
           }
           try {
@@ -270,11 +276,10 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
             ctx.out.error(`the one-run token ${t.name} could not be revoked: ${revokeByHand}`);
             throw error;
           }
+          tokenGone = true;
           ctx.run.step("token", t.name, "revoke");
           ctx.out.info(`  revoked the one-run token ${t.name}`);
-        })().finally(() => {
-          revocationSettled = true;
-        });
+        })();
         return revocation;
       };
       return ctx.applyPlan(
@@ -340,7 +345,7 @@ export function staticDeployCommand(load: RendererLoader = loadWebHostRenderer):
         {
           cleanup: revoke,
           leftover: () =>
-            mint !== undefined && !revocationSettled
+            mint !== undefined && !tokenGone
               ? `the one-run token ${t.name} may not be revoked: ${revokeByHand}`
               : undefined,
           after: async () => {

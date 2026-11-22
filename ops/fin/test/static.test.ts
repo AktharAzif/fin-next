@@ -487,6 +487,7 @@ describe("static deploy (pnpm fin)", () => {
     const statics = new FakeStatic(MINTED);
     const sequence: string[] = [];
     let failPut: string | undefined;
+    let refuseRevoke = false;
     /** Calls held in flight until the test opens them: the first call each one matches. */
     const holds: Array<{
       match: (method: string, path: string) => boolean;
@@ -504,6 +505,15 @@ describe("static deploy (pnpm fin)", () => {
         held.reached();
         await held.wait;
       }
+      if (refuseRevoke && method === "DELETE" && path.includes("/tokens/"))
+        return new Response(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 9109, message: "Unauthorized to access requested resource" }],
+            result: null,
+          }),
+          { status: 403 },
+        );
       if (path.includes("/tokens")) return cf.fetch(url, init);
       if (failPut !== undefined && init.method === "PUT" && path.endsWith(`/${failPut}`))
         return new Response(JSON.stringify({ success: false, errors: [], result: null }), {
@@ -592,6 +602,10 @@ describe("static deploy (pnpm fin)", () => {
       railwayDeploy,
       failAt: (script: string) => {
         failPut = script;
+      },
+      /** Cloudflare refuses the one-run token's revocation (403). */
+      refuseRevoke: () => {
+        refuseRevoke = true;
       },
     };
   }
@@ -944,6 +958,99 @@ describe("static deploy (pnpm fin)", () => {
     mint.open();
     await stopping;
     await done;
+  });
+
+  /** What a stop that could not revoke the one-run token says to do (the plan's leftover). */
+  const REVOKE_BY_HAND =
+    /^the one-run token fin-next-staging-static-run may not be revoked: revoke it by hand now \(it expires within 60 minutes\)$/;
+
+  /**
+   * The run log's run.done and the run.leftover line kept (and shipped) with it, once each has said
+   * that the one-run token may not be revoked and that it is revoked by hand. The output is closed
+   * in these tests, so the record is all there is.
+   */
+  const leftoverRecorded = (
+    t: { env: Record<string, string> },
+    rt: { err(): string },
+  ): { done: Record<string, unknown>; line: Record<string, unknown> } => {
+    const done = records(t).at(-1) ?? {};
+    assert.equal(done.event, "run.done");
+    assert.match(String(done.leftover), REVOKE_BY_HAND);
+    const lines = readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const at = lines.findLastIndex((l) => l.event === "run.leftover");
+    const line = lines[at] ?? {};
+    assert.equal(line.level, "error");
+    assert.equal(line.command, "static deploy");
+    assert.match(String(line.leftover), REVOKE_BY_HAND);
+    assert.equal(lines[at + 1]?.event, "run.done", "written just before run.done's own line");
+    assert.doesNotMatch(rt.err(), /by hand/, "nothing printed reached anyone");
+    for (const value of [MINTED, ACCOUNT]) {
+      assert.equal(runsLog(t).includes(value), false);
+      assert.equal(JSON.stringify(lines).includes(value), false);
+    }
+    return { done, line };
+  };
+
+  it("records in the run log the one-run token a hangup leaves while it is being minted, with no one reading the output", async () => {
+    const t = await rendered();
+    const mint = t.hold(isMint);
+    const { rt, done } = t.start([], t.out, NEVER);
+    await mint.reached;
+    // The operator's terminal closed: the hangup comes, and nothing printed reaches anyone.
+    rt.closeOutput();
+    const stopping = rt.interrupt("SIGHUP");
+    // The mint is still in flight at the five-second deadline.
+    assert.equal(rt.forceClose("deadline"), true);
+    const { done: closed, line } = leftoverRecorded(t, rt);
+    assert.equal(closed.interrupted, "SIGHUP");
+    assert.equal(closed.forced, "deadline");
+    assert.equal(line.cleanupFailed, undefined, "the revocation had not failed: it had not run");
+    mint.open();
+    await stopping;
+    assert.equal(await done, EXIT.hangup);
+    // The real process exits at the deadline; here the revocation comes too late to write.
+    assert.equal(t.cf.tokens.length, 1, "the record names a token that is really there");
+    assert.equal(t.statics.calls.length, 0, "nothing is uploaded after the stop");
+  });
+
+  it("records in the run log a revocation Cloudflare refused after a hangup, with no one reading the output", async () => {
+    const t = await rendered();
+    t.refuseRevoke();
+    const upload = t.hold(
+      (method, path) => method === "PUT" && path.endsWith("/fin-next-staging-verify-static"),
+    );
+    // The fake runtime's sleep returns at once: the settle wait times out, and the trap revokes.
+    const { rt, done } = t.start();
+    await upload.reached;
+    rt.closeOutput();
+    assert.equal(await rt.interrupt("SIGHUP"), true);
+    const { done: closed, line } = leftoverRecorded(t, rt);
+    assert.equal(closed.error, "interrupted by SIGHUP", "the stop's trap closed the run");
+    for (const record of [closed, line]) {
+      assert.equal(record.cleanupFailed, true);
+      assert.match(String(record.cleanupError), /answered 403: 9109 Unauthorized/);
+    }
+    upload.open();
+    assert.notEqual(await done, EXIT.ok);
+    assert.equal(t.cf.tokens.length, 1, "the token Cloudflare would not revoke is still there");
+    assert.equal(t.sequence.filter((s) => s.startsWith("DELETE")).length, 1, "asked once");
+  });
+
+  it("records nothing left over when the one-run token is revoked", async () => {
+    const t = await rendered();
+    const { code, rt } = await t.run();
+    assert.equal(code, EXIT.ok, rt.err());
+    const closed = records(t).at(-1);
+    assert.equal(closed?.result, "ok");
+    assert.equal(closed?.leftover, undefined);
+    assert.equal(closed?.cleanupFailed, undefined);
+    assert.doesNotMatch(
+      readFileSync(join(t.env.FIN_STATE_DIR ?? "", "staging", "lines.jsonl"), "utf8"),
+      /"event":"run.leftover"/,
+    );
   });
 
   it("renders and uploads with packages/web-host's own renderer: the rendered files equal a fresh render", async () => {

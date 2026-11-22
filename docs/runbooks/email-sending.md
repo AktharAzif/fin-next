@@ -37,7 +37,9 @@ Mints the account-owned token `fin-next-<env>-email` (CR-08) and sets it on `wor
 - an expiry of 180 days (the settings refuse more, and the writer refuses a mint that would outlive
   180 days);
 - set as `worker`'s sealed `FIN_EMAIL_TOKEN`, with the plain `FIN_EMAIL_ACCOUNT_ID` and
-  `FIN_EMAIL_FROM` (`account-security@<auth subdomain>`). The value is never printed.
+  `FIN_EMAIL_FROM` (`account-security@<auth subdomain>`), in a commit that starts no deployment,
+  read back until it shows (`pnpm-fin.md`). The value is never printed. A first token is
+  provisioning: `worker` takes it at its next deployment (`railway deploy`).
 
 An existing token of that name is kept, unless it cannot be the one `worker` holds:
 
@@ -47,7 +49,8 @@ An existing token of that name is kept, unless it cannot be the one `worker` hol
   lost; the run log shows the run's `token create` step with no `variables` step after it.
 
 Then the plan says why (`replaces it: ...`) and does what `--rotate` does: mints a new token, sets
-it, and only then revokes the old ones. `--rotate` does the same on demand (see
+it, redeploys `worker` when it has a deployment (it holds the old token), waits for `SUCCESS`, reads
+back, and only then revokes the old ones. `--rotate` does the same on demand (see
 `rotate-email-token.md`). Revocations are named by ordinal (`fin-next-<env>-email #1`), never by any
 part of a token's ID.
 

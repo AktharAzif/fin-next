@@ -30,6 +30,16 @@ export interface Harness {
   /** Asserts that nothing readable holds a private value or any of the given secrets. */
   assertNoLeak(secrets?: readonly string[]): void;
   records(): Array<Record<string, unknown>>;
+  /** The telemetry lines kept beside the run log (lines.jsonl), in order. */
+  lines(): Array<Record<string, unknown>>;
+}
+
+/** One JSON record per line. */
+function parsed(text: string): Array<Record<string, unknown>> {
+  return text
+    .split("\n")
+    .filter((l) => l !== "")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
 /**
@@ -96,11 +106,8 @@ export function harness(
         );
       }
     },
-    records: () =>
-      read("runs.jsonl")
-        .split("\n")
-        .filter((l) => l !== "")
-        .map((l) => JSON.parse(l) as Record<string, unknown>),
+    records: () => parsed(read("runs.jsonl")),
+    lines: () => parsed(read("lines.jsonl")),
   };
   return h;
 }

@@ -96,8 +96,13 @@ Then, in order:
 3. the one-run token is revoked when the run ends, whether the uploads passed or failed or a signal
    stopped the run (Ctrl-C, SIGTERM, a closed terminal: it is revoked before `run.done`). If the
    revocation fails, or the run is closed at once before it could (Ctrl-\, a later second Ctrl-C,
-   the five-second deadline), the output says so: revoke `fin-next-staging-static-run` in Cloudflare
-   by hand (it expires within the hour anyway).
+   the five-second deadline), revoke `fin-next-staging-static-run` in Cloudflare by hand (it
+   expires within the hour anyway). The output says so, and so does the record, which outlives a
+   closed terminal: the run's `run.done` in the run log carries `leftover` (`the one-run token
+   fin-next-staging-static-run may not be revoked: revoke it by hand now (it expires within 60
+   minutes)`) and, when the revocation failed, `cleanupFailed` and its `cleanupError`; a
+   `run.leftover` line with the same fields goes just before `run.done`'s line, in `lines.jsonl`
+   and to the `ops` source.
 
 A failure stops the run; the output says which host serves which release
 (`static deploy stopped at <key> (it may serve either release); new release on: ...; previous

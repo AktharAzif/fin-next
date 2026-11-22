@@ -1,20 +1,34 @@
 // Railway's GraphQL API (P-13: `pnpm fin` drives it with fetch; spec 01 §6). The project token
 // (CR-04) travels in the `Project-Access-Token` header. Reads go through query(); every write goes
-// through mutate(), and every variable write through setVariables(), which names a service the
-// public settings list and sets each secret sealed.
+// through mutate(), every variable write through setVariables(), which names a service the public
+// settings list and sets each secret sealed.
+//
+// No deploy nobody asked for (the steward's ruling of 22 Nov; ARCHITECTURE §4.9: a changed variable
+// stages a redeploy):
+//   1. every environment patch commits with `skipDeploys: true`, so a variable write starts no
+//      deployment of its own; a provisioning or configuration write stops there;
+//   2. a rotation (a secret a running service holds) then redeploys each service that holds it as
+//      a step of its own plan, and reads back (rollout.ts);
+//   3. nothing removes a variable: Railway's variableDelete takes no skipDeploys, so every removal
+//      would start a deployment. mutate() refuses it, and a value no deployment may carry is
+//      overwritten with the inert value instead (inspect.ts INERT_VALUE), waiting for removal;
+//   4. every commit also sets the plain WRITE_MARKER to `<run ID>:<n>`, which setVariables returns,
+//      so a read-back counts only once it shows that write (rollout.ts confirmWritten).
+// So `railway deploy` starts exactly one deployment per service it rolls, and migrate runs once
+// per run, never a second time racing the password it gives fin_owner for the run.
 //
 // mutate() checks the mutation it is about to send, not a label beside it: outside a registered run
 // it refuses; the mutation must call exactly one root field, one of WRITE_FIELDS, with no selection
 // set; its `environmentId` must be the overlay's environment; and every service it names (its
-// `serviceId`, or each service of an environment patch) must be one of the project's services. A
-// variableDelete (whose arguments travel in one `input`) also names the overlay's project, and
-// removes only a variable of DELETABLE_VARIABLES.
+// `serviceId`, or each service of an environment patch) must be one of the project's services. An
+// environment patch must pass `skipDeploys: true` in the call itself.
 //
 // Operation shapes: the project's services, serviceInstanceUpdate and serviceInstanceDeployV2 are
 // the ones the hand provisioning used; environmentPatchCommit with
-// `{services: {<id>: {variables: {NAME: {value, isSealed: true}}}}}` was verified on staging on
-// 21 Nov (a sealed value is absent from reads afterwards). Field names marked UNVERIFIED in
-// queries.ts are SP-03's to confirm before a run depends on them.
+// `{services: {<id>: {variables: {NAME: {value, isSealed: true}}}}}` and `skipDeploys: true` was
+// verified on staging on 21 Nov (a sealed value is never read back: the variables read answers its
+// name with a null value). Field names marked UNVERIFIED are SP-03's to confirm before a run
+// depends on them.
 
 import { ConfigError, ProviderError, RefusedError } from "../core/errors.ts";
 import { send } from "../core/http.ts";
@@ -24,6 +38,7 @@ import type { Run } from "../core/run.ts";
 import type { Runtime } from "../core/runtime.ts";
 import { Secret } from "../core/secret.ts";
 import { mustBeSealed, type Settings } from "../core/settings.ts";
+import { WRITE_MARKER } from "./inspect.ts";
 
 export const RAILWAY_API = "https://backboard.railway.com/graphql/v2";
 
@@ -32,21 +47,24 @@ const MAX_DETAIL = 400;
 
 /**
  * The root fields a `pnpm fin` mutation may call: environmentPatchCommit (setVariables), and
- * serviceInstanceUpdate, serviceInstanceDeployV2 and variableDelete (`railway deploy`). Nothing
- * creates, and the one delete removes a variable of DELETABLE_VARIABLES.
+ * serviceInstanceUpdate and serviceInstanceDeployV2 (`railway deploy`, and the redeploy a rotation
+ * makes). Nothing creates and nothing deletes: Railway's variableDelete takes no skipDeploys, so it
+ * would start a deployment nobody asked for (rule 3).
  */
 const WRITE_FIELDS: ReadonlySet<string> = new Set([
   "environmentPatchCommit",
   "serviceInstanceUpdate",
   "serviceInstanceDeployV2",
-  "variableDelete",
 ]);
 
-/** The variables a mutation may delete: migrate's superuser reference, after its run (spec 01 §6.6). */
-const DELETABLE_VARIABLES: ReadonlySet<string> = new Set(["FIN_BOOTSTRAP_DATABASE_URL"]);
-
 /** `mutation <name>(<args>) { <field>(<args>) }`: one root field call and no selection set. */
-const ONE_FIELD = /^\s*mutation\s+\w+\s*(?:\([^)]*\))?\s*\{\s*(\w+)\s*\([^(){}]*\)\s*\}\s*$/;
+const ONE_FIELD = /^\s*mutation\s+\w+\s*(?:\([^)]*\))?\s*\{\s*(\w+)\s*\(([^(){}]*)\)\s*\}\s*$/;
+
+/** `skipDeploys: true` as one argument of the field call. */
+const SKIP_DEPLOYS = /(?:^|,)\s*skipDeploys\s*:\s*true\s*(?:,|$)/;
+
+const PATCH_COMMIT =
+  "mutation finPatch($environmentId: String!, $patch: EnvironmentConfig, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage, skipDeploys: true) }";
 
 interface GraphQlAnswer<T> {
   data?: T;
@@ -54,6 +72,19 @@ interface GraphQlAnswer<T> {
 }
 
 export type VariableValue = Secret | string;
+
+/**
+ * One variable commit, as a read-back checks it (rule 4): the service, the marker the commit set,
+ * the names it set sealed (a read shows each by its name, with a null value) and the plain values
+ * it set (held here for the comparison only, never printed).
+ */
+export interface Written {
+  service: string;
+  serviceId: string;
+  marker: string;
+  sealed: readonly string[];
+  plain: Readonly<Record<string, string>>;
+}
 
 export class RailwayApi {
   readonly #token: Secret;
@@ -63,6 +94,8 @@ export class RailwayApi {
   readonly #projectId: string;
   readonly #environmentId: string;
   #services: Map<string, string> | undefined;
+  /** The variable commits this client has sent, for each one's marker (`<run ID>:<n>`). */
+  #commits = 0;
 
   constructor(
     token: Secret,
@@ -150,25 +183,26 @@ export class RailwayApi {
   async mutate<T>(run: Run, query: string, variables: Record<string, unknown>): Promise<T> {
     if (!/^\s*mutation\s/.test(query)) throw new RefusedError("railway: mutate() only writes");
     run.assertWritable("railway mutation");
-    const field = ONE_FIELD.exec(query)?.[1];
+    const call = ONE_FIELD.exec(query);
+    const field = call?.[1];
+    if (field === "variableDelete") {
+      throw new RefusedError(
+        "railway: no variable is deleted: Railway's variableDelete takes no skipDeploys, so it would start a deployment; overwrite the value with the inert one instead",
+      );
+    }
     if (field === undefined || !WRITE_FIELDS.has(field)) {
       throw new RefusedError(
-        "railway: a mutation calls one of the fields pnpm fin writes (environment patch, instance update, deploy, variable delete)",
+        "railway: a mutation calls one of the fields pnpm fin writes (environment patch, instance update, deploy)",
       );
     }
-    // variableDelete carries its arguments in one input object.
-    const args =
-      field === "variableDelete" ? ((variables.input ?? {}) as Record<string, unknown>) : variables;
+    if (field === "environmentPatchCommit" && !SKIP_DEPLOYS.test(call?.[2] ?? "")) {
+      throw new RefusedError(
+        "railway: an environment patch commits with skipDeploys: true, so it starts no deployment of its own",
+      );
+    }
+    const args = variables;
     if (args.environmentId !== this.#environmentId) {
       throw new RefusedError("railway: a mutation names the overlay's environment");
-    }
-    if (
-      field === "variableDelete" &&
-      (args.projectId !== this.#projectId || !DELETABLE_VARIABLES.has(String(args.name)))
-    ) {
-      throw new RefusedError(
-        "railway: a variable delete names the overlay's project and only migrate's superuser reference",
-      );
     }
     const known = new Set((await this.services()).values());
     const patch = args.patch as { services?: Record<string, unknown> } | undefined;
@@ -211,8 +245,10 @@ export class RailwayApi {
   }
 
   /**
-   * Sets variables on one service in one environment commit. A Secret is set sealed; a plain
-   * string is set unsealed, and is refused for any name the settings say must be sealed.
+   * Sets variables on one service in one environment commit, which starts no deployment
+   * (`skipDeploys: true`): the service takes them at its next deployment. A Secret is set sealed; a
+   * plain string is set unsealed, and is refused for any name the settings say must be sealed. The
+   * same commit sets WRITE_MARKER to `<run ID>:<n>`; the commit is returned for its read-back.
    */
   async setVariables(
     run: Run,
@@ -220,32 +256,41 @@ export class RailwayApi {
     service: string,
     variables: Record<string, VariableValue>,
     message: string,
-  ): Promise<void> {
+  ): Promise<Written> {
     if (settings.railway.services[service] === undefined) {
       throw new RefusedError(`railway: ${service} is not a service the public settings list`);
     }
+    if (Object.hasOwn(variables, WRITE_MARKER)) {
+      throw new RefusedError(`railway: ${WRITE_MARKER} is set by every commit itself`);
+    }
     const patch: Record<string, { value: string; isSealed?: true }> = {};
+    const sealed: string[] = [];
+    const plain: Record<string, string> = {};
     for (const [name, value] of Object.entries(variables)) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(name))
         throw new RefusedError(`railway: ${name} is not a variable name`);
-      if (value instanceof Secret) patch[name] = { value: value.reveal(), isSealed: true };
-      else {
+      if (value instanceof Secret) {
+        patch[name] = { value: value.reveal(), isSealed: true };
+        sealed.push(name);
+      } else {
         if (mustBeSealed(settings, name)) {
           throw new RefusedError(`railway: ${name} must be sealed, and a plain value was given`);
         }
         patch[name] = { value };
+        plain[name] = value;
       }
     }
     const serviceId = await this.serviceId(service);
-    await this.mutate(
-      run,
-      "mutation finPatch($environmentId: String!, $patch: EnvironmentConfig, $commitMessage: String) { environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage) }",
-      {
-        environmentId: this.#environmentId,
-        patch: { services: { [serviceId]: { variables: patch } } },
-        commitMessage: message.slice(0, 200),
-      },
-    );
+    this.#commits++;
+    const marker = `${run.id}:${this.#commits}`;
+    patch[WRITE_MARKER] = { value: marker };
+    plain[WRITE_MARKER] = marker;
+    await this.mutate(run, PATCH_COMMIT, {
+      environmentId: this.#environmentId,
+      patch: { services: { [serviceId]: { variables: patch } } },
+      commitMessage: message.slice(0, 200),
+    });
+    return { service, serviceId, marker, sealed, plain };
   }
 
   /** The static egress addresses of a service (UNVERIFIED field names, SP-08 and SP-03). */

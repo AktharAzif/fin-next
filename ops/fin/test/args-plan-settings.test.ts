@@ -96,7 +96,11 @@ describe("plans", () => {
 /** The parts of the staging file these tests change. */
 interface StagingRaw {
   email: { dmarcPolicy: string; token: { service: string } };
-  railway: { deployOrder: string[]; connectorOrder: string[] };
+  railway: {
+    deployOrder: string[];
+    connectorOrder: string[];
+    services: Record<string, { startCommand?: string }>;
+  };
   tunnels: { public: { standby: string } };
   staticOrder: string[];
   static: Record<string, unknown>;
@@ -104,6 +108,20 @@ interface StagingRaw {
 
 function stagingRaw(): StagingRaw {
   return JSON.parse(readFileSync(join(REPO_ROOT, "ops", "environments", "staging.json"), "utf8"));
+}
+
+/** The exec-form CMD of app.Dockerfile's release stage: the Node flags, then `dist/main.js`. */
+function releaseCmd(): string[] {
+  const text = readFileSync(join(REPO_ROOT, "ops", "docker", "app.Dockerfile"), "utf8");
+  const release = text.slice(text.lastIndexOf("\nFROM ") + 1);
+  // The distroless Node image, whose entrypoint is /nodejs/bin/node.
+  assert.match(
+    release,
+    /^FROM gcr\.io\/distroless\/nodejs\d+-debian\d+:nonroot@sha256:[0-9a-f]{64} AS release\n/,
+  );
+  const cmd = /^CMD (\[.*\])$/m.exec(release)?.[1];
+  assert.ok(cmd !== undefined, "app.Dockerfile's release stage has an exec-form CMD");
+  return JSON.parse(cmd);
 }
 
 describe("the public settings", () => {
@@ -139,7 +157,42 @@ describe("the public settings", () => {
     assert.equal(services.backup?.cron, "17 3 * * *");
     assert.equal(services["backup-hourly"]?.cron, "5 * * * *");
     assert.equal(services["backup-hourly"]?.image, services.backup?.image);
-    assert.equal(services["backup-hourly"]?.startCommand, "dist/main.js --hourly");
+    // The whole command line (SP-03): the backup image is built on the pinned build image, not
+    // the distroless one (spec 01 §4.9), so its Node is the official image's /usr/local/bin/node;
+    // the flags are every Fin Node image's (ARCHITECTURE §3.5). ops/docker/backup.Dockerfile
+    // does not exist yet: when it lands, this line is checked against its CMD.
+    assert.equal(
+      services["backup-hourly"]?.startCommand,
+      "/usr/local/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js --hourly",
+    );
+  });
+
+  it("gives worker and migrate the api image's whole command line, then the mode (SP-03)", () => {
+    const services = loadSettings(REPO_ROOT, "staging").railway.services;
+    const line = ["/nodejs/bin/node", ...releaseCmd()].join(" ");
+    assert.equal(
+      line,
+      "/nodejs/bin/node --max-old-space-size-percentage=70 --disable-proto=throw --enable-source-maps dist/main.js",
+    );
+    assert.equal(services.worker?.startCommand, `${line} --worker`);
+    assert.equal(services.migrate?.startCommand, `${line} --migrate`);
+  });
+
+  it("refuses a start command that does not name the binary: Railway runs it in place of ENTRYPOINT and CMD", () => {
+    for (const command of [
+      "dist/main.js --worker",
+      "--migrate",
+      "node dist/main.js --worker",
+      "/nodejs/bin/node",
+    ]) {
+      const raw = stagingRaw();
+      raw.railway.services.worker = { ...raw.railway.services.worker, startCommand: command };
+      assert.throws(
+        () => parseSettings(raw, "staging"),
+        /railway\.services\.worker\.startCommand must give the whole command line/,
+        command,
+      );
+    }
   });
 
   it("never takes a name every object inherits for a service or a static deployment", () => {

@@ -52,7 +52,20 @@ a refusal of it (a plan limit, say) never stops a required rule.
 An existing proof is kept. A host with no proof gets a new one (32 random bytes, base64url). The
 new proof is set first, sealed, as `FIN_INGRESS_PROOFS` on the services that check it (edge: api;
 console; admin; verify: verify and selfie), and only then is the rule that sends it written. That
-variable write needs `FIN_RAILWAY_TOKEN_FILE`, and Railway redeploys the services it touches.
+variable write needs `FIN_RAILWAY_TOKEN_FILE`, and so does the dry run of a plan with a new proof,
+which reads which of those services have a deployment. It commits with `skipDeploys: true`, so the
+commit starts no deployment, and is read back until a read shows it (`pnpm-fin.md`). Only a service
+with no deployment takes the proof at its next deployment (`railway deploy`) with nothing deployed
+for it. A service that has a deployment, whatever the newest one's status (`REMOVED` and
+`REMOVING` included: Railway marks an aborted deployment `REMOVED` while the one before it keeps
+serving with the old proofs), holds the old proofs, so the plan redeploys it as a step of its own
+(`~ update redeploy <service> [FIN_INGRESS_PROOFS]`), waits for `SUCCESS` and reads back, before
+any rule is written: no host ever answers the new rule's requests with 403. A redeploy of a service
+whose newest deployment did not end `SUCCESS` is refused unless it is set to the digest the
+registered deploys recorded for it. If a redeploy or a read-back fails or is refused, no rule is
+written; run the command again once the cause is fixed. The dry run only reads, from Railway and
+Cloudflare, and never prints the Railway token; a plan with no new proof needs no Railway token at
+all.
 Escrow comes before the variable in the plan; staging has no escrow recipient yet (BD-14), so a lost
 proof is replaced by rotation (`rotate-ingress-proof.md`).
 

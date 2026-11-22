@@ -234,7 +234,9 @@ describe("the overlay", () => {
       assert.ok(parseOverlay(clean, "staging").neverTouch.labels.includes("legacy2"), entry);
     }
     assert.equal(neverTouchLabel(ZONE, ZONE), "@");
-    for (const entry of ["*.legacy2", "legacy 2", "", "a..b"]) {
+    // `*.legacy2` is not a label either; its refusal names the fix (never-touch.test.ts).
+    assert.equal(neverTouchLabel("*.legacy2", ZONE), undefined);
+    for (const entry of ["legacy 2", "", "a..b", "*", `*.${ZONE}`]) {
       assert.equal(neverTouchLabel(entry, ZONE), undefined, entry);
       assert.throws(
         () =>

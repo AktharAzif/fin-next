@@ -270,7 +270,13 @@ export function parseSettings(raw: unknown, environment: Environment): Settings 
       service.restart = c.oneOf(s.restart, `${p}.restart`, ["ALWAYS", "NEVER", "ON_FAILURE"]);
       service.memoryMb = c.num(s.memoryMb, `${p}.memoryMb`);
       if (s.startCommand !== undefined) {
-        service.startCommand = c.str(s.startCommand, `${p}.startCommand`, /^[A-Za-z0-9 ./_=-]+$/);
+        const command = c.str(s.startCommand, `${p}.startCommand`, /^[A-Za-z0-9 ./_=-]+$/);
+        // A Railway start command replaces the image's ENTRYPOINT and CMD, not only its CMD
+        // (SP-03's run, docs/plan/spikes.md run 2): one of arguments only exits within seconds
+        // and leaves no log, so the whole command line, from the binary's absolute path.
+        if (command !== "" && !/^\/[A-Za-z0-9./_-]+ \S/.test(command))
+          c.problems.push(`${p}.startCommand must give the whole command line, binary first`);
+        service.startCommand = command;
       }
       if (s.noToken !== undefined) service.noToken = c.bool(s.noToken, `${p}.noToken`);
       if (s.task !== undefined) service.task = c.bool(s.task, `${p}.task`);

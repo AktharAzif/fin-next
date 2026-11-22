@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runCli } from "../src/cli.ts";
 import type { Command } from "../src/command.ts";
-import type { Context } from "../src/core/context.ts";
+import type { Context, PlanHooks } from "../src/core/context.ts";
 import { EXIT, ProviderError, RefusedError } from "../src/core/errors.ts";
 import { Masker } from "../src/core/mask.ts";
 import type { Change } from "../src/core/plan.ts";
@@ -58,6 +58,8 @@ interface StubOptions {
   /** A writer that forgets assertWritable(), so only the core's own checks stand in the way. */
   unchecked?: boolean;
   words?: string[];
+  /** The plan's hooks (its cleanup, and what it leaves to do by hand). */
+  hooks?: PlanHooks;
 }
 
 interface Stub {
@@ -86,7 +88,7 @@ function stub(options: StubOptions): Stub {
           await options.apply?.(change, ctx);
           s.applied.push(change.name);
         };
-        const code = await ctx.applyPlan("stub plan", options.changes, apply);
+        const code = await ctx.applyPlan("stub plan", options.changes, apply, {}, options.hooks);
         if (options.twice === true) return ctx.applyPlan("stub plan again", options.changes, apply);
         return code;
       },
@@ -770,6 +772,86 @@ describe("an interrupted run", () => {
     } finally {
       child.process.kill("SIGKILL");
     }
+  });
+});
+
+describe("what a run's cleanup leaves", () => {
+  it("records in run.done, and in a run.leftover line just before its own, what a failed cleanup left, masked, keeping the run's own error", async () => {
+    const h = harness();
+    const s = stub({
+      changes: [CREATE, UPDATE],
+      apply: async (change) => {
+        if (change.kind === "setting") {
+          throw new ProviderError("cloudflare", "cloudflare PATCH answered 500", 500);
+        }
+      },
+      hooks: {
+        cleanup: async () => {
+          throw new ProviderError("cloudflare", `cloudflare DELETE answered 500 for ${ZONE}`, 500);
+        },
+        leftover: () => `the record on ${ZONE} may still exist: delete it by hand now`,
+      },
+    });
+    assert.equal(await h.run(s), EXIT.unavailable);
+    const done = h.log.records().at(-1);
+    assert.equal(done?.event, "run.done");
+    assert.equal(done?.error, "cloudflare PATCH answered 500");
+    const lines = h.lines();
+    assert.deepEqual(
+      lines.slice(-2).map((l) => l.event),
+      ["run.leftover", "run.done"],
+    );
+    for (const record of [done, lines.at(-2)]) {
+      assert.equal(record?.cleanupFailed, true);
+      assert.equal(record?.cleanupError, "cloudflare DELETE answered 500 for <zone>");
+      assert.equal(record?.leftover, "the record on <zone> may still exist: delete it by hand now");
+    }
+    assert.equal(lines.at(-2)?.level, "error");
+    assert.equal(lines.at(-2)?.command, "stub apply");
+    assertNoLeak(h);
+  });
+
+  it("fails a run that would have passed when its cleanup fails, and records it", async () => {
+    const h = harness();
+    const s = stub({
+      changes: [CREATE],
+      hooks: {
+        cleanup: async () => {
+          throw new RefusedError("the token is still there");
+        },
+        leftover: () => "revoke it by hand now",
+      },
+    });
+    assert.equal(await h.run(s), EXIT.refused);
+    const done = h.log.records().at(-1);
+    assert.equal(done?.result, "refused");
+    assert.equal(done?.error, "the token is still there");
+    assert.equal(done?.cleanupFailed, true);
+    assert.equal(done?.cleanupError, "the token is still there");
+    assert.equal(done?.leftover, "revoke it by hand now");
+  });
+
+  it("records nothing left over when the cleanup passes", async () => {
+    const h = harness();
+    let undone = false;
+    const s = stub({
+      changes: [CREATE],
+      hooks: {
+        cleanup: async () => {
+          undone = true;
+        },
+        leftover: () => (undone ? undefined : "undo it by hand now"),
+      },
+    });
+    assert.equal(await h.run(s), EXIT.ok);
+    const done = h.log.records().at(-1);
+    assert.equal(done?.result, "ok");
+    assert.equal(done?.leftover, undefined);
+    assert.equal(done?.cleanupFailed, undefined);
+    assert.equal(
+      h.lines().some((l) => l.event === "run.leftover"),
+      false,
+    );
   });
 });
 
