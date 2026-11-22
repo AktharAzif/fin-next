@@ -719,6 +719,40 @@ describe("static builds", () => {
         "assets/a.js",
         'const S="/a.png 100px, //evil.example/b.png 200w";',
       ],
+      // A first candidate a substitution writes is one word whatever it holds (a helper call, a
+      // condition), and a path's brackets that pair are the path's.
+      [
+        "a helper call in a condition's branch",
+        "assets/a.js",
+        `jsx(\`img\`,{srcSet:d?\`${"$"}{u(\`/a.png\`)}, //evil.example/b.png 2x\`:\`/l.png\`})`,
+      ],
+      [
+        "a helper call in a constant",
+        "assets/a.js",
+        `const H=\`${"$"}{asset(\`hero.png\`)}, //evil.example/hero-2x.png 2x\`;`,
+      ],
+      [
+        "a condition in a constant",
+        "assets/a.js",
+        `const H=\`${"$"}{k?"/d.png":"/l.png"}, //evil.example/b.png 2x\`;`,
+      ],
+      ["a path with brackets", "assets/a.js", 'const H="/hero(1).png, //evil.example/b.png 2x";'],
+      [
+        "a helper call, then a candidate with no descriptor",
+        "assets/a.js",
+        `const H=\`${"$"}{asset(\`a.png\`)}, /b.png, //evil.example/c.png 3x\`;`,
+      ],
+      [
+        "a condition, then a candidate with no descriptor",
+        "assets/a.js",
+        `const H=\`${"$"}{k?"/d.png":"/l.png"}, /b.png, //evil.example/c.png 3x\`;`,
+      ],
+      [
+        "a path with brackets, then a candidate with no descriptor",
+        "assets/a.js",
+        'const H="/a(1).png, /b.png, //evil.example/c.png 3x";',
+      ],
+      ["a path with square brackets", "assets/a.js", 'const H="/a[1].png, //evil.example/c.png";'],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -755,6 +789,9 @@ describe("static builds", () => {
       'f("(",a,b,/\\//)',
       'x="a,b".split(","),/\\//.test(x)',
       'x="Hello, world, and more, //evil.example/x";',
+      // Brackets that do not pair within the run, and a call in code, start no list.
+      'x="see (the docs), //evil.example/x";',
+      'a=f(y),/\\//.test(z);x="q",g(h),/\\/a\\//.test(b);',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -771,6 +808,38 @@ describe("static builds", () => {
       'x="// note: see the docs";',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+  });
+
+  it("reads two slashes or backslashes with no scheme as a URL only where they name a host", (t) => {
+    const bs = (/** @type {number} */ n) => "\\".repeat(n);
+    // With no scheme, a host no URL parser takes loads nothing (the browser's parser is the same
+    // one), and backslashes alone name a host only where it has a dot or is an IP address. A
+    // pattern in a string starts so: a highlighter's grammar (two of @scalar/code-highlight's
+    // rules as the minifier prints them, a line comment's pattern, a string's), a bytea escape,
+    // an escape table.
+    for (const text of [
+      `const g=[{match:\`${bs(4)}(?:u[0-9a-fA-F]{4}|["${bs(4)}/bfnrt])\`,scope:\`string.escape\`}];`,
+      `const g=[{match:\`${bs(6)}s+${bs(4)}\`,scope:\`string.escape\`}];`,
+      `const g={match:\`//[^${bs(2)}n]*\`,scope:\`comment\`};`,
+      `const g={match:\`"(?:[^"${bs(6)}r${bs(2)}n]|${bs(4)}.)*"\`,scope:\`string\`};`,
+      `function b(e){return\`${bs(4)}x\`+e.toString(\`hex\`)}`,
+      `const E={'${bs(1)}n':\`${bs(4)}n\`,'${bs(1)}r':\`${bs(4)}r\`,'${bs(1)}t':\`${bs(4)}t\`};`,
+      `const r=new RegExp("${bs(4)}d+");`,
+      'fetch("//evil.example^x/c");',
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+    /** @type {[string, string][]} */
+    const cases = [
+      ["a host with a dot", `a.href="${bs(4)}evil.example${bs(2)}x";`],
+      ["an IPv4 address as one number", `a.href="${bs(4)}3221225985${bs(2)}x";`],
+      ["an IPv6 address", `a.href="${bs(4)}[2001:db8::1]${bs(2)}x";`],
+      ["a slash and a backslash", `a.href="/${bs(2)}evil${bs(2)}x";`],
+    ];
+    for (const [what, text] of cases) {
+      const found = staticRules(t, { "assets/a.js": text });
+      assert.deepEqual(found, ["third-party-origin"], `${what}: ${found.join()}`);
     }
   });
 
@@ -1026,6 +1095,17 @@ describe("static builds", () => {
       // A comparison before a substitution in a template literal's text opens a tag that the
       // next `>` ends.
       `x=\`${"$"}{a}<b${"$"}{c} items>\`;y=/\\/assets\\//;`,
+      // A `<` before a substitution in a message or a comparison opens a tag only as far as its
+      // template literal goes, with no `>` after it: the code after the literal is no tag's
+      // (Babel's minified semver, a message, the build's minifier's output of one).
+      `if(!s.intersects(\`<${"$"}{r}\`,t))n=/\\/node_modules\\//.test(p);`,
+      `function v(e,t){if(e.length>t)throw Error(\`Too long: ${"$"}{e.length}<${"$"}{t}\`)}let a=/\\/api\\//;`,
+      `let s=\`Array<${"$"}{t}\`,p=/\\/v1\\//;s+=\`>\`;`,
+      `x=\`${"$"}{a}<${"$"}{b}\`;y=/\\/assets\\//;`,
+      `throw RangeError(\`index out of range: 0<=i<${"$"}{n}\`);for(e=/\\/\\//g;;){}`,
+      `export function check(e,t){if(e>=t)throw RangeError(\`expected ${"$"}{e}<${"$"}{t}\`)}export const API=/\\/api\\/v4\\//;export const isApi=e=>API.test(e);`,
+      `const m=\`expected ${"$"}{a}<${"$"}{b}\`,re=/\\/api\\/v4\\//;`,
+      `throw Error(\`index<n${"$"}{i}\`);var r=/\\/x\\//;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1275,6 +1355,31 @@ describe("static builds", () => {
         "m.setAttribute(`content`,t+`; url=//evil.example/next`);",
         "https://evil.example",
       ],
+      // A time written at run time with no `url=`, which a browser's refresh does not need.
+      [
+        "a time a substitution writes, with no url=",
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",content:\`${"$"}{n}; //evil.example/next\`})`,
+        "https://evil.example",
+      ],
+      [
+        "a time concatenated before the string, with no url=",
+        "assets/a.js",
+        'jsx("meta",{httpEquiv:"refresh",content:n+";//evil.example/next"})',
+        "https://evil.example",
+      ],
+      [
+        "a written meta's time a substitution writes, with no url=",
+        "assets/a.js",
+        `e.innerHTML=\`<meta http-equiv=refresh content="${"$"}{n}; //evil.example/x">\`;`,
+        "https://evil.example",
+      ],
+      [
+        "a value set apart from its meta",
+        "assets/a.js",
+        'x=n+"; //evil.example/x";',
+        "https://evil.example",
+      ],
     ];
     for (const [what, file, text, origin] of cases) {
       const found = staticOrigins(t, { [file]: text });
@@ -1286,8 +1391,9 @@ describe("static builds", () => {
       ["index.html", '<meta http-equiv="refresh" content="0;url=\'https://react.dev\'">'],
       ["assets/a.js", 'x="1, https://react.dev and more";y="2 https://react.dev, see";'],
       ["assets/a.js", "a.x='used'.length;// https://react.dev here\nb();"],
-      // With no `url=`, a time written at run time starts no refresh (prose's `; //host`).
-      ["assets/a.js", `x=n+"; //evil.example/x";y=\`${"$"}{n}; //evil.example/x\`;`],
+      // After a time written at run time, a comment's note names no host, nor does a host built
+      // at run time.
+      ["assets/a.js", `x=\`${"$"}{a}; // note\`;y=n+"; // note";z=\`${"$"}{code};//${"$"}{c}\`;`],
     ];
     for (const [file, text] of passes) {
       assert.deepEqual(staticRules(t, { [file]: text }), [], text);
@@ -1441,6 +1547,55 @@ describe("static builds", () => {
         `const esc=(s)=>s.replace(/\\${d}\\{/g,"\\\\${d}{");${nl}i.src=\`${d}{a?"}":""}//evil.example/x.png\``,
         "https://evil.example",
       ],
+      // A scheme written at run time before `://`: a substitution, or the code before a string.
+      [
+        "a scheme a substitution writes",
+        "assets/a.js",
+        `jsx("a",{href:\`${d}{s}://evil.example/x\`,children:"go"})`,
+        "https://evil.example",
+      ],
+      [
+        "a scheme a condition in a substitution picks",
+        "assets/a.js",
+        `window.location.href=\`${d}{secure?"https":"http"}://evil.example/login\`;`,
+        "https://evil.example",
+      ],
+      [
+        "a scheme concatenated before the string",
+        "assets/a.js",
+        'window.location.href=(secure?"https":"http")+"://evil.example/login";',
+        "https://evil.example",
+      ],
+      [
+        "a scheme's last letter a substitution writes",
+        "assets/a.js",
+        `location.href=\`http${d}{secure?"s":""}://evil.example/x\`;`,
+        "https://evil.example",
+      ],
+      [
+        "a scheme concatenated in a call",
+        "assets/a.js",
+        'location.assign((p?"https":"http")+"://evil.example/cb")',
+        "https://evil.example",
+      ],
+      [
+        "a form's action",
+        "assets/a.js",
+        `jsx("form",{action:\`${d}{proto}://evil.example/submit\`,method:"post"})`,
+        "https://evil.example",
+      ],
+      [
+        "a refresh's URL",
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",content:\`0;url=${d}{s}://evil.example/\`})`,
+        "https://evil.example",
+      ],
+      [
+        "an IPv4 address as one number",
+        "assets/a.js",
+        `location.href=\`${d}{s}://3221225985/x\`;`,
+        "https://192.0.2.1",
+      ],
       // Outside a script nothing is built at run time: a `$` is the host's own.
       [
         "a $ in markup",
@@ -1479,6 +1634,10 @@ describe("static builds", () => {
       // A `}` that closes a block, not a substitution, starts no URL: a comment after it is code's.
       `if(a){b()} // @ts-expect-error${nl}c();x=\`${d}{"{"}\`;`,
       `function f(){}${nl}${nl}// Node walkers.${nl}${nl}var base = {};x=\`${d}{"{"}\`;`,
+      // After a scheme written at run time: a single label (a devtools page), a host built at
+      // run time, and a scheme the text fixes that names no web host.
+      `const u=\`${d}{name}://inspect\`;const v=\`${d}{p}://localhost:${d}{port}\`;const w=p+"://"+h;`,
+      'x="chrome://inspect";y="about://blank";',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1538,6 +1697,17 @@ describe("static builds", () => {
     assert.deepEqual(originsIn(list, { kind: "script" }), ["https://evil.example"]);
     const spent = performance.now() - begun;
     assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${list.length} characters`);
+    // Lists read back over many substitutions, and from inside each of many side by side: a run
+    // stops at what no candidate holds, never passing the substitutions before it again.
+    for (const many of [
+      `x="${`${d}{a}`.repeat(100_000)}, //evil.example/b.png 2x";`,
+      `x=\`${`${d}{a,//b.png}`.repeat(50_000)}\`;y="${d}{a}, //evil.example/b.png";`,
+    ]) {
+      const begun = performance.now();
+      assert.deepEqual(originsIn(many, { kind: "script" }), ["https://evil.example"]);
+      const spent = performance.now() - begun;
+      assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${many.length} characters`);
+    }
   });
 
   it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {

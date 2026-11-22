@@ -22,7 +22,8 @@
 //       protocol-relative one where a URL starts (after a quote, an unquoted attribute's `=` in
 //       markup or in a start tag a script writes, CSS's url(, a refresh's time, a template
 //       literal's substitution, or as a srcset candidate; and after any C0 control or space, which
-//       the URL parser strips first) has an origin on ALLOWED_ORIGINS, the namespace and message
+//       the URL parser strips first), and in a script every `://` after a scheme written at run
+//       time (`${s}://host`), has an origin on ALLOWED_ORIGINS, the namespace and message
 //       URLs the pinned libraries carry, none of which is fetched; and no URL with a user name or
 //       password, whose host is not the one it seems to name. Each URL is read as a browser reads
 //       it, in every reading of the text a browser may apply (readings: JavaScript's and JSON's
@@ -40,10 +41,13 @@
 //       quote's other spelling opened, so the URL is read both up to it and past it; so is a
 //       script's `${`, which may be a template literal's substitution. A URL whose authority (or
 //       a srcset that does not close, or a srcset template literal that closes past the bound)
-//       runs past what the scanner reads, or whose host it reads but a URL parser refuses, is
-//       refused, never read as its first part names or passed as a host built at run time. A
-//       host a script builds at run time (`"https://" + host`, `https://${host}`) is not read
-//       here: the page's own policy refuses it in the browser;
+//       runs past what the scanner reads, or, after a scheme the text fixes, whose host it reads
+//       but a URL parser refuses, is refused, never read as its first part names or passed as a
+//       host built at run time. With no scheme in the text, such a host loads nothing and is no
+//       finding, and backslashes alone or a scheme written at run time name a host only where it
+//       has a dot or is an IP address (a pattern's `\\n` names none). A host a script builds at
+//       run time (`"https://" + host`, `https://${host}`) is not read here: the page's own policy
+//       refuses it in the browser;
 //     - no source map (`*.map` in any case, or a `sourceMappingURL` comment pointing at one);
 //     - nothing a deployment refuses (release-static.mjs's artefactProblems: `_headers` or
 //       `env.json`, which the deploy renders, SF-05; a Worker control file; a path read two ways;
@@ -478,9 +482,13 @@ const cssBadUrl = (c) => {
  * (letters, digits and hyphens), then white space or `/`, or a raw quote, which may end the
  * script's string with the tag going on in the next (`"<img"+" src=..."`), or a template
  * literal's substitution, which may write the white space and more (`` `<a${c} href=...>` ``) or
- * the name itself (`` `<${t} href=...>` ``).
+ * the name itself (`` `<${t} href=...>` ``). A tag a substitution ends or names is read only as
+ * far as its template literal goes (attributeEquals): a message's `` `${a}<${b}` `` opens one
+ * too, and the code after the literal is no tag's.
  */
 const TAG_OPEN = /<(?:[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /"'`]|(?:[A-Za-z][A-Za-z0-9-]*)?(?=\$\{))/g;
+/** What ends a name in TAG_OPEN's first form; the form a substitution follows ends in none. */
+const NAME_END = /[\t\n\f\r /"'`]$/;
 // The HTML tokenizer's states inside a start tag, as bits, so every tag open at once is followed
 // in one pass: before an attribute's name, in it, after it, before its value, in a double- or
 // single-quoted value, in an unquoted one, after a quoted one.
@@ -800,6 +808,10 @@ function nextRaw(reading, c, from) {
  *   `,` looks like the next one's start), so a string after a tag may be read as part of it, but
  *   only within the bound, and only its own text: the code after a string is read by the
  *   literal reading only.
+ * A tag a substitution ends or names (`` `<a${c} href=...>` ``, `` `<${t} href=...>` ``) is read
+ * by the template literal's piece reading alone, never the literal one, so it ends at the
+ * literal's closing backtick: `<` before a substitution is as often a comparison in a message
+ * (`` `expected ${a}<${b}` ``), and the code after it is no tag's.
  * @param {Reading} reading
  * @param {() => Map<number, number[]>} spansOf the reading's substitutions
  * @returns {Set<number>}
@@ -812,12 +824,17 @@ function attributeEquals(reading, spansOf) {
   // at the `${` that ends its name (or stands for it).
   /** @type {number[]} */
   const opens = [];
+  // The opens whose tag a substitution ends or names: read only to the template literal's end.
+  /** @type {Set<number>} */
+  const written = new Set();
   for (const m of text.matchAll(TAG_OPEN)) {
     const at = m.index ?? 0;
     const last = at + m[0].length - 1;
     let raw = true;
     for (let k = at; k <= last && raw; k++) raw = !isSpelled(reading, k);
-    if (raw) opens.push(last);
+    if (!raw) continue;
+    opens.push(last);
+    if (!NAME_END.test(m[0])) written.add(last);
   }
   if (opens.length === 0) return equals;
   const spans = spansOf();
@@ -930,7 +947,11 @@ function attributeEquals(reading, spansOf) {
     }
     if (i <= unsureUntil && c === "}" && !data) live |= afterSubstitution(unsureLive);
     while (next < opens.length && (opens[next] ?? 0) <= i) {
-      if (opens[next] === i) {
+      if (opens[next] === i && written.has(i)) {
+        // A tag a substitution ends or names: the template literal's text only.
+        piece[2] = (piece[2] ?? 0) | BEFORE_NAME;
+        pieceOpen[2] = true;
+      } else if (opens[next] === i) {
         live |= BEFORE_NAME;
         // A tag's name may end the script's string (`"<img"+" src=...>"`, `` [`<a`,...] ``).
         if (quote !== -1) hold(BEFORE_NAME, i);
@@ -980,10 +1001,11 @@ const VALUE_START = new Set(["=", ...QUOTES]);
  * an index, or -1: the value's start, ASCII white space, a time of digits and dots (a digit in
  * it: prose's `'a'.` is no time), `;`, `,` or white space, white space, an optional `url=`, then
  * what the URL parser strips first (a C0 control or a space). In a script, a time written at run
- * time is read too, where `url=` stands (prose's `"a; //host"` starts no refresh): a
+ * time is read too, with `url=` or without it as a browser reads it (`` `${n}; //host/x` ``): a
  * substitution's `}` right before the separator (`` `${n}; url=...` ``), whose literal is a
  * template literal (the `}` is returned), or the quote that opens the string right before it
- * (`n+"; url=..."`: the code before the string wrote the time). Read back from the URL with no
+ * (`n+"; url=..."`: the code before the string wrote the time). A comment's `; // note` reads a
+ * host that starts with white space, which no host does. Read back from the URL with no
  * bound: each run it passes holds no URL's start (a scheme's letter or a slash), so the runs read
  * back from two URLs never overlap and the work stays linear.
  * @param {Reading} reading
@@ -1017,7 +1039,7 @@ function refreshStart(reading, index, closesSubstitution) {
   }
   // A time ends at the separator: white space right after it, or `;` or `,`.
   if (!sep || !(space(i + 1) || text[i + 1] === ";" || text[i + 1] === ",")) return -1;
-  if (named && closesSubstitution !== null && !isSpelled(reading, i)) {
+  if (closesSubstitution !== null && !isSpelled(reading, i)) {
     const c = text[i] ?? "";
     if (c === "}" && closesSubstitution(i)) return i;
     if ((c === '"' || c === "'" || c === "`") && opensString(text, i)) return i;
@@ -1208,17 +1230,39 @@ function readAuthority(reading, start, context, script) {
  */
 
 /**
+ * How a URL's start is written: a scheme the text fixes (`scheme`); slashes with no scheme, a
+ * protocol-relative URL, at least one of them `/` (`slashes`) or backslashes only
+ * (`backslashes`); or `://` after a scheme written at run time (`run-time`: `` `${s}://host` ``,
+ * `s+"://host"`), read as https.
+ * @typedef {"scheme" | "slashes" | "backslashes" | "run-time"} UrlStart
+ */
+
+/**
+ * Whether a host the URL parser wrote names one a browser reaches on the network: it has a dot
+ * (an IPv4 address in any spelling is written with dots) or is an IPv6 address. A single label
+ * names no host anyone outside the network holds.
+ * @param {string} hostname
+ */
+const networkHost = (hostname) => hostname.includes(".") || hostname.startsWith("[");
+
+/**
  * A URL from its scheme and authority: its origin, or null when it has none the text fixes (a
  * host built at run time, or none a browser could load), whether it carries a user name or
  * password, whether its authority ran past what the scanner reads (`unread`), and whether the
- * scanner read a host no URL parser takes (`unparsed`), which is refused rather than passed as
- * one built at run time. The URL parser drops the C0 controls and spaces at a URL's end as it
- * does those at its start, so they are dropped here too.
+ * scanner read a host no URL parser takes after a scheme the text fixes (`unparsed`), which is
+ * refused rather than passed as one built at run time. With no scheme in the text, such a host
+ * is no finding: the browser's parser is the same one, so the URL loads nothing, and two slashes
+ * or backslashes start a pattern as often as a URL (a line comment's `//[^\n]*`, a string
+ * escape's `\\(?:u...)`). Backslashes alone, and a scheme written at run time, name a host only
+ * where it is one a browser reaches on the network (networkHost): a pattern's `\\n`, a bytea
+ * escape's `\\x` and `${name}://inspect` name none. The URL parser drops the C0 controls and
+ * spaces at a URL's end as it does those at its start, so they are dropped here too.
  * @param {string} scheme
  * @param {AuthorityRead} read
+ * @param {UrlStart} start
  * @returns {FoundUrl | null}
  */
-function foundUrl(scheme, { authority, cut, crossed, built }) {
+function foundUrl(scheme, { authority, cut, crossed, built }, start) {
   let end = authority.length;
   while (end > 0 && stripped(authority[end - 1] ?? "")) end--;
   const read = authority.slice(0, end);
@@ -1237,8 +1281,17 @@ function foundUrl(scheme, { authority, cut, crossed, built }) {
     // context (the reading up to it, or in the first context, is checked too), a host with no
     // letter or digit (a device path's `//./`), and one that starts with white space, which no
     // host does (a comment's `// note`; with a user name after it, the URL parses and is read).
-    const unparsed = !cut && !crossed && !built && /[\p{L}\p{N}]/u.test(read) && !/^\s/u.test(read);
+    const unparsed =
+      start === "scheme" &&
+      !cut &&
+      !crossed &&
+      !built &&
+      /[\p{L}\p{N}]/u.test(read) &&
+      !/^\s/u.test(read);
     return { url: at, origin: null, userinfo: false, unread: cut, unparsed };
+  }
+  if ((start === "backslashes" || start === "run-time") && !cut && !networkHost(url.hostname)) {
+    return null;
   }
   // Read past a quote that ends the script's string, the host's last label holds the quote and the
   // code after it (`https://react.dev'+t+'`): a host built at run time. No top-level domain holds
@@ -1333,13 +1386,34 @@ function opensString(text, quote) {
 
 /**
  * A srcset candidate's URL in a list no key opens, with each substitution read as a word: a
- * path, a relative path or a word's start, and nothing code holds (a bracket, a brace, `<`, `>`,
- * `;`, a backslash, a quote, `^`, `|`, `*` or `$`). Code after a string's closing quote starts with
- * an operator or a bracket (`"x"),`, `"("+t,`, `"?".length,`), never so.
+ * path, a relative path or a word's start, and nothing code holds (a brace, `<`, `>`, `;`, a
+ * backslash, a quote, `^`, `|`, `*` or `$`, and a bracket that does not pair within it:
+ * bracketsPair). Code after a string's closing quote starts with an operator or a bracket
+ * (`"x"),`, `"("+t,`, `"?".length,`), never so.
  */
-const CANDIDATE_URL = /^(?:\.{0,2}\/|\w)[^()[\]{}<>;\\"'`^|*$\u{e000}-\u{e002}]*$/u;
+const CANDIDATE_URL = /^(?:\.{0,2}\/|\w)[^{}<>;\\"'`^|*$\u{e000}-\u{e002}]*$/u;
+/** What no candidate's URL nor descriptor holds, which ends a list's read-back at once. */
+const NO_CANDIDATE = new Set([..."{}<>;\\^|*$"]);
 /** A descriptor, misspelled ones included (`2X`, `100px`, `1.5dppx`): a number first. */
 const DESCRIPTOR_LIKE = /^\.?[0-9][0-9A-Za-z.+-]*$/;
+/** What a substitution a list's read-back passes over stands for in the run read: a word. */
+const WORD = "\u{1}";
+
+/**
+ * Whether every bracket of a run pairs within it, each closed after it opens: `/hero(1).png` and
+ * `/a[1].png` do; `)`, `){if(C.shift()` and `^([^\s].*)\((\d+` do not.
+ * @param {string} run
+ */
+function bracketsPair(run) {
+  /** @type {string[]} */
+  const open = [];
+  for (const c of run) {
+    if (c === "(" || c === "[") open.push(c);
+    else if (c === ")" && open.pop() !== "(") return false;
+    else if (c === "]" && open.pop() !== "[") return false;
+  }
+  return open.length === 0;
+}
 
 /**
  * Whether a comma ends a candidate of a srcset list a script's string holds where no srcset key
@@ -1347,17 +1421,21 @@ const DESCRIPTOR_LIKE = /^\.?[0-9][0-9A-Za-z.+-]*$/;
  * `c?"/a.png, //host/b.png 2x":x`), so a URL after it is a later candidate. The list is read back
  * piece by piece (split at commas) from the comma to the quote that opens it: each piece is one
  * candidate, its URL (CANDIDATE_URL) and descriptors after white space, misspelled ones
- * included (DESCRIPTOR_LIKE); an empty piece (`,,`) is passed over. The quote must open a string
+ * included (DESCRIPTOR_LIKE); an empty piece (`,,`) is passed over. A substitution the lexer or
+ * brace counting pairs is one word, whatever it holds (`${asset(`a.png`)}`,
+ * `${dark?"/d.png":"/l.png"}`): the read-back goes on from its `${`. The quote must open a string
  * (opensString) and the first candidate stand right after it, past white space: a quote right
  * before a comma closes a string and opens no list. With no quote between the comma and the
  * quote, the whole list is that string's text when the quote opens it; the first candidate's
  * shape tells a closing quote from an opening one. Each comma passed is remembered with the
- * answer, so each piece is read back once and the work stays linear.
+ * answer, so each piece is read back once, a run stops at the first character no candidate holds
+ * (NO_CANDIDATE), and the work stays linear.
  * @param {string} text
  * @param {number} comma
  * @param {Map<number, boolean>} known the answers so far, for this text
+ * @param {Map<number, number>} openers each `}` that may close a substitution, to its `${`
  */
-function srcsetListBefore(text, comma, known) {
+function srcsetListBefore(text, comma, known, openers) {
   /** @type {number[]} */
   const passed = [];
   let answer = false;
@@ -1375,21 +1453,34 @@ function srcsetListBefore(text, comma, known) {
     for (;;) {
       while (i >= 0 && ASCII_SPACE.has(text[i] ?? "")) i--;
       const end = i;
-      while (
-        i >= 0 &&
-        !ASCII_SPACE.has(text[i] ?? "") &&
-        !QUOTES.has(text[i] ?? "") &&
-        text[i] !== ","
-      ) {
+      // The run, back to white space, a quote or a comma, each substitution in it a word.
+      /** @type {string[]} */
+      const parts = [];
+      let to = end + 1;
+      while (i >= 0) {
+        const c = text[i] ?? "";
+        const open = c === "}" ? openers.get(i) : undefined;
+        if (open !== undefined) {
+          parts.push(text.slice(i + 1, to), WORD);
+          to = open;
+          i = open - 1;
+          continue;
+        }
+        if (ASCII_SPACE.has(c) || QUOTES.has(c) || c === ",") break;
+        if (NO_CANDIDATE.has(c)) {
+          shape = false;
+          break;
+        }
         i--;
       }
-      if (i === end) break;
+      if (!shape || i === end) break;
+      parts.push(text.slice(i + 1, to));
       // A run before another: the one after it is a descriptor.
-      if (url !== "" && !DESCRIPTOR_LIKE.test(url.replace(CANDIDATE_SUBSTITUTION, "1"))) {
+      if (url !== "" && !DESCRIPTOR_LIKE.test(url.replaceAll(WORD, "1"))) {
         shape = false;
         break;
       }
-      url = text.slice(i + 1, end + 1);
+      url = parts.reverse().join("");
     }
     const start = text[i] ?? "";
     if (!shape) break;
@@ -1398,7 +1489,7 @@ function srcsetListBefore(text, comma, known) {
       at = i;
       continue;
     }
-    if (!CANDIDATE_URL.test(url.replace(CANDIDATE_SUBSTITUTION, "x"))) break;
+    if (!CANDIDATE_URL.test(url.replaceAll(WORD, "x")) || !bracketsPair(url)) break;
     if (start === ",") {
       at = i;
       continue;
@@ -1467,11 +1558,12 @@ function scanReading(reading, kind, found) {
    * @param {string} scheme
    * @param {number} start
    * @param {UrlContext} context
+   * @param {UrlStart} how
    */
-  const read = (scheme, start, context) => {
+  const read = (scheme, start, context, how) => {
     for (const r of readAuthority(reading, start, context, kind === "script")) {
       const authority = context.kind === "srcset" ? r.authority.replace(/,+$/, "") : r.authority;
-      keep(foundUrl(scheme, { ...r, authority }));
+      keep(foundUrl(scheme, { ...r, authority }, how));
     }
   };
   /** @type {Map<number, number[]> | null} */
@@ -1487,26 +1579,35 @@ function scanReading(reading, kind, found) {
     equals ??= attributeEquals(reading, spansOf);
     return equals.has(eq);
   };
-  /** @type {Set<number> | null} */
+  /**
+   * Each `}` that counting or the lexer pairs with a `${`, to the nearest such `${`.
+   * @type {Map<number, number> | null}
+   */
   let substitutionEnds = null;
   /** The starts whose `}` neither counting nor the lexer knows, least first. */
   /** @type {number[]} */
   const unknownStarts = [];
+  const openers = () => {
+    if (substitutionEnds === null) {
+      substitutionEnds = new Map();
+      for (const [start, ends] of spansOf()) {
+        if (ends.length === 0) unknownStarts.push(start);
+        for (const end of ends) {
+          if ((substitutionEnds.get(end) ?? -1) < start) substitutionEnds.set(end, start);
+        }
+      }
+    }
+    return substitutionEnds;
+  };
   /**
    * Whether the `}` at an index may close a substitution: one that counting or the lexer pairs
    * with a `${`, or any raw `}` up to MAX_SUBSTITUTION after a `${` neither pairs.
    * @param {number} brace
    */
   const closesSubstitution = (brace) => {
-    if (substitutionEnds === null) {
-      substitutionEnds = new Set();
-      for (const [start, ends] of spansOf()) {
-        if (ends.length === 0) unknownStarts.push(start);
-        for (const end of ends) substitutionEnds.add(end);
-      }
-    }
+    const paired = openers();
     if (isSpelled(reading, brace)) return false;
-    if (substitutionEnds.has(brace)) return true;
+    if (paired.has(brace)) return true;
     let lo = 0;
     let hi = unknownStarts.length;
     while (lo < hi) {
@@ -1520,30 +1621,47 @@ function scanReading(reading, kind, found) {
   /** @type {Map<number, boolean>} */
   const listEnds = new Map();
   /** @param {number} comma */
-  const inList = (comma) => srcsetListBefore(text, comma, listEnds);
+  const inList = (comma) => srcsetListBefore(text, comma, listEnds, openers());
   /** @param {number} start */
   const contexts = (start) =>
     contextsBefore(reading, start, kind, inTag, inList, closesSubstitution);
+  // The colons SCHEME reads: the slashes after one are its scheme's.
+  /** @type {Set<number>} */
+  const schemeColons = new Set();
   for (const m of text.matchAll(SCHEME)) {
     const scheme = (m[1] ?? "").replace(/[\t\n\r]/g, "").toLowerCase();
     const after = (m.index ?? 0) + m[0].length;
+    schemeColons.add(after - 1);
     SLASH_RUN.lastIndex = after;
     const run = SLASH_RUN.exec(text)?.[0] ?? "";
     for (const context of contexts(m.index ?? 0)) {
       // With no slash, only where a literal or a value starts (`"wss:host"`): `{https:443}` names
       // no URL, nor does a scheme after a comma (`{http:80,https:443}`).
       if (run === "" && (context.kind === "none" || context.kind === "srcset")) continue;
-      read(scheme, after + run.length, context);
+      read(scheme, after + run.length, context, "scheme");
     }
   }
   for (const m of text.matchAll(TWO_SLASHES)) {
     const start = m.index ?? 0;
-    if (/[/\\:]/.test(text[start - 1] ?? "")) continue; // inside a run, or a scheme's slashes
+    const before = text[start - 1] ?? "";
+    if (before === "/" || before === "\\") continue; // inside a run
     SLASH_RUN.lastIndex = start;
+    const run = SLASH_RUN.exec(text)?.[0] ?? "";
     // White space after the slashes is the URL's own: its host's, or a user name's before an `@`.
-    const host = start + (SLASH_RUN.exec(text)?.[0].length ?? 0);
+    const host = start + run.length;
+    if (before === ":") {
+      // A scheme's slashes; or, in a script, after a scheme written at run time, where the colon
+      // starts a string or follows a substitution (`` `${s}://host` ``, `s+"://host"`,
+      // `` `http${s?"s":""}://host` ``), whose host is read as https.
+      if (kind !== "script" || schemeColons.has(start - 1)) continue;
+      for (const context of contexts(start - 1)) {
+        if (context.kind === "quoted") read("https", host, context, "run-time");
+      }
+      continue;
+    }
+    const how = run.includes("/") ? "slashes" : "backslashes";
     for (const context of contexts(start)) {
-      if (context.kind !== "none") read("https", host, context);
+      if (context.kind !== "none") read("https", host, context, how);
     }
   }
   /** @type {number[] | null} */
@@ -1597,12 +1715,16 @@ function scanReading(reading, kind, found) {
       const scheme = SRCSET_SCHEME.exec(text);
       at += scheme?.[0].length ?? 0;
       let slashes = 0;
+      let forward = false;
       while (at < end && (text[at] === "/" || text[at] === "\\")) {
+        if (text[at] === "/") forward = true;
         at++;
         slashes++;
       }
       if (scheme === null && slashes < 2) continue;
-      read((scheme?.[1] ?? "https").toLowerCase(), at, { kind: "srcset", end });
+      /** @type {UrlStart} */
+      const how = scheme !== null ? "scheme" : forward ? "slashes" : "backslashes";
+      read((scheme?.[1] ?? "https").toLowerCase(), at, { kind: "srcset", end }, how);
     }
   }
 }
