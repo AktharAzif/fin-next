@@ -236,6 +236,13 @@ const LIMIT_MS = 1000;
 const MAX_GROWTH = 24;
 /** A floor under the 128 KB time, so a reading near clock resolution cannot inflate the growth. */
 const FLOOR_MS = 5;
+/**
+ * The wall-clock timeout of a linear-time test, there only to stop a hang: the speed is judged in
+ * CPU time, above. Vitest fails a test that runs past its timeout even when every check passed, and
+ * load stretches the wall time: on a loaded machine a test that needed about 0.13 s of CPU took
+ * 2.3 s, and the heaviest shapes need about 0.25 s, too near the default of 5 s.
+ */
+const WALL_TIMEOUT_MS = 60_000;
 
 /** The CPU time this thread has used, in milliseconds. */
 function threadCpuMs(): number {
@@ -419,8 +426,8 @@ describe("scrubText", () => {
 
   describe("scrubs 1 MB of an adversarial input for every shape in linear time", () => {
     // Four times the largest body Fin accepts. Each input repeats what starts a match and never
-    // finishes it, which is what makes an open-ended part quadratic. One test per shape keeps each
-    // well inside the test timeout, which six runs of all of them together would come near.
+    // finishes it, which is what makes an open-ended part quadratic. One test per shape, so that a
+    // failure names its shape and the six runs of each stay short.
     const begin = join(dashes, "BEGIN ", "PRIVATE KEY", dashes);
     const end = join(dashes, "END ");
     const runs: Record<string, (fill: Fill) => string> = {
@@ -479,7 +486,7 @@ describe("scrubText", () => {
       letters: (fill) => fill("a"),
     };
     for (const [name, run] of Object.entries(runs)) {
-      it(name, () => {
+      it(name, { timeout: WALL_TIMEOUT_MS }, () => {
         expectLinearTime(name, (size) => run(filler(size)), scrubText);
       });
     }
@@ -833,7 +840,7 @@ describe("scrubEvent and scrubBreadcrumb", () => {
     ).toEqual({ category: "navigation", data: { from: "/a", to: "/b" } });
   });
 
-  it("cuts a long breadcrumb's query in linear time", () => {
+  it("cuts a long breadcrumb's query in linear time", { timeout: WALL_TIMEOUT_MS }, () => {
     const froms: Record<string, (size: number) => string> = {
       "one long query": (size) => `${"?".repeat(size)}\nx`,
       "a fragment on every line": (size) => "#\n".repeat(size / 2),
