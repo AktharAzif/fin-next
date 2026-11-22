@@ -1126,9 +1126,7 @@ describe("a staff change from the Admin's own browser while their own step-up is
     const blocker = await h.platform.superuser();
     try {
       await blocker.query("BEGIN");
-      await blocker.query("SELECT 1 FROM staff.member WHERE id = $1 FOR UPDATE", [
-        target.staffId,
-      ]);
+      await blocker.query("SELECT 1 FROM staff.member WHERE id = $1 FOR UPDATE", [target.staffId]);
       const resetting = h.route(
         actor.browser,
         { ...resetPath(target.staffId), intent },
