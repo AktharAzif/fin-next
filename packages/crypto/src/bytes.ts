@@ -26,11 +26,15 @@ export function fromBase64Url(text: string): Uint8Array {
   return new Uint8Array(bytes);
 }
 
-/** Standard base64 without padding, as PHC strings write it. */
+/**
+ * Standard base64 without padding, as PHC strings write it. Base64 pads only its last quantum,
+ * with at most two "=", so one backward pass drops them after reading at most three characters.
+ */
 export function toBase64NoPad(bytes: Uint8Array): string {
-  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    .toString("base64")
-    .replace(/=+$/, "");
+  const padded = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  let end = padded.length;
+  while (end > 0 && padded.charCodeAt(end - 1) === 0x3d) end -= 1;
+  return padded.slice(0, end);
 }
 
 export function fromBase64NoPad(text: string): Uint8Array {

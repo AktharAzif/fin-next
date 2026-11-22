@@ -68,7 +68,7 @@ for (const { file, html, entry } of DOCUMENTS) {
     });
 
     it("loads theme.js first, render-blocking, then the module entry", () => {
-      const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+      const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
       expect(scripts.map((s) => s[1]?.trim())).toEqual([
         'src="/theme.js"',
         `type="module" src="${entry}"`,

@@ -3,7 +3,7 @@
 // body on unsafe methods; `Fin-Organization` on organisation routes), keeps the host-only cookies it
 // is given, and arrives from a connector peer with the client's address in `CF-Connecting-IP`.
 // Addresses use example.com only; secrets are made at run time.
-import { randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 import type { bootApi } from "@fin/web-host/testing";
 import type { Pool } from "pg";
 import { base32Decode, totpCode } from "../../../packages/orgs/test/index.ts";
@@ -21,8 +21,9 @@ export interface Reply {
 
 export class Client {
   readonly jar = new Map<string, string>();
-  // Canonical form (no leading zero), as Postgres's inet writes it back.
-  readonly ip = `2001:db8:${(0x1000 + (randomBytes(2).readUInt16BE() % 0xe000)).toString(16)}::7`;
+  // Canonical form (no leading zero), as Postgres's inet writes it back: an unbiased draw of
+  // 0x1000 to 0xefff.
+  readonly ip = `2001:db8:${randomInt(0x1000, 0xf000).toString(16)}::7`;
   readonly userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
   secret: Uint8Array | null = null;

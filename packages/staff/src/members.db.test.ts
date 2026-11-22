@@ -24,6 +24,12 @@ import { requireStaff } from "./require-staff.ts";
 
 let h: StaffHarness;
 
+/**
+ * An address as Postgres's `host(inet)` writes it back: lower case, no leading zeros, the longest
+ * run of zero groups compressed. A browser's random group (`2001:db8:0a1b::1`) may have a zero.
+ */
+const canonicalIp = (ip: string) => new URL(`http://[${ip}]`).hostname.slice(1, -1);
+
 interface Member {
   staffId: string;
   email: string;
@@ -197,7 +203,8 @@ describe("adding staff (§10.2)", () => {
       "SELECT host(client_ip) AS client_ip, user_agent FROM audit.event_context WHERE event_id = $1",
       [events[0]?.id],
     );
-    expect(context.rows[0]?.client_ip).toBe(admin.browser.ip.replace("::1", "::1"));
+    expect(context.rows[0]?.client_ip).toBe(canonicalIp(admin.browser.ip));
+    expect(canonicalIp("2001:db8:0a1b::1")).toBe("2001:db8:a1b::1");
     expect(context.rows[0]?.user_agent).toBe(admin.browser.userAgent);
 
     const notices = (await h.outbox("staff/staff-access-changed")).filter(

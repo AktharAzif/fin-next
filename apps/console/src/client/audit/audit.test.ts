@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditRow } from "../api/contracts/audit.ts";
-import { auditQuery, emptyKind, objectChip, readAuditSearch } from "./filters.ts";
+import { auditQuery, emptyKind, objectChip, rangeEmptyTitle, readAuditSearch } from "./filters.ts";
 import {
   actorName,
   categoryLabel,
@@ -113,6 +113,14 @@ describe("the audit log's filters (spec 02 §15.2.1)", () => {
     expect(emptyKind({ target: "mem_1" })).toBe("noMatch");
     expect(emptyKind({})).toBe("range");
     expect(emptyKind({ range: "all" })).toBe("ever");
+  });
+
+  it("titles an empty range in words that read for every range", () => {
+    expect(rangeEmptyTitle("today")).toBe("No events today");
+    expect(rangeEmptyTitle("7d")).toBe("No events in the last 7 days");
+    expect(rangeEmptyTitle("30d")).toBe("No events in the last 30 days");
+    expect(rangeEmptyTitle("90d")).toBe("No events in the last 90 days");
+    expect(rangeEmptyTitle("all")).toBe("No events yet");
   });
 
   it("names the one object in the chip, with its current label when the API gave one", () => {

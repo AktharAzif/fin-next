@@ -22,7 +22,7 @@ describe("the docs placeholder", () => {
     expect(indexHtml.match(/<meta\b[^>]*property="csp-nonce"[^>]*>/g)).toEqual([
       '<meta property="csp-nonce">',
     ]);
-    const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+    const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     expect(scripts.map((s) => [s[1]?.trim(), s[2]])).toEqual([['src="/theme.js"', ""]]);
     expect(indexHtml).not.toMatch(/\snonce\s*=|<[a-z][^>]*\s(?:on[a-z]+|style)\s*=|<style\b/i);
   });
