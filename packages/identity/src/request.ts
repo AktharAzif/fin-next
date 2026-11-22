@@ -91,6 +91,15 @@ export interface RequestState {
    * request may hash or check a password (passwords/flows.ts, `requireAdmission`).
    */
   hashAdmitted: boolean;
+  /**
+   * A reset's or a change's password work, done in the before-hook before the request took any row
+   * that a request the hasher never admitted waits on (passwords/flows.ts, `passwordAhead`): the
+   * library's hash and check give back each result once, for the same password only.
+   */
+  passwordAhead: {
+    hash: { password: string; hash: string } | null;
+    verify: { hash: string; password: string; ok: boolean } | null;
+  };
   readonly line: Record<string, LineValue>;
 }
 
@@ -132,6 +141,7 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     password: null,
     passwordWaiver: null,
     hashAdmitted: false,
+    passwordAhead: { hash: null, verify: null },
     // §18.1: `none` until a live session is read or made.
     line: { realm, assurance: "none" },
   };

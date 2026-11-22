@@ -1,10 +1,12 @@
 // Limits in Postgres (spec 02 §5.6, [DA-16]; T-SAT-33, AC-SAT-10, AC-SAT-44): the per-recipient
 // code allowance holds under 20 concurrent requests; a pause outlives a restart that empties the
-// UNLOGGED counters; the limiter fails closed when the database refuses it.
+// UNLOGGED counters; a limit read ahead answers as its count would, counting nothing and taking no
+// row; the limiter fails closed when the database refuses it.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, type TestDatabase, testRole } from "../test/db.ts";
 import { codeSignIn, createHarness, type Harness } from "../test/harness.ts";
-import { HOUR, ManualClock } from "./ports/clock.ts";
+import { HOUR, ManualClock, MINUTE } from "./ports/clock.ts";
+import type { UnitTx } from "./ports/db.ts";
 
 let database: TestDatabase;
 let h: Harness;
@@ -94,6 +96,49 @@ describe("the per-recipient allowance", () => {
     expect(answers[6]?.json).toMatchObject({ code: "rate_limited" });
     expect(Number(answers[6]?.headers.get("retry-after"))).toBeGreaterThan(0);
     expect(h.lines.named("limits.refused").at(-1)).toEqual({ bucket: "code_send" });
+  });
+});
+
+describe("reading a limit without counting", () => {
+  it("answers as the next count would, counts nothing and waits on no row", async () => {
+    // Five minutes into a ten-minute window on the realm's clock, so the window is the same
+    // throughout.
+    const clock = new ManualClock(new Date(Math.floor(Date.now() / HOUR) * HOUR + 5 * MINUTE));
+    const realm = await createHarness(database, "developer", { clock });
+    const limits = realm.realm.runtime.limits;
+    const subject = `check.${Math.random().toString(36).slice(2, 8)}`;
+    const key = `code_send:${10 * MINUTE}:${subject}`;
+    const inUnit = <T>(fn: (tx: UnitTx) => Promise<T>) =>
+      realm.realm.run(realm.browser().context(), fn);
+    // 6 in 10 minutes (§5.6): room before each of them.
+    for (let i = 0; i < 6; i += 1) {
+      expect(await inUnit((tx) => limits.check(tx, "code_send", subject))).toEqual({
+        allowed: true,
+        retryAfter: 0,
+        resetAt: null,
+      });
+      expect((await inUnit((tx) => limits.consume(tx, "code_send", subject))).allowed).toBe(true);
+    }
+    const read = await inUnit((tx) => limits.check(tx, "code_send", subject));
+    const counted = await inUnit((tx) => limits.consume(tx, "code_send", subject));
+    expect(counted.allowed).toBe(false);
+    expect(read).toEqual(counted);
+    // Reading counted nothing: the window holds the seven counts.
+    const rows = await h.admin.query<{ count: number }>(
+      "SELECT count FROM ops.rate_window WHERE key = $1",
+      [key],
+    );
+    expect(rows.rows.map((r) => Number(r.count))).toEqual([7]);
+    // And it takes no row: it answers while another transaction holds the window's.
+    const client = await h.admin.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT 1 FROM ops.rate_window WHERE key = $1 FOR UPDATE", [key]);
+      expect((await inUnit((tx) => limits.check(tx, "code_send", subject))).allowed).toBe(false);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 });
 

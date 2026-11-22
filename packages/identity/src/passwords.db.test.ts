@@ -19,7 +19,10 @@
 //     that may hash never hold the pool's last two clients: the rest are answered 503 at once; a
 //     reset and a change are admitted as a sign-in is; and a request that never hashes (a code
 //     request or try from a sign-up's network, for a signing-in address, from a waiting reset's
-//     network) never waits on a hash.
+//     network, for a resetting address and from its network; a request with a changing person's
+//     session) never waits on a hash; a reset its network's tries refuse never takes the
+//     address's turn; and a request that may hash is refused, unhashed, once the gate has ended
+//     its session.
 import { hashPassword, verifyPassword } from "@fin/crypto";
 import type { Pool, PoolClient, QueryConfig } from "pg";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
@@ -35,6 +38,7 @@ import {
   setUpAuthenticator,
 } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
+import { createEmailEnqueue, type EmailEnqueue } from "./email/enqueue.ts";
 import { createLimitStore, type LimitStore } from "./limits.ts";
 import { verifyWithWaiver } from "./passwords/flows.ts";
 import { CLIENTS_KEPT_FREE, createPasswordHasher } from "./passwords/hasher.ts";
@@ -273,6 +277,26 @@ async function atTheFactorStep(g: Harness, label: string) {
   const step = () =>
     other.post("/api/auth/two-factor/verify-totp", { code: hotp(secret, totpStep(new Date())) });
   return { email, id, asker, code, step };
+}
+
+/** The headers of a change-password whose intent this browser has proved with its factor. */
+async function provedChange(
+  on: Harness,
+  browser: Browser,
+  factor: Uint8Array,
+  change: { currentPassword: string; newPassword: string },
+): Promise<Record<string, string>> {
+  const asked = await browser.post("/api/auth/change-password", change);
+  expect(asked.json).toMatchObject({ code: "step_up_required" });
+  const intent = { "fin-step-up-intent": String(asked.json?.intent_id) };
+  await on.admin.query("UPDATE identity.totp_step SET last_step = 0");
+  const proved = await browser.post(
+    "/api/auth/two-factor/verify-totp",
+    { code: hotp(factor, totpStep(new Date())) },
+    intent,
+  );
+  expect(proved.status, JSON.stringify(proved.json)).toBe(200);
+  return intent;
 }
 
 /** The answer as a stranger sees it: status, body and header names but the request's own. */
@@ -896,7 +920,37 @@ describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, ()
   });
 
   it("answers a sign-in that comes while a reset is under way 503 at once, so it never reads the old password", async () => {
-    const { held, harness: g } = await heldHarness();
+    const held = heldWork();
+    // An outbox whose notice of a reset waits while the test holds it: the reset stops there, its
+    // new password written and every session ended, holding the address's turn until it commits.
+    const noticing = { hold: false, entered: 0, waiters: [] as (() => void)[] };
+    const enqueue = createEmailEnqueue({ clock: systemClock, lines: new MemoryLineSink() });
+    const outbox: EmailEnqueue = async (tx, input) => {
+      if (input.template === "identity/sign-in-methods-changed") {
+        noticing.entered += 1;
+        if (noticing.hold) await new Promise<void>((resolve) => noticing.waiters.push(resolve));
+      }
+      return enqueue(tx, input);
+    };
+    const release = () => {
+      noticing.hold = false;
+      for (const resolve of noticing.waiters.splice(0)) resolve();
+    };
+    // Released whatever this test does, so a failure here leaves no unit open holding rows.
+    onTestFinished(release);
+    const g = await createHarness(database, "developer", {
+      env: PASSWORDS_ON,
+      deps: {
+        email: outbox,
+        passwords: createPasswordHasher({
+          lines: new MemoryLineSink(),
+          concurrency: 8,
+          queueLimit: 8,
+          queueWaitMs: 30_000,
+          work: held.work,
+        }),
+      },
+    });
     const email = unique("race.second");
     const owner = await signUpWithPassword(email, GOOD, g);
     const id = (await userId(email)) as string;
@@ -905,18 +959,18 @@ describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, ()
     await requestReset(asker, email);
     const code = (await g.latestCode(email)) as string;
 
-    // The reset's new password is held in its hash: its code is tried and the address's lock held.
-    held.hold("hash");
-    const hashes = held.entered.hash;
+    // The reset is held at its notice: its code is tried and the new password written.
+    noticing.hold = true;
+    const notices = noticing.entered;
     const resetting = reset(asker, email, code);
-    expect(await until(() => held.entered.hash > hashes)).toBe(true);
+    expect(await until(() => noticing.entered > notices)).toBe(true);
     // A sign-in with the old password comes meanwhile: refused before any password is read.
     const checks = held.entered.verify;
     const during = await passwordSignIn(g.browser(), email, GOOD);
     expect(during.status).toBe(503);
     expect(during.json).toMatchObject({ code: "unavailable", retry_after: 2 });
     expect(held.entered.verify).toBe(checks);
-    held.release("hash");
+    release();
     const done = await resetting;
     expect(done.status, JSON.stringify(done.json)).toBe(200);
 
@@ -1635,6 +1689,171 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     expect((await resetting).status).toBe(400);
   });
 
+  it("hashes a reset's new password before it takes any row, so code requests and tries for its address and from its network are answered", async () => {
+    const { held, harness: g, passwords, freeClients } = await consoleSized();
+    const email = unique("burst.reset");
+    await signUpWithPassword(email, GOOD, g);
+    const ip = "198.51.100.141";
+    const asker = g.browser({ ip });
+    await requestReset(asker, email);
+    const code = (await g.latestCode(email)) as string;
+    held.hold("hash");
+    onTestFinished(() => held.release("hash"));
+    const hashes = held.entered.hash;
+    // A reset with the right code, held in the hash of its new password.
+    const resetting = reset(asker, email, code);
+    expect(await until(() => held.entered.hash - hashes === 1)).toBe(true);
+    // Twelve requests that never hash: sign-in codes asked for the address and tried for it, each
+    // from its own /48 (they take the address's code lock), and code tries from the reset's
+    // network (they count its tries).
+    const ask = () =>
+      g.browser().post("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
+    const tryHere = () =>
+      g.browser().post("/api/auth/sign-in/email-otp", { email, otp: "00000000" });
+    const tryThere = (k: number) =>
+      g.browser({ ip }).post("/api/auth/sign-in/email-otp", {
+        email: unique(`burst.resettry${k}`),
+        otp: "00000000",
+      });
+    const send = (k: number) => (k % 3 === 0 ? ask() : k % 3 === 1 ? tryHere() : tryThere(k));
+    const sent = burst(Array.from({ length: 12 }, (_, k) => () => send(k)));
+    expect(await until(() => sent.settled.length === 12)).toBe(true);
+    for (const { value } of sent.settled) expect(value?.status).toBeLessThan(500);
+    expect(passwords.load()).toEqual({ running: 1, waiting: 0, admitted: 1 });
+    expect(freeClients()).toBeGreaterThanOrEqual(CLIENTS_KEPT_FREE);
+    const bystander = await within(3_000, g.browser().get("/api/auth/get-session"));
+    expect(bystander === "timeout" ? "timeout" : bystander.status).toBe(200);
+    held.release("hash");
+    const done = await resetting;
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect((await passwordSignIn(g.browser(), email, BETTER)).status).toBe(200);
+  });
+
+  it("refuses a reset from a network with no tries left before it takes the address's turn, so the address's sign-ins are never answered 503 for it", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("turn.limit");
+    const owner = await signUpWithPassword(email, GOOD, g);
+    const ip = "198.51.100.151";
+    // The network uses its 12 code tries in 10 minutes (§5.6).
+    for (let k = 0; k < 12; k += 1) {
+      const tried = await g.browser({ ip }).post("/api/auth/sign-in/email-otp", {
+        email: unique(`turn.try${k}`),
+        otp: "00000000",
+      });
+      expect(tried.status).toBe(400);
+    }
+    const fromThere = () => reset(g.browser({ ip }), email, "00000000");
+    // A sign-in of the address holds its turn while its password is checked; resets of the address
+    // from that network, sent together meanwhile, are each refused at once, none waiting on it.
+    held.hold("verify");
+    onTestFinished(() => held.release("verify"));
+    const checks = held.entered.verify;
+    const signingIn = passwordSignIn(g.browser(), email, BETTER);
+    expect(await until(() => held.entered.verify - checks === 1)).toBe(true);
+    const sent = burst(Array.from({ length: 10 }, () => fromThere));
+    expect(await until(() => sent.settled.length === 10, 3_000)).toBe(true);
+    for (const { value } of sent.settled) {
+      expect(value?.status).toBe(429);
+      expect(value?.json).toMatchObject({ code: "rate_limited" });
+      expect(Number(value?.headers.get("retry-after"))).toBeGreaterThan(0);
+    }
+    held.release("verify");
+    expect((await signingIn).status).toBe(401);
+    // While such resets keep coming, the owner's browser signs in with the password every time.
+    const knownCookie = owner.jar.get("__Host-fin.known_browser") as string;
+    for (let round = 0; round < 3; round += 1) {
+      const resets = burst(Array.from({ length: 10 }, () => fromThere));
+      const browser = g.browser();
+      browser.jar.set("__Host-fin.known_browser", knownCookie);
+      const signedIn = await passwordSignIn(browser, email, GOOD);
+      expect(signedIn.status, `round ${round}: ${JSON.stringify(signedIn.json)}`).toBe(200);
+      await resets.done();
+      expect(resets.settled.map((s) => s.value?.status)).toEqual(Array(10).fill(429));
+    }
+  });
+
+  it("checks a change's passwords before it takes any row, so its session's other requests are answered meanwhile", async () => {
+    const { held, harness: g, passwords, freeClients } = await consoleSized();
+    const email = unique("burst.change");
+    const owner = await signUpWithPassword(email, GOOD, g);
+    const { secret } = await setUpAuthenticator(owner);
+    // A wrong current password: refused, so the intent is not spent.
+    const change = { currentPassword: "not the password at all", newPassword: BETTER };
+    const intent = await provedChange(g, owner, secret, change);
+    // The session is due for the library's refresh (10 minutes after its last), which writes its
+    // row: the change's own read of its session does, and so does every other request with it.
+    await seed(
+      g.admin,
+      "UPDATE identity.session SET expires_at = now() + interval '23 hours' WHERE token = $1",
+      [owner.sessionToken()],
+    );
+    held.hold("verify");
+    onTestFinished(() => held.release("verify"));
+    const checks = held.entered.verify;
+    const changing = owner.post("/api/auth/change-password", change, intent);
+    expect(await until(() => held.entered.verify - checks === 1)).toBe(true);
+    // Twelve requests with the same session, each from its own /48, while the change checks.
+    const withSession = () => {
+      const browser = g.browser();
+      for (const [name, value] of owner.jar) browser.jar.set(name, value);
+      return browser.get("/api/auth/get-session");
+    };
+    const sent = burst(Array.from({ length: 12 }, () => withSession));
+    expect(await until(() => sent.settled.length === 12)).toBe(true);
+    for (const { value } of sent.settled) expect(value?.status).toBe(200);
+    expect(passwords.load()).toEqual({ running: 1, waiting: 0, admitted: 1 });
+    expect(freeClients()).toBeGreaterThanOrEqual(CLIENTS_KEPT_FREE);
+    held.release("verify");
+    const refused = await changing;
+    expect(refused.status).toBe(400);
+    expect(refused.json).toMatchObject({ code: "INVALID_PASSWORD" });
+  });
+
+  it("refuses a sign-in or a reset whose session the gate ends before it hashes, so the ended row is held across no hash", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("burst.lapsed");
+    const owner = await signUpWithPassword(email, GOOD, g);
+    await setUpAuthenticator(owner);
+    // Two browsers at the factor step after a password sign-in, the second asking a reset code;
+    // then their 10 minutes pass (S2-07), so the gate ends each session at its next request.
+    const signingIn = g.browser();
+    const resetting = g.browser();
+    for (const browser of [signingIn, resetting]) {
+      expect((await passwordSignIn(browser, email, GOOD)).status).toBe(200);
+    }
+    await requestReset(resetting, email);
+    const code = (await g.latestCode(email)) as string;
+    await seed(
+      g.admin,
+      "UPDATE identity.session SET created_at = now() - interval '11 minutes' WHERE token = ANY($1)",
+      [[signingIn.sessionToken(), resetting.sessionToken()]],
+    );
+    held.hold("hash");
+    held.hold("verify");
+    onTestFinished(() => {
+      held.release("hash");
+      held.release("verify");
+    });
+    const entered = { ...held.entered };
+    const answers = [
+      await within(3_000, passwordSignIn(signingIn, email, GOOD)),
+      await within(3_000, reset(resetting, email, code)),
+    ];
+    for (const answer of answers) {
+      expect(answer === "timeout" ? "timeout" : answer.status).toBe(401);
+      if (answer !== "timeout") {
+        expect(answer.json).toMatchObject({ code: "unauthenticated", reason: "expired" });
+      }
+    }
+    expect(held.entered).toEqual(entered);
+    for (const browser of [signingIn, resetting]) expect(await sessionOf(browser)).toBeNull();
+    // Sent again, with no session now, the reset goes on as from any browser: no try was spent.
+    held.release("hash");
+    held.release("verify");
+    const again = await reset(resetting, email, code);
+    expect(again.status, JSON.stringify(again.json)).toBe(200);
+  });
+
   it("admits a reset and a change, hashing only admitted, and answers each 503 at once when the admitted are full", async () => {
     // Inside its hash or check, each is a request the hasher admitted.
     const { held, harness: g } = await heldHarness();
@@ -1642,20 +1861,8 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     const owner = await signUpWithPassword(email, GOOD, g);
     const { secret } = await setUpAuthenticator(owner);
     const change = { currentPassword: GOOD, newPassword: BETTER };
-    /** The headers of a change-password whose intent this browser has proved with its factor. */
-    async function prove(on: Harness, browser: Browser, factor: Uint8Array) {
-      const asked = await browser.post("/api/auth/change-password", change);
-      expect(asked.json).toMatchObject({ code: "step_up_required" });
-      const intent = { "fin-step-up-intent": String(asked.json?.intent_id) };
-      await on.admin.query("UPDATE identity.totp_step SET last_step = 0");
-      const proved = await browser.post(
-        "/api/auth/two-factor/verify-totp",
-        { code: hotp(factor, totpStep(new Date())) },
-        intent,
-      );
-      expect(proved.status, JSON.stringify(proved.json)).toBe(200);
-      return intent;
-    }
+    const prove = (on: Harness, browser: Browser, factor: Uint8Array) =>
+      provedChange(on, browser, factor, change);
     const intent = await prove(g, owner, secret);
     held.hold("verify");
     onTestFinished(() => held.release("verify"));

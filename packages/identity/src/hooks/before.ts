@@ -1,8 +1,9 @@
 // `hooks.before` (spec 02 §3.5): in this order, the realm's gate for the path, the step-up rule
-// for `step_up_self` paths, a password reset's turn with the address's sign-ins
-// (passwords/flows.ts), Fin's limits, the body allowlist (stripping `trustDevice` and
-// `rememberMe`), and each path's own rules: emailed codes bound to the asking browser, the staff
-// Access binding, the sign-ups switch, TOTP replay and lockout, and the last-factor rule.
+// for `step_up_self` paths, a password reset's or change's hashing and a reset's turn with the
+// address's sign-ins (passwords/flows.ts), Fin's limits, the body allowlist (stripping
+// `trustDevice` and `rememberMe`), and each path's own rules: emailed codes bound to the asking
+// browser, the staff Access binding, the sign-ups switch, TOTP replay and lockout, and the
+// last-factor rule.
 import { symmetricDecrypt } from "better-auth/crypto";
 import { trustedBrowserOf } from "../browsers.ts";
 import { attemptCode, requestCode } from "../codes.ts";
@@ -25,8 +26,9 @@ import type { CountedBucket } from "../limits.ts";
 import {
   isPasswordPath,
   PASSWORD_BODY_FIELDS,
+  PASSWORD_HASHING_PATHS,
+  passwordAhead,
   passwordBefore,
-  passwordTurn,
   waivePasswordRecheck,
 } from "../passwords/flows.ts";
 import type { UnitTx } from "../ports/db.ts";
@@ -93,10 +95,15 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   state.rule = rule;
   state.line.authPath = rule.path;
 
-  await loadPrior(rt, ctx, state, tx);
+  const ended = await loadPrior(rt, ctx, state, tx);
+  // A request that may hash goes no further once the gate has ended the session it came with: its
+  // unit holds that session's deleted row to its end, and every other request with the cookie
+  // waits on it (each ends it too), holding a client the hasher never admitted
+  // (passwords/hasher.ts). Refused here, the end commits at once and nothing is hashed.
+  if (ended && PASSWORD_HASHING_PATHS.has(rule.path)) refuseGate(rt, state);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
   await stepUpRule(rt, ctx, state, tx);
-  if (realm === "developer") await passwordTurn(rt, ctx, tx);
+  if (realm === "developer") await passwordAhead(rt, ctx, state, tx);
   await finLimits(rt, ctx, state, tx, rule);
   stripBody(ctx, state);
   await waivePasswordRecheck(rt, ctx, state, tx);
@@ -125,12 +132,13 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   return undefined;
 }
 
+/** Reads the session the request came with into `state`; true when the gate ended it here. */
 async function loadPrior(
   rt: RealmRuntime,
   ctx: HookContext,
   state: RequestState,
   tx: UnitTx,
-): Promise<void> {
+): Promise<boolean> {
   const realm = rt.settings.realm;
   const now = rt.clock.now();
   state.prior = null;
@@ -139,18 +147,18 @@ async function loadPrior(
     ctx.context.authCookies.sessionToken.name,
     ctx.context.secret,
   );
-  if (typeof token !== "string" || token === "") return;
+  if (typeof token !== "string" || token === "") return false;
   const session = await sessionByToken(tx, realm, token, now);
   if (session === null) {
     state.line.unauthenticated = "signed_out";
-    return;
+    return false;
   }
   if (!isLive(session, now)) {
     state.line.unauthenticated = session.stepUpFailures >= 5 ? "too_many_tries" : "expired";
-    return;
+    return false;
   }
   const person = await personById(tx, realm, session.userId);
-  if (person === null) return;
+  if (person === null) return false;
   const factors = await factorFacts(tx, realm, person.id);
   if (realm === "developer") {
     const facts = await personGate(tx, person.id);
@@ -158,7 +166,7 @@ async function loadPrior(
     if (gate === "factor_step" && factorStepExpired(session, now)) {
       await endSession(tx, realm, session.id, now);
       state.line.unauthenticated = "expired";
-      return;
+      return true;
     }
     state.prior = { session, person, factors, facts };
     state.gate = gate;
@@ -178,12 +186,12 @@ async function loadPrior(
         throw new AuthRefusal("access_mismatch", "staff.access_mismatch");
       }
       state.line.unauthenticated = "signed_out";
-      return;
+      return true;
     }
     if (result.state !== "ok" && factorStepExpired(session, now)) {
       await endSession(tx, realm, session.id, now);
       state.line.unauthenticated = "expired";
-      return;
+      return true;
     }
     state.prior = { session, person, factors, facts: null };
     state.gate = result.state;
@@ -191,6 +199,7 @@ async function loadPrior(
   state.line.assurance = session.assurance;
   state.line[realm === "developer" ? "userId" : "staffId"] = person.id;
   state.line.gate = state.gate;
+  return false;
 }
 
 function refuseGate(rt: RealmRuntime, state: RequestState): never {

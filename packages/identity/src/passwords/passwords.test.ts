@@ -539,6 +539,47 @@ describe("the realm with passwords on", () => {
     });
   });
 
+  it("gives the library a hash or a check made ahead once, for the same password only, and only when admitted", async () => {
+    const realm = build("developer", { FIN_FEATURE_PASSWORDS: "on" });
+    const rt = realm.runtime;
+    const stored = await rt.passwords.hash(GOOD_PASSWORD);
+    const OTHER = "a quiet lighthouse at dusk";
+    const state = newRequestState("developer", {
+      requestId: "req_01jd0000000000000000000000",
+      clientIp: null,
+      userAgent: null,
+    });
+    await rt.requests.run(state, async () => {
+      // Made ahead, but for a request the hasher did not admit: refused all the same.
+      state.passwordAhead.hash = { password: GOOD_PASSWORD, hash: "made ahead" };
+      await expect(hashWhenAdmitted(rt, GOOD_PASSWORD)).rejects.toThrow(/did not admit/);
+      state.hashAdmitted = true;
+      expect(await hashWhenAdmitted(rt, GOOD_PASSWORD)).toBe("made ahead");
+      // Used up: the next is hashed.
+      expect(parsePasswordHash(await hashWhenAdmitted(rt, GOOD_PASSWORD)).memoryKiB).toBe(19_456);
+      // Another password is hashed, and the one made ahead is used up all the same.
+      state.passwordAhead.hash = { password: GOOD_PASSWORD, hash: "made ahead" };
+      expect(await hashWhenAdmitted(rt, OTHER)).not.toBe("made ahead");
+      expect(state.passwordAhead.hash).toBeNull();
+
+      // A check made ahead (its answer here is one a real check would never give, to tell them
+      // apart): given back once for the same stored hash and password.
+      state.passwordAhead.verify = { hash: stored, password: OTHER, ok: true };
+      expect(await verifyWithWaiver(rt, { hash: stored, password: OTHER })).toBe(true);
+      expect(await verifyWithWaiver(rt, { hash: stored, password: OTHER })).toBe(false);
+      // Another stored hash or another password: checked for real, and used up all the same.
+      state.passwordAhead.verify = {
+        hash: "$argon2id$another",
+        password: GOOD_PASSWORD,
+        ok: false,
+      };
+      expect(await verifyWithWaiver(rt, { hash: stored, password: GOOD_PASSWORD })).toBe(true);
+      state.passwordAhead.verify = { hash: stored, password: OTHER, ok: false };
+      expect(await verifyWithWaiver(rt, { hash: stored, password: GOOD_PASSWORD })).toBe(true);
+      expect(state.passwordAhead.verify).toBeNull();
+    });
+  });
+
   it("throws a deadlock on the pause's generation as it came, and refuses a store failure closed", async () => {
     const realm = build("developer", { FIN_FEATURE_PASSWORDS: "on" });
     const rt = realm.runtime;

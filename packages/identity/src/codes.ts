@@ -105,7 +105,10 @@ export async function lockAddress(
  * address, which never hashes, never waits on that check holding a database client the hasher
  * never admitted (passwords/hasher.ts). A reset waits for its turn here, before any row a request
  * that never hashes may wait on (hooks/before.ts takes it ahead of the network's limit), and only
- * then takes the address's code lock; a sign-in never waits (tryLockPasswordTurn()).
+ * then takes the address's code lock; it comes here only once its network's tries are read as
+ * left and its new password is hashed (passwordAhead() in passwords/flows.ts), so it never holds
+ * the turn across a hash, and a reset its network's limit refuses never takes it. A sign-in never
+ * waits (tryLockPasswordTurn()).
  */
 export async function lockPasswordTurn(
   db: Queryable,

@@ -102,6 +102,13 @@ export interface LimitStore {
   ): Promise<ConsumeResult>;
   /** Reads how many uses are left in the tightest window, without counting. */
   remaining(db: Queryable, bucket: CountedBucket, subject: string): Promise<number>;
+  /**
+   * What consume() would answer now, counting nothing and taking no row: refused (with when the
+   * refusing window ends, and the `limits.refused` line) when a window is already full. For a path
+   * that must turn away a request its limit refuses before it takes or waits on any lock
+   * (passwords/flows.ts).
+   */
+  check(db: Queryable, bucket: CountedBucket, subject: string): Promise<ConsumeResult>;
   /** Records a lockout that survives a restart (`ops.lockout`). */
   lock(db: Queryable, key: string, kind: string, until: Date): Promise<void>;
   /** The time a live lockout ends, or null. */
@@ -187,6 +194,32 @@ export function createLimitStore(deps: { clock: Clock; lines: LineSink }): Limit
         }
       }
       return Math.max(0, left);
+    },
+    async check(db, bucket, subject) {
+      const now = deps.clock.now();
+      let resetAt: Date | null = null;
+      for (const window of LIMITS[bucket]) {
+        const start = windowStart(now, window.ms);
+        let count: number;
+        try {
+          const result = await db.query<{ count: number }>(
+            "SELECT count FROM ops.rate_window WHERE key = $1 AND window_start = $2",
+            [`${bucket}:${window.ms}:${subject}`, start],
+          );
+          count = Number(result.rows[0]?.count ?? 0);
+        } catch (error) {
+          return fail(bucket, error);
+        }
+        // consume() refuses the use that takes the count past `max`: so one more is refused now.
+        if (count >= window.max) {
+          const ends = new Date(start.getTime() + window.ms);
+          if (resetAt === null || ends.getTime() > resetAt.getTime()) resetAt = ends;
+        }
+      }
+      if (resetAt === null) return { allowed: true, retryAfter: 0, resetAt: null };
+      deps.lines.write("limits.refused", "info", { bucket });
+      const retryAfter = Math.ceil((resetAt.getTime() - now.getTime()) / 1000);
+      return { allowed: false, retryAfter, resetAt };
     },
     async lock(db, key, kind, until) {
       try {

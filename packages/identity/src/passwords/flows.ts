@@ -28,7 +28,9 @@
 //   `sign-in-methods-changed` (kind `password_reset`) tells them. The same answer for every address.
 // - **Load.** Each path that may hash is admitted by the hasher before its unit of work opens
 //   (PASSWORD_HASHING_PATHS, passwords/hasher.ts), and a hash or a check for a request that was
-//   not admitted fails closed (hashWhenAdmitted(), verifyWithWaiver()).
+//   not admitted fails closed (hashWhenAdmitted(), verifyWithWaiver()). A reset and a change do
+//   their hashing in the before-hook, before they take any row a request that never hashes may
+//   wait on, and the library is given those results (passwordAhead()).
 // - **Change.** With a step-up intent (`account.password_change`, §7.6) and the current password.
 // - **Factor changes.** The library re-asks a person with a password for it before an
 //   authenticator or backup-code change; Fin's step-up stands in for that (see RECHECKED_PATHS).
@@ -59,6 +61,7 @@ import {
   nowIso,
   revokeTrust,
 } from "../hooks/shared.ts";
+import type { CountedBucket } from "../limits.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { PasswordRequest, RequestState } from "../request.ts";
 import type { RealmRuntime } from "../runtime.ts";
@@ -69,7 +72,7 @@ import {
   liftPasswordPauses,
   passwordPausedUntil,
 } from "./pause.ts";
-import { assertNewPassword } from "./policy.ts";
+import { assertNewPassword, PASSWORD_MAX_LENGTH, passwordProblem } from "./policy.ts";
 
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,253}\.[^\s@]{2,63}$/;
 
@@ -154,16 +157,30 @@ function requireAdmission(rt: RealmRuntime): void {
   }
 }
 
-/** The library's `password.hash`, and signUp()'s: argon2id, for an admitted request only. */
+function samePassword(a: string, b: string): boolean {
+  return constantTimeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+/**
+ * The library's `password.hash`, and signUp()'s: argon2id, for an admitted request only. A hash
+ * this request made ahead (passwordAhead()) is given back once, for the same password only.
+ */
 export async function hashWhenAdmitted(rt: RealmRuntime, password: string): Promise<string> {
   requireAdmission(rt);
+  const state = rt.requests.getStore();
+  const ahead = state?.passwordAhead.hash ?? null;
+  if (state !== undefined && ahead !== null) {
+    state.passwordAhead.hash = null;
+    if (samePassword(ahead.password, password)) return ahead.hash;
+  }
   return rt.passwords.hash(password);
 }
 
 /**
  * The library's `password.verify`: the stand-in, when this request holds one for its own path
  * (used up by the first check), and argon2id against the stored hash otherwise, for an admitted
- * request only.
+ * request only. A check this request made ahead (passwordAhead()) is given back once, for the
+ * same stored hash and password only.
  */
 export async function verifyWithWaiver(
   rt: RealmRuntime,
@@ -178,6 +195,11 @@ export async function verifyWithWaiver(
     return state.rule?.path === waiver.path && constantTimeEqual(sent, expected);
   }
   requireAdmission(rt);
+  const ahead = state?.passwordAhead.verify ?? null;
+  if (state !== undefined && ahead !== null) {
+    state.passwordAhead.verify = null;
+    if (ahead.hash === input.hash && samePassword(ahead.password, input.password)) return ahead.ok;
+  }
   return rt.passwords.verify(input);
 }
 
@@ -215,21 +237,111 @@ async function personOf(tx: UnitTx, email: string): Promise<PasswordRequest["per
 }
 
 /**
- * A reset's turn with the address's sign-ins (lockPasswordTurn() in codes.ts), which the
- * before-hook takes ahead of the network's limit: a reset waits here while a sign-in of the address
- * checks its password, holding meanwhile no row that a request which never hashes also takes (its
- * network's `code_sign_in` count, the address's code lock), so none of those queues behind the
- * check. Waiting is right for a reset, which a stream of sign-ins must not keep out: sign-ins
- * never wait for the turn, so the reset has it next. An address Fin does not accept takes no
- * turn; resetBefore() refuses it.
+ * A reset's and a change's password work, done by the before-hook ahead of Fin's limits, and a
+ * reset's turn with the address's sign-ins (passwords/hasher.ts). Each row such a request takes
+ * from Fin's limits on (its network's `code_sign_in` count or the person's `method_add` count, a
+ * reset's address turn and code lock, the session's row the library refreshes) is one a request
+ * that never hashes may wait on, holding a client the hasher never admitted: so the hash of the
+ * new password and the check of the current one are made here, before any of them, and the
+ * library is given those results (hashWhenAdmitted(), verifyWithWaiver()). The only row held by
+ * then is the library's own count of this path from this network, which only requests the hasher
+ * admitted take; a request whose session the gate ended never comes here (hooks/before.ts).
+ *
+ * The limit that will count the request is read first, taking no row, so a request it refuses
+ * costs no hash and, for a reset, never takes or waits for the address's turn: a stream of resets
+ * past their network's tries cannot keep the turn held and the address's password sign-ins, which
+ * never wait for it, answered 503. Requests sent together may all read room; those past the limit
+ * are refused when it counts them, within what admission lets in. A password the rule refuses is
+ * not hashed: resetBefore() and changeBefore() refuse it after the limit, as before.
  */
-export async function passwordTurn(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
-  if (ctx.path !== "/email-otp/reset-password") return;
+export async function passwordAhead(
+  rt: RealmRuntime,
+  ctx: HookContext,
+  state: RequestState,
+  tx: UnitTx,
+): Promise<void> {
   if (rt.settings.realm !== "developer" || !rt.settings.features.passwords) return;
+  if (ctx.path === "/email-otp/reset-password") return resetAhead(rt, ctx, state, tx);
+  if (ctx.path === "/change-password") return changeAhead(rt, ctx, state, tx);
+}
+
+/** Refuses as the limit would (429), counting nothing and taking no row, when it is used up. */
+async function refuseUsedUp(
+  rt: RealmRuntime,
+  tx: UnitTx,
+  bucket: CountedBucket,
+  subject: string,
+): Promise<void> {
+  const result = await rt.limits.check(tx, bucket, subject);
+  if (!result.allowed) {
+    throw new AuthRefusal("rate_limited", `limits.${bucket}`, { retry_after: result.retryAfter });
+  }
+}
+
+async function hashAhead(rt: RealmRuntime, state: RequestState, password: string): Promise<void> {
+  requireAdmission(rt);
+  state.passwordAhead.hash = { password, hash: await rt.passwords.hash(password) };
+}
+
+/**
+ * A reset: its network's tries, its new password's hash, then its turn (lockPasswordTurn() in
+ * codes.ts). It waits for the turn while a sign-in of the address checks its password, holding
+ * no row that a request which never hashes also takes, so none of those queues behind the check;
+ * and it holds the turn only for its own statements, never across a hash. Waiting is right for a
+ * reset, which a stream of sign-ins must not keep out: sign-ins never wait for the turn, so the
+ * reset has it next. An address Fin does not accept takes no turn and costs no hash;
+ * resetBefore() refuses it.
+ */
+async function resetAhead(
+  rt: RealmRuntime,
+  ctx: HookContext,
+  state: RequestState,
+  tx: UnitTx,
+): Promise<void> {
   const body = bodyOf(ctx);
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   if (!EMAIL.test(email)) return;
+  await refuseUsedUp(rt, tx, "code_sign_in", rt.hasher.bucket("network", state.network));
+  const password = body.password;
+  if (typeof password === "string" && passwordProblem(password, { email }) === null) {
+    await hashAhead(rt, state, password);
+  }
   await lockPasswordTurn(tx, rt, email);
+}
+
+/**
+ * A change, once its intent has passed (stepUpRule()): the person's `method_add` allowance, then
+ * the new password's hash and the check of the current one against the stored hash, as the
+ * library would make them. Without a password to check, the library refuses without hashing.
+ */
+async function changeAhead(
+  rt: RealmRuntime,
+  ctx: HookContext,
+  state: RequestState,
+  tx: UnitTx,
+): Promise<void> {
+  const person = state.prior?.person;
+  if (person === undefined) return;
+  const body = bodyOf(ctx);
+  const current = body.currentPassword;
+  const next = body.newPassword;
+  if (typeof current !== "string" || current === "" || typeof next !== "string") return;
+  // The library refuses a current password past the maximum before it hashes anything.
+  if (current.length > PASSWORD_MAX_LENGTH) return;
+  if (passwordProblem(next, { email: person.email }) !== null) return;
+  await refuseUsedUp(rt, tx, "method_add", rt.hasher.bucket("person", person.id));
+  const account = await tx.query<{ password: string | null }>(
+    "SELECT password FROM identity.account WHERE user_id = $1 AND provider_id = 'credential'",
+    [person.id],
+  );
+  const stored = account.rows[0]?.password ?? null;
+  if (stored === null) return;
+  await hashAhead(rt, state, next);
+  state.passwordAhead.verify = {
+    hash: stored,
+    password: current,
+    ok: await rt.passwords.verify({ hash: stored, password: current }),
+  };
 }
 
 /** The before-hook's part: an answer to give instead of the library's, or undefined to go on. */

@@ -17,12 +17,14 @@
 //     most a second; past that wait (or a full queue), they too are answered 503.
 // The bound holds for the pool only because an admitted request holds across its hash no row that
 // a request which is never admitted waits on: a sign-up hashes before it takes its limits and the
-// address's code lock (sign-up.ts); a sign-in holds its address's password turn, never its code
-// lock (codes.ts); a reset waits for that turn before its network's code count (hooks/before.ts).
-// What is left: a change holds the person's own rows (their session, their `method_add` count),
-// which only that person's requests take; and a reset whose code was right holds its network's
-// `code_sign_in` count and its address's code lock across its one hash, which only someone with
-// the code emailed to the address can make happen.
+// address's code lock (sign-up.ts); a reset and a change hash (and a change checks its current
+// password) in the before-hook, before Fin's limits, a reset's turn and code lock, and the
+// session's refresh, and the library is given those results (passwordAhead() in
+// passwords/flows.ts); a sign-in holds across its check only its address's password turn, which
+// only resets wait for, never its code lock (codes.ts), and its network's password count, which
+// only sign-ins take; and a request whose session the gate ends is refused before it hashes, so
+// the ended row is never held across a hash (hooks/before.ts). By then each holds the library's
+// own count of its path from its network, which only requests of that path take, all admitted.
 // The sizes are what the process can spare (hashSlots()): two hashes per vCPU, but never
 //   - more than libuv's thread pool less two threads, where `crypto.argon2` runs, so a sign-in
 //     flood cannot starve the DNS lookups that `pg` and `fetch` need;

@@ -26,6 +26,7 @@ function calls(limits: LimitStore, db: Queryable): (() => Promise<unknown>)[] {
     () => limits.consume(db, "code_send", "subject"),
     () => limits.consumeWindows(db, "default", [{ ms: 10_000, max: 100 }], "subject"),
     () => limits.remaining(db, "code_send", "subject"),
+    () => limits.check(db, "code_send", "subject"),
     () => limits.lock(db, "key", "code_email", new Date()),
     () => limits.lockedUntil(db, "key"),
     () => limits.holdLockout(db, "key", "factor_code"),
