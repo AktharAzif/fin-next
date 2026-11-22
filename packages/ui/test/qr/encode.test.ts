@@ -321,12 +321,15 @@ describe("refusals", () => {
       }
       expect(error, message).toBeInstanceOf(RangeError);
       const thrown = error as Error;
-      // No cause and no field of its own: the sentence is all it carries.
+      // No cause and no field of its own, enumerable or not (a cause is not): the sentence is all
+      // it carries.
       expect({
         name: thrown.name,
         message: thrown.message,
         cause: thrown.cause,
-        fields: Object.keys(thrown).filter((field) => field !== "name"),
+        fields: Object.getOwnPropertyNames(thrown).filter(
+          (field) => !["name", "message", "stack"].includes(field),
+        ),
       }).toEqual({ name, message, cause: undefined, fields: [] });
       // A stack's header holds the name and the message as they were when it was made.
       const header = String(thrown.stack).split(/\n\s+at /)[0];

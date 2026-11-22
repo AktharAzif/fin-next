@@ -38,6 +38,18 @@ const auditLog = defineContract({
 // A UUID-shaped key, built at run time so the public-safety scan never sees an ID-shaped literal.
 const GENERATED_KEY = ["11111111", "1111", "4111", "8111", "111111111111"].join("-");
 
+/**
+ * An error's own properties, enumerable or not (`cause` is not, so JSON never shows it), all but
+ * its stack: what a reporter or a relay could read of it.
+ */
+function ownFields(error: Error): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.getOwnPropertyNames(error)
+      .filter((key) => key !== "stack")
+      .map((key) => [key, Reflect.get(error, key)]),
+  );
+}
+
 interface Call {
   url: string;
   init: RequestInit;
@@ -286,21 +298,37 @@ describe("api()", () => {
     expect(reported).toBeInstanceOf(Error);
     const thrown = reported as Error;
     // No cause and no field of its own: the sentence names the contract and nothing else.
-    expect({
-      name: thrown.name,
-      message: thrown.message,
-      cause: thrown.cause,
-      fields: Object.keys(thrown),
-    }).toEqual({
-      name: "Error",
+    expect(thrown.name).toBe("Error");
+    expect(thrown.cause).toBeUndefined();
+    expect(ownFields(thrown)).toStrictEqual({
       message: "auth.totpEnable: the answer does not match the contract",
-      cause: undefined,
-      fields: [],
     });
-    // Nothing of the answer in the report, nor in the error the caller is given. A stack's header
-    // holds the name and the message as they were when it was made; its frames are file paths.
-    const header = String(thrown.stack).split(/\n\s+at /)[0];
-    const carried = JSON.stringify([thrown.message, header, ids, error.message, error]);
+    // The caller's error is as tight: no cause (which JSON never shows), and only its own fields,
+    // none of which holds the answer.
+    expect(error.cause).toBeUndefined();
+    expect(ownFields(error)).toStrictEqual({
+      message: "auth.totpEnable: unexpected_response 200",
+      name: "ApiError",
+      kind: "unexpected_response",
+      contract: "auth.totpEnable",
+      status: 200,
+      code: null,
+      problem: null,
+      requestId: "req_9",
+      retryAfterSeconds: null,
+      aborted: false,
+    });
+    // Nothing of the answer in the report, nor in the error the caller is given, in any property
+    // of either. A stack's header holds the name and the message as they were when it was made;
+    // its frames are file paths.
+    const header = (made: Error) => String(made.stack).split(/\n\s+at /)[0];
+    const carried = JSON.stringify([
+      ownFields(thrown),
+      header(thrown),
+      ids,
+      ownFields(error),
+      header(error),
+    ]);
     for (const piece of [key.slice(0, 8), "otpauth", "example.com"]) {
       expect(carried).not.toContain(piece);
     }

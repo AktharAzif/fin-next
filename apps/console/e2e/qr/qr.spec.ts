@@ -5,16 +5,17 @@
 // between the answer and its drawing, so no chunk that fails to load can make the frame reload the
 // page (FW-C13's reload on a failed chunk) and lose the answer: each journey refuses every script
 // asked for after the answer, and checks there was none, one answer, and no reload. Nothing the
-// page sends to `/api/*` carries the key or the URI. (The frame keeps a failure report in memory
-// until the monitoring lane's relay is installed, so a journey cannot read the report a refusal
-// makes; the kit spec and the unit tests read it. The relay's envelopes go to `/api/*`, and this
+// page sends to `/api/*` carries the key or the URI, however spelt (escaped, form-encoded, in
+// groups of four, in any case: a test checks the check). (The frame keeps a failure report in
+// memory until the monitoring lane's relay is installed, so a journey cannot read the report a
+// refusal makes; the kit spec and the unit tests read it. The relay's envelopes go to `/api/*`, and this
 // check will cover them.) The app runs on the harness's static host under the production page
 // policy (the fixtures fail a test on any violation or off-site request); `/api/*` is the scripted
 // stand-in.
 import { expect, gotoReady, test } from "@fin/testing/playwright";
 import type { Page, Route } from "@playwright/test";
 import { readDrawnQr, scanDrawnQr } from "../../../../packages/ui/test/qr/drawn.ts";
-import { ApiDouble, ok, viewer } from "../support/api-double.ts";
+import { ApiDouble, ok, type Recorded, viewer } from "../support/api-double.ts";
 
 const LABEL = "QR code for your authenticator app";
 const FAILED = "Couldn’t draw the QR code. Type the key instead.";
@@ -82,17 +83,60 @@ class SetUpWatch {
 }
 
 /**
+ * Text as the check reads it, however a request spelt it: every `%XX` escape undone (again while
+ * one is left, so a value escaped twice reads too; a byte past ASCII as a space), then upper case
+ * with everything but letters and digits gone. The key reads the same in groups of four, in a
+ * path, a query string or a form body (space as `%20` or `+`), and in any case.
+ */
+function readable(text: string): string {
+  let current = text;
+  let previous: string;
+  do {
+    previous = current;
+    current = previous.replace(/%([0-9A-Fa-f]{2})/g, (_, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return code < 0x80 ? String.fromCharCode(code) : " ";
+    });
+  } while (current !== previous);
+  return current.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+/** Each part of one recorded request as text: its method, path, query, headers and body. */
+function partsOf(request: Recorded): (readonly [string, string])[] {
+  const body =
+    typeof request.body === "string" ? request.body : (JSON.stringify(request.body) ?? "");
+  return [
+    ["method", request.method],
+    ["path", request.path],
+    ...[...request.search].flatMap(([name, value]) => [
+      ["query", name] as const,
+      ["query", value] as const,
+    ]),
+    ...Object.entries(request.headers).flatMap(([name, value]) => [
+      ["header", name] as const,
+      ["header", value] as const,
+    ]),
+    ["body", body],
+  ];
+}
+
+/** Which parts of the requests carry the key or the URI, each read as `readable` reads it. */
+function keyCarriers(requests: readonly Recorded[]): string[] {
+  const pieces = [readable(SECRET), readable("otpauth")];
+  return requests.flatMap((request, index) =>
+    partsOf(request)
+      .filter(([, text]) => pieces.some((piece) => readable(text).includes(piece)))
+      .map(([part]) => `request ${index} (${request.method}): its ${part}`),
+  );
+}
+
+/**
  * Nothing the page sent to `/api/*` (its method, path, query, headers or body) carries the key or
- * the URI: only the code from the app goes back.
+ * the URI, however it is spelt: only the code from the app goes back.
  */
 function expectKeyNeverSent(api: ApiDouble): void {
-  const sent = JSON.stringify(
-    api.requests.map((r) => [r.method, r.path, r.search.toString(), r.headers, r.body]),
-  );
   expect(api.requests.length).toBeGreaterThan(0);
-  for (const piece of [SECRET, GROUPED, "otpauth"]) {
-    expect(sent, "the key or the URI in a request").not.toContain(piece);
-  }
+  expect(keyCarriers(api.requests), "the key or the URI in a request").toEqual([]);
 }
 
 /** The welcome step's stand-in: a developer held at "Protect your account", with no factor yet. */
@@ -115,6 +159,41 @@ const scan = (page: Page) =>
 const tile = (page: Page) => scan(page).locator('[data-slot="qr-code"]');
 
 test.describe("the authenticator's QR code", () => {
+  test("@journey the check on what the page sends finds the key and the URI however a request spells them", () => {
+    const sent = (part: Partial<Recorded>): Recorded => ({
+      method: "GET",
+      path: "/api/viewer",
+      search: new URLSearchParams(),
+      headers: {},
+      body: undefined,
+      ...part,
+    });
+    const spellings: readonly Recorded[] = [
+      // The key as the screen shows it, in groups of four: in a query string (as a URL's
+      // searchParams reads `%20`, and as a form encodes it, with `+`), a path and a form body.
+      sent({ search: new URLSearchParams(`k=${encodeURIComponent(GROUPED)}`) }),
+      sent({ search: new URLSearchParams(`k=${GROUPED.replaceAll(" ", "+")}`) }),
+      sent({ path: `/api/keys/${encodeURIComponent(GROUPED)}` }),
+      sent({ method: "POST", body: new URLSearchParams({ key: GROUPED }).toString() }),
+      // In lower case with other separators in a JSON body, and escaped twice in a header.
+      sent({ method: "POST", body: { key: GROUPED.toLowerCase().replaceAll(" ", "-") } }),
+      sent({ headers: { "x-key": encodeURIComponent(encodeURIComponent(GROUPED)) } }),
+      // The URI, escaped, in a form body.
+      sent({ method: "POST", body: `u=${encodeURIComponent(URI)}` }),
+    ];
+    for (const [index, request] of spellings.entries()) {
+      expect(keyCarriers([request]), `spelling ${index}`).toHaveLength(1);
+    }
+    // What a set-up sends back, the code from the app, carries neither.
+    const code = sent({
+      method: "POST",
+      path: "/api/auth/two-factor/verify-totp",
+      headers: { "x-fin-app": "console", "content-type": "application/json" },
+      body: { code: "123456" },
+    });
+    expect(keyCarriers([code])).toEqual([]);
+  });
+
   test("@journey @csp the set-up draws the QR code with the key from one answer, fetching nothing after it", async ({
     page,
     browserName,
@@ -140,12 +219,14 @@ test.describe("the authenticator's QR code", () => {
     await expect(scan(page).getByText("Can’t scan? Type this key instead.")).toBeVisible();
     await expect(page.getByTestId("authenticator-key")).toHaveText(GROUPED);
 
-    // Drawn in place: no image, no image URL, and the secret nowhere but the key.
+    // Drawn in place: no image, no image URL, and the secret nowhere but the key, however spelt
+    // (the key shows in groups of four, so a raw search alone would miss a grouped copy).
     const markup = await scan(page).evaluate((element) => element.outerHTML);
     expect(markup).not.toContain(["da", "ta:"].join(""));
     expect(markup).not.toMatch(/<img|<image|<object|<embed|<iframe|href=|style=/i);
     expect(markup).not.toContain("otpauth");
     expect(markup.split(SECRET)).toHaveLength(1);
+    expect(readable(markup).split(readable(SECRET))).toHaveLength(2);
     expect(await page.locator("img").count()).toBe(0);
 
     // keyCopied: the key, ungrouped, on the clipboard (Chromium grants the clipboard to a test).

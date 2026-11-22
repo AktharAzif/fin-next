@@ -270,12 +270,15 @@ describe("a refusal's report", () => {
       expect(ids).toEqual(IDS);
       expect(error).toBeInstanceOf(RangeError);
       const thrown = error as Error;
-      // Nothing rides on the error beside its sentence: no cause, no field of its own.
+      // Nothing rides on the error beside its sentence: no cause, no field of its own, enumerable
+      // or not (a cause is not, so JSON never shows it).
       expect({
         name: thrown.name,
         message: thrown.message,
         cause: thrown.cause,
-        fields: Object.keys(thrown).filter((key) => key !== "name"),
+        fields: Object.getOwnPropertyNames(thrown).filter(
+          (key) => !["name", "message", "stack"].includes(key),
+        ),
       }).toEqual({ name, message, cause: undefined, fields: [] });
       // A stack's header holds the name and the message as they were when it was made; its frames
       // are file paths.
