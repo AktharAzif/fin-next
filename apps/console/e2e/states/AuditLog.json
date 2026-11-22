@@ -1,0 +1,77 @@
+{
+  "board": "AuditLog",
+  "canvas": "fin-dashboard",
+  "route": "/audit-log",
+  "states": {
+    "list": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey filtered to one member from the Team row menu, with its entry"
+    },
+    "filtered": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey filtered to one member from the Team row menu, with its entry"
+    },
+    "person": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey filtered to one member from the Team row menu, with its entry"
+    },
+    "search": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "custom": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "refreshing": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noMatch": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the empty states and a failed load"
+    },
+    "emptyRange": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the empty states and a failed load"
+    },
+    "emptyEver": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the empty states and a failed load"
+    },
+    "entry": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey filtered to one member from the Team row menu, with its entry"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "failed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey the empty states and a failed load"
+    },
+    "noPermission": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a Developer sees the team but cannot change it"
+    }
+  }
+}

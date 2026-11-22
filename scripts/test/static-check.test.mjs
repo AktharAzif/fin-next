@@ -187,6 +187,72 @@ describe("static:check", () => {
     );
   });
 
+  test("a noscript's content is read as markup too, as a browser with scripting off reads it", () => {
+    for (const [html, message] of /** @type {[string, RegExp][]} */ ([
+      ['<noscript><p style="color:red">x</p></noscript>', /no style attribute/],
+      ["<noscript><img src=x onerror=alert(1)></noscript>", /no inline event handler/],
+      ["<noscript><script>alert(1)</script></noscript>", /no inline script/],
+      ["<noscript><style>p{}</style></noscript>", /no <style> element/],
+      // With scripting on, the noscript ends at its end tag, and what follows is markup.
+      ["<noscript><xmp></noscript><img src=x onerror=y></xmp>", /no inline event handler/],
+      // With scripting off, an end tag inside an attribute's value does not end the noscript, so
+      // what scripting on reads as a comment is markup: the whole document is read both ways.
+      [
+        '<noscript><p title="</noscript><!--"><img style="color:red" onload="x"><p title="-->"></noscript>',
+        /no style attribute/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><img style="color:red" onload="x"><p title="-->"></noscript>',
+        /no inline event handler/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><meta property="csp-nonce" nonce="x"><p title="-->"></noscript>',
+        /exactly one <meta property="csp-nonce">/,
+      ],
+      [
+        '<noscript><p title="</noscript><!--"><meta property="csp-nonce" nonce="x"><p title="-->"></noscript>',
+        /no nonce attribute/,
+      ],
+      [
+        '<noscript><a title="</noscript><!--"><script>alert(1)</script><a title="-->"></noscript>',
+        /no inline script/,
+      ],
+    ])) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      const findings = checkIndexHtml("index.html", page);
+      assert.ok(
+        findings.some((f) => message.test(f.message)),
+        `${html}: ${JSON.stringify(findings)}`,
+      );
+    }
+    for (const html of [
+      "<noscript>Turn on JavaScript to use Fin.</noscript>",
+      '<noscript><a href="/help">Help</a></noscript>',
+    ]) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      assert.deepEqual(checkIndexHtml("index.html", page), [], html);
+    }
+    // A tag both readings find is reported once.
+    const both = checkIndexHtml(
+      "index.html",
+      INDEX.replace("<body>", '<body><noscript>x</noscript><img src=x onerror="y">'),
+    );
+    assert.deepEqual(
+      both.map((f) => f.message),
+      ["no inline event handler (script-src 'self')"],
+    );
+    // The two readings, tag by tag.
+    const split = '<noscript><p title="</noscript><!--"><img onload="x"><p title="-->"></noscript>';
+    assert.deepEqual(
+      htmlStartTags(split).map((t) => t.name),
+      ["noscript"],
+    );
+    assert.deepEqual(
+      htmlStartTags(split, { scripting: false }).map((t) => t.name),
+      ["noscript", "p", "img", "p"],
+    );
+  });
+
   test("SVG and MathML, inside which a browser reads raw-text elements as markup, fail", () => {
     for (const html of [
       '<svg><title><img src="x" onerror="alert(1)"></title></svg>',
@@ -208,6 +274,37 @@ describe("static:check", () => {
         html,
       );
     }
+  });
+
+  test("an element after which a browser ignores a raw-text start tag fails", () => {
+    // In select, in frameset and in a template's column group, the tree builder ignores the start
+    // tag of a raw-text element, so the tokenizer reads on as markup what the two readings take
+    // for text: each of these puts an image with a handler in the DOM.
+    for (const [html, name] of /** @type {[string, string][]} */ ([
+      [
+        '<select><noscript><p title="</noscript><!--"></noscript></select><noscript><p title="</noscript><img src=x onerror=alert(1)>-->"></noscript>',
+        "select",
+      ],
+      ["<select><xmp></select><img src=x onerror=alert(1)></xmp>", "select"],
+      ["<select><title></select><img src=x onerror=alert(1)></title>", "select"],
+      ["<SELECT><style></SELECT><img src=x onerror=alert(1)></style>", "select"],
+      ["<template><col><xmp></template><img src=x onerror=alert(1)></xmp>", "template"],
+      ['<frameset><title><frame onload="alert(1)"></title></frameset>', "frameset"],
+      ["<frame>", "frame"],
+    ])) {
+      const page = INDEX.replace("<body>", `<body>${html}`);
+      const findings = checkIndexHtml("index.html", page);
+      assert.deepEqual(rules(findings), ["static-html"], html);
+      assert.ok(
+        findings.some((f) => f.message.startsWith(`no <${name}> element: it can put the parser`)),
+        `${html}: ${JSON.stringify(findings)}`,
+      );
+    }
+    // A table's column group switches the tokenizer as the readings do.
+    assert.deepEqual(
+      checkIndexHtml("index.html", INDEX.replace("<body>", "<body><table><col></table>")),
+      [],
+    );
   });
 
   test("a javascript: URL or a srcdoc, which hold inline script, fails in every spelling", () => {
@@ -278,6 +375,10 @@ describe("static:check", () => {
       assert.deepEqual(checkCss("a.css", `${first}\nbody{margin:0}\n`), [], first);
     }
     for (const first of ["@layer ui-sdk-overrides;", "@layer ui-sdkx;", "@layer base, ui-sdk;"]) {
+      assert.deepEqual(rules(checkCss("a.css", `${first}\n`)), ["static-css"], first);
+    }
+    // A sub-layer of ui-sdk is not the layer either (\b would have matched before "." and "-").
+    for (const first of ["@layer ui-sdk.inner;", "@layer ui-sdk-extra; a{}"]) {
       assert.deepEqual(rules(checkCss("a.css", `${first}\n`)), ["static-css"], first);
     }
   });

@@ -1,0 +1,119 @@
+{
+  "board": "AdminStaff",
+  "canvas": "fin-admin",
+  "route": "/staff",
+  "states": {
+    "list": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "operator": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "stepUp": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "add": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "addCode": { "status": "superseded", "decision": "[SA-13]" },
+    "addWrongCode": { "status": "superseded", "decision": "[SA-13]" },
+    "addShortCode": { "status": "superseded", "decision": "[SA-13]" },
+    "refused": {
+      "status": "covered-unit",
+      "day": "sat",
+      "spec": "apps/admin/src/client/staff/messages.test.ts",
+      "test": "says the role doesn't allow it when the server refuses the permission"
+    },
+    "added": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "changeRole": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "changeRoleCode": { "status": "superseded", "decision": "[SA-13]" },
+    "remove": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey a new enrolment code, then removing the member, each with the passkey"
+    },
+    "loading": {
+      "status": "covered-unit",
+      "day": "sat",
+      "spec": "apps/admin/src/client/screens.test.tsx",
+      "test": "draws the Staff skeleton with shapes and a header, never a spinner"
+    },
+    "failed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/shell.spec.ts",
+      "test": "@journey Staff that cannot load keeps its header and offers Try again"
+    },
+    "enrolmentCodeShown": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "newEnrolmentCode": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey a new enrolment code, then removing the member, each with the passkey"
+    },
+    "lastAdmin": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey the last Admin refused by the server after the proof is said in the dialog"
+    },
+    "outranked": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/staff/rules.test.ts",
+      "test": "refuses a target whose role allows more than the actor's"
+    },
+    "resetFactors": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "stretch-4",
+      "spec": "apps/admin/e2e/factor-reset/staff-factor-reset.spec.ts",
+      "test": "@journey an Admin resets a member's second factors: signed out at once, the old passkey refused, the new code once, and they enrol again"
+    },
+    "resetCodeShown": {
+      "status": "new",
+      "uiRequest": "UR-26",
+      "drawn": false,
+      "day": "stretch-4",
+      "spec": "apps/admin/e2e/factor-reset/staff-factor-reset.spec.ts",
+      "test": "@journey an Admin resets a member's second factors: signed out at once, the old passkey refused, the new code once, and they enrol again"
+    }
+  }
+}

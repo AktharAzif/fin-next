@@ -1,0 +1,21 @@
+{
+  "name": "@fin/app-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The web apps' own JSON route contracts, browser-safe Zod in and out (FW-C08, spec 06 §2.4)",
+  "sideEffects": [
+    "./src/zod.ts"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  }
+}
