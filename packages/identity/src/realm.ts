@@ -65,7 +65,10 @@ export interface RealmDeps {
   email?: EmailEnqueue;
   limits?: LimitStore;
   killSwitch?: KillSwitchReader;
-  /** The password hasher (passwords/hasher.ts); one per process with its hashing slots. */
+  /**
+   * The password hasher (passwords/hasher.ts); one per process with its hashing slots. Made by the
+   * factory when not given, sized by `settings.threadPoolSize` and the database's pool.
+   */
   passwords?: PasswordHasher;
   /** Other areas' step-up action fragments (IF-03). */
   actions?: readonly (readonly StepUpAction[])[];
@@ -374,7 +377,13 @@ export function createRealm(deps: RealmDeps): Realm {
     actions: stepUpCatalogue(deps.actions ?? []),
     requests: new AsyncLocalStorage<RequestState>(),
     docsOrigin: deps.docsOrigin,
-    passwords: deps.passwords ?? createPasswordHasher({ lines: deps.lines }),
+    // Sized by what this process can spare: libuv's thread pool and the database pool (§3.5).
+    passwords:
+      deps.passwords ??
+      createPasswordHasher({
+        lines: deps.lines,
+        limits: { threadPoolSize: settings.threadPoolSize, databasePoolSize: deps.db.poolSize },
+      }),
   };
   const auth = betterAuth(buildAuthOptions(rt, deps.db));
 

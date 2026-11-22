@@ -27,6 +27,23 @@ export interface LibraryClient {
 export interface PgFinDatabase extends FinDatabase {
   /** The client to give `drizzle()`: it runs every query on the bound unit. */
   readonly libraryClient: LibraryClient;
+  /**
+   * The pool's size: a unit of work holds one of its clients from start to end, so what may wait
+   * inside a unit (password hashing, passwords/hasher.ts) is sized against it.
+   */
+  readonly poolSize: number;
+}
+
+/** node-postgres's pool size when none is given. */
+const DEFAULT_POOL_SIZE = 10;
+
+/**
+ * The pool's `max` as node-postgres resolved it (`pool.options`, which the narrow declarations of
+ * `pg` in this repository leave out), or its default for a pool that does not say.
+ */
+function poolSizeOf(pool: Pool): number {
+  const max = (pool as unknown as { options?: { max?: unknown } }).options?.max;
+  return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_POOL_SIZE;
 }
 
 export interface PgDatabaseOptions {
@@ -191,6 +208,7 @@ export function createPgDatabase(options: PgDatabaseOptions): PgFinDatabase {
     unit,
     current: () => storage.getStore() ?? null,
     libraryClient,
+    poolSize: poolSizeOf(options.pool),
   };
 }
 

@@ -35,6 +35,33 @@ export interface RealmSettings {
   secrets: readonly RealmSecret[];
   limitKeys: readonly LimitKey[];
   features: { passwords: boolean; google: boolean };
+  /**
+   * libuv's thread pool size (`UV_THREADPOOL_SIZE`, 8 on console and admin, ARCHITECTURE §3.5):
+   * password hashing runs there and never takes all of it (passwords/hasher.ts).
+   */
+  threadPoolSize: number;
+}
+
+/** libuv's thread pool when `UV_THREADPOOL_SIZE` is unset. */
+export const DEFAULT_THREAD_POOL_SIZE = 4;
+/** libuv's largest thread pool. */
+export const MAX_THREAD_POOL_SIZE = 1_024;
+
+/**
+ * `UV_THREADPOOL_SIZE`: libuv's default of 4 when unset, otherwise a whole number from 1 to 1,024.
+ * libuv itself would run a malformed or empty value as a pool of one thread, so one is refused at
+ * start-up rather than sized for.
+ */
+export function parseThreadPoolSize(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_THREAD_POOL_SIZE;
+  const text = raw.trim();
+  const size = /^\d{1,4}$/.test(text) ? Number(text) : Number.NaN;
+  if (!(size >= 1 && size <= MAX_THREAD_POOL_SIZE)) {
+    throw new RealmConfigError(
+      `UV_THREADPOOL_SIZE must be a whole number from 1 to ${MAX_THREAD_POOL_SIZE}`,
+    );
+  }
+  return size;
 }
 
 export class RealmConfigError extends Error {
@@ -193,6 +220,7 @@ export function readRealmSettings(
     secrets: parseSecrets(requireValue(env, "BETTER_AUTH_SECRETS")),
     limitKeys: parseLimitKeys(env),
     features,
+    threadPoolSize: parseThreadPoolSize(env.UV_THREADPOOL_SIZE),
   };
 }
 
