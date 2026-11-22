@@ -1,6 +1,7 @@
 // Organisations (spec 02 §9.1, §5.9; T-SAT-35, AC-SAT-33, AC-SAT-34): the first organisation and its
-// hold; at most 10 as Super admin; the `Fin-Organization` rules (missing 400, not a member and deleted
-// both 404); deletion refused while approved, and its one transaction.
+// hold; at most 10 as Super admin; an organisation asked for while the person's own step-up is in
+// flight; the `Fin-Organization` rules (missing 400, not a member and deleted both 404); deletion
+// refused while approved, and its one transaction.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -10,7 +11,11 @@ import {
   createHarness,
   extensionsOf,
   type Harness,
+  intentIdOf,
+  type Outcome,
   person,
+  type SignedIn,
+  totpCode,
   unique,
   withIntent,
 } from "../test/harness.ts";
@@ -145,6 +150,106 @@ describe("POST /api/orgs", () => {
     );
     expect(codeOf(out)).toBe("invalid");
   });
+});
+
+/** Waits until `n` backends of this file's database wait for a lock, or `settles` settles. */
+async function lockWaiters(n: number, settles?: Promise<unknown>): Promise<void> {
+  let settled = false;
+  settles?.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let tries = 0; tries < 1000; tries += 1) {
+    if (settled) return;
+    const waiting = await h.admin.query<{ n: number }>(
+      `SELECT count(*)::integer AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+    );
+    if (Number(waiting.rows[0]?.n ?? 0) >= n) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${n} backends never waited for a lock`);
+}
+
+describe("an organisation made while the person's own step-up is in flight (§5.9, §9.1, §11.2)", () => {
+  // The step-up holds the person's row from its start and reads and renews their session later;
+  // the organisation's route reads and renews that session first. Its own lock on the person's
+  // row (two organisations at once cannot both pass) must never wait on the step-up's, or each
+  // would wait on the other.
+  type Make = (who: SignedIn) => Promise<Outcome<unknown>>;
+  const first: Make = (who) =>
+    asPerson(h, who, {}, { stepUp: { kind: "none" } }, (tx, g) =>
+      createFirstOrganization(h.orgs, tx, g),
+    );
+  const another: Make = (who) =>
+    asPerson(
+      h,
+      who,
+      { body: { name: "Overlap" } },
+      { stepUp: { kind: "intent", action: "org.create" } },
+      (tx, g) => createOrganization(h.orgs, tx, g, { name: "Overlap" }),
+    );
+
+  it.each([
+    ["the first organisation", first, "ok"],
+    ["another organisation", another, "step_up_required"],
+  ] as const)(
+    "answers %s as it would alone, and the step-up passes",
+    async (_label, make, code) => {
+      const who = await person(h, "overlap");
+      const asked = await another(who);
+      const intent = intentIdOf(asked.ok ? null : asked.error);
+      expect(intent).not.toBeNull();
+      // The session at its renewal age: a developer session is renewed after 10 of its 24 hours.
+      await seed(
+        h.admin,
+        "UPDATE identity.session SET expires_at = now() + interval '85000 seconds' WHERE user_id = $1",
+        [who.userId],
+      );
+      await h.admin.query("UPDATE identity.totp_step SET last_step = 0 WHERE user_id = $1", [
+        who.userId,
+      ]);
+      // Another transaction holds the person's authenticator step for a moment, so the step-up
+      // stops there, holding the person's row; the organisation is asked for meanwhile.
+      const blocker = await h.admin.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT 1 FROM identity.totp_step WHERE user_id = $1 FOR UPDATE", [
+          who.userId,
+        ]);
+        const stepping = who.browser.auth(
+          "/two-factor/verify-totp",
+          { code: totpCode(who.secret as Uint8Array, new Date()) },
+          { "fin-step-up-intent": String(intent) },
+        );
+        stepping.catch(() => undefined);
+        await lockWaiters(1);
+        const making = make(who);
+        await lockWaiters(2, making);
+        await blocker.query("ROLLBACK");
+        const [made, stepped] = await Promise.all([making, stepping]);
+
+        expect(codeOf(made)).toBe(code);
+        expect(stepped.status, JSON.stringify(stepped.json)).toBe(200);
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        blocker.release();
+      }
+      // The intent the step-up proved makes the organisation it was asked for.
+      const made = await asPerson(
+        h,
+        who,
+        { body: { name: "Overlap" }, headers: { "fin-step-up-intent": String(intent) } },
+        { stepUp: { kind: "intent", action: "org.create" } },
+        (tx, g) => createOrganization(h.orgs, tx, g, { name: "Overlap" }),
+      );
+      expect(codeOf(made)).toBe("ok");
+    },
+  );
 });
 
 async function ownerWithOrganization(label: string) {

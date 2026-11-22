@@ -2,6 +2,16 @@
 // change starts its transaction with the one lock row, then reads the actor's and the target's
 // roles again, so two concurrent demotions or removals of the last two active Admins cannot both
 // pass: the second waits for the first to commit and then counts what is left.
+//
+// Only the target's row is locked (`FOR UPDATE`, which waits for any of the target's factor
+// ceremonies in flight, §10.4). The actor's own row is read without a lock: by then the actor's
+// request has read and renewed their own session (requireStaff), and a ceremony of theirs in flight
+// holds their row while it waits to write that session, so a lock on it here would wait on that
+// ceremony while it waits on this change. No lock is needed: everything that can take a role or
+// an active status away takes the change lock first (the changes here and the operator's
+// bootstrap), so the row read inside it is the committed one, and enrolment only makes a pending
+// member active. A change aimed at the actor themselves is refused on that same read, before any
+// row is locked.
 import type { StaffPermission } from "@fin/access";
 import { AuthRefusal } from "@fin/identity";
 import { resolveStaffRole, type StaffRoleLookup, staffPermissionsOf } from "./catalogue.ts";
@@ -19,18 +29,26 @@ export async function takeStaffChangeLock(tx: Queryable): Promise<void> {
   if (result.rowCount !== 1) throw new Error("staff.change_lock has no row");
 }
 
-/** A member's row, locked for the change. */
-export async function memberForChange(tx: Queryable, id: string): Promise<MemberRow | null> {
+async function memberRow(
+  tx: Queryable,
+  id: string,
+  lock: "" | " FOR UPDATE",
+): Promise<MemberRow | null> {
   const result = await tx.query<{
     id: string;
     email: string;
     role_key: string;
     status: MemberRow["status"];
-  }>("SELECT id, email, role_key, status FROM staff.member WHERE id = $1 FOR UPDATE", [id]);
+  }>(`SELECT id, email, role_key, status FROM staff.member WHERE id = $1${lock}`, [id]);
   const row = result.rows[0];
   return row === undefined
     ? null
     : { id: row.id, email: row.email, roleKey: row.role_key, status: row.status };
+}
+
+/** A change's target's row, locked for the change. Never the actor's own (see above). */
+export function memberForChange(tx: Queryable, id: string): Promise<MemberRow | null> {
+  return memberRow(tx, id, " FOR UPDATE");
 }
 
 /** How many active Admins there are besides `exceptId` (pending ones never count). */
@@ -49,15 +67,16 @@ export interface ActorNow {
 }
 
 /**
- * The actor read again inside the lock: still active, and still holding the route's permission.
- * A change that raced the actor's own removal or demotion is refused here.
+ * The actor read again inside the lock, without locking their row (see above): still active, and
+ * still holding the route's permission. A change that raced the actor's own removal or demotion is
+ * refused here.
  */
 export async function actorInsideLock(
   tx: Queryable,
   staffId: string,
   permission: StaffPermission,
 ): Promise<ActorNow> {
-  const row = await memberForChange(tx, staffId);
+  const row = await memberRow(tx, staffId, "");
   if (row === null || row.status !== "active") {
     throw new AuthRefusal("unauthenticated", "staff.actor_gone", { reason: "signed_out" });
   }

@@ -1,7 +1,8 @@
 // Account security over HTTP (spec 02 §14.2, §11.4, §6.6): the name change with a window step-up and
-// its events (`user.name_changed`, and `member.name_changed` per membership); one other session
-// signed out with an intent, every other one with an intent; a trusted browser forgotten with an
-// intent; the lists; and switching the current organisation, which is navigation and writes nothing.
+// its events (`user.name_changed`, and `member.name_changed` per membership), and while the person's
+// own step-up is in flight; one other session signed out with an intent, every other one with an
+// intent; a trusted browser forgotten with an intent; the lists; and switching the current
+// organisation, which is navigation and writes nothing.
 import { randomBytes } from "node:crypto";
 import { bootApi } from "@fin/web-host/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -58,6 +59,29 @@ async function signIn(email: string): Promise<Client> {
   });
   if (signed.status !== 200) throw new Error(`sign-in answered ${signed.status}`);
   return client;
+}
+
+/** Waits until `n` backends of this file's database wait for a lock, or `settles` settles. */
+async function lockWaiters(n: number, settles?: Promise<unknown>): Promise<void> {
+  let settled = false;
+  settles?.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let tries = 0; tries < 1000; tries += 1) {
+    if (settled) return;
+    const waiting = await database.admin.query<{ n: number }>(
+      `SELECT count(*)::integer AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+    );
+    if (Number(waiting.rows[0]?.n ?? 0) >= n) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${n} backends never waited for a lock`);
 }
 
 async function events(event: string) {
@@ -197,6 +221,58 @@ describe("Account security", () => {
     expect(refused.status).toBe(404);
     const list = await me.call("GET", "/api/orgs");
     expect((list.json.items as unknown[]).length).toBe(2);
+  });
+
+  it("changes the name while the person's own step-up is in flight, and the step-up passes", async () => {
+    // The step-up holds the person's row from its start and renews their session later; the name
+    // change renews that session first and then writes the person's row, which must never wait on
+    // the step-up's hold, or each would wait on the other.
+    const email = `overlap.${tag}@example.com`;
+    const me = await signIn(email);
+    await enrolAuthenticator(me);
+    const user = await database.admin.query<{ id: string }>(
+      'SELECT id FROM identity."user" WHERE email = $1',
+      [email],
+    );
+    const userId = user.rows[0]?.id;
+    // The session at its renewal age: a developer session is renewed after 10 of its 24 hours.
+    await seed(
+      database.admin,
+      "UPDATE identity.session SET expires_at = now() + interval '85000 seconds' WHERE user_id = $1",
+      [userId],
+    );
+    await database.admin.query("UPDATE identity.totp_step SET last_step = 0 WHERE user_id = $1", [
+      userId,
+    ]);
+    // Another transaction holds the person's authenticator step for a moment, so the step-up stops
+    // there, holding the person's row; the name change is sent meanwhile.
+    const blocker = await database.admin.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM identity.totp_step WHERE user_id = $1 FOR UPDATE", [
+        userId,
+      ]);
+      const stepping = me.call("POST", "/api/auth/two-factor/verify-totp", {
+        code: totpCode(me.secret as Uint8Array, new Date()),
+      });
+      stepping.catch(() => undefined);
+      await lockWaiters(1);
+      const renaming = me.call("PATCH", "/api/account/name", { name: "Grace Hopper" });
+      await lockWaiters(2, renaming);
+      await blocker.query("ROLLBACK");
+      const [renamed, stepped] = await Promise.all([renaming, stepping]);
+
+      expect(renamed.status, JSON.stringify(renamed.json)).toBe(200);
+      expect(stepped.status, JSON.stringify(stepped.json)).toBe(200);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+    const named = await database.admin.query<{ name: string }>(
+      'SELECT name FROM identity."user" WHERE id = $1',
+      [userId],
+    );
+    expect(named.rows[0]?.name).toBe("Grace Hopper");
   });
 
   it("refuses a page of activity past the 10,000th row as invalid, never as an error", async () => {

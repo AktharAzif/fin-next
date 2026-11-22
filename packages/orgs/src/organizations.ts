@@ -139,6 +139,17 @@ async function insertOrganization(
   return { orgId, memberId };
 }
 
+/**
+ * Serialises a person's organisation creations, so two sent together cannot both pass the checks
+ * that follow. `FOR NO KEY UPDATE` conflicts with another creation's lock, but not with the hold a
+ * factor ceremony of the same person takes (`FOR KEY SHARE`, @fin/identity's before-hook): by now
+ * the guard has read and renewed the person's session, and such a ceremony waits to write that
+ * session while it holds the row, so a stronger lock here would wait on it while it waits on this.
+ */
+async function lockForCreation(tx: UnitTx, personId: string): Promise<void> {
+  await tx.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR NO KEY UPDATE', [personId]);
+}
+
 async function checkOrganisationAllowance(tx: UnitTx, who: Guarded): Promise<void> {
   const held = await superAdminOrganisations(tx, who.person.id);
   if (!(Number.isSafeInteger(held) && held < SUPER_ADMIN_ORGANISATIONS)) {
@@ -158,7 +169,7 @@ export async function createFirstOrganization(
   who: Guarded,
 ): Promise<{ orgId: string; name: string }> {
   // Serialised per person, so two first-organisation requests cannot both pass.
-  await tx.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR UPDATE', [who.person.id]);
+  await lockForCreation(tx, who.person.id);
   if ((await membershipsOfPerson(tx, who.person.id)).length > 0) {
     throw new OrgRefusal("already_member", "org.has_membership");
   }
@@ -177,7 +188,7 @@ export async function createOrganization(
   body: { name: string },
 ): Promise<{ orgId: string; name: string }> {
   const name = organisationName(body.name);
-  await tx.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR UPDATE', [who.person.id]);
+  await lockForCreation(tx, who.person.id);
   await checkOrganisationAllowance(tx, who);
   await who.confirm({ body: { name }, target: null, organizationId: null });
   await orgs.limits.count(tx, "org_change", who.person.id);

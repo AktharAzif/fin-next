@@ -18,6 +18,7 @@ import { type IssuedCode, issueEnrolmentCode } from "./enrolment-codes.ts";
 import { StaffRefusal } from "./errors.ts";
 import { newId } from "./ids.ts";
 import {
+  type ActorNow,
   actorInsideLock,
   type MemberRow,
   memberForChange,
@@ -37,7 +38,13 @@ function givingRefusal(problem: string): StaffRefusal {
   return new StaffRefusal("giving_refused", `staff.giving.${problem}`, { problem });
 }
 
-async function targetForChange(tx: UnitTx, staffId: string): Promise<MemberRow> {
+/**
+ * The change's target, locked for it; the actor themselves as read inside the lock, unlocked (the
+ * rules then refuse a change aimed at oneself, and lock.ts says why the actor's row is never
+ * locked).
+ */
+async function targetForChange(tx: UnitTx, actor: ActorNow, staffId: string): Promise<MemberRow> {
+  if (staffId === actor.row.id) return actor.row;
   const target = await memberForChange(tx, staffId);
   if (target === null || target.status === "removed") {
     throw new StaffRefusal("not_found", "staff.not_found");
@@ -111,12 +118,15 @@ export async function addStaff(
     newRole,
   });
   if (giving !== null && giving !== "self") throw givingRefusal(giving);
+  // One's own address is refused before the address's row is locked: that row is the actor's own,
+  // which a change never locks (lock.ts).
+  if (giving === "self") throw new StaffRefusal("already_staff", "staff.already_staff");
   const existing = await tx.query<{ id: string; status: MemberRow["status"] }>(
     "SELECT id, status FROM staff.member WHERE email = $1 FOR UPDATE",
     [email],
   );
   const row = existing.rows[0];
-  if (giving === "self" || (row !== undefined && row.status !== "removed")) {
+  if (row !== undefined && row.status !== "removed") {
     throw new StaffRefusal("already_staff", "staff.already_staff");
   }
   const stepUp = await who.stepUp(tx, {
@@ -183,7 +193,7 @@ export async function changeStaffRole(
 ): Promise<{ staffId: string; roleKey: string; roleLabel: string; sessionsEnded: number }> {
   await takeStaffChangeLock(tx);
   const actor = await actorInsideLock(tx, who.staffId, "staff.role");
-  const target = await targetForChange(tx, staffId);
+  const target = await targetForChange(tx, actor, staffId);
   const current = await resolveStaffRole(tx, target.roleKey);
   const next = await resolveStaffRole(tx, input.roleKey);
   const giving = givingProblem(STAFF_CATALOGUE, {
@@ -254,7 +264,7 @@ async function actingOn(
 ): Promise<{ target: MemberRow; current: StaffRoleLookup }> {
   await takeStaffChangeLock(tx);
   const actor = await actorInsideLock(tx, who.staffId, permission);
-  const target = await targetForChange(tx, staffId);
+  const target = await targetForChange(tx, actor, staffId);
   const current = await resolveStaffRole(tx, target.roleKey);
   const acting = actingProblem(STAFF_CATALOGUE, {
     actorPerms: actor.permissions,

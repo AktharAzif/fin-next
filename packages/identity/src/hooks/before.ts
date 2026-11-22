@@ -128,17 +128,27 @@ export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * A ceremony holds its person's row (`FOR NO KEY UPDATE`) before anything reads their session or
- * credentials. Every change that removes a person's factors locks the same row first, `FOR
- * UPDATE`: a staff reset or removal inside the staff-change lock (§10.8, which a role change, ending
- * the sessions, takes too), the operator's bootstrap reset (§10.6), and the last-factor rule's
- * removals (§6.7). So the two never overlap: either the change waits for the ceremony to commit
- * and then ends what it made, or the ceremony waits for the change and then reads the person as
- * the change left them, the credential gone and the session ended (§11.4). Taken first, it also
- * keeps either from waiting on a row the other holds (a passkey's counter, a session). A passkey
- * assertion names its person by its credential; every other ceremony by the session it runs in.
- * A person's own ceremonies queue on it; each is short. (Signing out everywhere else removes no
- * credential, so a ceremony that commits after it is a new sign-in like any other.)
+ * A ceremony holds its person's row `FOR KEY SHARE`, from before anything reads their session or
+ * credentials to its commit. Every change that removes a person's factors or ends their sessions
+ * locks the same row first `FOR UPDATE`, the one mode that conflicts with the hold: a staff reset,
+ * removal or role change inside the staff-change lock (§10.8), the operator's bootstrap reset
+ * (§10.6), and the last-factor rule's removals (§6.7). So the two never overlap: either the change
+ * waits for the ceremony to commit and then ends what it made, or the ceremony waits for the change
+ * and then reads the person as the change left them, the credential gone and the session ended
+ * (§11.4). Taken first, it also keeps either from waiting on a row the other holds (a passkey's
+ * counter, a session).
+ *
+ * Nothing else waits on the hold: neither another ceremony of the person, nor a foreign-key check,
+ * nor the person's own routes, which read and renew their session first and only then write their
+ * row (the name, §14.2) or serialise on it `FOR NO KEY UPDATE` (an organisation's creation, §9.1).
+ * Those must never wait on the hold, because the ceremony writes that session (it renews it, or
+ * replaces it on a step-up) while it holds the row. A staff change never locks its actor's own row
+ * (`@fin/staff`'s lock.ts). A ceremony that writes the row itself later (a sign-in's time, an
+ * enrolment) does so under its own hold, without queueing behind a change that waits for it.
+ *
+ * A passkey assertion names its person by its credential; every other ceremony by the session it
+ * runs in. (Signing out everywhere else removes no credential, so a ceremony that commits after it
+ * is a new sign-in like any other.)
  */
 async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
   if (!CEREMONY_PATHS.has(ctx.path)) return;
@@ -149,7 +159,7 @@ async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promi
     await tx.query(
       `SELECT 1 FROM ${tables.user}
         WHERE id = (SELECT user_id FROM ${tables.passkey} WHERE credential_id = $1)
-          FOR NO KEY UPDATE`,
+          FOR KEY SHARE`,
       [response.id],
     );
     return;
@@ -162,7 +172,7 @@ async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promi
   await tx.query(
     `SELECT 1 FROM ${tables.user}
       WHERE id = (SELECT user_id FROM ${tables.session} WHERE token = $1)
-        FOR NO KEY UPDATE`,
+        FOR KEY SHARE`,
     [token],
   );
 }

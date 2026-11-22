@@ -13,7 +13,10 @@
 //   - A pending member mid-enrolment loses the window; two Admins resetting at once leave one code.
 //   - The member's own ceremonies cannot outlast it: a passkey sign-in or a further passkey that
 //     was in flight when it committed leaves no session and no factor, the code it showed still
-//     enrols the member, and a sign-in that overlaps it cannot make it fail.
+//     enrols the member, a sign-in that overlaps it cannot make it fail, and one that holds the
+//     member's row first finishes and then loses the session it made.
+//   - An Admin's own staff change, sent while their own step-up is in flight from a session due
+//     for renewal, answers as it would alone, and the step-up passes.
 import type { RequestContext } from "@fin/identity";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -30,7 +33,7 @@ import {
   unique,
 } from "../test/harness.ts";
 import type { StaffDeps } from "./deps.ts";
-import { redeemCode, resetStaffFactors } from "./members.ts";
+import { addStaff, changeStaffRole, redeemCode, resetStaffFactors } from "./members.ts";
 import type { UnitTx } from "./ports.ts";
 import { requireStaff } from "./require-staff.ts";
 
@@ -180,9 +183,22 @@ async function assertionFrom(browser: Browser, authenticator: SoftAuthenticator)
   return authenticator.authenticate(String(options.json?.challenge));
 }
 
-/** Waits until `n` backends of this test's database wait for a lock another transaction holds. */
-async function lockWaiters(n: number): Promise<void> {
+/**
+ * Waits until `n` backends of this test's database wait for a lock another transaction holds, or
+ * until `settles` (when given) has settled, whichever comes first.
+ */
+async function lockWaiters(n: number, settles?: Promise<unknown>): Promise<void> {
+  let settled = false;
+  settles?.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
   for (let tries = 0; tries < 1000; tries += 1) {
+    if (settled) return;
     const waiting = await h.admin.query<{ n: number }>(
       `SELECT count(*)::integer AS n FROM pg_stat_activity
         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
@@ -559,6 +575,48 @@ describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)"
     expect(await reaches(device)).toBe("unauthenticated");
   });
 
+  it("waits for a passkey sign-in that holds the member's row, then ends the session it made", async () => {
+    const target = await enrolled("reset.after", "viewer");
+    const intent = await provedIntent(admin, target.staffId);
+    const device = h.browser(accessFor(target.email));
+    const response = await assertionFrom(device, target.authenticator);
+    // Another transaction holds the member's passkey for a moment, so the sign-in stops at its
+    // counter, holding the member's row; the reset queues for that row meanwhile.
+    const blocker = await h.platform.superuser();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM staff.passkey WHERE user_id = $1 FOR UPDATE", [
+        target.staffId,
+      ]);
+      const signingIn = device.auth("POST", "/passkey/verify-authentication", { response });
+      signingIn.catch(() => undefined);
+      await lockWaiters(1);
+      const resetting = h.route(
+        admin.browser,
+        { ...resetPath(target.staffId), intent },
+        resetFn(target.staffId),
+      );
+      resetting.catch(() => undefined);
+      await lockWaiters(2);
+      await blocker.query("ROLLBACK");
+      const [signIn, reset] = await Promise.allSettled([signingIn, resetting]);
+
+      // The sign-in finishes first, writing the member's row as every sign-in does, and the reset
+      // then ends the session it made.
+      expect(signIn).toMatchObject({ status: "fulfilled", value: { status: 200 } });
+      expect(reset).toMatchObject({ status: "fulfilled", value: { status: "pending" } });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+    expect(await reaches(device)).toBe("unauthenticated");
+  });
+
   it("is not made to fail by a passkey sign-in that overlaps it", async () => {
     const target = await enrolled("reset.overlap", "viewer");
     const intent = await provedIntent(admin, target.staffId);
@@ -643,4 +701,94 @@ describe("a reset while the member's own ceremony is in flight (§10.4, §11.4)"
     expect((await registerNewPasskey(browser)).status).toBe(200);
     expect(await memberRow(target.staffId)).toMatchObject({ status: "active" });
   });
+});
+
+describe("a staff change from the Admin's own browser while their own step-up is in flight (§10.8, §11.2)", () => {
+  // The step-up holds the Admin's row from its start and replaces their session at its end. The
+  // change reads that session first, which renews it once its renewal age has passed (§11.1), and
+  // holds the renewed row until it commits; so it must never wait on the Admin's own row after
+  // that, or each would wait on the other.
+  let actor: Member;
+  let other: Member;
+
+  beforeAll(async () => {
+    actor = await enrolled("own.admin", "admin");
+    other = await enrolled("own.other", "viewer");
+  }, 120_000);
+
+  type Change = () => { request: { method: string; path: string; body?: unknown }; fn: RouteFn };
+  const resetOther: Change = () => ({
+    request: resetPath(other.staffId),
+    fn: resetFn(other.staffId),
+  });
+  const resetSelf: Change = () => ({
+    request: resetPath(actor.staffId),
+    fn: resetFn(actor.staffId),
+  });
+  const ownRole: Change = () => ({
+    request: { method: "PATCH", path: `/api/staff/${actor.staffId}`, body: { roleKey: "viewer" } },
+    fn: async (tx, req, ctx) =>
+      changeStaffRole(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+        actor.staffId,
+        { roleKey: "viewer" },
+      ),
+  });
+  const ownAddress: Change = () => ({
+    request: {
+      method: "POST",
+      path: "/api/staff",
+      body: { email: actor.email, roleKey: "viewer" },
+    },
+    fn: async (tx, req, ctx) =>
+      addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
+        email: actor.email,
+        roleKey: "viewer",
+      }),
+  });
+
+  it.each([
+    ["resetting another member", resetOther, "step_up_required"],
+    ["resetting themselves", resetSelf, "giving_refused"],
+    ["changing their own role", ownRole, "giving_refused"],
+    ["adding their own address", ownAddress, "already_staff"],
+  ] as const)(
+    "answers %s as it would alone, and the step-up passes",
+    async (_label, change, code) => {
+      const response = await assertionFrom(actor.browser, actor.authenticator);
+      // The session at its renewal age: a staff session is renewed after 5 of its 60 minutes.
+      await h.fixture(
+        "UPDATE staff.session SET expires_at = now() + interval '3200 seconds' WHERE token = $1",
+        [actor.browser.sessionToken()],
+      );
+      const { request, fn } = change();
+      // Another transaction holds the Admin's passkey for a moment, so the step-up stops at its
+      // counter, holding the Admin's row; the change is sent from the same browser meanwhile.
+      const blocker = await h.platform.superuser();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT 1 FROM staff.passkey WHERE user_id = $1 FOR UPDATE", [
+          actor.staffId,
+        ]);
+        const stepping = actor.browser.auth("POST", "/passkey/verify-authentication", { response });
+        stepping.catch(() => undefined);
+        await lockWaiters(1);
+        const changing = refusalOf(h.route(actor.browser, request, fn));
+        changing.catch(() => undefined);
+        await lockWaiters(2, changing);
+        await blocker.query("ROLLBACK");
+        const [changed, stepped] = await Promise.allSettled([changing, stepping]);
+
+        expect(changed).toMatchObject({ status: "fulfilled", value: { code } });
+        expect(stepped).toMatchObject({ status: "fulfilled", value: { status: 200 } });
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        await blocker.end();
+      }
+      // The step-up replaced the session the change read; the new one works.
+      expect(await reaches(actor.browser)).toBe("none");
+    },
+  );
 });
