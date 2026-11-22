@@ -175,22 +175,27 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
   describe("email.enqueue()", () => {
     it("refuses every template outside each role's folders with FE001, and allows the rest (T08-22)", async () => {
       // Each role's calls share one held client: through the pool, each of the 108 refusals made the
-      // next call log in afresh, about 0.9 s alone here and past 5 s on CI's 4-vCPU runner.
-      for (const role of SENDER_ROLES) {
-        await onOneClient(role, async (client) => {
-          for (const t of TEMPLATES) {
-            const attempt = enqueue(client, {
-              id: newId("eml", clock),
-              template: t.id,
-              recipientKind: "address",
-              recipient: "person@example.com",
-              params: t.sample as Record<string, unknown>,
-            });
-            if (rolesFor(t).includes(role)) await expect(attempt).resolves.toMatch(/^eml_/u);
-            else await expect(attempt).rejects.toMatchObject({ code: "FE001" });
-          }
-        });
-      }
+      // next call log in afresh, about 0.9 s alone here and past 5 s on CI's 4-vCPU runner. The
+      // roles run side by side, each on its own client, so the test waits for one role's chain of
+      // round trips rather than all five in turn: in the full db run it is the file's first test,
+      // while every other package's files start, and the wait between round trips is the time.
+      await Promise.all(
+        SENDER_ROLES.map((role) =>
+          onOneClient(role, async (client) => {
+            for (const t of TEMPLATES) {
+              const attempt = enqueue(client, {
+                id: newId("eml", clock),
+                template: t.id,
+                recipientKind: "address",
+                recipient: "person@example.com",
+                params: t.sample as Record<string, unknown>,
+              });
+              if (rolesFor(t).includes(role)) await expect(attempt).resolves.toMatch(/^eml_/u);
+              else await expect(attempt).rejects.toMatchObject({ code: "FE001" });
+            }
+          }),
+        ),
+      );
       await expect(
         queue("fin_payments", "identity/sign-in-code", { code: "12345678" }),
       ).rejects.toMatchObject({ code: "FE001" });
