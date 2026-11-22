@@ -7,20 +7,25 @@
 // build that carries a harness file as an asset Vite read itself (a worker's
 // `new URL(..., import.meta.url)`, an `?inline` stylesheet's `url()`), inlined or emitted, planted
 // inside the repository so the asset's name is the one a real app's build gives. Each of the
-// guard's three checks refuses on its own. Every real server bundle (apps/*/vite.server.config.ts)
-// carries the guard in a release build, in its main bundle and in every worker's, and still builds,
-// with no module of the harness in its graph and no file of it in its output, as the build itself
-// reports them, built as the release image's build runs `vite build`: in a Node process of its own
-// with no exec arguments, from the app's directory, with NODE_ENV unset (so Vite resolves a
-// production build) and Vite's default config loader (test/release-build.ts). turbo runs these
-// tests on every run, so no cached pass hides a release build that lost the guard; planted apps
-// whose config's helper spreads the guard away (always, only when NODE_ENV is production, or only
-// in the `default` branch of the app's `exports` map, which the test runner's worker does not
+// guard's three checks refuses on its own. Every release server build the images run (each
+// ops/docker Dockerfile's build step, the script it runs and the config file that script names,
+// read by test/image-build.ts, which refuses a script or a step it cannot read) carries the guard,
+// in its main bundle and in every worker's, and still builds, with no module of the harness in its
+// graph and no file of it in its output, as the build itself reports them, and the image's output
+// scan passes over that output. Each is built as the release image's build runs it: in a Node
+// process of its own with no exec arguments, from the package's directory, in the environment the
+// Dockerfile gives the step (so NODE_ENV is unset and Vite resolves a production build) and with
+// Vite's default config loader (test/release-build.ts). An app whose build:server names another
+// config, one without the guard, fails the check (round 2's attacker's reproduction). turbo runs
+// these tests on every run, so no cached pass hides a release build that lost the guard; planted
+// apps whose config's helper spreads the guard away (always, only when NODE_ENV is production, or
+// only in the `default` branch of the app's `exports` map, which the test runner's worker does not
 // take), whose file of re-exports or package's production export loads the harness by a typed
 // glob, whose helper aliases the app's own module to the harness, or whose stylesheet inlines an
 // asset linked to a harness file, fail the same check.
 import { execFile, execFileSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   globSync,
   mkdirSync,
@@ -36,6 +41,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { build, type Plugin } from "vite";
 import { afterAll, describe, expect, it } from "vitest";
+import { type ImageBuild, imageBuilds, runHarnessScan } from "../../test/image-build.ts";
 import type {
   RecordedBundle,
   RecordedOutput,
@@ -440,47 +446,70 @@ interface Inspection extends Omit<Recording, "bundles"> {
 const RELEASE_BUILD = join(REPOSITORY, "packages/server/test/release-build.ts");
 
 /**
- * The environment app.Dockerfile's build-release stage gives `vite build`, built from a short list
- * rather than by removing names from the test runner's: the image's CI=1, FIN_BUILD_TARGET=release
- * and no NODE_ENV (so `vite build` sets it to `production` before it loads the config, and Vite
- * resolves the `development|production` export condition and import.meta.env.PROD as that build
- * does), with PATH and HOME taken from here. NODE_OPTIONS is not among them, so nothing adds
- * Node's exec arguments, and none of the test runner's variables (VITEST and the rest) reach it.
+ * Every release server build the images run, read from the Dockerfiles under ops/docker, the
+ * script each runs and the config file that script names (test/image-build.ts).
  */
-function releaseEnvironment(): Record<string, string> {
-  return {
-    PATH: process.env.PATH ?? "",
-    HOME: process.env.HOME ?? "",
-    CI: "1",
-    FIN_BUILD_TARGET: "release",
-  };
+const IMAGES = imageBuilds(REPOSITORY);
+
+/** A release build to inspect: the config file, the directory it runs from and its environment. */
+type Target = Pick<ImageBuild, "configFile" | "directory" | "environment">;
+
+/**
+ * The environment app.Dockerfile gives its release build step, as test/image-build.ts reads it for
+ * the first app it builds (the ENV of its stages, the app's build argument and the step's
+ * FIN_BUILD_TARGET=release, with no NODE_ENV), for a planted app's build.
+ */
+function appImageEnvironment(): Record<string, string> {
+  const build = IMAGES.builds.find((each) => each.dockerfile === "ops/docker/app.Dockerfile");
+  if (build === undefined) {
+    throw new Error(`app.Dockerfile builds no app: ${IMAGES.refusals.join("; ")}`);
+  }
+  return { ...build.environment };
 }
+
+/** The planted app at `root`, built from its vite.server.config.ts as app.Dockerfile builds one. */
+const planted = (root: string): Target => ({
+  configFile: join(root, "vite.server.config.ts"),
+  directory: root,
+  environment: appImageEnvironment(),
+});
 
 const decode = (output: RecordedOutput): string | Uint8Array =>
   "text" in output ? output.text : new Uint8Array(Buffer.from(output.base64, "base64"));
 
 /**
- * Runs the release build of the server bundle `configFile` describes into a temporary directory,
- * with a recorder added to its plugins and to every worker's, as app.Dockerfile's build-release
- * stage runs `vite build --config` (test/release-build.ts): in a process of its own started with
- * `node` and no exec arguments (this test's worker thread runs with Vitest's `--conditions node
- * --conditions development`, under which Node takes a package's `exports` or `imports` map's
- * `development` branch where a release build takes `default`), with the app's directory as its
- * working directory, in releaseEnvironment() with `env` laid over it (an `undefined` value unsets
- * a name), and with Vite's default config loader, which bundles the config and imports it. A
- * build that fails rejects with its error's message. What still differs from the release build:
- * the recorder in each bundle's plugins and the output's directory, which the recorder needs; the
- * variables `pnpm run` adds for a script (npm_lifecycle_event and the rest), which no app's config
- * reads; and that the image's build runs on Linux from a fresh install. problems() refuses a build
- * that ran with exec arguments or did not resolve as a production build.
+ * Runs the release build of the server bundle that `target`'s config file describes into a
+ * temporary directory, with a recorder added to its plugins and to every worker's, as the image's
+ * build step runs `vite build --config <file>` through pnpm (test/release-build.ts): in a process
+ * of its own started with `node` and no exec arguments (this test's worker thread runs with
+ * Vitest's `--conditions node --conditions development`, under which Node takes a package's
+ * `exports` or `imports` map's `development` branch where a release build takes `default`), with
+ * the package's directory as its working directory, where pnpm runs the script, and with Vite's
+ * default config loader, which bundles the config and imports it. Its environment is the one the
+ * Dockerfile gives the build step (`target.environment`: its stages' ENV, such as CI=1, the app's
+ * build argument and FIN_BUILD_TARGET=release, and no NODE_ENV, so `vite build` sets it to
+ * `production` before it loads the config, and Vite resolves the `development|production` export
+ * condition and import.meta.env.PROD as that build does), with PATH and HOME taken from here and
+ * `env` laid over it (an `undefined` value unsets a name); it is built from that list rather than
+ * by removing names from the test runner's, so NODE_OPTIONS and the runner's variables (VITEST and
+ * the rest) never reach it. A build that fails rejects with its error's message. What still
+ * differs from the release build: the recorder in each bundle's plugins and the output's
+ * directory, which the recorder needs; the base image's own variables and those `pnpm run` adds
+ * for a script (npm_lifecycle_event and the rest), which no app's config reads; and that the
+ * image's build runs on Linux from a fresh install. problems() refuses a build that ran with exec
+ * arguments or did not resolve as a production build.
  */
 async function inspect(
-  configFile: string,
+  target: Target,
   env: Readonly<Record<string, string | undefined>> = {},
 ): Promise<Inspection> {
   const outDir = temporary();
   const resultFile = join(temporary(), "result.json");
-  const environment = releaseEnvironment();
+  const environment: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? "",
+    ...target.environment,
+  };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete environment[name];
     else environment[name] = value;
@@ -488,9 +517,9 @@ async function inspect(
   const stderr = await new Promise<string>((done, fail) => {
     execFile(
       process.execPath,
-      [RELEASE_BUILD, configFile, outDir, resultFile],
+      [RELEASE_BUILD, target.configFile, outDir, resultFile],
       {
-        cwd: dirname(configFile),
+        cwd: target.directory,
         env: environment,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -589,38 +618,38 @@ function serverTestTask(): { cache: boolean } {
   return task.resolvedTaskDefinition;
 }
 
-// These tests read files no list of a task's inputs can name before they exist: any file an app's
-// vite.server.config.ts imports (a helper it spreads into its config), every module of a bundle's
-// graph wherever it lies (a file of re-exports adds no code, so no map names it), every file of
-// packages/testing (harnessContents compares each output with them all), and any file Vite reads
-// itself into a bundle as an asset. A cached pass replayed after a change to one of them could
-// hide a release build that lost the guard and ships the harness. So turbo never caches
+// These tests read files no list of a task's inputs can name before they exist: the Dockerfiles
+// under ops/docker and each app's manifest (which script the image runs, and which config file it
+// names), any file an app's config imports (a helper it spreads into its config), every module of a
+// bundle's graph wherever it lies (a file of re-exports adds no code, so no map names it), every
+// file of packages/testing (harnessContents compares each output with them all), and any file
+// Vite reads itself into a bundle as an asset. A cached pass replayed after a change to one of them
+// could hide a release build that lost the guard and ships the harness. So turbo never caches
 // `@fin/server#test`: the tests run on every `turbo run test`, which costs `pnpm check` the
 // package's whole suite (4 to 16 s on a developer's machine, by its load) even when nothing
-// changed. Each real-bundle test reads the build itself, run as the release build runs (inspect):
-// the plugins each of its bundles ran, every module of each one's graph and its output, as the
-// build reports them.
+// changed. Each real-bundle test builds what an image's build step runs (IMAGES) and reads the
+// build itself, run as that step runs it (inspect): the plugins each of its bundles ran, every
+// module of each one's graph and its output, as the build reports them; and it runs the image's
+// output scan over that output, as the step does right after the build.
 describe("the real server bundles", () => {
-  const configs = globSync("apps/*/vite.server.config.ts", { cwd: REPOSITORY })
-    .map((path) => path.split(sep).join("/"))
-    .sort();
-
-  it("are found", () => {
-    expect(configs.length).toBeGreaterThan(0);
+  it("are every release build the images run, each read from its Dockerfile and script", () => {
+    expect(IMAGES.refusals).toEqual([]);
+    expect(IMAGES.builds.length).toBeGreaterThan(0);
   });
 
   it("are checked on every run of the tests, never by a cached pass", () => {
     expect(serverTestTask().cache).toBe(false);
   }, 30_000);
 
-  it.each(configs)(
-    "%s carries the guard in every bundle of a release build and still builds",
-    async (path) => {
-      const inspection = await inspect(join(REPOSITORY, path));
+  it.each(IMAGES.builds.map((build) => [build.label, build] as const))(
+    "%s carries the guard in every bundle of a release build, still builds, and passes the scan",
+    async (_label, build) => {
+      const inspection = await inspect(build);
       expect(problems(inspection)).toEqual([]);
       expect(existsSync(join(inspection.outDir, "main.js"))).toBe(true);
       const main = inspection.bundles.find((bundle) => !bundle.worker);
       expect(main?.modules).toContain(inspection.entry);
+      expect(runHarnessScan(REPOSITORY, inspection.outDir).status).toBe(0);
     },
     60_000,
   );
@@ -635,11 +664,11 @@ const appManifest = (fields: Readonly<Record<string, unknown>> = {}): Source => 
 /**
  * A planted app that builds from its own vite.server.config.ts as a real app does, with its own
  * package.json (appManifest unless `files` writes one) and `@fin/server`, `@fin/testing` and `vite`
- * linked into its node_modules as pnpm links them; `files` writes each file under its root, given
- * how that file's directory reaches the harness's files.
+ * linked into its node_modules as pnpm links them; `files` writes each file under its root (a new
+ * temporary directory unless `root` names one), given how that file's directory reaches the
+ * harness's files.
  */
-function plantApp(files: Readonly<Record<string, Source>>): string {
-  const root = temporary();
+function plantApp(files: Readonly<Record<string, Source>>, root: string = temporary()): string {
   mkdirSync(join(root, "node_modules/@fin"), { recursive: true });
   symlinkSync(HARNESS, join(root, "node_modules/@fin/testing"), "dir");
   symlinkSync(join(REPOSITORY, "packages/server"), join(root, "node_modules/@fin/server"), "dir");
@@ -799,7 +828,7 @@ const CONDITIONAL_PACKAGE: Record<string, Source> = {
 // in the test runner's worker, whose Node takes the `development` branch. The tests run on every
 // change (above), and each case is what they then report.
 describe("a release build that lost the guard fails the real-bundle check", () => {
-  const config = (root: string) => join(root, "vite.server.config.ts");
+  const config = planted;
   // A file of the harness that Vite inlines as a data: URL (under 4 KiB).
   const small = globSync("src/**/*.ts", { cwd: HARNESS })
     .map((path) => path.split(sep).join("/"))
@@ -979,4 +1008,90 @@ describe("a release build that lost the guard fails the real-bundle check", () =
     expect(inspection.bundles.flatMap((bundle) => bundle.modules)).toContain(barrel);
     expect(mapSources(inspection.outDir)).not.toContain(barrel);
   }, 60_000);
+});
+
+/**
+ * A planted repository holding the real Dockerfiles and pnpm-workspace.yaml, and one app, apps/api,
+ * planted from `files` as plantApp plants one, so test/image-build.ts reads the image's build of it
+ * as it reads a real app's.
+ */
+function plantRepository(files: Readonly<Record<string, Source>>): string {
+  const repository = temporary();
+  const copied = [
+    "pnpm-workspace.yaml",
+    ...globSync("ops/docker/*.Dockerfile", { cwd: REPOSITORY }),
+  ];
+  for (const path of copied) {
+    mkdirSync(dirname(join(repository, path)), { recursive: true });
+    copyFileSync(join(REPOSITORY, path), join(repository, path));
+  }
+  plantApp(files, join(repository, "apps/api"));
+  return repository;
+}
+
+// Round 2's attacker: app.Dockerfile runs `pnpm --filter "@fin/${APP}" run build:server`, not a
+// build of vite.server.config.ts, so an app whose build:server names another config, one without
+// the guard, shipped that config's build while the check, which built vite.server.config.ts by its
+// name, passed. Here apps/api's build:server names vite.bundle.config.ts, which spreads the guard
+// away and aliases the app's own module to the harness's totp.ts; its vite.server.config.ts, which
+// the image no longer runs, is the real apps' config and builds clean. The check builds what the
+// image runs (test/image-build.ts reads the Dockerfile and the script), so it reports the lost
+// guard and the harness in the bundle; and the image's output scan, which the build step runs right
+// after the build, refuses the output, which carries the harness's markers.
+describe("the release build the image runs is the one checked", () => {
+  const BUNDLE_CONFIG: Source = (harness) =>
+    'import { join } from "node:path";\n' +
+    'import { serverBundleConfig } from "@fin/server/vite";\n' +
+    'import { defineConfig } from "vite";\n\n' +
+    "export default defineConfig({\n" +
+    '  ...serverBundleConfig({ root: import.meta.dirname, entry: "src/server.node.ts" }),\n' +
+    "  plugins: [],\n" +
+    "  worker: {},\n" +
+    `  resolve: { alias: { "./codes.ts": join(import.meta.dirname, ${JSON.stringify(
+      harness("src/totp.ts"),
+    )}) } },\n` +
+    "});\n";
+  const SERVER_CONFIG: Source = () =>
+    'import { serverBundleConfig } from "@fin/server/vite";\n' +
+    'import { defineConfig } from "vite";\n\n' +
+    "export default defineConfig(\n" +
+    '  serverBundleConfig({ root: import.meta.dirname, entry: "src/server.node.ts" }),\n' +
+    ");\n";
+
+  it("an app whose build:server names a config without the guard fails the check", async () => {
+    const repository = plantRepository({
+      "package.json": appManifest({
+        name: "@fin/api",
+        scripts: { "build:server": "vite build --config vite.bundle.config.ts" },
+      }),
+      "vite.server.config.ts": SERVER_CONFIG,
+      "vite.bundle.config.ts": BUNDLE_CONFIG,
+      [ENTRY]: () => 'import { totp } from "./codes.ts";\nexport const planted = totp;\n',
+      "src/codes.ts": () => 'export const totp = (): string => "";\n',
+    });
+    const images = imageBuilds(repository);
+    expect(images.refusals).toEqual([]);
+    expect(images.builds.map((build) => [build.label, build.configFile])).toEqual([
+      ["ops/docker/app.Dockerfile, APP=api", join(repository, "apps/api/vite.bundle.config.ts")],
+    ]);
+    const [build] = images.builds;
+    if (build === undefined) throw new Error("the planted repository's image builds nothing");
+    const inspection = await inspect(build);
+    expect(readFileSync(join(inspection.outDir, "main.js"), "utf8")).toContain("function totp(");
+    expect(problems(inspection)).toEqual([
+      "the release config gives a worker's bundle no guard",
+      "the main bundle was built without the guard",
+      "the main bundle holds the harness: packages/testing/src/totp.ts",
+    ]);
+    const scan = runHarnessScan(REPOSITORY, inspection.outDir);
+    expect(scan.status).toBe(1);
+    expect(scan.stderr).toContain("/main.js: a module of the test harness (packages/testing)");
+    expect(scan.stderr).toContain("/main.js.map: a map names a file of the test harness");
+    // The config the image no longer runs builds clean: a check that took it by its name passed.
+    const named = await inspect({
+      ...build,
+      configFile: join(build.directory, "vite.server.config.ts"),
+    });
+    expect(problems(named)).toEqual([]);
+  }, 120_000);
 });

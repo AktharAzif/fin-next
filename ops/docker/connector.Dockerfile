@@ -26,9 +26,11 @@ RUN pnpm fetch --frozen-lockfile
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
-# ---- the supervisor bundle
+# ---- the supervisor bundle, its output scanned for the test harness's markers right after the
+# build over exactly what the release stage copies, as app.Dockerfile's (harness-scan.mjs)
 FROM deps AS build
 RUN FIN_BUILD_TARGET=release pnpm --filter @fin/connector run build \
+    && node ops/docker/harness-scan.mjs apps/connector/dist/server \
     && test -f apps/connector/dist/server/main.js
 
 # ---- release

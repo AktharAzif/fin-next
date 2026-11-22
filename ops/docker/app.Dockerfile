@@ -34,11 +34,15 @@ COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
 # ---- the two bundles
+# The release bundle's output is scanned for the test harness's markers right after its build, in
+# the same RUN, over exactly the directory the release stage copies (harness-scan.mjs): a finding
+# fails this RUN and so the image's build. packages/server's tests pin this step's shape.
 FROM deps AS build-release
 ARG APP
 RUN test -n "${APP}" \
     && test -f "apps/${APP}/vite.server.config.ts" \
     && FIN_BUILD_TARGET=release pnpm --filter "@fin/${APP}" run build:server \
+    && node ops/docker/harness-scan.mjs "apps/${APP}/dist/server" \
     && test -f "apps/${APP}/dist/server/main.js"
 
 FROM deps AS build-test
