@@ -187,7 +187,9 @@ describe("the Dockerfiles' release builds", () => {
    * Runs the build step's RUN text by the Dockerfile's shell, in its environment, from a directory
    * standing for the build context's root (the scan and the app's config file in it), with a
    * stand-in for pnpm first on PATH that records its arguments and writes `main` as the build's
-   * main.js (nothing when undefined).
+   * main.js (nothing when undefined). The RUN's `node` is a link beside the stand-in to the runtime
+   * running this test: Node's own binary, or under the Bun canary Bun's, which runs as Node when
+   * called by that name (as `bun --bun` runs a script's `node`).
    */
   function runRelease(build: ImageBuild, main: string | undefined) {
     const src = temporary();
@@ -204,13 +206,14 @@ describe("the Dockerfiles' release builds", () => {
         'if [ -f planted/main.js ]; then mkdir -p "$PLANTED_OUTPUT" && cp planted/main.js "$PLANTED_OUTPUT/"; fi\n',
       { mode: 0o755 },
     );
+    symlinkSync(process.execPath, join(bin, "node"));
     const [shell, ...flags] = build.shell;
     const run = spawnSync(shell ?? "/bin/sh", [...flags, build.run], {
       cwd: src,
       encoding: "utf8",
       env: {
         ...build.environment,
-        PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),
+        PATH: [bin, "/usr/bin", "/bin"].join(":"),
         PLANTED_ARGS: join(bin, "args"),
         PLANTED_OUTPUT: build.output,
       },

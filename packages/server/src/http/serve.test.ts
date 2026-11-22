@@ -13,6 +13,15 @@ import { apiHeaders } from "./headers.ts";
 import { errorHandler, notFoundHandler, refuse, requestUnit } from "./request.ts";
 import { startHttpServer } from "./serve.ts";
 
+// The Bun canary (DECISIONS CI-10, R15) runs this file under Bun 1.4.5 too, and its failures are
+// recorded (EXECUTION H-14). One is Bun's and not Fin's: Bun's HTTP parser refuses a request target
+// that is not a path (`GET *`) as malformed, answering a bare 400 and closing before any JavaScript
+// runs, where Node's parser hands it on to the front door. Node's parser answers what it cannot
+// read the same bare way (`GET api`), and Fin runs on Node alone (ARCHITECTURE §3.2), so nothing in
+// the server is changed for it. Under Bun such a case asserts Bun's own answer instead, never a
+// skip: if Bun ever hands it on, the canary says so. On Node every case is asserted in full.
+const ON_BUN = typeof process.versions.bun === "string";
+
 async function serve() {
   const proof = randomProof();
   const captured = capture();
@@ -51,7 +60,14 @@ describe("startHttpServer", () => {
   it("answers what the adapter cannot parse through the front door, inside the request unit", async () => {
     const { proof, captured, server } = await serve();
     try {
-      const cases: { head: string; body?: string; status: number; reason: string }[] = [
+      const cases: {
+        head: string;
+        body?: string;
+        status: number;
+        reason: string;
+        /** Bun's parser refuses it before the server's code runs (see ON_BUN). */
+        bunParserRefuses?: true;
+      }[] = [
         {
           head: "GET /api\\x HTTP/1.1\r\nHost: console.example.net\r\n",
           status: 400,
@@ -61,6 +77,7 @@ describe("startHttpServer", () => {
           head: "GET * HTTP/1.1\r\nHost: console.example.net\r\n",
           status: 400,
           reason: "ingress.bad_target",
+          bunParserRefuses: true,
         },
         {
           head: "POST /api\\x HTTP/1.1\r\nHost: console.example.net\r\nContent-Length: 5\r\n",
@@ -80,9 +97,21 @@ describe("startHttpServer", () => {
         },
         { head: "GET /api/x HTTP/1.1\r\n", status: 403, reason: "ingress.proof_missing" },
       ];
-      for (const { head, body: sent, status, reason } of cases) {
+      let bunRefused = 0;
+      for (const { head, body: sent, status, reason, bunParserRefuses } of cases) {
+        const lines = captured.events("request").length;
         const answer = await rawRequest(server.port, `${head}Connection: close\r\n`, sent);
         const label = head.split("\r\n")[0] ?? head;
+        if (ON_BUN && bunParserRefuses === true) {
+          expect(answer, label).toEqual({
+            status: 400,
+            headers: { connection: "close" },
+            body: "",
+          });
+          expect(captured.events("request"), label).toHaveLength(lines);
+          bunRefused += 1;
+          continue;
+        }
         expect(answer.status, label).toBe(status);
         expect(answer.headers["content-type"], label).toBe("application/problem+json");
         expect(answer.headers["request-id"], label).toMatch(/^req_/);
@@ -94,7 +123,7 @@ describe("startHttpServer", () => {
         const line = captured.events("request").at(-1);
         expect(line, label).toMatchObject({ status, outcome: "refused", reason });
       }
-      expect(captured.events("request")).toHaveLength(cases.length);
+      expect(captured.events("request")).toHaveLength(cases.length - bunRefused);
       expect(JSON.stringify(captured.stdout)).not.toContain(proof);
     } finally {
       await server.close(100);
