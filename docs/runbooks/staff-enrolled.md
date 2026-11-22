@@ -34,8 +34,9 @@ Find who by IDs only.
    sessions in Zero Trust.
 3. Read what the session did after enrolling: the staff audit events with that `staffId` as
    actor, by time.
-4. Close it when the enrolment is explained or undone; the incident recovers 15 minutes after the
-   last line.
+4. Close it when the enrolment is explained or undone. The incident closes within about three
+   minutes of the last line, and a later enrolment opens a new incident with its own email, so an
+   expected enrolment never hides an unexpected one: explain or undo each on its own.
 
 ## When to wake the owner
 

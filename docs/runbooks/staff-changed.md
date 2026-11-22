@@ -39,8 +39,10 @@ Find who and why by IDs only.
    member's factors or remove them, and remove their Access entry if the account is not theirs to
    use.
 3. A role raised to Admin that nobody agreed: lower it first, then find out how it was raised.
-4. Close it when the change is explained or undone; the incident recovers 15 minutes after the last
-   change.
+4. Close it when the change is explained or undone. The incident closes within about three minutes
+   of the last change of its kind, and every later change opens a new incident with its own email,
+   one series per kind (`added`, `role_changed`, `removed`, `reset`, and `other` for any other
+   value), so an expected change never hides the next one: explain or undo each on its own.
 
 ## When to wake the owner
 

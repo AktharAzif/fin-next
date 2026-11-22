@@ -51,6 +51,9 @@ export const entries: readonly CatalogEntry[] = [
       "packages/staff's member changes: a member added, their role changed, removed, or their factors reset (spec 02 §10.2)",
     fields: { kind: "string", staffId: "string", actorId: "string" },
     alerts: ["staff-changed"],
+    // A notice of every change: one incident per kind, so a change of one kind never joins the
+    // open incident of another (staff-changed holds the label to the four kinds written).
+    seriesBy: ["kind"],
   },
   {
     event: "staff.permission_refused",

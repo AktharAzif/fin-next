@@ -41,7 +41,9 @@ Find who by IDs only; the line never names the address.
 3. An Access change no registered run explains: someone else changed Fin Admin's outer door. Put
    the policy back with `pnpm fin access apply staging` and treat the Cloudflare operator token as
    exposed (`rotate-cloudflare-operator-token.md`).
-4. Close it when no new line comes; the incident recovers 15 minutes after the last line.
+4. Close it when no new line comes. The incident closes within about three minutes of the last
+   line, and a later line opens a new incident with its own email, so a colleague's visit never
+   hides another identity's: work through each incident on its own.
 
 ## When to wake the owner
 

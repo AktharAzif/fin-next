@@ -40,7 +40,9 @@ Find who by IDs only.
    `pnpm fin access apply staging` (see `access-apply.md`).
 3. Check what the member's session did before it was ended: the staff audit events with that
    `staffId` as actor, by time.
-4. Close it when no new line comes; the incident recovers 15 minutes after the last line.
+4. Close it when no new line comes. The incident closes within about three minutes of the last
+   line, and a later line opens a new incident with its own email, so an explained mismatch never
+   hides a later one: work through each incident on its own.
 
 ## When to wake the owner
 
