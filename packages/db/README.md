@@ -34,7 +34,10 @@ before any statement runs, since an empty grant set would revoke everything.
   sets `FIN_DB_ASSETS_DIR=/app/db-assets` (`IMAGE_ASSETS_DIR`) and copies there, read-only, exactly the
   files the rule finds, laid out as in the source: its `db-assets` stage runs
   `node packages/db/src/assets-cli.ts stage /out/db-assets`, which checks the copy yields the same set
-  byte for byte. Outside the source tree without the variable, `migrate` exits 78 naming it.
+  byte for byte, and then `node ops/docker/harness-scan.mjs --db-assets /out/db-assets`, which fails
+  the image's build on any file or folder outside this rule and on any path containing
+  `packages/testing` (the scan writes the rule again; `assets.test.ts` holds the two equal). Outside
+  the source tree without the variable, `migrate` exits 78 naming it.
 - **The release manifest's migrations** come from `listMigrations(root)`, or, for a script that may
   not import this package, `node packages/db/src/assets-cli.ts migrations`, which prints
   `{"migrations":[…],"minimumSchemaVersion":"<newest>"}`.

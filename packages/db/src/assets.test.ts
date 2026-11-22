@@ -311,6 +311,78 @@ describe("the image (ops/docker/app.Dockerfile)", () => {
     }
   });
 
+  it("scans what it stages in the image scan's database files' mode", () => {
+    const staged = stages
+      .get("db-assets")
+      ?.map((i) => stageCommand.exec(i)?.[1])
+      .find((dir) => dir !== undefined);
+    expect(stages.get("db-assets")?.at(-1)).toBe(
+      `RUN node ops/docker/harness-scan.mjs --db-assets ${staged}`,
+    );
+  });
+
+  // ops/docker/harness-scan.mjs (a control path, Node built-ins only) writes this rule again for the
+  // db-assets stage's scan, which refuses every other file: over a planted tree of the rule's files
+  // and of files beside them, the scan accepts exactly the files discoverDbAssets finds, but for
+  // those under packages/testing, which the rule reads as a package and the scan refuses.
+  it("its scan accepts exactly the files the rule finds, and none of packages/testing", () => {
+    const found = {
+      ...BASE,
+      "packages/orgs/bootstrap/015_orgs_extension.sql": "SELECT 1;",
+      "packages/orgs/migrations/20261121110000_orgs_tables.SQL": `${HEADER}SELECT 1;`,
+      "packages/a-b2/migrations/20261121150000_ab_x.sql": `${HEADER}SELECT 1;`,
+      "packages/identity/grants/identity.json": GRANT("identity"),
+      "packages/db/grants/extra.json": GRANT("extra"),
+    };
+    const testing = {
+      "packages/testing/migrations/20990101000000_testing_seed.sql": `${HEADER}SELECT 1;`,
+      "packages/testing/grants/testing.json": GRANT("testing"),
+    };
+    const beside = {
+      "packages/orgs/README.md": "not a database file",
+      "packages/orgs/migrations/notes.md": "not a migration",
+      "packages/orgs/migrations/x.json": GRANT("x"),
+      "packages/orgs/grants/x.sql": "SELECT 1;",
+      "packages/orgs/seeds/20261121160000_seed.sql": "SELECT 1;",
+      "packages/orgs/roles/grants/orgs-roles.json": GRANT("orgs-roles"),
+      "packages/db/migrations/old/20261121090000_old.sql": "SELECT 1;",
+      "packages/db/roles/x.json": GRANT("x"),
+      "packages/db/src/assets.ts": "export {};",
+      "packages/db/migrations/run.js": "export {};",
+      "packages/Caps/migrations/20261121170000_caps.sql": "SELECT 1;",
+      "packages/9lives/migrations/20261121180000_nine.sql": "SELECT 1;",
+      "packages/x.sql": "SELECT 1;",
+      "elsewhere/migrations/20261121190000_elsewhere.sql": "SELECT 1;",
+      "x.sql": "SELECT 1;",
+    };
+    const root = fixture({ ...found, ...testing, ...beside });
+    const discovered = discoverDbAssets(root);
+    const rule = [...discovered.bootstrap, ...discovered.migrations, ...discovered.grants]
+      .map((f) => f.source)
+      .sort();
+    expect(rule).toEqual(Object.keys({ ...found, ...testing }).sort());
+    let stderr = "";
+    try {
+      execFileSync(
+        process.execPath,
+        [join(ROOT, "ops/docker/harness-scan.mjs"), "--db-assets", root],
+        { encoding: "utf8", stdio: "pipe" },
+      );
+    } catch (error) {
+      stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    }
+    const prefix = `harness-scan: ${root}/`;
+    const refused = new Set(
+      stderr
+        .split("\n")
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => line.slice(prefix.length).split(": ")[0] ?? ""),
+    );
+    const files = Object.keys({ ...found, ...testing, ...beside }).sort();
+    expect(files.filter((file) => !refused.has(file))).toEqual(Object.keys(found).sort());
+    expect(rule.filter((file) => refused.has(file))).toEqual(Object.keys(testing).sort());
+  });
+
   it("builds from a context that holds every one of the files", () => {
     const ignore = readFileSync(join(ROOT, "ops/docker/app.Dockerfile.dockerignore"), "utf8")
       .split("\n")

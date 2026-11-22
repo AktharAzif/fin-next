@@ -14,7 +14,11 @@
 # the api image's `migrate` service reads: exactly the set packages/db/src/assets.ts finds in the
 # source tree, laid out as there.
 
-# ---- deps: the pinned build image, pnpm from its release asset by checksum, the workspace installed
+# ---- deps: the pinned build image, pnpm from its release asset by checksum, the workspace installed.
+# The bundle's build stages and the db-assets stage are built on it, so packages/server's tests
+# (test/image-build.ts) hold it to Node's image by digest and exactly these instructions (any other
+# instruction, RUN step, ENV name, ARG, ADD or COPY is refused), and refuse a workspace manifest
+# with a script pnpm runs on install.
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS deps
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV TURBO_TELEMETRY_DISABLED=1 \
@@ -38,12 +42,16 @@ COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
 # ---- the database's files: every package's bootstrap, migrations and grants, by assets.ts's rule.
-# The release stage copies them beside the bundle (release-allowlist.json names the copy), so the
-# stage's last step scans them for the test harness's markers as the bundle is scanned
-# (harness-scan.mjs): every copy the release stage takes is scanned. packages/server's tests pin it.
+# The release stage copies them beside the bundle (release-allowlist.json names the copy). This
+# stage is exactly the staging command and then the scan in its database files' mode over what it
+# staged, built on deps and run in its directory, and nothing else: packages/server's tests refuse
+# any other step or instruction. The scan (harness-scan.mjs --db-assets) fails this stage, and so
+# the image's build, on any file but a .sql or .json file in the database's folders assets.ts
+# reads, on any other directory, on any path that contains packages/testing, and on the test
+# harness's markers.
 FROM deps AS db-assets
 RUN node packages/db/src/assets-cli.ts stage /out/db-assets
-RUN node ops/docker/harness-scan.mjs /out/db-assets
+RUN node ops/docker/harness-scan.mjs --db-assets /out/db-assets
 
 # ---- the two bundles
 # The release bundle's output is scanned for the test harness's markers right after its build, in
@@ -75,7 +83,9 @@ USER nonroot
 EXPOSE 8080
 CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]
 
-# ---- release: the image that deploys (last, so it is also the default target)
+# ---- release: the image that deploys (last, so it is also the default target). packages/server's
+# tests refuse an ENTRYPOINT, a HEALTHCHECK, an ENV that sets a NODE_* variable, and any CMD but
+# this one: the known Node flags and the bundle's main.js.
 FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531 AS release
 ARG APP
 WORKDIR /app
