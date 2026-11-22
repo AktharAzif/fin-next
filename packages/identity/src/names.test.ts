@@ -71,3 +71,43 @@ describe("checkName", () => {
     expect(JSON.stringify(result)).not.toContain("example.com");
   });
 });
+
+// A Latin modifier letter drawn as punctuation is, in a role name, the punctuation it is drawn as
+// (spec 02 §8.4, the steward's ruling on F2.4): refused unless that is simple punctuation, in the
+// one rule both realms' custom roles are checked by. One drawn as a raised letter stays a letter.
+describe("modifier letters in a role name", () => {
+  it.each([
+    ["Admin\u{1dba}", "U+1DBA MODIFIER LETTER SMALL TURNED V, drawn as ^"],
+    ["Admin\u{2e4}", "U+02E4 MODIFIER LETTER SMALL REVERSED GLOTTAL STOP, drawn as U+02C1"],
+    ["Super\u{1dba}admin", "U+1DBA between the words"],
+    ["Admin\u{2c1}", "U+02C1 MODIFIER LETTER REVERSED GLOTTAL STOP, which folding leaves"],
+    ["Admin\u{1d52}", "U+1D52 MODIFIER LETTER SMALL O, drawn as the degree sign"],
+    ["Admin\u{2c6}", "U+02C6 MODIFIER LETTER CIRCUMFLEX ACCENT, drawn as ^"],
+    ["Admin\u{2d1}", "U+02D1 MODIFIER LETTER HALF TRIANGULAR COLON, drawn as a middle dot"],
+    ["Admin\u{a71d}", "U+A71D MODIFIER LETTER RAISED EXCLAMATION MARK"],
+    ["Admin\u{10782}", "U+10782, which folds to U+02D1"],
+  ])("refuses %j: %s", (name) => {
+    expect(checkName("roleName", name)).toMatchObject({
+      ok: false,
+      reason: "characters",
+      sentence: NAME_RULES.roleName.sentence,
+    });
+  });
+
+  it.each([
+    ["Hawai\u{2bb}i support", "U+02BB MODIFIER LETTER TURNED COMMA, drawn as an apostrophe"],
+    ["Partner\u{2bc}s desk", "U+02BC MODIFIER LETTER APOSTROPHE"],
+    ["Tier\u{2d0} one", "U+02D0 MODIFIER LETTER TRIANGULAR COLON, drawn as a colon"],
+    ["Tier\u{10781} one", "U+10781, which folds to U+02D0"],
+    // MODIFIER LETTER SMALL H, J, R, W, Y, L, S and X, CAPITAL A and B: raised letters.
+    ["\u{2b0}\u{2b2}\u{2b3}\u{2b7}\u{2b8}\u{2e1}\u{2e2}\u{2e3}\u{1d2c}\u{1d2e}", "raised letters"],
+    ["Admin\u{2b0}", "U+02B0 MODIFIER LETTER SMALL H, a raised letter"],
+    ["\u{30de}\u{30cd}\u{30fc}\u{30b8}\u{30e3}\u{30fc}", "kana's long-vowel mark, not Latin"],
+  ])("accepts %j: %s", (name) => {
+    expect(checkName("roleName", name)).toEqual({ ok: true, value: name });
+  });
+
+  it("leaves them as they were in a person's name", () => {
+    expect(checkName("personName", "Sa\u{2bf}id")).toEqual({ ok: true, value: "Sa\u{2bf}id" });
+  });
+});

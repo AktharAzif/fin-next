@@ -1,8 +1,10 @@
 // Names (spec 02 §8.6): what a person may call themselves, an organisation or a role. Letters,
 // numbers and simple punctuation; no invisible or bidirectional controls, no web addresses or
 // bare domains, no runs of 7 or more digits, no word mixing Latin, Cyrillic and Greek letters,
-// and no "Fin" in look-alike letters. Every refusal answers the field's one sentence from the
-// inventory; the reason code is for tests and logs only, never shown.
+// and no "Fin" in look-alike letters. In a role name, a Latin modifier letter drawn as punctuation
+// is that punctuation, so only one drawn as simple punctuation is allowed. Every refusal answers
+// the field's one sentence from the inventory; the reason code is for tests and logs only, never
+// shown.
 
 export type NameKind = "personName" | "organisationName" | "roleName" | "roleDescription";
 
@@ -75,6 +77,65 @@ const LATIN = /\p{Script=Latin}/u;
 const CYRILLIC = /\p{Script=Cyrillic}/u;
 const GREEK = /\p{Script=Greek}/u;
 
+// In a role name, a Latin modifier letter drawn as punctuation is the punctuation it is drawn as
+// (spec 02 §8.4: never a name that reads as a built-in's), so it is allowed only where that is
+// simple punctuation: "Hawaiʻi" keeps its turned comma, drawn as an apostrophe, while "Adminᶺ",
+// whose raised turned v is drawn as "^", is refused as "Admin^" is.
+//
+// Which ones, by Unicode's data alone. A Latin modifier letter is one of general category Lm whose
+// script is Latin, or Common (the one every script shares) with no script extensions or Latin
+// among them; the modifier letters of other scripts' words (kana's long-vowel mark, Arabic's
+// tatweel, Lisu's tones) are not. One is drawn as punctuation when compatibility folding leaves it
+// no other letter (no decomposition, or one to Common modifier letters only: the marks named
+// MODIFIER LETTER PRIME, APOSTROPHE, REVERSED GLOTTAL STOP, CIRCUMFLEX ACCENT, TRIANGULAR COLON,
+// RAISED EXCLAMATION MARK, VERTICAL TILDE and the like), or when Unicode's confusables data
+// (confusables.txt 18.0.0) draws it as punctuation, symbols or Common modifier letters though
+// folding makes it a letter (the last three rows below, as @fin/access's reading of a name has
+// them). Every other one is the letter folding makes of it, raised or lowered, as its name says
+// ("ʰ", MODIFIER LETTER SMALL H; "ᴬ", MODIFIER LETTER CAPITAL A), and stays a letter here. What
+// each is drawn as is the punctuation confusables.txt 18.0.0 draws it as (the rows), or itself.
+const DRAWN_AS: ReadonlyMap<string, string> = new Map([
+  ["\u{2b9}", "'"], // MODIFIER LETTER PRIME
+  ["\u{2ba}", "''"], // MODIFIER LETTER DOUBLE PRIME
+  ["\u{2bb}", "'"], // MODIFIER LETTER TURNED COMMA
+  ["\u{2bc}", "'"], // MODIFIER LETTER APOSTROPHE
+  ["\u{2bd}", "'"], // MODIFIER LETTER REVERSED COMMA
+  ["\u{2be}", "'"], // MODIFIER LETTER RIGHT HALF RING
+  ["\u{2c6}", "^"], // MODIFIER LETTER CIRCUMFLEX ACCENT
+  ["\u{2c8}", "'"], // MODIFIER LETTER VERTICAL LINE
+  ["\u{2ca}", "'"], // MODIFIER LETTER ACUTE ACCENT
+  ["\u{2cb}", "'"], // MODIFIER LETTER GRAVE ACCENT
+  ["\u{2d0}", ":"], // MODIFIER LETTER TRIANGULAR COLON
+  ["\u{2d1}", "\u{b7}"], // MODIFIER LETTER HALF TRIANGULAR COLON, drawn as a middle dot
+  ["\u{2ee}", "''"], // MODIFIER LETTER DOUBLE APOSTROPHE
+  ["\u{2e4}", "\u{2c1}"], // MODIFIER LETTER SMALL REVERSED GLOTTAL STOP, drawn as U+02C1
+  ["\u{1d52}", "\u{b0}"], // MODIFIER LETTER SMALL O, drawn as the degree sign
+  ["\u{1dba}", "^"], // MODIFIER LETTER SMALL TURNED V
+]);
+const MODIFIER_LETTER = /^\p{Lm}$/u;
+const LATIN_OR_SHARED = /^[\p{Script_Extensions=Latin}\p{Script_Extensions=Common}]$/u;
+const SHARED = /^\p{Script=Common}$/u;
+// The punctuation ALLOWED allows.
+const SIMPLE_PUNCTUATION = /^[.,'’\-&()/:!?#+@]+$/u;
+
+/** What a Latin modifier letter drawn as punctuation is drawn as; null for any other character. */
+function punctuationOf(char: string): string | null {
+  if (!MODIFIER_LETTER.test(char) || !LATIN_OR_SHARED.test(char)) return null;
+  const drawn = DRAWN_AS.get(char);
+  if (drawn !== undefined) return drawn;
+  const folding = [...char.normalize("NFKD")];
+  if (!folding.every((c) => MODIFIER_LETTER.test(c) && SHARED.test(c))) return null;
+  return folding.map((c) => DRAWN_AS.get(c) ?? c).join("");
+}
+
+/** Whether a name holds a Latin modifier letter drawn as anything but simple punctuation. */
+function holdsOtherPunctuation(value: string): boolean {
+  return [...value].some((char) => {
+    const drawn = punctuationOf(char);
+    return drawn !== null && !SIMPLE_PUNCTUATION.test(drawn);
+  });
+}
+
 // Look-alikes of F, I and N from Cyrillic, Greek and other blocks, and fullwidth forms.
 const FIN_SKELETON: Readonly<Record<string, string>> = {
   ғ: "f",
@@ -134,6 +195,7 @@ export function checkName(kind: NameKind, input: string): NameResult {
   const words = value.split(" ");
   if (rule.maxWords !== null && words.length > rule.maxWords) return refuse("too_many_words");
   if (!ALLOWED.test(value)) return refuse("characters");
+  if (kind === "roleName" && holdsOtherPunctuation(value)) return refuse("characters");
   if (WEB.test(value) || value.includes("@")) return refuse("web_address");
   if (DIGIT_RUN.test(value.replace(/[\s\-().+]/gu, ""))) return refuse("digits");
   for (const word of value.split(/[\s.,'’\-&()/:!?#+]+/u)) {
