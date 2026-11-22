@@ -51,10 +51,11 @@ const ownerEmail = `owner.${tag}@example.com`;
 const inviteeEmail = `invitee.${tag}@example.com`;
 
 describe("the console's API, end to end", () => {
-  // Genuinely heavy, so a timeout of its own: the whole journey is one test, about 40 requests over
-  // a real socket through the front door, with two code sign-ins, a factor enrolment and four
-  // stepped-up actions with their proofs. Alone it takes 0.9 to 1.4 s; in the full db run on 4
-  // CPUs, 2.4 s to past the 5 s default.
+  // Genuinely heavy, so a timeout of its own: the whole journey is one test, 36 requests over a
+  // real socket through the front door, with two code sign-ins, a factor enrolment and four
+  // stepped-up actions with their proofs; the requests are 95% of its time and nothing waits. On a
+  // 4-CPU fin-ci slice it takes 0.9 to 1.4 s alone and 2.4 s to past the 5 s default in the full
+  // db run; on GitHub's runner, 0.4 s alone and 2.7 and 2.8 s in the full db run.
   it("signs up, enrols a factor, creates an organisation, invites, accepts, changes a role and removes a member", async () => {
     const owner = new Client(api);
 

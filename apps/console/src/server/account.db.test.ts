@@ -18,6 +18,7 @@ import {
   enrolAuthenticator,
   latestCode,
   ORIGIN,
+  type Reply,
   steppedUp,
 } from "../../test/client.ts";
 import { defineConsoleService } from "./main.ts";
@@ -70,16 +71,29 @@ async function events(event: string) {
 }
 
 describe("Account security", () => {
-  it("changes the name behind a window, with its events, and never stores the name in them", async () => {
-    const email = `name.${tag}@example.com`;
-    const me = await signIn(email);
+  // The name change (its event per membership) and the switch of the current organisation need
+  // the same person: signed in with a code, given an authenticator, in a first organisation and in
+  // a second made with a proof. Each test built its own, eight requests through the front door
+  // before its first check (0.2 s alone, 1.2 s in the full db run on GitHub's runner); the two now
+  // share one, built once here. Neither changes what the other relies on: one renames the person,
+  // the other switches their current organisation.
+  let twoOrgs: { me: Client; first: Reply; second: { asked: Reply; done: Reply } };
+
+  beforeAll(async () => {
+    const me = await signIn(`member.${tag}@example.com`);
     await enrolAuthenticator(me);
     const first = await me.call("POST", "/api/orgs/first");
     const second = await steppedUp(database.admin, me, (h) =>
       me.call("POST", "/api/orgs", { name: "Second Team" }, h),
     );
+    twoOrgs = { me, first, second };
+  });
+
+  it("changes the name behind a window, with its events, and never stores the name in them", async () => {
+    const { me, first, second } = twoOrgs;
     expect(second.done.status).toBe(201);
-    // The authenticator's set-up just proved a factor: the window is open for five minutes.
+    // The authenticator's set-up (in the hook) just proved a factor: the window is open for five
+    // minutes.
     const renamed = await me.call("PATCH", "/api/account/name", { name: "Ada Lovelace" });
     expect(renamed.status, JSON.stringify(renamed.json)).toBe(200);
     expect(renamed.json).toEqual({ name: "Ada Lovelace" });
@@ -177,13 +191,7 @@ describe("Account security", () => {
   });
 
   it("switches the current organisation as navigation only, and refuses one the person is not in", async () => {
-    const email = `switch.${tag}@example.com`;
-    const me = await signIn(email);
-    await enrolAuthenticator(me);
-    const first = await me.call("POST", "/api/orgs/first");
-    const second = await steppedUp(database.admin, me, (h) =>
-      me.call("POST", "/api/orgs", { name: "Other Team" }, h),
-    );
+    const { me, first, second } = twoOrgs;
     const before = await database.admin.query("SELECT count(*)::integer AS n FROM audit.event");
     const switched = await me.call("PUT", "/api/viewer/organization", { orgId: first.json.orgId });
     expect(switched.status).toBe(200);
