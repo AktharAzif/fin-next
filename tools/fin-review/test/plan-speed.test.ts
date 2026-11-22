@@ -75,8 +75,11 @@ const BIG_TREE = 4000;
  * both sizes: 3,959 against 209) and a quadratic part about 263 times. Under an uncached check's
  * load (1-minute loads of 27 to 97 on the CI box), every run single-threaded and a process of its
  * own, a planted linear part that takes each case over the limit grew 15.2 to 19.8 times (11
- * cases) and a planted quadratic part 149 to 251 times (8 cases). 48 leaves linear 2.4 times its
- * growth and fails quadratic by 3.1 times.
+ * cases) and a planted quadratic part 149 to 251 times (8 cases). With the links grown as the
+ * files (1-minute loads of 36 to 78), a part linear in the links grew 14.6 to 15.7 times and one
+ * quadratic in the links 160 to 212 (3 cases each); parts in the tree's entries, measured again,
+ * grew 16.0 to 19.4 and 144 to 242 (4 cases each). 48 leaves linear 2.4 times its growth and fails
+ * quadratic by 3.0 times.
  */
 const MAX_GROWTH = 48;
 /** How many runs of each tree a slow plan's times are the fastest of. */
@@ -136,6 +139,12 @@ describe("T-RV-20's speed rule", () => {
       [3162, 38, 97, 10365, 3000, true], // a quadratic part, 300 links on main (measured): 175.0
       [5115, 44, 171, 18964, 3000, true], // a quadratic part, 1,000 files added (measured): 149.0
       [3048, 33, 88, 11967, 3000, true], // a quadratic part, 300 links added (measured): 217.0
+      [6338, 42, 858, 12399, 6000, false], // linear in the links, 300 links on main (measured): 15.1
+      [7238, 45, 1011, 14112, 6000, false], // linear in the links, 1,000 files added (measured): 14.6
+      [7562, 50, 922, 13774, 6000, false], // linear in the links, 300 links added (measured): 15.7
+      [8204, 59, 249, 34798, 6000, true], // quadratic in the links, 300 links on main (measured): 182.8
+      [8706, 52, 285, 37493, 6000, true], // quadratic in the links, 1,000 files added (measured): 160.7
+      [7197, 34, 166, 27953, 6000, true], // quadratic in the links, 300 links added (measured): 211.5
       [3060, 2754, 2826, 3150, 3000, false], // every size slowed alike (the floor counts): 1.2
       [3000, 218, 515, 5831, 3000, false], // a linear part at the limit (modelled): 18.9
       [3000, 160, 222, 11200, 3000, true], // a quadratic part at the limit, behind 20 ms: 178
