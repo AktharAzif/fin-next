@@ -10,12 +10,14 @@
 // repository, however Docker lets the copy name its stage (by index, in quotes, with an escape,
 // after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). It reads
 // the Dockerfile's lines as Docker's parser does, and refuses what Docker would read otherwise
-// (a parser directive, a heredoc, a character outside ASCII). The scan itself finds each of CI's
-// bundle-check harness rules in a planted output
-// (the fin:test-seam marker, a module comment naming packages/testing, as bundle-check's
-// `//#region` and as this build's Vite writes it, `// <path>`, an import of the harness's package,
-// packages/testing in a map's sources, inline or beside the file), refuses a link and a missing or
-// empty output, and passes an honest one.
+// (a parser directive, a heredoc however its lines are continued), a Dockerfile holding any
+// character but printable ASCII, tabs and newlines, and one that names two stages alike (Docker
+// reads the last stage of a name, where a first match would read the first). The scan itself
+// finds each of CI's bundle-check harness rules in a planted output (the fin:test-seam marker, a
+// module comment naming packages/testing, as bundle-check's `//#region` and as this build's Vite
+// writes it, `// <path>`, an import of the harness's package, packages/testing in a map's sources,
+// inline or beside the file), refuses a link and a missing or empty output, and passes an honest
+// one.
 import { spawnSync } from "node:child_process";
 import {
   globSync,
@@ -445,13 +447,28 @@ describe("a changed release build is refused, or followed", () => {
 // Each Dockerfile's release stage changed in a way Docker reads one way, which the reader must read
 // the same way or refuse: a stage named by its index, in quotes, with an escape or after another
 // flag; a --from Docker reads as a source or as the build context; a parent stage's ONBUILD,
-// command or copy from a later stage; and the lines Docker joins or splits otherwise than a plain
-// reading would (a heredoc, a parser directive, a blank line or a form feed in a continuation, a
-// line that is no comment to Docker).
+// command or copy from a later stage; a stage name used twice, which Docker resolves to the last
+// stage of the name; and the lines Docker joins or splits otherwise than a plain reading would (a
+// heredoc, split or not, a parser directive, a blank line in a continuation), with any character
+// but printable ASCII, tab and newline refused outright (a carriage return or a form feed after a
+// line's last escape, a byte-order mark, a Unicode blank after a directive's `#`).
 describe.each([
-  { dockerfile: APP_DOCKERFILE, label: `${APP_DOCKERFILE}, APP=api`, copy: APP_COPY, deps: 0 },
-  { dockerfile: CONNECTOR_DOCKERFILE, label: CONNECTOR_DOCKERFILE, copy: CONNECTOR_COPY, deps: 1 },
-])("$dockerfile's release stage, read as Docker reads it", ({ dockerfile, label, copy, deps }) => {
+  {
+    dockerfile: APP_DOCKERFILE,
+    label: `${APP_DOCKERFILE}, APP=api`,
+    copy: APP_COPY,
+    deps: 0,
+    buildStage: "build-release",
+  },
+  {
+    dockerfile: CONNECTOR_DOCKERFILE,
+    label: CONNECTOR_DOCKERFILE,
+    copy: CONNECTOR_COPY,
+    deps: 1,
+    buildStage: "build",
+  },
+])("$dockerfile's release stage, read as Docker reads it", (planted) => {
+  const { dockerfile, label, copy, deps, buildStage } = planted;
   /** `text` with `from`, which it must hold once, replaced by `to`. */
   const swap = (text: string, from: string, to: string): string => {
     if (text.split(from).length !== 2) throw new Error(`${dockerfile} does not hold ${from} once`);
@@ -468,6 +485,18 @@ describe.each([
   const context = new RegExp(
     `^its ${RELEASE_STAGE} stage copies from the build context on line \\d+$`,
   );
+  /** The refusal of a stage name used twice. */
+  const again = (name: string) =>
+    new RegExp(
+      `^FROM on line \\d+ names the stage ${name} again \\(the FROM on line \\d+ names it first\\), which the test refuses: Docker would read the last stage of a name$`,
+    );
+  /** The refusal of the character `code` (U+XXXX), on line `line` when given. */
+  const outside = (code: string, line?: number) =>
+    new RegExp(
+      `^line ${line ?? "\\d+"} holds U\\+${code}, a character outside printable ASCII, tab and newline, which the test does not read$`,
+    );
+  const heredoc =
+    /^the instruction on line \d+ holds a heredoc \(`<<`\), which the test does not read$/;
 
   it.each<[string, (text: string) => string, string | RegExp]>([
     ["a second copy that names a stage by its index", second(testing(`--from=${deps}`)), twice],
@@ -538,7 +567,14 @@ describe.each([
     [
       "a heredoc, whose lines Docker reads as a file's text",
       second(`COPY <<EOF /app/notes.txt\nFROM scratch AS notes\nEOF\n${testing("--from=deps")}`),
-      /^line \d+ holds a heredoc \(`<<`\), which the test does not read$/,
+      heredoc,
+    ],
+    [
+      "a heredoc whose `<<` is split over a continued line, which Docker joins first",
+      second(
+        `COPY --from=${deps} <\\\n<EOF /app/NOTICE\nFROM scratch AS notes\nEOF\n${testing("--from=deps")}`,
+      ),
+      heredoc,
     ],
     [
       "a blank line in a continued instruction, which Docker skips",
@@ -546,9 +582,19 @@ describe.each([
       twice,
     ],
     [
-      "a form feed after a line's last escape, which Docker does not continue",
+      "a form feed after a line's last escape",
       second(`CMD ["x"] \\\f\n${testing("--from=deps")}`),
-      twice,
+      outside("000C"),
+    ],
+    [
+      "two carriage returns after a line's last escape, which Docker trims and continues",
+      second(`ENV NOTE keep \\\r\r\nFROM deps AS extras\n${testing("--from=deps")}`),
+      outside("000D"),
+    ],
+    [
+      "a Dockerfile whose lines end in a carriage return",
+      (text) => text.replaceAll("\n", "\r\n"),
+      outside("000D", 1),
     ],
     [
       "a line that ends in an escaped escape",
@@ -558,7 +604,49 @@ describe.each([
     [
       "a line that begins with a byte-order mark, which Docker reads as no comment",
       second(`CMD ["x"] \\\n\uFEFF# a note\n${testing("--from=deps")}`),
-      /^line \d+ holds a character outside ASCII, which the test does not read$/,
+      outside("FEFF"),
+    ],
+    [
+      "a syntax directive with a no-break space after its #, which Docker reads as a directive",
+      (text) => `#\u00A0syntax=example.org/frontend\n${text}`,
+      outside("00A0", 1),
+    ],
+    [
+      "an escape directive with a next-line character after its #",
+      (text) => `#\u0085escape=\`\n${text}`,
+      outside("0085", 1),
+    ],
+    ["a character outside ASCII in a comment", second("# A note \u2014 kept.\n"), outside("2014")],
+    [
+      "a character outside ASCII in an instruction",
+      second("LABEL note=caf\u00E9\n"),
+      outside("00E9"),
+    ],
+    [
+      "a later stage that reuses the build stage's name, whose output Docker's copy reads",
+      (text) =>
+        `${text}FROM deps AS ${buildStage}\nRUN FIN_BUILD_TARGET=test pnpm --filter @fin/api run build:server\n`,
+      again(buildStage),
+    ],
+    [
+      "a later stage named release, which Docker's --target builds",
+      (text) => `${text}FROM deps AS Release\n`,
+      again(RELEASE_STAGE),
+    ],
+    [
+      "a stage that reuses the build stage's parent's name",
+      (text) =>
+        swap(
+          text,
+          `FROM deps AS ${buildStage}\n`,
+          `FROM deps AS deps\nRUN rm -rf packages/server\nFROM deps AS ${buildStage}\n`,
+        ),
+      again("deps"),
+    ],
+    [
+      "a stage named by a number, which Docker refuses and the reader uses for unnamed stages",
+      (text) => `${text}FROM deps AS 0\n`,
+      /^FROM on line \d+ names its stage "0", which Docker refuses as a stage's name$/,
     ],
     [
       "an escape directive",

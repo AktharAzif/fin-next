@@ -6,7 +6,9 @@
 //     the one stage of the Dockerfile's own, built from the repository, whose output it copies,
 //     with the file's lines, each instruction's flags and each COPY's --from read as Docker reads
 //     them (a stage by index or by name in any case and quoting, an image only by digest), and a
-//     parent stage that runs a command or copies from the repository refused, as ONBUILD is;
+//     parent stage that runs a command or copies from the repository refused, as ONBUILD is; a
+//     Dockerfile that holds any character but printable ASCII, tabs and newlines, or that names
+//     two stages alike (Docker reads the last), is refused rather than read;
 //     that stage's one RUN, read as a list of steps joined by `&&` (so any step's failure fails
 //     the RUN): `test` checks, exactly one `[NAME=value ...] pnpm --filter <package> run
 //     <script>`, and right after it the output scan, `node ops/docker/harness-scan.mjs <dir>`,
@@ -87,19 +89,24 @@ function fail(message: string): never {
   throw new Unreadable(message);
 }
 
-// The blanks Docker's parser trims a line by and splits an instruction's flags at, in ASCII (a line
-// outside ASCII is refused, so Docker's other blanks never reach the reader).
+// The blanks Docker's parser trims a line by and splits an instruction's flags at, in ASCII (a
+// Dockerfile is read only when it holds nothing but printable ASCII, tabs and newlines, so Docker's
+// other blanks never reach the reader).
 const BLANK = /[\t\n\v\f\r ]/;
 // A parser directive Docker or its frontend may read among the file's first comments.
 const DIRECTIVE = /^[\t\n\v\f\r ]*#[\t\n\v\f\r ]*(?:syntax|escape|check)[\t\n\v\f\r ]*=/i;
+// A character the reader does not read: anything but printable ASCII, a tab or a newline.
+const UNREAD = /[^\t\n\x20-\x7e]/u;
 
 /**
  * The instructions of a Dockerfile, as Docker's parser reads them: comment and blank lines dropped
  * (inside a continued instruction too), and a line that ends in a backslash, then spaces or tabs
- * only, joined to the next one. What Docker would read otherwise is refused: a parser directive
- * (which can change the escape character or the frontend), a heredoc (whose lines are a file's
- * text, not instructions), a line that ends in an escaped escape, and a character outside ASCII
- * (whose blanks Docker and the reader tell apart differently).
+ * only, joined to the next one. A Dockerfile that holds any character but printable ASCII, a tab
+ * or a newline is refused outright (a carriage return, a form feed, a Unicode blank or mark, which
+ * Docker reads otherwise than a plain reading would, in a comment or a parser directive too), and
+ * so is what Docker would read otherwise: a parser directive (which can change the escape
+ * character or the frontend), a heredoc (whose lines are a file's text, not instructions), however
+ * its instruction's lines are continued, and a line that ends in an escaped escape.
  */
 export function dockerInstructions(text: string): Instruction[] {
   const instructions: Instruction[] = [];
@@ -108,24 +115,29 @@ export function dockerInstructions(text: string): Instruction[] {
   const end = () => {
     const joined = parts.join("").trim();
     parts = [];
+    if (joined.includes("<<")) {
+      fail(
+        `the instruction on line ${start} holds a heredoc (\`<<\`), which the test does not read`,
+      );
+    }
     const match = /^([A-Za-z]+)(?:\s+([\s\S]*))?$/.exec(joined);
     if (match?.[1] === undefined) fail(`line ${start} is no instruction`);
     instructions.push({ keyword: match[1].toUpperCase(), text: match[2] ?? "", line: start });
   };
-  for (const [index, raw] of text.split("\n").entries()) {
-    const line = raw.replace(/\r$/, "");
+  for (const [index, line] of text.split("\n").entries()) {
+    const unread = UNREAD.exec(line)?.[0];
+    if (unread !== undefined) {
+      const code = (unread.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0");
+      fail(
+        `line ${index + 1} holds U+${code}, a character outside printable ASCII, tab and newline, which the test does not read`,
+      );
+    }
     if (instructions.length === 0 && parts.length === 0 && DIRECTIVE.test(line)) {
       fail(`line ${index + 1} is a parser directive, which changes how Docker reads the file`);
     }
     if (/^[\t\n\v\f\r ]*(?:#|$)/.test(line)) continue;
-    if (/[\u0080-\uffff]/.test(line)) {
-      fail(`line ${index + 1} holds a character outside ASCII, which the test does not read`);
-    }
     if (/\\\\[ \t]*$/.test(line)) {
       fail(`line ${index + 1} ends in an escaped escape, which the test does not read`);
-    }
-    if (line.includes("<<")) {
-      fail(`line ${index + 1} holds a heredoc (\`<<\`), which the test does not read`);
     }
     if (parts.length === 0) start = index + 1;
     const continued = /\\[ \t]*$/.test(line);
@@ -325,6 +337,9 @@ function copySource(copy: Instruction, stages: readonly Stage[]): Stage | "image
   );
 }
 
+// A stage's name as Docker accepts one, in lower case.
+const STAGE_NAME = /^[a-z][a-z0-9_.-]*$/;
+
 function stagesOf(instructions: readonly Instruction[]): Stage[] {
   const stages: Stage[] = [];
   const bases: { base: string; line: number }[] = [];
@@ -342,6 +357,22 @@ function stagesOf(instructions: readonly Instruction[]): Stage[] {
         (words.length !== 1 && (words.length !== 3 || as?.toUpperCase() !== "AS"))
       ) {
         fail(`FROM on line ${instruction.line} is not \`FROM <image> [AS <name>]\``);
+      }
+      if (name !== undefined) {
+        // Docker reads a stage name in any case, refuses one that is not of this form, and lets a
+        // later stage of a name replace an earlier one (with a warning only): the reader, which
+        // would read the first, refuses a name used twice.
+        if (!STAGE_NAME.test(name.toLowerCase())) {
+          fail(
+            `FROM on line ${instruction.line} names its stage ${JSON.stringify(name)}, which Docker refuses as a stage's name`,
+          );
+        }
+        const earlier = stages.findIndex((each) => each.name === name.toLowerCase());
+        if (earlier !== -1) {
+          fail(
+            `FROM on line ${instruction.line} names the stage ${name.toLowerCase()} again (the FROM on line ${bases[earlier]?.line} names it first), which the test refuses: Docker would read the last stage of a name`,
+          );
+        }
       }
       stages.push({
         name: (name ?? String(stages.length)).toLowerCase(),

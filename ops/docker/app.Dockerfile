@@ -1,5 +1,6 @@
-# The Fin Node images: fin-next-edge, -api, -payments, -console, -admin and -verify (spec 01 §4.9;
-# ARCHITECTURE §3.5; [SA-38]). One Dockerfile, ARG APP, two targets built from the same sources:
+# The Fin Node images: fin-next-edge, -api, -payments, -console, -admin and -verify (spec 01
+# section 4.9; ARCHITECTURE section 3.5; [SA-38]). One Dockerfile, ARG APP, two targets built
+# from the same sources:
 #   release  the only target pushed to GHCR, attested and deployed; it holds no seam, and its bundle
 #            (built with FIN_BUILD_TARGET=release) exits 78 when any FIN_SEAM_* variable is set;
 #   test     the bundle built with FIN_BUILD_TARGET=test, for CI's journeys; it refuses to start
@@ -16,9 +17,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV TURBO_TELEMETRY_DISABLED=1 \
     CI=1
 WORKDIR /src
-# pnpm 12.21.0, the linux-x64 release asset checked against its SHA-256 (spec 01 §4.1): never
-# Corepack, never npm i -g. The asset's name and layout (a tarball holding `pnpm` and `dist/`, as the
-# other platforms' assets do) are confirmed by CI's first image build.
+# pnpm 12.21.0, the linux-x64 release asset checked against its SHA-256 (spec 01 section 4.1):
+# never Corepack, never npm i -g. The asset's name and layout (a tarball holding `pnpm` and
+# `dist/`, as the other platforms' assets do) are confirmed by CI's first image build.
 ADD --checksum=sha256:84c4773bcf4a217f4083cd7b2a91e4cee6103cf42426c1282ef37d308f55a410 \
     https://github.com/pnpm/pnpm/releases/download/v12.21.0/pnpm-linux-x64.tar.gz /tmp/pnpm.tar.gz
 RUN mkdir -p /opt/pnpm \
