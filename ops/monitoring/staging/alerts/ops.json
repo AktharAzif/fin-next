@@ -1,0 +1,26 @@
+{
+  "$comment": "The operations alerts (spec 08 §7.8 group I): switch-changed, a kill switch set or cleared by a person. Fin Admin's switches route (packages/staff, ARCHITECTURE §15.1) writes switch.set or switch.cleared on admin, in the unit that calls ops.set_switch() and records the audit event; one series, so no field of the line becomes a label; the operator's `pnpm fin switch` joins the sources when it is built. The rest of group I comes with the lines that feed it.",
+  "alerts": [
+    {
+      "name": "switch-changed",
+      "group": "I",
+      "severity": "N",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["switch.set", "switch.cleared"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A person set or cleared a kill switch from Fin Admin: the work it names stops or starts again. Changes: {{value}}.",
+      "metadata": {
+        "check": "Who and why: the switch.set or switch.cleared event in the staff audit log (actor, the switch as target, reasonCode), and the line's switch, reasonCode and staffId.",
+        "flow": "F23",
+        "runbook": "docs/runbooks/kill-switches.md"
+      }
+    }
+  ]
+}
