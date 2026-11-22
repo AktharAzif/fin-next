@@ -135,16 +135,50 @@ describe("the alerts the steward ruled real failure modes", () => {
     });
     const sql = alert === undefined ? "" : renderSql(alert);
     expect(sql).toContain("NOT (JSONExtractString(raw, 'class') = 'blocked')");
-    expect(sql).toContain("JSONExtractString(raw, 'service') AS series");
+    expect(sql).toContain(`, ${bounded("service", ["console", "admin", "verify"])} AS series`);
   });
 
-  it("open one incident per reason, and per budget scope and share", () => {
-    expect(rule("security-email-unsent")?.seriesBy).toBe("reason");
-    expect(rule("email-budget-reached")?.seriesBy).toEqual(["scope", "share"]);
+  it("open one incident per reason, per budget scope and share, and per service, each label held to a closed set", () => {
+    expect(rule("security-email-unsent")?.seriesBy).toEqual([{ field: "reason", oneOf: REASONS }]);
+    expect(rule("email-budget-reached")?.seriesBy).toEqual([
+      { field: "scope", oneOf: SCOPES },
+      { field: "share", oneOf: SHARES },
+    ]);
+    expect(rule("auth-endpoint-unlisted")?.seriesBy).toEqual([
+      { field: "service", oneOf: ["console", "admin", "verify"] },
+    ]);
     expect(rule("access-keys-unavailable")?.seriesBy).toBeUndefined();
-    const budget = rule("email-budget-reached");
-    expect(budget === undefined ? "" : renderSql(budget)).toContain(
-      "concat(JSONExtractString(raw, 'scope'), '/', JSONExtractString(raw, 'share')) AS series",
+    const sql = (name: string) => {
+      const alert = rule(name);
+      return alert === undefined ? "" : renderSql(alert);
+    };
+    expect(sql("security-email-unsent")).toContain(`, ${bounded("reason", REASONS)} AS series`);
+    expect(sql("email-budget-reached")).toContain(
+      `, concat(${bounded("scope", SCOPES)}, '/', ${bounded("share", SHARES)}) AS series`,
     );
   });
 });
+
+/**
+ * email.security_unsent's reasons: the sender's (packages/email: budget, failed, and a row's end,
+ * suppressed or invalid_recipient) and the queue-time ones of identity's, staff's and
+ * organisations' notices (not_allowed, enqueue_failed, params_refused).
+ */
+const REASONS = [
+  "budget",
+  "enqueue_failed",
+  "failed",
+  "invalid_recipient",
+  "not_allowed",
+  "params_refused",
+  "suppressed",
+];
+/** email.budget_reached's scope, and its share: the sender's early warning and BudgetShare. */
+const SCOPES = ["environment", "organisation"];
+const SHARES = ["account_only", "all", "code_only", "ordinary", "security", "security_only"];
+
+/** A series label held to `values`: the line's value when it is one of them, else `other`. */
+function bounded(field: string, values: readonly string[]): string {
+  const value = `JSONExtractString(raw, '${field}')`;
+  return `if(${value} IN (${values.map((v) => `'${v}'`).join(", ")}), ${value}, 'other')`;
+}

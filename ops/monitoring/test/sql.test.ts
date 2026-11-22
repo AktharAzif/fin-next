@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type AlertDef, loadEnv } from "../src/config.ts";
-import { condition, QueryError, renderSql } from "../src/sql.ts";
+import { type AlertDef, loadEnv, type SeriesField } from "../src/config.ts";
+import { condition, QueryError, renderSql, seriesFields } from "../src/sql.ts";
 
 const base: AlertDef = {
   name: "x",
@@ -102,6 +102,45 @@ describe("renderSql", () => {
     expect(sql).toContain("GROUP BY time, series");
     expect(() => renderSql({ ...base, seriesBy: [] })).toThrow(QueryError);
     expect(() => renderSql({ ...base, seriesBy: ["target", "it's"] })).toThrow(QueryError);
+  });
+
+  it("holds a bounded series field to its set or its shape, and gives any other value the one label other", () => {
+    const sql = renderSql({
+      ...base,
+      sources: ["api", "console"],
+      seriesBy: [
+        { field: "service", oneOf: ["api", "console"] },
+        { field: "sqlstate", shape: "sqlstate" },
+      ],
+    });
+    expect(sql).toContain(
+      "concat(if(JSONExtractString(raw, 'service') IN ('api', 'console'), JSONExtractString(raw, 'service'), 'other'), '/', if(match(JSONExtractString(raw, 'sqlstate'), '^[0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]$'), JSONExtractString(raw, 'sqlstate'), 'other')) AS series",
+    );
+    expect(seriesFields({ ...base, seriesBy: [{ field: "sqlstate", shape: "sqlstate" }] })).toEqual(
+      ["sqlstate"],
+    );
+  });
+
+  it("refuses a bounded series field it cannot hold to a closed set of labels", () => {
+    const bad: unknown[] = [
+      { field: "x" },
+      { field: "x", oneOf: ["a"], shape: "sqlstate" },
+      { field: "x", oneOf: [] },
+      { field: "x", oneOf: ["other"] },
+      { field: "x", oneOf: ["a/b"] },
+      { field: "x", oneOf: ["it's"] },
+      { field: "x", oneOf: [1] },
+      { field: "x", shape: "anything" },
+      { field: "it's", shape: "sqlstate" },
+      { oneOf: ["a"] },
+      null,
+    ];
+    for (const field of bad) {
+      expect(
+        () => renderSql({ ...base, seriesBy: [field as SeriesField] }),
+        JSON.stringify(field),
+      ).toThrow(QueryError);
+    }
   });
 });
 

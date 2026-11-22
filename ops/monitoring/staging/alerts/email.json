@@ -1,5 +1,5 @@
 {
-  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G), with security-email-unsent and email-budget-reached by the steward's ruling of 22 Nov. security-email-unsent reads the sender's lines on worker and identity's queue-time lines on console and admin, one incident per reason; email-budget-reached has one incident per scope and share, so an organisation's ceiling never hides the environment's budget. L-SAT-05 extends this fragment with the rest of group G.",
+  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G), with security-email-unsent and email-budget-reached by the steward's ruling of 22 Nov. security-email-unsent reads the sender's lines on worker and identity's queue-time lines on console and admin, one incident per reason; email-budget-reached has one incident per scope and share, so an organisation's ceiling never hides the environment's budget. Each label is held to the closed set of values the code writes (the sender's reasons, and the queue-time reasons of identity's, staff's and organisations' notices; the budget's scopes and shares), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. L-SAT-05 extends this fragment with the rest of group G.",
   "alerts": [
     {
       "name": "email-not-sent",
@@ -82,7 +82,20 @@
       "group": "G",
       "severity": "P",
       "sources": ["worker", "console", "admin"],
-      "seriesBy": "reason",
+      "seriesBy": [
+        {
+          "field": "reason",
+          "oneOf": [
+            "budget",
+            "enqueue_failed",
+            "failed",
+            "invalid_recipient",
+            "not_allowed",
+            "params_refused",
+            "suppressed"
+          ]
+        }
+      ],
       "query": { "count": { "events": ["email.security_unsent"] } },
       "operator": "higher_than",
       "threshold": "@any",
@@ -104,7 +117,13 @@
       "group": "G",
       "severity": "N",
       "sources": ["worker"],
-      "seriesBy": ["scope", "share"],
+      "seriesBy": [
+        { "field": "scope", "oneOf": ["environment", "organisation"] },
+        {
+          "field": "share",
+          "oneOf": ["account_only", "all", "code_only", "ordinary", "security", "security_only"]
+        }
+      ],
       "query": { "count": { "events": ["email.budget_reached"] } },
       "operator": "higher_than",
       "threshold": "@any",

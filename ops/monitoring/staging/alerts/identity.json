@@ -1,11 +1,12 @@
 {
-  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed.",
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`.",
   "alerts": [
     {
       "name": "auth-endpoint-unlisted",
       "group": "C",
       "severity": "N",
       "sources": ["console", "admin", "verify"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin", "verify"] }],
       "query": {
         "count": {
           "events": ["auth.endpoint_blocked"],
