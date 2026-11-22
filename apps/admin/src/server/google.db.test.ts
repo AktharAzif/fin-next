@@ -212,12 +212,14 @@ describe("staff Google switched off", () => {
     );
     expect(callback.status).toBe(404);
     // The staff realm's endpoint policy answered both, not the library (whose own 404 for a
-    // provider it does not have carries a body): an empty answer, and each path lined as blocked.
+    // provider it does not have carries a body): an empty answer, and each path lined by the
+    // policy's step: the start as blocked, and the callback as unlisted, since `/callback/google`
+    // stands for the `/callback/:id` rule only while staff Google is on.
     expect(start.json).toBeNull();
     expect(callback.json).toBeNull();
     expect(offHost.captured.events("auth.endpoint_blocked").slice(blocked)).toEqual([
       expect.objectContaining({ realm: "staff", class: "blocked" }),
-      expect.objectContaining({ realm: "staff", class: "blocked" }),
+      expect.objectContaining({ realm: "staff", class: "unlisted" }),
     ]);
   });
 });
