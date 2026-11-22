@@ -23,11 +23,19 @@
 // every size), measured as the plan of a minimal tree (the fixture's skeleton alone, with one file
 // changed) and taken off both sizes. Each of those times is the fastest of three runs, the trees
 // taking turns: a run on one of the machine's slower cores takes more CPU time for the same work.
-// A first run under the limit already decides the case, so each case runs the plan once unless it
-// is slow. Sixteen times apart, a linear part grows about 19 times and a quadratic one about 263,
+// A first run under the limit already decides the case's speed: only a slow case times the other
+// trees. Sixteen times apart, a linear part grows about 19 times and a quadratic one about 263,
 // fourteen times as much; eight times apart (250 to 2,000) it was seven times as much, and under
 // an uncached check's load the least quadratic growth measured was only about three times the
 // greatest linear one, which leaves no threshold both its margins.
+//
+// A case's shape grows its links with its files: 38 links on 250 files and 608 on 4,000 (63 and
+// 1,008 for the thousand files added), so a part quadratic in the links grows about 256 times as
+// well; links kept as many as at 2,000 files grew only about 8 times, and such a part about 62.
+// Every case plans its shape once on each of the two trees, slow or not, and each must take the
+// 2,000-file plan's path: the same everything and reason, and the links within the plan's caps or
+// past them alike, since a shape past the caps where the case keeps within them would skip the
+// work on the link paths that the case is timed on.
 //
 // Every timed run starts Node with TIMED_NODE_FLAGS (V8 single-threaded), so that work V8 moves
 // to its helper threads when they get a core, and does on the timed thread when they do not, is
@@ -78,6 +86,8 @@ const RUNS = 3;
  * difference lost in the noise of two readings cannot inflate the growth.
  */
 const FLOOR_SHARE = 1 / 8;
+/** What the plan notes when the links reach a change's paths past its caps (src/plan/plan.ts). */
+const PAST_LINK_CAPS = "by more paths or longer chains than the plan follows";
 
 /** The growth of the fastest times from the 250-file tree to the 4,000, net of the start. */
 function netGrowth(startMs: number, smallMs: number, bigMs: number): number {
@@ -182,8 +192,8 @@ describe("T-RV-20: plan speed", () => {
     return ["plan", "--base", change.base, "--head", change.head, "--tree", tmp.dir];
   }
 
-  /** The plan of `change` in a process of its own, and its CPU time; killed only by a hang. */
-  function timedPlan(change: Change): { document: PlanDocument; cpuMs: number } {
+  /** `change`'s plan in a process of its own, its notes and its CPU time; killed only by a hang. */
+  function timedPlan(change: Change): { document: PlanDocument; notes: string; cpuMs: number } {
     const run = spawnCli(planArgs(change), {
       main: TIMED_CLI,
       nodeFlags: TIMED_NODE_FLAGS,
@@ -193,7 +203,16 @@ describe("T-RV-20: plan speed", () => {
     assert.equal(run.code, 0, run.stderr);
     const timed = JSON.parse(run.stdout) as TimedCliRun;
     assert.equal(timed.code, 0, timed.stderr);
-    return { document: JSON.parse(timed.stdout) as PlanDocument, cpuMs: timed.cpuMs };
+    return {
+      document: JSON.parse(timed.stdout) as PlanDocument,
+      notes: timed.stderr,
+      cpuMs: timed.cpuMs,
+    };
+  }
+
+  /** A plan's path: whether it runs everything and why, and whether the links passed its caps. */
+  function planPath(run: { document: PlanDocument; notes: string }): [boolean, string, boolean] {
+    return [run.document.everything, run.document.reason, run.notes.includes(PAST_LINK_CAPS)];
   }
 
   /** The base and head of a fixture of `fileCount` files, committed. */
@@ -217,15 +236,27 @@ describe("T-RV-20: plan speed", () => {
   }
 
   /**
-   * Plans `large`, the case's change on the 2,000-file tree, and judges its speed: when that run
-   * is over the limit, the fastest CPU times of three runs each of the minimal change and of the
-   * case's shape at 250 and at 4,000 files (made only then), each in a process of its own, must
-   * pass tooSlow. Returns the first run's plan, for the case's own checks.
+   * Plans `large`, the case's change on the 2,000-file tree, checks that the case's shape at 250
+   * and at 4,000 files takes that plan's path, and judges its speed: when the first run is over
+   * the limit, the fastest CPU times of three runs each of the minimal change and of the two
+   * shapes, each in a process of its own, must pass tooSlow. Returns the first run's plan, for the
+   * case's own checks.
    */
   function judgedPlan(large: Change, shape: Shape): PlanDocument {
     const first = timedPlan(large);
+    const [small, big] = [shape.small(), shape.big()];
+    for (const [files, change] of [
+      [SMALL_TREE, small],
+      [BIG_TREE, big],
+    ] as const) {
+      assert.deepEqual(
+        planPath(timedPlan(change)),
+        planPath(first),
+        `the shape at ${files} files takes the path of the plan at ${LIMIT_TREE}`,
+      );
+    }
     if (first.cpuMs < LIMIT_MS) return first.document;
-    const [minimal, small, big] = [minimalChange(), shape.small(), shape.big()];
+    const minimal = minimalChange();
     let startMs = Number.POSITIVE_INFINITY;
     let smallMs = Number.POSITIVE_INFINITY;
     let bigMs = Number.POSITIVE_INFINITY;
@@ -274,11 +305,12 @@ describe("T-RV-20: plan speed", () => {
     });
 
     it(`plans the wide change through 300 links on main in under ${LIMIT_MS} ms of CPU, or in linear time`, () => {
-      // At 4,000 files the links are as many and fewer of them reach packages/core/src, so the
-      // change's link paths stay within the caps there too.
+      // At 4,000 files the links are sixteen times those at 250, and only 4 of them reach
+      // packages/core/src, so the change's link paths stay within the caps there too (about
+      // 1,660 of the 2,000 a change may have).
       const document = judgedPlan(linked, {
         small: () => commitFixture(SMALL_TREE, { links: 38, coreLinks: 3, addedToCore: 3 }),
-        big: () => commitFixture(BIG_TREE, { links: 300, coreLinks: 10, addedToCore: 40 }),
+        big: () => commitFixture(BIG_TREE, { links: 608, coreLinks: 4, addedToCore: 40 }),
       });
       assert.deepEqual(
         [document.tier, document.everything, document.reason],
@@ -289,10 +321,11 @@ describe("T-RV-20: plan speed", () => {
 
     it(`plans a thousand files added where 63 links reach in under ${LIMIT_MS} ms of CPU, or in linear time`, () => {
       // The other trees keep the shape: 63 links reach each of the files added, more link paths
-      // than the plan follows in a change.
+      // than the plan follows in a change, and the links are sixteen times as many at 4,000 files
+      // as at 250.
       const document = judgedPlan(many, {
         small: () => commitFixture(SMALL_TREE, { links: 63, coreLinks: 63, addedToCore: 125 }),
-        big: () => commitFixture(BIG_TREE, { links: 463, coreLinks: 63, addedToCore: 2000 }),
+        big: () => commitFixture(BIG_TREE, { links: 1008, coreLinks: 63, addedToCore: 2000 }),
       });
       assert.ok(document.changed > 1200, `changed ${document.changed}`);
       assert.deepEqual(
@@ -304,11 +337,14 @@ describe("T-RV-20: plan speed", () => {
 
     it(`plans a change that adds 300 links in under ${LIMIT_MS} ms of CPU, or in linear time`, () => {
       const added = repo.commit(head, fixtureLinks(300, 20));
+      // At 4,000 files the change adds sixteen times the links it adds at 250, and only 4 of them
+      // reach packages/core/src, so its link paths stay within the caps as at 2,000 (about 1,900
+      // of the 2,000 a change may have).
       const document = judgedPlan(
         { base, head: added },
         {
           small: () => withLinks(commitFixture(SMALL_TREE, { addedToCore: 3 }), 38, 3),
-          big: () => withLinks(commitFixture(BIG_TREE, { addedToCore: 40 }), 300, 20),
+          big: () => withLinks(commitFixture(BIG_TREE, { addedToCore: 40 }), 608, 4),
         },
       );
       assert.deepEqual([document.everything, document.reason], [true, "link"]);
