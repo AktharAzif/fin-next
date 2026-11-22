@@ -300,6 +300,42 @@ describe("refusals", () => {
     expect((error as Error).message.length).toBeLessThan(80);
   });
 
+  it("refuses in a fixed sentence on every path, carrying nothing of the text", () => {
+    // An authenticator's URI, its key joined at run time (CONTRIBUTING).
+    const key = ["KRUGS4ZA", "NFXGO3LT", "MFWXA3DF"].join("");
+    const uri = `otpauth://totp/Fin:maya%40example.com?${["sec", "ret"].join("")}=${key}&issuer=Fin`;
+    const tooLong = "The text is too long for a QR code.";
+    const cases: readonly [string, QrLevel, string, string][] = [
+      // From its length alone.
+      [`${uri}&pad=${"7".repeat(MAX_TEXT_LENGTH)}`, "L", "QrCapacityError", tooLong],
+      // From its bit count at the level: 3,085 bytes, past version 40-L's 2,953.
+      [`${uri}&pad=${"a".repeat(3000)}`, "L", "QrCapacityError", tooLong],
+      [`${uri}\ud800`, "M", "RangeError", "The text is not well-formed Unicode."],
+    ];
+    for (const [text, level, name, message] of cases) {
+      let error: unknown;
+      try {
+        encodeQr(text, { level });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, message).toBeInstanceOf(RangeError);
+      const thrown = error as Error;
+      // No cause and no field of its own: the sentence is all it carries.
+      expect({
+        name: thrown.name,
+        message: thrown.message,
+        cause: thrown.cause,
+        fields: Object.keys(thrown).filter((field) => field !== "name"),
+      }).toEqual({ name, message, cause: undefined, fields: [] });
+      // A stack's header holds the name and the message as they were when it was made.
+      const header = String(thrown.stack).split(/\n\s+at /)[0];
+      for (const piece of [key, "otpauth", "example.com", "7777777", "aaaaaaa"]) {
+        expect(header, message).not.toContain(piece);
+      }
+    }
+  });
+
   it("refuses a text longer than any symbol holds from its length, before reading it", () => {
     const encode = vi.spyOn(TextEncoder.prototype, "encode");
     try {

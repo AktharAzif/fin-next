@@ -69,6 +69,7 @@ import {
 } from "../src/index.ts";
 import { PolicyProbes } from "../src/kit.tsx";
 import { QrSection } from "./qr.tsx";
+import { bodyReporter } from "./reports.ts";
 
 function Section(props: { name: string; title: string; children: ReactNode }) {
   return (
@@ -402,8 +403,10 @@ export function Kit(props: { onReady: () => void }) {
   const [tab, setTab] = useState("overview");
   const [checked, setChecked] = useState<boolean | "indeterminate">("indeterminate");
   const [theme, setTheme] = useState("system");
+  // Keeps what each report carried, not only that there was one, so the spec can read it.
+  const [report] = useState(bodyReporter);
   return (
-    <FailureReporterProvider report={() => document.body.setAttribute("data-reported", "")}>
+    <FailureReporterProvider report={report}>
       <TooltipProvider delay={300}>
         <div className="mx-auto flex max-w-drawer-l flex-col gap-12 p-4 sm:p-8">
           <PageHeader

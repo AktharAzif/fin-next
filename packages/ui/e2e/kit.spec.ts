@@ -25,6 +25,16 @@ const section = (page: Page, name: string) => page.locator(`section[data-kit="${
 const toasts = (page: Page) => page.getByRole("region", { name: "Notifications" });
 
 /**
+ * The page's one report so far, as its reporter kept it (kit/reports.ts): the control passed on
+ * the action's own error with the caller's IDs (none in the kit), and added nothing of its own.
+ */
+async function expectReported(page: Page, message: string) {
+  await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+  const log = (await page.locator("body").getAttribute("data-report-log")) ?? "";
+  expect(JSON.parse(log)).toEqual([{ name: "Error", message, cause: null, fields: {}, ids: {} }]);
+}
+
+/**
  * Focus as the keyboard gives it: tooltips and focus rings answer keyboard focus, not a click.
  * A key press first sets the keyboard modality; then focus moves (Tab does not reach buttons in
  * every WebKit build, so the spec moves it directly).
@@ -309,13 +319,13 @@ test.describe("the components @kit", () => {
     await expect(pending).toBeFocused();
     await expect(pending).not.toHaveAttribute("data-pending", "", { timeout: 3000 });
     await page.locator('[data-kit="throwing-button"]').click();
-    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expectReported(page, "kit failure");
     await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
   test("a text button's failure is reported and said, as a button's is", async ({ page }) => {
     await page.locator('[data-kit="throwing-text-button"]').click();
-    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expectReported(page, "kit failure");
     await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
@@ -323,7 +333,7 @@ test.describe("the components @kit", () => {
     await page.locator('[data-kit="toast-undo"]').click();
     const region = page.getByRole("region", { name: "Notifications" });
     await region.getByRole("button", { name: "Undo" }).click();
-    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expectReported(page, "kit failure");
     await expect(region.getByText("That didn’t work. Try again.")).toBeVisible();
   });
 
@@ -745,7 +755,7 @@ test.describe("the components @kit", () => {
     await keyboardFocus(page, resend);
     await page.keyboard.press("Enter");
     await expect(toasts(page).getByText("That didn’t work. Try again.")).toBeVisible();
-    await expect(page.locator("body")).toHaveAttribute("data-reported", "");
+    await expectReported(page, "kit: resend refused");
     await expect(resend).toBeFocused();
     await expect(resend).not.toHaveAttribute("aria-disabled", "true");
   });

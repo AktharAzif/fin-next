@@ -258,6 +258,54 @@ describe("api()", () => {
     });
   });
 
+  it("reports a broken answer by the contract's name and the IDs, never the answer", async () => {
+    // Shaped as an authenticator set-up's answer, its key joined at run time (CONTRIBUTING); the
+    // URI's scheme is misspelt, so the answer breaks the contract.
+    const key = ["KRUGS4ZA", "NFXGO3LT", "MFWXA3DF"].join("");
+    const enable = defineContract({
+      name: "auth.totpEnable",
+      method: "POST",
+      path: "/auth/two-factor/enable",
+      input: noInput,
+      output: z.looseObject({
+        totpURI: z.string().startsWith("otpauth://"),
+        backupCodes: z.array(z.string().min(1)),
+      }),
+    });
+    const answer = {
+      totpURI: `otpauth:/totp/Fin:maya%40example.com?${["sec", "ret"].join("")}=${key}`,
+      backupCodes: [`code-${key.slice(0, 8)}`],
+    };
+    const report = vi.fn();
+    const { api } = client([json(200, answer, { "Request-Id": "req_9" })], { report });
+    const error = (await api(enable, {}).catch((e: unknown) => e)) as ApiError;
+    expect(error.kind).toBe("unexpected_response");
+    expect(report).toHaveBeenCalledOnce();
+    const [reported, ids] = report.mock.calls[0] ?? [];
+    expect(ids).toEqual({ contract: "auth.totpEnable", requestId: "req_9" });
+    expect(reported).toBeInstanceOf(Error);
+    const thrown = reported as Error;
+    // No cause and no field of its own: the sentence names the contract and nothing else.
+    expect({
+      name: thrown.name,
+      message: thrown.message,
+      cause: thrown.cause,
+      fields: Object.keys(thrown),
+    }).toEqual({
+      name: "Error",
+      message: "auth.totpEnable: the answer does not match the contract",
+      cause: undefined,
+      fields: [],
+    });
+    // Nothing of the answer in the report, nor in the error the caller is given. A stack's header
+    // holds the name and the message as they were when it was made; its frames are file paths.
+    const header = String(thrown.stack).split(/\n\s+at /)[0];
+    const carried = JSON.stringify([thrown.message, header, ids, error.message, error]);
+    for (const piece of [key.slice(0, 8), "otpauth", "example.com"]) {
+      expect(carried).not.toContain(piece);
+    }
+  });
+
   it("hands every Fin-Release to the frame", async () => {
     const release = vi.fn();
     const { api } = client([json(200, { status: "ok" }, { "Fin-Release": "abc123" })], { release });
