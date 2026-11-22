@@ -12,6 +12,7 @@ import {
   checkSource,
   codeMask,
   findImports,
+  isTestSupport,
 } from "../import-rules.mjs";
 import { cleanUp, makeRepo, REPO_ROOT, rules, runScript } from "./helpers.mjs";
 
@@ -390,6 +391,92 @@ describe("imports:check", () => {
     // Tests and test support may load the harness this way too.
     for (const file of ["apps/api/src/main.test.ts", "apps/api/test/canon.ts", "e2e/x.ts"]) {
       assert.deepEqual(check(file, glob(`"../../../packages/testing/src/*.ts"`)), [], file);
+    }
+  });
+
+  test("in test code that is not test support, the glob reader alone refuses a pattern into the harness or onto a test file", () => {
+    // Code that runs refuses every glob outright, so the refusals above in apps/api/src/main.ts
+    // never depend on the reading of a glob's patterns (findGlobCalls and globReachesTests). In a
+    // file the page policy leaves out as test code that is not test support, that reading is the
+    // only rule a glob meets: each refusal here carries its message (the outright refusal's and
+    // the template loader's differ), and each pass is its decision alone.
+    const READER =
+      "in a file the page policy leaves out as test code, import.meta's glob takes literal relative patterns, with no base or exhaustive option, that stay in the repository and out of node_modules and test support and cannot match a test file (code that runs uses none)";
+    const G = `${IMP}.meta.glob`;
+    const glob = (/** @type {string} */ args) => src(`const m = ${G}(${args});`);
+    const outright = checkSource("apps/api/src/main.ts", glob(`"./routes/*.page.tsx"`));
+    assert.deepEqual(rules(outright), ["glob-import"]);
+    assert.ok(outright.every((finding) => finding.message !== READER));
+    // Each file, with the relative path from its directory to the repository's root: under
+    // fixtures/, tests/ or __tests__/, and a test/ or e2e/ below a package's src/.
+    for (const [file, root] of /** @type {[string, string][]} */ ([
+      ["apps/api/fixtures/routes.ts", "../../../"],
+      ["packages/access/tests/helpers.ts", "../../../"],
+      ["apps/api/src/__tests__/routes.ts", "../../../../"],
+      ["packages/access/src/test/helpers.ts", "../../../../"],
+      ["apps/console/src/e2e/pages.ts", "../../../../"],
+    ])) {
+      assert.equal(isTestSupport(file), false, file);
+      const byReader = (/** @type {number} */ line) => [
+        { file, line, rule: "glob-import", message: READER },
+      ];
+      const harness = `"${root}packages/testing/src/clock.ts"`;
+      for (const args of [
+        // Into the harness: a file of it, a pattern whose fixed part lies in it (in any case) or
+        // stops where it lies below, each with a fixed end no test file's name has, so the path
+        // alone refuses it; one pattern of several is enough, and a negative one only narrows.
+        harness,
+        `"${root}packages/testing/src/**/*.json"`,
+        `"${root}packages/Testing/src/*.json"`,
+        `"${root}packages/*/src/index.json"`,
+        `["./routes/*.page.tsx", ${harness}]`,
+        `["${root}packages/testing/src/*.json", "!${root}packages/testing/src/clock.json"]`,
+        // Into the other test support: the root's e2e/ and a workspace package's test/.
+        `"${root}e2e/*.json"`,
+        `"${root}apps/console/test/*.json"`,
+        // Onto a test file: by its name (in any case, or the stem a resolver completes), or by a
+        // pattern whose fixed end can end a test file's name.
+        `"./sign-in.test.ts"`,
+        `"./sign-in.TEST.ts"`,
+        `"./sign-in.test"`,
+        `"./routes/*.ts"`,
+        `"./routes/*est.ts"`,
+        `"./routes/*.{ts,tsx}"`,
+        `"./routes/**/*.test.tsx", { eager: true }`,
+      ]) {
+        assert.deepEqual(checkSource(file, glob(args)), byReader(1), `${file} ${args}`);
+      }
+      // Patterns that stay in the file's own code or reach another package's source (one whose
+      // name only starts like the harness's included), with options that only shape the import.
+      for (const args of [
+        `"./routes/*.page.tsx"`,
+        `"./routes/home.page.tsx"`,
+        `"./routes/**/*.page.ts", { eager: true, import: "default" }`,
+        `["./routes/*.page.tsx", "!./routes/draft.page.tsx"]`,
+        `"./icons/*.svg", { query: "?raw", import: "default" }`,
+        `"../shared/*.page.ts"`,
+        `"${root}packages/ui/src/*.page.tsx"`,
+        `"${root}packages/testing-kit/src/*.json"`,
+      ]) {
+        assert.deepEqual(checkSource(file, glob(args)), [], `${file} ${args}`);
+      }
+      // It reads calls, not text: a glob in a comment, in a string or as another object's member
+      // is no call of import.meta's glob; one spelled with spaces or with one type argument is,
+      // and each call is reported at its own line.
+      for (const text of [
+        src(`// const m = ${G}(${harness});`),
+        src(`const s = '${G}(${harness})';`),
+        src(`const m = loader.${G}(${harness});`),
+      ]) {
+        assert.deepEqual(checkSource(file, text), [], `${file} ${text}`);
+      }
+      for (const [text, line] of /** @type {[string, number][]} */ ([
+        [src(`const m = ${IMP} . meta . glob(${harness});`), 1],
+        [src(`const m = ${G}<Module>(${harness});`), 1],
+        [src(`const a = ${G}("./routes/*.page.tsx");`, "", `const b = ${G}(${harness});`), 3],
+      ])) {
+        assert.deepEqual(checkSource(file, text), byReader(line), `${file} ${text}`);
+      }
     }
   });
 
