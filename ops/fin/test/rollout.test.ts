@@ -119,6 +119,17 @@ function setImage(h: H, service: string, image: string): void {
   instance.image = image;
 }
 
+/** Ends a service's newest deployment with a status, as Railway reports it from then on. */
+function endNewest(h: H, service: string, status: string): void {
+  const instance = h.rw.instances.get(service);
+  const latest = instance?.latestDeployment ?? null;
+  const deployment = latest === null ? undefined : h.rw.deployments.get(latest.id);
+  if (instance === undefined || latest === null || deployment === undefined)
+    throw new Error(`no deployment of ${service}`);
+  deployment.statuses = [status];
+  instance.latestDeployment = { id: latest.id, status };
+}
+
 /** The variables each deployment of a service started with, newest last. */
 function startedWith(h: H, service: string): Array<Record<string, string>> {
   return [...h.rw.deployments.entries()]
@@ -232,7 +243,8 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
   });
 
   it("a rotation whose redeploy fails revokes nothing, says the rotation is not done, and a re-run finishes it", async () => {
-    const h = staging({ worker: "fin-next-api" });
+    const h = staging();
+    assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
     assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok);
     h.rw.deployStatuses = ["DEPLOYING", "CRASHED"];
     assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.unavailable);
@@ -241,7 +253,13 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     assert.match(h.runtime.err(), /the rotation is not done: worker may still run the old token/);
     assert.equal(h.records().at(-1)?.result, "failed");
     h.rw.deployStatuses = ["DEPLOYING", "SUCCESS"];
+    // worker's newest deployment is the redeploy that crashed, on the digest the registered
+    // deploys recorded for it: the re-run takes that digest again, and says so.
     assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.ok, h.runtime.err());
+    assert.match(
+      h.runtime.err(),
+      /worker's newest deployment is CRASHED, not SUCCESS: the redeploy takes the image it is set to, the digest the registered deploys recorded for it/,
+    );
     assert.equal(h.cf.tokens.length, 1);
     assert.equal(
       startedWith(h, "worker").at(-1)?.FIN_EMAIL_TOKEN,
@@ -340,6 +358,130 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     );
     assert.deepEqual(h.rw.deployed.slice(rolled), ["worker"]);
     assert.equal(h.cf.tokens.length, 2);
+  });
+
+  it("refuses a redeploy when the newest deployment did not end SUCCESS and the service is set to an image the registered deploys did not record: a rotation does not roll a failed deploy's image", async () => {
+    // Before, only the images were compared: after a railway deploy that failed at worker (its
+    // deployment ended FAILED on the new release's image while the one before kept serving), the
+    // rotation's redeploy passed and rolled the failed release's image, outside the deploy's order
+    // and its after-checks, then revoked the old token.
+    const h = staging();
+    assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    const next = hex(40, "b");
+    const images = { ...IMAGES, "fin-next-api": DIGEST("c") };
+    h.rw.onUpdate = (service) => {
+      h.rw.deployStatuses =
+        service === "worker" ? ["DEPLOYING", "FAILED"] : ["DEPLOYING", "SUCCESS"];
+    };
+    assert.equal(
+      await h.run([
+        "railway",
+        "deploy",
+        "staging",
+        "--release",
+        next,
+        "--manifest",
+        manifest(h, { commit: next, images }),
+      ]),
+      EXIT.unavailable,
+    );
+    h.rw.onUpdate = undefined;
+    h.rw.deployStatuses = ["DEPLOYING", "SUCCESS"];
+    const worker = h.rw.instances.get("worker");
+    assert.equal(worker?.image, `ghcr.io/aktharazif/fin-next-api@${images["fin-next-api"]}`);
+    assert.equal(worker?.latestDeployment?.status, "FAILED");
+    const rolled = h.rw.deployed.length;
+    for (const answer of ["ok", "no-image"] as const) {
+      h.rw.deploymentImageAnswer = answer;
+      const tokens = h.cf.tokens.length;
+      assert.equal(
+        await h.run(["email", "token", "staging", "--rotate"]),
+        EXIT.refused,
+        h.runtime.err(),
+      );
+      assert.match(
+        h.runtime.err(),
+        /worker's newest deployment is FAILED, not SUCCESS, and worker is set to an image other than the one the registered deploys recorded for it, so a redeploy could roll an image nobody asked for/,
+      );
+      assert.match(h.runtime.err(), /the rotation is not done: worker may still run the old token/);
+      assert.deepEqual(h.rw.deployed.slice(rolled), [], answer);
+      assert.equal(h.cf.tokens.length, tokens + 1, "a token is minted, and none is revoked");
+    }
+
+    // zone apply: a proof service whose newest deployment FAILED, with no registered deploy that
+    // recorded its image, is refused, and no rule that sends the new proof is written.
+    const zone = staging(PROOF_SERVICES);
+    endNewest(zone, "admin", "FAILED");
+    assert.equal(
+      await zone.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.refused,
+      zone.runtime.err(),
+    );
+    assert.match(zone.runtime.err(), /admin's newest deployment is FAILED, not SUCCESS/);
+    assert.equal(zone.rw.deployed.includes("admin"), false);
+    assert.equal(
+      zone.sequence.some((c) => /^cf (POST|PATCH) .*\/rulesets/.test(c)),
+      false,
+      "no rule is written",
+    );
+  });
+
+  it("a service whose newest deployment was removed holds nothing: a rotation deploys nothing for it, and revokes or writes the rule once the write shows", async () => {
+    // Before, any newest deployment counted as holding the old value, whatever its status: a
+    // service taken down by hand was started again by the rotation's redeploy.
+    const email = staging({ worker: "fin-next-api" });
+    assert.equal(await email.run(["email", "token", "staging"]), EXIT.ok);
+    endNewest(email, "worker", "REMOVED");
+    assert.equal(
+      await email.run(["email", "token", "staging", "--rotate"]),
+      EXIT.ok,
+      email.runtime.err(),
+    );
+    assert.match(email.runtime.out(), /worker has no deployment that holds the old one/);
+    assert.deepEqual(email.rw.deployed, []);
+    assert.deepEqual(steps(email, "redeploy"), []);
+    assert.equal(email.cf.tokens.length, 1, "the old token is revoked");
+
+    // Removed between the plan and its redeploy step: the step deploys nothing either.
+    email.rw.running("worker", ref("fin-next-api"));
+    email.rw.ignorePatch = (service) => {
+      if (service === "worker") endNewest(email, "worker", "REMOVED");
+      return false;
+    };
+    assert.equal(
+      await email.run(["email", "token", "staging", "--rotate"]),
+      EXIT.ok,
+      email.runtime.err(),
+    );
+    assert.match(
+      email.runtime.out(),
+      /worker has no deployment that runs \(its newest was removed\): it takes the new value at its next \(railway deploy\); nothing is deployed for it here/,
+    );
+    assert.deepEqual(email.rw.deployed, []);
+    assert.equal(email.cf.tokens.length, 1);
+
+    const zone = staging(PROOF_SERVICES);
+    endNewest(zone, "edge", "REMOVED");
+    assert.equal(
+      await zone.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.ok,
+      zone.runtime.err(),
+    );
+    assert.deepEqual([...zone.rw.deployed].sort(), ["admin", "console", "verify"]);
+    assert.deepEqual([...steps(zone, "redeploy")].sort(), ["admin", "console", "verify"]);
+    assert.ok(zone.sequence.some((c) => /^cf (POST|PATCH) .*\/rulesets/.test(c)));
+
+    const tunnel = staging({ "cloudflared-admin": "fin-next-connector" });
+    endNewest(tunnel, "cloudflared-admin", "REMOVED");
+    assert.equal(
+      await tunnel.run(["tunnel", "create", "staging", "admin", "--redeploy"]),
+      EXIT.ok,
+      tunnel.runtime.err(),
+    );
+    assert.match(tunnel.runtime.out(), /cloudflared-admin has no deployment/);
+    assert.deepEqual(tunnel.rw.deployed, []);
+    assert.deepEqual(steps(tunnel, "redeploy"), []);
   });
 
   it("the tunnel-token incident: tunnel create after the tunnel was deleted rotates, redeploys the connector and reads back", async () => {

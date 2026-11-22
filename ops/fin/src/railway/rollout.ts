@@ -8,8 +8,9 @@
 //      service that has a deployment, as a step of its own plan (`run.step` kind `redeploy`, and a
 //      `rotation.redeployed` line naming the service and the variables), waits for SUCCESS and
 //      reads back again. The rotation is done only then, and only then may the old secret be
-//      revoked or a rule start sending the new one. A service with no deployment holds nothing: it
-//      takes the value at its first deployment, and nothing is deployed for it here.
+//      revoked or a rule start sending the new one. A service with no deployment, or whose newest
+//      deployment was removed, holds nothing: it takes the value at its next deployment, and
+//      nothing is deployed for it here.
 //   3. No variable is deleted (api.ts): a value no deployment may carry is overwritten with
 //      INERT_VALUE, with skipDeploys: true, and waits for removal (railway verify lists it).
 //   4. A read-back is proof only once it shows the write: the write's own marker (WRITE_MARKER, set
@@ -26,6 +27,7 @@ import { ProviderError, RefusedError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import type { RailwayApi, Written } from "./api.ts";
 import {
+  type InstanceState,
   isRefusal,
   READ_BACK_READS,
   readInstances,
@@ -130,8 +132,20 @@ export async function confirmWritten(
 }
 
 /**
- * The services of a list that have a deployment: each holds the variables it started with, so a
- * rotated secret reaches it only through a redeploy. A service with none takes it at its first.
+ * Whether a service's newest deployment may hold the variables it started with: there is one, and
+ * it was not removed. A newest deployment REMOVED means the service was taken down and runs
+ * nothing; one that FAILED or was SKIPPED leaves the deployment before it serving, which holds
+ * them.
+ */
+function holdsDeployment(instance: InstanceState | undefined): boolean {
+  const latest = instance?.latestDeployment ?? null;
+  return latest !== null && latest.status !== "REMOVED";
+}
+
+/**
+ * The services of a list that have a deployment that may hold the old value: each holds the
+ * variables it started with, so a rotated secret reaches it only through a redeploy. A service with
+ * none, or whose newest deployment was removed, takes it at its next deployment.
  */
 export async function deployedOf(
   ctx: Context,
@@ -142,7 +156,7 @@ export async function deployedOf(
   return new Set(
     services.filter((service) => {
       const instance = instances.get(service);
-      return instance?.inEnvironment === true && (instance.latestDeployment ?? null) !== null;
+      return instance?.inEnvironment === true && holdsDeployment(instance);
     }),
   );
 }
@@ -164,13 +178,16 @@ export function redeployChange(service: string, variables: readonly string[]): C
  * refuses when the service is set to an image its newest deployment does not run (the redeploy
  * would roll that image: a deploy nobody asked for), starts one deployment, waits for SUCCESS, and
  * reads back: the variables still show the write, and the service's newest deployment is this one,
- * ended SUCCESS. Then writes `rotation.redeployed`. A service that no longer has a deployment gets
- * none.
+ * ended SUCCESS. Then writes `rotation.redeployed`. A service that no longer has a deployment, or
+ * whose newest deployment was removed (taken down), gets none.
  *
- * When Railway does not say which image the newest deployment runs (a refused read, or a meta that
- * names no image; SP-03), unread is not passing: the redeploy goes on only when the service is set
- * to the digest the registered deploys recorded for it (railway verify's digest check), an image a
- * `railway deploy` verified and rolled, and is refused otherwise.
+ * A service runs an image only when its newest deployment ended SUCCESS on it (running.ts). When
+ * that deployment did not end SUCCESS (a `railway deploy` that failed at the service leaves it set
+ * to the failed release's image while the deployment before serves), or Railway does not say which
+ * image it runs (a refused read, or a meta that names no image; SP-03), neither is passing: the
+ * redeploy goes on only when the service is set to the digest the registered deploys recorded for
+ * it (railway verify's digest check), an image a `railway deploy` verified and rolled, and is
+ * refused otherwise.
  */
 export async function redeploy(
   ctx: Context,
@@ -180,22 +197,26 @@ export async function redeploy(
 ): Promise<void> {
   const service = written.service;
   const instance = (await readInstances(ctx, rw)).get(service);
-  if ((instance?.latestDeployment ?? null) === null) {
+  if (!holdsDeployment(instance)) {
     ctx.out.info(
-      `  ${service} has no deployment: it takes the new value at its first (railway deploy); nothing is deployed for it here`,
+      `  ${service} has no deployment${(instance?.latestDeployment ?? null) === null ? "" : " that runs (its newest was removed)"}: it takes the new value at its next (railway deploy); nothing is deployed for it here`,
     );
     return;
   }
   const running = await readRunning(ctx, rw, service, instance);
-  if (typeof running.image !== "string") {
+  if (running.status !== "SUCCESS" || typeof running.image !== "string") {
+    const why =
+      running.status !== "SUCCESS"
+        ? `${service}'s newest deployment is ${running.status ?? "missing"}, not SUCCESS`
+        : `Railway did not say which image ${service}'s newest deployment runs (SP-03)`;
     const recorded = lastDeployed(ctx).get(service);
     if (recorded === undefined || recorded !== instance?.image) {
       throw new RefusedError(
-        `Railway did not say which image ${service}'s newest deployment runs (SP-03), and ${service} is set to ${recorded === undefined ? "an image no registered railway deploy recorded for it" : "an image other than the one the registered deploys recorded for it"}, so a redeploy could roll an image nobody asked for: check by hand which image it runs, run railway deploy for the release it should run, then run this command again`,
+        `${why}, and ${service} is set to ${recorded === undefined ? "an image no registered railway deploy recorded for it" : "an image other than the one the registered deploys recorded for it"}, so a redeploy could roll an image nobody asked for: check by hand which image it runs, run railway deploy for the release it should run, then run this command again`,
       );
     }
     ctx.out.warn(
-      `Railway did not say which image ${service}'s newest deployment runs (SP-03): the redeploy takes the image it is set to, the digest the registered deploys recorded for it`,
+      `${why}: the redeploy takes the image it is set to, the digest the registered deploys recorded for it`,
     );
   } else if (running.image !== instance?.image) {
     throw new RefusedError(

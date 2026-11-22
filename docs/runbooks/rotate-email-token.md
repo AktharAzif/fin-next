@@ -26,9 +26,11 @@ was exposed.
      is minted again, set, `worker` redeployed, and the orphan revoked.
    - If `worker` is set to an image its newest deployment does not run, the redeploy is refused
      (it would roll that image): run `railway deploy` for the release staging runs first. When
-     Railway does not say which image that deployment runs (SP-03), the redeploy goes on only if
-     `worker` is set to the digest the registered deploys recorded for it, and is refused
-     otherwise, the same way.
+     that deployment did not end `SUCCESS` (a `railway deploy` that failed at `worker`), or
+     Railway does not say which image it runs (SP-03), the redeploy goes on only if `worker` is
+     set to the digest the registered deploys recorded for it, and is refused otherwise, the same
+     way. A `worker` whose newest deployment is `REMOVED` (taken down) holds no token: nothing is
+     deployed, and the old token is revoked once the write shows.
 3. Check: the next `email-delivery-check` reaches the seed inbox; `email.send_failed` lines stop.
 4. Update `ops/credentials.json`'s `email-token` row with the new dates.
 

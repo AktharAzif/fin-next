@@ -55,11 +55,13 @@ console; admin; verify: verify and selfie), and only then is the rule that sends
 variable write needs `FIN_RAILWAY_TOKEN_FILE`, and so does the dry run of a plan with a new proof,
 which reads which of those services have a deployment. It commits with `skipDeploys: true`, so the
 commit starts no deployment, and is read back until a read shows it (`pnpm-fin.md`). A service with
-no deployment takes the proof at its first (`railway deploy`); nothing is deployed for it. A
-service that has a deployment holds the old proofs, so the plan redeploys it as a step of its own
-(`~ update redeploy <service> [FIN_INGRESS_PROOFS]`), waits for `SUCCESS` and reads back, before
-any rule is written: no host ever answers the new rule's requests with 403. If a redeploy or a
-read-back fails, no rule is written; run the command again once the cause is fixed.
+no deployment, or whose newest deployment is `REMOVED`, takes the proof at its next deployment
+(`railway deploy`); nothing is deployed for it. A redeploy of a service whose newest deployment
+did not end `SUCCESS` is refused unless it is set to the digest the registered deploys recorded
+for it. A service that has a deployment holds the old proofs, so the plan redeploys it as a step
+of its own (`~ update redeploy <service> [FIN_INGRESS_PROOFS]`), waits for `SUCCESS` and reads
+back, before any rule is written: no host ever answers the new rule's requests with 403. If a
+redeploy or a read-back fails, no rule is written; run the command again once the cause is fixed.
 Escrow comes before the variable in the plan; staging has no escrow recipient yet (BD-14), so a lost
 proof is replaced by rotation (`rotate-ingress-proof.md`).
 
