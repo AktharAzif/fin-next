@@ -58,10 +58,6 @@ afterAll(async () => {
 }, DROP_TIMEOUT_MS);
 
 describe("a removal", () => {
-  // Genuinely heavy, so a timeout of its own: a custom role made with a proof, two members, each
-  // invited with a proof, signed in, given an authenticator and accepted with a proof, then the
-  // removal with its proof. Alone it takes up to 1.4 s; in the full db run on 4 CPUs, up to
-  // 2.9 s.
   it("rolls at once what the actor may roll, the rest with an hour's overlap, in the same unit", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");
     // A role that may invite and remove people and roll only Sandbox keys.
@@ -107,7 +103,7 @@ describe("a removal", () => {
       (m) => m.template === "orgs/member-removed",
     );
     expect(toLeaver.at(-1)?.params).toMatchObject({ audience: "person" });
-  }, 20_000);
+  });
 
   it("rolls nothing when asked not to, and still counts what was listed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_keep");

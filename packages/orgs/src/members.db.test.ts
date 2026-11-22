@@ -37,9 +37,6 @@ afterAll(async () => {
 }, DROP_TIMEOUT_MS);
 
 describe("a role change", () => {
-  // Genuinely heavy, so a timeout of its own: a member invited with a proof, signed in, given an
-  // authenticator and accepted with a proof, a custom role made with a proof, then two role changes
-  // with proofs. Alone it takes up to 1.4 s; in the full db run on 4 CPUs, up to 3.1 s.
   it("writes member.role_changed, tells the person and every Super admin, and lowers into the journal", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner");
     const admin = await seededMemberOf(h, who, orgId, "admin", "admin");
@@ -65,12 +62,12 @@ describe("a role change", () => {
     expect((await changeRoleAs(h, who, orgId, admin.memberId, "admin")).ok).toBe(true);
     const raised = (await h.events({ event: "member.role_changed", organizationId: orgId })).at(-1);
     expect(raised?.metadata).toMatchObject({ lowered: false });
-  }, 20_000);
+  });
 
-  // Genuinely heavy, so a timeout of its own: four members, each invited with a proof, signed in,
-  // given an authenticator and accepted with a proof, two custom roles made with proofs, then ten
-  // role changes and removals. Alone it takes 0.9 to 2.2 s; in the full db run on 4 CPUs, 3.2 s
-  // to past the 5 s default.
+  // Genuinely heavy, so a timeout of its own: five people, each signed in by code and given an
+  // authenticator (the memberships and the two custom roles are seeded), then the ten role changes
+  // and removals it is about. On GitHub's runner it takes 0.44 s alone and 1.8 s in the full db
+  // run.
   it("refuses giving beyond one's role, the top role from anyone else, one's own role, and the same role", async () => {
     const { who, orgId, memberId: ownerMember } = await ownerWithOrganization(h, "owner_rules");
     const admin = await seededMemberOf(h, who, orgId, "admin_rules", "admin");

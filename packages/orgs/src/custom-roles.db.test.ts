@@ -295,9 +295,6 @@ describe("deleting a custom role", () => {
     expect(list.ok && list.value.roles.map((r) => r.roleKey)).toEqual(["super_admin", "admin"]);
   });
 
-  // Genuinely heavy, so a timeout of its own: two custom roles, a member and two invitations, each
-  // with a proof, the deletion with its proof, then the invitee signed in and accepting with a
-  // proof. Alone it takes 0.8 to 1.3 s; in the full db run on 4 CPUs, 2.2 to 2.8 s.
   it("withdraws, never leaves unusable, the invitations whose inviter cannot give the new role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_inviters");
     const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
@@ -328,7 +325,7 @@ describe("deleting a custom role", () => {
     const invitee = await person(h, "from_owner", { email: fromOwnerEmail });
     const joined = await acceptAs(h, invitee, ownerId);
     expect(joined.ok && joined.value.roleKey).toBe("admin");
-  }, 20_000);
+  });
 
   it("withdraws the invitations of holders moved to a role that can no longer give them", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "deleter_holders");
@@ -347,10 +344,10 @@ describe("deleting a custom role", () => {
 });
 
 describe("an edit that leaves an inviter unable to give an invitation", () => {
-  // Genuinely heavy, so a timeout of its own: three custom roles, a member invited, signed in,
-  // given an authenticator and accepted, three invitations and three role edits, each with a
-  // proof. Alone it takes 0.9 to 1.7 s; in the full db run on 4 CPUs, 2.0 s to past the 5 s
-  // default.
+  // Genuinely heavy, so a timeout of its own: three invitations and three role edits, each with an
+  // intent and a proof, which are what it is about, for an owner and an inviter each signed in
+  // with an authenticator (the roles and the membership are seeded). On GitHub's runner it takes
+  // 0.3 s alone and 2.2 s in the full db run.
   it("withdraws it, whether the inviter's role lost a permission or the offered role gained one", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "edit_inviters");
     const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
