@@ -89,11 +89,22 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
 
   // Anyone may send a passkey assertion naming any credential, or a code naming any address, so
   // its allowance (its network's, or for a staff code its Access identity's) is counted before it
-  // can take anyone's lock. Every gate state reaches both and no step-up rule applies to either, so
-  // counting first changes no answer the order of §3.5 would give.
+  // can take anyone's lock. A refused count still checks the session the request carries, as
+  // §3.5's order would before it counted: a session past its factor step is ended, and a staff
+  // session under another Access identity is ended, written and audited and answered
+  // `403 access_mismatch` (§10.5), all of which the refusal commits. Every gate state reaches both
+  // paths and no step-up rule applies to either, so counting first changes no answer and drops no
+  // effect that the order of §3.5 would give.
   const countedFirst =
     ctx.path === "/passkey/verify-authentication" || ctx.path === "/sign-in/email-otp";
-  if (countedFirst) await finLimits(rt, ctx, state, tx, rule);
+  if (countedFirst) {
+    try {
+      await finLimits(rt, ctx, state, tx, rule);
+    } catch (refusal) {
+      if (refusal instanceof AuthRefusal) await loadPrior(rt, ctx, state, tx);
+      throw refusal;
+    }
+  }
   await holdCeremonies(rt, ctx, state, tx);
   await loadPrior(rt, ctx, state, tx);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
@@ -145,14 +156,15 @@ export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
  * A ceremony takes its person's ceremony lock (store.ts) before anything reads their session,
  * credentials or counts, and holds it to its commit; it then holds their row `FOR KEY SHARE`. Every
  * change that removes the person's factors or ends their sessions takes the same lock first and
- * then locks their row `FOR UPDATE`: the last-factor rule (§6.7, below) and a staff reset, removal
- * or role change (@fin/staff's lock.ts, inside the staff-change lock, §10.8). The operator's
- * bootstrap reset (§10.6) locks the row only, which conflicts with the share, so it waits for the
- * one ceremony that holds the row. So a change and a ceremony never overlap: either the change
- * waits for the ceremony to commit and then ends what it made, or the ceremony waits for the change
- * and then reads the person as the change left them, the credential gone, the session ended and
- * the emailed code void (§11.4). And the person's ceremonies run one at a time, in the order they
- * asked (store.ts says what each of these gives).
+ * then locks their row `FOR UPDATE`: the last-factor rule (§6.7, below), a staff reset, removal
+ * or role change (@fin/staff's lock.ts, inside the staff-change lock, §10.8), and the operator's
+ * bootstrap reset of the last Admin (§10.6, @fin/staff's `_staff_bootstrap_reset` migration). So a
+ * change and a ceremony never overlap: either the change waits for the ceremony to commit and then
+ * ends what it made, or the ceremony waits for the change and then reads the person as the change
+ * left them: the credential gone, and for a reset, removal or role change (the operator's reset
+ * included) the sessions ended and the emailed sign-in codes void, as they are after a removal of
+ * one of the person's factors (§11.4, the after-hook). And the person's ceremonies run one at a
+ * time, in the order they asked (store.ts says what each of these gives).
  *
  * The row is held in the one mode that never makes the person's own routes wait: they read and
  * renew their session first (§11.2) and only then write their row (the name, §14.2) or lock it

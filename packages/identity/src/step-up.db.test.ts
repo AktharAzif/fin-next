@@ -2,7 +2,7 @@
 // AC-SAT-32): refused with no intent, with an intent for another action, for other parameters,
 // used, expired or of another session; passes once with a fresh one; a window passes within 5
 // minutes of a proof and not after; two concurrent re-sends make exactly one action; five wrong
-// codes end the session.
+// codes end the session, and no more than five are checked however many are sent together.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -314,5 +314,46 @@ describe("wrong codes at a step-up (§7.7)", () => {
     expect((await h.events({ event: "step_up.failed" })).length).toBeGreaterThanOrEqual(5);
     expect((await h.outbox(email)).some((m) => m.template === "identity/session-ended")).toBe(true);
     expect(h.lines.named("step_up.locked").at(-1)).toEqual({ realm: "developer" });
+  });
+
+  it("sent together, are checked one at a time: the fifth ends the session and no more are checked", async () => {
+    const { browser, secret } = await personWithAuthenticator("fivetogether");
+    const asked = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+    const intentId = String(asked.json?.intent_id);
+    // The working session's cookies in 12 browsers, each on a network of its own.
+    const browsers = Array.from({ length: 12 }, () => {
+      const copy = h.browser();
+      for (const [name, value] of browser.jar) copy.jar.set(name, value);
+      return copy;
+    });
+    // Codes that are wrong at any step the check accepts.
+    const now = totpStep(new Date());
+    const right = new Set([-2n, -1n, 0n, 1n, 2n].map((d) => hotp(secret, now + d)));
+    const wrong: string[] = [];
+    for (let n = 100_000; wrong.length < browsers.length; n += 7919) {
+      const code = String(n % 1_000_000).padStart(6, "0");
+      if (!right.has(code)) wrong.push(code);
+    }
+    const failedBefore = (await h.events({ event: "step_up.failed" })).length;
+    const lockedBefore = (await h.events({ event: "step_up.locked" })).length;
+
+    const answers = await Promise.all(
+      browsers.map((copy, i) =>
+        copy.post(
+          "/api/auth/two-factor/verify-totp",
+          { code: wrong[i] },
+          { "fin-step-up-intent": intentId },
+        ),
+      ),
+    );
+
+    const tally: Record<string, number> = {};
+    for (const answer of answers) {
+      const key = `${answer.status}:${String(answer.json?.code)}`;
+      tally[key] = (tally[key] ?? 0) + 1;
+    }
+    expect(tally).toEqual({ "401:INVALID_CODE": 5, "401:unauthenticated": 7 });
+    expect((await h.events({ event: "step_up.failed" })).length - failedBefore).toBe(5);
+    expect((await h.events({ event: "step_up.locked" })).length - lockedBefore).toBe(1);
   });
 });

@@ -2,7 +2,8 @@
 // AC-SAT-29, AC-SAT-41): a code goes only to the Access identity's own address; a pending member
 // enrols only with the emailed code and an enrolment code, once; production refuses an
 // authenticator as the first factor; staff set-up answers carry no backup codes; a session whose
-// member is not the Access identity is refused and logged; a removed member cannot sign in.
+// member is not the Access identity is refused and logged, even once its network has used its
+// allowance; a removed member cannot sign in; a removed factor voids the codes already emailed.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -411,6 +412,50 @@ describe("a working staff member", () => {
     expect(kept.json).toMatchObject({ code: "last_factor" });
   });
 
+  it("voids the sign-in codes already emailed when a factor is removed (§6.7, §11.4)", async () => {
+    const { email, browser, authenticator } = await enrolledMember("removal.codes");
+    // A second passkey, which may go while the first stays (§6.7).
+    const asked = await browser.post("/api/auth/passkey/verify-registration", {});
+    const intent = String(asked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+    ).toBe(200);
+    const { verify } = await registerPasskey(browser, h.authenticator(), {
+      "fin-step-up-intent": intent,
+    });
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+    // A code asked for in another browser and not used yet.
+    const device = staffBrowser(h, email);
+    const sent = await device.post("/api/auth/email-otp/send-verification-otp", {
+      email,
+      type: "sign-in",
+    });
+    expect(sent.json).toEqual({ success: true });
+    const code = await h.latestCode(email);
+    expect(code).not.toBeNull();
+
+    const id = String(verify.json?.id);
+    const removeAsked = await browser.post("/api/auth/passkey/delete-passkey", { id });
+    const removeIntent = String(removeAsked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": removeIntent }))
+        .status,
+    ).toBe(200);
+    const removed = await browser.post(
+      "/api/auth/passkey/delete-passkey",
+      { id },
+      { "fin-step-up-intent": removeIntent },
+    );
+    expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+    const codes = await h.admin.query("SELECT 1 FROM staff.verification WHERE identifier = $1", [
+      `sign-in-otp-${email}`,
+    ]);
+    expect(codes.rowCount).toBe(0);
+    const signIn = await device.post("/api/auth/sign-in/email-otp", { email, otp: code });
+    expect(signIn.status).not.toBe(200);
+    expect(device.sessionToken()).toBeNull();
+  });
+
   it("is signed out after five refused ceremonies at a step-up (§7.7)", async () => {
     const victim = await enrolledMember("victim");
     const other = await enrolledMember("other");
@@ -518,6 +563,44 @@ describe("the Access identity (§10.5, AC-SAT-12)", () => {
     // The same address under another Access identity (a re-created or second IdP account).
     browser.options.access = { email, sub: "sub-of-another-access-identity" };
     const refused = await browser.get("/api/auth/get-session");
+    expect(refused.status).toBe(403);
+    expect(refused.json).toMatchObject({ code: "access_mismatch" });
+    const gone = await h.admin.query("SELECT 1 FROM staff.session WHERE id = $1", [session?.id]);
+    expect(gone.rowCount).toBe(0);
+    expect(h.lines.named("staff.access_mismatch").slice(mismatchesBefore)).toEqual([
+      { staffId: memberId },
+    ]);
+    expect(
+      (await h.events({ event: "staff.sign_in_failed" })).some(
+        (e) => e.target_id === memberId && e.metadata.reason === "access_mismatch",
+      ),
+    ).toBe(true);
+  });
+
+  it("is checked on a passkey assertion even once its network has used its allowance (§5.6)", async () => {
+    const email = unique("mismatch.spent");
+    const memberId = await addMember(email, "viewer", "pending");
+    const browser = staffBrowser(h, email);
+    await staffCode(h, browser, email);
+    const session = await sessionOf(browser);
+    // Another browser on the same network uses up the network's assertions (§5.6).
+    const neighbour = h.browser({
+      ip: browser.options.ip,
+      access: { email: unique("neighbour"), sub: "sub-neighbour" },
+    });
+    let spent = false;
+    for (let i = 0; i < 40 && !spent; i += 1) {
+      const answer = await neighbour.post("/api/auth/passkey/verify-authentication", {
+        response: { id: "unknown" },
+      });
+      spent = answer.status === 429;
+    }
+    expect(spent).toBe(true);
+    const mismatchesBefore = h.lines.named("staff.access_mismatch").length;
+    browser.options.access = { email: unique("intruder"), sub: "sub-intruder" };
+    const refused = await browser.post("/api/auth/passkey/verify-authentication", {
+      response: { id: "unknown" },
+    });
     expect(refused.status).toBe(403);
     expect(refused.json).toMatchObject({ code: "access_mismatch" });
     const gone = await h.admin.query("SELECT 1 FROM staff.session WHERE id = $1", [session?.id]);

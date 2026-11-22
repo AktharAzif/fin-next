@@ -202,7 +202,8 @@ export async function personByEmail(
  * `FOR UPDATE`. Every sign-in and factor ceremony of the person takes it before it reads anything
  * of theirs (the before-hook), and so does every change that removes their factors or ends their
  * sessions, before it locks their row (the last-factor rule, a staff reset, removal or role
- * change). So (spec 02 §5.3, §5.4, §6.7, §10.4, §11.4):
+ * change, and the operator's bootstrap reset, @fin/staff's `_staff_bootstrap_reset` migration).
+ * So (spec 02 §5.3, §5.4, §6.7, §10.4, §11.4):
  *   - a change and a ceremony never overlap: whichever waits reads what the other committed, so no
  *     sign-in that began before a change finishes after it on what the change removed;
  *   - the person's ceremonies run one at a time, so what one reads before its check (the wrong

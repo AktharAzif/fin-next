@@ -31,6 +31,7 @@ import {
   raiseAssurance,
   setSessionExpiry,
   TABLES,
+  voidSignInCodes,
 } from "../store.ts";
 import { bodyOf, type HookContext, headersOf, tokenCookie } from "./context.ts";
 import {
@@ -830,6 +831,18 @@ async function passkeyAdded(
   });
 }
 
+/**
+ * A factor removed (§6.7) voids the emailed sign-in codes already sent to its person, as a staff
+ * reset, removal or role change does (§11.4): a code sign-in that began before the removal and
+ * waited for it on the person's ceremony lock (the before-hook) finds its code void, so no
+ * sign-in begun before the removal finishes after it.
+ */
+async function factorRemovedVoidsCodes(tx: UnitTx, state: RequestState): Promise<void> {
+  const prior = state.prior;
+  if (prior === null) return;
+  await voidSignInCodes(tx, state.realm, prior.person.email);
+}
+
 async function passkeyRemoved(
   rt: RealmRuntime,
   ctx: HookContext,
@@ -843,6 +856,7 @@ async function passkeyRemoved(
   const userId = prior.person.id;
   const refs = [userId, ...intentRefs(intent)];
   const stepUp = stepUpOf(intent);
+  await factorRemovedVoidsCodes(tx, state);
   if (state.realm === "developer") {
     await audit(rt, tx, state, {
       event: "passkey.removed",
@@ -931,6 +945,7 @@ async function authenticatorRemoved(
   const userId = prior.person.id;
   const replacement = ctx.context.newSession?.session.id ?? null;
   const tfaId = state.removedTwoFactorId ?? userId;
+  await factorRemovedVoidsCodes(tx, state);
   const refs = [
     userId,
     prior.session.id,

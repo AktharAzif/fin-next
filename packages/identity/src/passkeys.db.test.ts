@@ -5,8 +5,9 @@
 // sign-in in flight while its passkey is removed finds it gone, whatever form its credential ID
 // takes, and a credential ID that is not a string is refused; an assertion takes its person's
 // ceremony lock only once its network's allowance is counted and its browser holds a challenge;
-// a person's assertions run one at a time, so of two clones sent together one passes; and no
-// number of forged assertions in flight keeps a removal out.
+// a person's assertions run one at a time, so of two clones sent together one passes; no number
+// of forged assertions in flight keeps a removal out; and a removal voids the sign-in codes
+// already emailed to the person.
 import { createHash, randomInt } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -271,6 +272,48 @@ describe("removing a passkey (§7.6 account.passkey_remove)", () => {
     expect(event?.step_up_ref).toBe(intent);
     const notices = (await h.outbox(email)).map((m) => String(m.params.kind ?? ""));
     expect(notices).toContain("passkey_removed");
+  });
+
+  it("voids the sign-in codes already emailed to its person (§6.7, §11.4)", async () => {
+    const { browser, authenticator, email } = await personWithPasskey("remove.codes");
+    const add = await browser.post("/api/auth/passkey/verify-registration", {});
+    const addIntent = String(add.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": addIntent })).status,
+    ).toBe(200);
+    const { verify } = await registerPasskey(browser, h.authenticator(), {
+      "fin-step-up-intent": addIntent,
+    });
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+    // A code asked for in another browser and not used yet.
+    const device = h.browser();
+    const sent = await device.post("/api/auth/email-otp/send-verification-otp", {
+      email,
+      type: "sign-in",
+    });
+    expect(sent.status).toBe(200);
+    const code = await h.latestCode(email);
+    expect(code).not.toBeNull();
+
+    const id = String(verify.json?.id);
+    const asked = await browser.post("/api/auth/passkey/delete-passkey", { id });
+    const intent = String(asked.json?.intent_id);
+    expect(
+      (await passkeyCeremony(browser, authenticator, { "fin-step-up-intent": intent })).status,
+    ).toBe(200);
+    const removed = await browser.post(
+      "/api/auth/passkey/delete-passkey",
+      { id },
+      { "fin-step-up-intent": intent },
+    );
+    expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+    const codes = await h.admin.query("SELECT 1 FROM identity.verification WHERE identifier = $1", [
+      `sign-in-otp-${email}`,
+    ]);
+    expect(codes.rowCount).toBe(0);
+    const signIn = await device.post("/api/auth/sign-in/email-otp", { email, otp: code });
+    expect(signIn.status).not.toBe(200);
+    expect(device.sessionToken()).toBeNull();
   });
 });
 

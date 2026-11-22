@@ -235,13 +235,21 @@ export async function hasFreshProof(
   return result.rows[0]?.fresh === true;
 }
 
-/** Moves the open intents and the proofs of a replaced session to its replacement (§11.3). */
+/**
+ * Moves the open intents and the proofs of a replaced session to its replacement (§11.3). The old
+ * session's row is locked first, in the order every route of the person's takes them: a route
+ * reads (and renews) its session before it consumes the intent it carries, so a replacement that
+ * held an intent while it waited for the session would wait on that route while it waited on the
+ * replacement. Locked first, the replacement waits for the route to commit and then moves only
+ * what the route left unconsumed.
+ */
 export async function moveToReplacement(
   db: Queryable,
   realm: Realm,
   oldSessionId: string,
   newSessionId: string,
 ): Promise<void> {
+  await db.query(`SELECT 1 FROM ${SESSION_TABLE[realm]} WHERE id = $1 FOR UPDATE`, [oldSessionId]);
   await db.query(`UPDATE ${PROOF_TABLE[realm]} SET session_id = $2 WHERE session_id = $1`, [
     oldSessionId,
     newSessionId,
