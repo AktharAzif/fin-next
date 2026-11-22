@@ -1,0 +1,25 @@
+{
+  "name": "@fin/testing",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./playwright": "./src/playwright/index.ts",
+    "./playwright/config": "./src/playwright/config.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "e2e": "playwright test --config ../../playwright.config.ts"
+  },
+  "dependencies": {
+    "@playwright/test": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

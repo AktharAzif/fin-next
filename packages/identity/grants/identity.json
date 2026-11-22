@@ -1,0 +1,182 @@
+{
+  "$comment": "The developer realm's grants (spec 02 §13.7). Read by the migration runner's grant renderer (packages/db, P0-E); test/grants.ts renders the same shape for the integration tests. A role named here holds exactly these privileges on these objects and USAGE on their schemas; every other statement fails with 42501.",
+  "area": "identity",
+  "grants": [
+    {
+      "role": "fin_console",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "tables": [
+        "identity.user",
+        "identity.session",
+        "identity.account",
+        "identity.verification",
+        "identity.passkey",
+        "identity.two_factor",
+        "identity.assurance",
+        "identity.totp_step",
+        "identity.known_browser",
+        "identity.trusted_browser",
+        "identity.email_code_request",
+        "identity.sign_up_request"
+      ]
+    },
+    {
+      "role": "fin_console",
+      "privileges": ["SELECT"],
+      "tables": ["identity.privileged_permission"]
+    },
+    {
+      "role": "fin_console",
+      "privileges": ["EXECUTE"],
+      "functions": ["identity.person_gate(text)"]
+    },
+    {
+      "role": "fin_api",
+      "privileges": ["SELECT"],
+      "tables": ["identity.session_view", "identity.proof_view"]
+    },
+    {
+      "role": "fin_api",
+      "privileges": ["EXECUTE"],
+      "functions": [
+        "identity.person_gate(text)",
+        "identity.revoke_trusted_browsers(text, text, jsonb, text, text)"
+      ]
+    },
+    {
+      "role": "fin_worker",
+      "privileges": ["EXECUTE"],
+      "functions": ["identity.sweep()"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.user",
+      "columns": [
+        "id",
+        "name",
+        "email",
+        "email_verified",
+        "image",
+        "two_factor_enabled",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.session",
+      "columns": [
+        "id",
+        "user_id",
+        "expires_at",
+        "ip_address",
+        "user_agent",
+        "assurance",
+        "absolute_expires_at",
+        "created_via",
+        "mailbox_proved_at",
+        "trusted_browser_id",
+        "step_up_failures",
+        "current_organization_id",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.account",
+      "columns": [
+        "id",
+        "user_id",
+        "account_id",
+        "provider_id",
+        "access_token_expires_at",
+        "refresh_token_expires_at",
+        "scope",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.verification",
+      "columns": ["id", "identifier", "expires_at", "created_at", "updated_at"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.passkey",
+      "columns": [
+        "id",
+        "name",
+        "public_key",
+        "user_id",
+        "credential_id",
+        "counter",
+        "device_type",
+        "backed_up",
+        "transports",
+        "aaguid",
+        "created_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.two_factor",
+      "columns": ["id", "user_id", "verified", "failed_verification_count", "locked_until"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "tables": ["identity.assurance", "identity.totp_step", "identity.privileged_permission"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.known_browser",
+      "columns": ["id", "user_id", "label", "first_seen_at", "last_seen_at"]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.trusted_browser",
+      "columns": [
+        "id",
+        "user_id",
+        "label",
+        "created_at",
+        "last_used_at",
+        "expires_at",
+        "revoked_at",
+        "revoked_reason"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.email_code_request",
+      "columns": [
+        "id",
+        "purpose",
+        "browser_known",
+        "created_at",
+        "expires_at",
+        "browser_tries",
+        "other_tries",
+        "superseded_at",
+        "used_at"
+      ]
+    },
+    {
+      "role": "fin_readonly",
+      "privileges": ["SELECT"],
+      "table": "identity.sign_up_request",
+      "columns": ["id", "email", "name", "invitation_id", "created_at", "expires_at", "used_at"]
+    }
+  ]
+}
