@@ -14,6 +14,12 @@ export const CONFIG_DIR = join(TOOL_ROOT, "config");
 export const MAIN = join(TOOL_ROOT, "src", "main.ts");
 /** The script that runs the CLI once in a process of its own and reports its CPU time. */
 export const TIMED_CLI = join(TOOL_ROOT, "test", "helpers", "timed-cli.ts");
+/**
+ * The flags Node starts a timed run with. V8 compiles and collects garbage on helper threads when
+ * they get a core and on the running thread when they do not, so on a loaded machine the timed
+ * thread took in work the helpers did on a quiet one; single-threaded, all of it is on that thread.
+ */
+export const TIMED_NODE_FLAGS: readonly string[] = ["--single-threaded"];
 
 export interface CliRun {
   code: number;
@@ -46,16 +52,20 @@ export async function cli(argv: string[], options: CliOptions = {}): Promise<Cli
   return { code, stdout, stderr };
 }
 
-/** Runs `node <main> ...argv` as a real process, killed after `timeoutMs` (30 s by default). */
+/**
+ * Runs `node [...nodeFlags] <main> ...argv` as a real process, killed after `timeoutMs` (30 s by
+ * default).
+ */
 export function spawnCli(
   argv: string[],
-  options: CliOptions & { main?: string; timeoutMs?: number } = {},
+  options: CliOptions & { main?: string; nodeFlags?: readonly string[]; timeoutMs?: number } = {},
 ): CliRun {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(options.env ?? { PATH: process.env["PATH"] })) {
     if (value !== undefined) env[name] = value;
   }
-  const result = spawnSync(process.execPath, [options.main ?? MAIN, ...argv], {
+  const args = [...(options.nodeFlags ?? []), options.main ?? MAIN, ...argv];
+  const result = spawnSync(process.execPath, args, {
     cwd: options.cwd ?? process.cwd(),
     env,
     shell: false,
