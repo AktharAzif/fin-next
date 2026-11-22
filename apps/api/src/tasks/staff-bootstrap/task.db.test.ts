@@ -27,13 +27,19 @@ const registry = (q: unknown) => syncEventTypes(q as Queryable, "test-release");
 // `task.failed` line, never `task_unknown`, and a run that succeeds ends with `task.done`.
 let platform: StaffPlatform;
 let su: PlatformClient;
+// The file's one fin_owner session, opened with the platform. Logging in as fin_owner takes the
+// cluster-wide lock that every other test file's bootstrap and migrations hold in turn, so a login
+// per run waited behind them inside the tests: about 0.2 s alone, past 5 s in the full db run.
+let owner: PlatformClient;
 
 beforeAll(async () => {
   platform = await createStaffPlatform("sat04task", { registry });
   su = await platform.superuser();
+  owner = await platform.owner();
 }, 120_000);
 
 afterAll(async () => {
+  await owner?.end();
   await su?.end();
   await platform?.drop();
 });
@@ -43,29 +49,32 @@ const codeHash = (code: string) =>
 
 /** One task run: fin_owner, one transaction, committed only when the task returns. */
 async function run(params: Record<string, unknown>, runId = `run_${Date.now()}`) {
-  const owner = await platform.owner();
+  await owner.query("BEGIN");
+  const tx = {
+    ids: createIdSource({ now: () => Date.now() }),
+    query: (text: string, values?: readonly unknown[]) => owner.query(text, values),
+  } as unknown as UnitTx;
   try {
-    await owner.query("BEGIN");
-    const tx = {
-      ids: createIdSource({ now: () => Date.now() }),
-      query: (text: string, values?: readonly unknown[]) => owner.query(text, values),
-    } as unknown as UnitTx;
-    try {
-      const result = await staffBootstrap.run(tx, staffBootstrap.params.parse(params), {
-        runId,
-        release: "test-release",
-        environment: "ci",
-      });
-      await owner.query("COMMIT");
-      return result;
-    } catch (error) {
-      await owner.query("ROLLBACK");
-      throw error;
-    }
-  } finally {
-    await owner.end();
+    const result = await staffBootstrap.run(tx, staffBootstrap.params.parse(params), {
+      runId,
+      release: "test-release",
+      environment: "ci",
+    });
+    await owner.query("COMMIT");
+    return result;
+  } catch (error) {
+    await owner.query("ROLLBACK");
+    throw error;
   }
 }
+
+/**
+ * The timeout of each test that runs `cli()`. Migrate's entry point sets fin_owner's password for
+ * its run, so it runs under the cluster-wide lock, behind every other test file's bootstrap and
+ * migrations, as this file's own hooks do. Each test takes 0.1 to 0.7 s alone; the wait for the
+ * lock is the long part, from 2 s to past 5 s in the full db run on a developer machine.
+ */
+const CLI_TIMEOUT_MS = 60_000;
 
 /** The same run through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it. */
 async function cli(params: Record<string, unknown>, on: StaffPlatform = platform) {
@@ -267,31 +276,35 @@ describe("staff-bootstrap", () => {
     expect(viewer).toMatch(/^stf_/);
   });
 
-  it("names the refusal in migrate's task.failed line, where the operator reads it", async () => {
-    // An active Admin exists (the test above): the run is refused, and the line says why.
-    const { code, lines, raw } = await cli({
-      address: "other@example.com",
-      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-      reasonCode: "first_admin",
-    });
-    expect(code).toBe(EXIT_FAILED);
-    expect(lines.at(-1)).toMatchObject({
-      event: "task.failed",
-      task: "staff-bootstrap",
-      code: "active_admin_exists",
-    });
-    expect(raw).not.toContain("other@example.com");
-    const reset = await cli({
-      address: "first.admin@example.com",
-      codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-      reset: true,
-      reasonCode: "lost_factors",
-    });
-    expect(reset.lines.at(-1)).toMatchObject({
-      event: "task.failed",
-      code: "another_admin_can_reset",
-    });
-  });
+  it(
+    "names the refusal in migrate's task.failed line, where the operator reads it",
+    async () => {
+      // An active Admin exists (the test above): the run is refused, and the line says why.
+      const { code, lines, raw } = await cli({
+        address: "other@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reasonCode: "first_admin",
+      });
+      expect(code).toBe(EXIT_FAILED);
+      expect(lines.at(-1)).toMatchObject({
+        event: "task.failed",
+        task: "staff-bootstrap",
+        code: "active_admin_exists",
+      });
+      expect(raw).not.toContain("other@example.com");
+      const reset = await cli({
+        address: "first.admin@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reset: true,
+        reasonCode: "lost_factors",
+      });
+      expect(reset.lines.at(-1)).toMatchObject({
+        event: "task.failed",
+        code: "another_admin_can_reset",
+      });
+    },
+    CLI_TIMEOUT_MS,
+  );
 
   it("resets the last Admin who lost every factor, with the reset's events and journal entry", async () => {
     await su.query("BEGIN");
@@ -415,59 +428,63 @@ describe("migrate --task staff-bootstrap on a new environment", () => {
     await fresh?.drop();
   });
 
-  it("makes the first Admin, records it as the operator and says so with IDs only", async () => {
-    const hash = codeHash("KMNP-QRST-VWXY-Z012");
-    const { code, lines, raw } = await cli(
-      { address: "Cli.Admin@Example.com", codeHash: hash, reasonCode: "first_admin" },
-      fresh,
-    );
-    expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
-    expect(code).toBe(EXIT_OK);
-    const done = lines.at(-1);
-    expect(done).toMatchObject({
-      event: "task.done",
-      task: "staff-bootstrap",
-      rowsChanged: 2,
-      reset: 0,
-      reactivated: 0,
-    });
-    const staffId = String(done?.staffId);
-    const codeId = String(done?.enrolmentCodeId);
-    expect(staffId).toMatch(/^stf_[0-9a-hjkmnp-tv-z]{26}$/);
-    expect(codeId).toMatch(/^enc_[0-9a-hjkmnp-tv-z]{26}$/);
-    // Neither the address nor the code's hash reaches the output, in any case.
-    expect(raw.toLowerCase()).not.toContain("cli.admin@example.com");
-    expect(raw.toLowerCase()).not.toContain(hash);
-
-    const member = await freshSu.query<{ id: string; email: string; status: string }>(
-      "SELECT id, email, status FROM staff.member WHERE role_key = 'admin'",
-    );
-    expect(member.rows).toEqual([
-      { id: staffId, email: "cli.admin@example.com", status: "pending" },
-    ]);
-    const events = await freshSu.query<{
-      event: string;
-      target_id: string;
-      actor_kind: string;
-      actor_id: string;
-      actor_via: string;
-      db_login: string;
-    }>(
-      "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
-    );
-    expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
-      ["operator.task_completed", "staff-bootstrap"],
-      ["staff.bootstrapped", staffId],
-      ["staff.enrolment_code_issued", codeId],
-      ["staff.member_added", staffId],
-    ]);
-    for (const event of events.rows) {
-      expect(event).toMatchObject({
-        actor_kind: "operator",
-        actor_id: "run_cli",
-        actor_via: "operator",
-        db_login: "fin_owner",
+  it(
+    "makes the first Admin, records it as the operator and says so with IDs only",
+    async () => {
+      const hash = codeHash("KMNP-QRST-VWXY-Z012");
+      const { code, lines, raw } = await cli(
+        { address: "Cli.Admin@Example.com", codeHash: hash, reasonCode: "first_admin" },
+        fresh,
+      );
+      expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
+      expect(code).toBe(EXIT_OK);
+      const done = lines.at(-1);
+      expect(done).toMatchObject({
+        event: "task.done",
+        task: "staff-bootstrap",
+        rowsChanged: 2,
+        reset: 0,
+        reactivated: 0,
       });
-    }
-  });
+      const staffId = String(done?.staffId);
+      const codeId = String(done?.enrolmentCodeId);
+      expect(staffId).toMatch(/^stf_[0-9a-hjkmnp-tv-z]{26}$/);
+      expect(codeId).toMatch(/^enc_[0-9a-hjkmnp-tv-z]{26}$/);
+      // Neither the address nor the code's hash reaches the output, in any case.
+      expect(raw.toLowerCase()).not.toContain("cli.admin@example.com");
+      expect(raw.toLowerCase()).not.toContain(hash);
+
+      const member = await freshSu.query<{ id: string; email: string; status: string }>(
+        "SELECT id, email, status FROM staff.member WHERE role_key = 'admin'",
+      );
+      expect(member.rows).toEqual([
+        { id: staffId, email: "cli.admin@example.com", status: "pending" },
+      ]);
+      const events = await freshSu.query<{
+        event: string;
+        target_id: string;
+        actor_kind: string;
+        actor_id: string;
+        actor_via: string;
+        db_login: string;
+      }>(
+        "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
+      );
+      expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
+        ["operator.task_completed", "staff-bootstrap"],
+        ["staff.bootstrapped", staffId],
+        ["staff.enrolment_code_issued", codeId],
+        ["staff.member_added", staffId],
+      ]);
+      for (const event of events.rows) {
+        expect(event).toMatchObject({
+          actor_kind: "operator",
+          actor_id: "run_cli",
+          actor_via: "operator",
+          db_login: "fin_owner",
+        });
+      }
+    },
+    CLI_TIMEOUT_MS,
+  );
 });
