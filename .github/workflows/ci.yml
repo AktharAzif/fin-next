@@ -5,7 +5,8 @@
 # in engine/, never the pull request's), or, until main has the engine, a plan that runs everything.
 # `gate` is the one check the ruleset requires beside commit-dates-utc; it runs main's gate.mjs over
 # every job's result (Phase 0 trimmed, BD-02). `bun` is the non-blocking canary and not in gate's
-# needs. Every job prints `ci.timing job=<name> ms=<n> cache=<hit|miss>` as its last line.
+# needs. `merge` runs after gate on a push to main only, the result a staging deploy checks. Every
+# job prints `ci.timing job=<name> ms=<n> cache=<hit|miss>` as its last line.
 #
 # Rules every job keeps: least permissions, persist-credentials: false on every checkout, values
 # reach a shell only through env:, every action pinned by SHA, ubuntu-24.04, a timeout. The pnpm
@@ -502,3 +503,31 @@ jobs:
           CI_JOB: gate
           CI_CACHE: miss
         run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  # A stand-in for fin-review's merge mode (spec 07 §2.3.4) until that mode exists: on a push to
+  # main only, it succeeds exactly when gate succeeded for the pushed commit. ops/fin's provenance
+  # check refuses a staging deploy unless this job, by the name `merge`, concluded success in the
+  # commit's ci.yml run (spec 01 §6.9 step 2; BD-05). There is no always() or !cancelled() in its
+  # condition, so the implied success() skips it whenever gate did not succeed, and a skipped job
+  # refuses the deploy too; the step checks gate's result again. It runs after gate, so it is not
+  # in gate's needs (workflow-rules.mjs allows that only for a job that needs gate and runs on push
+  # to main alone). No checkout, no action, no secret, no token permission. Its one step prints
+  # ci.timing as its last line itself.
+  merge:
+    needs: [gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Gate succeeded for this commit
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          if [ "$GATE_RESULT" = "success" ]; then verdict=pass; else verdict=fail; fi
+          echo "merge.result result=${verdict} gate=${GATE_RESULT} mode=stand-in"
+          if [ "$verdict" != "pass" ]; then
+            echo "::error title=merge::gate did not succeed for this commit, so it is not deployed"
+          fi
+          echo "ci.timing job=merge ms=$(( SECONDS * 1000 )) cache=miss"
+          if [ "$verdict" != "pass" ]; then exit 1; fi

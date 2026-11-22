@@ -1,18 +1,21 @@
 // workflow-rules (spec 07 §10.8, T-RV-40): each refusal planted in a workflow that is otherwise
 // clean, the outline reader on the YAML shapes the workflows use, and this repository's own files.
 import assert from "node:assert/strict";
-import { readFileSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GATED_JOBS } from "../gate.mjs";
 import {
+  AFTER_GATE_IF,
   checkAction,
   checkPins,
   checkRepository,
   checkWorkflow,
   child,
   EXPRESSION_OPEN as E,
+  expressionText,
   parseFlow,
   parseOutline,
   stripComment,
@@ -795,6 +798,44 @@ describe("the gate needs every job that can fail", () => {
     }
     assert.deepEqual(rules(gate("[build]").replace("if: always()", `if: ${E} always() }}`)), []);
   });
+
+  /** gate's workflow with a job after it, which needs gate and runs on `when`. */
+  const after = (/** @type {string} */ when, /** @type {string} */ needs = "[gate]") =>
+    `${gate("[build]")}  merge:\n    needs: ${needs}\n${when === "" ? "" : `    if: ${when}\n`}    runs-on: ubuntu-24.04\n    timeout-minutes: 3\n    permissions: {}\n    steps:\n      - run: echo\n`;
+
+  it("keeps a job that needs gate out of gate's needs when it runs on a push to main alone", () => {
+    for (const when of [
+      AFTER_GATE_IF,
+      `${E} ${AFTER_GATE_IF} }}`,
+      `"${AFTER_GATE_IF}"`,
+      `'${AFTER_GATE_IF.replaceAll("'", "''")}'`,
+    ]) {
+      assert.deepEqual(rules(after(when)), [], when);
+    }
+    assert.deepEqual(rules(after(AFTER_GATE_IF, "gate")), []);
+    assert.deepEqual(rules(after(AFTER_GATE_IF, "\n      - gate")), []);
+  });
+
+  it("refuses a job after gate that could run on a pull request or when gate did not succeed", () => {
+    for (const when of [
+      "",
+      "always()",
+      `always() && ${AFTER_GATE_IF}`,
+      `${E} !cancelled() && ${AFTER_GATE_IF} }}`,
+      `${AFTER_GATE_IF} && !cancelled()`,
+      `${AFTER_GATE_IF} || failure()`,
+      "github.event_name == 'push'",
+      "github.ref == 'refs/heads/main'",
+      "github.event_name == 'pull_request' && github.ref == 'refs/heads/main'",
+      "github.event_name == 'push' && github.ref == 'refs/heads/next'",
+    ]) {
+      const found = checkWorkflow("ci.yml", after(when));
+      assert.ok(
+        found.some((f) => f.rule === "gate-needs" && f.message.includes("merge needs gate")),
+        when,
+      );
+    }
+  });
 });
 
 describe("caches a pull request's run could leave", () => {
@@ -999,6 +1040,110 @@ describe("this repository", () => {
       const guard = list.findIndex((s) => runOf(s) === "node .github/scripts/node-check.mjs");
       const setup = list.findIndex((s) => usesOf(s).startsWith("actions/setup-node@"));
       assert.equal(guard, setup + 1, `${name}: the Node check follows setup-node`);
+    }
+  });
+
+  // ops/fin's provenance check refuses a staging deploy unless ci.yml's job named `merge`
+  // concluded success in the run for a push of that commit to main. Until fin-review's merge mode
+  // exists, the job stands in with gate's result and nothing else.
+  describe("the merge job", () => {
+    const text = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
+    const jobs = child(parseOutline("ci.yml", text).root, "jobs");
+    const merge = jobs === undefined ? undefined : child(jobs, "merge");
+    /** Every value and block-scalar line in the job, as the context rules read an expression. */
+    const texts = () => {
+      /** @type {string[]} */
+      const found = [];
+      /** @param {import("../workflow-rules.mjs").OutlineNode} node */
+      const visit = (node) => {
+        found.push(`${node.key ?? ""} ${node.value}`, ...node.scalar.map((s) => s.text));
+        for (const c of node.children) visit(c);
+      };
+      if (merge !== undefined) visit(merge);
+      return found.map((t) => expressionText(t).replace(/\s+/g, ""));
+    };
+
+    it("runs on a push to main only, after gate, with no token permission", () => {
+      assert.ok(merge !== undefined, "ci.yml has a merge job");
+      // The provenance check finds the job by its name: a name: would rename it.
+      assert.equal(child(merge, "name"), undefined);
+      assert.equal(valueAt(merge, "if"), AFTER_GATE_IF);
+      assert.equal(valueAt(merge, "needs"), "[gate]");
+      assert.equal(valueAt(merge, "permissions"), "{}");
+      assert.equal(child(merge, "permissions")?.children.length, 0);
+      assert.equal(child(merge, "continue-on-error"), undefined);
+    });
+
+    it("has no status function, no secret, no token, no action and no container", () => {
+      for (const t of texts()) {
+        assert.doesNotMatch(t, /always\(|cancelled\(|failure\(|success\(/, t);
+        assert.doesNotMatch(t, /\bsecrets\b|github\.token/, t);
+      }
+      for (const key of ["uses", "container", "services", "strategy", "secrets"]) {
+        assert.equal(merge === undefined ? undefined : child(merge, key), undefined, key);
+      }
+      const list = steps("ci.yml", "merge");
+      assert.equal(list.length, 1, "one step");
+      const step = /** @type {import("../workflow-rules.mjs").OutlineNode} */ (list[0]);
+      assert.deepEqual(
+        step.children.map((c) => c.key),
+        ["name", "env", "run"],
+      );
+      assert.equal(usesOf(step), "");
+      assert.equal(child(step, "if"), undefined);
+      assert.deepEqual(
+        child(step, "env")?.children.map((c) => `${c.key}=${c.value}`),
+        [`GATE_RESULT=${E} needs.gate.result }}`],
+      );
+    });
+
+    /**
+     * Runs the step's script as the runner's default shell does, with gate's result.
+     * @param {import("node:test").TestContext} t
+     * @param {string | undefined} result
+     */
+    const runStep = (t, result) => {
+      const run = child(/** @type {any} */ (steps("ci.yml", "merge")[0]), "run");
+      assert.equal(run?.value, "|");
+      const script = join(tempDir(t), "merge.sh");
+      writeFileSync(script, `${(run?.scalar ?? []).map((s) => s.text).join("\n")}\n`);
+      /** @type {NodeJS.ProcessEnv} */
+      const env = { PATH: process.env.PATH };
+      if (result !== undefined) env.GATE_RESULT = result;
+      return spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", script], {
+        encoding: "utf8",
+        env,
+      });
+    };
+
+    it("its step passes when gate succeeded, and prints ci.timing last", (t) => {
+      const ran = runStep(t, "success");
+      assert.equal(ran.status, 0, ran.stderr);
+      const lines = ran.stdout.trim().split("\n");
+      assert.match(lines.at(-1) ?? "", /^ci\.timing job=merge ms=\d+ cache=miss$/);
+      assert.ok(lines.includes("merge.result result=pass gate=success mode=stand-in"));
+      assert.doesNotMatch(ran.stdout, /::error/);
+    });
+
+    for (const result of [
+      "failure",
+      "cancelled",
+      "skipped",
+      "",
+      undefined,
+      "Success",
+      "SUCCESS",
+      " success",
+      "success ",
+      "success\n",
+    ]) {
+      it(`its step fails when gate's result is ${JSON.stringify(result) ?? "unset"}`, (t) => {
+        const ran = runStep(t, result);
+        assert.notEqual(ran.status, 0);
+        assert.match(ran.stdout, /^::error title=merge::/m);
+        assert.match(ran.stdout, /^merge\.result result=fail /m);
+        assert.match(ran.stdout.trim().split("\n").at(-1) ?? "", /^ci\.timing job=merge /);
+      });
     }
   });
 });

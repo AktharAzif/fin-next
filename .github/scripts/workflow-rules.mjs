@@ -19,7 +19,10 @@
 //     ubuntu-24.04; a job that calls a reusable workflow;
 //   - in a workflow with a `gate` job: a job that can fail (no `continue-on-error: true`) left out
 //     of gate's needs, and a gate without `if: always()` (spec 01 §5.3: gate needs every job
-//     but the non-blocking canary);
+//     but the non-blocking canary); a job that needs gate itself (ci.yml's `merge`) runs after
+//     it and cannot be in its needs, so it is refused unless its condition is exactly
+//     `github.event_name == 'push' && github.ref == 'refs/heads/main'`: no pull request waits on
+//     it, and no status function (always(), !cancelled()) runs it when gate did not succeed;
 //   - a checkout without `persist-credentials: false`; a setup-node without
 //     `package-manager-cache: false`, or with `cache:`;
 //   - a `uses:` that is not a GitHub-owned action (actions/*, github/*) or a local action under
@@ -123,6 +126,8 @@ const ODD_CHARACTER = /(?![\t\n\r\u0085\u{2028}\u{2029} ])[\p{Cc}\p{Cf}\p{Z}\u{F
 const ALIAS_START = /^[&*!]/;
 /** A save that runs on push only: `github.event_name == 'push'`, alone or first in a conjunction. */
 const PUSH_ONLY = /^github\.event_name\s*==\s*'push'\s*(?:&&[^|]*)?$/;
+/** The one condition a job after the gate runs on: a push to main, with the implied success(). */
+export const AFTER_GATE_IF = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
 
 /**
  * Reads a line as YAML does for two things: where its comment starts (a `#` at the start or after
@@ -899,7 +904,8 @@ export function checkWorkflow(file, text) {
 }
 
 /**
- * The gate job, when a workflow has one: it needs every job that can fail, and runs always().
+ * The gate job, when a workflow has one: it needs every job that can fail, and runs always(). A
+ * job that needs gate runs after it, so gate cannot need it; it runs on a push to main only.
  * @param {string} file
  * @param {OutlineNode} jobs
  * @returns {Finding[]}
@@ -912,6 +918,18 @@ function checkGate(file, jobs) {
   const needs = scalarList(child(gate, "needs"));
   for (const job of jobs.children) {
     if (job.key === null || job === gate) continue;
+    if (scalarList(child(job, "needs")).includes("gate")) {
+      const when = child(job, "if");
+      if (when === undefined || condition(when.value) !== AFTER_GATE_IF) {
+        findings.push({
+          file,
+          line: when?.line ?? job.line,
+          rule: "gate-needs",
+          message: `${clean(job.key, 60)} needs gate, so it runs after it: only with \`if: ${AFTER_GATE_IF}\`, nothing else`,
+        });
+      }
+      continue;
+    }
     const blocking = unquote(child(job, "continue-on-error")?.value ?? "") !== "true";
     if (blocking && !needs.includes(job.key)) {
       findings.push({

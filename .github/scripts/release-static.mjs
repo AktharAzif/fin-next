@@ -11,7 +11,7 @@
 //             stages each output in release/static/<key>/ and moves every source map out into
 //             release/source-maps/<key>/; refuses a build no artefact may be (artefactProblems:
 //             _headers or env.json, which the deploy renders, SF-05; a Worker control file; a
-//             path the deploy and a browser would read two ways; an asset over 25 MiB), or a link
+//             path the deploy refuses or would read two ways; an asset over 25 MiB), or a link
 //   take      (static, from here on no dependency code runs) admits what the build job staged,
 //             downloaded into release-staged/: static/, source-maps/ and meta/static-build.json
 //             only, no link, copied into release/ before anything else is downloaded there
@@ -24,17 +24,21 @@
 //             SP-26); sets the step outputs the uploads read
 //   record    adds each uploaded artefact's SHA-256, writes the checksums file actions/attest
 //             signs, and gives the static record's own SHA-256 as the step output record_sha256
-//   manifest  writes release-manifest.json: the commit, each image's digest from exactly one
-//             record per release image (readImageRecords), each static artefact's name, SHA-256
-//             and asset manifest hash, the source-map artefact, the migrations and the minimum
-//             schema version. Any job of a run can replace an artefact of that run, but only a
-//             job sets its own outputs: each record is taken only when its SHA-256 equals the one
-//             the job that wrote it gave as an output (RECORD_SHA256_<IMAGE>, RECORD_SHA256_STATIC)
+//   manifest  writes release-manifest.json: the commit, every release image's digest from exactly
+//             one record per image (readImageRecords: an image whose record is missing, says it
+//             was not built or has no digest refuses the manifest), each static artefact's name,
+//             SHA-256 and asset manifest hash, the source-map artefact, every package's
+//             migrations by migrate's own rule (readMigrations) and the minimum schema version,
+//             the newest of them. Any job of a run can replace an artefact of that run, but only
+//             a job sets its own outputs: each record is taken only when its SHA-256 equals the
+//             one the job that wrote it gave as an output (RECORD_SHA256_<IMAGE>,
+//             RECORD_SHA256_STATIC)
 //
 // Only the previous release's *own* assets travel (the ones its build produced, which its
 // manifest lists), so an artefact holds two releases' assets at most, never a growing pile. The
 // same path rule (artefactPathProblem) admits a release's own assets and the previous release's
-// list, so no name one release accepts can break the release after it.
+// list, and it is the deploy's own (ops/fin's zip reader), so no name one release accepts can break
+// the release after it or its deploy.
 // Node built-ins only. Every line it prints is `release.<what> key=value ...`.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -53,7 +57,11 @@ import { dirname, extname, join, posix, relative, sep } from "node:path";
 import { addSummary, annotate, clean, isMain, isRecord, isSha, say, setOutput } from "./lib/ci.mjs";
 
 export const RELEASE = "release";
-/** The release images, one matrix entry each of release.yml's images job (release-image.sh). */
+/**
+ * The release images, one matrix entry each of release.yml's images job (release-image.sh), and
+ * every one required in each release. spec 01 §4.9's fin-next-payments and fin-next-backup are not
+ * among them: the release does not build them yet.
+ */
 export const RELEASE_IMAGES = ["console", "admin", "verify", "edge", "api", "connector"];
 const KEY = /^[a-z]+$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -76,31 +84,38 @@ export const REFUSED_NAMES = new Set([
 /** tools/static-deploy's limits: Cloudflare's 25 MiB per asset, 20,000 files per artefact. */
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const MAX_ARTEFACT_FILES = 20_000;
-/** packages/db's migration file names (DA-04). */
+/** A migration's file name, in whichever package (DA-04; packages/db's MIGRATION_NAME). */
 const MIGRATION = /^\d{14}_[a-z][a-z0-9-]*_[a-z0-9][a-z0-9_]*\.sql$/;
+/** A package folder whose files migrate reads (packages/db/src/assets.ts's PACKAGE_NAME). */
+const PACKAGE = /^[a-z][a-z0-9-]*$/;
+/**
+ * The characters a path segment of an artefact may hold: exactly ops/fin's zip reader's SEGMENT
+ * (ops/fin/src/static/zip.ts), which `fin static render` applies to every entry of the archive.
+ */
+const SEGMENT = /^[A-Za-z0-9._@~+=,-]+$/;
 
 /**
- * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy,
- * Cloudflare and a browser all read one way: absolute, with no empty, `.` or `..` segment, no
- * backslash, no `%` (read again as an escape), `?` or `#` (they end a URL's path), no control or
- * invisible format character, and at most 1,024 characters. Spaces, brackets and letters beyond
- * ASCII are kept, as the bundler keeps them in an asset's name (`logo (1)-Bq3x.svg`).
+ * Why a path may not name a file of a static artefact, or null. It is a URL path that the deploy
+ * takes and that the deploy, Cloudflare and a browser all read one way: absolute, at most 1,024
+ * characters, with no empty, `.` or `..` segment, and every segment made only of ASCII letters,
+ * digits and `. _ @ ~ + = , -` (SEGMENT, the deploy's own rule). So no backslash, no `%` (read
+ * again as an escape), no `?` or `#` (they end a URL's path), no control or format character, and
+ * no space, bracket, `!`, `'`, `&` or letter beyond ASCII either: a bundler keeps those in an
+ * asset's name (`logo (1)-Bq3x.svg`), but `fin static render` refuses the archive that holds one,
+ * so the release refuses the build here rather than carry an asset no later release could deploy
+ * (FW-C13). Rename the source file instead.
  * @param {unknown} path
  * @returns {string | null}
  */
 export function artefactPathProblem(path) {
   if (typeof path !== "string" || !path.startsWith("/")) return "is not an absolute URL path";
   if (path.length > 1024) return "is longer than 1,024 characters";
-  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\%?#]/u.test(path)) {
-    return "holds a control or format character, a backslash, %, ? or #";
-  }
-  if (
-    path
-      .slice(1)
-      .split("/")
-      .some((s) => s === "" || s === "." || s === "..")
-  ) {
+  const segments = path.slice(1).split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) {
     return "has an empty, . or .. segment";
+  }
+  if (!segments.every((s) => SEGMENT.test(s))) {
+    return "holds a character the deploy refuses (it takes A-Z a-z 0-9 . _ @ ~ + = , - only)";
   }
   return null;
 }
@@ -470,7 +485,8 @@ export function previousOwnAssets(manifest, key, previousDir) {
     walkFiles(join(previousDir, "assets")).map((f) => posix.join("/assets", f.path.slice(1)));
   for (const path of paths) {
     // The same rule this release's own paths passed (merge), so no name a release accepted
-    // breaks the one after it; only what could leave assets/ or read two ways is refused.
+    // breaks the one after it: a path that could leave assets/ or that the deploy refuses is
+    // refused.
     if (
       typeof path !== "string" ||
       !path.startsWith("/assets/") ||
@@ -703,13 +719,17 @@ export function record(ctx) {
  * record artefact, `image-record-<image>-<sha>/fin-next-<image>.json` (download-artifact's layout
  * without merge-multiple), exactly one for each of RELEASE_IMAGES and nothing else, each record
  * the very bytes the images job wrote (its SHA-256 is that job's output, which no other job can
- * set, while any job of the run can replace an artefact), naming its own image, and a built
- * image's reference this repository's own GHCR package, `ghcr.io/<owner>/fin-next-<image>`.
- * These digests are what the attested manifest names, so a missing, extra, second or replaced
- * record, or a reference elsewhere, refuses the release.
+ * set, while any job of the run can replace an artefact), naming its own image, saying it was
+ * built, with its digest and its reference this repository's own GHCR package,
+ * `ghcr.io/<owner>/fin-next-<image>`. Every release image is required (the steward's ruling of
+ * 22 Nov): these digests are what the attested manifest names and what the operator deploys, so a
+ * missing, extra, second or replaced record, an image not built or without a digest, or a
+ * reference elsewhere refuses the release, and no manifest is written.
  * @param {string} dir
  * @param {{ sha: string, owner: string, hashes: Record<string, string | undefined> }} run this
  *   run's commit, the repository's owner, and each image's record SHA-256 from the images job
+ * @returns {{ images: Record<string, string>, refs: Record<string, string> }} every release
+ *   image's digest and its reference at that digest
  */
 export function readImageRecords(dir, { sha, owner, hashes }) {
   if (!isSha(sha)) throw new Error("GITHUB_SHA is not a commit SHA");
@@ -720,13 +740,17 @@ export function readImageRecords(dir, { sha, owner, hashes }) {
   const images = {};
   /** @type {Record<string, string>} */
   const refs = {};
-  /** @type {{ image: string, why: string }[]} */
-  const skipped = [];
-  const expected = RELEASE_IMAGES.map((image) => `image-record-${image}-${sha}`).sort();
+  const folderOf = (/** @type {string} */ image) => `image-record-${image}-${sha}`;
   const folders = existsSync(dir) ? readdirSync(dir).sort() : [];
-  if (folders.join("\n") !== expected.join("\n")) {
+  const missing = RELEASE_IMAGES.filter((image) => !folders.includes(folderOf(image)));
+  const extra = folders.filter((folder) => !RELEASE_IMAGES.some((i) => folderOf(i) === folder));
+  if (missing.length > 0 || extra.length > 0) {
+    const problems = [
+      ...missing.map((image) => `no record of fin-next-${image}`),
+      ...extra.map((folder) => `an artefact no release image has, ${clean(folder, 120)}`),
+    ];
     throw new Error(
-      `the image records are not exactly one artefact per release image (${RELEASE_IMAGES.join(", ")})`,
+      `the image records are not exactly one artefact per release image (${RELEASE_IMAGES.join(", ")}): ${problems.join("; ")}`,
     );
   }
   const namespace = `ghcr.io/${owner.toLowerCase()}/`;
@@ -749,34 +773,82 @@ export function readImageRecords(dir, { sha, owner, hashes }) {
     if (!isRecord(rec) || rec.image !== name || !IMAGE.test(name)) {
       throw new Error(`${name}.json is not ${name}'s record`);
     }
-    if (rec.built === true) {
-      if (typeof rec.digest !== "string" || !DIGEST.test(rec.digest)) {
-        throw new Error(`${name}: the record's digest is not sha256:<hex>`);
-      }
-      if (rec.ref !== `${namespace}${name}`) {
-        throw new Error(`${name}: the record's reference is not ${namespace}${name}`);
-      }
-      images[name] = rec.digest;
-      refs[name] = `${rec.ref}@${rec.digest}`;
-    } else if (rec.built === false) {
-      skipped.push({ image: name, why: clean(rec.why ?? "not built", 200) });
-    } else {
-      throw new Error(`${name}: the record says neither built nor skipped`);
+    if (rec.built !== true) {
+      const why = typeof rec.why === "string" ? ` (${clean(rec.why, 200)})` : "";
+      throw new Error(
+        `${name} was not built${why}: every release image is required, so the release has no manifest`,
+      );
     }
+    if (rec.digest === undefined || rec.digest === null || rec.digest === "") {
+      throw new Error(`${name}: the record has no image digest`);
+    }
+    if (typeof rec.digest !== "string" || !DIGEST.test(rec.digest)) {
+      throw new Error(`${name}: the record's digest is not sha256:<hex>`);
+    }
+    if (rec.ref !== `${namespace}${name}`) {
+      throw new Error(`${name}: the record's reference is not ${namespace}${name}`);
+    }
+    images[name] = rec.digest;
+    refs[name] = `${rec.ref}@${rec.digest}`;
   }
-  return { images, refs, skipped };
+  return { images, refs };
 }
 
 /**
- * The migration files packages/db ships, in name order, and the newest as the minimum schema.
+ * The migrations the release's migrate applies, in the order it applies them, and the newest as
+ * the minimum schema version (ARCHITECTURE §6.4). Found by the runner's own rule (packages/db/src/
+ * assets.ts, discoverDbAssets and listMigrations): every `.sql` file, in any case, of
+ * packages/<package>/migrations for each package folder with a lower-case name, in one name order
+ * across the packages. This job attests the manifest, so it runs only control-path code and reads
+ * the files itself rather than running packages/db's `assets-cli.ts migrations`; a test compares
+ * the two on this repository. So that the manifest never lists other than migrate applies, a
+ * `.sql` file whose name is not a migration's, a name two packages hold, a timestamp two files
+ * share, or a link refuses the release, as each would refuse migrate. A tree with no packages
+ * (before the data layer is on main) has none.
  * @param {string} root
+ * @returns {{ migrations: string[], minimumSchemaVersion: string | null }}
  */
 export function readMigrations(root) {
-  const dir = join(root, "packages", "db", "migrations");
-  if (!existsSync(dir)) return { migrations: [], minimumSchemaVersion: null };
-  const migrations = readdirSync(dir)
-    .filter((name) => MIGRATION.test(name))
+  const packagesDir = join(root, "packages");
+  if (!existsSync(packagesDir)) return { migrations: [], minimumSchemaVersion: null };
+  /** @param {string} abs @param {string} shown */
+  const plainFolder = (abs, shown) => {
+    const stat = lstatSync(abs);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`${shown} is not a plain folder`);
+    }
+  };
+  plainFolder(packagesDir, "packages");
+  /** @type {Map<string, string>} each migration to the folder that holds it */
+  const found = new Map();
+  const packages = readdirSync(packagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && PACKAGE.test(entry.name))
+    .map((entry) => entry.name)
     .sort();
+  for (const pkg of packages) {
+    const folder = `packages/${pkg}/migrations`;
+    const dir = join(packagesDir, pkg, "migrations");
+    if (!existsSync(dir)) continue;
+    plainFolder(dir, folder);
+    for (const name of readdirSync(dir).sort()) {
+      if (!/\.sql$/i.test(name)) continue;
+      const shown = `${folder}/${clean(name, 120)}`;
+      if (!lstatSync(join(dir, name)).isFile()) throw new Error(`${shown} is not a plain file`);
+      if (!MIGRATION.test(name)) {
+        throw new Error(`${shown} is not named <YYYYMMDDHHMMSS>_<area>_<what>.sql`);
+      }
+      const other = found.get(name);
+      if (other !== undefined) throw new Error(`${name} is in both ${other} and ${folder}`);
+      found.set(name, folder);
+    }
+  }
+  const migrations = [...found.keys()].sort();
+  for (let i = 1; i < migrations.length; i++) {
+    const [before, name] = [migrations[i - 1] ?? "", migrations[i] ?? ""];
+    if (before.slice(0, 14) === name.slice(0, 14)) {
+      throw new Error(`${name} shares its timestamp with ${before}`);
+    }
+  }
   return { migrations, minimumSchemaVersion: migrations.at(-1) ?? null };
 }
 
@@ -883,8 +955,8 @@ export function writeManifest(ctx) {
       isRecord(staticMeta) && isRecord(staticMeta.sourceMaps) ? staticMeta.sourceMaps : null,
     migrations,
     minimumSchemaVersion,
+    // Static outputs only: no release image is ever skipped (readImageRecords refuses one).
     skipped: {
-      images: images.skipped,
       static: isRecord(staticMeta) && Array.isArray(staticMeta.skipped) ? staticMeta.skipped : [],
     },
   };
@@ -895,7 +967,7 @@ export function writeManifest(ctx) {
   const imageCount = Object.keys(manifest.images).length;
   const staticCount = Object.keys(manifest.static).length;
   say(
-    `release.manifest commit=${sha} images=${imageCount} static=${staticCount} migrations=${migrations.length}`,
+    `release.manifest commit=${sha} images=${imageCount} static=${staticCount} migrations=${migrations.length} minimumSchemaVersion=${minimumSchemaVersion ?? "none"}`,
   );
   addSummary(
     [
@@ -908,7 +980,9 @@ export function writeManifest(ctx) {
         ([k, e]) => `| static | ${k} | \`${isRecord(e) ? String(e.sha256) : ""}\` |`,
       ),
       "",
-      `Skipped: ${[...manifest.skipped.images.map((s) => s.image), ...manifest.skipped.static.map((s) => (isRecord(s) ? String(s.key) : ""))].join(", ") || "none"}.`,
+      `Migrations: ${migrations.length}, minimum schema version ${minimumSchemaVersion === null ? "none" : `\`${minimumSchemaVersion}\``}.`,
+      "",
+      `Static outputs skipped: ${manifest.skipped.static.map((s) => (isRecord(s) ? String(s.key) : "")).join(", ") || "none"}.`,
     ].join("\n"),
     env,
   );

@@ -125,7 +125,7 @@ describe("static builds", () => {
       "assets/index-abc.js":
         'const ns="http://www.w3.org/2000/svg";const e="https://react.dev/errors/1";new URL(p,"http://localhost");a.replace(/\\/\\/+/g,"/");b.match(/\\/assets\\/(.*)/);',
       "assets/index-abc.css": "@layer ui-sdk;",
-      "assets/logo (1)-Bq3x.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+      "assets/logo_1-Bq3x.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
     });
     assert.deepEqual(checkStatic("apps/console/dist/static", dir), []);
   });
@@ -2126,6 +2126,7 @@ describe("static builds", () => {
       assert.deepEqual(staticRules(t, { [file]: "x" }), ["artefact"], file);
     }
     assert.deepEqual(staticRules(t, { "assets/a%2e.js": "x" }), ["artefact"]);
+    assert.deepEqual(staticRules(t, { "assets/logo (1)-Bq3x.svg": "<svg/>" }), ["artefact"]);
   });
 
   it("refuses a link instead of following it", (t) => {

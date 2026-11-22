@@ -5,8 +5,11 @@
 # operator deploys staging from the release manifest it leaves:
 #   images        each release image ops/docker's Dockerfiles define, built by BuildKit with no
 #                 cache and SOURCE_DATE_EPOCH, pushed to ghcr.io/<owner>/fin-next-<name> by digest
-#                 with the OCI source label, attested with actions/attest (a missing Dockerfile
-#                 skips with a notice); the dependencies' code runs inside BuildKit, not on the host
+#                 with the OCI source label, attested with actions/attest; the dependencies' code
+#                 runs inside BuildKit, not on the host. Every image of the matrix is required: a
+#                 missing Dockerfile or build input, or a build with no digest, fails its leg and
+#                 the run, and no manifest is written (fin-next-payments and fin-next-backup are
+#                 not in the matrix: this release does not build them yet)
 #   static-build  each static app's client build with no cache, staged with its source maps moved
 #                 aside, uploaded for the next job as staged-static-<sha> (1 day). The only job that
 #                 runs the dependencies' code on the runner, so it holds no token, no OIDC
@@ -21,7 +24,8 @@
 #                 and gitleaks), and only then uploads static-<key>-<sha> (90 days), the source
 #                 maps as source-maps-<sha>, and attests them
 #   manifest      release-manifest.json (commit, image digests from exactly one record per image,
-#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested.
+#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested,
+#                 refused when any image's record is missing, unbuilt or without its digest.
 #                 Any job of the run could replace a record artefact (static-build runs the
 #                 dependencies' code), so each record is taken only with the SHA-256 the job that
 #                 wrote it gave as a job output, which no other job can set
@@ -88,8 +92,8 @@ jobs:
           IMAGE: ${{ matrix.image }}
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-image.sh
+      # Runs whenever the build step passed, which it does only with the image pushed by digest.
       - name: Attest the image
-        if: steps.build.outputs.built == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.build.outputs.name }}
