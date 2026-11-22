@@ -249,11 +249,15 @@ describe("the order a text is drawn in", () => {
     expect(drawnOrder(text, line)).toBe(drawn);
   });
 
+  // Heavy by design: two million characters drawn in each direction, so that a step holding the
+  // whole text on the call stack would exhaust it. That is about 1.7 s of CPU alone (2 to 3 s of
+  // wall time), linear in the text, and it took 27 to 32 s inside a loaded `pnpm check`, so it has
+  // a minute. A quadratic step would take hours here, and still fails.
   it("draws text of any length", () => {
     const text = `${heh}a`.repeat(1_000_000);
     expect(drawnOrder(text, "ltr")).toBe(text);
     expect(drawnOrder(text, "rtl")).toHaveLength(text.length);
-  });
+  }, 60_000);
 
   it("keeps every character", () => {
     const text = `Pa${heh}\u{64e}${ta} 12 ${alef}!b4.7${one}\u{903}$`;

@@ -764,61 +764,71 @@ describe("monitoring apply: applying", () => {
     expect(pieces(failing.text())).toEqual([]);
   });
 
-  it("looks up a create that got no answer by name, and delivers its secrets", async () => {
-    const { config } = loadEnv(ROOT, "staging");
-    if (config === undefined) throw new Error("no config");
-    const desired = buildDesired(config, { hosts: HOSTS, thresholds: {}, grace: {} }).objects;
-    const labels = (o: (typeof desired)[number]) =>
-      (o.delivery?.services ?? []).flatMap((service) =>
-        Object.keys(o.delivery?.variables ?? {}).map((variable) => `${service} ${variable}`),
-      );
+  describe("looks up a create that got no answer by name, and delivers its secrets", () => {
+    // One test for each kind and each way the answer is lost: each runs the whole apply twice, and
+    // the six together took about 0.4 s alone and went over the test timeout inside a loaded
+    // `pnpm check`.
     const cases = [
       ["source", "/api/v3/sources"],
       ["application", "/api/v3/applications"],
       ["heartbeat", "/api/v2/heartbeats"],
     ] as const;
+    const failures = [
+      ["a failed fetch", () => new TypeError("fetch failed")],
+      [
+        "a timeout",
+        () => new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      ],
+    ] as const;
     for (const [kind, path] of cases) {
-      const target = desired.find((o) => o.kind === kind && labels(o).length > 0);
-      if (target === undefined) throw new Error(`no ${kind} with secrets`);
-      for (const failure of [
-        new TypeError("fetch failed"),
-        new DOMException("The operation was aborted due to timeout", "TimeoutError"),
-      ]) {
-        const run = setup(["--assert-empty-team", "fin-staging"]);
-        const serve = run.bs.fetch;
-        let lost = false;
-        // Better Stack makes the object, but its answer never arrives.
-        const fetch = async (input: string, init?: RequestInit) => {
-          const body = init?.body === undefined ? {} : JSON.parse(String(init.body));
-          if (!lost && init?.method === "POST" && new URL(input).pathname === path) {
-            if ((body as { name?: string }).name === target.key) {
-              lost = true;
-              await serve(input, init);
-              throw failure;
+      for (const [how, lostAnswer] of failures) {
+        it(`${kind}, after ${how}`, async () => {
+          const { config } = loadEnv(ROOT, "staging");
+          if (config === undefined) throw new Error("no config");
+          const desired = buildDesired(config, { hosts: HOSTS, thresholds: {}, grace: {} }).objects;
+          const labels = (o: (typeof desired)[number]) =>
+            (o.delivery?.services ?? []).flatMap((service) =>
+              Object.keys(o.delivery?.variables ?? {}).map((variable) => `${service} ${variable}`),
+            );
+          const target = desired.find((o) => o.kind === kind && labels(o).length > 0);
+          if (target === undefined) throw new Error(`no ${kind} with secrets`);
+          const failure = lostAnswer();
+          const run = setup(["--assert-empty-team", "fin-staging"]);
+          const serve = run.bs.fetch;
+          let lost = false;
+          // Better Stack makes the object, but its answer never arrives.
+          const fetch = async (input: string, init?: RequestInit) => {
+            const body = init?.body === undefined ? {} : JSON.parse(String(init.body));
+            if (!lost && init?.method === "POST" && new URL(input).pathname === path) {
+              if ((body as { name?: string }).name === target.key) {
+                lost = true;
+                await serve(input, init);
+                throw failure;
+              }
             }
-          }
-          return serve(input, init);
-        };
-        const result = await monitoringApply({ ...run.ctx, fetch });
-        const what = `${kind} ${failure.name}`;
-        expect(lost, what).toBe(true);
-        expect(result.exitCode, what).toBe(1);
-        const delivered = run.delivered.map((d) => `${d.service} ${d.variable}`);
-        for (const label of labels(target)) expect(delivered, what).toContain(label);
-        expect(result.undelivered, what).toEqual([]);
-        expect(run.text(), what).toContain(
-          `created ${kind} ${target.key} (its create got no answer; found by name)`,
-        );
-        expect(run.text(), what).not.toContain("fetch failed");
-        expectNothingPrivate(run.text());
+            return serve(input, init);
+          };
+          const result = await monitoringApply({ ...run.ctx, fetch });
+          const what = `${kind} ${failure.name}`;
+          expect(lost, what).toBe(true);
+          expect(result.exitCode, what).toBe(1);
+          const delivered = run.delivered.map((d) => `${d.service} ${d.variable}`);
+          for (const label of labels(target)) expect(delivered, what).toContain(label);
+          expect(result.undelivered, what).toEqual([]);
+          expect(run.text(), what).toContain(
+            `created ${kind} ${target.key} (its create got no answer; found by name)`,
+          );
+          expect(run.text(), what).not.toContain("fetch failed");
+          expectNothingPrivate(run.text());
 
-        // The next plain run finds nothing left to deliver for it.
-        const next = setup([]);
-        for (const [k, v] of run.bs.store) next.bs.store.set(k, v);
-        expect((await monitoringApply(next.ctx)).exitCode, what).toBe(0);
-        expect(
-          next.bs.items(`${kind}s`).filter((i) => i.attributes.name === target.key),
-        ).toHaveLength(1);
+          // The next plain run finds nothing left to deliver for it.
+          const next = setup([]);
+          for (const [k, v] of run.bs.store) next.bs.store.set(k, v);
+          expect((await monitoringApply(next.ctx)).exitCode, what).toBe(0);
+          expect(
+            next.bs.items(`${kind}s`).filter((i) => i.attributes.name === target.key),
+          ).toHaveLength(1);
+        });
       }
     }
   });
