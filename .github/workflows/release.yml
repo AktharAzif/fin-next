@@ -1,0 +1,358 @@
+# Release builds on every push to main (spec 01 §5.5; ARCHITECTURE §11.7; EXECUTION §2.3; orchestrator
+# decision BD-05). A control path.
+#
+# This workflow builds and records; it deploys nothing and holds no deploy credential (BD-05). The
+# operator deploys staging from the release manifest it leaves:
+#   images        each release image ops/docker's Dockerfiles define, built by BuildKit with no
+#                 cache and SOURCE_DATE_EPOCH, pushed to ghcr.io/<owner>/fin-next-<name> by digest
+#                 with the OCI source label, attested with actions/attest; the dependencies' code
+#                 runs inside BuildKit, not on the host. Every image of the matrix is required: a
+#                 missing Dockerfile or build input, or a build with no digest, fails its leg and
+#                 the run, and no manifest is written (fin-next-payments and fin-next-backup are
+#                 not in the matrix: this release does not build them yet)
+#   static-build  each static app's client build with no cache, staged with its source maps moved
+#                 aside, uploaded for the next job as staged-static-<sha> (1 day). The only job that
+#                 runs the dependencies' code on the runner, so it holds no token, no OIDC
+#                 permission and no attestation right
+# Only the static outputs are named static-<key>-<sha>: the next release downloads the previous
+# one's with the pattern static-*-<sha>, which must match nothing else (an expired artefact it
+# matched would fail every later release).
+#   static        runs no install and no dependency code: takes the staged outputs on no trust
+#                 (release-static.mjs merge refuses anything a deployment would), carries the
+#                 previous release's own assets/ in (FW-C13), scans each artefact with gitleaks,
+#                 and only then uploads static-<key>-<sha> (90 days), the source maps as
+#                 source-maps-<sha>, and attests them
+#   manifest      release-manifest.json (commit, image digests from exactly one record per image,
+#                 static artefact SHA-256s, migrations) as the artefact release-<sha>, attested,
+#                 refused when any image's record is missing, unbuilt or without its digest.
+#                 Any job of the run could replace a record artefact (static-build runs the
+#                 dependencies' code), so each record is taken only with the SHA-256 the job that
+#                 wrote it gave as a job output, which no other job can set
+# No job restores or saves a cache (ARCHITECTURE §11.3). A run never cancels the one in progress,
+# but GitHub keeps one pending run per concurrency group: when a third release queues behind a
+# running one, the pending one is cancelled and that commit gets no release (no images, artefacts
+# or manifest, so it cannot be deployed or rolled back to). The next release still finds the last
+# one that finished as its previous release, so FW-C13's carry holds; the gap is recorded in the
+# pull request that added this workflow.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # push the image to this repository's GHCR package
+      id-token: write # the OIDC token Sigstore signs the attestation with
+      attestations: write # store the attestation
+      artifact-metadata: write # the attestation's storage record for the pushed image
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [console, admin, verify, edge, api, connector]
+    # Each record's SHA-256, which only this job can set (any job of the run can replace the
+    # record artefact, so an artefact would not do). One name per image: each leg sets its own,
+    # and the legs' outputs combine (GitHub's workflow syntax, jobs.<job_id>.outputs: a matrix's
+    # outputs are combined, and an output with an empty value is not set, so no leg clears
+    # another's).
+    outputs:
+      record_sha256_console: ${{ steps.build.outputs.record_sha256_console }}
+      record_sha256_admin: ${{ steps.build.outputs.record_sha256_admin }}
+      record_sha256_verify: ${{ steps.build.outputs.record_sha256_verify }}
+      record_sha256_edge: ${{ steps.build.outputs.record_sha256_edge }}
+      record_sha256_api: ${{ steps.build.outputs.record_sha256_api }}
+      record_sha256_connector: ${{ steps.build.outputs.record_sha256_connector }}
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Build and push the release image
+        id: build
+        env:
+          IMAGE: ${{ matrix.image }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-image.sh
+      # Runs whenever the build step passed, which it does only with the image pushed by digest.
+      - name: Attest the image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.build.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Keep the image record for the manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-record-${{ matrix.image }}-${{ github.sha }}
+          path: ${{ runner.temp }}/image-record/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io || true
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: images-${{ matrix.image }}
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  static-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Install (no cache)
+        run: pnpm install --frozen-lockfile
+      - name: Build the static apps (no cache) and stage them
+        run: node .github/scripts/release-static.mjs build
+      - name: Hand the staged outputs to the static job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staged-static-${{ github.sha }}
+          path: release/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: static-build
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  static:
+    needs: static-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # find the previous release's run and download its artefacts (FW-C13)
+      id-token: write # the OIDC token Sigstore signs the attestation with
+      attestations: write # store the attestation
+    # The static record's SHA-256, which only this job can set (see the images job).
+    outputs:
+      record_sha256: ${{ steps.record.outputs.record_sha256 }}
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install gitleaks (release asset, by checksum)
+        run: .github/scripts/install-tools.sh gitleaks
+      - name: Download the staged outputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: staged-static-${{ github.sha }}
+          path: release-staged
+      - name: Take only what a stage writes (before any previous release is downloaded)
+        run: node .github/scripts/release-static.mjs take
+      - name: Find the previous release
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/release-static.mjs previous
+      - name: Download the previous release's static artefacts
+        if: steps.previous.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: static-*-${{ steps.previous.outputs.sha }}
+          path: release/previous/static
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Download the previous release's manifest
+        if: steps.previous.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ steps.previous.outputs.sha }}
+          path: release/previous/manifest
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Check the staged outputs and carry the previous release's assets in (FW-C13)
+        id: merge
+        env:
+          PREVIOUS_SHA: ${{ steps.previous.outputs.sha }}
+        run: node .github/scripts/release-static.mjs merge
+      - name: gitleaks (each artefact)
+        run: .github/scripts/gitleaks-static.sh release/static
+      - name: Upload static-console
+        id: up-console
+        if: steps.merge.outputs.console == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-console-${{ github.sha }}
+          path: release/static/console/
+          retention-days: 90
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload static-admin
+        id: up-admin
+        if: steps.merge.outputs.admin == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-admin-${{ github.sha }}
+          path: release/static/admin/
+          retention-days: 90
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload static-verify
+        id: up-verify
+        if: steps.merge.outputs.verify == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-verify-${{ github.sha }}
+          path: release/static/verify/
+          retention-days: 90
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload static-selfie
+        id: up-selfie
+        if: steps.merge.outputs.selfie == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-selfie-${{ github.sha }}
+          path: release/static/selfie/
+          retention-days: 90
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload static-docs
+        id: up-docs
+        if: steps.merge.outputs.docs == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: static-docs-${{ github.sha }}
+          path: release/static/docs/
+          retention-days: 90
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload the browser source maps
+        id: up-maps
+        if: steps.merge.outputs.maps == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-maps-${{ github.sha }}
+          path: release/source-maps/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Record the artefacts' SHA-256s
+        id: record
+        env:
+          MAPS: ${{ steps.merge.outputs.maps }}
+          DIGEST_CONSOLE: ${{ steps.up-console.outputs.artifact-digest }}
+          DIGEST_ADMIN: ${{ steps.up-admin.outputs.artifact-digest }}
+          DIGEST_VERIFY: ${{ steps.up-verify.outputs.artifact-digest }}
+          DIGEST_SELFIE: ${{ steps.up-selfie.outputs.artifact-digest }}
+          DIGEST_DOCS: ${{ steps.up-docs.outputs.artifact-digest }}
+          DIGEST_SOURCE_MAPS: ${{ steps.up-maps.outputs.artifact-digest }}
+        run: node .github/scripts/release-static.mjs record
+      - name: Attest the static artefacts
+        if: steps.record.outputs.attest == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release/meta/static-checksums.txt
+      - name: Keep the static record for the manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: record-static-${{ github.sha }}
+          path: release/meta/static.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: static
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  manifest:
+    needs: [images, static]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # the OIDC token Sigstore signs the attestation with
+      attestations: write # store the attestation
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      # Each record in its own folder, named by its artefact (no merge-multiple, which would let a
+      # second record overwrite the first): the manifest step refuses anything but one per image.
+      - name: Download the image records
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-record-*-${{ github.sha }}
+          path: release/images
+      - name: Download the static record
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: record-static-${{ github.sha }}
+          path: release/meta
+      - name: Write release-manifest.json
+        env:
+          RECORD_SHA256_CONSOLE: ${{ needs.images.outputs.record_sha256_console }}
+          RECORD_SHA256_ADMIN: ${{ needs.images.outputs.record_sha256_admin }}
+          RECORD_SHA256_VERIFY: ${{ needs.images.outputs.record_sha256_verify }}
+          RECORD_SHA256_EDGE: ${{ needs.images.outputs.record_sha256_edge }}
+          RECORD_SHA256_API: ${{ needs.images.outputs.record_sha256_api }}
+          RECORD_SHA256_CONNECTOR: ${{ needs.images.outputs.record_sha256_connector }}
+          RECORD_SHA256_STATIC: ${{ needs.static.outputs.record_sha256 }}
+        run: node .github/scripts/release-static.mjs manifest
+      - name: Upload the release manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ github.sha }}
+          path: release/out/release-manifest.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: Attest the release manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/out/release-manifest.json
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: manifest
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
