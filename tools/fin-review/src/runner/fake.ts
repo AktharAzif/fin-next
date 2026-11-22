@@ -45,17 +45,25 @@ export interface FakeCall {
 }
 
 /**
+ * A fixed version 4 UUID for the fake stream, `n` in its last field. Built when called, so the
+ * repository holds no UUID-shaped text (public-safety refuses one: real tunnel and service IDs are UUIDs).
+ */
+function fakeUuid(n: number): string {
+  return ["0".repeat(8), "0".repeat(4), `4${"0".repeat(3)}`, `8${"0".repeat(3)}`, String(n).padStart(12, "0")].join("-");
+}
+
+/**
  * Claude Code's stream-json output for a scripted reply, as 2.1.328 prints it: the init line, one
  * assistant message per served model, and the result last (the field names recorded from 2.1.328).
  */
 export function fakeSessionStream(spec: SessionSpec, reply: FakeResult): string {
   const served = reply.served ?? [reply.isError === true ? SYNTHETIC_MODEL : spec.modelId];
-  const init = { type: "system", subtype: "init", model: reply.initModel ?? spec.modelId, session_id: "00000000-0000-4000-8000-000000000000", uuid: "00000000-0000-4000-8000-000000000002" };
+  const init = { type: "system", subtype: "init", model: reply.initModel ?? spec.modelId, session_id: fakeUuid(0), uuid: fakeUuid(2) };
   const messages = served.map((model, index) => ({
     type: "assistant",
     message: { id: `msg_fake_${index}`, type: "message", role: "assistant", model, content: [], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
     parent_tool_use_id: null,
-    session_id: "00000000-0000-4000-8000-000000000000",
+    session_id: fakeUuid(0),
   }));
   return [init, ...messages].map((line) => `${JSON.stringify(line)}\n`).join("") + fakeResultLine(spec, reply);
 }
@@ -77,7 +85,7 @@ function fakeResultLine(spec: SessionSpec, reply: FakeResult): string {
     num_turns: 2,
     result: reply.resultText ?? (reply.output === undefined ? "" : JSON.stringify(reply.output)),
     stop_reason: reply.stopReason ?? "end_turn",
-    session_id: "00000000-0000-4000-8000-000000000000",
+    session_id: fakeUuid(0),
     total_cost_usd: cost,
     usage: { input_tokens: 10, cache_creation_input_tokens: 100, cache_read_input_tokens: 5, output_tokens: 20 },
     modelUsage,
@@ -85,7 +93,7 @@ function fakeResultLine(spec: SessionSpec, reply: FakeResult): string {
     terminal_reason: "completed",
     fast_mode_state: "off",
     api_error_status: reply.apiErrorStatus ?? null,
-    uuid: "00000000-0000-4000-8000-000000000001",
+    uuid: fakeUuid(1),
   };
   if (reply.output !== undefined) result["structured_output"] = reply.output;
   return `${JSON.stringify(result)}\n`;

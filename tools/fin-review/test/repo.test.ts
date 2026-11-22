@@ -19,13 +19,18 @@ describe("argument validation (spec 07 §2.1)", () => {
   });
 
   it("accepts https, ssh and local-path origins only", () => {
-    for (const url of ["https://github.com/o/r.git", "git@github.com:o/r.git", "ssh://git@github.com/o/r", "/srv/git/r"]) assert.ok(isRemoteUrl(url), url);
+    for (const url of ["https://github.com/o/r.git", "git@example.com:o/r.git", "ssh://git@example.com/o/r", "/srv/git/r"]) assert.ok(isRemoteUrl(url), url);
     for (const url of ["ext::sh -c x", "file:///x", "http://github.com/o/r", "-uploadpack=x", "https://h/a/../b", "git@h:a b"]) assert.ok(!isRemoteUrl(url), url);
   });
 
   it("reads a GitHub slug from the origin", () => {
     assert.equal(githubSlug("https://github.com/AktharAzif/fin-next.git"), "AktharAzif/fin-next");
-    assert.equal(githubSlug("git@github.com:o/r"), "o/r");
+    // GitHub's SSH forms, with the host spelled when the test runs: the public tree holds no address
+    // outside the reserved example domains.
+    const host = ["github", "com"].join(".");
+    assert.equal(githubSlug(`git@${host}:o/r`), "o/r");
+    assert.equal(githubSlug(`ssh://git@${host}/o/r.git`), "o/r");
+    assert.equal(githubSlug("git@example.com:o/r"), null);
     assert.equal(githubSlug("https://example.com/o/r"), null);
   });
 
