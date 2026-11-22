@@ -12,6 +12,7 @@ import {
   stepped,
   unique,
 } from "../test/harness.ts";
+import { instrument, markSetup, timed, timeTests } from "../test/timing.ts";
 import { requireStaff } from "./require-staff.ts";
 import { listSwitches, setSwitch } from "./switches.ts";
 
@@ -19,13 +20,17 @@ type Member = Awaited<ReturnType<StaffHarness["enrolled"]>>;
 
 let h: StaffHarness;
 
+timeTests("src/switches.db.test.ts");
+
 /** The file's people, made once in its setup: the one Admin, an Operator, a Compliance member. */
 let adminEmail: string;
 let operator: Member;
 let compliance: Member;
 
 beforeAll(async () => {
-  h = await createStaffHarness("sat04switch");
+  markSetup();
+  h = await timed("createStaffHarness", () => createStaffHarness("sat04switch"));
+  instrument(h);
   // The tests are about the switches, not how a member is made, and none needs fresh people: each
   // comes through the whole journey (a code sign-in, the enrolment code, a passkey registered),
   // here, once. The file's first realm requests, which pay a fresh process's cold paths and the

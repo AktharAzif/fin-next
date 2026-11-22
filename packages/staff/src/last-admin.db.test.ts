@@ -13,6 +13,7 @@ import {
   type StaffHarness,
   unique,
 } from "../test/harness.ts";
+import { instrument, markSetup, timed, timeTests } from "../test/timing.ts";
 import { resolveStaffRole } from "./catalogue.ts";
 import { memberForChange, takeStaffChangeLock } from "./lock.ts";
 import { changeStaffRole, refuseLastActiveAdmin, removeStaff } from "./members.ts";
@@ -22,6 +23,8 @@ import { requireStaff } from "./require-staff.ts";
 type RouteFn = (tx: UnitTx, request: Request, context: RequestContext) => Promise<unknown>;
 
 let h: StaffHarness;
+
+timeTests("src/last-admin.db.test.ts");
 
 interface Admin {
   staffId: string;
@@ -34,7 +37,9 @@ let demoting: [Admin, Admin];
 let removing: [Admin, Admin];
 
 beforeAll(async () => {
-  h = await createStaffHarness("sat04last");
+  markSetup();
+  h = await timed("createStaffHarness", () => createStaffHarness("sat04last"));
+  instrument(h);
   // The races test the staff-change lock, not how an Admin is made: each Admin comes through the
   // whole journey (a code sign-in, the enrolment code, a passkey registered), here, once. The
   // file's first realm requests, which pay a fresh process's cold paths and the database's new
