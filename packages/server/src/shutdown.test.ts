@@ -17,6 +17,26 @@ import { capture, type Line, TEST_RELEASE } from "./testing/capture.ts";
 const errorsDsn = (): string =>
   ["https://", "k".repeat(32), "@s1.eu-nbg-2.betterstackdata.com/4242"].join("");
 
+/**
+ * Wraps an exit callback so a test can wait for its first call, an event, instead of sleeping and
+ * hoping the exit came in time on a loaded machine.
+ */
+function waitable<A extends unknown[]>(
+  record: (...args: A) => void,
+): { call: (...args: A) => void; called: Promise<void> } {
+  let resolve = () => {};
+  const called = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return {
+    call: (...args) => {
+      record(...args);
+      resolve();
+    },
+    called,
+  };
+}
+
 describe("planShutdown", () => {
   it("fits every phase inside FIN_DRAIN_SECONDS", () => {
     for (const drain of [5, 15, 35, 40, 60, 600]) {
@@ -89,6 +109,7 @@ describe("createShutdown", () => {
   it("forces the exit before the drain ends when a phase hangs", async () => {
     const { telemetry, reporter, events } = capture();
     const exits: number[] = [];
+    const exit = waitable((code: number) => void exits.push(code));
     const shutdown = createShutdown({
       drainSeconds: 40,
       telemetry,
@@ -96,11 +117,11 @@ describe("createShutdown", () => {
       readiness: new Readiness(),
       server: fakeServer(10_000),
       hooks: [],
-      exit: (code) => exits.push(code),
+      exit: exit.call,
       plan: { preStopMs: 5, inFlightMs: 10_000, forcedAtMs: 60 },
     });
     void shutdown.begin("SIGTERM");
-    await new Promise((r) => setTimeout(r, 700));
+    await exit.called;
     expect(exits).toEqual([1]);
     expect(events("shutdown.forced")[0]).toMatchObject({ phase: "in_flight", level: "error" });
   });
@@ -126,6 +147,9 @@ describe("createShutdown", () => {
   it("has shipped shutdown.forced to Better Stack by the time it exits 1", async () => {
     const { telemetry, reporter, shipped } = capture({ ship: true });
     const atExit: { code: number; shipped: unknown[] }[] = [];
+    const exit = waitable(
+      (code: number) => void atExit.push({ code, shipped: shipped.flat().map((l) => l.event) }),
+    );
     const shutdown = createShutdown({
       drainSeconds: 40,
       telemetry,
@@ -133,11 +157,11 @@ describe("createShutdown", () => {
       readiness: new Readiness(),
       server: fakeServer(10_000),
       hooks: [],
-      exit: (code) => atExit.push({ code, shipped: shipped.flat().map((l) => l.event) }),
+      exit: exit.call,
       plan: { preStopMs: 5, inFlightMs: 10_000, forcedAtMs: 100 },
     });
     void shutdown.begin("SIGTERM");
-    await new Promise((r) => setTimeout(r, 700));
+    await exit.called;
     expect(atExit).toEqual([{ code: 1, shipped: ["shutdown.started", "shutdown.forced"] }]);
   });
 
@@ -145,18 +169,19 @@ describe("createShutdown", () => {
     const { telemetry, reporter } = capture();
     const target = new EventEmitter();
     const exits: number[] = [];
+    const exit = waitable((code: number) => void exits.push(code));
     const shutdown = createShutdown({
       drainSeconds: 40,
       telemetry,
       reporter,
       readiness: new Readiness(),
       hooks: [],
-      exit: (code) => exits.push(code),
+      exit: exit.call,
       plan: { preStopMs: 1, inFlightMs: 1, forcedAtMs: 1000 },
     });
     onSignals(shutdown, target);
     target.emit("SIGINT");
-    await new Promise((r) => setTimeout(r, 50));
+    await exit.called;
     expect(shutdown.started).toBe(true);
     expect(exits).toEqual([0]);
   });
@@ -167,10 +192,11 @@ describe("onCrash", () => {
     const { telemetry, reporter, events } = capture();
     const target = new EventEmitter();
     const exits: number[] = [];
-    onCrash({ telemetry, reporter, exit: (code) => exits.push(code) }, target);
+    const exit = waitable((code: number) => void exits.push(code));
+    onCrash({ telemetry, reporter, exit: exit.call }, target);
     target.emit("unhandledRejection", new Error("someone@example.com"));
     target.emit("uncaughtException", new RangeError("boom"));
-    await new Promise((r) => setTimeout(r, 50));
+    await exit.called;
     expect(events("process.unhandled_rejection")).toHaveLength(1);
     expect(events("process.uncaught_exception")[0]).toMatchObject({ errorName: "RangeError" });
     expect(events("error.unexpected")).toHaveLength(2);
@@ -206,26 +232,22 @@ describe("onCrash", () => {
     const target = new EventEmitter();
     const atExit: { code: number; shipped: string[]; envelopes: number; ms: number }[] = [];
     const t0 = performance.now();
-    onCrash(
-      {
-        telemetry,
-        reporter,
-        exit: (code) =>
-          atExit.push({
-            code,
-            shipped: [...shipped],
-            envelopes: envelopes.length,
-            ms: performance.now() - t0,
-          }),
-      },
-      target,
+    const exit = waitable(
+      (code: number) =>
+        void atExit.push({
+          code,
+          shipped: [...shipped],
+          envelopes: envelopes.length,
+          ms: performance.now() - t0,
+        }),
     );
+    onCrash({ telemetry, reporter, exit: exit.call }, target);
     target.emit("uncaughtException", new RangeError("first"));
     target.emit("uncaughtException", new TypeError("second"));
     await new Promise((r) => setTimeout(r, 5));
     target.emit("uncaughtException", new TypeError("third"));
     expect(atExit).toEqual([]);
-    await vi.waitFor(() => expect(atExit).toHaveLength(1), { timeout: 3000, interval: 20 });
+    await exit.called;
     await new Promise((r) => setTimeout(r, 100));
     expect(atExit).toHaveLength(1);
     const [end] = atExit;
@@ -282,9 +304,10 @@ describe("onCrash", () => {
     const { telemetry, shipped } = capture({ ship: true });
     const target = new EventEmitter();
     const atExit: unknown[][] = [];
-    onCrash({ telemetry, exit: () => atExit.push(shipped.flat()) }, target);
+    const exit = waitable(() => void atExit.push(shipped.flat()));
+    onCrash({ telemetry, exit: exit.call }, target);
     target.emit("uncaughtException", new RangeError("boom"));
-    await new Promise((r) => setTimeout(r, 50));
+    await exit.called;
     expect(atExit).toHaveLength(1);
     expect(atExit[0]?.[0]).toMatchObject({
       event: "process.uncaught_exception",

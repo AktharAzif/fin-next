@@ -28,6 +28,19 @@ async function keyPair(kid: string) {
   };
 }
 
+// Making an RSA key pair is most of these tests' work (tens to hundreds of milliseconds each, and
+// far more on a loaded machine, where four pairs in one test went over its timeout), so each kid's
+// pair is made once for the file and shared: every test still builds its own verifier and certs.
+const pairs = new Map<string, ReturnType<typeof keyPair>>();
+function sharedPair(kid: string): ReturnType<typeof keyPair> {
+  let pair = pairs.get(kid);
+  if (pair === undefined) {
+    pair = keyPair(kid);
+    pairs.set(kid, pair);
+  }
+  return pair;
+}
+
 const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
 
 async function sign(
@@ -61,8 +74,8 @@ function claims(patch: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 async function setup(options: { failFetch?: boolean; hang?: boolean } = {}) {
-  const k1 = await keyPair("k1");
-  const k2 = await keyPair("k2");
+  const k1 = await sharedPair("k1");
+  const k2 = await sharedPair("k2");
   let served = [k1.jwk];
   let fetches = 0;
   const urls: string[] = [];
@@ -147,7 +160,7 @@ describe("AccessVerifier", () => {
     serve([k1.jwk, k2.jwk]);
     expect((await verifier.verify(await sign(k2, claims()))).ok).toBe(true);
     expect(fetches()).toBe(2);
-    const k3 = await keyPair("k3");
+    const k3 = await sharedPair("k3");
     await verifier.verify(await sign(k3, claims()));
     expect(fetches()).toBe(2);
     clock.advance(30_000);

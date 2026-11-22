@@ -139,12 +139,22 @@ describe("forward's timeout", () => {
   });
 
   it("lets a body stream past the wait once the headers have come", async () => {
+    // The rest of the body is sent only once the client has the headers and the first part and the
+    // connection has then stood idle for longer than the wait, which a timer still running would
+    // have ended. Events order the steps, not timers racing each other: the one timer left is the
+    // idle time, and a timer never fires early. The wait is the test's one bound on the machine:
+    // the headers must come within it, and a loaded machine took over 100 ms, so it is a second.
+    const waitMs = 1000;
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const server = await serve(async () => {
       const encoder = new TextEncoder();
       const body = new ReadableStream<Uint8Array>({
         async start(controller) {
           controller.enqueue(encoder.encode("first "));
-          await new Promise((resolve) => setTimeout(resolve, 400));
+          await released;
           controller.enqueue(encoder.encode("second"));
           controller.close();
         },
@@ -154,10 +164,25 @@ describe("forward's timeout", () => {
     const response = await forward(
       server.loopbackOrigin,
       { method: "GET", target: "/", headers: [["Host", server.authority]], body: null },
-      { timeoutMs: 100 },
+      { timeoutMs: waitMs },
     );
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe("first second");
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const readUntil = async (until: (text: string) => boolean) => {
+      while (!until(text)) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+      }
+    };
+    await readUntil((seen) => seen.length >= "first ".length);
+    expect(text).toBe("first ");
+    await new Promise((resolve) => setTimeout(resolve, waitMs + 100));
+    release();
+    await readUntil(() => false);
+    expect(text).toBe("first second");
   });
 
   it("refuses an upstream that is not http or https", async () => {

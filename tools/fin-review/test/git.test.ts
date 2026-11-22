@@ -1,22 +1,27 @@
 // The git output parsers, the git calls and the program runner (spec 07 §2.1's process rules).
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
-import { resolveProgram, runProgram } from "../src/exec.ts";
+import { resolveProgram, runProgram, STALL_MS, stallFreeTimeout } from "../src/exec.ts";
 import {
   gitEnv,
   isSha,
@@ -407,6 +412,108 @@ describe("runProgram", () => {
     );
   });
 
+  describe("the timeout", () => {
+    let tmp: ReturnType<typeof tempDir>;
+    before(() => {
+      tmp = tempDir("timeout");
+    });
+    after(() => tmp.cleanup());
+
+    /** The times stallFreeTimeout checks at, from 0, with each check run `late(n)` ms late. */
+    function checkTimes(timeoutMs: number, late: (n: number) => number = () => 0): number[] {
+      const timeout = stallFreeTimeout(timeoutMs);
+      const times: number[] = [];
+      let now = 0;
+      for (let delay = timeout(now); delay !== null; delay = timeout(now)) {
+        now += delay + late(times.length);
+        times.push(now);
+        assert.ok(times.length < 1000, "the timeout never ended");
+      }
+      return times;
+    }
+
+    it("counts the time between checks that run on time, checking at least every STALL_MS", () => {
+      assert.equal(STALL_MS, 1000);
+      assert.deepEqual(checkTimes(200), [200]);
+      assert.deepEqual(
+        checkTimes(3500),
+        [1000, 2000, 3000, 3500],
+        "every check at most STALL_MS after the last",
+      );
+      assert.equal(checkTimes(30_000).at(-1), 30_000);
+      // A check less than STALL_MS late still counts its whole interval.
+      assert.deepEqual(
+        checkTimes(3000, (n) => (n === 0 ? 999 : 0)),
+        [1999, 2999, 3000],
+      );
+    });
+
+    it("counts nothing for an interval whose check ran STALL_MS or more late", () => {
+      // The engine's own work held the event loop for 35 s from the start: the whole timeout
+      // follows it.
+      const stalledFirst = checkTimes(30_000, (n) => (n === 0 ? 35_000 : 0));
+      assert.deepEqual(stalledFirst.slice(0, 2), [36_000, 37_000]);
+      assert.equal(stalledFirst.at(-1), 66_000);
+      // A stall over the end leaves one more interval in which the program's end can be read.
+      const stalledLast = checkTimes(3000, (n) => (n === 2 ? 30_000 : 0));
+      assert.deepEqual(stalledLast, [1000, 2000, 33_000, 34_000]);
+      // Exactly STALL_MS late is a stall.
+      assert.deepEqual(
+        checkTimes(1000, (n) => (n === 0 ? 1000 : 0)),
+        [2000, 3000],
+      );
+    });
+
+    it("does not time out a program that ended while the engine's own work held the event loop", {
+      skip: !POSIX,
+    }, async () => {
+      // The program opens the FIFO's writing end, says it is up and ends, which closes that end.
+      // The test holds the event loop from the call until it has read the program's end there,
+      // and past the point where the call's first check is STALL_MS late, so the program ended
+      // in the stall with its exit and output still unread when the loop is free again.
+      const fifo = join(tmp.dir, "stall.fifo");
+      const made = spawnSync("mkfifo", [fifo], { shell: false });
+      assert.equal(made.status, 0, made.stderr.toString("utf8"));
+      const reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        const script = `const fs = require("node:fs"); const fd = fs.openSync(${JSON.stringify(fifo)}, "w"); fs.writeSync(fd, "up"); process.stdout.write("done");`;
+        const timeoutMs = 200;
+        const call = runProgram(node, ["-e", script], { ...base, timeoutMs });
+        const called = performance.now();
+        const chunk = Buffer.alloc(16);
+        let up = false;
+        let ended = false;
+        while (!ended || performance.now() - called < timeoutMs + STALL_MS + 100) {
+          assert.ok(performance.now() - called < 120_000, "the program never ended");
+          if (ended) continue;
+          try {
+            if (readSync(reader, chunk) > 0) up = true;
+            else if (up) ended = true; // end of file once up: the program has closed its end
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error;
+          }
+        }
+        const result = await call;
+        assert.deepEqual([result.code, result.stdout.toString("utf8")], [0, "done"]);
+      } finally {
+        closeSync(reader);
+      }
+    });
+
+    it("still times out a hung program after the engine's own work held the event loop", async () => {
+      const timeoutMs = 200;
+      const call = runProgram(node, ["-e", "setInterval(() => {}, 1000)"], { ...base, timeoutMs });
+      const called = performance.now();
+      // Holds the event loop past the point where the call's first check is STALL_MS late.
+      while (performance.now() - called < timeoutMs + STALL_MS + 100) {
+        // the engine's own work
+      }
+      const timedOut = (error: unknown) =>
+        error instanceof ProgramError && /timed out/.test(error.message);
+      await assert.rejects(call, timedOut);
+    });
+  });
+
   describe("a grandchild that holds the output pipes", () => {
     let tmp: ReturnType<typeof tempDir>;
     before(() => {
@@ -414,19 +521,45 @@ describe("runProgram", () => {
     });
     after(() => tmp.cleanup());
 
+    /**
+     * Code that records the pid `pidExpression` gives in `pidFile` whole: written beside it, then
+     * renamed. A plain write leaves the file empty when a kill comes between creating and writing
+     * it, and an empty file must never be read as a pid.
+     */
+    function recordPid(pidFile: string, pidExpression: string): string {
+      const part = JSON.stringify(`${pidFile}.part`);
+      return `require("node:fs").writeFileSync(${part}, String(${pidExpression})); require("node:fs").renameSync(${part}, ${JSON.stringify(pidFile)});`;
+    }
+
+    /**
+     * The pid in `pidFile`. Refuses a file that does not hold a positive whole number: an empty
+     * file read as a number is 0, and pid 0 names the test's own process group.
+     */
+    function readPid(pidFile: string): number {
+      const text = readFileSync(pidFile, "utf8");
+      assert.match(text, /^[1-9][0-9]*$/, `the pid file holds no pid: ${JSON.stringify(text)}`);
+      const pid = Number(text);
+      assert.ok(Number.isSafeInteger(pid), `the pid file holds no pid: ${JSON.stringify(text)}`);
+      return pid;
+    }
+
     /** A node script that starts a grandchild sharing its stdio, records the grandchild's pid, then `then`. */
     function parentScript(pidFile: string, grandchild: string, then: string): string[] {
       const script = `
         const { spawn } = require("node:child_process");
-        const { writeFileSync } = require("node:fs");
         const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "inherit" });
-        writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+        ${recordPid(pidFile, "child.pid")}
         ${then}
       `;
       return ["-e", script];
     }
 
+    /**
+     * Whether the process `pid` is gone within 2 s. Refuses, before it signals anything, a pid
+     * that is not one process: 0 names the caller's own process group and a negative pid a group.
+     */
     async function gone(pid: number): Promise<boolean> {
+      assert.ok(Number.isSafeInteger(pid) && pid > 0, `not one process's pid: ${pid}`);
       for (let i = 0; i < 100; i++) {
         try {
           process.kill(pid, 0);
@@ -438,39 +571,104 @@ describe("runProgram", () => {
       return false;
     }
 
+    /**
+     * Runs the parent script under a timeout that starts at `firstMs` and doubles, up to 8 s, until
+     * the program got to start its grandchild before the timeout ended it (the pid file says so): a
+     * run that never reached the grandchild is not the case under test, and on a loaded machine
+     * Node's own start took longer than half a second. Each run must time out, and settle within
+     * 2.5 s of its timeout. Returns the grandchild's pid.
+     */
+    async function timedOutWithGrandchild(
+      pidFile: string,
+      then: string,
+      firstMs: number,
+    ): Promise<number> {
+      for (let timeoutMs = firstMs; timeoutMs <= 8000; timeoutMs *= 2) {
+        rmSync(pidFile, { force: true });
+        const started = performance.now();
+        await assert.rejects(
+          runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", then), {
+            ...base,
+            timeoutMs,
+          }),
+          (error: unknown) =>
+            error instanceof ProgramError &&
+            error.message.includes(`timed out after ${timeoutMs} ms`),
+        );
+        const took = performance.now() - started;
+        assert.ok(took < timeoutMs + 2500, `settled after ${Math.round(took)} ms`);
+        if (existsSync(pidFile)) return readPid(pidFile);
+      }
+      assert.fail("the program never started its grandchild before its timeout");
+    }
+
+    /** Whether reading `text` as a pid file is refused. */
+    function pidRefused(text: string): boolean {
+      const pidFile = join(tmp.dir, "refused.pid");
+      writeFileSync(pidFile, text);
+      try {
+        readPid(pidFile);
+        return false;
+      } catch (error) {
+        return error instanceof assert.AssertionError;
+      }
+    }
+
+    /**
+     * Whether `gone(pid)` is refused, and how many times it called process.kill, which answers
+     * here as for a process that no longer exists and signals nothing.
+     */
+    async function goneRefused(pid: number): Promise<{ refused: boolean; signalled: number }> {
+      const kill = mock.method(process, "kill", () => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      });
+      try {
+        const refused = await gone(pid).then(
+          () => false,
+          (error: unknown) => error instanceof assert.AssertionError,
+        );
+        return { refused, signalled: kill.mock.callCount() };
+      } finally {
+        kill.mock.restore();
+      }
+    }
+
+    it("refuses an empty pid file", () => {
+      for (const text of ["", "\n", " "])
+        assert.equal(pidRefused(text), true, JSON.stringify(text));
+      assert.equal(pidRefused("4242"), false);
+    });
+
+    it("refuses a pid file that does not hold a positive whole number", () => {
+      for (const text of ["abc", "12x", " 12", "12\n", "1.5", "1e3", "0", "-1", "Infinity"]) {
+        assert.equal(pidRefused(text), true, JSON.stringify(text));
+      }
+    });
+
+    it("never signals pid 0, the test's own process group", async () => {
+      for (const pid of [0, -0]) {
+        assert.deepEqual(await goneRefused(pid), { refused: true, signalled: 0 }, String(pid));
+      }
+      assert.deepEqual(await goneRefused(4242), { refused: false, signalled: 1 }, "one process");
+    });
+
+    it("never signals a negative pid, a process group", async () => {
+      for (const pid of [-1, -process.pid, -4242]) {
+        assert.deepEqual(await goneRefused(pid), { refused: true, signalled: 0 }, String(pid));
+      }
+      assert.deepEqual(await goneRefused(Number.NaN), { refused: true, signalled: 0 });
+    });
+
     it("a timeout settles the call at once and kills the grandchild too", async () => {
       const pidFile = join(tmp.dir, "hang.pid");
-      const started = performance.now();
-      await assert.rejects(
-        runProgram(
-          node,
-          parentScript(pidFile, "setInterval(() => {}, 1000)", "setInterval(() => {}, 1000);"),
-          { ...base, timeoutMs: 400 },
-        ),
-        (error: unknown) =>
-          error instanceof ProgramError && /timed out after 400 ms/.test(error.message),
-      );
-      assert.ok(
-        performance.now() - started < 3000,
-        `settled after ${Math.round(performance.now() - started)} ms`,
-      );
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = await timedOutWithGrandchild(pidFile, "setInterval(() => {}, 1000);", 400);
       if (POSIX) assert.equal(await gone(pid), true, "the grandchild was killed with the group");
       else process.kill(pid);
     });
 
     it("a program that exits while its grandchild keeps the pipes open settles at the timeout", async () => {
       const pidFile = join(tmp.dir, "exit.pid");
-      const started = performance.now();
-      await assert.rejects(
-        runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", "process.exit(0);"), {
-          ...base,
-          timeoutMs: 500,
-        }),
-        (error: unknown) => error instanceof ProgramError && /timed out/.test(error.message),
-      );
-      assert.ok(performance.now() - started < 3000);
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = await timedOutWithGrandchild(pidFile, "process.exit(0);", 500);
       if (POSIX) assert.equal(await gone(pid), true);
       else process.kill(pid);
     });
@@ -490,7 +688,7 @@ describe("runProgram", () => {
         (error: unknown) =>
           error instanceof ProgramError && /more than 1000 bytes/.test(error.message),
       );
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = readPid(pidFile);
       if (POSIX) assert.equal(await gone(pid), true);
       else process.kill(pid);
     });
@@ -502,23 +700,29 @@ describe("runProgram", () => {
       const exec = fileURLToPath(new URL("../src/exec.ts", import.meta.url));
       const engine = `
         import { runProgram } from ${JSON.stringify(exec)};
-        const script = ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)};
+        const script = ${JSON.stringify(`${recordPid(pidFile, "process.pid")} setInterval(() => {}, 1000);`)};
         await runProgram(process.execPath, ["-e", script], { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, timeoutMs: 60000, maxOutputBytes: 1024 });
       `;
       const child = spawn(node, ["--input-type=module", "-e", engine], { stdio: "ignore" });
-      for (let i = 0; i < 200 && !existsSync(pidFile); i++)
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.ok(existsSync(pidFile), "the program started");
       const exited = new Promise<NodeJS.Signals | null>((resolve) =>
         child.on("exit", (_code, signal) => resolve(signal)),
       );
-      child.kill("SIGTERM");
-      assert.equal(await exited, "SIGTERM", "the engine still ends by the signal");
-      assert.equal(
-        await gone(Number(readFileSync(pidFile, "utf8"))),
-        true,
-        "its program did not outlive it",
-      );
+      try {
+        // Waits for the program to record its pid, or for the engine to end first, however long
+        // a loaded machine takes to start both: the engine's own 60-second timeout bounds it.
+        let ended = false;
+        void exited.then(() => {
+          ended = true;
+        });
+        while (!existsSync(pidFile) && !ended)
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.ok(existsSync(pidFile), "the program started before the engine ended");
+        child.kill("SIGTERM");
+        assert.equal(await exited, "SIGTERM", "the engine still ends by the signal");
+        assert.equal(await gone(readPid(pidFile)), true, "its program did not outlive it");
+      } finally {
+        child.kill("SIGKILL");
+      }
     });
   });
 

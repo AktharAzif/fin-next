@@ -198,14 +198,22 @@ function walk(root: string, dir: string, out: string[]): void {
   }
 }
 
-/** Events written in code: `log("<event>", ...)` in TypeScript outside tests. */
-export function eventsInCode(root: string): Map<string, string> {
+/** The files the code scan reads, relative to root: TypeScript outside tests and ops/monitoring. */
+export function codeFiles(root: string): string[] {
   const files: string[] = [];
   for (const dir of CODE_DIRS) walk(root, dir, files);
+  return files.filter(
+    (file) =>
+      /\.tsx?$/.test(file) &&
+      !/\.(?:db\.)?test\.tsx?$/.test(file) &&
+      !file.startsWith("ops/monitoring/"),
+  );
+}
+
+/** Events written in code: `log("<event>", ...)` in TypeScript outside tests. */
+export function eventsInCode(root: string): Map<string, string> {
   const found = new Map<string, string>();
-  for (const file of files) {
-    if (!/\.tsx?$/.test(file) || /\.(?:db\.)?test\.tsx?$/.test(file)) continue;
-    if (file.startsWith("ops/monitoring/")) continue;
+  for (const file of codeFiles(root)) {
     const text = readFileSync(join(root, file), "utf8");
     for (const match of text.matchAll(LOG_CALL)) {
       const event = match[1] ?? "";

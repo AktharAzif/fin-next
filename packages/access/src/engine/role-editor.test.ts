@@ -199,6 +199,9 @@ describe("names already taken in the realm", () => {
     expect(taken(name, takenNames)).toEqual(["name_taken"]);
   });
 
+  // Heavy by design: it reads all 1.1 million code points and runs each of the letters with another
+  // case through validateRole both ways. About 0.4 s alone; it took up to 8 s inside a loaded
+  // `pnpm check`, so it has 30.
   it("ignores the case of every letter that has another", () => {
     const wrong: string[] = [];
     for (let cp = 0; cp <= 0x10ffff; cp++) {
@@ -215,7 +218,7 @@ describe("names already taken in the realm", () => {
       }
     }
     expect(wrong).toEqual([]);
-  });
+  }, 30_000);
 
   it.each([
     ["another name", "Payments", ["Support desk", "Billing"]],
@@ -521,6 +524,9 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     }
   });
 
+  // Heavy by design: it reads all 1.1 million code points, and draws each character whose folding
+  // changes its class (over 600) on both kinds of line. About 0.6 s alone; it took up to 5.4 s
+  // inside a loaded `pnpm check`, so it has 30.
   it("reads every character whose folding has another class in the order a line draws it", () => {
     const rightToLeft = (char: string) => ["R", "AL"].includes(bidiClassOf(char));
     const wrong: string[] = [];
@@ -544,7 +550,7 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     }
     expect(changed).toBeGreaterThan(600);
     expect(wrong).toEqual([]);
-  });
+  }, 30_000);
 
   // A capital Unicode draws unlike its small letter reads as no Latin letter (Armenian Ա, though ա
   // is drawn as w; Greek Σ, though σ is drawn as o), so it may stand for the letter it is seen as.

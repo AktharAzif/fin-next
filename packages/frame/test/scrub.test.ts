@@ -37,6 +37,69 @@ function pick(rand: () => number, alphabet: string, length: number): string {
 const join = (...parts: string[]): string => parts.join("");
 const dashes = "-".repeat(5);
 
+// A linear-time check judges two things and fails only when both say quadratic: the time at 1 MB,
+// and its growth from 128 KB, eight times less input. A quadratic part takes seconds or minutes at
+// 1 MB and grows about 64 times, so it fails both. Each time is the fastest of three runs, the
+// sizes taking turns, and it is the thread's CPU time, not the clock on the wall: what load adds
+// is time spent waiting for a core, and it adds it unevenly: a linear shape's wall time at 1 MB
+// went over a second inside a loaded `pnpm check`, while it takes under 100 ms alone and its CPU
+// time grows about 8 to 9 times from 128 KB.
+const SMALL_INPUT = 128 * 1024;
+const LARGE_INPUT = 1024 * 1024;
+/** The CPU time at 1 MB a linear shape stays far under: the slowest takes under 60 ms. */
+const LIMIT_MS = 1000;
+/**
+ * Growth from 128 KB to 1 MB: about 8 times for a linear shape, about 64 for a quadratic one. 24
+ * sits near their geometric mean (about 23), about a factor of three from each.
+ */
+const MAX_GROWTH = 24;
+/** A floor under the 128 KB time, so a reading near clock resolution cannot inflate the growth. */
+const FLOOR_MS = 5;
+
+/** The CPU time this thread has used, in milliseconds. */
+function threadCpuMs(): number {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+}
+
+/** Fails when `scrub` is quadratic on the input `build` makes at 128 KB and at 1 MB. */
+function expectLinearTime(
+  name: string,
+  build: (size: number) => string,
+  scrub: (text: string) => unknown,
+): void {
+  const time = (text: string): number => {
+    const t0 = threadCpuMs();
+    scrub(text);
+    return threadCpuMs() - t0;
+  };
+  const large = build(LARGE_INPUT);
+  let largeMs = time(large);
+  // The fastest of three runs can only be faster than the first, so a first run at 1 MB within
+  // the limit already passes, and a linear shape is scrubbed once: six runs of every shape took
+  // the file from about 20 s to 45 s inside a loaded `pnpm check`.
+  if (largeMs <= LIMIT_MS) return;
+  const small = build(SMALL_INPUT);
+  let smallMs = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < 3; run++) {
+    smallMs = Math.min(smallMs, time(small));
+    if (run > 0) largeMs = Math.min(largeMs, time(large));
+  }
+  const growth = largeMs / Math.max(smallMs, FLOOR_MS);
+  const ms = (value: number): string => `${value.toFixed(1)} ms of CPU`;
+  const seen = `${ms(smallMs)} at 128 KB, ${ms(largeMs)} at 1 MB, growth ${growth.toFixed(1)}`;
+  expect(largeMs > LIMIT_MS && growth > MAX_GROWTH, `${name}: ${seen}`).toBe(false);
+}
+
+/** Builds an adversarial input: the unit repeated to the input's size, then the tail. */
+type Fill = (unit: string, tail?: string) => string;
+
+/** The Fill for inputs of `size` characters. */
+const filler =
+  (size: number): Fill =>
+  (unit, tail = "") =>
+    unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+
 /** A random IPv6 address: eight groups, or a `::` form keeping at least two of them. */
 function ipv6(rand: () => number): string {
   const groups = Array.from({ length: 8 }, () => pick(rand, HEX, 1 + Math.floor(rand() * 4)));
@@ -680,89 +743,84 @@ describe("the browser's scrub shapes (spec 08 §5.4)", () => {
     // Each run repeats what starts a match and never finishes it, which is what makes an open part
     // quadratic. A quadratic part takes seconds here, or minutes; every linear one a few
     // milliseconds. The console guard scrubs on the page's main thread.
-    const size = 1024 * 1024;
-    const fill = (unit: string, tail = ""): string =>
-      unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
     const begin = join(dashes, "BEGIN ", "PRIVATE KEY", dashes);
     const end = join(dashes, "END ");
     const address = ["a", "b.co"].join("@");
-    const runs: Record<string, () => string> = {
-      "private key, BEGIN after BEGIN": () => fill(begin),
-      "private key, a long body and no END": () => `${begin}\n${fill("A")}`,
-      "private key, ENDs of something else": () => `${begin}${fill(`${end}X `)}`,
-      "private key, a long header": () => join(dashes, "BEGIN ", fill("A")),
-      "age identity": () => fill(["AGE", "SECRET", "KEY", "1"].join("-")),
-      "Fin API key": () => fill(["fin", "live", "sk", ""].join("_")),
-      "Fin key-like": () => fill(["fin", "test", ""].join("_")),
-      "webhook secret": () => fill(join("wh", "sec_")),
-      "Cloudflare token": () => fill(join("cf", "at_")),
-      "JWT, eyJ after eyJ": () => fill("eyJ"),
-      "JWT, a short part after each": () => fill("eyJabcdefgh."),
-      "heartbeat URL, one long host": () => `https://${fill(join("better", "stack"))}`,
-      "heartbeat URL, a host and no path": () =>
+    const runs: Record<string, (fill: Fill) => string> = {
+      "private key, BEGIN after BEGIN": (fill) => fill(begin),
+      "private key, a long body and no END": (fill) => `${begin}\n${fill("A")}`,
+      "private key, ENDs of something else": (fill) => `${begin}${fill(`${end}X `)}`,
+      "private key, a long header": (fill) => join(dashes, "BEGIN ", fill("A")),
+      "age identity": (fill) => fill(["AGE", "SECRET", "KEY", "1"].join("-")),
+      "Fin API key": (fill) => fill(["fin", "live", "sk", ""].join("_")),
+      "Fin key-like": (fill) => fill(["fin", "test", ""].join("_")),
+      "webhook secret": (fill) => fill(join("wh", "sec_")),
+      "Cloudflare token": (fill) => fill(join("cf", "at_")),
+      "JWT, eyJ after eyJ": (fill) => fill("eyJ"),
+      "JWT, a short part after each": (fill) => fill("eyJabcdefgh."),
+      "heartbeat URL, one long host": (fill) => `https://${fill(join("better", "stack"))}`,
+      "heartbeat URL, a host and no path": (fill) =>
         fill(join("https://a.", "better", "stack.com/api/v1/")),
-      "heartbeat URL, one host of dots": () => `https://${fill(join("a.", "better", "stack."))}`,
-      "DSN, a login and no host": () => fill("https://a@"),
-      "DSN, one long login": () => `https://${fill("a")}`,
-      "DSN, starts": () => fill("https://"),
-      "Postgres URL, logins and no @": () => fill(join("postgres", "://a:")),
-      "Postgres URL, ql and a password": () => fill(join("postgres", "ql://a:b")),
-      "Postgres URL, one long password": () => join("postgres", "://a:", fill("b")),
-      "Postgres URL, no colon after the login": () => fill(join("postgres", "://a")),
-      "bearer, no token": () => fill(join("bea", "rer ")),
-      "bearer, a long gap": () => join("bea", "rer", fill(" ")),
-      "basic, no token": () => fill(join("bas", "ic ")),
-      "__Host- cookie, no =": () => fill("__Host-a"),
-      "__Secure- cookie, no =": () => fill("__Secure-"),
-      "cookie, one long name": () => `__Host-${fill("a")}`,
-      "Access cookie": () => fill("CF_Authorization"),
-      "ingress proof, a long gap": () => join("fin-ingress-proof:", fill(" ")),
-      "email, no @": () => fill("a."),
-      "email, letters and no @": () => fill("a"),
-      "email, @ after @": () => fill("@a"),
-      "email, a long domain": () => `a@${fill("a.")}`,
-      "email, a long local part": () => `${fill("a%")}@`,
-      "email, addresses run together": () => fill(`${address}%2C`),
-      "email, domains with no top level": () => fill("a@b.c"),
-      "email, apostrophes and no @": () => fill("a'"),
-      "email, quotes before each @": () => fill("'@a.co"),
-      "email, apostrophes between addresses": () => fill(`a'${address}'`),
-      "email, quotes and no local part": () => fill("''@"),
-      "IPv4, dots and no end": () => fill("1.1.1."),
-      "IPv4, escapes and dots": () => fill("%201.1."),
-      "IPv6, hex and colons and no end": () => fill("a:", "g"),
-      "IPv6, compressed runs": () => fill("1::", "x"),
-      "IPv6, compressed runs of letters": () => fill("a::"),
-      "IPv6, hex and no colon": () => fill("0123456789abcdef"),
-      "IPv6, zones": () => fill("::1%a"),
-      "IPv6, one long zone": () => `::1%${fill("a")}`,
-      "IPv6, one long zone and a colon": () => `::1%${fill("g")}:`,
-      "IPv6, zones that run on": () => fill("::1%a:"),
-      "IPv6, escapes between runs": () => fill("1::1%20"),
-      "IPv6, colons then a hex digit": () => fill(":", "a"),
-      "IPv6, a hex digit between colons": () => `${fill(":")}a${fill(":")}`,
-      "IPv6, colons and no hex": () => fill(":"),
-      "query string": () => fill("?"),
-      "query string, apostrophes": () => fill("?'"),
-      "ID-bearing path": () => fill("/c/"),
-      "long segment": () => `/${fill("A1")}`,
-      slashes: () => fill("/"),
-      "digits, then a letter": () => fill("1", "a"),
-      "code, no digits": () => fill("code "),
-      "fragment, # after #": () => fill("#"),
-      "fragment, short ones": () => fill("#a"),
-      "fragment, one long one": () => `#${fill("a=")}`,
-      "fragment, quotes and parentheses": () => fill("#'()"),
-      "fragment, ended by spaces": () => fill("#a=b "),
-      "fragment, code words and digits": () => fill("#pin-123456"),
-      "fragment, code tokens and no #": () => fill(" [code]"),
+      "heartbeat URL, one host of dots": (fill) =>
+        `https://${fill(join("a.", "better", "stack."))}`,
+      "DSN, a login and no host": (fill) => fill("https://a@"),
+      "DSN, one long login": (fill) => `https://${fill("a")}`,
+      "DSN, starts": (fill) => fill("https://"),
+      "Postgres URL, logins and no @": (fill) => fill(join("postgres", "://a:")),
+      "Postgres URL, ql and a password": (fill) => fill(join("postgres", "ql://a:b")),
+      "Postgres URL, one long password": (fill) => join("postgres", "://a:", fill("b")),
+      "Postgres URL, no colon after the login": (fill) => fill(join("postgres", "://a")),
+      "bearer, no token": (fill) => fill(join("bea", "rer ")),
+      "bearer, a long gap": (fill) => join("bea", "rer", fill(" ")),
+      "basic, no token": (fill) => fill(join("bas", "ic ")),
+      "__Host- cookie, no =": (fill) => fill("__Host-a"),
+      "__Secure- cookie, no =": (fill) => fill("__Secure-"),
+      "cookie, one long name": (fill) => `__Host-${fill("a")}`,
+      "Access cookie": (fill) => fill("CF_Authorization"),
+      "ingress proof, a long gap": (fill) => join("fin-ingress-proof:", fill(" ")),
+      "email, no @": (fill) => fill("a."),
+      "email, letters and no @": (fill) => fill("a"),
+      "email, @ after @": (fill) => fill("@a"),
+      "email, a long domain": (fill) => `a@${fill("a.")}`,
+      "email, a long local part": (fill) => `${fill("a%")}@`,
+      "email, addresses run together": (fill) => fill(`${address}%2C`),
+      "email, domains with no top level": (fill) => fill("a@b.c"),
+      "email, apostrophes and no @": (fill) => fill("a'"),
+      "email, quotes before each @": (fill) => fill("'@a.co"),
+      "email, apostrophes between addresses": (fill) => fill(`a'${address}'`),
+      "email, quotes and no local part": (fill) => fill("''@"),
+      "IPv4, dots and no end": (fill) => fill("1.1.1."),
+      "IPv4, escapes and dots": (fill) => fill("%201.1."),
+      "IPv6, hex and colons and no end": (fill) => fill("a:", "g"),
+      "IPv6, compressed runs": (fill) => fill("1::", "x"),
+      "IPv6, compressed runs of letters": (fill) => fill("a::"),
+      "IPv6, hex and no colon": (fill) => fill("0123456789abcdef"),
+      "IPv6, zones": (fill) => fill("::1%a"),
+      "IPv6, one long zone": (fill) => `::1%${fill("a")}`,
+      "IPv6, one long zone and a colon": (fill) => `::1%${fill("g")}:`,
+      "IPv6, zones that run on": (fill) => fill("::1%a:"),
+      "IPv6, escapes between runs": (fill) => fill("1::1%20"),
+      "IPv6, colons then a hex digit": (fill) => fill(":", "a"),
+      "IPv6, a hex digit between colons": (fill) => `${fill(":")}a${fill(":")}`,
+      "IPv6, colons and no hex": (fill) => fill(":"),
+      "query string": (fill) => fill("?"),
+      "query string, apostrophes": (fill) => fill("?'"),
+      "ID-bearing path": (fill) => fill("/c/"),
+      "long segment": (fill) => `/${fill("A1")}`,
+      slashes: (fill) => fill("/"),
+      "digits, then a letter": (fill) => fill("1", "a"),
+      "code, no digits": (fill) => fill("code "),
+      "fragment, # after #": (fill) => fill("#"),
+      "fragment, short ones": (fill) => fill("#a"),
+      "fragment, one long one": (fill) => `#${fill("a=")}`,
+      "fragment, quotes and parentheses": (fill) => fill("#'()"),
+      "fragment, ended by spaces": (fill) => fill("#a=b "),
+      "fragment, code words and digits": (fill) => fill("#pin-123456"),
+      "fragment, code tokens and no #": (fill) => fill(" [code]"),
     };
     for (const [name, run] of Object.entries(runs)) {
       it(name, () => {
-        const text = run();
-        const started = performance.now();
-        scrubText(text);
-        expect(performance.now() - started, name).toBeLessThan(1000);
+        expectLinearTime(name, (size) => run(filler(size)), scrubText);
       });
     }
   });

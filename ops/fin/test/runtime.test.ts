@@ -8,6 +8,7 @@ import { GENESIS, sha256 } from "../src/core/runlog.ts";
 import {
   INTERRUPT_SIGNALS,
   processRuntime,
+  REPEAT_GRACE_MS,
   STOP_EXIT,
   stopDescription,
 } from "../src/core/runtime.ts";
@@ -81,6 +82,31 @@ function closedRun(child: Child) {
 
 const IN_FLIGHT = { kind: "dns", name: "console", action: "create" };
 
+/**
+ * Resolves once the child has taken the first stop for `signal` (it says so on standard error
+ * after it noted when the stop came), so a second signal sent after this is a repeat of it.
+ */
+function stopTaken(child: Child, signal: string): Promise<void> {
+  return child.waitFor(`interrupted by ${signal}: closing the run`, "stderr");
+}
+
+/** Whether the child's change in flight ran to its end (the stub says so on standard output). */
+function settled(child: Child): boolean {
+  return child.out().split("\n").includes("settled");
+}
+
+/**
+ * How many times the one-change stub's own listener for `signal`, added after the runtime's trap,
+ * ran (it prints a line each time). A runtime that exits inside its own listener for a signal never
+ * lets the stub's run for that signal: no time is measured, and no load can make it come.
+ */
+function heard(child: Child, signal: "SIGINT" | "SIGQUIT"): number {
+  return child
+    .out()
+    .split("\n")
+    .filter((line) => line === `heard ${signal}`).length;
+}
+
 /** A run log of `count` chained records with its head file, written at once. */
 function writeLog(dir: string, count: number): void {
   const lines: string[] = [];
@@ -118,6 +144,7 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
         await sleep(50);
         child.process.kill(signal);
         assert.equal(await child.exit(), exit, child.errors());
+        assert.equal(settled(child), true, "the stop waited for the change in flight");
         const run = closedRun(child);
         assert.deepEqual(run.events, ["run.registered", "run.step", "run.done"]);
         assert.equal(run.done?.interrupted, signal);
@@ -136,11 +163,16 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     try {
       await child.waitFor("waiting");
       child.process.kill("SIGINT");
-      await sleep(1_500);
-      const second = performance.now();
+      // The second comes the grace after the child took the first, which no load can make early;
+      // it has until the stop's wait for the change ends (INTERRUPT_SETTLE_MS) to arrive.
+      await stopTaken(child, "SIGINT");
+      await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGINT");
       assert.equal(await child.exit(), EXIT.interrupted, child.errors());
-      assert.ok(performance.now() - second < 1_000, "it did not wait for the change in flight");
+      // The first Ctrl-C starts the stop and lets the stub's listener run; the second exits inside
+      // the runtime's own listener, so the stub's never runs for it.
+      assert.equal(heard(child, "SIGINT"), 1, "it exited in the second Ctrl-C's own listener");
+      assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.result, "failed");
@@ -160,7 +192,8 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     try {
       await child.waitFor("waiting");
       child.process.kill("SIGHUP");
-      await sleep(1_500);
+      await stopTaken(child, "SIGHUP");
+      await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGHUP");
       assert.equal(await child.exit(), EXIT.hangup, child.errors());
       const run = closedRun(child);
@@ -178,10 +211,12 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     const child = spawnChild(["stub", "hang", "staging"]);
     try {
       await child.waitFor("waiting");
-      const sent = performance.now();
       child.process.kill("SIGQUIT");
       assert.equal(await child.exit(), EXIT.quit, child.errors());
-      assert.ok(performance.now() - sent < 1_000, "it did not wait for the change in flight");
+      // A runtime that closed the run at once but exited later would pass run.done's checks; it
+      // would also let the stub's own listener run.
+      assert.equal(heard(child, "SIGQUIT"), 0, "it exited in SIGQUIT's own listener");
+      assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.interrupted, "SIGQUIT");
@@ -257,11 +292,15 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
         FIN_OPS_INGEST_TOKEN_FILE: writePrivate(dir, "ingest", `tok${"x".repeat(24)}`),
       },
     });
-    const watchdog = setTimeout(() => child.process.kill("SIGKILL"), 9_000);
+    // The bounds hold the 5-second deadline, from the signal. The watchdog starts with the signal
+    // too: started with the spawn, it killed a child that a loaded machine took over 4 s to start
+    // before the child's own deadline came.
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
       await child.waitFor("waiting");
       const sent = performance.now();
       child.process.kill("SIGTERM");
+      watchdog = setTimeout(() => child.process.kill("SIGKILL"), 9_000);
       assert.equal(await child.exit(), EXIT.terminated, child.errors());
       const took = performance.now() - sent;
       assert.ok(took > 4_000 && took < 7_000, `exited after ${Math.round(took)} ms`);
@@ -275,7 +314,12 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       child.process.kill("SIGKILL");
     }
   });
+});
 
+// Apart from the suite above, and after it: writing and checking a 30,000-record log holds this
+// process for up to a second, and the deadline test's time, read in this process, took that stall
+// in when it fell on the child's exit.
+describe("a stop while a long log is checked, in a real process", () => {
   it("closes the run on a signal that comes the moment the lock is taken, even while a long log is checked", async () => {
     const child = spawnChild(["stub", "wait", "staging"], {
       before: (dir) => writeLog(dir, 30_000),

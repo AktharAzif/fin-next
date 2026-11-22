@@ -11,6 +11,14 @@
 // cap kills the whole group, so a grandchild that inherited the output pipes (git's lazy fetch,
 // say) can neither keep the call waiting nor outlive it, and the call settles once the child has
 // exited. If the engine itself is interrupted while children run, their groups go with it.
+//
+// A timeout counts only the time in which the engine could read the child's output and see its
+// exit. While the engine's own work holds the event loop (parsing another call's output, say),
+// nothing is read; a child that finished in that stretch has its end waiting behind the loop's
+// timers, and a plain timer would time it out the moment the loop is free. The timeout is
+// checked at least every STALL_MS, and the interval before a check that ran STALL_MS or more
+// late counts for nothing. The engine's synchronous work is finite and the engine awaits its
+// children, so once it is idle the checks run on time and a hung child is still killed.
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
@@ -25,7 +33,10 @@ export interface RunOptions {
   readonly env: Readonly<Record<string, string>>;
   /** Bytes written to the child's stdin, which is then closed. */
   readonly input?: Uint8Array;
-  /** Kill the child (SIGKILL, with its process group) after this many milliseconds. */
+  /**
+   * Kill the child (SIGKILL, with its process group) after this many milliseconds, not counting
+   * the time the engine's own work held the event loop (see stallFreeTimeout).
+   */
   readonly timeoutMs: number;
   /** Kill the child when stdout or stderr grows past this many bytes. */
   readonly maxOutputBytes: number;
@@ -46,6 +57,34 @@ const PROCESS_GROUPS = !WINDOWS;
 const KILL_GRACE_MS = 2_000;
 /** The signals that, arriving while children run, take their process groups with the engine. */
 const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+/**
+ * The longest a timeout goes between checks, and how late a check may run with the interval
+ * before it still counted: a check this late shows that the engine's own work held the loop.
+ */
+export const STALL_MS = 1_000;
+
+/**
+ * A timeout of `timeoutMs` that counts only the time in which the engine could serve a child.
+ * Call the returned function at the start and then at each check, with the time in milliseconds
+ * from a monotonic clock: it returns the delay to the next check (never more than STALL_MS), or
+ * null once `timeoutMs` has been counted. The time between two checks counts unless the later
+ * check ran STALL_MS or more after it was due; then the whole interval counts for nothing.
+ */
+export function stallFreeTimeout(timeoutMs: number): (nowMs: number) => number | null {
+  let counted = 0;
+  let last: number | null = null;
+  let due = 0;
+  return (nowMs) => {
+    if (last !== null) {
+      const elapsed = nowMs - last;
+      if (elapsed - due < STALL_MS) counted += elapsed;
+    }
+    last = nowMs;
+    if (counted >= timeoutMs) return null;
+    due = Math.min(timeoutMs - counted, STALL_MS);
+    return due;
+  };
+}
 
 /** The process groups of the children running now. */
 const runningGroups = new Set<number>();
@@ -201,7 +240,8 @@ export function resolveProgram(
 /**
  * Runs `program` with `args` and resolves with its exit status and output. Rejects with a
  * ProgramError when it cannot start, times out or writes more than the cap; the call settles
- * within the timeout and a short grace period whatever the program's own children do.
+ * within the timeout (counted while the engine was free to serve it) and a short grace period
+ * whatever the program's own children do.
  */
 export function runProgram(
   program: string,
@@ -259,6 +299,7 @@ export function runProgram(
     let stderrBytes = 0;
     let failure: ProgramError | null = null;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
@@ -290,7 +331,14 @@ export function runProgram(
       else graceTimer = setTimeout(() => settle(null, "SIGKILL"), KILL_GRACE_MS);
     };
 
-    const timer = setTimeout(() => {
+    const timeout = stallFreeTimeout(options.timeoutMs);
+    const check = (): void => {
+      if (settled || failure !== null) return;
+      const delay = timeout(performance.now());
+      if (delay !== null) {
+        timer = setTimeout(check, delay);
+        return;
+      }
       fail(
         new ProgramError(
           program,
@@ -299,7 +347,8 @@ export function runProgram(
           "",
         ),
       );
-    }, options.timeoutMs);
+    };
+    check();
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;

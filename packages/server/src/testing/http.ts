@@ -1,7 +1,7 @@
 // A raw HTTP client for tests: it sends exactly the headers it is given (Host and Origin included,
 // which fetch would not let a caller set) from a chosen local address, so a test can be a connector
 // peer or a neighbour. node:http lives in packages/server; apps' tests use it through here.
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 
 export interface RawRequest {
   port: number;
@@ -50,4 +50,21 @@ export function rawRequest(options: RawRequest): Promise<RawResponse> {
     req.on("error", reject);
     req.end(options.body);
   });
+}
+
+/**
+ * Whether no listener on this machine holds `port` on 127.0.0.1 or on 0.0.0.0: a test about to
+ * serve on `::` at that port asks first, since on macOS such a listener would share the port and
+ * take the connections sent to 127.0.0.1.
+ */
+export async function loopbackPortFree(port: number): Promise<boolean> {
+  for (const host of ["127.0.0.1", "0.0.0.0"]) {
+    const free = await new Promise<boolean>((resolve) => {
+      const probe = createServer();
+      probe.once("error", () => resolve(false));
+      probe.listen(port, host, () => probe.close(() => resolve(true)));
+    });
+    if (!free) return false;
+  }
+  return true;
 }

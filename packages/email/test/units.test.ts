@@ -213,6 +213,19 @@ describe("the codes Fin issues, passed into a name", () => {
     }
   }
 
+  /**
+   * What expectHidden checks, as the places `value` is not hidden ("shape" when no secret shape
+   * is found in it), for the tests that draw thousands of codes: each asserts once over all of
+   * them, since an expect for every form and field came to 100,000 of them in one test.
+   */
+  function notHidden(value: string): string[] {
+    const places = typeof nameSecretShapeIn(value) === "string" ? [] : [`shape: ${value}`];
+    for (const field of NAME_FIELDS) {
+      if (param[field].parse(value) !== HIDDEN_VALUE) places.push(`${field}: ${value}`);
+    }
+    return places;
+  }
+
   it("hides a backup code with a single digit or a single letter, in every place", () => {
     const next = seeded(1);
     for (let place = 0; place < 10; place += 1) {
@@ -229,13 +242,15 @@ describe("the codes Fin issues, passed into a name", () => {
   it("hides 5,000 backup codes drawn by the issuing rule", () => {
     const next = seeded(2);
     const alphabet = LETTERS + DIGITS;
+    const shown: string[] = [];
     let drawn = 0;
     while (drawn < 5_000) {
       const raw = Array.from({ length: 10 }, () => pick(next, alphabet)).join("");
       if (!/\d/.test(raw) || !/[A-Za-z]/.test(raw)) continue;
       drawn += 1;
-      expectHidden(`${raw.slice(0, 5)}-${raw.slice(5)}`);
+      shown.push(...notHidden(`${raw.slice(0, 5)}-${raw.slice(5)}`));
     }
+    expect(shown).toEqual([]);
   });
 
   /** An enrolment code's four groups in each form it is printed or typed in. */
@@ -274,6 +289,7 @@ describe("the codes Fin issues, passed into a name", () => {
   it("hides 5,000 enrolment codes drawn by the issuing rule, in every form", () => {
     const next = seeded(4);
     const alphabet = CROCKFORD_LETTERS + DIGITS;
+    const shown: string[] = [];
     let drawn = 0;
     while (drawn < 5_000) {
       const groups = Array.from({ length: 4 }, () =>
@@ -281,8 +297,9 @@ describe("the codes Fin issues, passed into a name", () => {
       );
       if (!groups.some((g) => /\d/.test(g) && /[A-Z]/.test(g))) continue;
       drawn += 1;
-      for (const form of enrolmentForms(groups)) expectHidden(form);
+      for (const form of enrolmentForms(groups)) shown.push(...notHidden(form));
     }
+    expect(shown).toEqual([]);
   });
 });
 

@@ -33,6 +33,9 @@ describe("enrolment codes", () => {
   // A code with no group of four mixing a letter and a digit (about one plain draw in 340) is also
   // an ordinary name's shape, which the email's name fields show; every code Fin Admin issues has
   // such a group, so one passed into a name by mistake is hidden in every form (SA-29, T08-23).
+  // Heavy by design: 20,000 codes in four forms through three name fields, 240,000 parses, already
+  // checked in plain code. About 0.25 s alone; it took up to 4.7 s inside a loaded `pnpm check`,
+  // so it has 20.
   it("always have a group mixing a letter and a digit, so every name field hides them", () => {
     const codes = Array.from({ length: 20_000 }, generateEnrolmentCode);
     const unmixed = codes.filter(
@@ -49,7 +52,7 @@ describe("enrolment codes", () => {
       }
     }
     expect(shown).toEqual([]);
-  });
+  }, 20_000);
 
   it("read as typed: any case, spaces and hyphens, I and L as 1, O as 0", () => {
     const code = "AB1C-DE0F-GH2J-KM3N";
