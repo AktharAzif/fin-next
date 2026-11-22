@@ -295,6 +295,8 @@ describe("the command line", () => {
       "0",
       ...args,
     ]);
+    // Stopped after the tests should it start after all.
+    running.push(bad);
     expect(await bad.exited()).toBe(78);
     expect(bad.stderr()).toContain(named);
   });

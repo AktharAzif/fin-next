@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { ConfigError } from "@fin/core";
 import { Hono } from "hono";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { SEAM_VARIABLES } from "./config/seams.ts";
 import { privateHealth } from "./health/readiness.ts";
 import type { FinEnv } from "./http/context.ts";
@@ -13,11 +13,21 @@ import { errorHandler, notFoundHandler, requestUnit } from "./http/request.ts";
 import { runService, type ServiceDefinition } from "./runtime.ts";
 import type { Transport } from "./telemetry/ship.ts";
 import { baseEnv, type Line } from "./testing/capture.ts";
-import { freePort, spawnThenCloseStdout } from "./testing/child.ts";
+import {
+  endTestProcesses,
+  exitWithParent,
+  freePort,
+  spawnThenCloseStdout,
+} from "./testing/child.ts";
 
-afterEach(() => {
+// A service child started by a test never outlives it: its process group is ended after each
+// test, which fails naming the pid if it still runs, and it ends itself should this process die.
+afterEach(async () => {
   vi.unstubAllGlobals();
+  await endTestProcesses();
 });
+
+afterAll(() => endTestProcesses());
 
 /** A run whose build fails, recording what had been shipped when it exits. */
 async function failedBuild(error: Error): Promise<{ exits: number[]; atExit: string[][] }> {
@@ -229,7 +239,7 @@ describe("runService", () => {
 /**
  * A service run as its own process, with the process handlers on. Every request writes a line;
  * what it ships goes to a file; each byte on stdin throws from a timer, uncaught, and the bytes of
- * one write throw in the same turn of the event loop.
+ * one write throw in the same turn of the event loop. It ends itself should this process die.
  */
 function serviceChild(): { script: string; shipped: string } {
   const dir = mkdtempSync(join(tmpdir(), "fin-stdout-gone-"));
@@ -239,6 +249,7 @@ function serviceChild(): { script: string; shipped: string } {
     `import { appendFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { runService } from ${JSON.stringify(new URL("./runtime.ts", import.meta.url).href)};
+${exitWithParent(process.pid)}
 const shipped = ${JSON.stringify(join(dir, "shipped.jsonl"))};
 await runService(
   {
