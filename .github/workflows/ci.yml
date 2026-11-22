@@ -142,8 +142,30 @@ jobs:
             turbo-check-main-
       - name: Install
         run: pnpm install --frozen-lockfile
-      - name: pnpm check
-        run: pnpm check
+      # `pnpm check` split into its parts, so one failure no longer hides the rest: package.json's
+      # `check` script's turbo tasks (TURBO_TELEMETRY_DISABLED comes from the workflow's env), then
+      # its five root checks, one step each. turbo --continue runs every task whatever an earlier
+      # one did and exits with the highest code any task gave; each root check runs once the setup
+      # above succeeded (the turbo step ran), whatever turbo or another check found. Any failure
+      # still fails the job. These steps mirror the `check` script: change them together.
+      - name: Turborepo's tasks (pnpm check's, with --continue)
+        id: turbo
+        run: pnpm exec turbo run lint typecheck test lint:root typecheck:root test:root --continue
+      - name: layout:check
+        if: ${{ !cancelled() && steps.turbo.outcome != 'skipped' }}
+        run: pnpm run layout:check
+      - name: supply-chain:check
+        if: ${{ !cancelled() && steps.turbo.outcome != 'skipped' }}
+        run: pnpm run supply-chain:check
+      - name: public-safety
+        if: ${{ !cancelled() && steps.turbo.outcome != 'skipped' }}
+        run: pnpm run public-safety
+      - name: imports:check
+        if: ${{ !cancelled() && steps.turbo.outcome != 'skipped' }}
+        run: pnpm run imports:check
+      - name: static:check
+        if: ${{ !cancelled() && steps.turbo.outcome != 'skipped' }}
+        run: pnpm run static:check
       - name: Type-check the CI scripts
         run: pnpm exec tsc -p .github/scripts/tsconfig.json
       - name: Save the pnpm store (main only)
@@ -223,8 +245,11 @@ jobs:
         env:
           PGPASSWORD_CI: postgres
         run: echo "FIN_TEST_DATABASE_URL=postgres://postgres:${PGPASSWORD_CI}@127.0.0.1:5432/postgres" >> "$GITHUB_ENV"
-      - name: pnpm test:db
-        run: pnpm test:db
+      # pnpm adds the arguments after a script's name to the script, so this runs the test:db
+      # script's `turbo run test:db --continue`: every package's tests run whatever an earlier one
+      # did, and turbo exits with the highest code any task gave, so any failure fails the job.
+      - name: pnpm test:db --continue
+        run: pnpm test:db --continue
       - name: ci.timing
         if: always()
         env:
