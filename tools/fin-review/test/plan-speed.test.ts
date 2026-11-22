@@ -30,18 +30,48 @@ const LIMIT_MS = process.env["CI"] === "true" ? 6000 : 3000;
 const LARGE_TREE = 2000;
 const SMALL_TREE = 250;
 /**
- * Growth from 250 files to 2,000: at most 8 times for a plan that is linear in the tree, and far
- * less in practice, since Node's start and git's own are the same at both sizes (about 1.1 times
- * alone). A quadratic part grows 64 times, and one that takes a plan over the limit grows at least
- * about 15 times with that fixed start in front of it. 12 sits between the two.
+ * Growth from 250 files to 2,000 above which a plan over the limit fails. Node's and git's start,
+ * the same at both sizes, is most of the plan's time (about 150 to 290 ms of it), so the plan as it
+ * is grows about 1.1 times (0.9 to 1.25 measured under load, fastest of three). A quadratic part
+ * that takes the plan to the 3-second limit adds only a sixty-fourth of itself at 250 files, so
+ * behind that start it grows 9 to 11 times (more at CI's 6 seconds). 4 is more than twice the
+ * first and at most half the second. A plan made slow by a cost that is fixed or linear in the
+ * tree is not what this growth judges.
  */
-const MAX_GROWTH = 12;
+const MAX_GROWTH = 4;
+
+/** Whether the fastest times on the 250-file and 2,000-file trees show a plan that got quadratic. */
+function tooSlow(smallMs: number, largeMs: number, limitMs: number): boolean {
+  return largeMs >= limitMs && largeMs / smallMs > MAX_GROWTH;
+}
 
 /** A base and a head to plan between. */
 interface Change {
   readonly base: string;
   readonly head: string;
 }
+
+describe("T-RV-20's speed rule", () => {
+  it("fails a plan over the limit that grew as a quadratic part does, and passes the plan as it is", () => {
+    // [ms at 250 files, ms at 2,000, limit, fails]: measured plans, quadratic parts that take the
+    // plan to the limit behind the slowest and fastest measured start, then the rule's edges.
+    const cases: [number, number, number, boolean][] = [
+      [220, 234, 3000, false], // the plan as it is, under load (measured)
+      [227, 284, 3000, false], // the slowest growth measured, 1.25
+      [2700, 3100, 3000, false], // both sizes slowed alike by load, over the limit
+      [329, 3000, 3000, true], // a quadratic part behind a 286 ms start: growth 9.1
+      [263, 3000, 3000, true], // a quadratic part behind a 220 ms start: growth 11.4
+      [207, 3059, 3000, true], // a quadratic part planted in the plan (measured): growth 14.8
+      [394, 6000, 6000, true], // a quadratic part at CI's limit behind a 300 ms start: 15.2
+      [1, 2999, 3000, false], // under the limit, whatever the growth
+      [750, 3000, 3000, false], // at the limit, growth 4
+      [740, 3000, 3000, true], // at the limit, growth 4.05
+    ];
+    for (const [smallMs, largeMs, limitMs, fails] of cases) {
+      assert.equal(tooSlow(smallMs, largeMs, limitMs), fails, `${smallMs} ms, ${largeMs} ms`);
+    }
+  });
+});
 
 describe("T-RV-20: plan speed", () => {
   let tmp: ReturnType<typeof tempDir>;
@@ -82,8 +112,8 @@ describe("T-RV-20: plan speed", () => {
 
   /**
    * Plans `large` and judges its speed: over the limit, the fastest of three runs of it and of
-   * `small` (made only then) must not show the growth of a quadratic part as well. Returns the
-   * first run's plan, for the case's own checks.
+   * `small` (made only then) must pass tooSlow. Returns the first run's plan, for the case's own
+   * checks.
    */
   function judgedPlan(large: Change, small: () => Change): PlanDocument {
     const first = timedPlan(large);
@@ -97,7 +127,7 @@ describe("T-RV-20: plan speed", () => {
     }
     const growth = largeMs / smallMs;
     const seen = `${Math.round(smallMs)} ms at ${SMALL_TREE} files, ${Math.round(largeMs)} ms at ${LARGE_TREE}, growth ${growth.toFixed(1)}`;
-    assert.ok(!(largeMs >= LIMIT_MS && growth > MAX_GROWTH), `plan took ${seen}`);
+    assert.ok(!tooSlow(smallMs, largeMs, LIMIT_MS), `plan took ${seen}`);
     return first.document;
   }
 

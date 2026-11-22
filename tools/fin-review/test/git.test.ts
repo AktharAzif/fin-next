@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProgramError } from "../src/errors.ts";
 import { resolveProgram, runProgram } from "../src/exec.ts";
@@ -415,19 +415,45 @@ describe("runProgram", () => {
     });
     after(() => tmp.cleanup());
 
+    /**
+     * Code that records the pid `pidExpression` gives in `pidFile` whole: written beside it, then
+     * renamed. A plain write leaves the file empty when a kill comes between creating and writing
+     * it, and an empty file must never be read as a pid.
+     */
+    function recordPid(pidFile: string, pidExpression: string): string {
+      const part = JSON.stringify(`${pidFile}.part`);
+      return `require("node:fs").writeFileSync(${part}, String(${pidExpression})); require("node:fs").renameSync(${part}, ${JSON.stringify(pidFile)});`;
+    }
+
+    /**
+     * The pid in `pidFile`. Refuses a file that does not hold a positive whole number: an empty
+     * file read as a number is 0, and pid 0 names the test's own process group.
+     */
+    function readPid(pidFile: string): number {
+      const text = readFileSync(pidFile, "utf8");
+      assert.match(text, /^[1-9][0-9]*$/, `the pid file holds no pid: ${JSON.stringify(text)}`);
+      const pid = Number(text);
+      assert.ok(Number.isSafeInteger(pid), `the pid file holds no pid: ${JSON.stringify(text)}`);
+      return pid;
+    }
+
     /** A node script that starts a grandchild sharing its stdio, records the grandchild's pid, then `then`. */
     function parentScript(pidFile: string, grandchild: string, then: string): string[] {
       const script = `
         const { spawn } = require("node:child_process");
-        const { writeFileSync } = require("node:fs");
         const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "inherit" });
-        writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+        ${recordPid(pidFile, "child.pid")}
         ${then}
       `;
       return ["-e", script];
     }
 
+    /**
+     * Whether the process `pid` is gone within 2 s. Refuses, before it signals anything, a pid
+     * that is not one process: 0 names the caller's own process group and a negative pid a group.
+     */
     async function gone(pid: number): Promise<boolean> {
+      assert.ok(Number.isSafeInteger(pid) && pid > 0, `not one process's pid: ${pid}`);
       for (let i = 0; i < 100; i++) {
         try {
           process.kill(pid, 0);
@@ -465,10 +491,67 @@ describe("runProgram", () => {
         );
         const took = performance.now() - started;
         assert.ok(took < timeoutMs + 2500, `settled after ${Math.round(took)} ms`);
-        if (existsSync(pidFile)) return Number(readFileSync(pidFile, "utf8"));
+        if (existsSync(pidFile)) return readPid(pidFile);
       }
       assert.fail("the program never started its grandchild before its timeout");
     }
+
+    /** Whether reading `text` as a pid file is refused. */
+    function pidRefused(text: string): boolean {
+      const pidFile = join(tmp.dir, "refused.pid");
+      writeFileSync(pidFile, text);
+      try {
+        readPid(pidFile);
+        return false;
+      } catch (error) {
+        return error instanceof assert.AssertionError;
+      }
+    }
+
+    /**
+     * Whether `gone(pid)` is refused, and how many times it called process.kill, which answers
+     * here as for a process that no longer exists and signals nothing.
+     */
+    async function goneRefused(pid: number): Promise<{ refused: boolean; signalled: number }> {
+      const kill = mock.method(process, "kill", () => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      });
+      try {
+        const refused = await gone(pid).then(
+          () => false,
+          (error: unknown) => error instanceof assert.AssertionError,
+        );
+        return { refused, signalled: kill.mock.callCount() };
+      } finally {
+        kill.mock.restore();
+      }
+    }
+
+    it("refuses an empty pid file", () => {
+      for (const text of ["", "\n", " "])
+        assert.equal(pidRefused(text), true, JSON.stringify(text));
+      assert.equal(pidRefused("4242"), false);
+    });
+
+    it("refuses a pid file that does not hold a positive whole number", () => {
+      for (const text of ["abc", "12x", " 12", "12\n", "1.5", "1e3", "0", "-1", "Infinity"]) {
+        assert.equal(pidRefused(text), true, JSON.stringify(text));
+      }
+    });
+
+    it("never signals pid 0, the test's own process group", async () => {
+      for (const pid of [0, -0]) {
+        assert.deepEqual(await goneRefused(pid), { refused: true, signalled: 0 }, String(pid));
+      }
+      assert.deepEqual(await goneRefused(4242), { refused: false, signalled: 1 }, "one process");
+    });
+
+    it("never signals a negative pid, a process group", async () => {
+      for (const pid of [-1, -process.pid, -4242]) {
+        assert.deepEqual(await goneRefused(pid), { refused: true, signalled: 0 }, String(pid));
+      }
+      assert.deepEqual(await goneRefused(Number.NaN), { refused: true, signalled: 0 });
+    });
 
     it("a timeout settles the call at once and kills the grandchild too", async () => {
       const pidFile = join(tmp.dir, "hang.pid");
@@ -499,7 +582,7 @@ describe("runProgram", () => {
         (error: unknown) =>
           error instanceof ProgramError && /more than 1000 bytes/.test(error.message),
       );
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = readPid(pidFile);
       if (POSIX) assert.equal(await gone(pid), true);
       else process.kill(pid);
     });
@@ -511,23 +594,29 @@ describe("runProgram", () => {
       const exec = fileURLToPath(new URL("../src/exec.ts", import.meta.url));
       const engine = `
         import { runProgram } from ${JSON.stringify(exec)};
-        const script = ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)};
+        const script = ${JSON.stringify(`${recordPid(pidFile, "process.pid")} setInterval(() => {}, 1000);`)};
         await runProgram(process.execPath, ["-e", script], { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, timeoutMs: 60000, maxOutputBytes: 1024 });
       `;
       const child = spawn(node, ["--input-type=module", "-e", engine], { stdio: "ignore" });
-      for (let i = 0; i < 200 && !existsSync(pidFile); i++)
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.ok(existsSync(pidFile), "the program started");
       const exited = new Promise<NodeJS.Signals | null>((resolve) =>
         child.on("exit", (_code, signal) => resolve(signal)),
       );
-      child.kill("SIGTERM");
-      assert.equal(await exited, "SIGTERM", "the engine still ends by the signal");
-      assert.equal(
-        await gone(Number(readFileSync(pidFile, "utf8"))),
-        true,
-        "its program did not outlive it",
-      );
+      try {
+        // Waits for the program to record its pid, or for the engine to end first, however long
+        // a loaded machine takes to start both: the engine's own 60-second timeout bounds it.
+        let ended = false;
+        void exited.then(() => {
+          ended = true;
+        });
+        while (!existsSync(pidFile) && !ended)
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.ok(existsSync(pidFile), "the program started before the engine ended");
+        child.kill("SIGTERM");
+        assert.equal(await exited, "SIGTERM", "the engine still ends by the signal");
+        assert.equal(await gone(readPid(pidFile)), true, "its program did not outlive it");
+      } finally {
+        child.kill("SIGKILL");
+      }
     });
   });
 

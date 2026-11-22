@@ -6,9 +6,9 @@ import { describe, it } from "node:test";
 import { EXIT } from "../src/core/errors.ts";
 import { GENESIS, sha256 } from "../src/core/runlog.ts";
 import {
-  INTERRUPT_DEADLINE_MS,
   INTERRUPT_SIGNALS,
   processRuntime,
+  REPEAT_GRACE_MS,
   STOP_EXIT,
   stopDescription,
 } from "../src/core/runtime.ts";
@@ -82,6 +82,14 @@ function closedRun(child: Child) {
 
 const IN_FLIGHT = { kind: "dns", name: "console", action: "create" };
 
+/**
+ * Resolves once the child has taken the first stop for `signal` (it says so on standard error
+ * after it noted when the stop came), so a second signal sent after this is a repeat of it.
+ */
+function stopTaken(child: Child, signal: string): Promise<void> {
+  return child.waitFor(`interrupted by ${signal}: closing the run`, "stderr");
+}
+
 /** A run log of `count` chained records with its head file, written at once. */
 function writeLog(dir: string, count: number): void {
   const lines: string[] = [];
@@ -137,11 +145,15 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     try {
       await child.waitFor("waiting");
       child.process.kill("SIGINT");
-      await sleep(1_500);
-      const second = performance.now();
+      // The second comes the grace after the child took the first, which no load can make early;
+      // it has until the stop's wait for the change ends (INTERRUPT_SETTLE_MS) to arrive.
+      await stopTaken(child, "SIGINT");
+      await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGINT");
       assert.equal(await child.exit(), EXIT.interrupted, child.errors());
-      assert.ok(performance.now() - second < 1_000, "it did not wait for the change in flight");
+      // No time is measured: the change takes ten seconds, so waiting for it would close the run
+      // after the wait for it, with no forced close, or at the deadline as "deadline"; run.done
+      // says which close it was.
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.result, "failed");
@@ -161,7 +173,8 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     try {
       await child.waitFor("waiting");
       child.process.kill("SIGHUP");
-      await sleep(1_500);
+      await stopTaken(child, "SIGHUP");
+      await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGHUP");
       assert.equal(await child.exit(), EXIT.hangup, child.errors());
       const run = closedRun(child);
@@ -179,10 +192,10 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
     const child = spawnChild(["stub", "hang", "staging"]);
     try {
       await child.waitFor("waiting");
-      const sent = performance.now();
       child.process.kill("SIGQUIT");
       assert.equal(await child.exit(), EXIT.quit, child.errors());
-      assert.ok(performance.now() - sent < 1_000, "it did not wait for the change in flight");
+      // No time is measured: waiting for the ten-second change would close the run after the
+      // wait for it, with no forced close, or at the deadline as "deadline"; run.done says which.
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.interrupted, "SIGQUIT");
@@ -258,22 +271,18 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
         FIN_OPS_INGEST_TOKEN_FILE: writePrivate(dir, "ingest", `tok${"x".repeat(24)}`),
       },
     });
-    // The bounds start with the signal, not with the spawn: a loaded machine took seconds to start
-    // the child. A timer never fires early, so the exit comes at the deadline or later; the upper
-    // bound leaves the child as long again to write run.done and exit, and the watchdog ends a
-    // child that never exits well after that.
+    // The bounds hold the 5-second deadline, from the signal. The watchdog starts with the signal
+    // too: started with the spawn, it killed a child that a loaded machine took over 4 s to start
+    // before the child's own deadline came.
     let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
       await child.waitFor("waiting");
       const sent = performance.now();
       child.process.kill("SIGTERM");
-      watchdog = setTimeout(() => child.process.kill("SIGKILL"), 3 * INTERRUPT_DEADLINE_MS);
+      watchdog = setTimeout(() => child.process.kill("SIGKILL"), 9_000);
       assert.equal(await child.exit(), EXIT.terminated, child.errors());
       const took = performance.now() - sent;
-      assert.ok(
-        took > INTERRUPT_DEADLINE_MS - 1_000 && took < 2 * INTERRUPT_DEADLINE_MS,
-        `exited after ${Math.round(took)} ms`,
-      );
+      assert.ok(took > 4_000 && took < 7_000, `exited after ${Math.round(took)} ms`);
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.step", "run.done"]);
       assert.equal(run.done?.interrupted, "SIGTERM");

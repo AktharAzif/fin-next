@@ -1,10 +1,18 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
-import { checkMonitoring, PHASE0_EVENTS } from "../src/check.ts";
+import { checkMonitoring, codeFiles, PHASE0_EVENTS } from "../src/check.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 const roots: string[] = [];
@@ -44,21 +52,27 @@ function rules(root: string, options: Parameters<typeof checkMonitoring>[1] = {}
 }
 
 // monitoring:check runs in every `pnpm check`, under a second (spec 01 §4.2). Its speed is judged by
-// two things, and fails only when both say it got slow: its time over the repository against that
-// second, and the growth of its time from a tree of 100 code files to one of 800 (about the
-// repository's own number), the files its code scan reads (most of its time). A part quadratic in
-// the files grows about 64 times, a linear one at most 8 (about 3.5 here, the staging files' share
-// being the same at both sizes). Each time is the thread's CPU time, the fastest of three runs:
-// what load adds is time spent waiting for a core, and inside a loaded `pnpm check` the check took
-// over a second of wall time while it takes about 50 ms alone. A first run under the limit already
-// decides the case.
+// two things over the same inputs, and fails only when both say it got slow: its time over the
+// repository against that second, and the growth of that time from a sample of the repository
+// that holds an eighth of its code files (every eighth by size, at their real lengths) and the
+// same staging files, runbooks and catalogue. The code files are what grows with the repository,
+// and their scan is most of the check's time: a part quadratic in their number, their bytes or
+// the events in them grows about 64 times from the sample, a linear one at most about 8 (about 3
+// here, the rest of the check being the same in both). Each time is the thread's CPU time, the
+// fastest of three runs: what load adds is time spent waiting for a core, and inside a loaded
+// `pnpm check` the check took over a second of wall time while it takes about 50 ms alone. A
+// first run under the limit already decides the case.
 const LIMIT_MS = 1000;
-/** Between linear's 8 and quadratic's 64, about a factor of three from each. */
-const MAX_GROWTH = 24;
-/** A floor under the small tree's time, so a reading near clock resolution cannot inflate growth. */
+/**
+ * Twice linear's 8. A part quadratic in the code files' number or bytes that takes the check to
+ * the limit adds only a sixty-fourth of itself to the sample, behind the rest of the check, so it
+ * grows about 41 times (measured): more than twice this.
+ */
+const MAX_GROWTH = 16;
+/** A floor under the sample's time, so a reading near clock resolution cannot inflate growth. */
 const FLOOR_MS = 5;
-const SMALL_CODE = 100;
-const LARGE_CODE = 800;
+/** The sample holds one code file in this many. */
+const SAMPLE_EVERY = 8;
 
 /** The CPU time this thread has used, in milliseconds. */
 function threadCpuMs(): number {
@@ -73,24 +87,57 @@ function cpuMs(run: () => unknown): number {
   return threadCpuMs() - started;
 }
 
-/** A scratch copy of the staging files with `files` code files, each logging catalogued events. */
-function codeTree(files: number): string {
+/**
+ * A scratch copy of everything monitoring:check reads in the repository but its code files, with
+ * one code file in SAMPLE_EVERY: sorted by size, the middle one of each run of SAMPLE_EVERY, so the
+ * sample holds about an eighth of the files and of their bytes.
+ */
+function sampleTree(): { root: string; files: number } {
   const root = scratch();
-  for (let i = 0; i < files; i++) {
-    const dir = join(root, "packages", `p${i % 8}`, "src");
-    mkdirSync(dir, { recursive: true });
-    const lines = [
-      `export function handler${i}(telemetry: { log: (e: string, f: object) => void }) {`,
-    ];
-    for (let j = 0; j < 40; j++) {
-      lines.push(
-        `  telemetry.log("${j % 2 === 0 ? "request" : "process.start"}", { step: ${j} });`,
-      );
-    }
-    writeFileSync(join(dir, `f${i}.ts`), `${[...lines, "}"].join("\n")}\n`);
+  const monitoring = join("ops", "monitoring");
+  for (const path of [join(monitoring, "catalog"), join(monitoring, "README.md")]) {
+    cpSync(join(ROOT, path), join(root, path), { recursive: true });
   }
-  return root;
+  const sizes = new Map(codeFiles(ROOT).map((file) => [file, statSync(join(ROOT, file)).size]));
+  const bySize = [...sizes.keys()].sort(
+    (a, b) => (sizes.get(a) ?? 0) - (sizes.get(b) ?? 0) || (a < b ? -1 : 1),
+  );
+  const sample = bySize.filter((_, index) => index % SAMPLE_EVERY === SAMPLE_EVERY / 2);
+  for (const file of sample) {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    cpSync(join(ROOT, file), join(root, file));
+  }
+  return { root, files: sample.length };
 }
+
+/** The growth of the check's time from the sample's to the repository's. */
+const growthOf = (sampleMs: number, repoMs: number): number =>
+  repoMs / Math.max(sampleMs, FLOOR_MS);
+
+/** Whether the fastest CPU times over the sample and the repository show a check that got quadratic. */
+function tooSlow(sampleMs: number, repoMs: number): boolean {
+  return repoMs > LIMIT_MS && growthOf(sampleMs, repoMs) > MAX_GROWTH;
+}
+
+describe("monitoring:check's speed rule", () => {
+  it("fails a check over the limit that grew as a quadratic part does, and passes the check as it is", () => {
+    // [CPU ms over the sample, over the repository, fails]: the check as it is, and with a part
+    // quadratic in the code files' bytes or a linear one that takes it to the limit (measured at
+    // a load of 30 to 47, growth 3.1, 42.3 and 7.5), then the rule's edges.
+    const cases: [number, number, boolean][] = [
+      [8.4, 26, false], // the check as it is
+      [23.6, 1001, true], // a quadratic part at the limit
+      [133.5, 1001, false], // a linear part at the limit
+      [1, 1000, false], // at the limit, whatever the growth
+      [62.6, 1001, false], // over the limit, growth 15.99
+      [62, 1001, true], // over the limit, growth 16.1
+      [0.01, 1001, true], // a sample under the floor counts as the floor: growth 200
+    ];
+    for (const [sampleMs, repoMs, fails] of cases) {
+      expect(tooSlow(sampleMs, repoMs), `${sampleMs}, ${repoMs}`).toBe(fails);
+    }
+  });
+});
 
 describe("monitoring:check on the repository", () => {
   it("passes, in well under a second", () => {
@@ -99,29 +146,23 @@ describe("monitoring:check on the repository", () => {
       findings = checkMonitoring(ROOT);
     });
     expect(findings).toEqual([]);
-    if (repoMs < LIMIT_MS) return;
-    const [small, large] = [codeTree(SMALL_CODE), codeTree(LARGE_CODE)];
-    let smallMs = Number.POSITIVE_INFINITY;
-    let largeMs = Number.POSITIVE_INFINITY;
+    if (repoMs <= LIMIT_MS) return;
+    const sample = sampleTree();
+    let sampleMs = Number.POSITIVE_INFINITY;
     for (let run = 0; run < 3; run++) {
+      sampleMs = Math.min(
+        sampleMs,
+        cpuMs(() => checkMonitoring(sample.root)),
+      );
       if (run > 0)
         repoMs = Math.min(
           repoMs,
           cpuMs(() => checkMonitoring(ROOT)),
         );
-      smallMs = Math.min(
-        smallMs,
-        cpuMs(() => checkMonitoring(small)),
-      );
-      largeMs = Math.min(
-        largeMs,
-        cpuMs(() => checkMonitoring(large)),
-      );
     }
-    const growth = largeMs / Math.max(smallMs, FLOOR_MS);
     const ms = (value: number): string => `${value.toFixed(1)} ms of CPU`;
-    const seen = `${ms(repoMs)} over the repository; ${ms(smallMs)} with ${SMALL_CODE} code files, ${ms(largeMs)} with ${LARGE_CODE}, growth ${growth.toFixed(1)}`;
-    expect(repoMs > LIMIT_MS && growth > MAX_GROWTH, seen).toBe(false);
+    const seen = `${ms(repoMs)} over the repository, ${ms(sampleMs)} over ${sample.files} of its code files, growth ${growthOf(sampleMs, repoMs).toFixed(1)}`;
+    expect(tooSlow(sampleMs, repoMs), seen).toBe(false);
   });
 
   it("catalogues every event spec 01 §8.9 lists", () => {
