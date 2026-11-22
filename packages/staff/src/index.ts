@@ -29,6 +29,25 @@ export {
   staffEventTypeRows,
 } from "./audit/events.ts";
 export {
+  AUDIT_MAX_ACTIONS,
+  AUDIT_MAX_ACTORS,
+  AUDIT_MAX_ORGS,
+  AUDIT_PAGE_MAX,
+  AUDIT_PAGE_SIZE,
+  AUDIT_RANGES,
+  AUDIT_SHOWS,
+  type AuditRange,
+  type AuditShow,
+  auditPeople,
+  REJECTION_EVENTS,
+  type StaffAuditEntry,
+  type StaffAuditPage,
+  type StaffAuditQuery,
+  type StaffAuditReader,
+  staffAuditEntry,
+  staffAuditLog,
+} from "./audit/log.ts";
+export {
   type AuditActorInput,
   createRecordStaffAudit,
   type RecordStaffAudit,

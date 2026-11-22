@@ -71,8 +71,9 @@ export class Browser {
   constructor(realm: Realm, access: AccessIdentity | null) {
     this.#realm = realm;
     this.access = access;
-    // Each browser on its own /48 of the documentation prefix, so per-network limits are its own.
-    this.ip = `2001:db8:${randomBytes(2).toString("hex")}::1`;
+    // Each browser on its own /48 of the documentation prefix, so per-network limits are its own,
+    // written as the database writes it back (no leading zero), so a stored address compares equal.
+    this.ip = `2001:db8:${(0x1000 + (randomBytes(2).readUInt16BE() % 0xe000)).toString(16)}::1`;
   }
 
   context(): RequestContext {
