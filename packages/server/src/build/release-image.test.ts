@@ -30,13 +30,13 @@
 // heredoc however its lines are continued), a Dockerfile holding any character but printable
 // ASCII, tabs and newlines, and one that names two stages alike (Docker reads the last stage of a
 // name, where a first match would read the first). The scan itself
-// finds each of CI's bundle-check harness rules in a planted output (the fin:test-seam marker, a
-// module comment naming packages/testing, as bundle-check's `//#region` and as this build's Vite
-// writes it, `// <path>`, an import of the harness's package, packages/testing in a map's sources,
-// inline or beside the file), refuses a link and a missing or empty output, and passes an honest
-// one; in its database files' mode it also refuses every file but a .sql or .json file in the
-// database's folders, any path containing packages/testing and any directory outside those
-// folders, and passes the database's files.
+// finds each harness rule of CI's bundle check (which returns with the tokenizer PR) in a planted
+// output (the fin:test-seam marker, a module comment naming packages/testing, as the bundle check's
+// `//#region` and as this build's Vite writes it, `// <path>`, an import of the harness's package,
+// packages/testing in a map's sources, inline or beside the file), refuses a link and a missing or
+// empty output, and passes an honest one; in its database files' mode it also refuses every file
+// but a .sql or .json file in the database's folders, any path containing packages/testing and any
+// directory outside those folders, and passes the database's files.
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -1863,8 +1863,9 @@ describe("harness-scan.mjs", () => {
     return dir;
   };
   // An honest bundle as this build's Vite writes one (a `// <path>` comment before each module's
-  // code), with a `//#region` as bundle-check reads one, a comment that names the harness's
-  // directory in a sentence, and a string that names another package's testing subpath.
+  // code), with a `//#region` as CI's bundle check (back with the tokenizer PR) reads one, a
+  // comment that names the harness's directory in a sentence, and a string that names another
+  // package's testing subpath.
   const HONEST = {
     "main.js":
       '// ../../packages/core/src/clock.ts\nimport { createServer } from "node:http";\n' +
@@ -1895,7 +1896,7 @@ describe("harness-scan.mjs", () => {
       "a module of the test harness (packages/testing) is bundled",
     ],
     [
-      "a region of packages/testing, as bundle-check reads one",
+      "a region of packages/testing, as CI's bundle check reads one",
       "main.js",
       "//#region ../../packages/testing/src/totp.ts\nfunction totp() {}\n//#endregion\n",
       "a module of the test harness (packages/testing) is bundled",

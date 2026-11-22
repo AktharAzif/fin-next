@@ -24,21 +24,21 @@
 // packages/server/test/image-build.ts, which reads the Dockerfiles: the scan cannot see that it
 // was emptied or replaced.
 //
-// The marker rules, read in both modes, are CI's bundle check's harness rules
-// (.github/scripts/bundle-check.mjs, which the CI lane holds): in every file but a map, the
+// The marker rules, read in both modes, are the harness rules of CI's bundle check, which the CI
+// lane holds and which returns with the tokenizer PR: in every file but a map, the
 // `fin:test-seam` marker a seam module carries, a module comment naming a file of packages/testing
 // (the harness bundled in), and an import of the harness's package left in (a static, side-effect
 // or dynamic import, or a require call); in a source map, a `sources` entry under packages/testing
 // (its sourcesContent, the original text with its comments, is not read). A module comment is the
-// line the bundler writes before each module's code, the module's path alone: bundle-check reads
-// `//#region <path>`, and this build's Vite writes `// <path>`, so both are read. A path through
-// node_modules/@fin/testing, which the build writes only when it keeps symbolic links, counts as
-// packages/testing. A map inlined as a base64 `data:` URL is read as a map. A link in the output
-// is refused, since the image would copy the link and not what it names. This file is
+// line the bundler writes before each module's code, the module's path alone: CI's bundle check
+// reads `//#region <path>`, and this build's Vite writes `// <path>`, so both are read. A path
+// through node_modules/@fin/testing, which the build writes only when it keeps symbolic links,
+// counts as packages/testing. A map inlined as a base64 `data:` URL is read as a map. A link in
+// the output is refused, since the image would copy the link and not what it names. This file is
 // self-contained and uses Node built-ins only, so it runs in the build stage from the build
-// context with no install (bundle-check is not in this branch, and imports the CI lane's helpers;
-// assets.ts is not a control path, so its rule is written here again, and packages/db's tests
-// hold the two equal). Usage, from the repository's root:
+// context with no install (CI's bundle check returns only with the tokenizer PR, and imports the
+// CI lane's helpers; assets.ts is not a control path, so its rule is written here again, and
+// packages/db's tests hold the two equal). Usage, from the repository's root:
 //   node ops/docker/harness-scan.mjs <output directory>
 //   node ops/docker/harness-scan.mjs --db-assets <output directory>
 // It exits 0 when the directory holds at least one file and nothing the rules refuse, 1 on any
