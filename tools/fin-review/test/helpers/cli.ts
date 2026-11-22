@@ -1,5 +1,6 @@
-// Running the CLI from tests: in-process through runCli, or as a real process through main.ts,
-// optionally from a copy of the engine whose configuration a test changes.
+// Running the CLI from tests: in-process through runCli, or as a real process through main.ts
+// (or timed-cli.ts, which also reports the run's CPU time), optionally from a copy of the engine
+// whose configuration a test changes.
 
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
@@ -11,6 +12,8 @@ import { runCli } from "../../src/cli.ts";
 export const TOOL_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const CONFIG_DIR = join(TOOL_ROOT, "config");
 export const MAIN = join(TOOL_ROOT, "src", "main.ts");
+/** The script that runs the CLI once in a process of its own and reports its CPU time. */
+export const TIMED_CLI = join(TOOL_ROOT, "test", "helpers", "timed-cli.ts");
 
 export interface CliRun {
   code: number;
