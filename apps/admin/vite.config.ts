@@ -47,6 +47,23 @@ export default defineConfig(({ mode }) => ({
     sourcemap: "hidden",
     modulePreload: { polyfill: false },
     target: "baseline-widely-available",
+    // The scrubbing console guard (@fin/frame/report) gets a chunk of its own, which the entry
+    // imports first, so it is in place before any library chunk is evaluated (spec 06 §2.3 step
+    // 1). Left in the entry chunk, it would run after every shared chunk the entry imports, React
+    // DOM's included. The @security journey in e2e/shell.spec.ts holds the order.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "console-guard",
+              test: /[\\/]packages[\\/]frame[\\/]src[\\/](?:report[\\/][^\\/]+|api[\\/]errors)\.ts$/,
+              priority: 100,
+            },
+          ],
+        },
+      },
+    },
   },
   // `vite dev` only (FW-C17): the API half on its local port.
   server: { proxy: { "/api": "http://localhost:8080" } },

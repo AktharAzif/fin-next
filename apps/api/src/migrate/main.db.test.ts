@@ -1,8 +1,11 @@
 // `migrate` end to end against Postgres 18 (spec 01 §6.6 steps 3 to 6, AC-P0-29's local half): the
 // bootstrap from an empty database, the migration run with fin_owner's per-run password (cleared after),
 // the registry sync, the privileged-login record naming the run, and the operator tasks.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AUDIT_EVENTS } from "@fin/audit";
-import type { PgClient } from "@fin/db";
+import { listMigrations, type PgClient, sourceRoot, stageDbAssets } from "@fin/db";
 import {
   createTestDatabase,
   type TestDatabase,
@@ -10,6 +13,7 @@ import {
   testSuperuserUrl,
   testVerifiersJson,
 } from "@fin/db/testing";
+import { grantRows } from "@fin/email";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { EXIT_CONFIG, EXIT_FAILED, EXIT_OK, runMigrateCli } from "./main.ts";
 
@@ -103,15 +107,31 @@ describe("migrate --bootstrap", () => {
 });
 
 describe("migrate --migrate", () => {
-  it("applies every migration as fin_owner with a password for the run only, and syncs the registry", async () => {
+  const signInCode = (id: string) =>
+    JSON.stringify({
+      id,
+      template: "identity/sign-in-code",
+      recipient_kind: "address",
+      recipient: "person@example.com",
+      params: { code: "12345678" },
+    });
+
+  it("applies every package's migrations as fin_owner with a password for the run only, and syncs the registry", async () => {
     const { code, lines } = await cli(["--migrate"]);
     expect(code).toBe(EXIT_OK);
+    // The source tree's files (FIN_DB_ASSETS_DIR unset), every package's: the set the image ships.
+    const migrations = listMigrations(sourceRoot() ?? "");
+    expect(migrations.some((name) => /_identity_/.test(name))).toBe(true);
     expect(lines[1]).toMatchObject({
       event: "migrate.done",
       mode: "migrate",
-      applied: 5,
-      newest: expect.stringMatching(/_events_shell\.sql$/),
+      applied: migrations.length,
+      newest: migrations.at(-1),
     });
+    const recorded = await su.query<{ name: string }>(
+      "SELECT name FROM ops.schema_migrations ORDER BY name",
+    );
+    expect(recorded.rows.map((r) => r.name)).toEqual(migrations);
     const types = await su.query<{ n: number }>("SELECT count(*)::int AS n FROM audit.event_type");
     expect(types.rows[0]?.n).toBe(Object.keys(AUDIT_EVENTS).length);
     // AC-P0-29: fin_owner has no valid password once the run ends.
@@ -133,12 +153,159 @@ describe("migrate --migrate", () => {
     expect(lines[1]).toMatchObject({ applied: 0 });
   });
 
-  it("fails with migrate.failed and a non-zero exit when a migration fails", async () => {
+  it("builds the email sender's schema and email.enqueue()'s allowlist from the template catalogue", async () => {
+    // The sender's tables and the outbox's sender columns (packages/email's migration), all in
+    // email_private beside the outbox; the template grants and email.enqueue() stay in email.
+    const objects = await su.query<{ name: string; found: boolean }>(
+      `SELECT name, pg_catalog.to_regclass(name) IS NOT NULL AS found
+       FROM unnest($1::text[]) AS t(name) ORDER BY name`,
+      [
+        [
+          "email_private.recipient_window",
+          "email_private.daily_budget",
+          "email_private.send_bucket",
+          "email_private.delivery_check",
+          "email_private.delivery_check_turn",
+        ],
+      ],
+    );
+    for (const row of objects.rows) expect(row.found, row.name).toBe(true);
+    const columns = await su.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_schema = 'email_private' AND table_name = 'outbox'
+         AND column_name IN ('folded_into', 'first_due_at', 'counted')`,
+    );
+    expect(columns.rows[0]?.n).toBe(3);
+
+    // Exactly the catalogue's rows, each with its class's priority and secret flag.
+    const rows = await su.query<{
+      template: string;
+      role: string;
+      category: string;
+      priority: number;
+      carries_secret: boolean;
+    }>("SELECT template, role, category, priority, carries_secret FROM email.template_grant");
+    const byKey = (a: { template: string; role: string }, b: { template: string; role: string }) =>
+      `${a.template} ${a.role}` < `${b.template} ${b.role}` ? -1 : 1;
+    const want = grantRows().map((g) => ({
+      template: g.template,
+      role: g.role,
+      category: g.category,
+      priority: g.priority,
+      carries_secret: g.carriesSecret,
+    }));
+    expect(rows.rows.sort(byKey)).toEqual(want.sort(byKey));
+
+    // Only the worker holds the sender's tables, and only the worker may use their schema.
+    const privileges = await su.query<{
+      worker: boolean;
+      console: boolean;
+      worker_schema: boolean;
+      console_schema: boolean;
+    }>(
+      `SELECT has_table_privilege('fin_worker', 'email_private.send_bucket', 'UPDATE') AS worker,
+              has_table_privilege('fin_console', 'email_private.send_bucket', 'SELECT') AS console,
+              has_schema_privilege('fin_worker', 'email_private', 'USAGE') AS worker_schema,
+              has_schema_privilege('fin_console', 'email_private', 'USAGE') AS console_schema`,
+    );
+    expect(privileges.rows).toEqual([
+      { worker: true, console: false, worker_schema: true, console_schema: false },
+    ]);
+
+    // The console may queue a sign-in code; the api's login may not (FE001).
+    const consoleLogin = await db.connect("fin_console_a");
+    try {
+      const queued = await consoleLogin.query<{ id: string }>(
+        "SELECT email.enqueue($1::jsonb) AS id",
+        [signInCode(`eml_${"0".repeat(26)}`)],
+      );
+      expect(queued.rows).toEqual([{ id: `eml_${"0".repeat(26)}` }]);
+    } finally {
+      await consoleLogin.end();
+    }
+    const apiLogin = await db.connect("fin_api_a");
+    try {
+      await expect(
+        apiLogin.query("SELECT email.enqueue($1::jsonb)", [signInCode(`eml_${"1".repeat(26)}`)]),
+      ).rejects.toMatchObject({ code: "FE001" });
+    } finally {
+      await apiLogin.end();
+    }
+    await su.query("DELETE FROM email_private.outbox");
+  });
+
+  it("takes a template from a role whose rule no longer gives it, and keeps a newer release's template", async () => {
+    // Rows an earlier release's run could have left: the api's login holding the sign-in code (a
+    // template this catalogue gives only the console), and a template only a newer release knows.
+    await su.query(
+      `INSERT INTO email.template_grant (template, role, category, priority, carries_secret)
+       VALUES ('identity/sign-in-code', 'fin_api', 'code', 1, true),
+              ('kyc/from-a-newer-release', 'fin_api', 'customer', 3, false)`,
+    );
+    const apiLogin = await db.connect("fin_api_a");
+    try {
+      const queued = await apiLogin.query<{ id: string }>("SELECT email.enqueue($1::jsonb) AS id", [
+        signInCode(`eml_${"2".repeat(26)}`),
+      ]);
+      expect(queued.rows).toEqual([{ id: `eml_${"2".repeat(26)}` }]);
+
+      const { code, lines } = await cli(["--migrate"]);
+      expect(code).toBe(EXIT_OK);
+      expect(lines[1]).toMatchObject({ applied: 0 });
+
+      const rows = await su.query<{ template: string; role: string }>(
+        "SELECT template, role FROM email.template_grant",
+      );
+      const byKey = (
+        a: { template: string; role: string },
+        b: { template: string; role: string },
+      ) => (`${a.template} ${a.role}` < `${b.template} ${b.role}` ? -1 : 1);
+      const want = [
+        ...grantRows().map((g) => ({ template: g.template, role: g.role })),
+        { template: "kyc/from-a-newer-release", role: "fin_api" },
+      ];
+      expect(rows.rows.sort(byKey)).toEqual(want.sort(byKey));
+      await expect(
+        apiLogin.query("SELECT email.enqueue($1::jsonb)", [signInCode(`eml_${"3".repeat(26)}`)]),
+      ).rejects.toMatchObject({ code: "FE001" });
+    } finally {
+      await apiLogin.end();
+      await su.query("DELETE FROM email_private.outbox");
+      await su.query(
+        "DELETE FROM email.template_grant WHERE template = 'kyc/from-a-newer-release'",
+      );
+    }
+  });
+
+  it("reads the image's layout at FIN_DB_ASSETS_DIR: the same files, so nothing is pending", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fin-migrate-assets-"));
+    try {
+      const out = join(dir, "db-assets");
+      stageDbAssets(sourceRoot() ?? "", out);
+      const { code, lines } = await cli(["--migrate"], { FIN_DB_ASSETS_DIR: out });
+      expect(code).toBe(EXIT_OK);
+      expect(lines[1]).toMatchObject({ applied: 0, unknown: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a relative FIN_DB_ASSETS_DIR as configuration (exit 78)", async () => {
+    const { code, lines } = await cli(["--migrate"], { FIN_DB_ASSETS_DIR: "db-assets" });
+    expect(code).toBe(EXIT_CONFIG);
+    expect(lines.at(-1)).toMatchObject({ event: "migrate.failed", variable: "FIN_DB_ASSETS_DIR" });
+  });
+
+  it("fails with migrate.failed and a non-zero exit when the files are missing", async () => {
     const { code, lines } = await cli(["--migrate"], {
       FIN_DB_ASSETS_DIR: "/nonexistent-fin-assets",
     });
     expect(code).toBe(EXIT_FAILED);
-    expect(lines.at(-1)).toMatchObject({ event: "migrate.failed", mode: "migrate" });
+    expect(lines.at(-1)).toMatchObject({
+      event: "migrate.failed",
+      mode: "migrate",
+      code: "db_assets_missing",
+    });
   });
 });
 

@@ -1,8 +1,9 @@
 // Sign in (SignIn board; spec 02 §5.2, §5.3, §15.2): the passkey button and the email field's
 // passkey autofill first, then the work email, which sends an emailed code and opens the code
 // page. `?error=` says why the person is here (signed out, or after too many wrong tries); `?next=`
-// is kept, if it is a path of this app, for after the sign-in. Passwords and Google are stretch
-// items, not built here.
+// is kept, if it is a path of this app, for after the sign-in. "Continue with Google" shows only
+// when Google is on (stretch 5, §5.8); its round trip comes back here with `?via=google`, or with
+// the refusal in `?error=`. Passwords are stretch 2, not built here.
 import type { ConsoleViewer } from "@fin/app-contracts";
 import { useFin } from "@fin/frame";
 import { FingerprintIcon } from "@fin/icons";
@@ -22,12 +23,16 @@ import {
   passkeysSupported,
 } from "../../auth/webauthn.ts";
 import { AlertFrom, AuthLoading, LeadLink, OrRule } from "../../components/auth.tsx";
+import { GoogleButton, GoogleRefusal } from "../-google/GoogleButton.tsx";
+import { type GoogleError, isGoogleError } from "../-google/google.ts";
 
 const ERRORS = ["signed_out", "too_many_tries"] as const;
 
 export interface SignInSearch {
   next?: string;
-  error?: (typeof ERRORS)[number];
+  error?: (typeof ERRORS)[number] | GoogleError;
+  /** Back from Google's round trip, signed in (stretch 5). */
+  via?: "google";
 }
 
 function readSignInSearch(search: Record<string, unknown>): SignInSearch {
@@ -35,7 +40,10 @@ function readSignInSearch(search: Record<string, unknown>): SignInSearch {
   if (typeof search.next === "string" && search.next !== "") out.next = search.next;
   if (typeof search.error === "string" && (ERRORS as readonly string[]).includes(search.error)) {
     out.error = search.error as (typeof ERRORS)[number];
+  } else if (isGoogleError(search.error)) {
+    out.error = search.error;
   }
+  if (search.via === "google") out.via = "google";
   return out;
 }
 
@@ -136,11 +144,25 @@ function SignInPage() {
   const [busy, setBusy] = useState<"passkey" | "email" | null>(null);
   const supported = passkeysSupported();
   const mounted = useRef(true);
+  const googleError = isGoogleError(search.error) ? search.error : null;
+  // Back from Google signed in, with no page to go to yet (no organisation): finish here.
+  const [finishingGoogle, setFinishingGoogle] = useState(
+    search.via === "google" && fin.viewer.get() !== null,
+  );
 
   const finish = async () => {
     const href = await destinationAfterSignIn(fin, next);
     await router.navigate({ href, replace: true });
   };
+
+  useEffect(() => {
+    if (!finishingGoogle) return;
+    finish().catch((error: unknown) => {
+      if (!mounted.current) return;
+      setFinishingGoogle(false);
+      setAlert(failureOf(error));
+    });
+  }, []);
 
   const passkeyFailure = (error: unknown) => {
     if (isCeremonyError(error, "aborted")) return;
@@ -213,6 +235,8 @@ function SignInPage() {
     }
   };
 
+  if (finishingGoogle) return <AuthLoading />;
+
   return (
     <AuthCard
       title="Sign in to Fin"
@@ -223,6 +247,7 @@ function SignInPage() {
       }
     >
       {alertFor(alert)}
+      {alert === null && googleError !== null ? <GoogleRefusal error={googleError} /> : null}
       {supported ? (
         <>
           <Button
@@ -235,9 +260,23 @@ function SignInPage() {
           >
             Sign in with a passkey
           </Button>
+          <GoogleButton
+            page="/sign-in"
+            next={next}
+            disabled={busy !== null}
+            onFailure={(failure) => setAlert(failure)}
+          />
           <OrRule />
         </>
-      ) : null}
+      ) : (
+        <GoogleButton
+          page="/sign-in"
+          next={next}
+          disabled={busy !== null}
+          rule
+          onFailure={(failure) => setAlert(failure)}
+        />
+      )}
       <form
         noValidate
         className="flex flex-col gap-5"

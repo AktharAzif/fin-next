@@ -46,6 +46,13 @@ const noGap = (): Gap => ({ failedSends: 0, linesLost: 0, statuses: new Set() })
 
 const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
+/** Adds a caller's fields to a line whose envelope is set: an envelope key always keeps its own. */
+function addFields(line: Record<string, unknown>, fields: Fields): void {
+  for (const [key, value] of Object.entries(fields)) {
+    if (!ENVELOPE_KEYS.has(key) && value !== undefined) line[key] = value;
+  }
+}
+
 export interface TelemetryOptions {
   service: ServiceName;
   environment: Environment;
@@ -143,9 +150,7 @@ export class Telemetry {
     };
     if (unit?.requestId !== undefined) line.requestId = unit.requestId;
     if (unit?.runId !== undefined) line.runId = unit.runId;
-    for (const [key, value] of Object.entries(fields)) {
-      if (!ENVELOPE_KEYS.has(key) && value !== undefined) line[key] = value;
-    }
+    addFields(line, fields);
     return capLine(scrubLine(line));
   }
 
@@ -363,10 +368,18 @@ export function currentTelemetry(): Telemetry | undefined {
   return installed;
 }
 
-/** spec 08 §7.3's `log`: through the installed telemetry, or stdout alone before it exists. */
+/**
+ * spec 08 §7.3's `log`: through the installed telemetry, or stdout alone before it exists. Either
+ * way the envelope wins: a field named like an envelope key never relabels the line.
+ */
 export function log(event: string, fields: Fields = {}, level: Level = "info"): void {
-  if (installed !== undefined) installed.log(event, fields, level);
-  else writeStdout(JSON.stringify(scrubLine({ message: event, event, level, ...fields })));
+  if (installed !== undefined) {
+    installed.log(event, fields, level);
+    return;
+  }
+  const line: Record<string, unknown> = { message: event, event, level };
+  addFields(line, fields);
+  writeStdout(JSON.stringify(scrubLine(line)));
 }
 
 export function withUnit<T>(unit: UnitStart, fn: () => Promise<T>): Promise<T> {

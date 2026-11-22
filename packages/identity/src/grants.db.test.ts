@@ -53,7 +53,7 @@ describe("each role holds only its own tables", () => {
     ["fin_console", "SELECT identity.revoke_trusted_browsers('org_x', 'production_access')"],
     ["fin_console", "UPDATE identity.privileged_permission SET permission = 'x'"],
     ["fin_console", "DELETE FROM ops.lockout"],
-    ["fin_console", "SELECT 1 FROM email.outbox"],
+    ["fin_console", "SELECT 1 FROM email_private.outbox"],
     [
       "fin_console",
       "INSERT INTO audit.event_type (name, area, category, scope, roles) VALUES ('a.b', 'a', 'security', 'person', '{x}')",

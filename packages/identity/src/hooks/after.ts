@@ -11,6 +11,7 @@ import { randomToken } from "../crypto/keyed.ts";
 import { assertionVerified } from "../crypto/webauthn.ts";
 import { AuthRefusal } from "../errors.ts";
 import { personGate, trustedBrowserEligible } from "../gate.ts";
+import { googleCallbackAfter, googleUnlinked, isCallbackPath } from "../google/hooks.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
@@ -52,6 +53,12 @@ export async function afterHook(rt: RealmRuntime, ctx: HookContext): Promise<voi
   const state = requestState(rt);
   const tx = unitOf(rt);
   const returned = ctx.context.returned;
+  if (state.realm === "developer" && isCallbackPath(ctx.path)) {
+    // Google's callback answers a redirect either way; its Location says whether it succeeded.
+    return googleCallbackAfter(rt, ctx, tx, state, (person, first) =>
+      knownBrowserNotice(rt, ctx, tx, state, person, first),
+    );
+  }
   const failed = isAPIError(returned);
   if (failed) {
     const code = (returned as { body?: { code?: unknown } }).body?.code;
@@ -84,6 +91,10 @@ export async function afterHook(rt: RealmRuntime, ctx: HookContext): Promise<voi
       return failed ? undefined : backupCodesRegenerated(rt, tx, state);
     case "/sign-out":
       return failed ? undefined : signedOut(rt, tx, state);
+    case "/unlink-account":
+      return failed
+        ? undefined
+        : googleUnlinked(rt, tx, state, () => consumeRequestIntent(rt, tx, state));
     default:
       return undefined;
   }

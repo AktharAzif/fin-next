@@ -53,6 +53,9 @@ export const IDENTITY_TEMPLATES = {
         "backup_codes_regenerated",
         "browser_trusted",
         "signed_out_everywhere",
+        // With Google (stretch 5, §17.2).
+        "google_linked",
+        "google_unlinked",
       ]),
       device: device.optional(),
       time,

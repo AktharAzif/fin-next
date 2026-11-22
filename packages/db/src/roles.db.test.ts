@@ -13,7 +13,7 @@ import { GRANTS_DIR } from "./migrations.ts";
 import { enqueueJob, recordDutyRun } from "./ops.ts";
 import type { PgClient } from "./pg.ts";
 import { sqlState } from "./pg.ts";
-import { connectionLimit, SERVICE_GROUPS, SERVICE_LOGINS } from "./roles.ts";
+import { connectionLimit, ENQUEUE_OWNER, SERVICE_GROUPS, SERVICE_LOGINS } from "./roles.ts";
 import {
   createTestDatabase,
   TEST_REPLICAS,
@@ -41,10 +41,22 @@ interface Fn {
 let relations: Relation[] = [];
 let functions: Fn[] = [];
 
-const SCHEMAS = ["identity", "staff", "keys", "kyc", "money", "events", "email", "audit", "ops"];
+const SCHEMAS = [
+  "identity",
+  "staff",
+  "keys",
+  "kyc",
+  "money",
+  "events",
+  "email",
+  "email_private",
+  "audit",
+  "ops",
+];
 
 beforeAll(async () => {
-  db = await createTestDatabase({ prefix: "p0e" });
+  // Phase 0's objects: packages/db's files alone (assets.db.test.ts applies every package's).
+  db = await createTestDatabase({ prefix: "p0e", packages: ["db"] });
   su = await db.superuser();
   const rel = await su.query<{ name: string; kind: string; columns: string[] }>(
     `SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind,
@@ -288,7 +300,7 @@ describe("AC-P0-11: every login is refused (42501) outside its grants, and only 
 });
 
 describe("the roles themselves (spec 01 §6.6 step 4, P-20, AU-08)", () => {
-  it("makes each service login a member of exactly its group, and the groups members of nothing", async () => {
+  it("makes each service login a member of exactly its group, and the groups members of nothing; fin_owner is in enqueue's owner only", async () => {
     const result = await su.query<{ member: string; granted: string }>(
       `SELECT m.rolname AS member, g.rolname AS granted
        FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.roleid
@@ -298,6 +310,7 @@ describe("the roles themselves (spec 01 §6.6 step 4, P-20, AU-08)", () => {
       ...SERVICE_LOGINS.map((login) => ({ member: login, granted: login.replace(/_[ab]$/, "") })),
       { member: "fin_backup", granted: "pg_read_all_data" },
       { member: "fin_probe", granted: "pg_monitor" },
+      { member: "fin_owner", granted: ENQUEUE_OWNER },
     ].sort((a, b) => `${a.member} ${a.granted}`.localeCompare(`${b.member} ${b.granted}`));
     expect(
       result.rows.sort((a, b) =>
@@ -342,6 +355,37 @@ describe("the roles themselves (spec 01 §6.6 step 4, P-20, AU-08)", () => {
         "idle_in_transaction_session_timeout=30s",
       ]),
     );
+  });
+
+  it("makes enqueue's owner a role that cannot log in, has no attribute and no password, and is in no role", async () => {
+    const role = await su.query(
+      `SELECT rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls,
+              rolinherit, rolpassword IS NULL AS no_password
+       FROM pg_authid WHERE rolname = $1`,
+      [ENQUEUE_OWNER],
+    );
+    expect(role.rows).toEqual([
+      {
+        rolcanlogin: false,
+        rolsuper: false,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolreplication: false,
+        rolbypassrls: false,
+        rolinherit: false,
+        no_password: true,
+      },
+    ]);
+    const memberships = await su.query(
+      `SELECT m.rolname AS member, g.rolname AS granted, am.admin_option AS admin,
+              am.inherit_option AS inherit, am.set_option AS set
+       FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.roleid
+       WHERE m.rolname = $1 OR g.rolname = $1`,
+      [ENQUEUE_OWNER],
+    );
+    expect(memberships.rows).toEqual([
+      { member: "fin_owner", granted: ENQUEUE_OWNER, admin: false, inherit: true, set: true },
+    ]);
   });
 
   it("passes the boot check for each service's own login, and fails it for any other", async () => {

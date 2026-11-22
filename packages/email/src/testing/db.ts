@@ -6,7 +6,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import pg, { type Pool } from "pg";
 import { SENDER_ROLES, type SenderRole } from "../catalogue.ts";
-import { installOutboxSchema } from "./index.ts";
+import { ENQUEUE_OWNER, installOutboxSchema, type SchemaRole } from "./index.ts";
 
 export const DATABASE_URL = process.env.FIN_TEST_DATABASE_URL ?? "";
 export const HAS_DATABASE = DATABASE_URL !== "";
@@ -14,7 +14,8 @@ export const HAS_DATABASE = DATABASE_URL !== "";
 export interface TestDatabase {
   readonly admin: Pool;
   readonly as: Readonly<Record<SenderRole, Pool>>;
-  readonly roleName: (role: SenderRole) => string;
+  /** A group role's name, or enqueue's owner's (which has no login). */
+  readonly roleName: (role: SchemaRole) => string;
   readonly loginName: (role: SenderRole) => string;
   /** A connection URL for a role's login, for a dedicated client such as the LISTEN connection. */
   readonly urlFor: (role: SenderRole) => string;
@@ -52,7 +53,7 @@ export async function openTestDatabase(suffix: string): Promise<TestDatabase> {
   // one cluster with different FIN_TEST_DATABASE_URL databases never reset each other's logins.
   const tag = createHash("sha256").update(name).digest("hex").slice(0, 6);
   const prefix = `l05${suffix.replace(/[^a-z0-9]/gu, "").slice(0, 8)}${tag}_`;
-  const roleName = (role: SenderRole): string => `${prefix}${role}`;
+  const roleName = (role: SchemaRole): string => `${prefix}${role}`;
   const loginName = (role: SenderRole): string => `${prefix}${role}_a`;
   const admin = new pg.Pool({ connectionString: withDatabase(DATABASE_URL, name), max: 4 });
   const passwords = new Map<SenderRole, string>();
@@ -66,6 +67,8 @@ export async function openTestDatabase(suffix: string): Promise<TestDatabase> {
     await admin.query(`ALTER ROLE ${loginName(role)} WITH LOGIN PASSWORD '${password}'`);
     await admin.query(`GRANT CONNECT ON DATABASE ${name} TO ${roleName(role)}`);
   }
+  // email.enqueue()'s owner: no login, no password, a member of nothing.
+  await ignoreExists(admin.query(`CREATE ROLE ${roleName(ENQUEUE_OWNER)} NOLOGIN NOINHERIT`));
   await installOutboxSchema(admin, roleName);
 
   const as = Object.fromEntries(

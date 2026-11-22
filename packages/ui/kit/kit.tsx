@@ -91,6 +91,69 @@ function Row(props: { children: ReactNode }) {
   return <div className="flex flex-wrap items-center gap-3">{props.children}</div>;
 }
 
+/** More tabs than any column holds, even at 1440: the row must scroll inside itself. */
+const WIDE_TABS = [
+  "Overview and tasks",
+  "Details",
+  "People",
+  "Documents",
+  "Virtual accounts",
+  "Beneficiaries",
+  "Transactions",
+  "Transfers",
+  "Money",
+  "Activity",
+  "Webhooks",
+  "Audit log",
+];
+
+function WideTabs(props: {
+  name: string;
+  variant?: "page" | "drawer";
+  className?: string;
+  listClassName?: string;
+}) {
+  return (
+    <Tabs defaultValue="tab-0" variant={props.variant ?? "page"} className={props.className ?? ""}>
+      <TabsList aria-label={props.name} className={props.listClassName ?? ""}>
+        {WIDE_TABS.map((label, index) => (
+          <Tab key={label} value={`tab-${index}`}>
+            {label}
+          </Tab>
+        ))}
+      </TabsList>
+      <TabPanel value="tab-0">No open tasks.</TabPanel>
+    </Tabs>
+  );
+}
+
+function WideTabLinks(props: { name: string; variant?: "page" | "drawer"; className?: string }) {
+  return (
+    <TabLinks
+      label={props.name}
+      variant={props.variant ?? "page"}
+      className={props.className ?? ""}
+    >
+      {WIDE_TABS.map((label, index) => (
+        <TabLink key={label} href={`#section-${index}`} current={index === 0}>
+          {label}
+        </TabLink>
+      ))}
+    </TabLinks>
+  );
+}
+
+/** More lines than a 160px box holds: a panel taller than the tabs it sits in. */
+function TallLines() {
+  return (
+    <>
+      {Array.from({ length: 30 }, (_, index) => `Line ${index + 1}`).map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+    </>
+  );
+}
+
 // Sample values shaped like secrets are joined at run time, so the source holds no string the
 // public-safety check would take for a credential (CONTRIBUTING, "Tests that need a
 // secret-shaped value").
@@ -638,14 +701,24 @@ export function Kit(props: { onReady: () => void }) {
               <TabsList aria-label="Customer">
                 <Tab value="overview">Overview</Tab>
                 <Tab value="details">Details</Tab>
+                <Tab value="documents" disabled>
+                  Documents
+                </Tab>
                 <Tab value="money" count={3}>
                   Money
                 </Tab>
               </TabsList>
               <TabPanel value="overview">The overview.</TabPanel>
               <TabPanel value="details">The details.</TabPanel>
+              <TabPanel value="documents">The documents.</TabPanel>
               <TabPanel value="money">The money.</TabPanel>
             </Tabs>
+            {/* The page holds the choice (as `?tab=` does), so a control outside the tabs moves it. */}
+            <Row>
+              <Button variant="secondary" size="sm" onClick={() => setTab("money")}>
+                Open the Money tab
+              </Button>
+            </Row>
             <TabLinks label="Settings">
               <TabLink href="#organisation" current>
                 Organisation
@@ -653,6 +726,169 @@ export function Kit(props: { onReady: () => void }) {
               <TabLink href="#team">Team</TabLink>
               <TabLink href="#roles">Roles</TabLink>
             </TabLinks>
+            {/* A drawer's tabs, wider than an S drawer: the row scrolls inside itself. */}
+            <div
+              data-kit="tabs-drawer"
+              className="w-full max-w-drawer-s overflow-hidden rounded-md bg-surface-raised shadow-ring"
+            >
+              <Tabs variant="drawer" defaultValue="overview">
+                <TabsList aria-label="Customer drawer">
+                  <Tab value="overview">Overview and tasks</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                  <Tab value="beneficiaries">Beneficiaries</Tab>
+                  <Tab value="transactions">Transactions</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+                <TabPanel value="beneficiaries">No beneficiaries yet.</TabPanel>
+                <TabPanel value="transactions">No transactions yet.</TabPanel>
+              </Tabs>
+            </div>
+            {/* A row too wide for its column, in a grid and in a flex row: it scrolls in itself. */}
+            <div data-kit="tabs-grid" className="grid">
+              <WideTabs name="Customer in a grid" />
+            </div>
+            <div data-kit="tabs-flex" className="flex">
+              <WideTabs name="Customer in a flex row" />
+            </div>
+            {/* The same in parents that leave the tabs their own width instead of stretching them. */}
+            <div data-kit="tabs-grid-start" className="grid justify-items-start">
+              <WideTabs name="Customer in a start-aligned grid" />
+            </div>
+            <div data-kit="tabs-grid-centre" className="grid place-items-center">
+              <WideTabs name="Customer in a centred grid" />
+            </div>
+            <div data-kit="tabs-column-start" className="flex flex-col items-start">
+              <WideTabs name="Customer in a start-aligned column" />
+            </div>
+            <div data-kit="tab-links-grid-start" className="grid justify-items-start">
+              <WideTabLinks name="Sections in a start-aligned grid" />
+            </div>
+            {/* Tabs given a height, each panel taller than it: the row keeps its height and rule. */}
+            <div data-kit="tabs-bounded" className="h-40 overflow-hidden">
+              <Tabs defaultValue="plain" className="h-full">
+                <TabsList aria-label="Customer in a bounded box">
+                  <Tab value="plain">Plain</Tab>
+                  <Tab value="filling">Filling</Tab>
+                  <Tab value="scrolling">Scrolling</Tab>
+                </TabsList>
+                <TabPanel value="plain">
+                  <TallLines />
+                </TabPanel>
+                <TabPanel value="filling" className="flex-1">
+                  <TallLines />
+                </TabPanel>
+                <TabPanel value="scrolling" className="overflow-y-auto">
+                  <TallLines />
+                </TabPanel>
+              </Tabs>
+            </div>
+            {/* A disabled tab the page names: it still looks unavailable, with no chosen mark. */}
+            <Tabs defaultValue="documents">
+              <TabsList aria-label="Customer with Documents named">
+                <Tab value="overview">Overview</Tab>
+                <Tab value="documents" disabled>
+                  Documents
+                </Tab>
+              </TabsList>
+              <TabPanel value="overview">The overview.</TabPanel>
+              <TabPanel value="documents">The documents.</TabPanel>
+            </Tabs>
+            {/* Tabs run out over a padded box's sides, as a drawer lays them: max-w-none on each. */}
+            <div
+              data-kit="tabs-bleed"
+              className="w-full max-w-drawer-s rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <Tabs variant="drawer" defaultValue="overview" className="-mx-6 -mt-5 max-w-none">
+                <TabsList aria-label="Customer drawer, run out">
+                  <Tab value="overview">Overview</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+              </Tabs>
+              <Tabs defaultValue="overview" className="mt-6">
+                <TabsList aria-label="Customer, row run out" className="-mx-6 max-w-none px-4">
+                  <Tab value="overview">Overview</Tab>
+                  <Tab value="accounts">Virtual accounts</Tab>
+                </TabsList>
+                <TabPanel value="overview">No open tasks.</TabPanel>
+                <TabPanel value="accounts">Two virtual accounts.</TabPanel>
+              </Tabs>
+              <TabLinks
+                label="Sections, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none"
+              >
+                <TabLink href="#bleed-overview" current>
+                  Overview
+                </TabLink>
+                <TabLink href="#bleed-team">Team</TabLink>
+              </TabLinks>
+            </div>
+            {/*
+              The same, rows too wide for the box, in parents that size a part to its content: a
+              part run out there is stretched as well, or without its cap it grows to its row.
+            */}
+            <div
+              data-kit="tabs-bleed-start"
+              className="grid w-full max-w-drawer-s justify-items-start rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <WideTabs
+                name="Customer drawer in a start-aligned grid, run out"
+                variant="drawer"
+                className="-mx-6 -mt-5 max-w-none justify-self-stretch"
+              />
+              <WideTabs
+                name="Customer in a start-aligned grid, row run out"
+                className="mt-6"
+                listClassName="-mx-6 max-w-none px-4"
+              />
+              <WideTabLinks
+                name="Sections in a start-aligned grid, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none justify-self-stretch"
+              />
+            </div>
+            <div
+              data-kit="tabs-bleed-column"
+              className="flex w-full max-w-drawer-s flex-col items-start rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <WideTabs
+                name="Customer drawer in a start-aligned column, run out"
+                variant="drawer"
+                className="-mx-6 -mt-5 max-w-none self-stretch"
+              />
+              <WideTabLinks
+                name="Sections in a start-aligned column, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none self-stretch"
+              />
+            </div>
+            {/* Tab links under display text, whose line height each item must not take on. */}
+            <div data-kit="tab-links-display" className="text-display">
+              <TabLinks label="Sections under display text">
+                <TabLink href="#display-overview" current>
+                  Overview
+                </TabLink>
+                <TabLink href="#display-team">Team</TabLink>
+              </TabLinks>
+            </div>
+            {/* A kept panel holds a draft while the other tab is on show. */}
+            <div data-kit="tabs-kept">
+              <Tabs defaultValue="note">
+                <TabsList aria-label="Customer note">
+                  <Tab value="note">Note</Tab>
+                  <Tab value="history">History</Tab>
+                </TabsList>
+                <TabPanel value="note" keepMounted>
+                  <Field label="Internal note">
+                    <Input placeholder="Only staff see this note" />
+                  </Field>
+                </TabPanel>
+                <TabPanel value="history">No earlier notes.</TabPanel>
+              </Tabs>
+            </div>
           </Section>
 
           <Section name="states" title="EmptyState and ErrorState">

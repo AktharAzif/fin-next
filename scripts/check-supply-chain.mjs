@@ -34,7 +34,8 @@
 //   - a root package.json whose pnpm pin is not exact, or lacks devEngines.packageManager with
 //     onFail "error" (without it pnpm 12 downloads whatever packageManager names; SP-01);
 //   - a `uses:` in .github/ (or in any action.yml) not pinned to a 40-character commit SHA with a
-//     version comment, in any YAML spelling, or a local action outside .github/.
+//     version comment, in any YAML spelling, or a local action outside .github/; either path is
+//     read segment by segment, so an empty, `.` or `..` segment is refused.
 //
 // This file is self-contained (Node built-ins only, no import from another file of the
 // repository), so every line that decides its verdict is under the control path and the owner's
@@ -1541,6 +1542,17 @@ const ESCAPED_KEY = /"[^"\n]*\\[^"\n]*"\s*:/;
 const ALIAS_KEY = /(?:^|[\s[{,?-])\*[^\s[\]{},]+\s*:(?:\s|$)/;
 
 /**
+ * Whether a path in a `uses:` is plain: segments of letters, digits, `_`, `-` and `.`, none of
+ * them empty or made only of dots, so no segment can lead the path out of what it names (a
+ * runner joins it as written, and on Windows reads `\` as a separator too).
+ * @param {string} path
+ * @returns {boolean}
+ */
+function plainPath(path) {
+  return path.split("/").every((segment) => /^[\w.-]+$/.test(segment) && !/^\.+$/.test(segment));
+}
+
+/**
  * Checks `uses:` in a workflow or action file. YAML has many spellings of one key, so any line
  * that names `uses` in a form other than `uses: <owner>/<repo>@<sha> # vX.Y.Z` on its own line is
  * refused, and so are the constructs that can spell a key without its letters (an explicit `?`
@@ -1584,10 +1596,13 @@ export function checkUses(file, text) {
     }
     const [, , ref = "", comment] = match;
     if (ref.startsWith("./")) {
-      if (!ref.startsWith("./.github/")) {
+      // The runner joins the path to the workspace as written, so it is read segment by segment:
+      // `./.github/../x` names x, outside the control path.
+      const path = ref.slice(2).replace(/\/$/, "");
+      if (!path.startsWith(".github/") || !plainPath(path)) {
         add(
           at,
-          "a local action lives under .github/ (a control path), so its own uses: are checked",
+          "a local action lives under .github/ (a control path), named by a plain path with no empty, `.` or `..` segment, so its own uses: are checked",
         );
       }
       continue;
@@ -1599,6 +1614,11 @@ export function checkUses(file, text) {
     }
     if (!/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(ref)) {
       add(at, "uses: must pin a full 40-character commit SHA");
+    } else if (!plainPath(ref.slice(0, ref.lastIndexOf("@")))) {
+      add(
+        at,
+        "uses: names its repository and path plainly, with no empty, `.` or `..` segment, so the pin covers what runs",
+      );
     } else if (comment === undefined || !/^#\s*v?\d/.test(comment)) {
       add(at, "a pinned uses: needs its version as a comment (# vX.Y.Z)");
     }

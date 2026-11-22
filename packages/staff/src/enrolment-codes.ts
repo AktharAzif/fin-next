@@ -3,12 +3,17 @@
 // member (or, for the first Admin, on the operator's terminal), stored only as the SHA-256 of the
 // normalised code, alive 30 minutes, single use, bound to one member; one live code per member.
 //
+// The code is drawn by @fin/identity's generateEnrolmentCode, the one generator, which redraws any
+// code with no group of four mixing a letter and a digit: @fin/email's name fields hide a code
+// only in that shape, so one passed into a name by mistake is never mailed (T08-23, SA-29).
+//
 // The pending member redeems a code through @fin/identity's redeemEnrolmentCode, which normalises
 // and hashes exactly as this file does; enrolment-codes.db.test.ts issues with this file and
 // redeems with that one, so the two cannot drift apart. The issuing lives here rather than in
 // @fin/identity's issueEnrolmentCode because a Fin Admin actor's audit row carries the step-up
 // that authorised it and the request's address and device ([BC-03]), which that function cannot.
 import { createHash } from "node:crypto";
+import { generateEnrolmentCode } from "@fin/identity";
 import type { AuditActorInput, RecordStaffAudit } from "./audit/record.ts";
 import { newId } from "./ids.ts";
 import type { Clock, RequestFacts, UnitTx } from "./ports.ts";
@@ -17,23 +22,8 @@ export const ENROLMENT_CODE_LIFETIME_MS = 30 * 60_000;
 export const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const NORMALISED = /^[0-9A-HJKMNP-TV-Z]{16}$/;
 
-/** A new code: 16 characters from 80 random bits, shown `XXXX-XXXX-XXXX-XXXX`. */
-export function generateEnrolmentCode(): string {
-  const bytes = new Uint8Array(10);
-  crypto.getRandomValues(bytes);
-  let bits = 0;
-  let buffer = 0;
-  let out = "";
-  for (const byte of bytes) {
-    buffer = ((buffer << 8) | byte) & 0xffff;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      out += CROCKFORD[(buffer >> bits) & 31];
-    }
-  }
-  return out.match(/.{4}/g)?.join("-") ?? out;
-}
+/** A new code, shown `XXXX-XXXX-XXXX-XXXX`, from @fin/identity's one generator. */
+export { generateEnrolmentCode };
 
 /** Typed input as stored: upper case, without spaces or hyphens, I and L read as 1 and O as 0. */
 export function normaliseEnrolmentCode(input: string): string | null {

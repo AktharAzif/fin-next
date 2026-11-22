@@ -1,9 +1,9 @@
 // The migration runner (ARCHITECTURE §6.4, DECISIONS DA-04, spec 01 §6.10).
 //
-// - Files are packages/db/migrations/<YYYYMMDDHHMMSS>_<area>_<what>.sql, hand-written, applied in name
-//   order, each recorded in ops.schema_migrations with the SHA-256 of its bytes. A changed applied file
-//   stops the run; an applied file the runner does not know (a newer release's) is ignored, so an older
-//   image never trips on a newer schema.
+// - Files are packages/<package>/migrations/<YYYYMMDDHHMMSS>_<area>_<what>.sql (assets.ts's rule),
+//   hand-written, applied in name order across every package, each recorded in ops.schema_migrations
+//   with the SHA-256 of its bytes. A changed applied file stops the run; an applied file the runner
+//   does not know (a newer release's) is ignored, so an older image never trips on a newer schema.
 // - The whole run is one transaction holding `LOCK TABLE ops.schema_migrations IN EXCLUSIVE MODE`, so
 //   no other login can migrate at the same time, and a failure leaves the schema as it was.
 // - Every transactional file sets `SET LOCAL lock_timeout` and `SET LOCAL statement_timeout` before
@@ -14,8 +14,9 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { type AssetFile, type DiscoverOptions, discoverDbAssets } from "./assets.ts";
 import { MigrationError } from "./errors.ts";
-import { applyGrants, type GrantFragment } from "./grants.ts";
+import { applyGrants, type GrantFragment, loadFragmentFiles } from "./grants.ts";
 import { commitTransaction, type PgClient } from "./pg.ts";
 import type { Queryable } from "./unit.ts";
 
@@ -104,22 +105,53 @@ export function parseMigration(name: string, bytes: Buffer): MigrationFile {
   };
 }
 
-/** Reads and checks every migration in `dir`, in name order. Two files may not share a timestamp. */
+/**
+ * Reads and checks the migrations given, which must be in name order (discoverDbAssets's): two files
+ * may not share a timestamp, whichever packages they come from.
+ */
+export function readMigrationFiles(
+  files: readonly Pick<AssetFile, "name" | "path">[],
+): MigrationFile[] {
+  const parsed = files.map((file) => parseMigration(file.name, readFileSync(file.path)));
+  for (let i = 1; i < parsed.length; i++) {
+    const [before, file] = [parsed[i - 1], parsed[i]];
+    if (before === undefined || file === undefined) continue;
+    if (file.name.slice(0, 14) === before.name.slice(0, 14)) {
+      throw new MigrationError("migration_order", `${file.name}: shares its timestamp`, file.name);
+    }
+    if (file.name < before.name) {
+      throw new MigrationError("migration_order", `${file.name}: out of name order`, file.name);
+    }
+  }
+  return parsed;
+}
+
+/** Reads and checks every migration in one directory, in name order. */
 export function readMigrations(dir: string): MigrationFile[] {
   const names = readdirSync(dir)
     .filter((name) => name.endsWith(".sql"))
     .sort();
-  const files = names.map((name) => parseMigration(name, readFileSync(join(dir, name))));
-  for (let i = 1; i < files.length; i++) {
-    if (files[i]?.name.slice(0, 14) === files[i - 1]?.name.slice(0, 14)) {
-      throw new MigrationError(
-        "migration_order",
-        `${files[i]?.name}: shares its timestamp`,
-        files[i]?.name,
-      );
-    }
-  }
-  return files;
+  return readMigrationFiles(names.map((name) => ({ name, path: join(dir, name) })));
+}
+
+/** Every package's files, read and checked: what `migrate --bootstrap` and `--migrate` apply. */
+export interface LoadedDbAssets {
+  root: string;
+  /** The superuser's files, in the order discovered (bootstrap() checks the roles file is first). */
+  bootstrap: readonly AssetFile[];
+  migrations: MigrationFile[];
+  fragments: GrantFragment[];
+}
+
+/** Finds (assets.ts's rule), reads and checks every package's files under `root`. */
+export function loadDbAssets(root: string, options: DiscoverOptions = {}): LoadedDbAssets {
+  const assets = discoverDbAssets(root, options);
+  return {
+    root,
+    bootstrap: assets.bootstrap,
+    migrations: readMigrationFiles(assets.migrations),
+    fragments: loadFragmentFiles(assets.grants),
+  };
 }
 
 /**
@@ -253,7 +285,10 @@ export async function schemaVersion(q: Queryable): Promise<string | null> {
   return result.rows[0]?.name ?? null;
 }
 
-/** The packaged directories, resolved from this file so the image and the tests read the same ones. */
+/**
+ * packages/db's own directories, for its own tests of Phase 0's files. The runner reads every
+ * package's (loadDbAssets), never these alone.
+ */
 export const MIGRATIONS_DIR = join(import.meta.dirname, "..", "migrations");
 export const BOOTSTRAP_DIR = join(import.meta.dirname, "..", "bootstrap");
 export const GRANTS_DIR = join(import.meta.dirname, "..", "roles", "grants");

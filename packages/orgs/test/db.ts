@@ -16,7 +16,22 @@ import pg, { type Client, type Pool, type PoolConfig } from "pg";
 import { eventTypeRows } from "../src/audit/events.ts";
 import { ORG_TEMPLATES } from "../src/email.ts";
 
-export const ROLE_PREFIX = "l_sat_03_";
+/**
+ * The cluster-wide prefix of this harness's roles and databases. FIN_TEST_DB_PREFIX gives a
+ * parallel lane its own, so lanes that change the template's inputs on one shared server never
+ * rebuild each other's template mid-run; the default keeps `l_sat_03_`.
+ */
+export const ROLE_PREFIX = testPrefix(process.env.FIN_TEST_DB_PREFIX, "l_sat_03_");
+
+function testPrefix(given: string | undefined, fallback: string): string {
+  if (given === undefined || given === "") return fallback;
+  if (!/^[a-z][a-z0-9_]{1,24}_$/.test(given)) {
+    throw new Error("FIN_TEST_DB_PREFIX is lower-case letters, digits and _, ending in _");
+  }
+  // The identity harness takes the bare prefix; this one adds `o_`, so the two never share a
+  // template database.
+  return `${given}o_`;
+}
 export const SERVICE_ROLES = [
   "fin_console",
   "fin_admin",
@@ -32,40 +47,41 @@ const PACKAGE_ROOT = join(import.meta.dirname, "..");
 const IDENTITY_ROOT = join(PACKAGE_ROOT, "node_modules", "@fin", "identity");
 
 /** The platform grants P0-E's fragments hold (ops.json, audit.json, email.json). */
-const PLATFORM_GRANTS: IdentityFragment = {
+const PLATFORM_GRANTS: DbFragment = {
   area: "platform-test",
   grants: [
     {
-      role: "fin_console",
+      on: "function",
+      name: "audit.record(jsonb)",
       privileges: ["EXECUTE"],
-      functions: ["audit.record(jsonb)", "audit.record_journal(jsonb)", "email.enqueue(jsonb)"],
+      to: ["fin_console", "fin_admin", "fin_api"],
     },
     {
-      role: "fin_admin",
+      on: "function",
+      name: "audit.record_journal(jsonb)",
       privileges: ["EXECUTE"],
-      functions: ["audit.record(jsonb)", "audit.record_journal(jsonb)", "email.enqueue(jsonb)"],
+      to: ["fin_console", "fin_admin"],
     },
-    { role: "fin_api", privileges: ["EXECUTE"], functions: ["audit.record(jsonb)"] },
-    { role: "fin_console", privileges: ["SELECT"], tables: ["ops.kill_switch"] },
-    { role: "fin_admin", privileges: ["SELECT"], tables: ["ops.kill_switch"] },
+    {
+      on: "function",
+      name: "email.enqueue(jsonb)",
+      privileges: ["EXECUTE"],
+      to: ["fin_console", "fin_admin"],
+    },
+    {
+      on: "table",
+      name: "ops.kill_switch",
+      privileges: ["SELECT"],
+      to: ["fin_console", "fin_admin"],
+    },
   ],
 };
 
-/** The identity lane's fragment shape (packages/identity/grants/*.json). */
-interface IdentityFragment {
-  area: string;
-  grants: {
-    role: string;
-    privileges: string[];
-    tables?: string[];
-    functions?: string[];
-    table?: string;
-    columns?: string[];
-  }[];
-}
-
-/** packages/db's fragment shape (roles/grants/<area>.json), which this area's fragment uses. */
-interface DbFragment {
+/**
+ * packages/db's fragment shape (roles/grants/<area>.json), the migration runner's, which this
+ * area's fragment and @fin/identity's (packages/identity/grants/*.json) both use.
+ */
+export interface DbFragment {
   area: string;
   grants: {
     on: "schema" | "table" | "function";
@@ -79,6 +95,8 @@ interface DbFragment {
 const PRIVILEGE = /^(SELECT|INSERT|UPDATE|DELETE|EXECUTE|USAGE)$/;
 const OBJECT = /^[a-z_]+\.[a-z_]+(\([a-z0-9_, ]*\))?$/;
 const COLUMN = /^[a-z_][a-z0-9_]*$/;
+const KINDS: readonly string[] = ["schema", "table", "function"];
+const ENTRY_KEYS: readonly string[] = ["on", "name", "privileges", "columns", "to"];
 
 function quoteObject(name: string): string {
   const [schema, rest = ""] = name.split(".");
@@ -88,53 +106,34 @@ function quoteObject(name: string): string {
   return `"${schema}"."${object}"${args}`;
 }
 
-function checkPrivileges(privileges: readonly string[]): string {
-  for (const p of privileges) if (!PRIVILEGE.test(p)) throw new Error(`grant privilege ${p}`);
-  return privileges.join(", ");
+/**
+ * Checks that an entry is in the runner's shape: an entry in any other shape (the identity lane's
+ * old `{ role, tables, functions }`, say) is refused, never skipped, so a change of shape cannot
+ * drop a grant without a word.
+ */
+function checkEntry(area: string, grant: DbFragment["grants"][number]): void {
+  const shaped =
+    Object.keys(grant).every((key) => ENTRY_KEYS.includes(key)) &&
+    KINDS.includes(grant.on) &&
+    typeof grant.name === "string" &&
+    Array.isArray(grant.privileges) &&
+    grant.privileges.length > 0 &&
+    Array.isArray(grant.to) &&
+    grant.to.length > 0;
+  if (!shaped) throw new Error(`grant fragment ${area}: an entry not in the runner's shape`);
+  for (const p of grant.privileges) if (!PRIVILEGE.test(p)) throw new Error(`grant privilege ${p}`);
 }
 
-/** Renders both fragment shapes to SQL with the roles mapped to the test's prefixed roles. */
-export function renderGrants(
-  identity: readonly IdentityFragment[],
-  db: readonly DbFragment[],
-): string {
+/** Renders the fragments to SQL with the roles mapped to the test's prefixed roles. */
+export function renderGrants(fragments: readonly DbFragment[]): string {
   const statements: string[] = [];
   const usage = new Set<string>();
   const role = (name: string) => `"${testRole(name)}"`;
   const addUsage = (name: string, object: string) =>
     usage.add(`${object.split(".")[0] as string}\u0000${name}`);
-  for (const fragment of identity) {
+  for (const fragment of fragments) {
     for (const grant of fragment.grants) {
-      const privileges = checkPrivileges(grant.privileges);
-      for (const table of grant.tables ?? []) {
-        if (!OBJECT.test(table)) throw new Error(`grant object ${table}`);
-        statements.push(
-          `GRANT ${privileges} ON TABLE ${quoteObject(table)} TO ${role(grant.role)};`,
-        );
-        addUsage(grant.role, table);
-      }
-      for (const fn of grant.functions ?? []) {
-        if (!OBJECT.test(fn)) throw new Error(`grant function ${fn}`);
-        statements.push(
-          `GRANT ${privileges} ON FUNCTION ${quoteObject(fn)} TO ${role(grant.role)};`,
-        );
-        addUsage(grant.role, fn);
-      }
-      if (grant.table !== undefined) {
-        const columns = grant.columns ?? [];
-        if (!OBJECT.test(grant.table) || columns.some((c) => !COLUMN.test(c))) {
-          throw new Error(`grant columns of ${grant.table}`);
-        }
-        statements.push(
-          `GRANT ${privileges} (${columns.map((c) => `"${c}"`).join(", ")}) ON TABLE ${quoteObject(grant.table)} TO ${role(grant.role)};`,
-        );
-        addUsage(grant.role, grant.table);
-      }
-    }
-  }
-  for (const fragment of db) {
-    for (const grant of fragment.grants) {
-      const privileges = checkPrivileges(grant.privileges);
+      checkEntry(fragment.area, grant);
       for (const to of grant.to) {
         if (grant.on === "schema") {
           if (!/^[a-z_]+$/.test(grant.name)) throw new Error(`grant schema ${grant.name}`);
@@ -145,9 +144,11 @@ export function renderGrants(
         const columns = grant.columns ?? [];
         if (columns.some((c) => !COLUMN.test(c))) throw new Error(`grant columns ${grant.name}`);
         const cols = columns.length === 0 ? "" : ` (${columns.map((c) => `"${c}"`).join(", ")})`;
+        // The columns go with each privilege, as the runner writes them.
+        const privileges = grant.privileges.map((p) => `${p}${cols}`).join(", ");
         const kind = grant.on === "function" ? "FUNCTION" : "TABLE";
         statements.push(
-          `GRANT ${privileges}${cols} ON ${kind} ${quoteObject(grant.name)} TO ${role(to)};`,
+          `GRANT ${privileges} ON ${kind} ${quoteObject(grant.name)} TO ${role(to)};`,
         );
         addUsage(to, grant.name);
       }
@@ -216,6 +217,15 @@ const SOURCES = {
   orgsGrants: join(PACKAGE_ROOT, "grants"),
 };
 
+/** The template's grants: the platform's, @fin/identity's and this area's fragments. */
+export function templateGrantSql(): string {
+  return renderGrants([
+    PLATFORM_GRANTS,
+    ...readJson<DbFragment>(SOURCES.identityGrants),
+    ...readJson<DbFragment>(SOURCES.orgsGrants),
+  ]);
+}
+
 function templateGrants(): { template: string; role: string; category: string }[] {
   const rows = Object.entries(REALM_TEMPLATES).map(([template, spec]) => ({
     template,
@@ -244,7 +254,9 @@ function fingerprint(): string {
   hash.update(JSON.stringify(identityEventTypeRows()));
   hash.update(JSON.stringify(eventTypeRows()));
   hash.update(JSON.stringify(templateGrants()));
-  hash.update(JSON.stringify(PLATFORM_GRANTS));
+  // The SQL the grants render to, not only their files: a template an older renderer built is
+  // rebuilt, never cloned.
+  hash.update(templateGrantSql());
   return hash.digest("hex").slice(0, 32);
 }
 
@@ -283,9 +295,7 @@ async function buildTemplate(url: URL, admin: Client, print: string): Promise<vo
       await db.query(readFileSync(file, "utf8"));
       await db.query("COMMIT");
     }
-    const identity = [PLATFORM_GRANTS, ...readJson<IdentityFragment>(SOURCES.identityGrants)];
-    const orgs = readJson<DbFragment>(SOURCES.orgsGrants);
-    await db.query(renderGrants(identity, orgs));
+    await db.query(templateGrantSql());
     for (const row of identityEventTypeRows()) {
       await db.query(
         "INSERT INTO audit.event_type (name, area, category, scope, roles) VALUES ($1, $2, $3, $4, $5)",
@@ -318,7 +328,7 @@ export async function ensureTemplate(): Promise<void> {
   const admin = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
   await admin.connect();
   try {
-    await admin.query("SELECT pg_advisory_lock(hashtext('l_sat_03_template'))");
+    await admin.query("SELECT pg_advisory_lock(hashtext($1))", [TEMPLATE_DB]);
     await ensureRoles(admin, url);
     const print = fingerprint();
     const current = await admin.query<{ comment: string | null }>(
@@ -328,7 +338,7 @@ export async function ensureTemplate(): Promise<void> {
     if (current.rows[0]?.comment !== print) await buildTemplate(url, admin, print);
   } finally {
     await admin
-      .query("SELECT pg_advisory_unlock(hashtext('l_sat_03_template'))")
+      .query("SELECT pg_advisory_unlock(hashtext($1))", [TEMPLATE_DB])
       .catch(() => undefined);
     await admin.end();
   }
@@ -355,9 +365,9 @@ export async function createTestDatabase(label: string): Promise<TestDatabase> {
   const server = new pg.Client(serverConfig(url, url.pathname.slice(1) || "postgres"));
   await server.connect();
   try {
-    await server.query("SELECT pg_advisory_lock(hashtext('l_sat_03_template'))");
+    await server.query("SELECT pg_advisory_lock(hashtext($1))", [TEMPLATE_DB]);
     await server.query(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE_DB}"`);
-    await server.query("SELECT pg_advisory_unlock(hashtext('l_sat_03_template'))");
+    await server.query("SELECT pg_advisory_unlock(hashtext($1))", [TEMPLATE_DB]);
   } finally {
     await server.end();
   }

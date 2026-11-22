@@ -25,6 +25,7 @@ interface ResolvedContext {
   skipOriginCheck: boolean | string[];
   skipCSRFCheck: boolean;
   baseURL: string;
+  sessionConfig: { freshAge: number };
   secretConfig: { currentVersion: number; keys: Map<number, string> };
   authCookies: { sessionToken: { name: string; attributes: Record<string, unknown> } };
   createAuthCookie(
@@ -155,6 +156,12 @@ describe.each(["developer", "staff"] as const)("the %s realm as built", (realm) 
     expect(session.updateAge).toBe(realm === "developer" ? 600 : 300);
     expect(session.cookieCache).toEqual({ enabled: false });
     expect(ctx.options.telemetry).toEqual({ enabled: false });
+  });
+
+  it("leaves freshness to Fin's step-up and first-factor rules: the library's fresh-session age is off", async () => {
+    const { ctx } = await context(realm);
+    expect((ctx.options.session as Record<string, unknown>).freshAge).toBe(0);
+    expect(ctx.sessionConfig.freshAge).toBe(0);
   });
 
   it("mounts exactly the three plugins", async () => {

@@ -2,8 +2,8 @@
 -- Generated from src/guards.ts (guardSql); guards.db.test.ts checks the two agree and proves
 -- each registration refuses a commit without its event. 'guard.never_allowed' is an event no
 -- login can record, so a registration naming only it refuses every such change.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 SELECT audit.install_guard('identity.user'::regclass, ARRAY['INSERT'], 'id', ARRAY['user.created']);
 SELECT audit.install_guard('identity.user'::regclass, ARRAY['UPDATE OF two_factor_enabled'], 'id', ARRAY['two_factor.enabled', 'two_factor.disabled', 'account.recovery_finished']);

@@ -2,7 +2,9 @@
 //
 // Integration tests run against a real Postgres 18 named by FIN_TEST_DATABASE_URL (a superuser URL to a
 // loopback server, never PGlite, CI-12). Each test file gets a fresh database, bootstrapped and
-// migrated with the code under test. Roles are cluster-wide, so:
+// migrated with the code under test and every package's files from the source tree, the set
+// `migrate` applies (packages/db's own tests of Phase 0's objects may take packages/db's alone).
+// Roles are cluster-wide, so:
 //   - every login's test password is derived from its name (deterministic, never a secret: the
 //     cluster is a local throwaway), and concurrent runs set the same ones;
 //   - everything that changes a role (the bootstrap, fin_owner's password) runs under one
@@ -14,6 +16,7 @@
 //     connections of its own behind against those limits.
 import { createHash } from "node:crypto";
 import { scramSha256Verifier } from "@fin/crypto";
+import { sourceRoot } from "../assets.ts";
 import { bootstrap } from "../bootstrap.ts";
 import {
   connectClient,
@@ -23,13 +26,10 @@ import {
 } from "../connect.ts";
 import { type Clock, discardLines, type LineSink, type UnitContext } from "../context.ts";
 import { ClientHeldAcrossCallError } from "../errors.ts";
-import { loadFragments } from "../grants.ts";
 import {
-  BOOTSTRAP_DIR,
-  GRANTS_DIR,
-  MIGRATIONS_DIR,
+  type LoadedDbAssets,
+  loadDbAssets,
   type RunOptions,
-  readMigrations,
   runMigrations,
 } from "../migrations.ts";
 import { escapeIdentifier, escapeLiteral, type PgClient, type PgPool } from "../pg.ts";
@@ -75,6 +75,16 @@ export function testReplicasJson(): string {
 
 /** The environment every test database is bootstrapped for. */
 export const TEST_ENVIRONMENT = "ci";
+
+/**
+ * The source tree's database files (assets.ts's rule): every package's, as `migrate` applies them, or
+ * only the named packages'.
+ */
+export function testDbAssets(packages?: readonly string[]): LoadedDbAssets {
+  const root = sourceRoot();
+  if (root === null) throw new Error("the tests run from the source tree");
+  return loadDbAssets(root, packages === undefined ? {} : { packages });
+}
 
 /**
  * A connection, optionally with session settings in the startup packet (`-c name=value`), the way a
@@ -195,6 +205,8 @@ export interface CreateTestDatabaseOptions {
   bootstrap?: boolean;
   /** Runs after the migrations in their transaction: a lane's own registry sync. */
   after?: RunOptions["after"];
+  /** Only these packages' files (`["db"]` for Phase 0's alone); every package's when absent. */
+  packages?: readonly string[];
 }
 
 /** Creates, bootstraps and migrates a fresh database for one test file. */
@@ -203,6 +215,7 @@ export async function createTestDatabase(
 ): Promise<TestDatabase> {
   if (!/^[a-z][a-z0-9]{1,15}$/.test(options.prefix)) throw new TypeError("prefix shape");
   const cluster = testClusterSettings();
+  const assets = testDbAssets(options.packages);
   const name = `${options.prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const target: DatabaseTarget = { host: cluster.host, port: cluster.port, database: name };
   const pools: PgPool[] = [];
@@ -256,9 +269,9 @@ export async function createTestDatabase(
       const owner = await connectOwner();
       try {
         await runMigrations(owner, {
-          files: readMigrations(MIGRATIONS_DIR),
+          files: assets.migrations,
           release: "test-release",
-          fragments: loadFragments(GRANTS_DIR),
+          fragments: assets.fragments,
           ...(options.after === undefined ? {} : { after: options.after }),
           ...overrides,
         });
@@ -276,8 +289,8 @@ export async function createTestDatabase(
           verifiers: testVerifiers(),
           replicas: testReplicas(),
           environment: TEST_ENVIRONMENT,
-          bootstrapDir: BOOTSTRAP_DIR,
-          fragments: loadFragments(GRANTS_DIR),
+          files: assets.bootstrap,
+          fragments: assets.fragments,
         });
       } finally {
         await su.end();

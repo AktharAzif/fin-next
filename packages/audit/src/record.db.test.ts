@@ -8,11 +8,13 @@ import {
   isSwitchOn,
   type PgClient,
   type ServiceGroup,
+  type UnitTx,
 } from "@fin/db";
 import { collectLines, createTestDatabase, type TestDatabase, testContext } from "@fin/db/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AuditRole } from "./define.ts";
-import { AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
+import type { ActorKind, ActorVia, AuditRole } from "./define.ts";
+import { AUDIT_EVENT_AREAS, AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
+import type { events as PLATFORM_EVENTS } from "./events/platform.ts";
 import { AuditWriteError, type RecordInput, recordAudit } from "./record.ts";
 import { tripSwitch } from "./switches.ts";
 import { eventTypeRows, syncEventTypes } from "./sync.ts";
@@ -44,9 +46,12 @@ afterAll(async () => {
   await db?.drop();
 });
 
+type PlatformEventName = keyof typeof PLATFORM_EVENTS;
+
 // One valid input per platform event: the per-event tests below are generated from AUDIT_EVENTS, and a
-// new event without a sample here fails the coverage test.
-const SAMPLES: { [E in AuditEventName]: Omit<RecordInput<E>, "event"> } = {
+// new platform event without a sample here fails the coverage test. The other areas' events (each
+// area's package records its own, in its fragment's shape) are tried at audit.record() itself.
+const SAMPLES: { [E in PlatformEventName]: Omit<RecordInput<E>, "event"> } = {
   "switch.tripped": {
     actor: { kind: "system", id: null, via: "reconciliation" },
     target: "live_money",
@@ -120,12 +125,54 @@ function databaseFor(role: AuditRole): FinDatabase {
 
 class Rollback extends Error {}
 
-/** Records the sample in a unit that is then rolled back; resolves "ok" or the refusal's code. */
+/** The `via` each actor kind records with, for the inputs built below. */
+const VIA: Readonly<Record<ActorKind, ActorVia>> = {
+  user: "console",
+  api_key: "api",
+  staff: "admin",
+  customer_link: "hosted_pages",
+  person_link: "hosted_pages",
+  system: "job",
+  provider: "webhook",
+  operator: "operator",
+};
+
+/**
+ * audit.record()'s input for another area's event, as that area's package sends it: the event's
+ * first actor kind, a target of its prefix, its scope's fields and empty metadata (the database
+ * checks the metadata's shape; the area's own recorder checks its schema before it calls).
+ */
+function areaInput(tx: UnitTx, event: AuditEventName): Record<string, unknown> {
+  const spec = AUDIT_EVENTS[event];
+  const kind: ActorKind = spec.actors[0] ?? "system";
+  const someId = (prefix: string) => `${prefix}_01jd0000000000000000000000`;
+  return {
+    id: tx.ids.newId("aud"),
+    event,
+    actor_kind: kind,
+    actor_id: kind === "system" ? null : "act_test",
+    actor_via: VIA[kind],
+    target_id: /^[a-z]{3}$/.test(spec.target) ? someId(spec.target) : spec.target,
+    metadata: {},
+    release: tx.context.release,
+    ...(spec.scope === "organisation" ? { organization_id: someId("org") } : {}),
+    ...(spec.scope === "person" ? { subject_user_id: someId("usr") } : {}),
+  };
+}
+
+/** Records the event in a unit that is then rolled back; resolves "ok" or the refusal's code. */
 async function attempt(role: AuditRole, event: AuditEventName): Promise<string> {
   const database = databaseFor(role);
   try {
     await database.unit(testContext(), async (tx) => {
-      await recordAudit(tx, { event, ...SAMPLES[event] } as RecordInput<typeof event>);
+      if (Object.hasOwn(SAMPLES, event)) {
+        const platform = event as PlatformEventName;
+        await recordAudit(tx, { event: platform, ...SAMPLES[platform] } as RecordInput<
+          typeof platform
+        >);
+      } else {
+        await tx.query("SELECT audit.record($1::jsonb)", [JSON.stringify(areaInput(tx, event))]);
+      }
       throw new Rollback();
     });
     return "committed";
@@ -174,8 +221,12 @@ describe("T08-02: the registry in the database", () => {
 });
 
 describe("T08-04: each login records exactly the events whose roles name its group", () => {
-  it("has a sample for every registered event", () => {
-    expect(Object.keys(SAMPLES).sort()).toEqual(Object.keys(AUDIT_EVENTS).sort());
+  it("has a sample for every platform event", () => {
+    expect(Object.keys(SAMPLES).sort()).toEqual(
+      Object.keys(AUDIT_EVENTS)
+        .filter((name) => AUDIT_EVENT_AREAS[name as AuditEventName] === "platform")
+        .sort(),
+    );
   });
 
   for (const event of Object.keys(AUDIT_EVENTS) as AuditEventName[]) {

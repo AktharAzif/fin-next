@@ -2,6 +2,7 @@
 // strings included, so every fixture builds its keywords at run time: no line of this file holds
 // an import, a re-export or a loading call that the check could take for this file's own.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -11,6 +12,7 @@ import {
   checkSource,
   codeMask,
   findImports,
+  isTestSupport,
 } from "../import-rules.mjs";
 import { cleanUp, makeRepo, REPO_ROOT, rules, runScript } from "./helpers.mjs";
 
@@ -31,6 +33,57 @@ const src = (...lines) => `${lines.join("\n")}\n`;
 /** @param {string} specifier */
 const imp = (specifier) => src(`${IMP} x from "${specifier}";`);
 const CONTROL = { controlPaths: ["ops/fin/", ".github/", "scripts/check-supply-chain.mjs"] };
+
+// What is left to review (BD-19): the shapes only deliberate disguise produces, which the header of
+// scripts/import-rules.mjs records as its known limits, for this reason. Each comes with spellings
+// the check lets through today, so a change that refuses one also moves it out of this list and
+// out of the header. A shape left to review only where a glob is read by its patterns names that
+// file (`file`, a file the page policy leaves out as test code, which is not test support), and
+// the rules code that runs refuses its spellings with (`inCodeThatRuns`): there every glob import
+// is refused outright.
+const LEFT_TO_REVIEW_REASON =
+  "a lint against mistakes; the release build refuses any module from packages/testing; a disguised import in Fin's own code is a review finding by definition";
+/**
+ * @type {{ shape: string, file?: string, inCodeThatRuns?: string[], sources: string[],
+ *   manifests: Record<string, unknown>[] }[]}
+ */
+const LEFT_TO_REVIEW = [
+  {
+    shape: "a query or fragment suffix on the specifier",
+    sources: [],
+    // An entry point is read without what follows its `?` or `#`, though Vite follows a `?`
+    // segment of main or module as part of a path.
+    manifests: [{ main: "./src?/../test/canon.ts" }, { module: "./src#/../test/canon.ts" }],
+  },
+  {
+    shape: "a bare specifier that climbs out of its package or through node_modules",
+    // With packages/identity/linked a symbolic link to packages/testing/src: the check reads the
+    // name, not the link.
+    sources: [src(`${IMP} { listen } from "@fin/identity/linked/index.ts";`)],
+    manifests: [],
+  },
+  {
+    shape: "a typed or parenthesised glob call",
+    file: "apps/api/fixtures/routes.ts",
+    inCodeThatRuns: ["glob-import"],
+    sources: [
+      src(`const m = ${IMP}.meta.glob<Record<string, M>>("../../../packages/testing/src/*.ts");`),
+      src(`const m = ${IMP}.meta.glob<string[]>("../../../packages/testing/src/*.ts");`),
+      src(`const m = (${IMP}.meta.glob)("../../../packages/testing/src/*.ts");`),
+    ],
+    manifests: [],
+  },
+  {
+    shape: "a glob whose fixed end is itself a test file's ending",
+    file: "apps/api/fixtures/routes.ts",
+    inCodeThatRuns: ["glob-import"],
+    sources: [
+      src(`const m = ${IMP}.meta.glob("./**/*.db.test.ts", { eager: true });`),
+      src(`const m = ${IMP}.meta.glob("./routes/*n.test.ts");`),
+    ],
+    manifests: [],
+  },
+];
 
 describe("imports:check", () => {
   test("node:http outside packages/server and apps/connector fails; inside passes", () => {
@@ -92,14 +145,10 @@ describe("imports:check", () => {
       imp("@fin/testing#x"),
       imp("@fin/testing/playwright?raw"),
       imp(`@fin/te${String.fromCodePoint(0x17f)}ting`),
-      // A path a resolver normalises to the harness.
-      imp("@fin//testing"),
-      imp("@fin/console/../testing/src/index.ts"),
       // A workspace package's test support by that package's name.
       imp("@fin/console/e2e/fixtures.ts"),
       imp("@fin/identity/test/canon.ts"),
       imp("@fin/identity/TEST/canon.ts?raw"),
-      imp("@fin/console/src/../e2e/fixtures.ts"),
       src(`${IMP} type { Clock } from "@fin/testing";`),
       src(`${EXP} * from "@fin/testing";`),
       src(`const t = await ${IMP}("@fin/testing");`),
@@ -136,7 +185,66 @@ describe("imports:check", () => {
           file,
         );
       }
+      // A path a resolver normalises to the harness is its name too, and leaves the package it
+      // starts from; one that names a package's e2e/ is refused by the test-code rule as well.
+      for (const specifier of [
+        "@fin//testing",
+        "@fin/console/../testing/src/index.ts",
+        "@fin/console/src/../e2e/fixtures.ts",
+      ]) {
+        assert.deepEqual(
+          check(file, imp(specifier)),
+          testCodeForms.has(imp(specifier)) && !inTestCode
+            ? ["package-subpath", "test-file-import", "testing-import"]
+            : ["package-subpath", "testing-import"],
+          `${file} ${specifier}`,
+        );
+      }
     }
+    // A package's subpath that climbs out of the package, or walks into node_modules, reaches the
+    // harness, any test support, or a refused package, through any package listed (one with no
+    // `exports` map is read as a directory) and in any case; tests and test support may. Those
+    // that name a file under an e2e/ or test/ directory are refused by the test-code rule too.
+    const subpathTestCode = new Set([
+      "@fin/verify/../../../../../e2e/fixtures.ts",
+      "@fin/console/../../packages/identity/test/canon.ts",
+      "@fin/console/../../../../../packages/identity/test/canon.ts",
+    ]);
+    for (const specifier of [
+      "@fin/console/../../../../../packages/testing/src/index.ts",
+      "@types/node/../../../../../packages/testing/src/index.ts",
+      "@biomejs/biome/../../../../../packages/testing/src/index.ts?raw",
+      "@fin/verify/../../../../../e2e/fixtures.ts",
+      // require() reads a query as part of the path.
+      "@fin/core/clock?x=/../../../testing/src/index.ts",
+      "@fin/console/node_modules/@fin/testing/src/index.ts",
+      "@fin/console/Node_Modules/@fin/testing/src/index.ts",
+      "@fin/console/../../packages/identity/test/canon.ts",
+      "@fin/console/../../../../../packages/identity/test/canon.ts",
+      "@types/node/../../../../../node_modules/clsx/dist/clsx.mjs",
+      "@fin/console/./src/x.ts",
+      "@fin/console//src/x.ts",
+      "turbo/",
+      // A segment that is `..` only without its query, as a bundler reads it.
+      "@fin/console/src/..?raw",
+    ]) {
+      for (const file of ["apps/api/src/main.ts", "apps/console/src/client/main.tsx"]) {
+        assert.deepEqual(
+          check(file, imp(specifier)),
+          subpathTestCode.has(specifier)
+            ? ["package-subpath", "test-file-import"]
+            : ["package-subpath"],
+          `${file} ${specifier}`,
+        );
+      }
+      assert.deepEqual(check("apps/api/src/main.test.ts", imp(specifier)), [], specifier);
+      assert.deepEqual(check("packages/identity/test/canon.ts", imp(specifier)), [], specifier);
+    }
+    // A subpath inside its package is plain.
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/server/testing/http")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@types/node/fs.d.ts")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("@fin/core/clock")), []);
+    assert.deepEqual(check("apps/api/src/main.ts", imp("pkg/node-modules.js")), []);
     // A file of test support by a relative path reaches the same code, in any case; one under an
     // e2e/, test/ or fixtures/ directory is refused by the test-code rule too.
     for (const [specifier, testCode] of /** @type {[string, boolean][]} */ ([
@@ -152,6 +260,23 @@ describe("imports:check", () => {
         testCode ? ["test-file-import", "testing-import"] : ["testing-import"],
         specifier,
       );
+    }
+    // A relative path from one package across its boundary into packages/testing, as an import, a
+    // dynamic import or a re-export, and with a query, from a shared package, server code and
+    // client code.
+    for (const [file, specifier] of /** @type {[string, string][]} */ ([
+      ["packages/identity/src/sign-in.ts", "../../testing/src/index.ts"],
+      ["packages/access/src/catalogue/roles.ts", "../../../testing/src/clock.ts?raw"],
+      ["apps/console/src/server/routes.ts", "../../../../packages/testing/src/index.ts"],
+      ["apps/console/src/client/main.tsx", "../../../../packages/testing/src/http/node.ts"],
+    ])) {
+      for (const text of [
+        imp(specifier),
+        src(`const t = await ${IMP}("${specifier}");`),
+        src(`${EXP} * from "${specifier}";`),
+      ]) {
+        assert.deepEqual(check(file, text), ["testing-import"], `${file} ${text}`);
+      }
     }
     // Tests and test support may.
     for (const file of [
@@ -183,6 +308,282 @@ describe("imports:check", () => {
     ]);
   });
 
+  test("import.meta.glob loads only what an import may, so the harness never reaches a bundle", () => {
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text));
+    const glob = (/** @type {string} */ args) => src(`const m = ${IMP}.meta.glob(${args});`);
+    const refused = [
+      // A literal path into test support, a test file, or out of the repository.
+      `"../../../packages/testing/src/clock.ts", { eager: true }`,
+      `"../../../packages/Testing/src/clock.ts"`,
+      `"../test/canon.ts"`,
+      `"../../../e2e/fixtures.ts"`,
+      `"./sign-in.test.ts"`,
+      `"./sign-in.TEST.ts"`,
+      `"./sign-in.test"`,
+      `"../../../../src/packages/testing/src/index.ts"`,
+      // A pattern whose fixed part lies in test support, or stops where test support lies below.
+      `"../../../packages/testing/src/*.ts"`,
+      `"../../../packages/*/src/index.ts"`,
+      `"../*/canon.ts"`,
+      `"../../../**/fixtures.ts"`,
+      `["./routes/*.page.tsx", "../e2e/*.page.ts"]`,
+      // A pattern that can match a test file, or walks into node_modules or back up.
+      `"./routes/*.tsx"`,
+      `"./routes/**/*.ts"`,
+      `"./routes/*est.ts"`,
+      `"./routes/*.{ts,tsx}"`,
+      `"./routes/**/node_modules/**/x.page.ts"`,
+      `"./routes/*/../../../test/x.page.ts"`,
+      // A fixed directory out of the repository.
+      `"../../../../elsewhere/*.page.ts"`,
+      // What these rules cannot resolve: a root path, an alias, a bare name, a spelling a parser
+      // rewrites, a pattern built at run time.
+      `"/test/canon.ts"`,
+      `"@/test/canon.ts"`,
+      `"fixtures/x.page.ts"`,
+      `"./routes${BS}${BS}x.page.ts"`,
+      `"./routes/%2e%2e/*.page.ts"`,
+      `name`,
+      `[name]`,
+      `\`./routes/\${name}.page.ts\``,
+      `[]`,
+      // Options that move or widen the search.
+      `"./routes/*.page.ts", { base: "../../../packages/testing/src" }`,
+      `"./routes/*.page.ts", { "base": "../test" }`,
+      `"./routes/*.page.ts", { exhaustive: true }`,
+      `"./routes/*.page.ts", { ...options }`,
+      `"./routes/*.page.ts", { ["ba" + "se"]: "../test" }`,
+    ];
+    for (const args of refused) {
+      assert.deepEqual(check("apps/api/src/main.ts", glob(args)), ["glob-import"], args);
+    }
+    assert.deepEqual(
+      check("apps/api/src/main.ts", src(`const m = ${IMP}.meta.glob<Module>("../test/x.ts");`)),
+      ["glob-import"],
+    );
+    // In client code, by the same reading.
+    assert.deepEqual(
+      check("apps/console/src/client/main.ts", glob(`"../../../../packages/testing/src/*.ts"`)),
+      ["glob-import"],
+    );
+    // Patterns that stay in the file's own code, with options that only shape the import: code
+    // that runs uses no glob import at all, so they are refused there too (the UI landing's rule,
+    // which refuses every glob, holds over the reading of its patterns). Where a glob is read by
+    // its patterns, in a file the page policy leaves out as test code that is not test support,
+    // they pass, and a pattern into the harness is refused.
+    for (const args of [
+      `"./routes/*.page.tsx"`,
+      `"./routes/**/*.page.ts", { eager: true, import: "default" }`,
+      `["./routes/*.page.tsx", "!./routes/draft.page.tsx"]`,
+      `"./icons/*.svg", { query: "?raw", import: "default" }`,
+      `"./routes/home.page.tsx"`,
+      `"../shared/*.page.ts"`,
+    ]) {
+      assert.deepEqual(check("apps/api/src/main.ts", glob(args)), ["glob-import"], args);
+      assert.deepEqual(check("apps/console/src/client/main.ts", glob(args)), ["glob-import"], args);
+      assert.deepEqual(check("apps/api/fixtures/routes.ts", glob(args)), [], args);
+    }
+    assert.deepEqual(
+      check("apps/api/fixtures/routes.ts", glob(`"../../../packages/testing/src/*.ts"`)),
+      ["glob-import"],
+    );
+    // Tests and test support may load the harness this way too.
+    for (const file of ["apps/api/src/main.test.ts", "apps/api/test/canon.ts", "e2e/x.ts"]) {
+      assert.deepEqual(check(file, glob(`"../../../packages/testing/src/*.ts"`)), [], file);
+    }
+  });
+
+  test("in test code that is not test support, the glob reader alone refuses a pattern into the harness or onto a test file", () => {
+    // Code that runs refuses every glob outright, so the refusals above in apps/api/src/main.ts
+    // never depend on the reading of a glob's patterns (findGlobCalls and globReachesTests). In a
+    // file the page policy leaves out as test code that is not test support, that reading is the
+    // only rule a glob meets: each refusal here carries its message (the outright refusal's and
+    // the template loader's differ), and each pass is its decision alone.
+    const READER =
+      "in a file the page policy leaves out as test code, import.meta's glob takes literal relative patterns, with no base or exhaustive option, that stay in the repository and out of node_modules and test support and cannot match a test file (code that runs uses none)";
+    const G = `${IMP}.meta.glob`;
+    const glob = (/** @type {string} */ args) => src(`const m = ${G}(${args});`);
+    const outright = checkSource("apps/api/src/main.ts", glob(`"./routes/*.page.tsx"`));
+    assert.deepEqual(rules(outright), ["glob-import"]);
+    assert.ok(outright.every((finding) => finding.message !== READER));
+    // Each file, with the relative path from its directory to the repository's root: under
+    // fixtures/, tests/ or __tests__/, and a test/ or e2e/ below a package's src/.
+    for (const [file, root] of /** @type {[string, string][]} */ ([
+      ["apps/api/fixtures/routes.ts", "../../../"],
+      ["packages/access/tests/helpers.ts", "../../../"],
+      ["apps/api/src/__tests__/routes.ts", "../../../../"],
+      ["packages/access/src/test/helpers.ts", "../../../../"],
+      ["apps/console/src/e2e/pages.ts", "../../../../"],
+    ])) {
+      assert.equal(isTestSupport(file), false, file);
+      const byReader = (/** @type {number} */ line) => [
+        { file, line, rule: "glob-import", message: READER },
+      ];
+      const harness = `"${root}packages/testing/src/clock.ts"`;
+      for (const args of [
+        // Into the harness: a file of it, a pattern whose fixed part lies in it (in any case) or
+        // stops where it lies below, each with a fixed end no test file's name has, so the path
+        // alone refuses it; one pattern of several is enough, and a negative one only narrows.
+        harness,
+        `"${root}packages/testing/src/**/*.json"`,
+        `"${root}packages/Testing/src/*.json"`,
+        `"${root}packages/*/src/index.json"`,
+        `["./routes/*.page.tsx", ${harness}]`,
+        `["${root}packages/testing/src/*.json", "!${root}packages/testing/src/clock.json"]`,
+        // Into the other test support: the root's e2e/ and a workspace package's test/.
+        `"${root}e2e/*.json"`,
+        `"${root}apps/console/test/*.json"`,
+        // Onto a test file: by its name (in any case, or the stem a resolver completes), or by a
+        // pattern whose fixed end can end a test file's name.
+        `"./sign-in.test.ts"`,
+        `"./sign-in.TEST.ts"`,
+        `"./sign-in.test"`,
+        `"./routes/*.ts"`,
+        `"./routes/*est.ts"`,
+        `"./routes/*.{ts,tsx}"`,
+        `"./routes/**/*.test.tsx", { eager: true }`,
+      ]) {
+        assert.deepEqual(checkSource(file, glob(args)), byReader(1), `${file} ${args}`);
+      }
+      // Patterns that stay in the file's own code or reach another package's source (one whose
+      // name only starts like the harness's included), with options that only shape the import.
+      for (const args of [
+        `"./routes/*.page.tsx"`,
+        `"./routes/home.page.tsx"`,
+        `"./routes/**/*.page.ts", { eager: true, import: "default" }`,
+        `["./routes/*.page.tsx", "!./routes/draft.page.tsx"]`,
+        `"./icons/*.svg", { query: "?raw", import: "default" }`,
+        `"../shared/*.page.ts"`,
+        `"${root}packages/ui/src/*.page.tsx"`,
+        `"${root}packages/testing-kit/src/*.json"`,
+      ]) {
+        assert.deepEqual(checkSource(file, glob(args)), [], `${file} ${args}`);
+      }
+      // It reads calls, not text: a glob in a comment, in a string or as another object's member
+      // is no call of import.meta's glob; one spelled with spaces or with one type argument is,
+      // and each call is reported at its own line.
+      for (const text of [
+        src(`// const m = ${G}(${harness});`),
+        src(`const s = '${G}(${harness})';`),
+        src(`const m = loader.${G}(${harness});`),
+      ]) {
+        assert.deepEqual(checkSource(file, text), [], `${file} ${text}`);
+      }
+      for (const [text, line] of /** @type {[string, number][]} */ ([
+        [src(`const m = ${IMP} . meta . glob(${harness});`), 1],
+        [src(`const m = ${G}<Module>(${harness});`), 1],
+        [src(`const a = ${G}("./routes/*.page.tsx");`, "", `const b = ${G}(${harness});`), 3],
+      ])) {
+        assert.deepEqual(checkSource(file, text), byReader(line), `${file} ${text}`);
+      }
+    }
+  });
+
+  test("Vite's other build-time loaders are read like an import: a template import() and new URL(x, import.meta.url)", () => {
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text));
+    // Vite expands an import() of a template into the glob of its text, each substitution a `*`.
+    const load = (/** @type {string} */ template) =>
+      src(`${EXP} const load = (a, b) => ${IMP}(${template});`);
+    for (const [file, template] of /** @type {[string, string][]} */ ([
+      ["apps/console/src/server/load.ts", `\`../../../../packages/testing/src/\${a}.ts\``],
+      ["packages/access/src/load.ts", `\`../test/\${a}.ts\``],
+      ["apps/api/src/main.ts", `\`../../../e2e/\${a}.page.ts\``],
+      // A glob that can match a test file, or walks back up or into node_modules after a wildcard.
+      ["apps/api/src/main.ts", `\`./routes/\${a}.ts\``],
+      ["apps/api/src/main.ts", `\`./routes/\${a}\``],
+      ["apps/api/src/main.ts", `\`./routes/\${\`\${a}x\`}.ts\``],
+      ["apps/api/src/main.ts", `\`./routes/\${a}/../../../test/\${b}.page.ts\``],
+      ["apps/api/src/main.ts", `\`./routes/\${a}/node_modules/\${b}.page.ts\``],
+      ["apps/api/src/main.ts", `\`../../../../elsewhere/\${a}.page.ts\``],
+      ["apps/api/src/main.ts", `/* a comment */ \`../test/\${a}.page.ts\``],
+    ])) {
+      assert.deepEqual(check(file, load(template)), ["glob-import"], `${file} ${template}`);
+    }
+    // In client code a template import() is refused already, and read the same way.
+    assert.deepEqual(check("apps/console/src/client/load.ts", load(`\`../../test/\${a}.ts\``)), [
+      "dynamic-import",
+      "glob-import",
+    ]);
+    // A glob that stays in the file's own code, templates inside a substitution, and an import()
+    // Vite leaves to run time (no fixed relative start) are not refused here.
+    for (const template of [
+      `\`./routes/\${a}.page.ts\``,
+      `\`./routes/\${a}/\${b}.page.ts\``,
+      `\`./routes/\${f(\`\${a}\`)}.page.ts\``,
+      `\`./routes/\${\`x\${a}y\${b}z\`}.page.ts\``,
+      `\`./locales/\${a}.json\``,
+      `\`./routes/\${a}.page.ts\`, { with: { type: "x" } }`,
+      `\`\${a}/x.ts\``,
+      "a",
+    ]) {
+      assert.deepEqual(check("apps/api/src/main.ts", load(template)), [], template);
+    }
+    // Vite bundles the file of new URL(<string>, import.meta.url) as a worker's code, or copies it
+    // into the build: it is read as an import of that string.
+    const url = (/** @type {string} */ args) => src(`const w = new URL(${args});`);
+    const META_URL = `${IMP}.meta.url`;
+    // A URL that names a file under a test/ or e2e/ directory is refused by the test-code rule
+    // too, which reads a module URL the same (TEST_CODE in import-rules.mjs).
+    const TEST_CODE_RULES = ["test-file-import", "testing-import"];
+    for (const [text, expected] of /** @type {[string, string[]][]} */ ([
+      [
+        src(
+          `const w = new Worker(new URL("../../../../packages/testing/src/clock.ts", ${META_URL}), { type: "module" });`,
+        ),
+        ["testing-import"],
+      ],
+      [
+        src(`const w = new SharedWorker(new URL("../../test/canon.ts", ${META_URL}));`),
+        TEST_CODE_RULES,
+      ],
+      [url(`"../../e2e/fixtures.ts", ${META_URL}`), TEST_CODE_RULES],
+      [url(`\`../../test/canon.ts\`, ${META_URL}`), TEST_CODE_RULES],
+      [url(`"../../test/canon.ts?worker", ${META_URL}`), TEST_CODE_RULES],
+      [url(`/* a comment */ "../../test/canon.ts" , ${IMP} . meta . url ,`), TEST_CODE_RULES],
+      // A string without `./` is read both as a relative path, which Vite tries first, and as a
+      // package's name.
+      [url(`"@fin/testing/src/index.ts", ${META_URL}`), ["testing-import"]],
+      [url(`"routes/sign-in.test.ts", ${META_URL}`), ["test-file-import"]],
+      [url(`"./sign-in.test.ts", ${META_URL}`), ["test-file-import"]],
+      [url(`"../../../../../x.ts", ${META_URL}`), ["relative-escape"]],
+    ])) {
+      for (const file of ["apps/console/src/client/main.ts", "packages/access/src/workers/a.ts"]) {
+        assert.deepEqual(check(file, text), expected, `${file} ${text}`);
+      }
+    }
+    assert.deepEqual(
+      check("packages/access/main.ts", url(`"test/canon.ts", ${META_URL}`)),
+      TEST_CODE_RULES,
+    );
+    // A file of the code's own, a URL with a scheme or from the site's root, a template (an
+    // asset's), and a URL against another base are not imports.
+    for (const args of [
+      `"./worker.ts", ${META_URL}`,
+      `"../config/", ${META_URL}`,
+      `"https://example.com/x.test.ts", ${META_URL}`,
+      `"/favicon.svg", ${META_URL}`,
+      `\`./icons/\${a}.svg\`, ${META_URL}`,
+      `"./x.test.ts", base`,
+    ]) {
+      // Where every import must be read (client code), a module URL takes one string literal,
+      // so a template's is refused there (dynamic-import), though it is no import.
+      const expected = args.startsWith("`") ? ["dynamic-import"] : [];
+      assert.deepEqual(check("apps/console/src/client/main.ts", url(args)), expected, args);
+      assert.deepEqual(check("packages/access/src/workers/a.ts", url(args)), [], args);
+    }
+    // Tests and test support may load the harness these ways too.
+    for (const file of ["apps/api/src/main.test.ts", "apps/api/test/canon.ts"]) {
+      assert.deepEqual(check(file, load(`\`../../../packages/testing/src/\${a}.ts\``)), [], file);
+      assert.deepEqual(
+        check(file, url(`"../../../packages/testing/src/clock.ts", ${META_URL}`)),
+        [],
+        file,
+      );
+    }
+  });
+
   test("outside tests and test support, a relative import stays in the repository and out of node_modules", () => {
     const check = (/** @type {string} */ file, /** @type {string} */ text) =>
       rules(checkSource(file, text));
@@ -203,6 +604,32 @@ describe("imports:check", () => {
     }
     assert.deepEqual(check("apps/api/src/main.ts", imp("../../../packages/core/src/x.ts")), []);
     assert.deepEqual(check("apps/api/src/main.ts", imp("./node-modules.ts")), []);
+  });
+
+  test("what is left to review is the header's list of known limits, with its reason", () => {
+    const text = readFileSync(join(REPO_ROOT, "scripts/import-rules.mjs"), "utf8");
+    const header = text
+      .slice(0, text.indexOf("\nimport "))
+      .split("\n")
+      .map((line) => line.replace(/^\/\/\s*/, ""))
+      .join(" ")
+      .replace(/\s+/g, " ");
+    assert.ok(header.includes(LEFT_TO_REVIEW_REASON), "the reason");
+    assert.ok(header.includes("(LEFT_TO_REVIEW)"), "the header points at this list");
+    for (const { shape, file, inCodeThatRuns, sources, manifests } of LEFT_TO_REVIEW) {
+      assert.ok(header.includes(shape), shape);
+      for (const text of sources) {
+        assert.deepEqual(checkSource(file ?? "apps/api/src/main.ts", text), [], text);
+        // Where a shape is left to review only outside code that runs, code that runs refuses it.
+        if (inCodeThatRuns !== undefined) {
+          assert.deepEqual(rules(checkSource("apps/api/src/main.ts", text)), inCodeThatRuns, text);
+        }
+      }
+      for (const fields of manifests) {
+        const manifest = JSON.stringify({ name: "@fin/identity", private: true, ...fields });
+        assert.deepEqual(checkManifest("packages/identity/package.json", manifest), [], manifest);
+      }
+    }
   });
 
   test("no package's entry point names test support, so its name never loads the harness", () => {
@@ -228,6 +655,46 @@ describe("imports:check", () => {
       { browser: { "./src/x.ts": "./test/x.ts" } },
       { bin: { fixtures: "./test/cli.ts" } },
       { bin: "./e2e/cli.ts" },
+      // A pattern whose fixed end a test file's name can end with: the wildcard supplies the rest.
+      { exports: { "./*": "./src/*.ts" } },
+      { exports: { "./checks/*": "./src/*est.ts" } },
+      { exports: { "./checks/*": "./src/*.TS" } },
+      { exports: { "./src/*": "./src/*" } },
+      { exports: { "./x/*.js": "./src/*" } },
+      // A name a resolver completes into a test file.
+      { main: "./src/sign-in.test" },
+      // A directory, whose index file a resolver loads.
+      { main: "test" },
+      { main: "./test/." },
+      { main: "./test/" },
+      { main: "./e2e" },
+      { module: "test" },
+      { bin: "e2e" },
+      // Vite's other main fields, which a bundle reads before main.
+      { main: "./src/index.ts", "jsnext:main": "./test/index.ts" },
+      { main: "./src/index.ts", jsnext: "./test/index.ts" },
+      // A browser or imports map's value that names the harness, or reaches test support, by a
+      // package's name.
+      { browser: { "./src/client/clock.ts": "@fin/testing" } },
+      { browser: { "fin-clock": "@FIN/Testing/src/index.ts" } },
+      { browser: { "fin-clock": "@fin/console/e2e/fixtures.ts" } },
+      { browser: { "fin-clock": "@types/node/../../../../packages/testing/src/index.ts" } },
+      { browser: { "fin-clock": "@fin/console/node_modules/@fin/testing/src/index.ts" } },
+      { browser: { "fin-clock": "@fin/identity/src/clock.test" } },
+      { browser: { "fin-clock": "@types/node/../../../test/canon.ts" } },
+      { imports: { "#clock": "@fin/testing" } },
+      // A folder mapping, which exposes every file below its target, as a pattern does.
+      { exports: { ".": "./src/index.ts", "./lib/": "./" } },
+      { exports: { "./lib/": "./src/../" } },
+      { exports: { "./lib/": "./src/lib/" } },
+      { imports: { "#lib/": "./" } },
+      // A target not spelled plainly: Node decodes percent-encoding in an exports target, and a
+      // URL parser reads a backslash as a slash.
+      { exports: { "./fixtures": "./%74est/canon.ts" } },
+      { exports: { "./fixtures": "./src/%2e%2e/test/canon.ts" } },
+      { main: `./src${BS}..${BS}test${BS}canon.ts` },
+      { module: " ./test/canon.ts" },
+      { exports: { "./x": "./src/x.ts\t" } },
     ]) {
       assert.deepEqual(
         check("packages/identity/package.json", fields),
@@ -235,30 +702,67 @@ describe("imports:check", () => {
         JSON.stringify(fields),
       );
     }
-    // The root's e2e/ and playwright.config.ts.
-    assert.deepEqual(check("package.json", { exports: { "./*": "./*" } }), ["testing-export"]);
-    assert.deepEqual(check("package.json", { main: "playwright.config.ts" }), ["testing-export"]);
+    // The root's e2e/ and playwright.config.ts, and the harness's directory, by any of the names a
+    // resolver reads.
+    for (const fields of [
+      { exports: { "./*": "./*" } },
+      { main: "playwright.config.ts" },
+      { main: "playwright.config" },
+      { main: "e2e" },
+      { main: "packages/testing" },
+      { module: "./packages/testing/" },
+      { exports: { "./lib/": "./" } },
+      { exports: { "./lib/": "./packages/" } },
+    ]) {
+      assert.deepEqual(check("package.json", fields), ["testing-export"], JSON.stringify(fields));
+    }
     const findings = checkManifest(
       "packages/identity/package.json",
       manifest({ exports: { ".": "./src/index.ts", "./fixtures": "./test/fixtures.ts" } }),
     );
     assert.equal(findings[0]?.line, 6);
-    // Entry points in src/, a pattern whose fixed part stops inside src/, and a src/testing/
-    // directory (deployable code's own test helpers) are not test support.
+    // Entry points in src/, a pattern whose fixed part stops inside src/ and whose fixed end no
+    // test file's name ends with, a src/testing/ directory (deployable code's own test helpers),
+    // and a browser map onto another package are not test support.
     for (const fields of [
       {
         exports: {
           ".": "./src/index.ts",
           "./testing": "./src/testing/index.ts",
-          "./src/*": "./src/*",
+          "./pages/*": "./src/pages/*.page.ts",
           "./package.json": "./package.json",
         },
         main: "./src/index.ts",
+        module: "./src",
+        "jsnext:main": "./src/index.ts",
         bin: { fin: "./src/cli.ts" },
-        browser: { "./src/node.ts": false },
+        browser: { "./src/node.ts": false, "./src/clock.ts": "@fin/core/clock", "node-x": "x" },
       },
+      // A directory as main or module, with its slash, is not a folder mapping.
+      { main: "./src/", module: "./src/" },
     ]) {
       assert.deepEqual(check("packages/identity/package.json", fields), []);
+    }
+    // Every main field Vite reads by default, for the client and the server, is an entry point
+    // here, so a field Vite adds is noticed.
+    const viteFields = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const v = await ${IMP}("vite"); console.log(JSON.stringify([...v.defaultClientMainFields, ...v.defaultServerMainFields]));`,
+      ],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    assert.equal(viteFields.status, 0, viteFields.stderr);
+    const mainFields = /** @type {string[]} */ (JSON.parse(viteFields.stdout));
+    assert.ok(mainFields.includes("jsnext:main"), viteFields.stdout);
+    for (const field of new Set(mainFields)) {
+      assert.deepEqual(
+        check("packages/identity/package.json", { [field]: "./test/index.ts" }),
+        ["testing-export"],
+        field,
+      );
     }
     // The harness's own manifest, and any in test support, are test support.
     assert.deepEqual(
@@ -1166,7 +1670,11 @@ describe("imports:check", () => {
         [`const all = ${META} . glob(["./a/*.ts", "./b/*.ts"]);`, ["glob-import"]],
         [
           `new Worker(new URL("../test/worker.ts", ${META}.url), { type: "module" });`,
-          ["test-file-import"],
+          // From packages/ui/src/, ../test/ is that package's test support, which the harness's
+          // reading of a worker's URL (testing-import) refuses as well.
+          file === "packages/ui/src/a.tsx"
+            ? ["test-file-import", "testing-import"]
+            : ["test-file-import"],
         ],
         [`new Worker(new URL("./x.test.ts", ${META}.url));`, ["test-file-import"]],
         [`const u = new URL(/* c */ "../Fixtures/a.png", ${META}.url);`, ["test-file-import"]],
@@ -1254,7 +1762,9 @@ describe("imports:check", () => {
       ],
     );
     // The harness rules see the same plants: the exports map's test/ and test-file targets
-    // (testing-export) and a package's test/ named by the package (testing-import).
+    // (testing-export) and a package's test/ named by the package (testing-import). They also
+    // refuse both targets of the `./kit/*` pattern, whose fixed end (`.ts`) a test file's name can
+    // end with.
     assert.deepEqual(
       findings
         .filter((f) => f.rule !== "test-file-import")
@@ -1262,6 +1772,8 @@ describe("imports:check", () => {
         .sort(),
       [
         "apps/api/src/a.ts:1 testing-import",
+        "packages/ui/package.json:1 testing-export",
+        "packages/ui/package.json:1 testing-export",
         "packages/ui/package.json:1 testing-export",
         "packages/ui/package.json:1 testing-export",
       ],
@@ -1362,6 +1874,8 @@ describe("imports:check", () => {
         // package's test/ or a test file, so the export for a package's tests is refused there.
         "packages/frame/package.json testing-export",
         "packages/icons/package.json package-manifest",
+        // jsnext:main is an entry point to the harness's manifest rule too.
+        "packages/icons/package.json testing-export",
         "packages/motion/package.json package-manifest",
         "packages/tokens/package.json package-manifest",
         "packages/tokens/package.json testing-export",
@@ -1601,6 +2115,13 @@ describe("imports:check", () => {
         "./x.cjs#/../rules.Test.cjs",
         "@fin/testing/src/x.db.test.ts",
         "@fin/testing/src/x.DB.Test.ts",
+        // A name to which a resolver adds the extension (an exports pattern `./src/*.ts`, a
+        // bundler's extensions, require()'s .js).
+        "@fin/identity/sign-in.test",
+        "@fin/identity/sign-in.db.test?raw",
+        "@fin/identity/sign-in.Spec",
+        "./x.test",
+        "./x.SPEC",
       ]) {
         assert.ok(
           rules(checkSource(file, imp(specifier), () => false, CONTROL)).includes(
@@ -1609,6 +2130,13 @@ describe("imports:check", () => {
           `${file} ${specifier}`,
         );
       }
+    }
+    // A name that only contains the word is not a test.
+    for (const specifier of ["@fin/identity/test-data", "./attest.ts", "@fin/core/inspect"]) {
+      assert.ok(
+        !rules(checkSource("apps/api/src/a.ts", imp(specifier))).includes("test-file-import"),
+        specifier,
+      );
     }
   });
 
@@ -1921,19 +2449,74 @@ describe("imports:check", () => {
       "apps/api/src/by-query.ts": imp("@fin/testing?x"),
       "apps/api/src/by-link.ts": imp("../node_modules/@fin/testing/src/index.ts"),
       "apps/api/src/by-checkout.ts": imp("../../../../src/packages/testing/src/index.ts"),
+      // Refused: a package's subpath out of the package or into node_modules, Vite's glob loader,
+      // and a test file by a name a resolver completes.
+      "apps/api/src/by-subpath.ts": imp("@types/node/../../../../../packages/testing/src/index.ts"),
+      "apps/api/src/by-module-link.ts": imp("@fin/console/node_modules/@fin/testing/src/index.ts"),
+      "apps/api/src/by-glob.ts": src(
+        `const h = ${IMP}.meta.glob("../../../packages/testing/src/clock.ts", { eager: true });`,
+      ),
+      "apps/api/src/by-stem.ts": imp("@fin/kyc/sign-in.test"),
+      // Refused: entry points that reach test support as a directory, through Vite's jsnext:main,
+      // through a browser map onto the harness's name, and through a pattern that adds `.ts`.
+      "apps/verify/package.json": manifest({ name: "@fin/verify", main: "test" }),
+      "apps/edge/package.json": manifest({
+        name: "@fin/edge",
+        main: "./src/index.ts",
+        "jsnext:main": "./test/index.ts",
+      }),
+      "apps/admin/package.json": manifest({
+        name: "@fin/admin",
+        browser: { "./src/client/clock.ts": "@fin/testing" },
+        devDependencies: { "@fin/testing": "workspace:*" },
+      }),
+      "packages/kyc/package.json": manifest({ name: "@fin/kyc", exports: { "./*": "./src/*.ts" } }),
+      // Refused: Vite's other build-time loaders (a template import() and a worker's URL), a
+      // folder mapping onto the package's root and a percent-encoded exports target.
+      "apps/api/src/by-template.ts": src(
+        `${EXP} const load = (name) => ${IMP}(\`../../../packages/testing/src/\${name}.ts\`);`,
+      ),
+      "apps/console/src/client/by-worker.ts": src(
+        `const w = new Worker(new URL("../../../../packages/testing/src/clock.ts", ${IMP}.meta.url));`,
+      ),
+      "packages/access/package.json": manifest({
+        name: "@fin/access",
+        exports: { "./lib/": "./" },
+      }),
+      "packages/orgs/package.json": manifest({
+        name: "@fin/orgs",
+        exports: { "./fixtures": "./%74est/canon.ts" },
+      }),
     });
     const findings = checkImports(dir);
     assert.deepEqual(findings.map((f) => `${f.file}:${f.line} ${f.rule}`).sort(), [
+      "apps/admin/package.json:6 testing-export",
+      // The test-code rule's manifest check (no line) refuses the same entry points: an object
+      // browser field, and a root entry field that names a test/ directory.
+      "apps/admin/package.json:undefined package-manifest",
       "apps/api/package.json:6 testing-dependency",
       "apps/api/src/by-checkout.ts:1 relative-escape",
       // The test-code rule reads the same plants through the exports map and the package's path.
       "apps/api/src/by-exports.ts:1 test-file-import",
+      "apps/api/src/by-glob.ts:1 glob-import",
       "apps/api/src/by-link.ts:1 relative-escape",
+      "apps/api/src/by-module-link.ts:1 package-subpath",
       "apps/api/src/by-name.ts:1 test-file-import",
       "apps/api/src/by-name.ts:1 testing-import",
       "apps/api/src/by-query.ts:1 testing-import",
+      "apps/api/src/by-stem.ts:1 test-file-import",
+      "apps/api/src/by-subpath.ts:1 package-subpath",
+      "apps/api/src/by-template.ts:1 glob-import",
       "apps/api/src/main.ts:2 testing-import",
+      "apps/console/src/client/by-worker.ts:1 testing-import",
+      "apps/edge/package.json:6 testing-export",
+      "apps/edge/package.json:undefined package-manifest",
+      "apps/verify/package.json:5 testing-export",
+      "apps/verify/package.json:undefined package-manifest",
+      "packages/access/package.json:6 testing-export",
       "packages/identity/package.json:7 testing-export",
+      "packages/kyc/package.json:6 testing-export",
+      "packages/orgs/package.json:6 testing-export",
       "packages/testing/src/email/sink.ts:1 node-network",
     ]);
     const run = runScript("scripts/import-rules.mjs", ["--root", dir]);

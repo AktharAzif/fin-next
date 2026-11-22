@@ -296,7 +296,10 @@ export interface EndpointPolicy {
   readonly realm: RealmName;
   readonly rules: readonly EndpointRule[];
   readonly features: PolicyFeatures;
-  /** The rule for a raw path after `/api/auth` and a method, or null when unlisted. */
+  /**
+   * The rule for a raw path after `/api/auth` and a method, or null when unlisted. A pattern rule
+   * is reached only through the paths it stands for (`/callback/google` while Google is on).
+   */
   match(path: string, method: string): EndpointRule | null;
   /** The blocked paths without parameters, for the library's `disabledPaths` second layer. */
   disabledPaths(): string[];
@@ -323,6 +326,9 @@ export function createEndpointPolicy(realm: RealmName, features: PolicyFeatures)
     rules,
     features,
     match(path, method) {
+      // A rule's pattern (`/callback/:id`, `/reset-password/:token`) names a route, never a path
+      // a request may use as it is: a raw path with a colon is unlisted.
+      if (path.includes(":")) return null;
       let found = byPath.get(path);
       if (found === undefined && features.google && path === "/callback/google") {
         found = byPath.get("/callback/:id");

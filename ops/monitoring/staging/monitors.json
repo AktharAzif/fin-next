@@ -1,0 +1,90 @@
+{
+  "$comment": "Uptime monitors for staging (spec 01 §8.4, spec 08 §7.6): every 60 s from us and eu, email only through staging-quiet. host names a host role; the real hostname comes from the deploy configuration at apply time and is never committed. The secret monitor header's value is read from FIN_MONITOR_HEADER_FILE at apply time and lives only in Better Stack. The keyword csp-nonce is the meta tag every built index.html carries (static:check), so it proves the static half answered with the app shell. api-canary waits for API keys (spec 01 §8.4): api-health stands in until then.",
+  "defaults": {
+    "checkFrequency": 60,
+    "regions": ["us", "eu"],
+    "requestTimeout": 15,
+    "confirmationPeriod": 120,
+    "recoveryPeriod": 180,
+    "sslExpiration": 14,
+    "domainExpiration": 30,
+    "followRedirects": false,
+    "verifySsl": true,
+    "secretHeader": "Fin-Monitor",
+    "policy": "staging-quiet",
+    "notify": {
+      "email": true,
+      "sms": false,
+      "call": false,
+      "push": false,
+      "critical_alert": false
+    },
+    "runbook": "docs/runbooks/monitor-down.md"
+  },
+  "monitors": [
+    {
+      "name": "api-health",
+      "host": "api",
+      "path": "/health",
+      "type": "expected_status_code",
+      "expectStatus": [200],
+      "proves": "the public tunnel, the edge and its readiness"
+    },
+    {
+      "name": "api-unauthenticated",
+      "host": "api",
+      "path": "/v4/whoami",
+      "type": "expected_status_code",
+      "expectStatus": [401],
+      "proves": "the edge refuses a call with no key (the errors/unauthenticated keyword joins once SP-06 shows a keyword check can expect a 401)"
+    },
+    {
+      "name": "console-sign-in",
+      "host": "console",
+      "path": "/sign-in",
+      "type": "keyword",
+      "keyword": "csp-nonce",
+      "proves": "the console's static half (its assets-only deployment)"
+    },
+    {
+      "name": "console-api-health",
+      "host": "console",
+      "path": "/api/health",
+      "type": "expected_status_code",
+      "expectStatus": [200],
+      "proves": "the console's /api/* route with no Worker, the tunnel and the API half"
+    },
+    {
+      "name": "verify",
+      "host": "verify",
+      "path": "/",
+      "type": "keyword",
+      "keyword": "csp-nonce",
+      "proves": "the hosted pages' static half"
+    },
+    {
+      "name": "verify-api-health",
+      "host": "verify",
+      "path": "/api/health",
+      "type": "expected_status_code",
+      "expectStatus": [200],
+      "proves": "the verify host's /api/* route, the tunnel and the verify API half"
+    },
+    {
+      "name": "admin",
+      "host": "admin",
+      "path": "/",
+      "type": "expected_status_code",
+      "expectStatus": [302],
+      "proves": "Access stands in front of Fin Admin (a 302 to the Access sign-in, redirects not followed)"
+    },
+    {
+      "name": "docs",
+      "host": "docs",
+      "path": "/",
+      "type": "keyword",
+      "keyword": "csp-nonce",
+      "proves": "the docs site's static half"
+    }
+  ]
+}

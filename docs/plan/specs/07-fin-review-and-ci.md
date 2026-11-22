@@ -36,8 +36,8 @@ hardening a merge follows [G-10]'s interim merge rule, which is the steward's, f
 review: CI is green, fin-review's local run on the pull request's exact head has passed and is
 recorded in the pull request, and the merge names that head. [UI-12] is no (the owner, about
 08:28), so nothing is ported and there is no `import` mode (§2.3.8). The decisions taken while the
-owner was away, the build's [BD-01] to [BD-17] among them (BD-15 is withdrawn), are register
-entries, for the owner's review. Where
+owner was away, the build's [BD-01] to [BD-29] among them (BD-15 and BD-25 are withdrawn), are
+register entries, for the owner's review. Where
 a decision of DECISIONS.md is still for the owner, this spec builds its **default** and says so; a
 later answer changes the code through a reviewed pull request. Among the specifications, this spec
 owns fin-review, the merge gate and the review parts of CI; the sibling owns any other area (spec 01
@@ -1748,9 +1748,10 @@ any install. Path classes live in `tools/fin-review/config/ci-map.json`:
 | `scripts` | `scripts/**`, `.githooks/**`, `.gitleaks.toml`, `CODEOWNERS`, the rules files | `check`, `static` |
 | `unmapped` | anything else | everything |
 
-`check`, `static` and `gate` always run (a docs change still needs the public-safety and layout
-checks; Turborepo's cache makes the rest nearly free, spec 01 §5.3). `review` runs for every
-same-repository pull request in `enforcing-ci` (§8.1).
+`check`, `static`, `commit-dates-utc` and `gate` always run (a docs change still needs the
+public-safety and layout checks, and every commit its `+0000` dates, [BD-18]; Turborepo's cache
+makes the rest nearly free, spec 01 §5.3). `review` runs for every same-repository pull request in
+`enforcing-ci` (§8.1).
 
 **The plan document** (one line of JSON, at most 64 KB):
 
@@ -1880,6 +1881,7 @@ modules outside `apps/api` (EXECUTION §4.4).
 - a workflow without a top-level `permissions: {}`, a job without `timeout-minutes`, a checkout
   without `persist-credentials: false`;
 - an `actions/cache/save` of the review ledger in a job that `pull_request` can trigger;
+- a `ci.yml` whose `gate` job's `needs` lacks a job other than `bun` (from P0-6);
 - a `uses:` not pinned to a 40-character SHA with a version comment, except the self-reference of
   §8.2;
 - a `uses:` that names an action not owned by GitHub. The repository's allow-list refuses third-party
@@ -1945,19 +1947,46 @@ then as the agents' user, with the owner's login, D6):
    Ship never reads the pull request's text for this ([CI-15]). From hardening, runs
    `checkReceipt` from the engine copy for the head (D6). Either way it reads `gate`'s status for
    the head; both must pass.
-4. Runs the similarity check ([G-04]): normalised lines of every file the pull request adds or changes
-   are compared with the old product's tree, read from the location the environment variable
-   `FIN_OLD_TREE` names on that machine (never written into the repository, a log or a pull request).
-   No file is skipped ([G-04] has no exception). A run of 12 or more identical normalised lines, or a
-   file whose lines match for 30% or more, stops the ship, except a match that lies wholly inside
-   the assets [G-04] lets fin-next reuse as the canvases use them. Those are the token values
-   (`packages/tokens/tokens.css` and `packages/tokens/export-pin/tokens.json`), the font files and
-   their OFL notice (`packages/tokens/fonts/**`), and the Fin logo's path data (the lockup and the
-   24px F mark in `packages/icons`, and each app's `public/favicon.svg`). Such a match does not stop
-   the ship: ship records it in the pull request's record (§7.4) by fin-next path and counts only.
+4. Runs the similarity check ([G-04]; its parameters and exceptions are [BD-29]'s, as the steward
+   ruled them): normalised lines (as [BD-29] normalises them: Unicode-normalised, invisible
+   characters removed, look-alike letters folded, and what a formatter changes folded; a line under
+   12 characters or without three letters in a row is trivial and ignored, unless it carries data)
+   of every file the pull request adds or changes are compared with every text blob of the old
+   product's whole history, read from the location the environment variable `FIN_OLD_TREE` names on
+   that machine (never written into the repository, a log or a pull request). No file is skipped
+   ([G-04] has no exception). A run of 12 or more identical normalised lines (rule A); 30% or more
+   of a file's distinctive lines found in the old product, for a file of 10 or more non-trivial
+   lines (rule B; a line is distinctive when at most two old file lineages contain it, a rename
+   continuing its file); for a file of fewer than 10 non-trivial lines, 3 or more matched
+   distinctive lines making up 30% or more (rule C); or, in a `package.json`, 12 or more consecutive
+   non-dictated lines found in the old product (rule M) stops the ship. The following are reported
+   by counts and do not stop the ship, by fin-next path in the pull request's record (§7.4), each
+   narrowly:
+   - a match wholly inside the assets [G-04] lets fin-next reuse as the canvases use them, as exact
+     files: the token values (`packages/tokens/tokens.css` and
+     `packages/tokens/export-pin/tokens.json`), the font files and their OFL notice
+     (`packages/tokens/fonts/**`), the Fin logo's path data
+     (`packages/icons/src/brand-art.ts`: the lockup and the 24px F mark), each app's
+     `apps/<app>/public/favicon.svg` and verify's selfie copy,
+     `apps/verify/public-selfie/favicon.svg` (spec 06 S6-27);
+   - the root `pnpm-lock.yaml` only, as "generated" (pnpm's resolution of public registry
+     metadata); no other generated file is exempt;
+   - lines inside the plan's fenced code blocks (plan-dictated), and in a `package.json` the lines
+     [BD-29]'s manifest class dictates by position (the package's own name, `catalog:` and
+     `workspace:*` dependency entries, the test scripts `VITEST_SCRIPTS` requires and the standard
+     key lines): a run is exempt only when every line in it is; for rules B and C they stay in the
+     denominator and never count as matches;
+   - a file listed in a `THIRD_PARTY.json` manifest (package, version, upstream path, SHA-256) whose
+     content matches the pinned upstream release byte for byte, as "third-party"; a licence or
+     notice file whose npm release ships none may name instead the raw GitHub file at a pinned
+     commit, compared by SHA-256, as [BD-29] allows;
+   - a file the steward accepts by path, pinned to its blob, recorded in [BD-29] with its blob,
+     counts and reason; reported as "accepted"; any other version of the file is checked afresh.
    Any other match stops the ship, including one that runs past those assets into other lines of
    the same file; the output names fin-next paths and counts only, never the old product's paths
-   or text. Without `FIN_OLD_TREE`, ship refuses.
+   or text. Without `FIN_OLD_TREE`, ship refuses. Matching by line misses renamed or reformatted
+   code. Until `fin-review ship` ships the pull requests, the build runs this check by hand on the
+   exact tree that merges ([BD-29]).
 5. **A control-path pull request** ([CI-14]). From hardening: ship refuses to run under
    `fin-builder`; the owner runs it in the owner's own session, and types `<n> <first 12 characters
    of the head SHA>` when asked. Until then GitHub does not record the owner's approval ([BD-02]).
@@ -2282,12 +2311,12 @@ label, S7-35).
 | T-RV-32 [CI] | (Hardening, D6) A pull request whose only "receipt" is valid JSON in a comment or its body fails `gate` with `receipt_missing` | [CI-11] |
 | T-RV-33 [CI] | A pull request that edits `plan.ts` to skip `e2e` fails `gate` with `plan_mismatch` | S7-04 |
 | T-RV-34 [CI] | The `merge` job passes a merge whose tree equals the reviewed head's; fails a direct commit with `main_not_merge` and a differing tree with `merge_tree_differs`; exempts only commits in `bootstrap.json` | §2.3.4 |
-| T-RV-35 [U] | `ship` refuses a draft, a head behind `main`, a missing receipt (until hardening, a head with no passed local run recorded under [G-10], D6), a red `gate`, a control path under `fin-builder` (from hardening, D6), an unset `FIN_OLD_TREE` and a planted 12-line copy (a 12-line match lying wholly inside `packages/tokens/tokens.css`'s token values passes and is recorded by fin-next path and counts); reads no title, body, comment or branch name, and until hardening posts [G-10]'s record from the run's `summary.json` before the merge ([CI-15]); builds exactly `gh pr merge <n> --merge --match-head-commit <sha>` | [G-04], [CI-14] |
+| T-RV-35 [U] | `ship` refuses a draft, a head behind `main`, a missing receipt (until hardening, a head with no passed local run recorded under [G-10], D6), a red `gate`, a control path under `fin-builder` (from hardening, D6), an unset `FIN_OLD_TREE`, a planted 12-line copy (rule A), a planted copy of 30% of the distinctive lines of a file of 10 non-trivial lines (rule B), a planted copy of 3 matched distinctive lines making 30% or more of a file of fewer than 10 non-trivial lines (rule C), a planted 12-line run only partly inside the plan's fenced code blocks, a `THIRD_PARTY.json`-listed file that differs from its pinned upstream release, and an accepted file whose blob has changed and that still matches (checked afresh, it blocks); it passes, recording each by fin-next path and counts, a 12-line match lying wholly inside `packages/tokens/tokens.css`'s token values, a match in the root `pnpm-lock.yaml` (as "generated"), a listed file that matches its pinned release (as "third-party") and a file the steward accepted, at its pinned blob (as "accepted"); reads no title, body, comment or branch name, and until hardening posts [G-10]'s record from the run's `summary.json` before the merge ([CI-15]); builds exactly `gh pr merge <n> --merge --match-head-commit <sha>` | [G-04], [CI-14] |
 | T-RV-36 [U] | The spool refuses an unknown key or kind, an oversized file, a head or path field; `serve` refuses a fork's, another author's or a non-`main` pull request; the `gh` call's filter reads only §7.2's fields | [CI-15] |
 | T-RV-37 [U] | A second request for a locked pull request waits; a new head cancels the run; finished sessions' results are reused by the next run | §4.9 |
 | T-RV-38 [U] | `judge` refuses without a TTY and on a mistyped confirmation, and, from hardening, under another OS user (D6); `accept` needs a decision; a judged `refuted` counts as closed; from hardening, `resign` includes judgements and approvals and the checker applies them (D6) | §7.5 |
 | T-RV-39 [CI] | With fake sessions that return planted unique strings as a title, a path and a quote, none of them appears in any artefact, log, step summary, receipt or line of a CI run (H-03) | [RV-09] |
-| T-RV-40 [U] | `workflow-rules.mjs` fails on each planted violation of §10.8, a `uses:` of an action not owned by GitHub among them, and passes the repository's workflows | [CI-08], [CI-15], [BD-03] |
+| T-RV-40 [U] | `workflow-rules.mjs` fails on each planted violation of §10.8, a `uses:` of an action not owned by GitHub and a `gate` whose `needs` lacks a job other than `bun` among them, and passes the repository's workflows | [CI-08], [CI-15], [BD-03] |
 | T-RV-41 [U] | Withdrawn: there is no `import` mode, since nothing is ported ([UI-12]) | [G-04] |
 | T-RV-42 [U] | `dependency`: registry facts captured from a recorded fixture; `dependency_unapproved` until `judge --dependency` | [G-06] |
 | T-RV-43 [U] | `trial --fake` finds every planted item; `trial` never signs; the fake runner refuses outside `trial --fake` | AC-P0-04 |
@@ -2308,9 +2337,10 @@ label, S7-35).
 
 **The MVP** is EXECUTION §2.4's three slices, made exact. Its bar: AC-P0-02 and AC-P0-04, and every
 Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run
-showing the attack pass on its S files (AC-SAT-22). AC-P0-03, the receipt check, moves to hardening
-(D6). AC-P0-02 is checked at the Phase 0 exit (13:30); AC-P0-04 rests on slice 3's `trial` and is
-checked by the end of Saturday (EXECUTION §2.11, §3.7).
+showing the attack pass on its S files (AC-SAT-22; until the pool transport lands, the build's
+workflow reviews stand in for that run: [BD-22], [BD-27]). AC-P0-03, the receipt check, moves to
+hardening (D6). AC-P0-02 is checked at the Phase 0 exit (13:30); AC-P0-04 rests on slice 3's
+`trial` and is checked by the end of Saturday (EXECUTION §2.11, §3.7).
 
 | Slice | By | What lands | Lanes |
 |---|---|---|---|
@@ -2359,9 +2389,9 @@ red once the checker is on `main`, which it reaches in hardening (D6); before th
 | AC-RV-13 [M] | `serve` reviews only open same-repository pull requests into `main` by allowed authors and never reads a title, body, comment or branch name | T-RV-36 |
 | AC-RV-14 [M] | Over Saturday's runs, `commit` p50 is at most 10 minutes and `pr` p50 at most 25 minutes, recorded by the steward at C4 with each miss's cause | `review.run` lines |
 | AC-RV-15 [M] | A pull request updated from `main` with an untouched neighbourhood gets a re-issued result within 60 seconds and no session (recorded in the pull request until hardening, a new signed receipt from then, D6) | T-RV-28, `review.reissue` |
-| AC-RV-16 [CI] | Every Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run showing the attack pass on its S files and sessions within R11 and the floor (AC-SAT-22) | the pull requests' records until hardening, the receipts from then (D6) |
+| AC-RV-16 [CI] | Every Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run showing the attack pass on its S files and sessions within R11 and the floor (AC-SAT-22). Until fin-review's pool transport lands, the build's workflow reviews, the Fable attacker among them, stand in for that run, and each pull request or batch records their rounds in its place ([BD-22], [BD-27]) | the pull requests' records until hardening, the receipts from then (D6) |
 | AC-RV-17 [U] | Every tracked path maps to a CI class, and every global input runs everything | T-RV-21, T-RV-22 |
-| AC-RV-18 [CI] | A docs-only pull request runs only `plan`, `check`, `static` and `gate` (and `review` in `enforcing-ci`) (AC-P0-27) | a planted pull request |
+| AC-RV-18 [CI] | A docs-only pull request runs only `plan`, `check`, `static`, `commit-dates-utc` and `gate` (and `review` in `enforcing-ci`) (AC-P0-27) | a planted pull request |
 | AC-RV-19 [CI] | The workflow rules refuse every case of §10.8 | T-RV-40 |
 | AC-RV-20 [M] | A plausible high finding blocks until the owner judges it at the build machine's terminal (the `fin-review` user's from hardening), with the judgement in the pull request's record until hardening and in the re-signed receipt from then (D6) | T-RV-38 |
 | AC-RV-21 [STG] | `review.run` lines reach the `fin-review-local` source with no finding text (the owner checks one); the `review-nightly` heartbeat pings after the first night | T-RV-46, Better Stack |

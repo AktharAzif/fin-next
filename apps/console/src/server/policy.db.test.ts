@@ -195,6 +195,7 @@ const SAMPLES: Record<RouteId, Sample> = {
     body: () => ({ name: "New Person", email: address("new") }),
   },
   codeLink: { path: () => "/api/sign-in/code-link", body: () => ({ email: address("new") }) },
+  signInMethods: { path: () => "/api/sign-in/methods" },
   viewer: { path: () => "/api/viewer" },
   viewerOrganization: { path: () => "/api/viewer/organization", body: () => ({ orgId: f.orgId }) },
   invitationOpen: {
