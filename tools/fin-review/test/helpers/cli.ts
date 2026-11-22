@@ -43,8 +43,11 @@ export async function cli(argv: string[], options: CliOptions = {}): Promise<Cli
   return { code, stdout, stderr };
 }
 
-/** Runs `node <main> ...argv` as a real process. */
-export function spawnCli(argv: string[], options: CliOptions & { main?: string } = {}): CliRun {
+/** Runs `node <main> ...argv` as a real process, killed after `timeoutMs` (30 s by default). */
+export function spawnCli(
+  argv: string[],
+  options: CliOptions & { main?: string; timeoutMs?: number } = {},
+): CliRun {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(options.env ?? { PATH: process.env["PATH"] })) {
     if (value !== undefined) env[name] = value;
@@ -53,7 +56,7 @@ export function spawnCli(argv: string[], options: CliOptions & { main?: string }
     cwd: options.cwd ?? process.cwd(),
     env,
     shell: false,
-    timeout: 30_000,
+    timeout: options.timeoutMs ?? 30_000,
     maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error !== undefined) throw result.error;
