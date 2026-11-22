@@ -13,6 +13,11 @@ export const roleRow = z.looseObject({
   builtIn: z.boolean(),
   permissionCount: z.number().int().nonnegative(),
   holders: z.number().int().nonnegative(),
+  /**
+   * Who holds the role, by member ID: what a deletion names back as the holders it moves. A list
+   * without it names none, which the server answers with a conflict when anyone holds the role.
+   */
+  holderIds: z.array(z.string()).optional(),
   /** Pending invitations that give this role. */
   invitations: z.number().int().nonnegative().optional(),
   /** The role's permissions, when the answer lists them (the pickers' "can do more than you"). */
@@ -80,11 +85,20 @@ export const saveRole = defineContract({
   output: z.looseObject({ version: z.number().int().nonnegative() }),
 });
 
+/**
+ * Deletes a custom role, moving its holders and pending invitations to `moveTo`. `holders` are the
+ * holders the page showed (the row's `holderIds`), which the intent binds: when they are not the
+ * role's holders now, the answer is `409 conflict` and nobody moves.
+ */
 export const deleteRole = defineContract({
   name: "roles.delete",
   method: "POST",
   path: "/roles/:roleId/delete",
   organization: true,
-  input: z.object({ roleId: z.string().min(1), moveTo: z.string().min(1).optional() }),
+  input: z.object({
+    roleId: z.string().min(1),
+    moveTo: z.string().min(1).optional(),
+    holders: z.array(z.string().min(1)),
+  }),
   output: z.unknown(),
 });

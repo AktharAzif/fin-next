@@ -111,7 +111,12 @@ export const ORGS_ACTIONS = [
     realm: "developer",
     kind: "intent",
     reasonKey: "delete_role",
-    bind: [{ name: "moveTo", kind: "string" }],
+    // The role the holders move to, and the holders the actor was shown (beyond §7.6's `moveTo`,
+    // so a proved intent moves nobody given the role after the actor looked; recorded in the PR).
+    bind: [
+      { name: "moveTo", kind: "string" },
+      { name: "holders", kind: "keys" },
+    ],
   },
 ] as const satisfies readonly StepUpAction[];
 

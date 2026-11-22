@@ -432,9 +432,10 @@ export const HANDLERS = {
 
   async roleDelete(input, deps) {
     const moveTo = typeof input.body.moveTo === "string" ? input.body.moveTo : undefined;
+    const holders = Array.isArray(input.body.holders) ? input.body.holders.map(String) : [];
     return ok(
       await actor(input, deps, (tx, a) =>
-        deleteRole(deps.orgs, tx, a, String(input.params.roleId), { moveTo }),
+        deleteRole(deps.orgs, tx, a, String(input.params.roleId), { moveTo, holders }),
       ),
     );
   },

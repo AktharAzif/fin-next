@@ -42,8 +42,10 @@
       "day": "sat"
     },
     "deleteFailed": {
-      "status": "pending",
-      "day": "sat"
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a deletion whose holders changed meanwhile moves nobody, and the dialog counts again"
     },
     "deleted": {
       "status": "covered",

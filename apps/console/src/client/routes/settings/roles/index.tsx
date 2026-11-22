@@ -1,7 +1,9 @@
 // Settings · Roles (Roles board; spec 02 §8.4, §15.2, §15.2.1): the built-in roles and the
 // organisation's own, with who holds each and how much it allows; duplicate, and delete with the
 // role its holders and invitations move to. Read-only without `role.manage`; moving people needs
-// `member.role` as well. "See changes in the audit log" shows only with `auditLog.read`.
+// `member.role` as well. "See changes in the audit log" shows only with `auditLog.read`. A
+// deletion names the holders the dialog counted, and a refusal that shows the list is out of date
+// reads it again first, so the dialog always counts and offers what is there now.
 import type { ConsoleViewer } from "@fin/app-contracts";
 import { RouterLink, useFin } from "@fin/frame";
 import { DotsThreeIcon, PlusIcon } from "@fin/icons";
@@ -34,6 +36,7 @@ import {
   SettingsTabs,
   useSignedIn,
 } from "../../../components/page.tsx";
+import { deletionInput, deletionRefusal } from "../../../components/role-deletion.ts";
 import {
   canGiveAny,
   pickedRole,
@@ -59,13 +62,16 @@ function RolesPage() {
   const signedIn = useSignedIn();
   const orgId = signedIn?.viewer.currentOrgId ?? "";
   const list = useResource(`roles:${orgId}`, (signal) => fin.api(rolesContract, {}, { signal }));
-  const [deleting, setDeleting] = useState<RoleRow | null>(null);
+  // The role being deleted, by key: the dialog always draws the row as the list has it now.
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const can = signedIn?.can ?? (() => false);
   const manage = can("role.manage");
   const auditLink = can("auditLog.read");
   const all = list.data?.roles ?? [];
   const builtIn = all.filter((role) => role.builtIn);
   const own = all.filter((role) => !role.builtIn);
+  const deleting =
+    deletingKey === null ? null : (own.find((role) => role.roleKey === deletingKey) ?? null);
 
   const columns: TableColumn<RoleRow>[] = [
     {
@@ -114,7 +120,7 @@ function RolesPage() {
             {role.builtIn ? null : (
               <>
                 <MenuSeparator />
-                <MenuItem destructive onSelect={() => setDeleting(role)}>
+                <MenuItem destructive onSelect={() => setDeletingKey(role.roleKey)}>
                   Delete role
                 </MenuItem>
               </>
@@ -216,11 +222,18 @@ function RolesPage() {
       )}
       {deleting === null ? null : (
         <DeleteRoleDialog
+          key={deleting.roleKey}
           role={deleting}
           roles={all}
-          onClose={() => setDeleting(null)}
+          onClose={() => setDeletingKey(null)}
+          onStale={list.reload}
+          onGone={async (sentence) => {
+            setDeletingKey(null);
+            await list.reload();
+            toast.info({ title: `${deleting.label} no longer exists`, description: sentence });
+          }}
           onDeleted={async () => {
-            setDeleting(null);
+            setDeletingKey(null);
             await list.reload();
           }}
         />
@@ -233,6 +246,10 @@ function DeleteRoleDialog(props: {
   role: RoleRow;
   roles: RoleRow[];
   onClose: () => void;
+  /** Reads the list again: who holds the role, or the roles to move to, changed meanwhile. */
+  onStale: () => Promise<void>;
+  /** The role no longer exists: closes the dialog, reads the list again and says so. */
+  onGone: (sentence: string) => Promise<void>;
   onDeleted: () => Promise<void>;
 }) {
   const fin = useFin<ConsoleViewer>();
@@ -245,7 +262,7 @@ function DeleteRoleDialog(props: {
     },
   );
   const [moveTo, setMoveTo] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const holders = props.role.holders;
   const invitations = props.role.invitations ?? 0;
@@ -266,13 +283,10 @@ function DeleteRoleDialog(props: {
   const remove = async () => {
     if (moves && chosen === null) return;
     setBusy(true);
-    setFailed(false);
+    setFailed(null);
     try {
       await withReasonValues("role.delete", { role: props.role.label }, () =>
-        fin.api(deleteRole, {
-          roleId: props.role.roleId ?? props.role.roleKey,
-          ...(moves && chosen !== null ? { moveTo: chosen } : {}),
-        }),
+        fin.api(deleteRole, deletionInput(props.role, moves ? chosen : null)),
       );
       toast.success({
         title: `${props.role.label} was deleted`,
@@ -280,7 +294,15 @@ function DeleteRoleDialog(props: {
       });
       await props.onDeleted();
     } catch (error) {
-      if (!toldElsewhere(error)) setFailed(true);
+      if (toldElsewhere(error)) return;
+      const refused = deletionRefusal(error);
+      if (refused.stale === "gone") {
+        await props.onGone(refused.sentence);
+        return;
+      }
+      // The list is read again first, so the count, the picker and the sentence agree.
+      if (refused.stale === "list") await props.onStale();
+      setFailed(refused.sentence);
     } finally {
       setBusy(false);
     }
@@ -323,15 +345,15 @@ function DeleteRoleDialog(props: {
         )
       }
     >
-      {failed ? (
+      {failed === null ? null : (
         <InlineAlert
           tone="danger"
           title="The role wasn’t deleted, and nobody moved"
           live="assertive"
         >
-          Try again.
+          {failed}
         </InlineAlert>
-      ) : null}
+      )}
       {blocked ? (
         <InlineAlert tone="info" title="You can’t move people to another role.">
           Ask someone who can change people’s roles.

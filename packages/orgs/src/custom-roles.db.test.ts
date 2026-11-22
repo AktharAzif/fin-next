@@ -88,8 +88,32 @@ function update(
   );
 }
 
-function remove(who: SignedIn, orgId: string, roleId: string, moveTo?: string) {
-  const body = moveTo === undefined ? {} : { moveTo };
+/** The holders the Roles page shows for a role (the list's `holderIds`), which a deletion names. */
+async function shown(who: SignedIn, orgId: string, roleId: string): Promise<string[]> {
+  const list = await asActor(
+    h,
+    who,
+    orgId,
+    { method: "GET" },
+    { permission: "member.read", stepUp: { kind: "none" } },
+    (tx, a) => listRoles(tx, a),
+  );
+  if (!list.ok) throw list.error;
+  return list.value.roles.find((r) => r.roleKey === roleId)?.holderIds ?? [];
+}
+
+/** Deletes a role with an intent, naming the holders the list shows now unless told others. */
+async function remove(
+  who: SignedIn,
+  orgId: string,
+  roleId: string,
+  moveTo?: string,
+  holders?: string[],
+) {
+  const body = {
+    ...(moveTo === undefined ? {} : { moveTo }),
+    holders: holders ?? (await shown(who, orgId, roleId)),
+  };
   return withIntent(h, who, (headers) =>
     asActor(
       h,
@@ -277,8 +301,8 @@ describe("the edit allowance (§8.4: 30 an hour and 100 a day per person)", () =
         label: "delete",
         method: "POST",
         action: "role.delete",
-        body: {},
-        run: (tx, a) => deleteRole(h.orgs, tx, a, spare, {}),
+        body: { holders: [] },
+        run: (tx, a) => deleteRole(h.orgs, tx, a, spare, { holders: [] }),
       },
     ];
     await fill(who.userId);
@@ -506,6 +530,62 @@ describe("deleting a custom role", () => {
       [sentId],
     );
     expect(row.rows[0]).toEqual({ status: "cancelled", cancel_reason: "role_deleted" });
+  });
+
+  it("moves only the holders the actor was shown: someone given the role after the proof is a conflict, and the intent binds them", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "deleter_shown");
+    const leads = await roleAs(h, who, orgId, "Leads", ["member.read", "member.invite"]);
+    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const lead = await memberOf(h, who, orgId, "shown_lead", leads);
+    const first = await memberOf(h, who, orgId, "shown_first", readers);
+    const holders = await shown(who, orgId, readers);
+    expect(holders).toEqual([first.memberId]);
+    const asked = { moveTo: "super_admin", holders };
+    const attempt = (body: { moveTo: string; holders: string[] }, headers = {}) =>
+      asActor(
+        h,
+        who,
+        orgId,
+        { body, headers },
+        { ...MANAGE, stepUp: { kind: "intent", action: "role.delete" } },
+        (tx, a) => deleteRole(h.orgs, tx, a, readers, body),
+      );
+    const firstTry = await attempt(asked);
+    const intent = firstTry.ok ? null : intentIdOf(firstTry.error);
+    expect(intent).not.toBeNull();
+    expect((await prove(h, who, intent as string)).status).toBe(200);
+
+    // Meanwhile the lead, who may invite to Readers but never give Super admin, brings someone in.
+    const second = await memberOf(h, lead.who, orgId, "shown_second", readers);
+
+    // The proved re-send: the role's holders are not those shown, so nobody moves.
+    const header = { "fin-step-up-intent": intent as string };
+    const refused = await attempt(asked, header);
+    expect([codeOf(refused), extensionsOf(refused)]).toEqual(["conflict", {}]);
+    // Naming the holders there are now does not fit the intent proved for the one shown.
+    const now = await shown(who, orgId, readers);
+    expect(now.sort()).toEqual([first.memberId, second.memberId].sort());
+    const other = await attempt({ moveTo: "super_admin", holders: now }, header);
+    expect([codeOf(other), extensionsOf(other).reason]).toEqual(["step_up_invalid", "digest"]);
+    const roles = await h.admin.query<{ role_key: string }>(
+      "SELECT role_key FROM identity.member WHERE id = ANY($1::text[])",
+      [[first.memberId, second.memberId]],
+    );
+    expect(roles.rows.map((r) => r.role_key)).toEqual([readers, readers]);
+    const spent = await h.admin.query(
+      "SELECT 1 FROM ops.step_up_intent WHERE id = $1 AND consumed_at IS NULL",
+      [intent],
+    );
+    expect(spent.rowCount).toBe(1);
+
+    // Naming holders the role does not have is the same conflict, before any factor is asked.
+    for (const named of [[], [first.memberId], [first.memberId, lead.memberId]]) {
+      const out = await attempt({ moveTo: "super_admin", holders: named });
+      expect(codeOf(out), JSON.stringify(named)).toBe("conflict");
+    }
+    // Shown both, the actor proves a factor for both, and both move.
+    const done = await remove(who, orgId, readers, "super_admin");
+    expect(done.ok && done.value).toMatchObject({ membersMoved: 2 });
   });
 });
 

@@ -448,11 +448,16 @@ export const ORGS_ROUTES = [
     permission: "role.manage",
     stepUp: "intent",
     action: "role.delete",
-    bind: ["moveTo"],
+    // The holders the actor was shown (the list's `holderIds`), bound beyond §7.6's `moveTo`: a
+    // deletion whose holders are not the role's now is `409 conflict` (recorded in the PR).
+    bind: ["moveTo", "holders"],
     assurance: "aal2_or_working",
     lock: true,
     params: { roleId: "rol" },
-    body: z.strictObject({ moveTo: roleKey.optional() }),
+    body: z.strictObject({
+      moveTo: roleKey.optional(),
+      holders: z.array(z.string().regex(/^mem_[0-9a-hjkmnp-tv-z]{26}$/)).max(1000),
+    }),
     query: "none",
     limits: ["step_up_intents", "role_edit"],
     audit: [

@@ -237,9 +237,9 @@ const CASES: Record<Exclude<OrgsEventName, (typeof REALM_WRITTEN_EVENTS)[number]
         h,
         who,
         orgId,
-        { body: {}, headers },
+        { body: { holders: [] }, headers },
         { ...MANAGE, stepUp: { kind: "intent", action: "role.delete" } },
-        (tx, a) => deleteRole(h.orgs, tx, a, roleId, {}),
+        (tx, a) => deleteRole(h.orgs, tx, a, roleId, { holders: [] }),
       ),
     );
     if (!out.ok) throw out.error;

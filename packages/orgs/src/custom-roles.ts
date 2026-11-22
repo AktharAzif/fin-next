@@ -40,6 +40,11 @@ export interface RoleDetail {
   permissions: DashboardPermission[];
   permissionCount: number;
   holders: number;
+  /**
+   * The members who hold the role, by member ID, in ID order: what a deletion names back as the
+   * holders it was shown, so it never moves anyone given the role since.
+   */
+  holderIds: string[];
   invitations: number;
   version: number | null;
 }
@@ -49,12 +54,15 @@ const NAME_RULES = {
   roleDescription: (description: string) => checkName("roleDescription", description).ok,
 };
 
-async function holderCounts(
-  tx: UnitTx,
-  orgId: string,
-): Promise<{ holders: Map<string, number>; invitations: Map<string, number> }> {
-  const holders = await tx.query<{ role_key: string; n: number }>(
-    `SELECT role_key, count(*)::integer AS n FROM identity.member
+interface HolderCounts {
+  /** The members holding each role key, by member ID, in ID order. */
+  holders: Map<string, string[]>;
+  invitations: Map<string, number>;
+}
+
+async function holderCounts(tx: UnitTx, orgId: string): Promise<HolderCounts> {
+  const holders = await tx.query<{ role_key: string; ids: string[] }>(
+    `SELECT role_key, array_agg(id ORDER BY id) AS ids FROM identity.member
       WHERE organization_id = $1 GROUP BY role_key`,
     [orgId],
   );
@@ -64,20 +72,21 @@ async function holderCounts(
     [orgId],
   );
   return {
-    holders: new Map(holders.rows.map((r) => [r.role_key, Number(r.n)])),
+    holders: new Map(holders.rows.map((r) => [r.role_key, [...r.ids]])),
     invitations: new Map(invitations.rows.map((r) => [r.role_key, Number(r.n)])),
   };
 }
 
 function detailOf(
   role: RoleLookup,
-  counts: { holders: Map<string, number>; invitations: Map<string, number> },
+  counts: HolderCounts,
   record: CustomRole | undefined,
 ): RoleDetail | null {
   if (typeof role === "string") return null;
   const key = roleKeyOf(role);
   const permissions = [...permissionsFor(role)];
   const builtIn = role.kind === "built_in" ? builtInRole(CATALOGUE, role.key) : undefined;
+  const holderIds = counts.holders.get(key) ?? [];
   return {
     roleKey: key,
     kind: role.kind,
@@ -86,7 +95,8 @@ function detailOf(
     summary: builtIn?.summary ?? summary(CATALOGUE, role),
     permissions,
     permissionCount: permissions.length,
-    holders: counts.holders.get(key) ?? 0,
+    holders: holderIds.length,
+    holderIds: [...holderIds],
     invitations: counts.invitations.get(key) ?? 0,
     version: record?.version ?? null,
   };
@@ -418,22 +428,40 @@ export async function updateRole(
   return { roleId, version: record.version + 1 };
 }
 
+/** Whether two lists name the same members, once each, in any order. */
+function sameMembers(held: readonly string[], named: readonly string[]): boolean {
+  const now = new Set(held);
+  const shown = new Set(named);
+  return now.size === shown.size && [...now].every((id) => shown.has(id));
+}
+
 /**
  * `POST /api/roles/:roleId/delete` (§8.4): `role.manage`, and `member.role` when people move; every
  * holder and every pending invitation moves to `moveTo`, a role the actor may give.
+ *
+ * `holders` are the members the actor was shown as holding the role (`holderIds` of the list), and
+ * the intent binds them: when the members holding it now are not exactly those, the answer is
+ * `409 conflict` and nobody moves, so a proved intent never moves someone given the role after the
+ * actor looked (an owner's decision beyond §7.6's `moveTo`, recorded in the pull request). Pending
+ * invitations need no such binding: each moves only when its inviter may give the new role.
  */
 export async function deleteRole(
   orgs: Orgs,
   tx: UnitTx,
   actor: OrgActor,
   roleId: string,
-  body: { moveTo?: string | undefined },
+  body: { moveTo?: string | undefined; holders: readonly string[] },
 ): Promise<{ roleId: string; membersMoved: number; invitationsMoved: number }> {
   const orgId = actor.organization.id;
   const { me } = await lockTeam(tx, actor, [], "role.manage");
   roleOf(me, roleId);
   const role = lookupRole(me.roles, roleId);
+  checkEditing(me, role);
   const holders = await holdersOf(tx, orgId, roleId);
+  const heldNow = holders.map((holder) => holder.memberId);
+  if (!sameMembers(heldNow, body.holders)) {
+    throw new OrgRefusal("conflict", "role.holders_changed");
+  }
   const invitations = await tx.query<{ id: string }>(
     `SELECT id FROM identity.invitation
       WHERE organization_id = $1 AND role_key = $2 AND status = 'pending' ORDER BY id FOR UPDATE`,
@@ -459,7 +487,7 @@ export async function deleteRole(
     });
   }
   await actor.confirm({
-    body: { moveTo: body.moveTo },
+    body: { moveTo: body.moveTo, holders: [...body.holders] },
     target: roleId,
     organizationId: orgId,
   });

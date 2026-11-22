@@ -230,6 +230,7 @@ export const BUILT_IN_ROLES = [
     builtIn: true,
     permissionCount: ALL.length,
     holders: 1,
+    holderIds: ["mem_maya"],
     permissions: ALL,
   },
   {
@@ -240,6 +241,7 @@ export const BUILT_IN_ROLES = [
     builtIn: true,
     permissionCount: ADMIN.length,
     holders: 1,
+    holderIds: ["mem_admin"],
     permissions: ADMIN,
   },
 ];
@@ -252,6 +254,7 @@ export const DEVELOPER_ROLE = {
   builtIn: false,
   permissionCount: 4,
   holders: 2,
+  holderIds: ["mem_dev_1", "mem_dev_2"],
   invitations: 0,
   permissions: ["member.read", "apiKey.read", "webhooks.read", "customers.read"],
 };

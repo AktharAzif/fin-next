@@ -874,11 +874,61 @@ test.describe("roles", () => {
     await enterCode(page, "Authenticator code", "123456");
     await expect(page.getByText("Developer was deleted").first()).toBeVisible();
     const deletes = api.calls("POST /api/roles/:roleId/delete");
+    // Each names the two holders the dialog counted.
+    const sent = { moveTo: "admin", holders: ["mem_dev_1", "mem_dev_2"] };
     expect(deletes.map((d) => [d.path, d.body])).toEqual([
-      ["/api/roles/rol_dev/delete", { moveTo: "admin" }],
-      ["/api/roles/rol_dev/delete", { moveTo: "admin" }],
+      ["/api/roles/rol_dev/delete", sent],
+      ["/api/roles/rol_dev/delete", sent],
     ]);
     expect(deletes[1]?.headers["fin-step-up-intent"]).toBe("sti_delete");
+  });
+
+  test("@journey @security a deletion whose holders changed meanwhile moves nobody, and the dialog counts again", async ({
+    page,
+  }) => {
+    const joined = {
+      ...DEVELOPER_ROLE,
+      holders: 3,
+      holderIds: [...DEVELOPER_ROLE.holderIds, "mem_dev_3"],
+    };
+    const api = signedIn()
+      .on("GET /api/roles", (_r, nth) =>
+        ok({ roles: [...BUILT_IN_ROLES, nth === 0 ? DEVELOPER_ROLE : joined] }),
+      )
+      .on("POST /api/roles/:roleId/delete", (_r, nth) =>
+        nth === 0
+          ? problem(409, "conflict")
+          : nth === 1
+            ? stepUpRequired("role.delete", { intentId: "sti_delete" })
+            : ok({}),
+      )
+      .on("POST /api/auth/two-factor/verify-totp", ok({}));
+    await api.install(page);
+    await gotoReady(page, "/settings/roles");
+    await page.getByRole("button", { name: "More for Developer" }).click();
+    await page.getByRole("menuitem", { name: "Delete role" }).click();
+    const remove = page.getByRole("dialog", { name: "Delete Developer?" });
+    await expect(remove.getByText("2 people have this role.")).toBeVisible();
+    await remove.getByRole("radio", { name: /^Admin/ }).check();
+    const confirm = remove.getByRole("button", { name: "Delete role" });
+    await confirm.click();
+    // Someone joined the role: nobody moved, the list was read again, and the dialog counts three.
+    await expect(
+      remove.getByText(
+        "The people with this role changed meanwhile. Check how many move now, then try again.",
+      ),
+    ).toBeVisible();
+    await expect(remove.getByText("3 people have this role.")).toBeVisible();
+    await expect(remove.getByRole("radio", { name: /^Admin/ })).toBeChecked();
+    await confirm.click();
+    await enterCode(page, "Authenticator code", "123456");
+    await expect(page.getByText("Developer was deleted").first()).toBeVisible();
+    const deletes = api.calls("POST /api/roles/:roleId/delete");
+    expect(deletes.map((d) => d.body)).toEqual([
+      { moveTo: "admin", holders: ["mem_dev_1", "mem_dev_2"] },
+      { moveTo: "admin", holders: ["mem_dev_1", "mem_dev_2", "mem_dev_3"] },
+      { moveTo: "admin", holders: ["mem_dev_1", "mem_dev_2", "mem_dev_3"] },
+    ]);
   });
 
   test("@journey a copy of Super admin leaves out what can't be given, and saves", async ({

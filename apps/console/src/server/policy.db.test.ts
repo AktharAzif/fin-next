@@ -255,7 +255,8 @@ const SAMPLES: Record<RouteId, Sample> = {
   },
   roleDelete: {
     path: () => `/api/roles/${f.limitedRoleId}/delete`,
-    body: () => ({ moveTo: "admin" }),
+    // The role's one holder, as the list shows it, so only the guard can refuse it.
+    body: () => ({ moveTo: "admin", holders: [f.limitedMemberId] }),
   },
   auditLog: { path: () => "/api/audit-log" },
 };

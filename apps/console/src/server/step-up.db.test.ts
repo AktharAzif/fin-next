@@ -431,10 +431,15 @@ const SCENARIOS: Record<string, () => Promise<Scenario>> = {
     return {
       who: o.client,
       orgId: o.orgId,
-      request: { path: `/api/roles/${first}/delete`, body: { moveTo: "admin" } },
+      // Nobody holds either role, so the holders a deletion names are none.
+      request: { path: `/api/roles/${first}/delete`, body: { moveTo: "admin", holders: [] } },
       variants: {
-        moveTo: { body: { moveTo: second } },
+        moveTo: { body: { moveTo: second, holders: [] } },
         target: { path: `/api/roles/${second}/delete` },
+      },
+      unreachable: {
+        holders:
+          "any other holders than the role has are refused as a conflict before the step-up is asked",
       },
       other: await anotherSession(o),
     };
