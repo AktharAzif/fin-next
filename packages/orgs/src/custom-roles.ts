@@ -127,11 +127,60 @@ const PROBLEM_FIELD: Readonly<Record<Exclude<RoleProblem, "beyond">, string>> = 
   missing_need: "permissions",
 };
 
-/** Refuses a draft as the role editor does: `beyond` is a giving refusal, the rest `400 invalid`. */
+/** The unique index on a custom role's name within its organisation (this area's migration). */
+const NAME_INDEX = "role_name_once";
+
+/**
+ * Whether another role of the organisation has `name` the way the `role_name_once` index compares
+ * names: `lower(name)` in the database's collation, which can fold letters the editor's own
+ * comparison keeps apart (a capital I with a dot above, under a libc collation). Read inside the
+ * team-change lock with the organisation's roles locked, so no name is written in between.
+ */
+async function nameTakenInStore(
+  tx: UnitTx,
+  orgId: string,
+  name: string,
+  exceptRoleId: string | null,
+): Promise<boolean> {
+  const result = await tx.query(
+    `SELECT 1 FROM identity.role
+      WHERE organization_id = $1 AND lower(name) = lower($2) AND ($3::text IS NULL OR id <> $3)
+      LIMIT 1`,
+    [orgId, name, exceptRoleId],
+  );
+  return result.rowCount > 0;
+}
+
+/**
+ * A write the name index refused, as the editor's refusal (`400 invalid`, `name_taken` on the
+ * name); null for anything else. The check inside the lock comes first, so this is a backstop.
+ */
+export function nameTakenRefusal(error: unknown): OrgRefusal | null {
+  if (typeof error !== "object" || error === null) return null;
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown };
+  if (code !== "23505" || constraint !== NAME_INDEX) return null;
+  return invalid([{ path: "name", code: "name_taken" }], "role.name_taken");
+}
+
+/** Runs a write of a role's name, answering the name index's refusal as the editor's. */
+async function writeName(run: () => Promise<{ rowCount: number }>): Promise<{ rowCount: number }> {
+  try {
+    return await run();
+  } catch (error) {
+    throw nameTakenRefusal(error) ?? error;
+  }
+}
+
+/**
+ * Refuses a draft as the role editor does: `beyond` is a giving refusal, the rest `400 invalid`.
+ * `takenInStore` says the database's name index holds the name for another role, which is
+ * `name_taken` too, in the engine's order, even where the engine tells the two names apart.
+ */
 function checkDraft(
   me: LockedActor,
   draft: { name: string; description: string; permissions: readonly string[] },
   others: readonly CustomRoleRecord[],
+  takenInStore: boolean,
 ): void {
   const problems = validateRole(
     CATALOGUE,
@@ -143,6 +192,10 @@ function checkDraft(
     me.permissions,
     { takenNames: others.map((r) => r.name), names: NAME_RULES },
   );
+  if (takenInStore && !problems.includes("name_taken")) {
+    // `name`, when it is there, is always the first problem, and `name_taken` the next.
+    problems.splice(problems[0] === "name" ? 1 : 0, 0, "name_taken");
+  }
   if (problems.includes("beyond")) throw givingRefusal("beyond");
   if (problems.length > 0) {
     const fields: FieldProblem[] = problems
@@ -197,7 +250,12 @@ export async function createRole(
   if (customRoleLimitReached(me.roles.size)) {
     throw new OrgRefusal("limit_reached", "limits.custom_roles", { limit: 30 });
   }
-  checkDraft(me, { name, description, permissions: body.permissions }, [...me.roles.values()]);
+  checkDraft(
+    me,
+    { name, description, permissions: body.permissions },
+    [...me.roles.values()],
+    await nameTakenInStore(tx, orgId, name, null),
+  );
   await actor.confirm({
     body: { name, description, permissions: [...body.permissions] },
     target: null,
@@ -207,10 +265,12 @@ export async function createRole(
   const permissions = knownPermissions(body.permissions);
   const roleId = newId("rol", orgs.clock);
   const now = orgs.clock.now();
-  await tx.query(
-    `INSERT INTO identity.role (id, organization_id, name, description, created_by, created_at, updated_at, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $6, 1)`,
-    [roleId, orgId, name, description, actor.person.id, now],
+  await writeName(() =>
+    tx.query(
+      `INSERT INTO identity.role (id, organization_id, name, description, created_by, created_at, updated_at, version)
+       VALUES ($1, $2, $3, $4, $5, $6, $6, 1)`,
+      [roleId, orgId, name, description, actor.person.id, now],
+    ),
   );
   await tx.query(
     `INSERT INTO identity.role_permission (role_id, permission)
@@ -271,6 +331,7 @@ export async function updateRole(
     me,
     { name, description, permissions: body.permissions },
     [...me.roles.values()].filter((r) => r.id !== roleId),
+    await nameTakenInStore(tx, orgId, name, roleId),
   );
   await actor.confirm({
     body: { name, description, permissions: [...body.permissions], version: body.version },
@@ -282,10 +343,12 @@ export async function updateRole(
   const after = knownPermissions(body.permissions);
   const { added, removed } = permissionDiff(CATALOGUE, before, after);
   const now = orgs.clock.now();
-  const updated = await tx.query(
-    `UPDATE identity.role SET name = $2, description = $3, version = version + 1, updated_at = $4
-      WHERE id = $1 AND version = $5`,
-    [roleId, name, description, now, body.version],
+  const updated = await writeName(() =>
+    tx.query(
+      `UPDATE identity.role SET name = $2, description = $3, version = version + 1, updated_at = $4
+        WHERE id = $1 AND version = $5`,
+      [roleId, name, description, now, body.version],
+    ),
   );
   if (updated.rowCount !== 1) throw new OrgRefusal("conflict", "role.stale_version");
   // The stored rows are replaced by the known set, so a row that broke a rule does not linger.

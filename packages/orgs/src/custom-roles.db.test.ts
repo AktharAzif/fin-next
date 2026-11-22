@@ -1,7 +1,9 @@
 // Custom roles (spec 02 §8.4, [SA-11], [SA-32]): made through the engine's editor validation, never
 // beyond the editor's own permissions, never restricted, every need held, a unique name that does
-// not read as a built-in; edited only with the current version, never one the editor holds or one
-// that outranks them; deleted with every holder and invitation moved; at most 30.
+// not read as a built-in (nor one the database's name index holds); edited only with the current
+// version, never one the editor holds or one that outranks them; deleted with every holder and
+// invitation moved; at most 30; every change counted against the person's edit allowance.
+import type { UnitTx } from "@fin/identity";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -12,16 +14,28 @@ import {
   createHarness,
   extensionsOf,
   type Harness,
+  intentIdOf,
   inviteAs,
   memberOf,
   ownerWithOrganization,
   person,
+  prove,
   roleAs,
   type SignedIn,
   unique,
   withIntent,
 } from "../test/harness.ts";
-import { createRole, deleteRole, getRole, listRoles, updateRole } from "./custom-roles.ts";
+import {
+  createRole,
+  deleteRole,
+  getRole,
+  listRoles,
+  nameTakenRefusal,
+  updateRole,
+} from "./custom-roles.ts";
+import type { OrgActor } from "./guard.ts";
+import { newId } from "./ids.ts";
+import { ORG_LIMITS } from "./limits.ts";
 
 let database: TestDatabase;
 let h: Harness;
@@ -143,6 +157,167 @@ describe("creating a custom role", () => {
     }
     const out = await create(who, orgId, "One more", ["member.read"]);
     expect([codeOf(out), extensionsOf(out).limit]).toEqual(["limit_reached", 30]);
+  });
+
+  it("refuses a name the database's name index holds for another role, even one the editor tells apart, before any factor is asked", async (ctx) => {
+    // "Info desk" with a capital I with a dot above: the editor's own comparison keeps it apart
+    // from "Info desk", while `lower()` folds both to one key under the server's collation.
+    const dotted = "İnfo desk";
+    const folds = await h.admin.query<{ same: boolean }>("SELECT lower($1) = lower($2) AS same", [
+      dotted,
+      "Info desk",
+    ]);
+    if (folds.rows[0]?.same !== true) {
+      ctx.skip("this database's collation keeps the two names apart, as the editor does");
+    }
+    const { who, orgId } = await ownerWithOrganization(h, "folding");
+    expect((await create(who, orgId, "Info desk", ["member.read"])).ok).toBe(true);
+    const other = await roleAs(h, who, orgId, "Help desk", ["member.read"]);
+    const draft = { name: dotted, description: "", permissions: ["member.read"] };
+    const firstTries = [
+      await asActor(
+        h,
+        who,
+        orgId,
+        { body: draft },
+        { ...MANAGE, stepUp: { kind: "intent", action: "role.create" } },
+        (tx, a) => createRole(h.orgs, tx, a, draft),
+      ),
+      await asActor(
+        h,
+        who,
+        orgId,
+        { method: "PUT", body: { ...draft, version: 1 } },
+        { ...MANAGE, stepUp: { kind: "intent", action: "role.update" } },
+        (tx, a) => updateRole(h.orgs, tx, a, other, { ...draft, version: 1 }),
+      ),
+    ];
+    for (const out of firstTries) {
+      expect(codeOf(out)).toBe("invalid");
+      expect(extensionsOf(out)).toEqual({ fields: [{ path: "name", code: "name_taken" }] });
+    }
+  });
+
+  it("answers the name index's own refusal as the editor's name_taken, should a write ever reach it", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "backstop");
+    const clock = { now: () => new Date() };
+    const insert = (name: string) =>
+      seed(
+        h.admin,
+        "INSERT INTO identity.role (id, organization_id, name, created_by) VALUES ($1, $2, $3, $4)",
+        [newId("rol", clock), orgId, name, who.userId],
+      );
+    await insert("Backstop role");
+    const refused = await insert("BACKSTOP ROLE").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(refused).toMatchObject({ code: "23505", constraint: "role_name_once" });
+    expect(nameTakenRefusal(refused)).toMatchObject({
+      code: "invalid",
+      status: 400,
+      lineReason: "role.name_taken",
+      extensions: { fields: [{ path: "name", code: "name_taken" }] },
+    });
+    for (const other of [{ code: "23505", constraint: "role_pkey" }, new Error("x"), null]) {
+      expect(nameTakenRefusal(other)).toBe(null);
+    }
+  });
+});
+
+describe("the edit allowance (§8.4: 30 an hour and 100 a day per person)", () => {
+  /** Fills the person's role edit allowance, both windows. */
+  async function fill(userId: string): Promise<void> {
+    const now = Date.now();
+    for (const window of ORG_LIMITS.role_edit) {
+      await h.admin.query(
+        `INSERT INTO ops.rate_window (key, window_start, count) VALUES ($1, $2, $3)
+         ON CONFLICT (key, window_start) DO UPDATE SET count = EXCLUDED.count`,
+        [
+          `role_edit:${window.ms}:${userId}`,
+          new Date(Math.floor(now / window.ms) * window.ms),
+          window.max,
+        ],
+      );
+    }
+  }
+
+  it("counts making, saving and deleting a role, refusing each past it with nothing changed and the intent unspent", async () => {
+    const { who, orgId } = await ownerWithOrganization(h, "allowance");
+    const kept = await roleAs(h, who, orgId, "Kept", ["member.read"]);
+    const spare = await roleAs(h, who, orgId, "Spare", ["member.read"]);
+    const draft = { name: "Kept", description: "", permissions: ["member.read", "auditLog.read"] };
+    const changes: {
+      label: string;
+      method: string;
+      action: "role.create" | "role.update" | "role.delete";
+      body: Record<string, unknown>;
+      run: (tx: UnitTx, a: OrgActor) => Promise<unknown>;
+    }[] = [
+      {
+        label: "make",
+        method: "POST",
+        action: "role.create",
+        body: { name: "Extra", description: "", permissions: ["member.read"] },
+        run: (tx, a) =>
+          createRole(h.orgs, tx, a, {
+            name: "Extra",
+            description: "",
+            permissions: ["member.read"],
+          }),
+      },
+      {
+        label: "save",
+        method: "PUT",
+        action: "role.update",
+        body: { ...draft, version: 1 },
+        run: (tx, a) => updateRole(h.orgs, tx, a, kept, { ...draft, version: 1 }),
+      },
+      {
+        label: "delete",
+        method: "POST",
+        action: "role.delete",
+        body: {},
+        run: (tx, a) => deleteRole(h.orgs, tx, a, spare, {}),
+      },
+    ];
+    await fill(who.userId);
+    try {
+      for (const change of changes) {
+        const attempt = (headers: Record<string, string>) =>
+          asActor(
+            h,
+            who,
+            orgId,
+            { method: change.method, body: change.body, headers },
+            { ...MANAGE, stepUp: { kind: "intent", action: change.action } },
+            change.run,
+          );
+        const first = await attempt({});
+        const intent = first.ok ? null : intentIdOf(first.error);
+        expect(intent, change.label).not.toBeNull();
+        expect((await prove(h, who, intent as string)).status, change.label).toBe(200);
+        const refused = await attempt({ "fin-step-up-intent": intent as string });
+        expect(codeOf(refused), change.label).toBe("rate_limited");
+        const spent = await h.admin.query(
+          "SELECT 1 FROM ops.step_up_intent WHERE id = $1 AND consumed_at IS NOT NULL",
+          [intent],
+        );
+        expect(spent.rowCount, change.label).toBe(0);
+      }
+      const roles = await h.admin.query<{ id: string; name: string; version: number }>(
+        "SELECT id, name, version FROM identity.role WHERE organization_id = $1 ORDER BY name",
+        [orgId],
+      );
+      expect(roles.rows.map((r) => [r.id, r.name, Number(r.version)])).toEqual([
+        [kept, "Kept", 1],
+        [spare, "Spare", 1],
+      ]);
+    } finally {
+      await h.admin.query("DELETE FROM ops.rate_window WHERE key LIKE $1", [
+        `role_edit:%:${who.userId}`,
+      ]);
+    }
   });
 });
 
