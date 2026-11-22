@@ -204,7 +204,7 @@ describe("the staff fragment's alerts", () => {
       (m) => /\bkind: "([a-z_]+)"/.exec(m[1] ?? "")?.[1],
     );
     expect(written.length).toBeGreaterThan(0);
-    expect([...written].sort()).toEqual(CHANGE_KINDS);
+    expect([...written].sort()).toEqual([...CHANGE_KINDS].sort());
   });
 });
 
