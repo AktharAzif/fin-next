@@ -399,6 +399,95 @@ describe("imports:check", () => {
     assert.deepEqual(check("packages/core/src/x.ts", imp("../../ops/fin/src/x.ts")), []);
   });
 
+  describe("the tokenizer's oracle: typescript/unstable/sync and typescript/unstable/ast", () => {
+    const ORACLE = ["typescript/unstable/sync", "typescript/unstable/ast"];
+    const controls = { controlPaths: [...CONTROL.controlPaths, "scripts/js-tokens.mjs"] };
+    const check = (/** @type {string} */ file, /** @type {string} */ text) =>
+      rules(checkSource(file, text, () => false, controls));
+    /** @param {string} specifier */
+    const dynamic = (specifier) => src(`const m = await ${IMP}("${specifier}");`);
+
+    test("the allowed case: a test file under scripts/ or a control path imports exactly them", () => {
+      for (const file of [
+        "scripts/test/js-tokens.oracle.test.mjs",
+        "scripts/test/x.test.mjs",
+        ".github/scripts/test/bundle-check.oracle.test.mjs",
+        "ops/fin/src/x.test.ts",
+      ]) {
+        for (const specifier of ORACLE) {
+          assert.deepEqual(check(file, imp(specifier)), [], `${file} ${specifier}`);
+          assert.deepEqual(check(file, dynamic(specifier)), [], `${file} ${specifier}`);
+        }
+      }
+    });
+
+    test("a control-path file that is no test is refused them", () => {
+      for (const specifier of ORACLE) {
+        assert.deepEqual(check(".github/scripts/bundle-check.mjs", imp(specifier)), [
+          "control-path-import",
+        ]);
+        assert.deepEqual(check("scripts/js-tokens.mjs", imp(specifier)), ["builtins-only"]);
+        assert.deepEqual(check("ops/fin/src/main.ts", imp(specifier)), ["builtins-only"]);
+        assert.deepEqual(check("scripts/layout-check.mjs", imp(specifier)), ["builtins-only"]);
+      }
+    });
+
+    test("a test importing typescript's main entry or any other subpath is refused", () => {
+      for (const specifier of [
+        "typescript",
+        "typescript/",
+        "typescript/unstable",
+        "typescript/unstable/ast/scanner",
+        "typescript/unstable/ast/is",
+        "typescript/unstable/fs",
+        "typescript/unstable/async",
+        "typescript/unstable/proto",
+        "typescript/unstable/sync/",
+        "typescript/unstable/sync?raw",
+        "typescript/package.json",
+        "typescript/lib/tsc.js",
+        "typescript/dist/api/sync/api.js",
+        "TypeScript/unstable/sync",
+      ]) {
+        assert.deepEqual(
+          check("scripts/test/x.test.mjs", imp(specifier)),
+          ["builtins-only"],
+          specifier,
+        );
+        assert.deepEqual(
+          check("scripts/test/x.test.mjs", dynamic(specifier)),
+          ["builtins-only"],
+          specifier,
+        );
+        assert.deepEqual(
+          check(".github/scripts/test/x.test.mjs", imp(specifier)),
+          ["control-path-import"],
+          specifier,
+        );
+      }
+    });
+
+    test("a test importing any other package is refused", () => {
+      for (const specifier of ["acorn", "@babel/parser", "typescript-eslint", "@typescript/api"]) {
+        assert.deepEqual(
+          check("scripts/test/x.test.mjs", imp(specifier)),
+          ["builtins-only"],
+          specifier,
+        );
+        assert.deepEqual(
+          check(".github/scripts/test/x.test.mjs", imp(specifier)),
+          ["control-path-import"],
+          specifier,
+        );
+        assert.deepEqual(
+          check("ops/fin/src/x.test.ts", imp(specifier)),
+          ["builtins-only"],
+          specifier,
+        );
+      }
+    });
+  });
+
   test("the two control-path checks of this repository import Node built-ins only", () => {
     for (const file of ["scripts/check-supply-chain.mjs", "scripts/public-safety.mjs"]) {
       const { imports } = findImports(readFileSync(join(REPO_ROOT, file), "utf8"));
