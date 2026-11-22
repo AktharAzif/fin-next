@@ -1126,6 +1126,10 @@ describe("static builds", () => {
       `throw Error(\`<${"$"}{u.displayName}> must be used inside <${"$"}{o}${"$"}{x}>.\`);let r=/\\/v1\\//;`,
       `x="<${"$"}{y}"+z;w=/\\/api\\//;q=\`a\`;`,
       `x='<a${"$"}{y}'+z;w=/\\/api\\//;q=\`a\`;`,
+      // A name joined to a `<` is read by that quote kind's piece reading alone: the code after
+      // the string is no tag's, so a regular expression there is code.
+      'x="<"+t;y=/\\/\\/x\\.y/.test(s);',
+      "x=`<`+t;y=/\\/\\/x\\.y/.test(s);",
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1162,6 +1166,23 @@ describe("static builds", () => {
       `e.innerHTML=\`<a${d}{c}${d}{\`href=//evil.example/x\`}>go</a>\`;`,
       "e.innerHTML=`<`+t+` href=//evil.example/x>go`;",
       'e.innerHTML="<"+t+" href=//evil.example/x>go";',
+      // An optional attribute right after the tag's name: the substitution that ends the name
+      // holds the literal that writes it (rolldown's output, and the quoted spelling of a file
+      // Vite copies as it is).
+      `e.innerHTML=\`<a${d}{t?\` href=//evil.example/x\`:\`\`}>go</a>\``,
+      `e.innerHTML=\`<img${d}{t?\` src=//evil.example/x.png\`:\`\`}>\``,
+      `e.innerHTML=\`<form${d}{t?\` action=//evil.example/s\`:\`\`}>\``,
+      `e.innerHTML=\`<button${d}{t?\` formaction=//evil.example/s\`:\`\`}>\``,
+      `e.innerHTML=\`<video${d}{t?\` poster=//evil.example/p.png\`:\`\`}>\``,
+      `e.innerHTML=\`<a${d}{t?\` href=//evil.example/x\`:\`\`} hidden>\``,
+      `e.innerHTML=\`<a${d}{h?" href=//evil.example/x":""}>go</a>\`;`,
+      `e.innerHTML=\`<a${d}{h?' href=//evil.example/x':''}>go</a>\`;`,
+      // A name joined by a list, a `+=` or concat (rolldown's output of each).
+      "function f(e){return[`<`,e,` href=//evil.example/x>go</`,e,`>`].join(``)}",
+      "function f(e){let t=`<`;return t+=e,t+=` href=//evil.example/x>go`,t}",
+      'e.innerHTML="<".concat(t," href=//evil.example/x>go");',
+      // An attribute's `=` far past the substitution, within MAX_NAME_GAP.
+      `e.innerHTML=\`<a${d}{c} data-tracking-disabled hidden href=//evil.example/x>go</a>\`;`,
     ]) {
       assert.deepEqual(staticOrigins(t, { "assets/a.js": text }), ["https://evil.example"], text);
     }
@@ -1177,6 +1198,9 @@ describe("static builds", () => {
       `${b}<${d}{t} title=${d}{n} `,
       `${b}<${b}+t+${b}`,
       `${b}<${b}+t+${b} `,
+      `${b}<a`,
+      `${b}<${b},t,${b}`,
+      `${b}<${b};h+=t,h+=${b}`,
     ];
     /** @type {((open: string, attribute: string) => string)[]} */
     const goesOn = [
@@ -1194,7 +1218,7 @@ describe("static builds", () => {
       for (const goOn of goesOn) {
         for (const name of attributes) {
           const text = goOn(open, `${name}=//evil.example/x`);
-          assert.ok(originsIn(text, { kind: "script" }).includes("https://evil.example"), text);
+          assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"], text);
         }
       }
     }
@@ -1294,7 +1318,12 @@ describe("static builds", () => {
     ];
     for (const [what, file, text] of cases) {
       const found = staticOrigins(t, { [file]: text });
-      assert.ok(found.includes("https://react.dev.evil.example"), `${what}: ${found.join()}`);
+      // Each origin compared whole, never as a substring of a URL.
+      const origin = "https://react.dev.evil.example";
+      assert.ok(
+        found.some((o) => o === origin),
+        `${what}: ${found.join()}`,
+      );
     }
   });
 
@@ -1489,6 +1518,18 @@ describe("static builds", () => {
         `jsx("meta",{httpEquiv:"refresh",content:\`${"$"}{n}; //intranet/x\`})`,
         "https://intranet",
       ],
+      [
+        "a single label after setAttribute's refresh key",
+        "assets/a.js",
+        'm.setAttribute("http-equiv","refresh"),m.content=n+";//intranet/x";',
+        "https://intranet",
+      ],
+      [
+        "a single label after a refresh property's name",
+        "assets/a.js",
+        `o={refresh:\`${"$"}{n}; //intranet/x\`};`,
+        "https://intranet",
+      ],
     ];
     for (const [what, file, text, origin] of cases) {
       const found = staticOrigins(t, { [file]: text });
@@ -1510,6 +1551,18 @@ describe("static builds", () => {
       ["assets/a.js", 'x=code+"; //@ts-ignore";'],
       ["assets/a.js", `x=\`let a=${"$"}{v};//TODO\`;`],
       ["assets/a.js", 'x=";//@ts-ignore";y=x+"; //istanbul ignore next";'],
+      // Nor where only a longer name, or a function's or a call's, holds the word: no refresh key.
+      ["assets/a.js", 'const r=e.refreshToken;x=code+";//eslint-disable-line";'],
+      ["assets/a.js", `function onRefresh(){}x=\`${"$"}{code};//TODO\`;`],
+      ["assets/a.js", 'i.refetchOnRefresh=!0,x=code+"; //@ts-ignore";'],
+      ["assets/a.js", `${"$"}RefreshReg${"$"}(a,"App");x=\`let a=${"$"}{v};//noop\`;`],
+      ["assets/a.js", `function refresh(){}x=\`${"$"}{code};//eslint-disable-line\`;`],
+      ["assets/a.js", 'refresh(),x=code+";//eslint-disable-line";'],
+      // Nor a key further back than REFRESH_REACH.
+      [
+        "assets/a.js",
+        `jsx("meta",{httpEquiv:"refresh",${"k:0,".repeat(70)}content:\`${"$"}{n}; //intranet/x\`})`,
+      ],
       // A regular expression after a string's closing quote and `,` or `;`, or after a `}`: its
       // escaped slashes are code's, never two raw ones; nor does a plain string's `"${"` close a
       // substitution before a comment.
@@ -1523,6 +1576,12 @@ describe("static builds", () => {
       ["assets/a.js", 'm="in";/\\/\\/cdn\\.example\\.com/.test(u)&&w();'],
       ["assets/a.js", `x="${"$"}{";f(function(){a()},/\\//.test(b));`],
       ["assets/a.js", `f({a:"${"$"}{"}, //cdn.example.com\n)`],
+      // A regular expression right after a block's `}`, a plain string's `"${"` before it: the
+      // `}` may close a substitution, but its escaped slashes are code's.
+      ["assets/a.js", `x="${"$"}{";if(a){b()}/\\/\\/cdn\\.example\\.com\\//.test(c)&&f();`],
+      ["assets/a.js", `x='${"$"}{';for(;;){}/\\/\\/cdn\\.example\\.com\\//.test(c);`],
+      ["assets/a.js", `x="${"$"}{";function f(){return 1}/\\/\\/cdn\\.example\\.com\\//.test(c);`],
+      ["assets/a.js", `x="${"$"}{";function f(){}/\\/\\/cdn\\.example\\.org\\//.test(s)&&c();`],
     ];
     for (const [file, text] of passes) {
       assert.deepEqual(staticRules(t, { [file]: text }), [], text);
@@ -1791,6 +1850,57 @@ describe("static builds", () => {
       ["a formatter", 'a.href=fmt("%s://evil.example/x",s);', ["https://evil.example"]],
       ["a scheme's start", `a.href=\`${d}{p}s://evil.example/x\`;`, ["https://evil.example"]],
       ["a variable's name", 'a.href="$SCHEME://evil.example/x";', ["https://evil.example"]],
+      [
+        "a formatter's named argument",
+        "t.href=e(`%(scheme)s://evil.example/x`,{scheme:n})",
+        ["https://evil.example"],
+      ],
+      // A scheme's start the code before the string writes: joined, listed or concatenated, its
+      // end at the string's own start is no scheme the text fixes (rolldown's output included).
+      ["a scheme's start joined", 'a.href=p+"s://evil.example/x";', ["https://evil.example"]],
+      ["the same in quotes", "a.href=p+'s://evil.example/x';", ["https://evil.example"]],
+      ["the same in backticks", "e.href=t+`s://evil.example/x`", ["https://evil.example"]],
+      ["after a call", 'a.href=f()+"s://evil.example/x";', ["https://evil.example"]],
+      ["more of it", 'a.href=h+"ttps://evil.example/x";', ["https://evil.example"]],
+      ["a scheme split", 'fetch("http"+"s://evil.example/x")', ["https://evil.example"]],
+      ["split elsewhere", "fetch('htt'+'ps://evil.example/x');", ["https://evil.example"]],
+      ["split in backticks", "fetch(`http`+`s://evil.example/x`)", ["https://evil.example"]],
+      ["a chosen start", "e.href=(t?`ws`:`http`)+`s://evil.example/x`", ["https://evil.example"]],
+      ["concat", 'a.href="".concat(p,"s://evil.example/x");', ["https://evil.example"]],
+      ["a list", 'a.href=[p,"s://evil.example/x"].join("");', ["https://evil.example"]],
+      // A quote character in the string's own text before the colon: an apostrophe, or an
+      // attribute's quote in markup the string holds.
+      ["an apostrophe", 'a.href="Don\'t go to %s://evil.example/x";', ["https://evil.example"]],
+      [
+        "an apostrophe's placeholder",
+        'a.href=t("it\'s {scheme}://evil.example/x");',
+        ["https://evil.example"],
+      ],
+      [
+        "one in backticks",
+        "e.href=fmt(`Can't open %s://evil.example/x`,t)",
+        ["https://evil.example"],
+      ],
+      [
+        "an attribute's quotes",
+        'e.innerHTML=`<a class="x" href={scheme}://evil.example/x>go</a>`.replace(`{scheme}`,t)',
+        ["https://evil.example"],
+      ],
+      [
+        "a formatter's markup",
+        'e.innerHTML=fmt(`<a class="btn" href=%s://evil.example/x>go</a>`,t)',
+        ["https://evil.example"],
+      ],
+      [
+        "single quotes in double",
+        "e.innerHTML=\"<a title='x' href={scheme}://evil.example/x>go</a>\";",
+        ["https://evil.example"],
+      ],
+      [
+        "a value joined before it",
+        "e.innerHTML='<a class=\"'+c+'\" href={scheme}://evil.example/x>go</a>';",
+        ["https://evil.example"],
+      ],
       // A URL split into literals the script joins.
       ["split at the scheme", 'fetch("https://"+"evil.example/x")', ["https://evil.example"]],
       ["the same in backticks", "fetch(`https://`+`evil.example/x`)", ["https://evil.example"]],
@@ -1827,6 +1937,55 @@ describe("static builds", () => {
           "https://d.evil.example",
         ],
       ],
+      // A host's start chosen and joined to a literal rest, in the substitution or the brackets.
+      [
+        "a chosen start joined in a substitution",
+        `function f(e){return fetch(\`https://${d}{(e?\`app\`:\`staging\`)+\`.evil.example\`}/login\`)}`,
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "a chosen start joined in brackets",
+        "function f(e){return fetch(`https://`+((e?`app`:`staging`)+`.evil.example`)+`/login`)}",
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "two choices in a row",
+        `u=\`https://${d}{a?\`x\`:\`y\`}${d}{b?\`.eu\`:\`.us\`}.evil.example/p\`;`,
+        [
+          "https://x.eu.evil.example",
+          "https://x.us.evil.example",
+          "https://y.eu.evil.example",
+          "https://y.us.evil.example",
+        ],
+      ],
+      ["a host split", 'fetch("https://evil"+".example/x")', ["https://evil.example"]],
+      // Literals joined after a scheme in markup a string holds, or where no quote starts the URL
+      // (rolldown's output of each).
+      [
+        "an attribute's quotes",
+        'e.innerHTML=`<a href="https://`+(t?`app.evil.example`:`staging.evil.example`)+`/login">Sign in</a>`',
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "an unquoted attribute",
+        "function f(e){return`<form action=https://`+(e?`app.evil.example`:`staging.evil.example`)+`/s method=post>`}",
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "a url(",
+        "function f(e){return`url(https://`+(e?`app.evil.example`:`staging.evil.example`)+`/p.png)`}",
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "prose",
+        "function f(e){return`Open https://`+(e?`app.evil.example`:`staging.evil.example`)+` to go on`}",
+        ["https://app.evil.example", "https://staging.evil.example"],
+      ],
+      [
+        "two literals in markup",
+        "e.innerHTML='<a href=\"https://'+\"evil.example\"+'/login\">go</a>';",
+        ["https://evil.example"],
+      ],
     ];
     for (const [what, text, origins] of cases) {
       assert.deepEqual(staticOrigins(t, { "assets/a.js": text }), origins, what);
@@ -1854,9 +2013,26 @@ describe("static builds", () => {
       'u="https://"+host;v="https://"+(a||b);w="https://"+f("x.example");',
       `u=\`https://${d}{f(\`x.example\`)}/a\`;v=\`https://${d}{a?b:\`x.example\`}/a\`;`,
       `u="{scheme}://intranet/x";v=\`${d}{p}s://localhost:8080/\`;`,
-      // A scheme the text fixes, not a web one: its URL loads no web page.
+      // A scheme the text fixes, not a web one: its URL loads no web page, joined to code or not.
       'u="git+https://github.example/x/y.git";v="mongodb://db.example.com:27017/d";',
       `w=\`socks5://proxy.example.com:${d}{p}\`;x="see chrome://policy.";y='a xhttps://evil.example';`,
+      'u=x+"git+https://github.example/a.git";v="see "+"chrome://policy";',
+      // A host's start chosen or joined, the rest built at run time from a name or configuration
+      // (hosts by role, AGENTS.md section 2; rolldown's output of each): only its start is
+      // literal, and a host's start is never read as an origin, nor is `${...}` text.
+      `location.href=\`https://${d}{p?"":"staging."}${d}{host}\`;`,
+      `location.href=\`https://${d}{e?"a":"b"}${d}{host}\`;`,
+      'location.href="https://"+(e?"staging.":"")+host;',
+      `function f(e,t){return\`https://${d}{e===\`api\`?\`api\`:\`console\`}.${d}{t.zone}/\`}`,
+      "function f(e,t){return`https://`+(e?`www.`:``)+t}",
+      `function f(e,t,n){return\`https://${d}{e?\`[\`:\`\`}${d}{t}${d}{e?\`]\`:\`\`}:${d}{n}\`}`,
+      `function f(e,t){return\`https://${d}{e?\`staging.\`:\`\`}${d}{t}\`}`,
+      `fetch(\`https://api.${d}{zone}/x\`);fetch("https://www."+host);`,
+      // `://` and a host's start with only a root dot: URL-normalising code, which names no host.
+      `function f(e){return e.replace(/^(\\w+):\\/\\//,\`${d}1://www.\`)}`,
+      "function f(e){return e.replace(`://www.`,`://`)}",
+      "function f(e){return e.includes(`://www.`)}",
+      'u=p+"://www."+h;w=e.replace("://m.","://");',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1902,6 +2078,13 @@ describe("static builds", () => {
           `u=\`https://${d}{a?\`x.y\`:b?\`z.w\`:\`q.r\`}/p\`;`.repeat(30_000),
           ["https://x.y", "https://z.w", "https://q.r"],
         ],
+        // Brackets after each of many schemes that never close: each join's scan runs to its
+        // bound, all of them within one budget linear in the text.
+        ['"://"+('.repeat(100_000), []],
+        ['"https://"+('.repeat(100_000), []],
+        ['"https://"+(a?"x":'.repeat(100_000), []],
+        // A long run of joined empty literals: followed MAX_JOINS deep, not to its end.
+        [`u="https://x.y"${'+""'.repeat(100_000)};`, ["https://x.y"]],
       ])) {
         assert.deepEqual(linearOrigins(text, "script"), origins, text.slice(0, 30));
       }

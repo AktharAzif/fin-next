@@ -23,10 +23,11 @@
 //       markup or in a start tag a script writes, CSS's url(, a refresh's time, a template
 //       literal's substitution, or as a srcset candidate; and after any C0 control or space, which
 //       the URL parser strips first), and in a script every `://` in a string's text that no
-//       scheme the text fixes stands before (`${s}://host`, `"{scheme}://host"`, `"%s://host"`),
-//       and every host a script joins to a scheme from literals or chooses among them
-//       (`"https://"+"host"`, `` `https://${p?`a.host`:`b.host`}` ``), has an origin on
-//       ALLOWED_ORIGINS, the namespace and message
+//       scheme the text fixes stands before (`${s}://host`, `"{scheme}://host"`, `"%s://host"`,
+//       a scheme's end the code before the string writes the start of: `p+"s://host"`), and
+//       every host a script joins to a URL from literals or chooses among them, in any context
+//       (`"https://"+"host"`, `` `https://${p?`a.host`:`b.host`}` ``, `(p?"a":"b")+".host"`), has
+//       an origin on ALLOWED_ORIGINS, the namespace and message
 //       URLs the pinned libraries carry, none of which is fetched; and no URL with a user name or
 //       password, whose host is not the one it seems to name. Each URL is read as a browser reads
 //       it, in every reading of the text a browser may apply (readings: JavaScript's and JSON's
@@ -52,9 +53,11 @@
 //       URL starts (after a `}` that may close a substitution, a refresh whose time a script
 //       writes, `://` after a scheme written at run time), two slashes count only as the source
 //       text wrote them: a regular expression's escaped `/\/` is code. A host a script builds at
-//       run time from a name or a call (`"https://" + host`, `https://${host}`) is not read
-//       here: the page's own policy refuses it in the browser. The work is linear in the text,
-//       counted, not timed (scanWork);
+//       run time from a name or a call (`"https://" + host`, `https://${host}`), or whose
+//       literal text is only its start, a single label with or without a dot after it
+//       (`https://api.${zone}`, `"https://www."+host`), is not read here: the page's own policy
+//       refuses it in the browser. The work is linear in the text, counted, not timed
+//       (scanWork);
 //     - no source map (`*.map` in any case, or a `sourceMappingURL` comment pointing at one);
 //     - nothing a deployment refuses (release-static.mjs's artefactProblems: `_headers` or
 //       `env.json`, which the deploy renders, SF-05; a Worker control file; a path the deploy
@@ -596,14 +599,19 @@ const MAX_NAME_GAP = 256;
  * that tag's markup: past a `}` that may close the substitution, before any raw `>`, `"` or `'`
  * and within MAX_NAME_GAP, an attribute's `=` (`` `<a${c} href=...>` ``), the literal's end, where
  * the tag may go on in the next string (`` `<a${c}`+` href=...>` ``), or another substitution,
- * which may write the attributes (`` `<a${c}${h?` href=...`:``}>` ``). A message goes on otherwise
- * (`` `<${o}> must be used inside` ``), and so does a plain string's `"<${"` (its quote comes
- * first).
+ * which may write the attributes (`` `<a${c}${h?` href=...`:``}>` ``). So does a substitution that
+ * holds a raw quote or backtick itself: a literal nested in it may write the attributes
+ * (`` `<a${h?` href=...`:``}>` ``, as the minifier prints an optional attribute). A message goes on
+ * otherwise (`` `<${o}> must be used inside` ``), and so does a plain string's `"<${"` (its quote
+ * comes first).
  * @param {Reading} reading
+ * @param {number} start the substitution's `${`
  * @param {number[]} closes each `}` that may close the substitution
+ * @param {(from: number) => number} quoteFrom the first raw quote or backtick at or after an index
  */
-function markupAfter(reading, closes) {
+function markupAfter(reading, start, closes, quoteFrom) {
   const { text } = reading;
+  if (closes.length > 0 && quoteFrom(start + 2) < Math.max(...closes)) return true;
   let visited = 0;
   let markup = false;
   for (const close of closes) {
@@ -624,7 +632,9 @@ function markupAfter(reading, closes) {
 
 /**
  * Whether a `<` right before a raw quote ends a string the code joins a tag's name to: past white
- * space after the quote, a `+` (`` `<`+t+` href=...>` ``).
+ * space after the quote, a `+` (`` `<`+t+` href=...>` ``), a list's or a call's next item
+ * (`` [`<`,t,` href=...>`].join(``) ``), the end of a statement a `+=` goes on from
+ * (`` let h=`<`;h+=t,h+=` href=...>` ``), or `.concat(` (`"<".concat(t," href=...>")`).
  * @param {Reading} reading
  * @param {number} quote
  */
@@ -633,7 +643,10 @@ function nameJoined(reading, quote) {
   if (isSpelled(reading, quote)) return false;
   let k = quote + 1;
   while (ASCII_SPACE.has(text[k] ?? "")) k++;
-  return text[k] === "+" && text[k + 1] !== "+";
+  const c = text[k];
+  return (
+    (c === "+" && text[k + 1] !== "+") || c === "," || c === ";" || text.startsWith(".concat(", k)
+  );
 }
 // The HTML tokenizer's states inside a start tag, as bits, so every tag open at once is followed
 // in one pass: before an attribute's name, in it, after it, before its value, in a double- or
@@ -1011,9 +1024,24 @@ function attributeEquals(reading, spansOf) {
   found.sort((a, b) => a - b);
   if (found.length === 0) return equals;
   const spans = spansOf();
+  // The raw quotes and backticks, least first, found once for every written tag (markupAfter).
+  /** @type {number[] | null} */
+  let quotes = null;
+  /** @param {number} from */
+  const quoteFrom = (from) => {
+    if (quotes === null) {
+      quotes = [];
+      for (let k = 0; k < text.length; k++) {
+        if (SCRIPT_QUOTES.includes(text[k] ?? "") && !isSpelled(reading, k)) quotes.push(k);
+      }
+      spend(text.length);
+    }
+    return firstFrom(quotes, from);
+  };
   // Such a tag opens only where its literal goes on as markup (markupAfter).
   const opens = found.filter(
-    (last) => !written.has(last) || markupAfter(reading, spans.get(last + 1) ?? []),
+    (last) =>
+      !written.has(last) || markupAfter(reading, last + 1, spans.get(last + 1) ?? [], quoteFrom),
   );
   if (opens.length === 0) return equals;
   // The states held at substitutions, by each `}` that may close them: the literal reading's,
@@ -1205,8 +1233,17 @@ const VALUE_START = new Set(["=", ...QUOTES]);
  * @typedef {{ at: number, named: boolean, written: boolean }} RefreshStart
  */
 
-/** How far before a refresh written at run time a refresh key (`refresh`) counts as its own. */
+/** How far before a refresh written at run time a refresh key (REFRESH_KEY) counts as its own. */
 const REFRESH_REACH = 256;
+/**
+ * A refresh key: the word `refresh` as http-equiv's value, right after a quote (raw, or one an
+ * escape spelled) or an `=` (`httpEquiv:"refresh"`, `"http-equiv","refresh"`, `http-equiv=refresh`),
+ * or as a property's or an attribute's name before its `:` or `=` (`{refresh:...}`); never part of
+ * a longer name (`refreshToken`, `onRefresh`, `$RefreshReg$`, `useCacheRefresh`), nor a function's
+ * or a call's name (`function refresh(){}`, `refresh()`).
+ */
+const REFRESH_KEY =
+  /(?:(?<=["'`\u{e000}-\u{e002}]|=[\t\n\f\r ]*)refresh(?![\w$-])|(?<![\w$-])refresh(?=[\t\n\f\r ]*(?::|=(?!=))))/giu;
 
 /**
  * Where the value starts whose refresh URL (HTML's shared declarative refresh steps) starts at
@@ -1349,8 +1386,11 @@ function contextsBefore(reading, index, kind, inTag, inList, script) {
 /**
  * An authority as one reading reads it: `cut` when it ran past MAX_AUTHORITY; `crossed` when it
  * was read past where the literal may end, or in a guessed context; `built` when a script's
- * template literal substitution (a raw `${`) stands in it or right after it.
- * @typedef {{ authority: string, cut: boolean, crossed: boolean, built: boolean }} AuthorityRead
+ * template literal substitution (a raw `${`) stands in it or right after it, or code goes on with
+ * it; `end`, where readAuthority stopped (the quote, the `${` or what else ended it), so a script's
+ * joins may go on from there (scanReading's `extend`).
+ * @typedef {{ authority: string, cut: boolean, crossed: boolean, built: boolean, end?: number }}
+ *   AuthorityRead
  */
 
 /**
@@ -1441,7 +1481,7 @@ function readAuthority(reading, start, context, script) {
     if ("/\\?#".includes(c)) break;
     if (context.kind === "quoted" && c === context.end && spelled === context.spelled) break;
     if (script && c === "$" && text[i + 1] === "{" && !spelled && !isSpelled(reading, i + 1)) {
-      reads.push({ authority, cut: false, crossed, built: true });
+      reads.push({ authority, cut: false, crossed, built: true, end: i });
       built = true;
       authority += "${";
       i++;
@@ -1456,7 +1496,7 @@ function readAuthority(reading, start, context, script) {
       if (context.kind === "css") {
         if (c === " " || c === "\f" || c === ")" || cssBadUrl(c)) break;
       } else if (QUOTES.has(c)) {
-        reads.push({ authority, cut: false, crossed, built });
+        reads.push({ authority, cut: false, crossed, built, end: i });
         crossed = true;
       } else if (context.kind === "attribute" && (c === " " || c === "\f" || c === ">")) {
         break;
@@ -1465,7 +1505,7 @@ function readAuthority(reading, start, context, script) {
     authority += UNMARKED.get(c) ?? c;
   }
   spend(i - start + 1);
-  reads.push({ authority, cut: false, crossed, built });
+  reads.push({ authority, cut: false, crossed, built, end: i });
   return reads;
 }
 
@@ -1484,11 +1524,13 @@ function readAuthority(reading, start, context, script) {
 
 /**
  * Whether a host the URL parser wrote names one a browser reaches on the network: it has a dot
- * (an IPv4 address in any spelling is written with dots) or is an IPv6 address. A single label
- * names no host anyone outside the network holds.
+ * between two labels (an IPv4 address in any spelling is written with dots) or is an IPv6
+ * address. A single label, with or without a root dot after it (`www.`, a host's start), names no
+ * host anyone outside the network holds.
  * @param {string} hostname
  */
-const networkHost = (hostname) => hostname.includes(".") || hostname.startsWith("[");
+const networkHost = (hostname) =>
+  hostname.replace(/\.$/, "").includes(".") || hostname.startsWith("[");
 
 /**
  * A URL from its scheme and authority: its origin, or null when it has none the text fixes (a
@@ -1548,8 +1590,13 @@ function foundUrl(scheme, { authority, cut, crossed, built }, start, network = f
   }
   // A host a script's substitution stands in is built at run time; the reading up to the
   // substitution names the fixed part before it, when there is one. A `$` anywhere else, or in
-  // markup or a stylesheet, is the host's own.
-  const runTime = !/[A-Za-z0-9]/.test(url.hostname) || (built && url.hostname.includes("${"));
+  // markup or a stylesheet, is the host's own. Where the script goes on building the host right
+  // after the text read (a substitution, or code its literal is joined to), a single label, with
+  // or without a dot after it, is only the host's start (`https://api.${zone}`,
+  // `"https://www."+host`): that host is built at run time too. A port's `:` ends the host.
+  const hostStart = built && !/:[0-9]*$/.test(read) && !networkHost(url.hostname);
+  const runTime =
+    !/[A-Za-z0-9]/.test(url.hostname) || (built && url.hostname.includes("${")) || hostStart;
   return {
     url: at,
     origin: runTime ? null : url.origin,
@@ -1752,13 +1799,22 @@ function lastBefore(list, at) {
 
 /** How many literals joined one after another a URL is read through (scanReading's joins). */
 const MAX_JOINS = 4;
+/**
+ * The most hosts a choice among literals, or literals joined to one, gives a URL (literalChoice,
+ * scanReading's `choose`): a bound on the readings, far past what honest code chooses among.
+ */
+const MAX_CHOICES = 64;
+/** A web scheme's end without its start (`s` of `https`, `ttps`, `ss` of `wss`). */
+const SCHEME_TAIL = /^(?:s|ps|tps|ttps|p|tp|ttp|ss)$/i;
 
 /**
  * Whether the text fixes a whole scheme before a colon in a string (from the string's start, or
  * after white space or punctuation): a letter, then letters, digits, `+`, `-` or `.`, as the URL
  * parser reads one (`git+https`, `chrome`, `mysql`). A scheme written at run time, in part or
- * whole, is none: after a substitution's `}` (`${p}s`), a placeholder's `%`, `{` or `$` (`%s`,
- * `$SCHEME`), or nothing at all (`{scheme}`, `"://"`).
+ * whole, is none: after a substitution's `}` (`${p}s`), a placeholder's `%`, `{`, `$` or `)`
+ * (`%s`, `$SCHEME`, `%(scheme)s`), or nothing at all (`{scheme}`, `"://"`); nor is a web scheme's
+ * end at the string's own start, whose start the code before the string wrote (`p+"s://host"`,
+ * `"http"+"s://host"`, `[p,"s://host"].join("")`).
  * @param {string} text
  * @param {number} colon
  * @param {number} opener where the string's text starts: its quote, or a substitution's `}`
@@ -1767,7 +1823,9 @@ function fixedScheme(text, colon, opener) {
   let k = colon - 1;
   while (k > opener && /[A-Za-z0-9+.-]/.test(text[k] ?? "")) k--;
   spend(colon - k);
-  return /^[A-Za-z]/.test(text.slice(k + 1, colon)) && !"}%{$".includes(text[k] ?? "");
+  const letters = text.slice(k + 1, colon);
+  if (!/^[A-Za-z]/.test(letters) || "}%{$)".includes(text[k] ?? "")) return false;
+  return !(k === opener && SCHEME_TAIL.test(letters));
 }
 
 /**
@@ -1825,15 +1883,17 @@ function closingBracket(reading, open, limit) {
 }
 
 /**
- * The literals an expression from `from` to `to` (a substitution's, or brackets') chooses its
- * value from, each as its text's start and its closing quote, or null where it may take any other
- * value: a literal, alone, in brackets, as a condition's branch (`c?"a":"b"`, nested) or after
- * `||` or `??` (`"a"||"b"`). A condition may hold anything but a `:` or `,` of its own; a value
- * that is a name, a call or anything else is one built at run time.
+ * The texts an expression from `from` to `to` (a substitution's, or brackets') chooses its value
+ * from, each as the URL parser reads a literal's text (tabs and new lines dropped), or null where
+ * it may take any other value: a literal, alone, in brackets, as a condition's branch
+ * (`c?"a":"b"`, nested), after `||` or `??` (`"a"||"b"`), or literals joined by `+`, each pair
+ * of choices joined (`(c?"app":"staging")+".host"`), at most MAX_CHOICES. A condition may hold
+ * anything but a `:` or `,` of its own; a value that is a name, a call or anything else, or joins
+ * one, is one built at run time.
  * @param {Reading} reading
  * @param {number} from
  * @param {number} to
- * @returns {[number, number][] | null}
+ * @returns {string[] | null}
  */
 function literalChoice(reading, from, to) {
   const { text } = reading;
@@ -1876,25 +1936,46 @@ function literalChoice(reading, from, to) {
     return mark;
   };
   /**
+   * A literal's text as the URL parser reads it.
+   * @param {[number, number]} literal its text's start and its closing quote
+   */
+  const textOf = ([start, end]) => {
+    let out = "";
+    for (let k = start; k < end; k++) {
+      const c = text[k] ?? "";
+      if (c !== "\t" && c !== "\n" && c !== "\r") out += UNMARKED.get(c) ?? c;
+    }
+    spend(end - start);
+    return out;
+  };
+  /** @typedef {{ values: string[], end: number }} Chosen */
+  /**
+   * A literal, or a value in brackets.
    * @param {number} p
    * @param {number} depth
-   * @returns {{ values: [number, number][], end: number } | null}
+   * @returns {Chosen | null}
    */
-  const value = (p, depth) => {
+  const primary = (p, depth) => {
     if (depth > 8) return null;
     const at = space(p);
     const literal = literalAt(reading, at, to);
-    /** @type {{ values: [number, number][], end: number } | null} */
-    let r = null;
-    if (literal !== null) {
-      r = { values: [literal], end: literal[1] + 1 };
-    } else if (text[at] === "(") {
-      const inner = value(at + 1, depth + 1);
-      const close = inner === null ? -1 : space(inner.end);
-      if (inner === null || text[close] !== ")") return null;
-      r = { values: inner.values, end: close + 1 };
-    } else {
-      const mark = conditionEnd(at);
+    if (literal !== null) return { values: [textOf(literal)], end: literal[1] + 1 };
+    if (text[at] !== "(") return null;
+    const inner = value(at + 1, depth + 1);
+    const close = inner === null ? -1 : space(inner.end);
+    if (inner === null || text[close] !== ")") return null;
+    return { values: inner.values, end: close + 1 };
+  };
+  /**
+   * @param {number} p
+   * @param {number} depth
+   * @returns {Chosen | null}
+   */
+  const value = (p, depth) => {
+    if (depth > 8) return null;
+    let r = primary(p, depth);
+    if (r === null) {
+      const mark = conditionEnd(space(p));
       const yes = mark === -1 ? null : value(mark + 1, depth + 1);
       const colon = yes === null ? -1 : space(yes.end);
       if (yes === null || text[colon] !== ":") return null;
@@ -1904,10 +1985,23 @@ function literalChoice(reading, from, to) {
     }
     for (;;) {
       const op = space(r.end);
-      if (!text.startsWith("||", op) && !text.startsWith("??", op)) return r;
-      const more = value(op + 2, depth + 1);
-      if (more === null) return null;
-      r = { values: [...r.values, ...more.values], end: more.end };
+      /** @type {string[]} */
+      let values;
+      if (text[op] === "+" && text[op + 1] !== "+" && text[op + 1] !== "=") {
+        // `+` joins tighter than `||`, `??` and a condition: only the literal or brackets after it.
+        const more = primary(op + 1, depth + 1);
+        if (more === null) return null;
+        values = r.values.flatMap((a) => more.values.map((b) => a + b));
+        r = { values, end: more.end };
+      } else if (text.startsWith("||", op) || text.startsWith("??", op)) {
+        const more = value(op + 2, depth + 1);
+        if (more === null) return null;
+        values = [...r.values, ...more.values];
+        r = { values, end: more.end };
+      } else {
+        return r;
+      }
+      if (values.length > MAX_CHOICES) return null;
     }
   };
   const r = value(from, 0);
@@ -1959,8 +2053,10 @@ function scanReading(reading, kind, found) {
    * @param {UrlStart} how
    */
   const read = (scheme, start, context, how) => {
-    const reads = readAuthority(reading, start, context, kind === "script");
-    if (how === "scheme" || how === "run-time") reads.push(...joinedReads(start, context, 0));
+    let reads = readAuthority(reading, start, context, kind === "script");
+    if (kind === "script" && (how === "scheme" || how === "run-time")) {
+      reads = extend(reads, context, 0);
+    }
     for (const r of reads) {
       const authority = context.kind === "srcset" ? r.authority.replace(/,+$/, "") : r.authority;
       keep(foundUrl(scheme, { ...r, authority }, how, context.network === true));
@@ -1975,93 +2071,176 @@ function scanReading(reading, kind, found) {
     spans ??= substitutions(reading, sureEnds);
     return spans;
   };
+  // The joins' scans (a literal's authority, a bracket's close, a choice among literals) are
+  // charged to one budget linear in the text: past it, no join is followed and the host is read as
+  // built at run time, so brackets that never close after many schemes cost no more than the text.
+  let joinBudget = 2 * text.length + 64 * MAX_SUBSTITUTION;
   /**
-   * The authorities a script joins to a URL's scheme from literals (`"https://"+"host/x"`,
-   * `` `https://`+`host` ``), or chooses from literals in a substitution or brackets right after
-   * it (`` `https://${p?`app.host`:`staging.host`}/x` ``, `` `https://`+(p?`a.host`:`b.host`) ``),
-   * each literal as a host (with the text after the choice where the literal names only the
-   * host's start), read as past the literal's end (`crossed`). A plain identifier, a call or
-   * anything else between them is a host built at run time: the page's own policy refuses it.
-   * Joins are followed up to MAX_JOINS deep, each over at most MAX_SUBSTITUTION characters.
-   * @param {number} start where the authority starts
+   * One scan of a join, its work charged to the budget; null once the budget is spent.
+   * @template T
+   * @param {() => T} scan
+   * @returns {T | null}
+   */
+  const charged = (scan) => {
+    if (joinBudget <= 0) return null;
+    const before = work.visits;
+    const result = scan();
+    joinBudget -= work.visits - before;
+    return result;
+  };
+  /** @param {number} k */
+  const space = (k) => {
+    let j = k;
+    while (ASCII_SPACE.has(text[j] ?? "")) j++;
+    spend(j - k + 1);
+    return j;
+  };
+  /** @param {number} k */
+  const rawQuote = (k) => SCRIPT_QUOTES.includes(text[k] ?? "") && !isSpelled(reading, k);
+  /** What a join goes on with where the host is built at run time, and where it ends. */
+  /** @type {AuthorityRead} */
+  const RUN_TIME = { authority: "", cut: false, crossed: true, built: true };
+  /** @type {AuthorityRead} */
+  const ENDS = { authority: "", cut: false, crossed: true, built: false };
+  /**
+   * Each chosen literal as a host's text: up to its first `/`, `\`, `?` or `#`, or, where it
+   * names none, joined to each authority the text after the choice goes on with, at most
+   * MAX_CHOICES.
+   * @param {string[]} values
+   * @param {() => AuthorityRead[]} after
+   * @returns {AuthorityRead[]}
+   */
+  const choose = (values, after) => {
+    /** @type {AuthorityRead[]} */
+    const out = [];
+    /** @type {AuthorityRead[] | null} */
+    let rests = null;
+    for (const value of values) {
+      const cut = value.search(/[/\\?#]/);
+      if (cut !== -1) {
+        out.push({ authority: value.slice(0, cut), cut: false, crossed: true, built: false });
+      } else {
+        rests ??= after();
+        for (const rest of rests) {
+          out.push({
+            authority: value + rest.authority,
+            cut: rest.cut,
+            crossed: true,
+            built: rest.built,
+          });
+        }
+      }
+      if (out.length >= MAX_CHOICES) break;
+    }
+    return out;
+  };
+  /**
+   * What the code joins with `+` to the literal whose closing quote is at an index: null where
+   * nothing is joined; the next literal's authority (past the URL's slashes, where none is read
+   * yet: `"https:/"+"/host"`), or each literal a choice in brackets gives
+   * (`` `https://`+(p?`a.host`:`b.host`) ``), each going on with its own joins; a host built at run
+   * time where a name, a call or anything else is joined, or the joins pass MAX_JOINS. The next
+   * literal ends the URL where the URL's own context does (white space in prose, an unquoted
+   * attribute's end, url('s `)`), and at its own closing quote.
+   * @param {number} quote
+   * @param {UrlContext} context the URL's
+   * @param {number} depth
+   * @param {boolean} slashes whether the URL's slashes may go on in the next literal
+   * @returns {AuthorityRead[] | null}
+   */
+  const joinedAfter = (quote, context, depth, slashes) => {
+    let k = space(quote + 1);
+    if (text[k] !== "+" || text[k + 1] === "+" || text[k + 1] === "=") return null;
+    k = space(k + 1);
+    if (depth >= MAX_JOINS) return [RUN_TIME];
+    if (rawQuote(k)) {
+      let from = k + 1;
+      if (slashes) {
+        SLASH_RUN.lastIndex = from;
+        from += SLASH_RUN.exec(text)?.[0].length ?? 0;
+      }
+      /** @type {UrlContext} */
+      const next =
+        context.kind === "none" || context.kind === "attribute" || context.kind === "css"
+          ? context
+          : { kind: "quoted", end: text[k] ?? "", spelled: false };
+      const reads = charged(() => readAuthority(reading, from, next, true));
+      if (reads === null) return [RUN_TIME];
+      return extend(reads, next, depth + 1).map((r) => ({ ...r, crossed: true }));
+    }
+    if (text[k] !== "(") return [RUN_TIME];
+    const close = charged(() =>
+      closingBracket(reading, k, Math.min(text.length, k + MAX_SUBSTITUTION)),
+    );
+    if (close === null || close === -1) return [RUN_TIME];
+    const values = charged(() => literalChoice(reading, k + 1, close));
+    if (values === null) return [RUN_TIME];
+    return choose(values, () => joinedAfter(close, context, depth + 1, false) ?? [ENDS]);
+  };
+  /**
+   * What a choice among literals in the substitution whose `${` is at an index gives the host,
+   * each literal joined to what the text after the substitution goes on with
+   * (`` `https://${p?`app.host`:`staging.host`}/x` ``, `` `https://${p?"":"staging."}host` ``), or
+   * null where the substitution may hold anything else.
+   * @param {number} at
+   * @param {UrlContext} context
+   * @param {number} depth
+   * @returns {AuthorityRead[] | null}
+   */
+  const chosenAt = (at, context, depth) => {
+    if (depth >= MAX_JOINS) return null;
+    const close = spansOf().get(at)?.at(-1);
+    if (close === undefined || close - at > MAX_SUBSTITUTION) return null;
+    const values = charged(() => literalChoice(reading, at + 2, close));
+    if (values === null) return null;
+    return choose(values, () => {
+      const rest = charged(() => readAuthority(reading, close + 1, context, true));
+      return rest === null ? [RUN_TIME] : extend(rest, context, depth + 1);
+    });
+  };
+  /**
+   * A script's reads of a URL's authority, with the hosts it joins to them from literals
+   * (`"https://"+"host/x"`, `"https://ho"+"st/x"`, in markup a string holds:
+   * `'<a href="https://'+"host"+'">'`) or chooses among literals in a substitution or brackets
+   * (`` `https://${p?`app.host`:`staging.host`}/x` ``, `` `https://`+(p?`a.host`:`b.host`) ``,
+   * `` `https://${(p?`app`:`staging`)+`.host`}` ``), read past the literal's end (`crossed`). A
+   * read the script goes on from is a host's start (`built`): a single label there, or one with
+   * only a dot after it, is a host built at run time (foundUrl), whether a name, a call or a
+   * literal goes on with it (`"https://www."+host`, `` `https://${p?"":"staging."}${zone}` ``).
+   * A plain identifier, a call or anything else joined or chosen is a host built at run time: the
+   * page's own policy refuses it. Joins are followed up to MAX_JOINS deep, each over at most
+   * MAX_SUBSTITUTION characters, their scans within the budget.
+   * @param {AuthorityRead[]} reads
    * @param {UrlContext} context
    * @param {number} depth
    * @returns {AuthorityRead[]}
    */
-  const joinedReads = (start, context, depth) => {
+  const extend = (reads, context, depth) => {
     /** @type {AuthorityRead[]} */
-    const reads = [];
-    if (kind !== "script" || depth >= MAX_JOINS) return reads;
-    /**
-     * @param {[number, number][]} values each literal's text, from its start to its closing quote
-     * @param {() => string[]} after the authorities the text after the choice goes on with
-     */
-    const choose = (values, after) => {
-      /** @type {string[] | null} */
-      let goesOn = null;
-      for (const [from, to] of values) {
-        let value = "";
-        for (let k = from; k < to; k++) {
-          const c = text[k] ?? "";
-          if (c !== "\t" && c !== "\n" && c !== "\r") value += UNMARKED.get(c) ?? c;
-        }
-        spend(to - from);
-        const cut = value.search(/[/\\?#]/);
-        if (cut === -1 && goesOn === null) goesOn = after();
-        const rests = cut === -1 ? (goesOn ?? []) : [""];
-        for (const rest of rests) {
-          const authority = cut === -1 ? value + rest : value.slice(0, cut);
-          reads.push({ authority, cut: false, crossed: true, built: false });
-        }
+    const out = [];
+    for (const r of reads) {
+      const at = r.end ?? -1;
+      /** @type {AuthorityRead[] | null} */
+      let rests = null;
+      if (!r.cut && at >= 0) {
+        if (text[at] === "$" && text[at + 1] === "{") rests = chosenAt(at, context, depth);
+        else if (rawQuote(at)) rests = joinedAfter(at, context, depth, r.authority === "");
       }
-    };
-    const space = (/** @type {number} */ k) => {
-      let j = k;
-      while (ASCII_SPACE.has(text[j] ?? "")) j++;
-      return j;
-    };
-    /** @param {number} k */
-    const rawQuote = (k) => SCRIPT_QUOTES.includes(text[k] ?? "") && !isSpelled(reading, k);
-    if (text[start] === "$" && text[start + 1] === "{" && !isSpelled(reading, start + 1)) {
-      const close = spansOf().get(start)?.at(-1);
-      if (close === undefined || close - start > MAX_SUBSTITUTION) return reads;
-      const values = literalChoice(reading, start + 2, close);
-      if (values !== null) {
-        choose(values, () =>
-          readAuthority(reading, close + 1, context, true).map((r) => r.authority),
-        );
+      if (rests === null) {
+        out.push(r);
+        continue;
       }
-      return reads;
-    }
-    if (context.kind !== "quoted" || text[start] !== context.end) return reads;
-    if (isSpelled(reading, start) !== context.spelled) return reads;
-    let k = space(start + 1);
-    if (text[k] !== "+" || text[k + 1] === "+") return reads;
-    k = space(k + 1);
-    if (rawQuote(k)) {
-      // The next literal goes on with the URL: its slashes, then its authority.
-      SLASH_RUN.lastIndex = k + 1;
-      const from = k + 1 + (SLASH_RUN.exec(text)?.[0].length ?? 0);
-      /** @type {UrlContext} */
-      const next = { kind: "quoted", end: text[k] ?? "", spelled: false };
-      for (const r of readAuthority(reading, from, next, true)) reads.push({ ...r, crossed: true });
-      reads.push(...joinedReads(from, next, depth + 1));
-    } else if (text[k] === "(") {
-      const close = closingBracket(reading, k, Math.min(text.length, k + MAX_SUBSTITUTION));
-      const values = close === -1 ? null : literalChoice(reading, k + 1, close);
-      if (values !== null) {
-        choose(values, () => {
-          let j = space(close + 1);
-          if (text[j] !== "+") return [""];
-          j = space(j + 1);
-          if (!rawQuote(j)) return [""];
-          /** @type {UrlContext} */
-          const next = { kind: "quoted", end: text[j] ?? "", spelled: false };
-          return readAuthority(reading, j + 1, next, true).map((r) => r.authority);
+      out.push({ ...r, built: true });
+      for (const rest of rests) {
+        out.push({
+          authority: r.authority + rest.authority,
+          cut: rest.cut,
+          crossed: true,
+          built: rest.built,
         });
       }
     }
-    return reads;
+    return out;
   };
   /** @type {Set<number> | null} */
   let equals = null;
@@ -2114,7 +2293,7 @@ function scanReading(reading, kind, found) {
           },
           refreshNear: (at) => {
             if (refreshKeys === null) {
-              refreshKeys = [...text.matchAll(/refresh/gi)].map((m) => m.index ?? 0);
+              refreshKeys = [...text.matchAll(REFRESH_KEY)].map((m) => m.index ?? 0);
               spend(text.length);
             }
             const key = lastBefore(refreshKeys, at);
@@ -2128,8 +2307,11 @@ function scanReading(reading, kind, found) {
   const inList = (comma) => srcsetListBefore(text, comma, listEnds);
   /** @param {number} start */
   const contexts = (start) => contextsBefore(reading, start, kind, inTag, inList, script);
-  /** The raw quotes, and the `}`s counting or the lexer pairs with a `${`, least first. */
-  /** @type {number[] | null} */
+  /**
+   * The raw quotes of each kind (SCRIPT_QUOTES' order), and the `}`s counting or the lexer pairs
+   * with a `${`, least first.
+   */
+  /** @type {number[][] | null} */
   let rawQuotes = null;
   /** @type {number[] | null} */
   let pairedEnds = null;
@@ -2137,22 +2319,34 @@ function scanReading(reading, kind, found) {
    * The string a script's colon is in, judged by the nearest raw quote or paired `}` before it:
    * the quote's index where it opens a string (opensString), the `}`'s where it closes a
    * substitution (template literal text), or -1 where the colon is code's (`"key":`, `c?"a":`).
+   * Where the nearest quote opens none, it may be a quote character in the string's own text (an
+   * apostrophe, `"Don't open %s://host"`; an attribute's quote in markup,
+   * `` `<a title="x" href={scheme}://host>` ``): the string is then the one the nearest quote of
+   * another kind opens, with no quote of its own kind between it and the colon, or the template
+   * literal text after the nearest paired `}`, with no backtick between them.
    * @param {number} colon
    */
   const stringOf = (colon) => {
     if (rawQuotes === null) {
-      rawQuotes = [];
+      rawQuotes = [[], [], []];
       for (let k = 0; k < text.length; k++) {
-        const c = text[k];
-        if ((c === '"' || c === "'" || c === "`") && !isSpelled(reading, k)) rawQuotes.push(k);
+        const kind = SCRIPT_QUOTES.indexOf(text[k] ?? "");
+        if (kind !== -1 && !isSpelled(reading, k)) rawQuotes[kind]?.push(k);
       }
       spend(text.length);
     }
     pairedEnds ??= [...new Set([...spansOf().values()].flat())].sort((a, b) => a - b);
-    const quote = lastBefore(rawQuotes, colon);
+    const last = rawQuotes.map((list) => lastBefore(list, colon));
+    const quote = Math.max(...last);
     const brace = lastBefore(pairedEnds, colon);
     if (brace > quote) return brace;
-    return quote !== -1 && opensString(text, quote) ? quote : -1;
+    if (quote === -1) return -1;
+    if (opensString(text, quote)) return quote;
+    let string = brace > (last[2] ?? -1) ? brace : -1;
+    for (const q of last) {
+      if (q !== quote && q > string && opensString(text, q)) string = q;
+    }
+    return string;
   };
   // The colons SCHEME reads: the slashes after one are its scheme's. Each pattern's search below
   // is one pass over the text.
