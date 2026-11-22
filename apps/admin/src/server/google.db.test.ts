@@ -6,7 +6,8 @@
 // gated POST and comes back on the one ungated GET; the session it leaves is at the factor step and
 // reaches nothing until the passkey; the callback without an Access token never reaches the realm
 // (no code is exchanged); an address the staff table does not list, or one that is not the Access
-// identity, is refused; and with the switch off every Google path answers 404.
+// identity, is refused; and with the switch off every Google path answers the endpoint policy's
+// empty 404, before the library.
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -195,8 +196,9 @@ describe("a staff Google round trip through the API half", () => {
 });
 
 describe("staff Google switched off", () => {
-  it("answers 404 on every Google path", async () => {
+  it("answers the endpoint policy's empty 404 on every Google path, before the library", async () => {
     const browser = offHost.client(unique("google.off"));
+    const blocked = offHost.captured.events("auth.endpoint_blocked").length;
     const start = await browser.post("/api/auth/sign-in/social", {
       provider: "google",
       callbackURL: "/sign-in",
@@ -209,5 +211,13 @@ describe("staff Google switched off", () => {
       fromGoogle,
     );
     expect(callback.status).toBe(404);
+    // The staff realm's endpoint policy answered both, not the library (whose own 404 for a
+    // provider it does not have carries a body): an empty answer, and each path lined as blocked.
+    expect(start.json).toBeNull();
+    expect(callback.json).toBeNull();
+    expect(offHost.captured.events("auth.endpoint_blocked").slice(blocked)).toEqual([
+      expect.objectContaining({ realm: "staff", class: "blocked" }),
+      expect.objectContaining({ realm: "staff", class: "blocked" }),
+    ]);
   });
 });
