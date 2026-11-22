@@ -220,12 +220,13 @@ function samples(rand: () => number): Sample[] {
 // growth, or it is over a lower limit and its growth is far above linear. A quadratic part takes
 // seconds or minutes at 1 MB and grows about 64 times; a part that grows more slowly but is costly,
 // such as a bounded run of hundreds of characters tried at every position, fails on the ceiling
-// alone. Each time is the fastest of three runs, the sizes taking turns, and it is the thread's CPU
-// time, not the clock on the wall: what load adds is time spent waiting for a core, and it adds it
-// unevenly. With many threads to each core, a run that fits in one scheduler slice keeps its wall
-// time while a longer one waits between slices: on such a machine a linear shape took over a
-// second of wall time at 1 MB, and its wall-clock growth reached 84, while its CPU time stayed
-// under 100 ms and grew about eight times. CPU time is what lets the ceiling stand alone.
+// alone. Each time is the fastest of three runs, the sizes taking turns, each run on a text no run
+// before it has seen (see timedTexts), and it is the thread's CPU time, not the clock on the wall:
+// what load adds is time spent waiting for a core, and it adds it unevenly. With many threads to
+// each core, a run that fits in one scheduler slice keeps its wall time while a longer one waits
+// between slices: on such a machine a linear shape took over a second of wall time at 1 MB, and
+// its wall-clock growth reached 84, while its CPU time stayed under 100 ms and grew about eight
+// times. CPU time is what lets the ceiling stand alone.
 const SMALL_INPUT = 128 * 1024;
 const LARGE_INPUT = 1024 * 1024;
 /**
@@ -273,18 +274,33 @@ function tooSlow(smallMs: number, largeMs: number): boolean {
   return largeMs > CEILING_MS || (largeMs > LIMIT_MS && growthOf(smallMs, largeMs) > MAX_GROWTH);
 }
 
-/** Fails when `scrub` is too slow or quadratic on the input `build` makes at 128 KB and 1 MB. */
+/**
+ * How many texts the linear-time checks have timed. Each timed text is its input behind a line of
+ * its own number, so no two are alike, and a scrubber that remembered what it scrubbed would still
+ * be timed on its first pass over every text: timing one text three times would judge the fastest,
+ * remembered, run. Every shape takes a line break as it takes the start of the text, and no shape
+ * matches a line of under nine digits.
+ */
+let timedTexts = 0;
+
+/**
+ * Fails when `scrub` is too slow or quadratic on the input `build` makes at 128 KB and 1 MB, timed
+ * by `cpuMs`: the thread's CPU time, or a test's own clock.
+ */
 function expectLinearTime(
   name: string,
   build: (size: number) => string,
   scrub: (text: string) => unknown,
+  cpuMs: () => number = threadCpuMs,
 ): void {
   const small = build(SMALL_INPUT);
   const large = build(LARGE_INPUT);
-  const time = (text: string): number => {
-    const t0 = threadCpuMs();
+  const time = (input: string): number => {
+    timedTexts += 1;
+    const text = `${timedTexts}\n${input}`;
+    const t0 = cpuMs();
     scrub(text);
-    return threadCpuMs() - t0;
+    return cpuMs() - t0;
   };
   let smallMs = Number.POSITIVE_INFINITY;
   let largeMs = Number.POSITIVE_INFINITY;
@@ -326,6 +342,28 @@ describe("the linear-time check", () => {
     for (const [smallMs, largeMs, fails] of cases) {
       expect(tooSlow(smallMs, largeMs), `${smallMs} ms, ${largeMs} ms`).toBe(fails);
     }
+  });
+
+  it("times a scrubber that remembers what it scrubbed on texts it has not seen", () => {
+    // On a clock of its own, each scrubber here costs `cost` of a text's size in KB the first
+    // time it sees the text, and nothing after. Timed three times on one text, the quadratic one
+    // would pass on its second and third runs, however slow its first.
+    let now = 0;
+    const remembering = (cost: (kb: number) => number): ((text: string) => void) => {
+      const seen = new Set<string>();
+      return (text) => {
+        if (!seen.has(text)) now += cost(text.length / 1024);
+        seen.add(text);
+      };
+    };
+    const build = (size: number): string => "a".repeat(size);
+    const clock = (): number => now;
+    // About 41 ms at 128 KB and 2621 ms at 1 MB.
+    const quadratic = remembering((kb) => (kb * kb) / 400);
+    expect(() => expectLinearTime("quadratic", build, quadratic, clock)).toThrow(/quadratic: /);
+    // About 6.4 ms at 128 KB and 51 ms at 1 MB.
+    const linear = remembering((kb) => kb / 20);
+    expectLinearTime("linear", build, linear, clock);
   });
 });
 
