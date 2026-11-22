@@ -11,6 +11,7 @@
     "pnpm-workspace.yaml",
     "scripts/check-supply-chain.mjs",
     "scripts/public-safety.mjs",
+    "scripts/js-tokens.mjs",
     "tools/fin-review/",
     "tools/layout.json",
     "docs/review/",
