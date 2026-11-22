@@ -1,7 +1,8 @@
 // The email area's events (spec 08 §4.1 to §4.3 and §7.2), written by packages/email's sender.
 // email.sent and email.send_failed are in platform.ts, beside Phase 0's email-not-sent alert. The
 // group G alerts these lines feed (spec 08 §7.8) are in the email area's alert fragment
-// (alerts/email.json).
+// (alerts/email.json), with email-delivery-stalled, which no text of the plan names: the name is
+// proposed by the lane that added the line, for the steward to confirm or change.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -44,5 +45,14 @@ export const entries: readonly CatalogEntry[] = [
       final: "boolean",
     },
     alerts: ["security-email-unsent"],
+  },
+  {
+    event: "email.delivery_stalled",
+    kind: "failure",
+    level: "error",
+    writtenBy:
+      "worker's sender, when a database step of the delivery path (step: claim, row, digest, age or sweep) stalls: a lock wait that ran out (code pg_55P03, SQLSTATE 55P03 after the login's lock timeout) or a connection the pool could not open or hand out in time (code connect_timeout); with the row's emailId for a row. Never the error's words. The error then goes on as before, to the loop's failed job.run or the row's email.send_failed",
+    fields: { step: "string", code: "string", emailId: "string" },
+    alerts: ["email-delivery-stalled"],
   },
 ];

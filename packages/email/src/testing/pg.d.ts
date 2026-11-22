@@ -14,6 +14,10 @@ declare module "pg" {
     connectionString?: string;
     max?: number;
     application_name?: string;
+    /** How long the pool waits for a connection before it gives up (stall.db.test.ts). */
+    connectionTimeoutMillis?: number;
+    /** The session's lock_timeout, in milliseconds (stall.db.test.ts). */
+    lock_timeout?: number;
   }
   export interface PoolClient {
     query<R = Record<string, unknown>>(text: string, values?: unknown[]): Promise<QueryResult<R>>;

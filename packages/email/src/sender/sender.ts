@@ -19,6 +19,10 @@
 // `flushDigests()` turns each digest's folded rows into one `ops/security-digest` row through
 // `email.enqueue()` in one transaction. Lines carry the template, class, code and IDs, never an
 // address, a subject or a parameter value.
+// A step of the delivery path that stalls on the database, a lock wait that ran out (55P03) or a
+// connection not had in time, writes one `email.delivery_stalled` line with the step and the code
+// (and the row's ID for a row), which the `email-delivery-stalled` alert counts; the error then goes
+// on as before, to the loop's failed `job.run` or the row's `email.send_failed`.
 
 import { describe, findTemplate, TEMPLATES } from "../catalogue.ts";
 import {
@@ -153,6 +157,39 @@ function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+/** Where on the delivery path a stall happened: the claims, one row, the digests, the age, the sweep. */
+export type StallStep = "claim" | "row" | "digest" | "age" | "sweep";
+
+/** A stall's code: a lock wait that ran out, or a connection not had in time. */
+export type StallCode = "pg_55P03" | "connect_timeout";
+
+/**
+ * The fixed messages `pg` and `pg-pool` give a connection they could not open or hand out in time.
+ * The driver gives these no SQLSTATE, so its own words are the only sign; nothing else of a message
+ * is read, and none of it is logged.
+ */
+const CONNECT_TIMEOUTS: readonly string[] = [
+  // pg-pool: every client stayed busy for connectionTimeoutMillis.
+  "timeout exceeded when trying to connect",
+  // pg-pool: a new client did not connect within connectionTimeoutMillis.
+  "Connection terminated due to connection timeout",
+  // pg: the client's own connection timer.
+  "timeout expired",
+];
+
+/**
+ * Whether what was thrown is a database stall on the delivery path, and which: SQLSTATE 55P03
+ * (lock_not_available, after the login's lock timeout) or a connection timeout. Anything else is no
+ * stall.
+ */
+export function stallOf(error: unknown): StallCode | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ((error as { code?: unknown }).code === "55P03") return "pg_55P03";
+  return error instanceof Error && CONNECT_TIMEOUTS.includes(error.message)
+    ? "connect_timeout"
+    : undefined;
+}
+
 function organisationOf(params: unknown): string | undefined {
   if (typeof params !== "object" || params === null) return undefined;
   const id = (params as Record<string, unknown>).orgId;
@@ -187,23 +224,27 @@ export class Sender {
       return { claimed: 0, sent: 0, failed: 0, folded: 0, deferred: 0, full: false, paused: true };
     }
     const { concurrency, reservedUrgent, leaseMs } = this.limits;
-    const urgent = await claimRows(db, {
-      now,
-      holder,
-      leaseMs,
-      limit: concurrency,
-      minPriority: 0,
-      maxPriority: URGENT_PRIORITY,
-    });
+    const urgent = await this.step("claim", () =>
+      claimRows(db, {
+        now,
+        holder,
+        leaseMs,
+        limit: concurrency,
+        minPriority: 0,
+        maxPriority: URGENT_PRIORITY,
+      }),
+    );
     const room = Math.min(concurrency - urgent.length, concurrency - reservedUrgent);
-    const ordinary = await claimRows(db, {
-      now,
-      holder,
-      leaseMs,
-      limit: room,
-      minPriority: URGENT_PRIORITY + 1,
-      maxPriority: 32767,
-    });
+    const ordinary = await this.step("claim", () =>
+      claimRows(db, {
+        now,
+        holder,
+        leaseMs,
+        limit: room,
+        minPriority: URGENT_PRIORITY + 1,
+        maxPriority: 32767,
+      }),
+    );
     const rows = [...urgent, ...ordinary];
     const results = await Promise.all(rows.map((row) => this.processSafely(row)));
     const count = (r: RowResult): number => results.filter((x) => x === r).length;
@@ -220,20 +261,45 @@ export class Sender {
 
   /** How long rows have waited, for the loop's `job.run`. */
   async age(): Promise<{ urgentS: number; otherS: number; waiting: number }> {
-    return outboxAge(this.o.db, this.o.clock.now());
+    return this.step("age", () => outboxAge(this.o.db, this.o.clock.now()));
   }
 
   /** Housekeeping of the count tables. */
   async sweep(): Promise<void> {
-    await sweep(this.o.db, this.o.clock.now());
+    await this.step("sweep", () => sweep(this.o.db, this.o.clock.now()));
+  }
+
+  /**
+   * Writes `email.delivery_stalled` when what was thrown is a stall: the step and the code, and the
+   * row's ID for a row's step. Never the error's message.
+   */
+  private noteStall(step: StallStep, error: unknown, emailId?: string): void {
+    const code = stallOf(error);
+    if (code === undefined) return;
+    this.o.log.log(
+      "email.delivery_stalled",
+      { step, code, ...(emailId === undefined ? {} : { emailId }) },
+      "error",
+    );
+  }
+
+  /** Runs one database step of the delivery path; a stall is noted before the error goes on. */
+  private async step<T>(step: StallStep, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      this.noteStall(step, error);
+      throw error;
+    }
   }
 
   private async processSafely(row: OutboxRow): Promise<RowResult> {
     try {
       return await this.process(row);
-    } catch {
+    } catch (error) {
       // A database error mid-row: the lease expires and the row is claimed again. The loop's
       // `job.run` carries the failure; nothing about the row or its recipient is logged.
+      this.noteStall("row", error, row.id);
       this.o.log.log(
         "email.send_failed",
         {
@@ -641,6 +707,10 @@ export class Sender {
    * `email.enqueue()` and deleted in the same transaction, so a restart neither loses nor repeats it.
    */
   async flushDigests(): Promise<number> {
+    return this.step("digest", () => this.flushDue());
+  }
+
+  private async flushDue(): Promise<number> {
     const now = this.o.clock.now();
     const due = await dueDigests(this.o.db, now, this.limits.digestDelayMs);
     let queued = 0;

@@ -1,5 +1,5 @@
 {
-  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G), with security-email-unsent and email-budget-reached by the steward's ruling of 22 Nov. security-email-unsent reads the sender's lines on worker and identity's queue-time lines on console and admin, one incident per reason; email-budget-reached has one incident per scope and share, so an organisation's ceiling never hides the environment's budget. Each label is held to the closed set of values the code writes (the sender's reasons, and the queue-time reasons of identity's, staff's and organisations' notices; the budget's scopes and shares), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. L-SAT-05 extends this fragment with the rest of group G.",
+  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G), with security-email-unsent and email-budget-reached by the steward's ruling of 22 Nov. security-email-unsent reads the sender's lines on worker and identity's queue-time lines on console and admin, one incident per reason; email-budget-reached has one incident per scope and share, so an organisation's ceiling never hides the environment's budget. Each label is held to the closed set of values the code writes (the sender's reasons, and the queue-time reasons of identity's, staff's and organisations' notices; the budget's scopes and shares), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. email-delivery-stalled (a name no text of the plan gives, proposed for the steward to confirm) notifies on any email.delivery_stalled, the line the sender writes when a database step of its delivery path stalls on a lock wait that ran out (55P03) or a connection not had in time, one incident per code, held to the two codes the sender writes; a stall that lasts also pages as email-outbox-age. L-SAT-05 extends this fragment with the rest of group G.",
   "alerts": [
     {
       "name": "email-not-sent",
@@ -136,6 +136,28 @@
       "incident_cause": "Ordinary mail used its part of today's send budget and reached the security share, or a daily budget refused a send: a flood of ordinary mail. Lines: {{value}}.",
       "metadata": {
         "check": "Which template: the template and class on email.budget_reached and email.sent by template for the day; the scope and share, and the orgId for an organisation's ceiling.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email.md"
+      }
+    },
+    {
+      "name": "email-delivery-stalled",
+      "group": "G",
+      "severity": "N",
+      "sources": ["worker"],
+      "seriesBy": [{ "field": "code", "oneOf": ["connect_timeout", "pg_55P03"] }],
+      "query": { "count": { "events": ["email.delivery_stalled"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The sender's delivery path stalled on the database: a lock wait ran out (55P03) or no connection was had in time, so that step failed and its mail waits for the next try. Stalls: {{value}}.",
+      "metadata": {
+        "check": "The step and code on email.delivery_stalled, and the emailId for a row; the worker's job.run lines for email-send with result failed; database-unreachable and pool-exhausted on worker; a run or migration holding a lock on email_private's tables.",
         "flow": "F10",
         "runbook": "docs/runbooks/email.md"
       }

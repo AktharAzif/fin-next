@@ -1,6 +1,7 @@
-# Email is failing, late, over budget or misconfigured
+# Email is failing, late, stalled, over budget or misconfigured
 
-Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-budget-reached`.
+Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-budget-reached`,
+`email-delivery-stalled`.
 
 ## What it means
 
@@ -29,6 +30,16 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-bu
   organisation's ceiling (`scope: organisation`, `share: all`, with its `orgId`, [SA-40]). A refused
   row waits for the next UTC day, but a code ends and a security notice also pages as
   `security-email-unsent`.
+- `email-delivery-stalled` (notify only, one incident per `code`): the sender wrote
+  `email.delivery_stalled`. A database step of its delivery path did not get what it waited for:
+  `code: pg_55P03` is a lock wait that ran out (SQLSTATE 55P03, after the worker login's lock
+  timeout), `code: connect_timeout` a connection the worker's pool could not open or hand out in
+  time. The `step` says where: `claim` (taking due rows), `row` (one claimed row, with its
+  `emailId`), `digest`, `age` or `sweep`. Nothing is lost: a failed claim, digest, age or sweep
+  ends that tick of the loop (its `job.run` line has `result: failed` and the code), and a stalled
+  row writes `email.send_failed` with `code: sender_error` and is claimed again when its lease
+  ends. Mail waits while it lasts; a stall that goes on also pages as `email-outbox-age`. No name
+  for this alert is given by the plan: it is proposed, for the steward to confirm.
 
 ## First check
 
@@ -36,7 +47,12 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-bu
    inventory). A `401` or `403` code means the token.
 2. The worker's lease and its last `job.run` line for the email loop.
 3. For a setting change: `pnpm fin email verify staging` and Cloudflare's audit log.
-4. For a budget, which template: the `template` and `class` on the `email.budget_reached` lines,
+4. For a stall, the `step` and `code` on the `email.delivery_stalled` lines and when they began.
+   `connect_timeout` points at the database or the pool: `database-unreachable` and
+   `pool-exhausted` on worker (`database.md`). `pg_55P03` points at a lock on the outbox's tables
+   in `email_private`: a migration or a `migrate --task` run going at that time (its run
+   registration), or a long transaction (the probe's longest transaction).
+5. For a budget, which template: the `template` and `class` on the `email.budget_reached` lines,
    and the day's `email.sent` lines by `template`, which show the one that is flooding; for an
    organisation's ceiling, the `orgId`. Then what queues that template: a release that loops, a
    flood of sign-ups or invitations, or one organisation's own use.
@@ -50,7 +66,13 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-bu
    anyone send as `auth.` or `notify.`: restore it at `p=reject` (BD-17) first, then look for
    mail sent in the window.
 3. A stopped loop: restart worker through `pnpm fin deploy` (never by hand in Railway).
-4. A budget reached: stop the flood where it is queued (roll back a release that loops; an
+4. A stall: let a registered run that holds the lock finish, or end the holder through a
+   registered task (`database.md`); for a connection timeout, follow `database.md`. Never raise the
+   worker's lock timeout or pool timeout by hand: they are its role default and its pool settings.
+   The loop recovers on its own once its statements succeed. Close it when no new
+   `email.delivery_stalled` line comes and the loop's `job.run` lines for `email-send` are no
+   longer `failed`; the incident recovers 15 minutes after the last line.
+5. A budget reached: stop the flood where it is queued (roll back a release that loops; an
    organisation at its ceiling is the ceiling working, [SA-40]). Never raise a budget or a share
    outside a reviewed change: they are the sender's limits in `packages/email`. The budgets start
    again at the next UTC day, and the rows they held are sent then. Close it when no new
@@ -59,5 +81,6 @@ Alerts: `email-not-sent`, `email-outbox-age`, `email-setting-changed`, `email-bu
 ## When to wake the owner
 
 At once if sign-in codes or security notices are failing (`class` `code` or `security`) for more
-than 15 minutes, a budget refused a code or a security notice, or a setting changed outside a
-registered run. Ordinary mail delays, and a budget that held back only ordinary mail, can wait.
+than 15 minutes, a budget refused a code or a security notice, a stall lasts past 15 minutes with
+no run to explain it, or a setting changed outside a registered run. Ordinary mail delays, and a
+budget that held back only ordinary mail, can wait.
