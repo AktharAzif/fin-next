@@ -479,7 +479,10 @@ describe("monitoring apply: applying", () => {
     expect(next.text()).toContain(
       "note: a real run would delete or pause 4 objects, so it needs --confirm-delete 4 (MA-03)",
     );
-    expect(next.text()).not.toContain("refused");
+    // A refusal reads `refused: …`, `apply: refused` or `Better Stack refused`; an alert's own
+    // name may end in -refused (admin-staff-refused, staff-enrolment-refused).
+    expect(next.text()).not.toMatch(/(?<![\w-])refused\b/);
+    expect(next.text()).toContain("alert admin-staff-refused");
     expect(writes(next.bs)).toEqual([]);
   });
 

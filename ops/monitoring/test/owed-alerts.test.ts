@@ -18,10 +18,12 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
-/** The ruling's fifteen: the alerts the code names that no fragment defines yet, due Sunday. */
+/**
+ * The ruling's fifteen, less those that have become rules (admin-access-mismatch,
+ * admin-staff-refused, staff-enrolled and staff-enrolment-refused, in alerts/staff.json and
+ * staff-alerts.test.ts): the alerts the code names that no fragment defines yet, due Sunday.
+ */
 const RULED: readonly string[] = [
-  "admin-access-mismatch",
-  "admin-staff-refused",
   "admin-without-second-factor",
   "audit-guard",
   "csrf-refused-jump",
@@ -30,17 +32,17 @@ const RULED: readonly string[] = [
   "secret-unreadable",
   "sign-in-code-contested",
   "sign-in-failing",
-  "staff-enrolled",
-  "staff-enrolment-refused",
   "step-up-failing",
   "step-up-locked",
   "duty-stalled-access-drift",
 ];
 
-/** The later ruling of 22 Nov: five more alerts the catalogue owes, each with its lane and date. */
+/**
+ * The later ruling of 22 Nov: five more alerts the catalogue owes, each with its lane and date,
+ * less staff-changed, a rule now (alerts/staff.json).
+ */
 const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
   "admin-access-drift": { lane: "L-SAT-09", due: "2026-11-22" },
-  "staff-changed": { lane: "L-SAT-09", due: "2026-11-22" },
   "review-refusals": { lane: "P0-C", due: "2026-11-22" },
   "review-model-mismatch": { lane: "P0-C", due: "2026-11-22" },
   "money-switch-tripped": { lane: "L-MON-09", due: "2026-11-23" },
