@@ -11,7 +11,6 @@ import { base32Decode, totp } from "@fin/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
-  type PlatformClient,
   SoftAuthenticator,
   type StaffHarness,
   unique,
@@ -20,19 +19,13 @@ import { type AdminClient, type AdminHost, createAdminHost } from "../../test/ho
 
 let h: StaffHarness;
 let host: AdminHost;
-// The operator's fin_owner session, opened with the platform. Logging in as fin_owner takes the
-// cluster-wide lock that every other test file's bootstrap and migrations hold in turn, so a login
-// in the first test waited behind them there: about 0.1 s alone, past 5 s beside the other files.
-let owner: PlatformClient;
 
 beforeAll(async () => {
   h = await createStaffHarness("sat04journey");
   host = await createAdminHost(h);
-  owner = await h.platform.owner();
 }, 120_000);
 
 afterAll(async () => {
-  await owner?.end();
   await h?.close();
 });
 
@@ -46,19 +39,24 @@ function secretOf(uri: string): Uint8Array {
  */
 async function bootstrap(address: string): Promise<{ staffId: string; code: string }> {
   const code = generateEnrolmentCode();
-  const ids = {
-    member_id: newIdLike("stf"),
-    code_id: newIdLike("enc"),
-    member_event_id: newIdLike("aud"),
-    code_event_id: newIdLike("aud"),
-    bootstrap_event_id: newIdLike("aud"),
-    journal_id: newIdLike("jrn"),
-  };
-  const result = await owner.query<{ answer: { staff_id: string } }>(
-    "SELECT staff.bootstrap_admin($1, $2, false, 'first_admin', 'run_journey', 'test-release', $3::jsonb) AS answer",
-    [address, hashEnrolmentCode(code), JSON.stringify(ids)],
-  );
-  return { staffId: String(result.rows[0]?.answer.staff_id), code };
+  const owner = await h.platform.owner();
+  try {
+    const ids = {
+      member_id: newIdLike("stf"),
+      code_id: newIdLike("enc"),
+      member_event_id: newIdLike("aud"),
+      code_event_id: newIdLike("aud"),
+      bootstrap_event_id: newIdLike("aud"),
+      journal_id: newIdLike("jrn"),
+    };
+    const result = await owner.query<{ answer: { staff_id: string } }>(
+      "SELECT staff.bootstrap_admin($1, $2, false, 'first_admin', 'run_journey', 'test-release', $3::jsonb) AS answer",
+      [address, hashEnrolmentCode(code), JSON.stringify(ids)],
+    );
+    return { staffId: String(result.rows[0]?.answer.staff_id), code };
+  } finally {
+    await owner.end();
+  }
 }
 
 const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -98,9 +96,17 @@ describe("Fin Admin, end to end through the API half", () => {
   let firstId: string;
   let secondId: string;
   let secondCode: string;
+  let boot: { staffId: string; code: string };
+
+  // The operator's bootstrap runs in a hook, never in a test: its fin_owner login takes the
+  // cluster-wide lock that every other test file's bootstrap and migrations hold in turn, so beside
+  // them the wait is seconds (past 5 s in the full db run) for a statement of about 0.1 s alone.
+  // Its session ends there, so the file holds no fin_owner connection while the journey runs.
+  beforeAll(async () => {
+    boot = await bootstrap(adminEmail);
+  }, 120_000);
 
   it("bootstraps the first Admin, who signs in by code and is held at enrolment", async () => {
-    const boot = await bootstrap(adminEmail);
     firstId = boot.staffId;
     first = host.client(adminEmail);
     const signedOut = await first.get("/api/viewer");

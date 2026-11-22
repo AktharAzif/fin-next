@@ -25,21 +25,28 @@ const registry = (q: unknown) => syncEventTypes(q as Queryable, "test-release");
 // `migrate --task staff-bootstrap` below finds the task in the real registry and runs it through the
 // real runner, as the image does: a refusal is read where the operator reads it, migrate's
 // `task.failed` line, never `task_unknown`, and a run that succeeds ends with `task.done`.
+//
+// Every wait for the cluster-wide lock is in a hook, never in a test. Logging in as fin_owner and
+// running migrate's entry point both take that lock (each sets fin_owner's password), and every
+// other test file's bootstrap and migrations hold it in turn, so in the full db run the wait is
+// seconds to a minute on a loaded machine, while the work itself takes well under a second. The
+// hooks allow 120 s for it, as the platform's own does.
+//
+// fin_owner's CONNECTION LIMIT is 6 for the whole cluster (AUXILIARY_BUDGET in packages/db), shared
+// with every other file. This file holds at most two at once: the task tests' one session below
+// (only while "staff-bootstrap" runs), or migrate's own run (its owner session and its pool's one),
+// never both.
 let platform: StaffPlatform;
 let su: PlatformClient;
-// The file's one fin_owner session, opened with the platform. Logging in as fin_owner takes the
-// cluster-wide lock that every other test file's bootstrap and migrations hold in turn, so a login
-// per run waited behind them inside the tests: about 0.2 s alone, past 5 s in the full db run.
+/** The task tests' fin_owner session, held from their describe's start to its end. */
 let owner: PlatformClient;
 
 beforeAll(async () => {
   platform = await createStaffPlatform("sat04task", { registry });
   su = await platform.superuser();
-  owner = await platform.owner();
 }, 120_000);
 
 afterAll(async () => {
-  await owner?.end();
   await su?.end();
   await platform?.drop();
 });
@@ -68,41 +75,51 @@ async function run(params: Record<string, unknown>, runId = `run_${Date.now()}`)
   }
 }
 
-/**
- * The timeout of each test that runs `cli()`. Migrate's entry point sets fin_owner's password for
- * its run, so it runs under the cluster-wide lock, behind every other test file's bootstrap and
- * migrations, as this file's own hooks do. Each test takes 0.1 to 0.7 s alone; the wait for the
- * lock is the long part, from 2 s to past 5 s in the full db run on a developer machine.
- */
-const CLI_TIMEOUT_MS = 60_000;
+/** What one run of migrate's entry point returned and wrote. */
+interface CliRun {
+  code: number;
+  lines: Record<string, unknown>[];
+  raw: string;
+}
 
-/** The same run through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it. */
-async function cli(params: Record<string, unknown>, on: StaffPlatform = platform) {
-  let raw = "";
-  const code = await on.withLock(() =>
-    runMigrateCli(
-      ["--task", "staff-bootstrap"],
-      {
-        FIN_ENVIRONMENT: "ci",
-        FIN_RELEASE: "test-release",
-        FIN_RUN_ID: "run_cli",
-        FIN_BOOTSTRAP_DATABASE_URL: on.superuserUrl(),
-        FIN_TASK_PARAMS: JSON.stringify(params),
-      },
-      {
-        stdout: (text) => {
-          raw += text;
+/**
+ * The same runs through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it,
+ * one after another under one hold of the cluster-wide lock, in their order. Called only from
+ * hooks (above).
+ */
+async function cli<const T extends readonly Record<string, unknown>[]>(
+  on: StaffPlatform,
+  ...runs: T
+): Promise<{ [K in keyof T]: CliRun }> {
+  return on.withLock(async () => {
+    const done: CliRun[] = [];
+    for (const params of runs) {
+      let raw = "";
+      const code = await runMigrateCli(
+        ["--task", "staff-bootstrap"],
+        {
+          FIN_ENVIRONMENT: "ci",
+          FIN_RELEASE: "test-release",
+          FIN_RUN_ID: "run_cli",
+          FIN_BOOTSTRAP_DATABASE_URL: on.superuserUrl(),
+          FIN_TASK_PARAMS: JSON.stringify(params),
         },
-        clock: { now: () => Date.now() },
-      },
-    ),
-  );
-  const lines = raw
-    .trim()
-    .split("\n")
-    .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { code, lines, raw };
+        {
+          stdout: (text) => {
+            raw += text;
+          },
+          clock: { now: () => Date.now() },
+        },
+      );
+      const lines = raw
+        .trim()
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      done.push({ code, lines, raw });
+    }
+    return done as { [K in keyof T]: CliRun };
+  });
 }
 
 async function seedMember(email: string, roleKey: string, status: "active" | "pending") {
@@ -156,6 +173,14 @@ async function eventsFor(target: string) {
 }
 
 describe("staff-bootstrap", () => {
+  beforeAll(async () => {
+    owner = await platform.owner();
+  }, 120_000);
+
+  afterAll(async () => {
+    await owner?.end();
+  });
+
   it("makes the first Admin pending, with one live code, and records it as the operator", async () => {
     const result = await run(
       {
@@ -276,36 +301,6 @@ describe("staff-bootstrap", () => {
     expect(viewer).toMatch(/^stf_/);
   });
 
-  it(
-    "names the refusal in migrate's task.failed line, where the operator reads it",
-    async () => {
-      // An active Admin exists (the test above): the run is refused, and the line says why.
-      const { code, lines, raw } = await cli({
-        address: "other@example.com",
-        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-        reasonCode: "first_admin",
-      });
-      expect(code).toBe(EXIT_FAILED);
-      expect(lines.at(-1)).toMatchObject({
-        event: "task.failed",
-        task: "staff-bootstrap",
-        code: "active_admin_exists",
-      });
-      expect(raw).not.toContain("other@example.com");
-      const reset = await cli({
-        address: "first.admin@example.com",
-        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
-        reset: true,
-        reasonCode: "lost_factors",
-      });
-      expect(reset.lines.at(-1)).toMatchObject({
-        event: "task.failed",
-        code: "another_admin_can_reset",
-      });
-    },
-    CLI_TIMEOUT_MS,
-  );
-
   it("resets the last Admin who lost every factor, with the reset's events and journal entry", async () => {
     await su.query("BEGIN");
     await su.query("SET LOCAL session_replication_role = replica");
@@ -412,15 +407,67 @@ describe("staff-bootstrap", () => {
   });
 });
 
+describe("migrate --task staff-bootstrap while Admins are active", () => {
+  // Two active Admins, seeded here (the task tests above have closed their fin_owner session): a
+  // run is refused while an Admin is active, and a reset of one while another can reset them.
+  let refused: CliRun;
+  let reset: CliRun;
+
+  beforeAll(async () => {
+    await seedActive("refusal.first@example.com", "admin");
+    await seedActive("refusal.second@example.com", "admin");
+    [refused, reset] = await cli(
+      platform,
+      {
+        address: "other@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reasonCode: "first_admin",
+      },
+      {
+        address: "refusal.first@example.com",
+        codeHash: codeHash("DEFG-HJKM-NPQR-STVW"),
+        reset: true,
+        reasonCode: "lost_factors",
+      },
+    );
+  }, 120_000);
+
+  it("names the refusal in migrate's task.failed line, where the operator reads it", () => {
+    const { code, lines, raw } = refused;
+    expect(code).toBe(EXIT_FAILED);
+    expect(lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      task: "staff-bootstrap",
+      code: "active_admin_exists",
+    });
+    expect(raw).not.toContain("other@example.com");
+    expect(reset.lines.at(-1)).toMatchObject({
+      event: "task.failed",
+      code: "another_admin_can_reset",
+    });
+  });
+});
+
 describe("migrate --task staff-bootstrap on a new environment", () => {
   // Its own database with no Admin yet, so the run must succeed end to end: the registry, the
   // runner, the task, the runner's own `operator.task_completed`, and the commit.
+  const hash = codeHash("KMNP-QRST-VWXY-Z012");
   let fresh: StaffPlatform;
   let freshSu: PlatformClient;
+  let made: CliRun;
 
   beforeAll(async () => {
     fresh = await createStaffPlatform("sat04cli", { registry });
     freshSu = await fresh.superuser();
+  }, 120_000);
+
+  // A hook of its own, so the run's wait for the lock has the whole allowance.
+  beforeAll(async () => {
+    [made] = await cli(fresh, {
+      address: "Cli.Admin@Example.com",
+      codeHash: hash,
+      reasonCode: "first_admin",
+    });
   }, 120_000);
 
   afterAll(async () => {
@@ -428,63 +475,55 @@ describe("migrate --task staff-bootstrap on a new environment", () => {
     await fresh?.drop();
   });
 
-  it(
-    "makes the first Admin, records it as the operator and says so with IDs only",
-    async () => {
-      const hash = codeHash("KMNP-QRST-VWXY-Z012");
-      const { code, lines, raw } = await cli(
-        { address: "Cli.Admin@Example.com", codeHash: hash, reasonCode: "first_admin" },
-        fresh,
-      );
-      expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
-      expect(code).toBe(EXIT_OK);
-      const done = lines.at(-1);
-      expect(done).toMatchObject({
-        event: "task.done",
-        task: "staff-bootstrap",
-        rowsChanged: 2,
-        reset: 0,
-        reactivated: 0,
-      });
-      const staffId = String(done?.staffId);
-      const codeId = String(done?.enrolmentCodeId);
-      expect(staffId).toMatch(/^stf_[0-9a-hjkmnp-tv-z]{26}$/);
-      expect(codeId).toMatch(/^enc_[0-9a-hjkmnp-tv-z]{26}$/);
-      // Neither the address nor the code's hash reaches the output, in any case.
-      expect(raw.toLowerCase()).not.toContain("cli.admin@example.com");
-      expect(raw.toLowerCase()).not.toContain(hash);
+  it("makes the first Admin, records it as the operator and says so with IDs only", async () => {
+    const { code, lines, raw } = made;
+    expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
+    expect(code).toBe(EXIT_OK);
+    const done = lines.at(-1);
+    expect(done).toMatchObject({
+      event: "task.done",
+      task: "staff-bootstrap",
+      rowsChanged: 2,
+      reset: 0,
+      reactivated: 0,
+    });
+    const staffId = String(done?.staffId);
+    const codeId = String(done?.enrolmentCodeId);
+    expect(staffId).toMatch(/^stf_[0-9a-hjkmnp-tv-z]{26}$/);
+    expect(codeId).toMatch(/^enc_[0-9a-hjkmnp-tv-z]{26}$/);
+    // Neither the address nor the code's hash reaches the output, in any case.
+    expect(raw.toLowerCase()).not.toContain("cli.admin@example.com");
+    expect(raw.toLowerCase()).not.toContain(hash);
 
-      const member = await freshSu.query<{ id: string; email: string; status: string }>(
-        "SELECT id, email, status FROM staff.member WHERE role_key = 'admin'",
-      );
-      expect(member.rows).toEqual([
-        { id: staffId, email: "cli.admin@example.com", status: "pending" },
-      ]);
-      const events = await freshSu.query<{
-        event: string;
-        target_id: string;
-        actor_kind: string;
-        actor_id: string;
-        actor_via: string;
-        db_login: string;
-      }>(
-        "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
-      );
-      expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
-        ["operator.task_completed", "staff-bootstrap"],
-        ["staff.bootstrapped", staffId],
-        ["staff.enrolment_code_issued", codeId],
-        ["staff.member_added", staffId],
-      ]);
-      for (const event of events.rows) {
-        expect(event).toMatchObject({
-          actor_kind: "operator",
-          actor_id: "run_cli",
-          actor_via: "operator",
-          db_login: "fin_owner",
-        });
-      }
-    },
-    CLI_TIMEOUT_MS,
-  );
+    const member = await freshSu.query<{ id: string; email: string; status: string }>(
+      "SELECT id, email, status FROM staff.member WHERE role_key = 'admin'",
+    );
+    expect(member.rows).toEqual([
+      { id: staffId, email: "cli.admin@example.com", status: "pending" },
+    ]);
+    const events = await freshSu.query<{
+      event: string;
+      target_id: string;
+      actor_kind: string;
+      actor_id: string;
+      actor_via: string;
+      db_login: string;
+    }>(
+      "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
+    );
+    expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
+      ["operator.task_completed", "staff-bootstrap"],
+      ["staff.bootstrapped", staffId],
+      ["staff.enrolment_code_issued", codeId],
+      ["staff.member_added", staffId],
+    ]);
+    for (const event of events.rows) {
+      expect(event).toMatchObject({
+        actor_kind: "operator",
+        actor_id: "run_cli",
+        actor_via: "operator",
+        db_login: "fin_owner",
+      });
+    }
+  });
 });
