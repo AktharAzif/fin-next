@@ -1,15 +1,38 @@
 // The supervisor end to end, with a stand-in for cloudflared: a small Node script that answers
 // `--version`, serves `/ready` on the metrics address it is given, records the environment it was
 // started with, and exits on SIGTERM. AC-P0-35's `/readyz` rule and the token rule are checked here.
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+//
+// No stand-in outlives its test. Its first statements make SIGTERM end it at once and make it end
+// itself once its parent is gone (a runner killed outright runs no clean-up); then it records its
+// pid. Every process a test starts that can start one leads its own process group, and after each
+// test endTestProcesses() ends those groups and fails, naming the pid, if a stand-in still runs.
+import { type ChildProcess, spawn } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SEAM_VARIABLES } from "@fin/server/seams";
 import { TEST_RELEASE } from "@fin/server/testing";
-import { spawnThenCloseStdout } from "@fin/server/testing/child";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  endTestProcesses,
+  exitWithParent,
+  isRunning,
+  recordPid,
+  spawnThenCloseStdout,
+  trackGroup,
+  watchPidDir,
+} from "@fin/server/testing/child";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { childEnvironment, cloudflaredArgs, main } from "./main.ts";
+import type { Supervisor } from "./supervisor.ts";
 
 /** A complete, valid public-connector environment: only the variable under test is wrong. */
 function validEnv(port: number, cloudflared: string): Record<string, string | undefined> {
@@ -32,9 +55,16 @@ function validEnv(port: number, cloudflared: string): Record<string, string | un
   };
 }
 
-afterEach(() => {
+/** The supervisors a test started in this process; one the test did not stop is stopped after it. */
+const supervisors: Supervisor[] = [];
+
+afterEach(async () => {
   vi.unstubAllGlobals();
+  await Promise.all(supervisors.splice(0).map((supervisor) => supervisor.stop()));
+  await endTestProcesses();
 });
+
+afterAll(() => endTestProcesses());
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -47,35 +77,169 @@ function freePort(): Promise<number> {
   });
 }
 
-const FAKE = `#!${process.execPath}
+/**
+ * Writes the stand-in for cloudflared into `dir` and returns its path. It records the environment
+ * and arguments it was started with in `dir`/env.json and, when it runs a tunnel, its pid in
+ * `dir`/pids for the check after each test. Its first statements can neither throw nor wait:
+ * SIGTERM ends it at once (process.exit waits for no open handle, its server's included, and no
+ * pending write), and so do its parent going away and a broken pipe to that parent; a server that
+ * cannot listen ends it too. Its only writes are one short line each, far below a pipe's buffer,
+ * so no write can block it.
+ */
+function fakeCloudflared(dir: string): string {
+  const pids = join(dir, "pids");
+  mkdirSync(pids, { recursive: true });
+  watchPidDir(pids);
+  const fake = join(dir, "fake-cloudflared");
+  writeFileSync(
+    fake,
+    `#!${process.execPath}
+process.on("SIGTERM", () => process.exit(0));
+${exitWithParent()}
+for (const stream of [process.stdout, process.stderr]) stream.on("error", () => process.exit(0));
 const { createServer } = require("node:http");
 const { writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--version") { console.log("cloudflared version 2026.11.1 (built test)"); process.exit(0); }
-writeFileSync(process.env.HOME + "/../fin-fake-env.json", JSON.stringify({ keys: Object.keys(process.env).sort(), args }));
+${recordPid(pids)}
+writeFileSync(${JSON.stringify(join(dir, "env.json"))}, JSON.stringify({ keys: Object.keys(process.env).sort(), args }));
 const metrics = args[args.indexOf("--metrics") + 1];
 const [host, port] = metrics.split(":");
 const server = createServer((req, res) => {
   if (req.url === "/ready") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ status: 200, readyConnections: 4 })); }
   else { res.writeHead(404); res.end(); }
 });
+server.on("error", () => process.exit(1));
 server.listen(Number(port), host);
 console.error("INF Registered tunnel connection connIndex=0 location=lhr01");
-process.on("SIGTERM", () => { server.close(); process.exit(0); });
-`;
+`,
+  );
+  chmodSync(fake, 0o755);
+  return fake;
+}
+
+interface End {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+function ended(child: ChildProcess): Promise<End> {
+  return new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+}
+
+/** `promise`'s value, or "running" when it has not settled within `ms`. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | "running"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"running">((resolve) => {
+    timer = setTimeout(() => resolve("running"), ms);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The pid the stand-in in `dir` recorded, once it has (0 if it has not within `ms`). */
+async function stubPid(dir: string, ms = 10_000): Promise<number> {
+  const end = performance.now() + ms;
+  let pid = 0;
+  while (pid <= 1 && performance.now() <= end) {
+    pid = Number(readdirSync(join(dir, "pids"))[0] ?? 0);
+    if (pid <= 1) await new Promise((r) => setTimeout(r, 5));
+  }
+  return pid;
+}
+
+/** Whether `pid` has stopped running within `ms`. */
+async function goneWithin(pid: number, ms: number): Promise<boolean> {
+  const end = performance.now() + ms;
+  while (isRunning(pid)) {
+    if (performance.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return true;
+}
+
+describe("the stand-in for cloudflared", () => {
+  /** Starts the stand-in as the supervisor does, but leading its own process group. */
+  async function startStub() {
+    const dir = mkdtempSync(join(tmpdir(), "fin-connector-stub-"));
+    const metrics = `127.0.0.1:${await freePort()}`;
+    const child = spawn(fakeCloudflared(dir), cloudflaredArgs(join(dir, "config.yml"), metrics), {
+      env: childEnvironment("t"),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    trackGroup(child.pid);
+    const spawned = new Promise((resolve) => child.once("spawn", resolve));
+    return { dir, child, metrics, spawned, end: ended(child) };
+  }
+
+  it("exits 0 on SIGTERM within 3 s once serving, with its output's reader gone", async () => {
+    const { child, metrics, end } = await startStub();
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i++) {
+      ready = await fetch(`http://${metrics}/ready`, { signal: AbortSignal.timeout(1000) }).then(
+        (response) => response.ok,
+        () => false,
+      );
+      if (!ready) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(ready).toBe(true);
+    child.stdout.destroy();
+    child.stderr.destroy();
+    child.kill("SIGTERM");
+    expect(await within(end, 3000)).toEqual({ code: 0, signal: null });
+  }, 20_000);
+
+  it("exits 0 on SIGTERM within 3 s sent the moment it has started, before its server serves", async () => {
+    const { dir, child, end } = await startStub();
+    expect(await stubPid(dir)).toBe(child.pid);
+    child.kill("SIGTERM");
+    expect(await within(end, 3000)).toEqual({ code: 0, signal: null });
+  }, 20_000);
+
+  it("ends on SIGTERM within 3 s sent as soon as it is spawned, before any of its code runs", async () => {
+    const { child, spawned, end } = await startStub();
+    await spawned;
+    child.kill("SIGTERM");
+    expect(await within(end, 3000)).not.toBe("running");
+  }, 20_000);
+
+  it("exits by itself within 5 s when its parent dies without ending it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fin-connector-orphan-"));
+    const fake = fakeCloudflared(dir);
+    const args = cloudflaredArgs(join(dir, "config.yml"), `127.0.0.1:${await freePort()}`);
+    // A parent that starts the stand-in as the supervisor does, then is killed outright.
+    const parent = spawn(
+      process.execPath,
+      [
+        "-e",
+        `${exitWithParent(process.pid)}
+const child = require("node:child_process").spawn(${JSON.stringify(fake)}, ${JSON.stringify(args)}, { env: ${JSON.stringify(childEnvironment("t"))}, stdio: ["ignore", "pipe", "pipe"] });
+child.stdout.resume();
+child.stderr.resume();
+setInterval(() => {}, 1000);`,
+      ],
+      { stdio: "ignore", detached: true },
+    );
+    trackGroup(parent.pid);
+    const parentEnd = ended(parent);
+    const stub = await stubPid(dir);
+    expect(stub).toBeGreaterThan(1);
+    parent.kill("SIGKILL");
+    await parentEnd;
+    expect(await goneWithin(stub, 5000), `the stand-in (pid ${stub}) outlived its parent`).toBe(
+      true,
+    );
+  }, 20_000);
+});
 
 describe("main", () => {
   it("renders the configuration, starts cloudflared with only the token, and answers /readyz", async () => {
     const dir = mkdtempSync(join(tmpdir(), "fin-connector-main-"));
-    const fake = join(dir, "fake-cloudflared");
-    writeFileSync(
-      fake,
-      FAKE.replace(
-        'process.env.HOME + "/../fin-fake-env.json"',
-        JSON.stringify(join(dir, "env.json")),
-      ),
-    );
-    chmodSync(fake, 0o755);
+    const fake = fakeCloudflared(dir);
     const [healthPort, metricsPort] = [await freePort(), await freePort()];
     const token = `eyJhIjoi${"x".repeat(60)}`;
     const lines: Record<string, unknown>[] = [];
@@ -106,6 +270,7 @@ describe("main", () => {
       signals: false,
       stdout: (line) => lines.push(JSON.parse(line) as Record<string, unknown>),
     });
+    if (supervisor !== undefined) supervisors.push(supervisor);
     expect(supervisor).toBeDefined();
     if (supervisor === undefined) return;
     const readyz = () => fetch(`http://127.0.0.1:${healthPort}/readyz`).then((r) => r.status);
@@ -262,23 +427,20 @@ describe("main", () => {
 /**
  * The supervisor run as its own process, as the image runs it (signal and crash handlers on), with
  * the stand-in for cloudflared; each byte on stdin throws from a timer, uncaught, and the bytes of
- * one write throw in the same turn of the event loop.
+ * one write throw in the same turn of the event loop. It ends itself should this process die.
  */
-async function connectorChild(): Promise<{ script: string; env: Record<string, string> }> {
+async function connectorChild(): Promise<{
+  dir: string;
+  script: string;
+  env: Record<string, string>;
+}> {
   const dir = mkdtempSync(join(tmpdir(), "fin-connector-stdout-"));
-  const fake = join(dir, "fake-cloudflared");
-  writeFileSync(
-    fake,
-    FAKE.replace(
-      'process.env.HOME + "/../fin-fake-env.json"',
-      JSON.stringify(join(dir, "env.json")),
-    ),
-  );
-  chmodSync(fake, 0o755);
+  const fake = fakeCloudflared(dir);
   const script = join(dir, "connector.mjs");
   writeFileSync(
     script,
     `import { main } from ${JSON.stringify(new URL("./main.ts", import.meta.url).href)};
+${exitWithParent(process.pid)}
 await main({
   host: "127.0.0.1",
   configPath: ${JSON.stringify(join(dir, "cloudflared", "config.yml"))},
@@ -297,7 +459,7 @@ process.stdin.on("data", (chunk) => {
   for (const [name, value] of Object.entries(validEnv(await freePort(), fake))) {
     if (value !== undefined) env[name] = value;
   }
-  return { script, env };
+  return { dir, script, env };
 }
 
 describe("main when stdout's reader goes away", () => {
@@ -335,5 +497,20 @@ describe("main when stdout's reader goes away", () => {
     run.child.stdin.write("xxx");
     expect(await run.exit(4000)).toBe(1);
     expect(run.stderr()).toBe("");
+  }, 30_000);
+
+  // A crash exits without stopping cloudflared (in the image, the container ends with its first
+  // process and takes cloudflared with it). Outside one, the stand-in must not stay behind: it
+  // ends itself once the supervisor is gone, before the clean-up after the test would end it.
+  it("leaves no stand-in running once it has exited 1 on an uncaught exception", async () => {
+    const { dir, script, env } = await connectorChild();
+    const run = await spawnThenCloseStdout(script, env);
+    const stub = await stubPid(dir);
+    expect(stub).toBeGreaterThan(1);
+    run.child.stdin.write("x");
+    expect(await run.exit(4000)).toBe(1);
+    expect(await goneWithin(stub, 5000), `the stand-in (pid ${stub}) outlived the supervisor`).toBe(
+      true,
+    );
   }, 30_000);
 });
