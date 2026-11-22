@@ -347,7 +347,12 @@ describe("the staff fragment's owed alerts", () => {
       "duty-stalled-access-drift",
     ]) {
       expect(rule(name), `${name} is a staging rule`).toBeUndefined();
-      expect(owed(name), name).toMatchObject({ fragment: "staff", lane: "L-SAT-09" });
+      // Re-dated, not left due today: the writer is another lane's (owed-alerts.test.ts).
+      expect(owed(name), name).toMatchObject({
+        fragment: "staff",
+        lane: "L-SAT-09",
+        due: "2026-11-23",
+      });
     }
     expect(owed("admin-without-second-factor")?.note).toMatch(
       /no admin request line carries assurance/,

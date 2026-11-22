@@ -38,11 +38,22 @@ const RULED: readonly string[] = [
 ];
 
 /**
+ * The staff alerts the ops lane cannot finish today, because no process writes what they read and
+ * the writer is another lane's work: each re-dated to a proposed later date, which the steward
+ * confirms or changes, so tonight's apply leaves nothing in owed.ts due today for them.
+ */
+const REDATED: Readonly<Record<string, string>> = {
+  "admin-without-second-factor": "2026-11-23",
+  "admin-access-drift": "2026-11-23",
+  "duty-stalled-access-drift": "2026-11-23",
+};
+
+/**
  * The later ruling of 22 Nov: five more alerts the catalogue owes, each with its lane and date,
  * less staff-changed, a rule now (alerts/staff.json).
  */
 const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
-  "admin-access-drift": { lane: "L-SAT-09", due: "2026-11-22" },
+  "admin-access-drift": { lane: "L-SAT-09", due: "2026-11-23" },
   "review-refusals": { lane: "P0-C", due: "2026-11-22" },
   "review-model-mismatch": { lane: "P0-C", due: "2026-11-22" },
   "money-switch-tripped": { lane: "L-MON-09", due: "2026-11-23" },
@@ -116,10 +127,10 @@ describe("the alert names on the repository", () => {
     expect(mc15(ROOT)).toEqual([]);
   });
 
-  it("owe the ruling's fifteen, each with its lane, due Sunday 22 Nov 2026", () => {
+  it("owe the ruling's fifteen, each with its lane, due Sunday 22 Nov 2026 unless re-dated", () => {
     for (const name of RULED) {
       expect(staging.has(name), `${name} is a staging rule now`).toBe(false);
-      expect(owedByName.get(name), name).toMatchObject({ due: "2026-11-22" });
+      expect(owedByName.get(name), name).toMatchObject({ due: REDATED[name] ?? "2026-11-22" });
       expect(owedByName.get(name)?.lane, name).toMatch(/^(?:P0-F|L-SAT-09)$/);
     }
     // Decided by the plan's order (spec 02 §10.9): a success alert and no heartbeat.
@@ -138,6 +149,23 @@ describe("the alert names on the repository", () => {
     for (const [name, ruled] of Object.entries({ ...RULED_LATER, ...BY_LANE_RULE })) {
       expect(owedByName.get(name), name).toMatchObject(ruled);
     }
+  });
+
+  it("re-date only alerts whose writer is another lane's, each note naming that lane and the proposed date", () => {
+    for (const [name, due] of Object.entries(REDATED)) {
+      const owed = owedByName.get(name);
+      expect(owed, name).toMatchObject({ due, lane: "L-SAT-09" });
+      expect(owed?.note, name).toMatch(/Re-dated from 2026-11-22 to 2026-11-23, a proposed date/);
+      expect(owed?.note, name).toMatch(/for the steward to confirm/);
+    }
+    expect(owedByName.get("admin-without-second-factor")?.note).toMatch(
+      /The writer is L-SAT-07's \(apps\/admin\)/,
+    );
+    expect(owedByName.get("admin-access-drift")?.note).toMatch(
+      /The writer is L-SAT-04's \(apps\/api\/src\/worker\/staff\//,
+    );
+    expect(owedByName.get("admin-access-drift")?.note).toMatch(/runs in no deployable/);
+    expect(owedByName.get("duty-stalled-access-drift")?.note).toMatch(/for the same writer/);
   });
 
   it("carry the later ruling's note, the decided question, and the production precondition", () => {

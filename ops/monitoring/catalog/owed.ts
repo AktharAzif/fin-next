@@ -47,6 +47,14 @@ export interface OwedAlert {
 /** Spec 02 §18.2's alerts and the audit guard, due by the steward's ruling of 22 Nov. */
 const SUNDAY = "2026-11-22";
 
+/**
+ * A later date, proposed for the steward to confirm, for an alert the ops lane cannot finish on
+ * its due day because what it reads is written by no process and the writer is another lane's
+ * work: the note names that lane and the writer. The ruling of 22 Nov leaves in this list only
+ * items due later than tonight's first apply, so such an alert is re-dated, never left due today.
+ */
+const PROPOSED_MONDAY = "2026-11-23";
+
 export const OWED_ALERTS: readonly OwedAlert[] = [
   // The steward's ruling of 22 Nov, option (b): the alerts the code names.
   {
@@ -118,7 +126,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     severity: "P",
     fragment: "staff",
     lane: "L-SAT-09",
-    due: SUNDAY,
+    due: PROPOSED_MONDAY,
     spec: "spec 02 §18.2",
     note:
       "Owed, not defined, because no admin request line carries assurance (spec 02 §18.1's field): " +
@@ -131,7 +139,12 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "Once admin's request line carries assurance, the rule is any request on admin with actor " +
       "staff, assurance notEq aal2 (failing closed), statusClass 1xx, 2xx or 3xx, and a route " +
       "outside spec 02 §6.4's aal1-allowed list, P, runbook " +
-      "docs/runbooks/admin-without-second-factor.md.",
+      "docs/runbooks/admin-without-second-factor.md. Re-dated from 2026-11-22 to 2026-11-23, a " +
+      "proposed date for the steward to confirm: ops/monitoring cannot land the writer. The " +
+      "writer is L-SAT-07's (apps/admin): admin's auth hook copies the staff realm's assurance " +
+      "onto the host's request line (spec 02 §18.1), with packages/server's RequestFields (P0-D's " +
+      "path) and the request catalogue entry declaring the field; then the ops lane defines the " +
+      "rule and drops this entry (MC-15).",
   },
   {
     // Named by the Access drift duty (packages/staff/src/access-drift.ts) as its success alert.
@@ -139,7 +152,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     severity: "N",
     fragment: "staff",
     lane: "L-SAT-09",
-    due: SUNDAY,
+    due: PROPOSED_MONDAY,
     spec: "spec 02 §10.9, §18.2",
     note:
       "The heartbeat question is decided (22 Nov, L-SAT-09) by the plan's order of precedence: " +
@@ -154,7 +167,9 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "job.run with that job and result ok in its window (lower_than @none, on_missing_data " +
       "start_incident, window @thresholds.duty-stalled-access-drift: spec 02 §18.2 says 2 hours, " +
       "ARCHITECTURE §4.6 and spec 08 §7.8 three cadences, 3 hours, and the higher text binds), " +
-      "runbook docs/runbooks/duty-stalled.md.",
+      "runbook docs/runbooks/duty-stalled.md. Re-dated from 2026-11-22 to 2026-11-23, a proposed " +
+      "date for the steward to confirm, with admin-access-drift and for the same writer: the " +
+      "worker's Access drift duty (L-SAT-04's), which writes this job.run line as well.",
   },
   {
     name: "audit-guard",
@@ -171,7 +186,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     severity: "P",
     fragment: "staff",
     lane: "L-SAT-09",
-    due: SUNDAY,
+    due: PROPOSED_MONDAY,
     spec: "spec 02 §18.2",
     note:
       "packages/staff's runAccessDriftCheck writes access.drift with its counts " +
@@ -180,7 +195,13 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "probe only, and apps/api does not depend on @fin/staff. An alert over a line no process " +
       "writes can never fire, so it stays owed, as clock-skew does, until the worker schedules " +
       "the duty with FIN_ACCESS_READ_TOKEN; the rule is then any access.drift on worker, P, " +
-      "runbook docs/runbooks/admin-access-drift.md.",
+      "runbook docs/runbooks/admin-access-drift.md. Spec 02 §10.9's hourly check therefore runs " +
+      "in no deployable, though the owed list once said the morning release wrote access.drift. " +
+      "Re-dated from 2026-11-22 to 2026-11-23, a proposed date for the steward to confirm: " +
+      "ops/monitoring cannot land the writer. The writer is L-SAT-04's (apps/api/src/worker/staff/" +
+      "access-drift.ts, spec 02 §10.9: the worker schedules packages/staff's runAccessDriftCheck " +
+      "hourly), with FIN_ACCESS_READ_TOKEN set on worker only by pnpm fin (S2-11, the ops lane's); " +
+      "then the ops lane defines the rule and drops this entry (MC-15).",
   },
   {
     // Its lines are local until fin-review ships them to Better Stack.
