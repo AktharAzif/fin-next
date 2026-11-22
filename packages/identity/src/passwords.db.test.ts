@@ -4,12 +4,17 @@
 //     with argon2id; a password sign-in is aal1, proves no mailbox and never enrols a first factor;
 //   - a person with a factor stops at the factor step, in a session the realm keeps (the library's
 //     own password challenge is never set), and passes it the signed-in way;
-//   - wrong passwords from browsers the account does not know pause the address (per network and
-//     across networks), alike for registered and unknown addresses, past a restart, with one
-//     notice a day; a known browser is never paused;
-//   - a reset by an emailed code, only in the browser that asked, ends every session, revokes the
-//     trusted browsers, lifts the authenticator lockout and the pauses, and tells the person;
-//   - a change needs a step-up intent; every action writes its event in its own transaction.
+//   - wrong passwords from browsers the account does not know pause the address (per network, in
+//     15 minutes and in an hour, and across networks), alike for registered and unknown
+//     addresses, past a restart, with one notice a day; a known browser is never paused; tries
+//     sent together reach the pause one at a time;
+//   - a reset by an emailed code, only in the browser that asked, ends every session (a sign-in
+//     or a passkey that overlaps it included), revokes the trusted browsers, forgets the known
+//     browsers but its own, lifts the authenticator lockout and the pauses, and tells the person;
+//   - a change needs a step-up intent; every action writes its event in its own transaction;
+//   - the counts and pauses are found by their keys, never by a scan of their tables.
+import { hashPassword, verifyPassword } from "@fin/crypto";
+import type { Pool, PoolClient, QueryConfig } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -18,14 +23,17 @@ import {
   codeSignIn,
   createHarness,
   type Harness,
+  passkeyCeremony,
+  registerPasskey,
   setUpAuthenticator,
 } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
 import { verifyWithWaiver } from "./passwords/flows.ts";
 import { createPasswordHasher } from "./passwords/hasher.ts";
 import { resetCodeLink } from "./passwords/links.ts";
-import { DAY, HOUR, MINUTE } from "./ports/clock.ts";
+import { DAY, HOUR, ManualClock, MINUTE, systemClock } from "./ports/clock.ts";
 import { MemoryLineSink } from "./ports/log.ts";
+import { createPgDatabase } from "./ports/pg-database.ts";
 import { signUp } from "./sign-up.ts";
 
 let database: TestDatabase;
@@ -67,10 +75,10 @@ async function eventsFor(event: string, target: string) {
 }
 
 /** Signs up with a password from a new browser and confirms the address there. */
-async function signUpWithPassword(email: string, password = GOOD): Promise<Browser> {
-  const browser = h.browser();
+async function signUpWithPassword(email: string, password = GOOD, on: Harness = h) {
+  const browser = on.browser();
   const answer = await signUp(
-    h.realm,
+    on.realm,
     browser.request("POST", "/api/sign-up", { name: "Ada Lovelace", email, password }),
     browser.context(),
     { name: "Ada Lovelace", email, password },
@@ -78,7 +86,7 @@ async function signUpWithPassword(email: string, password = GOOD): Promise<Brows
   expect(answer.status).toBe(202);
   for (const cookie of answer.setCookies)
     browser.absorb(new Response(null, { headers: { "set-cookie": cookie } }));
-  const code = await h.latestCode(email);
+  const code = await on.latestCode(email);
   const confirmed = await browser.post("/api/auth/sign-in/email-otp", { email, otp: code });
   expect(confirmed.status, JSON.stringify(confirmed.json)).toBe(200);
   return browser;
@@ -86,6 +94,12 @@ async function signUpWithPassword(email: string, password = GOOD): Promise<Brows
 
 const passwordSignIn = (browser: Browser, email: string, password: string) =>
   browser.post("/api/auth/sign-in/email", { email, password });
+const requestReset = (browser: Browser, email: string) =>
+  browser.post("/api/auth/email-otp/request-password-reset", { email });
+const reset = (browser: Browser, email: string, otp: string, password = BETTER) =>
+  browser.post("/api/auth/email-otp/reset-password", { email, otp, password });
+const clearSignInLimit = () =>
+  h.admin.query("DELETE FROM ops.rate_window WHERE key LIKE 'password_sign_in:%'");
 
 async function sessionOf(browser: Browser) {
   const result = await h.admin.query<{
@@ -93,14 +107,96 @@ async function sessionOf(browser: Browser) {
     assurance: string;
     created_via: string;
     mailbox_proved_at: Date | null;
+    trusted_browser_id: string | null;
     expires_at: Date;
     created_at: Date;
   }>(
-    `SELECT id, assurance, created_via, mailbox_proved_at, expires_at, created_at
+    `SELECT id, assurance, created_via, mailbox_proved_at, trusted_browser_id, expires_at,
+            created_at
        FROM identity.session WHERE token = $1`,
     [browser.sessionToken()],
   );
   return result.rows[0] ?? null;
+}
+
+/** The person's sessions still in the table. */
+async function liveSessions(id: string): Promise<string[]> {
+  const result = await h.admin.query<{ id: string }>(
+    "SELECT id FROM identity.session WHERE user_id = $1 ORDER BY id",
+    [id],
+  );
+  return result.rows.map((r) => r.id);
+}
+
+/** Polls until `check` holds or `ms` pass; says which. */
+async function until(check: () => boolean | Promise<boolean>, ms = 5_000): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return check();
+}
+
+/** How many of this database's connections wait on a lock now. */
+async function lockWaits(): Promise<number> {
+  const result = await h.admin.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND wait_event_type = 'Lock'",
+    [database.name],
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+/**
+ * Real argon2id whose hashes or checks wait while the test holds them, so that two requests can be
+ * set side by side: one inside its hash or check (its unit of work open), the other sent meanwhile.
+ */
+function heldWork() {
+  const held = { hash: false, verify: false };
+  const waiters: Record<"hash" | "verify", (() => void)[]> = { hash: [], verify: [] };
+  const entered = { hash: 0, verify: 0 };
+  const pass = async (kind: "hash" | "verify") => {
+    entered[kind] += 1;
+    if (held[kind]) await new Promise<void>((resolve) => waiters[kind].push(resolve));
+  };
+  return {
+    entered,
+    hold(kind: "hash" | "verify") {
+      held[kind] = true;
+    },
+    release(kind: "hash" | "verify") {
+      held[kind] = false;
+      for (const resolve of waiters[kind].splice(0)) resolve();
+    },
+    work: {
+      hash: async (password: string) => {
+        await pass("hash");
+        return hashPassword(password);
+      },
+      verify: async (hash: string, password: string) => {
+        await pass("verify");
+        return verifyPassword(hash, password);
+      },
+    },
+  };
+}
+
+/** A harness whose hasher the test can hold, with room for every request it sends at once. */
+async function heldHarness() {
+  const held = heldWork();
+  const harness = await createHarness(database, "developer", {
+    env: PASSWORDS_ON,
+    deps: {
+      passwords: createPasswordHasher({
+        lines: new MemoryLineSink(),
+        concurrency: 8,
+        queueLimit: 8,
+        queueWaitMs: 30_000,
+        work: held.work,
+      }),
+    },
+  });
+  return { held, harness };
 }
 
 /** The answer as a stranger sees it: status, body and header names but the request's own. */
@@ -231,6 +327,60 @@ describe("a password sign-in", { timeout: 30_000 }, () => {
     expect((await sessionOf(browser))?.assurance).toBe("aal2");
   });
 
+  it("from a browser the person trusts, is a working aal1 session for the day, made from that row (§6.6)", async () => {
+    const email = unique("trusted");
+    const owner = await signUpWithPassword(email);
+    const { secret } = await setUpAuthenticator(owner);
+    const id = (await userId(email)) as string;
+    // A password sign-in in a new browser stops at the factor step, where the person trusts it.
+    const browser = h.browser();
+    expect((await passwordSignIn(browser, email, GOOD)).status).toBe(200);
+    await h.admin.query("UPDATE identity.totp_step SET last_step = 0");
+    const trusted = await browser.post("/api/auth/two-factor/verify-totp", {
+      code: hotp(secret, totpStep(new Date())),
+      trustDevice: true,
+    });
+    expect(trusted.status, JSON.stringify(trusted.json)).toBe(200);
+    const row = (await h.events({ event: "browser.trusted" })).find((e) => e.ref_ids.includes(id));
+    expect(row?.target_id).toMatch(/^tbr_/);
+    expect((await browser.post("/api/auth/sign-out")).status).toBe(200);
+
+    // The next password sign-in there skips the factor step.
+    const answer = await passwordSignIn(browser, email, GOOD);
+    expect(answer.status, JSON.stringify(answer.json)).toBe(200);
+    const session = await sessionOf(browser);
+    expect(session).toMatchObject({
+      assurance: "aal1",
+      created_via: "password",
+      mailbox_proved_at: null,
+      trusted_browser_id: row?.target_id,
+    });
+    const lifetime = (session?.expires_at.getTime() ?? 0) - (session?.created_at.getTime() ?? 0);
+    expect(Math.abs(lifetime - DAY)).toBeLessThan(5_000);
+    const created = (await h.events({ event: "session.created" })).find(
+      (e) => e.target_id === session?.id,
+    );
+    expect(created?.metadata).toEqual({
+      method: "password",
+      assurance: "aal1",
+      trustedBrowser: true,
+    });
+    expect(created?.ref_ids).toEqual(expect.arrayContaining([id, row?.target_id]));
+    expect(
+      (await h.events({ event: "sign_in.second_factor_required" })).filter(
+        (e) => e.target_id === session?.id,
+      ),
+    ).toEqual([]);
+    const used = await h.admin.query<{ last_used_at: Date | null }>(
+      "SELECT last_used_at FROM identity.trusted_browser WHERE id = $1",
+      [row?.target_id],
+    );
+    expect(used.rows[0]?.last_used_at).not.toBeNull();
+    // A working session: a factor change asks for a step-up, not for the factor step.
+    const working = await browser.post("/api/auth/two-factor/generate-backup-codes", {});
+    expect(working.json).toMatchObject({ code: "step_up_required" });
+  });
+
   it("answers a wrong password the same for a registered and an unknown address", async () => {
     const email = unique("wrong");
     await signUpWithPassword(email);
@@ -329,6 +479,41 @@ describe("the pause after wrong passwords (§5.7)", { timeout: 60_000 }, () => {
     });
   });
 
+  it("lets tries sent together reach the pause one at a time, so none passes its count", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("together");
+    await signUpWithPassword(email, GOOD, g);
+    const id = (await userId(email)) as string;
+    // 39 wrong passwords, three per network: one short of the all-networks pause.
+    for (let i = 0; i < 39; i += 1) {
+      const ip = `2001:db8:${(Math.floor(i / 3) + 0x500).toString(16)}::7`;
+      expect((await passwordSignIn(g.browser({ ip }), email, BETTER)).status, `try ${i + 1}`).toBe(
+        401,
+      );
+    }
+    // Five more at once from five new networks, each check held until all five could be in it.
+    held.hold("verify");
+    const checks = held.entered.verify;
+    const together = [0, 1, 2, 3, 4].map((k) =>
+      passwordSignIn(g.browser({ ip: `2001:db8:${(0x600 + k).toString(16)}::7` }), email, BETTER),
+    );
+    expect(
+      await until(
+        async () =>
+          held.entered.verify - checks === 5 ||
+          (held.entered.verify - checks === 1 && (await lockWaits()) === 4),
+      ),
+    ).toBe(true);
+    held.release("verify");
+    const statuses = (await Promise.all(together)).map((a) => a.status).sort();
+    // The first is the 40th wrong password, which pauses the address; the four after it see it.
+    expect(statuses).toEqual([401, 429, 429, 429, 429]);
+    expect(await eventsFor("sign_in.failed", id)).toHaveLength(40);
+    expect((await eventsFor("password.paused", id)).map((e) => e.metadata.scope)).toEqual([
+      "address",
+    ]);
+  });
+
   it("never counts or pauses a browser the account knows", async () => {
     const email = unique("known");
     const owner = await signUpWithPassword(email);
@@ -402,11 +587,6 @@ describe("the pause after wrong passwords (§5.7)", { timeout: 60_000 }, () => {
 });
 
 describe("a password reset by an emailed code", { timeout: 60_000 }, () => {
-  const requestReset = (browser: Browser, email: string) =>
-    browser.post("/api/auth/email-otp/request-password-reset", { email });
-  const reset = (browser: Browser, email: string, otp: string, password = BETTER) =>
-    browser.post("/api/auth/email-otp/reset-password", { email, otp, password });
-
   it("answers every address the same, and emails a code only to an account", async () => {
     const registered = unique("reset.registered");
     await signUpWithPassword(registered);
@@ -586,6 +766,177 @@ describe("a password reset by an emailed code", { timeout: 60_000 }, () => {
   });
 });
 
+describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, () => {
+  it("ends the session of a sign-in with the old password that was checking it as the reset came", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("race.first");
+    await signUpWithPassword(email, GOOD, g);
+    const id = (await userId(email)) as string;
+    const asker = g.browser();
+    await requestReset(asker, email);
+    const code = (await g.latestCode(email)) as string;
+
+    // Someone who knows the old password signs in; their check is held after the library has read
+    // the old password, inside the sign-in's unit of work.
+    held.hold("verify");
+    const checks = held.entered.verify;
+    const intruder = g.browser();
+    const signIn = passwordSignIn(intruder, email, GOOD);
+    expect(await until(() => held.entered.verify > checks)).toBe(true);
+    // The reset comes meanwhile; it waits for the sign-in rather than ending the sessions first.
+    let resetDone = false;
+    const resetting = reset(asker, email, code).finally(() => {
+      resetDone = true;
+    });
+    expect(await until(async () => resetDone || (await lockWaits()) > 0)).toBe(true);
+    held.release("verify");
+    const [signedIn, done] = await Promise.all([signIn, resetting]);
+
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+    // No session outlives the reset, and the one the sign-in made ended with its event.
+    expect(await liveSessions(id)).toEqual([]);
+    expect((await intruder.get("/api/auth/get-session")).json).toBeNull();
+    const made = (await g.events({ event: "session.created" })).find(
+      (e) => e.ref_ids.includes(id) && e.metadata.method === "password",
+    );
+    expect(made?.target_id).toMatch(/^ses_/);
+    expect(
+      (await g.events({ event: "session.ended" }))
+        .filter((e) => e.target_id === made?.target_id)
+        .map((e) => e.metadata),
+    ).toEqual([{ reason: "password_reset" }]);
+    expect((await eventsFor("password.reset", id)).at(-1)?.metadata).toEqual({ sessionsEnded: 2 });
+  });
+
+  it("makes a sign-in that comes while a reset is under way read the new password", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("race.second");
+    const owner = await signUpWithPassword(email, GOOD, g);
+    const id = (await userId(email)) as string;
+    const before = await liveSessions(id);
+    const asker = g.browser();
+    await requestReset(asker, email);
+    const code = (await g.latestCode(email)) as string;
+
+    // The reset's new password is held in its hash: its code is tried and its sessions read.
+    held.hold("hash");
+    const hashes = held.entered.hash;
+    const resetting = reset(asker, email, code);
+    expect(await until(() => held.entered.hash > hashes)).toBe(true);
+    // A sign-in with the old password comes meanwhile; it waits for the reset to finish.
+    let signInDone = false;
+    const signIn = passwordSignIn(g.browser(), email, GOOD).finally(() => {
+      signInDone = true;
+    });
+    expect(await until(async () => signInDone || (await lockWaits()) > 0)).toBe(true);
+    held.release("hash");
+    const [done, signedIn] = await Promise.all([resetting, signIn]);
+
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(signedIn.status).toBe(401);
+    expect(signedIn.json).toMatchObject({ code: "INVALID_EMAIL_OR_PASSWORD" });
+    expect(await liveSessions(id)).toEqual([]);
+    expect((await owner.get("/api/auth/get-session")).json).toBeNull();
+    // Each session the reset ended has its event.
+    const ended = (await g.events({ event: "session.ended" })).map((e) => e.target_id);
+    for (const session of before) expect(ended).toContain(session);
+  });
+
+  it("lets no session made by another method during a reset vanish without its event", async () => {
+    const { held, harness: g } = await heldHarness();
+    const email = unique("race.passkey");
+    const owner = await signUpWithPassword(email, GOOD, g);
+    const authenticator = g.authenticator();
+    const { verify } = await registerPasskey(owner, authenticator);
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
+    const id = (await userId(email)) as string;
+    const asker = g.browser();
+    await requestReset(asker, email);
+    const code = (await g.latestCode(email)) as string;
+
+    held.hold("hash");
+    const hashes = held.entered.hash;
+    const resetting = reset(asker, email, code);
+    expect(await until(() => held.entered.hash > hashes)).toBe(true);
+    // A passkey sign-in of the same person while the reset holds its sessions.
+    let passkeyDone = false;
+    const passkey = passkeyCeremony(g.browser(), authenticator).finally(() => {
+      passkeyDone = true;
+    });
+    expect(await until(async () => passkeyDone || (await lockWaits()) > 0)).toBe(true);
+    held.release("hash");
+    const [done, signedIn] = await Promise.all([resetting, passkey]);
+    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+
+    // Every session of the person is either still there or ended with its event: the passkey's
+    // came after the reset, so it stays.
+    const made = (await g.events({ event: "session.created" }))
+      .filter((e) => e.ref_ids.includes(id))
+      .map((e) => e.target_id);
+    const ended = (await g.events({ event: "session.ended" })).map((e) => e.target_id);
+    const live = await liveSessions(id);
+    for (const session of made) {
+      expect(live.includes(session) || ended.includes(session), session).toBe(true);
+    }
+    const passkeySession = (await g.events({ event: "session.created" })).find(
+      (e) => e.ref_ids.includes(id) && e.metadata.method === "passkey",
+    )?.target_id;
+    expect(live).toEqual([passkeySession]);
+  });
+
+  it("forgets the known browsers but its own, so one that signed in with the old password is paused", async () => {
+    const email = unique("reset.known");
+    const owner = await signUpWithPassword(email);
+    const id = (await userId(email)) as string;
+    // Someone signs in once with the password and keeps the known-browser cookie it gave them.
+    const intruder = h.browser({ ip: "198.51.100.91" });
+    expect((await passwordSignIn(intruder, email, GOOD)).status).toBe(200);
+    const intruderCookie = intruder.jar.get("__Host-fin.known_browser") as string;
+    expect(intruderCookie).toMatch(/./);
+    const knownBefore = await h.admin.query(
+      "SELECT 1 FROM identity.known_browser WHERE user_id = $1",
+      [id],
+    );
+    expect(knownBefore.rowCount).toBe(2);
+
+    // The owner resets from their own browser, which the account knows.
+    await requestReset(owner, email);
+    expect((await reset(owner, email, (await h.latestCode(email)) as string)).status).toBe(200);
+    const knownAfter = await h.admin.query<{ id: string }>(
+      "SELECT id FROM identity.known_browser WHERE user_id = $1",
+      [id],
+    );
+    expect(knownAfter.rowCount).toBe(1);
+
+    // The intruder's cookie no longer exempts their guesses: ten from one network pause it there,
+    // so even the right new password is refused from it.
+    const ip = "198.51.100.92";
+    const asIntruder = () => {
+      const browser = h.browser({ ip });
+      browser.jar.set("__Host-fin.known_browser", intruderCookie);
+      return browser;
+    };
+    for (let i = 0; i < 10; i += 1) {
+      await clearSignInLimit();
+      expect((await passwordSignIn(asIntruder(), email, GOOD)).status, `try ${i + 1}`).toBe(401);
+    }
+    await clearSignInLimit();
+    const paused = await passwordSignIn(asIntruder(), email, BETTER);
+    expect(paused.json).toMatchObject({ code: "rate_limited", reason: "password_paused" });
+    // The browser that reset is still known: it signs in from that network all the same.
+    const ownerThere = h.browser({ ip });
+    ownerThere.jar.set(
+      "__Host-fin.known_browser",
+      owner.jar.get("__Host-fin.known_browser") as string,
+    );
+    await clearSignInLimit();
+    const signedIn = await passwordSignIn(ownerThere, email, BETTER);
+    expect(signedIn.status, JSON.stringify(signedIn.json)).toBe(200);
+  });
+});
+
 describe("changing a password", { timeout: 30_000 }, () => {
   it("needs a step-up intent and writes password.changed with it", async () => {
     const email = unique("change");
@@ -747,16 +1098,129 @@ describe("hashing under load (ARCHITECTURE §3.5)", () => {
   });
 });
 
-describe("the windows of the pause", () => {
-  it("are 10 in 15 minutes and 15 in an hour per network, 40 in an hour across networks", async () => {
-    const { PAUSE_THRESHOLDS } = await import("./passwords/pause.ts");
-    expect(PAUSE_THRESHOLDS).toEqual({
-      network: [
-        { ms: 15 * MINUTE, count: 10 },
-        { ms: HOUR, count: 15 },
-      ],
-      address: [{ ms: HOUR, count: 40 }],
+describe("the windows of the pause", { timeout: 60_000 }, () => {
+  it("pauses a network at its 15th wrong password in an hour, across 15-minute windows, until the hour ends", async () => {
+    // A clock the test moves, one minute into an hour, so the hour holds two 15-minute windows.
+    const start = new Date(Math.floor(Date.now() / HOUR) * HOUR + MINUTE);
+    const hourEnds = new Date(start.getTime() - MINUTE + HOUR);
+    const clock = new ManualClock(start);
+    const m = await createHarness(database, "developer", { env: PASSWORDS_ON, clock });
+    const email = unique("hour");
+    await signUpWithPassword(email, GOOD, m);
+    const id = (await userId(email)) as string;
+    const ip = "198.51.100.101";
+    const tryFrom = async (from: string, password: string) => {
+      await clearSignInLimit();
+      return passwordSignIn(m.browser({ ip: from }), email, password);
+    };
+
+    // Nine in the hour's first 15 minutes: one short of that window's 10.
+    for (let i = 0; i < 9; i += 1) expect((await tryFrom(ip, BETTER)).status).toBe(401);
+    // Six in the next 15 minutes: that window holds 6, the hour 15. The first five pause nothing.
+    clock.set(new Date(start.getTime() + 15 * MINUTE));
+    for (let i = 0; i < 5; i += 1) {
+      expect((await tryFrom(ip, BETTER)).status, `try ${10 + i}`).toBe(401);
+    }
+    expect(await eventsFor("password.paused", id)).toEqual([]);
+    // The 15th is checked and answered as any wrong password, and pauses this network for the
+    // rest of the hour.
+    expect((await tryFrom(ip, BETTER)).status).toBe(401);
+    expect((await eventsFor("password.paused", id)).map((e) => e.metadata)).toEqual([
+      { scope: "network", until: hourEnds.toISOString() },
+    ]);
+    const paused = await tryFrom(ip, GOOD);
+    expect(paused.json).toMatchObject({ code: "rate_limited", reason: "password_paused" });
+    expect(Number(paused.headers.get("retry-after"))).toBe(
+      (hourEnds.getTime() - clock.now().getTime()) / 1000,
+    );
+    // Another network is not paused by it.
+    expect((await tryFrom("198.51.100.102", GOOD)).status).toBe(200);
+    // Just before the hour ends the network is still paused; when it ends, it is not.
+    clock.set(new Date(hourEnds.getTime() - 1000));
+    expect((await tryFrom(ip, GOOD)).json).toMatchObject({ reason: "password_paused" });
+    clock.set(hourEnds);
+    expect((await tryFrom(ip, GOOD)).status).toBe(200);
+  });
+});
+
+describe("the counts and pauses behind the pause (§5.6)", { timeout: 60_000 }, () => {
+  /** Records each statement the pool's clients run. */
+  function recording(pool: Pool, seen: { text: string; values: readonly unknown[] }[]): Pool {
+    const connect = pool.connect.bind(pool);
+    const wrapped = new WeakSet<PoolClient>();
+    (pool as { connect: () => Promise<PoolClient> }).connect = async () => {
+      const client = await connect();
+      if (!wrapped.has(client)) {
+        wrapped.add(client);
+        const query = client.query.bind(client);
+        client.query = ((config: string | QueryConfig, values?: readonly unknown[]) => {
+          const text = typeof config === "string" ? config : config.text;
+          seen.push({ text, values: values ?? [] });
+          return query(config, values);
+        }) as PoolClient["query"];
+      }
+      return client;
+    };
+    return pool;
+  }
+
+  /** The tables a plan reads with a sequential scan, with sequential scans off. */
+  async function seqScans(text: string, values: readonly unknown[]): Promise<string[]> {
+    const client = await h.admin.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL enable_seqscan = off");
+      const plan = await client.query<{ "QUERY PLAN": unknown }>(
+        `EXPLAIN (FORMAT JSON) ${text}`,
+        values,
+      );
+      const found: string[] = [];
+      const walk = (node: unknown): void => {
+        if (typeof node !== "object" || node === null) return;
+        const record = node as Record<string, unknown>;
+        if (record["Node Type"] === "Seq Scan") found.push(String(record["Relation Name"]));
+        for (const value of Object.values(record)) walk(value);
+      };
+      walk(plan.rows[0]?.["QUERY PLAN"]);
+      return found;
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  }
+
+  it("are counted, read and lifted by their own keys, never by a scan of their tables", async () => {
+    const seen: { text: string; values: readonly unknown[] }[] = [];
+    const pool = recording(database.login("fin_console"), seen);
+    const db = createPgDatabase({
+      pool,
+      clock: systemClock,
+      release: "test",
+      lines: new MemoryLineSink(),
     });
-    expect(DAY).toBe(24 * HOUR);
+    const r = await createHarness(database, "developer", { env: PASSWORDS_ON, deps: { db } });
+    const email = unique("keys");
+    const owner = await signUpWithPassword(email, GOOD, r);
+    // Wrong passwords to a pause, a paused try, a reset that lifts it, and a sign-in after it.
+    const ip = "198.51.100.111";
+    for (let i = 0; i < 10; i += 1) {
+      await clearSignInLimit();
+      await passwordSignIn(r.browser({ ip }), email, BETTER);
+    }
+    await clearSignInLimit();
+    expect((await passwordSignIn(r.browser({ ip }), email, GOOD)).status).toBe(429);
+    await requestReset(owner, email);
+    expect((await reset(owner, email, (await r.latestCode(email)) as string)).status).toBe(200);
+    await clearSignInLimit();
+    expect((await passwordSignIn(r.browser({ ip }), email, BETTER)).status).toBe(200);
+
+    const statements = new Map<string, readonly unknown[]>();
+    for (const { text, values } of seen) {
+      if (/\bops\.(rate_window|lockout)\b/.test(text)) statements.set(text, values);
+    }
+    expect(statements.size).toBeGreaterThan(3);
+    for (const [text, values] of statements) {
+      expect(await seqScans(text, values), text).toEqual([]);
+    }
   });
 });

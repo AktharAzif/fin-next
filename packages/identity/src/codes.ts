@@ -71,11 +71,16 @@ export interface LiveCodeRequest {
  *
  * Every path takes its locks in one order, so that two units never wait on each other in a circle:
  * sign-up's own limits first (`sign_up_network`, then `sign_up_address`, which only sign-up takes);
- * then the network's code limit (`code_send`, or `code_sign_in` for a try); then this lock; then
- * the address's code limits (`code_send` for the address, the strangers' share and the allowance of
- * code emails, and their pause) and its requests. Nothing per address comes before this lock but
- * `sign_up_address`, which no unit takes after it, and no unit takes two addresses' locks, so a
- * shared slot adds no circle either.
+ * then the network's limit (`code_send`, `code_sign_in` for a try, `password_sign_in` for a
+ * password sign-in); then this lock; then the address's code limits (`code_send` for the address,
+ * the strangers' share and the allowance of code emails, and their pause), its requests, its
+ * password counts and pauses (passwords/pause.ts), and a password reset's person row. Nothing per
+ * address comes before this lock but `sign_up_address`, which no unit takes after it, no unit takes
+ * two addresses' locks, so a shared slot adds no circle either, and no path that holds a person's
+ * row takes this lock after it. One row can come first: the gate deletes the request's own session
+ * when its factor step has lapsed, before the path's own rules run. Should a reset of that same
+ * person hold this lock then, the two wait on each other; Postgres refuses one of them as a
+ * deadlock, and that request can be sent again.
  */
 export async function lockAddress(
   db: Queryable,
