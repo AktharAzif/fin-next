@@ -64,6 +64,17 @@ export const entries: readonly CatalogEntry[] = [
       "spec 02 §18.2 names no alert for it: the server refuses the request before its handler, Fin Admin's pages only mirror the check, and the line counts the refusals by permission for the area's panels",
   },
   {
+    event: "staff.audit_read_refused",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "packages/staff's audit log reads (Fin Admin's audit page and entry), when the database refuses a reader the staff guard let through (42501): its re-check of the session's own row and the guard disagree, and the answer is 403 forbidden",
+    fields: { staffId: "string" },
+    alerts: [],
+    noAlert:
+      "spec 02 §18.2 names no alert for it: the database refuses the read itself, so no row is returned, and the request is answered 403 forbidden",
+  },
+  {
     event: "access.drift",
     kind: "security",
     level: "error",
