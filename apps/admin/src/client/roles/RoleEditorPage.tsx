@@ -245,8 +245,14 @@ function Editor(props: { isNew: boolean; role: StaffRoleRow | null; takenNames: 
         return;
       }
       if (role === null || role.builtIn || base === null) return;
+      // The holders the editor counts: a save that adds a permission raises exactly those.
       const saved = await withStepUpSubject({ role: body.name }, () =>
-        fin.api(saveStaffRole, { roleId: role.key, ...body, version: base }),
+        fin.api(saveStaffRole, {
+          roleId: role.key,
+          ...body,
+          version: base,
+          holders: [...role.holderIds],
+        }),
       );
       setBase(saved.version);
       setState("saved");

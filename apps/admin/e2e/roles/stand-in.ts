@@ -3,9 +3,10 @@
 // server serves them. It keeps the contract @fin/staff answers (apps/admin's staff-roles.db.test.ts
 // pins it) and decides with the same permission engine the server runs: `validateRole` (without
 // the identity package's full name rules, which the server adds), `editingProblem` and
-// `deletionProblem`, the version, the 30-role limit, the holders a deletion names (exactly the
-// role's holders now, or `409 conflict`), and an intent bound to each change through the
-// stand-in's own step-up. Every change appends its audit event to the stand-in's trail.
+// `deletionProblem`, the version, the 30-role limit, the holders a deletion or a save adding a
+// permission names (exactly the role's holders now, or `409 conflict`), and an intent bound to
+// each change through the stand-in's own step-up. Every change appends its audit event to the
+// stand-in's trail.
 import {
   CUSTOM_ROLE_LIMIT,
   customRoleLimitReached,
@@ -217,6 +218,20 @@ export class StaffRolesStandIn {
     });
   }
 
+  /** The holders a request names (`holders`), once each and sorted; null when it names none. */
+  #shown(host: RolesHost): string[] | null {
+    const named = host.body.holders;
+    if (!Array.isArray(named) || named.some((v) => typeof v !== "string")) return null;
+    return [...new Set(named as string[])].sort();
+  }
+
+  /** Whether `shown` is exactly the role's holders now. */
+  #same(host: RolesHost, id: string, shown: readonly string[]): boolean {
+    const holders = host.holders(id);
+    const now = holders.map((holder) => holder.id).sort();
+    return shown.length === now.length && shown.every((holderId, i) => holderId === now[i]);
+  }
+
   #known(permissions: readonly string[]): StaffPermission[] {
     return sortPermissions(
       staffCatalogue,
@@ -279,14 +294,21 @@ export class StaffRolesStandIn {
       [...this.roles.values()].filter((r) => r.id !== id).map((r) => r.name),
     );
     if (refused !== null) return refused;
+    const after = this.#known(draft.permissions);
+    const { added, removed } = permissionDiff(staffCatalogue, role.permissions, after);
+    // The holders the editor counted: a save that adds a permission raises exactly those, or none.
+    const shown = this.#shown(host);
+    if (shown === null) {
+      return host.problem("invalid", { fields: [{ path: "holders", code: "invalid_type" }] });
+    }
+    if (added.length > 0 && !this.#same(host, id, shown)) return host.problem("conflict");
     const stepUp = host.stepUp("staffRole.update", "staff_role.update", {
       target: id,
       ...draft,
       version,
+      holders: shown,
     });
     if (stepUp !== null) return stepUp;
-    const after = this.#known(draft.permissions);
-    const { added, removed } = permissionDiff(staffCatalogue, role.permissions, after);
     const renamed = role.name !== draft.name;
     role.name = draft.name;
     role.description = draft.description;
@@ -306,15 +328,11 @@ export class StaffRolesStandIn {
     if ("status" in role) return role;
     const holders = host.holders(id);
     // The holders the page counted: exactly the role's holders now, or nobody moves.
-    const named = host.body.holders;
-    if (!Array.isArray(named) || named.some((v) => typeof v !== "string")) {
+    const shown = this.#shown(host);
+    if (shown === null) {
       return host.problem("invalid", { fields: [{ path: "holders", code: "invalid_type" }] });
     }
-    const shown = [...new Set(named as string[])].sort();
-    const now = holders.map((holder) => holder.id).sort();
-    if (shown.length !== now.length || shown.some((holderId, i) => holderId !== now[i])) {
-      return host.problem("conflict");
-    }
+    if (!this.#same(host, id, shown)) return host.problem("conflict");
     const moveTo = typeof host.body.moveTo === "string" ? host.body.moveTo : undefined;
     const problem = deletionProblem(staffCatalogue, {
       actorRoleKey: host.actor.roleKey,

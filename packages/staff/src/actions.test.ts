@@ -1,6 +1,6 @@
 // The staff area's step-up actions (spec 02 §7.6, §15.5): the keys, the intent kind, the fields each
-// binds (the custom staff role actions as the dashboard's role actions, a deletion also binding the
-// holders it was shown), and that nothing secret is ever bound.
+// binds (the custom staff role actions as the dashboard's role actions, a save and a deletion also
+// binding the holders they were shown), and that nothing secret is ever bound.
 import { describe, expect, it } from "vitest";
 import { STAFF_ACTIONS } from "./actions.ts";
 
@@ -15,7 +15,7 @@ describe("the staff step-up actions", () => {
       "staff.reset_factors": [],
       "staff.enrolment_code": [],
       "staffRole.create": ["name", "description", "permissions"],
-      "staffRole.update": ["name", "description", "permissions", "version"],
+      "staffRole.update": ["name", "description", "permissions", "version", "holders"],
       "staffRole.delete": ["moveTo", "holders"],
       "switch.set": ["state", "reasonCode"],
     });
@@ -29,7 +29,7 @@ describe("the staff step-up actions", () => {
     }
   });
 
-  it("bind a custom role's permissions and a deletion's holders as key lists, and its version as a value (§7.2)", () => {
+  it("bind a custom role's permissions and a save's and a deletion's holders as key lists, and its version as a value (§7.2)", () => {
     const kinds = (key: string) =>
       Object.fromEntries(
         (STAFF_ACTIONS.find((a) => a.key === key)?.bind ?? []).map((b) => [b.name, b.kind]),
@@ -39,7 +39,11 @@ describe("the staff step-up actions", () => {
       description: "string",
       permissions: "keys",
     });
-    expect(kinds("staffRole.update")).toMatchObject({ permissions: "keys", version: "value" });
+    expect(kinds("staffRole.update")).toMatchObject({
+      permissions: "keys",
+      version: "value",
+      holders: "keys",
+    });
     expect(kinds("staffRole.delete")).toEqual({ moveTo: "string", holders: "keys" });
   });
 

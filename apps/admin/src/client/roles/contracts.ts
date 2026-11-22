@@ -64,13 +64,20 @@ export const createStaffRole = defineContract({
 
 /**
  * `PUT /api/staff-roles/:roleId` (`staffRoles.manage`, intent `staffRole.update`): saves a custom
- * role at the version the draft was built on; the answer is the version the save made.
+ * role at the version the draft was built on; the answer is the version the save made. `holders`
+ * are the holders the editor showed (the role's `holderIds`), which the intent binds: when a save
+ * adds a permission and they are not the role's holders now, the answer is `409 conflict`.
  */
 export const saveStaffRole = defineContract({
   name: "staffRoles.save",
   method: "PUT",
   path: "/staff-roles/:roleId",
-  input: z.object({ roleId: z.string().min(1), ...draft, version: z.number().int().positive() }),
+  input: z.object({
+    roleId: z.string().min(1),
+    ...draft,
+    version: z.number().int().positive(),
+    holders: z.array(z.string().min(1)),
+  }),
   output: z.object({ roleId: z.string().min(1), version: z.number().int().positive() }),
 });
 

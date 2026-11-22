@@ -1,10 +1,12 @@
 // Custom staff roles through Fin Admin's API half (spec 02 §10.7, §14.3, §8.4; stretch 3), as the
 // admin tunnel reaches it: the Access token, the origin gate, the staff realm and the route policy,
 // on the real platform. An Admin lists the four prebuilt roles, makes a custom role with an intent,
-// gives it to a member, changes it (a stale save is a conflict), and deletes it with the member
-// moved, naming the holders the list showed (others are a conflict); every refusal is a problem
-// document naming its code and never the value (a name the database's index holds as well, never
-// an internal error), and every answer is what the AdminRoles and AdminRoleEditor screens read.
+// gives it to a member, changes it (a stale save is a conflict, and so is a save adding a
+// permission that names other holders than the role's), and deletes it with the member moved,
+// naming the holders the list showed (others are a conflict); every refusal is a problem document
+// naming its code and never the value (a name the database's index holds, or one the database
+// cannot store, never an internal error), and every answer is what the AdminRoles and
+// AdminRoleEditor screens read.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -113,6 +115,7 @@ describe("the staff roles routes", () => {
       description: "",
       permissions: ["customers.read", "rfis.read"],
       version: 1,
+      holders: [holderId],
     };
     const saved = await admin.client.stepped(
       admin.authenticator,
@@ -206,6 +209,7 @@ describe("the staff roles routes", () => {
       description: "",
       permissions: ["customers.read"],
       version: 1,
+      holders: [],
     });
     expect(prebuilt.status).toBe(404);
     expect(
@@ -258,12 +262,86 @@ describe("the staff roles routes", () => {
       ...draft,
       name: dotted,
       version: 1,
+      holders: [],
     });
     expect(renamed.status, JSON.stringify(renamed.json)).toBe(400);
     expect(renamed.json).toMatchObject(taken);
     for (const name of [dotted, "Info desk", "Front desk"]) {
       expect(JSON.stringify([again.json, renamed.json])).not.toContain(name);
     }
+  });
+
+  it("refuse a name holding a character the database refuses as the name rule does, before any intent, never as an internal error", async () => {
+    const made = await admin.client.stepped(admin.authenticator, "POST", "/api/staff-roles", {
+      name: "Night desk",
+      description: "",
+      permissions: ["customers.read"],
+    });
+    expect(made.status, JSON.stringify(made.json)).toBe(201);
+    const intents = async () => {
+      const result = await h.admin.query<{ n: number }>(
+        "SELECT count(*)::integer AS n FROM ops.step_up_intent",
+      );
+      return Number(result.rows[0]?.n);
+    };
+    const before = await intents();
+    const named = { code: "invalid", fields: [{ path: "name", code: "name" }] };
+    const draft = { description: "", permissions: ["customers.read"] };
+    const createdNul = await admin.client.post("/api/staff-roles", {
+      ...draft,
+      name: "Night\u0000shift",
+    });
+    expect(createdNul.status, JSON.stringify(createdNul.json)).toBe(400);
+    expect(createdNul.json).toMatchObject(named);
+    const savedNul = await admin.client.send("PUT", `/api/staff-roles/${made.json?.roleId}`, {
+      ...draft,
+      name: "Plain\u0000role",
+      version: 1,
+      holders: [],
+    });
+    expect(savedNul.status, JSON.stringify(savedNul.json)).toBe(400);
+    expect(savedNul.json).toMatchObject(named);
+    expect(await intents()).toBe(before);
+  });
+
+  it("refuse a save that adds a permission unless it names the role's holders now, before any intent", async () => {
+    const made = await admin.client.stepped(admin.authenticator, "POST", "/api/staff-roles", {
+      name: "Raised desk",
+      description: "",
+      permissions: ["customers.read"],
+    });
+    expect(made.status, JSON.stringify(made.json)).toBe(201);
+    const roleId = String(made.json?.roleId);
+    const added = await admin.client.stepped(admin.authenticator, "POST", "/api/staff", {
+      email: unique("api.roles.raised"),
+      roleKey: roleId,
+    });
+    expect(added.status, JSON.stringify(added.json)).toBe(201);
+    const holderId = String(added.json?.staffId);
+    const save = {
+      name: "Raised desk",
+      description: "",
+      permissions: ["customers.read", "audit.read"],
+      version: 1,
+    };
+    for (const holders of [[], [holderId, admin.staffId]]) {
+      const refused = await admin.client.send("PUT", `/api/staff-roles/${roleId}`, {
+        ...save,
+        holders,
+      });
+      expect(refused.status, JSON.stringify(holders)).toBe(409);
+      expect(refused.headers.get("content-type")).toContain("application/problem+json");
+      expect(refused.json).toMatchObject({ code: "conflict" });
+      expect(refused.json?.intent_id).toBeUndefined();
+    }
+    const saved = await admin.client.stepped(
+      admin.authenticator,
+      "PUT",
+      `/api/staff-roles/${roleId}`,
+      { ...save, holders: [holderId] },
+    );
+    expect(saved.status, JSON.stringify(saved.json)).toBe(200);
+    expect(saved.json).toEqual({ roleId, version: 2 });
   });
 
   it("are Admin-only for writes, and readable by every prebuilt role", async () => {

@@ -2,17 +2,20 @@
 // refused as the access engine's `validateRole` refuses it, with the identity package's full name
 // rules, and as taken when the database's name index holds its name; `beyond` is a giving refusal
 // and every other problem names its field and code, never the value; the name index's own refusal
-// reads as the editor's; the edit allowance is §8.4's.
+// reads as the editor's, and a name the rules refuse is never sent to it; the edit allowance is
+// §8.4's.
 import { type StaffPermission, staffCatalogue } from "@fin/access";
 import { describe, expect, it } from "vitest";
 import {
   checkStaffRoleDraft,
   cleanRoleText,
+  nameTakenInStore,
   nameTakenRefusal,
   STAFF_ROLE_EDIT_BUCKET,
   STAFF_ROLE_EDIT_WINDOWS,
 } from "./custom-roles.ts";
 import { StaffRefusal } from "./errors.ts";
+import type { Queryable } from "./ports.ts";
 
 const ADMIN = new Set<StaffPermission>(staffCatalogue.keys);
 const VIEWER = new Set<StaffPermission>([
@@ -139,6 +142,25 @@ describe("checkStaffRoleDraft", () => {
         checkStaffRoleDraft(VIEWER, draft("Deciders", ["customers.decide"]), [], store),
       ),
     ).toMatchObject({ code: "giving_refused" });
+  });
+});
+
+describe("nameTakenInStore", () => {
+  it("never sends the name index a name the name rule refuses, which no role can hold", async () => {
+    const sent: unknown[][] = [];
+    const db = {
+      query(_text: string, values?: readonly unknown[]) {
+        sent.push([...(values ?? [])]);
+        return Promise.resolve({ rows: [], rowCount: 1 });
+      },
+    } as unknown as Queryable;
+    for (const name of ["Night\u0000shift", "Zero\u200bwidth", "visit example.com"]) {
+      expect(await nameTakenInStore(db, name, null), JSON.stringify(name)).toBe(false);
+    }
+    expect(sent).toEqual([]);
+    // A name the rule accepts is asked about, as the index compares it.
+    expect(await nameTakenInStore(db, "Info desk", "srl_01jd0000000000000000000000")).toBe(true);
+    expect(sent).toEqual([["Info desk", "srl_01jd0000000000000000000000"]]);
   });
 });
 

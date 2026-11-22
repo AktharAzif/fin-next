@@ -151,11 +151,13 @@ async function scenario(id: PolicyId): Promise<Scenario> {
     }
     case "staff_roles.update": {
       const roleId = await madeRole();
+      // Nobody holds the role, so the holders a save names are none.
       const body = {
         name: roleName(),
         description: "",
         permissions: ["customers.read", "rfis.read"],
         version: 1,
+        holders: [],
       };
       return {
         path: `/api/staff-roles/${roleId}`,

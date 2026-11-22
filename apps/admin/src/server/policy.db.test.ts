@@ -84,7 +84,13 @@ function sample(id: PolicyId): { path: string; body?: unknown } {
     case "staff_roles.update":
       return {
         path: "/api/staff-roles/srl_01jd0000000000000000000000",
-        body: { name: "Sample role", description: "", permissions: ["customers.read"], version: 1 },
+        body: {
+          name: "Sample role",
+          description: "",
+          permissions: ["customers.read"],
+          version: 1,
+          holders: [],
+        },
       };
     case "staff_roles.delete":
       return {

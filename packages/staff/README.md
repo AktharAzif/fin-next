@@ -41,7 +41,7 @@ await realm.run(context, async (tx) => {
 |---|---|
 | `src/require-staff.ts`, `src/step-up.ts` | the guard and the intent check of Fin Admin's routes |
 | `src/members.ts`, `src/lock.ts` | add, change a role, remove, reset, new code, list; the lock and the last Admin |
-| `src/custom-roles.ts`, `src/roles.ts` | custom staff roles (§10.7, stretch 3): make, save and delete through the access engine's editor validation and the name index's own comparison, with intents, the version, the 30-role limit and the edit allowance; a deletion names and binds the holders it was shown (`409 conflict` when they changed); the role reads, each role read in one statement, with its holders' IDs |
+| `src/custom-roles.ts`, `src/roles.ts` | custom staff roles (§10.7, stretch 3): make, save and delete through the access engine's editor validation and the name index's own comparison, with intents, the version, the 30-role limit and the edit allowance; a deletion, and a save that adds a permission, names and binds the holders it was shown (`409 conflict` when they changed); the role reads, each role read in one statement, with its holders' IDs |
 | `src/enrolment-codes.ts` | the code's format, hash and issuing (identity's realm redeems it) |
 | `src/switches.ts`, `src/account.ts`, `src/viewer.ts` | the other routes' cores |
 | `src/access-drift.ts` | the Access drift check |

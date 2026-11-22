@@ -204,6 +204,7 @@ export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteH
         updateStaffRole(deps, tx, who, str(input.params.roleId), {
           ...roleDraft(input.body),
           version: Number(input.body.version),
+          holders: Array.isArray(input.body.holders) ? input.body.holders.map(str) : [],
         }),
       )(args);
       return ok({ roleId: saved.roleId, version: saved.version });

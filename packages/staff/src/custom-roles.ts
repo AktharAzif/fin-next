@@ -9,9 +9,9 @@
 //      `staff_role_name` index compares it, so a name the index would refuse is refused here
 //      too; who may edit or delete which role (`editingProblem`, `deletionProblem`: never a
 //      prebuilt role, never the actor's own role, never one that allows something the actor
-//      lacks), the optimistic `version`, the 30-role limit, and, when holders move, the members
-//      the request names as the holders it showed, the giving rules for the role they move to and
-//      the last Admin;
+//      lacks), the optimistic `version`, the 30-role limit, the members the request names as the
+//      holders it showed when holders move or a save adds a permission, and, when holders move,
+//      the giving rules for the role they move to and the last Admin;
 //   3. only then the intent (`who.stepUp`), spent in the same transaction as the change, its audit
 //      events, its revocation-journal entry and its notices;
 //   4. the edit allowance (30 an hour and 100 a day per person), counted once the change goes
@@ -158,13 +158,16 @@ const NAME_INDEX = "staff_role_name";
  * `staff_role_name` index compares names: `lower(name)` in the database's collation, which can fold
  * letters the editor's own comparison keeps apart (a capital I with a dot above, under a libc
  * collation). Read inside the staff-change lock with every role row locked, so no name can be
- * written between this read and the change's own write.
+ * written between this read and the change's own write. A name the editor's name rule refuses is
+ * never stored, so no role holds it, and it is never sent: the database refuses some text outright
+ * (U+0000), which would answer an internal error where the editor answers `400` on the name.
  */
 export async function nameTakenInStore(
   db: Queryable,
   name: string,
   exceptRoleId: string | null,
 ): Promise<boolean> {
+  if (!checkName("roleName", name).ok) return false;
   const result = await db.query(
     `SELECT 1 FROM staff.role
       WHERE lower(name) = lower($1) AND ($2::text IS NULL OR id <> $2) LIMIT 1`,
@@ -355,13 +358,21 @@ export async function createStaffRole(
  * `PUT /api/staff-roles/:roleId` (§10.7, §8.4): `staffRoles.manage`, an intent; never a prebuilt
  * role, the actor's own, or one that allows something the actor lacks; the optimistic `version`
  * (a stale save is `409 conflict`). Holders and every Admin are told when the permissions change.
+ *
+ * `holders` are the members the actor was shown as holding the role (`holderIds`), and the intent
+ * binds them. A save that adds a permission raises every holder, so when the members holding the
+ * role now are not exactly those, the answer is `409 conflict` and nothing changes: a proved save
+ * never raises someone given the role after the actor looked, as a deletion never moves them (the
+ * owner's decision for deletions, carried to saves; recorded in the pull request). A save that
+ * adds nothing raises nobody, so its holders are bound but never compared, and a stale list never
+ * holds up taking a permission away.
  */
 export async function updateStaffRole(
   deps: StaffDeps,
   tx: UnitTx,
   who: StaffActor,
   roleId: string,
-  body: StaffRoleDraft & { version: number },
+  body: StaffRoleDraft & { version: number; holders: readonly string[] },
 ): Promise<SavedStaffRole & { holders: number; added: number; removed: number }> {
   const { actor, roles } = await lockForRoles(tx, who);
   const row = roleNamed(roles, roleId);
@@ -376,15 +387,25 @@ export async function updateStaffRole(
     roles.filter((r) => r.id !== roleId).map((r) => r.name),
     { takenInStore: await nameTakenInStore(tx, name, roleId) },
   );
-  const stepUp = await who.stepUp(tx, {
-    action: "staffRole.update",
-    target: roleId,
-    body: { name, description, permissions: [...body.permissions], version: body.version },
-  });
-  await countEdit(deps, tx, who.staffId);
   const before = [...staffPermissionsOf(role)];
   const after = knownPermissions(body.permissions);
   const { added, removed } = permissionDiff(STAFF_CATALOGUE, before, after);
+  const holders = await holdersOf(tx, roleId);
+  if (added.length > 0 && !sameMembers(holders.map((holder) => holder.id), body.holders)) {
+    throw new StaffRefusal("conflict", "staff_role.holders_changed");
+  }
+  const stepUp = await who.stepUp(tx, {
+    action: "staffRole.update",
+    target: roleId,
+    body: {
+      name,
+      description,
+      permissions: [...body.permissions],
+      version: body.version,
+      holders: [...body.holders],
+    },
+  });
+  await countEdit(deps, tx, who.staffId);
   const now = deps.clock.now();
   const updated = await writeName(() =>
     tx.query(
@@ -400,7 +421,6 @@ export async function updateStaffRole(
     "INSERT INTO staff.role_permission (role_id, permission) SELECT $1, unnest($2::text[])",
     [roleId, after],
   );
-  const holders = await holdersOf(tx, roleId);
   await deps.audit(tx, {
     event: "staff.role_updated",
     actor: { ...who.actor, stepUp },

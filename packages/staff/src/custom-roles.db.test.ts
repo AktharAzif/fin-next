@@ -2,10 +2,10 @@
 // staff role half): each change runs as the API half runs it (requireStaff, then the action, in
 // the realm's unit of work, its intent proved with a passkey) and writes its events, its journal
 // entry and its notices with it; every refusal of the editor validation, the name index, the
-// editing and deletion rules, the version, the holders a deletion was shown, the 30-role limit and
-// the edit allowance writes nothing, and comes before any factor is asked for (the allowance and
-// the holders after it as well); a role is read whole; the database refuses a role written
-// without its event.
+// editing and deletion rules, the version, the holders a deletion or a save adding a permission
+// was shown, the 30-role limit and the edit allowance writes nothing, and comes before any factor
+// is asked for (the allowance and the holders after it as well); a role is read whole; the
+// database refuses a role written without its event.
 import { type StaffPermission, staffCatalogue } from "@fin/access";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -89,6 +89,13 @@ async function deletion(roleId: string, body: DeleteBody) {
   return { ...body, holders: body.holders ?? (await shown(roleId)) };
 }
 
+/** A save's draft and version, and the holders it names: by default those the list shows now. */
+type SaveInput = StaffRoleDraft & { version: number; holders?: string[] };
+
+async function saving(roleId: string, input: SaveInput) {
+  return { ...input, holders: input.holders ?? (await shown(roleId)) };
+}
+
 const create = (who: Member, draft: StaffRoleDraft) =>
   stepped(
     h,
@@ -99,15 +106,17 @@ const create = (who: Member, draft: StaffRoleDraft) =>
       createStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), draft),
   );
 
-const update = (who: Member, roleId: string, draft: StaffRoleDraft & { version: number }) =>
-  stepped(
+const update = async (who: Member, roleId: string, input: SaveInput) => {
+  const body = await saving(roleId, input);
+  return stepped(
     h,
     who.browser,
     who.authenticator,
-    { method: "PUT", path: `/api/staff-roles/${roleId}`, body: draft },
+    { method: "PUT", path: `/api/staff-roles/${roleId}`, body },
     async (tx, req, ctx) =>
-      updateStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), roleId, draft),
+      updateStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), roleId, body),
   );
+};
 
 const remove = async (who: Member, roleId: string, input: DeleteBody) => {
   const body = await deletion(roleId, input);
@@ -128,12 +137,14 @@ const tryCreate = (who: Member, draft: StaffRoleDraft) =>
       createStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), draft),
     ),
   );
-const tryUpdate = (who: Member, roleId: string, draft: StaffRoleDraft & { version: number }) =>
-  refusalOf(
+const tryUpdate = async (who: Member, roleId: string, input: SaveInput) => {
+  const body = await saving(roleId, input);
+  return refusalOf(
     h.route(who.browser, { method: "PUT", path: `/api/staff-roles/${roleId}` }, async (tx, r, c) =>
-      updateStaffRole(h.deps, tx, await requireStaff(h.realm, r, c, MANAGE), roleId, draft),
+      updateStaffRole(h.deps, tx, await requireStaff(h.realm, r, c, MANAGE), roleId, body),
     ),
   );
+};
 const tryDelete = async (who: Member, roleId: string, input: DeleteBody) => {
   const body = await deletion(roleId, input);
   return refusalOf(
@@ -333,6 +344,13 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
         "invalid",
         { fields: [{ path: "name", code: "name" }] },
       ],
+      // A character the database refuses in any text: the name rule's refusal, never an internal
+      // error from asking the name index about it.
+      [
+        draft("Night\u0000shift", ["customers.read"]),
+        "invalid",
+        { fields: [{ path: "name", code: "name" }] },
+      ],
       [draft("Nobody", []), "invalid", { fields: [{ path: "permissions", code: "empty" }] }],
       [
         draft("Recoverers", ["organisations.read", "accounts.recover"]),
@@ -462,7 +480,11 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
   it("counts a save and a deletion against the same allowance, refusing each past it with the role untouched and the intent unspent", async () => {
     const kept = await create(otherAdmin, draft("Allowance check", ["customers.read"]));
     const spare = await create(otherAdmin, draft("Allowance spare", ["audit.read"]));
-    const save = { ...draft("Allowance check", ["customers.read", "audit.read"]), version: 1 };
+    const save = {
+      ...draft("Allowance check", ["customers.read", "audit.read"]),
+      version: 1,
+      holders: [],
+    };
     const changes: {
       label: string;
       request: { method: string; path: string };
@@ -662,6 +684,15 @@ describe("changing a custom staff role (§8.4)", () => {
       code: "invalid",
       extensions: { fields: [{ path: "name", code: "name_taken" }] },
     });
+    // A rename to a name holding a character the database refuses: the name rule's refusal.
+    const unstorable = await tryUpdate(admin, made.roleId, {
+      ...draft("Plain\u0000role", ["money.read"]),
+      version: 2,
+    });
+    expect(unstorable).toEqual({
+      code: "invalid",
+      extensions: { fields: [{ path: "name", code: "name" }] },
+    });
     // An Admin-only permission, without what it needs: both said, on the permissions field.
     const restricted = await tryUpdate(admin, made.roleId, {
       ...draft("Money watchers", ["money.read", "staff.reset_factors"]),
@@ -683,6 +714,95 @@ describe("changing a custom staff role (§8.4)", () => {
       version: 2,
     });
     expect(same.code).toBe("step_up_required");
+  });
+
+  it("raises only the holders the Admin was shown: someone given the role after the proof is a conflict, and the intent binds them", async () => {
+    const leads = await create(
+      admin,
+      draft("Desk leads", ["staff.read", "staff.add", "audit.read", "money.read"]),
+    );
+    const readers = await create(admin, draft("Ledger readers", ["audit.read", "money.read"]));
+    const lead = await enrolled("roles.desk.lead", leads.roleId);
+    const first = await h.seedMember(unique("roles.ledger"), readers.roleId, "pending");
+    // The editor shows one holder, and the save names them.
+    const holders = await shown(readers.roleId);
+    expect(holders).toEqual([first]);
+    const raised = ["audit.read", "money.read", "customers.read", "customers.reveal"];
+    const asked = { ...draft("Ledger readers", raised), version: 1, holders };
+    const request = { method: "PUT", path: `/api/staff-roles/${readers.roleId}` };
+    const save =
+      (body: typeof asked) => (tx: UnitTx, actor: StaffActor) =>
+        updateStaffRole(h.deps, tx, actor, readers.roleId, body);
+    const intent = await provedIntent(admin, () => attempt(admin, request, save(asked)));
+
+    // Meanwhile a desk lead, who may give Ledger readers but never what the save adds, gives it to
+    // someone new.
+    const newcomer = { email: unique("roles.ledger.newcomer"), roleKey: readers.roleId };
+    const added = await stepped(
+      h,
+      lead.browser,
+      lead.authenticator,
+      { method: "POST", path: "/api/staff", body: newcomer },
+      async (tx, req, ctx) =>
+        addStaff(
+          h.deps,
+          tx,
+          await requireStaff(h.realm, req, ctx, { permission: "staff.add" }),
+          newcomer,
+        ),
+    );
+
+    // The Admin's proved re-send: the role's holders are not those shown, so nobody is raised.
+    const before = await snapshot();
+    expect(await attempt(admin, request, save(asked), intent)).toEqual({
+      code: "conflict",
+      extensions: {},
+    });
+    // Naming the holders there are now does not fit the intent proved for the one shown.
+    const now = await shown(readers.roleId);
+    expect(now.sort()).toEqual([first, added.staffId].sort());
+    expect(await attempt(admin, request, save({ ...asked, holders: now }), intent)).toEqual({
+      code: "step_up_invalid",
+      extensions: { reason: "digest" },
+    });
+    expect(await snapshot()).toEqual(before);
+    expect(await unspent(intent)).toBe(true);
+    expect(await roleRow(readers.roleId)).toMatchObject({
+      version: 1,
+      permissions: ["audit.read", "money.read"],
+    });
+
+    // A save that adds nothing raises nobody: the holders it names are not compared, so a stale
+    // list never holds up taking a permission away.
+    const lowering = await tryUpdate(admin, readers.roleId, {
+      ...draft("Ledger readers", ["audit.read"]),
+      version: 1,
+      holders,
+    });
+    expect(lowering.code).toBe("step_up_required");
+
+    // Shown both, the Admin proves a factor for both, and both are raised.
+    expect(
+      await update(admin, readers.roleId, { ...draft("Ledger readers", raised), version: 1 }),
+    ).toEqual({ roleId: readers.roleId, version: 2, holders: 2, added: 2, removed: 0 });
+  });
+
+  it("refuses a save adding a permission that names holders the role does not have, before any factor is asked for", async () => {
+    const made = await create(admin, draft("Quiet readers", ["audit.read"]));
+    const holder = await h.seedMember(unique("roles.quiet.reader"), made.roleId, "pending");
+    const stranger = await h.seedMember(unique("roles.quiet.stranger"), "viewer", "pending");
+    const before = await snapshot();
+    const adding = { ...draft("Quiet readers", ["audit.read", "money.read"]), version: 1 };
+    for (const holders of [[], [stranger], [holder, stranger]]) {
+      expect(await tryUpdate(admin, made.roleId, { ...adding, holders })).toEqual({
+        code: "conflict",
+        extensions: {},
+      });
+    }
+    expect(await snapshot()).toEqual(before);
+    // The same holder named twice is still the one holder.
+    const twice = await tryUpdate(admin, made.roleId, { ...adding, holders: [holder, holder] });
+    expect(twice.code).toBe("step_up_required");
   });
 });
 

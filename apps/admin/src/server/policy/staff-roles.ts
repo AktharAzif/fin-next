@@ -1,9 +1,10 @@
 // Custom staff roles: making, changing and deleting them (spec 02 §10.7, §14.3, §8.4; stretch 3).
 // The read routes (`GET /api/staff-roles`, `GET /api/staff-roles/:roleKey`) are must-have and sit
 // in staff.ts. Each write needs `staffRoles.manage` (Admin-only) and an intent bound as the
-// dashboard's role routes bind theirs (§7.6), and counts the person's role-edit allowance; a
-// deletion also names and binds the holders it was shown (`holders`, the list's `holderIds`), so
-// a proved intent never moves anyone given the role since (`409 conflict`; recorded in the PR).
+// dashboard's role routes bind theirs (§7.6), and counts the person's role-edit allowance; a save
+// and a deletion also name and bind the holders they were shown (`holders`, the list's
+// `holderIds`), so a proved intent never moves anyone given the role since, nor raises them with a
+// save that adds a permission (`409 conflict`; recorded in the PR).
 // Bodies are strict; the lengths here only bound the request, and the editor's own rules (the
 // access engine's `validateRole` with the identity package's name rules) answer a name or a
 // description that breaks them with its field and problem.
@@ -22,20 +23,23 @@ const draft = {
   permissions: z.array(z.string().min(1).max(64)).max(52),
 };
 
+/**
+ * The holders the actor was shown, by member ID (`[]` for nobody): on a deletion, and on a save that
+ * adds a permission, they must be exactly the role's holders now. Staff is one small team: a role
+ * with more holders than this is not changed in one step.
+ */
+const shownHolders = z.array(z.string().regex(/^stf_[0-9a-hjkmnp-tv-z]{26}$/)).max(1000);
+
 export const createStaffRoleBody = z.strictObject(draft);
 export const saveStaffRoleBody = z.strictObject({
   ...draft,
   version: z.number().int().min(1).max(2_147_483_647),
+  holders: shownHolders,
 });
-/**
- * Where the role's holders move (a prebuilt key or a custom role's ID; none when nobody holds it),
- * and the holders the actor was shown, by member ID (`[]` for nobody), which must be exactly the
- * role's holders now. Staff is one small team: a role with more holders than this is not deleted
- * in one step.
- */
+/** Where the holders move (a prebuilt key or a custom role's ID; none when nobody holds it). */
 export const deleteStaffRoleBody = z.strictObject({
   moveTo: z.string().min(1).max(40).optional(),
-  holders: z.array(z.string().regex(/^stf_[0-9a-hjkmnp-tv-z]{26}$/)).max(1000),
+  holders: shownHolders,
 });
 
 export const STAFF_ROLE_POLICIES = definePolicies([
@@ -66,7 +70,7 @@ export const STAFF_ROLE_POLICIES = definePolicies([
     scope: "staff",
     stepUp: "intent",
     action: "staffRole.update",
-    bind: ["name", "description", "permissions", "version"],
+    bind: ["name", "description", "permissions", "version", "holders"],
     assurance: "aal2_or_working",
     params: roleIdParams,
     query: null,
