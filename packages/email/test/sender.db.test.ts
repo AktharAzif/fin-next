@@ -11,7 +11,7 @@ import {
   TEMPLATES,
 } from "../src/catalogue.ts";
 import { newId } from "../src/ids.ts";
-import type { Queryable } from "../src/outbox/db.ts";
+import type { PoolLike, Queryable, QueryResultLike } from "../src/outbox/db.ts";
 import { enqueue, outboxAge, type RecipientKind } from "../src/outbox/store.ts";
 import { HIDDEN_VALUE, nameSecretShapeIn } from "../src/params.ts";
 import { recipientHasher } from "../src/recipient-key.ts";
@@ -62,6 +62,81 @@ function startClock(): Clock {
   return { now: () => t, advance: (ms) => (t += ms) };
 }
 
+// MEASUREMENT ONLY (a throwaway branch, never merged): where the slow test's time goes.
+interface Split {
+  statements: number;
+  poolWaitMs: number;
+  execMs: number;
+  tx: number;
+  txHoldMs: number;
+  lockWaitMs: number;
+}
+const freshSplit = (): Split => ({
+  statements: 0,
+  poolWaitMs: 0,
+  execMs: 0,
+  tx: 0,
+  txHoldMs: 0,
+  lockWaitMs: 0,
+});
+let split = freshSplit();
+let timeWorker = false;
+let drainPasses = 0;
+let beforeEachMs = 0;
+
+/** The worker's pool, timed: the wait for a pooled login, each statement, each transaction. */
+function timedPool(pool: PoolLike): PoolLike {
+  return {
+    async query<R = Record<string, unknown>>(
+      text: string,
+      values?: unknown[],
+    ): Promise<QueryResultLike<R>> {
+      const t0 = performance.now();
+      const client = await pool.connect();
+      const t1 = performance.now();
+      let failure: Error | undefined;
+      try {
+        return await client.query<R>(text, values);
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error("query failed");
+        throw error;
+      } finally {
+        client.release(failure ?? false);
+        split.statements += 1;
+        split.poolWaitMs += t1 - t0;
+        split.execMs += performance.now() - t1;
+      }
+    },
+    async connect() {
+      const t0 = performance.now();
+      const client = await pool.connect();
+      const t1 = performance.now();
+      split.poolWaitMs += t1 - t0;
+      split.tx += 1;
+      return {
+        async query<R = Record<string, unknown>>(
+          text: string,
+          values?: unknown[],
+        ): Promise<QueryResultLike<R>> {
+          const s = performance.now();
+          try {
+            return await client.query<R>(text, values);
+          } finally {
+            const d = performance.now() - s;
+            split.statements += 1;
+            split.execMs += d;
+            if (/FOR UPDATE/u.test(text)) split.lockWaitMs += d;
+          }
+        },
+        release(error?: Error | boolean) {
+          split.txHoldMs += performance.now() - t1;
+          client.release(error);
+        },
+      };
+    },
+  };
+}
+
 describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
   let db: TestDatabase;
   let clock: Clock;
@@ -78,6 +153,8 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
   });
 
   beforeEach(async () => {
+    const b0 = performance.now();
+    timeWorker = false;
     await db.admin.query(
       "TRUNCATE email_private.outbox, email_private.recipient_window, email_private.daily_budget, email_private.delivery_check",
     );
@@ -89,15 +166,24 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     clockStart = clock.now();
     port = new FakeTransport();
     log = new LineRecorder();
+    beforeEachMs = performance.now() - b0;
   });
 
-  afterEach(async () => {
+  afterEach(async (ctx) => {
     // Every row the test queued was stamped before the clock's start, so it was due at the clock's
     // time: a test that outran CLOCK_LEAD_MS fails here, by name, not as a claim that finds nothing.
-    const r = await db.admin.query<{ behind: boolean }>(
-      "SELECT statement_timestamp() < $1::timestamptz AS behind",
-      [new Date(clockStart).toISOString()],
+    const r = await db.admin.query<{ behind: boolean; elapsed: number }>(
+      "SELECT statement_timestamp() < $1::timestamptz AS behind, (extract(epoch FROM statement_timestamp()) * 1000 - $2::float8)::float8 AS elapsed",
+      [new Date(clockStart).toISOString(), clockStart - CLOCK_LEAD_MS],
     );
+    const line = {
+      test: ctx.task.name.slice(0, 60),
+      beforeEachMs: Math.round(beforeEachMs),
+      dbElapsedMs: Math.round(Number(r.rows[0]?.elapsed)),
+      pastBaseLead: Number(r.rows[0]?.elapsed) > 2_000,
+    };
+    // biome-ignore lint/suspicious/noConsole: measurement only (a throwaway branch)
+    console.log("MEASURE-TEST", JSON.stringify(line));
     expect(r.rows[0]?.behind, "the database's clock passed the test clock's start").toBe(true);
   });
 
@@ -107,7 +193,7 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     from: { notify?: typeof NOTIFY } = { notify: NOTIFY },
   ) {
     return new Sender({
-      db: db.as.fin_worker,
+      db: timeWorker ? timedPool(db.as.fin_worker) : db.as.fin_worker,
       port,
       clock,
       log,
@@ -1074,7 +1160,10 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
     /** Runs the sender until a pass claims nothing (rows held until tomorrow are not claimed). */
     async function drain(s: Sender): Promise<void> {
-      for (let i = 0; i < 20; i++) if ((await s.runOnce()).claimed === 0) return;
+      for (let i = 0; i < 20; i++) {
+        drainPasses += 1;
+        if ((await s.runOnce()).claimed === 0) return;
+      }
       throw new Error("the outbox did not drain");
     }
 
@@ -1090,6 +1179,24 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         concurrency: 16,
         reservedUrgent: 1,
       };
+      // MEASUREMENT ONLY: the step split, and where each group's rows fell against the base's lead.
+      timeWorker = true;
+      split = freshSplit();
+      drainPasses = 0;
+      const m0 = performance.now();
+      const steps: Record<string, number> = {};
+      const step = async (name: string, work: () => Promise<unknown>) => {
+        const t = performance.now();
+        await work();
+        steps[name] = Math.round(performance.now() - t);
+      };
+      const due: Record<string, number> = {};
+      const dueVsBase = async (name: string) => {
+        const r = await db.admin.query<{ due: Date | null }>(
+          "SELECT max(due_at) AS due FROM email_private.outbox WHERE NOT counted",
+        );
+        due[name] = new Date(r.rows[0]?.due ?? 0).getTime() - (clockStart - CLOCK_LEAD_MS + 2_000);
+      };
       // Ordinary mail has used its part of the day first.
       await db.admin.query(
         "INSERT INTO email_private.daily_budget (day, scope, count) VALUES ($1::date, 'environment', 10)",
@@ -1098,22 +1205,45 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
       const s = sender(limits);
       // Each group is queued side by side, on the pool's logins at once rather than one row after
       // another: one pass claims all of it, so the order of queueing is nothing the sender sees.
-      await Promise.all(
-        orgIds(4).flatMap((org, i) =>
-          [0, 1, 2].map((j) => orgNotice(org, `holder${i}-${j}@example.com`)),
+      await step("queueOrgNotices12", () =>
+        Promise.all(
+          orgIds(4).flatMap((org, i) =>
+            [0, 1, 2].map((j) => orgNotice(org, `holder${i}-${j}@example.com`)),
+          ),
         ),
       );
-      await drain(s);
-      await Promise.all(
-        Array.from({ length: 8 }, (_, i) =>
-          queue("fin_console", "identity/sign-in-code", { code: "12345678" }, `c${i}@example.com`),
+      await dueVsBase("orgNotices");
+      await step("drain1", () => drain(s));
+      await step("queueCodes8", () =>
+        Promise.all(
+          Array.from({ length: 8 }, (_, i) =>
+            queue(
+              "fin_console",
+              "identity/sign-in-code",
+              { code: "12345678" },
+              `c${i}@example.com`,
+            ),
+          ),
         ),
       );
-      await drain(s);
+      await dueVsBase("codes");
+      await step("drain2", () => drain(s));
       expect(port.of("identity/sign-in-code").length).toBeGreaterThan(0);
       // Sign-in alerts for two other people are still sent that day.
-      await Promise.all([notice("first@example.com"), notice("second@example.com")]);
-      await drain(s);
+      await step("queueNotices2", () =>
+        Promise.all([notice("first@example.com"), notice("second@example.com")]),
+      );
+      await dueVsBase("notices");
+      await step("drain3", () => drain(s));
+      const splitLine = {
+        totalMs: Math.round(performance.now() - m0),
+        steps,
+        drainPasses,
+        worker: Object.fromEntries(Object.entries(split).map(([k, v]) => [k, Math.round(v)])),
+        dueMsPastBaseClock: due,
+      };
+      // biome-ignore lint/suspicious/noConsole: measurement only (a throwaway branch)
+      console.log("MEASURE-SPLIT", JSON.stringify(splitLine));
       expect(port.of("identity/new-sign-in")).toHaveLength(2);
     });
 
