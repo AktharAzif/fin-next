@@ -107,6 +107,13 @@ export const events = defineEvents("identity", {
       .strict(),
   ),
   "step_up.locked": person("security", "ses", empty),
+  // Google sign-in (stretch 5, §5.8): a Google account linked to, or unlinked from, a person.
+  "account.linked": person("security", "acc", z.object({ provider: z.enum(["google"]) }).strict()),
+  "account.unlinked": person(
+    "security",
+    "acc",
+    z.object({ provider: z.enum(["google"]) }).strict(),
+  ),
   "browser.trusted": person("security", "tbr", empty),
   "browser.trust_revoked": {
     ...person(

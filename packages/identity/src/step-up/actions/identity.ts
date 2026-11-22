@@ -61,6 +61,22 @@ export const IDENTITY_ACTIONS: readonly StepUpAction[] = [
     reasonKey: "forget_browser",
     bind: [],
   },
+  // Google (stretch 5, §5.8, §7.6): linking only from Account security, with an intent bound to the
+  // provider; unlinking with an intent bound to the account it removes (the target).
+  {
+    key: "account.google_link",
+    realm: "developer",
+    kind: "intent",
+    reasonKey: "link_google",
+    bind: [{ name: "provider", kind: "string" }],
+  },
+  {
+    key: "account.google_unlink",
+    realm: "developer",
+    kind: "intent",
+    reasonKey: "unlink_google",
+    bind: [],
+  },
   {
     key: "staff.factor_add",
     realm: "staff",
@@ -100,6 +116,8 @@ export const SELF_PATH_ACTIONS = {
     "/two-factor/enable": "account.totp_enable",
     "/two-factor/disable": "account.totp_disable",
     "/two-factor/generate-backup-codes": "account.backup_codes",
+    "/link-social": "account.google_link",
+    "/unlink-account": "account.google_unlink",
   },
   staff: {
     "/passkey/generate-register-options": "staff.factor_add",

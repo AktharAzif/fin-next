@@ -137,6 +137,9 @@ describe.each(["developer", "staff"] as const)("the %s realm's allowlist", (real
     ["POST", "/api/auth/sign-up/email"],
     ["GET", "/api/auth/verify-email?token=x"],
     ["GET", "/api/auth/reset-password/abc"],
+    // A rule's pattern is never a path a request may use as it is.
+    ["GET", "/api/auth/reset-password/:token"],
+    ["GET", "/api/auth/callback/:id"],
     ["POST", "/api/auth/email-otp/check-verification-otp"],
     ["POST", "/api/auth/two-factor/get-totp-uri"],
     ["GET", "/api/auth/ok"],

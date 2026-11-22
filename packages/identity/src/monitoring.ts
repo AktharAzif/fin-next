@@ -38,6 +38,27 @@ export const IDENTITY_LINES = {
       none: "the library's own warnings, libraryLevel only; errors surface as auth.unhandled_error",
     },
   },
+  // Google sign-in (stretch 5, §5.8, §18.2's stretch alert). A failure on Fin's side or the
+  // provider's, and only that: the token endpoint unreachable, too slow, failing or unreadable,
+  // Fin's own client refused there, the provider's keys unavailable, or an ID token that is not
+  // the provider's for this client now. Whatever a client can cause is a refusal instead
+  // (google/flow.ts decides): it sends the callback's code, and its authorization request passes
+  // through its browser, where it can change the nonce, the scopes, the PKCE challenge or the
+  // redirect URI before the provider sees them.
+  "auth.google_failed": { kind: "failure", alerts: ["google-sign-in-failing"] },
+  // A round trip that came back refused: the person cancelled, the address has an account not
+  // linked to Google or is one Google has not verified, sign-ups are paused, a link did not match
+  // the account, a second callback came for a state already exchanged (`state_used`), or what the
+  // client changed in its round trip: a code the provider would not exchange (`invalid_code`), a
+  // request that asked for no ID token (`scope`), or an ID token whose nonce is not this
+  // sign-in's (`nonce`), that carries no usable address (`email`), or that a long nonce pushed
+  // past Fin's bound (`too_long`).
+  "auth.google_refused": {
+    kind: "security",
+    alerts: {
+      none: "expected refusals, each answered on the page; panelled by reason (§18.3), and google-sign-in-failing watches the failures",
+    },
+  },
   "step_up.refused": { kind: "security", alerts: ["step-up-failing"] },
   "step_up.locked": { kind: "security", alerts: ["step-up-locked"] },
   "limits.refused": {

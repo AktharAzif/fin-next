@@ -57,9 +57,10 @@
       "day": "sat"
     },
     "googleBusy": {
-      "status": "pending",
+      "status": "covered",
       "day": "stretch-5",
-      "note": "a stretch item (spec 06 §8.2): built with it"
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey the sign-up board offers Google too, busy while it starts, and comes back to itself"
     },
     "loading": {
       "status": "pending",

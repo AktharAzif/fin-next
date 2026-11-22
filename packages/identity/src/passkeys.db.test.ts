@@ -12,7 +12,9 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  setUpAuthenticator,
 } from "../test/harness.ts";
+import { hotp, totpStep } from "./crypto/totp.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
 
@@ -90,6 +92,38 @@ describe("the first passkey", () => {
       reason_key: "add_passkey",
     });
     expect(options.json?.methods).toEqual(["passkey"]);
+  });
+
+  it("adds a later passkey with its intent from a session older than a day (the intent is the proof)", async () => {
+    const email = unique("aged");
+    const browser = h.browser();
+    await codeSignIn(h, browser, email);
+    const { secret } = await setUpAuthenticator(browser);
+    // Two days old, and still live: 24 hours idle and 7 days at most (§11.1).
+    await h.admin.query(
+      "UPDATE identity.session SET created_at = now() - interval '2 days' WHERE token = $1",
+      [browser.sessionToken()],
+    );
+    const asked = await browser.post("/api/auth/passkey/verify-registration", {});
+    expect(asked.json).toMatchObject({ code: "step_up_required", reason_key: "add_passkey" });
+    const intent = String(asked.json?.intent_id);
+    // The authenticator's set-up used this 30-second step; the step-up may use it again here.
+    await h.admin.query(
+      `UPDATE identity.totp_step SET last_step = 0
+        WHERE user_id = (SELECT id FROM identity."user" WHERE email = $1)`,
+      [email],
+    );
+    const proved = await browser.post(
+      "/api/auth/two-factor/verify-totp",
+      { code: hotp(secret, totpStep(new Date())) },
+      { "fin-step-up-intent": intent },
+    );
+    expect(proved.status, JSON.stringify(proved.json)).toBe(200);
+    const { options, verify } = await registerPasskey(browser, h.authenticator(), {
+      "fin-step-up-intent": intent,
+    });
+    expect(options.status, JSON.stringify(options.json)).toBe(200);
+    expect(verify.status, JSON.stringify(verify.json)).toBe(200);
   });
 });
 
