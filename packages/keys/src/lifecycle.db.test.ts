@@ -294,11 +294,16 @@ describe("create", () => {
         createKey(keys, tx, actorOf(OWNER, ALL), { ...restricted, mode: "live" }),
       ),
     ).rejects.toMatchObject({ code: "forbidden", lineReason: "keys.live_not_enabled" });
+    // The mode's own permission is the first check, before the role bounds the key's scopes.
     await expect(
       inUnit(console_, (tx) =>
         createKey(keys, tx, actorOf(DEV, DEVELOPER, "approved"), { ...restricted, mode: "live" }),
       ),
-    ).rejects.toMatchObject({ code: "forbidden", extensions: { permission: "apiKey.live" } });
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      lineReason: "policy.permission",
+      extensions: { permission: "apiKey.live" },
+    });
   });
 
   it("makes a Production key once approved, and needs an allowlist on one that moves money", async () => {
@@ -699,6 +704,50 @@ describe("a leaving member's key in a roll's overlap (SA-33, S2-42)", () => {
     expect(after.rows[0]?.rolling_until).toEqual(before.rows[0]?.rolling_until);
     expect(await events(made.key.keyId)).toHaveLength(eventsBefore);
   });
+
+  it("cuts a key the edge still accepts that names a replacement but no overlap", async () => {
+    // No action writes this (a roll sets both together), but the table allows it: every key listed
+    // is rolled or cut, whatever its row holds.
+    const made = await inUnit(console_, (tx) =>
+      createKey(keys, tx, actorOf(LEAVER, DEVELOPER, "approved", ORG2), {
+        ...restricted,
+        name: "Replacement named",
+      }),
+    );
+    const other = await inUnit(console_, (tx) =>
+      createKey(keys, tx, actorOf(OWNER2, ALL, "approved", ORG2), {
+        ...restricted,
+        name: "The replacement",
+      }),
+    );
+    await su.query("BEGIN");
+    await su.query("SET LOCAL session_replication_role = replica");
+    await su.query("UPDATE keys.api_key SET replaced_by = $2 WHERE id = $1", [
+      made.key.keyId,
+      other.key.keyId,
+    ]);
+    await su.query("COMMIT");
+    expect(await atTheEdge(made.secret)).toMatchObject({ ok: true });
+    const listed = await inUnit(console_, (tx) => keysOfMember(tx, ORG2, LEAVER.userId));
+    expect(listed.map((k) => k.id)).toEqual([made.key.keyId]);
+    const changed = await inUnit(console_, (tx) =>
+      rollForMember(
+        keys,
+        tx,
+        org2,
+        listed.map((k) => k.id),
+        "now",
+        remover,
+      ),
+    );
+    expect(changed).toBe(1);
+    expect(await atTheEdge(made.secret)).toEqual({ ok: false, reason: "expired" });
+    expect(await atTheEdge(other.secret)).toMatchObject({ ok: true });
+    expect((await events(made.key.keyId)).at(-1)).toMatchObject({
+      event: "api_key.rolled",
+      metadata: { new_key_id: other.key.keyId, overlap: "now", shown_to: null },
+    });
+  });
 });
 
 describe("a roll's maker", () => {
@@ -854,6 +903,104 @@ describe("the key's own mode, and the role behind an allowlist change", () => {
       updateKey(keys, tx, owner, other.key.keyId, { ipAllowlist: ["8.8.4.0/24"] }),
     );
     expect(moved.ipAllowlist).toEqual(["8.8.4.0/24"]);
+  });
+});
+
+describe("the edit's own rules, before any step-up", () => {
+  it("refuses an edit of a key that is rolling, rolled away or revoked", async () => {
+    const owner = actorOf(OWNER2, ALL, "approved", ORG2);
+    const rolling = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Edit rolling" }),
+    );
+    await inUnit(console_, (tx) => rollKey(keys, tx, owner, rolling.key.keyId, { overlap: "1h" }));
+    const ended = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Edit ended" }),
+    );
+    await inUnit(console_, (tx) => rollKey(keys, tx, owner, ended.key.keyId, { overlap: "now" }));
+    const revoked = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Edit revoked" }),
+    );
+    await inUnit(console_, (tx) => revokeKey(keys, tx, owner, revoked.key.keyId));
+    const editor = actorOf(OWNER2, ALL, "approved", ORG2);
+    for (const id of [rolling.key.keyId, ended.key.keyId, revoked.key.keyId]) {
+      // An old key in its overlap keeps the allowlist it was rolled with: nobody re-points it.
+      await expect(
+        inUnit(console_, (tx) => updateKey(keys, tx, editor, id, { ipAllowlist: ["8.8.8.0/24"] })),
+        id,
+      ).rejects.toMatchObject({
+        code: "conflict",
+        lineReason: "keys.not_active",
+        extensions: { reason: "not_active" },
+      });
+    }
+    expect(editor.asked).toEqual([]);
+  });
+
+  it("refuses an expiry that is unreadable or already past", async () => {
+    const owner = actorOf(OWNER2, ALL, "approved", ORG2);
+    const made = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, { ...restricted, name: "Edit expiry" }),
+    );
+    const editor = actorOf(OWNER2, ALL, "approved", ORG2);
+    await expect(
+      inUnit(console_, (tx) =>
+        updateKey(keys, tx, editor, made.key.keyId, {
+          expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      extensions: { fields: [{ path: "expiresAt", code: "in_the_past" }] },
+    });
+    await expect(
+      inUnit(console_, (tx) =>
+        updateKey(keys, tx, editor, made.key.keyId, { expiresAt: "next Tuesday" }),
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      extensions: { fields: [{ path: "expiresAt", code: "invalid_format" }] },
+    });
+    expect(editor.asked).toEqual([]);
+    expect(await atTheEdge(made.secret)).toMatchObject({ ok: true });
+  });
+
+  it("keeps the allowlist on a Production key that can move money, a full-access one included ([MO-20])", async () => {
+    const owner = actorOf(OWNER2, ALL, "approved", ORG2);
+    const full = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, {
+        ...restricted,
+        mode: "live",
+        kind: "sk",
+        scopes: [],
+        name: "Live full access",
+        ipAllowlist: ["8.8.8.0/24"],
+      }),
+    );
+    const money = await inUnit(console_, (tx) =>
+      createKey(keys, tx, owner, {
+        ...restricted,
+        mode: "live",
+        scopes: ["customers:read", "money:write"],
+        name: "Live transfers",
+        ipAllowlist: ["8.8.8.0/24"],
+      }),
+    );
+    const editor = actorOf(OWNER2, ALL, "approved", ORG2);
+    for (const id of [full.key.keyId, money.key.keyId]) {
+      await expect(
+        inUnit(console_, (tx) => updateKey(keys, tx, editor, id, { ipAllowlist: [] })),
+        id,
+      ).rejects.toMatchObject({
+        code: "invalid",
+        extensions: { fields: [{ path: "ipAllowlist", code: "required_for_money" }] },
+      });
+    }
+    expect(editor.asked).toEqual([]);
+    // The rule reads the key as edited: once it can no longer move money, the allowlist may go.
+    const narrowed = await inUnit(console_, (tx) =>
+      updateKey(keys, tx, editor, money.key.keyId, { scopes: ["customers:read"], ipAllowlist: [] }),
+    );
+    expect(narrowed).toMatchObject({ scopes: ["customers:read"], ipAllowlist: [] });
   });
 });
 
