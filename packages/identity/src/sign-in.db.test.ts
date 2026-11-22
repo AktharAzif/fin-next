@@ -14,6 +14,7 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  warmUp,
 } from "../test/harness.ts";
 import { ADDRESS_LOCK_SLOTS, addressLockSlot, codeLinkAsking, lockAddress } from "./codes.ts";
 import { signUp } from "./sign-up.ts";
@@ -25,6 +26,11 @@ const allCookies: string[] = [];
 beforeAll(async () => {
   database = await createTestDatabase("sign_in");
   h = await createHarness(database, "developer");
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {

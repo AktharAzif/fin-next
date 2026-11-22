@@ -13,6 +13,7 @@ import {
   passkeyCeremony,
   registerPasskey,
   setUpAuthenticator,
+  warmUp,
 } from "../test/harness.ts";
 import { hotp, totpStep } from "./crypto/totp.ts";
 import { requirePerson } from "./require-person.ts";
@@ -24,6 +25,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("step_up");
   h = await createHarness(database, "developer");
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {

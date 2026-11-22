@@ -14,6 +14,7 @@ import {
   registerPasskey,
   setUpAuthenticator,
   totpFromUri,
+  warmUp,
 } from "../test/harness.ts";
 import { revokeTrustedBrowsers } from "./browsers.ts";
 import { mixesLettersAndDigits } from "./crypto/backup-codes.ts";
@@ -27,6 +28,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("factors");
   h = await createHarness(database, "developer");
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {

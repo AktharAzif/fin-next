@@ -250,6 +250,27 @@ export async function codeSignIn(h: Harness, browser: Browser, email: string): P
   return browser.post("/api/auth/sign-in/email-otp", { email, otp: code });
 }
 
+/**
+ * Starts a developer realm before a file's first test, in a `beforeAll` of its own after the one
+ * that made the harness: a code sign-in and an authenticator set-up for an address of its own, from
+ * a browser (and so a network) of its own, then the harness's own reads. A test process's first
+ * realm requests pay once for what every later request reuses: the library's context, the code
+ * each path runs (compiled on its first call), and the pools' first connections with their
+ * server backends' caches. Without this the file's first test carried all of it, whatever it was
+ * about. Nothing a test asserts reads this person, its rows or its lines.
+ */
+export async function warmUp(h: Harness): Promise<void> {
+  if (h.realm.settings.realm !== "developer") throw new Error("warmUp starts a developer realm");
+  const browser = h.browser();
+  const email = `warm.up.${randomBytes(4).toString("hex")}@example.com`;
+  const signedIn = await codeSignIn(h, browser, email);
+  if (signedIn.status !== 200) throw new Error(`the warm-up sign-in answered ${signedIn.status}`);
+  const { verify } = await setUpAuthenticator(browser);
+  if (verify.status !== 200) throw new Error(`the warm-up set-up answered ${verify.status}`);
+  await h.events();
+  await h.outbox(email);
+}
+
 /** The secret bytes of an `otpauth://` URI, and a code for now. */
 export function totpFromUri(
   uri: string,

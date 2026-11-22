@@ -3,7 +3,7 @@
 // UNLOGGED counters; the limiter fails closed when the database refuses it.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, DROP_TIMEOUT_MS, type TestDatabase, testRole } from "../test/db.ts";
-import { codeSignIn, createHarness, type Harness } from "../test/harness.ts";
+import { codeSignIn, createHarness, type Harness, warmUp } from "../test/harness.ts";
 import { HOUR, ManualClock } from "./ports/clock.ts";
 
 let database: TestDatabase;
@@ -12,6 +12,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("limits");
   h = await createHarness(database, "developer");
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {
