@@ -127,9 +127,11 @@ export const entries: readonly CatalogEntry[] = [
       listenConnected: "boolean",
       dbOk: "boolean",
       doorOk: "boolean",
+      // The plan's (CF-72), written by no process yet: clock-skew is owed until one writes it.
       clockSkewMs: "number",
     },
-    alerts: ["clock-skew", "pool-exhausted", "database-unreachable"],
+    alerts: ["pool-exhausted", "database-unreachable"],
+    owed: ["clock-skew"],
   },
   {
     event: "shutdown.started",

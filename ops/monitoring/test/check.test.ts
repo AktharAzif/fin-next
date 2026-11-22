@@ -93,12 +93,12 @@ describe("monitoring:check refuses", () => {
     edit(root, "alerts/platform.json", (j) => {
       alert(j, "process-crash").policy = "production-page";
       alert(j, "shutdown-forced").policy = "loud";
-      delete alert(j, "clock-skew").policy;
+      delete alert(j, "dns-lookup-failing").policy;
     });
     const found = rules(root);
     expect(found).toContainEqual("MC-13 process-crash: routes to production-page");
     expect(found).toContainEqual("RT-01 shutdown-forced: routes to loud");
-    expect(found).toContainEqual("RT-01 clock-skew: has no policy");
+    expect(found).toContainEqual("RT-01 dns-lookup-failing: has no policy");
   });
 
   it("a staging object that calls, texts or pushes (RT-03)", () => {
@@ -198,7 +198,7 @@ describe("monitoring:check refuses", () => {
   it("a literal threshold, window or grace (MC-11)", () => {
     const root = scratch();
     edit(root, "alerts/platform.json", (j) => {
-      alert(j, "clock-skew").threshold = 500;
+      alert(j, "dns-lookup-failing").threshold = 500;
       alert(j, "no-logs-{service}").window = "300";
     });
     edit(root, "heartbeats.json", (j) => {
@@ -206,7 +206,7 @@ describe("monitoring:check refuses", () => {
     });
     const found = rules(root);
     expect(found).toContainEqual(
-      "MC-11 clock-skew: threshold must be @any, @none or an @thresholds.<key> overlay key",
+      "MC-11 dns-lookup-failing: threshold must be @any, @none or an @thresholds.<key> overlay key",
     );
     expect(found).toContainEqual(
       "MC-11 no-logs-edge: window must be an @thresholds.<key> overlay key",
@@ -558,9 +558,33 @@ describe("monitoring:check refuses", () => {
     ]);
   });
 
-  it("a regular expression after an arrow, a postfix operator or a control head hides no writer call (MC-01)", () => {
+  it("a regular expression after an arrow, a block, a postfix operator or a control head hides no writer call (MC-01)", () => {
     const root = scratch();
     mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "s7.ts"),
+      [
+        // A regular expression that starts a statement after a block's `}`.
+        "export function fence(deps: Deps, line: string): boolean {",
+        '  if (line === "") {',
+        "    return false;",
+        "  }",
+        '  /^```/.test(line) || deps.lines.write("edge.no_fence", "warn", {});',
+        '  deps.lines.write("edge.after_block_regex", "warn", {});',
+        "  return true; // a fence is three ` marks",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(root, "packages", "edge", "src", "row.tsx"),
+      [
+        // JSX's `{x} />` closes a tag: the `/` after its `}` starts no regular expression.
+        "export const Row = ({ count }: Props) => <Cell value={count} />;",
+        'lines.write("edge.after_jsx", "warn", {});',
+        "export const Bare = ({ count }: Props) => <Cell value={count}/>;",
+        'lines.write("edge.after_bare_jsx", "warn", {});',
+      ].join("\n"),
+    );
     writeFileSync(
       join(root, "packages", "edge", "src", "a.ts"),
       [
@@ -592,6 +616,47 @@ describe("monitoring:check refuses", () => {
       'MC-01 lines.write("edge.after_postfix") is not catalogued',
       'MC-01 lines.write("edge.after_bang") is not catalogued',
       'MC-01 lines.write("edge.after_head") is not catalogued',
+      'MC-01 lines.write("edge.after_jsx") is not catalogued',
+      'MC-01 lines.write("edge.after_bare_jsx") is not catalogued',
+      'MC-01 lines.write("edge.no_fence") is not catalogued',
+      'MC-01 lines.write("edge.after_block_regex") is not catalogued',
+    ]);
+  });
+
+  it("a division after a member named as a keyword, or after `of`, hides no writer call and refuses no file (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // Read as a regular expression, `/ stats.out … // too` would close on its line and pair
+        // its brackets, and hide the call between.
+        "function skew(stats: Stats) {",
+        '  return stats.in / stats.out > 2 ? lines.write("edge.skew_failed", "error", {}) : undefined; // too much inbound',
+        "}",
+        // An honest single division would leave a regular expression open on its line.
+        "const ratio = stats.in / stats.out;",
+        'lines.write("edge.after_member_division", "info", { ratio });',
+        'counts.new / counts.total > 0.5 ? note(telemetry.log("edge.surge", {}, "error")) : counts.old / counts.total;',
+        'const share = this.#delete / 2; lines.write("edge.after_private", "warn", {}); const q = share / 3;',
+        'const left = diff?.void / 2; lines.write("edge.after_optional", "warn", {}); const p = left / 3;',
+        "io.in / io.out > LIMIT && run.line(`deploy.$" +
+          '{kind}_failed`, "error", {}); // more in than out',
+        // `of` is an identifier outside a `for` head, and a keyword in one.
+        'of / total > 1 ? fail(lines.write("edge.over", "error", {})) : of / total;',
+        "for (const m of /`/g.exec(text) ?? []) count++;",
+        'lines.write("edge.after_for_of", "warn", {});',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("edge.skew_failed") is not catalogued',
+      'MC-01 lines.write("edge.after_member_division") is not catalogued',
+      'MC-01 telemetry.log("edge.surge") is not catalogued',
+      'MC-01 lines.write("edge.after_private") is not catalogued',
+      'MC-01 lines.write("edge.after_optional") is not catalogued',
+      'MC-01 lines.write("edge.over") is not catalogued',
+      'MC-01 lines.write("edge.after_for_of") is not catalogued',
+      `MC-01 run.line(\`deploy.$\{kind}_failed\`) ${CANNOT}`,
     ]);
   });
 
@@ -777,16 +842,16 @@ describe("monitoring:check refuses", () => {
 
   it("a runbook without a heading, or that does not name its alert (MC-10)", () => {
     const root = scratch();
-    const path = join(root, "docs", "runbooks", "clock-skew.md");
+    const path = join(root, "docs", "runbooks", "private-dns.md");
     writeFileSync(
       path,
       readFileSync(path, "utf8")
         .replace("## Containment", "## Fixing")
-        .replace("`clock-skew`", "it"),
+        .replace("`dns-lookup-failing`", "it"),
     );
     const found = rules(root);
     expect(found).toContainEqual('MC-10 lacks the heading "## Containment"');
-    expect(found).toContainEqual("MC-10 does not name clock-skew, which points at it");
+    expect(found).toContainEqual("MC-10 does not name dns-lookup-failing, which points at it");
   });
 
   it("a source with no Errors application and no reason, and an alert on an unknown source (MC-07)", () => {

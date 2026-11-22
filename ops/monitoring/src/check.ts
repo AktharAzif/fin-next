@@ -265,14 +265,17 @@ function walk(root: string, dir: string, out: string[]): void {
 //
 // The scan reads code only: a lexer first blanks the comments, strings, templates (but their
 // `${…}`) and regular expressions. A `/` starts a regular expression where an operand is due: at
-// the start, after an operator or a punctuator (`=>`, `>`, `>=` and `>>` among them), after a
-// keyword such as `return` or `typeof`, after a prefix `!`, `++` or `--`, and after the `)` of an
-// `if`, `while`, `for` or `with` head. After an identifier, a literal, a `)`, a `]` or a `}`, or a
-// postfix `!`, `++` or `--` (one that follows an identifier, a `)` or a `]`), it is a division. The
-// lexer fails closed: when it reaches the end of the file inside a template or a block comment, or
-// the end of a line inside a string or a regular expression, or the blanked code's brackets do not
-// pair, the file is an MC-01 finding that names it and the place, and none of its calls is read
-// (a misread could blank a writer call and hide it).
+// the start, after an operator or a punctuator (`=>`, `>`, `>=` and `>>` among them), after a `}`
+// (a block's end, `} /re/.test(s)`: an object is never divided) unless a `>` follows the `/`
+// (JSX's `{x} />`), after a keyword such as `return` or `typeof` (`of` only in a `for` head), after
+// a prefix `!`, `++` or `--`, and after the `)` of an `if`, `while`, `for` or `with` head. After an
+// identifier (a member named as a keyword, `stats.in`, `counts.new` or `this.#delete`, and `of`
+// outside a `for` head, included), a literal, a `)` or a `]`, or a postfix `!`, `++` or `--` (one
+// that follows an identifier, a `)` or a `]`), it is a division. The lexer fails closed: when it
+// reaches the end of the file inside a template or a block comment, or the end of a line inside a
+// string or a regular expression, or the blanked code's brackets do not pair, the file is an MC-01
+// finding that names it and the place, and none of its calls is read (a misread could blank a
+// writer call and hide it).
 //
 // What a lexical scan cannot see is a review finding, as for imports:check (BD-19): a writer
 // reached under a name that is no writer method's (an alias such as `const emit = lines.write`, a
@@ -283,8 +286,10 @@ function walk(root: string, dir: string, out: string[]): void {
 // writer such a call is a finding, but what it computes, and the same through any other writer,
 // is the reviewer's to read); an object changed through another reference or by a destructuring
 // assignment; a raw line's `event` that is not a string literal (JSON.stringify builds other
-// things than lines, so it is not a finding); and JSX text (the lexer reads it as code; a quote or
-// a backtick in it fails closed).
+// things than lines, so it is not a finding); and JSX text (the lexer reads it as code: a quote, a
+// backtick, or a `/` after a `{…}` child, in it starts a string, a template or a regular
+// expression, which fails closed when it does not close, and when it does, blanks what it spans,
+// as `{done} / {total}</b>` does up to the `/` of `</b>`).
 const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)(?:\?\.)?\(/g;
 const WRITER_METHODS: ReadonlySet<string> = new Set([
   "log",
@@ -457,51 +462,76 @@ interface CodeFunction {
   readonly body: readonly [number, number];
 }
 
-/** Whether the identifier that ends at `end` is a keyword after which an operand is due. */
-function keywordEndsAt(text: string, end: number): boolean {
+/**
+ * Whether the identifier that ends at `end` is a keyword after which an operand is due. A word
+ * after `.`, `?.` or `#` is a member's name (`stats.in`, `counts.new`, `this.#delete`), and `of`
+ * is a keyword only in a `for` head (`forHead`: the innermost open `(` starts one).
+ */
+function keywordEndsAt(text: string, end: number, forHead: boolean): boolean {
   let k = end;
   while (k >= 0 && /[\w$]/.test(text[k] ?? "")) k--;
-  return /^(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(
-    text.slice(k + 1, end + 1),
-  );
+  if (text[k] === "#") return false;
+  let dot = k;
+  while (dot >= 0 && /\s/.test(text[dot] ?? "")) dot--;
+  // `...new Set(x)` spreads: its dots are no member access.
+  if (text[dot] === "." && text[dot - 1] !== ".") return false;
+  const word = text.slice(k + 1, end + 1);
+  if (word === "of") return forHead;
+  return /^(?:return|typeof|case|do|else|in|void|yield|await|delete|throw|new)$/.test(word);
 }
 
 /**
  * Whether an operand ends at `end` (spaces before it skipped): an identifier that is no keyword, a
  * `)` other than a control statement's head's, or a `]`. A `!`, `++` or `--` after one is postfix.
  */
-function operandEndsAt(text: string, end: number, heads: ReadonlySet<number>): boolean {
+function operandEndsAt(
+  text: string,
+  end: number,
+  heads: ReadonlySet<number>,
+  forHead: boolean,
+): boolean {
   let k = end;
   while (k >= 0 && /[ \t]/.test(text[k] ?? "")) k--;
   const c = text[k] ?? "";
   if (c === ")") return !heads.has(k);
   if (c === "]") return true;
-  return /[\w$]/.test(c) && !keywordEndsAt(text, k);
+  return /[\w$]/.test(c) && !keywordEndsAt(text, k, forHead);
 }
 
 /**
- * Whether a `/` after the code character at `prev` starts a regular expression, not a division
- * (see the rule above). `heads` holds each `)` that closes an `if`, `while`, `for` or `with` head.
+ * Whether the `/` at `at`, after the code character at `prev`, starts a regular expression, not a
+ * division (see the rule above). `heads` holds each `)` that closes an `if`, `while`, `for` or
+ * `with` head; `forHead` is whether the innermost open `(` starts a `for` head.
  */
-function regexStarts(text: string, prev: number, heads: ReadonlySet<number>): boolean {
+function regexStarts(
+  text: string,
+  at: number,
+  prev: number,
+  heads: ReadonlySet<number>,
+  forHead: boolean,
+): boolean {
   if (prev < 0) return true;
   const c = text[prev] ?? "";
   if (c === ")") return heads.has(prev);
   // `i++ / 2`, `x! / 2`: a postfix operator ends an operand. `++/re/.lastIndex`, `!/re/.test(s)`.
   if ((c === "+" || c === "-") && text[prev - 1] === c) {
-    return !operandEndsAt(text, prev - 2, heads);
+    return !operandEndsAt(text, prev - 2, heads, forHead);
   }
-  if (c === "!") return !operandEndsAt(text, prev - 1, heads);
-  // `=>`, `>`, `>=` and `>>` end with `>` or `=`: an operand follows. After a `}` (an object's, a
-  // block's, or JSX's `{x} />`) a `/` is read as a division.
+  if (c === "!") return !operandEndsAt(text, prev - 1, heads, forHead);
+  // After a block's `}` a regular expression may start a statement (`} /re/.test(s)`), and an
+  // object is never divided; but JSX's `{x} />` closes a tag.
+  if (c === "}") return text[at + 1] !== ">";
+  // `=>`, `>`, `>=` and `>>` end with `>` or `=`: an operand follows.
   if ("(,=:[&|?{;+-*%~^>".includes(c)) return true;
-  return /[\w$]/.test(c) && keywordEndsAt(text, prev);
+  return /[\w$]/.test(c) && keywordEndsAt(text, prev, forHead);
 }
 
-/** Whether the `(` at `open` starts an `if`, `while`, `for` or `with` head. */
-function controlHead(text: string, open: number): boolean {
-  return /(?:^|[^\w$.#])(?:if|while|for|with)(?:\s+await)?\s*$/.test(
-    text.slice(Math.max(0, open - 16), open),
+/** The statement whose head the `(` at `open` starts: `if`, `while`, `for`, `with`, or "". */
+function controlHead(text: string, open: number): string {
+  return (
+    /(?:^|[^\w$.#])(if|while|for|with)(?:\s+await)?\s*$/.exec(
+      text.slice(Math.max(0, open - 16), open),
+    )?.[1] ?? ""
   );
 }
 
@@ -539,8 +569,8 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
   // The brace depth at which each open `${` closes, back into its template.
   const templates: number[] = [];
   let depth = 0;
-  // Whether each open `(` starts a control statement's head, and each `)` that closed one.
-  const parens: boolean[] = [];
+  // The control statement whose head each open `(` starts (or ""), and each `)` that closed one.
+  const parens: string[] = [];
   const heads = new Set<number>();
   // The last code character that is not a space, before what the scan has reached.
   let prev = -1;
@@ -585,7 +615,7 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
         templates.push(depth);
       }
       blank(at, end, '"');
-    } else if (c === "/" && regexStarts(text, prev, heads)) {
+    } else if (c === "/" && regexStarts(text, at, prev, heads, parens.at(-1) === "for")) {
       end = regexEnd(text, at);
       if (end < 0) {
         return {
@@ -596,7 +626,7 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
       blank(at, end, '"');
     } else if (c === "(") parens.push(controlHead(text, at));
     else if (c === ")") {
-      if (parens.pop() === true) heads.add(at);
+      if ((parens.pop() ?? "") !== "") heads.add(at);
     } else if (c === "{") depth++;
     else if (c === "}") depth--;
     // A comment leaves `prev` as it was; a string or an expression is an operand that ends at `end`.

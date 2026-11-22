@@ -52,6 +52,8 @@ const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
  */
 const BY_LANE_RULE: Readonly<Record<string, { lane: string; due: string }>> = {
   "team-change-failing": { lane: "L-SAT-09", due: "2026-11-22" },
+  // Its rule read clockSkewMs, which no process writes (alert-fields.test.ts).
+  "clock-skew": { lane: "P0-F", due: "2026-11-22" },
 };
 
 /** A copy of the staging files, the watcher's settings and the runbooks, to plant one fault in. */

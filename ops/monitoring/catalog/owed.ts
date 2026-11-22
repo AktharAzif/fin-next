@@ -229,4 +229,16 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 02 §18.2",
   },
+  // Defined in alerts/platform.json until its field was found to have no writer: an alert that
+  // reads a field nobody writes can never fire, so it is owed, not defined. Its lane (the
+  // platform fragment's) and date follow the lane rule above; the steward confirms or changes them.
+  {
+    name: "clock-skew",
+    severity: "N",
+    fragment: "platform",
+    lane: "P0-F",
+    due: SUNDAY,
+    spec: "spec 01 §8.7, DECISIONS CF-72",
+    note: "No process writes clockSkewMs: process.health carries what a service's health hook gives (packages/server's BuiltService.health), and none gives the offset from the database's now() yet (P0-D's health line, with P0-E's pool and probe). The pull request that makes a process write it puts the rule back in alerts/platform.json (threshold @thresholds.clock-skew, runbook docs/runbooks/clock-skew.md) and removes it here.",
+  },
 ];

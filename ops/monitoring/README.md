@@ -38,7 +38,9 @@ not a literal) are at `eventsInCode` in `src/check.ts`. MC-15 holds every alert 
 (a line list's `alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the
 catalogue (an entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text)
 gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due date, and
-fails for an owed alert that has become a rule. MC-12 scans every file under
+fails for an owed alert that has become a rule. An alert reads only fields that a writer of its
+events writes (`test/alert-fields.test.ts`, which lists the exceptions by name with the reason); one
+whose field no process writes yet is owed, not defined. MC-12 scans every file under
 `staging/`, the catalogue, this README, the runbooks and the watcher's settings.
 
 ## Applying
