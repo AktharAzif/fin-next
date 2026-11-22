@@ -1,0 +1,12 @@
+@layer ui-sdk;
+/*
+ * The docs placeholder's stylesheet: Fin's tokens, theme, base and fonts, from its own origin.
+ * `@layer ui-sdk;` stays first, as in every app (spec 06 §3.2), though the placeholder uses no SDK
+ * part. The docs lane replaces the page and keeps the order (spec 05 §8).
+ */
+@import "tailwindcss";
+@import "@fin/tokens/tokens.css";
+@import "@fin/tokens/theme.css";
+@import "@fin/tokens/base.css";
+@import "@fin/tokens/fonts.css";
+@source "../index.html";

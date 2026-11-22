@@ -227,14 +227,16 @@ describe("imports:check", () => {
       ["new Func", "tion"],
       ["ev", "al"],
     ].map((parts) => parts.join(parts[0] === "process" ? "." : ""));
-    for (const line of [
-      `const r = ${createRequire}(${IMP}.meta.url);`,
-      `const b = ${binding}('fs');`,
-      `const f = ${fn}('return 1');`,
-      `const v = ${evaluate}('1');`,
-    ]) {
+    // Elsewhere the import rules allow them; eval and the Function constructor are still refused
+    // everywhere, by the page policy (spec 06 §11.5), but reported once where both rules apply.
+    for (const [line, elsewhere] of /** @type {[string, string[]][]} */ ([
+      [`const r = ${createRequire}(${IMP}.meta.url);`, []],
+      [`const b = ${binding}('fs');`, []],
+      [`const f = ${fn}('return 1');`, ["page-policy"]],
+      [`const v = ${evaluate}('1');`, ["page-policy"]],
+    ])) {
       assert.deepEqual(rules(checkSource("ops/fin/src/a.ts", src(line))), ["dynamic-import"], line);
-      assert.deepEqual(checkSource("apps/api/src/a.ts", src(line)), [], line);
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), elsewhere, line);
     }
   });
 
@@ -861,6 +863,100 @@ describe("imports:check", () => {
     assert.match(run.output, /^ops\/fin\/src\/commented\.ts:1 control-path-import: /m);
     assert.match(run.output, /^ops\/fin\/src\/escaped\.ts:1 control-path-import: /m);
     assert.match(run.output, /^tools\/fin-review\/src\/receipt\/check\.ts:1 test-file-import: /m);
+  });
+
+  test("@fin/icons and @fin/motion are client code: no node:* import and no server package", () => {
+    for (const file of [
+      "packages/icons/src/svg-node.ts",
+      "packages/icons/test/icons.test.tsx",
+      "packages/motion/src/index.tsx",
+      "packages/motion/test/motion.test.tsx",
+    ]) {
+      assert.deepEqual(rules(checkSource(file, imp("node:fs"))), ["client-node"], file);
+      assert.deepEqual(rules(checkSource(file, imp("@fin/db"))), ["client-server-package"], file);
+    }
+    assert.deepEqual(checkSource("packages/motion/src/index.tsx", imp("react")), []);
+  });
+
+  test("the page policy: markup or code from a string, or a style attribute, fails anywhere code runs", () => {
+    const planted = [
+      "el.innerHTML = html;",
+      "el.outerHTML = html;",
+      'el.insertAdjacentHTML("beforeend", html);',
+      "const part = document.createRange().createContextualFragment(html);",
+      "el.setHTMLUnsafe(html);",
+      "const doc = Document.parseHTMLUnsafe(html);",
+      "document.write(html);",
+      "document.writeln(html);",
+      'el["innerHTML"] = html;',
+      "<div dangerouslySetInnerHTML={{ __html: html }} />",
+      "const props = { dangerouslySetInnerHTML: { __html: html } };",
+      'el.setAttribute("style", "color: red");',
+      "el.setAttribute('STYLE', css);",
+      'el.setAttributeNS(null, "style", css);',
+      'setTimeout("tick()", 1);',
+      "window.setInterval(`tick()`, 10);",
+      'const g = Function("return 1");',
+      'const h = window.Function("return 1");',
+      'const i = globalThis["eval"]("1");',
+    ];
+    for (const file of [
+      "packages/icons/src/x.tsx",
+      "packages/ui/src/x.tsx",
+      "apps/console/src/client/a.tsx",
+      "apps/api/src/a.ts",
+      "scripts/x.mjs",
+    ]) {
+      for (const line of planted) {
+        assert.deepEqual(rules(checkSource(file, src(line))), ["page-policy"], `${file}: ${line}`);
+      }
+    }
+    // eval and new Function: the page policy where the import rules allow them, else theirs.
+    for (const line of ['eval("1");', 'globalThis.eval("1");', 'const f = new Function("x");']) {
+      assert.deepEqual(rules(checkSource("apps/api/src/a.ts", src(line))), ["page-policy"], line);
+      assert.deepEqual(rules(checkSource("packages/ui/src/x.ts", src(line))), ["dynamic-import"]);
+    }
+  });
+
+  test("the page policy reads code only, and leaves tests, their helpers and fixtures alone", () => {
+    for (const line of [
+      "// rendered with createElement, never through markup strings or innerHTML",
+      "/* eval(x), new Function(y) and setTimeout('z') are refused */",
+      'const word = "innerHTML";',
+      "el.textContent = text;",
+      "el.style.setProperty('color', 'red');",
+      "el.setAttribute('data-style', 'x');",
+      "el.setAttribute('aria-label', 'Close');",
+      "setTimeout(() => tick(), 10);",
+      "const delay = setTimeout(tick, 10);",
+      "await page.evaluate(() => 1);",
+      "await page.waitForFunction(() => true);",
+      "const fn: Function = () => {};",
+      "const value = retrieval(x);",
+    ]) {
+      assert.deepEqual(checkSource("apps/api/src/a.ts", src(line)), [], line);
+    }
+    const violations = src('probe.setAttribute("style", "color: red");', "el.innerHTML = html;");
+    for (const file of [
+      "packages/ui/e2e/kit.spec.ts",
+      "packages/ui/test/rules.test.ts",
+      "packages/ui/test/html.ts",
+      "packages/testing/test/fixtures/app/assets/app.js",
+      "apps/console/e2e/fixtures/csp.ts",
+    ]) {
+      assert.deepEqual(checkSource(file, violations), [], file);
+    }
+  });
+
+  test("a long export with comments and no `from` is read in linear time", {
+    timeout: 10_000,
+  }, () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `  // note ${i}: a few words\n  "${i}",`);
+    const text = `${EXP} const NOTES = [\n${lines.join("\n")}\n];\n`;
+    const start = performance.now();
+    assert.deepEqual(checkSource("packages/tokens/test/notes.ts", text), []);
+    assert.deepEqual(findImports(text).imports, []);
+    assert.ok(performance.now() - start < 2_000, "the clause reader backtracks");
   });
 
   test("a repository with planted imports fails, and this repository passes", () => {

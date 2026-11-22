@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en-GB" data-app="console">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta property="csp-nonce">
+    <title>Fin</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <script src="/theme.js"></script>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </head>
+  <body class="fin-shimmer">
+    <a class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-tooltip focus:rounded-control focus:bg-surface-raised focus:px-3 focus:py-2 focus:text-label focus:text-text-primary focus:shadow-popover focus:outline-focus" href="#main">Skip to content</a>
+    <div id="root">
+      <!-- boot:app --><div data-boot-block="app" aria-hidden="true" class="flex h-dvh flex-col bg-bg">
+        <div class="flex min-h-0 flex-1">
+          <div data-boot-sidebar class="hidden h-full w-sidebar shrink-0 flex-col overflow-hidden border-r border-border bg-surface lg:flex">
+            <div class="flex h-header shrink-0 items-center px-4"><div data-skeleton class="h-4.5 w-24 shrink-0 rounded-sm bg-fill-selected"></div></div>
+            <div class="flex flex-col gap-1 px-3">
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="mt-4 h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="h-8 rounded-control bg-fill-selected"></div>
+            </div>
+          </div>
+          <div class="flex min-w-0 flex-1 flex-col">
+            <div class="flex h-header shrink-0 items-center justify-between gap-3 border-b border-border px-6">
+              <div class="flex items-center gap-3">
+                <div data-skeleton class="h-8 w-36 rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="hidden h-8 w-44 rounded-control bg-fill-selected sm:block"></div>
+              </div>
+              <div data-skeleton class="size-6 rounded-full bg-fill-selected"></div>
+            </div>
+            <div class="flex flex-col gap-3 px-4 pt-7 md:px-6 lg:px-8 lg:pt-9">
+              <div data-skeleton class="h-6 w-48 rounded-sm bg-fill-selected"></div>
+              <div data-skeleton class="h-2 w-80 max-w-full rounded-sm bg-fill-selected"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /boot:app -->
+      <!-- boot:auth --><div data-boot-block="auth" aria-hidden="true" class="flex min-h-dvh flex-col bg-bg">
+        <div class="flex h-header shrink-0 items-center px-4 sm:px-8"><div data-skeleton class="h-5 w-28 rounded-sm bg-fill-selected"></div></div>
+        <div class="flex flex-1 flex-col items-center justify-center px-4 pt-6 pb-16">
+          <div class="w-full max-w-modal rounded-md border border-transparent bg-surface-raised p-6 shadow-ring sm:p-8">
+            <div class="flex flex-col gap-3">
+              <div data-skeleton class="h-6 w-40 rounded-sm bg-fill-selected"></div>
+              <div data-skeleton class="h-3 w-56 max-w-full rounded-sm bg-fill-selected"></div>
+              <div data-skeleton class="mt-4 h-control-lg rounded-control bg-fill-selected"></div>
+              <div data-skeleton class="h-control-lg rounded-control bg-fill-selected"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /boot:auth -->
+    </div>
+  </body>
+</html>

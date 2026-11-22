@@ -1,0 +1,54 @@
+{
+  "board": "Invite",
+  "canvas": "fin-dashboard",
+  "route": "/invite",
+  "states": {
+    "forYou": {
+      "status": "pending",
+      "day": "sat",
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
+    },
+    "accepting": {
+      "status": "pending",
+      "day": "sat",
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
+    },
+    "confirmItsYou": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "acceptFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "declining": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "otherAccount": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signingOut": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signedOut": {
+      "status": "pending",
+      "day": "sat",
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
+    },
+    "declined": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "cantUse": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}
