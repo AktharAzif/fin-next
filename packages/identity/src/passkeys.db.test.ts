@@ -2,7 +2,9 @@
 // first-factor rule raises the session; a passkey sign-in is aal2 at once; a passkey step-up
 // replaces the session without lengthening it and moves its proofs; another person's passkey is
 // refused; a challenge works once; a counter that goes backwards is refused and the person told; a
-// sign-in in flight while its passkey is removed finds it gone, and neither waits on the other.
+// sign-in in flight while its passkey is removed finds it gone, and neither waits on the other; an
+// assertion holds its person's row only once its network's allowance is counted and its browser
+// holds a challenge, and never in a way that keeps the person's own sign-in waiting.
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
@@ -292,6 +294,98 @@ describe("a passkey sign-in while that passkey is removed (§5.3, §6.7)", () =>
     expect(
       (await h.admin.query("SELECT 1 FROM identity.passkey WHERE id = $1", [id])).rowCount,
     ).toBe(0);
+  });
+});
+
+/** The answer, or a failure once it has waited two seconds (on a row another transaction holds). */
+function promptly<T>(answer: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("the answer waited on a held row")), 2000);
+  });
+  return Promise.race([answer, late]).finally(() => clearTimeout(timer));
+}
+
+describe("a passkey assertion before the library checks it (§5.3, §5.6)", () => {
+  it("holds no row with no challenge, or past its network's allowance, and answers at once while a change holds the person's row", async () => {
+    const { authenticator, email } = await personWithPasskey("unproven");
+    const owner = await h.admin.query<{ id: string }>(
+      'SELECT id FROM identity."user" WHERE email = $1',
+      [email],
+    );
+    // A change to the person's factors holds their row, as a removal does.
+    const holder = await h.admin.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query('SELECT 1 FROM identity."user" WHERE id = $1 FOR UPDATE', [
+        owner.rows[0]?.id,
+      ]);
+      // The credential's own signature, from a browser that holds no challenge.
+      const cold = await promptly(
+        h.browser().post("/api/auth/passkey/verify-authentication", {
+          response: authenticator.authenticate("Y2hhbGxlbmdl"),
+        }),
+      );
+      expect(cold.status).toBe(400);
+      expect(cold.json).toMatchObject({ code: "CHALLENGE_NOT_FOUND" });
+      // The credential's own signature over a live challenge, from a network that has used up its
+      // allowance.
+      const device = h.browser();
+      let tries = 0;
+      for (; tries < 40; tries += 1) {
+        const tried = await device.post("/api/auth/passkey/verify-authentication", {
+          response: { id: "x" },
+        });
+        if (tried.status === 429) break;
+      }
+      expect(tries).toBeLessThan(40);
+      const options = await device.get("/api/auth/passkey/generate-authenticate-options");
+      const limited = await promptly(
+        device.post("/api/auth/passkey/verify-authentication", {
+          response: authenticator.authenticate(String(options.json?.challenge)),
+        }),
+      );
+      expect(limited.status).toBe(429);
+      expect(limited.json).toMatchObject({ code: "rate_limited" });
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    // The credential still signs in once nothing holds its owner's row.
+    expect((await passkeyCeremony(h.browser(), authenticator)).status).toBe(200);
+  });
+
+  it("never holds up the person's own sign-in while another assertion naming them is in flight", async () => {
+    const { authenticator } = await personWithPasskey("unqueued");
+    // Another browser's assertion naming the credential, held up inside the library (another
+    // transaction holds its challenge), so it holds the person's row meanwhile.
+    const other = h.browser();
+    const challenge = await other.get("/api/auth/passkey/generate-authenticate-options");
+    const asserted = authenticator.authenticate(String(challenge.json?.challenge));
+    const row = await h.admin.query<{ id: string }>(
+      "SELECT id FROM identity.verification ORDER BY id DESC LIMIT 1",
+    );
+    const blocker = await h.admin.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM identity.verification WHERE id = $1 FOR UPDATE", [
+        row.rows[0]?.id,
+      ]);
+      const inFlight = other.post("/api/auth/passkey/verify-authentication", {
+        response: asserted,
+      });
+      inFlight.catch(() => undefined);
+      await lockWaiters(1);
+      // The person signs in from their own browser meanwhile, and is not kept waiting.
+      const own = await promptly(passkeyCeremony(h.browser(), authenticator));
+      expect(own.status, JSON.stringify(own.json)).toBe(200);
+      await blocker.query("ROLLBACK");
+      // The held assertion's counter is behind the one just used, so it is refused.
+      expect((await inFlight).status).not.toBe(200);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
   });
 });
 

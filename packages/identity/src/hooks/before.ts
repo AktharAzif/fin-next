@@ -2,7 +2,7 @@
 // gate for the path, the step-up rule for `step_up_self` paths, Fin's limits, the body allowlist
 // (stripping `trustDevice` and `rememberMe`), and each path's own rules: emailed codes bound to the
 // asking browser, the staff Access binding, the sign-ups switch, TOTP replay and lockout, and the
-// last-factor rule.
+// last-factor rule. A passkey assertion, which needs no session, counts its limit before its hold.
 import { symmetricDecrypt } from "better-auth/crypto";
 import { trustedBrowserOf } from "../browsers.ts";
 import { attemptCode, requestCode } from "../codes.ts";
@@ -85,11 +85,16 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   state.rule = rule;
   state.line.authPath = rule.path;
 
+  // Anyone may send a passkey assertion naming any credential, so its network's allowance is
+  // counted before it can hold anyone's row. Every gate state reaches it and no step-up rule
+  // applies to it, so counting it first changes no answer the order of §3.5 would give.
+  const countedFirst = ctx.path === "/passkey/verify-authentication";
+  if (countedFirst) await finLimits(rt, ctx, state, tx, rule);
   await holdPerson(rt, ctx, tx);
   await loadPrior(rt, ctx, state, tx);
   if (!rule.reach.includes(state.gate)) refuseGate(rt, state);
   await stepUpRule(rt, ctx, state, tx);
-  await finLimits(rt, ctx, state, tx, rule);
+  if (!countedFirst) await finLimits(rt, ctx, state, tx, rule);
   stripBody(ctx, state);
 
   if (realm === "developer") {
@@ -146,9 +151,12 @@ export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
  * (`@fin/staff`'s lock.ts). A ceremony that writes the row itself later (a sign-in's time, an
  * enrolment) does so under its own hold, without queueing behind a change that waits for it.
  *
- * A passkey assertion names its person by its credential; every other ceremony by the session it
- * runs in. (Signing out everywhere else removes no credential, so a ceremony that commits after it
- * is a new sign-in like any other.)
+ * Every ceremony but one names its person by the session it runs in, which only that person's
+ * browser holds. A passkey assertion needs no session and names its person by a credential ID,
+ * which is no secret: it is counted first (`beforeHook`) and holds the row only when this browser
+ * holds an authentication challenge, without which the library refuses it before it reads any
+ * credential. (Signing out everywhere else removes no credential, so a ceremony that commits after
+ * it is a new sign-in like any other.)
  */
 async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promise<void> {
   if (!CEREMONY_PATHS.has(ctx.path)) return;
@@ -156,6 +164,7 @@ async function holdPerson(rt: RealmRuntime, ctx: HookContext, tx: UnitTx): Promi
   if (ctx.path === "/passkey/verify-authentication") {
     const response = bodyOf(ctx).response as { id?: unknown } | undefined;
     if (typeof response?.id !== "string") return;
+    if (!(await holdsAuthenticationChallenge(ctx))) return;
     await tx.query(
       `SELECT 1 FROM ${tables.user}
         WHERE id = (SELECT user_id FROM ${tables.passkey} WHERE credential_id = $1)
@@ -798,21 +807,47 @@ async function lastFactorRule(
 /** The passkey plugin's challenge cookie (its default `advanced.webAuthnChallengeCookie`). */
 const PASSKEY_CHALLENGE_COOKIE = "better-auth-passkey";
 
-/** The challenge this browser's live passkey ceremony answers, read without consuming it. */
-async function passkeyChallenge(ctx: HookContext, now: Date): Promise<string | null> {
+interface ChallengeRow {
+  type: unknown;
+  expectedChallenge: unknown;
+  expiresAt: Date;
+}
+
+/** The challenge row this browser's passkey cookie names, read without consuming it. */
+async function challengeRow(ctx: HookContext): Promise<ChallengeRow | null> {
   const cookie = ctx.context.createAuthCookie(PASSKEY_CHALLENGE_COOKIE).name;
   const token = await ctx.getSignedCookie(cookie, ctx.context.secret);
   if (typeof token !== "string" || token === "") return null;
   const found = await ctx.context.internalAdapter.findVerificationValue(token);
-  if (found === null || new Date(found.expiresAt).getTime() <= now.getTime()) return null;
+  if (found === null) return null;
   try {
     const data = JSON.parse(found.value) as { type?: unknown; expectedChallenge?: unknown };
-    return data.type === "authentication" && typeof data.expectedChallenge === "string"
-      ? data.expectedChallenge
-      : null;
+    return {
+      type: data.type,
+      expectedChallenge: data.expectedChallenge,
+      expiresAt: new Date(found.expiresAt),
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether this browser holds a passkey authentication challenge: the library refuses an assertion
+ * without one before it reads any credential. An expired one counts too, since only the library
+ * decides that, so this never skips a hold an assertion the library accepts would need.
+ */
+async function holdsAuthenticationChallenge(ctx: HookContext): Promise<boolean> {
+  return (await challengeRow(ctx))?.type === "authentication";
+}
+
+/** The challenge this browser's live passkey ceremony answers, read without consuming it. */
+async function passkeyChallenge(ctx: HookContext, now: Date): Promise<string | null> {
+  const row = await challengeRow(ctx);
+  if (row === null || row.expiresAt.getTime() <= now.getTime()) return null;
+  return row.type === "authentication" && typeof row.expectedChallenge === "string"
+    ? row.expectedChallenge
+    : null;
 }
 
 /**
