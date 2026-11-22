@@ -1,7 +1,8 @@
 // The edge's statements as the store reads their rows (spec 05 §2.1 steps 15, 16 and 19): the switch
 // and the windows read as what they are, or the store throws, which the edge answers 503 for. A row
-// that lost a column never reads as "the live_keys switch is off" or "no refusals yet": the check
-// never fails open. The statements themselves run on Postgres 18 in schema.db.test.ts.
+// that lost a column never reads as "the live_keys switch is off", "no refusals yet" or "the window
+// has ended": the check never fails open. The statements themselves run on Postgres 18 in
+// schema.db.test.ts.
 import { describe, expect, it } from "vitest";
 import { keyStore, type Queryable } from "./lookup.ts";
 
@@ -59,18 +60,32 @@ describe("the lookup", () => {
 });
 
 describe("a window's count", () => {
-  it("reads the count and the seconds left, at least 1", async () => {
-    expect(await keyStore(answering({ count: "31", seconds_left: 0 })).count("w")).toEqual({
+  it("reads the count and the time left: the milliseconds as answered, the seconds rounded up, at least 1", async () => {
+    expect(await keyStore(answering({ count: "31", ms_left: 14_800 })).count("w")).toEqual({
       count: 31,
+      secondsLeft: 15,
+      msLeft: 14_800,
+    });
+    expect(await keyStore(answering({ count: 2, ms_left: "60000" })).count("w")).toEqual({
+      count: 2,
+      secondsLeft: 60,
+      msLeft: 60_000,
+    });
+    expect(await keyStore(answering({ count: 1, ms_left: 0 })).count("w")).toEqual({
+      count: 1,
       secondsLeft: 1,
+      msLeft: 0,
     });
   });
 
   it.each([
-    ["no count", { seconds_left: 5 }],
-    ["a count of nothing", { count: null, seconds_left: 5 }],
-    ["a zero count", { count: 0, seconds_left: 5 }],
-    ["no seconds left", { count: 1 }],
+    ["no count", { ms_left: 5 }],
+    ["a count of nothing", { count: null, ms_left: 5 }],
+    ["a zero count", { count: 0, ms_left: 5 }],
+    ["no time left", { count: 1 }],
+    ["a time left that is not a count", { count: 1, ms_left: 1.5 }],
+    ["a negative time left", { count: 1, ms_left: -1 }],
+    ["more time left than a window holds", { count: 1, ms_left: 60_001 }],
   ])("throws on a row with %s", async (_label, row) => {
     await expect(keyStore(answering(row)).count("w")).rejects.toThrow(/did not read/);
   });

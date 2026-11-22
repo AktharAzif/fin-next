@@ -3,8 +3,9 @@
 // revoked, a rolled (past its overlap), another environment's, an unknown and a malformed key
 // (T05-08, A05-02); a revocation refused on the very next request (T05-09, no positive cache); a
 // rolling key working until its overlap ends; the allowlist (T05-11); "last used" written after the
-// answer, at most once a minute (T05-16); and the timings of an unknown and a wrong key within a
-// set bound of each other.
+// answer, at most once a minute (T05-16); a key ID with no row answered the same 401s, then 429s, as
+// a wrong secret by two replicas taking turns on one database (spec 05 §3.7's window in Postgres);
+// and the timings of an unknown and a wrong key within a set bound of each other.
 import { randomBytes } from "node:crypto";
 import { createKeyring } from "@fin/crypto";
 import {
@@ -71,6 +72,8 @@ let platform: KeysPlatform;
 let su: PlatformClient;
 let consoleLogin: PlatformClient;
 let api: Awaited<ReturnType<typeof bootApi>>;
+/** The edge's settings on this database, for a second replica beside `api`. */
+let edgeEnv: Record<string, string>;
 
 const make = (over: Partial<Parameters<typeof createKey>[3]> = {}) =>
   inUnit(consoleLogin, (tx) =>
@@ -103,22 +106,19 @@ beforeAll(async () => {
       { ...OWNER, name: "Eve Owner", email: "eve.owner@example.com", roleKey: "super_admin" },
     ],
   });
-  api = await bootApi(defineEdgeService(), {
-    service: "edge",
-    roles: ["api"],
-    env: {
-      FIN_PUBLIC_ORIGIN: `https://${HOST}`,
-      FIN_CONNECTOR_SERVICES: "cloudflared-public",
-      FIN_KEY_SALT: "fin-ci-1",
-      API_KEY_PEPPER_1: pepper.toString("base64url"),
-      API_KEY_PEPPER_IN_USE: "1",
-      FIN_DB_HOST: platform.host,
-      FIN_DB_PORT: String(platform.port),
-      FIN_DB_NAME: platform.name,
-      FIN_DB_USER: "fin_edge_a",
-      FIN_DB_PASSWORD: platform.password("fin_edge_a"),
-    },
-  });
+  edgeEnv = {
+    FIN_PUBLIC_ORIGIN: `https://${HOST}`,
+    FIN_CONNECTOR_SERVICES: "cloudflared-public",
+    FIN_KEY_SALT: "fin-ci-1",
+    API_KEY_PEPPER_1: pepper.toString("base64url"),
+    API_KEY_PEPPER_IN_USE: "1",
+    FIN_DB_HOST: platform.host,
+    FIN_DB_PORT: String(platform.port),
+    FIN_DB_NAME: platform.name,
+    FIN_DB_USER: "fin_edge_a",
+    FIN_DB_PASSWORD: platform.password("fin_edge_a"),
+  };
+  api = await bootApi(defineEdgeService(), { service: "edge", roles: ["api"], env: edgeEnv });
 });
 
 afterAll(async () => {
@@ -230,6 +230,61 @@ describe("the edge on Postgres 18", () => {
     ]);
     // From an allowed address the same key works.
     expect((await whoami(allowlisted.secret, { "cf-connecting-ip": "8.8.4.9" })).status).toBe(200);
+  });
+
+  it("answers a key ID with no row the same 401s, then 429s, as a wrong secret, with two replicas taking turns", async () => {
+    const twin = await bootApi(defineEdgeService(), {
+      service: "edge",
+      roles: ["api"],
+      env: edgeEnv,
+    });
+    try {
+      const made = await make();
+      const withRow = newKey("test", "rk", saltFor("ci"), undefined, made.key.keyId).key;
+      const noRow = newKey("test", "rk", saltFor("ci")).key;
+      const send = (on: number, key: string, ip: string) =>
+        (on % 2 === 0 ? api : twin).send({
+          host: HOST,
+          path: "/v4/whoami",
+          headers: { ...HTTPS, "cf-connecting-ip": ip, authorization: `Bearer ${key}` },
+        });
+      const run = async (key: string, ip: string) => {
+        const out: number[] = [];
+        for (let i = 0; i < 36; i++) out.push((await send(i, key, ip)).status);
+        return out;
+      };
+      // Each run's refusals fall in one window of the database's clock: start with time to spare.
+      const left = Number(
+        (
+          await su.query<{ ms: string }>(
+            `SELECT floor(extract(epoch FROM date_trunc('minute', clock_timestamp())
+               + interval '1 minute' - clock_timestamp()) * 1000)::int::text AS ms`,
+          )
+        ).rows[0]?.ms,
+      );
+      if (left < 20_000) await new Promise((resolve) => setTimeout(resolve, left + 200));
+      const withRowRun = await run(withRow, "8.8.230.1");
+      const noRowRun = await run(noRow, "8.8.230.2");
+      expect(withRowRun).toEqual([...Array<number>(30).fill(401), ...Array<number>(6).fill(429)]);
+      expect(noRowRun).toEqual(withRowRun);
+      // Once each replica had seen the window full, its filter answered with no statement.
+      for (const replica of [api, twin]) {
+        const line = replica.stdout
+          .filter((l) => l.event === "request")
+          .at(-1) as unknown as Record<string, unknown>;
+        expect(line).toMatchObject({ status: 429, keyReason: "unknown", dbQueries: 0 });
+      }
+      // The filter's Retry-After is the window's own: a refused key with a row from the same
+      // address, counted by Postgres a moment before, waits as long (a second apart at most, when
+      // a second ends between the two).
+      const counted = await send(0, withRow, "8.8.230.2");
+      const filtered = await send(0, noRow, "8.8.230.2");
+      expect([counted.status, filtered.status]).toEqual([429, 429]);
+      const waits = [counted, filtered].map((res) => Number(res.headers["retry-after"]));
+      expect(Math.abs((waits[0] as number) - (waits[1] as number))).toBeLessThanOrEqual(1);
+    } finally {
+      await twin.stop();
+    }
   });
 
   it("takes about as long for an unknown key as for a wrong secret (the body is hashed either way)", async () => {

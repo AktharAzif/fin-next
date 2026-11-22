@@ -1,20 +1,25 @@
 // Load shedding (spec 05 §2.1 step 5 and step 14, §3.7; ARCHITECTURE §7.7; [SA-19]), before any
 // database work: a per-replica token bucket for the caller's address (IPv6 by its /64) and one for
-// the replica in all, and a negative filter of key IDs found not to exist in the last 60 seconds, so
-// a flood of well-formed unknown keys (the salt is public) never reaches Postgres. Shedding decides
-// nothing about a person: it lives in process memory (the one exception to ARCHITECTURE principle
-// 14) and every replica keeps its own. Rates and bursts are settings from the private overlay
-// ([OB-13]); the defaults below are for development and tests.
+// the replica in all, and a negative filter of key IDs found not to exist in the last 60 seconds.
+// Shedding decides nothing about a person: it lives in process memory (the one exception to
+// ARCHITECTURE principle 14) and every replica keeps its own. Rates and bursts are settings from the
+// private overlay ([OB-13]); the defaults below are for development and tests.
 //
-// A refusal the negative filter answers is still a refused key for the address's `refused_keys`
-// window (spec 05 §3.7): this replica counts it here, without a statement, beside the count the
-// window in Postgres answered for the refusals that reached it, and judges 429 on the larger. So an
-// ID with no row reaches the window's 429 after the same number of refusals as one with a row, and
-// the status sequence never tells the two apart (§4.7, T05-08). It only ever turns a refusal into a
-// 429; it never lets a key through.
+// The negative filter only repeats what Postgres has decided. Whether a refused key gets 401 or 429
+// is the address's `refused_keys` window (spec 05 §3.7), which lives in Postgres and counts every
+// refusal that reaches it, from every replica. Once a count answers past the limit, every refused
+// key from that address is 429 until the window ends, and nothing changes that sooner. So the
+// replica remembers that answer, per address, until a time it takes from the answer that is never
+// past the window's real end; and only while it does, the filter refuses a key ID found not to exist
+// with that 429, without a statement. Otherwise such an ID goes on to the statement like any other
+// key and Postgres counts its refusal. An ID with no row therefore reaches the 429 after exactly as
+// many refusals as one with a row, however many replicas share the address's requests (§4.7,
+// T05-08), and is told to wait as long (the filter's end is early by at most the count's round
+// trip); and a flood of a key ID found not to exist stops reaching Postgres once its address's
+// window is full (T05-10). The filter never answers a 401 and never lets a key through.
 import type { Clock } from "@fin/core";
 import { ConfigError } from "@fin/core";
-import { parseAddress } from "@fin/keys";
+import { parseAddress, REFUSED_KEYS_LIMIT, type WindowCount } from "@fin/keys";
 
 export interface ShedSettings {
   /** Tokens a second for one address, and its bucket's size. */
@@ -23,7 +28,10 @@ export interface ShedSettings {
   /** Tokens a second for the replica in all, and its bucket's size. */
   totalRate: number;
   totalBurst: number;
-  /** How long a key ID found not to exist is refused without a lookup. */
+  /**
+   * How long a key ID found not to exist is remembered: refused without a lookup, in that time,
+   * from an address whose refused-key window this replica knows is full.
+   */
   negativeTtlMs: number;
   /** The most addresses and unknown key IDs kept; the oldest go first. */
   maxEntries: number;
@@ -72,27 +80,14 @@ interface Bucket {
   at: number;
 }
 
-/** An address's refused keys in one fixed minute, as this replica knows them. */
-interface RefusedWindow {
-  minute: number;
-  count: number;
-}
-
-/** The refused-key window's count to judge, and the seconds left in its minute (at least 1). */
-export interface RefusedCount {
-  count: number;
-  secondsLeft: number;
-}
-
-const MINUTE_MS = 60_000;
-
 export class Shedder {
   readonly #settings: ShedSettings;
   readonly #clock: Clock;
   readonly #buckets = new Map<string, Bucket>();
   readonly #total: Bucket;
   readonly #unknown = new Map<string, number>();
-  readonly #refused = new Map<string, RefusedWindow>();
+  /** Address to the time (this replica's clock) until which Postgres's refused-key window is full. */
+  readonly #full = new Map<string, number>();
   shed = 0;
 
   constructor(settings: ShedSettings, clock: Clock) {
@@ -129,7 +124,7 @@ export class Shedder {
     return ok;
   }
 
-  /** A key ID found not to exist: refused without a lookup for the next 60 seconds. */
+  /** A key ID found not to exist, remembered for the next 60 seconds (`negativeTtlMs`). */
   rememberUnknown(keyId: string): void {
     if (this.#unknown.size >= this.#settings.maxEntries) {
       const oldest = this.#unknown.keys().next().value;
@@ -147,42 +142,39 @@ export class Shedder {
     return false;
   }
 
-  /** This minute's window for the address, made (or restarted) as needed and kept newest last. */
-  #window(address: string, minute: number): RefusedWindow {
-    let window = this.#refused.get(address);
-    if (window === undefined || window.minute !== minute) window = { minute, count: 0 };
-    this.#refused.delete(address);
-    if (this.#refused.size >= this.#settings.maxEntries) {
-      const oldest = this.#refused.keys().next().value;
-      if (oldest !== undefined) this.#refused.delete(oldest);
+  /**
+   * Runs the count of the address's refused-key window (`count`, its statement) and keeps what
+   * Postgres answers. Past the limit, the window is full until it ends: the time read just before the
+   * statement was sent, plus the milliseconds Postgres had left (rounded down), is never later than
+   * that end, whatever the offset between this replica's clock and the database's. At or under the
+   * limit, the replica forgets any window it kept for the address: Postgres's latest answer wins (a
+   * window can be reset, as the unlogged windows are when the database restarts), and forgetting
+   * costs at most one more statement. A statement that fails changes nothing.
+   */
+  async countRefused(address: string, count: () => Promise<WindowCount>): Promise<WindowCount> {
+    const sentAt = this.#clock.now();
+    const counted = await count();
+    this.#full.delete(address);
+    if (counted.count > REFUSED_KEYS_LIMIT) {
+      if (this.#full.size >= this.#settings.maxEntries) {
+        const oldest = this.#full.keys().next().value;
+        if (oldest !== undefined) this.#full.delete(oldest);
+      }
+      this.#full.set(address, sentAt + counted.msLeft);
     }
-    this.#refused.set(address, window);
-    return window;
+    return counted;
   }
 
   /**
-   * The database window's count for the address, as a lookup read it: this replica's count is never
-   * below it.
+   * While this replica knows Postgres's refused-key window for the address is full, the seconds
+   * left in it (at least 1, rounded up as Postgres's own count answers them); otherwise null.
    */
-  seenRefused(address: string, counted: number): void {
-    if (!Number.isSafeInteger(counted) || counted <= 0) return;
-    const window = this.#window(address, Math.floor(this.#clock.now() / MINUTE_MS));
-    window.count = Math.max(window.count, counted);
-  }
-
-  /**
-   * One more refused key for the address: `counted` is the database window's count after it when
-   * the refusal reached the database, and absent when the negative filter answered it. Answers the
-   * count to judge (spec 05 §3.7: past 30, 429) and the seconds left in this replica's minute.
-   */
-  refuse(address: string, counted = 0): RefusedCount {
-    const now = this.#clock.now();
-    const minute = Math.floor(now / MINUTE_MS);
-    const window = this.#window(address, minute);
-    window.count = Math.max(window.count + 1, Number.isSafeInteger(counted) ? counted : 0);
-    return {
-      count: window.count,
-      secondsLeft: Math.max(1, Math.ceil(((minute + 1) * MINUTE_MS - now) / 1000)),
-    };
+  refusedFull(address: string): number | null {
+    const until = this.#full.get(address);
+    if (until === undefined) return null;
+    const left = until - this.#clock.now();
+    if (left > 0) return Math.ceil(left / 1000);
+    this.#full.delete(address);
+    return null;
   }
 }

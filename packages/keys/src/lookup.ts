@@ -2,7 +2,10 @@
 // the key record from `keys.key_lookup`, the caller's refused-key window from `ops.rate_window` and
 // the `live_keys` switch from `ops.kill_switch`, read together, with no positive cache. The windows
 // are fixed 60-second windows by the database's clock and fail closed: a statement that fails is an
-// error the edge answers 503 for (`rate-limiter-failing`), never a pass.
+// error the edge answers 503 for (`rate-limiter-failing`), never a pass. A count answers the window's
+// new count and the time left in it, in milliseconds rounded down, from which the seconds for
+// `Retry-After` are rounded up: the edge's negative filter keeps a refused-key window Postgres
+// answered full, and must never keep it past the window's end (apps/edge/src/shed.ts).
 //
 // Window keys never hold an address: the refused-key window is keyed by a keyed hash of the address
 // (the caller passes it), the key window by the key ID, which is safe to store and log.
@@ -34,8 +37,9 @@ export const LOOKUP_SQL = `SELECT k.id, k.organization_id, k.mode, k.kind, k.sco
 const COUNT_SQL = `INSERT INTO ops.rate_window (key, window_start, count)
 VALUES ($1, date_trunc('minute', now()), 1)
 ON CONFLICT (key, window_start) DO UPDATE SET count = ops.rate_window.count + 1
-RETURNING count, ceil(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - now()))::int
-  AS seconds_left`;
+RETURNING count,
+  floor(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - now()) * 1000)::int
+  AS ms_left`;
 
 const TOUCH_SQL = "SELECT keys.touch_last_used($1) AS touched";
 
@@ -52,6 +56,12 @@ export interface WindowCount {
   count: number;
   /** Seconds until the window ends (at least 1), for `Retry-After` and `RateLimit`'s `t`. */
   secondsLeft: number;
+  /**
+   * Milliseconds until the window ends when the statement ran, rounded down (0 to 60,000): added to
+   * a time read before the statement was sent, it is never past the window's real end, whichever
+   * clock the caller keeps (the edge's filter relies on it, apps/edge/src/shed.ts).
+   */
+  msLeft: number;
 }
 
 /** The refused-key window's key for an address's keyed hash. */
@@ -104,17 +114,15 @@ export function keyStore(db: Queryable): KeyStore {
       };
     },
     async count(windowKey) {
-      const result = await db.query<{ count: unknown; seconds_left: unknown }>(COUNT_SQL, [
-        windowKey,
-      ]);
+      const result = await db.query<{ count: unknown; ms_left: unknown }>(COUNT_SQL, [windowKey]);
       const row = result.rows[0];
       if (row === undefined) throw new Error("keys: the window answered no row");
       const count = countOf(row.count);
-      const secondsLeft = countOf(row.seconds_left);
-      if (count === null || count < 1 || secondsLeft === null) {
+      const msLeft = countOf(row.ms_left);
+      if (count === null || count < 1 || msLeft === null || msLeft > WINDOW_SECONDS * 1000) {
         throw new Error("keys: the window's count did not read");
       }
-      return { count, secondsLeft: Math.max(1, secondsLeft) };
+      return { count, secondsLeft: Math.max(1, Math.ceil(msLeft / 1000)), msLeft };
     },
     async touch(keyId) {
       const result = await db.query<{ touched: boolean }>(TOUCH_SQL, [keyId]);

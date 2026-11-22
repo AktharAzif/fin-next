@@ -4,13 +4,14 @@
 //       checksum verifies with this deployment's salt, or the answer is 403 sandbox_key_required,
 //       before any lookup (Try it never sends anything else, spec 05 §9).
 //   13. `Authorization: Bearer <key>`: shape and checksum with this deployment's salt.
-//   14. The negative filter: a key ID found not to exist in the last 60 seconds is refused at once,
-//       counted for the address's refused-key window in this replica's memory (shed.ts), so it
-//       turns into 429 after as many refusals as a key ID with a row does.
+//   14. The negative filter: a key ID found not to exist in the last 60 seconds is refused at once
+//       only while this replica knows the address's refused-key window in Postgres is full, with
+//       that window's 429 (shed.ts); otherwise it goes on to the statement like any other key, so
+//       Postgres counts every refusal before the window fills, whichever replica answers.
 //   15. One statement: the record, the address's refused-key window and the live_keys switch.
 //   16. The constant-time compare across the pepper chain; revoked; expired; the allowlist. Every
 //       refusal is the same 401 (only `request_id` differs), or 429 once the address's refused-key
-//       window is full; the reason goes into the request line as `keyReason` only.
+//       window in Postgres is full; the reason goes into the request line as `keyReason` only.
 //   17. A Production key: the organisation not live, paused, or the live_keys switch on.
 //   18. The route's policy: key kind, scopes and mode.
 //   19. The key's window, 600 calls a minute, with the draft-11 RateLimit headers.
@@ -156,15 +157,15 @@ export async function checkKey(
   const key = pre.key;
   facts.keyId = key.id;
 
-  // 14: the negative filter, counted for the address's refused-key window without a statement.
+  // 14: the negative filter, only while Postgres has already answered this address's refused-key
+  // window full: the 429 it gives is the window's own, which cannot change before the window ends.
   const clientIp = c.get("ingress")?.clientIp;
   const address = addressKey(clientIp);
   if (deps.shedder.knownUnknown(key.id)) {
-    const seen = deps.shedder.refuse(address);
-    if (seen.count > REFUSED_KEYS_LIMIT) {
-      return { refused: refusedKeysLimited(c, deps, "unknown", seen.secondsLeft) };
+    const secondsLeft = deps.shedder.refusedFull(address);
+    if (secondsLeft !== null) {
+      return { refused: refusedKeysLimited(c, deps, "unknown", secondsLeft) };
     }
-    return { refused: unauthenticated(c, deps, "unknown") };
   }
 
   // 15: the one statement.
@@ -176,7 +177,6 @@ export async function checkKey(
     deps.telemetry.log("key.lookup_failed", { code: errorCode(error) }, "error");
     return { refused: unavailable(c, deps, "key.lookup_failed") };
   }
-  deps.shedder.seenRefused(address, lookup.refusedCount);
 
   // 16: the compare, revocation, expiry and the allowlist.
   const judged = judgeKey({
@@ -191,9 +191,12 @@ export async function checkKey(
     if (judged.reason === "pepper_missing") {
       deps.telemetry.log("key.pepper_missing", { keyId: key.id }, "error");
     }
+    // The window in Postgres decides; the filter keeps its answer when it is full (step 14).
     let count: Awaited<ReturnType<KeyStore["count"]>>;
     try {
-      count = await timed(c, () => deps.store.count(refusedWindow));
+      count = await deps.shedder.countRefused(address, () =>
+        timed(c, () => deps.store.count(refusedWindow)),
+      );
     } catch (error) {
       deps.telemetry.log(
         "rate_limiter.failed",
@@ -202,17 +205,8 @@ export async function checkKey(
       );
       return { refused: unavailable(c, deps, "rate_limiter.failed") };
     }
-    // The larger of the window in Postgres and what this replica answered from its filter.
-    const seen = deps.shedder.refuse(address, count.count);
-    if (seen.count > REFUSED_KEYS_LIMIT) {
-      return {
-        refused: refusedKeysLimited(
-          c,
-          deps,
-          judged.reason,
-          count.count > REFUSED_KEYS_LIMIT ? count.secondsLeft : seen.secondsLeft,
-        ),
-      };
+    if (count.count > REFUSED_KEYS_LIMIT) {
+      return { refused: refusedKeysLimited(c, deps, judged.reason, count.secondsLeft) };
     }
     return { refused: unauthenticated(c, deps, judged.reason) };
   }
