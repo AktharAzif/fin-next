@@ -89,11 +89,8 @@ async function activeAdmins(): Promise<number> {
 async function race(
   pairs: { who: Admin; request: { method: string; path: string }; fn: RouteFn }[],
 ) {
-  // Each Admin asks for and proves their own intent, side by side; then the re-sends go out at the
-  // same moment.
-  const intents = await Promise.all(
-    pairs.map((pair) => provedIntent(pair.who, pair.request, pair.fn)),
-  );
+  const intents: string[] = [];
+  for (const pair of pairs) intents.push(await provedIntent(pair.who, pair.request, pair.fn));
   return Promise.allSettled(
     pairs.map((pair, i) =>
       h.route(pair.who.browser, { ...pair.request, intent: intents[i] as string }, pair.fn),
