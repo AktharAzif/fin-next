@@ -206,7 +206,7 @@ async function events(target: string) {
 
 async function outbox(keyId: string) {
   const result = await su.query<{ recipient: string; params: Record<string, unknown> }>(
-    `SELECT recipient, params FROM email.outbox
+    `SELECT recipient, params FROM email_private.outbox
       WHERE template = 'api-keys/key-changed' AND params ->> 'keyId' = $1 ORDER BY recipient, id`,
     [keyId],
   );

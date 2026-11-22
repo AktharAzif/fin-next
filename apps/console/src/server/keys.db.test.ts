@@ -253,7 +253,7 @@ describe("the API keys journey", () => {
     expect(log.status).toBe(200);
     expect(JSON.stringify(log.json)).toContain("api_key.revoked");
     const notices = await su.query<{ n: string }>(
-      "SELECT count(*) AS n FROM email.outbox WHERE template = 'api-keys/key-changed'",
+      "SELECT count(*) AS n FROM email_private.outbox WHERE template = 'api-keys/key-changed'",
     );
     // Four changes, each to the three members.
     expect(Number(notices.rows[0]?.n)).toBe(12);

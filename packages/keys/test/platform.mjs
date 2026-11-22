@@ -1,120 +1,22 @@
 // The real platform for the keys integration tests (Postgres 18, never PGlite, CI-12): one fresh
-// database per test file, bootstrapped by @fin/db's own test bootstrap (the real roles, schemas and
-// privileged-login guard), then migrated by @fin/db's runner with every migration the keys area
-// stands on, in name order: P0-E's (audit, ops, email, events), @fin/identity's (the developer realm,
-// intents, limits, views and guards), @fin/orgs' (organisations, members, roles) and this package's;
-// and every grant fragment the runner renders: P0-E's, @fin/identity's (converted to the runner's
-// format), @fin/orgs' and this one's. The runner's `after` step registers the event types and the
-// email template grants, as the `migrate` service's registry sync does. The console's API half, the
-// edge and the lifecycle all run against it as their own logins (fin_console_a, fin_edge_a, ...).
+// database per test file, bootstrapped and migrated by @fin/db's own test helpers with every
+// package's database files, the set `migrate` applies: P0-E's (audit, ops, email, events),
+// @fin/identity's (the developer realm, intents, limits, views and guards), @fin/orgs'
+// (organisations, members, roles), this package's and the rest, migrations and grant fragments
+// alike. The runner's `after` step registers the event types and the email template grants, as the
+// `migrate` service's registry sync does. The console's API half, the edge and the lifecycle all
+// run against it as their own logins (fin_console_a, fin_edge_a, ...).
 //
 // JavaScript typed by platform.d.mts, as packages/staff's is, for one reason: @fin/db and
 // @fin/identity each declare the `pg` module for themselves, and the two declarations cannot share
 // one TypeScript program. The keys tests that drive the console import @fin/identity; this file is
 // the one place that needs @fin/db at run time beside it.
-import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { GRANTS_DIR, loadFragments, MIGRATIONS_DIR, parseMigration, readMigrations } from "@fin/db";
 import { createTestDatabase, testLoginPassword } from "@fin/db/testing";
 import { grantRows } from "@fin/email";
 import { eventTypeRows as identityEventTypeRows } from "@fin/identity";
 import { eventTypeRows as orgsEventTypeRows } from "@fin/orgs";
 import { keyEventTypeRows } from "../src/audit.ts";
 import { keyTemplateGrants } from "../src/email.ts";
-
-const KEYS_ROOT = join(import.meta.dirname, "..");
-const IDENTITY_ROOT = join(KEYS_ROOT, "..", "identity");
-const ORGS_ROOT = join(KEYS_ROOT, "..", "orgs");
-
-/** @fin/identity's migrations, which open with `SET` rather than the runner's `SET LOCAL`. */
-function identityMigrations() {
-  const dir = join(IDENTITY_ROOT, "migrations");
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".sql"))
-    .sort()
-    .map((name) => {
-      const bytes = readFileSync(join(dir, name));
-      return {
-        name,
-        sql: bytes.toString("utf8"),
-        checksum: createHash("sha256").update(bytes).digest(),
-        transactional: true,
-      };
-    });
-}
-
-/** A package's migrations, checked by the runner's own parser. */
-function packageMigrations(root) {
-  const dir = join(root, "migrations");
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".sql"))
-    .sort()
-    .map((name) => parseMigration(name, readFileSync(join(dir, name))));
-}
-
-/** @fin/identity's fragments in the runner's format: one entry per object, with schema USAGE. */
-function identityFragments() {
-  const out = [];
-  const dir = join(IDENTITY_ROOT, "grants");
-  for (const file of readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .sort()) {
-    const fragment = JSON.parse(readFileSync(join(dir, file), "utf8"));
-    const grants = [];
-    const usage = new Map();
-    const use = (role, object) => {
-      const schema = object.split(".")[0];
-      const roles = usage.get(schema) ?? new Set();
-      roles.add(role);
-      usage.set(schema, roles);
-    };
-    for (const entry of fragment.grants) {
-      for (const table of entry.tables ?? []) {
-        grants.push({ on: "table", name: table, privileges: entry.privileges, to: [entry.role] });
-        use(entry.role, table);
-      }
-      for (const fn of entry.functions ?? []) {
-        grants.push({ on: "function", name: fn, privileges: ["EXECUTE"], to: [entry.role] });
-        use(entry.role, fn);
-      }
-      if (entry.table !== undefined) {
-        grants.push({
-          on: "table",
-          name: entry.table,
-          privileges: entry.privileges,
-          columns: entry.columns,
-          to: [entry.role],
-        });
-        use(entry.role, entry.table);
-      }
-    }
-    for (const [schema, roles] of usage) {
-      grants.unshift({ on: "schema", name: schema, privileges: ["USAGE"], to: [...roles] });
-    }
-    out.push({ file: `identity-${file}`, area: `identity-${fragment.area}`, grants });
-  }
-  return out;
-}
-
-/** Every file the runner applies, in name order. */
-export function migrationFiles() {
-  return [
-    ...readMigrations(MIGRATIONS_DIR),
-    ...identityMigrations(),
-    ...packageMigrations(ORGS_ROOT),
-    ...packageMigrations(KEYS_ROOT),
-  ].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function grantFragments() {
-  return [
-    ...loadFragments(GRANTS_DIR),
-    ...identityFragments(),
-    ...loadFragments(join(ORGS_ROOT, "grants")),
-    ...loadFragments(join(KEYS_ROOT, "grants")),
-  ];
-}
 
 export function eventTypes() {
   return [
@@ -176,11 +78,13 @@ function wrap(client) {
 
 export async function createKeysPlatform(prefix) {
   const database = await createTestDatabase({ prefix, migrate: false });
-  await database.migrate({
-    files: migrationFiles(),
-    fragments: grantFragments(),
-    after: registerAll,
-  });
+  try {
+    await database.migrate({ after: registerAll });
+  } catch (error) {
+    // No test file holds the platform yet, so nothing else would drop the database.
+    await database.drop().catch(() => undefined);
+    throw error;
+  }
   return {
     name: database.name,
     host: database.target.host,
