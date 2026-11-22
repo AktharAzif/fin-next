@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { REALM_EVENTS } from "./audit/events.ts";
 import { auditPayload } from "./audit/record.ts";
-import { AuditMetadataError, personalShapeOf } from "./audit/shapes.ts";
+import { AuditMetadataError, assertNoPersonalShapes, personalShapeOf } from "./audit/shapes.ts";
 import { FIN_COOKIE_MAX_AGE, readCookie, serializeFinCookie } from "./cookies.ts";
 import {
   BACKUP_CODE_COUNT,
@@ -24,6 +24,29 @@ import {
   normaliseEnrolmentCode,
 } from "./staff/enrolment.ts";
 import { buildCatalogue, stepUpCatalogue } from "./step-up/actions/index.ts";
+
+/**
+ * The regular expressions `run` runs, counted without a clock: the UTF-16 length of each one's
+ * input. A run on more than the 400 units 200 characters can take is refused before it starts, so
+ * a pattern that could backtrack polynomially on a long value fails the test at once instead of
+ * hanging it.
+ */
+function countPatternRuns<T>(run: () => T): { result: T; runs: number[] } {
+  const { exec } = RegExp.prototype;
+  const runs: number[] = [];
+  RegExp.prototype.exec = function (this: RegExp, input: string): RegExpExecArray | null {
+    const length = String(input).length;
+    if (length > 400) throw new Error(`a regular expression ran on ${length} characters`);
+    runs.push(length);
+    return exec.call(this, input);
+  };
+  try {
+    const result = run();
+    return { result, runs };
+  } finally {
+    RegExp.prototype.exec = exec;
+  }
+}
 
 describe("newId", () => {
   it("makes time-ordered IDs of the database's shape", () => {
@@ -254,6 +277,55 @@ describe("audit payloads", () => {
     expect(personalShapeOf(userId)).toBeNull();
     expect(personalShapeOf("2026-11-21T10:00:00.000Z")).toBeNull();
     expect(personalShapeOf("signed_out")).toBeNull();
+  });
+
+  it.each([
+    ["x a@b.c y", "email"],
+    ["a@..c", "email"],
+    ["a@b.", null],
+    ["@b.c", null],
+    ["a@.c", null],
+    ["a@b@c.d", "email"],
+  ])("reads %s as an email address only when it is one", (value, shape) => {
+    expect(personalShapeOf(value)).toBe(shape);
+  });
+
+  it("refuses a string longer than the database stores before any pattern runs", () => {
+    // The shape an unanchored [^\s@]+@ is quadratic on: a long run with no "@" (here, of "!").
+    const long = "!".repeat(100_000);
+    let error: unknown;
+    const { runs } = countPatternRuns(() => {
+      try {
+        assertNoPersonalShapes({ note: long });
+      } catch (caught) {
+        error = caught;
+      }
+    });
+    expect(error).toBeInstanceOf(AuditMetadataError);
+    expect(error).toMatchObject({ key: "note", shape: "schema" });
+    expect(runs).toEqual([]);
+    expect(() => personalShapeOf(long)).toThrow(RangeError);
+  });
+
+  it("runs every pattern on at most the 200 characters a metadata string holds", () => {
+    for (const value of ["!".repeat(200), "a.".repeat(100), "a://".repeat(50), "1".repeat(8)]) {
+      const { result, runs } = countPatternRuns(() => personalShapeOf(value));
+      expect(result, value).toBeNull();
+      expect(runs.length, value).toBeGreaterThan(0);
+      expect(Math.max(...runs), value).toBeLessThanOrEqual(200);
+    }
+    expect(() => assertNoPersonalShapes({ note: "!".repeat(200) })).not.toThrow();
+    expect(() => assertNoPersonalShapes({ note: "!".repeat(201) })).toThrow(AuditMetadataError);
+  });
+
+  it("counts characters as Postgres does, so 200 astral characters still fit", () => {
+    // Each is two UTF-16 units: 400 units, 200 characters.
+    const astral = "\u{1F600}".repeat(200);
+    const { result, runs } = countPatternRuns(() => personalShapeOf(astral));
+    expect(result).toBeNull();
+    expect(Math.max(...runs)).toBeLessThanOrEqual(400);
+    expect(() => assertNoPersonalShapes({ note: astral })).not.toThrow();
+    expect(() => assertNoPersonalShapes({ note: `${astral}!` })).toThrow(AuditMetadataError);
   });
 
   it("names a person-scope subject for every identity event and a staff scope for the rest", () => {
