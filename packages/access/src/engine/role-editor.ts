@@ -105,6 +105,11 @@ const LOOK_ALIKES = table(
 );
 const UNLIKE_CAPITALS: ReadonlySet<string> = new Set(UNICODE_LOOK_ALIKES.unlikeCapitals.join(""));
 const BEFORE_FOLDING = table(...UNICODE_LOOK_ALIKES.beforeFolding);
+// Modifier letters drawn as punctuation that folding turns into a letter ("ᶺ", MODIFIER LETTER
+// SMALL TURNED V, is drawn as "^" and folds to "ʌ"), as Unicode's confusables data decides (the
+// rows say how). Every other modifier letter is left out where folding leaves it no letter ("ˁ",
+// "ʼ"), and read as the letter it folds to otherwise ("ʰ" as h, "ᴬ" as A).
+const PUNCTUATION_MODIFIERS = table(...UNICODE_LOOK_ALIKES.punctuationModifiers);
 
 // Digits and signs that may stand for a letter in a name, or be just what they are: "Adm1n",
 // "0perator", "@dmin", "Adm!n"; and the digits, punctuation and symbols of other scripts drawn as
@@ -124,7 +129,9 @@ const DRAWN_AS_ONE: ReadonlyMap<string, readonly [string, string]> = new Map([
 /**
  * One character of a name as it reads: a Latin letter (`reads`), a letter of no Latin reading
  * (`reads` null, which may stand for any one letter), and `optional` for a digit or sign, which
- * may stand for a letter or be passed over. A letter that is not an ASCII one once folded is
+ * may stand for a letter or be passed over, and for the letter a modifier letter drawn as
+ * punctuation folds to, which may be read as that letter or passed over as the punctuation it is
+ * drawn as ("ᶺ", drawn as "^", folds to "ʌ"). A letter that is not an ASCII one once folded is
  * `free`: whatever it reads as, it may also stand for any one letter, as a letter of no reading
  * may, so a row that reads it only ever adds to what is refused. A character drawn as several
  * letters ("æ", "‖") is a glyph for each.
@@ -146,23 +153,51 @@ export type ReadingOrder = "stored" | "ltr" | "rtl";
 const READING_ORDERS: readonly ReadingOrder[] = ["stored", "ltr", "rtl"];
 
 /**
- * A text's characters folded as they are read: put in the reading order first, by the classes of
- * the characters themselves, as a line draws them (folding changes some classes: a circled digit
- * is a neutral, its folding a European digit); then each character that compatibility folding
- * would turn into one drawn otherwise read first (`BEFORE_FOLDING`), and compatibility-folded
- * (NFKD). A character drawn as one glyph keeps its folding together, in the folding's own order,
- * but a right-to-left letter's (an Arabic or Hebrew ligature's), which is drawn right to left.
+ * A run of a text's characters folded (`foldedRuns`), and whether it is one modifier letter drawn
+ * as punctuation.
  */
-function folded(text: string, order: ReadingOrder): string {
+interface FoldedRun {
+  readonly text: string;
+  readonly punctuation: boolean;
+}
+
+/**
+ * A text's characters folded as they are read, in runs: put in the reading order first, by the
+ * classes of the characters themselves, as a line draws them (folding changes some classes: a
+ * circled digit is a neutral, its folding a European digit); then each character that
+ * compatibility folding would turn into one drawn otherwise read first (`BEFORE_FOLDING`), and
+ * compatibility-folded (NFKD). A character drawn as one glyph keeps its folding together, in the
+ * folding's own order, but a right-to-left letter's (an Arabic or Hebrew ligature's), which is
+ * drawn right to left. A modifier letter drawn as punctuation (`PUNCTUATION_MODIFIERS`) is a run
+ * of its own, marked: it folds to one letter, which canonical ordering never moves a mark past, so
+ * the runs joined are the whole text folded.
+ */
+function foldedRuns(text: string, order: ReadingOrder): FoldedRun[] {
+  const runs: FoldedRun[] = [];
   let out = "";
   for (const char of order === "stored" ? text : drawnOrder(text, order)) {
     const folding = (BEFORE_FOLDING.get(char) ?? char).normalize("NFKD");
     const rightToLeft = order !== "stored" && RIGHT_TO_LEFT.has(bidiClassOf(char));
-    out += rightToLeft ? drawnOrder(folding, "rtl") : folding;
+    const piece = rightToLeft ? drawnOrder(folding, "rtl") : folding;
+    if (!PUNCTUATION_MODIFIERS.has(char)) {
+      out += piece;
+      continue;
+    }
+    if (out !== "") runs.push({ text: out.normalize("NFKD"), punctuation: false });
+    runs.push({ text: piece, punctuation: true });
+    out = "";
   }
-  return out.normalize("NFKD");
+  if (out !== "") runs.push({ text: out.normalize("NFKD"), punctuation: false });
+  return runs;
 }
 const RIGHT_TO_LEFT: ReadonlySet<string> = new Set(["R", "AL"]);
+
+/** A text's characters folded as they are read (`foldedRuns`), as one text. */
+function folded(text: string, order: ReadingOrder): string {
+  let out = "";
+  for (const run of foldedRuns(text, order)) out += run.text;
+  return out;
+}
 
 /**
  * What one folded character's small letter is drawn as: the character lower-cased and each
@@ -189,26 +224,33 @@ const isFreeLetter = (char: string) => /^\p{L}$/u.test(char) && !/^[A-Za-z]$/.te
 
 /**
  * The glyphs of a text in a reading order (as drawn on a left-to-right line unless another is
- * named): invisible characters removed, folded (`folded`), look-alike capitals and letters made
+ * named): invisible characters removed, folded (`foldedRuns`), look-alike capitals and letters made
  * what they are drawn as, lower-cased; digits and signs drawn as letters made optional glyphs;
- * white space, punctuation, symbols, marks (accents) and modifier letters (a raised apostrophe)
- * left out, and so is a letter drawn as one ("Adminꞏ" reads as "Admin·"). Exported for the
- * tests, not from the package.
+ * white space, punctuation, symbols, marks (accents) and modifier letters folding leaves no letter
+ * (a raised apostrophe, "ˁ") left out, and so is a letter drawn as one ("Adminꞏ" reads as
+ * "Admin·"); and the letter a modifier letter drawn as punctuation folds to made an optional
+ * glyph, passed over as that punctuation is or read as the letter ("Adminᶺ" reads as "Admin^", and
+ * as "Adminʌ"). Exported for the tests, not from the package.
  */
 export function glyphsOf(text: string, order: ReadingOrder = "ltr"): Glyph[] {
   const glyphs: Glyph[] = [];
-  for (const char of folded(withoutInvisible(text), order)) {
-    const free = isFreeLetter(char);
-    for (const drawn of drawnAs(char)) {
-      const sign = SIGNS.get(drawn);
-      if (/^[a-z]$/.test(drawn)) {
-        glyphs.push({ char: drawn, reads: drawn, optional: false, free });
-      } else if (sign !== undefined) {
-        for (const reads of sign) glyphs.push({ char: drawn, reads, optional: true, free: false });
-      } else if (/^\p{L}$/u.test(drawn) && !/^\p{Lm}$/u.test(drawn)) {
-        glyphs.push({ char: drawn, reads: null, optional: false, free: true });
-      } else if (/^\p{N}$/u.test(drawn)) {
-        glyphs.push({ char: drawn, reads: null, optional: true, free: false });
+  for (const run of foldedRuns(withoutInvisible(text), order)) {
+    const passed = run.punctuation;
+    for (const char of run.text) {
+      const free = isFreeLetter(char);
+      for (const drawn of drawnAs(char)) {
+        const sign = SIGNS.get(drawn);
+        if (/^[a-z]$/.test(drawn)) {
+          glyphs.push({ char: drawn, reads: drawn, optional: passed, free });
+        } else if (sign !== undefined) {
+          for (const reads of sign) {
+            glyphs.push({ char: drawn, reads, optional: true, free: false });
+          }
+        } else if (/^\p{L}$/u.test(drawn) && !/^\p{Lm}$/u.test(drawn)) {
+          glyphs.push({ char: drawn, reads: null, optional: passed, free: true });
+        } else if (/^\p{N}$/u.test(drawn)) {
+          glyphs.push({ char: drawn, reads: null, optional: true, free: false });
+        }
       }
     }
   }
@@ -218,9 +260,10 @@ export function glyphsOf(text: string, order: ReadingOrder = "ltr"): Glyph[] {
 /**
  * What a name reads as, letter by letter, as drawn on a left-to-right line: invisible characters
  * removed, compatibility-folded, lower-cased, look-alike letters made Latin, and everything but
- * letters dropped (spaces, punctuation, digits and signs, accents, modifier letters, and letters
- * drawn as punctuation); a letter of no Latin reading stays as it is, and a final plural "s" is
- * dropped. "Super-Admins 2!" reads as "superadmin", and so does "ꓢuper ꓮdmin" in Lisu letters.
+ * letters dropped (spaces, punctuation, digits and signs, accents, modifier letters folding leaves
+ * no letter, and letters and modifier letters drawn as punctuation, so "Adminᶺ" reads as "admin");
+ * a letter of no Latin reading stays as it is, and a final plural "s" is dropped. "Super-Admins 2!"
+ * reads as "superadmin", and so does "ꓢuper ꓮdmin" in Lisu letters.
  */
 export function readingOf(text: string): string {
   let out = "";
@@ -295,14 +338,17 @@ function builtInReadings(cat: Catalogue): Set<string> {
  * "never a built-in's name or one that reads as one"). Case, accents, spaces, punctuation,
  * invisible characters and a plural "s" are ignored; look-alike letters of every script Unicode's
  * confusables data lists, and of Latin, read as the Latin letters they are drawn as, and a letter
- * drawn as punctuation as that punctuation; digits, signs and symbols may read as the letters they
- * are drawn as ("Adm1n", "0perator", "@dmin", "⍺dmin"); "rn", "vv" and "cl" may read as "m", "w"
- * and "d"; I and l read alike; a letter of no Latin reading, or one not an ASCII letter read as
- * another, may stand for one letter in four; and the name is read as stored and as drawn on either
- * kind of line, so right-to-left letters are read in the order they are seen. So "Super Admin",
- * "Admins", "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha, "ꓮꓓꓟꓲꓠ" in Lisu
- * letters, "Adminꞏ", "Adrnin" and "AcImin" are all refused. Text longer than any name may be is
- * not read (the length rule refuses it).
+ * drawn as punctuation as that punctuation; a modifier letter drawn as punctuation is passed over
+ * as that punctuation is, or read as the letter it folds to, and one drawn as a raised or lowered
+ * letter is read as that letter; digits, signs and symbols may read as the letters they are drawn
+ * as ("Adm1n", "0perator", "@dmin", "⍺dmin"); "rn", "vv" and "cl" may read as "m", "w" and "d"; I
+ * and l read alike; a letter of no Latin reading, or one not an ASCII letter read as another, may
+ * stand for one letter in four; and the name is read as stored and as drawn on either kind of
+ * line, so right-to-left letters are read in the order they are seen. So "Super Admin", "Admins",
+ * "Admin 2", "Аdmin" with a Cyrillic А, "ɑdmin" with a Latin alpha, "ꓮꓓꓟꓲꓠ" in Lisu letters,
+ * "Adminꞏ", "Adminᶺ" with a raised turned v (drawn as "^"), "ᴬdmin" with a raised A, "Adrnin" and
+ * "AcImin" are all refused. Text longer than any name may be is not read (the length rule refuses
+ * it).
  */
 export function readsAsBuiltIn(cat: Catalogue, name: string): boolean {
   if (name.length > READ_LIMIT) return false;

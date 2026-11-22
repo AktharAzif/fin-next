@@ -613,6 +613,70 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     },
   );
 
+  // A modifier letter Unicode's confusables data draws as punctuation, though folding turns it into
+  // a letter, is passed over as that punctuation is (access-engine#6 F2.4, as the steward ruled).
+  // Fin Admin has no Super admin, so "Super...admin" is the dashboard's alone.
+  it.each([
+    ["Admin\u{1dba}", [dash, staff]], // U+1DBA MODIFIER LETTER SMALL TURNED V, drawn as "^"
+    ["Admin\u{2e4}", [dash, staff]], // U+02E4 MODIFIER LETTER SMALL REVERSED GLOTTAL STOP, as "ˁ"
+    ["Super\u{1dba}admin", [dash]],
+    // U+02C1 MODIFIER LETTER REVERSED GLOTTAL STOP, which folding leaves: left out, as before.
+    ["Admin\u{2c1}", [dash, staff]],
+    ["Admin\u{1d52}", [dash, staff]], // U+1D52 MODIFIER LETTER SMALL O, drawn as the degree sign
+    ["Admin\u{1e03c}", [dash, staff]], // U+1E03C MODIFIER LETTER CYRILLIC SMALL O, the same
+    ["Super\u{2e4} admin\u{1dba}", [dash]],
+    ["Operator\u{1dba}", [staff]],
+    ["Vie\u{1d52}wer", [staff]],
+  ] as const)("%j, with a modifier letter drawn as punctuation, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toEqual(["reads_as_built_in"]);
+    }
+  });
+
+  // Each is still read as the letter it folds to as well, so nothing refused before is allowed
+  // now; and a modifier letter drawn as a raised letter is read as that letter.
+  it.each([
+    ["\u{1d52}perator", [staff]], // U+1D52 read as o
+    ["Su\u{1dba}er admin", [dash]], // U+1DBA folds to ʌ, a letter of no Latin reading, for the p
+    ["\u{1d2c}\u{1d30}\u{1d39}\u{1d35}\u{1d3a}", [dash, staff]], // CAPITAL A, D, M, I, N
+    ["Admin\u{2e2}", [dash, staff]], // U+02E2 MODIFIER LETTER SMALL S, a plural s
+    ["\u{1d43}dmin", [dash, staff]], // U+1D43 MODIFIER LETTER SMALL A
+  ] as const)("%j, with a modifier letter read as a letter, is refused", (name, cats) => {
+    for (const cat of cats as readonly Catalogue[]) {
+      expect(nameProblems(name, cat), cat.realm).toEqual(["reads_as_built_in"]);
+    }
+  });
+
+  it("reads a modifier letter drawn as punctuation as either, and a raised letter as it", () => {
+    // Drawn as punctuation: one optional glyph, the letter folding makes of it.
+    for (const char of ["\u{1dba}", "\u{2e4}", "\u{1d52}", "\u{1e03c}"]) {
+      const glyphs = glyphsOf(char);
+      expect(glyphs.length, char).toBe(1);
+      expect(glyphs.every((g) => g.optional), char).toBe(true);
+    }
+    expect(glyphsOf("\u{1d52}")).toEqual([{ char: "o", reads: "o", optional: true, free: false }]);
+    expect(glyphsOf("\u{1dba}")).toEqual([
+      { char: "\u{28c}", reads: null, optional: true, free: true },
+    ]);
+    expect(readingOf("Admin\u{1dba}")).toBe("admin");
+    expect(readingOf("Super\u{1dba}admin")).toBe("superadmin");
+    expect(readingOf("Admin\u{2e4}")).toBe("admin");
+    // Folding leaves no letter: left out, as before.
+    expect(glyphsOf("\u{2c1}\u{2bc}\u{2bb}\u{2d0}\u{2c6}")).toEqual([]);
+    // MODIFIER LETTER SMALL H, J, R, W, Y, L, S and X, CAPITAL A and B: raised letters, each read
+    // as its letter and never passed over.
+    const raised = glyphsOf(
+      "\u{2b0}\u{2b2}\u{2b3}\u{2b7}\u{2b8}\u{2e1}\u{2e2}\u{2e3}\u{1d2c}\u{1d2e}",
+    );
+    expect(raised.map((g) => g.reads).join("")).toBe("hjrwylsxab");
+    expect(raised.some((g) => g.optional)).toBe(false);
+    // So "Adminʰ" reads as "Adminh" does, which is no built-in's name.
+    for (const cat of [dash, staff] as Catalogue[]) {
+      expect(readsAsBuiltIn(cat, "Admin\u{2b0}"), cat.realm).toBe(false);
+    }
+    expect(readsAsBuiltIn(staff, "Super\u{1dba}admin")).toBe(false);
+  });
+
   it("is refused in the draft, with the name's other problems", () => {
     for (const cat of [dash, staff] as Catalogue[]) {
       expect(nameProblems("Admin\u{3164}", cat)).toEqual(["name", "reads_as_built_in"]);

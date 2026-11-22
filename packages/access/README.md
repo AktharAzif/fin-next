@@ -54,7 +54,11 @@ signs, and a spacing mark is written left to right. Two names are the same when 
 one of these orders, case ignored in every script ("Группа" is "группа", "Straße" is "STRASSE"),
 and a capital drawn as a Latin capital its small letter is not ("Ηelp" with a Greek Eta) is the
 same as both. A letter that is not an ASCII one may stand for one letter in four of a built-in's
-name, whatever it reads as, as a letter of no Latin reading may.
+name, whatever it reads as, as a letter of no Latin reading may. Against a built-in's name, a
+modifier letter Unicode draws as punctuation, though folding turns it into a letter ("Adminᶺ",
+whose raised turned v is drawn as "^"), may be passed over as punctuation is, or read as that
+letter; one drawn as a raised letter ("ᴬdmin") reads as its letter, and one folding leaves no
+letter ("Adminˁ") is left out.
 
 ## Look-alike data
 
@@ -73,7 +77,8 @@ character's bidirectional class (`DerivedBidiClass.txt` 18.0.0) and the paired b
 `src/test-support/confusables.ts` commits every entry of Unicode's file but those whose source is
 ASCII or draws as nothing, and `src/test-support/latin-letters.ts` the Latin letters compatibility
 folding leaves as they are, with their names. `src/engine/look-alikes.test.ts` fails when an entry
-does not read as its prototype is drawn, when two members of a class read differently, when a
+does not read as its prototype is drawn, when a modifier letter Unicode draws as punctuation could
+not be passed over, when two members of a class read differently, when a
 capital reads as its small letter though Unicode does not draw it so, when a letter named for a
 Latin letter (with a stroke, hook, curl or tail, a form of it such as insular or script, or a small
 capital) does not read as it, when a derived row is not one the data asks for, or when the
