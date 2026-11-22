@@ -272,7 +272,7 @@ export function SecretPanel(props: {
           <CopyField
             variant="block"
             label="Try it"
-            value={'curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"'}
+            value={'curl "$FIN_API_URL/v4/whoami" -H "Authorization: Bearer $FIN_KEY"'}
             className="w-full"
           />
           <Checkbox
