@@ -106,6 +106,47 @@ describe("server bundles", () => {
     });
   }
 
+  it("refuses the harness in a real Vite 8.3.8 server bundle, by its module comment", (t) => {
+    // Vite 8.3.8's output, verbatim, of `vite build --ssr src/entry.ts` for an entry that imports
+    // a module of packages/testing (apps/api/src/entry.ts importing
+    // ../../../packages/testing/src/sink.ts), and of the same build of an entry that imports
+    // nothing: Vite writes each module's path as a `// <path>` comment, where rolldown writes
+    // `//#region <path>`. bundle-check-real.test.mjs builds both with the workspace's own Vite.
+    const planted =
+      '// ../../packages/testing/src/sink.ts\nfunction sink(x) {\n\treturn ["fin-harness", x];\n}\n// src/entry.ts\nfunction main() {\n\treturn sink(1);\n}\nconsole.log(main());\nexport { main };\n';
+    const clean =
+      "// src/clean.ts\nfunction main() {\n\treturn 1;\n}\nconsole.log(main());\nexport { main };\n";
+    assert.deepEqual(checkServer("x", dirWith(t, { "entry.mjs": planted })), [
+      {
+        file: "x/entry.mjs",
+        rule: "seam",
+        message: "the test harness (packages/testing) is bundled",
+      },
+    ]);
+    assert.deepEqual(checkServer("x", dirWith(t, { "clean.mjs": clean })), []);
+    // Only a module comment, or code, counts: a literal holding such a line, a comment of prose
+    // that names the folder or a marker, is no module of the harness and no seam.
+    for (const text of [
+      'const s="\\n// ../../packages/testing/src/sink.ts\\n";',
+      "const s=`\n//#region ../../packages/testing/src/sink.ts\n`;",
+      "// see packages/testing/src for the fakes\nexport {};",
+      "/* __FIN_BUILD_TARGET__ is replaced at build time; fin:test-seam marks a seam */\nexport {};",
+    ]) {
+      assert.deepEqual(checkServer("x", dirWith(t, { "main.js": text })), [], text);
+    }
+  });
+
+  it("refuses a bundle the tokenizer cannot read, never reading it in part", (t) => {
+    for (const text of ["const a = `", "let a = 1 <!-- 2", "f(a"]) {
+      const found = checkServer("x", dirWith(t, { "main.js": text }));
+      assert.deepEqual(
+        found.map((f) => f.rule),
+        ["untokenized"],
+        text,
+      );
+    }
+  });
+
   it("reads a map's sources, not its sourcesContent, and refuses the test harness there", (t) => {
     const harness = dirWith(t, {
       "main.js.map": JSON.stringify({ sources: ["../../packages/testing/src/a.ts"] }),
@@ -2055,20 +2096,25 @@ describe("static builds", () => {
     }
   });
 
-  it("pairs a large script's substitutions with work linear in the text", HANG, () => {
-    // Each `${` in a plain string starts a lexer run that reads out of step, up to its bound.
-    const d = "$";
-    const strings = `"${d}{" '${d}{' x=/${d}{/g;`.repeat(40_000);
-    const tail = `i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
-    assert.deepEqual(linearOrigins(`${strings}${tail}`, "script"), ["https://evil.example"]);
-  });
+  it(
+    "reads a large script's `${` in strings and regular expressions with linear work",
+    HANG,
+    () => {
+      // A `${` in a plain string or a regular expression is text, never a substitution: the
+      // substitutions after many of them are read as the tokenizer pairs them.
+      const d = "$";
+      const strings = `"${d}{" '${d}{' x=/${d}{/g;`.repeat(40_000);
+      const tail = `i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
+      assert.deepEqual(linearOrigins(`${strings}${tail}`, "script"), ["https://evil.example"]);
+    },
+  );
 
   it(
     "reads a large script's schemes written at run time and joined hosts with linear work",
     HANG,
     () => {
-      // `://` after a scheme written at run time, each in a string the nearest quote opens, and
-      // hosts joined to a scheme from literals or chosen among them.
+      // `://` after a scheme written at run time, each in a literal of its own, and hosts joined
+      // to a scheme from literals or chosen among them.
       const d = "$";
       for (const [text, origins] of /** @type {[string, string[]][]} */ ([
         ['a="{s}://x.y"+b;'.repeat(50_000), ["https://x.y"]],
@@ -2078,8 +2124,8 @@ describe("static builds", () => {
           `u=\`https://${d}{a?\`x.y\`:b?\`z.w\`:\`q.r\`}/p\`;`.repeat(30_000),
           ["https://x.y", "https://z.w", "https://q.r"],
         ],
-        // Brackets after each of many schemes that never close: each join's scan runs to its
-        // bound, all of them within one budget linear in the text.
+        // Brackets after each of many schemes that never close: a script whose brackets do not
+        // pair is refused whole (untokenized), its URLs never read in part.
         ['"://"+('.repeat(100_000), []],
         ['"https://"+('.repeat(100_000), []],
         ['"https://"+(a?"x":'.repeat(100_000), []],
@@ -2101,9 +2147,9 @@ describe("static builds", () => {
       "https://react.dev",
       "https://evil.example",
     ]);
-    // Keyed template lists whose substitutions close far away, side by side, nested in each
-    // other or closing one by one: a list is read up to MAX_SRCSET, and one that closes past it
-    // is refused (url-unread) without its candidates being read.
+    // Keyed template lists whose substitutions close far away, nested in each other or closing
+    // one by one: a list whose source spans more than MAX_SRCSET is refused (url-unread) without
+    // its candidates being read, and a script whose literals never close is refused whole.
     for (const far of [
       `${`i.srcset=\`${d}{`.repeat(10_000)}x${"}".repeat(10_000)}\``,
       `${`srcset:\`${d}{`.repeat(6_000)}${"a".repeat(150_000)}${"}".repeat(6_000)}\``,
@@ -2240,6 +2286,31 @@ describe("static builds", () => {
     assert.ok(
       run.every((f) => !f.message.includes(token)),
       "a finding never prints the value",
+    );
+  });
+
+  it("reads a script by its tokens: a comment or a regular expression is no text a rule reads", (t) => {
+    // A script the tokenizer cannot read is refused whole, never scanned in part.
+    for (const text of ["const a = `", "x = a <!-- b", "f(a"]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), ["untokenized"], text);
+    }
+    // A URL, a setting's name or an import in a comment, a regular expression, or an import's
+    // text in a literal, is no code's: no rule reads it.
+    for (const text of [
+      '// import "node:fs" and FIN_DB_PASSWORD at https://evil.example/x\nexport {};',
+      '/* fetch("https://evil.example/x") and fin:test-seam */ export {};',
+      "const r=/https:\\/\\/evil\\.example\\//;",
+      'const s=`import { createHmac } from "node:crypto";`;',
+    ]) {
+      assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
+    }
+    // In a literal, the same text is read; and a sourceMappingURL counts only as a comment.
+    assert.deepEqual(staticRules(t, { "assets/a.js": 'const s="FIN_DB_PASSWORD";' }), [
+      "setting-name",
+    ]);
+    assert.deepEqual(
+      staticRules(t, { "assets/a.js": 'const s="//# sourceMappingURL=a.js.map";' }),
+      [],
     );
   });
 

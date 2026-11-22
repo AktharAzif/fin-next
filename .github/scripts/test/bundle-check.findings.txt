@@ -1,0 +1,1148 @@
+# Every reproduction from bundle-check's review rounds (pull request #20 and the rounds after it),
+# one block per finding, read by bundle-check.findings.test.mjs: each block is one test, named
+# after its finding, and each line one reproduction with the outcome its finding and the steward's
+# ruling give it. The texts are the findings' own, as written.
+#
+#   == <id> | <class> | <the finding's title>
+#   > <the ruling or the reason for an outcome, shown when a reproduction fails>
+#   + <file> [<origin or rule> ...] | <text>   refused: a URL rule fires (or each rule named), and
+#                                              each origin named is among those it names, exactly
+#   - <file> | <text>                          no finding at all
+#   ~ <kind> <origins or none or any> | <text> the scan's work stays linear (scanWork's bound),
+#                                              and it names exactly these origins (comma-separated)
+#
+# The classes: A, an outside origin as literal text where it loads or navigates (caught); B, out
+# of scope (a host built at run time, no literal host, a disguise only deliberate code writes: its
+# outcome is the one the port gives, pinned); C, honest code (no finding); W, the scan's work; R, a
+# record or a test's own coverage. In a text, ⟨NL⟩ is a new line, ⟨U+XXXX⟩ that character, and
+# ⟨N×S⟩ the text S repeated N times.
+
+== J0 | A | R1.3/R1.5 are not closed: a brace paired wrongly plus a `>` in the substitution's code still hides the rest of a written tag
++ assets/a.js | function f(a){e.innerHTML=`<img alt=${a.map(x=>x.replace(/{/g,'')).join()} src=//evil.example/p.png>`}
++ assets/a.js | function f(a,b){e.innerHTML=`<img ${a>b?"{":""} src=//evil.example/p.png>`}
++ assets/a.js | function f(a){e.innerHTML=`<img alt=${a.split("}").map(p=>p).join()} src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | fetch(`${a?"{":""}https://react.dev @evil.example/x`)
+
+== J1 | A | The R1.6 class is still open on the closing side: the script's own delimiter is read as the attribute's closing quote
++ assets/a.js | e.innerHTML="<img alt=\""+b+">\" src=//evil.example/p.png>";
++ assets/a.js | e.innerHTML='<img alt=\''+b+'>\' src=//evil.example/p.png>';
+
+== J2 | A | A refresh whose prefix is longer than MAX_REFRESH_PREFIX (256) is silently read as no refresh, never refused
+> a refresh's time with no digit (`.`) is a spelling only deliberate code writes: ruled out of scope (J65)
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;⟨300× ⟩//evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;⟨300× ⟩https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0.⟨300×0⟩;//evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="⟨300× ⟩0;https://react.dev @evil.example/">
+- index.html | <meta http-equiv="refresh" content=".;//evil.example/">
+
+== J3 | A | The new context for text right after a substitution is lost when a space or C0 control comes between `}` and the URL
++ assets/a.js https://evil.example | fetch(`${a}https://react.dev @evil.example/x`)
++ assets/a.js https://evil.example | fetch(`${a} https://react.dev @evil.example/x`)
++ assets/a.js https://react.dev.evil.example | fetch(`${a}\thttps://react.dev\n.evil.example/x`)
+
+== J4 | B | The new style-attribute reading (CSS escapes after HTML references) treats a `(` a reference spelled as data to CSS, so `url&#40;//host` is never read
+> ruled out of scope (J65): references spelling a style attribute's structure are a disguise only
+- assets/a.js | e.innerHTML='<div style="background:url&#40;//evil.example/a.png)"></div>';
+- index.html | <div style="background:url&lpar;//evil.example/a.png)"></div>
+- index.html | <div style="background:url&#40;\2f\2f evil.example/a.png)"></div>
+
+== J5 | A | R1.6 not fully closed: a script's raw string delimiter still closes a value that an escaped quote opened, so later attributes are not read
++ assets/a.js | e.innerHTML="<img alt=\""+n+" > "+m+"\" src=//evil.example/p.png>";
++ assets/a.js | e.innerHTML='<img alt=\''+n+' > '+m+'\' src=//evil.example/p.png>';
++ assets/a.js | e.innerHTML="<img alt=\""+n+" > "+m+"\" srcset=//evil.example/p.png>";
++ assets/a.js https://evil.example | e.innerHTML="<img alt=\""+n+" > "+m+"\" src=https://react.dev\x27@evil.example/p.png>";
+
+== J6 | A | The refresh fix (R1.7) fails open past MAX_REFRESH_PREFIX: a refresh with more than 256 characters before its URL is read as if no refresh started it
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;⟨300× ⟩https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="⟨300×0⟩;https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0; url=⟨300× ⟩https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;⟨300× ⟩//evil.example/">
++ assets/a.js https://evil.example | m.content="0;⟨300× ⟩https://react.dev @evil.example/"
+
+== J7 | A | Later srcset candidates a script sets are recognised only after a simple descriptor or a first candidate opened directly by a quote
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png, /b.png, //evil.example/c.png 3x"})
++ assets/a.js https://evil.example | i.setAttribute("srcset","/a.png 1x, /b.png, //evil.example/c.png 3x")
++ assets/a.js https://evil.example | jsx("img",{srcSet:" /a.png, //evil.example/c.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`⟨NL⟩  /a.png,⟨NL⟩  //evil.example/b.png 2x⟨NL⟩`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1e1x, //evil.example/c.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png, /b.png, https://react.dev'@evil.example/c.png 3x"})
+
+== J8 | A | R1.8's 'text right after a substitution' context needs the URL to start exactly at a `}` that the brace counter pairs correctly
++ assets/a.js https://evil.example | i.src=`${p} //evil.example/x.png`
++ assets/a.js https://evil.example | new WebSocket(`${p}\thttps://react.dev @evil.example/x`)
++ assets/a.js https://evil.example | i.src=`${a?"}":""}//evil.example/x.png`
++ assets/a.js https://evil.example | i.src=`${a.replace(/{/g,"")}//evil.example/x.png`
++ assets/a.js https://evil.example | i.src=`${a}//evil.example/x.png`
+
+== J9 | B | afterSubstitution says a substitution 'may write any text' but leaves out the states that text can reach (a value it opens or an `=` it writes)
+> ruled out of scope (J65): a substitution that leaves a quote open is a disguise only
+- assets/a.js | e.innerHTML=`<img ${a}>x" src=//evil.example/p.png>`
+- assets/a.js | e.innerHTML=`<img alt="${a}>' src=//evil.example/p.png>`
+- assets/a.js | e.innerHTML=`<img alt${eq}"a>b" src=//evil.example/p.png>`
+
+== J10 | B | readAuthority treats every raw `${` in a script as a substitution, so a fixed host in a plain string or after an escaped `\${` is passed as built at run time
+> ruled out of scope (J65) as a disguise; the tokens know a plain string's `${` is text, so its literal host is read and caught
++ assets/a.js https://react.dev${x}.evil.example | fetch("https://react.dev${x}.evil.example/x")
++ assets/a.js https://react.dev${x}.evil.example | fetch(`https://react.dev\${x}.evil.example/x`)
+
+== J11 | A | R1.3/R1.5/R1.1 still open: a `>` inside a `${...}` body (or inside concatenated run-time code) ends the tag in the reader, hiding a later fixed `src`, so a literal cross-origin host passes
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a>b?"{":""} src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a?"}":b>c} src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML="<img "+(a>b?"x":"y")+" src=//evil.example/p.png>";
+
+== J12 | B | R1.7 not fully closed: a meta refresh whose time is a bare '.' (spec-allowed, no digit) is not recognized, so its cross-origin URL passes
+> ruled out of scope (J65): a refresh's time with no digit is a spelling only deliberate code writes
+- index.html | <meta http-equiv="refresh" content=".;//evil.example/">
+- assets/a.js | e.innerHTML='<meta http-equiv=refresh content=.;//evil.example/>';
+- index.html | <meta http-equiv="refresh" content=".;https://react.dev⟨NL⟩.evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;//evil.example/">
+
+== J13 | W | Performance regression (ReDoS-class): REFRESH_PREFIX backtracks ~O(digits×spaces) per URL candidate, run for every candidate over a 256-char window, making realistic numeric-heavy assets ~100x slower to scan
+~ markup http://www.w3.org | <svg xmlns="http://www.w3.org/2000/svg"><path d="⟨20000×1⟩⟨20000× ⟩x//a"/></svg>
+~ markup http://www.w3.org | <svg xmlns="http://www.w3.org/2000/svg">⟨3000×<path d="1111111111111111111111111111111111111111          x//a"/>⟩</svg>
+
+== J14 | B | R1.2 residual: a raw-preserving tagged template (String.raw / lit css`` / styled-components) feeding a CSS sink is JS-decoded first, so a CSS escape that builds a cross-origin host is decoded away and missed
+> ruled out of scope (J65) as a disguise; the port reads a tagged template's raw text, which its tag reads, so it is caught
++ assets/a.js https://evil.example | e.style.backgroundImage=String.raw`url(https://react.dev\40 evil.example/a.png)`;
+
+== J15 | A | The third-party-origin check still misses srcset candidates, backslash spellings and HTML-entity spellings that a browser resolves to another origin
++ index.html https://evil.example.com | <img srcset="a.png 1x, //evil.example.com/b.png 2x">
++ index.html https://evil.example.com | <script src="https:\\evil.example.com/x.js"></script>
++ index.html https://evil.example.com | <script src="/\evil.example.com/x.js"></script>
++ index.html https://evil.example.com | <script src="https&#58;//evil.example.com/x.js"></script>
++ index.html https://evil.example.com | <script src="&#x2F;&#x2F;evil.example.com/x.js"></script>
+
+== J16 | A | R1.7/R1.13 only partly closed: protocol-relative URLs with escaped slashes, or in a srcset list, are not read
++ assets/a.js https://evil.example | fetch("\/\/evil.example/x")
++ assets/a.js https://evil.example | fetch("//evil.example/x")
++ assets/a.js https://evil.example | fetch("\x2f\x2fevil.example/x")
++ index.html https://evil.example | <img srcset="a.png 1x, //evil.example/b.png 2x">
++ assets/a.webmanifest https://evil.example | {"icons":[{"src":"\/\/evil.example/icon.png"}]}
+
+== J17 | A | The origin check still passes third-party URLs: the user-name rule is cut short by a stop character, and several spellings a browser reads as another host are not matched (R1.7, R1.13 not closed)
++ assets/a.js https://evil.example | location="https://react.dev(1)@evil.example/c"
++ assets/a.js https://evil.example | x="https://www.w3.org{x}@evil.example/"
++ assets/a.css https://evil.example | a{background:url(https://react.dev^@evil.example/p.png)}
++ index.html https://evil.example | <a href="https://react.dev @evil.example/">x</a>
++ index.html https://www.w3.org.evil.example | <script src="https://www.w3.org⟨NL⟩.evil.example/x.js"></script>
++ assets/a.js https://react.dev.evil.example | import("https://react.dev\t.evil.example/x.js")
++ assets/a.json https://evil.example | {"u":"\/\/evil.example\/c"}
++ index.html https://evil.example | <script src="///evil.example/x.js"></script>
++ index.html https://evil.example | <script src="/\evil.example/x.js"></script>
++ index.html https://evil.example | <script src="//@evil.example/x.js"></script>
++ index.html https://evil.example | <img srcset="/a.png 1x, //evil.example/b.png 2x">
++ assets/a.js wss://evil.example | new WebSocket("wss:evil.example/c")
++ assets/a.js https://evil.example | fetch("https:\\\\evil.example/c")
++ index.html https://evil.example | <script src="https:&#x2f;&#x2f;evil.example/x.js"></script>
++ assets/a.js https://evil.example | fetch("https:\u{2f}\u{2f}evil.example/c")
++ page.xhtml https://evil.example | <script src="https://evil.example/x.js"></script>
++ LICENSE setting-name third-party-origin | FIN_SESSION_SECRET is read at https://evil.example/x
+
+== J18 | A | Regression: a protocol-relative URL in an unquoted attribute of markup written by a script is no longer refused
++ assets/a.js https://collector.evil.example | e.innerHTML='<img src=//collector.evil.example/p.png>';
++ assets/a.js https://collector.evil.example | e.innerHTML="<script src=//collector.evil.example/x.js></script>";
++ assets/a.js https://collector.evil.example | document.write('<link rel=stylesheet href=//collector.evil.example/a.css>');
+- assets/a.js | y=/\/assets\//
+
+== J19 | A | R2.6 still open for common spellings: a fixed third-party host next to a template substitution, and a URL behind a leading control character
+> a host whose first label a substitution writes, or an allowed host a substitution goes on, is built at run time: class B
++ assets/a.js https://collector.evil.example | fetch(`https://collector.evil.example${path}`)
++ assets/a.js wss://collector.evil.example | new WebSocket(`wss://collector.evil.example:${port}/s`)
++ assets/a.js https://collector.evil.example | new WebSocket(`${secure ? "wss" : "ws"}://collector.evil.example/s`)
+- assets/a.js | fetch(`https://${region}.collector.evil.example/x`)
+- assets/a.js | fetch(`https://react.dev${suffix}/x`)
++ assets/a.js https://collector.evil.example | fetch("\v//collector.evil.example/x")
++ assets/a.js https://collector.evil.example | fetch("\0//collector.evil.example/x")
++ assets/a.js wss://collector.evil.example | new WebSocket("\vwss:collector.evil.example/x")
++ index.html https://collector.evil.example | <script src="&#11;//collector.evil.example/x.js"></script>
+
+== J20 | A | R2.6 not fully closed: a leading C0 control before a URL makes the scanner skip it, or cut its user name short, but the browser strips the control and loads the third-party host
++ assets/a-1.js https://evil.example wss://evil.example | fetch("\v//evil.example/x");new WebSocket("\x01wss:evil.example");
++ assets/b-2.js https://evil.example | fetch("\x1fhttps://react.dev,@evil.example/p");
++ index.html https://evil.example | <img src="&#x0B;//evil.example/a.png">
++ assets/c-3.css https://evil.example | a{background:url("\b //evil.example/a.png")}
++ assets/d-4.js https://evil.example | fetch("https://evil.example/control")
+
+== J21 | A | The new srcset reading misses React's compiled `srcSet:` prop, so a protocol-relative srcset candidate after the first passes
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1x, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1x,//evil.example/b.png 2x"})
+
+== J22 | A | A fixed third-party host followed by a template expression is treated as a host built at run time and passes (pre-existing, kept by the rewrite)
++ assets/a.js https://evil.example | fetch(`https://evil.example${p}`)
++ assets/a.js https://api.thirdparty.example | fetch(`https://api.thirdparty.example${path}`)
+- assets/a.js | fetch(`https://${host}`)
+
+== J23 | A | R2.6 regression: the new MAX_AUTHORITY=512 cap lets a crafted URL (long userinfo ending at the 512th char) read as a third-party host in a browser but pass the origin and userinfo checks
++ assets/app.js https://evil.example url-userinfo | location.href="https://⟨511×a⟩@evil.example/c"
+
+== J24 | A | R1.1/R2.6 still open: a space or control right after a protocol-relative URL's slashes makes the scanner skip the URL, but the URL parser keeps it as a user name and loads the host after @
++ assets/a.js https://evil.example | location.href="// @evil.example/c";
++ assets/a.js https://evil.example | location.href="//\v@evil.example/c";
++ assets/a.js https://evil.example | location.href="//\xa0@evil.example/c";
++ index.html https://evil.example | <a href="//&#32;@evil.example/">x</a>
++ index.html https://evil.example | <img src="// @evil.example/p.png">
++ assets/a.css https://evil.example | a{background:url("// @evil.example/p.png")}
++ assets/a.js https://evil.example | location.href="//@evil.example/c"
+
+== J25 | A | R2.6/R1.3 not closed for unquoted values: the scanner ends an unquoted attribute's, a CSS url()'s or a srcset candidate's URL at any JavaScript white space, but browsers end it only at ASCII white space, so a VT/NBSP/U+2028/BOM/U+3000 in the user name hides the real host
++ index.html https://evil.example url-userinfo | <img src=https://react.dev⟨U+00A0⟩@evil.example/p.png>
++ index.html https://evil.example url-userinfo | <img src=//react.dev⟨U+000B⟩@evil.example/p.png>
++ index.html https://evil.example url-userinfo | <img srcset="/a.png 1x, //react.dev⟨U+00A0⟩@evil.example/b.png 2x">
++ assets/a.css https://evil.example url-userinfo | a{background:url(https://react.dev⟨U+00A0⟩@evil.example/p.png)}
++ assets/a.css https://evil.example url-userinfo | a{background:url(//react.dev\a0 @evil.example/p.png)}
++ assets/a.js https://evil.example url-userinfo | e.innerHTML='<img src=//react.dev\xa0@evil.example/p.png>';
++ assets/a.js https://evil.example url-userinfo | e.innerHTML='<img src=https://react.dev\v@evil.example/p.png>';
++ assets/a.js https://evil.example url-userinfo | e.innerHTML='<a href=https://react.dev⟨U+2028⟩@evil.example/>x</a>';
+
+== J26 | A | Regression from the R1.3 fix: in markup a script writes, an absolute URL's host is now read past the JS string's closing quote, so a host followed by concatenated code is no longer refused
++ assets/a.js https://evil.example | e.innerHTML='<img src=https://evil.example'+t[0]+'>';
++ assets/a.js https://evil.example | e.innerHTML='<img src=https://evil.example'+(a|b)+'>';
++ assets/a.js https://evil.example | e.innerHTML="<img src=https://evil.example"+n[1]+">";
+- assets/a.js | e.innerHTML='<img src=https://react.dev'+t+'>';
+- assets/a.js | e.innerHTML='<img src=https://react.dev/'+t+'>';
+
+== J27 | A | R1.1 (R2.6) is only half closed: the URL parser strips trailing C0 controls and spaces as well as leading ones, but the scanner keeps them, cannot parse the URL, and passes it as a run-time host
++ assets/a.js https://evil.example | fetch("https://evil.example ")
++ assets/a.js https://evil.example | fetch("https://evil.example\x01")
++ assets/a.js wss://evil.example | new WebSocket("wss://evil.example\x00")
++ assets/a.js https://evil.example | fetch("//evil.example ")
++ index.html https://evil.example | <iframe src="https://evil.example "></iframe>
++ index.html https://evil.example | <img srcset="//evil.example⟨U+0001⟩ 1x">
++ assets/a.css https://evil.example | a{background:url("https://evil.example\1 ")}
+
+== J28 | A | Pre-existing, in the srcset code the fix rewrote: a protocol-relative candidate in an unquoted srcset, split off by a character reference, is never read
++ index.html https://evil.example | <img srcset=a.png&#32;3x,//evil.example/b.png>
++ index.html https://evil.example | <img srcset=a.png&Tab;3x,//evil.example/b.png>
++ index.html https://evil.example | <img srcset=a.png&#32;3x,&#32;//evil.example/b.png>
++ assets/a.js https://evil.example | e.innerHTML='<img srcset=a.png&#32;3x,//evil.example/b.png>'
+
+== J29 | A | R1.1 is half closed: a C0 control or space AFTER a bare third-party origin still passes (the URL parser strips trailing ones too), and this is a regression of this PR's rewrite
++ assets/a.js https://evil.example | fetch("https://evil.example ")
++ assets/a.js https://evil.example | new Image().src="https://evil.example\x01"
++ assets/a.js https://evil.example | new Image().src="https://evil.example\0"
++ assets/a.js https://evil.example | new Image().src="https://evil.example\f"
++ assets/a.js https://evil.example | new Image().src="https://evil.example\v"
++ assets/a.js https://evil.example | new Image().src="https://evil.example\x1f"
++ index.html https://evil.example | <script src="https://evil.example "></script>
++ index.html https://evil.example | <link rel=stylesheet href='//evil.example '>
++ assets/a.css https://evil.example | @import "//evil.example ";
++ assets/a.css https://evil.example | a{background:url("https://evil.example ")}
++ assets/a.css https://evil.example | a{background:url(https://evil.example\1 )}
+
+== J30 | A | R1.3 not fully closed: the new tag reader runs on reference-decoded text and ends a tag at any `>`, so a protocol-relative URL in an unquoted attribute a script writes still passes
++ assets/a.js https://evil.example | e.innerHTML='<img alt=&quot;x src=&#47;/evil.example/p.png>';
++ assets/a.js https://evil.example | e.innerHTML='<img alt=&gt; src=&#47;/evil.example/p.png>';
++ assets/a.js https://evil.example | e.innerHTML='<img &gt; src=&#47;/evil.example/p.png>';
++ assets/a.js https://evil.example | e.innerHTML="<img title=&apos; src=&sol;&sol;evil.example/a4.png>";
++ assets/a.js https://evil.example | e.innerHTML='<img src=&#47;/evil.example/p.png>';
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a>b?"x":"y"} src=//evil.example/p.png>`;
+
+== J31 | A | A tab or new line spelled by a CSS escape or an HTML reference ends an unquoted URL's host early: `url(https://react.dev\9 .evil.example/a.png)` is read as react.dev
++ assets/a.css https://react.dev.evil.example | a{background:url(https://react.dev\9 .evil.example/a.png)}
++ assets/a.css https://react.dev.evil.example | a{background:url(//react.dev\a .evil.example/a.png)}
++ index.html https://react.dev.evil.example | <script src=https://react.dev&Tab;.evil.example:44&Tab;3/x.js></script>
++ assets/a.css https://react.dev.evil.example | a{background:url("https://react.dev\9 .evil.example/a.png")}
+
+== J32 | A | A quoted attribute whose closing quote is spelled otherwise than its opening one is over-read, fails to parse and is dropped: `'<img src="https://evil.example\" alt=x>'` passes (regression of this PR's rewrite)
++ assets/a.js https://evil.example | e.innerHTML='<img src="https://evil.example\" alt=x>';
++ assets/a.js https://evil.example | e.innerHTML='<img src="//evil.example\" alt=d1>';
++ assets/a.js http://evil.example | e.innerHTML='<img src=\x22http://evil.example" alt=d2>';
+
+== J33 | A | A protocol-relative URL whose host starts with U+FEFF is skipped: JavaScript's \s counts it as white space, the browser's host parser ignores it
++ assets/a.js https://evil.example | new Image().src="//⟨U+FEFF⟩evil.example/c1.png";
++ index.html https://evil.example | <script src="//&#xFEFF;evil.example/c2.js"></script>
++ assets/a.js https://evil.example | new Image().src="https://⟨U+FEFF⟩evil.example/c.png";
+
+== J34 | A | A URL that starts where no quote, `=` or url( stands before it is still skipped or cut at a comma: later srcset candidates set through a property or setAttribute, and a meta refresh
++ assets/a.js https://evil.example | i.setAttribute("srcset","/a.png 1x, //evil.example/e1.png 2x")
++ assets/a.js https://evil.example | x={srcSet:"/a.png 1x, //evil.example/e2.png 2x"}
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://react.dev,@evil.example/">
+
+== J35 | C | New false positive: `<name/` or `<name ` in ordinary code opens a phantom tag, so a regular expression assigned inside it is refused as a third-party origin
+- assets/a.js | for(let i=0;i<n/2;i++){const m=/\/api\//.test(s);}
+- assets/a.js | if(a<b &&c){d=/\/assets\//}
+
+== J36 | A | Regression: the new template-substitution skip in attributeEquals hides every later attribute of a written tag after a `${` that is not a real substitution
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img alt="${" src=//evil.example/p.png>'}
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img ${ src=//evil.example/p.png>'}
++ assets/a.js https://evil.example | function f(){e.innerHTML=`<img ${a?"{":""} src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img ${ src=https://react.dev\x22@evil.example/p.png>'}
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img ${ src=//evil.example'+t+'>'}
+
+== J37 | A | R2.7 is not closed for CSS held in a script: script files get no CSS-escape reading, so an escape in a url( a script sets is never decoded
++ assets/a.js https://evil.example | e.style.backgroundImage="url(https://react.dev\\40 evil.example/a.png)";
++ assets/a.js https://react.dev.evil.example | e.style.background="url(https://react.dev\\9 .evil.example/a.png)";
++ assets/a.js https://evil.example | e.style.backgroundImage="url(\\2f\\2f evil.example/a.png)";
++ assets/a.js https://evil.example | const css=".a{background:url(https://react.dev\\40 evil.example/a.png)}";
+
+== J38 | A | R2.9's U+FEFF gap is still open where nothing known starts the URL: a host continued past U+FEFF is not read
++ index.html https://react.dev.evil.example | <meta http-equiv="refresh" content="0;https://react.dev⟨U+FEFF⟩.evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://&#xFEFF;evil.example/">
++ assets/a.js https://react.dev.evil.example | document.head.innerHTML='<meta http-equiv=refresh content="0;https://react.dev⟨U+FEFF⟩.evil.example/">';
+
+== J39 | A | Regression: the new template-substitution skip treats any `${` as a substitution and pairs braces with no regard to strings or regexes, so the tag reader jumps past `src=` and a protocol-relative URL in markup a script writes passes again
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img ${ src=//evil.example/p.png>'}
++ assets/a.js https://evil.example | e.innerHTML='<img ${ src=//evil.example/p.png>';x='}';
++ assets/a.js https://evil.example | function f(){e.innerHTML=`<img ${"{"} src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | function f(a){e.innerHTML=`<img alt=${a.replace(/{/g,'')} src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | function f(){e.innerHTML=`<img \${ src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | function f(){e.innerHTML='<img ${ srcset=//evil.example/p.png>'}
++ assets/a.js https://evil.example | e.innerHTML=`<img alt="${q} src=//evil.example/p.png>`
+
+== J40 | A | R2.9/R2.4 class still open where nothing known starts the URL: a U+FEFF in an absolute srcset candidate's host (a srcset a script sets from a string) or a refresh URL ends the scanner's read, while the host parser ignores it
++ assets/a.js https://react.dev.evil.example | jsx("img",{srcSet:"/a.png 1x, https://react.dev⟨U+FEFF⟩.evil.example/b.png 2x"})
++ assets/a.js https://react.dev.evil.example | i.setAttribute("srcset","/a.png 1x, https://react.dev⟨U+FEFF⟩.evil.example/b.png 2x")
++ index.html https://react.dev.evil.example | <meta http-equiv="refresh" content="0;https://react.dev⟨U+FEFF⟩.evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://react.dev @evil.example/">
++ assets/a.js https://react.dev.evil.example | fetch(`${""}https://react.dev⟨U+FEFF⟩.evil.example/x`)
+
+== J41 | A | A raw U+E000-U+E002 in the file is read as a quote: CSS url( and the `none` context end the URL there, but CSS and the URL parser keep it as an ordinary character
+> the port marks an escaped quote apart from the text, so a private-use character is the text's own
++ assets/a.css https://evil.example | a{background:url(//react.dev⟨U+E000⟩@evil.example/a.png)}
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://react.dev⟨U+E000⟩@evil.example/">
+
+== J42 | R | Several of the new tests already pass on the pre-fix script, so they do not pin the fixes they claim to cover
+> each case's origin compared exactly, never only its rule
++ index.html https://react.dev.evil.example | <img src=https://react.dev&#10;.evil.example/p.png>
++ assets/a.js https://react.dev.evil.example | e.innerHTML='<img src=https://react.dev&Tab;.evil.example/p.png>';
++ index.html https://evil.example | <img src=https://evil.example&#12;>
++ index.html https://evil.example | <img srcset="//evil.example&#1; 1x">
++ assets/a.js https://evil.example | e.innerHTML='<img src=https://react.dev"@evil.example/p.png>';
++ assets/a.js https://'x.evil.example | fetch("https://'x.evil.example/c")
+
+== J43 | A | Regression: a `${` the new tag reader pairs with the wrong `}` hides the rest of the tag, so an unquoted protocol-relative attribute a script writes passes again
++ assets/a.js https://evil.example | function f(e){e.innerHTML='<img ${ src=//evil.example/p.png>'}
++ assets/a.js https://evil.example | function f(e){e.innerHTML=`<img alt=${"{"} src=//evil.example/p.png>`}
++ assets/a.js https://evil.example | function f(e){e.innerHTML='<img alt=${ src=//evil.example/p.png>'}
++ assets/a.js https://evil.example | function f(e){e.innerHTML="<img title=${ src=//evil.example/p.png>"}
+
+== J44 | A | The class of R2.1 and R2.8 is still open in the tag reader: the script's own string delimiter is read as an attribute's quote, so attributes after a value built by concatenation are never read
++ assets/a.js https://evil.example | e.innerHTML='<img alt='+x+" src=//evil.example/p.png>";
++ assets/a.js https://evil.example | e.innerHTML="<img alt="+x+' src=//evil.example/p.png title="a">';
++ assets/a.js https://evil.example | e.innerHTML="<img"+" src=//evil.example/p.png>";
++ assets/a.js https://evil.example | e.innerHTML="<img alt="+x+" src=//evil.example/p.png>";
+
+== J45 | A | A refresh's URL is still misread: the new user-name read stops at ASCII white space and at a quote, runs past an unquoted attribute's `>`, and a protocol-relative refresh is not read at all
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;https://react.dev'@evil.example/">
++ index.html https://react.dev.evil.example | <meta http-equiv="refresh" content="0;https://react.dev⟨NL⟩.evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;url=https://react.dev @evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;url=https://react.dev>@evil.example/">
++ index.html https://evil.example | <meta http-equiv="refresh" content="0;//evil.example/">
++ index.html https://evil.example | <meta http-equiv=refresh content=0;https://react.dev,@evil.example>
++ assets/a.js https://evil.example | e.innerHTML='<meta http-equiv=refresh content=0;https://react.dev,@evil.example>';
++ assets/a.js https://evil.example | m.httpEquiv="refresh";m.content="0;https://react.dev @evil.example/";
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1x, https://react.dev'@evil.example/b.png 2x"})
+
+== J46 | A | The class of R2.1 is open for template literals: a fixed host followed by a substitution is passed as a host built at run time
++ assets/a.js https://evil.example | fetch(`https://evil.example${p}`)
++ assets/a.js https://evil.example | i.src=`//evil.example${p}`
++ assets/a.js wss://evil.example | new WebSocket(`wss://evil.example${q}`)
++ assets/a.js https://evil.example | fetch(`https://evil.example:${port}/x`)
++ assets/a.js https://evil.example | e.innerHTML=`<img src=https://evil.example${p}>`
++ assets/a.js https://evil.example | fetch("https://evil.example"+p)
++ assets/a.js https://evil.example | fetch(`https://evil.example/${p}`)
++ index.html https://evil$.example | <script src="https://evil$.example/x.js"></script>
++ index.html https://$.evil.example | <img src=//$.evil.example/p.png>
++ assets/a.css https://x$.evil.example | a{b:url(//x$.evil.example/p.png)}
+
+== J47 | A | The `${...}` part of the R2.6 fix holds only for a substitution with no `}` in a string or comment: after one, a `>` in the substitution still ends the tag
++ assets/a.js https://evil.example | e.innerHTML=`<img ${"}">0?"x":"y"} src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a/*}*/>b?"x":"y"} src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a>b?"x":"y"} src=//evil.example/p.png>`;
+
+== J48 | A | The new reading of a srcset a script sets from a string finds only some of its later candidates
++ assets/a.js https://evil.example | i.setAttribute("srcset",",//evil.example/b.png")
++ assets/a.js https://evil.example | i.setAttribute("srcset","/a.png foo, //evil.example/b.png")
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1e0x, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a,b.png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 1x,/b.png, //evil.example/c.png 3x"})
+- assets/a.js | a=[1, //x⟨NL⟩2]
+
+== J49 | A | Regression: when the new lexer loses step, it drops substitution pairings that brace counting got right. This hides a protocol-relative host after `${...}` and adds false findings
++ assets/a.js https://cdn.evil.example | n=s.split("${").length;⟨NL⟩i.src=`${secure?"https:":"http:"}//cdn.evil.example/lib.js`;f("x");
++ assets/a.js https://cdn.evil.example | const esc=(s)=>s.replace(/\$\{/g,"\\${");⟨NL⟩i.src=`${secure?"https:":"http:"}//cdn.evil.example/lib.js`;
++ assets/a.js https://cdn.evil.example | const esc=(s)=>s.replace(/\$\{/g,"\\${");⟨NL⟩new WebSocket(`${secure?"wss:":"ws:"}//cdn.evil.example/live`);
++ assets/a.js https://evil.example | const esc=(s)=>s.replace(/\$\{/g,"\\${");⟨NL⟩i.src=`${a?"}":""}//evil.example/x.png`
+- assets/a.js | const esc=(s)=>s.replace(/\$\{/g,"\\${");⟨NL⟩e.innerHTML=`<b ${a?"{":""}>`;if(c){d()}y=/\/assets\//;
+
+== J50 | W | The new DESCRIPTOR regex backtracks quadratically on a long digit run
+~ script none | x=" ⟨100000×1⟩y,//a"
+~ script https://evil.example | x="/a.png ⟨100000×1⟩, //evil.example/b.png 2x"
+
+== J51 | A | Only `+` counts as concatenation, so `.concat(`, array join and `+=` still let a `>` in run-time code end the tag
++ assets/a.js https://evil.example | e.innerHTML="<img ".concat(a>b?"x":"y"," src=//evil.example/p.png>");
++ assets/a.js https://evil.example | e.innerHTML="<img alt=\"".concat(a.map(function(x){return x>1}),"\" src=//evil.example/p.png>");
++ assets/a.js https://evil.example | e.innerHTML=["<img ",a>b?"x":"y"," src=//evil.example/p.png>"].join("");
++ assets/a.js https://evil.example | h="<img ";h+=a>b?"x":"y";h+=" src=//evil.example/p.png>";
+
+== J52 | A | Regression: an earlier plain-string `${` stops the lexer pairing later substitutions, and closesSubstitution has no fallback, so the context right after a substitution is lost
++ assets/a.js https://cdn.example | if(m[1]==="${")depth++;⟨NL⟩s.src = `${secure ? "https:" : "http:"}//cdn.example/x.png`;⟨NL⟩log("done");
++ assets/a.js https://cdn.example | if(m[1]==='${')depth++;⟨NL⟩s.src = `${secure ? 'https:' : 'http:'}//cdn.example/x.png`;⟨NL⟩log('done');
++ assets/a.js https://evil.example url-userinfo | if(m[1]==="${")depth++;⟨NL⟩fetch(`${a?"x":""}https://react.dev @evil.example/x`);log("done");
+
+== J53 | A | Regression: the new srcset walk-back gives up on a first candidate holding `(`, `)` or `;`, or a substitution with a quote in it, which d7aad83 recognised
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/assets/logo(1).png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | i.setAttribute("srcset","/assets/logo(1).png, //evil.example/b.png 2x")
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a;v=2.png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${asset("a.png")}, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${dark ? "/d" : "/l"}/a.png, //evil.example/b.png 2x`})
+
+== J54 | A | Regression: a later srcset candidate is no longer read when the candidate before it holds a bracket, a semicolon, or a substitution with a quote in it
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/hero(1).png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png;v=2, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${asset("a.png")}, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${asset(`a.png`)}, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${dark?"/d.png":"/l.png"}, //evil.example/b.png 2x`})
+
+== J55 | A | The concatenation fix resumes once: code between two strings that concatenates a string itself uses the resume up, and a later `>` still ends the tag
++ assets/a.js https://evil.example | el.innerHTML = "<a " + (n > 0 ? c + " active" : m > 0 ? "muted" : "") + " href=//evil.example/>go</a>";
++ assets/a.js https://evil.example | e.innerHTML=`<a `+(n>0?t+` active`:r>0?`muted`:``)+` href=//evil.example/>go</a>`
++ assets/a.js https://evil.example | e.innerHTML="<a "+(x?a+"b":c)+(n>0?"on":"")+" href=//evil.example/>go</a>";
++ assets/a.js https://evil.example | let n=`<a `;t&&(n+=`class=x `),n+=`href=//evil.example/>go</a>`
++ assets/a.js https://evil.example | [`<a`,n>r?`class=x`:``,`href=//evil.example/>go</a>`].join(` `)
++ assets/a.js https://evil.example | e.innerHTML='<a class="'+c+'" '+(a>b?"hidden":"")+" href=//evil.example/>go</a>"
+
+== J56 | A | Regression: one literal `${` earlier in a file puts the lexer out of step, and the text after a later substitution is no longer read
++ assets/a.js https://evil.example | var re=/\$\{/;i.src=`${s?"https:":"http:"}//evil.example/x.png`;
++ assets/a.js https://evil.example | function t(e){return e.indexOf("${")>-1}var m="a";location.href=`${s?'https:':'http:'}//evil.example/`;var n="b";
++ assets/a.js https://evil.example | function t(e){return e.indexOf(`\${`)>-1}var m=`can't`;i.src=`${s?`https:`:`http:`}//evil.example/x.png`;var n=`don't`;
++ assets/a.js https://evil.example | const o=x.split("${");e.innerHTML=`<img ${a>b?"x":"⟨5000×a⟩"} src=//evil.example/p.png>`;
+
+== J57 | C | New false positives: a comma list after any quote is read as a srcset, and tag states held at a concatenation resume anywhere later in the file
+- assets/a.js | f("GET",h,/\/users\//)
+- assets/a.js | const r=["api",!0,/\/v1\//];
+- assets/a.js | a="x",b=1,/\/admin/.test(p)&&go();
+- assets/a.js | const help="Write a path as /a, //host/a or https://react.dev/a";
+- index.html | <p title="Write a path as /a, //host/a or https://react.dev/a">x</p>
+- assets/a.js | // isn't a @scope, //nerf.dart, or _private⟨NL⟩x=1;
+- assets/a.js | function t(c,a,b){return"<td "+(a>b?c:"")}function u(n){return n+"px"}const r=/\/assets\//;
+
+== J58 | W | New backtracking: DESCRIPTOR is quadratic on a run of digits before a comma and a URL
+~ script none | x=[ ⟨64000×1⟩,//a/
+~ script none | ⟨1000×x=[ 11111111111111111111,1];⟩
+~ script none | x="⟨1000× 2222222222222222222222,//n⟩"
+
+== J59 | A | Not introduced here, still open: a substitution right after a tag's name hides the tag, so a link's unquoted href after it is not read
++ assets/a.js https://evil.example | e.innerHTML=`<a${cls} href=//evil.example/>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=`<a${t?` class=${t}`:``} href=//evil.example/>go</a>`
++ assets/a.js https://evil.example | e.innerHTML=`<img${a} src=//evil.example/p.png>`;
+
+== J60 | A | Not introduced here, still open: a refresh whose delay is set at run time is not read as a refresh
++ assets/a.js https://evil.example | m.content=s+";url=//evil.example/";
++ assets/a.js https://evil.example | m.content=`${s};url=//evil.example/`;
++ assets/a.js https://evil.example | m.content=s+";//evil.example/";
++ assets/a.js https://evil.example | m.content="0;url=//evil.example/"
++ assets/a.js https://evil.example | m.content=s+";url=https://evil.example/"
+
+== J61 | R | Several parts of the fix are not held by any test
++ assets/a.js https://evil.example | n=x.split("${");e.innerHTML=`<img ${a.map(x=>`${x/2}`).join()} src=//evil.example/p.png>`;
+- assets/a.js | e.innerHTML="<b "+a;f("x");g("y=//not");
+- assets/a.js | e.innerHTML="<b ";h=c,"y=//not";
+- assets/a.js | x="see the docs, //evil.example/x";
+- assets/a.js | x=n+".; //evil.example/x";
+- assets/a.js | m.content=n+";curl=//evil.example/x";
+~ script https://evil.example | x="⟨200000×/a.png, ⟩//evil.example/b.png 2x";
+
+== J62 | C | Regression: the relaxed first srcset piece accepts a closing quote, so a regex literal after a comma is reported as a third-party origin
+- assets/a.js | n=e.indexOf("x"),/\//.test(n)&&f();
+- assets/a.js | n=e.indexOf(`x`),/\//.test(n)&&f();
+- assets/a.js | let t=e.trim(),n=t.split(`\n`),/\r/.test(t)&&n.pop();
+- assets/a.js | t=e.replace(`a`,`b`),/\/\/cdn\.example\.com\//.test(t)&&g(t);
+- assets/a.js | if(C.shift(),/\n/.test(C[0])){}
+
+== J63 | A | Open in the class this commit claims to close: code between two strings that writes an unquoted value, with a `>` in it, hides a later src when the strings are backtick-quoted (as the minifier prints them)
++ assets/a.js https://evil.example | e.innerHTML=`<img width=`+(w>0?w:100)+` src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img width=`+(w>0?w:100)+` srcset=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=https://react.dev\x27@evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img width=${w>0?w:100} src=//evil.example/p.png>`;
+
+== J64 | C | New false-positive path: any raw `}` within MAX_SUBSTITUTION after an unpaired `${` starts an after-substitution context, so code after a block is read as a URL
+- assets/a.js | a="${";if(a){b()}/\//.test(c)&&f();
+- assets/a.js | a="${";⟨NL⟩function f(){⟨NL⟩  return 1;⟨NL⟩}⟨NL⟩//prettier-ignore⟨NL⟩foo();⟨NL⟩
+
+== J65 | B | Five findings from the open list are still unfixed at c66da8f; under the ruling all are disguise-only and need rejections recorded by ID
+> the five rejections recorded: references spelling a style attribute's url(, a substitution that leaves a quote open, a refresh time with no digit (each not read); a literal `${` in a fixed host and String.raw's CSS escapes (each read by the port's tokens, so caught)
+- assets/a.js | e.innerHTML='<div style="background:url&#40;//evil.example/a.png)"></div>';
+- assets/a.js | e.innerHTML=`<img ${a}>x" src=//evil.example/p.png>`
+- index.html | <meta http-equiv="refresh" content=".;//evil.example/">
++ assets/a.js https://react.dev${x}.evil.example | fetch("https://react.dev${x}.evil.example/x")
++ assets/a.js https://evil.example | e.style.backgroundImage=String.raw`url(https://react.dev\40 evil.example/a.png)`;
+
+== J66 | A | Regression: a later srcset candidate is missed when an earlier candidate's descriptor is built at run time (`${dpr}x`) or misspelled
++ assets/a.js https://evil.example | jsx("img",{srcSet:`/a.png 1x, /b.png ${x}x, //evil.example/c.png 3x`})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:`${base}/a.png ${dpr}x, //cdn.evil.example/b.png 2x`})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:`${a} ${w}w, //cdn.evil.example/x.png 800w`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 2X, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | i.setAttribute("srcset","/a.png 100px, //evil.example/b.png 200w")
+
+== J67 | A | Piece readings ignore the text the code between two strings writes, so a value built by code hides the next piece's first attribute (two quote kinds)
++ assets/a.js https://cdn.evil.example | e.innerHTML="<img width="+(w>0?w:100)+' src=//cdn.evil.example/x.png alt="y">'
++ assets/a.js https://evil.example | e.innerHTML="<a title="+(n>0?c:x)+' href=//evil.example/x data-k="y">go</a>'
++ assets/a.js https://cdn.evil.example | e.innerHTML="<img width="+(w>0?w:100)+` src=//cdn.evil.example/x.png alt="${a}">`
+
+== J68 | B | Regression: past MAX_PIECE_GAP (1024 characters), a `+`-joined tag piece d3a9fc7 read is silently dropped, and a new test asserts the miss
+> MAX_PIECE_GAP, the characters of code between two literals a tag goes on through, is the documented bound the steward kept (the existing test pins it); within it the tag is read
+- assets/a.js | e.innerHTML="<a "+(n>0?"x":"")+f(a=>{⟨180×a=a+1;⟩return a})+" href=//evil.example/>go</a>";
++ assets/a.js https://evil.example | e.innerHTML="<a "+(n>0?"x":"")+f(a=>{⟨140×a=a+1;⟩return a})+" href=//evil.example/>go</a>";
+
+== J69 | A | Regression: each lexer run stops 4096 characters after its `${`, so a longer substitution with a brace in a string loses the pairing d3a9fc7's single pass found
++ assets/a.js https://evil.example | e.innerHTML=`<img ${a.map(x=>{⟨700×x=x+1;⟩return x.split("{").join()}).join()} src=//evil.example/p.png>`;f("x");
++ assets/a.js https://evil.example | i.src=`${a.map(x=>{⟨700×x=x+1;⟩return x.split("{").join()}).join()}//evil.example/x.png`;f("x");
+
+== J70 | C | Regression (false finding): the new srcset shape test reads ordinary minified code as a srcset list, so honest bundles are refused
+- assets/a.js | if(C[0]===""){if(C.shift(),/\n/.test(C[0])){let y=1}}
+- assets/a.js | a=b.replace("x","y"),/\//.test(a)&&c();
+- assets/a.js | m=[[q("a"),/\/v1\//],[q("b"),/\/v2\//]]
+- assets/a.js | routes.push(route("about"), //about page⟨NL⟩0)
+- assets/a.js | k(0,k(0,t,"'",'"'),/\\([^\da-f])/gi,"$1")
+- assets/a.js | x="^([^\\\\s].*)\\\\((\\\\d+,\\\\d+)";
+
+== J71 | C | Regression (false finding): code after a finished tag is read as the tag's next piece, so a regular-expression constant after it is refused
+- assets/a.js | e.innerHTML="<b "+a+">";f("x, ");const r = /\\/g;
+- assets/a.js | e.innerHTML='<td class="c">'+v+"</td>";s=t.join(", ");const r=/\n/g;
+- assets/a.js | const s='<svg xmlns="http://www.w3.org/2000/svg" viewBox="'+b+'">'+p+"</svg>";function l(e){return"Error: "+e}const a=/\/users\/(\d+)/,c=l("x");
+- assets/a.js | e.innerHTML='<div class="a">x</div>';t=c+" a=//not";
+
+== J72 | C | Regression (false finding): the counted `}` is now kept where counting is known to be wrong, so the enclosing block's `}` revives the tag or the template's context
+- assets/a.js | function f(){e.innerHTML=`<b ${a?"{":""}>`;if(c){g()}}y=/\/assets\//;
+- assets/a.js | function f(a){const s=`${a?"{":""}`;if(a){g()}}/\/api\//.test(location.pathname)&&h();
+- assets/a.js | {e.innerHTML=`<b ${a?"{":""}>`}var y=/\\/g;
+- assets/a.js | const OPEN = "${";⟨NL⟩for(;;){⟨NL⟩} // end of the loop⟨NL⟩x=⟨2700×a⟩;⟨NL⟩
+
+== J73 | A | Regression (missed): a later srcset candidate after a computed descriptor is no longer read
++ assets/a.js https://evil.example | jsx("img",{srcSet:`/a.png ${dpr}x, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${a} ${w}w, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | i.srcset=`⟨NL⟩  ./a.png ${w}w,⟨NL⟩  //evil.example/b.png 2x`
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${asset("a.png", 2)}, //evil.example/b.png 2x`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:`${dark ? d1 : l1}, //evil.example/b.png 2x`})
+
+== J74 | A | Regression (missed, navigation included): a tag built by concatenation is lost once its pieces run past 1024 characters after the first `>` in the code
+> MAX_PIECE_GAP counts only the code between two literals, never a literal's own text
++ assets/a.js https://evil.example | e.innerHTML="<a "+(n>0?"x":"")+" class=\"⟨1100×c⟩\" "+(m>0?"y":"")+" href=//evil.example/>go</a>";
++ assets/a.js https://evil.example | e.innerHTML='<a '+(n>0?'data-count="'+n+'" ':'')+'class="⟨340×abc ⟩" '+(t?'title="'+t+'" ':'')+'href=//evil.example/docs>Docs</a>';
++ assets/a.js https://evil.example | e.innerHTML='<img '+(w>h?'class="wide" ':'')+'src="data:image/png;base64,⟨1400×A⟩" '+(z?'hidden ':'')+'data-full=//evil.example/x.png>';
++ assets/a.js https://evil.example | e.innerHTML='<meta '+(w>h?'class="wide" ':'')+'content="⟨1400×A⟩" '+(z?'hidden ':'')+'http-equiv=refresh content=0;url=//evil.example/>';
+
+== J75 | A | Regression: honest srcset lists that no key directly opens are no longer read, so a later protocol-relative candidate passes (narrower than ruled)
++ assets/a.js https://evil.example | jsx("img",{srcSet:d?"/a.png, //evil.example/b.png 2x":"/l.png"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:d?"/l.png":"/a.png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:d&&"/a.png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | i.srcset=d?"/a.png, //evil.example/b.png 2x":"/l.png"
++ assets/a.js https://evil.example | jsx(`img`,{srcSet:d?`/a.png, //evil.example/b.png 2x`:`/l.png`})
++ assets/a.js https://evil.example | const s="/a.png, //evil.example/b.png 2x";i.srcset=s;
++ assets/a.js https://evil.example | const s=`${b}/a.png, //evil.example/b.png 2x`;
++ assets/a.js https://evil.example | jsx("img",{srcSet:d?"/a.png 1x, /b.png, //evil.example/c.png 2x":"/l.png"})
++ assets/a.js https://evil.example | x=JSON.parse("{\"srcset\":\"/a.png, //evil.example/b.png 2x\"}")
+
+== J76 | W | templateEnd makes the srcset pass quadratic: a keyed template list follows a substitution's far `}` past every later list
+~ script none | i.srcset=`⟨16000×${⟩x⟨16000×}⟩`
+
+== J77 | A | Regression: honest srcset lists that no key opens directly are no longer read, so a later protocol-relative candidate is missed
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:d?"/a.png, //cdn.evil.example/a-2x.png 2x":"/l.png"})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:d?`/a.png, //cdn.evil.example/a-2x.png 2x`:`/l.png`})
++ assets/a.js https://cdn.evil.example | const H="/hero.png, //cdn.evil.example/hero-2x.png 2x";function A(){return jsx("img",{srcSet:H})}
++ assets/a.js https://cdn.evil.example | const H=`/hero.png, //cdn.evil.example/hero-2x.png 2x`;function A(){return jsx("img",{srcSet:H})}
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:p.srcSet??"/a.png, //cdn.evil.example/a-2x.png 2x"})
++ assets/a.js https://cdn.evil.example | i.srcset=dark?"/d.png, //cdn.evil.example/d-2x.png 2x":"/l.png"
++ assets/a.js https://cdn.evil.example | const I={hero:"/hero.png, //cdn.evil.example/hero-2x.png 2x"}
++ assets/a.js https://cdn.evil.example | i["srcset"]="/a.png, //cdn.evil.example/a-2x.png 2x"
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:c?"/a.png, /b.png, //cdn.evil.example/c.png 3x":"/l.png"})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:c?"/a.png 2X, //cdn.evil.example/b.png 2x":"/l.png"})
++ assets/a.js https://cdn.evil.example | const S="/a.png 100px, //cdn.evil.example/b.png 200w";
+
+== J78 | W | The keyed template-literal path is not linear: one crafted script makes the scan quadratic
+~ script none | ⟨4000×srcset:`${⟩⟨100000×a⟩⟨4000×}⟩`
+~ script none | ⟨16000×srcset:`${⟩⟨400000×a⟩⟨16000×}⟩`
+
+== J79 | W | The scanner is no longer linear: nested srcset-keyed template literals take quadratic time (448 KB: 53 s at the head, 16 ms at the base)
+~ script none | i.srcset=`⟨32000×${⟩0⟨32000×}`⟩
+~ script none | ⟨10000×i.srcset=`${⟩0⟨10000×}`⟩
+
+== J80 | A | Regression: a srcset list no key opens is no longer read when its earlier candidate has no descriptor (the most common form)
++ assets/a.js https://evil.example | jsx("img",{srcSet:d?"/a.png, //evil.example/b.png 2x":"/l.png"})
++ assets/a.js https://evil.example | jsx("img",{srcSet:e.srcSet??"/a.png, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | const s="/a.png, //evil.example/b.png 2x";jsx("img",{srcSet:s})
++ assets/a.js https://evil.example | jsx("img",{srcSet:pick("/a.png, //evil.example/b.png 2x")})
++ assets/a.js https://evil.example | jsx("img",{srcSet:d?"/a.png 2X, //evil.example/b.png 2x":x})
+
+== J81 | A | Navigation miss: a meta refresh whose delay is built at run time passes with an outside origin
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${n}; url=//evil.example/`})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:n+"; url=//evil.example/"})
++ assets/a.js https://evil.example | m.httpEquiv="refresh",m.content=t+";url=//evil.example/next"
++ assets/a.js https://evil.example | m.setAttribute(`content`,t+`; url=//evil.example/next`);
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:"5; url=//evil.example/"})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${n}; url=https://evil.example/`})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${Math.ceil(ms/1e3)}; url=//evil.example/`})
+- assets/a.js | x="see the docs, //evil.example/x";
+- assets/a.js | u=p+";url=/local";
+
+== J82 | A | Navigation miss: a tag name followed directly by a substitution hides an unquoted href, form action or base href
++ assets/a.js https://evil.example | e.innerHTML=`<a${c?" hidden":""} href=//evil.example/x>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=`<form${attrs} action=//evil.example/submit method=post>`;
++ assets/a.js https://evil.example | e.innerHTML=`<base${t} href=//evil.example/>`;
++ assets/a.js https://evil.example | e.innerHTML="<"+t+" href=//evil.example/x>";
+- assets/a.js | x=a<b${c}
+
+== J83 | C | A real console build is refused, and the plan's docs samples will be: the real-build test cannot be green once those land
+> the steward ruled (a): SAMPLE_NAMES stays as it is, and the lane's sample uses $FIN_API_URL; a docs build's _redirects is release-static's to refuse
+- assets/keys.js | const s=`curl "$FIN_API_URL/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`,c=`Copy as FIN_KEY=…`;
++ assets/keys.js setting-name | const s=`curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`;
++ _redirects artefact | /a /b 301
+
+== J84 | C | The regular-expression false positive comes back through the key door: a string that ends at a srcset key makes the code after it a list
+- assets/a.js | console.warn("Invalid srcset:",e);return n.push(e),/\//.test(e)?"a":"b"
+- assets/a.js | o(`Invalid srcset:`,e);return n.push(e),/\\/.test(e)?`a`:`b`
+- assets/a.js | L(`srcset:`,v);for(const k in v)x(k),/\\/.test(k)&&y(`z`)
+- assets/a.js | console.warn("bad srcset:",v);const P={http:80,https:443};
+
+== J85 | C | The piece fix widens a false-positive path: a string that ends at `=//` after any open tag is read as an unquoted attribute
+- assets/a.js | e.innerHTML="<div class="+c+">";u=p+"?next=//"+h.host+"/x";
+- assets/a.js | e.innerHTML=`<div class=`+c+`>`;u=p+`?next=//`+h.host+`/x`;
+- assets/a.js | for(let e=0;e<t/2;e++){s+="a"}u=p+"?next=//"+h.host+"/x";
+
+== J86 | A | Navigation miss: a scheme built at run time before a fixed outside host is never read
++ assets/a.js https://evil.example | location.href=s+"://evil.example/x";
++ assets/a.js https://evil.example | location.href=`${s}://evil.example/x`;
++ assets/a.js https://evil.example | jsx("a",{href:(secure?"https":"http")+"://evil.example/x"})
++ assets/a.js https://evil.example | location.href=location.protocol+"//evil.example/x"
+
+== J87 | C | Regression (false finding): a `<` right before a substitution now opens a tag, and that tag runs on into the code after the template literal
+- assets/a.js | if(!s.intersects(`<${r}`,t))n=/\/node_modules\//.test(p);
+- assets/a.js | function v(e,t){if(e.length>t)throw Error(`Too long: ${e.length}<${t}`)}let a=/\/api\//;
+- assets/a.js | let s=`Array<${t}`,p=/\/v1\//;s+=`>`;
+- assets/a.js | x=`${a}<${b}`;y=/\/assets\//;
+- assets/a.js | throw RangeError(`index out of range: 0<=i<${n}`);for(e=/\/\//g;;){}
+
+== J88 | A | Narrower than ruled: a srcset list in a string (no srcset key) is still missed when its first candidate is a helper call or condition in a substitution, or a path with brackets
+> a substitution reads as one word of a list; a keyless list's candidate holds no bracket (the steward's item 8, its second option: `x="f(x), //note"` is code)
++ assets/a.js https://evil.example | jsx(`img`,{srcSet:d?`${u(`/a.png`)}, //evil.example/b.png 2x`:`/l.png`})
++ assets/a.js https://evil.example | const H=`${asset(`hero.png`)}, //evil.example/hero-2x.png 2x`;
++ assets/a.js https://evil.example | const H=`${k?"/d.png":"/l.png"}, //evil.example/b.png 2x`;
+- assets/a.js | const H="/hero(1).png, //evil.example/b.png 2x";
+
+== J89 | C | New false finding: a backtick after `srcset=` that closes a string now gives url-unread when no backtick follows within 4,096 characters
+- assets/a.js | e.innerHTML=`<img srcset=`+s+">";⟨800×a=b+1;⟩x=`y`;
+
+== J90 | A | Navigation miss left open: a refresh whose time is written at run time and has no `url=` is still not read, and a negative test now locks the miss in
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${n}; //evil.example/next`})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:n+";//evil.example/next"})
++ assets/a.js https://evil.example | e.innerHTML=`<meta http-equiv=refresh content="${n}; //evil.example/x">`;
+- assets/a.js | x=`${a}; // note`;y=n+"; // note";z=`${code};//${c}`;
+
+== J91 | C | New false-positive path: a string's text of one-word pieces before a comma is read as a srcset list, so prose and code samples are refused
+> a list read by its shape alone names only a host on the network
+- assets/a.js | const s=`apiKey,//from the dashboard`;
+- assets/a.js | const s="a, b, //c";
+- assets/a.js | const ignore="node_modules,dist,//generated";
+- assets/a.js | x=f("a,\\\\b")
+- assets/a.js | JSON.parse('{"k":"a,\\\\\\\\b"}')
+- assets/a.js | x=`${a}<${b}`;y=/\/assets\//;
+
+== J92 | C | The opensString guard in srcsetListBefore is untested: removing it keeps all 38 tests green while prose with an apostrophe is refused
+- assets/a.js | x="don't,//evil.example/x";
+- assets/a.js | x=`can't,//note`;
+- assets/a.js | x="the 'a' key,//note";
+- assets/a.js | x="say \"a, //evil.example/x\" now";
+
+== J93 | A | Honest srcset lists no key opens are still missed when the first candidate is a helper call, a condition or a file name with brackets
++ assets/a.js https://cdn.evil.example | const H=`${asset(`a.png`)}, //cdn.evil.example/b.png 2x`;
++ assets/a.js https://cdn.evil.example | const H=`${dk?`/d.png`:`/l.png`}, //cdn.evil.example/b.png 2x`;
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:d?"/hero(1).png, //cdn.evil.example/b.png 2x":"/l.png"})
+
+== J94 | C | Honest minified code is still refused: a pattern string (a line comment's `//[^\n]*`, a string escape's `\\x`) is read as a protocol-relative URL, and the plan's pinned docs reference carries such strings
+- assets/a.js | const g={match:`//[^\\n]*`,scope:`comment`};
+- assets/a.js | function b(e){return`\\\\x`+e.toString(`hex`)}
+- assets/a.js | const g=[{match:`\\\\(?:u[0-9a-fA-F]{4}|["\\\\/bfnrt])`,scope:`string.escape`}];
+- assets/a.js | const g=[{match:`\\\\\\s+\\\\`,scope:`string.escape`}];
+- assets/a.js | const E={'\n':`\\\\n`,'\r':`\\\\r`,'\t':`\\\\t`};
+- assets/a.js | const g={match:`"(?:[^"\\\\\\r\\n]|\\\\.)*"`,scope:`string`};
++ assets/a.js https://evil.example | a.href="\\\\evil.example\\x";
+
+== J95 | C | New false-positive path: a `<` right before a substitution in any template literal (a message's `${a}<${b}`) now opens a tag, and the code after it is read as that tag's attributes
+- assets/a.js | export function check(e,t){if(e>=t)throw RangeError(`expected ${e}<${t}`)}export const API=/\/api\/v4\//;export const isApi=e=>API.test(e);
+- assets/a.js | const m=`expected ${a}<${b}`,re=/\/api\/v4\//;
+- assets/a.js | throw Error(`index<n${i}`);var r=/\/x\//;
+
+== J96 | A | Navigation miss with an ordinary idiom: a scheme written at run time before a fixed outside host (`${s}://evil.example`, `http${s}://evil.example`, `s+"://evil.example"`) is not read
+> a host whose first label a substitution writes is built at run time: class B
++ assets/a.js https://evil.example | jsx("a",{href:`${s}://evil.example/x`,children:"go"})
++ assets/a.js https://evil.example | window.location.href=`${secure?"https":"http"}://evil.example/login`;
++ assets/a.js https://evil.example | window.location.href=(secure?"https":"http")+"://evil.example/login";
++ assets/a.js https://evil.example | location.href=`http${secure?"s":""}://evil.example/x`;
++ assets/a.js https://evil.example | location.assign((p?"https":"http")+"://evil.example/cb")
++ assets/a.js https://evil.example | jsx("form",{action:`${proto}://evil.example/submit`,method:"post"})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`0;url=${s}://evil.example/`})
+- assets/a.js | window.location.href=`https://${tenant}.evil.example/authorize`
+
+== J97 | A | Two navigation twins of what this commit covers still pass: a tag name joined with `+` (the minifier's own output), and a run-time refresh without `url=`
+> a bare host with no URL is not what the check reads: class B
++ assets/a.js https://evil.example | e.innerHTML="<"+t+" href=//evil.example/x>go";
++ assets/a.js https://evil.example | e.innerHTML=`<`+t+` href=//evil.example/x>go`;
++ assets/a.js https://evil.example | e.innerHTML="<".concat(t," href=//evil.example/x>go");
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:n+";//evil.example/"})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${n};//evil.example/`})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:`${n}0;url=//evil.example/`})
++ assets/a.js https://evil.example | jsx("meta",{httpEquiv:"refresh",content:[n,"url=//evil.example/"].join(";")})
+- assets/a.js | window.location.hostname="evil.example"
+
+== J98 | C | The new list and refresh guards refuse some honest text: a sample line with a `//comment`, a regular expression that ends in a quote, a variable named `url`
+- assets/a.js | const s="timeout: 30, //seconds";
+- assets/a.json | {"line":"retries: 3, //default"}
+- assets/a.js | const s="a, b, //c";
+- assets/a.js | t=f(/,"/,/\//.test(b))
+- assets/a.js | e.c=(/="/g,/\r\n/+c)
+- assets/a.js | function f(sep=",",url=/\/api\//){}
+- assets/a.js | var c="?:",url=/\/api\//.test(a)
+
+== J99 | W | The new timing cases fail under load: the head's own test failed 7 of 16 runs on this machine, the base's passed 6 of 6
+> no clock decides: the work is counted (scanWork), and only a hang timeout stands
+~ script none | ⟨10000×i.srcset=`${⟩0⟨10000×}`⟩
+~ script https://react.dev,https://evil.example | ⟨100×i.srcset=`⟨400×${a} 1x, ⟩`;⟩x=`⟨20000×/a.png 2x, //react.dev/b.png ⟩`;jsx("img",{srcSet:`${f(`a`)} 1x, //evil.example/b.png 2x`})
+
+== J100 | C | Samples: one real console build is still refused (`$FIN_API`), and the plan's Node verifier sample will be refused as server-only code
+> the plan's names pass and any other is refused (the steward's ruling 3(a)); an import in a guide's sample is text, never code
++ assets/keys.js setting-name | (0,Z.jsx)(w,{variant:`block`,label:`Try it`,value:`curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`});
+- assets/keys.js | (0,Z.jsx)(w,{variant:`block`,label:`Try it`,value:`curl "$FIN_API_URL/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`});
+- assets/guide.js | const s=`import { createHmac, timingSafeEqual } from "node:crypto";`;
+- guides/webhooks/index.html | <pre><code>import { createHmac, timingSafeEqual } from "node:crypto";</code></pre>
++ assets/a.js server-only | import{createHmac as h}from"node:crypto";
+
+== J101 | A | Regression: a written tag (`<a${c}`, `<${t}`) no longer reaches a later string or a nested template literal, so href, form action and src values written there are missed
++ assets/a.js https://evil.example | e.innerHTML=`<a${c}${h?` href=//evil.example/x`:``}>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=`<form${c}${p?` action=//evil.example/x`:``}>`;
++ assets/a.js https://evil.example | e.innerHTML=`<${t}`+(h?` href=//evil.example/x`:``)+`>`;
++ assets/a.js https://evil.example | e.innerHTML=`<a${c}`+` href=//evil.example/x>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=[`<a${c}`,` href=//evil.example/x>`].join(``);
++ assets/a.js https://evil.example | let h=`<a${c}`;h+=` href=//evil.example/x>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img${c}${s?` src=//evil.example/x.png`:``}>`;
++ assets/a.js https://evil.example | e.innerHTML=`<a class=x${h?` href=//evil.example/x`:``}>`;
+
+== J102 | C | New false positive: with `url=` no longer required, a regular expression after a string's closing quote and `,` or `;` is read as a refresh URL
+- assets/a.js | a=":",/\n/.test(b)&&c();
+- assets/a.js | x+="(";/\//.test(y)&&z();
+- assets/a.js | k="=",/\\/.test(q)&&r();
+- assets/a.js | p=e?"?":"&",/\//.test(u)&&v();
+- assets/a.js | w="+",/\r/.test(t)&&a();
+- assets/a.js | a.type="new";/\//.test(y)&&z();
+- assets/a.js | m="in";/\/\/cdn\.example\.com/.test(u)&&w();
+- assets/a.js | x="${";f(function(){a()},/\//.test(b));
+
+== J103 | C | New false positive: the run-time-scheme rule reads a regular expression after `"":` (a conditional's branch or a case label) as `https://` plus a host
+- assets/a.js | a=e?"":/\//.test(t);
+- assets/a.js | switch(k){case"x":/\//.test(y)&&z();break}
+- assets/a.js | a=e?`${b}`:/\//.test(t);
+- assets/a.js | a=e?"":/\/\/cdn\.example\.com\//.test(t);
+
+== J104 | A | Regression: the written-tag change stops reading href, form action and src after the tag's first template literal, including in the project minifier's output
++ assets/a.js https://evil.example | e.innerHTML=`<${t} class=${n}${r?` href=//evil.example/x`:``}>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<${t} class=x `+(n?`href=//evil.example/x`:``)+`>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<${t} title=`+n+` href=//evil.example/x>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<form${c} ${a?`action=//evil.example/s`:``}>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img${c} ${u?`src=//evil.example/x.png`:``}>`;
++ assets/a.js https://evil.example | let n=`<${t} `;n+=`href=//evil.example/x>`;
++ assets/a.js https://evil.example | [`<${t}`,`href=//evil.example/x>`].join(` `)
+
+== J105 | C | New false positive: the run-time scheme path treats a closing quote before `:` as a URL start, so a regex after a quoted key, a ternary branch or a case label is refused
+- assets/a.js | export const R={"cdn-host":/\/\/cdn\.example\.org\//};
+- assets/a.js | function f(e,t){return e?`a`:/\/\/cdn\.example\.org\//.test(t)}
+- assets/a.js | const P={"you-tube":/\/\/www\.youtube\.com\/embed\//};
+- assets/a.js | switch(x){case"a":/\/\/a\.b\.c\//.test(y)&&f()}
+
+== J106 | C | The refresh read without `url=` (and the srcset read-back over a substitution) refuses code-generation strings and a `${` held in a plain string
+- assets/a.js | x=code+";//eslint-disable-line";
+- assets/a.js | x=`${code};//eslint-disable-line`;
+- assets/a.js | x=code+"; //@ts-ignore";
+- assets/a.js | x=`let a=${v};//TODO`;
+- assets/a.js | o={k:"${"},/\/\/x\.y/.test(d)
+- assets/a.js | f({a:"${"}, //cdn.example.com⟨NL⟩)
+
+== J107 | A | Class A miss: a partial scheme joined with + is passed (`p+"s://evil.example/x"`, `"http"+"s://evil.example/x"`)
+> a placeholder written in letters (`"SCHEME://host"`) cannot be told from a scheme the text fixes: class B
++ assets/a.js https://evil.example | a.href=p+"s://evil.example/x";
++ assets/a.js https://evil.example | a.href=h+"ttps://evil.example/x";
++ assets/a.js https://evil.example | a.href=f()+"s://evil.example/x";
++ assets/a.js https://evil.example | fetch("http"+"s://evil.example/x");
++ assets/a.js https://evil.example | fetch(`http`+`s://evil.example/x`);
++ assets/a.js https://evil.example | fetch('htt'+'ps://evil.example/x');
++ assets/a.js https://evil.example | a.href=`${p}s://evil.example/x`;
+- assets/a.js | a.href="SCHEME://evil.example/x".replace("SCHEME",s);
+- assets/a.js | x='a xhttps://evil.example';y="mongodb://db.example.com:27017/d";
+
+== J108 | C | Class C: any identifier containing 'refresh' counts as a refresh key, so the ruled code-generation strings are refused near one
+- assets/a.js | refreshToken(),x=code+";//eslint-disable-line";
+- assets/a.js | const onRefresh=()=>{};x=code+"; //TODO";
+- assets/a.js | function refresh(){}x=`${code};//eslint-disable-line`;
+- assets/a.js | jsx("meta",{httpEquiv:"refresh",⟨70×k:0,⟩content:`${n}; //intranet/x`})
++ assets/a.js https://intranet | jsx("meta",{httpEquiv:"refresh",content:`${n}; //intranet/x`})
+
+== J109 | A | Class A miss: a partial scheme at the start of a joined string is treated as a fixed scheme (`p+"s://host"`, `"http"+"s://host"`)
++ assets/a.js https://evil.example | a.href=p+"s://evil.example/x";
++ assets/a.js https://evil.example | location.href=proto+"s://evil.example/login";
++ assets/a.js https://evil.example | a.href=p+'s://evil.example/x';
++ assets/a.js https://evil.example | a.href=p+`s://evil.example/x`;
++ assets/a.js https://evil.example | fetch("http"+"s://evil.example/x")
++ assets/a.js https://evil.example | fetch("htt"+"ps://evil.example/x")
++ assets/a.js https://evil.example | fetch(`http`+`s://evil.example/x`)
++ assets/a.js https://evil.example | a.href=`${p}s://evil.example/x`
+- assets/a.js | u=x+"git+https://github.example/a.git";v="see "+"chrome://policy";
+
+== J110 | A | Class A miss: stringOf judges the string by the nearest raw quote of any kind, so `://host` after an apostrophe or an inner quoted attribute is not read
++ assets/a.js https://evil.example | a.href="Don't go to %s://evil.example/x";
++ assets/a.js https://evil.example | a.href="it's {scheme}://evil.example/x";
++ assets/a.js https://evil.example | a.href=`it's {scheme}://evil.example/x`;
++ assets/a.js https://evil.example | e.innerHTML=`<a title="x" href=%s://evil.example/x>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML="<a title='x' href={scheme}://evil.example/x>go</a>";
++ assets/a.js https://evil.example | a.href="%s://evil.example/x";
++ assets/a.js https://evil.example | e.innerHTML='<a href="%s://evil.example/x">';
+
+== J111 | W | The new joined-reads pass is O(n x MAX_SUBSTITUTION): about 930 visits per character, against the tests' own linear bound of 64
+~ script none | ⟨100000×"://"+(⟩
+~ script none | ⟨100000×"https://"+(⟩
+~ script none | ⟨100000×"https://"+(a?"x":⟩
+~ script https://x.y,https://z.w | ⟨30000×u="https://"+(a?"x.y":"z.w")+"/p";⟩
+
+== J112 | C | Class C: a literal choice joined to a run-time host is reported as an origin, because choose() drops readAuthority's `built` mark
+- assets/a.js | location.href=`https://${p?"":"staging."}${host}`;
+- assets/a.js | location.href=`https://${e?"a":"b"}${host}`;
+- assets/a.js | location.href="https://"+(e?"staging.":"")+host;
+- assets/a.js | location.href=`https://${p?"":""}${host}`;
+- assets/a.js | location.href="https://"+(p?"":"")+host;
+
+== J113 | C | Class C: 'a refresh key in reach' matches any `refresh` substring, so code-generation comments near `refreshToken`, `onRefresh` or `$RefreshReg$` are still refused
+- assets/a.js | const r=e.refreshToken;x=code+";//eslint-disable-line";
+- assets/a.js | function onRefresh(){}x=`${code};//TODO`;
+- assets/a.js | i.refetchOnRefresh=!0,x=code+"; //@ts-ignore";
+- assets/a.js | $RefreshReg$(a,"App");x=`let a=${v};//noop`;
++ assets/a.js https://intranet | jsx("meta",{httpEquiv:"refresh",content:`${n}; //intranet/x`})
+
+== J114 | C | Class C fix with no test: the raw-slashes guard on the `}` context (a regex right after a `}`) can be removed with every test still passing
+- assets/a.js | x="${";if(a){b()}/\/\/cdn\.example\.com\//.test(c)&&f();
+- assets/a.js | x='${';for(;;){}/\/\/cdn\.example\.com\//.test(c);
+- assets/a.js | x="${";function f(){return 1}/\/\/cdn\.example\.com\//.test(c);
+
+== J115 | A | Class A (navigation), the written-tag regression is only half undone: an optional attribute right after a tag's name still passes, in the minifier's own output
++ assets/a.js https://evil.example | e.innerHTML=`<a${t?` href=//evil.example/x`:``}>go</a>`
++ assets/a.js https://evil.example | e.innerHTML=`<img${t?` src=//evil.example/x.png`:``}>`
++ assets/a.js https://evil.example | e.innerHTML=`<form${t?` action=//evil.example/s`:``}>`
++ assets/a.js https://evil.example | e.innerHTML=`<button${t?` formaction=//evil.example/s`:``}>`
++ assets/a.js https://evil.example | e.innerHTML=`<video${t?` poster=//evil.example/p.png`:``}>`
++ assets/a.js https://evil.example | e.innerHTML=`<a${t?` href=//evil.example/x`:``} hidden>`
++ assets/a.js https://evil.example | e.innerHTML=`<a${h?" href=//evil.example/x":""}>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=`<a${h?' href=//evil.example/x':''}>go</a>`;
+
+== J116 | A | Class A: literal hosts joined to or chosen after a fixed scheme are read only where the URL starts at its string's own opening quote; in markup a string holds they pass
++ assets/a.js https://app.evil.example https://staging.evil.example | e.innerHTML=`<a href="https://`+(t?`app.evil.example`:`staging.evil.example`)+`/login">Sign in</a>`
++ assets/a.js https://app.evil.example https://staging.evil.example | function f(e){return`<form action=https://`+(e?`app.evil.example`:`staging.evil.example`)+`/s method=post>`}
++ assets/a.js https://app.evil.example https://staging.evil.example | function f(e){return`url(https://`+(e?`app.evil.example`:`staging.evil.example`)+`/p.png)`}
++ assets/a.js https://app.evil.example https://staging.evil.example | function f(e){return`Open https://`+(e?`app.evil.example`:`staging.evil.example`)+` to go on`}
++ assets/a.js https://evil.example | e.innerHTML='<a href="https://'+"evil.example"+'/login">go</a>';
++ assets/a.js https://cdn1.evil.example https://cdn2.evil.example | function f(e){return`//${e?`cdn1.evil.example`:`cdn2.evil.example`}/x.js`}
+
+== J117 | A | Class A: a host concatenated from a chosen literal and a literal, inside the substitution or the brackets, passes (rolldown output)
++ assets/a.js https://app.evil.example https://staging.evil.example | function f(e){return fetch(`https://${(e?`app`:`staging`)+`.evil.example`}/login`)}
++ assets/a.js https://app.evil.example https://staging.evil.example | function f(e){return fetch(`https://`+((e?`app`:`staging`)+`.evil.example`)+`/login`)}
+
+== J118 | A | Class A: a tag whose name is joined by a list or by `+=` is never opened; only `+` right after the `<` string counts
++ assets/a.js https://evil.example | function f(e){return[`<`,e,` href=//evil.example/x>go</`,e,`>`].join(``)}
++ assets/a.js https://evil.example | function f(e){let t=`<`;return t+=e,t+=` href=//evil.example/x>go`,t}
++ assets/a.js https://evil.example | e.innerHTML="<".concat(t," href=//evil.example/x>go");
+
+== J119 | A | Class A: `://host` after a placeholder is missed when the string holds another quote character before it (an attribute's quote, an apostrophe)
++ assets/a.js https://evil.example | e.innerHTML=`<a class="x" href={scheme}://evil.example/x>go</a>`.replace(`{scheme}`,t)
++ assets/a.js https://evil.example | e.innerHTML=fmt(`<a class="btn" href=%s://evil.example/x>go</a>`,t)
++ assets/a.js https://evil.example | e.href=fmt(`Can't open %s://evil.example/x`,t)
++ assets/a.js https://evil.example | e.innerHTML='<a class="'+c+'" href={scheme}://evil.example/x>go</a>';
++ assets/a.js https://evil.example | a.href=t("it's {scheme}://evil.example/x");
+- assets/a.js | x={"key":/\/\/x\//};
+
+== J120 | A | Class A: a partial scheme joined by `+` (`p+"s://host"`) and a formatter's tail (`%(scheme)s://host`) are read as a scheme the text fixes, and pass
+> a placeholder written in letters (`"SCHEME://host"`) cannot be told from a scheme the text fixes: class B
++ assets/a.js https://evil.example | e.href=(t?`ws`:`http`)+`s://evil.example/x`
++ assets/a.js https://evil.example | e.href=t+`s://evil.example/x`
++ assets/a.js https://evil.example | a.href="".concat(p,"s://evil.example/x");
++ assets/a.js https://evil.example | a.href=[p,"s://evil.example/x"].join("");
++ assets/a.js https://evil.example | a.href="http"+"s://evil.example/x";
++ assets/a.js https://evil.example | t.href=e(`%(scheme)s://evil.example/x`,{scheme:n})
+- assets/a.js | a.href="SCHEME://evil.example/x".replace("SCHEME",s);
+- assets/a.js | x="chrome://inspect";y="git+https://github.example/x/y.git";z="mongodb://db.example.com:27017/d";
+
+== J121 | C | Class C, new in this range: a chosen or joined literal that is only a host's START is refused when the rest is built at run time, and `${...}` text is reported as a literal origin
+- assets/a.js | function f(e,t){return`https://${e===`api`?`api`:`console`}.${t.zone}/`}
+- assets/a.js | function f(e,t){return`https://`+(e?`www.`:``)+t}
+- assets/a.js | function f(e,t,n){return`https://${e?`[`:``}${t}${e?`]`:``}:${n}`}
+- assets/a.js | function f(e,t){return`https://${e?`staging.`:``}${t}`}
+- assets/a.js | fetch(`https://api.${zone}/x`);
++ assets/a.js https://evil.example https://staging.evil.example | location.href=`https://${p?"":"staging."}evil.example/x`;
+
+== J122 | C | Class C: `://www.` in ordinary URL-normalising code is refused as a third-party origin (a trailing dot makes a single label a network host); the placeholder form is new in this range
+- assets/a.js | function f(e){return e.replace(/^(\w+):\/\//,`$1://www.`)}
+- assets/a.js | function f(e){return e.replace(`://www.`,`://`)}
+- assets/a.js | function f(e){return e.includes(`://www.`)}
+- assets/a.js | u=p+"://www."+h;w=e.replace("://m.","://");
++ assets/a.js https://evil.example | x=p+"://evil.example/x";
++ assets/a.js https://evil.example | x="{scheme}://evil.example/x";
++ assets/a.js https://evil.example | a.href="\\\\evil.example\\x";
+
+== J123 | R | Coverage, class C guards: two of the new restrictions can be removed with all 42 tests green, and each removal refuses honest code
+- assets/a.js | x="<"+t;y=/\/\/x\.y/.test(s);
+- assets/a.js | x=`<`+t;y=/\/\/x\.y/.test(s);
+- assets/a.js | x="${";if(a){b()}/\/\/cdn\.example\.org\//.test(s)&&c();
+- assets/a.js | x='${';function f(){}/\/\/cdn\.example\.org\//.test(s)&&c();
+~ script https://x.y | u="https://x.y"⟨100000×+""⟩;
++ assets/a.js https://evil.example | e.innerHTML=`<a${c} data-tracking-disabled hidden href=//evil.example/x>go</a>`;
+
+== J124 | R | Record, no action on this branch: what was confirmed as ruled, the real-build count, and the lane's `$FIN_API`
+> SAMPLE_NAMES only: `$FIN_API` in a sample, in a script or in markup, is refused
++ assets/a.js setting-name | const s="curl $FIN_API/v4/x";
++ guides/a/index.html setting-name | <pre><code>curl "$FIN_API/v4/x"</code></pre>
+- assets/a.js | const s="curl $FIN_API_URL/v4/x -H \"Authorization: Bearer $FIN_KEY\"";
+
+== J125 | C | Class C regression: markupAfter's new nested-quote rule opens a written tag at a plain string's "<${", so a regex later in the code is read as a URL
+- assets/a.js | export function f(e){let t="<${",n=/\/\/cdn\.example\.com\//;return e&&(t=e,n=/x/),[t,n]}
+- assets/a.js | function f(s){var x='<${',y=/\/\/cdn\.example\.com\//.test(s);return x+y}
++ assets/a.js https://evil.example | e.innerHTML=`<a${t?` href=//evil.example/x`:``}>`
+
+== J126 | R | The refresh-key ruling's protections are not pinned by tests: REFRESH_KEY's lookahead and its `=` arm can each be removed with all tests green
+- assets/a.js | const r=e["refresh_token"];x=code+";//eslint-disable-line";
+- assets/a.js | localStorage.getItem("refreshToken");x=`${code};//TODO`;
++ assets/a.js https://intranet | e.innerHTML=`<meta http-equiv=refresh content=${n};//intranet/x>`;
++ assets/a.js https://intranet | e.innerHTML=`<meta http-equiv=refresh content=`+n+`;//intranet/x>`;
++ assets/a.js https://intranet | location.href="https://intranet:"+p+"/x"
++ assets/a.js https://x.evil.example https://y.evil.example | location.href="https://"+(a?"x.evil.example":"y.evil.example")
+
+== J127 | W | literalChoice's cross product is not counted as work, and its MAX_CHOICES guard is unpinned
+~ script none | u="https://"+(⟨22×(c?"a":"b")+⟩".evil.example");
+~ script none | u="https://"+(⟨40×(c?"a":"b")+⟩".evil.example");
+
+== J128 | C | REFRESH_KEY treats any quoted word "refresh" as a refresh key, so a code generator's comment near a "Refresh" label is still refused (class C)
+- assets/a.js | jsx("button",{onClick:r,children:"Refresh"}),x=code+";//eslint-disable-line";
+- assets/a.js | jsx("button",{onClick:r,children:"Refresh now"}),x=`${code};//TODO`;
+- assets/a.js | dispatch({type:"refresh"});x=code+"; //@ts-ignore";
+- assets/a.js | e.on("refresh",f);x=`let a=${v};//noop`;
+- assets/a.js | let refresh=!1;x=code+";//eslint-disable-line";
+- assets/a.js | x=a?refresh:b,y=code+";//eslint-disable-line";
++ assets/a.js https://intranet | m.httpEquiv="refresh";m.content=n+";//intranet/x";
++ assets/a.js https://intranet | m.setAttribute("http-equiv","refresh"),m.content=n+";//intranet/x";
+
+== J129 | W | The joins' new fan-out bounds (MAX_CHOICES in literalChoice and in choose) are not pinned: the work count does not see the fan-out, and removing both leaves every test green
+~ script none | u=`https://${⟨20×(a?"x":"y")+⟩"x"}.evil.example/`;
+~ script any | u="https://"+⟨3×((a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y"))+⟩".evil.example/";
+~ script any | u="https://"+⟨4×((a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y")+(a?"x":"y"))+⟩".evil.example/";
+
+== J130 | R | hostStart's port exception is untested
++ assets/a.js https://intranet | fetch(`https://intranet:${p}/x`)
++ assets/a.js https://intranet | fetch("https://intranet:"+p+"/x")
++ assets/a.js https://intranet:8443 | fetch("https://intranet:8443"+p)
+
+== J131 | A | [A] A host chosen between literals after a protocol-relative start passes: href, src, action, refresh, url( and after location.protocol
+> a host joined to two slashes counts only where a browser reaches it on the network
++ assets/a.js https://app.evil.example https://staging.evil.example | export function go(e){location.href=`//`+(e?`app.evil.example`:`staging.evil.example`)+`/login`}
++ assets/a.js https://app.evil.example https://staging.evil.example | export function link(e,t){e.href=`//${t?`app.evil.example`:`staging.evil.example`}/login`}
++ assets/a.js https://cdn.evil.example https://cdn-staging.evil.example | e.innerHTML=`<img src=//`+(t?`cdn.evil.example`:`cdn-staging.evil.example`)+`/logo.png>`
++ assets/a.js https://app.evil.example https://staging.evil.example | e.innerHTML=`<a href="//`+(t?`app.evil.example`:`staging.evil.example`)+`/login">Sign in</a>`
++ assets/a.js https://app.evil.example https://staging.evil.example | e.innerHTML=`<form action=//${t?`app.evil.example`:`staging.evil.example`}/s method=post></form>`
++ assets/a.js https://api.evil.example https://api-staging.evil.example | fetch(location.protocol+`//`+(e?`api.evil.example`:`api-staging.evil.example`)+t)
++ assets/a.js https://app.evil.example https://staging.evil.example | e(`meta`,{httpEquiv:`refresh`,content:t+`;url=//`+(n?`app.evil.example`:`staging.evil.example`)+`/x`})
++ assets/a.js https://cdn.evil.example https://cdn-staging.evil.example | e.style.backgroundImage=`url(//`+(t?`cdn.evil.example`:`cdn-staging.evil.example`)+`/bg.png)`
+- assets/a.js | x="//"+(a?"eslint-disable":"ts-ignore")
+- assets/a.js | x="//"+(a?"div":"span")+"[@id]"
+- assets/a.js | x="//"+location.host
+
+== J132 | A | [A] Literal hosts chosen by ?: after a fixed scheme pass when the condition starts with a string literal or holds a regular expression with `?` or `:`
++ assets/a.js https://sw.evil.example https://www.evil.example | fetch(`https://`+(`serviceWorker`in navigator?`sw.evil.example`:`www.evil.example`)+e)
++ assets/a.js https://m.evil.example https://www.evil.example | location.href=`https://${`ontouchstart`in window?`m.evil.example`:`www.evil.example`}/login`
++ assets/a.js https://eu.evil.example https://us.evil.example | fetch(`https://`+(`eu,uk,de`.includes(e)?`eu.evil.example`:`us.evil.example`)+t)
++ assets/a.js https://dev-api.evil.example https://api.evil.example | fetch(`https://`+(/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(location.host)?`dev-api.evil.example`:`api.evil.example`)+e)
++ assets/a.js https://api.evil.example https://dev-api.evil.example | fetch(`https://`+(/^(staging\.)?console\./.test(location.hostname)?`api.evil.example`:`dev-api.evil.example`)+e)
++ assets/a.js https://app.evil.example https://staging.evil.example | location.href=`https://`+(/^https:$/.test(location.protocol)?`app.evil.example`:`staging.evil.example`)+`/login`
++ assets/a.js https://app.evil.example https://staging.evil.example | location.href=`https://${/^https?:$/.test(location.protocol)?`app.evil.example`:`staging.evil.example`}/login`
++ assets/a.js https://eu.evil.example https://us.evil.example | location.href=`https://`+(e===`${t}-eu`?`eu.evil.example`:`us.evil.example`)+`/login`
++ assets/a.js https://sw.evil.example https://www.evil.example | fetch(`https://`+(navigator.serviceWorker?`sw.evil.example`:`www.evil.example`)+e)
++ assets/a.js https://app.evil.example https://staging.evil.example | fetch(`https://`+(e===`production`?`app.evil.example`:`staging.evil.example`)+t)
+
+== J133 | C | [C] The refresh key still counts `refresh` where it is no http-equiv value and no property name: any quoted "refresh", and a bare name after `=`
+- assets/a.js | e.on("refresh",f);x=code+";//eslint-disable-line";
+- assets/a.js | d({type:"refresh"});x=code+";//eslint-disable-line";
+- assets/a.js | d({type:"refresh"});x=`${code};//eslint-disable-line`;
+- assets/a.js | switch(a){case"refresh":x=code+";//eslint-disable-line"}
+- assets/a.js | y=refresh(),x=code+";//eslint-disable-line";
+- assets/a.js | if(a==refresh)x=code+";//eslint-disable-line";
+- assets/a.js | d({type:"reload"});x=code+";//eslint-disable-line";
++ assets/a.js https://intranet | m.httpEquiv="refresh";m.content=n+";//intranet/x";
++ assets/a.js https://intranet | jsx("meta",{httpEquiv:"refresh",content:n+";//intranet/x"})
++ assets/a.js https://intranet | e.innerHTML=`<meta http-equiv=refresh content=`+n+`;//intranet/x>`;
++ assets/a.js https://intranet | e.innerHTML=`<meta http-equiv="refresh" content="`+n+`;//intranet/x">`;
++ assets/a.js https://intranet | o={refresh:n+";//intranet/x"};
+
+== J134 | R | [coverage] The two ruled fixes are only partly pinned: the http and wss scheme ends, and a longer name after a quote, have no test
++ assets/a.js https://evil.example | fetch("htt"+"p://evil.example/x")
++ assets/a.js https://evil.example | fetch(a+"tp://evil.example/x")
++ assets/a.js https://evil.example | fetch(h+"ttp://evil.example/x")
++ assets/a.js https://evil.example | new WebSocket("w"+"ss://evil.example/s")
++ assets/a.js https://evil.example | fetch(p+"S://evil.example/x")
+- assets/a.js | b={grant_type:"refresh_token"};x=code+";//eslint-disable-line";
+- assets/a.js | k="refreshToken";x=code+";//eslint-disable-line";
+- assets/a.js | k="refresh-token";x=code+";//eslint-disable-line";
++ assets/a.js https://intranet | e.innerHTML="<meta http-equiv=refresh content="+n+";//intranet/x>";
++ assets/a.js https://intranet | e.innerHTML="<meta http-equiv=\"refresh\" content=\""+n+";//intranet/x\">";
+
+== J135 | W | [coverage] Two bounds that keep the joins' work linear are pinned by no test, and the work they bound is not counted
+~ script none | u="https://"+(⟨22×(a?"x":"y")+⟩".e.example");
+~ script none | u=`https://⟨6000×${a?"x":"y"}⟩.e.example/`;
++ assets/a.js https://intranet:8443 | fetch("https://intranet:8443"+p)
+
+== F1.0 | C | Regression: the relaxed first srcset piece accepts a closing quote, so a regex literal after a comma is reported as a third-party origin
+- assets/a.js | n=e.indexOf("x"),/\//.test(n)&&f();
+- assets/a.js | n=e.indexOf(`x`),/\//.test(n)&&f();
+- assets/a.js | let t=e.trim(),n=t.split(`\n`),/\r/.test(t)&&n.pop();
+- assets/a.js | t=e.replace(`a`,`b`),/\/\/cdn\.example\.com\//.test(t)&&g(t);
+- assets/a.js | if(C.shift(),/\n/.test(C[0])){}
+
+== F1.1 | A | Open in the class this commit claims to close: code between two strings that writes an unquoted value, with a `>` in it, hides a later src when the strings are backtick-quoted (as the minifier prints them)
++ assets/a.js https://evil.example | e.innerHTML=`<img width=`+(w>0?w:100)+` src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img width=`+(w>0?w:100)+` srcset=//evil.example/p.png>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img alt=`+a.map(e=>e.n).join(``)+` src=https://react.dev\x27@evil.example/p.png>`;
+
+== F1.2 | A | Regression: a later srcset candidate is missed when an earlier candidate's descriptor is built at run time (`${dpr}x`) or misspelled
++ assets/a.js https://evil.example | jsx("img",{srcSet:`/a.png 1x, /b.png ${x}x, //evil.example/c.png 3x`})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:`${base}/a.png ${dpr}x, //cdn.evil.example/b.png 2x`})
++ assets/a.js https://cdn.evil.example | jsx("img",{srcSet:`${a} ${w}w, //cdn.evil.example/x.png 800w`})
++ assets/a.js https://evil.example | jsx("img",{srcSet:"/a.png 2X, //evil.example/b.png 2x"})
++ assets/a.js https://evil.example | i.setAttribute("srcset","/a.png 100px, //evil.example/b.png 200w")
+
+== F1.3 | A | Piece readings ignore the text the code between two strings writes, so a value built by code hides the next piece's first attribute (two quote kinds)
++ assets/a.js https://cdn.evil.example | e.innerHTML="<img width="+(w>0?w:100)+' src=//cdn.evil.example/x.png alt="y">'
++ assets/a.js https://evil.example | e.innerHTML="<a title="+(n>0?c:x)+' href=//evil.example/x data-k="y">go</a>'
++ assets/a.js https://cdn.evil.example | e.innerHTML="<img width="+(w>0?w:100)+` src=//cdn.evil.example/x.png alt="${a}">`
+
+== F1.4 | C | Regression (false finding): the new srcset shape test reads ordinary minified code as a srcset list, so honest bundles are refused
+- assets/a.js | if(C[0]===""){if(C.shift(),/\n/.test(C[0])){let y=1}}
+- assets/a.js | k(0,k(0,t,"'",'"'),/\\([^\da-f])/gi,"$1")
+- assets/a.js | x="^([^\\\\s].*)\\\\((\\\\d+,\\\\d+)";
+- assets/a.js | a=b.replace("x","y"),/\//.test(a)&&c();
+- assets/a.js | m=[[q("a"),/\/v1\//],[q("b"),/\/v2\//]]
+- assets/a.js | routes.push(route("about"), //about page⟨NL⟩0)
+
+== R2.A1 | C | A regex literal after a string and a colon is refused as a third-party origin (regression from fix 2)
+- assets/a.js | const e={"text/html":/\/index\.html$/,"application/json":/\/data\.json$/,"image/svg+xml":/\/icons\.svg$/}
+- assets/a.js | const e=e=>e?`strict`:/\/app\.css$/,t={"a-b":/\\d+\.\d+/}
+- assets/a.js | switch(a){case"x":/\/a.b/.test(c)&&f();break}
+- assets/a.js | const r=e?``:/\/\/cdn.jsdelivr.net/;
+
+== R2.A2 | A | An unquoted href is missed when the tag's name ends at a substitution and its attributes are in the next string (regression, navigation)
++ assets/a.js https://evil.example | e.innerHTML=`<a${t}`+n(e)+` href=//evil.example/x>go</a>`
++ assets/a.js https://evil.example | let r=`<a${t}`;n&&(r+=` data-x=${n}`),r+=` href=//evil.example/x>go</a>`,e.innerHTML=r
++ assets/a.js https://evil.example | [`<a${c}`,` href=//evil.example/x>`].join("")
++ assets/a.js https://evil.example | e.innerHTML=`<a${c}`+" href=//evil.example/x>go</a>"
+
+== R2.A3 | C | The real console build on origin/sat/api-keys is refused (setting-name FIN_API)
+> the steward ruled (a): the lane's sample uses $FIN_API_URL, and SAMPLE_NAMES stays as it is
++ assets/keys.js setting-name | x={value:'curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"'}
+- assets/keys.js | x={value:'curl "$FIN_API_URL/v4/whoami" -H "Authorization: Bearer $FIN_KEY"'}
+
+== R2.A4 | W | The timing tests keep wall-clock limits, and fix 2 added one more
+> the work is counted, never timed: load slows a run but never adds to its count
+~ script none | ⟨30000×for(let e=0;e<t.length;e++){const n=/\/assets\//;a=>b}⟩
+~ script https://react.dev | x=`⟨20000×/a.png 2x, //react.dev/b.png ⟩`
+
+== R2.A5 | A | Literal hosts chosen by a condition after a fixed scheme pass
+> a substitution that is a plain identifier or a call stays class B
++ assets/a.js https://app.evil.example https://staging.evil.example | window.location.href=`https://${e?`app.evil.example`:`staging.evil.example`}/login`
++ assets/a.js https://app.evil.example https://staging.evil.example | window.location.href=`https://`+(e?`app.evil.example`:`staging.evil.example`)+`/login`
+- assets/a.js | location.href=`https://${host}/login`
+- assets/a.js | location.href=`https://${f()}/login`
+
+== R2.A6 | A | A literal host after a scheme written by a placeholder or formatter passes; two refresh edge shapes pass
+> (i) `://host` with anything before it, anywhere in a literal's text; (ii) a protocol-relative `//host` only where a URL starts
++ assets/a.js https://evil.example | a.href="{scheme}://evil.example/x".replace("{scheme}",s);
++ assets/a.js https://evil.example | a.href=fmt("%s://evil.example/x",s);
++ assets/a.js https://evil.example | a.href=`${p}s://evil.example/x`;
++ assets/a.js https://evil.example | m.content=`${n}0; //evil.example/x`;
++ assets/a.js https://evil.example | m.content=[n,"url=//evil.example/x"].join(";");
+- assets/a.js | x="a //evil.example/x b";
+
+== F2.code.0 | A | Regression: the written-tag change stops reading href, form action and src after the tag's first template literal, including in the project minifier's output
++ assets/a.js https://evil.example | e.innerHTML=`<${t} class=${n}${r?` href=//evil.example/x`:``}>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<${t} class=x `+(n?`href=//evil.example/x`:``)+`>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<${t} title=`+n+` href=//evil.example/x>go</${t}>`
++ assets/a.js https://evil.example | e.innerHTML=`<form${c} ${a?`action=//evil.example/s`:``}>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img${c} ${u?`src=//evil.example/x.png`:``}>`;
++ assets/a.js https://evil.example | let n=`<${t} `;n+=`href=//evil.example/x>`;
++ assets/a.js https://evil.example | [`<${t}`,`href=//evil.example/x>`].join(` `)
+
+== F2.code.1 | C | New false positive: the run-time scheme path treats a closing quote before `:` as a URL start, so a regex after a quoted key, a ternary branch or a case label is refused
+- assets/a.js | export const R={"cdn-host":/\/\/cdn\.example\.org\//};
+- assets/a.js | function f(e,t){return e?`a`:/\/\/cdn\.example\.org\//.test(t)}
+- assets/a.js | const P={"you-tube":/\/\/www\.youtube\.com\/embed\//};
+- assets/a.js | switch(x){case"a":/\/\/a\.b\.c\//.test(y)&&f()}
+
+== F2.code.2 | C | The refresh read without `url=` (and the srcset read-back over a substitution) refuses code-generation strings and a `${` held in a plain string
+- assets/a.js | x=code+";//eslint-disable-line";
+- assets/a.js | x=`${code};//eslint-disable-line`;
+- assets/a.js | x=code+"; //@ts-ignore";
+- assets/a.js | x=`let a=${v};//TODO`;
+- assets/a.js | o={k:"${"},/\/\/x\.y/.test(d)
+- assets/a.js | f({a:"${"}, //cdn.example.com⟨NL⟩)
+
+== F2.security.0 | A | Regression: a written tag (`<a${c}`, `<${t}`) no longer reaches a later string or a nested template literal, so href, form action and src values written there are missed
++ assets/a.js https://evil.example | e.innerHTML=`<a${c}${h?` href=//evil.example/x`:``}>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=`<form${c}${p?` action=//evil.example/x`:``}>`;
++ assets/a.js https://evil.example | e.innerHTML=`<${t}`+(h?` href=//evil.example/x`:``)+`>`;
++ assets/a.js https://evil.example | e.innerHTML=`<a${c}`+` href=//evil.example/x>go</a>`;
++ assets/a.js https://evil.example | e.innerHTML=[`<a${c}`,` href=//evil.example/x>`].join(``);
++ assets/a.js https://evil.example | let h=`<a${c}`;h+=` href=//evil.example/x>`;
++ assets/a.js https://evil.example | e.innerHTML=`<img${c}${s?` src=//evil.example/x.png`:``}>`;
+
+== F2.security.1 | C | New false positive: with `url=` no longer required, a regular expression after a string's closing quote and `,` or `;` is read as a refresh URL
+- assets/a.js | a=":",/\n/.test(b)&&c();
+- assets/a.js | x+="(";/\//.test(y)&&z();
+- assets/a.js | k="=",/\\/.test(q)&&r();
+- assets/a.js | p=e?"?":"&",/\//.test(u)&&v();
+- assets/a.js | w="+",/\r/.test(t)&&a();
+- assets/a.js | a.type="new";/\//.test(y)&&z();
+- assets/a.js | m="in";/\/\/cdn\.example\.com/.test(u)&&w();
+- assets/a.js | x="${";f(function(){a()},/\//.test(b));
+
+== F2.security.2 | C | New false positive: the run-time-scheme rule reads a regular expression after `"":` (a conditional's branch or a case label) as `https://` plus a host
+- assets/a.js | a=e?"":/\//.test(t);
+- assets/a.js | switch(k){case"x":/\//.test(y)&&z();break}
+- assets/a.js | a=e?`${b}`:/\//.test(t);
+- assets/a.js | a=e?"":/\/\/cdn\.example\.com\//.test(t);
+
+== S2x.4 | C | The srcset bracket pass reads code text as a srcset list (it came with class-B widening)
+- assets/a.js | x="f(x), //note";
+- assets/a.js | x=`${name}(${args}), //eslint-disable-line`;
+- assets/a.js | x="f(x), //cdn.example.org/a";
+
+== S2x.5 | A | A URL split at the scheme into two literals passes; poster and formaction have no pinning test
++ assets/a.js https://evil.example | fetch("https://"+"evil.example/x")
++ assets/a.js https://evil.example | fetch(`https://`+`evil.example/x`)
++ index.html https://evil.example | <button formaction=//evil.example/x>go</button>
++ index.html https://evil.example | <video poster="//evil.example/p.png"></video>
++ assets/a.js https://evil.example | e.innerHTML='<video poster=//evil.example/p.png>';
++ assets/a.js https://evil.example | jsx("button",{formAction:"//evil.example/x"})
+
+== C2x.1 | A | Written-tag regression (same as R2.A2), with four rolldown outputs and a 1,904-shape grid (264 template forms regress, 66 href navigations)
++ assets/a.js https://evil.example | e.innerHTML=`<a${t} `+(n?`href=//evil.example/y`:``)+`>go</a>`
++ assets/a.js https://evil.example | e.innerHTML=`<a${t} title=`+n+` href=//evil.example/w>go</a>`
++ assets/a.js https://evil.example | e.innerHTML=`<a${t} ${n?`href=//evil.example/v`:``}>go</a>`
++ assets/a.js https://evil.example | e.innerHTML=`<${t} `+(n?`src=//evil.example/z.png`:``)+`>`
+
+== C2x.3 | W | Wall-clock limits; and the srcset read-back's linear-time early stop is caught only by a wall-clock limit
+~ script https://react.dev,https://evil.example | x="⟨25000×/a.png, //react.dev/b.png, ⟩//evil.example/b.png 2x";
+~ script https://evil.example | x="⟨200000×/a.png, ⟩//evil.example/b.png 2x";
+
+== C2x.4 | R | Mutations the tests do not catch
+> a keyless list's candidate holds no bracket (the steward's item 8); a candidate of backslashes alone names a host only where it has a dot
+- assets/a.js | x="a(b, //evil.example/x";
+- index.html | <img srcset="\\evil\x.png 2x">
++ index.html https://evil.example | <img srcset="\\evil.example\x.png 2x">
++ index.html https://evil.example | <button formaction=//evil.example/x>go</button>
++ index.html https://evil.example | <video poster="//evil.example/p.png"></video>
+
+== C2x.6 | A | A tag whose name comes from a concatenation is never opened: ``e.innerHTML=`<`+t+` href=//evil.example/x>go`;`` passes at every head; rolldown prints exactly this shape from '<' + tag + ...
++ assets/a.js https://evil.example | e.innerHTML=`<`+t+` href=//evil.example/x>go`;
++ assets/a.js https://evil.example | e.innerHTML="<"+t+" href=//evil.example/x>go";
