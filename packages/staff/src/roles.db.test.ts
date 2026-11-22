@@ -4,14 +4,19 @@
 // names below otherwise, while a Mac sorts them by bytes and never shows the difference.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createStaffHarness, type StaffHarness, unique } from "../test/harness.ts";
+import { instrument, markSetup, timed, timeTests } from "../test/timing.ts";
 import { PREBUILT_ROLE_KEYS } from "./catalogue.ts";
 import { requireStaff } from "./require-staff.ts";
 import { listStaffRoles } from "./roles.ts";
 
 let h: StaffHarness;
 
+timeTests("src/roles.db.test.ts");
+
 beforeAll(async () => {
-  h = await createStaffHarness("sat04roles");
+  markSetup();
+  h = await timed("createStaffHarness", () => createStaffHarness("sat04roles"));
+  instrument(h);
 }, 120_000);
 
 afterAll(async () => {

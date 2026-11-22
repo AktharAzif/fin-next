@@ -13,6 +13,7 @@ import {
   stepped,
   unique,
 } from "../test/harness.ts";
+import { instrument, markSetup, timed, timeTests } from "../test/timing.ts";
 import { hashEnrolmentCode } from "./enrolment-codes.ts";
 import {
   addStaff,
@@ -24,6 +25,8 @@ import {
 import { requireStaff } from "./require-staff.ts";
 
 let h: StaffHarness;
+
+timeTests("src/members.db.test.ts");
 
 /**
  * An address as Postgres's `host(inet)` writes it back: lower case, no leading zeros, the longest
@@ -47,7 +50,9 @@ async function enrolled(label: string, roleKey: string): Promise<Member> {
 }
 
 beforeAll(async () => {
-  h = await createStaffHarness("sat04members");
+  markSetup();
+  h = await timed("createStaffHarness", () => createStaffHarness("sat04members"));
+  instrument(h);
   admin = await enrolled("admin", "admin");
 }, 120_000);
 
