@@ -17,9 +17,38 @@ import { resolveStaffRole } from "./catalogue.ts";
 import { memberForChange, takeStaffChangeLock } from "./lock.ts";
 import { changeStaffRole, refuseLastActiveAdmin, removeStaff } from "./members.ts";
 import type { UnitTx } from "./ports.ts";
-import { requireStaff } from "./require-staff.ts";
+import { requireStaff, type StaffActor } from "./require-staff.ts";
 
 type RouteFn = (tx: UnitTx, request: Request, context: RequestContext) => Promise<unknown>;
+/** What a request's guard (requireStaff) passes through before the action. */
+type Gate = (guard: Promise<StaffActor>) => Promise<StaffActor>;
+/** A route's work, given the gate its guard passes through. */
+type GatedRouteFn = (gate: Gate) => RouteFn;
+
+/** No wait: the guard's answer goes straight on (every request outside a race). */
+const open: Gate = (guard) => guard;
+
+/**
+ * Holds each of `n` raced requests just after its guard until every one has finished its own, so
+ * all of them reach the staff-change lock in flight together, which is what the races test. A
+ * request whose guard ran only after the other had committed would meet no lock: its sessions
+ * already ended by the change, it is refused at the guard as signed out (seen on GitHub's runner
+ * as `unauthenticated` where the loser re-reading itself inside the lock is `forbidden`). A guard
+ * that refuses counts as finished, so the others never wait for it.
+ */
+function together(n: number): Gate {
+  let finished = 0;
+  const all = Promise.withResolvers<void>();
+  return async (guard) => {
+    try {
+      return await guard;
+    } finally {
+      finished += 1;
+      if (finished === n) all.resolve();
+      await all.promise;
+    }
+  };
+}
 
 let h: StaffHarness;
 
@@ -87,13 +116,16 @@ async function activeAdmins(): Promise<number> {
 }
 
 async function race(
-  pairs: { who: Admin; request: { method: string; path: string }; fn: RouteFn }[],
+  pairs: { who: Admin; request: { method: string; path: string }; fn: GatedRouteFn }[],
 ) {
   const intents: string[] = [];
-  for (const pair of pairs) intents.push(await provedIntent(pair.who, pair.request, pair.fn));
+  for (const { who, request, fn } of pairs) {
+    intents.push(await provedIntent(who, request, fn(open)));
+  }
+  const gate = together(pairs.length);
   return Promise.allSettled(
     pairs.map((pair, i) =>
-      h.route(pair.who.browser, { ...pair.request, intent: intents[i] as string }, pair.fn),
+      h.route(pair.who.browser, { ...pair.request, intent: intents[i] as string }, pair.fn(gate)),
     ),
   );
 }
@@ -102,12 +134,13 @@ describe("the last Admin (§10.8)", () => {
   it("survives two concurrent demotions: exactly one passes", async () => {
     const [a, b] = await onlyActive(demoting);
     const demote =
-      (target: Admin): RouteFn =>
+      (target: Admin): GatedRouteFn =>
+      (gate) =>
       async (tx, req, ctx) =>
         changeStaffRole(
           h.deps,
           tx,
-          await requireStaff(h.realm, req, ctx, { permission: "staff.role" }),
+          await gate(requireStaff(h.realm, req, ctx, { permission: "staff.role" })),
           target.staffId,
           { roleKey: "viewer" },
         );
@@ -125,12 +158,13 @@ describe("the last Admin (§10.8)", () => {
   it("survives two concurrent removals: exactly one passes", async () => {
     const [a, b] = await onlyActive(removing);
     const remove =
-      (target: Admin): RouteFn =>
+      (target: Admin): GatedRouteFn =>
+      (gate) =>
       async (tx, req, ctx) =>
         removeStaff(
           h.deps,
           tx,
-          await requireStaff(h.realm, req, ctx, { permission: "staff.remove" }),
+          await gate(requireStaff(h.realm, req, ctx, { permission: "staff.remove" })),
           target.staffId,
         );
     const results = await race([
