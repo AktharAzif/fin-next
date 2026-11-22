@@ -134,14 +134,14 @@ export const CEREMONY_PATHS: ReadonlySet<string> = new Set([
 
 /**
  * A ceremony holds its person's row `FOR KEY SHARE`, from before anything reads their session or
- * credentials to its commit. Every change that removes a person's factors or ends their sessions
- * locks the same row first `FOR UPDATE`, the one mode that conflicts with the hold: a staff reset,
- * removal or role change inside the staff-change lock (§10.8), the operator's bootstrap reset
- * (§10.6), and the last-factor rule's removals (§6.7). So the two never overlap: either the change
- * waits for the ceremony to commit and then ends what it made, or the ceremony waits for the change
- * and then reads the person as the change left them, the credential gone and the session ended
- * (§11.4). Taken first, it also keeps either from waiting on a row the other holds (a passkey's
- * counter, a session).
+ * credentials to its commit. Every change that removes a person's factors, or ends their sessions
+ * because their access changed, locks the same row first `FOR UPDATE`, the one mode that conflicts
+ * with the hold: a staff reset, removal or role change inside the staff-change lock (§10.8), the
+ * operator's bootstrap reset (§10.6), and the last-factor rule's removals (§6.7). So the two never
+ * overlap: either the change waits for the ceremony to commit and then ends what it made, or the
+ * ceremony waits for the change and then reads the person as the change left them, the credential
+ * gone and the session ended (§11.4). Taken first, it also keeps either from waiting on a row the
+ * other holds (a passkey's counter, a session).
  *
  * Nothing else waits on the hold: neither another ceremony of the person, nor a foreign-key check,
  * nor the person's own routes, which read and renew their session first and only then write their
