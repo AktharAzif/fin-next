@@ -809,9 +809,9 @@ export async function keysOfMember(
  * someone rolls it, and its maker is the person whose act rolled it. An old key still inside a
  * roll's overlap (which the member may hold: they made it, or rolled it themselves just before)
  * already has its replacement, so its overlap is cut to end at once or within the hour, never
- * later than it would have; it is audited and emailed as a roll to that same replacement. Keys that
- * ended, or whose overlap already ends within the hour, are left as they are. Answers how many keys
- * it changed.
+ * later than it would have, as is any other key the edge accepts that names a replacement; it is
+ * audited and emailed as a roll to that same replacement. Keys that ended, or whose overlap already
+ * ends within the hour, are left as they are. Answers how many keys it changed.
  */
 export async function rollForMember(
   keys: Keys,
@@ -832,11 +832,14 @@ export async function rollForMember(
           ? actor.id
           : row.created_by;
       replacement = (await replace(keys, tx, row, overlap, maker, null)).id;
-    } else if (row.status === "rolling" && row.replaced_by !== null) {
+    } else if ((row.status === "rolling" || row.status === "active") && row.replaced_by !== null) {
+      // An active key naming a replacement has no overlap at all: no action writes one (a roll
+      // sets both together), but the table allows it, and the edge accepts it with no end.
       const cut = await tx.query<{ id: string }>(
         `UPDATE keys.api_key
             SET rolling_until = now() + $3::interval, updated_at = now()
-          WHERE id = $1 AND organization_id = $2 AND rolling_until > now() + $3::interval
+          WHERE id = $1 AND organization_id = $2
+            AND (rolling_until IS NULL OR rolling_until > now() + $3::interval)
           RETURNING id`,
         [id, organization.id, OVERLAP_INTERVAL[overlap]],
       );
