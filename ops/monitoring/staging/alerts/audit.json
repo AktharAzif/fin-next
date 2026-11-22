@@ -15,6 +15,11 @@
         {
           "field": "auditEvent",
           "oneOf": [
+            "api_key.created",
+            "api_key.exposed",
+            "api_key.revoked",
+            "api_key.rolled",
+            "api_key.updated",
             "audit.epoch_started",
             "audit.failover_recorded",
             "audit.restore_replayed",

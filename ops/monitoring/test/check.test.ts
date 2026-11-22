@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
-import { checkMonitoring, PHASE0_EVENTS } from "../src/check.ts";
+import { checkMonitoring, eventsInCode, PHASE0_EVENTS } from "../src/check.ts";
+import { loadEnv } from "../src/config.ts";
+import { queryEvents } from "../src/sql.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 const roots: string[] = [];
@@ -57,6 +59,31 @@ describe("monitoring:check on the repository", () => {
 
   it("passes on the scratch copy (the planted cases below start clean)", () => {
     expect(rules(scratch())).toEqual([]);
+  });
+
+  it("catalogues the edge's key check failures, each watched by spec 05 §10.2's paging alert", () => {
+    // The check fails closed: a statement that fails answers 503 and alerts (spec 05 §3.7), and a
+    // key naming a pepper the edge lacks is refused and alerts (§4.7).
+    const watchedBy: Readonly<Record<string, string>> = {
+      "key.lookup_failed": "rate-limiter-failing",
+      "rate_limiter.failed": "rate-limiter-failing",
+      "key.pepper_missing": "pepper-missing",
+    };
+    const { config } = loadEnv(ROOT, "staging");
+    const inCode = eventsInCode(ROOT);
+    const entries = Object.values(fragments).flat();
+    for (const [event, name] of Object.entries(watchedBy)) {
+      expect(inCode.has(event), `${event} is written in code`).toBe(true);
+      expect(entries.find((e) => e.event === event)?.alerts, event).toEqual([name]);
+      const rule = config?.alerts.find((a) => a.name === name);
+      expect(rule, name).toMatchObject({
+        severity: "P",
+        threshold: "@any",
+        operator: "higher_than",
+      });
+      expect(rule?.sources, name).toContain("edge");
+      expect(rule === undefined ? [] : queryEvents(rule.query), name).toContain(event);
+    }
   });
 });
 
