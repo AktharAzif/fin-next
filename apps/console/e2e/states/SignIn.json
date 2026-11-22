@@ -1,0 +1,174 @@
+{
+  "board": "SignIn",
+  "canvas": "fin-dashboard",
+  "route": "/sign-in",
+  "states": {
+    "start": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "signedOut": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signedOutTries": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "googleNotLinked": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleCancelled": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleUnconfirmed": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleNoSignup": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleUnfinished": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleOurSide": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleIncomplete": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "googleBusy": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "passkeyBusy": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a passkey added on Protect your account, then a sign-in with it"
+    },
+    "noPasskey": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a cancelled or failed passkey says so on the card"
+    },
+    "passkeyFailed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a cancelled or failed passkey says so on the card"
+    },
+    "passkeyRemoved": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "emailInvalid": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "offline": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "password": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
+    },
+    "signingIn": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
+    },
+    "wrongPassword": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security the password step, a wrong password, then the factor step"
+    },
+    "tooManyTries": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
+    },
+    "ourSide": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "didntWork": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passwordPaused": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
+    },
+    "pausedLinkRefused": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey @security too many wrong passwords pause it, and a refused link says so"
+    },
+    "tooManyEmails": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "sendingLink": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loadError": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's boot failure page draws it (\"Couldn't load Fin\")"
+    },
+    "loadOffline": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's boot failure page draws it"
+    },
+    "notFound": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's not-found page draws it"
+    }
+  }
+}

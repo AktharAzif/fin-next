@@ -1,0 +1,71 @@
+{
+  "board": "SignUp",
+  "canvas": "fin-dashboard",
+  "route": "/sign-up",
+  "states": {
+    "form": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "invited": {
+      "status": "pending",
+      "day": "sat",
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "nameRefused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "emailInvalid": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passwordShort": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey too short and too common are said on the field, then the account is asked"
+    },
+    "passwordCommon": {
+      "status": "covered",
+      "day": "stretch-2",
+      "spec": "apps/console/e2e/passwords/password.spec.ts",
+      "test": "@journey too short and too common are said on the field, then the account is asked"
+    },
+    "creating": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "didntWork": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "googleBusy": {
+      "status": "pending",
+      "day": "stretch-5",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "$comment": "The worker's email side, checked on its own: its db test reaches pg through @fin/email/testing/db, whose test-only declaration of pg differs from @fin/db's, and one program cannot hold both.",
+  "extends": "../../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts"]
+}

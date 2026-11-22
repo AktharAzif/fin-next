@@ -14,12 +14,15 @@ import {
   exoticKind,
   isDatedApproval,
   parsePolicy,
+  projectsWithoutDependencies,
 } from "../check-supply-chain.mjs";
 import { cleanUp, git, makeRepo, REPO_ROOT, readRepoFile, rules, runScript } from "./helpers.mjs";
 
 after(cleanUp);
 
 const WORKSPACE = readRepoFile("pnpm-workspace.yaml");
+/** This repository's workspace projects whose lockfile importer pnpm writes as `{}`. */
+const REPO_EMPTY_PROJECTS = projectsWithoutDependencies(REPO_ROOT);
 const APPROVAL = "# 2026-11-21: approved by the owner";
 const DEV_ENGINES = { packageManager: { name: "pnpm", version: "12.21.0", onFail: "error" } };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -86,6 +89,10 @@ const workspaceWith = (from, to) => {
 /** The lockfile with `text` added at the start of the packages section. */
 const lockWithPackage = (/** @type {string} */ text) =>
   LOCK_OK.replace("packages:\n", `packages:\n\n${text}`);
+
+/** The lockfile with one importer, `path: {}`, the form pnpm writes for a project with none. */
+const emptyImporter = (/** @type {string} */ path) =>
+  LOCK_OK.replace("packages:\n", `importers:\n\n  ${path}: {}\n\npackages:\n`);
 
 describe("supply-chain:check", () => {
   test("a valid repository passes", () => {
@@ -634,6 +641,102 @@ describe("supply-chain:check", () => {
     }
   });
 
+  test("pnpm's empty importer passes for a workspace project whose package.json declares no dependency", () => {
+    const lock = emptyImporter("tools/fin-review");
+    const bare = pkg("@fin/fin-review", { scripts: { test: "node --test" } });
+    const dir = fixture({ "tools/fin-review/package.json": bare, "pnpm-lock.yaml": lock });
+    assert.deepEqual(checkSupplyChain(dir), []);
+    assert.deepEqual([...projectsWithoutDependencies(dir)], ["tools/fin-review"]);
+    // Dependency fields that are present but empty declare nothing either.
+    const emptyFields = pkg("@fin/fin-review", {
+      dependencies: {},
+      devDependencies: {},
+      optionalDependencies: {},
+      peerDependencies: {},
+    });
+    const withEmptyFields = fixture({
+      "tools/fin-review/package.json": emptyFields,
+      "pnpm-lock.yaml": lock,
+    });
+    assert.deepEqual(checkSupplyChain(withEmptyFields), []);
+    // A project a wildcard glob selects is a workspace project too.
+    const selected = fixture({
+      "apps/console/package.json": pkg("@fin/console", {}),
+      "pnpm-lock.yaml": emptyImporter("apps/console"),
+    });
+    assert.deepEqual(checkSupplyChain(selected), []);
+    // Without the workspace projects to compare with, the lockfile check refuses every `{}`.
+    assert.deepEqual(rules(checkLockfile(lock)), ["lockfile-format"]);
+    assert.deepEqual(checkLockfile(lock, new Map(), new Set(["tools/fin-review"])), []);
+  });
+
+  test("an empty importer at a path that is not a workspace project fails", () => {
+    const bare = (/** @type {string} */ name) => pkg(name, {});
+    for (const [path, files] of /** @type {[string, Record<string, string>][]} */ ([
+      // A directory with a manifest that no package glob selects.
+      ["scripts", { "scripts/package.json": bare("@fin/scripts") }],
+      ["apps/console/sub", { "apps/console/sub/package.json": bare("@fin/sub") }],
+      ["tools", { "tools/package.json": bare("@fin/tools") }],
+      // A directory a glob selects that holds no manifest.
+      ["apps/missing", {}],
+      // The root, which no package glob selects (and which declares dependencies).
+      [".", {}],
+      // Directories pnpm skips when it looks for workspace projects, and hidden ones.
+      ["apps/node_modules", { "apps/node_modules/package.json": bare("@fin/nm") }],
+      ["packages/bower_components", { "packages/bower_components/package.json": bare("@fin/b") }],
+      ["apps/.hidden", { "apps/.hidden/package.json": bare("@fin/hidden") }],
+      // Another spelling of a workspace project's path.
+      ["tools/fin-review/", { "tools/fin-review/package.json": bare("@fin/fin-review") }],
+      ["Tools/Fin-Review", { "tools/fin-review/package.json": bare("@fin/fin-review") }],
+      ["tools/./fin-review", { "tools/fin-review/package.json": bare("@fin/fin-review") }],
+    ])) {
+      const lock = emptyImporter(path);
+      const findings = checkSupplyChain(fixture({ ...files, "pnpm-lock.yaml": lock }));
+      assert.deepEqual(rules(findings), ["lockfile-format"], path);
+      assert.match(findings[0]?.message ?? "", /empty importer/, path);
+    }
+    // A manifest git does not track is not one this check has read.
+    const untracked = fixture({
+      "tools/fin-review/package.json": bare("@fin/fin-review"),
+      "pnpm-lock.yaml": emptyImporter("tools/fin-review"),
+    });
+    git(untracked, ["rm", "-q", "--cached", "tools/fin-review/package.json"]);
+    assert.deepEqual(rules(checkSupplyChain(untracked)), ["lockfile-format"]);
+  });
+
+  test("an empty importer for a project whose package.json declares any dependency fails", () => {
+    for (const field of [
+      "dependencies",
+      "devDependencies",
+      "optionalDependencies",
+      "peerDependencies",
+    ]) {
+      const dir = fixture({
+        "tools/fin-review/package.json": pkg("@fin/fin-review", { [field]: { zod: "catalog:" } }),
+        "pnpm-lock.yaml": emptyImporter("tools/fin-review"),
+      });
+      assert.deepEqual(rules(checkSupplyChain(dir)), ["lockfile-format"], field);
+      assert.deepEqual([...projectsWithoutDependencies(dir)], [], field);
+    }
+    // The fixture's packages/core depends on zod.
+    const core = fixture({ "pnpm-lock.yaml": emptyImporter("packages/core") });
+    assert.deepEqual(rules(checkSupplyChain(core)), ["lockfile-format"]);
+    // A dependency field that is not an object, or a manifest that is not one, declares nothing
+    // this check can read, so its `{}` is refused as well.
+    for (const manifest of [
+      pkg("@fin/fin-review", { dependencies: null }),
+      pkg("@fin/fin-review", { devDependencies: [] }),
+      "[]",
+      "{",
+    ]) {
+      const dir = fixture({
+        "tools/fin-review/package.json": manifest,
+        "pnpm-lock.yaml": emptyImporter("tools/fin-review"),
+      });
+      assert.ok(rules(checkSupplyChain(dir)).includes("lockfile-format"), manifest);
+    }
+  });
+
   test("a snapshot's dependency is a registry version, never a link, a path, a tarball or a git URL", () => {
     const { catalog } = checkWorkspace(WORKSPACE);
     const lock = readRepoFile("pnpm-lock.yaml");
@@ -649,7 +752,11 @@ describe("supply-chain:check", () => {
       '"3.1.3"',
     ]) {
       const bad = lock.replace(line, line.replace("3.1.3", ref));
-      assert.deepEqual(rules(checkLockfile(bad, catalog)), ["exotic-resolution"], ref);
+      assert.deepEqual(
+        rules(checkLockfile(bad, catalog, REPO_EMPTY_PROJECTS)),
+        ["exotic-resolution"],
+        ref,
+      );
     }
     // An optional dependency is installed the same way.
     const optional = lock.replace(
@@ -657,14 +764,18 @@ describe("supply-chain:check", () => {
       "      '@biomejs/cli-darwin-arm64': link:../evil\n",
     );
     assert.notEqual(optional, lock);
-    assert.deepEqual(rules(checkLockfile(optional, catalog)), ["exotic-resolution"]);
+    assert.deepEqual(rules(checkLockfile(optional, catalog, REPO_EMPTY_PROJECTS)), [
+      "exotic-resolution",
+    ]);
     // pnpm writes the list as a block; an inline map is not its form.
     const inline = lock.replace(
       `    dependencies:\n${line}: 1.6.0\n`,
       "    dependencies: {'@jridgewell/resolve-uri': 'link:../evil', '@jridgewell/sourcemap-codec': 1.6.0}\n",
     );
     assert.notEqual(inline, lock);
-    assert.deepEqual(rules(checkLockfile(inline, catalog)), ["lockfile-format"]);
+    assert.deepEqual(rules(checkLockfile(inline, catalog, REPO_EMPTY_PROJECTS)), [
+      "lockfile-format",
+    ]);
   });
 
   test("every dependency, and every snapshot, is a registry package the lockfile holds", () => {
@@ -673,17 +784,25 @@ describe("supply-chain:check", () => {
     const line = "      '@jridgewell/resolve-uri': 3.1.3\n";
     for (const ref of ["3.1.4", "other@3.1.3", "'@other/name@3.1.3'"]) {
       const bad = lock.replace(line, line.replace("3.1.3", ref));
-      assert.deepEqual(rules(checkLockfile(bad, catalog)), ["exotic-resolution"], ref);
+      assert.deepEqual(
+        rules(checkLockfile(bad, catalog, REPO_EMPTY_PROJECTS)),
+        ["exotic-resolution"],
+        ref,
+      );
     }
     // An alias that stands for a refused package is refused, whatever its name.
     const alias = lock.replace(line, line.replace("3.1.3", "clsx@2.1.1"));
-    assert.ok(rules(checkLockfile(alias, catalog)).includes("refused-package"));
+    assert.ok(
+      rules(checkLockfile(alias, catalog, REPO_EMPTY_PROJECTS)).includes("refused-package"),
+    );
     // A snapshot with no package entry has no resolution to install from.
     const orphan = lock.replace(
       "  why-is-node-running@3.2.1: {}",
       "  why-is-node-running@3.2.1: {}\n\n  left-pad@1.3.0: {}",
     );
-    assert.deepEqual(rules(checkLockfile(orphan, catalog)), ["exotic-resolution"]);
+    assert.deepEqual(rules(checkLockfile(orphan, catalog, REPO_EMPTY_PROJECTS)), [
+      "exotic-resolution",
+    ]);
     // A registry alias the document holds is how registry packages depend on one another.
     const aliased = LOCK_OK.replace(
       "packages:\n",
@@ -715,7 +834,7 @@ describe("supply-chain:check", () => {
       ],
     ])) {
       assert.ok(lock.includes(from), `fixture text not found: ${from}`);
-      assert.ok(checkLockfile(lock.replace(from, to), catalog).length > 0, to);
+      assert.ok(checkLockfile(lock.replace(from, to), catalog, REPO_EMPTY_PROJECTS).length > 0, to);
     }
     const meta = LOCK_OK.replace(
       "packages:\n",
@@ -782,7 +901,10 @@ describe("supply-chain:check", () => {
 
   test("this repository's lockfile reads cleanly, line by line", () => {
     const { catalog } = checkWorkspace(WORKSPACE);
-    assert.deepEqual(checkLockfile(readRepoFile("pnpm-lock.yaml"), catalog), []);
+    assert.deepEqual(
+      checkLockfile(readRepoFile("pnpm-lock.yaml"), catalog, REPO_EMPTY_PROJECTS),
+      [],
+    );
   });
 
   test("the packageManager pin must be exact and match engines.pnpm", () => {

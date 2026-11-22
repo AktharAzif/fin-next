@@ -1,0 +1,61 @@
+{
+  "$comment": "The staff area's grants (spec 02 §13.7, §13.6), in the migration runner's fragment format (packages/db/roles/grants). @fin/identity's staff-realm.json holds the staff realm's sign-in tables; this fragment adds the schema's use, custom staff roles, the staff-change lock and the two views. staff.bootstrap_admin() has no grant: only fin_owner, which owns it, runs it in a registered operator task.",
+  "area": "staff",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "staff",
+      "privileges": ["USAGE"],
+      "to": ["fin_admin", "fin_api", "fin_worker", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "staff.role",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "staff.role_permission",
+      "privileges": ["SELECT", "INSERT", "DELETE"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "staff.change_lock",
+      "privileges": ["SELECT"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "staff.change_lock",
+      "privileges": ["UPDATE"],
+      "columns": ["id"],
+      "to": ["fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "staff.access_list_view",
+      "privileges": ["SELECT"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "staff.role_permission_view",
+      "privileges": ["SELECT"],
+      "to": ["fin_api"]
+    },
+    {
+      "on": "table",
+      "name": "staff.role",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "staff.role_permission",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    }
+  ]
+}
