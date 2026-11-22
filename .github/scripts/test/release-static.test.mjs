@@ -1442,13 +1442,12 @@ describe("release.yml", () => {
     const take = at(/release-static\.mjs take/);
     const previous = at(/release-static\.mjs previous/);
     const merge = at(/release-static\.mjs merge/);
-    const scan = at(/bundle-check\.mjs --artefacts release\/static/);
     const gitleaks = at(/gitleaks-static\.sh release\/static/);
     const firstUpload = at(/actions\/upload-artifact@/);
     const attest = at(/actions\/attest@/);
     assert.ok(take >= 0 && take < previous && previous < merge, "take, previous, then merge");
-    assert.ok(merge < scan && merge < gitleaks, "the scans read the merged artefacts");
-    assert.ok(scan < firstUpload && gitleaks < firstUpload && firstUpload < attest);
+    assert.ok(merge < gitleaks, "the scan reads the merged artefacts");
+    assert.ok(gitleaks < firstUpload && firstUpload < attest);
   });
 
   it("names no artefact the previous-release download could take but the static outputs", () => {

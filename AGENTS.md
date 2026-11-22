@@ -23,6 +23,14 @@ imports this file and adds nothing.
   every control-path file. No built-in review command counts as a review. A builder never reviews
   its own work. Signed review receipts, the builder machine account and the separate OS users come
   with hardening, not in Phase 0 (the owner's trim of 21 Nov).
+- **Review severities** (DECISIONS G-10 as amended by the owner on 22 Nov; spec 07 §2.11). A
+  critical or high finding always blocks. A medium blocks until a piece has had its full review and
+  one fix round; after that only a regression the latest fix caused, or an earlier finding that was
+  not actually fixed, blocks, and a new medium on code that already passed review is marked
+  `[follow-up]` and fixed the same day, at the normal bar, in a follow-up pull request. A low is
+  logged, never fixed in the middle of a merge cycle, swept per area at the end of each milestone,
+  and given a disposition before production. Nothing reaches production with an alert owed, a
+  `[follow-up]` item open or a low without a disposition (EXECUTION §7.3, PG-15 to PG-17).
 - **Stay in your lane.** A lane edits only the paths `tools/layout.json` and the lane tables give
   it; anything else goes through the lane board. Shared registries use per-area fragment files.
 - **Before you push**, `pnpm check` passes and the pre-push hook runs (enable it once per clone
