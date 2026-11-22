@@ -269,9 +269,18 @@ describe("Unicode's confusables data (UTS #39)", () => {
       const glyphs = read(char);
       const letter = read(char.normalize("NFKD"));
       expect(glyphs.length, hex(row)).toBeGreaterThan(0);
-      expect(glyphs.every((g) => g.optional), hex(row)).toBe(true);
-      expect(letter.every((g) => !g.optional), hex(row)).toBe(true);
-      expect(glyphs.map((g) => ({ ...g, optional: false })), hex(row)).toEqual(letter);
+      expect(
+        glyphs.every((g) => g.optional),
+        hex(row),
+      ).toBe(true);
+      expect(
+        letter.every((g) => !g.optional),
+        hex(row),
+      ).toBe(true);
+      expect(
+        glyphs.map((g) => ({ ...g, optional: false })),
+        hex(row),
+      ).toEqual(letter);
     }
   });
 

@@ -652,7 +652,10 @@ describe("names that read as a built-in role's (spec 02 §8.4)", () => {
     for (const char of ["\u{1dba}", "\u{2e4}", "\u{1d52}", "\u{1e03c}"]) {
       const glyphs = glyphsOf(char);
       expect(glyphs.length, char).toBe(1);
-      expect(glyphs.every((g) => g.optional), char).toBe(true);
+      expect(
+        glyphs.every((g) => g.optional),
+        char,
+      ).toBe(true);
     }
     expect(glyphsOf("\u{1d52}")).toEqual([{ char: "o", reads: "o", optional: true, free: false }]);
     expect(glyphsOf("\u{1dba}")).toEqual([
