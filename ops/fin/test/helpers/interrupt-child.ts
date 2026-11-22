@@ -14,6 +14,9 @@
 //   stub reject <env>  the same, with a promise rejected and never handled instead;
 //   probe throw <env>  a read-only command that throws from a timer (no run, no lock).
 //
+// Each one-change stub prints "settled" when its change ends, so a test can tell a stop that
+// waited for the change from one that did not.
+//
 // The thrown text is FIN_TEST_MARKER, which must never be printed. With FIN_TEST_HANG_SHIPPING=1,
 // shipping a batch of lines answers the first time and then never answers (holding the process
 // open, as a stuck connection does), so the clean-up after a stop hangs.
@@ -57,6 +60,7 @@ function oneChange(ctx: Context, inside: () => Promise<void>): Promise<number> {
   return ctx.applyPlan("stub", [{ kind: "dns", name: "console", action: "create" }], async () => {
     process.stdout.write("waiting\n");
     await inside();
+    process.stdout.write("settled\n");
   });
 }
 

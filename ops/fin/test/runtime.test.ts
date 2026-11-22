@@ -90,6 +90,11 @@ function stopTaken(child: Child, signal: string): Promise<void> {
   return child.waitFor(`interrupted by ${signal}: closing the run`, "stderr");
 }
 
+/** Whether the child's change in flight ran to its end (the stub says so on standard output). */
+function settled(child: Child): boolean {
+  return child.out().split("\n").includes("settled");
+}
+
 /** A run log of `count` chained records with its head file, written at once. */
 function writeLog(dir: string, count: number): void {
   const lines: string[] = [];
@@ -127,6 +132,7 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
         await sleep(50);
         child.process.kill(signal);
         assert.equal(await child.exit(), exit, child.errors());
+        assert.equal(settled(child), true, "the stop waited for the change in flight");
         const run = closedRun(child);
         assert.deepEqual(run.events, ["run.registered", "run.step", "run.done"]);
         assert.equal(run.done?.interrupted, signal);
@@ -151,9 +157,8 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGINT");
       assert.equal(await child.exit(), EXIT.interrupted, child.errors());
-      // No time is measured: the change takes ten seconds, so waiting for it would close the run
-      // after the wait for it, with no forced close, or at the deadline as "deadline"; run.done
-      // says which close it was.
+      // No time is measured: the change takes ten seconds and says when it ends.
+      assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.result, "failed");
@@ -194,8 +199,9 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       await child.waitFor("waiting");
       child.process.kill("SIGQUIT");
       assert.equal(await child.exit(), EXIT.quit, child.errors());
-      // No time is measured: waiting for the ten-second change would close the run after the
-      // wait for it, with no forced close, or at the deadline as "deadline"; run.done says which.
+      // No time is measured: the change takes ten seconds and says when it ends. A runtime that
+      // closed the run at once but exited only after the change would pass run.done's checks.
+      assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
       assert.equal(run.done?.interrupted, "SIGQUIT");
@@ -293,7 +299,12 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       child.process.kill("SIGKILL");
     }
   });
+});
 
+// Apart from the suite above, and after it: writing and checking a 30,000-record log holds this
+// process for up to a second, and the deadline test's time, read in this process, took that stall
+// in when it fell on the child's exit.
+describe("a stop while a long log is checked, in a real process", () => {
   it("closes the run on a signal that comes the moment the lock is taken, even while a long log is checked", async () => {
     const child = spawnChild(["stub", "wait", "staging"], {
       before: (dir) => writeLog(dir, 30_000),

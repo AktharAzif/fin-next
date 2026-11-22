@@ -6,11 +6,14 @@
 //
 // A plan is judged slow only when two things agree: its time on the 2,000-file tree is over the
 // limit, and that time grew far more than linearly from the same shape of change on a tree eight
-// times smaller (250 files). Each time is then the fastest of three runs, the sizes taking turns.
-// Wall time alone also measures the machine: inside a loaded `pnpm check` a plan that takes about
-// 250 ms alone took over 4 seconds, waiting for a core. A plan that got quadratic, or one that
-// hangs (the run's own 30-second timeout), still fails. A first run under the limit already
-// decides the case, so on a quiet machine each case runs the plan once.
+// times smaller (250 files). The growth is taken net of the plan's start: Node's and git's own,
+// the same at every size, measured as the plan of a minimal tree (the fixture's skeleton alone,
+// with one file changed) and taken off both sizes. Each time is then the fastest of three runs,
+// the three trees taking turns. Wall time alone also measures the machine: inside a loaded
+// `pnpm check` a plan that takes about 250 ms alone took over 4 seconds, waiting for a core. A
+// plan that got quadratic, or one that hangs (the run's own 30-second timeout), still fails. A
+// first run under the limit already decides the case, so on a quiet machine each case runs the
+// plan once.
 
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
@@ -30,19 +33,28 @@ const LIMIT_MS = process.env["CI"] === "true" ? 6000 : 3000;
 const LARGE_TREE = 2000;
 const SMALL_TREE = 250;
 /**
- * Growth from 250 files to 2,000 above which a plan over the limit fails. Node's and git's start,
- * the same at both sizes, is most of the plan's time (about 150 to 290 ms of it), so the plan as it
- * is grows about 1.1 times (0.9 to 1.25 measured under load, fastest of three). A quadratic part
- * that takes the plan to the 3-second limit adds only a sixty-fourth of itself at 250 files, so
- * behind that start it grows 9 to 11 times (more at CI's 6 seconds). 4 is more than twice the
- * first and at most half the second. A plan made slow by a cost that is fixed or linear in the
- * tree is not what this growth judges.
+ * Net growth from 250 files to 2,000 above which a plan over the limit fails. Net of the start, a
+ * part linear in the tree grows at most about 9.4 times (the minimal tree's own 41 entries are
+ * taken off both sizes: 1,959 against 209), 6.9 to 9.6 measured for one that takes each case to
+ * the limit; a quadratic part grows about 66 times alone, and 45 to 65 measured or modelled for one
+ * that takes a plan to the limit behind the plan's own linear part. 20 leaves linear more than
+ * twice its growth and fails quadratic by more than twice.
  */
-const MAX_GROWTH = 4;
+const MAX_GROWTH = 20;
+/**
+ * The least the 250-file tree's time over the start counts as: an eighth of the start, so a
+ * difference lost in the noise of two slowed times cannot inflate the growth.
+ */
+const FLOOR_SHARE = 1 / 8;
 
-/** Whether the fastest times on the 250-file and 2,000-file trees show a plan that got quadratic. */
-function tooSlow(smallMs: number, largeMs: number, limitMs: number): boolean {
-  return largeMs >= limitMs && largeMs / smallMs > MAX_GROWTH;
+/** The growth of the fastest times from the 250-file tree to the 2,000, net of the start. */
+function netGrowth(startMs: number, smallMs: number, largeMs: number): number {
+  return (largeMs - startMs) / Math.max(smallMs - startMs, startMs * FLOOR_SHARE);
+}
+
+/** Whether the fastest times (the start, 250 files, 2,000) show a plan that got quadratic. */
+function tooSlow(startMs: number, smallMs: number, largeMs: number, limitMs: number): boolean {
+  return largeMs >= limitMs && netGrowth(startMs, smallMs, largeMs) > MAX_GROWTH;
 }
 
 /** A base and a head to plan between. */
@@ -52,23 +64,31 @@ interface Change {
 }
 
 describe("T-RV-20's speed rule", () => {
-  it("fails a plan over the limit that grew as a quadratic part does, and passes the plan as it is", () => {
-    // [ms at 250 files, ms at 2,000, limit, fails]: measured plans, quadratic parts that take the
-    // plan to the limit behind the slowest and fastest measured start, then the rule's edges.
-    const cases: [number, number, number, boolean][] = [
-      [220, 234, 3000, false], // the plan as it is, under load (measured)
-      [227, 284, 3000, false], // the slowest growth measured, 1.25
-      [2700, 3100, 3000, false], // both sizes slowed alike by load, over the limit
-      [329, 3000, 3000, true], // a quadratic part behind a 286 ms start: growth 9.1
-      [263, 3000, 3000, true], // a quadratic part behind a 220 ms start: growth 11.4
-      [207, 3059, 3000, true], // a quadratic part planted in the plan (measured): growth 14.8
-      [394, 6000, 6000, true], // a quadratic part at CI's limit behind a 300 ms start: 15.2
-      [1, 2999, 3000, false], // under the limit, whatever the growth
-      [750, 3000, 3000, false], // at the limit, growth 4
-      [740, 3000, 3000, true], // at the limit, growth 4.05
+  it("fails a plan over the limit that grew as a quadratic part does, and passes one that grew linearly", () => {
+    // [ms for the start, at 250 files, at 2,000, limit, fails]: the plan as it is, linear and
+    // quadratic parts planted to take a case to the limit (measured under load), the same parts
+    // modelled at the slowest growth, then the rule's edges.
+    const cases: [number, number, number, number, boolean][] = [
+      [153, 157, 166, 3000, false], // the plan as it is (measured)
+      [2754, 2826, 3060, 3000, false], // the plan as it is, every size slowed alike by load: 0.9
+      [326, 1199, 6314, 3000, false], // a linear part, the wide change (measured): 6.9
+      [244, 584, 3520, 3000, false], // a linear part, 300 links added (measured): 9.6
+      [218, 515, 3000, 3000, false], // a linear part at the limit (modelled): 9.4
+      [161, 294, 6783, 3000, true], // a quadratic part, 1,000 files added (measured): 50
+      [161, 234, 3912, 3000, true], // a quadratic part, 300 links added (measured): 51
+      [160, 223, 3000, 3000, true], // a quadratic part at the limit, behind 20 ms of the plan's: 45
+      [300, 406, 6000, 6000, true], // the same at CI's limit, behind a 300 ms start: 54
+      [300, 300, 3000, 3000, true], // no difference at 250 files counts as the floor: 72
+      [160, 300, 2999, 3000, false], // under the limit, whatever the growth
+      [200, 340, 3000, 3000, false], // at the limit, net growth 20
+      [200, 339, 3000, 3000, true], // at the limit, net growth 20.1
     ];
-    for (const [smallMs, largeMs, limitMs, fails] of cases) {
-      assert.equal(tooSlow(smallMs, largeMs, limitMs), fails, `${smallMs} ms, ${largeMs} ms`);
+    for (const [startMs, smallMs, largeMs, limitMs, fails] of cases) {
+      assert.equal(
+        tooSlow(startMs, smallMs, largeMs, limitMs),
+        fails,
+        `${startMs} ms, ${smallMs} ms, ${largeMs} ms`,
+      );
     }
   });
 });
@@ -110,24 +130,33 @@ describe("T-RV-20: plan speed", () => {
     return { base: fixtureBase, head: repo.commit(fixtureBase, fixture.head) };
   }
 
+  /** The minimal change: the fixture's skeleton alone, with one file changed. */
+  function minimalChange(): Change {
+    const fixture = generatePlanSpeedFixture(fixtureLayout(), 0, { addedToCore: 0 });
+    const fixtureBase = repo.commit(null, fixture.base);
+    return { base: fixtureBase, head: repo.commit(fixtureBase, fixture.head) };
+  }
+
   /**
-   * Plans `large` and judges its speed: over the limit, the fastest of three runs of it and of
-   * `small` (made only then) must pass tooSlow. Returns the first run's plan, for the case's own
-   * checks.
+   * Plans `large` and judges its speed: over the limit, the fastest of three runs of it, of
+   * `small` (made only then) and of the minimal change must pass tooSlow. Returns the first run's
+   * plan, for the case's own checks.
    */
   function judgedPlan(large: Change, small: () => Change): PlanDocument {
     const first = timedPlan(large);
     if (first.elapsed < LIMIT_MS) return first.document;
-    const smallChange = small();
+    const [smallChange, minimal] = [small(), minimalChange()];
     let largeMs = first.elapsed;
     let smallMs = Number.POSITIVE_INFINITY;
+    let startMs = Number.POSITIVE_INFINITY;
     for (let run = 0; run < 3; run++) {
+      startMs = Math.min(startMs, timedPlan(minimal).elapsed);
       smallMs = Math.min(smallMs, timedPlan(smallChange).elapsed);
       if (run > 0) largeMs = Math.min(largeMs, timedPlan(large).elapsed);
     }
-    const growth = largeMs / smallMs;
-    const seen = `${Math.round(smallMs)} ms at ${SMALL_TREE} files, ${Math.round(largeMs)} ms at ${LARGE_TREE}, growth ${growth.toFixed(1)}`;
-    assert.ok(!tooSlow(smallMs, largeMs, LIMIT_MS), `plan took ${seen}`);
+    const growth = netGrowth(startMs, smallMs, largeMs);
+    const seen = `${Math.round(startMs)} ms for the start, ${Math.round(smallMs)} ms at ${SMALL_TREE} files, ${Math.round(largeMs)} ms at ${LARGE_TREE}, net growth ${growth.toFixed(1)}`;
+    assert.ok(!tooSlow(startMs, smallMs, largeMs, LIMIT_MS), `plan took ${seen}`);
     return first.document;
   }
 
