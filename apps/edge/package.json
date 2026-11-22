@@ -1,0 +1,32 @@
+{
+  "name": "@fin/edge",
+  "private": true,
+  "type": "module",
+  "description": "The public API's edge: load shedding, the API key check, GET /v4/whoami, RFC 9457 problems and one request line per request (spec 05 §2, §4).",
+  "scripts": {
+    "build": "pnpm run build:server",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start:server": "node --enable-source-maps --disable-proto=throw dist/server/main.js",
+    "lint": "biome check .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "test:db": "vitest run --config ../../vitest.config.ts --mode db"
+  },
+  "dependencies": {
+    "@fin/core": "workspace:*",
+    "@fin/crypto": "workspace:*",
+    "@fin/db": "workspace:*",
+    "@fin/keys": "workspace:*",
+    "@fin/server": "workspace:*",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@fin/web-host": "workspace:*",
+    "@types/node": "catalog:",
+    "pg": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

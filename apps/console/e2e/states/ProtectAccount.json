@@ -1,0 +1,65 @@
+{
+  "board": "ProtectAccount",
+  "canvas": "fin-dashboard",
+  "route": "/welcome/secure",
+  "states": {
+    "default": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a privileged person is held with no Skip; another may skip"
+    },
+    "confirmedElsewhere": {
+      "status": "superseded",
+      "decision": "S2-39",
+      "reason": "a code from another browser never makes an account, so an address is never confirmed elsewhere"
+    },
+    "addingPasskey": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a passkey added on Protect your account, then a sign-in with it"
+    },
+    "noPasskey": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passkeyFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noPasskeySupport": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signInByEmail": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signInByEmailSending": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signInByEmailFailed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "held": {
+      "status": "new",
+      "uiRequest": "UR-25",
+      "drawn": false,
+      "reason": "no \"Skip for now\" for a privileged person ([SA-05]); L-SAT-10 draws it",
+      "covered": true,
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a privileged person is held with no Skip; another may skip"
+    }
+  }
+}

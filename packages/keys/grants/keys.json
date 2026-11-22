@@ -1,0 +1,88 @@
+{
+  "$comment": "The keys area's grants (spec 05 §4.9; spec 02 §13.7; ARCHITECTURE §6.3), in packages/db's fragment shape. fin_console reads keys and writes them only in the columns a create, edit, roll or revoke changes, never a hash, a pepper version or 'last used'. fin_edge and fin_payments read the one view, which carries no name, and fin_edge writes 'last used' only through keys.touch_last_used(). fin_worker reads and re-hashes the hash and its pepper chain only (keys.rehash). fin_readonly reads every column but the hash. Every other statement fails with 42501.",
+  "area": "keys",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "keys",
+      "privileges": ["USAGE"],
+      "to": ["fin_console", "fin_edge", "fin_payments", "fin_worker", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "keys.api_key",
+      "privileges": ["SELECT", "INSERT"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "keys.api_key",
+      "privileges": ["UPDATE"],
+      "columns": [
+        "name",
+        "scopes",
+        "ip_allowlist",
+        "expires_at",
+        "revoked_at",
+        "revoked_reason",
+        "replaced_by",
+        "rolling_until",
+        "seen_by",
+        "updated_at"
+      ],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "keys.api_key",
+      "privileges": ["SELECT"],
+      "columns": ["id", "hash", "pepper_versions"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "keys.api_key",
+      "privileges": ["UPDATE"],
+      "columns": ["hash", "pepper_versions"],
+      "to": ["fin_worker"]
+    },
+    {
+      "on": "table",
+      "name": "keys.api_key",
+      "privileges": ["SELECT"],
+      "columns": [
+        "id",
+        "organization_id",
+        "mode",
+        "kind",
+        "name",
+        "scopes",
+        "ip_allowlist",
+        "pepper_versions",
+        "created_by",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "revoked_at",
+        "revoked_reason",
+        "replaced_by",
+        "rolling_until",
+        "last_used_at",
+        "seen_by"
+      ],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "keys.key_lookup",
+      "privileges": ["SELECT"],
+      "to": ["fin_edge", "fin_payments"]
+    },
+    {
+      "on": "function",
+      "name": "keys.touch_last_used(text)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_edge"]
+    }
+  ]
+}

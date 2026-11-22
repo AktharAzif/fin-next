@@ -1,0 +1,69 @@
+{
+  "board": "AdminStepUp",
+  "canvas": "fin-admin",
+  "route": "(the root dialog)",
+  "states": {
+    "both": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-manage.spec.ts",
+      "test": "@journey the first Admin enrols, adds staff with a step-up, changes the role, and stays the last Admin"
+    },
+    "passkeyOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey a new enrolment code, then removing the member, each with the passkey"
+    },
+    "appOnly": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey five wrong codes at Confirm it's you end the session, and only Sign in again is left"
+    },
+    "passkeyPrompt": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey the passkey at Confirm it's you: closed, waiting, and a browser without passkeys"
+    },
+    "passkeyClosed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey the passkey at Confirm it's you: closed, waiting, and a browser without passkeys"
+    },
+    "noPasskeySupport": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey the passkey at Confirm it's you: closed, waiting, and a browser without passkeys"
+    },
+    "codeShort": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey five wrong codes at Confirm it's you end the session, and only Sign in again is left"
+    },
+    "verifying": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey five wrong codes at Confirm it's you end the session, and only Sign in again is left"
+    },
+    "tooManyTries": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey five wrong codes at Confirm it's you end the session, and only Sign in again is left"
+    },
+    "cancelled": {
+      "status": "new",
+      "uiRequest": "UR-25",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/sat/staff-step-up.spec.ts",
+      "test": "@journey closing Confirm it's you adds nobody"
+    }
+  }
+}

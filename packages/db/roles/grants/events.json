@@ -1,0 +1,18 @@
+{
+  "$comment": "The events area's Phase 0 grants (spec 01 §6.10 row 7; spec 05 §5.5): EXECUTE on the events.emit() shell only. Spec 05's lane (L-SUN-04) takes this fragment over with its tables.",
+  "area": "events",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "events",
+      "privileges": ["USAGE"],
+      "to": ["fin_api", "fin_worker", "fin_payments"]
+    },
+    {
+      "on": "function",
+      "name": "events.emit(jsonb)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_api", "fin_worker", "fin_payments"]
+    }
+  ]
+}
