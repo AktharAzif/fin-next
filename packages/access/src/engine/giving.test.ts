@@ -395,25 +395,36 @@ function step(rng: Seeded, world: World, applied: Map<string, number>, at: strin
     }
   }
 
-  // The invariants, after every step that changed something.
+  // The invariants, after every step that changed something. Each is checked in plain code and
+  // the step asserts once that none is broken: an expect for every member, restricted key and
+  // role permission came to about 90,000 of them for each seed and catalogue.
+  const broken: string[] = [];
   const topAfter = new Set(topHolders(world).map((m) => m.id));
-  expect(topAfter.size, `${at}: the last top holder was lost`).toBeGreaterThanOrEqual(1);
+  if (topAfter.size < 1) broken.push("the last top holder was lost");
   const lostTop = [...topBefore].some((id) => !topAfter.has(id));
-  if (lostTop) expect(actorWasTop, `${at}: a non-top actor removed a top holder`).toBe(true);
+  if (lostTop && !actorWasTop) broken.push("a non-top actor removed a top holder");
   for (const member of world.members) {
-    expect(lookup(world, member.roleKey), `${at}: a member's role vanished`).not.toBe("gone");
+    if (lookup(world, member.roleKey) === "gone") {
+      broken.push(`member ${member.id}'s role vanished`);
+    }
     const perms = permsOf(world, member);
-    expect(missingNeed(cat, perms), at).toEqual([]);
+    const missing = missingNeed(cat, perms);
+    if (missing.length > 0)
+      broken.push(`member ${member.id} lacks needs: ${JSON.stringify(missing)}`);
     if (member.roleKey !== cat.topRoleKey) {
-      for (const key of cat.restricted)
-        expect(perms.has(key), `${at}: ${key} below the top`).toBe(false);
+      for (const key of cat.restricted) {
+        if (perms.has(key)) broken.push(`${key} below the top (member ${member.id})`);
+      }
     }
   }
   for (const record of world.roles.values()) {
     for (const key of permissionsOf(cat, lookup(world, record.id))) {
-      expect(cat.permissions[key]?.restricted, at).toBe(false);
+      if (cat.permissions[key]?.restricted !== false) {
+        broken.push(`role ${record.id} holds ${key}, which is restricted or unknown`);
+      }
     }
   }
+  expect(broken, at).toEqual([]);
 }
 
 describe.each(catalogues)("a model team under the rules of [SA-32] (%s)", (_realm, cat) => {
