@@ -1,0 +1,12 @@
+{
+  "name": "@fin/static-deploy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Uploads each static app as an assets-only Workers deployment through Cloudflare's API (BD-16), with Node built-ins only and no dependency.",
+  "scripts": {
+    "deploy": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}

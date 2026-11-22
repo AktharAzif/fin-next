@@ -1,0 +1,22 @@
+{
+  "$comment": "Staging's one escalation policy (spec 01 §8.6, spec 08 §7.9): email only, no call, SMS or push, no escalation, no on-call schedule. 'Staging stays quiet.' The quiet severity is a Better Stack severity (its API calls them urgencies).",
+  "team": "fin-staging",
+  "severities": [
+    {
+      "name": "quiet",
+      "email": true,
+      "sms": false,
+      "call": false,
+      "push": false,
+      "critical_alert": false
+    }
+  ],
+  "policies": [
+    {
+      "name": "staging-quiet",
+      "repeatCount": 0,
+      "repeatDelay": 0,
+      "steps": [{ "waitBefore": 0, "severity": "quiet", "members": [{ "type": "entire_team" }] }]
+    }
+  ]
+}
