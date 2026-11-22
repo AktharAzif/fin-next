@@ -2,8 +2,9 @@
 // admin tunnel reaches it: the Access token, the origin gate, the staff realm and the route policy,
 // on the real platform. An Admin lists the four prebuilt roles, makes a custom role with an intent,
 // gives it to a member, changes it (a stale save is a conflict), and deletes it with the member
-// moved; every refusal is a problem document naming its code and never the value, and every
-// answer is what the AdminRoles and AdminRoleEditor screens read.
+// moved, naming the holders the list showed (others are a conflict); every refusal is a problem
+// document naming its code and never the value (a name the database's index holds as well, never
+// an internal error), and every answer is what the AdminRoles and AdminRoleEditor screens read.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -35,6 +36,7 @@ afterAll(async () => {
 const ROLE_FIELDS = [
   "builtIn",
   "description",
+  "holderIds",
   "holders",
   "key",
   "kind",
@@ -125,20 +127,30 @@ describe("the staff roles routes", () => {
     expect(stale.json).toMatchObject({ code: "conflict" });
     expect((await admin.client.get(`/api/staff-roles/${roleId}`)).json).toMatchObject({
       holders: 1,
+      holderIds: [holderId],
       version: 2,
       permissionCount: 2,
       summary: expect.any(String),
     });
 
-    // Deleted while held: the move is required, then the member moves to Viewer.
-    const unmoved = await admin.client.post(`/api/staff-roles/${roleId}/delete`, {});
+    // Deleted while held: the holders shown are named, the move is required, then the member
+    // moves to Viewer. Naming other holders than the role's is a conflict.
+    const holders = [holderId];
+    const unmoved = await admin.client.post(`/api/staff-roles/${roleId}/delete`, { holders });
     expect(unmoved.status).toBe(403);
     expect(unmoved.json).toMatchObject({ code: "giving_refused", problem: "move_required" });
+    const otherHolders = await admin.client.post(`/api/staff-roles/${roleId}/delete`, {
+      moveTo: "viewer",
+      holders: [],
+    });
+    expect(otherHolders.status).toBe(409);
+    expect(otherHolders.headers.get("content-type")).toContain("application/problem+json");
+    expect(otherHolders.json).toMatchObject({ code: "conflict" });
     const deleted = await admin.client.stepped(
       admin.authenticator,
       "POST",
       `/api/staff-roles/${roleId}/delete`,
-      { moveTo: "viewer" },
+      { moveTo: "viewer", holders },
     );
     expect(deleted.status, JSON.stringify(deleted.json)).toBe(200);
     expect(deleted.json).toEqual({ roleId, movedTo: "viewer", membersMoved: 1 });
@@ -197,9 +209,61 @@ describe("the staff roles routes", () => {
     });
     expect(prebuilt.status).toBe(404);
     expect(
-      (await admin.client.post("/api/staff-roles/rol_01jd0000000000000000000000/delete", {}))
-        .status,
+      (
+        await admin.client.post("/api/staff-roles/rol_01jd0000000000000000000000/delete", {
+          holders: [],
+        })
+      ).status,
     ).toBe(404);
+    // A deletion names the holders it was shown, each a member's ID.
+    const unnamed = "/api/staff-roles/srl_01jd0000000000000000000000/delete";
+    for (const body of [
+      {},
+      { holders: ["someone"] },
+      { holders: "stf_01jd0000000000000000000000" },
+    ]) {
+      const refused = await admin.client.post(unnamed, body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.json).toMatchObject({ code: "invalid" });
+    }
+  });
+
+  it("refuse a name the database's name index holds for another role as taken, before any factor, never as an internal error", async (ctx) => {
+    // A capital I with a dot above: the editor's own comparison keeps "İnfo desk" apart from
+    // "Info desk", while the server's collation folds both to one key in the name index.
+    const dotted = "İnfo desk";
+    const folds = await h.admin.query<{ same: boolean }>("SELECT lower($1) = lower($2) AS same", [
+      dotted,
+      "Info desk",
+    ]);
+    if (folds.rows[0]?.same !== true) {
+      ctx.skip("this database's collation keeps the two names apart, as the editor does");
+    }
+    const draft = { description: "", permissions: ["customers.read"] };
+    const made = await admin.client.stepped(admin.authenticator, "POST", "/api/staff-roles", {
+      ...draft,
+      name: "Info desk",
+    });
+    expect(made.status, JSON.stringify(made.json)).toBe(201);
+    const other = await admin.client.stepped(admin.authenticator, "POST", "/api/staff-roles", {
+      ...draft,
+      name: "Front desk",
+    });
+    expect(other.status, JSON.stringify(other.json)).toBe(201);
+    const taken = { code: "invalid", fields: [{ path: "name", code: "name_taken" }] };
+    const again = await admin.client.post("/api/staff-roles", { ...draft, name: dotted });
+    expect(again.status, JSON.stringify(again.json)).toBe(400);
+    expect(again.json).toMatchObject(taken);
+    const renamed = await admin.client.send("PUT", `/api/staff-roles/${other.json?.roleId}`, {
+      ...draft,
+      name: dotted,
+      version: 1,
+    });
+    expect(renamed.status, JSON.stringify(renamed.json)).toBe(400);
+    expect(renamed.json).toMatchObject(taken);
+    for (const name of [dotted, "Info desk", "Front desk"]) {
+      expect(JSON.stringify([again.json, renamed.json])).not.toContain(name);
+    }
   });
 
   it("are Admin-only for writes, and readable by every prebuilt role", async () => {

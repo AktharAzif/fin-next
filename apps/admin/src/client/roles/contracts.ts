@@ -19,6 +19,8 @@ export const staffRoleRow = z.object({
   summary: z.string(),
   topRole: z.boolean(),
   holders: z.number().int().nonnegative(),
+  /** Who holds it, by member ID: what a deletion names back as the holders it moves. */
+  holderIds: z.array(z.string()),
   permissions: z.array(z.string()),
   permissionCount: z.number().int().nonnegative(),
   /** The version a save names (a stale one is `409 conflict`); null for a prebuilt role. */
@@ -74,13 +76,19 @@ export const saveStaffRole = defineContract({
 
 /**
  * `POST /api/staff-roles/:roleId/delete` (`staffRoles.manage`, intent `staffRole.delete`): every
- * holder moves to `moveTo`, which needs `staff.role` too.
+ * holder moves to `moveTo`, which needs `staff.role` too. `holders` are the holders the page showed
+ * (the row's `holderIds`), which the intent binds: when they are not the role's holders now, the
+ * answer is `409 conflict` and nobody moves.
  */
 export const deleteStaffRole = defineContract({
   name: "staffRoles.delete",
   method: "POST",
   path: "/staff-roles/:roleId/delete",
-  input: z.object({ roleId: z.string().min(1), moveTo: z.string().min(1).optional() }),
+  input: z.object({
+    roleId: z.string().min(1),
+    moveTo: z.string().min(1).optional(),
+    holders: z.array(z.string().min(1)),
+  }),
   output: z.object({
     roleId: z.string().min(1),
     movedTo: z.string().nullable(),

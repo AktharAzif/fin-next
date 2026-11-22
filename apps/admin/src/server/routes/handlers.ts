@@ -214,6 +214,7 @@ export function adminHandlers(deps: StaffDeps): Readonly<Record<PolicyId, RouteH
         await guarded(realm, "staff_roles.delete", (tx, who, { input }) =>
           deleteStaffRole(deps, tx, who, str(input.params.roleId), {
             ...(typeof input.body.moveTo === "string" ? { moveTo: input.body.moveTo } : {}),
+            holders: Array.isArray(input.body.holders) ? input.body.holders.map(str) : [],
           }),
         )(args),
       ),

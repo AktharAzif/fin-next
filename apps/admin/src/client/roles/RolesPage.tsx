@@ -2,7 +2,9 @@
 // spec 02 §10.7, §15.3, S2-16): the four prebuilt roles and the custom staff roles, with who holds
 // each and how much it allows; duplicate, and delete with the role its holders move to. Read-only
 // without `staffRoles.manage` (an Admin-only permission); moving people needs `staff.role` too.
-// The server decides every change; this page only asks and reports.
+// The server decides every change; this page only asks and reports. A deletion names the holders
+// the dialog counted, and a refusal that shows the list is out of date reads it again first, so
+// the dialog always counts and offers what is there now.
 //
 // @pendingDesign UR-16: AdminRoles has no board yet ([UI-04]); this is composed from @fin/ui's
 // controls and tokens after the dashboard's Roles board, and enters the state manifest as `new`.
@@ -43,7 +45,7 @@ import {
   STAFF_PAGE_DESCRIPTION,
 } from "./editor.ts";
 import type { RolesData } from "./load.ts";
-import { CANT_MOVE, roleActionError } from "./messages.ts";
+import { CANT_MOVE, GONE, roleActionError } from "./messages.ts";
 import { StaffTabs } from "./StaffTabs.tsx";
 
 const ROLE_NOUN = { singular: "role", plural: "roles" } as const;
@@ -116,7 +118,8 @@ export function RolesPage({ data }: { data: RolesData }) {
   const fin = useFin<StaffViewer>();
   const router = useRouter();
   const viewer = fin.viewer.get();
-  const [deleting, setDeleting] = useState<StaffRoleRow | null>(null);
+  // The role being deleted, by key: the dialog always draws the row as the list has it now.
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   if (viewer?.state !== "ok" || data.kind === "notAllowed") return null;
   const actor = actorOf(viewer);
@@ -170,6 +173,8 @@ export function RolesPage({ data }: { data: RolesData }) {
 
   const prebuilt = data.roles.filter((role) => role.builtIn);
   const custom = data.roles.filter((role) => !role.builtIn);
+  const deleting =
+    deletingKey === null ? null : (custom.find((role) => role.key === deletingKey) ?? null);
   const columns: TableColumn<StaffRoleRow>[] = [
     {
       id: "role",
@@ -213,7 +218,7 @@ export function RolesPage({ data }: { data: RolesData }) {
             {role.builtIn ? null : (
               <>
                 <MenuSeparator />
-                <MenuItem destructive onSelect={() => setDeleting(role)}>
+                <MenuItem destructive onSelect={() => setDeletingKey(role.key)}>
                   Delete role
                 </MenuItem>
               </>
@@ -283,12 +288,19 @@ export function RolesPage({ data }: { data: RolesData }) {
       </Section>
       {deleting === null ? null : (
         <DeleteRoleDialog
+          key={deleting.key}
           role={deleting}
           roles={data.roles}
           actor={actor}
-          onClose={() => setDeleting(null)}
+          onClose={() => setDeletingKey(null)}
+          onStale={reload}
+          onGone={async () => {
+            setDeletingKey(null);
+            await reload();
+            toast.info({ title: `${deleting.label} no longer exists`, description: GONE });
+          }}
           onDeleted={async () => {
-            setDeleting(null);
+            setDeletingKey(null);
             await reload();
           }}
         />
@@ -308,11 +320,27 @@ export function moveChoices(
     .map((other) => ({ role: other, disabledReason: givingReason(actor, other) }));
 }
 
+/**
+ * The deletion's body: where its holders move, and the holders the dialog counted (the row's
+ * `holderIds`), which the server binds, so it never moves anyone given the role since.
+ */
+export function deletionInput(role: StaffRoleRow, moveTo: string | null) {
+  return {
+    roleId: role.key,
+    holders: [...role.holderIds],
+    ...(role.holders > 0 && moveTo !== null ? { moveTo } : {}),
+  };
+}
+
 function DeleteRoleDialog(props: {
   role: StaffRoleRow;
   roles: readonly StaffRoleRow[];
   actor: Actor;
   onClose: () => void;
+  /** Reads the list again: who holds the role, or the roles to move to, changed meanwhile. */
+  onStale: () => Promise<void>;
+  /** The role no longer exists: closes the dialog, reads the list again and says so. */
+  onGone: () => Promise<void>;
   onDeleted: () => Promise<void>;
 }) {
   const fin = useFin<StaffViewer>();
@@ -337,10 +365,7 @@ function DeleteRoleDialog(props: {
     setMessage(null);
     try {
       const answer = await withStepUpSubject({ role: role.label }, () =>
-        fin.api(deleteStaffRole, {
-          roleId: role.key,
-          ...(moves && chosen !== null ? { moveTo: chosen.role.key } : {}),
-        }),
+        fin.api(deleteStaffRole, deletionInput(role, chosen?.role.key ?? null)),
       );
       toast.success({
         title: `${role.label} was deleted`,
@@ -350,7 +375,13 @@ function DeleteRoleDialog(props: {
       });
       await props.onDeleted();
     } catch (error) {
-      const refused = roleActionError(error);
+      const refused = roleActionError(error, "delete");
+      if (refused.stale === "gone") {
+        await props.onGone();
+        return;
+      }
+      // The list is read again first, so the count, the picker and the sentence agree.
+      if (refused.stale === "list") await props.onStale();
       setMessage(refused.message);
     } finally {
       setBusy(false);

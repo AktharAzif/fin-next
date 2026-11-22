@@ -38,9 +38,18 @@ import {
   whySaveIsOff,
 } from "./editor.ts";
 import { loadRoleEditor, loadRoles } from "./load.ts";
-import { BEYOND_YOURS, CONFLICT, LIMIT, MOVE_NEEDED, roleActionError } from "./messages.ts";
+import {
+  BEYOND_YOURS,
+  CONFLICT,
+  GONE,
+  HOLDERS_CHANGED,
+  LIMIT,
+  MOVE_GONE,
+  MOVE_NEEDED,
+  roleActionError,
+} from "./messages.ts";
 import { RoleEditorSkeleton } from "./RoleEditorPage.tsx";
-import { moveChoices, RolesSkeleton } from "./RolesPage.tsx";
+import { deletionInput, moveChoices, RolesSkeleton } from "./RolesPage.tsx";
 
 const ALL: Permission[] = [
   "golive.read",
@@ -89,6 +98,7 @@ const row = (over: Partial<StaffRoleRow> & { key: string }): StaffRoleRow => ({
   summary: "",
   topRole: false,
   holders: 0,
+  holderIds: [],
   permissions: [],
   permissionCount: 0,
   version: 1,
@@ -133,6 +143,7 @@ describe("the contracts", () => {
           summary: "Does everything.",
           topRole: true,
           holders: 1,
+          holderIds: ["stf_01jd0000000000000000000001"],
           permissions: ALL,
           permissionCount: 26,
           version: null,
@@ -146,6 +157,7 @@ describe("the contracts", () => {
           summary: "Answers questions.",
           topRole: false,
           holders: 0,
+          holderIds: [],
           permissions: ["customers.read"],
           permissionCount: 1,
           version: 3,
@@ -155,6 +167,9 @@ describe("the contracts", () => {
     expect(staffRolesIndex.output.safeParse(answer).success).toBe(true);
     const { version: _v, ...noVersion } = answer.roles[1] as Record<string, unknown>;
     expect(staffRolesIndex.output.safeParse({ roles: [noVersion] }).success).toBe(false);
+    // Nor one without its holders, which a deletion names.
+    const { holderIds: _h, ...noHolders } = answer.roles[1] as Record<string, unknown>;
+    expect(staffRolesIndex.output.safeParse({ roles: [noHolders] }).success).toBe(false);
     // The detail's groups are the server's; the editor reads the row's own fields.
     expect(staffRoleDetail.output.safeParse({ ...answer.roles[1], groups: [] }).success).toBe(true);
   });
@@ -290,36 +305,98 @@ describe("deleting a role", () => {
       "Only an Admin can give the Admin role.",
     ]);
   });
+
+  it("names the holders the dialog counted, and where they move only when there are any", () => {
+    const held = row({
+      key: "srl_01jd0000000000000000000000",
+      holders: 2,
+      holderIds: ["stf_01jd0000000000000000000001", "stf_01jd0000000000000000000002"],
+    });
+    expect(deletionInput(held, "viewer")).toEqual({
+      roleId: held.key,
+      holders: held.holderIds,
+      moveTo: "viewer",
+    });
+    const unheld = row({ key: "srl_01jd0000000000000000000009" });
+    expect(deletionInput(unheld, "viewer")).toEqual({ roleId: unheld.key, holders: [] });
+    // The contract sends the holders in the body, and refuses a deletion without them.
+    expect(deleteStaffRole.input.safeParse(deletionInput(held, "viewer")).success).toBe(true);
+    expect(deleteStaffRole.input.safeParse({ roleId: held.key, moveTo: "viewer" }).success).toBe(
+      false,
+    );
+  });
 });
 
 describe("what a refused change says", () => {
   it("names the conflict, the limit, the move and a role beyond the actor's", () => {
-    expect(roleActionError(problem(409, "conflict")).message).toBe(CONFLICT);
-    expect(roleActionError(problem(409, "limit_reached", { limit: 30 })).message).toBe(LIMIT);
-    expect(
-      roleActionError(problem(403, "giving_refused", { problem: "move_required" })).message,
-    ).toBe(MOVE_NEEDED);
-    expect(roleActionError(problem(403, "giving_refused", { problem: "beyond" })).message).toBe(
-      BEYOND_YOURS,
+    expect(roleActionError(problem(409, "conflict"), "edit").message).toBe(CONFLICT);
+    expect(roleActionError(problem(409, "limit_reached", { limit: 30 }), "edit").message).toBe(
+      LIMIT,
     );
-    expect(roleActionError(problem(403, "step_up_required")).message).toBeNull();
+    expect(
+      roleActionError(problem(403, "giving_refused", { problem: "move_required" }), "delete")
+        .message,
+    ).toBe(MOVE_NEEDED);
+    expect(
+      roleActionError(problem(403, "giving_refused", { problem: "beyond" }), "edit").message,
+    ).toBe(BEYOND_YOURS);
+    expect(roleActionError(problem(403, "step_up_required"), "delete").message).toBeNull();
+  });
+
+  it("says when the page is out of date, so it reads the list again before it shows the sentence", () => {
+    const said = (error: ApiError, action: "edit" | "delete") => {
+      const refused = roleActionError(error, action);
+      return [refused.message, refused.stale];
+    };
+    // A deletion's conflict is its holders: someone was given or left the role meanwhile.
+    expect(said(problem(409, "conflict"), "delete")).toEqual([HOLDERS_CHANGED, "list"]);
+    // A save's is its version: the draft stays, and the person reloads to see the change.
+    expect(said(problem(409, "conflict"), "edit")).toEqual([CONFLICT, null]);
+    expect(said(problem(403, "giving_refused", { problem: "move_required" }), "delete")).toEqual([
+      MOVE_NEEDED,
+      "list",
+    ]);
+    for (const gone of ["gone", "unknown_role"]) {
+      expect(said(problem(403, "giving_refused", { problem: gone }), "delete")).toEqual([
+        MOVE_GONE,
+        "list",
+      ]);
+    }
+    // The role itself gone: the page reads again and leaves it.
+    for (const action of ["edit", "delete"] as const) {
+      expect(said(problem(404, "not_found"), action)).toEqual([GONE, "gone"]);
+    }
+    for (const [code, extra] of [
+      ["outranked", {}],
+      ["giving_refused", { problem: "beyond" }],
+      ["limit_reached", { limit: 30 }],
+      ["rate_limited", {}],
+      ["step_up_invalid", { reason: "digest" }],
+    ] as const) {
+      expect(roleActionError(problem(403, code, extra), "delete").stale, code).toBeNull();
+    }
   });
 
   it("puts a field's problem beside the field, never the value", () => {
     const refused = roleActionError(
       problem(400, "invalid", { fields: [{ path: "name", code: "name_taken" }] }),
+      "edit",
     );
     expect(refused).toEqual({
       message: null,
       fields: { name: "Another role already has that name." },
       requestId: "req_9",
+      stale: null,
     });
     expect(
-      roleActionError(problem(400, "invalid", { fields: [{ path: "permissions", code: "empty" }] }))
-        .message,
+      roleActionError(
+        problem(400, "invalid", { fields: [{ path: "permissions", code: "empty" }] }),
+        "edit",
+      ).message,
     ).toBe("Check what you entered and try again.");
     expect(
-      roleActionError(new ApiError({ kind: "network", contract: "staffRoles.create" })).message,
+      roleActionError(new ApiError({ kind: "network", contract: "staffRoles.create" }), "edit")
+        .message,
     ).toBe("Couldn’t reach Fin. Check your connection and try again.");
   });
 });

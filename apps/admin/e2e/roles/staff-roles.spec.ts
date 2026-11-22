@@ -3,8 +3,10 @@
 // and no custom one, makes "Support desk" in the editor (needs ticked for her, Admin-only
 // permissions locked, a name that reads as a prebuilt role refused) with "Confirm it's you", saves
 // a change, gives the role to a new member, and deletes it with that member moved to Viewer; the
-// member, holding the custom role, sees the roles read-only. Against the built app on the static
-// host, behind the Access stand-in, with the admin API stand-in on the admin API port.
+// member, holding the custom role, sees the roles read-only. While the delete dialog is open the
+// role is given to someone else: the deletion named only the holder it counted, so nobody moves,
+// the dialog counts again, and the next try moves both. Against the built app on the static host,
+// behind the Access stand-in, with the admin API stand-in on the admin API port.
 import { expect, test } from "@fin/testing/playwright";
 import type { Page } from "@playwright/test";
 import {
@@ -31,6 +33,45 @@ async function confirmWithCode(page: Page, key: string, line: string): Promise<v
     .getByRole("textbox", { name: "Authenticator code" })
     .fill(await authenticatorCode(key));
   await expect(confirm).toBeHidden();
+}
+
+/**
+ * Adds a member of staff through the API from the page's own session, behind the screen's back
+ * (as another Admin's tab would): the intent asked for, proved with the authenticator's next code,
+ * and the request sent again with it.
+ */
+async function addBehindTheScreen(
+  page: Page,
+  key: string,
+  email: string,
+  roleKey: string,
+): Promise<void> {
+  const call = (path: string, body: unknown, intent: string | null) =>
+    page.evaluate(
+      async ({ path, body, intent }) => {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "X-Fin-App": "admin",
+            ...(intent === null ? {} : { "Fin-Step-Up-Intent": intent }),
+          },
+          body: JSON.stringify(body),
+        });
+        return {
+          status: response.status,
+          body: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+        };
+      },
+      { path, body, intent },
+    );
+  const asked = await call("/api/staff", { email, roleKey }, null);
+  expect(asked.body.code).toBe("step_up_required");
+  const intent = String(asked.body.intent_id);
+  const code = await authenticatorCode(key);
+  expect((await call("/api/auth/two-factor/verify-totp", { code }, intent)).status).toBe(200);
+  expect((await call("/api/staff", { email, roleKey }, intent)).status).toBe(201);
 }
 
 test("@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only", async ({
@@ -154,9 +195,25 @@ test("@journey an Admin makes, changes, gives and deletes a custom staff role, a
   await expect(confirmDelete).toHaveAttribute("aria-disabled", "true");
   await expect(remove.getByRole("radio", { name: "Admin" })).toBeEnabled();
   await remove.getByRole("radio", { name: "Viewer" }).check();
+
+  // Meanwhile Ravi is given the role. The deletion names the one holder the dialog counted, so
+  // nobody moves; the dialog counts again, keeps Nadia's pick, and the next try moves both.
+  const roleKey = new URL(roleUrl).pathname.split("/").pop() as string;
+  await addBehindTheScreen(page, key, addresses.address("ravi.kumar"), roleKey);
+  await confirmDelete.click();
+  await expect(
+    remove.getByText(
+      "The people with this role changed meanwhile. Check how many move now, then try again.",
+    ),
+  ).toBeVisible();
+  await expect(
+    remove.getByText("2 people have this role. Pick the role they move to."),
+  ).toBeVisible();
+  await expect(remove.getByRole("radio", { name: "Viewer" })).toBeChecked();
   await confirmDelete.click();
   await confirmWithCode(page, key, "Use your second factor to delete the staff role Support desk.");
   await expect(inApp(page).getByText("Support desk was deleted")).toBeVisible();
+  await expect(inApp(page).getByText("2 people moved to Viewer.")).toBeVisible();
   await expect(inApp(page).getByText("No custom roles yet")).toBeVisible();
 
   // Every change wrote its audit event, and Mei's move was a role change.

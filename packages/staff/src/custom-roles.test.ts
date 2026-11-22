@@ -1,12 +1,14 @@
 // The custom staff role editor's checks without a database (spec 02 §8.4, §8.6, §14.1): a draft is
 // refused as the access engine's `validateRole` refuses it, with the identity package's full name
-// rules; `beyond` is a giving refusal and every other problem names its field and code, never the
-// value; the edit allowance is §8.4's.
+// rules, and as taken when the database's name index holds its name; `beyond` is a giving refusal
+// and every other problem names its field and code, never the value; the name index's own refusal
+// reads as the editor's; the edit allowance is §8.4's.
 import { type StaffPermission, staffCatalogue } from "@fin/access";
 import { describe, expect, it } from "vitest";
 import {
   checkStaffRoleDraft,
   cleanRoleText,
+  nameTakenRefusal,
   STAFF_ROLE_EDIT_BUCKET,
   STAFF_ROLE_EDIT_WINDOWS,
 } from "./custom-roles.ts";
@@ -87,6 +89,76 @@ describe("checkStaffRoleDraft", () => {
       const refused = refusal(() => checkStaffRoleDraft(ADMIN, input, taken));
       expect(refused, input.name).toEqual({ code: "invalid", extensions: { fields }, status: 400 });
       expect(JSON.stringify(refused)).not.toContain(input.name);
+    }
+  });
+
+  it("refuses a name the database's index holds as taken, in the engine's order, once", () => {
+    const store = { takenInStore: true };
+    expect(
+      refusal(() => checkStaffRoleDraft(ADMIN, draft("İnfo desk", ["customers.read"]), [])),
+    ).toBe(null);
+    expect(
+      refusal(() => checkStaffRoleDraft(ADMIN, draft("İnfo desk", ["customers.read"]), [], store)),
+    ).toEqual({
+      code: "invalid",
+      extensions: { fields: [{ path: "name", code: "name_taken" }] },
+      status: 400,
+    });
+    // After a name the rules refuse, before one that reads as a built-in; never twice.
+    expect(
+      refusal(() =>
+        checkStaffRoleDraft(ADMIN, draft(`Call ${"55".repeat(5)}`, []), ["Other"], store),
+      ),
+    ).toMatchObject({
+      extensions: {
+        fields: [
+          { path: "name", code: "name" },
+          { path: "name", code: "name_taken" },
+          { path: "permissions", code: "empty" },
+        ],
+      },
+    });
+    expect(
+      refusal(() => checkStaffRoleDraft(ADMIN, draft("Operators", ["customers.read"]), [], store)),
+    ).toMatchObject({
+      extensions: {
+        fields: [
+          { path: "name", code: "name_taken" },
+          { path: "name", code: "reads_as_built_in" },
+        ],
+      },
+    });
+    expect(
+      refusal(() =>
+        checkStaffRoleDraft(ADMIN, draft("Support", ["customers.read"]), ["support"], store),
+      ),
+    ).toMatchObject({ extensions: { fields: [{ path: "name", code: "name_taken" }] } });
+    // Beyond the editor's role is still the giving refusal.
+    expect(
+      refusal(() =>
+        checkStaffRoleDraft(VIEWER, draft("Deciders", ["customers.decide"]), [], store),
+      ),
+    ).toMatchObject({ code: "giving_refused" });
+  });
+});
+
+describe("nameTakenRefusal", () => {
+  it("reads the name index's unique violation as name_taken, and nothing else", () => {
+    expect(nameTakenRefusal({ code: "23505", constraint: "staff_role_name" })).toMatchObject({
+      code: "invalid",
+      status: 400,
+      lineReason: "staff_role.name_taken",
+      extensions: { fields: [{ path: "name", code: "name_taken" }] },
+    });
+    for (const other of [
+      { code: "23505", constraint: "staff_role_pkey" },
+      { code: "23514", constraint: "staff_role_name" },
+      { code: "23505" },
+      new Error("23505"),
+      null,
+      undefined,
+    ]) {
+      expect(nameTakenRefusal(other), JSON.stringify(other)).toBe(null);
     }
   });
 });

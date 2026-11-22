@@ -5,11 +5,13 @@
 //   1. the staff-change lock, then the actor read again (still active, still holding the
 //      permission) and every custom role read `FOR UPDATE`;
 //   2. the rules: the permission engine's own editor validation (`validateRole`, with the identity
-//      package's name rules and the other roles' names), who may edit or delete which role
-//      (`editingProblem`, `deletionProblem`: never a prebuilt role, never the actor's own role,
-//      never one that allows something the actor lacks), the optimistic `version`, the 30-role
-//      limit, and, when holders move, the giving rules for the role they move to and the last
-//      Admin;
+//      package's name rules and the other roles' names), and the name compared again as the
+//      `staff_role_name` index compares it, so a name the index would refuse is refused here
+//      too; who may edit or delete which role (`editingProblem`, `deletionProblem`: never a
+//      prebuilt role, never the actor's own role, never one that allows something the actor
+//      lacks), the optimistic `version`, the 30-role limit, and, when holders move, the members
+//      the request names as the holders it showed, the giving rules for the role they move to and
+//      the last Admin;
 //   3. only then the intent (`who.stepUp`), spent in the same transaction as the change, its audit
 //      events, its revocation-journal entry and its notices;
 //   4. the edit allowance (30 an hour and 100 a day per person), counted once the change goes
@@ -44,7 +46,7 @@ import { StaffRefusal } from "./errors.ts";
 import { isIdOf, newId } from "./ids.ts";
 import { type ActorNow, actorInsideLock, type MemberRow, takeStaffChangeLock } from "./lock.ts";
 import { refuseLastActiveAdmin } from "./members.ts";
-import type { UnitTx } from "./ports.ts";
+import { type Queryable, sqlState, type UnitTx } from "./ports.ts";
 import type { StaffActor } from "./require-staff.ts";
 import { type CustomStaffRoleRow, customStaffRoleRows } from "./roles.ts";
 
@@ -94,12 +96,16 @@ export function cleanRoleText(kind: "roleName" | "roleDescription", value: strin
 /**
  * Refuses a draft as the role editor does: a permission the actor's role does not allow (or one
  * the catalogue does not know) is `403 giving_refused` with `problem: beyond`; every other problem
- * is `400 invalid` naming its field and the problem, never the value (§14.1).
+ * is `400 invalid` naming its field and the problem, never the value (§14.1). `takenInStore` says
+ * the database's unique name index holds the name for another role (`nameTakenInStore`), which
+ * is `name_taken` too, in the engine's order, even where the engine's own comparison tells the
+ * two names apart.
  */
 export function checkStaffRoleDraft(
   actorPerms: ReadonlySet<StaffPermission>,
   draft: StaffRoleDraft,
   otherNames: readonly string[],
+  options: { takenInStore?: boolean } = {},
 ): void {
   const problems = validateRole(
     STAFF_CATALOGUE,
@@ -111,6 +117,10 @@ export function checkStaffRoleDraft(
     actorPerms,
     { takenNames: otherNames, names: NAME_RULES },
   );
+  if (options.takenInStore === true && !problems.includes("name_taken")) {
+    // `name`, when it is there, is always the first problem, and `name_taken` the next.
+    problems.splice(problems[0] === "name" ? 1 : 0, 0, "name_taken");
+  }
   if (problems.includes("beyond")) {
     throw new StaffRefusal("giving_refused", "staff_role.beyond", { problem: "beyond" });
   }
@@ -138,6 +148,58 @@ function lookupOf(row: CustomStaffRoleRow): StaffRoleLookup {
     description: row.description,
     permissions: row.permissions,
   };
+}
+
+/** The unique index on custom staff role names (the staff area's first migration). */
+const NAME_INDEX = "staff_role_name";
+
+/**
+ * Whether another custom staff role's stored name is the same as `name` the way the
+ * `staff_role_name` index compares names: `lower(name)` in the database's collation, which can fold
+ * letters the editor's own comparison keeps apart (a capital I with a dot above, under a libc
+ * collation). Read inside the staff-change lock with every role row locked, so no name can be
+ * written between this read and the change's own write.
+ */
+export async function nameTakenInStore(
+  db: Queryable,
+  name: string,
+  exceptRoleId: string | null,
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1 FROM staff.role
+      WHERE lower(name) = lower($1) AND ($2::text IS NULL OR id <> $2) LIMIT 1`,
+    [name, exceptRoleId],
+  );
+  return result.rowCount > 0;
+}
+
+/**
+ * A write the name index refused, as the editor's refusal: `400 invalid` with `name_taken` on the
+ * name. The check inside the lock (`nameTakenInStore`) comes first, so this is only a backstop;
+ * anything else is not a refusal (null).
+ */
+export function nameTakenRefusal(error: unknown): StaffRefusal | null {
+  if (sqlState(error) !== "23505") return null;
+  if ((error as { constraint?: unknown }).constraint !== NAME_INDEX) return null;
+  return new StaffRefusal("invalid", "staff_role.name_taken", {
+    fields: [{ path: "name", code: "name_taken" }],
+  });
+}
+
+/** Runs a write of a role's name, answering the name index's refusal as the editor's. */
+async function writeName(run: () => Promise<{ rowCount: number }>): Promise<{ rowCount: number }> {
+  try {
+    return await run();
+  } catch (error) {
+    throw nameTakenRefusal(error) ?? error;
+  }
+}
+
+/** Whether two lists name the same members, once each, in any order. */
+function sameMembers(held: readonly string[], named: readonly string[]): boolean {
+  const now = new Set(held);
+  const shown = new Set(named);
+  return now.size === shown.size && [...now].every((id) => shown.has(id));
 }
 
 /** Counts one edit against the actor's allowance; past it, `429` and the whole unit rolls back. */
@@ -252,6 +314,7 @@ export async function createStaffRole(
     actor.permissions,
     { name, description, permissions: body.permissions },
     roles.map((r) => r.name),
+    { takenInStore: await nameTakenInStore(tx, name, null) },
   );
   const stepUp = await who.stepUp(tx, {
     action: "staffRole.create",
@@ -262,10 +325,12 @@ export async function createStaffRole(
   const permissions = knownPermissions(body.permissions);
   const roleId = newId("srl", deps.clock);
   const now = deps.clock.now();
-  await tx.query(
-    `INSERT INTO staff.role (id, name, description, created_by, created_at, updated_at, version)
-     VALUES ($1, $2, $3, $4, $5, $5, 1)`,
-    [roleId, name, description, who.staffId, now],
+  await writeName(() =>
+    tx.query(
+      `INSERT INTO staff.role (id, name, description, created_by, created_at, updated_at, version)
+       VALUES ($1, $2, $3, $4, $5, $5, 1)`,
+      [roleId, name, description, who.staffId, now],
+    ),
   );
   await tx.query(
     "INSERT INTO staff.role_permission (role_id, permission) SELECT $1, unnest($2::text[])",
@@ -309,6 +374,7 @@ export async function updateStaffRole(
     actor.permissions,
     { name, description, permissions: body.permissions },
     roles.filter((r) => r.id !== roleId).map((r) => r.name),
+    { takenInStore: await nameTakenInStore(tx, name, roleId) },
   );
   const stepUp = await who.stepUp(tx, {
     action: "staffRole.update",
@@ -320,10 +386,12 @@ export async function updateStaffRole(
   const after = knownPermissions(body.permissions);
   const { added, removed } = permissionDiff(STAFF_CATALOGUE, before, after);
   const now = deps.clock.now();
-  const updated = await tx.query(
-    `UPDATE staff.role SET name = $2, description = $3, version = version + 1, updated_at = $4
-      WHERE id = $1 AND version = $5`,
-    [roleId, name, description, now, body.version],
+  const updated = await writeName(() =>
+    tx.query(
+      `UPDATE staff.role SET name = $2, description = $3, version = version + 1, updated_at = $4
+        WHERE id = $1 AND version = $5`,
+      [roleId, name, description, now, body.version],
+    ),
   );
   if (updated.rowCount !== 1) throw new StaffRefusal("conflict", "staff_role.stale_version");
   // The stored rows become the known set, so a stored name that broke a rule does not linger.
@@ -369,18 +437,28 @@ export async function updateStaffRole(
  * `staff.role` as well (the move permission). Each move is a role change: `staff.role_changed`
  * with `reason: role_deleted`, the holder's sessions ended (S2-20) and `staff-access-changed` to
  * them and every Admin. The last active Admin stays (§10.8).
+ *
+ * `holders` are the members the actor was shown as holding the role (`holderIds` of the list),
+ * and the intent binds them: when the members holding it now are not exactly those, the answer is
+ * `409 conflict` and nobody moves, so a proved intent never moves someone given the role after
+ * the actor looked (an owner's decision beyond §7.6's `moveTo`, recorded in the pull request).
  */
 export async function deleteStaffRole(
   deps: StaffDeps,
   tx: UnitTx,
   who: StaffActor,
   roleId: string,
-  body: { moveTo?: string | undefined },
+  body: { moveTo?: string | undefined; holders: readonly string[] },
 ): Promise<{ roleId: string; movedTo: string | null; membersMoved: number }> {
   const { actor, roles } = await lockForRoles(tx, who);
   const row = roleNamed(roles, roleId);
   const role = lookupOf(row);
+  refuseEditing(actor, role);
   const holders = await holdersOf(tx, roleId);
+  const heldNow = holders.map((holder) => holder.id);
+  if (!sameMembers(heldNow, body.holders)) {
+    throw new StaffRefusal("conflict", "staff_role.holders_changed");
+  }
   const moveTo = body.moveTo === undefined ? undefined : await resolveStaffRole(tx, body.moveTo);
   const problem = deletionProblem(STAFF_CATALOGUE, {
     actorRoleKey: actor.row.roleKey,
@@ -414,7 +492,7 @@ export async function deleteStaffRole(
   const stepUp = await who.stepUp(tx, {
     action: "staffRole.delete",
     target: roleId,
-    body: { moveTo: body.moveTo },
+    body: { moveTo: body.moveTo, holders: [...body.holders] },
   });
   await countEdit(deps, tx, who.staffId);
   const now = deps.clock.now();

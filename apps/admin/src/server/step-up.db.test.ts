@@ -168,10 +168,11 @@ async function scenario(id: PolicyId): Promise<Scenario> {
     }
     case "staff_roles.delete": {
       const [a, b] = [await madeRole(), await madeRole()];
+      // Nobody holds either role, so the holders a deletion names are none.
       return {
         path: `/api/staff-roles/${a}/delete`,
-        body: {},
-        tampered: { path: `/api/staff-roles/${b}/delete`, body: {} },
+        body: { holders: [] },
+        tampered: { path: `/api/staff-roles/${b}/delete`, body: { holders: [] } },
       };
     }
     default:

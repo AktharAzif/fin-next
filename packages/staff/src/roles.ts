@@ -1,11 +1,11 @@
 // `GET /api/staff-roles` and `GET /api/staff-roles/:roleKey` (spec 02 §10.7, must-have): the four
-// prebuilt roles and the custom staff roles (stretch 3), with what each allows, its summary, how
-// many members hold it and, for a custom role, its description and the `version` a save names
-// (§8.4), for the Staff page's Roles card, the role picker, AdminRoles and AdminRoleEditor.
-import type { StaffPermission } from "@fin/access";
+// prebuilt roles and the custom staff roles (stretch 3), with what each allows, its summary, who
+// holds it (how many, and their member IDs, which a deletion names back as the holders it moves)
+// and, for a custom role, its description and the `version` a save names (§8.4), for the Staff
+// page's Roles card, the role picker, AdminRoles and AdminRoleEditor.
+import { isCustomRoleId, resolveRole, type StaffPermission } from "@fin/access";
 import {
   PREBUILT_ROLE_KEYS,
-  resolveStaffRole,
   STAFF_CATALOGUE,
   type StaffRoleLookup,
   staffPermissionsOf,
@@ -26,6 +26,11 @@ export interface StaffRoleView {
   summary: string;
   topRole: boolean;
   holders: number;
+  /**
+   * The members (pending or active) who hold the role, by ID, in ID order: what a deletion names
+   * back as the holders it was shown, so it never moves anyone given the role since.
+   */
+  holderIds: string[];
   permissions: StaffPermission[];
   permissionCount: number;
   /** A custom role's version, which a save names (a stale one is `409 conflict`); null if prebuilt. */
@@ -52,7 +57,8 @@ export interface CustomStaffRoleRow {
 
 /**
  * Every custom staff role, or the one named, with its stored permissions, in name order. Inside
- * the staff-change lock a change reads them `FOR UPDATE`.
+ * the staff-change lock a change reads them `FOR UPDATE`. One statement reads each role's name,
+ * description, version and permissions together, so they always belong to one save.
  */
 export async function customStaffRoleRows(
   db: Queryable,
@@ -83,18 +89,19 @@ export async function customStaffRoleRows(
   }));
 }
 
-/** How many members (pending or active) hold each role key now. */
-export async function holderCounts(db: Queryable): Promise<Map<string, number>> {
-  const result = await db.query<{ role_key: string; n: number }>(
-    "SELECT role_key, count(*)::integer AS n FROM staff.member WHERE status <> 'removed' GROUP BY role_key",
+/** The members (pending or active) who hold each role key now, by ID, in ID order. */
+export async function holdersByRole(db: Queryable): Promise<Map<string, string[]>> {
+  const result = await db.query<{ role_key: string; ids: string[] }>(
+    `SELECT role_key, array_agg(id ORDER BY id) AS ids FROM staff.member
+      WHERE status <> 'removed' GROUP BY role_key`,
   );
-  return new Map(result.rows.map((r) => [r.role_key, Number(r.n)]));
+  return new Map(result.rows.map((r) => [r.role_key, [...r.ids]]));
 }
 
 function view(
   key: string,
   role: StaffRoleLookup,
-  held: number,
+  held: readonly string[],
   custom: CustomStaffRoleRow | undefined,
 ): StaffRoleView {
   const permissions = staffPermissionsOf(role);
@@ -107,7 +114,8 @@ function view(
     description: custom?.description ?? "",
     summary: staffRoleSummary(role),
     topRole: key === STAFF_CATALOGUE.topRoleKey,
-    holders: held,
+    holders: held.length,
+    holderIds: [...held],
     permissions: listed,
     permissionCount: listed.length,
     version: custom?.version ?? null,
@@ -126,28 +134,33 @@ function customLookup(row: CustomStaffRoleRow): StaffRoleLookup {
 
 /** The prebuilt roles in the catalogue's order, then the custom roles by name. */
 export async function listStaffRoles(tx: UnitTx): Promise<StaffRoleView[]> {
-  const counts = await holderCounts(tx);
+  const holders = await holdersByRole(tx);
   const out: StaffRoleView[] = [];
   for (const key of PREBUILT_ROLE_KEYS) {
-    out.push(view(key, { kind: "built_in", key }, counts.get(key) ?? 0, undefined));
+    out.push(view(key, { kind: "built_in", key }, holders.get(key) ?? [], undefined));
   }
   for (const row of await customStaffRoleRows(tx)) {
-    out.push(view(row.id, customLookup(row), counts.get(row.id) ?? 0, row));
+    out.push(view(row.id, customLookup(row), holders.get(row.id) ?? [], row));
   }
   return out;
 }
 
-/** One prebuilt or custom role, with every group of the catalogue and what the role holds. */
+/**
+ * One prebuilt or custom role, with every group of the catalogue and what the role holds. A custom
+ * role is read in one statement, so its label, permissions, description and version are always
+ * one save's: never one save's permissions beside the next one's version, which a save would then
+ * name as the version it built on (§8.4).
+ */
 export async function getStaffRole(tx: UnitTx, roleKey: string): Promise<StaffRoleDetail> {
-  const role = await resolveStaffRole(tx, roleKey);
+  const custom = isCustomRoleId(STAFF_CATALOGUE, roleKey)
+    ? (await customStaffRoleRows(tx, { id: roleKey }))[0]
+    : undefined;
+  const role = resolveRole(STAFF_CATALOGUE, roleKey, (id) =>
+    custom?.id === id ? custom : undefined,
+  );
   if (typeof role === "string") throw new StaffRefusal("not_found", "staff_role.not_found");
-  const custom =
-    role.kind === "custom" ? (await customStaffRoleRows(tx, { id: roleKey }))[0] : undefined;
-  if (role.kind === "custom" && custom === undefined) {
-    throw new StaffRefusal("not_found", "staff_role.not_found");
-  }
-  const counts = await holderCounts(tx);
-  const base = view(roleKey, role, counts.get(roleKey) ?? 0, custom);
+  const holders = await holdersByRole(tx);
+  const base = view(roleKey, role, holders.get(roleKey) ?? [], custom);
   const held = new Set(base.permissions);
   return {
     ...base,

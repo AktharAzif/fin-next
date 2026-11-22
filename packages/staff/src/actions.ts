@@ -5,7 +5,9 @@
 // ...) are @fin/identity's fragment; createRealm assembles both and refuses a key listed twice.
 // Custom staff roles' actions (`staffRole.*`, stretch 3) bind what the dashboard's role actions
 // bind (§7.6 "as the developer ones"): the name, description and permissions of a draft, its
-// version on a save, and the role its holders move to on a delete. Their reason keys are §15.5's
+// version on a save, and on a delete the role its holders move to and the holders themselves, the
+// members the actor was shown (beyond §7.6's `moveTo`, so a proved intent moves nobody given the
+// role after the actor looked; recorded in the pull request). Their reason keys are §15.5's
 // `staffRole.*` keys written as `staff_role.*`: ops.step_up_intent's reason_key column (identity's
 // `_ops_step_up`) takes lower-case keys only, while an action key may carry a capital.
 import type { StepUpAction } from "@fin/identity";
@@ -71,7 +73,10 @@ export const STAFF_ACTIONS = [
     realm: "staff",
     kind: "intent",
     reasonKey: "staff_role.delete",
-    bind: [{ name: "moveTo", kind: "string" }],
+    bind: [
+      { name: "moveTo", kind: "string" },
+      { name: "holders", kind: "keys" },
+    ],
   },
   {
     key: "switch.set",

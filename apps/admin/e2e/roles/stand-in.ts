@@ -3,7 +3,8 @@
 // server serves them. It keeps the contract @fin/staff answers (apps/admin's staff-roles.db.test.ts
 // pins it) and decides with the same permission engine the server runs: `validateRole` (without
 // the identity package's full name rules, which the server adds), `editingProblem` and
-// `deletionProblem`, the version, the 30-role limit, and an intent bound to each change through the
+// `deletionProblem`, the version, the 30-role limit, the holders a deletion names (exactly the
+// role's holders now, or `409 conflict`), and an intent bound to each change through the
 // stand-in's own step-up. Every change appends its audit event to the stand-in's trail.
 import {
   CUSTOM_ROLE_LIMIT,
@@ -121,7 +122,9 @@ export class StaffRolesStandIn {
   }
 
   /** `GET /api/staff-roles`'s rows: the prebuilt roles, then the custom ones by name. */
-  rows(prebuilt: readonly StandInRole[], holders: (key: string) => number) {
+  rows(prebuilt: readonly StandInRole[], holdersOf: (key: string) => readonly string[]) {
+    const holders = (key: string) => holdersOf(key).length;
+    const holderIds = (key: string) => [...holdersOf(key)].sort();
     const custom = [...this.roles.values()].sort(
       (a, b) =>
         a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.id.localeCompare(b.id),
@@ -136,6 +139,7 @@ export class StaffRolesStandIn {
         summary: role.summary,
         topRole: role.key === staffCatalogue.topRoleKey,
         holders: holders(role.key),
+        holderIds: holderIds(role.key),
         permissions: [...role.permissions],
         permissionCount: role.permissions.length,
         version: null,
@@ -151,6 +155,7 @@ export class StaffRolesStandIn {
           summary: view.summary,
           topRole: false,
           holders: holders(role.id),
+          holderIds: holderIds(role.id),
           permissions: [...view.permissions],
           permissionCount: view.permissions.length,
           version: role.version,
@@ -161,7 +166,8 @@ export class StaffRolesStandIn {
 
   /** Every `/api/staff-roles` route. */
   route(host: RolesHost): RoleAnswer {
-    const rows = () => this.rows(host.prebuilt, (key) => host.holders(key).length);
+    const rows = () =>
+      this.rows(host.prebuilt, (key) => host.holders(key).map((holder) => holder.id));
     if (host.method === "GET" && host.path === "/api/staff-roles") {
       return host.needs("staff.read") ?? host.ok({ roles: rows() });
     }
@@ -299,6 +305,16 @@ export class StaffRolesStandIn {
     const role = this.#editable(host, id);
     if ("status" in role) return role;
     const holders = host.holders(id);
+    // The holders the page counted: exactly the role's holders now, or nobody moves.
+    const named = host.body.holders;
+    if (!Array.isArray(named) || named.some((v) => typeof v !== "string")) {
+      return host.problem("invalid", { fields: [{ path: "holders", code: "invalid_type" }] });
+    }
+    const shown = [...new Set(named as string[])].sort();
+    const now = holders.map((holder) => holder.id).sort();
+    if (shown.length !== now.length || shown.some((holderId, i) => holderId !== now[i])) {
+      return host.problem("conflict");
+    }
     const moveTo = typeof host.body.moveTo === "string" ? host.body.moveTo : undefined;
     const problem = deletionProblem(staffCatalogue, {
       actorRoleKey: host.actor.roleKey,
@@ -318,7 +334,11 @@ export class StaffRolesStandIn {
         problem: problem === "move_gone" ? "gone" : problem,
       });
     }
-    const stepUp = host.stepUp("staffRole.delete", "staff_role.delete", { target: id, moveTo });
+    const stepUp = host.stepUp("staffRole.delete", "staff_role.delete", {
+      target: id,
+      moveTo,
+      holders: shown,
+    });
     if (stepUp !== null) return stepUp;
     const movedTo = holders.length > 0 && moveTo !== undefined ? moveTo : null;
     for (const holder of holders) {

@@ -87,7 +87,10 @@ function sample(id: PolicyId): { path: string; body?: unknown } {
         body: { name: "Sample role", description: "", permissions: ["customers.read"], version: 1 },
       };
     case "staff_roles.delete":
-      return { path: "/api/staff-roles/srl_01jd0000000000000000000000/delete", body: {} };
+      return {
+        path: "/api/staff-roles/srl_01jd0000000000000000000000/delete",
+        body: { holders: [] },
+      };
     case "switches.list":
       return { path: "/api/switches" };
     case "switches.set":

@@ -1,11 +1,14 @@
 // Custom staff roles on Postgres 18 (spec 02 §10.7, §8.4, §8.5, §10.8, §16.4, §17.3; T-SAT-23's
 // staff role half): each change runs as the API half runs it (requireStaff, then the action, in
 // the realm's unit of work, its intent proved with a passkey) and writes its events, its journal
-// entry and its notices with it; every refusal of the editor validation, the editing and deletion
-// rules, the version, the 30-role limit and the edit allowance writes nothing, and comes before any
-// factor is asked for; the database refuses a role written without its event.
+// entry and its notices with it; every refusal of the editor validation, the name index, the
+// editing and deletion rules, the version, the holders a deletion was shown, the 30-role limit and
+// the edit allowance writes nothing, and comes before any factor is asked for (the allowance and
+// the holders after it as well); a role is read whole; the database refuses a role written
+// without its event.
+import { type StaffPermission, staffCatalogue } from "@fin/access";
 import type { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   type Browser,
   createStaffHarness,
@@ -17,14 +20,18 @@ import {
 } from "../test/harness.ts";
 import { resolveStaffRole, staffPermissionsOf } from "./catalogue.ts";
 import {
+  checkStaffRoleDraft,
   createStaffRole,
   deleteStaffRole,
+  nameTakenRefusal,
   STAFF_ROLE_EDIT_BUCKET,
   type StaffRoleDraft,
   updateStaffRole,
 } from "./custom-roles.ts";
 import { newId } from "./ids.ts";
-import { requireStaff } from "./require-staff.ts";
+import { addStaff } from "./members.ts";
+import type { UnitTx } from "./ports.ts";
+import { requireStaff, type StaffActor } from "./require-staff.ts";
 import { getStaffRole, listStaffRoles } from "./roles.ts";
 
 let h: StaffHarness;
@@ -55,7 +62,32 @@ afterAll(async () => {
   await h?.close();
 });
 
+// Every test proves intents from one test address, more passkey ceremonies than a person makes in
+// a minute: each test starts with that address's passkey allowance (§5.6) anew.
+beforeEach(async () => {
+  await h.fixture("DELETE FROM ops.rate_window WHERE key LIKE 'passkey_options:%'");
+});
+
 const MANAGE = { permission: "staffRoles.manage" } as const;
+
+/** Every staff permission: an Admin's, for the editor's own checks. */
+const ALL = new Set<StaffPermission>(staffCatalogue.keys);
+
+/** The holders AdminRoles shows for a role (the list's `holderIds`), which a deletion sends. */
+async function shown(roleId: string): Promise<string[]> {
+  const roles = await h.db.unit((tx) => listStaffRoles(tx));
+  return roles.find((r) => r.key === roleId)?.holderIds ?? [];
+}
+
+interface DeleteBody {
+  moveTo?: string;
+  /** The holders the deletion names; by default those the list shows now. */
+  holders?: string[];
+}
+
+async function deletion(roleId: string, body: DeleteBody) {
+  return { ...body, holders: body.holders ?? (await shown(roleId)) };
+}
 
 const create = (who: Member, draft: StaffRoleDraft) =>
   stepped(
@@ -77,8 +109,9 @@ const update = (who: Member, roleId: string, draft: StaffRoleDraft & { version: 
       updateStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), roleId, draft),
   );
 
-const remove = (who: Member, roleId: string, body: { moveTo?: string }) =>
-  stepped(
+const remove = async (who: Member, roleId: string, input: DeleteBody) => {
+  const body = await deletion(roleId, input);
+  return stepped(
     h,
     who.browser,
     who.authenticator,
@@ -86,6 +119,7 @@ const remove = (who: Member, roleId: string, body: { moveTo?: string }) =>
     async (tx, req, ctx) =>
       deleteStaffRole(h.deps, tx, await requireStaff(h.realm, req, ctx, MANAGE), roleId, body),
   );
+};
 
 /** The first try only: a refusal that comes before any factor is asked for. */
 const tryCreate = (who: Member, draft: StaffRoleDraft) =>
@@ -100,8 +134,9 @@ const tryUpdate = (who: Member, roleId: string, draft: StaffRoleDraft & { versio
       updateStaffRole(h.deps, tx, await requireStaff(h.realm, r, c, MANAGE), roleId, draft),
     ),
   );
-const tryDelete = (who: Member, roleId: string, body: { moveTo?: string }) =>
-  refusalOf(
+const tryDelete = async (who: Member, roleId: string, input: DeleteBody) => {
+  const body = await deletion(roleId, input);
+  return refusalOf(
     h.route(
       who.browser,
       { method: "POST", path: `/api/staff-roles/${roleId}/delete` },
@@ -109,6 +144,63 @@ const tryDelete = (who: Member, roleId: string, body: { moveTo?: string }) =>
         deleteStaffRole(h.deps, tx, await requireStaff(h.realm, r, c, MANAGE), roleId, body),
     ),
   );
+};
+
+/** One try of a stepped-up route, with an intent once there is one: the first asks for a factor. */
+const attempt = <T>(
+  who: Member,
+  request: { method: string; path: string },
+  run: (tx: UnitTx, actor: StaffActor) => Promise<T>,
+  intent?: string,
+) =>
+  refusalOf(
+    h.route(
+      who.browser,
+      { ...request, ...(intent === undefined ? {} : { intent }) },
+      async (tx, r, c) => run(tx, await requireStaff(h.realm, r, c, MANAGE)),
+    ),
+  );
+
+/** Asks for the route's intent with a first try and proves it; returns the intent's ID. */
+async function provedIntent(
+  who: Member,
+  first: () => Promise<{ code: string; extensions: Record<string, unknown> }>,
+): Promise<string> {
+  const asked = await first();
+  expect(asked.code).toBe("step_up_required");
+  const intent = String(asked.extensions.intent_id);
+  expect((await h.prove(who.browser, who.authenticator, intent)).status).toBe(200);
+  return intent;
+}
+
+/** Fills a person's role edit allowance, both windows (§8.4: 30 an hour, 100 a day). */
+async function fillAllowance(staffId: string): Promise<void> {
+  const now = Date.now();
+  for (const [ms, max] of [
+    [3_600_000, 30],
+    [86_400_000, 100],
+  ] as const) {
+    await h.fixture(
+      `INSERT INTO ops.rate_window (key, window_start, count) VALUES ($1, $2, $3)
+       ON CONFLICT (key, window_start) DO UPDATE SET count = EXCLUDED.count`,
+      [`${STAFF_ROLE_EDIT_BUCKET}:${ms}:${staffId}`, new Date(Math.floor(now / ms) * ms), max],
+    );
+  }
+}
+
+async function clearAllowance(staffId: string): Promise<void> {
+  await h.fixture("DELETE FROM ops.rate_window WHERE key LIKE $1", [
+    `${STAFF_ROLE_EDIT_BUCKET}:%:${staffId}`,
+  ]);
+}
+
+async function unspent(intent: string): Promise<boolean> {
+  return (
+    (await count("SELECT 1 FROM ops.step_up_intent WHERE id = $1 AND consumed_at IS NULL", [
+      intent,
+    ])) === 1
+  );
+}
 
 async function count(sql: string, values: readonly unknown[] = []): Promise<number> {
   const result = await h.admin.query<{ n: number }>(
@@ -202,6 +294,7 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
       summary: "Answers questions.",
       topRole: false,
       holders: 0,
+      holderIds: [],
       permissions: ["customers.read", "rfis.read"],
       permissionCount: 2,
       version: 1,
@@ -338,24 +431,7 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
   });
 
   it("counts the edit allowance once the change goes ahead, and refuses past it with nothing written", async () => {
-    const now = Date.now();
-    const hour = 3_600_000;
-    const day = 24 * hour;
-    const windows = [
-      [hour, 30],
-      [day, 100],
-    ] as const;
-    for (const [ms, max] of windows) {
-      await h.fixture(
-        `INSERT INTO ops.rate_window (key, window_start, count) VALUES ($1, $2, $3)
-         ON CONFLICT (key, window_start) DO UPDATE SET count = EXCLUDED.count`,
-        [
-          `${STAFF_ROLE_EDIT_BUCKET}:${ms}:${otherAdmin.staffId}`,
-          new Date(Math.floor(now / ms) * ms),
-          max,
-        ],
-      );
-    }
+    await fillAllowance(otherAdmin.staffId);
     try {
       const body = draft("Over the limit", ["customers.read"]);
       const first = await tryCreate(otherAdmin, body);
@@ -377,16 +453,105 @@ describe("making a custom staff role (§10.7, §8.4)", () => {
       expect(Number(refused.extensions.retry_after)).toBeGreaterThan(0);
       expect(await count("SELECT 1 FROM staff.role")).toBe(roles);
       // The whole unit rolled back, the intent's spending with it.
-      expect(
-        await count("SELECT 1 FROM ops.step_up_intent WHERE id = $1 AND consumed_at IS NULL", [
-          intent,
-        ]),
-      ).toBe(1);
+      expect(await unspent(intent)).toBe(true);
     } finally {
-      await h.fixture("DELETE FROM ops.rate_window WHERE key LIKE $1", [
-        `${STAFF_ROLE_EDIT_BUCKET}:%:${otherAdmin.staffId}`,
-      ]);
+      await clearAllowance(otherAdmin.staffId);
     }
+  });
+
+  it("counts a save and a deletion against the same allowance, refusing each past it with the role untouched and the intent unspent", async () => {
+    const kept = await create(otherAdmin, draft("Allowance check", ["customers.read"]));
+    const spare = await create(otherAdmin, draft("Allowance spare", ["audit.read"]));
+    const save = { ...draft("Allowance check", ["customers.read", "audit.read"]), version: 1 };
+    const changes: {
+      label: string;
+      request: { method: string; path: string };
+      run: (tx: UnitTx, actor: StaffActor) => Promise<unknown>;
+    }[] = [
+      {
+        label: "save",
+        request: { method: "PUT", path: `/api/staff-roles/${kept.roleId}` },
+        run: (tx: UnitTx, actor: StaffActor) =>
+          updateStaffRole(h.deps, tx, actor, kept.roleId, save),
+      },
+      {
+        label: "delete",
+        request: { method: "POST", path: `/api/staff-roles/${spare.roleId}/delete` },
+        run: (tx: UnitTx, actor: StaffActor) =>
+          deleteStaffRole(h.deps, tx, actor, spare.roleId, { holders: [] }),
+      },
+    ];
+    await fillAllowance(otherAdmin.staffId);
+    try {
+      for (const change of changes) {
+        const intent = await provedIntent(otherAdmin, () =>
+          attempt(otherAdmin, change.request, change.run),
+        );
+        const before = await snapshot();
+        const refused = await attempt(otherAdmin, change.request, change.run, intent);
+        expect(refused.code, change.label).toBe("rate_limited");
+        expect(Number(refused.extensions.retry_after), change.label).toBeGreaterThan(0);
+        expect(await snapshot(), change.label).toEqual(before);
+        expect(await unspent(intent), change.label).toBe(true);
+      }
+      expect(await roleRow(kept.roleId)).toMatchObject({
+        version: 1,
+        permissions: ["customers.read"],
+      });
+      expect(await roleRow(spare.roleId)).toMatchObject({ version: 1 });
+    } finally {
+      await clearAllowance(otherAdmin.staffId);
+    }
+  });
+
+  it("refuses a name the database's name index holds for another role, even one the editor tells apart, before any factor is asked for", async (ctx) => {
+    // "Info desk" with a capital I with a dot above: the editor's own comparison keeps it apart
+    // from "Info desk", while `lower()` folds both to one key under the server's collation.
+    const dotted = "İnfo desk";
+    const folds = await h.admin.query<{ same: boolean }>("SELECT lower($1) = lower($2) AS same", [
+      dotted,
+      "Info desk",
+    ]);
+    if (folds.rows[0]?.same !== true) {
+      ctx.skip("this database's collation keeps the two names apart, as the editor does");
+    }
+    expect(() =>
+      checkStaffRoleDraft(ALL, draft(dotted, ["customers.read"]), ["Info desk"]),
+    ).not.toThrow();
+    await create(admin, draft("Info desk", ["customers.read"]));
+    const renamed = await create(admin, draft("Help desk", ["customers.read"]));
+    const before = await snapshot();
+    const taken = {
+      code: "invalid",
+      extensions: { fields: [{ path: "name", code: "name_taken" }] },
+    };
+    expect(await tryCreate(admin, draft(dotted, ["customers.read"]))).toEqual(taken);
+    expect(
+      await tryUpdate(admin, renamed.roleId, { ...draft(dotted, ["customers.read"]), version: 1 }),
+    ).toEqual(taken);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("answers the name index's own refusal as the editor's name_taken, should a write ever reach it", async () => {
+    const seeded = await h.seedCustomRole("Backstop role", ["audit.read"]);
+    let refused: unknown;
+    try {
+      await h.fixture(
+        "INSERT INTO staff.role (id, name, description, created_by) VALUES ($1, 'BACKSTOP ROLE', '', $2)",
+        [newId("srl", { now: () => new Date() }), admin.staffId],
+      );
+    } catch (error) {
+      refused = error;
+    } finally {
+      await h.fixture("DELETE FROM staff.role WHERE id = $1", [seeded]);
+    }
+    expect(refused).toMatchObject({ code: "23505", constraint: "staff_role_name" });
+    expect(nameTakenRefusal(refused)).toMatchObject({
+      code: "invalid",
+      status: 400,
+      lineReason: "staff_role.name_taken",
+      extensions: { fields: [{ path: "name", code: "name_taken" }] },
+    });
   });
 });
 
@@ -521,6 +686,76 @@ describe("changing a custom staff role (§8.4)", () => {
   });
 });
 
+describe("reading a custom staff role (§10.7, §8.4)", () => {
+  it("answers one save's name, permissions, description and version even while another Admin saves, so a save from it is stale", async () => {
+    const made = await create(
+      admin,
+      draft("Case readers", ["customers.read", "customers.reveal", "documents.view"], "First."),
+    );
+    // A read whose first statement on the role is followed at once by another Admin's save, which
+    // commits before the read goes on.
+    let raced = false;
+    const racing = {
+      async query(text: string, values?: readonly unknown[]) {
+        const result = await h.admin.query(text, values);
+        if (!raced && /\bstaff\.role\b/.test(text)) {
+          raced = true;
+          await update(otherAdmin, made.roleId, {
+            ...draft("Case readers", ["customers.read"], "Second."),
+            version: 1,
+          });
+        }
+        return result;
+      },
+    } as unknown as UnitTx;
+    const detail = await getStaffRole(racing, made.roleId);
+    expect(raced).toBe(true);
+    expect({
+      label: detail.label,
+      description: detail.description,
+      summary: detail.summary,
+      permissions: detail.permissions,
+      held: detail.groups.flatMap((g) => g.permissions.filter((p) => p.held).map((p) => p.key)),
+      version: detail.version,
+    }).toEqual({
+      label: "Case readers",
+      description: "First.",
+      summary: "First.",
+      permissions: ["customers.read", "customers.reveal", "documents.view"],
+      held: ["customers.read", "customers.reveal", "documents.view"],
+      version: 1,
+    });
+    // The editor's save from that answer names the version it was read at, and is stale: what the
+    // other Admin took away does not come back.
+    const stale = await tryUpdate(admin, made.roleId, {
+      ...draft(detail.label, detail.permissions, "Changed."),
+      version: detail.version ?? 0,
+    });
+    expect(stale.code).toBe("conflict");
+    expect(await roleRow(made.roleId)).toMatchObject({
+      version: 2,
+      description: "Second.",
+      permissions: ["customers.read"],
+    });
+  });
+
+  it("answers a prebuilt role with no version, and a key that names nothing as not found", async () => {
+    const operator = await h.db.unit((tx) => getStaffRole(tx, "operator"));
+    expect(operator).toMatchObject({
+      key: "operator",
+      kind: "prebuilt",
+      builtIn: true,
+      version: null,
+    });
+    for (const key of ["superuser", newId("srl", { now: () => new Date() })]) {
+      expect(await refusalOf(h.db.unit((tx) => getStaffRole(tx, key))), key).toEqual({
+        code: "not_found",
+        extensions: {},
+      });
+    }
+  });
+});
+
 describe("deleting a custom staff role (§8.4)", () => {
   it("moves every holder to the role chosen, ending their sessions, with their events and notices", async () => {
     const made = await create(admin, draft("Temporary", ["customers.read", "customers.reveal"]));
@@ -625,6 +860,89 @@ describe("deleting a custom staff role (§8.4)", () => {
       expect((await tryDelete(admin, key, { moveTo: "viewer" })).code, key).toBe("not_found");
     }
     expect(await snapshot()).toEqual(before);
+  });
+
+  it("moves only the holders the Admin was shown: someone given the role after the proof is a conflict, and the intent binds them", async () => {
+    const leads = await create(
+      admin,
+      draft("Team leads", ["staff.read", "staff.add", "audit.read"]),
+    );
+    const auditors = await create(admin, draft("Auditors", ["audit.read"]));
+    const lead = await enrolled("roles.lead", leads.roleId);
+    const first = await h.seedMember(unique("roles.auditor"), auditors.roleId, "pending");
+    // The dialog shows one holder, and the deletion names them.
+    const holders = await shown(auditors.roleId);
+    expect(holders).toEqual([first]);
+    const request = { method: "POST", path: `/api/staff-roles/${auditors.roleId}/delete` };
+    const deleting =
+      (body: { moveTo: string; holders: string[] }) => (tx: UnitTx, actor: StaffActor) =>
+        deleteStaffRole(h.deps, tx, actor, auditors.roleId, body);
+    const asked = { moveTo: "admin", holders };
+    const intent = await provedIntent(admin, () => attempt(admin, request, deleting(asked)));
+
+    // Meanwhile a team lead, who may give Auditors but never Admin, gives Auditors to someone new.
+    const addAs = (email: string, roleKey: string) =>
+      stepped(
+        h,
+        lead.browser,
+        lead.authenticator,
+        { method: "POST", path: "/api/staff", body: { email, roleKey } },
+        async (tx, req, ctx) =>
+          addStaff(h.deps, tx, await requireStaff(h.realm, req, ctx, { permission: "staff.add" }), {
+            email,
+            roleKey,
+          }),
+      );
+    expect(await refusalOf(addAs(unique("roles.climber"), "admin"))).toMatchObject({
+      code: "giving_refused",
+      extensions: { problem: "top_only" },
+    });
+    const added = await addAs(unique("roles.newcomer"), auditors.roleId);
+
+    // The Admin's proved re-send: the role's holders are not those shown, so nobody moves.
+    const before = await snapshot();
+    expect(await attempt(admin, request, deleting(asked), intent)).toEqual({
+      code: "conflict",
+      extensions: {},
+    });
+    // Naming the holders there are now does not fit the intent proved for the one shown.
+    const now = await shown(auditors.roleId);
+    expect(now.sort()).toEqual([first, added.staffId].sort());
+    expect(
+      await attempt(admin, request, deleting({ moveTo: "admin", holders: now }), intent),
+    ).toEqual({ code: "step_up_invalid", extensions: { reason: "digest" } });
+    expect(await snapshot()).toEqual(before);
+    expect(await unspent(intent)).toBe(true);
+    const roles = await h.admin.query<{ role_key: string }>(
+      "SELECT role_key FROM staff.member WHERE id = ANY($1::text[])",
+      [[first, added.staffId]],
+    );
+    expect(roles.rows.map((r) => r.role_key)).toEqual([auditors.roleId, auditors.roleId]);
+
+    // Shown both, the Admin proves a factor for both, and both move.
+    expect(await remove(admin, auditors.roleId, { moveTo: "admin" })).toEqual({
+      roleId: auditors.roleId,
+      movedTo: "admin",
+      membersMoved: 2,
+    });
+  });
+
+  it("refuses a deletion naming holders the role does not have, before any factor is asked for", async () => {
+    const made = await create(admin, draft("Quiet watchers", ["audit.read"]));
+    const holder = await h.seedMember(unique("roles.quiet"), made.roleId, "pending");
+    const stranger = await h.seedMember(unique("roles.stranger"), "viewer", "pending");
+    const before = await snapshot();
+    for (const holders of [[], [stranger], [holder, stranger]]) {
+      expect(await tryDelete(admin, made.roleId, { moveTo: "viewer", holders })).toEqual({
+        code: "conflict",
+        extensions: {},
+      });
+    }
+    expect(await snapshot()).toEqual(before);
+    // The same holder named twice is still the one holder.
+    expect(
+      (await tryDelete(admin, made.roleId, { moveTo: "viewer", holders: [holder, holder] })).code,
+    ).toBe("step_up_required");
   });
 });
 

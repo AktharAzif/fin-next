@@ -3,7 +3,8 @@
 // permissions; a new role (`/staff/roles/new`, `?from=` to duplicate); or a prebuilt role,
 // read-only. Needs are ticked with what needs them; Admin-only permissions and those the member of
 // staff lacks are locked with the reason. Saving asks "Confirm it's you" for its intent; a stale
-// version is refused. Read-only without `staffRoles.manage`. The server decides; this only asks.
+// version is refused; a role deleted meanwhile is read again and shown as not found. Read-only
+// without `staffRoles.manage`. The server decides; this only asks.
 //
 // @pendingDesign UR-16: AdminRoleEditor has no board yet ([UI-04]); this is composed from @fin/ui's
 // controls and tokens after the dashboard's RoleEditor board, and enters the manifest as `new`.
@@ -252,7 +253,12 @@ function Editor(props: { isNew: boolean; role: StaffRoleRow | null; takenNames: 
       await router.invalidate();
     } catch (error) {
       setState("idle");
-      const refused = roleActionError(error);
+      const refused = roleActionError(error, "edit");
+      if (refused.stale === "gone") {
+        // Deleted meanwhile: read again, the page says this role doesn't exist.
+        await router.invalidate();
+        return;
+      }
       setServerFields(refused.fields);
       setFailed(refused.message);
     }
