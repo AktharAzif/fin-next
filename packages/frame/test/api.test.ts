@@ -2,7 +2,7 @@ import { defineContract, health, noContent, noInput, z } from "@fin/app-contract
 import { describe, expect, it, vi } from "vitest";
 import { type ApiHooks, createApiClient, type StepUpProof } from "../src/api/client.ts";
 import { ApiError, isUnreachable } from "../src/api/errors.ts";
-import { buildRequest, parseRetryAfter } from "../src/api/request.ts";
+import { buildRequest, decodeOnce, parseRetryAfter } from "../src/api/request.ts";
 
 const inviteMember = defineContract({
   name: "team.invite",
@@ -182,6 +182,50 @@ describe("buildRequest", () => {
       "/team/members/mem.1..2/remove",
     );
     expect(buildRequest(removeMember, { memberId: "..." }).path).toBe("/team/members/.../remove");
+  });
+
+  it("round-trips a value with escape characters: what is built decodes back to the original", () => {
+    // The escape character alone and in runs, escapes of it, sequences that look already escaped
+    // (once, twice, half, with a bad hex digit), characters that must be escaped, and non-ASCII.
+    const values = [
+      "%",
+      "%%",
+      "100%",
+      "%25",
+      "%2525",
+      "%252e.x",
+      "%2",
+      "%252",
+      "%2g",
+      "%%2e",
+      "%2e%2e%2e",
+      "a%2e",
+      "%2e%2e%2fx",
+      "a%2Fb",
+      "%25%32",
+      "%E2%82%AC",
+      "€ 50% off",
+      "a/b?c#d e",
+      "back\\slash%5C",
+      "mem.1..2",
+    ];
+    for (const memberId of values) {
+      const { path } = buildRequest(removeMember, { memberId });
+      // As api() sends it: under the base, read by the URL parser, which resolves no segment here.
+      const url = new URL(`/api${path}`, "https://console.example.com");
+      expect(url.pathname, memberId).toBe(`/api${path}`);
+      const segments = url.pathname.split("/");
+      expect(segments, memberId).toHaveLength(6);
+      // A server decodes the segment once and has the value the screen passed.
+      expect(decodeURIComponent(segments[4] as string), memberId).toBe(memberId);
+    }
+    // The decoder isDotSegment runs undoes exactly one level of encoding, never more: decoding an
+    // encoded value gives the value, and decoding a twice-encoded value gives it encoded once.
+    for (const value of values.filter((v) => /^[\x20-\x7e]*$/.test(v))) {
+      const once = encodeURIComponent(value);
+      expect(decodeOnce(once), value).toBe(value);
+      expect(decodeOnce(encodeURIComponent(once)), value).toBe(once);
+    }
   });
 
   it("puts a GET's fields in the query, arrays repeated, absent fields dropped", () => {

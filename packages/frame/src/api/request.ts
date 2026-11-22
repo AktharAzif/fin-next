@@ -20,8 +20,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** One percent escape: `%` and two hex digits. */
 const ESCAPE = /%([0-9a-f]{2})/gi;
 
-/** One level of percent-decoding: every escape at once, in one pass, as a decoder reads it. */
-function decodeOnce(value: string): string {
+/**
+ * One level of percent-decoding: every escape at once, in one pass, as a decoder reads it.
+ * Exported for the tests, which hold it to undoing exactly one encodeURIComponent; the package
+ * does not export it.
+ */
+export function decodeOnce(value: string): string {
   return value.replace(ESCAPE, (_escape, hex: string) =>
     String.fromCharCode(Number.parseInt(hex, 16)),
   );
