@@ -4,7 +4,9 @@
 // @fin/identity's (the staff realm's sign-in tables, intents, limits, views and guards, already in
 // the runner's form), this package's and the rest, migrations and grant fragments alike. The
 // runner's `after` step registers the event types and the email template grants, as the `migrate`
-// service's registry sync does.
+// service's registry sync does; a caller that holds that sync (@fin/audit's syncEventTypes) passes
+// it as `registry`, so the database holds exactly the event types `migrate --migrate` writes and
+// none of this file's own.
 //
 // This file is JavaScript, typed by platform.d.mts, for one reason recorded in the pull request:
 // @fin/db and @fin/identity each declare the `pg` module for themselves, and the two declarations
@@ -28,15 +30,9 @@ export function eventTypes() {
   ];
 }
 
-async function registerAll(q) {
-  await q.query(
-    `INSERT INTO audit.event_type AS t (name, area, category, scope, roles, journal_kind, retired, synced_release)
-     SELECT r.name, r.area, r.category, r.scope, r.roles, r.journal_kind, r.retired, 'test-release'
-       FROM jsonb_to_recordset($1::jsonb)
-         AS r(name text, area text, category text, scope text, roles text[], journal_kind text, retired boolean)
-     ON CONFLICT (name) DO NOTHING`,
-    [JSON.stringify(eventTypes())],
-  );
+async function registerAll(q, registry) {
+  if (registry !== undefined) await registry(q);
+  else await registerEventTypes(q);
   const templates = grantRows().map((g) => ({
     template: g.template,
     role: g.role,
@@ -51,6 +47,17 @@ async function registerAll(q) {
   );
 }
 
+async function registerEventTypes(q) {
+  await q.query(
+    `INSERT INTO audit.event_type AS t (name, area, category, scope, roles, journal_kind, retired, synced_release)
+     SELECT r.name, r.area, r.category, r.scope, r.roles, r.journal_kind, r.retired, 'test-release'
+       FROM jsonb_to_recordset($1::jsonb)
+         AS r(name text, area text, category text, scope text, roles text[], journal_kind text, retired boolean)
+     ON CONFLICT (name) DO NOTHING`,
+    [JSON.stringify(eventTypes())],
+  );
+}
+
 function wrap(client) {
   return {
     query: async (text, values) => {
@@ -61,10 +68,10 @@ function wrap(client) {
   };
 }
 
-export async function createStaffPlatform(prefix) {
+export async function createStaffPlatform(prefix, options = {}) {
   const database = await createTestDatabase({ prefix, migrate: false });
   try {
-    await database.migrate({ after: registerAll });
+    await database.migrate({ after: (q) => registerAll(q, options.registry) });
   } catch (error) {
     // No test file holds the platform yet, so nothing else would drop the database.
     await database.drop().catch(() => undefined);
