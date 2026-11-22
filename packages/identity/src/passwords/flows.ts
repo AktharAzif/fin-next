@@ -582,7 +582,7 @@ async function passwordReset(
   // The authenticator lockout first, then the sessions: the order of every unit that takes both.
   // A factor code (the factor step, a step-up, finishing an authenticator's set-up) holds the
   // person's lockout row from its before-hook on (holdLockout() in hooks/before.ts), before the
-  // library reads and refreshes its session, and touches the lockout again only after that; a
+  // library reads (and may refresh) its session, and touches the lockout again only after that; a
   // wrong code's lockout and a step-up's ending of its session come after the row too. So this
   // reset and the person's factor code in another browser never wait on each other in a circle:
   // whichever has the row first finishes, and the other goes on after it.

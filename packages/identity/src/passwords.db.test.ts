@@ -22,7 +22,7 @@
 //     network) never waits on a hash.
 import { hashPassword, verifyPassword } from "@fin/crypto";
 import type { Pool, PoolClient, QueryConfig } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
   type Answer,
@@ -1044,30 +1044,36 @@ describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, ()
       held.hold("hash");
       const hashes = held.entered.hash;
       const resetting = reset(asker, email, code);
-      expect(await until(() => held.entered.hash > hashes)).toBe(true);
-      const operator = await holdLockoutRow(id);
-      const waits = await lockWaits();
-      let stepping: Promise<Answer>;
-      if (first === "reset") {
-        // The reset comes to the lockout row first and waits there; the factor code queues behind.
+      let operator: { release(): Promise<void> } | undefined;
+      let stepping: Promise<Answer> | undefined;
+      try {
+        expect(await until(() => held.entered.hash > hashes)).toBe(true);
+        operator = await holdLockoutRow(id);
+        const waits = await lockWaits();
+        if (first === "reset") {
+          // The reset comes to the lockout row first and waits; the factor code queues behind.
+          held.release("hash");
+          expect(await until(async () => (await lockWaits()) > waits), first).toBe(true);
+          stepping = step();
+        } else {
+          // The factor code waits on the lockout row first, before the library reads its session.
+          stepping = step();
+          expect(await until(async () => (await lockWaits()) > waits), first).toBe(true);
+          held.release("hash");
+        }
+        expect(await until(async () => (await lockWaits()) > waits + 1), first).toBe(true);
+      } finally {
+        // Whatever failed above, nothing is left holding a row the tests after this one take.
         held.release("hash");
-        expect(await until(async () => (await lockWaits()) > waits), first).toBe(true);
-        stepping = step();
-      } else {
-        // The factor code waits on the lockout row first, before the library reads its session.
-        stepping = step();
-        expect(await until(async () => (await lockWaits()) > waits), first).toBe(true);
-        held.release("hash");
+        await operator?.release();
       }
-      expect(await until(async () => (await lockWaits()) > waits + 1), first).toBe(true);
-      await operator.release();
       const [done, stepped] = await Promise.all([resetting, stepping]);
 
       // Neither waited on the other in a circle: both are answered, and nothing failed.
       expect(done.status, `${first}: ${JSON.stringify(done.json)}`).toBe(200);
       // A factor code that came second finds its session ended: a refusal, never a failure.
       const expected = first === "reset" ? 401 : 200;
-      expect(stepped.status, `${first}: ${JSON.stringify(stepped.json)}`).toBe(expected);
+      expect(stepped?.status, `${first}: ${JSON.stringify(stepped?.json)}`).toBe(expected);
       expect(g.lines.named("auth.unhandled_error"), first).toEqual([]);
       expect(g.lines.named("limits.store_failed"), first).toEqual([]);
       expect(await deadlocks(), first).toBe(deadlocksBefore);
@@ -1075,10 +1081,10 @@ describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, ()
     }
   });
 
-  it("waits for a factor code that holds the person's session and lockout, and ends its session after", async () => {
+  it("waits for a factor code held between the library and its lockout statement, and ends its session after", async () => {
     const held = heldWork();
     // A limit store whose clearing of the lockout waits while the test holds it: the factor code
-    // stops there, after the library has read (and refreshed) its session.
+    // stops there, after the library has answered it and before the after-hook's lockout statement.
     const clearing = { hold: false, entered: 0, waiters: [] as (() => void)[] };
     const store = createLimitStore({ clock: systemClock, lines: new MemoryLineSink() });
     const limits: LimitStore = {
@@ -1107,21 +1113,25 @@ describe("a reset and what overlaps it (§5.7, §11.4)", { timeout: 60_000 }, ()
     clearing.hold = true;
     const entered = clearing.entered;
     const stepping = step();
-    expect(await until(() => clearing.entered > entered)).toBe(true);
-    // Between its session and its lockout: it holds both rows, the lockout's since its before-hook.
-    const key = `factor:developer:${id}`;
-    expect(await rowLocked("SELECT 1 FROM identity.session WHERE user_id = $1", [id])).toBe(true);
-    expect(await rowLocked("SELECT 1 FROM ops.lockout WHERE key = $1", [key])).toBe(true);
-    // The reset comes meanwhile and waits on the lockout row, before it touches a session.
-    const waits = await lockWaits();
-    const resetting = reset(asker, email, code);
-    expect(await until(async () => (await lockWaits()) > waits)).toBe(true);
-    clearing.hold = false;
-    for (const resolve of clearing.waiters.splice(0)) resolve();
+    let resetting: Promise<Answer> | undefined;
+    try {
+      expect(await until(() => clearing.entered > entered)).toBe(true);
+      // It holds the person's lockout row already, since its before-hook, before the library ran.
+      const key = `factor:developer:${id}`;
+      expect(await rowLocked("SELECT 1 FROM ops.lockout WHERE key = $1", [key])).toBe(true);
+      // The reset comes meanwhile and waits on the lockout row, before it touches a session.
+      const waits = await lockWaits();
+      resetting = reset(asker, email, code);
+      expect(await until(async () => (await lockWaits()) > waits)).toBe(true);
+    } finally {
+      // Whatever failed above, the factor code goes on and commits, holding no row after the test.
+      clearing.hold = false;
+      for (const resolve of clearing.waiters.splice(0)) resolve();
+    }
     const [stepped, done] = await Promise.all([stepping, resetting]);
 
     expect(stepped.status, JSON.stringify(stepped.json)).toBe(200);
-    expect(done.status, JSON.stringify(done.json)).toBe(200);
+    expect(done?.status, JSON.stringify(done?.json)).toBe(200);
     expect(g.lines.named("auth.unhandled_error")).toEqual([]);
     expect(await deadlocks()).toBe(deadlocksBefore);
     // The session the factor code raised is one the reset ended, with its event.
@@ -1484,6 +1494,8 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     const { held, harness: g, passwords, freeClients } = await consoleSized();
     const email = unique("burst.signup");
     held.hold("hash");
+    // Released whatever this test does, so a failure here leaves no unit open holding rows.
+    onTestFinished(() => held.release("hash"));
     const hashes = held.entered.hash;
     const sent = burst(
       Array.from({ length: 10 }, () => () => {
@@ -1537,6 +1549,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     const { held, harness: g, passwords, freeClients } = await consoleSized();
     const ip = "198.51.100.77";
     held.hold("hash");
+    onTestFinished(() => held.release("hash"));
     const hashes = held.entered.hash;
     const browser = g.browser({ ip });
     const input = { name: "Ada Lovelace", email: unique("burst.netsignup"), password: GOOD };
@@ -1570,6 +1583,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     const email = unique("burst.codes");
     await signUpWithPassword(email, GOOD, g);
     held.hold("verify");
+    onTestFinished(() => held.release("verify"));
     const checks = held.entered.verify;
     const signingIn = passwordSignIn(g.browser(), email, BETTER);
     expect(await until(() => held.entered.verify - checks === 1)).toBe(true);
@@ -1594,6 +1608,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     const email = unique("burst.turn");
     await signUpWithPassword(email, GOOD, g);
     held.hold("verify");
+    onTestFinished(() => held.release("verify"));
     const checks = held.entered.verify;
     const signingIn = passwordSignIn(g.browser(), email, BETTER);
     expect(await until(() => held.entered.verify - checks === 1)).toBe(true);
@@ -1643,6 +1658,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     }
     const intent = await prove(g, owner, secret);
     held.hold("verify");
+    onTestFinished(() => held.release("verify"));
     const checks = held.entered.verify;
     const changing = owner.post("/api/auth/change-password", change, intent);
     expect(await until(() => held.entered.verify > checks)).toBe(true);
@@ -1653,6 +1669,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     await requestReset(asker, email);
     const code = (await g.latestCode(email)) as string;
     held.hold("hash");
+    onTestFinished(() => held.release("hash"));
     const hashes = held.entered.hash;
     const resetting = reset(asker, email, code, GOOD);
     expect(await until(() => held.entered.hash > hashes)).toBe(true);
@@ -1684,6 +1701,7 @@ describe("hashing under load (ARCHITECTURE §3.5)", { timeout: 60_000 }, () => {
     await requestReset(resetter, person);
     const resetCode = (await one.latestCode(person)) as string;
     full.hold("hash");
+    onTestFinished(() => full.release("hash"));
     const fullHashes = full.entered.hash;
     // A sign-in for an address no account has: the library hashes its password all the same.
     const busy = passwordSignIn(one.browser(), unique("admit.other"), BETTER);

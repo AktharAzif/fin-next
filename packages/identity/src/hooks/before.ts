@@ -666,11 +666,11 @@ async function factorCodeChecks(
   if (prior === null) return;
   const realm = rt.settings.realm;
   // The person's lockout row is held from here to the end of the unit, before the library reads
-  // the session: its read refreshes the session row on nearly every request (always at the factor
-  // step), and the after-hook clears or counts the lockout only then. So every unit that takes
-  // both takes the lockout first, as a password reset does (passwords/flows.ts), and the two never
-  // wait on each other in a circle. The row is made when there is none, or there is nothing to
-  // hold.
+  // the session: that read may refresh the session's row (by the library's own rule, a
+  // factor-step session is due on every request), and the after-hook clears or counts the lockout
+  // only after it. So every unit that takes both takes the lockout first, as a password reset does
+  // (passwords/flows.ts), and the two never wait on each other in a circle. The row is made when
+  // there is none, or there is nothing to hold.
   const lockedUntil = await rt.limits.holdLockout(
     tx,
     factorLockKey(state, prior.person.id),
