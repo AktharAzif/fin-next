@@ -1,9 +1,11 @@
 // Fin Admin's audit log reads on the real platform (spec 02 §14.3, §14.5, §16.4; ARCHITECTURE
 // §8.6; spec 08 §3.11): the staff rows newest first with their actor, labels, chip, address and
 // device; nothing of an organisation's or a person's log, by the list or by an entry's ID; paging
-// both ways by cursor within its limits; the filters and the two views; and the database's own
-// re-check of the reader (the door's stand-in), which refuses whatever the guard would, even when
-// called past it, and leaves fin_admin no way to read audit.event but the two reads.
+// both ways by cursor within its limits, with the count and a way back on a page past either end;
+// the filters and the two views; the database's own re-check of the reader (the door's stand-in),
+// each of whose checks refuses on its own what the guard would, even when called past it; and the
+// grants as the database holds them, which leave fin_admin no way to read audit.event but the two
+// reads and give them to no other login.
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -11,6 +13,7 @@ import {
   type Browser,
   createStaffHarness,
   type StaffHarness,
+  signInByCode,
   unique,
 } from "../../test/harness.ts";
 import { newId } from "../ids.ts";
@@ -24,11 +27,15 @@ import {
   staffAuditLog,
 } from "./log.ts";
 
+type Member = { staffId: string; browser: Browser; email: string };
+
 let h: StaffHarness;
-let admin: { staffId: string; browser: Browser; email: string };
-let viewer: { staffId: string; browser: Browser; email: string };
-let reader: { staffId: string; browser: Browser; email: string };
-let nonReader: { staffId: string; browser: Browser; email: string };
+let admin: Member;
+let viewer: Member;
+let reader: Member;
+let nonReader: Member;
+/** Tried by an emailed code that failed, under another Access identity and under their own. */
+let tried: Member;
 let personRow: string;
 let orgRow: string;
 let orgStaffRow: string;
@@ -36,7 +43,7 @@ let rejection: string;
 let operatorRow: string;
 const ORG = `org_01jd${"7".repeat(22)}`;
 
-async function member(roleKey: string, label: string) {
+async function member(roleKey: string, label: string): Promise<Member> {
   const email = unique(label);
   const { staffId, browser } = await h.enrolled(email, roleKey);
   return { staffId, browser, email };
@@ -86,6 +93,40 @@ async function refused(run: Promise<unknown>): Promise<string> {
   return "none";
 }
 
+/** The two reads, called past the guard with the session the guard read for `actor`. */
+function readsOf(browser: Browser, actor: StaffActor) {
+  const as = readerOf(browser, actor);
+  return {
+    log: () =>
+      h.route(browser, { method: "GET", path: "/api/audit" }, (tx) =>
+        staffAuditLog(h.deps, tx, as, { limit: 10 }),
+      ),
+    entry: (id: string) =>
+      h.route(browser, { method: "GET", path: `/api/audit/${id}` }, (tx) =>
+        staffAuditEntry(h.deps, tx, as, id),
+      ),
+  };
+}
+
+/** Both reads answer for this reader. */
+async function bothRead(browser: Browser, actor: StaffActor): Promise<void> {
+  const reads = readsOf(browser, actor);
+  expect((await reads.log()).items.length).toBeGreaterThan(0);
+  expect((await reads.entry(operatorRow)).id).toBe(operatorRow);
+}
+
+/** Both reads refuse this reader (403 forbidden), and each refusal writes one line naming them. */
+async function bothRefuse(browser: Browser, actor: StaffActor): Promise<void> {
+  const reads = readsOf(browser, actor);
+  const before = h.lines.named("staff.audit_read_refused").length;
+  expect(await refused(reads.log())).toBe("forbidden");
+  expect(await refused(reads.entry(operatorRow))).toBe("forbidden");
+  expect(h.lines.named("staff.audit_read_refused").slice(before)).toEqual([
+    { staffId: actor.staffId },
+    { staffId: actor.staffId },
+  ]);
+}
+
 /** A row written straight into audit.event, as a fixture (another scope, or a later area's event). */
 async function seedRow(input: {
   event: string;
@@ -130,6 +171,7 @@ beforeAll(async () => {
   viewer = await member("viewer", "audit.viewer");
   reader = await member(await h.seedCustomRole("Auditors", ["audit.read"]), "audit.reader");
   nonReader = await member(await h.seedCustomRole("Staff readers", ["staff.read"]), "audit.no");
+  tried = await member("viewer", "audit.tried");
   personRow = await seedRow({
     event: "user.created",
     scope: "person",
@@ -270,6 +312,43 @@ describe("the staff log", () => {
     );
   });
 
+  it("answers a page past either end with the real count and a way back into the log", async () => {
+    const all = (await list(admin.browser, { limit: 100 })).items.map((item) => item.id);
+    const oldest = `aud_${"0".repeat(26)}`;
+    const newest = `aud_${"z".repeat(26)}`;
+
+    // Older than the oldest row: no rows, the count of every matching row, and the cursor itself
+    // as the way back to the newer rows (a stale link, or rows that left a rolling window).
+    const pastOldest = await list(admin.browser, { limit: 2, cursor: oldest });
+    expect(pastOldest).toEqual({
+      items: [],
+      total: all.length,
+      totalCapped: false,
+      nextCursor: null,
+      previousCursor: oldest,
+    });
+    const up = await list(admin.browser, { limit: 2, before: pastOldest.previousCursor ?? "" });
+    expect(up.items.map((item) => item.id)).toEqual(all.slice(-2));
+
+    // Newer than the newest row: the same, the way back leading to the newest rows.
+    const pastNewest = await list(admin.browser, { limit: 2, before: newest });
+    expect(pastNewest).toEqual({
+      items: [],
+      total: all.length,
+      totalCapped: false,
+      nextCursor: newest,
+      previousCursor: null,
+    });
+    const down = await list(admin.browser, { limit: 2, cursor: pastNewest.nextCursor ?? "" });
+    expect(down.items.map((item) => item.id)).toEqual(all.slice(0, 2));
+    expect(down.previousCursor).toBeNull();
+
+    // Nothing matching at all: no count and nowhere to go.
+    expect(
+      await list(admin.browser, { cursor: newest, actions: ["staff.nothing_like_this"] }),
+    ).toEqual({ items: [], total: 0, totalCapped: false, nextCursor: null, previousCursor: null });
+  });
+
   it("filters by action, actor and days, and reads the two views", async () => {
     const enrolments = await list(admin.browser, { actions: ["staff.factor_enrolled"] });
     expect(enrolments.items.length).toBeGreaterThanOrEqual(4);
@@ -302,9 +381,62 @@ describe("the staff log", () => {
     expect((await list(admin.browser, { to: "2026-01-01" })).items).toEqual([]);
     expect((await list(admin.browser, { range: "today" })).total).toBeGreaterThan(5);
   });
+
+  it("gives a failed sign-in no verification chip: it proves nothing about the member it names", async () => {
+    // Someone under another Access identity, with no session, types the member's address.
+    const stranger = h.browser(accessFor(unique("audit.stranger")));
+    const typed = await stranger.auth("POST", "/sign-in/email-otp", {
+      email: tried.email,
+      otp: "12345678",
+    });
+    expect(typed.status).toBe(400);
+    // The member themselves, under their own Access identity, sends a wrong emailed code.
+    const own = h.browser(accessFor(tried.email));
+    const sent = await own.auth("POST", "/email-otp/send-verification-otp", {
+      email: tried.email,
+      type: "sign-in",
+    });
+    expect(sent.status).toBe(200);
+    const code = (await h.latestCode(tried.email)) ?? "";
+    const wrong = String((Number(code) + 1) % 10 ** code.length).padStart(code.length, "0");
+    const signIn = await own.auth("POST", "/sign-in/email-otp", { email: tried.email, otp: wrong });
+    expect(signIn.status).toBe(400);
+    expect(own.sessionToken()).toBeNull();
+
+    const failed = await list(admin.browser, {
+      actions: ["staff.sign_in_failed"],
+      actors: [tried.staffId],
+    });
+    expect(failed.items.map((item) => item.metadata.reason).sort()).toEqual([
+      "access_mismatch",
+      "wrong_code",
+    ]);
+    for (const item of failed.items) {
+      expect(item).toMatchObject({ actor: { id: tried.staffId }, refs: [], verification: null });
+    }
+    const typedRow = failed.items.find((item) => item.metadata.reason === "access_mismatch");
+    expect(typedRow?.address).toBe(stranger.ip);
+  });
 });
 
 describe("the database's own check of the reader (the door's stand-in)", () => {
+  // Each case's member is enrolled here, through the real ceremonies, so the cases themselves
+  // only read and change fixtures (and this block's rows come after the list's exact counts).
+  let pending: { staffId: string; browser: Browser };
+  let leaving: Member;
+  let stepping: Member;
+  let locked: Member;
+  let bare: Member;
+  let old: Member;
+  beforeAll(async () => {
+    pending = await h.pendingSession(unique("audit.pending"), "admin");
+    leaving = await member("viewer", "audit.leaving");
+    stepping = await member("viewer", "audit.stepping");
+    locked = await member("viewer", "audit.locked");
+    bare = await member("viewer", "audit.bare");
+    old = await member("viewer", "audit.old");
+  }, 180_000);
+
   it("lets a custom role holding audit.read read, and refuses one without it", async () => {
     expect((await list(reader.browser)).items.length).toBeGreaterThan(0);
     const before = h.lines.named("staff.audit_read_refused").length;
@@ -322,7 +454,6 @@ describe("the database's own check of the reader (the door's stand-in)", () => {
   });
 
   it("refuses a pending member's aal1 session, an ended session and a removed member", async () => {
-    const pending = await h.pendingSession(unique("audit.pending"), "admin");
     const pendingActor = await h.route(
       pending.browser,
       { method: "GET", path: "/api/audit" },
@@ -336,7 +467,6 @@ describe("the database's own check of the reader (the door's stand-in)", () => {
       ),
     ).toBe("forbidden");
 
-    const leaving = await member("viewer", "audit.leaving");
     const actor = await who(leaving.browser);
     const read = () =>
       h.route(leaving.browser, { method: "GET", path: "/api/audit" }, (tx) =>
@@ -359,6 +489,85 @@ describe("the database's own check of the reader (the door's stand-in)", () => {
     );
     expect(await refused(read())).toBe("forbidden");
   });
+
+  // Each check below is the only one the reader fails, so each case fails if its check goes (each
+  // was run with its check taken out of the migration, and failed).
+
+  it("refuses an active member's session held at the factor step (aal1)", async () => {
+    // Signed in again by an emailed code alone, in another browser: an aal1 session, at the factor
+    // step, of an active member with a passkey and a role holding audit.read.
+    const browser = h.browser(accessFor(stepping.email));
+    await signInByCode(h, browser, stepping.email);
+    const actor = await h.route(
+      browser,
+      { method: "GET", path: "/api/audit" },
+      (_tx, request, context) =>
+        requireStaff(h.realm, request, context, { reach: ["factor_step"] }),
+    );
+    expect(actor).toMatchObject({ staffId: stepping.staffId, gate: "factor_step" });
+    await bothRefuse(browser, actor);
+    // The same member's working session still reads.
+    await bothRead(stepping.browser, await who(stepping.browser));
+  });
+
+  it("refuses a session whose step-ups are locked (five failures), and not one with four", async () => {
+    const actor = await who(locked.browser);
+    await h.fixture("UPDATE staff.session SET step_up_failures = 4 WHERE id = $1", [
+      actor.sessionId,
+    ]);
+    await bothRead(locked.browser, actor);
+    await h.fixture("UPDATE staff.session SET step_up_failures = 5 WHERE id = $1", [
+      actor.sessionId,
+    ]);
+    await bothRefuse(locked.browser, actor);
+  });
+
+  it("refuses an active member left with no second factor, and counts only a confirmed authenticator", async () => {
+    const actor = await who(bare.browser);
+    await bothRead(bare.browser, actor);
+    // The session stays aal2; only the factors go.
+    await h.fixture("DELETE FROM staff.passkey WHERE user_id = $1", [bare.staffId]);
+    await h.fixture("DELETE FROM staff.two_factor WHERE user_id = $1", [bare.staffId]);
+    await bothRefuse(bare.browser, actor);
+    // An authenticator whose setup was never confirmed is no second factor; a confirmed one is.
+    await h.fixture(
+      `INSERT INTO staff.two_factor (id, secret, backup_codes, user_id, verified)
+       VALUES ($1, 'fixture', 'fixture', $2, false)`,
+      [newId("stf", { now: () => new Date() }).replace(/^stf_/, "tfa_"), bare.staffId],
+    );
+    await bothRefuse(bare.browser, actor);
+    await h.fixture("UPDATE staff.two_factor SET verified = true WHERE user_id = $1", [
+      bare.staffId,
+    ]);
+    await bothRead(bare.browser, actor);
+  });
+
+  it("refuses a session past its absolute lifetime by its own check, not only the table's", async () => {
+    const actor = await who(old.browser);
+    await bothRead(old.browser, actor);
+    // The table never lets a session's expiry outlive its absolute lifetime, so the live check
+    // alone would refuse any session the absolute check would.
+    const pastAbsolute =
+      "UPDATE staff.session SET absolute_expires_at = now() - interval '1 second' WHERE id = $1";
+    expect(await refused(h.fixture(pastAbsolute, [actor.sessionId]))).toBe("23514");
+    // To show the read's own check refuses it too (and still would were the table's check to go),
+    // this fixture lifts the table's check while one session outlives its absolute lifetime, then
+    // ends that session and puts the check back.
+    await h.fixture("ALTER TABLE staff.session DROP CONSTRAINT staff_session_within_absolute");
+    try {
+      await h.fixture(pastAbsolute, [actor.sessionId]);
+      await bothRefuse(old.browser, actor);
+    } finally {
+      await h.fixture(
+        "UPDATE staff.session SET expires_at = absolute_expires_at WHERE id = $1 AND expires_at > absolute_expires_at",
+        [actor.sessionId],
+      );
+      await h.fixture(
+        `ALTER TABLE staff.session ADD CONSTRAINT staff_session_within_absolute
+           CHECK (expires_at <= absolute_expires_at)`,
+      );
+    }
+  });
 });
 
 describe("what fin_admin may run", () => {
@@ -367,35 +576,105 @@ describe("what fin_admin may run", () => {
     fin = h.login("fin_admin_a", 2);
   });
 
-  const denied = (run: Promise<unknown>) => expect(run).rejects.toMatchObject({ code: "42501" });
+  const READS = [
+    "staff.audit_log(text, text, boolean, text[], text[], text[], timestamptz, timestamptz, text, text, integer)",
+    "staff.audit_entry(text, text, text)",
+  ];
+  const HELPERS = [
+    "staff.audit_reader(text, text)",
+    "staff.audit_matches(text, text, text, text, timestamptz, text[], text[], text[], timestamptz, timestamptz)",
+  ];
+
+  /**
+   * Refused by the grants themselves: on the object, or on its schema for a login with no use of
+   * it at all. A read's own refusal of a reader is also SQLSTATE 42501, so the code alone would
+   * pass with or without a grant: the message says which it was.
+   */
+  const denied = (run: Promise<unknown>, kind: "table" | "function") =>
+    expect(run).rejects.toMatchObject({
+      code: "42501",
+      message: expect.stringMatching(new RegExp(`^permission denied for (${kind}|schema) `)),
+    });
 
   it("is the two reads, never audit.event, the reader check or the filter", async () => {
-    await denied(fin.query("SELECT 1 FROM audit.event"));
-    await denied(fin.query("SELECT 1 FROM audit.event_context"));
-    await denied(fin.query("SELECT staff.audit_reader('sts_x', 'sub')"));
+    await denied(fin.query("SELECT 1 FROM audit.event"), "table");
+    await denied(fin.query("SELECT 1 FROM audit.event_context"), "table");
+    await denied(fin.query("SELECT staff.audit_reader('sts_x', 'sub')"), "function");
     await denied(
       fin.query(
         "SELECT staff.audit_matches('staff', 'x', 'e', NULL, now(), NULL, NULL, NULL, NULL, NULL)",
       ),
+      "function",
     );
-    // Without a working session the reads themselves refuse.
-    await denied(
+    // fin_admin may run the reads; without a working session they refuse on their own.
+    await expect(
       fin.query(
         "SELECT * FROM staff.audit_log('sts_x', 'sub', false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 10)",
       ),
-    );
-    await denied(fin.query("SELECT * FROM staff.audit_entry('sts_x', 'sub', $1)", [operatorRow]));
+    ).rejects.toMatchObject({
+      code: "42501",
+      message: "staff audit read: no working staff session",
+    });
+    await expect(
+      fin.query("SELECT * FROM staff.audit_entry('sts_x', 'sub', $1)", [operatorRow]),
+    ).rejects.toMatchObject({
+      code: "42501",
+      message: "staff audit read: no working staff session",
+    });
   });
 
-  it("is not given to any other service", async () => {
-    for (const login of ["fin_api_a", "fin_worker_a", "fin_console_a"]) {
+  it("is not given to any other service, refused by the grant before any check of the reader", async () => {
+    for (const login of ["fin_api_a", "fin_worker_a", "fin_console_a", "fin_edge_a"]) {
       const pool = h.login(login, 1);
       await denied(
         pool.query(
           "SELECT * FROM staff.audit_log('sts_x', 'sub', false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 10)",
         ),
+        "function",
       );
-      await denied(pool.query("SELECT * FROM staff.audit_entry('sts_x', 'sub', $1)", [orgRow]));
+      await denied(
+        pool.query("SELECT * FROM staff.audit_entry('sts_x', 'sub', $1)", [orgRow]),
+        "function",
+      );
+    }
+  });
+
+  it("holds EXECUTE on the reads for fin_admin alone, whatever fragment granted it", async () => {
+    // Every privilege the database holds on the four functions, but their owner's.
+    const acl = await h.admin.query<{ fn: string; grantee: string; privilege: string }>(
+      `SELECT p.proname AS fn,
+              CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+              a.privilege_type AS privilege
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+        WHERE n.nspname = 'staff'
+          AND p.proname IN ('audit_reader', 'audit_matches', 'audit_log', 'audit_entry')
+          AND a.grantee <> p.proowner
+        ORDER BY 1, 2, 3`,
+    );
+    expect(acl.rows).toEqual([
+      { fn: "audit_entry", grantee: "fin_admin", privilege: "EXECUTE" },
+      { fn: "audit_log", grantee: "fin_admin", privilege: "EXECUTE" },
+    ]);
+    // And through role membership: of every Fin role, only fin_admin's logins (and the owner)
+    // may run a read, and only the owner the reader check or the filter.
+    const roles = await h.admin.query<{ rolname: string }>(
+      "SELECT rolname FROM pg_roles WHERE rolname LIKE 'fin\\_%' ORDER BY rolname",
+    );
+    expect(roles.rows.length).toBeGreaterThan(10);
+    for (const { rolname } of roles.rows) {
+      for (const fn of [...READS, ...HELPERS]) {
+        const held = await h.admin.query<{ held: boolean }>(
+          "SELECT has_function_privilege($1, $2, 'EXECUTE') AS held",
+          [rolname, fn],
+        );
+        const owner = rolname === "fin_owner";
+        const reader = ["fin_admin", "fin_admin_a", "fin_admin_b"].includes(rolname);
+        expect(held.rows[0]?.held, `${rolname} on ${fn}`).toBe(
+          owner || (reader && READS.includes(fn)),
+        );
+      }
     }
   });
 });

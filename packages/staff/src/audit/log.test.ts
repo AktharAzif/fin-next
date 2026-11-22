@@ -2,8 +2,8 @@
 // Date filter and "Rejections this week" read in UTC, the events a view narrows to, the
 // verification chip, the shape checks every read makes before any SQL, and the migration and grant
 // fragment that hold the door's re-check (two SECURITY DEFINER reads, nothing on audit.event).
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { globSync, readFileSync } from "node:fs";
+import { join, sep } from "node:path";
 import { staffCatalogue } from "@fin/access";
 import { describe, expect, it } from "vitest";
 import { StaffRefusal } from "../errors.ts";
@@ -132,9 +132,21 @@ describe("the verification chip (§14.5)", () => {
       "staff.factor_added",
       "staff.factor_removed",
       "staff.step_up_failed",
-      "staff.sign_in_failed",
     ]) {
       expect(verificationOf(event, null, { method: "passkey" }, "staff")).toBe("session");
+    }
+  });
+
+  it("is none for a failed sign-in, which proves nothing about the member it names", () => {
+    // A wrong emailed code, or the member's address typed under another Access identity: no
+    // session, and nothing verified.
+    for (const metadata of [
+      { method: "email_otp", reason: "wrong_code" },
+      { method: "email_otp", reason: "access_mismatch" },
+      { method: "passkey", reason: "passkey_failed" },
+      {},
+    ]) {
+      expect(verificationOf("staff.sign_in_failed", null, metadata, "staff")).toBeNull();
     }
   });
 
@@ -228,6 +240,12 @@ describe("the migration that holds the door's re-check", () => {
     for (const read of reads) expect(read.slice(0, 400)).toContain("e.scope = 'staff'");
   });
 
+  it("returns a page as one row, its count and beyond apart from the page's rows", () => {
+    expect(sql).toMatch(
+      /staff\.audit_log\([^)]*\) RETURNS TABLE \(items jsonb, total bigint, beyond boolean\)/,
+    );
+  });
+
   it("lets through exactly the prebuilt roles the catalogue gives audit.read", () => {
     const listed = /held_role NOT IN \(([^)]*)\)/.exec(sql)?.[1] ?? "";
     const prebuilt = listed.split(",").map((key) => key.trim().replace(/'/g, ""));
@@ -239,6 +257,22 @@ describe("the migration that holds the door's re-check", () => {
 });
 
 describe("the grant fragment", () => {
+  it("is the only fragment in the repository that names the reads or their helpers", () => {
+    // The database tests check the grants the staff platform applies; this checks every fragment
+    // any area keeps, so a grant on these functions anywhere else fails here too.
+    const repo = join(root, "..", "..");
+    const fragments = [
+      ...globSync("packages/*/grants/*.json", { cwd: repo }),
+      ...globSync("packages/*/roles/grants/*.json", { cwd: repo }),
+      ...globSync("apps/*/grants/*.json", { cwd: repo }),
+    ];
+    expect(fragments.length).toBeGreaterThan(3);
+    const naming = fragments
+      .filter((file) => readFileSync(join(repo, file), "utf8").includes("staff.audit_"))
+      .map((file) => file.split(sep).join("/"));
+    expect(naming).toEqual(["packages/staff/grants/staff-audit.json"]);
+  });
+
   it("gives fin_admin EXECUTE on the two reads and nothing else", () => {
     expect(grants.area).toBe("staff-audit");
     expect(grants.grants).toEqual([

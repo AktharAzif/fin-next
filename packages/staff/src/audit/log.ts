@@ -3,11 +3,14 @@
 // `audit.event` only through the two SECURITY DEFINER functions of `_staff_audit_log`, which
 // re-check the session, its Access `sub`, the member, the second factor and `audit.read` from the
 // session's own row (the stand-in for `api`'s `audit.staff_log` door until it exists, recorded),
-// and return nothing outside the staff scope. Paging is by keyset on the time-ordered `aud_` ID:
-// `cursor` reads the older rows, `before` the newer ones. Each row names its actor as the staff
-// table says now, its target and refs with their current labels where they are staff objects that
-// still exist, how the actor was verified, and the address and device of the request ([BC-03]).
-// Filters are IDs, event names, presets and UTC days: no typed text reaches the database or a line.
+// and return nothing outside the staff scope. The re-check holds against a fault in requireStaff,
+// not against someone holding the fin_admin login, who can read the session row it compares (the
+// migration's header says why; the door closes it). Paging is by keyset on the time-ordered `aud_`
+// ID: `cursor` reads the older rows, `before` the newer ones, and the count comes apart from the
+// page's rows. Each row names its actor as the staff table says now, its target and refs with
+// their current labels where they are staff objects that still exist, how the actor was verified,
+// and the address and device of the request ([BC-03]). Filters are IDs, event names, presets and
+// UTC days: no typed text reaches the database or a line.
 import { deviceSummary } from "@fin/identity";
 import { StaffRefusal } from "../errors.ts";
 import type { Clock, LineSink, UnitTx } from "../ports.ts";
@@ -104,19 +107,27 @@ export interface StaffAuditEntry {
 
 export interface StaffAuditPage {
   items: StaffAuditEntry[];
+  /** The rows matching the query, whatever the page holds (counted up to the cap). */
   total: number;
   totalCapped: boolean;
-  /** The cursor of the next (older) page, or null when nothing older matches. */
+  /**
+   * The cursor of the next (older) page, or null when nothing older matches. On a page with no
+   * rows it is the `before` cursor itself, the way back to the older rows.
+   */
   nextCursor: string | null;
-  /** The cursor of the previous (newer) page, or null on the first page. */
+  /**
+   * The cursor of the previous (newer) page, or null on the first page. On a page with no rows it
+   * is the `cursor` itself, the way back to the newer rows.
+   */
   previousCursor: string | null;
 }
 
+/** A row as both reads return it: `recorded_at` is ISO 8601 in UTC with milliseconds. */
 interface RawRow {
   id: string;
   event: string;
   category: string;
-  recorded_at: Date;
+  recorded_at: string;
   actor_kind: string;
   actor_id: string | null;
   actor_via: string;
@@ -129,8 +140,13 @@ interface RawRow {
   organization_id: string | null;
   client_ip: string | null;
   user_agent: string | null;
-  total?: string | number;
-  beyond?: boolean;
+}
+
+/** `staff.audit_log`'s one row: the page's rows, and the count and `beyond` apart from them. */
+interface RawPage {
+  items: RawRow[] | null;
+  total: string | number | null;
+  beyond: boolean | null;
 }
 
 export interface AuditReadDeps {
@@ -222,9 +238,17 @@ const CHIPS: ReadonlySet<string> = new Set<StaffVerification>([
 const PROVED_BY_METHOD: ReadonlySet<string> = new Set(["staff.signed_in", "staff.step_up_passed"]);
 
 /**
+ * The rows that prove nothing about the member they name: a failed sign-in names the member whose
+ * address was tried, often with no session at all (a wrong emailed code, or the address typed under
+ * another Access identity), and never says the member was verified.
+ */
+const PROVES_NOTHING: ReadonlySet<string> = new Set(["staff.sign_in_failed"]);
+
+/**
  * The verification chip (§14.5): the proof of a stepped-up action; otherwise the method a sign-in
  * or a passed step-up records; otherwise the session the member acted in. An actor who is not a
- * member of staff (the operator, the system, a provider) has none.
+ * member of staff (the operator, the system, a provider) has none, and neither has a row that
+ * proves nothing about its actor (a failed sign-in).
  */
 export function verificationOf(
   event: string,
@@ -232,6 +256,7 @@ export function verificationOf(
   metadata: Record<string, unknown>,
   actorKind: string,
 ): StaffVerification | null {
+  if (PROVES_NOTHING.has(event)) return null;
   if (stepUpMethod === "passkey" || stepUpMethod === "totp" || stepUpMethod === "backup_code") {
     return stepUpMethod;
   }
@@ -285,7 +310,7 @@ function toEntry(row: RawRow, labels: ReadonlyMap<string, string>): StaffAuditEn
     id: row.id,
     event: row.event,
     category: row.category,
-    at: row.recorded_at.toISOString(),
+    at: row.recorded_at,
     actor: {
       kind: row.actor_kind,
       id: row.actor_id,
@@ -379,11 +404,11 @@ export async function staffAuditLog(
 ): Promise<StaffAuditPage> {
   checkQuery(query);
   const window = windowOf(query, deps.clock.now());
-  const rows = await read<RawRow>(
+  const [summary] = await read<RawPage>(
     deps,
     tx,
     reader,
-    "SELECT * FROM staff.audit_log($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    "SELECT items, total, beyond FROM staff.audit_log($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     [
       reader.sessionId,
       reader.accessSub,
@@ -398,8 +423,11 @@ export async function staffAuditLog(
       query.limit,
     ],
   );
-  const total = Number(rows[0]?.total ?? 0);
-  const beyond = rows[0]?.beyond === true;
+  // The count and `beyond` come with the one summary row, never with the page's own rows, so a
+  // page with no rows still carries them.
+  const rows = summary?.items ?? [];
+  const total = Number(summary?.total ?? 0);
+  const beyond = summary?.beyond === true;
   const extra = rows.length > query.limit;
   let page = rows;
   let hasNewer: boolean;
@@ -417,12 +445,15 @@ export async function staffAuditLog(
   }
   const labels = await staffLabels(tx, idsOf(page));
   const items = page.map((row) => toEntry(row, labels));
+  // A page with no rows (a cursor past either end, or rows that left a rolling window) leads back
+  // by its own cursor: `before=<cursor>` reads the rows just newer than it, `cursor=<before>` the
+  // rows just older.
   return {
     items,
     total: Math.min(total, AUDIT_TOTAL_CAP),
     totalCapped: total > AUDIT_TOTAL_CAP,
-    nextCursor: hasOlder ? (items.at(-1)?.id ?? null) : null,
-    previousCursor: hasNewer ? (items[0]?.id ?? null) : null,
+    nextCursor: hasOlder ? (items.at(-1)?.id ?? query.before ?? null) : null,
+    previousCursor: hasNewer ? (items[0]?.id ?? query.cursor ?? null) : null,
   };
 }
 

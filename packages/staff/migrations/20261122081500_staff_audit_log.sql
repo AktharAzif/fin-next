@@ -9,10 +9,21 @@
 -- organisation's or a person's. fin_admin holds EXECUTE on the two reads and still no privilege on
 -- audit.event itself.
 --
+-- What the re-check does not do: it holds against a fault in the API half's guard (requireStaff
+-- letting through a reader it should not), never against someone holding the fin_admin login. The
+-- staff realm's library needs fin_admin to read and write staff.session, so the session ID and
+-- Access `sub` these reads compare are values that login can read itself; only the door, which
+-- verifies the Access token and is reached with a signed caller key, closes that. Until the door
+-- exists, a leaked fin_admin credential reads every staff-scope row (and nothing outside the staff
+-- scope). The door is a hardening item before production.
+--
 -- Paging is by keyset on the row ID, newest first (the `aud_` ID is time-ordered and
 -- `event_staff_log` indexes it): `p_after` reads the rows older than an ID, `p_before` the rows
 -- newer than one, at most `p_limit` (1 to 100) plus one row that says whether more lie beyond. A
--- cursor is only a bound: no row is read for it, so an ID from another scope reveals nothing.
+-- cursor is only a bound: no row is read for it, so an ID from another scope reveals nothing. The
+-- page comes back as one row whose count and `beyond` do not ride on the page's own rows, so a page
+-- with none (a cursor past either end of the log, or rows that left a rolling window) still says
+-- how many rows match and that a way back exists.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -73,11 +84,13 @@ LANGUAGE sql IMMUTABLE AS $$
      AND (p_to IS NULL OR e_recorded_at < p_to)
 $$;
 
--- One page of the staff log (§14.5). `p_mine` keeps the rows the reader made (the reader as the
--- database read it, never an ID the caller names); `total` counts the matching rows up to 10,001;
--- `beyond` says whether rows lie on the other side of the cursor (newer for `p_after`, older for
--- `p_before`). Address and user agent come from the context row ([BC-03]); the actor's address
--- and name from the staff table, as they are now.
+-- One page of the staff log (§14.5), always exactly one row. `items` holds the page's rows (at most
+-- `p_limit` plus the one that says more lie past its end), newest first, as JSON objects with the
+-- columns `staff.audit_entry` returns; `total` counts the matching rows up to 10,001, and `beyond`
+-- says whether matching rows lie on the other side of the cursor (newer for `p_after`, older for
+-- `p_before`), both whatever the page holds. `p_mine` keeps the rows the reader made (the reader as
+-- the database read it, never an ID the caller names). Address and user agent come from the
+-- context row ([BC-03]); the actor's address and name from the staff table, as they are now.
 CREATE FUNCTION staff.audit_log(
   p_session_id text,
   p_access_sub text,
@@ -90,12 +103,7 @@ CREATE FUNCTION staff.audit_log(
   p_after text,
   p_before text,
   p_limit integer
-) RETURNS TABLE (
-  id text, event text, category text, recorded_at timestamptz,
-  actor_kind text, actor_id text, actor_via text, actor_email text, actor_name text,
-  step_up_method text, target_id text, ref_ids text[], metadata jsonb, organization_id text,
-  client_ip text, user_agent text, total bigint, beyond boolean
-)
+) RETURNS TABLE (items jsonb, total bigint, beyond boolean)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   reader text;
@@ -155,23 +163,28 @@ BEGIN
      LIMIT 10001
   ) counted;
   RETURN QUERY
-    SELECT e.id, e.event, e.category, e.recorded_at,
-           e.actor_kind, e.actor_id, e.actor_via, m.email, nullif(m.name, ''),
-           e.step_up_method, e.target_id, e.ref_ids, e.metadata, e.organization_id,
-           host(c.client_ip), c.user_agent, matching, more
-      FROM audit.event e
-      LEFT JOIN audit.event_context c ON c.event_id = e.id
-      LEFT JOIN staff.member m ON e.actor_kind = 'staff' AND m.id = e.actor_id
-     WHERE e.scope = 'staff' AND e.id = ANY (coalesce(page_ids, ARRAY[]::text[]))
-     ORDER BY e.id DESC;
+    SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id DESC), '[]'::jsonb), matching, more
+      FROM (
+        SELECT e.id, e.event, e.category,
+               to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 AS recorded_at,
+               e.actor_kind, e.actor_id, e.actor_via, m.email AS actor_email,
+               nullif(m.name, '') AS actor_name, e.step_up_method, e.target_id, e.ref_ids,
+               e.metadata, e.organization_id, host(c.client_ip) AS client_ip, c.user_agent
+          FROM audit.event e
+          LEFT JOIN audit.event_context c ON c.event_id = e.id
+          LEFT JOIN staff.member m ON e.actor_kind = 'staff' AND m.id = e.actor_id
+         WHERE e.scope = 'staff' AND e.id = ANY (coalesce(page_ids, ARRAY[]::text[]))
+      ) p;
 END
 $$;
 
 -- One entry of the staff log (the drawer's deep link, `view=<aud_…>`): the row when it is a staff
--- row, nothing otherwise, so an ID from another scope reads as not found.
+-- row, nothing otherwise, so an ID from another scope reads as not found. `recorded_at` is the
+-- instant in UTC with milliseconds (ISO 8601), as `staff.audit_log`'s items carry it.
 CREATE FUNCTION staff.audit_entry(p_session_id text, p_access_sub text, p_event_id text)
 RETURNS TABLE (
-  id text, event text, category text, recorded_at timestamptz,
+  id text, event text, category text, recorded_at text,
   actor_kind text, actor_id text, actor_via text, actor_email text, actor_name text,
   step_up_method text, target_id text, ref_ids text[], metadata jsonb, organization_id text,
   client_ip text, user_agent text
@@ -182,7 +195,8 @@ DECLARE
 BEGIN
   reader := staff.audit_reader(p_session_id, p_access_sub);
   RETURN QUERY
-    SELECT e.id, e.event, e.category, e.recorded_at,
+    SELECT e.id, e.event, e.category,
+           to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
            e.actor_kind, e.actor_id, e.actor_via, m.email, nullif(m.name, ''),
            e.step_up_method, e.target_id, e.ref_ids, e.metadata, e.organization_id,
            host(c.client_ip), c.user_agent
