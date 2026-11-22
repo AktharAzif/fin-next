@@ -7,6 +7,11 @@
 // and for an entry here that a fragment already defines: the lane that lands the alert moves it to
 // the catalogue entry's `alerts` and removes it from this list in the same pull request.
 //
+// A defined alert can owe a part as well: a trigger the plan gives it that reads a line nothing in
+// the tree writes. The rule fires on the rest, and OWED_PARTS below lists the part with its lane,
+// its date and why (held by test/sat09-alerts.test.ts); the lane that builds the part adds it to
+// the rule and removes it there in the same pull request.
+//
 // The lane is the one whose row in EXECUTION's lane tables carries the fragment's work: L-SAT-09
 // ("Auth alerts and catalogue fragments", ops/monitoring/**) for spec 02 §18.2's identity, staff
 // and organisation alerts, P0-F (ops/monitoring/** in Phase 0) for the audit fragment,
@@ -17,10 +22,10 @@
 // alert reaches production. Before production's first deploy, a gate is built on whatever path
 // production really takes: the operator's launcher outside this repository (CI-04, FD-19), static
 // uploads included. The gate reads this list as data, fails closed when it cannot read it, and
-// refuses the deploy while any entry here exists. It is not built yet because production has no
-// deploy path yet (ops/fin and tools/static-deploy know only staging); a production gate in
-// ops/fin now would guard a path that does not exist. Until it is built, this paragraph and the
-// plan's entry are the record that it is owed.
+// refuses the deploy while any entry here exists, an owed part included. It is not built yet
+// because production has no deploy path yet (ops/fin and tools/static-deploy know only staging); a
+// production gate in ops/fin now would guard a path that does not exist. Until it is built, this
+// paragraph and the plan's entry are the record that it is owed.
 
 export interface OwedAlert {
   /** The alert's name, as its fragment will define it. */
@@ -204,5 +209,47 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 01 §8.7, DECISIONS CF-72",
     note: "No process writes clockSkewMs: process.health carries what a service's health hook gives (packages/server's BuiltService.health), and none gives the offset from the database's now() yet (P0-D's health line, with P0-E's pool and probe). The pull request that makes a process write it puts the rule back in alerts/platform.json (threshold @thresholds.clock-skew, runbook docs/runbooks/clock-skew.md) and removes it here.",
+  },
+];
+
+/** A trigger the plan gives a defined alert that its rule cannot read yet (the header above). */
+export interface OwedPart {
+  /** The alert, a rule of its fragment that fires on its other triggers. */
+  readonly alert: string;
+  /** The trigger that is owed, in the plan's words. */
+  readonly part: string;
+  /** The fragment that defines the alert: ops/monitoring/<env>/alerts/<fragment>.json. */
+  readonly fragment: string;
+  /** The lane that owes it (EXECUTION's lane tables). */
+  readonly lane: string;
+  /** The date it is due, YYYY-MM-DD. */
+  readonly due: string;
+  /** Where the plan defines it. */
+  readonly spec: string;
+  /** Why the rule cannot read it yet, and what it needs. */
+  readonly note: string;
+}
+
+export const OWED_PARTS: readonly OwedPart[] = [
+  {
+    alert: "sign-in-failing",
+    part: "successful sign-ins at zero while attempts continue",
+    fragment: "identity",
+    lane: "L-SAT-09",
+    due: SUNDAY,
+    spec: "spec 02 §18.2",
+    note:
+      "Owed, not built: the rule fires on spec 02 §18.2's 5xx half only (auth.unhandled_error " +
+      "off the factor-step paths), because no line names a sign-in attempt or its outcome by " +
+      "path where the realms run. The realm keeps authPath on its request state, but console's and " +
+      "admin's annotate hooks (apps/console/src/server/routes.ts, " +
+      "apps/admin/src/server/auth-hook.ts) copy only the outcome, the reason and the actor onto " +
+      "the host's one request line, whose route is the pattern /api/auth/*; packages/server's " +
+      "RequestFields has no authPath and the request catalogue entry declares none. " +
+      "session.created is an audit event, not a line, and auth.unhandled_error names the path " +
+      "for a 500 only. Once the host's request line for /api/auth/* carries the realm's " +
+      "authPath (or the realm writes a bounded sign-in outcome line), the part is a rule over " +
+      "the sign-in paths' lines that fires while attempts continue and none ends ok, in " +
+      "alerts/identity.json beside the 5xx half, runbook docs/runbooks/sign-in-failing.md.",
   },
 ];

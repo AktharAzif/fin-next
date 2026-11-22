@@ -47,6 +47,8 @@ export const entries: readonly CatalogEntry[] = [
     // factor-step and step-up alerts read identity's own lines (auth.unhandled_error, which names
     // the library path, and step_up.refused), since the host's one request line for /api/auth/*
     // carries no path; a 5xx anywhere on a service is 5xx-rate-<service> and 5xx-count-<service>.
+    // For the same reason sign-in-failing's other trigger, successful sign-ins at zero while
+    // attempts continue, is owed (OWED_PARTS in owed.ts) until this line carries the realm's path.
     owed: ["admin-without-second-factor", "team-change-failing"],
   },
   {

@@ -14,6 +14,14 @@ The auth library answered 500 for an error no refusal names, and the realm wrote
 - `sign-in-failing`: every other path, a line without an `authPath` included: the sign-in, code
   and session paths. People may not be able to sign in at all.
 
+`sign-in-failing` fires on spec 02 §18.2's 5xx half only. Its other trigger, successful sign-ins
+at zero while attempts continue, is owed (`OWED_PARTS` in `ops/monitoring/catalog/owed.ts`, with
+its lane, date and reason): no line names a sign-in attempt or its outcome by path, because the
+host's `request` line for `/api/auth/*` carries no `authPath` and `session.created` is an audit
+event, not a line. Until it is built, sign-ins that stop succeeding without a 500 raise no alert
+of their own: when people report that they cannot sign in, try the console's and Fin Admin's
+sign-in by hand.
+
 The host's own `request` line for `/api/auth/*` names no path, so a 5xx anywhere on the service is
 also `5xx-rate-<service>` and `5xx-count-<service>`. A limiter that cannot reach its store is
 `rate-limiter-failing`, a key no version opens `secret-unreadable`, and a refused commit

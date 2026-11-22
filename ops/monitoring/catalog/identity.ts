@@ -46,7 +46,9 @@ export const entries: readonly CatalogEntry[] = [
       "the realm's error handler, beside error.unexpected with the same errorId, for an error no refusal names (500)",
     fields: { realm: "string", authPath: "string", errorId: "string" },
     // Split by authPath: the factor-step and enrolment paths are second-factor-step-failing's,
-    // every other value, a missing one included, sign-in-failing's.
+    // every other value, a missing one included, sign-in-failing's. That is spec 02 §18.2's 5xx
+    // half of sign-in-failing; its other trigger (successful sign-ins at zero while attempts
+    // continue) reads no line yet and is owed in owed.ts's OWED_PARTS, with why.
     alerts: ["sign-in-failing", "second-factor-step-failing"],
   },
   {

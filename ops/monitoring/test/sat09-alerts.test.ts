@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
-import { OWED_ALERTS } from "../catalog/owed.ts";
+import { OWED_ALERTS, OWED_PARTS } from "../catalog/owed.ts";
 import { RUNBOOK_HEADINGS } from "../src/check.ts";
 import { type AlertDef, type Condition, loadEnv } from "../src/config.ts";
 import { queryEvents, renderSql } from "../src/sql.ts";
@@ -426,6 +426,57 @@ describe("what stays owed, with why", () => {
     expect(commands.some((text) => /words: \["github"/.test(text))).toBe(false);
     expect(entry("run.done")?.owed).toEqual(["github-settings-changed"]);
     expect(entry("run.done")?.alerts).toEqual([]);
+  });
+
+  it("every owed part belongs to a staging rule, with a lane, a date and why", () => {
+    expect(OWED_PARTS.length).toBeGreaterThan(0);
+    for (const part of OWED_PARTS) {
+      const alert = rule(part.alert);
+      expect(alert, `${part.alert} is no staging rule`).toBeDefined();
+      expect(alert?.file).toBe(`ops/monitoring/staging/alerts/${part.fragment}.json`);
+      expect(part.lane, part.alert).toMatch(/^(?:P0-[A-Z][0-9]?|L-[A-Z]{3,4}-[0-9]{2})$/);
+      expect(part.due, part.alert).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(part.spec.trim(), part.alert).not.toBe("");
+      expect(part.note.trim(), part.alert).not.toBe("");
+      // The rule's fragment and runbook say which part is owed.
+      const fragment = `ops/monitoring/staging/alerts/${part.fragment}.json`;
+      const runbook = alert?.metadata?.runbook ?? "";
+      for (const file of [fragment, runbook]) {
+        expect(read(file).replace(/\s+/g, " "), file).toContain(part.part);
+      }
+    }
+  });
+
+  it("sign-in-failing's zero-success trigger: no line names a sign-in attempt or its outcome by path", () => {
+    expect(OWED_PARTS.find((p) => p.alert === "sign-in-failing")).toMatchObject({
+      part: "successful sign-ins at zero while attempts continue",
+      fragment: "identity",
+      lane: "L-SAT-09",
+      spec: "spec 02 §18.2",
+    });
+    // The rule is the 5xx half only.
+    expect(queryEvents(rule("sign-in-failing")?.query ?? { lines: {} })).toEqual([
+      "auth.unhandled_error",
+    ]);
+    // What the other half needs, which nothing writes yet; each check fails once something does,
+    // and the lane then builds the part and removes it from OWED_PARTS. The host's one request
+    // line names no auth path: its fields, its catalogue entry, and both realms' hosts, which
+    // pass annotate (so the realm writes no request line of its own) and copy no authPath.
+    const fields = read("packages/server/src/telemetry/lines.ts");
+    expect(fields).toContain("export interface RequestFields {");
+    expect(fields).not.toContain("authPath");
+    expect(entry("request")?.fields).not.toHaveProperty("authPath");
+    const hosts = ["apps/console/src/server/routes.ts", "apps/admin/src/server/auth-hook.ts"];
+    for (const file of hosts) {
+      const text = read(file);
+      expect(text, file).toContain("annotate: (fields) =>");
+      expect(text, file).not.toContain("authPath");
+    }
+    // No catalogued line is a sign-in or session outcome (session.created is an audit event).
+    const events = Object.values(fragments)
+      .flat()
+      .map((e) => e.event);
+    expect(events.filter((e) => /^(?:sign_in|session|signin)[._]/.test(e))).toEqual([]);
   });
 
   it("every L-SAT-09 or P0-F alert owed today says why it is not built", () => {
