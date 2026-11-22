@@ -180,12 +180,21 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
       }),
     );
 
-  /** Waits until `done` has settled or the backend `pid` waits on a lock, whichever comes first. */
+  /**
+   * Waits until `done` has settled or the backend `pid` waits on a lock, whichever comes first. The
+   * pause between polls ends as soon as `done` settles: a refused statement settles within the
+   * first poll, and a fixed 20 ms pause there cost the test about 1 s over its 48 cases.
+   */
   async function settledOrWaiting(pid: number, done: Promise<unknown>): Promise<void> {
     let settled = false;
-    void done.then(() => {
-      settled = true;
-    });
+    const marker = done.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     const until = Date.now() + 2000;
     while (!settled && Date.now() < until) {
       const waiting = await db.admin.query(
@@ -193,7 +202,12 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
         [pid],
       );
       if (waiting.rows.length > 0) return;
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([marker, new Promise((resolve) => (timer = setTimeout(resolve, 20)))]);
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
 
@@ -231,6 +245,11 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     }
   }
 
+  // Its 120 s timeout is for genuinely heavy work, not a wait: 48 cases (four other logins, six
+  // tables, two kinds of DDL), each an enqueue, a refused PREPARE and refused DDL in two sessions, a
+  // delivery check and a full sender pass, with two fresh sessions per login. Alone it takes about
+  // 1.2 to 2.4 s on a loaded developer machine, and 2.6 s inside the full db run there; CI's db job
+  // took 7.7 s before the poll above stopped pausing once the DDL had settled.
   it("keeps another login's PREPARE, and a CREATE RULE or CREATE TRIGGER queued behind it, off every table in email_private", async () => {
     let run = 0;
     for (const role of OTHERS) {
