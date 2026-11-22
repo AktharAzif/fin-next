@@ -270,7 +270,7 @@ describe("migrate --migrate", () => {
       ).rejects.toMatchObject({ code: "FE001" });
     } finally {
       await apiLogin.end();
-      await su.query("DELETE FROM email.outbox");
+      await su.query("DELETE FROM email_private.outbox");
       await su.query(
         "DELETE FROM email.template_grant WHERE template = 'kyc/from-a-newer-release'",
       );
