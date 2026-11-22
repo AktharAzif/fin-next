@@ -3,14 +3,18 @@
 // and names it back, and the catalogue's entry names the same alerts. The fields every writer
 // passes are the ones the catalogue declares, and the catalogue, runbook and alert say when a
 // writer leaves the audit event's name out. audit-not-written opens one incident per service,
-// SQLSTATE and audit event, each label held to a closed set (AUDIT_EVENTS for the event, read from
-// packages/audit's generated index), so a refusal that stands never hides a later, different one
-// and no line can choose or multiply a label. The list, the writers and the index are read as
-// text: ops/monitoring imports no other package, which is why this package's tests are never
-// cached (ops/monitoring/turbo.json, test/turbo.test.ts).
+// SQLSTATE and audit event, each label held to a closed set (for the event, the names in
+// AUDIT_EVENTS, read from packages/audit's generated index, and the events each area's recorder
+// writes, read from its events module), so a refusal that stands never hides a later, different
+// one and no line can choose or multiply a label. The scenarios build each line from the fields
+// its writer passes, so a writer that drops the event's name shows as the residual it leaves. The
+// list, the writers and the index are read as text, and the area events by a child Node:
+// ops/monitoring imports no other package, which is why this package's tests are never cached
+// (ops/monitoring/turbo.json, test/turbo.test.ts).
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
 import { type AlertDef, type EnvConfig, loadEnv } from "../src/config.ts";
@@ -191,6 +195,58 @@ function auditEventNames(): string[] {
   return [...(block[1] ?? "").matchAll(/^ {2}"([^"]+)": "[^"]+",$/gm)]
     .map((m) => m[1] ?? "")
     .sort();
+}
+
+/**
+ * Run by a child Node over each area's events module: the keys of every exported record of event
+ * specs (each key an event name, each value a spec with its `roles`), the list the area's recorder
+ * checks an event against. A module that exports none fails the run.
+ */
+const AREA_EVENTS_SCRIPT = `
+const names = new Set();
+for (const url of process.argv.slice(1)) {
+  const module = await import(url);
+  let records = 0;
+  for (const value of Object.values(module)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const entries = Object.entries(value);
+    const specs = entries.every(
+      ([name, spec]) =>
+        /^[a-z][a-z_]*\\.[a-z][a-z_]*$/.test(name) &&
+        typeof spec === "object" && spec !== null && Array.isArray(spec.roles),
+    );
+    if (entries.length === 0 || !specs) continue;
+    for (const [name] of entries) names.add(name);
+    records += 1;
+  }
+  if (records === 0) throw new Error(url + " exports no audit events");
+}
+process.stdout.write(JSON.stringify([...names].sort()));
+`;
+
+/**
+ * The audit events the area recorders write, from the events module beside each recorder
+ * (packages/<area>/src/audit/events.ts), loaded where it lives by a child Node.
+ */
+function areaEventNames(): string[] {
+  const modules = areaRecorders().map((file) => pathToFileURL(join(file, "..", "events.ts")).href);
+  const run = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", AREA_EVENTS_SCRIPT, ...modules],
+    { cwd: ROOT, encoding: "utf8" },
+  );
+  if (run.status !== 0) throw new Error(`the area events could not be read: ${run.stderr}`);
+  return JSON.parse(run.stdout) as string[];
+}
+
+/** The field each write of a writer passes the audit event's name in: `auditEvent` or `event`. */
+function nameField(file: string): string {
+  const named = new Set(writtenFields(file).map((fields) => fields.find((f) => f !== "sqlstate")));
+  const [only, ...rest] = named;
+  if (only === undefined || rest.length > 0) {
+    throw new Error(`${file}: its writes do not pass the event's name in one field`);
+  }
+  return only;
 }
 
 type SqlNode =
@@ -377,20 +433,39 @@ function refusal(minute: number, fields: Readonly<Record<string, unknown>>): Lin
   };
 }
 
+/**
+ * One audit.write_failed line as a writer's write reaches Better Stack: the writer passes the audit
+ * event's name in `field` and the SQLSTATE in `sqlstate`, and the envelope's own fields (`event`
+ * among them, the line's name) win over any the writer passes with the same name.
+ */
+function shipped(
+  minute: number,
+  service: string,
+  field: string,
+  auditEvent: string,
+  sqlstate: string,
+): Line {
+  const envelope = { event: EVENT, message: EVENT, level: "error", service, release: "r1" };
+  return { at: minute * 60, fields: { [field]: auditEvent, sqlstate, ...envelope } };
+}
+
 describe("audit-not-written's incidents", () => {
   if (config === undefined) throw new Error("no staging config");
   const env = config;
   const rule = env.alerts.find((a) => a.name === "audit-not-written");
   if (rule === undefined) throw new Error("audit-not-written is no rule");
   const AUDIT_EVENTS = auditEventNames();
+  const AREA_EVENTS = areaEventNames();
+  /** Every audit event the code defines: AUDIT_EVENTS and the area recorders' own. */
+  const CODE_EVENTS = [...new Set([...AUDIT_EVENTS, ...AREA_EVENTS])].sort();
   const { sql } = desiredAlert(env, rule);
   const { series } = seriesQuery(sql);
   const seriesOf = (fields: Readonly<Record<string, unknown>>) =>
     evaluate(series, { event: EVENT, ...fields });
-  // Events of AUDIT_EVENTS: one the scenario's FA004 refuses, and two no fragment gives console.
+  // Events of AUDIT_EVENTS: one fin_owner records (migrate's tasks), and two no fragment gives it.
   const OWN = "operator.task_completed";
   const FOREIGN = "switch.tripped";
-  const SECOND = "audit.epoch_started";
+  const SECOND = "system.sweep_completed";
 
   it("are one per service, SQLSTATE and audit event, as the catalogue's entry says", () => {
     expect(seriesFields(rule)).toEqual(["service", "sqlstate", "auditEvent"]);
@@ -403,24 +478,28 @@ describe("audit-not-written's incidents", () => {
     });
   });
 
-  it("hold each label to a closed set: the rule's sources, a five-character SQLSTATE, AUDIT_EVENTS", () => {
+  it("hold each label to a closed set: the rule's sources, a five-character SQLSTATE, the code's audit events", () => {
     expect(AUDIT_EVENTS).toEqual(expect.arrayContaining([OWN, FOREIGN, SECOND]));
+    // identity's recorder is the only writer console and admin have: its events are in the set.
+    expect(AREA_EVENTS).toEqual(
+      expect.arrayContaining(["session.created", "staff.signed_in", "staff.signed_out"]),
+    );
     expect(rule.seriesBy).toEqual([
       { field: "service", oneOf: [...rule.sources] },
       { field: "sqlstate", shape: "sqlstate" },
-      { field: "auditEvent", oneOf: AUDIT_EVENTS },
+      { field: "auditEvent", oneOf: CODE_EVENTS },
     ]);
     const extract = (field: string) => `JSONExtractString(raw, '${field}')`;
     const bounded = (field: string, values: readonly string[]) =>
       `if(${extract(field)} IN (${values.map((v) => `'${v}'`).join(", ")}), ${extract(field)}, '${OTHER_LABEL}')`;
     const services = ["api", "worker", "payments", "console", "admin", "migrate"];
     const sqlstate = `if(match(${extract("sqlstate")}, '^[0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]$'), ${extract("sqlstate")}, 'other')`;
-    const expected = `SELECT {{time}} AS time, concat(${bounded("service", services)}, '/', ${sqlstate}, '/', ${bounded("auditEvent", AUDIT_EVENTS)}) AS series, count(*) AS value FROM {{source}} WHERE ${WINDOW} AND JSONExtractString(raw, 'event') = 'audit.write_failed' GROUP BY time, series`;
+    const expected = `SELECT {{time}} AS time, concat(${bounded("service", services)}, '/', ${sqlstate}, '/', ${bounded("auditEvent", CODE_EVENTS)}) AS series, count(*) AS value FROM {{source}} WHERE ${WINDOW} AND JSONExtractString(raw, 'event') = 'audit.write_failed' GROUP BY time, series`;
     expect(renderSql(rule)).toBe(expected);
     expect(sql).toBe(expected);
   });
 
-  it("give an audit event outside AUDIT_EVENTS, a missing one and every forged value the one label other", () => {
+  it("give an audit event the code does not define, a missing one and every forged value the one label other", () => {
     const at = (auditEvent: unknown) =>
       seriesOf({ service: "console", sqlstate: "FA004", auditEvent });
     expect(at(OWN)).toBe(`console/FA004/${OWN}`);
@@ -474,33 +553,119 @@ describe("audit-not-written's incidents", () => {
     ]);
   });
 
-  it("open for an FA011 and for each foreign event's FA002 while an FA004 stands on the service", () => {
-    // console refuses OWN with FA004 every 2 minutes for 40 minutes; meanwhile an FA011 at minute
-    // 12, an FA002 at minute 20 for an event no fragment gives console, and an FA002 at minute 26
-    // for a second such event, while the first FA002's incident is still open.
-    const lines = [
-      ...Array.from({ length: 20 }, (_, i) =>
-        refusal(i * 2, { service: "console", sqlstate: "FA004", auditEvent: OWN }),
-      ),
-      refusal(12, { service: "console", sqlstate: "FA011", auditEvent: OWN }),
-      refusal(20, { service: "console", sqlstate: "FA002", auditEvent: FOREIGN }),
-      refusal(26, { service: "console", sqlstate: "FA002", auditEvent: SECOND }),
+  /**
+   * A service refuses `standing` with `code` every 2 minutes for 40 minutes; meanwhile an FA011 at
+   * minute 12, an FA002 at minute 20 for an event no fragment gives the service, and an FA002 at
+   * minute 26 for a second such event, while the first FA002's incident is still open. Each line
+   * carries the event's name in the field the writer passes it in.
+   */
+  function scenario(
+    service: string,
+    field: string,
+    standing: string,
+    code: string,
+    foreign: string,
+    second: string,
+  ): Line[] {
+    return [
+      ...Array.from({ length: 20 }, (_, i) => shipped(i * 2, service, field, standing, code)),
+      shipped(12, service, field, standing, "FA011"),
+      shipped(20, service, field, foreign, "FA002"),
+      shipped(26, service, field, second, "FA002"),
     ];
+  }
+
+  it("open, for migrate's lines, for an FA011 and for each foreign event's FA002 while an FA004 stands", () => {
+    // migrate's tasks record fin_owner's events through packages/audit's recordAudit, which names
+    // the event auditEvent; switch.tripped and system.sweep_completed are never fin_owner's.
+    const field = nameField(AUDIT_WRITER);
+    expect(field).toBe("auditEvent");
+    const lines = scenario("migrate", field, OWN, "FA004", FOREIGN, SECOND);
     expect(incidents(env, rule, lines)).toEqual([
-      { series: `console/FA004/${OWN}`, at: 60 },
-      { series: `console/FA011/${OWN}`, at: 12 * 60 },
-      { series: `console/FA002/${FOREIGN}`, at: 20 * 60 },
-      { series: `console/FA002/${SECOND}`, at: 26 * 60 },
+      { series: `migrate/FA004/${OWN}`, at: 60 },
+      { series: `migrate/FA011/${OWN}`, at: 12 * 60 },
+      { series: `migrate/FA002/${FOREIGN}`, at: 20 * 60 },
+      { series: `migrate/FA002/${SECOND}`, at: 26 * 60 },
     ]);
     // Grouped by service alone, as the rule first was, the three later refusals join the FA004's
     // incident; by service and SQLSTATE, the second FA002 joins the first's.
     const { seriesBy: _seriesBy, ...byService } = rule;
-    expect(incidents(env, byService, lines).map((i) => i.series)).toEqual(["console"]);
+    expect(incidents(env, byService, lines).map((i) => i.series)).toEqual(["migrate"]);
     const bySqlstate: AlertDef = { ...rule, seriesBy: ["service", "sqlstate"] };
     expect(incidents(env, bySqlstate, lines).map((i) => i.series)).toEqual([
-      "console/FA004",
-      "console/FA011",
-      "console/FA002",
+      "migrate/FA004",
+      "migrate/FA011",
+      "migrate/FA002",
     ]);
+  });
+
+  describe("for console's and admin's lines, which only identity's recorder writes", () => {
+    // console records the person-scope events (fin_console) and admin the staff realm's
+    // (fin_admin): a staff event's FA002 on console, or a person event's on admin, is foreign.
+    const written = nameField(IDENTITY_WRITER);
+    const named = written === "auditEvent";
+    /** The incidents for console's scenario, and for an FA002 standing on each service. */
+    const outcomes = (field: string) => ({
+      console: incidents(
+        env,
+        rule,
+        scenario(
+          "console",
+          field,
+          "session.created",
+          "FA004",
+          "staff.signed_in",
+          "staff.signed_out",
+        ),
+      ),
+      consoleFa002: incidents(env, rule, [
+        ...Array.from({ length: 20 }, (_, i) =>
+          shipped(i * 2, "console", field, "session.created", "FA002"),
+        ),
+        shipped(20, "console", field, "staff.signed_in", "FA002"),
+      ]).map((i) => i.series),
+      adminFa002: incidents(env, rule, [
+        ...Array.from({ length: 20 }, (_, i) =>
+          shipped(i * 2, "admin", field, "staff.signed_in", "FA002"),
+        ),
+        shipped(20, "admin", field, "session.created", "FA002"),
+      ]).map((i) => i.series),
+    });
+    /** One incident per service, SQLSTATE and event: what the rule gives lines with auditEvent. */
+    const perEvent = {
+      console: [
+        { series: "console/FA004/session.created", at: 60 },
+        { series: "console/FA011/session.created", at: 12 * 60 },
+        { series: "console/FA002/staff.signed_in", at: 20 * 60 },
+        { series: "console/FA002/staff.signed_out", at: 26 * 60 },
+      ],
+      consoleFa002: ["console/FA002/session.created", "console/FA002/staff.signed_in"],
+      adminFa002: ["admin/FA002/staff.signed_in", "admin/FA002/session.created"],
+    };
+
+    it("are read from the field identity's recorder passes the event's name in", () => {
+      expect(["auditEvent", "event"]).toContain(written);
+    });
+
+    it("are one per service, SQLSTATE and event once the recorder names the event auditEvent", () => {
+      expect(outcomes("auditEvent")).toEqual(perEvent);
+    });
+
+    it("are, as the recorder writes them today, per event once it names it, and per service and SQLSTATE only while it passes `event`", () => {
+      // While it passes `event`, the envelope keeps its own `event`, the line carries no
+      // auditEvent, and every console and admin refusal is <service>/<sqlstate>/other: the second
+      // FA002 joins the first's incident, and a foreign event's FA002 joins a standing FA002's,
+      // sending no email. The runbook and the alert's check say so for exactly as long.
+      const residual = {
+        console: [
+          { series: "console/FA004/other", at: 60 },
+          { series: "console/FA011/other", at: 12 * 60 },
+          { series: "console/FA002/other", at: 20 * 60 },
+        ],
+        consoleFa002: ["console/FA002/other"],
+        adminFa002: ["admin/FA002/other"],
+      };
+      expect(outcomes(written)).toEqual(named ? perEvent : residual);
+    });
   });
 });

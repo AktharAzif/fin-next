@@ -21,8 +21,10 @@ export const entries: readonly CatalogEntry[] = [
     alerts: ["audit-not-written"],
     // One incident per service, SQLSTATE and audit event: a refusal that stands (every later try
     // fails the same way) must never hide a later, different one, such as an FA011 or an FA002 on
-    // an event no fragment gives the service (MC-04). The rule holds each label to a closed set and
-    // gives any other value, a missing one included, the one label `other`.
+    // an event no fragment gives the service (MC-04). The rule holds each label to a closed set (for
+    // the event, AUDIT_EVENTS and the area recorders' own events) and gives any other value, a
+    // missing one included, the one label `other`: so a recorder's lines without `auditEvent` share
+    // it, and on their service an incident is per SQLSTATE only.
     seriesBy: ["service", "sqlstate", "auditEvent"],
   },
   {

@@ -41,13 +41,22 @@ An incident is per service, SQLSTATE and audit event: its series is
 `<service>/<sqlstate>/<auditEvent>`. A refusal that stands never hides a later, different one, so
 an `FA011`, or an `FA002` on another event, opens its own incident and sends its own email while an
 `FA004` stands on the same service. Each label is held to a closed set: the services the alert
-reads, a five-character SQLSTATE (`FA004`, `42501`), and the events in packages/audit's
-`AUDIT_EVENTS`. Any other value, or none, is the one label `other`: a line without `auditEvent`, an
-`auditEvent` outside `AUDIT_EVENTS`, and the area recorders' `input` and `unknown`. So no line can
-choose a label or add one, and every line still opens or joins an incident; none is dropped. Read
-the value an `other` stands for from the line itself. Lines that share an `other` label share an
-incident: while one stands, a later refusal with the same service and SQLSTATE whose event is
+reads, a five-character SQLSTATE (`FA004`, `42501`), and the audit events the code defines (the
+events in packages/audit's `AUDIT_EVENTS` and those each area's own recorder writes, identity's
+today). Any other value, or none, is the one label `other`: a line without `auditEvent`, an
+`auditEvent` the code does not define, and the area recorders' `input` and `unknown`. So no line
+can choose a label or add one, and every line still opens or joins an incident; none is dropped.
+Read the value an `other` stands for from the line itself. Lines that share an `other` label share
+an incident: while one stands, a later refusal with the same service and SQLSTATE whose event is
 `other` too joins it, so read the lines, not only the incidents.
+
+While identity's recorder passes the event's name as `event`, none of its lines carries
+`auditEvent`, and it is the only writer console and admin have. So every console and admin refusal
+is `<service>/<sqlstate>/other`: there an incident is per service and SQLSTATE only, and one
+standing `FA002` hides the next `FA002` on another event, the foreign-event `FA002` that must wake
+the owner among them, which joins the open incident and sends no email. While such an incident is
+open, read each of its lines (First check, step 2) and treat any foreign-event `FA002` among them as
+the email it did not send.
 
 ## First check
 
@@ -98,6 +107,6 @@ The refused action changed nothing, so there is nothing to undo: the work is to 
 
 At once for `FA011`, for `FA002` on an event no fragment gives the service, or for any refusal no
 new release explains. Each opens its own incident and email even while another refusal stands on
-the same service, unless it shares an `other` label with it (What it means). A refusal a release
-caused can wait for the rollback, unless it blocks sign-in, a factor, a credential or a member
-change for more than 15 minutes.
+the same service, unless it shares an `other` label with it, as every console and admin refusal
+does for now (What it means). A refusal a release caused can wait for the rollback, unless it
+blocks sign-in, a factor, a credential or a member change for more than 15 minutes.
