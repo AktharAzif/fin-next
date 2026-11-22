@@ -47,10 +47,15 @@ const float = (name: string) => `JSONExtract(raw, '${field(name)}', 'Nullable(Fl
 
 /** One condition as a SQL boolean expression. */
 export function condition(c: Condition): string {
-  const set = [c.eq, c.notEq, c.in, c.notIn, c.gt, c.contains].filter(
+  const set = [c.eq, c.notEq, c.in, c.notIn, c.gt, c.contains, c.present].filter(
     (v) => v !== undefined,
   ).length;
   if (set !== 1) throw new QueryError(`condition on ${c.field} must set exactly one comparison`);
+  if (c.present !== undefined) {
+    // Only a line that carries the field, whatever its value: a line without it does not count.
+    if (c.present !== true) throw new QueryError(`present on ${c.field} takes only true`);
+    return `JSONHas(raw, '${field(c.field)}')`;
+  }
   if (c.notEq !== undefined) {
     // The negation of `eq`, so a line without the field matches (fails closed).
     if (typeof c.notEq !== "boolean" && typeof c.notEq !== "string") {

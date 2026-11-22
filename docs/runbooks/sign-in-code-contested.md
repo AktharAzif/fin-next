@@ -17,9 +17,10 @@ asked the live code) is held back twice, and each time the console writes `auth.
   nothing was sent; the rest of the allowance stays for known browsers.
 
 The line carries the account's `userId` when the address has an account, and never the address,
-the browser or the code. The alert counts per `userId`, so one incident is one account. Lines for
-an address with no account carry no `userId` and share one series with an empty label: one person
-asking codes for many addresses that have no account.
+the browser or the code. The alert counts only lines with a `userId`, one series per `userId`, so
+one incident is one account. A line for an address with no account carries no `userId` and is not
+counted: someone signing up who asks for a code again and again writes such lines, and they say
+nothing about any account.
 
 Nobody was signed in by a contest, and the owner can still sign in: with their own browser's code,
 or with a passkey whatever happens here. Many contests for one account mean someone is asking codes
@@ -37,8 +38,9 @@ Find who by IDs only.
    address or a query string.
 3. Whether that account signed in meanwhile: the person-scope audit events for the `userId`
    (`session.created`, `browser.trusted`).
-4. The empty series: whether the networks are few and the addresses many, which is probing for
-   accounts rather than an attack on one.
+4. Whether the same networks also wrote lines with no `userId` at the same time (the alert does
+   not count those): few networks and many such lines is probing addresses as well as attacking
+   this account.
 
 ## Containment
 

@@ -1,5 +1,5 @@
 {
-  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C). auth-endpoint-unlisted, the steward's ruling of 22 Nov, counts the API halves' auth.endpoint_blocked lines (console's developer realm, admin's staff realm, verify with none) whose class is not blocked, so a line that lost its class counts and the alert fails closed. L-SAT-09's sign-in-code-contested counts auth.code_contested per userId on console, whose developer realm alone writes it (spec 02 §5.2); contests for addresses with no account share the empty label. step-up-locked counts step_up.locked, which both realms write. A service label is held to the rule's sources. Owed in catalog/owed.ts, with why: sign-in-failing, second-factor-step-failing and step-up-failing, which read the auth path that the host's request line does not carry yet. Every staging alert routes to staging-quiet, email only.",
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C). auth-endpoint-unlisted, the steward's ruling of 22 Nov, counts the API halves' auth.endpoint_blocked lines (console's developer realm, admin's staff realm, verify with none) whose class is not blocked, so a line that lost its class counts and the alert fails closed. L-SAT-09's sign-in-code-contested counts auth.code_contested per userId on console, whose developer realm alone writes it (spec 02 §5.2), over lines that carry a userId: an address with no account has none. step-up-locked counts step_up.locked, which both realms write. A service label is held to the rule's sources. Owed in catalog/owed.ts, with why: sign-in-failing, second-factor-step-failing and step-up-failing, which read the auth path that the host's request line does not carry yet. Every staging alert routes to staging-quiet, email only.",
   "alerts": [
     {
       "name": "auth-endpoint-unlisted",
@@ -34,7 +34,12 @@
       "severity": "N",
       "sources": ["console"],
       "seriesBy": "userId",
-      "query": { "count": { "events": ["auth.code_contested"] } },
+      "query": {
+        "count": {
+          "events": ["auth.code_contested"],
+          "where": [{ "field": "userId", "present": true }]
+        }
+      },
       "operator": "higher_than",
       "threshold": "@thresholds.sign-in-code-contested",
       "check_period": 60,
@@ -43,7 +48,7 @@
       "recovery_period": 3600,
       "on_missing_data": "dont_fire",
       "policy": "staging-quiet",
-      "incident_cause": "Sign-in codes for one account were contested more often than its threshold in an hour: browsers the account does not know asked for codes over its owner's live code, or used up the strangers' share of its code emails. The series is the account's userId (empty for addresses with no account). Contests: {{value}}.",
+      "incident_cause": "Sign-in codes for one account were contested more often than its threshold in an hour: browsers the account does not know asked for codes over its owner's live code, or used up the strangers' share of its code emails. The series is the account's userId; a contest for an address with no account carries none and is not counted. Contests: {{value}}.",
       "metadata": {
         "check": "Someone asking codes for that account from browsers it does not know: the lines' reason (supersede_refused or unknown_share_used) for the userId, the request lines with the same requestIds and their cfRay, and the networks behind those Ray IDs in Cloudflare's records.",
         "flow": "F3",

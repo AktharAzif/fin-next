@@ -143,7 +143,9 @@ export interface PoliciesFile {
 /**
  * A condition on one field of a line. Exactly one comparison is set. `eq: false` needs the field
  * on the line; `notEq` also matches a line without it, which is what a security alert wants (a
- * line whose field is missing must alert, never pass).
+ * line whose field is missing must alert, never pass). `present: true` matches only a line that
+ * carries the field, whatever its value: for an alert the plan defines per that field, where a
+ * line without it is no part of what the alert counts (spec 02 §18.2's "for one userId").
  */
 export interface Condition {
   readonly field: string;
@@ -153,6 +155,7 @@ export interface Condition {
   readonly notIn?: readonly string[];
   readonly gt?: number;
   readonly contains?: number;
+  readonly present?: true;
 }
 
 export type AlertQuery =

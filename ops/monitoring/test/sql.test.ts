@@ -162,6 +162,18 @@ describe("conditions", () => {
     expect(() => condition({ field: "registered", notEq: true, eq: false })).toThrow(QueryError);
   });
 
+  it("matches only a line that carries the field for present, whatever its value", () => {
+    expect(condition({ field: "userId", present: true })).toBe("JSONHas(raw, 'userId')");
+    for (const value of [false, "true", 1, null]) {
+      expect(
+        () => condition({ field: "userId", present: value as unknown as true }),
+        String(value),
+      ).toThrow(QueryError);
+    }
+    expect(() => condition({ field: "userId", present: true, eq: "x" })).toThrow(QueryError);
+    expect(() => condition({ field: "it's", present: true })).toThrow(QueryError);
+  });
+
   it("renders privileged-login so a login whose registration is unknown alerts", () => {
     const { config } = loadEnv(join(import.meta.dirname, "..", "..", ".."), "staging");
     const login = config?.alerts.find((a) => a.name === "privileged-login");

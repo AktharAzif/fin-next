@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
 import { OWED_ALERTS } from "../catalog/owed.ts";
 import { RUNBOOK_HEADINGS, readCode } from "../src/check.ts";
-import { type AlertDef, loadEnv } from "../src/config.ts";
+import { type AlertDef, type AlertQuery, loadEnv } from "../src/config.ts";
 import { renderSql } from "../src/sql.ts";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -24,6 +24,7 @@ interface IdentityRule {
   readonly threshold: string;
   readonly sources: readonly string[];
   readonly seriesBy: AlertDef["seriesBy"];
+  readonly query: AlertQuery;
   readonly queryPeriod: number;
   readonly recoveryPeriod: number;
   readonly flow: string;
@@ -36,19 +37,24 @@ const WINDOW = "time BETWEEN {{start_time}} AND {{end_time}}";
 
 const RULES: readonly IdentityRule[] = [
   {
-    // Contests for one userId above the threshold: one series per account. Only the developer
-    // realm's code requests write the line (spec 02 §5.2), so console is the one source.
+    // Contests for one userId above the threshold: one series per account, over the lines that
+    // carry a userId (a contest for an address with no account has none and is no account's).
+    // Only the developer realm's code requests write the line (spec 02 §5.2), so console is the
+    // one source.
     name: "sign-in-code-contested",
     event: "auth.code_contested",
     severity: "N",
     threshold: "@thresholds.sign-in-code-contested",
     sources: ["console"],
     seriesBy: "userId",
+    query: {
+      count: { events: ["auth.code_contested"], where: [{ field: "userId", present: true }] },
+    },
     queryPeriod: 3600,
     recoveryPeriod: 3600,
     flow: "F3",
     runbook: "docs/runbooks/sign-in-code-contested.md",
-    sql: `SELECT {{time}} AS time, JSONExtractString(raw, 'userId') AS series, count(*) AS value FROM {{source}} WHERE ${WINDOW} AND JSONExtractString(raw, 'event') = 'auth.code_contested' GROUP BY time, series`,
+    sql: `SELECT {{time}} AS time, JSONExtractString(raw, 'userId') AS series, count(*) AS value FROM {{source}} WHERE ${WINDOW} AND JSONExtractString(raw, 'event') = 'auth.code_contested' AND JSONHas(raw, 'userId') GROUP BY time, series`,
   },
   {
     // Locks above the threshold, per service: both realms write the line.
@@ -58,6 +64,8 @@ const RULES: readonly IdentityRule[] = [
     threshold: "@thresholds.step-up-locked",
     sources: ["console", "admin"],
     seriesBy: [{ field: "service", oneOf: ["console", "admin"] }],
+    // Every line of the event counts: no filter can drop a line that lost a field.
+    query: { count: { events: ["step_up.locked"] } },
     queryPeriod: 900,
     recoveryPeriod: 900,
     flow: "F4",
@@ -73,6 +81,43 @@ const entry = (event: string) =>
     .flat()
     .find((e) => e.event === event);
 const read = (...path: string[]) => readFileSync(join(ROOT, ...path), "utf8");
+
+type Line = Readonly<Record<string, unknown>>;
+
+const PLAIN_SERIES =
+  /^SELECT \{\{time\}\} AS time, JSONExtractString\(raw, '([A-Za-z]+)'\) AS series, count\(\*\) AS value FROM \{\{source\}\} WHERE (.+) GROUP BY time, series$/;
+
+/**
+ * Counts lines per series as ClickHouse would run the rendered SQL over them, for a series that is
+ * one plain field and a filter of `=` and JSONHas conditions joined by AND: JSONExtractString gives
+ * '' for a missing field or a value that is not a string, and JSONHas whether the line carries the
+ * key. Any other shape throws, so the counts come from the SQL that is sent.
+ */
+function seriesCounts(sql: string, lines: readonly Line[]): Record<string, number> {
+  const [, seriesField = "", where = ""] = PLAIN_SERIES.exec(sql) ?? [];
+  if (!where.startsWith(`${WINDOW} AND `)) throw new Error(`SQL this test cannot read: ${sql}`);
+  const extract = (line: Line, key: string) => {
+    const value = line[key];
+    return typeof value === "string" ? value : "";
+  };
+  const tests = where
+    .slice(`${WINDOW} AND `.length)
+    .split(" AND ")
+    .map((part): ((line: Line) => boolean) => {
+      const eq = /^JSONExtractString\(raw, '([A-Za-z]+)'\) = '([^']*)'$/.exec(part);
+      if (eq !== null) return (line) => extract(line, eq[1] ?? "") === eq[2];
+      const has = /^JSONHas\(raw, '([A-Za-z]+)'\)$/.exec(part);
+      if (has !== null) return (line) => Object.hasOwn(line, has[1] ?? "");
+      throw new Error(`a condition this test cannot read: ${part}`);
+    });
+  const counts: Record<string, number> = {};
+  for (const line of lines) {
+    if (!tests.every((test) => test(line))) continue;
+    const label = extract(line, seriesField);
+    counts[label] = (counts[label] ?? 0) + 1;
+  }
+  return counts;
+}
 
 describe("the identity fragment's sign-in and step-up rates", () => {
   it("load from the staging files", () => {
@@ -99,8 +144,7 @@ describe("the identity fragment's sign-in and step-up rates", () => {
         });
         expect(alert?.sources).toEqual(want.sources);
         expect(alert?.seriesBy).toEqual(want.seriesBy);
-        // Every line of the event counts: no filter can drop a line that lost a field.
-        expect(alert?.query).toEqual({ count: { events: [want.event] } });
+        expect(alert?.query).toEqual(want.query);
         expect(alert?.window).toBeUndefined();
         expect(alert === undefined ? "" : renderSql(alert)).toBe(want.sql);
       });
@@ -137,6 +181,33 @@ describe("the identity fragment's sign-in and step-up rates", () => {
   it("sign-in-code-contested: the catalogue groups every alert on the line by userId", () => {
     expect(entry("auth.code_contested")?.seriesBy).toEqual(["userId"]);
     expect(entry("auth.code_contested")?.fields).toMatchObject({ userId: "string" });
+  });
+
+  it("sign-in-code-contested: counts one account's contests, never contests for addresses with no account", () => {
+    const alert = rule("sign-in-code-contested");
+    if (alert === undefined) throw new Error("sign-in-code-contested is no staging rule");
+    // Six people signing up, each asking for a code again on an address with no account (no
+    // userId, as codes.ts writes it), and a stranger contesting one account three times.
+    const contest = (reason: string, userId?: string) => ({
+      event: "auth.code_contested",
+      level: "warn",
+      service: "console",
+      reason,
+      ...(userId === undefined ? {} : { userId }),
+    });
+    const lines = [
+      ...Array.from({ length: 6 }, () => contest("unknown_share_used")),
+      contest("supersede_refused", "usr_contested"),
+      contest("unknown_share_used", "usr_contested"),
+      contest("unknown_share_used", "usr_contested"),
+    ];
+    const sql = renderSql(alert);
+    expect(seriesCounts(sql, lines)).toEqual({ usr_contested: 3 });
+    // The same lines without the rule's userId condition: every no-account contest would share one
+    // empty series, held to the threshold meant for one account.
+    const unfiltered = sql.replace(" AND JSONHas(raw, 'userId')", "");
+    expect(unfiltered).not.toBe(sql);
+    expect(seriesCounts(unfiltered, lines)).toEqual({ "": 6, usr_contested: 3 });
   });
 
   it("are written by the code the catalogue names, on the services their rules read", () => {
