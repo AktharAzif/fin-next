@@ -119,6 +119,21 @@ describe("connectors", () => {
     expect(tunnelNameMatches("fin-next-staging-public", "xfin-next-staging-public")).toBe(false);
   });
 
+  it("reads a configured tunnel name as text, never as a pattern", () => {
+    // The settings take any string as a name: a character a pattern reads specially is itself.
+    const stamp = "-202611211200";
+    expect(tunnelNameMatches("fin+public", `fin+public${stamp}`)).toBe(true);
+    expect(tunnelNameMatches("fin+public", `finnpublic${stamp}`)).toBe(false);
+    expect(tunnelNameMatches(String.raw`fin\dpublic`, `fin7public${stamp}`)).toBe(false);
+    expect(tunnelNameMatches(String.raw`fin\dpublic`, String.raw`fin\dpublic${stamp}`)).toBe(true);
+    expect(tunnelNameMatches("fin(public", `fin(public${stamp}`)).toBe(true);
+    expect(tunnelNameMatches("fin.public", `fin_public${stamp}`)).toBe(false);
+    // The stamp is exactly twelve ASCII digits.
+    expect(tunnelNameMatches("fin-public", "fin-public-20261121120")).toBe(false);
+    expect(tunnelNameMatches("fin-public", "fin-public-2026112112000")).toBe(false);
+    expect(tunnelNameMatches("fin-public", "fin-public-２０２６１１２１１２００")).toBe(false);
+  });
+
   it("fails closed when Cloudflare refuses the read", async () => {
     const world = healthyWorld();
     world.failures[`/accounts/${ACCOUNT}/cfd_tunnel/${PUBLIC_TUNNEL}/connections`] = 403;

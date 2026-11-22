@@ -51,12 +51,18 @@ export function records(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
-/** A tunnel's name, or the dated name a blue and green swap gives its replacement. */
+/** The stamp a blue and green swap appends to its replacement's name: twelve digits. */
+const SWAP_STAMP = /^[0-9]{12}$/;
+
+/**
+ * A tunnel's name, or the dated name a blue and green swap gives its replacement. The configured
+ * name is compared as text, never built into a pattern, so no character in it needs escaping.
+ */
 export function tunnelNameMatches(expected: string, actual: unknown): boolean {
   if (typeof actual !== "string") return false;
-  return (
-    actual === expected || new RegExp(`^${expected.replace(/[.-]/g, "\\$&")}-\\d{12}$`).test(actual)
-  );
+  if (actual === expected) return true;
+  const prefix = `${expected}-`;
+  return actual.startsWith(prefix) && SWAP_STAMP.test(actual.slice(prefix.length));
 }
 
 /** Builds the shared context: the zone ID and each role's tunnel, read once per run. */
