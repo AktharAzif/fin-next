@@ -20,10 +20,13 @@
 // command stages nothing but the files of packages/db/src/assets.ts's rule. The stages under the
 // bundle's build stage (deps) are held to the pinned base, word for word (a RUN, a step, an ENV, an
 // ARG, an ADD or a COPY planted there is refused, and so is a base image that is not Node's by
-// digest and a workspace script pnpm's install runs), and the release stage starts nothing but its
-// bundle (no ENTRYPOINT, HEALTHCHECK or NODE_* ENV, and one CMD of known flags and main.js). Each of
-// the variants of the steward's ruling of 22 Nov on the db-assets copy is shown refused by the
-// reader, by the scan of the stage's output, or by both. A `pre` script is read only when it is byte for byte a command
+// digest and a workspace script pnpm's install runs, in the root's manifest or a package's that
+// pnpm-workspace.yaml's packages list names, which is read as YAML reads it, comment and blank
+// lines included, and refuses every build when it holds a line the reader cannot read), and the
+// release stage starts nothing but its bundle (no ENTRYPOINT, HEALTHCHECK or NODE_* ENV, and one
+// CMD of known flags and main.js). Each of the variants of the steward's ruling of 22 Nov on the
+// db-assets copy is shown refused by the reader, by the scan of the stage's output, or by both. A
+// `pre` script is read only when it is byte for byte a command
 // the allowlist names (the api's generator of the audit event index); that command edited by one
 // byte, any other pre-script and every `post` script are refused. It reads the Dockerfile's lines
 // as Docker's parser does, and refuses what Docker would read otherwise (a parser directive, a
@@ -53,6 +56,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { workspaceGlobs as vitestWorkspaceGlobs } from "../../../../vitest.config.ts";
 import {
   ALLOWLIST_FILE,
   builderFlags,
@@ -65,6 +69,7 @@ import {
   SCAN_SCRIPT,
   shellSteps,
   viteBuildConfig,
+  workspaceGlobs,
 } from "../../test/image-build.ts";
 
 const REPOSITORY = resolve(import.meta.dirname, "../../../..");
@@ -137,6 +142,24 @@ function setScripts(
     else manifest.scripts[name] = command;
   }
   files.set(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+// A package pnpm-workspace.yaml lists after others, and not under a control path: its manifest.
+const MONITORING_MANIFEST = "ops/monitoring/package.json";
+// The line that lists it, and a postinstall that empties the scan, which pnpm's install would run.
+const MONITORING_ITEM = "  - ops/monitoring\n";
+const EMPTIES_SCAN = { postinstall: "cp /dev/null ../docker/harness-scan.mjs" };
+
+/** Plants ops/monitoring's real manifest with the scripts `scripts` added. */
+function plantMonitoring(
+  files: Map<string, string>,
+  scripts: Readonly<Record<string, string>> = {},
+): void {
+  const manifest = JSON.parse(readFileSync(join(REPOSITORY, MONITORING_MANIFEST), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  manifest.scripts = { ...manifest.scripts, ...scripts };
+  files.set(MONITORING_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // app.Dockerfile's text: its build step's parts and its release stage's copy of the output.
@@ -1354,7 +1377,8 @@ describe("the release stage's allowlisted copies", () => {
 // BASH_ENV, ENV or a name added to the base's), an ARG, an ADD, a COPY or any other instruction
 // planted there is refused, and so are a base image that is not Node's by digest, pnpm from
 // anywhere but its release asset, and a script of the workspace's manifests that the base's pnpm
-// install runs. Each would run before the database files' scan and the bundle's, so it could empty
+// install runs (a package listed after a comment line and a blank line included, as pnpm installs
+// it). Each would run before the database files' scan and the bundle's, so it could empty
 // or replace a scan or the staging command, set what Node or the shell reads, or plant a file in a
 // folder assets.ts stages (which the database files' scan, reading folders and extensions, would
 // pass: only the reader refuses that one).
@@ -1507,6 +1531,24 @@ describe.each([
       (files) => setScripts(files, "api", { prepare: `cp /dev/null ${SCAN_SCRIPT}` }),
       /^apps\/api\/package\.json has a prepare script, which the base's pnpm install runs$/,
     ],
+    [
+      "a script pnpm's install runs of a package the workspace lists after others",
+      (files) => plantMonitoring(files, EMPTIES_SCAN),
+      /^ops\/monitoring\/package\.json has a postinstall script, which the base's pnpm install runs$/,
+    ],
+    [
+      "that script with a comment line and a blank line before the package's line in the list",
+      (files) => {
+        plantMonitoring(files, EMPTIES_SCAN);
+        replace(
+          files,
+          "pnpm-workspace.yaml",
+          MONITORING_ITEM,
+          `  # operations\n\n${MONITORING_ITEM}`,
+        );
+      },
+      /^ops\/monitoring\/package\.json has a postinstall script, which the base's pnpm install runs$/,
+    ],
   ])("refuses %s", (_name, change, refusal) => {
     const images = imageBuilds(plantRepository(change));
     const prefix = `${dockerfile}: `;
@@ -1516,6 +1558,264 @@ describe.each([
     expect(refusals).toContainEqual(expect.stringMatching(refusal));
     expect(images.builds.map((build) => build.label)).not.toContain(label);
   });
+});
+
+// pnpm-workspace.yaml's packages list, which says whose manifests the base's pnpm install reads (and
+// so runs the install scripts of), is read as YAML, and so pnpm, reads it in the subset
+// supply-chain:check accepts: a blank or comment-only line inside the list, a trailing comment and
+// a quoted item hide no package after them, and a line of the list the reader cannot read (an
+// indentless item, which pnpm reads too, a flow list, a nested or odd item, a tab, a no-break
+// space, which YAML reads as part of a scalar) refuses every build rather than ending the list
+// there. vitest.config.ts's copy of the reader agrees on each.
+describe("pnpm-workspace.yaml's packages list", () => {
+  const WORKSPACE = "pnpm-workspace.yaml";
+  const workspace = readFileSync(join(REPOSITORY, WORKSPACE), "utf8");
+  // The list as the repository writes it, and the text from its key to its last item.
+  const GLOBS = [
+    "apps/*",
+    "packages/*",
+    "tools/fin-review",
+    "tools/static-deploy",
+    "ops/fin",
+    "ops/monitoring",
+    "ops/watcher",
+    "ops/backup",
+  ];
+  const LIST = `packages:\n${GLOBS.map((glob) => `  - ${glob}\n`).join("")}`;
+
+  /** What `read` gives for `text`: its globs, or the message it refuses the text with. */
+  const outcome = (read: (text: string) => string[], text: string): string[] | string => {
+    try {
+      return read(text);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  /** The globs both readers give for `text`, which must agree. */
+  const read = (text: string): string[] | string => {
+    const ours = outcome(workspaceGlobs, text);
+    expect(outcome(vitestWorkspaceGlobs, text)).toEqual(ours);
+    return ours;
+  };
+
+  it("reads the repository's list", () => {
+    expect(workspace.startsWith(LIST)).toBe(true);
+    expect(read(workspace)).toEqual(GLOBS);
+  });
+
+  it.each<[string, string]>([
+    ["a comment line before an item", "  # operations\n  - ops/monitoring\n"],
+    ["a blank line before an item", "\n  - ops/monitoring\n"],
+    ["a comment line and a blank line", "  # operations\n\n  - ops/monitoring\n"],
+    ["a comment line at column 0", "# operations\n  - ops/monitoring\n"],
+    ["a line of white space", "   \n  - ops/monitoring\n"],
+    ["a trailing comment", "  - ops/monitoring   # operations\n"],
+    ["a single-quoted item", "  - 'ops/monitoring'\n"],
+    ["a double-quoted item with a trailing comment", '  - "ops/monitoring" # ops\n'],
+    ["two spaces after the dash", "  -  ops/monitoring\n"],
+    ["a line of tabs", "\t\t\n  - ops/monitoring\n"],
+    ["a tab before a trailing comment", "  - ops/monitoring\t# operations\n"],
+  ])("reads every item after %s", (_name, item) => {
+    expect(read(workspace.replace(MONITORING_ITEM, item))).toEqual(GLOBS);
+  });
+
+  it("reads a comment on the key's line, a comment after the list and a CRLF file", () => {
+    const text = workspace
+      .replace("packages:\n", "packages:   # the workspace\n")
+      .replace("  - ops/backup\n", "  - ops/backup\n  # end of the list\n\n");
+    expect(read(text)).toEqual(GLOBS);
+    expect(read(text.replaceAll("\n", "\r\n"))).toEqual(GLOBS);
+  });
+
+  it("reads a list at another indentation, and a file without the key as no list", () => {
+    expect(read(LIST.replaceAll("  - ", "    - "))).toEqual(GLOBS);
+    expect(read("strictDepBuilds: true\n")).toEqual([]);
+  });
+
+  it.each<[string, string, string]>([
+    [
+      "an indentless item, which pnpm reads as the list's",
+      "- ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+    [
+      "an item at another indentation",
+      "   - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line under an item, which YAML reads as the item's",
+      "  - ops/monitoring\n    ops/zz\n",
+      "line 8, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a tab before the item",
+      "\t- ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+    [
+      "a tab after the dash",
+      "  -\tops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an empty item",
+      "  -\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a nested list",
+      "  - - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a map item",
+      "  - path: ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a negated glob",
+      "  - '!ops/monitoring'\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a glob with a brace",
+      "  - ops/{monitoring,zz}\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a double-quoted item with an escape",
+      '  - "ops/monitor\\x69ng"\n',
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an item YAML reads as a boolean",
+      "  - true\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a block scalar",
+      "  - |\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "an anchor",
+      "  - &a ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    // White space is YAML's (a space or a tab): to pnpm a no-break space after a glob is part of
+    // it, so `ops/monitoring` and a NBSP selects a folder of that name, not ops/monitoring; one
+    // before a `#` starts no comment; and a line of one is not blank.
+    [
+      "a no-break space after the item",
+      "  - ops/monitoring\u00a0\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a no-break space before a #",
+      "  - ops/monitoring\u00a0# operations\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line of a no-break space in the list",
+      "  \u00a0\n  - ops/monitoring\n",
+      "line 7, in the packages list, is not an item `- <glob>` the reader reads",
+    ],
+    [
+      "a line of a no-break space at column 0",
+      "\u00a0\n  - ops/monitoring\n",
+      "line 7 is not a top-level key the reader reads",
+    ],
+  ])("refuses %s", (_name, item, message) => {
+    expect(read(workspace.replace(MONITORING_ITEM, item))).toBe(`${WORKSPACE}: ${message}`);
+  });
+
+  it.each<[string, string, string]>([
+    [
+      "a flow list",
+      "packages: [apps/*, ops/monitoring]\n",
+      "line 1 gives packages a value on its line, not a block list",
+    ],
+    [
+      "a second packages key",
+      `${LIST}packages:\n  - ops/zz\n`,
+      "line 10 holds the packages key a second time",
+    ],
+    [
+      "a quoted second packages key",
+      `${LIST}"packages" :\n  - ops/zz\n`,
+      "line 10 holds the packages key a second time",
+    ],
+    [
+      "a complex key",
+      "? packages\n:\n  - ops/zz\n",
+      "line 1 is not a top-level key the reader reads",
+    ],
+    ["a document marker", `---\n${LIST}`, "line 1 is not a top-level key the reader reads"],
+    [
+      "an indented line before any key",
+      `  - ops/zz\n${LIST}`,
+      "line 1 is indented under no top-level key",
+    ],
+    [
+      "a key with an anchor",
+      `&a packages:\n  - ops/zz\n`,
+      "line 1 is not a top-level key the reader reads",
+    ],
+  ])("refuses %s", (_name, text, message) => {
+    expect(read(text)).toBe(`${WORKSPACE}: ${message}`);
+  });
+
+  it("refuses every build when the list holds a line the reader cannot read", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        plantMonitoring(files, EMPTIES_SCAN);
+        replace(files, WORKSPACE, MONITORING_ITEM, "- ops/monitoring\n");
+      }),
+    );
+    expect(images).toEqual({
+      builds: [],
+      refusals: [`${WORKSPACE}: line 7 is not a top-level key the reader reads`],
+      skipped: [],
+    });
+  });
+
+  it("builds each image when comment and blank lines go before a package with no install script", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        plantMonitoring(files);
+        replace(files, WORKSPACE, MONITORING_ITEM, `  # operations\n\n${MONITORING_ITEM}`);
+      }),
+    );
+    expect(images.refusals).toEqual([]);
+    expect(images.builds.map((build) => build.label)).toEqual(
+      imageBuilds(REPOSITORY).builds.map((build) => build.label),
+    );
+  });
+
+  // A comment line and a blank line before the package's line, and the same list without them,
+  // are refused in the stages under each Dockerfile's bundle build stage, above.
+  it.each<[string, string, string]>([
+    ["a trailing comment on the line before", "  - ops/fin\n", "  - ops/fin # operations\n"],
+    ["a quoted item", MONITORING_ITEM, "  - 'ops/monitoring'\n"],
+  ])(
+    "refuses an install script of a package listed after %s, in every Dockerfile",
+    (_name, from, to) => {
+      const images = imageBuilds(
+        plantRepository((files) => {
+          plantMonitoring(files, EMPTIES_SCAN);
+          replace(files, WORKSPACE, from, to);
+        }),
+      );
+      const refusal =
+        "ops/monitoring/package.json has a postinstall script, which the base's pnpm install runs";
+      expect(images.builds).toEqual([]);
+      expect(images.refusals).toEqual([
+        `${APP_DOCKERFILE}: ${refusal}`,
+        `${CONNECTOR_DOCKERFILE}: ${refusal}`,
+      ]);
+    },
+  );
 });
 
 // How each Dockerfile's release stage starts its image: the run image's entrypoint, node, runs the
