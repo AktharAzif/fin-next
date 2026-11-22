@@ -1,9 +1,9 @@
-# fin-next-connector (spec 01 §4.9, §7.3; ARCHITECTURE §5.4; [FD-13]): cloudflared 2026.11.1 copied
-# from its official image by digest, and the connector supervisor bundle, on the distroless Node run
-# image. The supervisor is Node with no third-party dependency; it renders cloudflared's
-# configuration from apps/connector/src/map.ts at start and runs cloudflared with TUNNEL_TOKEN in
-# the child's environment only. Dependabot watches the digests; a new cloudflared is a reviewed
-# change. CI builds it from the repository root (this machine has no Docker):
+# fin-next-connector (spec 01 sections 4.9 and 7.3; ARCHITECTURE section 5.4; [FD-13]): cloudflared
+# 2026.11.1 copied from its official image by digest, and the connector supervisor bundle, on the
+# distroless Node run image. The supervisor is Node with no third-party dependency; it renders
+# cloudflared's configuration from apps/connector/src/map.ts at start and runs cloudflared with
+# TUNNEL_TOKEN in the child's environment only. Dependabot watches the digests; a new cloudflared
+# is a reviewed change. CI builds it from the repository root (this machine has no Docker):
 #   docker build -f ops/docker/connector.Dockerfile --target release .
 
 FROM cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d AS cloudflared
@@ -26,9 +26,11 @@ RUN pnpm fetch --frozen-lockfile
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
-# ---- the supervisor bundle
+# ---- the supervisor bundle, its output scanned for the test harness's markers right after the
+# build over exactly what the release stage copies, as app.Dockerfile's (harness-scan.mjs)
 FROM deps AS build
 RUN FIN_BUILD_TARGET=release pnpm --filter @fin/connector run build \
+    && node ops/docker/harness-scan.mjs apps/connector/dist/server \
     && test -f apps/connector/dist/server/main.js
 
 # ---- release
