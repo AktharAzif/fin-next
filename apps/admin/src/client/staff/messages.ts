@@ -1,5 +1,8 @@
 // What a refused staff change says (spec 02 §14.1's codes, §8.5's problems, §10.8's last Admin). A
-// closed step-up dialog says nothing: the person chose not to go on, and nothing changed.
+// closed step-up dialog says nothing: the person chose not to go on, and nothing changed. A refusal
+// that shows the page's data is out of date (the member gone, a change meanwhile, the role picked
+// gone) says so (`stale`), and the page reads it again before the dialog shows the sentence, so
+// "The list is up to date now." is true when it is read.
 import { type ApiError, isApiError, isUnreachable } from "@fin/frame";
 import { BEYOND, LAST_ADMIN, NO_PERMISSION, OUTRANKED, TOP_ONLY } from "./rules.ts";
 
@@ -13,6 +16,8 @@ export interface ActionError {
   /** For the email field, when the address itself is the problem. */
   readonly emailError?: string;
   readonly requestId: string | null;
+  /** The staff list or the roles changed meanwhile: the page reads them again first. */
+  readonly stale?: true;
 }
 
 function field(problem: ApiError["problem"], name: string): unknown {
@@ -46,7 +51,9 @@ export function staffActionError(error: unknown, email?: string): ActionError {
               : problem === "gone" || problem === "unknown_role"
                 ? "That role no longer exists. Choose another."
                 : BEYOND;
-      return { message, requestId };
+      // A custom role deleted meanwhile: the roles are read again, so the picker leaves it out.
+      const gone = problem === "gone" || problem === "unknown_role";
+      return { message, requestId, ...(gone ? { stale: true as const } : {}) };
     }
     case "last_top_role":
       return { message: LAST_ADMIN, requestId };
@@ -70,10 +77,18 @@ export function staffActionError(error: unknown, email?: string): ActionError {
       return { message: "Check what you entered and try again.", requestId };
     }
     case "not_found":
-      return { message: "They’re no longer on staff. The list is up to date now.", requestId };
+      return {
+        message: "They’re no longer on staff. The list is up to date now.",
+        requestId,
+        stale: true,
+      };
     case "conflict":
     case "already_done":
-      return { message: "Someone changed this just now. The list is up to date now.", requestId };
+      return {
+        message: "Someone changed this just now. The list is up to date now.",
+        requestId,
+        stale: true,
+      };
     case "rate_limited": {
       const wait = error.retryAfterSeconds;
       return {

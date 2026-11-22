@@ -3,6 +3,8 @@
 // change goes through api(), which asks the root "Confirm it's you" for the intent the server names
 // and sends the change again once; the dialog's subject gives that dialog its line ("Use your second
 // factor to add mei.tanaka@example.com to staff."). The server decides; these only ask and report.
+// A refusal that shows the page's data is out of date has the page read it again (`onStale`)
+// before the dialog says so; a role picked that the list no longer has is no longer picked.
 import type { StaffViewerSignedIn } from "@fin/app-contracts";
 import { useFin } from "@fin/frame";
 import { Button, ConfirmDialog, CopyField, Field, InlineAlert, Input, Modal } from "@fin/ui";
@@ -41,6 +43,11 @@ function labelOf(roles: readonly StaffRole[], key: string | null): string {
   return roles.find((role) => role.key === key)?.label ?? "";
 }
 
+/** The role picked, while the roles still have it (a custom role may be deleted meanwhile). */
+function pickedOf(roles: readonly StaffRole[], key: string | null): string | null {
+  return key !== null && roles.some((role) => role.key === key) ? key : null;
+}
+
 function ErrorAlert({ message }: { message: string | null }) {
   if (message === null) return null;
   return <InlineAlert tone="danger" title={message} live="assertive" />;
@@ -61,12 +68,15 @@ export function AddStaffDialog(props: {
   actor: Actor;
   roles: readonly StaffRole[];
   onAdded: (issued: IssuedCode, member: StaffMember) => void;
+  /** Reads the page's data again: the roles or the staff changed meanwhile. */
+  onStale: () => Promise<void>;
 }) {
   const fin = useFin();
   const [email, setEmail] = useState("");
-  const [roleKey, setRoleKey] = useState<string | null>(() =>
+  const [picked, setRoleKey] = useState<string | null>(() =>
     defaultRoleKey(props.actor, props.roles),
   );
+  const roleKey = pickedOf(props.roles, picked);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -115,6 +125,7 @@ export function AddStaffDialog(props: {
       );
     } catch (error) {
       const refused = staffActionError(error, address);
+      if (refused.stale === true) await props.onStale();
       setMessage(refused.message);
       if (refused.emailError !== undefined) {
         setEmailError(refused.emailError);
@@ -191,10 +202,13 @@ export function ChangeRoleDialog(props: {
   actor: Actor;
   roles: readonly StaffRole[];
   onChanged: (member: StaffMember) => void;
+  /** Reads the page's data again: the member, the roles or the staff changed meanwhile. */
+  onStale: () => Promise<void>;
 }) {
   const fin = useFin();
   const member = props.member;
-  const [roleKey, setRoleKey] = useState<string | null>(member?.roleKey ?? null);
+  const [picked, setRoleKey] = useState<string | null>(member?.roleKey ?? null);
+  const roleKey = pickedOf(props.roles, picked);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [shownFor, setShownFor] = useState<string | null>(member?.id ?? null);
@@ -216,7 +230,9 @@ export function ChangeRoleDialog(props: {
       );
       props.onChanged(answer.staff);
     } catch (error) {
-      setMessage(staffActionError(error).message);
+      const refused = staffActionError(error);
+      if (refused.stale === true) await props.onStale();
+      setMessage(refused.message);
     } finally {
       setBusy(false);
     }
@@ -278,6 +294,8 @@ export function RemoveDialog(props: {
   member: StaffMember | null;
   onClose: () => void;
   onRemoved: (member: StaffMember) => void;
+  /** Reads the page's data again: the member or the staff changed meanwhile. */
+  onStale: () => Promise<void>;
 }) {
   const fin = useFin();
   const member = props.member;
@@ -311,8 +329,9 @@ export function RemoveDialog(props: {
           );
           props.onRemoved(member);
         } catch (error) {
-          const refused = staffActionError(error).message;
-          if (refused !== null) setMessage(refused);
+          const refused = staffActionError(error);
+          if (refused.stale === true) await props.onStale();
+          if (refused.message !== null) setMessage(refused.message);
         } finally {
           setBusy(false);
         }
@@ -326,6 +345,8 @@ export function NewCodeDialog(props: {
   member: StaffMember | null;
   onClose: () => void;
   onIssued: (issued: IssuedCode) => void;
+  /** Reads the page's data again: the member or the staff changed meanwhile. */
+  onStale: () => Promise<void>;
 }) {
   const fin = useFin();
   const member = props.member;
@@ -363,8 +384,9 @@ export function NewCodeDialog(props: {
             reason: "reissued",
           });
         } catch (error) {
-          const refused = staffActionError(error).message;
-          if (refused !== null) setMessage(refused);
+          const refused = staffActionError(error);
+          if (refused.stale === true) await props.onStale();
+          if (refused.message !== null) setMessage(refused.message);
         } finally {
           setBusy(false);
         }

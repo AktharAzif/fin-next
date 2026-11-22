@@ -36,16 +36,16 @@ async function confirmWithCode(page: Page, key: string, line: string): Promise<v
 }
 
 /**
- * Adds a member of staff through the API from the page's own session, behind the screen's back
+ * Sends a stepped-up change through the API from the page's own session, behind the screen's back
  * (as another Admin's tab would): the intent asked for, proved with the authenticator's next code,
- * and the request sent again with it.
+ * and the request sent again with it. Answers the change's status and body.
  */
-async function addBehindTheScreen(
+async function behindTheScreen(
   page: Page,
   key: string,
-  email: string,
-  roleKey: string,
-): Promise<void> {
+  path: string,
+  body: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const call = (path: string, body: unknown, intent: string | null) =>
     page.evaluate(
       async ({ path, body, intent }) => {
@@ -66,12 +66,12 @@ async function addBehindTheScreen(
       },
       { path, body, intent },
     );
-  const asked = await call("/api/staff", { email, roleKey }, null);
+  const asked = await call(path, body, null);
   expect(asked.body.code).toBe("step_up_required");
   const intent = String(asked.body.intent_id);
   const code = await authenticatorCode(key);
   expect((await call("/api/auth/two-factor/verify-totp", { code }, intent)).status).toBe(200);
-  expect((await call("/api/staff", { email, roleKey }, intent)).status).toBe(201);
+  return call(path, body, intent);
 }
 
 test("@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only", async ({
@@ -199,7 +199,8 @@ test("@journey an Admin makes, changes, gives and deletes a custom staff role, a
   // Meanwhile Ravi is given the role. The deletion names the one holder the dialog counted, so
   // nobody moves; the dialog counts again, keeps Nadia's pick, and the next try moves both.
   const roleKey = new URL(roleUrl).pathname.split("/").pop() as string;
-  await addBehindTheScreen(page, key, addresses.address("ravi.kumar"), roleKey);
+  const ravi = { email: addresses.address("ravi.kumar"), roleKey };
+  expect((await behindTheScreen(page, key, "/api/staff", ravi)).status).toBe(201);
   await confirmDelete.click();
   await expect(
     remove.getByText(
@@ -276,4 +277,50 @@ test("@journey a role key that names nothing is not found, and a prebuilt role i
   await expect(
     inApp(page).getByText("Saved. Changes apply on each person’s next request."),
   ).toBeVisible();
+});
+
+test("@journey a custom role deleted while Add staff offers it is refused, and the roles are read again without it", async ({
+  page,
+  emailSink,
+  addresses,
+}) => {
+  const nadia = addresses.address("nadia.brooks");
+  const { enrolmentCode } = await server.bootstrap(nadia);
+  await throughAccess(page, nadia, "/staff");
+  await emailedCodeSignIn(page, emailSink, nadia);
+  const key = (await enrol(page, enrolmentCode, "authenticator")) as string;
+
+  // A custom role made in another tab, which this page offers once it reads the roles again.
+  const made = await behindTheScreen(page, key, "/api/staff-roles", {
+    name: "Night desk",
+    description: "",
+    permissions: ["customers.read"],
+  });
+  expect(made.status).toBe(201);
+  await page.reload();
+  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  await page.getByRole("button", { name: "Add staff" }).click();
+  const add = page.getByRole("dialog", { name: "Add staff" });
+  await add.getByRole("textbox", { name: "Work email" }).fill(addresses.address("omar.haddad"));
+  await add.getByRole("radio", { name: "Night desk" }).check();
+
+  // Meanwhile the role is deleted: the add is refused, the roles are read again, and the picker
+  // no longer offers it or keeps it picked.
+  const roleId = String(made.body.roleId);
+  const removed = await behindTheScreen(page, key, `/api/staff-roles/${roleId}/delete`, {
+    holders: [],
+  });
+  expect(removed.status).toBe(200);
+  await add.getByRole("button", { name: "Add staff" }).click();
+  await expect(add.getByText("That role no longer exists. Choose another.")).toBeVisible();
+  await expect(add.getByRole("radio", { name: "Night desk" })).toHaveCount(0);
+  await expect(add.getByRole("radio", { checked: true })).toHaveCount(0);
+  // Adding again asks for a role first, and sends nothing with the deleted one.
+  let sent = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/staff") sent += 1;
+  });
+  await add.getByRole("button", { name: "Add staff" }).click();
+  await expect(add.getByText("Choose a role.")).toBeVisible();
+  expect(sent).toBe(0);
 });

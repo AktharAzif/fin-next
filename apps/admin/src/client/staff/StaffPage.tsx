@@ -313,6 +313,7 @@ export function StaffPage({
             }}
             actor={actor}
             roles={data.roles}
+            onStale={reload}
             onAdded={(code) => {
               setAdding(false);
               onAddClosed();
@@ -325,6 +326,7 @@ export function StaffPage({
             onClose={() => setChanging(null)}
             actor={actor}
             roles={data.roles}
+            onStale={reload}
             onChanged={(member) => {
               setChanging(null);
               toast.success({
@@ -337,6 +339,7 @@ export function StaffPage({
           <RemoveDialog
             member={removing}
             onClose={() => setRemoving(null)}
+            onStale={reload}
             onRemoved={(member) => {
               setRemoving(null);
               toast.success({
@@ -349,6 +352,7 @@ export function StaffPage({
           <NewCodeDialog
             member={reissuing}
             onClose={() => setReissuing(null)}
+            onStale={reload}
             onIssued={(code) => {
               setReissuing(null);
               setIssued(code);

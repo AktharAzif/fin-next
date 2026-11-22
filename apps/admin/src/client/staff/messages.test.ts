@@ -84,4 +84,35 @@ describe("staffActionError", () => {
       "Something went wrong on our side. Nothing was changed.",
     );
   });
+
+  it("says when the page is out of date, so it reads the list again before it shows the sentence", () => {
+    expect(staffActionError(refused(404, "not_found"))).toEqual({
+      message: "They’re no longer on staff. The list is up to date now.",
+      requestId: "req_7",
+      stale: true,
+    });
+    for (const code of ["conflict", "already_done"]) {
+      expect(staffActionError(refused(409, code)), code).toEqual({
+        message: "Someone changed this just now. The list is up to date now.",
+        requestId: "req_7",
+        stale: true,
+      });
+    }
+    // A custom role deleted meanwhile: the roles are read again, so the picker leaves it out.
+    for (const problem of ["gone", "unknown_role"]) {
+      expect(staffActionError(refused(403, "giving_refused", { problem })), problem).toEqual({
+        message: "That role no longer exists. Choose another.",
+        requestId: "req_7",
+        stale: true,
+      });
+    }
+    for (const error of [
+      refused(403, "giving_refused", { problem: "beyond" }),
+      refused(403, "outranked"),
+      refused(409, "last_top_role"),
+      refused(429, "rate_limited", {}, 12),
+    ]) {
+      expect(staffActionError(error).stale, error.code ?? "").toBeUndefined();
+    }
+  });
 });
