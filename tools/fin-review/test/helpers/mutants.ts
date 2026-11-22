@@ -5,12 +5,26 @@
 // remembering to add it:
 //
 // - every `if` of a walk, which the reader classifies by what it guards and fails on when it cannot:
-//   a refusal (`return false;`, `null` or `""`, bare or braced), a gate (a braced block that holds a
-//   refusal: taking the condition out skips the block's checks), an acceptance (a `return` of
-//   anything else) or a flag (`x = true;`), whose conditions are guards; or a step that checks
-//   nothing (`continue`, `break`, a value assigned), whose condition picks a path and is no guard;
+//   a refusal (`return false;`, `null` or `""`, bare or braced, or a flag cleared, `x = false;`), a
+//   gate (a braced block that holds a refusal: taking the condition out skips the block's checks),
+//   an acceptance (a `return` of anything else) or a flag (`x = true;`), whose conditions are
+//   guards; or a step (`continue`, `break`, a value assigned), whose condition picks a path, so a
+//   wrong pick can let bytes through as surely as a missing check: each of its conditions is taken
+//   as true and, in turn, as false;
+// - every `else` of a walk: an `else if` is read as an `if`; an `else` that refuses (bare, braced, a
+//   refusal at its block's top level, or a flag cleared) is taken out whole, so the walk goes on past
+//   what it refused (the GIF walk's last branch among them); an `else` that only takes a path (a
+//   value assigned, a block whose checks are `if`s read on their own) has nothing of its own; an
+//   `else` that accepts, or that the reader cannot classify, fails it;
+// - every `switch` of a walk, whose `default:` must refuse (a kind the walk does not know) and is
+//   taken out by accepting instead; a switch without one fails the reader;
 // - each condition of a `return` that gives a boolean (an acceptance), of the condition of a
 //   `cond ? x : null` (or `null : x`) in a `return` or a `const`, and of a `for` loop's bound;
+// - every loop's condition (a `for` loop's bound, a `while` loop's condition) taken as false, so the
+//   loop and every check in it is skipped;
+// - every other conditional of a walk, which picks a value or a path (a field's width, a table that
+//   may be there or not, where a range goes), and the predicate of a `.filter`, `.some` or `.find`:
+//   each condition taken as true and, in turn, as false;
 // - each operand of the `||` and `&&` chains in those, nested groups and negations included, the
 //   body of an `.every((x) => ...)` arrow inside one, and each arm of a ternary: a ternary that is
 //   a condition gives the guards of each arm, and a ternary inside a guard (a value it compares, an
@@ -21,12 +35,13 @@
 //   ARGUMENT_CHECKS does not list fails the reader.
 //
 // A guard is taken out by putting in its place the value that lets more through: `false` for a part
-// of a refusal or a gate, `true` for a part of an acceptance or a flag (a negation flips which). A
-// guard that calls a closure of its walk with a block body (one that moves the walk's position, such
-// as `read` or `field`) keeps the call and drops only what it checks of the result. This is a lexer
-// over one file whose layout the test knows, not a parser for any TypeScript: the test checks that it
-// finds the guards it names, and the reader throws on a layout it cannot classify, so a change it
-// cannot read fails rather than passing with fewer.
+// of a refusal or a gate, `true` for a part of an acceptance or a flag (a negation flips which), and
+// each value in turn for a condition that only picks a path. A guard that calls a closure of its
+// walk with a block body (one that moves the walk's position, such as `read` or `field`) keeps the
+// call and drops only what it checks of the result. This is a lexer over one file whose layout the
+// test knows, not a parser for any TypeScript: the test checks that it finds the guards it names,
+// and the reader throws on a layout it cannot classify, so a change it cannot read fails rather than
+// passing with fewer.
 
 /** One guard taken out: a stable key (the function, the condition and its ordinal there), the line, and the source without it. */
 export interface Mutant {
@@ -279,16 +294,24 @@ function innerConditions(r: Reader, from: number, to: number): string[] {
   return out;
 }
 
-/** The guards of the condition [from, to) (masked) whose being `loosened` lets more through. */
-function guardsOf(r: Reader, from: number, to: number, loosened: boolean, out: Guard[]): void {
+/** A guard's note with `tag` (which way a condition that picks a path is taken) put first. */
+function tagged(tag: string | null, note: string | null): string | null {
+  return tag === null ? note : note === null ? tag : `${tag}, ${note}`;
+}
+
+/**
+ * The guards of the condition [from, to) (masked) whose being `loosened` lets more through; `tag`,
+ * when given, notes each (a condition that picks a path is taken each way in turn).
+ */
+function guardsOf(r: Reader, from: number, to: number, loosened: boolean, out: Guard[], tag: string | null = null): void {
   const { text, source } = r;
   [from, to] = trimmed(text, from, to);
   if (from >= to) return;
   // A conditional binds loosest: each arm's guards in turn (its condition only picks an arm).
   const ternary = ternaryAt(text, from, to);
   if (ternary !== null) {
-    guardsOf(r, ternary.question + 1, ternary.colon, loosened, out);
-    guardsOf(r, ternary.colon + 1, to, loosened, out);
+    guardsOf(r, ternary.question + 1, ternary.colon, loosened, out, tag);
+    guardsOf(r, ternary.colon + 1, to, loosened, out, tag);
     return;
   }
   for (const op of ["||", "&&"]) {
@@ -296,27 +319,27 @@ function guardsOf(r: Reader, from: number, to: number, loosened: boolean, out: G
     if (at.length === 0) continue;
     let start = from;
     for (const split of [...at, to]) {
-      guardsOf(r, start, split, loosened, out);
+      guardsOf(r, start, split, loosened, out, tag);
       start = split + op.length;
     }
     return;
   }
   if (text[from] === "(" && closing(text, from) === to - 1) {
-    guardsOf(r, from + 1, to - 1, loosened, out);
+    guardsOf(r, from + 1, to - 1, loosened, out, tag);
     return;
   }
-  out.push({ from, to, replacement: takenOut(r, from, to, loosened), note: null });
+  out.push({ from, to, replacement: takenOut(r, from, to, loosened), note: tag });
   // A conditional inside the guard (a value it compares, an argument): the guard taken out for one arm at a time.
   const conditions = innerConditions(r, from, to);
   if (conditions.length > 0 && movingCalls(r, from, to).length > 0) throw new Error(`a guard with a conditional and a call that moves the walk at ${from}`);
   const guard = source.slice(from, to);
   for (const condition of conditions) {
-    out.push({ from, to, replacement: `((${condition}) ? ${loosened} : (${guard}))`, note: `when ${condition}` });
-    out.push({ from, to, replacement: `((${condition}) ? (${guard}) : ${loosened})`, note: `unless ${condition}` });
+    out.push({ from, to, replacement: `((${condition}) ? ${loosened} : (${guard}))`, note: tagged(tag, `when ${condition}`) });
+    out.push({ from, to, replacement: `((${condition}) ? (${guard}) : ${loosened})`, note: tagged(tag, `unless ${condition}`) });
   }
   const negated = text[from] === "!";
   if (negated && text[from + 1] === "(" && closing(text, from + 1) === to - 1) {
-    guardsOf(r, from + 2, to - 1, !loosened, out);
+    guardsOf(r, from + 2, to - 1, !loosened, out, tag);
     return;
   }
   // The expression body of an `.every((x) => ...)` arrow in this guard.
@@ -327,8 +350,14 @@ function guardsOf(r: Reader, from: number, to: number, loosened: boolean, out: G
     if (arrow < 0 || arrow > close) continue;
     const [bodyFrom] = trimmed(text, arrow + 2, close);
     if (text[bodyFrom] === "{") continue;
-    guardsOf(r, bodyFrom, close, negated ? !loosened : loosened, out);
+    guardsOf(r, bodyFrom, close, negated ? !loosened : loosened, out, tag);
   }
+}
+
+/** A condition that picks a path, taken as true and, in turn, as false. */
+function bothWays(r: Reader, from: number, to: number, out: Guard[]): void {
+  guardsOf(r, from, to, true, out, "taken as true");
+  guardsOf(r, from, to, false, out, "taken as false");
 }
 
 /** A `return` or `const` expression's condition when it is `cond ? x : null` (acceptance) or `cond ? null : x` (refusal). */
@@ -343,12 +372,15 @@ function ternaryGuards(r: Reader, from: number, to: number, out: Guard[]): boole
 }
 
 const REFUSAL_RE = /^return\s+(?:false|null|"")$/;
+/** A flag cleared (`x = false`): a refusal written as a flag the walk checks later. */
+const FLAG_OFF_RE = /^\w+\s*=\s*false$/;
 
 /**
  * What the statement after an `if`'s condition (from `at`, masked) does, so its condition's guards
- * can be taken out the way that lets more through: `refusal` and `gate` (a braced block that holds
- * a refusal) take `false`, `acceptance` (a `return` of anything else) and `flag` (`x = true;`) take
- * `true`, and `step` (`continue`, `break` or a value assigned) checks nothing. Throws on anything else.
+ * can be taken out the way that lets more through: `refusal` (a refusal or a flag cleared) and
+ * `gate` (a braced block that holds a refusal) take `false`, `acceptance` (a `return` of anything
+ * else) and `flag` (`x = true;`) take `true`, and `step` (`continue`, `break` or a value assigned)
+ * picks a path, so it is taken each way. Throws on anything else.
  */
 function consequent(r: Reader, at: number, line: number): "refusal" | "gate" | "acceptance" | "flag" | "step" {
   const [start] = trimmed(r.text, at, r.text.length);
@@ -359,19 +391,135 @@ function consequent(r: Reader, at: number, line: number): "refusal" | "gate" | "
       .split(";")
       .map((part) => part.trim())
       .filter((part) => part !== "");
-    if (statements.length === 1 && REFUSAL_RE.test(statements[0] ?? "")) return "refusal";
+    if (statements.length === 1 && (REFUSAL_RE.test(statements[0] ?? "") || FLAG_OFF_RE.test(statements[0] ?? ""))) return "refusal";
     if (/\breturn\s+(?:false|null|"")\s*;/.test(r.source.slice(start + 1, end))) return "gate";
     const last = statements[statements.length - 1] ?? "";
-    if (!/\breturn\b/.test(r.text.slice(start + 1, end)) && (last === "continue" || last === "break")) return "step";
+    if (!/\breturn\b/.test(r.text.slice(start + 1, end)) && !statements.some((part) => FLAG_OFF_RE.test(part)) && (last === "continue" || last === "break")) return "step";
     throw new Error(`content.ts:${line}: an if whose block the reader cannot classify: ${r.source.slice(start, end + 1).replace(/\s+/g, " ")}`);
   }
   const end = statementEnd(r.text, start);
   const statement = r.source.slice(start, end < 0 ? start : end).trim();
-  if (REFUSAL_RE.test(statement)) return "refusal";
+  if (REFUSAL_RE.test(statement) || FLAG_OFF_RE.test(statement)) return "refusal";
   if (/^return\b/.test(statement)) return "acceptance";
   if (/^\w+\s*=\s*true$/.test(statement)) return "flag";
   if (statement === "continue" || statement === "break" || /^\w+\s*=\s*[^=]/.test(statement)) return "step";
   throw new Error(`content.ts:${line}: an if whose statement the reader cannot classify: ${statement}`);
+}
+
+/**
+ * The `return` statements at the top level of the block [from, to) (masked), as the source spells
+ * them: not those that are the statement of an `if`, `else`, `for` or `while` inside it (read on
+ * their own).
+ */
+function blockReturns(r: Reader, from: number, to: number): string[] {
+  const out: string[] = [];
+  for (const match of r.text.slice(from, to).matchAll(/\breturn\b/g)) {
+    const at = from + match.index;
+    if (opening(r.text, from, at) >= 0) continue;
+    const before = r.text.slice(from, at).trimEnd();
+    if (/\belse$/.test(before)) continue;
+    if (before.endsWith(")")) {
+      let depth = 0;
+      let open = before.length - 1;
+      for (; open >= 0; open--) {
+        if (before[open] === ")") depth++;
+        else if (before[open] === "(" && --depth === 0) break;
+      }
+      if (/\b(?:if|for|while)\s*$/.test(before.slice(0, open))) continue;
+    }
+    const end = statementEnd(r.text, at);
+    out.push(r.source.slice(at, end < 0 ? to : end).trim());
+  }
+  return out;
+}
+
+/**
+ * What an `else` (its statement from `at`, masked) does: whether it refuses (a refusal or a flag
+ * cleared, bare, braced, or at its block's top level), and where it ends. An `else` that only takes a
+ * path (a value assigned, `continue`, `break`, or a block with no `return` of its own) does not.
+ * Throws on anything else (an `else` that accepts, or one the reader cannot read).
+ */
+function elseBranch(r: Reader, at: number, line: number): { refuses: boolean; end: number } {
+  const [start] = trimmed(r.text, at, r.text.length);
+  if (r.text[start] === "{") {
+    const end = closing(r.text, start);
+    const returns = blockReturns(r, start + 1, end);
+    const flags = r.source
+      .slice(start + 1, end)
+      .split(";")
+      .map((part) => part.trim());
+    if (returns.some((statement) => REFUSAL_RE.test(statement)) || flags.some((part) => FLAG_OFF_RE.test(part))) return { refuses: true, end: end + 1 };
+    if (returns.length > 0) throw new Error(`content.ts:${line}: an else whose block the reader cannot classify: ${returns.join("; ")}`);
+    return { refuses: false, end: end + 1 };
+  }
+  const end = statementEnd(r.text, start);
+  const statement = r.source.slice(start, end < 0 ? start : end).trim();
+  if (end >= 0 && (REFUSAL_RE.test(statement) || FLAG_OFF_RE.test(statement))) return { refuses: true, end: end + 1 };
+  if (end >= 0 && (statement === "continue" || statement === "break" || /^\w+\s*=\s*[^=]/.test(statement))) return { refuses: false, end: end + 1 };
+  throw new Error(`content.ts:${line}: an else whose statement the reader cannot classify: ${statement}`);
+}
+
+/** True when [from, to) (masked) is a comparison at its top level (a boolean), not an arrow function, a shift or a conditional. */
+function isComparison(text: string, from: number, to: number): boolean {
+  if (topLevel(text, from, to, "=>").length > 0 || topLevel(text, from, to, "?").length > 0) return false;
+  if (["===", "!==", "<=", ">="].some((op) => topLevel(text, from, to, op).length > 0)) return true;
+  // A lone `<` or `>` with space on each side, as content.ts writes a comparison: not a shift (`<<`,
+  // `>>`), an arrow or a type's arguments (`new Map<string, Box>()`).
+  return ["<", ">"].some((op) => topLevel(text, from, to, op).some((at) => /\s/.test(text[at - 1] ?? "") && /\s/.test(text[at + 1] ?? "")));
+}
+
+/** The two arms of the conditional whose `?` is at `at` (masked): each up to its `:`, or to the end of the expression. */
+function ternaryArms(text: string, at: number): Array<[number, number]> {
+  let nested = 0;
+  let depth = 0;
+  let colon = -1;
+  for (let i = at + 1; i < text.length && colon < 0; i++) {
+    const c = text[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (depth === 0 && c === "?" && !notConditional(text, i)) nested++;
+    else if (depth === 0 && c === ":") {
+      if (nested === 0) colon = i;
+      else nested--;
+    }
+  }
+  if (colon < 0) throw new Error(`a conditional with no ":" at ${at}`);
+  // The second arm ends at a `,` or `;` of its level, or at the bracket that closes its group.
+  let stop = text.length;
+  depth = 0;
+  for (let i = colon + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if ((c === ")" || c === "]" || c === "}") && --depth < 0) {
+      stop = i;
+      break;
+    } else if (depth === 0 && (c === "," || c === ";")) {
+      stop = i;
+      break;
+    }
+  }
+  return [trimmed(text, at + 1, colon), trimmed(text, colon + 1, stop)];
+}
+
+/**
+ * Where the condition of the conditional whose `?` is at `at` (masked) starts: after the bracket that
+ * opens its group, or after a `,`, `;`, `?`, `:`, an assignment or `return` before it at its level.
+ */
+function conditionStart(text: string, at: number): number {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    const c = text[i] ?? "";
+    if (c === ")" || c === "]" || c === "}") depth++;
+    else if (c === "(" || c === "[" || c === "{") {
+      if (depth === 0) return i + 1;
+      depth--;
+    } else if (depth === 0) {
+      if (c === "," || c === ";" || c === "?" || c === ":") return i + 1;
+      if (c === "=" && !"=!<>".includes(text[i - 1] ?? "") && text[i + 1] !== "=" && text[i + 1] !== ">") return i + 1;
+      if (c === "n" && text.slice(i - 5, i + 1) === "return" && !/\w/.test(text[i - 6] ?? "")) return i + 1;
+    }
+  }
+  return 0;
 }
 
 /** Every guard of `source` (content.ts) taken out on its own, in the order they occur. */
@@ -392,6 +540,45 @@ export function guardMutants(source: string): Mutant[] {
     const kind = consequent(r, close + 1, lineAt(open));
     if (kind === "refusal" || kind === "gate") guardsOf(r, open + 1, close, false, guards);
     else if (kind === "acceptance" || kind === "flag") guardsOf(r, open + 1, close, true, guards);
+    else bothWays(r, open + 1, close, guards);
+  }
+  // Every `else` of a walk that is not an `else if`: one that refuses is taken out whole.
+  for (const match of text.matchAll(/\belse\b/g)) {
+    if (NOT_WALKS.has(functionAt(match.index))) continue;
+    const [start] = trimmed(text, match.index + 4, text.length);
+    if (/^if\b/.test(text.slice(start, start + 3))) continue;
+    const branch = elseBranch(r, start, lineAt(match.index));
+    if (branch.refuses) guards.push({ from: match.index, to: branch.end, replacement: "", note: null });
+  }
+  // Every `switch` of a walk: its `default:` must refuse, and is taken out by accepting instead.
+  for (const match of text.matchAll(/\bswitch\s*\(/g)) {
+    if (NOT_WALKS.has(functionAt(match.index))) continue;
+    const open = text.indexOf("{", closing(text, match.index + match[0].length - 1));
+    const end = closing(text, open);
+    const label = topLevel(text, open + 1, end, "default").find((at) => /^default\s*:/.test(text.slice(at, at + 16)));
+    if (label === undefined) throw new Error(`content.ts:${lineAt(match.index)}: a switch with no default the reader can take out`);
+    const [start] = trimmed(text, text.indexOf(":", label) + 1, end);
+    const stop = statementEnd(text, start);
+    const statement = source.slice(start, stop < 0 ? start : stop).trim();
+    if (statement !== "return false") throw new Error(`content.ts:${lineAt(label)}: a switch whose default the reader cannot classify: ${statement}`);
+    guards.push({ from: label, to: stop, replacement: "default:\n      return true", note: null });
+  }
+  // Every loop's condition taken as false: the loop, and each check in it, skipped.
+  for (const match of text.matchAll(/\b(for|while)\s*\(/g)) {
+    if (NOT_WALKS.has(functionAt(match.index))) continue;
+    const open = match.index + match[0].length - 1;
+    const close = closing(text, open);
+    let from = open + 1;
+    let to = close;
+    if (match[1] === "for") {
+      const parts = topLevel(text, open + 1, close, ";");
+      if (parts.length !== 2) continue;
+      from = (parts[0] ?? 0) + 1;
+      to = parts[1] ?? 0;
+    }
+    [from, to] = trimmed(text, from, to);
+    if (from >= to || NOT_WALK_CONDITION_RE.test(source.slice(from, to))) continue;
+    guards.push({ from, to, replacement: takenOut(r, from, to, false), note: "loop skipped" });
   }
   // Acceptances and conditional nulls in `return` and `const`.
   for (const match of text.matchAll(/\b(?:return|const|let)\s+/g)) {
@@ -403,7 +590,12 @@ export function guardMutants(source: string): Mutant[] {
       if (assign < 0 || assign > end || text[assign + 1] === "=" || text[assign + 1] === ">") continue;
       from = assign + 1;
     }
-    if (ternaryGuards(r, from, end, guards) || !match[0].startsWith("return")) continue;
+    if (ternaryGuards(r, from, end, guards)) continue;
+    if (!match[0].startsWith("return")) {
+      // A boolean a declaration computes (a flag read from a field, used as a path's condition later): taken each way.
+      if (isComparison(text, from, end)) bothWays(r, from, end, guards);
+      continue;
+    }
     const expr = source.slice(from, end).trim();
     if (/^(?:true|false|null|""|\w+|\{[\s\S]*\})$/.test(expr)) continue;
     const call = /^(\w+)\(/.exec(expr)?.[1];
@@ -440,6 +632,28 @@ export function guardMutants(source: string): Mutant[] {
       const loosened = [...args.slice(0, check.index), check.loosened];
       guards.push({ from: match.index, to: close + 1, replacement: `${helper}(${loosened.join(", ")})`, note: check.note(args) });
     }
+  }
+  // Every other conditional of a walk (one no guard above holds), which picks a value or a path, and
+  // the predicate of a `.filter`, `.some` or `.find`: each condition taken each way in turn.
+  const read = [...guards];
+  const covered = (from: number, to: number): boolean => read.some((guard) => guard.from < to && from < guard.to);
+  for (let at = 0; at < text.length; at++) {
+    // `?.`, `??` and an optional field or parameter (`x?:`, `x?)`, `x?,`) start no conditional.
+    if (text[at] !== "?" || notConditional(text, at) || /[:),]/.test(text[at + 1] ?? "") || NOT_WALKS.has(functionAt(at))) continue;
+    const [from, to] = trimmed(text, conditionStart(text, at), at);
+    if (from >= to || covered(from, to) || NOT_WALK_CONDITION_RE.test(source.slice(from, to))) continue;
+    bothWays(r, from, to, guards);
+    // An arm that is itself a comparison (the conditional gives a boolean) is a condition too.
+    for (const [armFrom, armTo] of ternaryArms(text, at)) if (isComparison(text, armFrom, armTo) && !covered(armFrom, armTo)) bothWays(r, armFrom, armTo, guards);
+  }
+  for (const match of text.matchAll(/\.(?:filter|some|find)\(/g)) {
+    if (NOT_WALKS.has(functionAt(match.index))) continue;
+    const open = match.index + match[0].length - 1;
+    const close = closing(text, open);
+    const arrow = text.indexOf("=>", open);
+    const [from] = trimmed(text, arrow + 2, close);
+    if (arrow < 0 || arrow > close || text[from] === "{") throw new Error(`content.ts:${lineAt(match.index)}: a predicate the reader cannot classify`);
+    if (!covered(from, close)) bothWays(r, from, close, guards);
   }
   const seen = new Map<string, number>();
   const out: Mutant[] = [];

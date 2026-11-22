@@ -1,10 +1,12 @@
 // Every guard of the image and font walks is pinned by a test (spec 07 §2.5): with any one guard
-// of src/units/content.ts taken out (helpers/mutants.ts: every condition of every `if`, each arm of
-// a ternary, each check a helper takes as an argument, a call that moves the walk kept), some shape
-// of helpers/media.ts's `planted` or `textShaped` is exempt, so units.test.ts fails. The guards
-// whose removal lets nothing more through are listed below, each with the reason; the list must
-// match exactly, so a guard added without a shape, or a listed guard that comes to matter, fails
-// here.
+// of src/units/content.ts taken out (helpers/mutants.ts: every condition of every `if`, every
+// `else` that refuses, a `switch`'s default, each arm of a ternary, each check a helper takes as an
+// argument, a call that moves the walk kept; and every condition that picks a path, each loop's
+// condition and each filter's predicate, taken the wrong way), some shape of helpers/media.ts's
+// `planted`, `textShaped` or `misnamed` is exempt, or an exempt shape or twin is refused, so
+// units.test.ts fails. The guards whose removal lets nothing more through and refuses nothing the
+// walks accept are listed below, each with the reason; the list must match exactly, so a guard
+// added without a shape, or a listed guard that comes to matter, fails here.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -63,6 +65,7 @@ const NO_EFFECT: Readonly<Record<string, string>> = {
   "avifExtents: sizes === null": "the count after it is then read past iloc's end too, which refuses",
   "avifExtents: count === null": "with no count there are no items, and a file with no extents is refused",
   "avifExtents: id === null": "no item has a null ID",
+  "avifExtents: version === 0 [taken as false]": "version 0 is refused just before unless those four bits are zero, so the index size is 0 either way",
   "avifProperties: children === null": "ipco is then undefined, which the next check refuses",
   "avifProperty: size >= 5": "the size it must then equal is at least 5",
   "avifProperty: after !== null": "`box.end - null` is the box's end, past byte 64 of any AVIF (ftyp, meta's header and hdlr come first), so the bound refuses it",
@@ -116,14 +119,16 @@ const CPU_LIMIT_MICROSECONDS = 5_000_000;
 
 /**
  * The check each mutant runs, as units.test.ts asserts it: every planted shape is no format and not
- * exempt (a walk that throws on one names it), every text-shaped file is not exempt, no bytes at all
- * are no format, and every exempt shape stays exempt as what its name says. It prints "unchanged"
+ * exempt (a walk that throws on one names it), every text-shaped or misnamed file is not exempt, no
+ * bytes at all are no format, and every exempt shape and every twin (a planted shape with its one
+ * field restored) stays exempt as what its name says, so a condition taken the wrong way that only
+ * refuses a layout the walks accept fails too. It prints "unchanged"
  * when all of that holds, and what broke otherwise. A watchdog thread kills it once it has used
  * CPU_LIMIT_MICROSECONDS of CPU time.
  */
 const CHECK = `import { Worker } from "node:worker_threads";
 import * as content from "./content.ts";
-import { FONT_NAME_RE, exemptShapes, misnamed, planted, textShaped } from "../media.ts";
+import { FONT_NAME_RE, exemptShapes, misnamed, planted, textShaped, twins } from "../media.ts";
 new Worker("const { cpuUsage, kill, pid } = process; setInterval(() => { const used = cpuUsage(); if (used.user + used.system > ${CPU_LIMIT_MICROSECONDS}) kill(pid, 'SIGKILL'); }, 50);", { eval: true }).unref();
 const payload = Buffer.from("\\0#!/bin/sh\\necho MARKER-PAYLOAD\\n");
 const broken = [];
@@ -140,6 +145,9 @@ for (const [name, bytes] of Object.entries({ ...textShaped(), ...misnamed() })) 
 if (content.mediaFormat(Buffer.alloc(0)) !== null) broken.push("passes no bytes");
 for (const [name, bytes] of Object.entries(exemptShapes())) {
   if (content.verifiedExclusion("assets/" + name, bytes) !== (FONT_NAME_RE.test(name) ? "font" : "image")) broken.push("refuses " + name);
+}
+for (const [name, bytes] of Object.entries(twins())) {
+  if (content.verifiedExclusion("assets/" + name, bytes) !== (FONT_NAME_RE.test(name) ? "font" : "image")) broken.push("refuses twin " + name);
 }
 process.stdout.write(broken.length === 0 ? "unchanged" : broken.join(" "));
 `;
@@ -210,13 +218,38 @@ describe("the guards of the image and font walks (spec 07 §2.5)", () => {
       "ipmaLaidOut: fullBoxVersion(bytes, ipma, 1) [every flag of ipma]",
       "isEot: field(EOT_MAX_ROOT) [no bound]",
       "isIco: tiled(bytes, directory, images, 1) [any zero padding]",
+      // The GIF walk's last refusal (an else), an AVIF property of a type the walk does not know (a
+      // switch's default), a step's condition and a value's each taken both ways, a loop skipped, a
+      // boolean a declaration computes, a conditional's comparison arm, and a filter's predicate.
+      "isGif: else return false;",
+      "avifProperty: default: return false",
+      "isJpeg: marker !== 0xda [taken as false]",
+      "isJpeg: next >= 0xd0 [taken as true]",
+      "isGif: (screen & 0x80) !== 0 [taken as true]",
+      "isWoff: stored === length [taken as true]",
+      "avifMeta: idat === undefined [taken as true]",
+      "isAvif: brand < ftyp.end [loop skipped]",
+      "isEot: reserved < 80 [loop skipped]",
+      "bitmapLayout: headerSize === 12 [taken as false]",
+      "isWoff2: version !== 0 [taken as false]",
+      'isAvif: box.type === "mdat" [taken as true]',
     ]) {
       assert.ok(keys.has(key), key);
     }
-    assert.ok(mutants.length >= 460, `${mutants.length} guards`);
+    assert.ok(mutants.length >= 590, `${mutants.length} guards`);
     // A layout the reader cannot classify fails rather than being skipped.
     assert.throws(() => guardMutants(`function isX(bytes: Uint8Array): boolean {\n  if (bytes.length > 4) bytes.reverse();\n  return true;\n}\n`), /an if whose statement the reader cannot classify/);
     assert.throws(() => guardMutants(`function isX(bytes: Uint8Array, limit: number): boolean {\n  return bytes.length < limit;\n}\n`), /takes limit, a check the reader does not take out/);
+    assert.throws(() => guardMutants(`function isX(bytes: Uint8Array): boolean {\n  if (bytes.length > 4) return false;\n  else return true;\n}\n`), /an else whose statement the reader cannot classify/);
+    assert.throws(() => guardMutants(`function isX(bytes: Uint8Array): boolean {\n  if (bytes.length > 4) {\n    return false;\n  } else {\n    bytes.reverse();\n    return bytes.length > 2;\n  }\n}\n`), /an else whose block the reader cannot classify/);
+    assert.throws(() => guardMutants(`function isX(kind: string): boolean {\n  switch (kind) {\n    case "a":\n      return true;\n  }\n  return false;\n}\n`), /a switch with no default/);
+    assert.throws(() => guardMutants(`function isX(kind: string): boolean {\n  switch (kind) {\n    case "a":\n      return false;\n    default:\n      return kind.length > 2;\n  }\n}\n`), /a switch whose default the reader cannot classify/);
+    // A refusal written as a flag cleared is a refusal: its condition is taken out with false, and an
+    // else that clears the flag is taken out whole.
+    const flagged = guardMutants(`function isX(bytes: Uint8Array): boolean {\n  let ok = true;\n  if (bytes.length > 4) ok = false;\n  if (bytes.length > 9) ok = true;\n  else ok = false;\n  return ok;\n}\n`);
+    const flags = new Map(flagged.map((mutant) => [mutant.key, mutant.source]));
+    assert.match(flags.get("isX: bytes.length > 4") ?? "", /if \(false\) ok = false;/);
+    assert.ok(!(flags.get("isX: else ok = false;") ?? "else ok = false").includes("else ok = false"), "the else that clears the flag is taken out");
     for (const key of Object.keys(NO_EFFECT)) assert.ok(keys.has(key), `listed as having no effect but not a guard: ${key}`);
 
     const dir = mkdtempSync(join(tmpdir(), "fin-review-guards-"));
