@@ -22,7 +22,11 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
    is masked too and never printed. Short numbers (thresholds, grace periods, the roster's timings)
    are protected by never being printed rather than by masking: masking them would also mask the
    tool's own counts (a log's record numbers, a plan's counts), which would show the value. A
-   threshold prints as `<threshold:<name>>` wherever a command shows one. A number of six digits or
+   threshold prints as `<threshold:<name>>` and a grace period as `<grace:<name>>` wherever a
+   command shows one. `thresholds` and `grace` hold the numbers ops/monitoring's files name
+   (`@thresholds.<name>`, `@grace.<name>`; a name may start with a digit, `5xx-rate-api`): a
+   threshold is a positive number (a ratio such as `5xx-rate-api` is a fraction; the zone's rate
+   rule takes only a whole one), a grace period whole seconds. A number of six digits or
    more (an ID) is masked where it stands on its own: in text, and as a number in a run log record
    or a telemetry line. Pick private names that are not Fin's own
    words (for example an Access team that is not called `fin-next`): a private value is masked
@@ -40,7 +44,12 @@ takes `--dry-run`. Until the root `package.json` gains a `fin` script (a steward
 2. Credentials are files too, each readable by its owner only, named by a variable and read inside
    the process: `FIN_CF_TOKEN_FILE` (the Cloudflare operator token), `FIN_RAILWAY_TOKEN_FILE` (the
    Railway project token), `FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE` and
-   `FIN_BETTERSTACK_UPTIME_TOKEN_FILE`. Never paste a token on the command line or into a variable.
+   `FIN_BETTERSTACK_UPTIME_TOKEN_FILE` (the Better Stack team tokens), and
+   `FIN_MONITOR_HEADER_FILE` (the secret header every Better Stack monitor sends; `monitoring
+   apply` needs it for a real run). Never paste a token on the command line or into a variable.
+   `monitoring apply` runs ops/monitoring's own code as a child process and keeps every one of
+   these in pnpm fin: the child gets no token, and nothing private in its argv or environment
+   (`monitoring-drift.md`).
 3. Every command prints names and placeholders only, and the commands that do not need the overlay
    (`log verify`, `log restart`, `lock status`, `lock break`) still mask with it when
    `FIN_OVERLAY_FILE` is set.

@@ -6,13 +6,14 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  ExecResult,
-  FetchFn,
-  ForcedClose,
-  Runtime,
-  StopCause,
-  StopHandlers,
+import {
+  type ExecResult,
+  type FetchFn,
+  type ForcedClose,
+  type Runtime,
+  runNodeChild,
+  type StopCause,
+  type StopHandlers,
 } from "../../src/core/runtime.ts";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -121,6 +122,8 @@ export interface FakeRuntimeOptions {
   env?: Record<string, string | undefined>;
   fetch?: FetchFn;
   exec?: (program: string, args: readonly string[]) => ExecResult;
+  /** How a Node child runs (default: the real child process, the repository's own program). */
+  node?: Runtime["node"];
   repoRoot?: string;
   start?: Date;
   /** Whether the checkout has local changes (default: clean). */
@@ -165,6 +168,7 @@ export function fakeRuntime(options: FakeRuntimeOptions = {}): FakeRuntime {
     commit: () => hex(40, "e"),
     dirty: () => options.dirty ?? false,
     exec: options.exec ?? (() => ({ status: 127, stdout: "", stderr: "not available in tests" })),
+    node: options.node ?? runNodeChild,
     trap: (handlers) => {
       trapped = handlers;
       return () => {

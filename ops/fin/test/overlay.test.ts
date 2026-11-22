@@ -167,6 +167,34 @@ describe("the overlay", () => {
     }
   });
 
+  it("takes ops/monitoring's thresholds (a ratio too) and grace periods, each printing its role", () => {
+    const raw = withChange((o) =>
+      Object.assign(o, {
+        thresholds: { "api-v4": 100, "5xx-rate-api": 0.05, "5xx-rate-min-count": 20 },
+        grace: { watcher: 120 },
+      }),
+    );
+    const o = parseOverlay(raw, "staging");
+    assert.equal(thresholdOf(o, "5xx-rate-api").reveal(), 0.05);
+    assert.equal(`${thresholdOf(o, "5xx-rate-api")}`, "<threshold:5xx-rate-api>");
+    assert.equal(o.grace.watcher?.reveal(), 120);
+    assert.equal(`${o.grace.watcher}`, "<grace:watcher>");
+    // A name that starts with a digit is a plain name: the plan's own alert names stay readable.
+    const m = new Masker();
+    registerOverlay(raw, m);
+    assert.equal(m.mask("+ alert 5xx-rate-api"), "+ alert 5xx-rate-api");
+    for (const [change, message] of [
+      [{ thresholds: { "api-v4": 0 } }, /thresholds.api-v4 must be a positive number/],
+      [{ thresholds: { "12345": 3 } }, /thresholds holds a key that is not an overlay key's name/],
+      [{ thresholds: { "Clock-Skew": 3 } }, /thresholds holds a key that is not/],
+      [{ grace: { watcher: 1.5 } }, /grace.watcher must be a positive integer/],
+      [{ grace: { watcher: "60" } }, /grace.watcher must be a positive integer/],
+      [{ grace: [] }, /grace must be an object/],
+    ] as const) {
+      assert.match(refusal(withChange((o) => Object.assign(o, change))).message, message);
+    }
+  });
+
   it("refuses an overlay for another environment", () => {
     assert.throws(
       () =>
@@ -330,7 +358,7 @@ describe("the overlay", () => {
           withChange((o) => (o.thresholds = { "api-v4": -1 })),
           "staging",
         ),
-      /positive integer/,
+      /thresholds.api-v4 must be a positive number/,
     );
     assert.throws(
       () =>

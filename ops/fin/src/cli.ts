@@ -19,6 +19,7 @@ import { MUTATING_FLAGS } from "./command.ts";
 import { CLOUDFLARE_COMMANDS } from "./commands/cloudflare.ts";
 import { CORE_COMMANDS } from "./commands/core.ts";
 import { DEPLOY_COMMANDS } from "./commands/deploy.ts";
+import { MONITORING_COMMANDS } from "./commands/monitoring.ts";
 import { parseArgs } from "./core/args.ts";
 import { Context, messageOf, resultOf } from "./core/context.ts";
 import { EXIT, FinError, UsageError } from "./core/errors.ts";
@@ -36,6 +37,7 @@ export const COMMANDS: readonly Command[] = [
   ...CORE_COMMANDS,
   ...CLOUDFLARE_COMMANDS,
   ...DEPLOY_COMMANDS,
+  ...MONITORING_COMMANDS,
 ];
 
 function usage(commands: readonly Command[]): string {

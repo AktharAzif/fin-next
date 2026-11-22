@@ -24,7 +24,7 @@
 import type { Command } from "../command.ts";
 import { flagBool, flagString } from "../core/args.ts";
 import type { Context } from "../core/context.ts";
-import { RefusedError } from "../core/errors.ts";
+import { ConfigError, RefusedError } from "../core/errors.ts";
 import { type HostRole, hostOf } from "../core/overlay.ts";
 import { type Change, canonical, differingFields } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
@@ -251,6 +251,10 @@ async function rulePlan(
     ? ctx.overlay.thresholds[thresholdName]?.reveal()
     : undefined;
   const placeholder = `<threshold:${s.rules.rate.threshold}>`;
+  // The overlay admits a ratio for monitoring's thresholds; a rate rule counts whole requests.
+  if (threshold !== undefined && !Number.isInteger(threshold)) {
+    throw new ConfigError(`the overlay's thresholds.${thresholdName} must be a whole number`);
+  }
   const held = new Set<number>(threshold === undefined ? [] : [threshold]);
   for (const { phase, rule } of existing.values()) {
     const now = rule.ratelimit?.requests_per_period;
