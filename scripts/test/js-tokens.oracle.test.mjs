@@ -19,16 +19,23 @@
 // of every literal it jumps.
 //
 // The corpora. Inside `pnpm check`: every JavaScript and TypeScript file under node_modules/.pnpm
-// (declaration files included) and every source file of the repository. With
-// FIN_JSTOK_FULL_CORPUS=1 also the apps' real builds: every workspace package with a build script
-// must have built JavaScript under its dist/, and a missing build fails the test (CI's build job
-// runs it so after `pnpm build`). A large corpus is split into shards, each read by this same file
-// run as a worker process (FIN_JSTOK_ORACLE_WORKER names its shard) with its own TypeScript.
+// (declaration files included), every source file of the repository, and the shapes the
+// tokenizer's reviews found it misreading (SHAPES below: minified bundles, `catch {`, `of` as a
+// name, automatic semicolon insertion, `<` after a type), each of which TypeScript reads with no
+// syntax error. With FIN_JSTOK_FULL_CORPUS=1 also the apps' real builds: every workspace package
+// with a build script must have built JavaScript under its dist/, and a missing build fails the
+// test. Run it after `pnpm build` as `FIN_JSTOK_FULL_CORPUS=1 pnpm run test:root` (or through
+// `pnpm test` or `pnpm check`: turbo.json's root test task declares the variable, so it reaches
+// the test, and is never cached, so a change anywhere reruns every corpus). No CI step runs it yet:
+// that is the CI lane's build job, after its `pnpm build`. A large corpus is split into shards,
+// each read by this same file run as a worker process (FIN_JSTOK_ORACLE_WORKER names its shard)
+// with its own TypeScript.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -56,6 +63,167 @@ const MAX_SHARDS = 8;
 const BYTES_PER_SHARD = 2_000_000;
 
 /** @typedef {{ kind: string, start: number, end: number }} Range */
+
+// The shapes the tokenizer's reviews found it misreading, as [file name, text]: each is valid, and
+// TypeScript reads it with no syntax error, so the tokenizer must agree on every literal, comment
+// and JSX text. Minified ones are what rolldown (Vite's minifier) makes of ordinary source.
+/** @type {[string, string][]} */
+const SHAPES = [
+  // `catch {` with no binding opens a block, not an object literal.
+  [
+    "x.js",
+    'export function f(a, b) {\n  try { return g(a) } catch { return /"/.test(a) && /"/.test(b) }\n}',
+  ],
+  [
+    "x.tsx",
+    "export function F() {\n  try { return g(); } catch { return <p>see http://example.com</p>\n  }\n}",
+  ],
+  ["x.js", "try { g(); } catch {}\n/\\.ts$/.test(name) && h();"],
+  ["x.js", "function f() { try { a() } catch { throw /'/ } }"],
+  ["x.js", "try{g()}catch{}/re/.test(s);"],
+  ["x.ts", "function f(s: string) { try { g() } catch { return /re/.test(s) } }"],
+  ["x.js", "function f(s) { try{g()}catch{if(s)/re/.test(s)} }"],
+  [
+    "x.js",
+    'function f(a) {\n  try { g() } catch { return /"/.test(a) || fetch("//evil.example/x") }\n  /}/.test(a);\n}',
+  ],
+  [
+    "Probe.tsx",
+    "export function Probe({ load }: { load: () => string }) {\n  try {\n    return <p>{load()}</p>;\n  } catch {\n    return <p>See http://example.com/help</p>;\n  }\n}",
+  ],
+  [
+    "x.js",
+    "export function h(e,t){try{JSON.parse(e)}catch{log(1)}/'/.test(e)&&send(`https://third.example`),globalThis.ok=/'/.test(t)}",
+  ],
+  [
+    "x.js",
+    'export function safeParse(e){try{return JSON.parse(e)}catch{return/^\\s*"/.test(e)?`a string // not a comment`:null}}',
+  ],
+  // `of`, `keyof`, `yield` and `await` as names divide.
+  [
+    "x.js",
+    'import { of } from "rxjs";\nexport const half = of / 2; const sep = "//"; fetch("https://third.example/x");',
+  ],
+  ["x.ts", "const keyof = 4;\nexport const q = keyof / 2 / 1;"],
+  ["x.cjs", "var yield = 2, t = 1;\nz = yield / t / 1;"],
+  ["x.js", 'var of = 1; var r = [of / 1, "evil.example", 1 / 1];'],
+  ["x.js", 'const of=4;x=of/2;fetch("https:\\/\\/third.example");y=of/(2);'],
+  ["x.js", "export const r=[];const of=7,t=[1];r.push(of/-t.length,`https:third-701.example`);"],
+  ["x.js", 'for (var of = 0; of < n; of++) { s += "it\'s"; }'],
+  ["x.js", "for (const of of /re/.exec(s)) {}"],
+  ["x.js", "function f() { var yield = 6; return yield / 2 / 3; }"],
+  [
+    "x.js",
+    "function* g() { function h() { var r = yield / 2 / 3; } var k = () => yield / 2 / 3; }",
+  ],
+  ["x.js", "class A { static { var r = yield / 2 / 3; } }"],
+  [
+    "x.js",
+    "async function f() { function g() { var r = await / 2 / 3; } var h = () => await / 2 / 3; }",
+  ],
+  [
+    "x.js",
+    "async function f() { class A { x = await / 2 / 3; } var o = { m() { return await / 2 / 3; } }; }",
+  ],
+  ["x.js", "export class A { x = await / 2 / 3; }\nexport function f() { var r = await / 2 / 3; }"],
+  [
+    "x.js",
+    "async function f() { var g = () => c ? 1 : await / 2 / 3; var k = function () { return await / 2 / 3; }; }",
+  ],
+  ["x.ts", "async function f() { class A { m?() { return await / 2 / 3; } } }"],
+  ["x.ts", "export {};\nnamespace N { var r = await / 2 / 3; }"],
+  ["x.js", "function f() { var r = async\nfunction g() { return await / 2 / 3; } }"],
+  ["x.js", "function f() { var g = async\nx => await / 2 / 3; }"],
+  ["x.js", "var o = { get a() { return await / 2 / 3; }, async *b() { yield /re/; } };"],
+  ["x.ts", "class A { constructor(private a = await / 2 / 3) {} }"],
+  [
+    "x.js",
+    "function* g() { var r = yield\n/re/.test(s); }\nasync function f() { var r = await\n/re/.test(s); }",
+  ],
+  ["x.js", "class A { static async *[Symbol.iterator]() { yield /re/; await /re/; } }"],
+  ["x.js", "async function f() { var g = async x => await /re/; }"],
+  ["x.ts", "for (const x: T of /re/.exec(s)) {}\nfor (const [a, b]: T of /re/.exec(s)) {}"],
+  [
+    "x.ts",
+    "export {}\ndeclare global { var r = await / 2 / 3 }\nglobal\n{ var s = await / 2 / 3 }\ndeclare module 'm' { global { var t = await / 2 / 3 } }",
+  ],
+  ["x.js", "export {}\nglobal { var r = await / 2 / 3 }"],
+  [
+    "x.ts",
+    "async function f() { namespace N { await /re/ } module M { await /re/ } }\nfunction* g() { namespace N { yield /re/ } }",
+  ],
+  [
+    "x.js",
+    "async function f() { var g = () => a\n~await /re/ }\nasync function h() { g = () => a\n.5, await /re/ }",
+  ],
+  [
+    "x.ts",
+    "async function f() { var a = 1\nx = 2, await /re/ }\nasync function g() { var b = () => a\n\u03c0, await /re/ }",
+  ],
+  // A line break after a statement that cannot go on starts the next one.
+  ["x.js", 'import x from "y"\n/"/.test(x) || fetch("https://evil.example")\n'],
+  [
+    "x.js",
+    "var x\n/re/.test(y)\nlet z\n/re/.test(q)\nvar a, b\n/re/.test(q)\nvar [c]\n/re/.test(q)\nvar {d}\n/re/.test(q)",
+  ],
+  ["x.js", "a: for (;;) { break a\n/re/.test(y) }\nb: for (;;) { continue b\n/re/.test(y) }"],
+  ["x.js", 'import "a"\n/re/.test(q)\nimport b from "a" with { type: "json" }\n/re/.test(q)'],
+  [
+    "x.js",
+    'import x from "a"\nwith { type: "json" }\n/re/.test(q)\nimport { a }\nfrom "b"\n/re/.test(q)',
+  ],
+  [
+    "x.js",
+    'export * from "x"\n/re/.test(q)\nexport { a } from "b"\n/re/.test(q)\nexport { c }\nfrom "b"\n/re/.test(q)',
+  ],
+  [
+    "x.js",
+    'export { a as "b c" } from "d"\n/re/.test(q)\nimport x, { y } from "z"\n/re/.test(q)\nexport * as ns from "x"\n/re/.test(q)',
+  ],
+  ["x.ts", "declare function f()\n/re/.test(q)\ndeclare var a\n/re/.test(q)"],
+  ["x.ts", 'declare module "m"\n/re/.test(q)'],
+  ["x.ts", 'import a = require("a")\n/re/.test(q)\nimport b = a.c\n/re/.test(q)'],
+  ["x.ts", "export as namespace a\n/re/.test(q)"],
+  ["x.ts", "import a = b\n.c\n/re/.test(q)\nimport d = e /* c */\n.f\n.g\n/re/.test(q)"],
+  [
+    "x.ts",
+    'import type { A } from "a"\n/re/.test(q)\nexport type * from "a"\n/re/.test(q)\nexport type { B }\n/re/.test(q)',
+  ],
+  ["x.tsx", "let v\n<p>it's Bob's</p>"],
+  ["x.js", "var x\n(a)\n/ 2 / 3\nvar y\n= 1\n/ 2 / 3\nvar z = 1\n/ 2 / 3"],
+  [
+    "x.ts",
+    "let x\n: number = 1\n/ 2 / 3\nfunction f(a: string)\nfunction f(a) { return /re/ }\n/re/.test(q)",
+  ],
+  ["x.js", 'export { a }\nfoo("x", {})\n/ 2 / 3\nx = from\n/ 2 / 3\nmodule\n/ 2 / 3'],
+  // `<` after a type that is no type reference is the less-than operator.
+  ["x.ts", "const ok = n as number < 5 && m > /re/.exec(s).length;"],
+  [
+    "x.ts",
+    'const a = n as T[] < 5;\nif (x as number < y) { z = "s" }\nconst b = n as number << 5 / 2 / 1;',
+  ],
+  ["x.tsx", "const x = count as number < 5 && <i>it's Bob's</i>;"],
+  ["x.ts", "const a = x as 'lit' < 5, b = x as {} < 5, c = x as (A) < 5, d = x as `t` < 5;"],
+  ["x.ts", "const a = x as this < 5, b = x as unknown < 5, c = x as void < 5, d = x as null < 5;"],
+  [
+    "x.ts",
+    "const a = x as true < 5, b = x as -1 < 5, c = x as unique symbol < 5, d = x satisfies boolean < 5;",
+  ],
+  [
+    "x.ts",
+    "const a = x as Array<string>;\n/re/.test(q)\nconst b = x as typeof y<string>;\n/re/.test(q)",
+  ],
+  ["x.ts", "const a = x as import('m').T<string>;\n/re/.test(q)\nconst b = x as A.B<C> / 2 / 1;"],
+  [
+    "x.ts",
+    "const a = x as A.string<C> / 2 / 1, b = x as A.void<C> / 2 / 1, c = x as typeof A.number<C> / 2 / 1;",
+  ],
+  [
+    "x.ts",
+    "function f() { const g = async <T,>(x: T) => await /re/; const h = async <T>(x: T): Promise<T> => await /re/; }",
+  ],
+  ["x.ts", "const async = 1; const r = async < b && c > /re/.exec(s);"],
+];
 
 const LITERAL = new Map([
   [SyntaxKind.StringLiteral, "string"],
@@ -489,6 +657,41 @@ if (WORKER !== undefined) {
 
     test("differential: the repository's own sources", async (t) => {
       await check(t, "repository sources", repositorySources());
+    });
+
+    test("differential: the shapes the reviews found", async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "fin-jstok-shapes-"));
+      try {
+        const files = SHAPES.map(([name, text], i) => {
+          const sub = join(dir, String(i));
+          mkdirSync(sub);
+          const file = join(sub, name);
+          writeFileSync(file, text);
+          return file;
+        });
+        await check(t, "shapes", files);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("FIN_JSTOK_FULL_CORPUS reaches the test through pnpm test and pnpm check, and nothing replays an old result", () => {
+      // Turborepo passes a task only the variables it declares: without the declaration the
+      // builds differential would skip silently. A cached result would replay a comparison of
+      // files that have changed since (the test reads every source file and every build).
+      const turbo = JSON.parse(readFileSync(join(REPO_ROOT, "turbo.json"), "utf8"));
+      const task = turbo.tasks?.["//#test:root"];
+      assert.ok(task !== undefined, "turbo.json has no //#test:root task");
+      assert.ok(
+        Array.isArray(task.env) && task.env.includes("FIN_JSTOK_FULL_CORPUS"),
+        "turbo.json's //#test:root does not declare FIN_JSTOK_FULL_CORPUS in env",
+      );
+      assert.equal(task.cache, false, "turbo.json's //#test:root may be cached");
+      const scripts = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).scripts;
+      assert.equal(scripts["test:root"], 'node --test "scripts/test/*.test.mjs"');
+      for (const name of ["test", "check"]) {
+        assert.match(scripts[name], /turbo run [^&]*\btest:root\b/, `pnpm ${name} runs test:root`);
+      }
     });
 
     test("differential: the apps' real builds (FIN_JSTOK_FULL_CORPUS=1; a missing build fails)", {
