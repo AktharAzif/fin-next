@@ -58,7 +58,14 @@ export type Action =
     }
   | { readonly op: "delete"; readonly remote: RemoteObject; readonly why: string }
   | { readonly op: "pause"; readonly remote: RemoteObject; readonly reason: string }
-  | { readonly op: "manual"; readonly key: string; readonly kind: Kind; readonly note: string };
+  | {
+      readonly op: "manual";
+      readonly key: string;
+      readonly kind: Kind;
+      /** The part Better Stack fixes at creation, as printed (`data_region`, `type`). */
+      readonly path: string;
+      readonly note: string;
+    };
 
 export interface Change {
   /** The compared attribute (what `immutable` names). */
@@ -742,6 +749,7 @@ export function makePlan(desired: Desired, remote: Remote, options: PlanOptions)
           op: "manual",
           kind,
           key: object.key,
+          path: change.path,
           note: `${change.path} is ${change.from}, the files say ${change.to}; Better Stack fixes it at creation, so recreate it by hand after review`,
         });
       }

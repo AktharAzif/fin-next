@@ -60,13 +60,15 @@ refuses two Better Stack objects with one name, and refuses anything in staging 
 or pushes, or routes to any policy but `staging-quiet` (MA-06); a managed alert, monitor or
 heartbeat someone made loud, or gave a maintenance window or a team wait, is put back and shown as
 drift. After a run that wrote anything, everything is read back and compared with the files again:
-any object that differs fails the run, named with the parts that differ. New tokens, DSNs and
+any object that differs fails the run, named with the parts that differ, a part Better Stack fixes
+at creation (a source's `data_region`, a metric's `type`) included. New tokens, DSNs and
 heartbeat URLs go to `ctx.deliver` (Railway services' sealed variables only, MC-07; pnpm fin does
 not deliver yet, so they are listed by service and variable, and Better Stack keeps them for a
 later `--redeliver`) and are never printed; the
 watcher's and `pnpm fin verify`'s own are read from Better Stack by those commands. The output
 names objects, never their IDs, and masks the hostnames, the zones (`ctx.zones`) and the monitor
-header, Better Stack's own error text included. Each change is printed by the part that changed
+header, Better Stack's own error text included, where each private number a refused write carried
+(or its object held) also prints as its placeholder. Each change is printed by the part that changed
 (`steps[0].step_members`, `metadata.runbook`), cut around its first difference, so no change
 prints the same on both sides; a value, like an error text, is masked whole before it is cut, so
 no cut leaves part of a hostname or zone. Anything that stops the writes (a refusal from Better

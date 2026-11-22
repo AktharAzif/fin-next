@@ -3,7 +3,7 @@
 // Better Stack (no network, no token: the tokens are built at run time).
 
 import assert from "node:assert/strict";
-import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { loadEnv } from "../../monitoring/src/config.ts";
@@ -169,19 +169,25 @@ describe("pnpm fin monitoring apply", () => {
   });
 
   it("refuses while any overlay key the files name has no value, a dry run and a run alike (MA-10)", async () => {
+    // The key the first recorded run writes first (docs/runbooks/monitoring-drift.md): the
+    // identity fragment's auth-endpoint-unlisted reads it.
     const without = (o: Json) => {
-      delete (o.thresholds as Json)["clock-skew"];
+      delete (o.thresholds as Json)["auth-endpoint-unlisted"];
     };
     const dry = harness({ overlay: without });
     assert.equal(await dry.run(["--dry-run", "--assert-empty-team", "fin-staging"]), EXIT.refused);
     assert.match(
       dry.runtime.out(),
-      /refused: MA-10 the run's settings have no value for thresholds\.clock-skew/,
+      /refused: MA-10 the run's settings have no value for thresholds\.auth-endpoint-unlisted/,
     );
     assert.deepEqual(dry.writes(), []);
 
     const real = harness({ overlay: without });
     assert.equal(await real.run(["--assert-empty-team", "fin-staging"]), EXIT.refused);
+    assert.match(
+      real.runtime.out(),
+      /refused: MA-10 the run's settings have no value for thresholds\.auth-endpoint-unlisted/,
+    );
     assert.deepEqual(real.writes(), []);
     assert.deepEqual(real.records(), [], "a refused plan registers no run");
     assert.equal(real.lines().at(-1)?.outcome, "refused");
@@ -249,8 +255,10 @@ describe("pnpm fin monitoring apply", () => {
         const response = await serve(url, init);
         if (init?.method === "POST" && /\/alerts$/.test(new URL(url).pathname)) {
           const sent = JSON.parse(String(init.body)) as Json;
-          if (sent.name === "clock-skew") {
-            const item = h.bs.items("alerts").find((i) => i.attributes.name === "clock-skew");
+          if (sent.name === "auth-endpoint-unlisted") {
+            const item = h.bs
+              .items("alerts")
+              .find((i) => i.attributes.name === "auth-endpoint-unlisted");
             if (item !== undefined) item.attributes.value = 987_654;
           }
         }
@@ -260,11 +268,11 @@ describe("pnpm fin monitoring apply", () => {
     assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.drift);
     const out = h.runtime.out();
     assert.match(out, /read back: 1 difference\(s\) from the files after the writes/);
-    assert.match(out, /alert clock-skew: differs in value/);
+    assert.match(out, /alert auth-endpoint-unlisted: differs in value/);
     assert.equal(h.readable().includes("987654"), false);
     const done = h.records().at(-1);
     assert.equal(done?.result, "failed");
-    assert.deepEqual(((done?.readBack ?? {}) as Json).mismatched, ["alert:clock-skew"]);
+    assert.deepEqual(((done?.readBack ?? {}) as Json).mismatched, ["alert:auth-endpoint-unlisted"]);
     const line = h.lines().find((l) => l.event === "monitoring.apply");
     assert.equal(line?.outcome, "mismatch");
     assert.equal(line?.level, "error");
@@ -276,13 +284,16 @@ describe("pnpm fin monitoring apply", () => {
     const changed = harness({
       bs: first.bs,
       overlay: (o) => {
-        (o.thresholds as Json)["clock-skew"] = 4_321;
+        (o.thresholds as Json)["auth-endpoint-unlisted"] = 4_321;
         (o.grace as Json).watcher = 97;
       },
     });
     assert.equal(await changed.run(["--dry-run"]), EXIT.drift);
     const out = changed.runtime.out();
-    assert.match(out, /^~ alert clock-skew: value \(not shown\) -> <threshold:clock-skew>$/m);
+    assert.match(
+      out,
+      /^~ alert auth-endpoint-unlisted: value \(not shown\) -> <threshold:auth-endpoint-unlisted>$/m,
+    );
     assert.match(out, /^~ heartbeat watcher: grace \(not shown\) -> <grace:watcher>$/m);
     assert.equal(out.includes("4321"), false);
     assert.doesNotMatch(out, /\b97\b/);
@@ -301,15 +312,17 @@ describe("pnpm fin monitoring apply", () => {
         filter: (source) => !source.includes("node_modules"),
       });
     }
-    const file = join(root, "ops", "monitoring", "staging", "alerts", "platform.json");
+    const file = join(root, "ops", "monitoring", "staging", "alerts", "identity.json");
     const json = JSON.parse(readFileSync(file, "utf8")) as { alerts: Json[] };
-    const alert = json.alerts.find((a) => a.name === "clock-skew");
-    if (alert === undefined) throw new Error("no clock-skew alert");
+    const alert = json.alerts.find((a) => a.name === "auth-endpoint-unlisted");
+    if (alert === undefined) throw new Error("no auth-endpoint-unlisted alert");
     alert.policy = "loud";
     writeFileSync(file, JSON.stringify(json));
     const h = harness({ repoRoot: root });
     assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.refused);
-    assert.match(h.runtime.out(), /RT-01.*clock-skew.*routes to loud/);
+    // monitoring:check's RT-01 refuses it first; the plan's own MA-06 behind it is held by
+    // ops/monitoring/test/apply-quiet.test.ts, which reaches the plan with the check passed.
+    assert.match(h.runtime.out(), /RT-01.*auth-endpoint-unlisted.*routes to loud/);
     assert.deepEqual(h.bs.requests, [], "refused before Better Stack is read");
     assert.deepEqual(h.records(), []);
   });
@@ -354,6 +367,84 @@ describe("pnpm fin monitoring apply", () => {
       (name) => name !== "__CF_USER_TEXT_ENCODING",
     );
     assert.deepEqual({ ...seen[0], env }, { argv: [], env: [], execArgv: [] });
+  });
+
+  it("fails a run whose read-back finds a part fixed at creation different on an object it made", async () => {
+    const SOURCE = "fin-next-staging-edge";
+    const h: Harness = harness({
+      // Better Stack takes the source, but keeps it in another region than the one sent.
+      fetch: (serve) => async (url, init) => {
+        const response = await serve(url, init);
+        const sent = init?.method === "POST" ? (JSON.parse(String(init.body)) as Json) : {};
+        if (new URL(url).pathname === "/api/v3/sources" && sent.name === SOURCE) {
+          const item = h.bs.items("sources").find((i) => i.attributes.name === SOURCE);
+          if (item !== undefined) item.attributes.data_region = "somewhere-else";
+        }
+        return response;
+      },
+    });
+    assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.drift);
+    const out = h.runtime.out();
+    assert.match(out, new RegExp(`source ${SOURCE}: differs in data_region, which Better Stack`));
+    assert.doesNotMatch(out, /every one as the files say/);
+    assert.equal(h.readable().includes("somewhere-else"), false);
+    const done = h.records().at(-1);
+    assert.equal(done?.event, "run.done");
+    assert.equal(done?.result, "failed");
+    assert.deepEqual(((done?.readBack ?? {}) as Json).mismatched, [`source:${SOURCE}`]);
+    const line = h.lines().find((l) => l.event === "monitoring.apply");
+    assert.equal(line?.outcome, "mismatch");
+    assert.equal(line?.drift, true);
+  });
+
+  it("never prints a private number Better Stack echoes back in a refusal", async () => {
+    const SECRET = 43_217;
+    const bs = new FakeBetterStack({ telemetryToken: TELEMETRY, uptimeToken: UPTIME });
+    bs.failWith = (method, path, body) => {
+      const sent = body as Json;
+      if (
+        method !== "POST" ||
+        !path.endsWith("/alerts") ||
+        sent.name !== "auth-endpoint-unlisted"
+      ) {
+        return undefined;
+      }
+      return {
+        status: 422,
+        body: { errors: { value: `${String(sent.value)} is above the limit` } },
+      };
+    };
+    const h = harness({
+      bs,
+      overlay: (o) => {
+        (o.thresholds as Json)["auth-endpoint-unlisted"] = SECRET;
+      },
+    });
+    assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.unavailable);
+    assert.match(h.runtime.out(), /<threshold:auth-endpoint-unlisted> is above the limit/);
+    assert.equal(h.readable().includes(String(SECRET)), false, "the echoed number is printed");
+    assert.equal(h.records().at(-1)?.result, "failed");
+  });
+
+  it("stops writing, and fails the run, once a write's run.step cannot be recorded", async () => {
+    let sent = 0;
+    const h: Harness = harness({
+      fetch: (serve) => async (url, init) => {
+        if ((init?.method ?? "GET") !== "GET") {
+          sent += 1;
+          // The run log's head file goes just before the sixth write: appending is then refused.
+          if (sent === 6) rmSync(join(h.stateDir, "head.json"));
+        }
+        return serve(url, init);
+      },
+    });
+    assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.drift);
+    assert.equal(h.writes().length, 6, "no write after the one whose record failed");
+    const steps = h.records().filter((r) => r.event === "run.step");
+    assert.equal(steps.length, 5);
+    assert.match(h.runtime.err(), /its run\.step could not be recorded/);
+    assert.match(h.runtime.err(), /pnpm fin did not send a call: an earlier call was refused/);
+    assert.doesNotMatch(h.runtime.out(), /read back: \d+ object\(s\) compared/);
   });
 });
 

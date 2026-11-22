@@ -7,9 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  hideNumbers,
   type MonitoringContext,
   monitoringApply,
   type PlanCounts,
+  privateNumbersOf,
   STAGING_QUIET,
   type WriteChange,
 } from "../src/apply.ts";
@@ -189,6 +191,99 @@ describe("monitoring apply under pnpm fin", () => {
     expect(run.text()).not.toContain("something-else");
     expect(run.text()).not.toContain(ZONE);
   });
+
+  it("fails a read-back where a part Better Stack fixes at creation differs on an object this run made", async () => {
+    const bs = fake();
+    const SOURCE = "fin-next-staging-edge";
+    // Better Stack answers the source's create, but keeps it in another region than the one sent.
+    const serve = async (input: string, init?: RequestInit) => {
+      const response = await bs.fetch(input, init);
+      const sent = init?.method === "POST" ? (JSON.parse(String(init.body)) as Json) : {};
+      if (new URL(input).pathname === PATHS.sources && sent.name === SOURCE) {
+        const item = bs.items("sources").find((i) => i.attributes.name === SOURCE);
+        if (item !== undefined) item.attributes.data_region = "somewhere-else";
+      }
+      return response;
+    };
+    const run = forwarded(["--assert-empty-team", "fin-staging"], bs, serve);
+    const result = await monitoringApply(run.ctx);
+    expect(result.outcome).toBe("mismatch");
+    expect(result.exitCode).toBe(1);
+    expect(result.drift).toBe(true);
+    expect(result.readBack?.mismatched).toEqual([`source:${SOURCE}`]);
+    expect(run.text()).toContain(
+      `source ${SOURCE}: differs in data_region, which Better Stack fixes at creation`,
+    );
+    expect(run.text()).not.toContain("every one as the files say");
+    expect(run.text()).not.toContain("somewhere-else");
+
+    // With nothing left to write, a real run still reports it as drift.
+    const again = forwarded([], bs);
+    const second = await monitoringApply(again.ctx);
+    expect(second.outcome).toBe("unchanged");
+    expect(second.drift).toBe(true);
+    expect(again.text()).toContain("nothing to write, but Better Stack differs from the files");
+  });
+
+  it("hides a private number Better Stack echoes in a refused write's error text", async () => {
+    const bs = fake();
+    const SECRET = 43_217;
+    bs.failWith = (method, path, body) => {
+      const sent = body as Json;
+      if (
+        method !== "POST" ||
+        !path.endsWith("/alerts") ||
+        sent.name !== "auth-endpoint-unlisted"
+      ) {
+        return undefined;
+      }
+      return {
+        status: 422,
+        body: { errors: { value: `${String(sent.value)} is above the limit` } },
+      };
+    };
+    const run = forwarded(["--assert-empty-team", "fin-staging"], bs);
+    const { thresholds, grace } = numbers();
+    const result = await monitoringApply({
+      ...run.ctx,
+      thresholds: { ...thresholds, "auth-endpoint-unlisted": SECRET },
+      grace,
+    });
+    expect(result.outcome).toBe("stopped");
+    expect(result.exitCode).toBe(1);
+    expect(run.text()).toContain("<threshold:auth-endpoint-unlisted> is above the limit");
+    expect(run.text()).not.toContain(String(SECRET));
+  });
+});
+
+describe("hideNumbers", () => {
+  it("replaces a private number standing alone, never one inside a longer number, a word or an ID", () => {
+    const n = [{ value: 300, as: "<threshold:x>" }];
+    expect(hideNumbers("value 300 at 13000, t300, 300.5, 3000; ends 300.", n)).toBe(
+      "value <threshold:x> at 13000, t300, 300.5, 3000; ends <threshold:x>.",
+    );
+    expect(hideNumbers("ratio 0.05, not 10.05", [{ value: 0.05, as: "<threshold:r>" }])).toBe(
+      "ratio <threshold:r>, not 10.05",
+    );
+  });
+
+  it("names what a write carries: the overlay's numbers its parts name, and what an update replaces", () => {
+    const object: DesiredObject = {
+      kind: "alert",
+      key: "a",
+      body: { name: "a" },
+      private: { value: "<threshold:a>", query_period: "<threshold:a-window>" },
+    };
+    const settings = { thresholds: { a: 7, "a-window": 900 }, grace: {} };
+    expect(privateNumbersOf(object, settings)).toEqual([
+      { value: 7, as: "<threshold:a>" },
+      { value: 900, as: "<threshold:a-window>" },
+    ]);
+    expect(privateNumbersOf(object, settings, { value: 5 })).toContainEqual({
+      value: 5,
+      as: "<threshold:a>",
+    });
+  });
 });
 
 describe("staging stays quiet (MA-06)", () => {
@@ -263,7 +358,7 @@ describe("the overlay's numbers are never printed", () => {
       ...next.ctx,
       thresholds: {
         ...thresholds,
-        "clock-skew": 4321,
+        "auth-endpoint-unlisted": 4321,
         "no-logs-api": 5432,
         "5xx-rate-min-count": 6543,
       },
@@ -271,7 +366,9 @@ describe("the overlay's numbers are never printed", () => {
     };
     await monitoringApply(changed);
     const text = next.text();
-    expect(text).toContain("~ alert clock-skew: value (not shown) -> <threshold:clock-skew>");
+    expect(text).toContain(
+      "~ alert auth-endpoint-unlisted: value (not shown) -> <threshold:auth-endpoint-unlisted>",
+    );
     expect(text).toContain(
       "~ alert no-logs-api: query_period (not shown) -> <threshold:no-logs-api>",
     );

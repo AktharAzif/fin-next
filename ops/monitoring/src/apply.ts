@@ -26,7 +26,8 @@
 // `ctx.deliver` (the services' sealed variables) and never printed. Everything printed passes
 // one mask: the hostnames, the zones and the monitor header's value, Better Stack's own error
 // text included. The overlay's numbers (thresholds, windows, grace periods) are never printed: a
-// change to one shows its placeholder (`<threshold:clock-skew>`).
+// change to one shows its placeholder (`<threshold:clock-skew>`), and so does each number a
+// refused write carried (or its object held) where Better Stack's error text echoes it.
 import { readFileSync, statSync } from "node:fs";
 import {
   BetterStackClient,
@@ -148,8 +149,9 @@ export interface ApplyResult {
   readonly undelivered: readonly string[];
   /**
    * Whether Better Stack differs from the files, the daily dry run's drift: what a dry run or a
-   * refused run found (a refusal never hides it), and true after a real run that stopped partway.
-   * A real run that applied everything leaves no drift.
+   * refused run found (a refusal never hides it), true after a real run that stopped partway or
+   * read back different, and after any real run whose plan still holds what no run changes (a
+   * part Better Stack fixes at creation, a source or an Errors application the files do not name).
    */
   readonly drift: boolean;
   /** How many refusals stopped the run before it wrote anything. */
@@ -437,9 +439,11 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   // Better Stack's refusals, and calls that got no answer, are printed through the mask, never
   // thrown past it. The message is masked whole and only then cut to length: a cut made first
   // could leave part of a hostname or zone that the mask no longer finds.
-  const refusedBy = (error: unknown): boolean => {
+  // A refused write's own private numbers are hidden too: Better Stack may echo a value it was
+  // sent (or the one it holds), and pnpm fin's masker leaves short numbers alone.
+  const refusedBy = (error: unknown, numbers: readonly PrivateNumber[] = []): boolean => {
     if (!(error instanceof BetterStackError)) return false;
-    const masked = mask(error.message);
+    const masked = hideNumbers(mask(error.message), numbers);
     const message = masked.length > ERROR_WIDTH ? `${masked.slice(0, ERROR_WIDTH - 3)}...` : masked;
     out(
       error.status === 0
@@ -456,15 +460,13 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     throw error;
   }
   const today = (ctx.now?.() ?? new Date()).toISOString().slice(0, 10);
-  const planOptions: PlanOptions = {
+  const planOptions = planOptionsFor(ctx.env, {
     team,
     ...(flags.assertEmptyTeam === undefined ? {} : { assertEmptyTeam: flags.assertEmptyTeam }),
     headerValues: monitorHeader !== undefined,
     today,
     mask,
-    // MA-06: everything in staging routes to the one quiet policy.
-    ...(ctx.env === "staging" ? { quietPolicy: STAGING_QUIET } : {}),
-  };
+  });
   const plan = makePlan(desired, remote, {
     ...planOptions,
     ...(flags.confirmDelete === undefined ? {} : { confirmDelete: flags.confirmDelete }),
@@ -500,9 +502,9 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   let failed = false;
   // A fault that is not Better Stack's is rethrown once the secrets are delivered.
   let fault: { readonly error: unknown } | undefined;
-  const stoppedBy = (error: unknown) => {
+  const stoppedBy = (error: unknown, numbers: readonly PrivateNumber[] = []) => {
     failed = true;
-    if (refusedBy(error)) return;
+    if (refusedBy(error, numbers)) return;
     fault = { error };
     const name = error instanceof Error ? error.name : typeof error;
     out(`monitoring apply: stopped by an unexpected ${name}`);
@@ -540,6 +542,8 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   };
   // The create in flight, while its call is unanswered.
   let creating: DesiredObject | undefined;
+  // The private numbers the write in flight carries, hidden in a refusal's text.
+  let carried: readonly PrivateNumber[] = [];
   try {
     const byKind = (a: Action) =>
       KIND_ORDER.indexOf(a.op === "create" || a.op === "update" ? a.object.kind : "heartbeat");
@@ -552,6 +556,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
         const path = pathFor(action.object, ids);
         const body = sendable(action.object, ids, false);
         creating = action.object;
+        carried = privateNumbersOf(action.object, settings);
         const resource = await write({ op: "create", kind, key }, () =>
           clientFor(clients, kind).create(path, body),
         );
@@ -563,11 +568,14 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       } else if (action.op === "update") {
         const path = itemPath(action.remote);
         const body = sendable(action.object, ids, true);
+        carried = privateNumbersOf(action.object, settings, action.remote.attributes);
         await write({ op: "update", kind, key }, () => clientFor(clients, kind).update(path, body));
         result.updated += 1;
         out(`updated ${kind} ${key}`);
       }
     }
+    // Deletions and pauses send no number of the files'.
+    carried = [];
     // Deletions: alerts before their explorations, then the rest.
     const deletions = plan.actions
       .filter((a): a is Extract<Action, { op: "delete" }> => a.op === "delete")
@@ -590,7 +598,7 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
       out(`paused ${action.remote.kind} ${action.remote.key}: ${action.reason}`);
     }
   } catch (error) {
-    stoppedBy(error);
+    stoppedBy(error, carried);
     // A refusal (4xx) made nothing; no answer or a server error may have made the object.
     if (
       creating !== undefined &&
@@ -644,7 +652,16 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
   );
   if (fault !== undefined) throw fault.error;
   if (failed) return { ...result, outcome: "stopped", drift: true, exitCode: 1 };
-  if (writeCount === 0) return { ...result, outcome: "unchanged", exitCode: 0 };
+  // Nothing to write, though the plan may still hold what no run changes (a part Better Stack
+  // fixes at creation, a source the files do not name): its drift stands.
+  if (writeCount === 0) {
+    if (plan.drift) {
+      out(
+        "nothing to write, but Better Stack differs from the files in what no run changes (above)",
+      );
+    }
+    return { ...result, outcome: "unchanged", drift: plan.drift, exitCode: 0 };
+  }
 
   // Read everything back and compare it with the files again, as a dry run would: what this run
   // wrote, and what it left alone, must now be exactly what the files say.
@@ -656,10 +673,15 @@ export async function monitoringApply(ctx: MonitoringContext): Promise<ApplyResu
     out("read back: Better Stack could not be read after the writes, so nothing was compared");
     return { ...result, outcome: "stopped", drift: true, exitCode: 1 };
   }
-  const { lines, ...readBack } = compareBack(
-    desired,
-    makePlan(desired, after, { ...planOptions, dryRun: true }),
-  );
+  const afterPlan = makePlan(desired, after, { ...planOptions, dryRun: true });
+  const { lines, ...readBack } = compareBack(desired, afterPlan);
+  if (readBack.mismatched.length === 0 && afterPlan.drift) {
+    // Only what no run changes is left: a source or an Errors application the files do not name.
+    out(
+      `read back: ${readBack.compared} object(s) compared, each as the files say, but Better Stack also holds what the files do not name (drift):\n  ${afterPlan.notes.join("\n  ")}`,
+    );
+    return { ...result, outcome: "applied", drift: true, exitCode: 0, readBack };
+  }
   if (readBack.mismatched.length === 0) {
     out(`read back: ${readBack.compared} object(s) compared, every one as the files say`);
     return { ...result, outcome: "applied", exitCode: 0, readBack };
@@ -687,34 +709,114 @@ export function countPlan(plan: Plan): PlanCounts {
 }
 
 /**
- * What a plan made after the writes says: every action it still holds (but `manual`, which no run
- * makes) and every refusal is a difference. Each is named by kind, name and the parts that differ,
- * never a value.
+ * What a plan made after the writes says: every action it still holds and every refusal is a
+ * difference, a `manual` one included: a part Better Stack fixes at creation that differs (a
+ * source's data_region, a metric's type) is not as the files say, whether this run created the
+ * object or found it so, and only a recreation by hand fixes it. Each object is named once, by
+ * kind and name, with the parts that differ, never a value.
  */
 export function compareBack(
   desired: { readonly objects: readonly DesiredObject[] },
   plan: Plan,
 ): ReadBack & { readonly lines: readonly string[] } {
-  const mismatched: string[] = [];
-  const lines: string[] = [];
+  const found = new Map<string, { readonly label: string; readonly what: string[] }>();
+  const differs = (kind: string, key: string, what: string) => {
+    const id = `${kind}:${key}`;
+    const entry = found.get(id) ?? { label: `${kind} ${key}`, what: [] };
+    entry.what.push(what);
+    found.set(id, entry);
+  };
   for (const action of plan.actions) {
-    if (action.op === "manual") continue;
-    const object = action.op === "create" || action.op === "update" ? action.object : action.remote;
-    mismatched.push(`${object.kind}:${object.key}`);
-    const what =
-      action.op === "create"
-        ? "missing"
-        : action.op === "update"
-          ? `differs in ${[...new Set(action.changes.map((c) => c.path))].join(", ")}`
-          : action.op === "delete"
-            ? "still there, though the files dropped it"
-            : "not paused, though the files dropped it";
-    lines.push(`${object.kind} ${object.key}: ${what}`);
+    switch (action.op) {
+      case "create":
+        differs(action.object.kind, action.object.key, "missing");
+        break;
+      case "update":
+        differs(
+          action.object.kind,
+          action.object.key,
+          `differs in ${[...new Set(action.changes.map((c) => c.path))].join(", ")}`,
+        );
+        break;
+      case "manual":
+        differs(
+          action.kind,
+          action.key,
+          `differs in ${action.path}, which Better Stack fixes at creation (recreate it by hand after review)`,
+        );
+        break;
+      case "delete":
+        differs(action.remote.kind, action.remote.key, "still there, though the files dropped it");
+        break;
+      case "pause":
+        differs(action.remote.kind, action.remote.key, "not paused, though the files dropped it");
+        break;
+    }
   }
+  const mismatched = [...found.keys()];
+  const lines = [...found.values()].map((e) => `${e.label}: ${e.what.join("; ")}`);
   for (const refusal of plan.refusals) {
     // A rule's refusal by its rule; the one refusal without a rule is two objects with one name.
     mismatched.push(`refused:${/^MA-\d{2}\b/.exec(refusal)?.[0] ?? "duplicate-name"}`);
     lines.push(`refused: ${refusal}`);
   }
   return { compared: desired.objects.length, mismatched, lines };
+}
+
+/** A private number a write carries (a threshold, a window, a grace period) and its placeholder. */
+export interface PrivateNumber {
+  readonly value: number;
+  readonly as: string;
+}
+
+const PLACEHOLDER = /<(threshold|grace):([a-z0-9][a-z0-9-]*)>/g;
+
+/**
+ * The private numbers one write carries: each overlay number its object's `private` parts name
+ * (`<threshold:x>`, `<grace:x>`, a ratio query's minimum count) and, for an update, the numbers
+ * the object holds in those parts now, which are the overlay's earlier ones.
+ */
+export function privateNumbersOf(
+  object: DesiredObject,
+  settings: Pick<RunSettings, "thresholds" | "grace">,
+  held: Readonly<Record<string, unknown>> = {},
+): PrivateNumber[] {
+  const out: PrivateNumber[] = [];
+  for (const [field, shown] of Object.entries(object.private ?? {})) {
+    for (const m of shown.matchAll(PLACEHOLDER)) {
+      const family = m[1] === "grace" ? settings.grace : settings.thresholds;
+      const value = family[m[2] ?? ""];
+      if (typeof value === "number") out.push({ value, as: m[0] });
+    }
+    const was = held[field];
+    const as = [...shown.matchAll(PLACEHOLDER)][0]?.[0];
+    if (typeof was === "number" && as !== undefined) out.push({ value: was, as });
+  }
+  return out;
+}
+
+/**
+ * Replaces each private number in a text (Better Stack's error text, which may echo a value it was
+ * sent or holds) with its placeholder wherever it stands as a number of its own, never inside a
+ * longer number, a word or an ID.
+ */
+export function hideNumbers(text: string, numbers: readonly PrivateNumber[]): string {
+  const longestFirst = [...numbers]
+    .filter((n) => Number.isFinite(n.value))
+    .sort((a, b) => String(b.value).length - String(a.value).length);
+  let out = text;
+  for (const { value, as } of longestFirst) {
+    const spelt = String(value).replace(/[.+-]/g, (c) => `\\${c}`);
+    const alone = new RegExp(`(?<![0-9A-Za-z_.])${spelt}(?![0-9A-Za-z_]|\\.[0-9])`, "g");
+    out = out.replace(alone, as);
+  }
+  return out;
+}
+
+/**
+ * The plan's options for an environment: in staging, MA-06's one quiet policy, which every alert,
+ * monitor and heartbeat must route to (spec 08 §7.9).
+ */
+export function planOptionsFor(env: string, options: PlanOptions): PlanOptions {
+  return env === "staging" ? { ...options, quietPolicy: STAGING_QUIET } : options;
 }

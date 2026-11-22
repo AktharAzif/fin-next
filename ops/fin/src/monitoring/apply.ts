@@ -18,7 +18,9 @@
 //     Better Stack's three API hosts, with that product's team token; a write never in a dry run,
 //     only inside the registered run (Run.assertCanStart: registered, still holding the lock, not
 //     stopped), only once the child has named it (marked in flight while it is sent), and never
-//     after a stop. Whatever is refused gets no answer, so the child stops.
+//     after a stop or after any refusal of pnpm fin's own, a write whose run.step could not be
+//     recorded among them (the run then ends failed with that error's code, as applyPlan's does).
+//     Whatever is refused gets no answer, so the child stops.
 //   - the run. cli.ts takes the lock before the child starts; run.registered (with the plan's
 //     counts) is written and shipped when the child asks, after its plan has passed every rule and
 //     before its first write; each write it made is a run.step; run.done records the counts and the
@@ -175,8 +177,18 @@ class ApplySession {
     return { exit, result: this.#result, error: this.#error, refusal: this.#refusal };
   }
 
+  /**
+   * Keeps a message's work until it ends. A fault in it is pnpm fin's own: it is kept as the run's
+   * refusal, so nothing more is sent and the run ends failed with its code, and the child, which
+   * may be waiting for an answer that will not come, is ended.
+   */
   #track(work: Promise<void>): void {
-    const tracked = work.catch(() => undefined).finally(() => this.#pending.delete(tracked));
+    const tracked = work
+      .catch((error: unknown) => {
+        this.#refusal ??= error;
+        this.#child?.kill();
+      })
+      .finally(() => this.#pending.delete(tracked));
     this.#pending.add(tracked);
   }
 
@@ -258,6 +270,8 @@ class ApplySession {
     );
     try {
       if (this.#ctx.dryRun) throw new FinError("a dry run registers no run", EXIT.internal);
+      if (this.#refusal !== undefined)
+        throw new FinError("an earlier call was refused", EXIT.refused);
       this.#ctx.run.register({ plan: counts });
       await this.#ctx.run.flushLines();
       this.#send({ t: "ack", id });
@@ -319,12 +333,15 @@ class ApplySession {
     }
     const run = this.#ctx.run;
     if (run.stopped !== undefined) return refuse("the run was stopped");
-    const send = () => this.#call(product, method, url.href, body as string | undefined, answer);
+    const send = () => this.#call(product, method, url.href, body as string | undefined);
     if (method === "GET") {
-      await send();
+      answer(await send());
       return;
     }
     if (this.#ctx.dryRun) return refuse("a write in a dry run");
+    // Once pnpm fin has refused anything (a record it could not write among them), nothing more
+    // is written, as applyPlan stops at the change whose record failed.
+    if (this.#refusal !== undefined) return refuse("an earlier call was refused");
     const change = this.#current;
     if (change === undefined) return refuse("a write the apply did not name first");
     try {
@@ -332,15 +349,26 @@ class ApplySession {
     } catch (error) {
       return refuse(error instanceof FinError ? error.message : "the run cannot send", error);
     }
-    let status: number | undefined;
+    let answered: Record<string, unknown> = { error: "no answer" };
     await run.sending(change, async () => {
-      status = await send();
+      answered = await send();
     });
-    // Recorded once Better Stack has made it, whatever the child does next (it may have been
-    // stopped meanwhile), as applyPlan records the change in flight that settles.
-    if (status !== undefined && status >= 200 && status < 300) {
-      run.step(change.kind, change.name, change.action);
+    // Recorded once Better Stack has made it, before the child hears of it, whatever the child
+    // does next (it may have been stopped meanwhile), as applyPlan records the change in flight
+    // that settles. A record that cannot be written refuses every later write.
+    const status = answered.status;
+    if (typeof status === "number" && status >= 200 && status < 300) {
+      try {
+        run.step(change.kind, change.name, change.action);
+      } catch (error) {
+        this.#refusal ??= error;
+        this.#ctx.out.error(
+          `monitoring apply: Better Stack made ${change.action} ${change.kind} ${change.name}, but its run.step could not be recorded (${this.#ctx.masker.mask(messageOf(error))}); nothing more is sent`,
+        );
+      }
     }
+    // The child is told what Better Stack did either way: an object it made has secrets to deliver.
+    answer(answered);
   }
 
   async #call(
@@ -348,8 +376,7 @@ class ApplySession {
     method: string,
     url: string,
     body: string | undefined,
-    answer: (fields: Record<string, unknown>) => void,
-  ): Promise<number | undefined> {
+  ): Promise<Record<string, unknown>> {
     let status: number;
     let text: string;
     try {
@@ -368,12 +395,10 @@ class ApplySession {
       text = await response.text();
     } catch (error) {
       const timedOut = isRecord(error) && error.name === "TimeoutError";
-      answer({ error: timedOut ? "timed out" : "no answer" });
-      return undefined;
+      return { error: timedOut ? "timed out" : "no answer" };
     }
     this.#learn(text);
-    answer({ status, body: text });
-    return status;
+    return { status, body: text };
   }
 
   /**
