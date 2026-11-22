@@ -33,26 +33,44 @@
 // .js, .mjs and .cjs allow JSX; .ts, .mts and .cts allow `<T>x` type assertions instead. Whether
 // a `/` starts a regular expression is decided by the significant token before it: after an
 // identifier, a number, a string, a template's end, `)`, `]` or `}` it divides, except after the
-// keywords that take an operand (return, typeof, instanceof, in, of, new, delete, void, throw,
-// case, do, else, yield, await, extends, default, break, continue); a `)` is judged by what it
-// closes (the condition of if, while, for or with is followed by a statement) and a `}` by whether
-// it closes a block or an expression (an object literal, a function or class expression, a
-// template substitution); a postfix `++`, `--` or TypeScript's non-null `!` leaves an expression
-// behind. TypeScript's types (annotations, `as` and `satisfies`, aliases, interfaces, type
-// arguments and parameters) are followed far enough to know where each ends, so a `<` in a type
-// is never JSX; a `<` that starts an expression in a JSX file is JSX unless it starts a generic
-// arrow function (`<T,>`, `<T extends U>`), as TypeScript decides it. JSX text is text: a `//` or
-// a quote in it is never a comment or a string.
+// keywords that take an operand (return, typeof, instanceof, in, new, delete, void, throw, case,
+// do, else, extends, default, break, continue); a `)` is judged by what it closes (the condition
+// of if, while, for or with is followed by a statement) and a `}` by whether it closes a block or
+// an expression (an object literal, a function or class expression, a template substitution; the
+// block of `catch` with no binding is a block); a postfix `++`, `--` or TypeScript's non-null `!`
+// leaves an expression behind. A line break after a statement that cannot go on (a binding with
+// no initializer, the module specifier, clause or attributes that end an import or export
+// statement, `break` or `continue` with a label, a function declaration's parameters with no body
+// yet, TypeScript's import-equals declaration and `export as namespace`) starts a statement.
+// Three words take an operand only where the syntax makes them operators, and are names
+// elsewhere, as TypeScript and JavaScript decide it: `of` in a for head after its binding,
+// `yield` in a generator's body and parameters, `await` in an async function's body and
+// parameters, a class static block and a module's top level (a .mjs or .mts file, or any file once
+// an import or export statement or `import.meta` is read). A function, an arrow function, a
+// method and a class field's initializer each read them afresh; the body of a namespace, module
+// or global declaration at the top level reads `await` as a name. Where the file alone cannot
+// decide (`await` at the top level of a file that has read no import or export yet, which a
+// module and a script read differently; a parenthesis after `async`, which is an async arrow
+// function's parameters only if `=>` follows; `global` and a `{` on a later line in a JavaScript
+// file, which TypeScript reads as a global declaration and a JavaScript engine as a block), an
+// `await` or `yield` before a token the two readings tokenize differently (`/`, `<`, `!`, `++`,
+// `--`, `{`, `of`) fails closed. TypeScript's types (annotations, `as` and `satisfies`, aliases,
+// interfaces, type arguments and parameters) are followed far enough to know where each ends, so
+// a `<` in a type is never JSX, and a `<` after a type that is no type reference (`x as number <
+// y`) is the less-than operator; a `<` that starts an expression in a JSX file is JSX unless it
+// starts a generic arrow function (`<T,>`, `<T extends U>`), as TypeScript decides it. JSX text
+// is text: a `//` or a quote in it is never a comment or a string.
 //
 // It fails closed. Text it cannot tokenize stops it with a TokenizeError that names the file,
 // line and column: an unterminated string, template, comment, regular expression or JSX element,
 // an invalid escape (outside a tagged template), a character that cannot stand in code, a
 // closing bracket that does not match, a bracket or element left open, a JSX closing tag that
 // does not match its opening tag, an HTML-like comment (`<!--`, or `-->` at a line's start),
-// which a script and a module read differently, and a version-control conflict marker. It never
-// skips a region it cannot read. Its reading is checked against TypeScript's own parser over
-// node_modules, the repository's sources and the apps' builds (scripts/test/js-tokens.oracle.
-// test.mjs).
+// which a script and a module read differently, an `await` or `yield` whose reading the file
+// alone cannot decide (above), and a version-control conflict marker. It never skips a region it
+// cannot read. Its reading is checked against TypeScript's own parser over node_modules, the
+// repository's sources, the shapes its reviews found and the apps' builds
+// (scripts/test/js-tokens.oracle.test.mjs).
 
 /**
  * @typedef {"hashbang" | "line-comment" | "block-comment" | "string" | "template"
@@ -146,26 +164,45 @@ const isIdChar = (cp, first) => {
 // --- Words ---------------------------------------------------------------------------------------
 
 // After these words an expression follows: a `/` starts a regular expression and a `{` an object.
+// `of`, `yield` and `await` are operators only where the syntax makes them so (name() decides);
+// `keyof` is one only in a type, which typeToken reads.
 const OPERAND_WORDS = new Set([
   "return",
   "typeof",
   "instanceof",
   "in",
-  "of",
   "new",
   "delete",
   "void",
   "throw",
   "case",
-  "yield",
-  "await",
   "extends",
   "default",
-  "keyof",
   "var",
   "let",
   "const",
-  "import",
+]);
+// The words that go on with an expression after a line break (binary operators), so they never
+// start a statement by automatic semicolon insertion.
+const CONTINUE_WORDS = new Set(["in", "instanceof", "of"]);
+// The keyword types, after which a `<` is never type arguments (TypeScript reads type arguments
+// only after a type reference: a name, a qualified name, a `typeof` query or an import type).
+const KEYWORD_TYPES = new Set([
+  "any",
+  "unknown",
+  "string",
+  "number",
+  "bigint",
+  "symbol",
+  "boolean",
+  "undefined",
+  "never",
+  "object",
+  "void",
+  "null",
+  "this",
+  "true",
+  "false",
 ]);
 // After these words a statement starts.
 const STATEMENT_START_WORDS = new Set(["else", "do", "try", "finally", "break", "continue"]);
@@ -263,10 +300,36 @@ const P_FOR = 8; // a for statement's head
 const P_DECORATOR = 16; // a decorator's arguments
 const P_DECORATOR_AT_START = 32; // ... of a decorator that starts a statement or member
 const P_FN_TYPE = 64; // a function type's parameters
+const P_METHOD = 1024; // a class or object method's parameters
+const P_ASYNC = 2048; // a parenthesis right after `async`: an async arrow's parameters, or a call
+const P_FOR_SEMI = 4096; // a for statement's head that has a `;` (no for-of head)
+const P_MEMBER = 8192; // a member's type parameters (`m<T>()`): its parameters may follow
+const P_IMPORT_TYPE = 16384; // the parenthesis that names an import type's module
 // Bracket and brace flags.
 const B_COMPUTED_KEY = 128; // a computed member key
 const B_DECL_PATTERN = 256; // a declaration's binding pattern
 const B_ENDS_EXPR = 512; // a block that is a function or class expression's body
+const B_MODULE = 32768; // the clause or the attributes of an import or export statement
+
+// How `await` or `yield` reads where a frame stands (Frame.aw, Frame.yi).
+const CX_NAME = 0; // an identifier
+const CX_OP = 1; // an operator: an operand follows
+const CX_UNKNOWN = 2; // either: the file alone cannot say, so an ambiguous token after it fails
+const CX_TOP = 3; // `await` at a file's top level: an operator in a module, else unknown
+
+// An import or export statement being read (Frame.mod), for where it ends.
+const M_NONE = 0;
+const M_CLAUSE = 1; // its clause: a module specifier follows `from` (or `import`)
+const M_ATTR = 2; // after the module specifier: attributes may follow (`with { ... }`)
+const M_EQ = 3; // TypeScript's import-equals: a line break after a complete operand ends it
+const M_NS = 4; // `export as namespace`: it ends after the name
+const M_FROM = 5; // after an export's clause: `from` and a module specifier may follow
+
+// A namespace, module or global declaration awaiting its body (Frame.ns).
+const NS_NONE = 0;
+const NS_BODY = 1; // TypeScript reads its body as a module block
+const NS_SPLIT = 2; // `global` then `{` on a later line in a JavaScript file: TypeScript reads a
+// module block, a JavaScript engine an expression statement and a block
 
 // Roles of a typed frame: what its closing leaves.
 const R_NESTED = 0; // inside another type
@@ -302,8 +365,17 @@ const J_VALUE = 3; // after `=`: the value
 const J_CHILDREN = 4;
 
 /**
- * @typedef {{ origin: number, state: number, ext: number, q: number, fnGroup: boolean }} TypeTop
- * @typedef {{ kind: number, expr: boolean, named: boolean }} Head
+ * @typedef {object} TypeTop
+ * @property {number} origin T_AS or T_ANNOTATION
+ * @property {number} state T_EXPECT or T_AFTER
+ * @property {number} ext `extends` awaiting their `?`
+ * @property {number} q `?` awaiting their `:`
+ * @property {boolean} fnGroup the last part was a function type's parameters
+ * @property {boolean} ref the last part was a type reference: a `<` after it is type arguments
+ * @property {string} word the last part, when it was a word or a dot
+ * @typedef {{ kind: number, expr: boolean, named: boolean, async: boolean, gen: boolean }} Head
+ * @typedef {{ aw: number, yi: number, ternary: number }} Scope an arrow function's expression
+ *   body, or a class field's initializer, read at its frame's own level
  * @typedef {object} Frame
  * @property {number} kind
  * @property {number} start where its opener stands
@@ -320,6 +392,15 @@ const J_CHILDREN = 4;
  * @property {string} tag a JSX element's name ("" for a fragment)
  * @property {number} phase a JSX element's phase (J_*)
  * @property {boolean} tagged a template substitution's template is tagged
+ * @property {number} aw how `await` reads here (CX_*; -1 until pushed: inherited)
+ * @property {number} yi how `yield` reads here (CX_*; -1 until pushed: inherited)
+ * @property {Scope[] | null} scopes arrow bodies and field initializers open at this level
+ * @property {number} bodyAw for a pending function body, how `await` reads in it
+ * @property {number} bodyYi for a pending function body, how `yield` reads in it
+ * @property {boolean} mAsync a class or object member being read is async
+ * @property {boolean} mGen a class or object member being read is a generator
+ * @property {number} mod an import or export statement being read (M_*)
+ * @property {number} ns a namespace, module or global declaration awaits its body (NS_*)
  */
 
 /**
@@ -344,6 +425,15 @@ function frame(kind, start) {
     tag: "",
     phase: J_ATTRS,
     tagged: false,
+    aw: -1,
+    yi: -1,
+    scopes: null,
+    bodyAw: CX_NAME,
+    bodyYi: CX_NAME,
+    mAsync: false,
+    mGen: false,
+    mod: M_NONE,
+    ns: NS_NONE,
   };
 }
 
@@ -400,6 +490,18 @@ export function tokenize(text, file) {
   let deco = 0;
   let decoAtStart = false;
   let significant = false;
+  // The file is a module as TypeScript decides it (.mjs and .mts always; any other file once an
+  // import or export statement, or `import.meta`, is read): `await` at its top level is an
+  // operator. Before that, the file may still be a script, and such an `await` is unknown.
+  let isModule = /\.m[jt]s$/i.test(file);
+  // The token just read ends the parameters of an async arrow function, if `=>` follows.
+  let arrowAsync = false;
+  // How `await` and `yield` read in the block body of the arrow function whose `=>` was just read.
+  let arrowAw = CX_NAME;
+  let arrowYi = CX_NAME;
+  // The token just read ends a statement that cannot go on: a line break after it starts the
+  // next statement (automatic semicolon insertion).
+  let endsStatement = false;
 
   /** The 1-based line of an offset. @param {number} at */
   const lineOf = (at) => {
@@ -414,6 +516,9 @@ export function tokenize(text, file) {
   };
 
   const top0 = frame(F_TOP, 0);
+  // At the top level `yield` is always a name, and `await` an operator only in a module.
+  top0.aw = CX_TOP;
+  top0.yi = CX_NAME;
   /** @type {Frame[]} */
   const frames = [top0];
   let top = top0;
@@ -443,8 +548,46 @@ export function tokenize(text, file) {
     return token;
   };
 
-  /** @param {Frame} f */
+  /**
+   * The innermost scope at a frame's own level: an open arrow body or field initializer, or the
+   * frame itself.
+   * @param {Frame} f
+   * @returns {{ aw: number, yi: number }}
+   */
+  const scopeOf = (f) => {
+    const scopes = f.scopes;
+    return scopes !== null && scopes.length > 0 ? (scopes[scopes.length - 1] ?? f) : f;
+  };
+  /**
+   * How `await` or `yield` reads where the frame `f` stands (CX_OP, CX_NAME or CX_UNKNOWN).
+   * @param {Frame} f
+   * @param {boolean} isAwait
+   */
+  const readingOf = (f, isAwait) => {
+    const scope = scopeOf(f);
+    const value = isAwait ? scope.aw : scope.yi;
+    if (value === CX_TOP) return isModule ? CX_OP : CX_UNKNOWN;
+    return value;
+  };
+  /**
+   * Opens a scope at the frame `f`'s own level, in which `yield` is a name and `await` reads as
+   * `aw` says: an arrow function's expression body, or a class field's initializer.
+   * @param {Frame} f
+   * @param {number} aw
+   */
+  const openScope = (f, aw) => {
+    const scope = { aw, yi: CX_NAME, ternary: f.ternary };
+    if (f.scopes === null) f.scopes = [scope];
+    else f.scopes.push(scope);
+  };
+  /**
+   * Opens a frame: what it does not set of how `await` and `yield` read, it inherits.
+   * @param {Frame} f
+   */
   const push = (f) => {
+    const scope = scopeOf(top);
+    if (f.aw < 0) f.aw = scope.aw;
+    if (f.yi < 0) f.yi = scope.yi;
     frames.push(f);
     top = f;
   };
@@ -486,6 +629,8 @@ export function tokenize(text, file) {
     memberMod = false;
     newline = false;
     significant = true;
+    arrowAsync = false;
+    endsStatement = false;
   };
 
   // --- Trivia -----------------------------------------------------------------------------------
@@ -1112,8 +1257,10 @@ export function tokenize(text, file) {
       case 46:
         return d !== 46 && !isDigit(d);
       case 91:
-      case 60:
         return !newline;
+      case 60:
+        // Type arguments follow only a type reference; after any other type, `<` is less-than.
+        return !newline && tt.ref;
       case 63:
         return tt.ext > 0 && d !== 46 && d !== 63;
       case 58:
@@ -1133,8 +1280,10 @@ export function tokenize(text, file) {
     const tt = top.tt;
     if (tt === null) return;
     top.tt = null;
-    // What follows the type reads the state it leaves; a line break before it still counts.
-    state = tt.origin === T_AS ? END : START;
+    // What follows the type reads the state it leaves; a line break before it still counts. In a
+    // for head an annotated binding goes on (`for (const x: T of y)`: `of` is the operator).
+    const forHead = top.kind === F_PAREN && (top.flags & P_FOR) !== 0;
+    state = tt.origin === T_AS || forHead ? END : START;
     declPos = state === START;
     prevWord = "";
     prevPunct = "";
@@ -1169,10 +1318,16 @@ export function tokenize(text, file) {
       if (tt !== null) {
         tt.state = f.after;
         tt.fnGroup = (f.flags & P_FN_TYPE) !== 0;
+        tt.ref = (f.flags & P_IMPORT_TYPE) !== 0;
       }
     } else if (f.role === R_ASSERT) settle(EXPR, "", "");
-    else if (f.role === R_PARAMS) settle(END, "", "");
-    else if (f.role === R_INTERFACE) settle(START, "", "");
+    else if (f.role === R_PARAMS) {
+      settle(END, "", "");
+      // A member's type parameters: its parameters follow (`m<T>() {}`).
+      if ((f.flags & P_MEMBER) !== 0) memberKey = true;
+      // An async arrow function's type parameters: its parameters follow, as after `async`.
+      if ((f.flags & P_ASYNC) !== 0) prevWord = "async";
+    } else if (f.role === R_INTERFACE) settle(START, "", "");
   };
 
   /**
@@ -1183,7 +1338,12 @@ export function tokenize(text, file) {
   const typeToken = (c, tt) => {
     const role = tt === null ? R_NESTED : R_TOP;
     const expect = tt !== null && tt.state === T_EXPECT;
-    if (tt !== null) tt.fnGroup = false;
+    const prevTypeWord = tt === null ? "" : tt.word;
+    if (tt !== null) {
+      tt.fnGroup = false;
+      tt.ref = false;
+      tt.word = "";
+    }
     if (c === 34 || c === 39) {
       string();
       if (tt !== null) tt.state = T_AFTER;
@@ -1203,6 +1363,10 @@ export function tokenize(text, file) {
       const { value } = identifier();
       emit("name", start, pos, value);
       if (tt !== null) {
+        tt.word = value;
+        // A type reference: a name that is no keyword type, any name a `typeof` queries, and the
+        // last name of a qualified name (`A.string`).
+        tt.ref = !KEYWORD_TYPES.has(value) || prevTypeWord === "typeof" || prevTypeWord === ".";
         if (expect) tt.state = TYPE_PREFIX_WORDS.has(value) ? T_EXPECT : T_AFTER;
         else if (value === "extends") {
           tt.ext++;
@@ -1221,6 +1385,7 @@ export function tokenize(text, file) {
       case 40: {
         const f = openTyped(F_TYPE_PAREN, role, T_AFTER);
         if (expect && functionTypeAt(pos)) f.flags |= P_FN_TYPE;
+        if (prevTypeWord === "import") f.flags |= P_IMPORT_TYPE;
         punct("(");
         push(f);
         return;
@@ -1281,6 +1446,7 @@ export function tokenize(text, file) {
     }
     punct(value);
     if (tt !== null) {
+      if (value === ".") tt.word = ".";
       if (value === "?") {
         tt.ext--;
         tt.q++;
@@ -1294,7 +1460,7 @@ export function tokenize(text, file) {
    * @param {number} origin
    */
   const startType = (origin) => {
-    top.tt = { origin, state: T_EXPECT, ext: 0, q: 0, fnGroup: false };
+    top.tt = { origin, state: T_EXPECT, ext: 0, q: 0, fnGroup: false, ref: false, word: "" };
   };
 
   // --- JSX --------------------------------------------------------------------------------------
@@ -1480,6 +1646,7 @@ export function tokenize(text, file) {
    */
   const name = (start) => {
     const wasAfterDot = afterDot;
+    const before = prevWord;
     const { value, escaped } = identifier();
     emit("name", start, pos, value);
     const f = top;
@@ -1495,6 +1662,7 @@ export function tokenize(text, file) {
     }
     if (memberPosition()) {
       const modifier = MEMBER_MODIFIERS.has(value) && idOrKeyNext(pos);
+      if (modifier && value === "async") f.mAsync = true;
       settle(END, "", "");
       memberKey = true;
       memberMod = modifier;
@@ -1520,6 +1688,8 @@ export function tokenize(text, file) {
       settle(END, "", "");
       return;
     }
+    // A declaration's binding name: never a keyword operator.
+    const binding = f.decl === D_BINDING;
     if (f.decl === D_BINDING) f.decl = D_AFTER;
     else if (f.decl === D_AFTER) f.decl = D_NONE;
     switch (value) {
@@ -1539,19 +1709,75 @@ export function tokenize(text, file) {
       case "function":
       case "class": {
         if (keyNext(pos, value === "class")) break;
-        f.head = { kind: value === "function" ? H_FN : H_CLASS, expr: !decl, named: false };
+        f.head = {
+          kind: value === "function" ? H_FN : H_CLASS,
+          expr: !decl,
+          named: false,
+          // `async [no line break] function`
+          async: value === "function" && before === "async" && !newline,
+          gen: false,
+        };
         settle(EXPR, "", "");
         return;
       }
       case "interface":
       case "type": {
         if (!decl || !idStartsAt(peek(pos, true))) break;
-        f.head = { kind: value === "type" ? H_ALIAS : H_INTERFACE, expr: false, named: false };
+        f.head = {
+          kind: value === "type" ? H_ALIAS : H_INTERFACE,
+          expr: false,
+          named: false,
+          async: false,
+          gen: false,
+        };
         settle(EXPR, "", "");
+        return;
+      }
+      case "namespace":
+      case "module": {
+        // A namespace or module declaration (`namespace A.B {`, `declare module "m" {`): its
+        // body is a module block (openBrace).
+        const next = peek(pos, true);
+        if (
+          decl &&
+          next >= 0 &&
+          (idStartsAt(next) || text.charAt(next) === '"' || text.charAt(next) === "'")
+        ) {
+          f.ns = NS_BODY;
+        }
+        break;
+      }
+      case "global": {
+        // A global augmentation (`declare global {`): TypeScript reads `global` and a `{` on any
+        // later line, where a statement starts, as one, in every file. In a JavaScript file with a
+        // line break between them a JavaScript engine reads `global;` and a block instead.
+        const next = peek(pos);
+        if (atStart && text.charAt(next) === "{") {
+          f.ns = typescript || peek(pos, true) === next ? NS_BODY : NS_SPLIT;
+        }
+        break;
+      }
+      case "import": {
+        const next = peek(pos);
+        const c = text.charAt(next);
+        if (c === "." && wordAt(peek(next + 1)) === "meta") isModule = true;
+        else if (atStart && c !== "(" && c !== ".") {
+          f.mod = M_CLAUSE;
+          // An import statement makes the file a module, except TypeScript's import-equals
+          // declaration of an entity name.
+          if (f.kind === F_TOP && !importEqualsEntity(next)) isModule = true;
+        }
+        settle(EXPR, "import", "");
         return;
       }
       case "export":
         if (atStart) {
+          const next = peek(pos);
+          const word = wordAt(next);
+          // Every export statement makes the file a module, except `export as namespace N`.
+          if (f.kind === F_TOP && word !== "as") isModule = true;
+          if (word === "as") f.mod = M_NS;
+          else if (exportClauseAt(next)) f.mod = M_CLAUSE;
           settle(START, "export", "");
           return;
         }
@@ -1564,13 +1790,42 @@ export function tokenize(text, file) {
           const word = wordAt(next);
           if (value === "declare" || word === "class" || word === "function") {
             const keep = state;
-            settle(keep === START ? START : EXPR, "", "");
+            settle(keep === START ? START : EXPR, value, "");
             declPos = true;
             return;
           }
         }
         break;
       }
+      case "await":
+      case "yield": {
+        const reading = binding ? CX_NAME : readingOf(f, value === "await");
+        if (reading === CX_OP) {
+          settle(EXPR, value, "");
+          return;
+        }
+        if (reading === CX_UNKNOWN) {
+          unknownReading(start, value);
+          settle(EXPR, value, "");
+          return;
+        }
+        // An identifier; never a restricted production's keyword.
+        settle(END, "", "");
+        return;
+      }
+      case "of":
+        // An operator only in a for head, after its binding or left-hand side.
+        if (
+          !binding &&
+          state === END &&
+          f.kind === F_PAREN &&
+          (f.flags & P_FOR) !== 0 &&
+          (f.flags & P_FOR_SEMI) === 0
+        ) {
+          settle(EXPR, "of", "");
+          return;
+        }
+        break;
       case "default":
         if (prevWord === "export") {
           settle(EXPR, "default", "");
@@ -1605,12 +1860,83 @@ export function tokenize(text, file) {
           settle(START, value, "");
           return;
         }
+        // `catch {` with no binding opens a block, as `try {` does; `catch (e)` its binding.
+        if (value === "catch" && text.charAt(peek(pos)) === "{") {
+          settle(START, value, "");
+          return;
+        }
         if (PAREN_KEYWORDS.has(value) || value === "switch" || value === "catch") {
           settle(EXPR, value, "");
           return;
         }
     }
+    const brokeLine = newline;
     settle(END, value, "");
+    // `async x =>`: the parameter of an async arrow function, if `=>` follows.
+    arrowAsync = before === "async" && !brokeLine;
+    // A statement that ends after this name: `break label`, `continue label` and `export as
+    // namespace N`.
+    if ((before === "break" || before === "continue") && !brokeLine) endsStatement = true;
+    if (f.mod === M_NS && before === "namespace") {
+      f.mod = M_NONE;
+      endsStatement = true;
+    }
+  };
+
+  /**
+   * Whether an import statement whose clause starts at `p` is TypeScript's import-equals
+   * declaration of an entity name (`x = N.y` after the keyword, `type` allowed before `x`), which
+   * does not make the file a module; one whose right-hand side calls `require` does.
+   * @param {number} p
+   */
+  const importEqualsEntity = (p) => {
+    let q = p;
+    if (wordAt(q) === "type" && idStartsAt(peek(q + 4))) q = peek(q + 4);
+    if (!idStartsAt(q)) return false;
+    q = peek(q + wordAt(q).length);
+    if (text.charAt(q) !== "=" || text.charAt(q + 1) === "=" || text.charAt(q + 1) === ">") {
+      return false;
+    }
+    const target = peek(q + 1);
+    return !(wordAt(target) === "require" && text.charAt(peek(target + 7)) === "(");
+  };
+  /**
+   * Whether an `export` statement whose rest starts at `p` has a clause a module specifier may
+   * follow: `export {`, `export *`, `export type {` or `export type *`.
+   * @param {number} p
+   */
+  const exportClauseAt = (p) => {
+    let q = p;
+    if (wordAt(q) === "type") q = peek(q + 4);
+    const c = text.charAt(q);
+    return c === "{" || c === "*";
+  };
+  /**
+   * After an `await` or `yield` whose reading the file alone cannot decide (an operator in a
+   * module or an async function or generator, a name elsewhere), refuses a next token that the two
+   * readings tokenize differently: `/`, `<`, `!`, `++`, `--`, `{` and `of`.
+   * @param {number} start the word's offset
+   * @param {string} word
+   */
+  const unknownReading = (start, word) => {
+    const p = peek(pos);
+    const c = text.charAt(p);
+    const d = text.charAt(p + 1);
+    const next = wordAt(p) === "of" ? "of" : c;
+    if (
+      c === "/" ||
+      c === "<" ||
+      (c === "!" && d !== "=") ||
+      (c === "+" && d === "+") ||
+      (c === "-" && d === "-") ||
+      c === "{" ||
+      next === "of"
+    ) {
+      fail(
+        start,
+        `${word === "await" ? "an" : "a"} ${word} before "${next}" that may be an operator or a name (the file alone does not say whether it is a module, whether a parenthesis after async holds an async arrow function's parameters, or whether global and a block on a later line are a global declaration)`,
+      );
+    }
   };
 
   /**
@@ -1646,6 +1972,15 @@ export function tokenize(text, file) {
     );
   };
 
+  /** The last token that is no comment, or undefined. */
+  const lastToken = () => {
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const t = tokens[i];
+      if (t !== undefined && t.kind !== "line-comment" && t.kind !== "block-comment") return t;
+    }
+    return undefined;
+  };
+
   /** Opens a `{` in code. */
   const openBrace = () => {
     const f = top;
@@ -1653,6 +1988,8 @@ export function tokenize(text, file) {
     const head = f.head;
     let kind = F_BLOCK;
     let flags = 0;
+    let aw = -1;
+    let yi = -1;
     if (head !== null && (head.kind === H_CLASS || head.kind === H_INTERFACE)) {
       f.head = null;
       if (head.kind === H_INTERFACE) {
@@ -1664,17 +2001,49 @@ export function tokenize(text, file) {
       if (head.expr) flags = B_ENDS_EXPR;
     } else if (f.body !== 0) {
       if (f.body === 2) flags = B_ENDS_EXPR;
+      aw = f.bodyAw;
+      yi = f.bodyYi;
     } else if (prevPunct === "=>") {
       kind = F_BLOCK;
+      aw = arrowAw;
+      yi = arrowYi;
     } else if (state === EXPR) {
       kind = F_OBJECT;
       if (f.decl === D_BINDING) flags = B_DECL_PATTERN;
     }
+    const last = lastToken();
+    if (f.kind === F_CLASS && memberKey && last?.kind === "name" && last.value === "static") {
+      // A class static block: `await` is an operator in it, `yield` a name.
+      aw = CX_OP;
+      yi = CX_NAME;
+    } else if (f.ns !== NS_NONE && scopeOf(f).aw === CX_TOP) {
+      // A namespace's, module's or global augmentation's body at a file's top level: TypeScript
+      // reads `await` in it as a name (as an operator only in the file's own top-level
+      // statements). Elsewhere `await` and `yield` read in it as around it. Where a JavaScript
+      // engine reads a block instead, the two readings differ: unknown.
+      aw = f.ns === NS_SPLIT ? CX_UNKNOWN : CX_NAME;
+    }
+    // The clause of an import or export statement (after the keyword, `type` or the default
+    // binding's comma), or its attributes (after `with`): a line break after it may end the
+    // statement.
+    if (
+      (f.mod === M_CLAUSE &&
+        (prevWord === "import" ||
+          prevWord === "export" ||
+          prevWord === "type" ||
+          prevPunct === ",")) ||
+      (f.mod === M_ATTR && (prevWord === "with" || prevWord === "assert"))
+    ) {
+      flags |= B_MODULE;
+    }
     f.head = null;
     f.body = 0;
+    f.ns = NS_NONE;
     punct("{");
     const g = frame(kind, start);
     g.flags = flags;
+    g.aw = aw;
+    g.yi = yi;
     push(g);
     settle(kind === F_OBJECT ? EXPR : START, "", "{");
   };
@@ -1697,9 +2066,13 @@ export function tokenize(text, file) {
     if (f.kind === F_OBJECT) {
       settle(END, "", "");
       if ((f.flags & B_DECL_PATTERN) !== 0 && parent.decl === D_BINDING) parent.decl = D_AFTER;
-      return;
+    } else settle((f.flags & B_ENDS_EXPR) !== 0 ? END : START, "", "}");
+    if ((f.flags & B_MODULE) !== 0) {
+      // The clause of an import or export statement (`from` may follow it) or its attributes
+      // (nothing may).
+      endsStatement = true;
+      parent.mod = parent.mod === M_CLAUSE ? M_FROM : M_NONE;
     }
-    settle((f.flags & B_ENDS_EXPR) !== 0 ? END : START, "", "}");
   };
 
   /** Opens a `(` in code. */
@@ -1708,9 +2081,25 @@ export function tokenize(text, file) {
     const g = frame(F_PAREN, pos);
     if (forPending) g.flags |= P_FOR | P_KEYWORD;
     else if (PAREN_KEYWORDS.has(prevWord)) g.flags |= P_KEYWORD;
-    if (f.head !== null && f.head.kind === H_FN) {
+    const head = f.head;
+    if (head !== null && head.kind === H_FN) {
+      // A function's parameters read `await` and `yield` as its body does.
       g.flags |= P_FN_PARAMS;
-      if (f.head.expr) g.flags |= P_FN_EXPR;
+      if (head.expr) g.flags |= P_FN_EXPR;
+      g.aw = head.async ? CX_OP : CX_NAME;
+      g.yi = head.gen ? CX_OP : CX_NAME;
+    } else if (memberKey && (f.kind === F_CLASS || f.kind === F_OBJECT)) {
+      // A method's parameters: its modifiers decide.
+      g.flags |= P_FN_PARAMS | P_METHOD;
+      g.aw = f.mAsync ? CX_OP : CX_NAME;
+      g.yi = f.mGen ? CX_OP : CX_NAME;
+    } else if (prevWord === "async" && !newline) {
+      // An async arrow function's parameters (`await` an operator, `yield` a name) or a call's
+      // arguments (as around it): where the two differ, unknown until `=>` would say.
+      g.flags |= P_ASYNC;
+      const scope = scopeOf(f);
+      g.aw = scope.aw === CX_OP || scope.aw === CX_TOP ? scope.aw : CX_UNKNOWN;
+      g.yi = scope.yi === CX_NAME ? CX_NAME : CX_UNKNOWN;
     }
     if (deco === 1 || deco === 2) {
       g.flags |= P_DECORATOR;
@@ -1730,7 +2119,11 @@ export function tokenize(text, file) {
     if (f.kind !== F_PAREN) mismatch(")", f);
     punct(")");
     pop();
-    if ((f.flags & P_FN_PARAMS) !== 0) top.body = (f.flags & P_FN_EXPR) !== 0 ? 2 : 1;
+    if ((f.flags & P_FN_PARAMS) !== 0) {
+      top.body = (f.flags & P_FN_EXPR) !== 0 ? 2 : 1;
+      top.bodyAw = f.aw;
+      top.bodyYi = f.yi;
+    }
     if ((f.flags & P_KEYWORD) !== 0) {
       settle(START, "", ")");
       return;
@@ -1741,15 +2134,24 @@ export function tokenize(text, file) {
     }
     settle(END, "", ")");
     closedParen = (f.flags & P_DECORATOR) === 0;
+    arrowAsync = (f.flags & P_ASYNC) !== 0;
+    // A function declaration's parameters with no body after them on the line (TypeScript's
+    // overloads and `declare function f()`): a line break ends the statement.
+    if ((f.flags & (P_FN_PARAMS | P_FN_EXPR | P_METHOD)) === P_FN_PARAMS) endsStatement = true;
   };
 
   /** Reads a `:` in code. */
   const colon = () => {
     const f = top;
     const afterParen = closedParen;
+    const async = arrowAsync;
     punct(":");
     if (f.ternary > 0) {
       f.ternary--;
+      // The arrow bodies opened inside this conditional's middle end here.
+      const scopes = f.scopes;
+      while (scopes !== null && (scopes[scopes.length - 1]?.ternary ?? -1) > f.ternary)
+        scopes.pop();
       settle(EXPR, "", ":");
       return;
     }
@@ -1761,6 +2163,8 @@ export function tokenize(text, file) {
     if (afterParen) {
       settle(EXPR, "", ":");
       startType(T_ANNOTATION);
+      // A return type: an async arrow function's `=>` may follow it.
+      arrowAsync = async;
       return;
     }
     switch (f.kind) {
@@ -1800,6 +2204,30 @@ export function tokenize(text, file) {
     }
     if (!marker) top.ternary++;
     settle(EXPR, "", "?");
+    // An optional method's parameters may follow (`m?() {}`).
+    if (optional) memberKey = true;
+  };
+
+  /**
+   * Whether the `<` at `at` has a matching `>` followed by `(`, without reading anything: angle
+   * brackets counted (an arrow's `=>` is none), quoted text skipped.
+   * @param {number} at
+   */
+  const angleThenParen = (at) => {
+    let depth = 0;
+    for (let p = at; p < n; p++) {
+      const ch = text.charCodeAt(p);
+      if (ch === 60) depth++;
+      else if (ch === 62 && text.charCodeAt(p - 1) !== 61) {
+        depth--;
+        if (depth === 0) return text.charAt(peek(p + 1)) === "(";
+      } else if (ch === 34 || ch === 39 || ch === 96) {
+        const close = text.indexOf(text.charAt(p), p + 1);
+        if (close < 0) return false;
+        p = close;
+      }
+    }
+    return false;
   };
 
   /** Reads a `<` in code. */
@@ -1816,6 +2244,24 @@ export function tokenize(text, file) {
       (head !== null && (head.kind !== H_ALIAS || head.named))
     ) {
       const angle = openTyped(F_TYPE_ANGLE, R_PARAMS, T_AFTER);
+      if (memberKey && (top.kind === F_CLASS || top.kind === F_OBJECT)) angle.flags |= P_MEMBER;
+      punct("<");
+      push(angle);
+      return;
+    }
+    // TypeScript's generic async arrow function, `async <T>(x: T) => ...`: a name after the `<`
+    // in .ts, and in .tsx the forms that are no JSX (`<T,>`), as TypeScript decides it, with a
+    // parenthesis after the matching `>` (else `async` is a name compared with `<`).
+    if (
+      state === END &&
+      prevWord === "async" &&
+      !newline &&
+      typescript &&
+      (jsx ? genericArrowAt() : idStartsAt(peek(pos + 1))) &&
+      angleThenParen(pos)
+    ) {
+      const angle = openTyped(F_TYPE_ANGLE, R_PARAMS, T_AFTER);
+      angle.flags |= P_ASYNC;
       punct("<");
       push(angle);
       return;
@@ -1847,6 +2293,62 @@ export function tokenize(text, file) {
       state = START;
       declPos = true;
     }
+    if (newline && state === END) {
+      const d = text.charCodeAt(pos + 1);
+      const word = idStartsAt(pos) ? wordAt(pos) : "";
+      // After a statement that cannot go on, the line break ends it: a binding with no
+      // initializer (unless `=`, `,` or `:` goes on with it), the module specifier, clause or
+      // attributes that end an import or export statement, TypeScript's import-equals
+      // declaration (unless a dot goes on with its name), a labelled `break` or `continue`, a
+      // bodiless function declaration and `export as namespace N`.
+      const goesOnDecl = (c === 61 && d !== 61 && d !== 62) || c === 44 || c === 58;
+      const declEnds = f.decl === D_AFTER && f.kind !== F_PAREN && !goesOnDecl;
+      const eqEnds = f.mod === M_EQ && !(c === 46 && !isDigit(d));
+      if (endsStatement || eqEnds || declEnds) {
+        state = START;
+        declPos = true;
+        if (eqEnds) f.mod = M_NONE;
+        if (declEnds) f.decl = D_NONE;
+      }
+      // A token that cannot go on with the expression before the line break starts a statement
+      // (automatic semicolon insertion): the arrow bodies and field initializers open at this
+      // level end, and so does a declaration (a comma after it separates no bindings). A `{`
+      // after a function's parameters, and anything after a class or function head, goes on.
+      const goesOnHead = f.head !== null || (c === 123 && f.body !== 0);
+      const asi =
+        !goesOnHead &&
+        (idStartsAt(pos)
+          ? !CONTINUE_WORDS.has(word)
+          : c === 34 ||
+            c === 39 ||
+            isDigit(c) ||
+            (c === 46 && isDigit(d)) ||
+            c === 123 ||
+            c === 35 ||
+            c === 64 ||
+            c === 126 ||
+            (c === 33 && d !== 61) ||
+            ((c === 43 || c === 45) && d === c));
+      if (asi) {
+        f.scopes = null;
+        if (f.kind !== F_PAREN) f.decl = D_NONE;
+      }
+    }
+    // An import or export statement: what may follow its clause or its module specifier.
+    if (f.mod === M_FROM) f.mod = idStartsAt(pos) && wordAt(pos) === "from" ? M_CLAUSE : M_NONE;
+    else if (f.mod === M_ATTR && prevWord !== "with" && prevWord !== "assert") {
+      const word = idStartsAt(pos) ? wordAt(pos) : "";
+      if (word !== "with" && word !== "assert") f.mod = M_NONE;
+    }
+    // A namespace or module declaration's head goes on only with names, dots and a string.
+    if (f.ns !== NS_NONE && c !== 123 && c !== 46 && c !== 34 && c !== 39 && !idStartsAt(pos)) {
+      f.ns = NS_NONE;
+    }
+    // A class or object member starts: its modifiers are read afresh.
+    if ((f.kind === F_CLASS || f.kind === F_OBJECT) && !memberMod && memberPosition()) {
+      f.mAsync = false;
+      f.mGen = false;
+    }
     // A pending function body survives only its return type; a head, only its own parts.
     if (f.body !== 0 && c !== 123 && c !== 58) f.body = 0;
     const head = f.head;
@@ -1869,9 +2371,17 @@ export function tokenize(text, file) {
     }
     if (c === 34 || c === 39) {
       const key = memberPosition();
+      const before = prevWord;
       string();
       settle(END, "", "");
       memberKey = key;
+      if (f.mod === M_CLAUSE && (before === "from" || before === "import")) {
+        // A module specifier: only attributes may follow it.
+        f.mod = M_ATTR;
+        endsStatement = true;
+      } else if (f.ns !== NS_NONE && before === "module") {
+        endsStatement = true; // `declare module "m"`
+      }
       return;
     }
     if (c === 96) {
@@ -1980,6 +2490,10 @@ export function tokenize(text, file) {
         f.decl = D_NONE;
         f.head = null;
         f.body = 0;
+        f.scopes = null;
+        f.mod = M_NONE;
+        f.ns = NS_NONE;
+        if (f.kind === F_PAREN && (f.flags & P_FOR) !== 0) f.flags |= P_FOR_SEMI;
         settle(
           f.kind === F_TOP || f.kind === F_BLOCK || f.kind === F_CLASS ? START : EXPR,
           "",
@@ -1988,6 +2502,8 @@ export function tokenize(text, file) {
         return;
       case ",":
         if (f.decl === D_AFTER || f.decl === D_INIT) f.decl = D_BINDING;
+        // An arrow function's expression body ends at a comma of its own level.
+        f.scopes = null;
         settle(EXPR, "", ",");
         return;
       case "=":
@@ -1998,8 +2514,21 @@ export function tokenize(text, file) {
           startType(T_ANNOTATION);
           return;
         }
+        // A class field's initializer: `await` and `yield` are names in it.
+        if (f.kind === F_CLASS) openScope(f, CX_NAME);
+        if (f.mod === M_CLAUSE) f.mod = M_EQ; // TypeScript's import-equals declaration
         settle(EXPR, "", "=");
         return;
+      case "=>": {
+        // An arrow function's body: `await` is an operator in an async one's, `yield` a name.
+        const aw = arrowAsync ? CX_OP : CX_NAME;
+        settle(EXPR, "", "=>");
+        if (text.charCodeAt(peek(pos)) === 123) {
+          arrowAw = aw;
+          arrowYi = CX_NAME;
+        } else openScope(f, aw);
+        return;
+      }
       case ".":
       case "?.":
         settle(EXPR, "", value);
@@ -2007,7 +2536,10 @@ export function tokenize(text, file) {
         if (deco === 2) deco = 3;
         return;
       case "*":
+        // `function*`: a generator.
+        if (f.head !== null && f.head.kind === H_FN && !f.head.named) f.head.gen = true;
         if (memberPosition()) {
+          f.mGen = true;
           settle(EXPR, "", "*");
           memberMod = true;
           return;

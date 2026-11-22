@@ -187,6 +187,378 @@ describe("js-tokens: regular expression or division, by the keyword before it", 
   });
 });
 
+describe("js-tokens: of, keyof, yield and await are operators only where the syntax makes them so", () => {
+  test("of as a name divides; a literal after it is read", () => {
+    assert.deepEqual(regexes("var of = 6; var r = of / 2 / 3;"), []);
+    assert.ok(divides("var of = 6; var r = of / 2 / 3;"));
+    assert.deepEqual(literals('var of = 1; var r = [of / 1, "evil.example", 1 / 1];'), [
+      'string:"evil.example"',
+    ]);
+    assert.deepEqual(
+      literals(
+        'import { of } from "rxjs";\nexport const half = of / 2; const sep = "//"; fetch("https://third.example/x");',
+      ),
+      ['string:"rxjs"', 'string:"//"', 'string:"https://third.example/x"'],
+    );
+    assert.deepEqual(literals('const of=4;x=of/2;fetch("https:\\/\\/third.example");y=of/(2);'), [
+      'string:"https:\\/\\/third.example"',
+    ]);
+  });
+
+  test("of as a mangled name in a minified bundle", () => {
+    assert.deepEqual(literals("n.push(of/-t.length,`https:third-701.example`),n.push(of/3,`s`);"), [
+      "template:`https:third-701.example`",
+      "template:`s`",
+    ]);
+    assert.deepEqual(literals("const as=6,is=2,of=1;r=as/is/of;q=of/2,`s705`,of/3;"), [
+      "template:`s705`",
+    ]);
+  });
+
+  test("of is an operator in a for-of head, after its binding or left-hand side", () => {
+    assert.deepEqual(regexes("for (const m of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (const of of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (of of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (const [a, b] of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (const { a } of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("for (x.y of /re/.exec(s)) {}"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { for await (const x of /re/.exec(s)) {} }"), [
+      "/re/",
+    ]);
+    assert.deepEqual(literals('for (var of = 0; of < n; of++) { s += "it\'s"; }'), [
+      'string:"it\'s"',
+    ]);
+    assert.deepEqual(regexes("for (var i = 0; i < of / 2 / 1; i++) {}"), []);
+  });
+
+  test("of is an operator after an annotated binding in a TypeScript for head", () => {
+    assert.deepEqual(regexes("for (const x: T of /re/.exec(s)) {}", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("for (const x: of of /re/.exec(s)) {}", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("for (const [a, b]: T of /re/.exec(s)) {}", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("for (let x: T = of / 2 / 1; ;) {}", "x.ts"), []);
+    assert.deepEqual(regexes("for (const f = (): T => { return /re/ }; ;) {}", "x.ts"), ["/re/"]);
+  });
+
+  test("keyof as a name divides; in a type it is read by the type", () => {
+    assert.deepEqual(regexes("const keyof = 6; const r = keyof / 2 / 3;", "x.ts"), []);
+    assert.deepEqual(regexes("var keyof = 6; var r = keyof / 2 / 3;"), []);
+    assert.deepEqual(regexes("type K = keyof T;\n/re/.test(s);", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("let k: keyof T = x;\n/re/.test(s);", "x.ts"), ["/re/"]);
+  });
+
+  test("yield is an operator in a generator's body and parameters, a name elsewhere", () => {
+    assert.deepEqual(regexes("function* g() { yield /re/; }"), ["/re/"]);
+    assert.deepEqual(regexes("var g = function* () { yield /re/; };"), ["/re/"]);
+    assert.deepEqual(regexes("class A { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("var o = { *g() { yield /re/; } };"), ["/re/"]);
+    assert.deepEqual(regexes("class A { static async *[Symbol.iterator]() { yield /re/; } }"), [
+      "/re/",
+    ]);
+    assert.deepEqual(regexes("function* g(a = yield /re/) {}"), ["/re/"]);
+    assert.deepEqual(regexes("function* g() { var r = yield\n/re/.test(s); }"), ["/re/"]);
+    assert.deepEqual(regexes("function f() { var yield = 6; return yield / 2 / 3; }"), []);
+    assert.deepEqual(regexes("var yield = 2, t = 1;\nz = yield / t / 1;", "x.cjs"), []);
+    assert.deepEqual(regexes("function g() { var r = yield\n/ 2 / 3; }"), []);
+    assert.deepEqual(regexes("var r = yield / 2 / 3;"), []);
+    // A function, arrow function or class field inside a generator reads it as a name.
+    assert.deepEqual(regexes("function* g() { function h() { return yield / 2 / 3; } }"), []);
+    assert.deepEqual(regexes("function* g() { var h = () => yield / 2 / 3; }"), []);
+    assert.deepEqual(regexes("function* g() { var h = () => { return yield / 2 / 3; }; }"), []);
+    assert.deepEqual(
+      regexes("var o = { get a() { return yield / 2 / 3; }, *b() { yield /re/; } };"),
+      ["/re/"],
+    );
+  });
+
+  test("await is an operator in an async body and parameters, a name elsewhere", () => {
+    assert.deepEqual(regexes("async function f() { await /re/; }"), ["/re/"]);
+    assert.deepEqual(
+      regexes("function f() { var g = async function () { return await /re/; }; }"),
+      ["/re/"],
+    );
+    assert.deepEqual(regexes("const f = async () => await /re/;"), ["/re/"]);
+    assert.deepEqual(regexes("const f = async x => await /re/;"), ["/re/"]);
+    assert.deepEqual(regexes("const f = async (x) => { await /re/; };"), ["/re/"]);
+    assert.deepEqual(regexes("class A { async m() { await /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("var o = { async m() { return await /re/; } };"), ["/re/"]);
+    assert.deepEqual(regexes("async function f(a = await /re/) {}"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { var r = await\n/re/.test(s); }"), ["/re/"]);
+    assert.deepEqual(regexes("class A { static { await /re/; } }"), ["/re/"]);
+    assert.deepEqual(
+      regexes("async function f() { var o = { [await /re/]: 1, a: await /re/ }; }"),
+      ["/re/", "/re/"],
+    );
+    // A function, a non-async arrow function or method, or a class field reads it as a name.
+    assert.deepEqual(regexes("var await = 6; function f() { return await / 2 / 3; }"), []);
+    assert.deepEqual(regexes("async function f() { function g() { return await / 2 / 3; } }"), []);
+    assert.deepEqual(regexes("async function f() { var g = () => await / 2 / 3; }"), []);
+    assert.deepEqual(regexes("async function f() { var g = x => await / 2 / 3; }"), []);
+    assert.deepEqual(regexes("async function f() { class A { x = await / 2 / 3; } }"), []);
+    assert.deepEqual(
+      regexes("async function f() { var o = { m() { return await / 2 / 3; } }; }"),
+      [],
+    );
+    assert.deepEqual(
+      regexes("function f() { var r = async\nfunction g() { return await / 2 / 3; } }"),
+      [],
+    );
+    assert.deepEqual(regexes("function f() { var g = async\nx => await / 2 / 3; }"), []);
+  });
+
+  test("an arrow function's expression body ends at a comma, a conditional's colon or a new statement", () => {
+    assert.deepEqual(regexes("async function f() { var g = () => 1, h = await /re/; }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { g(() => 1, await /re/); }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { var g = c ? () => 1 : await /re/; }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { var g = () => c ? 1 : await / 2 / 3; }"), []);
+    assert.deepEqual(regexes("async function f() { var g = () => 1\nawait /re/; }"), ["/re/"]);
+    assert.deepEqual(
+      regexes("async function f() { class A { x = 1\ny = () => 2\nasync m() { await /re/ } } }"),
+      ["/re/"],
+    );
+    // `~` and a number such as `.5` cannot go on with an expression either.
+    assert.deepEqual(regexes("async function f() { var g = () => a\n~await /re/ }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { g = () => a\n.5, await /re/ }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { var g = () => a\n.b / 2 / 3 }"), []);
+  });
+
+  test("a statement that a line break ends ends its declaration: a comma after it separates no bindings", () => {
+    assert.deepEqual(regexes("async function f() { var a = 1\nx = 2, await /re/ }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { let a = 1\nfoo(), await /re/ }"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { var g = () => a\n.5, await /re/ }"), ["/re/"]);
+    // A name that starts with a letter outside ASCII (U+03C0).
+    assert.deepEqual(regexes("async function f() { var g = () => a\n\u03c0, await /re/ }"), [
+      "/re/",
+    ]);
+    assert.deepEqual(regexes("async function f() { var g = () => a\n\\u0061, await /re/ }"), [
+      "/re/",
+    ]);
+    // A `{` after a function's parameters or anything after a class head goes on.
+    assert.deepEqual(
+      regexes("async function f() { var a = function ()\n{ return 1 }, b = await /re/ }"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("async function f() { var C = () => class extends B\n{ [await / 2 / 3]() {} } }"),
+      [],
+    );
+  });
+
+  test("TypeScript: async methods and arrow functions with type parameters, optional methods", () => {
+    assert.deepEqual(
+      regexes("function f() { const g = async <T,>(x: T) => await /re/; }", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("function f() { const g = async <T>(x: T): Promise<T> => await /re/; }", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("function f() { const g = async <T,>(x: T) => await /re/; }", "x.tsx"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("function f() { const g = async (x): Promise<number> => await /re/; }", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("function f() { class A { async m<T>() { return await /re/; } } }", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("function f() { class A { async m?() { return await /re/; } } }", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(
+      regexes("async function f() { class A { m?() { return await / 2 / 3; } } }", "x.ts"),
+      [],
+    );
+    assert.deepEqual(regexes("const async = 1; const r = async < b && c > /re/.exec(s);", "x.ts"), [
+      "/re/",
+    ]);
+  });
+
+  test("await at the top level: an operator in a module", () => {
+    assert.deepEqual(regexes("await /re/.test(s);", "x.mjs"), ["/re/"]);
+    assert.deepEqual(regexes("await /re/.test(s);", "x.mts"), ["/re/"]);
+    assert.deepEqual(regexes('import x from "y";\nawait /re/.test(x);'), ["/re/"]);
+    assert.deepEqual(regexes("export {};\nawait /re/.test(s);", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes('import x = require("y");\nawait /re/.test(x);', "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("import.meta;\nawait /re/.test(s);"), ["/re/"]);
+    // In a module, a namespace's body and a function's read it as a name.
+    assert.deepEqual(regexes("export {};\nnamespace N { var r = await / 2 / 3; }", "x.ts"), []);
+    assert.deepEqual(regexes("export function f() { var r = await / 2 / 3; }"), []);
+    // So do a module declaration's and a global augmentation's, and one nested in either.
+    for (const src of [
+      "export {};\ndeclare module 'm' { var r = await / 2 / 3 }",
+      "export {};\ndeclare global { var r = await / 2 / 3 }",
+      "export {};\nglobal { var r = await / 2 / 3 }",
+      "export {};\nglobal\n{ var r = await / 2 / 3 }",
+      "export {};\nnamespace A { namespace B { var r = await / 2 / 3 } }",
+      "declare module 'm' { global { var r = await / 2 / 3 } }",
+    ]) {
+      assert.deepEqual(regexes(src, "x.ts"), [], src);
+    }
+    assert.deepEqual(regexes("namespace A { var r = await / 2 / 3 }", "x.mts"), []);
+    // Elsewhere their bodies read `await` and `yield` as around them.
+    assert.deepEqual(regexes("async function f() { namespace N { await /re/ } }", "x.ts"), [
+      "/re/",
+    ]);
+    assert.deepEqual(regexes("async function f() { module N { await /re/ } }", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("function* g() { namespace N { yield /re/ } }", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("async function f() { global { await /re/ } }", "x.ts"), ["/re/"]);
+    assert.deepEqual(
+      regexes("export {};\nnamespace A { async function f() { await /re/ } }", "x.ts"),
+      ["/re/"],
+    );
+    // `global` that declares nothing is a name.
+    assert.deepEqual(regexes("export {};\nglobal.x\n{ var r = await /re/ }", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("export {};\nx = global\n{ var r = await /re/ }", "x.ts"), ["/re/"]);
+    // Until an import or export says it is a module, the file may be a script: unknown.
+    assert.deepEqual(regexes("await (x);\nexport {};"), []);
+  });
+
+  test("an await or yield whose reading the file alone cannot decide fails closed before a token the readings split on", () => {
+    const reason = /may be an operator or a name/;
+    refuses("var await = 6; var r = await / 2 / 3;", "bad.js", 1, reason);
+    refuses("var await = 6; var r = await / 2 / 3;", "bad.ts", 1, reason);
+    refuses("var r = await / 2 / 3;", "bad.cjs", 1, reason);
+    refuses("var r = await / 2 / 3;\nimport x from 'y';", "bad.js", 1, reason);
+    refuses("import x = y.z;\nvar r = await / 2 / 3;", "bad.ts", 2, reason);
+    refuses("export as namespace N;\nvar r = await / 2 / 3;", "bad.ts", 2, reason);
+    refuses("var r = import('x');\nvar s = await\n/ 2 / 3;", "bad.js", 2, reason);
+    refuses("var a = await <b>c</b>;", "bad.jsx", 1, reason);
+    refuses("var a = await !b;", "bad.js", 1, reason);
+    refuses("var a = await ++b;", "bad.js", 1, reason);
+    refuses("var a = await\n{};", "bad.js", 1, reason);
+    refuses("for (await of /re/.exec(s)) {}", "bad.js", 1, reason);
+    // A parenthesis after async: an async arrow function's parameters, or a call's arguments.
+    refuses("function f() { var h = async (await / 2 / 3); }", "bad.js", 1, reason);
+    refuses("function* g() { var h = async (yield / 2 / 3); }", "bad.js", 1, reason);
+    // `global` then a block on a later line in a JavaScript file: TypeScript reads a global
+    // declaration, a JavaScript engine `global;` and a block.
+    refuses("export {};\nglobal\n{ var r = await / 2 / 3 }", "bad.js", 3, reason);
+    assert.deepEqual(regexes("export {};\nglobal { var r = await / 2 / 3 }"), []);
+  });
+});
+
+describe("js-tokens: a line break after a statement that cannot go on starts the next one", () => {
+  for (const [what, src, file] of [
+    ["a var binding with no initializer", "var x", "x.js"],
+    ["a let binding with no initializer", "let x", "x.js"],
+    ["two bindings", "var x, y", "x.js"],
+    ["an array pattern", "var [a]", "x.js"],
+    ["an object pattern", "var {a}", "x.js"],
+    ["a labelled break", "a: for (;;) { break a", "x.js"],
+    ["a labelled continue", "a: for (;;) { continue a", "x.js"],
+    ["an import's module specifier", 'import x from "y"', "x.js"],
+    ["an import of a module only", 'import "a"', "x.js"],
+    ["an import's attributes", 'import x from "a" with { type: "json" }', "x.js"],
+    ["an import's attributes on the next line", 'import x from "a"\nwith { type: "json" }', "x.js"],
+    ["a named import on two lines", 'import { a }\nfrom "b"', "x.js"],
+    ["a default and named import", 'import x, { y } from "z"', "x.js"],
+    ["export * from", 'export * from "x"', "x.js"],
+    ["export * as from", 'export * as ns from "x"', "x.js"],
+    ["export { } from", 'export { a } from "b"', "x.js"],
+    ["export { } from on two lines", 'export { a }\nfrom "b"', "x.js"],
+    ["export { } with a string name", 'export { a as "b c" } from "d"', "x.js"],
+    ["export { }", "export { a }", "x.js"],
+    ["declare function", "declare function f()", "x.ts"],
+    ["an overload signature", "function f(a: string)", "x.ts"],
+    ["declare module", 'declare module "m"', "x.ts"],
+    ["declare var", "declare var a", "x.ts"],
+    ["import = require", 'import a = require("a")', "x.ts"],
+    ["import = entity", "import a = b.c", "x.ts"],
+    ["import = entity on two lines", "import a = b\n.c", "x.ts"],
+    ["import = entity on three lines", "import a = b /* c */\n.c\n.d", "x.ts"],
+    ["export as namespace", "export as namespace a", "x.ts"],
+    ["import type", 'import type { A } from "a"', "x.ts"],
+    ["export type * from", 'export type * from "a"', "x.ts"],
+    ["export type { }", "export type { A }", "x.ts"],
+  ]) {
+    test(`after ${what}`, () => {
+      const close = (src ?? "").includes("for (;;) {") ? " }" : "";
+      assert.deepEqual(
+        regexes(`${src}\n/re/.test(q)${close}`, file).filter((r) => r === "/re/"),
+        ["/re/"],
+      );
+    });
+  }
+
+  test("an import's module specifier then a regular expression holding a quote", () => {
+    assert.deepEqual(
+      literals('import x from "y"\n/"/.test(x) || fetch("https://evil.example")\n'),
+      ['string:"y"', 'regex:/"/', 'string:"https://evil.example"'],
+    );
+  });
+
+  test("after a binding with no initializer, JSX on the next line", () => {
+    assert.deepEqual(literals("let v\n<p>it's Bob's</p>", "x.tsx"), ["jsx-text:it's Bob's"]);
+  });
+
+  test("what goes on with the statement after a line break still divides", () => {
+    assert.deepEqual(regexes("var x = 1\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("var x\n= 1\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("var x\n(a)\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("let x\n: number = 1\n/ 2 / 3", "x.ts"), []);
+    assert.deepEqual(regexes('export { a }\nfoo("x", {})\n/ 2 / 3'), []);
+    assert.deepEqual(regexes("export const a = 1\nx = {}\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("x = from\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("module\n/ 2 / 3"), []);
+    assert.deepEqual(regexes("function f()\n{ return /re/ }"), ["/re/"]);
+    assert.deepEqual(regexes('declare module "m"\n{ export const a = /re/; }', "x.ts"), ["/re/"]);
+  });
+});
+
+describe("js-tokens: TypeScript reads type arguments only after a type reference", () => {
+  test("after a keyword type, a literal or a closing bracket, < is less-than", () => {
+    assert.deepEqual(regexes("const ok = n as number < 5 && m > /re/.exec(s).length;", "x.ts"), [
+      "/re/",
+    ]);
+    for (const type of [
+      "number",
+      "T[]",
+      "'lit'",
+      "{}",
+      "(A)",
+      "`t`",
+      "this",
+      "unknown",
+      "void",
+      "null",
+      "true",
+      "-1",
+      "unique symbol",
+    ]) {
+      const src = `const a = x as ${type} < 5 && m > /re/.exec(s).length;`;
+      assert.deepEqual(regexes(src, "x.ts"), ["/re/"], type);
+    }
+    assert.deepEqual(literals('if (x as number < y) { z = "s" }', "x.ts"), ['string:"s"']);
+    assert.deepEqual(regexes("const ok = n as number << 5 / 2 / 1;", "x.ts"), []);
+    assert.deepEqual(
+      regexes("const a = x satisfies boolean < 5 && m > /re/.exec(s).length;", "x.ts"),
+      ["/re/"],
+    );
+    assert.deepEqual(literals("const x = count as number < 5 && <i>it's Bob's</i>;", "x.tsx"), [
+      "jsx-text:it's Bob's",
+    ]);
+  });
+
+  test("after a type reference, a typeof query or an import type, < opens type arguments", () => {
+    assert.deepEqual(regexes("const a = x as Array<string>;\n/re/.test(q)", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("const a = x as typeof y<string>;\n/re/.test(q)", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("const a = x as import('m').T<string>;\n/re/.test(q)", "x.ts"), [
+      "/re/",
+    ]);
+    assert.deepEqual(regexes("const a = x as string.T<string>;\n/re/.test(q)", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("const a = x as A.B<C> / 2 / 1;", "x.ts"), []);
+    assert.deepEqual(regexes("const a = x as intrinsic<C> / 2 / 1;", "x.ts"), []);
+    // A qualified name is a type reference whatever its last name (`A.string`, `A.void`).
+    for (const type of ["A.string", "A.void", "A.B.any", "typeof A.number"]) {
+      assert.deepEqual(regexes(`const a = x as ${type}<C> / 2 / 1;`, "x.ts"), [], type);
+    }
+  });
+});
+
 describe("js-tokens: ) ] and } decided by what they close", () => {
   for (const keyword of ["if", "while", "for", "with"]) {
     test(`) closing the condition of ${keyword} is followed by a statement: a regular expression`, () => {
@@ -239,6 +611,60 @@ describe("js-tokens: ) ] and } decided by what they close", () => {
       assert.ok(divides(src ?? ""));
     });
   }
+
+  test("catch with no binding opens a block: a regular expression in it and after it", () => {
+    for (const file of ["x.js", "x.ts"]) {
+      assert.deepEqual(regexes("try { g() } catch { return /re/ }", file), ["/re/"], file);
+      assert.deepEqual(regexes("try { g() } catch { return /re/.test(s) }", file), ["/re/"], file);
+    }
+    assert.deepEqual(regexes("try{g()}catch{return/re/}"), ["/re/"]);
+    assert.deepEqual(regexes("try{g()}catch{throw/re/}"), ["/re/"]);
+    assert.deepEqual(regexes("try{g()}catch{if(a)/re/.test(b)}"), ["/re/"]);
+    assert.deepEqual(regexes("try{g()}catch{}/re/.test(s);"), ["/re/"]);
+    assert.deepEqual(regexes("try { g(); } catch {}\n/\\.ts$/.test(name) && h();"), ["/\\.ts$/"]);
+    assert.deepEqual(regexes("function f() { try { a() } catch { throw /'/ } }"), ["/'/"]);
+    assert.deepEqual(regexes("try { a() } catch { b() } finally { c() } /re/.test(s);"), ["/re/"]);
+    // catch with a binding is unchanged, and `catch` as a key or member is no keyword.
+    assert.deepEqual(regexes("try { a() } catch (e) { b() } /re/.test(s);"), ["/re/"]);
+    assert.deepEqual(regexes("x = { catch: 1 } / 2 / 3; y = p.catch / 2 / 3;"), []);
+  });
+
+  test("catch with no binding: strings, comments and JSX text in its block keep their kind", () => {
+    assert.deepEqual(
+      literals(
+        'function f(a) {\n  try { g() } catch { return /"/.test(a) || fetch("//evil.example/x") }\n  /}/.test(a);\n}',
+      ),
+      ['regex:/"/', 'string:"//evil.example/x"', "regex:/}/"],
+    );
+    assert.deepEqual(
+      literals(
+        'export function f(a, b) {\n  try { return g(a) } catch { return /"/.test(a) && /"/.test(b) }\n}',
+      ),
+      ['regex:/"/', 'regex:/"/'],
+    );
+    assert.deepEqual(
+      literals(
+        "export function F() {\n  try { return g(); } catch { return <p>see http://example.com // b</p>\n  }\n}",
+        "x.tsx",
+      ),
+      ["jsx-text:see http://example.com // b"],
+    );
+  });
+
+  test("catch with no binding in a minified bundle (rolldown drops an unused binding)", () => {
+    assert.deepEqual(
+      literals(
+        "export function h(e,t){try{JSON.parse(e)}catch{log(1)}/'/.test(e)&&send(`https://third.example`),globalThis.ok=/'/.test(t)}",
+      ),
+      ["regex:/'/", "template:`https://third.example`", "regex:/'/"],
+    );
+    assert.deepEqual(
+      literals(
+        'export function safeParse(e){try{return JSON.parse(e)}catch{return/^\\s*"/.test(e)?`a string // not a comment`:null}}',
+      ),
+      ['regex:/^\\s*"/', "template:`a string // not a comment`"],
+    );
+  });
 
   test("} closing a template substitution goes on with the template", () => {
     assert.deepEqual(literals("x = `a${ {b: 1}.b }c` / 2;"), [
