@@ -890,16 +890,23 @@ export class AdminApiStandIn {
     let page: AuditEvent[];
     let older: boolean;
     let newer: boolean;
+    // As the real read: a page with rows leads back by its own first or last row, whose read takes
+    // in the cursor row; a page with none only by the cursor itself, whose read leaves it out, so
+    // only while rows lie strictly past it.
     if (before !== null) {
       const above = matching.filter((event) => event.id > before);
       page = above.slice(Math.max(0, above.length - limit));
       newer = above.length > limit;
-      older = matching.some((event) => event.id <= before);
+      const held = page.length > 0;
+      older = matching.some((event) => (held ? event.id <= before : event.id < before));
     } else {
       const below = cursor === null ? matching : matching.filter((event) => event.id < cursor);
       page = below.slice(0, limit);
       older = below.length > limit;
-      newer = cursor !== null && matching.some((event) => event.id >= cursor);
+      const held = page.length > 0;
+      newer =
+        cursor !== null &&
+        matching.some((event) => (held ? event.id >= cursor : event.id > cursor));
     }
     const people =
       this.#needs(reader, "staff.read") === null
@@ -907,7 +914,7 @@ export class AdminApiStandIn {
             .map((member) => ({ id: member.id, email: member.email }))
             .sort((a, b) => a.email.localeCompare(b.email))
         : [];
-    // As the real read: a page with no rows leads back by its own cursor.
+    // A page with no rows leads back by its own cursor (`before=<cursor>`, `cursor=<before>`).
     return ok({
       items: page.map((event) => this.#auditRow(event)),
       total: matching.length,

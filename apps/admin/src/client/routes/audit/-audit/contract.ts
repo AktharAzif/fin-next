@@ -45,12 +45,14 @@ export const auditPageAnswer = z.object({
   totalCapped: z.boolean(),
   /**
    * The older page's cursor, or null when nothing older matches. On a page with no rows past the
-   * newest end, the way back to the rows.
+   * newest end, the way back to the rows; null there too when the page's own cursor names the only
+   * matching row, which the empty state's way to the newest rows reaches.
    */
   nextCursor: z.string().nullable(),
   /**
    * The newer page's cursor, or null on the first page. On a page with no rows past the oldest
-   * end, the way back to the rows.
+   * end, the way back to the rows; null there too when the page's own cursor names the only
+   * matching row, which the empty state's way to the newest rows reaches.
    */
   previousCursor: z.string().nullable(),
   /** The Staff member filter's choices; empty for a reader without `staff.read`. */

@@ -48,6 +48,7 @@ export const server = {
     (
       await control<{
         events: {
+          id: string;
           event: string;
           target: string | null;
           metadata: Readonly<Record<string, unknown>>;

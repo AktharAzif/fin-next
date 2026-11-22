@@ -21,9 +21,9 @@
 -- `event_staff_log` indexes it): `p_after` reads the rows older than an ID, `p_before` the rows
 -- newer than one, at most `p_limit` (1 to 100) plus one row that says whether more lie beyond. A
 -- cursor is only a bound: no row is read for it, so an ID from another scope reveals nothing. The
--- page comes back as one row whose count and `beyond` do not ride on the page's own rows, so a page
--- with none (a cursor past either end of the log, or rows that left a rolling window) still says
--- how many rows match and that a way back exists.
+-- page comes back as one row whose count, `beyond` and `past` do not ride on the page's own rows,
+-- so a page with none (a cursor past either end of the log, or rows that left a rolling window)
+-- still says how many rows match and whether its own cursor leads back to any of them.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -86,11 +86,15 @@ $$;
 
 -- One page of the staff log (§14.5), always exactly one row. `items` holds the page's rows (at most
 -- `p_limit` plus the one that says more lie past its end), newest first, as JSON objects with the
--- columns `staff.audit_entry` returns; `total` counts the matching rows up to 10,001, and `beyond`
--- says whether matching rows lie on the other side of the cursor (newer for `p_after`, older for
--- `p_before`), both whatever the page holds. `p_mine` keeps the rows the reader made (the reader as
--- the database read it, never an ID the caller names). Address and user agent come from the
--- context row ([BC-03]); the actor's address and name from the staff table, as they are now.
+-- columns `staff.audit_entry` returns; `total` counts the matching rows up to 10,001; `beyond` says
+-- whether matching rows lie on the other side of the cursor (newer for `p_after`, older for
+-- `p_before`), the cursor row among them, and `past` whether any lies strictly past the cursor, the
+-- cursor row left out; all three whatever the page holds. A page with rows leads back by its own
+-- first or last row, whose read takes in the cursor row (`beyond`); a page with none can lead back
+-- only by the cursor itself, whose read leaves the cursor row out (`past`). `p_mine` keeps the rows
+-- the reader made (the reader as the database read it, never an ID the caller names). Address and
+-- user agent come from the context row ([BC-03]); the actor's address and name from the staff
+-- table, as they are now.
 CREATE FUNCTION staff.audit_log(
   p_session_id text,
   p_access_sub text,
@@ -103,7 +107,7 @@ CREATE FUNCTION staff.audit_log(
   p_after text,
   p_before text,
   p_limit integer
-) RETURNS TABLE (items jsonb, total bigint, beyond boolean)
+) RETURNS TABLE (items jsonb, total bigint, beyond boolean, past boolean)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   reader text;
@@ -111,6 +115,7 @@ DECLARE
   page_ids text[];
   matching bigint;
   more boolean := false;
+  further boolean := false;
 BEGIN
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 OR (p_after IS NOT NULL AND p_before IS NOT NULL)
      OR coalesce(cardinality(p_actors), 0) > 20 OR coalesce(cardinality(p_events), 0) > 50
@@ -134,11 +139,16 @@ BEGIN
        LIMIT p_limit + 1
     ) x;
     IF p_after IS NOT NULL THEN
-      more := EXISTS (
-        SELECT 1 FROM audit.event e
+      -- The two matching rows nearest the cursor on its newer side, the cursor row one of them
+      -- when it matches: whether any lies there, and whether one lies strictly past the cursor.
+      SELECT count(*) > 0, coalesce(bool_or(n.id > p_after), false) INTO more, further FROM (
+        SELECT e.id FROM audit.event e
          WHERE e.scope = 'staff' AND e.id >= p_after
            AND staff.audit_matches(e.actor_kind, e.actor_id, e.event, e.organization_id,
-                 e.recorded_at, actors, p_events, p_orgs, p_from, p_to));
+                 e.recorded_at, actors, p_events, p_orgs, p_from, p_to)
+         ORDER BY e.id ASC
+         LIMIT 2
+      ) n;
     END IF;
   ELSE
     SELECT array_agg(x.id) INTO page_ids FROM (
@@ -149,11 +159,15 @@ BEGIN
        ORDER BY e.id ASC
        LIMIT p_limit + 1
     ) x;
-    more := EXISTS (
-      SELECT 1 FROM audit.event e
+    -- The same on the cursor's older side.
+    SELECT count(*) > 0, coalesce(bool_or(n.id < p_before), false) INTO more, further FROM (
+      SELECT e.id FROM audit.event e
        WHERE e.scope = 'staff' AND e.id <= p_before
          AND staff.audit_matches(e.actor_kind, e.actor_id, e.event, e.organization_id,
-               e.recorded_at, actors, p_events, p_orgs, p_from, p_to));
+               e.recorded_at, actors, p_events, p_orgs, p_from, p_to)
+       ORDER BY e.id DESC
+       LIMIT 2
+    ) n;
   END IF;
   SELECT count(*) INTO matching FROM (
     SELECT 1 FROM audit.event e
@@ -163,7 +177,8 @@ BEGIN
      LIMIT 10001
   ) counted;
   RETURN QUERY
-    SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id DESC), '[]'::jsonb), matching, more
+    SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id DESC), '[]'::jsonb), matching, more,
+           further
       FROM (
         SELECT e.id, e.event, e.category,
                to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')

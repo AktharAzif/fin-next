@@ -7,10 +7,11 @@
 // not against someone holding the fin_admin login, who can read the session row it compares (the
 // migration's header says why; the door closes it). Paging is by keyset on the time-ordered `aud_`
 // ID: `cursor` reads the older rows, `before` the newer ones, and the count comes apart from the
-// page's rows. Each row names its actor as the staff table says now, its target and refs with
-// their current labels where they are staff objects that still exist, how the actor was verified,
-// and the address and device of the request ([BC-03]). Filters are IDs, event names, presets and
-// UTC days: no typed text reaches the database or a line.
+// page's rows; a page with no rows leads back by its own cursor only while rows lie strictly past
+// it. Each row names its actor as the staff table says now, its target and refs with their current
+// labels where they are staff objects that still exist, how the actor was verified, and the
+// address and device of the request ([BC-03]). Filters are IDs, event names, presets and UTC days:
+// no typed text reaches the database or a line.
 import { deviceSummary } from "@fin/identity";
 import { StaffRefusal } from "../errors.ts";
 import type { Clock, LineSink, UnitTx } from "../ports.ts";
@@ -112,12 +113,14 @@ export interface StaffAuditPage {
   totalCapped: boolean;
   /**
    * The cursor of the next (older) page, or null when nothing older matches. On a page with no
-   * rows it is the `before` cursor itself, the way back to the older rows.
+   * rows it is the `before` cursor itself, the way back to the rows older than it, or null when
+   * there are none (the cursor row is then the only one that may match, on the first page).
    */
   nextCursor: string | null;
   /**
    * The cursor of the previous (newer) page, or null on the first page. On a page with no rows it
-   * is the `cursor` itself, the way back to the newer rows.
+   * is the `cursor` itself, the way back to the rows newer than it, or null when there are none
+   * (the cursor row is then the only one that may match, on the first page).
    */
   previousCursor: string | null;
 }
@@ -142,11 +145,16 @@ interface RawRow {
   user_agent: string | null;
 }
 
-/** `staff.audit_log`'s one row: the page's rows, and the count and `beyond` apart from them. */
+/**
+ * `staff.audit_log`'s one row: the page's rows, and apart from them the count, whether matching
+ * rows lie on the cursor's other side (`beyond`, the cursor row among them) and whether any lies
+ * strictly past the cursor (`past`, the cursor row left out).
+ */
 interface RawPage {
   items: RawRow[] | null;
   total: string | number | null;
   beyond: boolean | null;
+  past: boolean | null;
 }
 
 export interface AuditReadDeps {
@@ -408,7 +416,7 @@ export async function staffAuditLog(
     deps,
     tx,
     reader,
-    "SELECT items, total, beyond FROM staff.audit_log($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    "SELECT items, total, beyond, past FROM staff.audit_log($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     [
       reader.sessionId,
       reader.accessSub,
@@ -423,31 +431,33 @@ export async function staffAuditLog(
       query.limit,
     ],
   );
-  // The count and `beyond` come with the one summary row, never with the page's own rows, so a
-  // page with no rows still carries them.
+  // The count, `beyond` and `past` come with the one summary row, never with the page's own rows,
+  // so a page with no rows still carries them.
   const rows = summary?.items ?? [];
   const total = Number(summary?.total ?? 0);
-  const beyond = summary?.beyond === true;
   const extra = rows.length > query.limit;
   let page = rows;
-  let hasNewer: boolean;
-  let hasOlder: boolean;
-  if (query.before === undefined) {
-    // Newest first: the extra row is the oldest one, past the page's end.
-    if (extra) page = rows.slice(0, query.limit);
-    hasOlder = extra;
-    hasNewer = query.cursor !== undefined && beyond;
-  } else {
-    // Read upwards from the cursor: the extra row is the newest one, past the page's start.
-    if (extra) page = rows.slice(rows.length - query.limit);
-    hasNewer = extra;
-    hasOlder = beyond;
+  if (extra) {
+    // Newest first, the extra row is the oldest one, past the page's end; read upwards from
+    // `before`, it is the newest one, past the page's start.
+    page =
+      query.before === undefined
+        ? rows.slice(0, query.limit)
+        : rows.slice(rows.length - query.limit);
   }
+  // The way back to the cursor's other side. A page with rows takes it by its own first or last
+  // row, whose read takes in the cursor row (`beyond`). A page with none (a cursor past either
+  // end, or rows that left a rolling window) can take it only by the cursor itself, whose read
+  // leaves the cursor row out (`past`). With nothing strictly past it, the cursor row is the only
+  // one that may match: no cursor reaches it from here, and the empty state's way to the newest
+  // rows does.
+  const back = page.length > 0 ? summary?.beyond === true : summary?.past === true;
+  const hasNewer = query.before === undefined ? query.cursor !== undefined && back : extra;
+  const hasOlder = query.before === undefined ? extra : back;
   const labels = await staffLabels(tx, idsOf(page));
   const items = page.map((row) => toEntry(row, labels));
-  // A page with no rows (a cursor past either end, or rows that left a rolling window) leads back
-  // by its own cursor: `before=<cursor>` reads the rows just newer than it, `cursor=<before>` the
-  // rows just older.
+  // On a page with no rows, `before=<cursor>` reads the rows just newer than the cursor, and
+  // `cursor=<before>` the rows just older.
   return {
     items,
     total: Math.min(total, AUDIT_TOTAL_CAP),

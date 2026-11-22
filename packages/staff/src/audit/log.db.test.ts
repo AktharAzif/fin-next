@@ -349,6 +349,99 @@ describe("the staff log", () => {
     ).toEqual({ items: [], total: 0, totalCapped: false, nextCursor: null, previousCursor: null });
   });
 
+  it("leads a page with no rows back only to rows, even when its cursor is a row that matches", async () => {
+    // A stale or hand-edited link may name a matching row as its cursor. A page reads strictly past
+    // its cursor, so the cursor row is never on the page the cursor itself leads back to. One event
+    // with one row and one with three, written straight in (the operator's, so no view counts them).
+    const seed = (event: string) =>
+      seedRow({
+        event,
+        scope: "staff",
+        category: "staff",
+        actorKind: "operator",
+        actorId: "run_fixture",
+        target: admin.staffId,
+      });
+    const only = await seed("staff.fixture_only");
+    const three = [
+      await seed("staff.fixture_three"),
+      await seed("staff.fixture_three"),
+      await seed("staff.fixture_three"),
+    ].sort();
+    const [oldest = "", middle = "", newest = ""] = three;
+    const ids = (page: StaffAuditPage) => page.items.map((item) => item.id);
+
+    // The only matching row as the cursor, either way: no rows, the real count, and no page to go
+    // to (each would be empty too); the empty state's way to the newest rows reaches it.
+    const lone = { actions: ["staff.fixture_only"] };
+    for (const at of [{ cursor: only }, { before: only }]) {
+      expect(await list(admin.browser, { ...lone, ...at })).toEqual({
+        items: [],
+        total: 1,
+        totalCapped: false,
+        nextCursor: null,
+        previousCursor: null,
+      });
+    }
+    expect(ids(await list(admin.browser, lone))).toEqual([only]);
+
+    // The oldest of three as the cursor: the cursor leads back to the row above it, and the way
+    // older from there to the cursor row. The newest as `before`, the same the other way.
+    const trio = { actions: ["staff.fixture_three"], limit: 1 };
+    expect(await list(admin.browser, { ...trio, cursor: oldest })).toMatchObject({
+      items: [],
+      total: 3,
+      nextCursor: null,
+      previousCursor: oldest,
+    });
+    const up = await list(admin.browser, { ...trio, before: oldest });
+    expect(ids(up)).toEqual([middle]);
+    expect(ids(await list(admin.browser, { ...trio, cursor: up.nextCursor ?? "" }))).toEqual([
+      oldest,
+    ]);
+    expect(await list(admin.browser, { ...trio, before: newest })).toMatchObject({
+      items: [],
+      total: 3,
+      nextCursor: newest,
+      previousCursor: null,
+    });
+    const down = await list(admin.browser, { ...trio, cursor: newest });
+    expect(ids(down)).toEqual([middle]);
+    expect(ids(await list(admin.browser, { ...trio, before: down.previousCursor ?? "" }))).toEqual([
+      newest,
+    ]);
+
+    // Whichever row a cursor names, either way and at either size, a page with no rows offers a
+    // way only to a page that has some: here the four past either end of the three rows do.
+    let followed = 0;
+    for (const [event, rows] of [
+      ["staff.fixture_only", [only]],
+      ["staff.fixture_three", three],
+    ] as const) {
+      for (const limit of [1, 2]) {
+        const query = { actions: [event], limit };
+        for (const row of rows) {
+          for (const at of [{ cursor: row }, { before: row }]) {
+            const page = await list(admin.browser, { ...query, ...at });
+            expect(page.total).toBe(rows.length);
+            if (page.items.length > 0) continue;
+            const ways = [
+              ...(page.previousCursor === null ? [] : [{ before: page.previousCursor }]),
+              ...(page.nextCursor === null ? [] : [{ cursor: page.nextCursor }]),
+            ];
+            for (const way of ways) {
+              const next = await list(admin.browser, { ...query, ...way });
+              const said = `${event}, limit ${limit}: ${JSON.stringify(at)} to ${JSON.stringify(way)}`;
+              expect(next.items.length, said).toBeGreaterThan(0);
+              followed += 1;
+            }
+          }
+        }
+      }
+    }
+    expect(followed).toBe(4);
+  });
+
   it("filters by action, actor and days, and reads the two views", async () => {
     const enrolments = await list(admin.browser, { actions: ["staff.factor_enrolled"] });
     expect(enrolments.items.length).toBeGreaterThanOrEqual(4);

@@ -140,6 +140,45 @@ describe("GET /api/audit", () => {
     expect(all.total).toBeGreaterThan(0);
   });
 
+  it("leads a page with no rows back only to rows, when its cursor is a real row", async () => {
+    const read = async (query: string) =>
+      auditPageAnswer.parse((await admin.client.get(`/api/audit?${query}`)).json);
+    // The auditor's one enrolment as the cursor, either way: no rows, the real count, and no page
+    // to go to (each would be empty too, its cursor row on neither).
+    const enrolment = `action=staff.factor_enrolled&actor=${auditor.staffId}`;
+    const only = (await read(enrolment)).items.map((item) => item.id);
+    expect(only).toHaveLength(1);
+    for (const at of [`cursor=${only[0]}`, `before=${only[0]}`]) {
+      expect(await read(`${enrolment}&${at}`), at).toMatchObject({
+        items: [],
+        total: 1,
+        nextCursor: null,
+        previousCursor: null,
+      });
+    }
+    // Each of the auditor's rows as the cursor, either way, a page at a time: a page with no rows
+    // offers a way only to rows (here past each end: the oldest as `cursor`, the newest as `before`).
+    const theirs = `actor=${auditor.staffId}`;
+    const rows = (await read(theirs)).items.map((item) => item.id);
+    expect(rows.length).toBeGreaterThan(1);
+    let followed = 0;
+    for (const row of rows) {
+      for (const at of [`cursor=${row}`, `before=${row}`]) {
+        const page = await read(`${theirs}&limit=1&${at}`);
+        if (page.items.length > 0) continue;
+        const ways = [
+          ...(page.previousCursor === null ? [] : [`before=${page.previousCursor}`]),
+          ...(page.nextCursor === null ? [] : [`cursor=${page.nextCursor}`]),
+        ];
+        for (const way of ways) {
+          expect((await read(`${theirs}&limit=1&${way}`)).items, `${at} to ${way}`).toHaveLength(1);
+          followed += 1;
+        }
+      }
+    }
+    expect(followed).toBe(2);
+  });
+
   it("filters by comma-separated actions and actors, and by the two views", async () => {
     const reply = await admin.client.get(
       `/api/audit?action=staff.signed_in,staff.factor_enrolled&actor=${auditor.staffId},${admin.staffId}`,
