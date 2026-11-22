@@ -54,6 +54,22 @@ export function pageCountOf(total: number, size = KEYS_PAGE_SIZE): number {
   return Math.max(1, Math.ceil(total / size));
 }
 
+/** The page each mode's list shows, and the organisation it was chosen in. */
+export interface KeyPages {
+  orgId: string;
+  test: number;
+  live: number;
+}
+
+/**
+ * The pages to show in `orgId`: the ones chosen there, or the first of each list once the viewer
+ * switches organisation. The page stays mounted across a switch, and another organisation may have
+ * fewer keys, so a page kept from the last one could be past its end, empty and with no pager.
+ */
+export function pagesIn(chosen: KeyPages, orgId: string): KeyPages {
+  return chosen.orgId === orgId ? chosen : { orgId, test: 1, live: 1 };
+}
+
 /** What a role may make in one mode, as `GET /api/keys` answers it (`can.test`, `can.live`). */
 export interface ModeAbilities {
   manage: boolean;

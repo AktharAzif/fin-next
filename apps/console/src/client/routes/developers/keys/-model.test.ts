@@ -9,6 +9,7 @@ import {
   KEYS_PAGE_SIZE,
   lastUsedLine,
   pageCountOf,
+  pagesIn,
   parseAllowlist,
   SCOPE_ORDER,
   STATUS,
@@ -105,6 +106,18 @@ describe("paging and the role", () => {
     expect(pageCountOf(100)).toBe(1);
     expect(pageCountOf(101)).toBe(2);
     expect(pageCountOf(250)).toBe(3);
+  });
+
+  it("keeps the pages chosen in an organisation, and starts another at the first page", () => {
+    const chosen = { orgId: "org_acme", test: 3, live: 2 };
+    expect(pagesIn(chosen, "org_acme")).toBe(chosen);
+    expect(pagesIn(chosen, "org_ito")).toEqual({ orgId: "org_ito", test: 1, live: 1 });
+    // Before the viewer names an organisation, then once it does.
+    expect(pagesIn({ orgId: "", test: 1, live: 1 }, "org_acme")).toEqual({
+      orgId: "org_acme",
+      test: 1,
+      live: 1,
+    });
   });
 
   it("reads whether the role holds a key, as an allowlist change asks", () => {
