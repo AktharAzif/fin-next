@@ -271,11 +271,13 @@ function walk(root: string, dir: string, out: string[]): void {
 // a prefix `!`, `++` or `--`, and after the `)` of an `if`, `while`, `for` or `with` head. After an
 // identifier (a member named as a keyword, `stats.in`, `counts.new` or `this.#delete`, and `of`
 // outside a `for` head, included), a literal, a `)` or a `]`, or a postfix `!`, `++` or `--` (one
-// that follows an identifier, a `)` or a `]`), it is a division. The lexer fails closed: when it
-// reaches the end of the file inside a template or a block comment, or the end of a line inside a
-// string or a regular expression, or the blanked code's brackets do not pair, the file is an MC-01
-// finding that names it and the place, and none of its calls is read (a misread could blank a
-// writer call and hide it).
+// that follows an identifier, a `)` or a `]`), it is a division. What stands before a word or a
+// `(` is read in the code, past spaces and comments: a comment's closing full stop is no member's
+// dot (`// A sentence.` above `return /re/`), nor its last word a head's keyword (`// … with` above
+// `(a + b) / c`). The lexer fails closed: when it reaches the end of the file inside a template or
+// a block comment, or the end of a line inside a string or a regular expression, or the blanked
+// code's brackets do not pair, the file is an MC-01 finding that names it and the place, and none
+// of its calls is read (a misread could blank a writer call and hide it).
 //
 // What a lexical scan cannot see is a review finding, as for imports:check (BD-19): a writer
 // reached under a name that is no writer method's (an alias such as `const emit = lines.write`, a
@@ -463,19 +465,50 @@ interface CodeFunction {
 }
 
 /**
- * Whether the identifier that ends at `end` is a keyword after which an operand is due. A word
- * after `.`, `?.` or `#` is a member's name (`stats.in`, `counts.new`, `this.#delete`), and `of`
- * is a keyword only in a `for` head (`forHead`: the innermost open `(` starts one).
+ * The comments the lexer has met so far: each one's last character that is not a space, to its
+ * first. The code before a word or a bracket is read past them, never in them (a comment's closing
+ * full stop is no member's dot, nor its last word a keyword).
  */
-function keywordEndsAt(text: string, end: number, forHead: boolean): boolean {
+type Comments = ReadonlyMap<number, number>;
+
+/** The index of the last code character at or before `i`: spaces and comments skipped, or -1. */
+function codeBefore(text: string, i: number, comments: Comments): number {
+  let k = i;
+  for (;;) {
+    while (k >= 0 && /\s/.test(text[k] ?? "")) k--;
+    const start = comments.get(k);
+    if (start === undefined) return k;
+    k = start - 1;
+  }
+}
+
+/** The index of the first character of the identifier that ends at `end` (`end + 1` when none). */
+function wordStart(text: string, end: number): number {
   let k = end;
   while (k >= 0 && /[\w$]/.test(text[k] ?? "")) k--;
-  if (text[k] === "#") return false;
-  let dot = k;
-  while (dot >= 0 && /\s/.test(text[dot] ?? "")) dot--;
-  // `...new Set(x)` spreads: its dots are no member access.
-  if (text[dot] === "." && text[dot - 1] !== ".") return false;
-  const word = text.slice(k + 1, end + 1);
+  return k + 1;
+}
+
+/**
+ * Whether the word that starts at `start` is a member's name: after `.`, `?.` or `#` (`stats.in`,
+ * `counts.new`, `this.#delete`), spaces and comments between (`stats.` at a line's end, `in` on the
+ * next), but not after a spread's `...` (`...new Set(x)`).
+ */
+function memberName(text: string, start: number, comments: Comments): boolean {
+  if (text[start - 1] === "#") return true;
+  const dot = codeBefore(text, start - 1, comments);
+  return text[dot] === "." && text[dot - 1] !== ".";
+}
+
+/**
+ * Whether the identifier that ends at `end` is a keyword after which an operand is due. A member's
+ * name is none, and `of` is a keyword only in a `for` head (`forHead`: the innermost open `(`
+ * starts one).
+ */
+function keywordEndsAt(text: string, end: number, forHead: boolean, comments: Comments): boolean {
+  const start = wordStart(text, end);
+  if (memberName(text, start, comments)) return false;
+  const word = text.slice(start, end + 1);
   if (word === "of") return forHead;
   return /^(?:return|typeof|case|do|else|in|void|yield|await|delete|throw|new)$/.test(word);
 }
@@ -489,13 +522,14 @@ function operandEndsAt(
   end: number,
   heads: ReadonlySet<number>,
   forHead: boolean,
+  comments: Comments,
 ): boolean {
   let k = end;
   while (k >= 0 && /[ \t]/.test(text[k] ?? "")) k--;
   const c = text[k] ?? "";
   if (c === ")") return !heads.has(k);
   if (c === "]") return true;
-  return /[\w$]/.test(c) && !keywordEndsAt(text, k, forHead);
+  return /[\w$]/.test(c) && !keywordEndsAt(text, k, forHead, comments);
 }
 
 /**
@@ -509,30 +543,37 @@ function regexStarts(
   prev: number,
   heads: ReadonlySet<number>,
   forHead: boolean,
+  comments: Comments,
 ): boolean {
   if (prev < 0) return true;
   const c = text[prev] ?? "";
   if (c === ")") return heads.has(prev);
   // `i++ / 2`, `x! / 2`: a postfix operator ends an operand. `++/re/.lastIndex`, `!/re/.test(s)`.
   if ((c === "+" || c === "-") && text[prev - 1] === c) {
-    return !operandEndsAt(text, prev - 2, heads, forHead);
+    return !operandEndsAt(text, prev - 2, heads, forHead, comments);
   }
-  if (c === "!") return !operandEndsAt(text, prev - 1, heads, forHead);
+  if (c === "!") return !operandEndsAt(text, prev - 1, heads, forHead, comments);
   // After a block's `}` a regular expression may start a statement (`} /re/.test(s)`), and an
   // object is never divided; but JSX's `{x} />` closes a tag.
   if (c === "}") return text[at + 1] !== ">";
   // `=>`, `>`, `>=` and `>>` end with `>` or `=`: an operand follows.
   if ("(,=:[&|?{;+-*%~^>".includes(c)) return true;
-  return /[\w$]/.test(c) && keywordEndsAt(text, prev, forHead);
+  return /[\w$]/.test(c) && keywordEndsAt(text, prev, forHead, comments);
 }
 
 /** The statement whose head the `(` at `open` starts: `if`, `while`, `for`, `with`, or "". */
-function controlHead(text: string, open: number): string {
-  return (
-    /(?:^|[^\w$.#])(if|while|for|with)(?:\s+await)?\s*$/.exec(
-      text.slice(Math.max(0, open - 16), open),
-    )?.[1] ?? ""
-  );
+function controlHead(text: string, open: number, comments: Comments): string {
+  let end = codeBefore(text, open - 1, comments);
+  let start = wordStart(text, end);
+  let word = text.slice(start, end + 1);
+  if (word === "await") {
+    // `for await (…)`.
+    end = codeBefore(text, start - 1, comments);
+    start = wordStart(text, end);
+    word = text.slice(start, end + 1) === "for" ? "for" : "";
+  }
+  if (!/^(?:if|while|for|with)$/.test(word) || memberName(text, start, comments)) return "";
+  return word;
 }
 
 /** The index of a regular expression's last character (its last flag), or -1 when it is none. */
@@ -566,6 +607,13 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
     parts.push(text.slice(emitted, from), text.slice(from, to + 1).replace(/[^\n]/g, fill));
     emitted = to + 1;
   };
+  const comments = new Map<number, number>();
+  const comment = (from: number, to: number) => {
+    let last = to;
+    while (last > from && /\s/.test(text[last] ?? "")) last--;
+    comments.set(last, from);
+    blank(from, to, " ");
+  };
   // The brace depth at which each open `${` closes, back into its template.
   const templates: number[] = [];
   let depth = 0;
@@ -588,12 +636,12 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
     if (c === "/" && text[at + 1] === "/") {
       const newline = text.indexOf("\n", at);
       end = newline < 0 ? text.length - 1 : newline - 1;
-      blank(at, end, " ");
+      comment(at, end);
     } else if (c === "/" && text[at + 1] === "*") {
       const close = text.indexOf("*/", at + 2);
       if (close < 0) return { code: text, failure: { at, why: "a block comment never closes" } };
       end = close + 1;
-      blank(at, end, " ");
+      comment(at, end);
     } else if (c === '"' || c === "'") {
       end = stringEnd(text, at);
       if (end < 0) {
@@ -615,7 +663,7 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
         templates.push(depth);
       }
       blank(at, end, '"');
-    } else if (c === "/" && regexStarts(text, at, prev, heads, parens.at(-1) === "for")) {
+    } else if (c === "/" && regexStarts(text, at, prev, heads, parens.at(-1) === "for", comments)) {
       end = regexEnd(text, at);
       if (end < 0) {
         return {
@@ -624,7 +672,7 @@ function lexCode(text: string): { code: string; failure?: LexFailure } {
         };
       }
       blank(at, end, '"');
-    } else if (c === "(") parens.push(controlHead(text, at));
+    } else if (c === "(") parens.push(controlHead(text, at, comments));
     else if (c === ")") {
       if ((parens.pop() ?? "") !== "") heads.add(at);
     } else if (c === "{") depth++;

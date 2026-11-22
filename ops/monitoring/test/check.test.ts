@@ -660,6 +660,111 @@ describe("monitoring:check refuses", () => {
     ]);
   });
 
+  it("a comment that ends in a full stop leaves the keyword after it a keyword, and hides no writer call (MC-01)", () => {
+    const root = scratch();
+    const dir = join(root, "packages", "edge", "src");
+    mkdirSync(dir, { recursive: true });
+    const files: Record<string, string[]> = {
+      // Read as divisions, the two fences' backticks would pair as a template over the call.
+      "a.ts": [
+        "export function opens(line: string): boolean {",
+        "  // A fence opens a code block.",
+        "  return /^```/.test(line);",
+        "}",
+        "export function between(deps: Deps): void {",
+        '  deps.lines.write("edge.between_fences", "error", {});',
+        "}",
+        "export function closes(line: string): boolean {",
+        "  // A fence closes it.",
+        "  return /^```\\s*$/.test(line);",
+        "}",
+      ],
+      // A prefix `!` after the keyword; the comment's backtick would close the template.
+      "b.ts": [
+        "export function plain(text: string): boolean {",
+        "  // No code marks in it.",
+        "  return !/`/.test(text);",
+        "}",
+        "export function after(deps: Deps): void {",
+        '  deps.lines.write("edge.after_bang_regex", "warn", {});',
+        "  return; // a mark is a ` sign",
+        "}",
+      ],
+      "c.ts": [
+        "export function kind(deps: Deps, line: string): string {",
+        "  switch (true) {",
+        "    // A fence line.",
+        "    case /^`/.test(line):",
+        '      deps.lines.write("edge.after_case", "warn", {});',
+        '      return "fence";',
+        "    default:",
+        '      return "text"; // not a ` line',
+        "  }",
+        "}",
+      ],
+      // Read as a division, `\/*` would open a block comment to the `*/` after the call.
+      "d.ts": [
+        "export function slashes(path: string): boolean {",
+        "  // Whether the path is only slashes.",
+        "  return /^\\/*$/.test(path);",
+        "}",
+        "export function after(deps: Deps): void {",
+        '  deps.lines.write("edge.after_slashes", "error", {}); /* one line per unit */',
+        "}",
+      ],
+      // Read as a division, the pattern's `//` would start a line comment over the call.
+      "e.ts": [
+        "export function scheme(deps: Deps, url: string): boolean {",
+        "  // Only web addresses pass.",
+        '  return /^https?:\\/\\//.test(url) || refuse(deps.lines.write("edge.bad_scheme", "error", {}));',
+        "}",
+      ],
+    };
+    for (const [name, lines] of Object.entries(files)) {
+      writeFileSync(join(dir, name), lines.join("\n"));
+    }
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("edge.between_fences") is not catalogued',
+      'MC-01 lines.write("edge.after_bang_regex") is not catalogued',
+      'MC-01 lines.write("edge.after_case") is not catalogued',
+      'MC-01 lines.write("edge.after_slashes") is not catalogued',
+      'MC-01 lines.write("edge.bad_scheme") is not catalogued',
+    ]);
+  });
+
+  it("a comment before a keyword, a member's name or a bracket refuses no honest file (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // Read as a division, the quote would open a string that never closes on its line.
+        "export function quoted(value: string): boolean {",
+        "  // A value in quotes is a literal.",
+        "  return /^['\"]/.test(value);",
+        "}",
+        'lines.write("edge.after_quote_regex", "warn", {});',
+        // A comment that ends in `with` starts no `with` head: the `/` after `)` divides.
+        "export function share(deps: Deps, used: number, pending: number, total: number): number {",
+        "  const part =",
+        "    // the part to compare the total with",
+        "    (used + pending) / total;",
+        '  deps.lines.write("edge.after_share", "info", { part });',
+        "  return part;",
+        "}",
+        // A member's name on the line after its dot is still a member's.
+        "const ratio = stats.",
+        "  in / stats.out;",
+        'lines.write("edge.after_split_member", "info", { ratio });',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("edge.after_quote_regex") is not catalogued',
+      'MC-01 lines.write("edge.after_share") is not catalogued',
+      'MC-01 lines.write("edge.after_split_member") is not catalogued',
+    ]);
+  });
+
   it("a file the lexer cannot read is a finding that names it, never a skip (MC-01)", () => {
     const root = scratch();
     const dir = join(root, "packages", "edge", "src");
