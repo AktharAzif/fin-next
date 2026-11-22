@@ -7,14 +7,21 @@
 //     every file it adds or changes (for a merge, every file that differs from its first parent),
 //     each annotated tag's message, and the pushed ref names, with the overlay's refuse list when
 //     FIN_OVERLAY_FILE is set;
+//   - refuses a new commit whose author or committer date, and an annotated tag whose tagger date,
+//     carries a UTC offset other than +0000 (G-09: the build clock's time zone is private, so
+//     every commit and tag is made with TZ=UTC); it names the commit or the ref, never the offset;
 //   - runs gitleaks with Fin's token shapes (.gitleaks.toml) over the same commits, merges
 //     included, redacted, when gitleaks is installed.
+// A new commit is one the remote has on none of its branches as this clone last fetched them: a
+// commit already there is published already, so a merge of another pushed branch is not read
+// twice.
 // git passes the remote's name and URL as arguments and one line per ref on standard input:
 //   <local ref> <local sha> <remote ref> <remote sha>
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  DATE_OFF_UTC,
   formatFinding,
   git,
   loadRefuseList,
@@ -60,7 +67,9 @@ function objectType(root, sha) {
 }
 
 /**
- * The git log arguments that select what this push would publish for one ref.
+ * The git log arguments that select what this push would publish for one ref: the commits it
+ * reaches that neither the ref's remote value nor any of the remote's branches (as this clone
+ * last fetched them) has, since those are published already.
  * @param {string} root
  * @param {string} remote
  * @param {PushedRef} ref
@@ -68,7 +77,7 @@ function objectType(root, sha) {
  */
 export function rangeFor(root, remote, ref) {
   if (!ZERO.test(ref.remoteSha) && objectType(root, `${ref.remoteSha}^{commit}`) === "commit") {
-    return [`${ref.remoteSha}..${ref.localSha}`];
+    return [ref.localSha, "--not", ref.remoteSha, `--remotes=${remote}`];
   }
   return [ref.localSha, "--not", `--remotes=${remote}`];
 }
@@ -77,11 +86,13 @@ export function rangeFor(root, remote, ref) {
  * Reads the annotated tags a pushed object goes through, down to the object they name.
  * @param {string} root
  * @param {string} sha
- * @returns {{ messages: string[], type: string | undefined }}
+ * @returns {{ messages: string[], datesOffUtc: number, type: string | undefined }}
+ *   datesOffUtc: how many of the tags have a tagger date whose offset is not +0000
  */
 function peel(root, sha) {
   /** @type {string[]} */
   const messages = [];
+  let datesOffUtc = 0;
   let current = sha;
   let type = objectType(root, current);
   for (let depth = 0; type === "tag" && depth < 16; depth++) {
@@ -89,14 +100,17 @@ function peel(root, sha) {
     const split = raw.indexOf("\n\n");
     const header = split < 0 ? raw : raw.slice(0, split);
     const target = /^object ([0-9a-f]+)$/m.exec(header)?.[1];
-    // The tagger line is the tagger's own git identity; the message is what the tag publishes
-    // (its name is the pushed ref's, scanned with the other ref names).
+    // The tagger line is the tagger's own git identity, and its date's offset must be +0000
+    // (G-09); the message is what the tag publishes (its name is the pushed ref's, scanned with
+    // the other ref names).
+    const tagger = /^tagger .* -?\d+ ([+-]\d{4})$/m.exec(header);
+    if (tagger !== null && tagger[1] !== "+0000") datesOffUtc++;
     messages.push(split < 0 ? "" : raw.slice(split + 2));
-    if (target === undefined) return { messages, type: undefined };
+    if (target === undefined) return { messages, datesOffUtc, type: undefined };
     current = target;
     type = objectType(root, current);
   }
-  return { messages, type };
+  return { messages, datesOffUtc, type };
 }
 
 /**
@@ -135,9 +149,16 @@ export function prePush(options) {
     // Reported by position, so the output never repeats a value found in a name.
     const label = `pushed ref #${index + 1}`;
     findings.push(...scanName(ref.remoteRef, refused, "in the pushed ref's name", label));
-    const { messages, type } = peel(options.root, ref.localSha);
+    const { messages, datesOffUtc, type } = peel(options.root, ref.localSha);
     for (const message of messages) {
       findings.push(...scanMessage(`${label} (tag message)`, message, refused));
+    }
+    if (datesOffUtc > 0) {
+      findings.push({
+        file: `${label} (tag date)`,
+        rule: "commit-date",
+        message: `the annotated tag's tagger date ${DATE_OFF_UTC}`,
+      });
     }
     if (type === "commit") commitRefs.push(ref);
     else {
