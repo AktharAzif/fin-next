@@ -580,6 +580,21 @@ describe("a page past the end of the list", () => {
     expect(html).toContain("8 staff actions");
   });
 
+  it("leads back by its empty state alone when its cursor names the only matching row", () => {
+    // Every page a cursor could open from here would be empty too (the API offers none): the way
+    // back is to the newest rows, which hold that row, and no pager offers a dead end.
+    for (const search of [
+      { action: "staff.bootstrapped", cursor: id("aud", 1) },
+      { action: "staff.bootstrapped", before: id("aud", 1) },
+    ]) {
+      const html = draw(search, { total: 1 });
+      expect(html).toContain("No staff actions on this page");
+      expect(html).toContain("Show the newest staff actions");
+      expect(html).not.toContain("No staff actions yet");
+      expect(html).not.toContain('aria-label="Pagination"');
+    }
+  });
+
   it("keeps the first use for a log with nothing in it, with no toolbar and no pager", () => {
     const html = draw({}, {});
     expect(html).toContain("No staff actions yet");

@@ -3,8 +3,9 @@
 // page asks for (`page.route`), so each is exact: the list newest first, the drawer stepping
 // through the page and an entry with nothing changed, My actions and Rejections this week, the
 // filters as chips and the no-results state, the first use with no toolbar, loading and failed,
-// the drawer's loading and failed states from a link to an entry, and no permission. One journey
-// runs against the admin API stand-in: the first Admin's enrolment lands on the log, which shows it.
+// the drawer's loading and failed states from a link to an entry, and no permission. Two journeys
+// run against the admin API stand-in: the first Admin's enrolment lands on the log, which shows it,
+// and a link whose cursor is the only matching row leads to that row.
 import { expect, test } from "@fin/testing/playwright";
 import type { Page, Request, Route } from "@playwright/test";
 import {
@@ -517,5 +518,32 @@ test.describe("against the admin API stand-in", () => {
     await page.getByRole("button", { name: "My actions" }).click();
     await expect(rows(page).filter({ hasText: "Made the first Admin" })).toHaveCount(0);
     await expect(rows(page).filter({ hasText: "Added their first second factor" })).toHaveCount(1);
+  });
+
+  test("@journey a link whose cursor is the only matching row leads to it, never between empty pages", async ({
+    page,
+    authenticator: _authenticator,
+    emailSink,
+    addresses,
+  }) => {
+    const nadia = addresses.address("nadia.brooks");
+    const { enrolmentCode } = await server.bootstrap(nadia);
+    await throughAccess(page, nadia, "/sign-in");
+    await emailedCodeSignIn(page, emailSink, nadia);
+    await enrol(page, enrolmentCode, "passkey");
+    // The one row of the first Admin's making, as a hand-edited link's cursor, either way.
+    const made = (await server.audit()).filter((event) => event.event === "staff.bootstrapped");
+    expect(made).toHaveLength(1);
+    const only = made[0]?.id ?? "";
+    for (const at of [`cursor=${only}`, `before=${only}`]) {
+      await page.goto(`/audit?action=staff.bootstrapped&${at}`);
+      await expect(inApp(page).getByText("No staff actions on this page")).toBeVisible();
+      // No pager: every page a cursor could open from here would be empty too.
+      await expect(page.getByRole("navigation", { name: "Pagination" })).toHaveCount(0);
+      await page.getByRole("button", { name: "Show the newest staff actions" }).click();
+      await expect(page).toHaveURL(`${ORIGIN}/audit?action=staff.bootstrapped`);
+      await expect(rows(page)).toHaveCount(1);
+      await expect(rows(page).first()).toContainText("Made the first Admin");
+    }
   });
 });

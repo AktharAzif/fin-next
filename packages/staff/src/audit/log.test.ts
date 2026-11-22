@@ -240,9 +240,9 @@ describe("the migration that holds the door's re-check", () => {
     for (const read of reads) expect(read.slice(0, 400)).toContain("e.scope = 'staff'");
   });
 
-  it("returns a page as one row, its count and beyond apart from the page's rows", () => {
+  it("returns a page as one row, its count, beyond and past apart from the page's rows", () => {
     expect(sql).toMatch(
-      /staff\.audit_log\([^)]*\) RETURNS TABLE \(items jsonb, total bigint, beyond boolean\)/,
+      /staff\.audit_log\([^)]*\) RETURNS TABLE \(items jsonb, total bigint, beyond boolean, past boolean\)/,
     );
   });
 
