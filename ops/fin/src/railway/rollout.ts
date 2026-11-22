@@ -33,6 +33,7 @@ import {
   type Variables,
 } from "./inspect.ts";
 import { readRunning } from "./running.ts";
+import { lastDeployed } from "./verify.ts";
 
 export const POLL_MS = 5_000;
 export const SERVICE_TIMEOUT_MS = 15 * 60_000;
@@ -165,6 +166,11 @@ export function redeployChange(service: string, variables: readonly string[]): C
  * reads back: the variables still show the write, and the service's newest deployment is this one,
  * ended SUCCESS. Then writes `rotation.redeployed`. A service that no longer has a deployment gets
  * none.
+ *
+ * When Railway does not say which image the newest deployment runs (a refused read, or a meta that
+ * names no image; SP-03), unread is not passing: the redeploy goes on only when the service is set
+ * to the digest the registered deploys recorded for it (railway verify's digest check), an image a
+ * `railway deploy` verified and rolled, and is refused otherwise.
  */
 export async function redeploy(
   ctx: Context,
@@ -181,14 +187,19 @@ export async function redeploy(
     return;
   }
   const running = await readRunning(ctx, rw, service, instance);
-  if (typeof running.image === "string" && running.image !== instance?.image) {
+  if (typeof running.image !== "string") {
+    const recorded = lastDeployed(ctx).get(service);
+    if (recorded === undefined || recorded !== instance?.image) {
+      throw new RefusedError(
+        `Railway did not say which image ${service}'s newest deployment runs (SP-03), and ${service} is set to ${recorded === undefined ? "an image no registered railway deploy recorded for it" : "an image other than the one the registered deploys recorded for it"}, so a redeploy could roll an image nobody asked for: check by hand which image it runs, run railway deploy for the release it should run, then run this command again`,
+      );
+    }
+    ctx.out.warn(
+      `Railway did not say which image ${service}'s newest deployment runs (SP-03): the redeploy takes the image it is set to, the digest the registered deploys recorded for it`,
+    );
+  } else if (running.image !== instance?.image) {
     throw new RefusedError(
       `${service} is set to an image its newest deployment does not run, so a redeploy would roll that image: run railway deploy for the release it should run, then run this command again`,
-    );
-  }
-  if (running.image === undefined) {
-    ctx.out.warn(
-      `Railway did not say which image ${service}'s newest deployment runs (SP-03): the redeploy takes the image the service is set to`,
     );
   }
   // The write showed before this deployment starts, so the deployment takes it.

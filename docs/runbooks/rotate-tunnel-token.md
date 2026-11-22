@@ -19,14 +19,19 @@ recreating the tunnel, with a short outage of the hosts on that tunnel.
    of its own (`~ update redeploy cloudflared-<role> [TUNNEL_TOKEN]`, a `run.step` and a
    `rotation.redeployed` line naming the service), waits for `SUCCESS` and reads back again. The
    rotation is done only then. Run it with `--dry-run` first to read the plan.
-   - If the redeploy or a read-back fails, the output says the rotation is not done and names the
-     command that finishes it once the cause is fixed: `node ops/fin/src/main.ts tunnel create
-     staging <role> --redeploy` (the tunnel is kept, its token set again, and the connector
-     redeployed). Without `--redeploy`, a kept tunnel never redeploys a connector: its token is the
-     one the connector already runs.
+   - If any step after the run began fails or is stopped (the tunnel, the token fetch, the
+     variables write or its read-back, the redeploy), the output says the rotation is not done and
+     names the command that finishes it once the cause is fixed: `node ops/fin/src/main.ts tunnel
+     create staging <role> --redeploy` (the tunnel is kept, its token set again, and the connector
+     redeployed); `run.done` records the same as its `leftover`. A plain re-run finishes it too:
+     the rotation registered as one, so the run log shows it unfinished, and the kept tunnel's
+     connector is redeployed. A kept tunnel with no unfinished rotation in the run log redeploys
+     nothing without `--redeploy`.
    - If the connector is set to an image its newest deployment does not run, the redeploy is
      refused (it would roll that image): run `railway deploy` for the release staging runs, then
-     step 2 again with `--redeploy`.
+     step 2 again with `--redeploy`. When Railway does not say which image that deployment runs
+     (SP-03), the redeploy goes on only if the connector is set to the digest the registered
+     deploys recorded for it, and is refused otherwise, the same way.
 3. `node ops/fin/src/main.ts routes apply staging`: the proxied CNAMEs move to the new tunnel's ID.
 4. Check: the watcher shows the expected connector count, version and origin address for the new
    tunnel; `/api/health` answers through the console and verify hosts (or `/health` through the API

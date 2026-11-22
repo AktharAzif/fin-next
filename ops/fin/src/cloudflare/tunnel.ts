@@ -11,11 +11,17 @@
 // token at its first deployment (`railway deploy`): provisioning, rule 1. A tunnel made anew for a
 // connector that has a deployment is a rotation (rule 2): the running connector holds the old
 // tunnel's token, so the plan redeploys it as a step of its own, waits for SUCCESS and reads back;
-// the rotation is done only then. A tunnel that is kept has the token it had, so the connector is
-// redeployed only with --redeploy, which finishes a rotation whose redeploy did not pass.
+// the rotation is done only then. A rotation registers as one (`rotates` names the connector), so
+// one that failed or was stopped after the tunnel was made and before its redeploy passed is in
+// the run log: the next run keeps that tunnel, and redeploys the connector all the same, since its
+// newest deployment may still hold the old tunnel's token. Any such failure says the rotation is
+// not done and names the command that finishes it, and run.done records it as `leftover`. A tunnel
+// that is kept with no unfinished rotation in the run log has the token it had, so the connector is
+// redeployed only with --redeploy.
 
 import type { Command } from "../command.ts";
 import { flagBool } from "../core/args.ts";
+import type { Context } from "../core/context.ts";
 import { RefusedError } from "../core/errors.ts";
 import { hostOf } from "../core/overlay.ts";
 import type { Change } from "../core/plan.ts";
@@ -24,6 +30,30 @@ import type { TunnelRole } from "../core/settings.ts";
 import type { Written } from "../railway/api.ts";
 import { confirmWritten, deployedOf, redeploy, redeployChange } from "../railway/rollout.ts";
 import { bindZone, cloudflare, findTunnel, railway, type Tunnel } from "./common.ts";
+
+/**
+ * Whether the run log shows a rotation of a connector's tunnel token left unfinished: a run of
+ * `tunnel create` that registered as a rotation of it (`rotates` names it), with no `redeploy` step
+ * of the connector after it. A failure or a stop after such a run made the tunnel, and before its
+ * redeploy passed, leaves the new tunnel standing while the connector's newest deployment may hold
+ * the old tunnel's token. A run log that cannot be read throws: such a rotation cannot be ruled
+ * out, and nothing has been sent yet.
+ */
+export function unfinishedRotation(ctx: Context, connector: string): boolean {
+  const name = ctx.masker.mask(connector);
+  let unfinished = false;
+  for (const r of ctx.log.records()) {
+    if (
+      r.event === "run.registered" &&
+      r.command === "tunnel create" &&
+      Array.isArray(r.rotates) &&
+      r.rotates.includes(name)
+    )
+      unfinished = true;
+    else if (r.event === "run.step" && r.kind === "redeploy" && r.name === name) unfinished = false;
+  }
+  return unfinished;
+}
 
 export const tunnelCreate: Command = {
   words: ["tunnel", "create"],
@@ -53,14 +83,20 @@ export const tunnelCreate: Command = {
     for (const host of Object.values(hostMap)) ctx.guard.checkName(host, `tunnel ${t.name}`);
     const running = (await deployedOf(ctx, rw, [t.connector])).has(t.connector);
     const asked = flagBool(ctx.args, "redeploy");
-    const rotation = running && (tunnel === undefined || asked);
+    const unfinished =
+      running && tunnel !== undefined && !asked && unfinishedRotation(ctx, t.connector);
+    const rotation = running && (tunnel === undefined || asked || unfinished);
     if (asked && !running) {
       ctx.out.info(
         `${t.connector} has no deployment: it takes the token at its first (railway deploy), so nothing is redeployed`,
       );
+    } else if (unfinished) {
+      ctx.out.info(
+        `the run log shows a rotation of ${t.connector}'s token whose redeploy did not pass: the tunnel is kept, and ${t.connector} is redeployed to finish it`,
+      );
     } else if (running && !rotation) {
       ctx.out.info(
-        `the tunnel is kept, so its token is the one ${t.connector} runs: it is not redeployed (--redeploy finishes a rotation whose redeploy did not pass)`,
+        `the tunnel is kept, and the run log shows no rotation of ${t.connector}'s token left unfinished: it is not redeployed (--redeploy redeploys it all the same)`,
       );
     }
 
@@ -82,64 +118,78 @@ export const tunnelCreate: Command = {
     ];
     const create = { name: t.name, config_src: "local" };
     let written: Written | undefined;
-    return ctx.applyPlan(
-      `tunnel ${role}`,
-      changes,
-      async (change) => {
-        if (change.kind === "tunnel") {
-          tunnel = await writer.write<Tunnel>(
-            { kind: "tunnel", name: t.name },
-            "POST",
-            `${accountPath}/cfd_tunnel`,
-            create,
-          );
-          ctx.masker.register(tunnel.id, `<tunnel:${role}>`);
-          return;
-        }
-        if (change.kind === "redeploy") {
-          if (written === undefined) throw new Error("the token was not set");
-          try {
-            await redeploy(ctx, rw, written, ["TUNNEL_TOKEN"]);
-          } catch (error) {
-            ctx.out.error(
-              `the rotation is not done: ${t.connector} may still run the old token; once the cause is fixed, run: pnpm fin tunnel create ${ctx.environment} ${role} --redeploy`,
-            );
-            throw error;
-          }
-          return;
-        }
-        if (tunnel === undefined) throw new Error("the tunnel was not created");
-        const raw = await api.get<string>(`${accountPath}/cfd_tunnel/${tunnel.id}/token`);
-        if (typeof raw !== "string" || raw.length < 20)
-          throw new Error("Cloudflare answered no tunnel token");
-        ctx.masker.register(raw, "<tunnel-token>");
-        const token = new Secret(raw);
-        written = await rw.setVariables(
-          ctx.run,
-          ctx.settings,
-          t.connector,
-          { TUNNEL_TOKEN: token, FIN_TUNNEL_ROLE: role, FIN_TUNNEL_HOSTS: JSON.stringify(hostMap) },
-          `pnpm fin tunnel create ${role} (${ctx.run.id})`,
-        );
-        await confirmWritten(ctx, rw, written);
-      },
-      {},
-      {
-        check: (change) => {
+    // A rotation is not done until its redeploy passed: a failure or a stop at any step before
+    // that (the tunnel, the token fetch, the commit or its read-back, the redeploy) says so.
+    let begun = false;
+    let redeployed = false;
+    const notDone = () =>
+      rotation && begun && !redeployed
+        ? `the rotation is not done: ${t.connector} may still run the old token; once the cause is fixed, run: pnpm fin tunnel create ${ctx.environment} ${role} --redeploy`
+        : undefined;
+    try {
+      return await ctx.applyPlan(
+        `tunnel ${role}`,
+        changes,
+        async (change) => {
+          begun = true;
           if (change.kind === "tunnel") {
-            writer.check(
+            tunnel = await writer.write<Tunnel>(
               { kind: "tunnel", name: t.name },
               "POST",
               `${accountPath}/cfd_tunnel`,
               create,
             );
-          } else if (ctx.settings.railway.services[t.connector] === undefined) {
-            throw new RefusedError(
-              `railway: ${t.connector} is not a service the public settings list`,
-            );
+            ctx.masker.register(tunnel.id, `<tunnel:${role}>`);
+            return;
           }
+          if (change.kind === "redeploy") {
+            if (written === undefined) throw new Error("the token was not set");
+            await redeploy(ctx, rw, written, ["TUNNEL_TOKEN"]);
+            redeployed = true;
+            return;
+          }
+          if (tunnel === undefined) throw new Error("the tunnel was not created");
+          const raw = await api.get<string>(`${accountPath}/cfd_tunnel/${tunnel.id}/token`);
+          if (typeof raw !== "string" || raw.length < 20)
+            throw new Error("Cloudflare answered no tunnel token");
+          ctx.masker.register(raw, "<tunnel-token>");
+          const token = new Secret(raw);
+          written = await rw.setVariables(
+            ctx.run,
+            ctx.settings,
+            t.connector,
+            {
+              TUNNEL_TOKEN: token,
+              FIN_TUNNEL_ROLE: role,
+              FIN_TUNNEL_HOSTS: JSON.stringify(hostMap),
+            },
+            `pnpm fin tunnel create ${role} (${ctx.run.id})`,
+          );
+          await confirmWritten(ctx, rw, written);
         },
-      },
-    );
+        rotation ? { rotates: [t.connector] } : {},
+        {
+          check: (change) => {
+            if (change.kind === "tunnel") {
+              writer.check(
+                { kind: "tunnel", name: t.name },
+                "POST",
+                `${accountPath}/cfd_tunnel`,
+                create,
+              );
+            } else if (ctx.settings.railway.services[t.connector] === undefined) {
+              throw new RefusedError(
+                `railway: ${t.connector} is not a service the public settings list`,
+              );
+            }
+          },
+          leftover: notDone,
+        },
+      );
+    } catch (error) {
+      const left = notDone();
+      if (left !== undefined) ctx.out.error(left);
+      throw error;
+    }
   },
 };

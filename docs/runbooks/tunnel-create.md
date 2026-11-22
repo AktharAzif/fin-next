@@ -22,9 +22,11 @@ been deployed takes the token at its first roll by `railway deploy`: nothing is 
 tunnel made anew for a connector that has a deployment is a rotation: the running connector holds
 the old tunnel's token, so the plan redeploys it as a step of its own (`~ update redeploy
 cloudflared-<role> [TUNNEL_TOKEN]`), waits for `SUCCESS` and reads back; the rotation is done only
-then (`rotate-tunnel-token.md`). Re-running is safe: the tunnel is kept and the same token is set
-again, and the running connector is left alone, unless `--redeploy` asks for its redeploy, which
-finishes a rotation whose redeploy did not pass.
+then (`rotate-tunnel-token.md`). A rotation registers as one, so a rotation that failed or was
+stopped after the tunnel was made and before its redeploy passed is in the run log: a re-run keeps
+the tunnel, sets its token again and redeploys the connector, which finishes it. Otherwise
+re-running is safe: the tunnel is kept and the same token is set again, and the running connector
+is left alone, unless `--redeploy` asks for its redeploy.
 
 ## Run it
 

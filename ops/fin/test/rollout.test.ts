@@ -112,6 +112,13 @@ function lastSet(h: H, service: string, variable: string): string | undefined {
   ]?.value;
 }
 
+/** Sets the image a service's instance is set to (what its next deployment takes). */
+function setImage(h: H, service: string, image: string): void {
+  const instance = h.rw.instances.get(service);
+  if (instance === undefined) throw new Error(`no instance of ${service}`);
+  instance.image = image;
+}
+
 /** The variables each deployment of a service started with, newest last. */
 function startedWith(h: H, service: string): Array<Record<string, string>> {
   return [...h.rw.deployments.entries()]
@@ -143,7 +150,7 @@ describe("rule 1: a provisioning or configuration write starts no deployment", (
     });
   });
 
-  it("a first email token on a running worker is provisioning: worker takes it at its next deploy", async () => {
+  it("a first email token on a running worker that has never held one is provisioning: worker takes it at its next deploy", async () => {
     const h = staging({ worker: "fin-next-api" });
     assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
     assert.deepEqual(h.rw.deployed, [], "worker held no token, so none is rotated");
@@ -192,6 +199,38 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     h.assertNoLeak([token ?? ""]);
   });
 
+  it("the leak path: with the old token revoked at Cloudflare first, --rotate still redeploys worker, which runs on it", async () => {
+    // Before, the rotation was read from Cloudflare's list: once the leaked token was revoked by
+    // hand (rotate-email-token.md), none was listed, the run counted as provisioning and exited 0,
+    // and worker kept running on the revoked token until someone ran railway deploy.
+    const h = staging({ worker: "fin-next-api" });
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    // worker's deployment takes the first token, as its next railway deploy would.
+    h.rw.running("worker", ref("fin-next-api"));
+    h.cf.tokens.length = 0;
+    h.sequence.length = 0;
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.ok, h.runtime.err());
+    assert.deepEqual(writes(h), ["cf POST", "rw finPatch", "rw finDeploy"]);
+    assert.deepEqual(h.rw.deployed, ["worker"]);
+    const order = h.sequence;
+    const patch = order.indexOf("rw finPatch");
+    assert.ok(patch < order.indexOf("rw finVariables", patch), "read back");
+    assert.ok(order.indexOf("rw finVariables", patch) < order.indexOf("rw finDeploy"));
+    // The redeploy started after this run's write showed, and took it: the new token.
+    const took = startedWith(h, "worker").at(-1);
+    assert.equal(took?.[WRITE_MARKER], lastSet(h, "worker", WRITE_MARKER));
+    assert.equal(took?.FIN_EMAIL_TOKEN, lastSet(h, "worker", "FIN_EMAIL_TOKEN"));
+    assert.deepEqual(steps(h, "redeploy"), ["worker"]);
+    assert.deepEqual(
+      h
+        .lines()
+        .filter((l) => l.event === "rotation.redeployed")
+        .map((l) => l.services),
+      [["worker"]],
+    );
+    h.assertNoLeak([lastSet(h, "worker", "FIN_EMAIL_TOKEN") ?? ""]);
+  });
+
   it("a rotation whose redeploy fails revokes nothing, says the rotation is not done, and a re-run finishes it", async () => {
     const h = staging({ worker: "fin-next-api" });
     assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok);
@@ -231,6 +270,78 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     assert.equal(h.cf.tokens.length, 2);
   });
 
+  it("refuses a redeploy when Railway does not say which image the newest deployment runs and no registered deploy recorded the one set: email token, tunnel create and zone apply", async () => {
+    // Before, an unread image only warned, and the redeploy rolled whatever image the service was
+    // set to, then revoked the old token or wrote the rule.
+    for (const answer of ["refused", "no-image"] as const) {
+      const email = staging({ worker: "fin-next-api" });
+      assert.equal(await email.run(["email", "token", "staging"]), EXIT.ok);
+      setImage(email, "worker", `ghcr.io/someone/else@${DIGEST("e")}`);
+      email.rw.deploymentImageAnswer = answer;
+      assert.equal(
+        await email.run(["email", "token", "staging", "--rotate"]),
+        EXIT.refused,
+        answer,
+      );
+      assert.match(
+        email.runtime.err(),
+        /Railway did not say which image worker's newest deployment runs \(SP-03\), and worker is set to an image no registered railway deploy recorded for it/,
+      );
+      assert.match(
+        email.runtime.err(),
+        /the rotation is not done: worker may still run the old token/,
+      );
+      assert.deepEqual(email.rw.deployed, [], answer);
+      assert.equal(email.cf.tokens.length, 2, "the old token is not revoked");
+
+      const tunnel = staging({ "cloudflared-admin": "fin-next-connector" });
+      tunnel.rw.deploymentImageAnswer = answer;
+      assert.equal(
+        await tunnel.run(["tunnel", "create", "staging", "admin"]),
+        EXIT.refused,
+        answer,
+      );
+      assert.match(tunnel.runtime.err(), /Railway did not say which image cloudflared-admin's/);
+      assert.deepEqual(tunnel.rw.deployed, [], answer);
+
+      const zone = staging(PROOF_SERVICES);
+      zone.rw.deploymentImageAnswer = answer;
+      assert.equal(
+        await zone.run(["zone", "apply", "staging", "--only", "rules"]),
+        EXIT.refused,
+        answer,
+      );
+      assert.deepEqual(zone.rw.deployed, [], answer);
+      assert.equal(
+        zone.sequence.some((c) => /^cf (POST|PATCH) .*\/rulesets/.test(c)),
+        false,
+        "no rule is written",
+      );
+    }
+  });
+
+  it("with the running image unread, a redeploy rolls only the digest the registered deploys recorded for the service", async () => {
+    const h = staging();
+    assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    const rolled = h.rw.deployed.length;
+    h.rw.deploymentImageAnswer = "no-image";
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.ok, h.runtime.err());
+    assert.match(h.runtime.err(), /the digest the registered deploys recorded for it/);
+    assert.deepEqual(h.rw.deployed.slice(rolled), ["worker"]);
+    assert.equal(h.cf.tokens.length, 1);
+    // Set to another digest since (a deploy stopped between its update and its deployment, or a
+    // change by hand): refused, nothing deployed, the old token kept.
+    setImage(h, "worker", ref("fin-next-edge"));
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.refused);
+    assert.match(
+      h.runtime.err(),
+      /worker is set to an image other than the one the registered deploys recorded for it/,
+    );
+    assert.deepEqual(h.rw.deployed.slice(rolled), ["worker"]);
+    assert.equal(h.cf.tokens.length, 2);
+  });
+
   it("the tunnel-token incident: tunnel create after the tunnel was deleted rotates, redeploys the connector and reads back", async () => {
     // Before the ruling no pnpm fin command redeployed the connector, and the runbook woke the
     // owner.
@@ -259,12 +370,11 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     assert.ok(order.lastIndexOf("rw finVariables") > order.indexOf("rw finDeploy"));
     h.assertNoLeak([token ?? ""]);
 
-    // A kept tunnel has the token the connector runs: no redeploy, unless asked for, which is how
-    // a rotation whose redeploy did not pass is finished.
+    // A kept tunnel with no unfinished rotation in the run log: no redeploy, unless asked for.
     assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.ok);
     assert.match(
       h.runtime.out(),
-      /the tunnel is kept, so its token is the one cloudflared-public runs/,
+      /the tunnel is kept, and the run log shows no rotation of cloudflared-public's token left unfinished: it is not redeployed/,
     );
     assert.equal(h.rw.deployed.length, 1);
     assert.equal(
@@ -273,6 +383,46 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
       h.runtime.err(),
     );
     assert.deepEqual(h.rw.deployed, ["cloudflared-public", "cloudflared-public"]);
+  });
+
+  it("a tunnel rotation that fails before its redeploy says it is not done, and a plain re-run redeploys the connector", async () => {
+    // Before, only the redeploy step said the rotation was not done; a failed read-back after the
+    // new tunnel was made printed the provider error alone, and a plain re-run kept the tunnel,
+    // exited 0 and said the connector ran its token while it still ran the deleted tunnel's.
+    const h = staging();
+    assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.ok);
+    const first = lastSet(h, "cloudflared-public", "TUNNEL_TOKEN");
+    h.rw.running("cloudflared-public", ref("fin-next-connector"));
+    h.cf.tunnels.length = 0;
+    h.rw.ignorePatch = (service) => service === "cloudflared-public";
+    assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.unavailable);
+    assert.equal(h.cf.tunnels.length, 1, "the new tunnel stands");
+    assert.deepEqual(h.rw.deployed, []);
+    const notDone =
+      /the rotation is not done: cloudflared-public may still run the old token; once the cause is fixed, run: pnpm fin tunnel create staging public --redeploy/;
+    assert.match(h.runtime.err(), notDone);
+    const failed = h.records().at(-1);
+    assert.equal(failed?.result, "failed");
+    assert.match(String(failed?.leftover), notDone);
+
+    h.rw.ignorePatch = undefined;
+    assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.ok, h.runtime.err());
+    assert.match(
+      h.runtime.out(),
+      /the run log shows a rotation of cloudflared-public's token whose redeploy did not pass: the tunnel is kept, and cloudflared-public is redeployed to finish it/,
+    );
+    assert.doesNotMatch(h.runtime.out(), /it is not redeployed/);
+    assert.deepEqual(h.rw.deployed, ["cloudflared-public"]);
+    const token = lastSet(h, "cloudflared-public", "TUNNEL_TOKEN");
+    assert.notEqual(token, first);
+    assert.equal(startedWith(h, "cloudflared-public").at(-1)?.TUNNEL_TOKEN, token);
+    assert.deepEqual(steps(h, "redeploy"), ["cloudflared-public"]);
+    assert.equal(h.records().at(-1)?.leftover, undefined);
+
+    // Finished: the next plain run keeps the tunnel and redeploys nothing.
+    assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.ok, h.runtime.err());
+    assert.deepEqual(h.rw.deployed, ["cloudflared-public"]);
+    h.assertNoLeak([token ?? "", first ?? ""]);
   });
 
   it("a tunnel rotation whose redeploy fails names the command that finishes it", async () => {

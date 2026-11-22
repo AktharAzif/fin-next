@@ -14,11 +14,14 @@
 // token that is no longer active (expired or disabled), or one minted by a run of this command that
 // never set it on worker (Cloudflare shows a value only when it mints it, so such a token's value
 // is lost). Then, as with --rotate, the new one is minted and set first; when worker has a
-// deployment, it holds the old token, so worker is redeployed as a step of its own, waits for
-// SUCCESS and is read back (a rotation, rule 2 of the steward's ruling of 22 Nov), and only
-// afterwards are the old ones revoked (ARCHITECTURE §4.9: Railway, then verify, then revoke). A
-// first token, with none to replace, is provisioning (rule 1): worker takes it at its next
-// deployment. Tokens are named by ordinal, never by ID.
+// deployment that may hold a token (its variables name FIN_EMAIL_TOKEN, or Cloudflare lists an old
+// one), worker is redeployed as a step of its own, waits for SUCCESS and is read back (a rotation,
+// rule 2 of the steward's ruling of 22 Nov), and only afterwards are the old ones revoked
+// (ARCHITECTURE §4.9: Railway, then verify, then revoke). That is decided by what worker holds,
+// not by what Cloudflare lists: a token revoked at Cloudflare first (a leak) is listed no more,
+// and worker still runs on it. A first token, on a worker that has never held one, is
+// provisioning (rule 1): worker takes it at its next deployment. Tokens are named by ordinal,
+// never by ID.
 
 import type { Command } from "../command.ts";
 import { flagBool } from "../core/args.ts";
@@ -26,7 +29,8 @@ import type { Context } from "../core/context.ts";
 import { ConfigError, RefusedError } from "../core/errors.ts";
 import type { Change } from "../core/plan.ts";
 import { Secret } from "../core/secret.ts";
-import type { Written } from "../railway/api.ts";
+import type { RailwayApi, Written } from "../railway/api.ts";
+import { isRefusal, readVariables } from "../railway/inspect.ts";
 import { confirmWritten, deployedOf, redeploy, redeployChange } from "../railway/rollout.ts";
 import type { WriteTarget } from "./api.ts";
 import { bindZone, cloudflare, railway, registerId } from "./common.ts";
@@ -301,6 +305,37 @@ export function mintedButNeverSet(ctx: Context, token: string, service: string):
   );
 }
 
+/**
+ * Whether the service's running deployment may hold a token, so that a new one reaches it only by
+ * a redeploy (rule 2). Read from the service, not from Cloudflare's list: it has a deployment, and
+ * its variables name the token (Railway answers a sealed one by its name), or Cloudflare still
+ * lists a token of the name it may have started with. A token revoked at Cloudflare first (the
+ * leak path of rotate-email-token.md) is listed no more, yet the deployment still runs on it. A
+ * variables read Railway refuses leaves it unknown, which counts as holding one: leaving the
+ * service on a revoked token stops every send. A service that has never had the variable is
+ * provisioned (rule 1).
+ */
+export async function holdsToken(
+  ctx: Context,
+  rw: RailwayApi,
+  service: string,
+  variable: string,
+  listed: boolean,
+): Promise<boolean> {
+  if (!(await deployedOf(ctx, rw, [service])).has(service)) return false;
+  if (listed) return true;
+  try {
+    const v = await readVariables(rw, ctx.settings, service, await rw.serviceId(service));
+    return v.sealed.includes(variable) || v.readable.includes(variable);
+  } catch (error) {
+    if (!isRefusal(error)) throw error;
+    ctx.out.warn(
+      `Railway refused ${service}'s variables read, so whether its deployment holds ${variable} is unknown: it is redeployed as if it did`,
+    );
+    return true;
+  }
+}
+
 export const emailToken: Command = {
   words: ["email", "token"],
   summary: "mint the IP-filtered Email Sending token and set it sealed on worker",
@@ -383,7 +418,7 @@ export const emailToken: Command = {
       });
       // A rotation: the old tokens are revoked only once the service that may hold one runs the
       // new token (rule 2). A service with no deployment holds none.
-      const holds = revoke.size > 0 && (await deployedOf(ctx, rw, [t.service])).has(t.service);
+      const holds = await holdsToken(ctx, rw, t.service, t.variable, revoke.size > 0);
       if (holds) changes.push(redeployChange(t.service, [t.variable]));
       for (const name of revoke.keys())
         changes.push({
