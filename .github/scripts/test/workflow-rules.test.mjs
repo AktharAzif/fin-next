@@ -10,14 +10,17 @@ import { GATED_JOBS } from "../gate.mjs";
 import {
   AFTER_GATE_IF,
   checkAction,
+  checkCheckParity,
   checkPins,
   checkRepository,
   checkWorkflow,
   child,
   EXPRESSION_OPEN as E,
   expressionText,
+  parseCheckScript,
   parseFlow,
   parseOutline,
+  ROOT_CHECK_IF,
   stripComment,
 } from "../workflow-rules.mjs";
 import { tempDir, writeTree } from "./helpers.mjs";
@@ -955,11 +958,313 @@ describe("checkPins", () => {
   });
 });
 
+/** The condition each root check's step carries, as a workflow writes it. */
+const ROOT_IF = `${E} ${ROOT_CHECK_IF} }}`;
+
+/**
+ * A root check's step in the check job below.
+ * @param {string} name
+ */
+function rootStep(name) {
+  return `      - name: ${name}\n        if: ${ROOT_IF}\n        run: pnpm run ${name}\n`;
+}
+
+/** A check script; each test changes one thing. */
+const SCRIPT = [
+  "TURBO_TELEMETRY_DISABLED=1 turbo run lint typecheck test",
+  "pnpm run layout:check",
+  "pnpm run public-safety",
+  "pnpm run static:check",
+].join(" && ");
+const TURBO_RUN = "pnpm exec turbo run lint typecheck test --continue";
+const ROOT_STEPS = ["layout:check", "public-safety", "static:check"].map(rootStep).join("");
+
+/** A check job that mirrors SCRIPT; each test changes one thing. */
+const CHECK = `name: ci
+on:
+  pull_request:
+permissions: {}
+concurrency:
+  group: ci-${E} github.sha }}
+  cancel-in-progress: true
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Turborepo's tasks
+        id: turbo
+        run: ${TURBO_RUN}
+${ROOT_STEPS}      - name: Type-check the CI scripts
+        run: pnpm exec tsc -p .github/scripts/tsconfig.json
+`;
+
+/**
+ * The check-parity findings for a check job and a check script.
+ * @param {string} workflow
+ * @param {string} [script]
+ */
+function parity(workflow, script = SCRIPT) {
+  return checkCheckParity(
+    "ci.yml",
+    workflow,
+    "package.json",
+    JSON.stringify({ scripts: { check: script } }),
+  );
+}
+
+/**
+ * The check job with one change.
+ * @param {string} from
+ * @param {string} to
+ */
+function plantedCheck(from, to) {
+  assert.ok(CHECK.includes(from), `the check job holds ${from}`);
+  return CHECK.replace(from, to);
+}
+
+/**
+ * Asserts that a check-parity finding in the file has a message holding the text.
+ * @param {import("../workflow-rules.mjs").Finding[]} found
+ * @param {string} text
+ * @param {string} [file]
+ */
+function assertMessage(found, text, file = "ci.yml") {
+  assert.ok(
+    found.some((f) => f.file === file && f.rule === "check-parity" && f.message.includes(text)),
+    `${file}: ${text}\nfound:\n${found.map((f) => `${f.file}: ${f.message}`).join("\n")}`,
+  );
+}
+
+describe("ci.yml's check job mirrors package.json's check script (check-parity)", () => {
+  it("passes a check job that mirrors the script, which keeps every other rule too", () => {
+    assert.deepEqual(parity(CHECK), []);
+    assert.deepEqual(checkWorkflow("ci.yml", CHECK), []);
+    assert.deepEqual(parseCheckScript(SCRIPT), {
+      turbo: {
+        env: [{ name: "TURBO_TELEMETRY_DISABLED", value: "1" }],
+        tasks: ["lint", "typecheck", "test"],
+      },
+      roots: ["layout:check", "public-safety", "static:check"],
+      unknown: [],
+    });
+  });
+
+  it("refuses a check added to the script alone, naming the step to add and where", () => {
+    const found = parity(CHECK, `${SCRIPT} && pnpm run new:check`);
+    assert.equal(found.length, 1, found.map((f) => f.message).join("\n"));
+    assertMessage(
+      found,
+      `add a step that runs \`pnpm run new:check\` to ci.yml's check job, after the step that runs \`pnpm run static:check\`, with \`if: ${ROOT_IF}\``,
+    );
+  });
+
+  it("refuses a step removed from the job, naming the step to add back and where", () => {
+    assertMessage(
+      parity(plantedCheck(rootStep("public-safety"), "")),
+      "add a step that runs `pnpm run public-safety` to ci.yml's check job, after the step that runs `pnpm run layout:check`",
+    );
+    assertMessage(
+      parity(plantedCheck(rootStep("layout:check"), "")),
+      "add a step that runs `pnpm run layout:check` to ci.yml's check job, after the turbo step (id: turbo)",
+    );
+  });
+
+  it("refuses a root-check step the script does not have, added to the job or dropped from the script", () => {
+    const extra = `${rootStep("static:check")}${rootStep("extra:check")}`;
+    assertMessage(
+      parity(plantedCheck(rootStep("static:check"), extra)),
+      "ci.yml's check job runs `pnpm run extra:check`, which package.json's check script does not: remove the step, or add `&& pnpm run extra:check` to the script",
+    );
+    assertMessage(
+      parity(CHECK, SCRIPT.replace(" && pnpm run public-safety", "")),
+      "ci.yml's check job runs `pnpm run public-safety`, which package.json's check script does not",
+    );
+  });
+
+  it("refuses two steps swapped, and two parts of the script swapped", () => {
+    const two = `${rootStep("layout:check")}${rootStep("public-safety")}`;
+    const swapped = `${rootStep("public-safety")}${rootStep("layout:check")}`;
+    assertMessage(
+      parity(plantedCheck(two, swapped)),
+      "ci.yml's check job runs the root checks in the order public-safety, layout:check, static:check, and package.json's check script in the order layout:check, public-safety, static:check: put the steps in the script's order",
+    );
+    const script = SCRIPT.replace(
+      "layout:check && pnpm run public-safety",
+      "public-safety && pnpm run layout:check",
+    );
+    assertMessage(
+      parity(CHECK, script),
+      "in the order layout:check, public-safety, static:check, and package.json's check script in the order public-safety, layout:check, static:check",
+    );
+  });
+
+  it("refuses a turbo task added or removed on either side, or the tasks in another order", () => {
+    const added = parity(CHECK, SCRIPT.replace("typecheck test", "typecheck test lint:root"));
+    assertMessage(added, "it does not run lint:root, which the check script's turbo part runs");
+    assertMessage(
+      added,
+      "Make it run `pnpm exec turbo run lint typecheck test lint:root --continue`",
+    );
+    const removed = parity(CHECK, SCRIPT.replace("typecheck test", "typecheck"));
+    assertMessage(removed, "it runs test, which the check script's turbo part does not");
+    const inStep = "pnpm exec turbo run lint typecheck test lint:root --continue";
+    const stepAdded = parity(plantedCheck(TURBO_RUN, inStep));
+    assertMessage(stepAdded, "it runs lint:root, which the check script's turbo part does not");
+    const stepRemoved = parity(plantedCheck(TURBO_RUN, "pnpm exec turbo run lint test --continue"));
+    assertMessage(
+      stepRemoved,
+      "it does not run typecheck, which the check script's turbo part runs",
+    );
+    assertMessage(stepRemoved, `Make it run \`${TURBO_RUN}\``);
+    const reordered = TURBO_RUN.replace("lint typecheck", "typecheck lint");
+    const order = parity(plantedCheck(TURBO_RUN, reordered));
+    assertMessage(order, "it runs the tasks in another order than the check script");
+  });
+
+  it("refuses a turbo step without --continue, or with another flag", () => {
+    assertMessage(
+      parity(plantedCheck(TURBO_RUN, "pnpm exec turbo run lint typecheck test")),
+      "it has no --continue, so turbo would stop at the first failed task",
+    );
+    const partial = parity(plantedCheck(TURBO_RUN, `${TURBO_RUN}=dependencies-successful`));
+    assertMessage(partial, "it has no --continue");
+    assertMessage(
+      partial,
+      "it passes --continue=dependencies-successful, which the check script's turbo part does not",
+    );
+  });
+
+  it("refuses a root-check step without the condition, on another, or with another command or key", () => {
+    const layout = rootStep("layout:check");
+    assertMessage(
+      parity(plantedCheck(layout, layout.replace(`        if: ${ROOT_IF}\n`, ""))),
+      `the step for \`pnpm run layout:check\` has no if:; give it \`if: ${ROOT_IF}\``,
+    );
+    assertMessage(
+      parity(plantedCheck(layout, layout.replace(ROOT_IF, "always()"))),
+      `the step for \`pnpm run layout:check\` runs on \`always()\`; give it \`if: ${ROOT_IF}\``,
+    );
+    const orTrue = layout.replace("pnpm run layout:check", "pnpm run layout:check || true");
+    assertMessage(
+      parity(plantedCheck(layout, orTrue)),
+      "the step for `pnpm run layout:check` runs `pnpm run layout:check || true`: make it run exactly `pnpm run layout:check`",
+    );
+    assertMessage(
+      parity(plantedCheck(layout, `${layout}        continue-on-error: true\n`)),
+      "the step for `pnpm run layout:check` sets continue-on-error:",
+    );
+  });
+
+  it("refuses a check job without its turbo step, and a turbo step with a condition or another key", () => {
+    const id = "        id: turbo\n";
+    assertMessage(
+      parity(plantedCheck(id, "")),
+      `the check job has no step with id: turbo; add one after the install that runs \`${TURBO_RUN}\``,
+    );
+    assertMessage(
+      parity(plantedCheck(id, `${id}        if: false\n`)),
+      "the turbo step has if:; remove it",
+    );
+    assertMessage(
+      parity(plantedCheck(id, `${id}        continue-on-error: true\n`)),
+      "the turbo step sets continue-on-error:",
+    );
+  });
+
+  it("refuses another step between the turbo step and the root checks", () => {
+    const between = `      - run: echo between\n${rootStep("layout:check")}`;
+    assertMessage(
+      parity(plantedCheck(rootStep("layout:check"), between)),
+      "the step for `pnpm run layout:check` comes right after the turbo step (id: turbo), with no other step between",
+    );
+  });
+
+  it("refuses a part of the script of any other shape, so a new kind of part changes ci.yml too", () => {
+    /** @type {[string, string][]} */
+    const cases = [
+      [
+        `${SCRIPT} && node scripts/x.mjs`,
+        "the part `node scripts/x.mjs` of package.json's check script is not `pnpm run <name>`",
+      ],
+      [
+        `${SCRIPT} || true`,
+        "the part `pnpm run static:check || true` of package.json's check script is not `pnpm run <name>`",
+      ],
+      [`${SCRIPT}; node x.mjs`, "the part `pnpm run static:check; node x.mjs`"],
+      [`${SCRIPT} && FIN_X=1 pnpm run x`, "the part `FIN_X=1 pnpm run x`"],
+      [`${SCRIPT} && pnpm run "x"`, 'the part `pnpm run "x"`'],
+      [
+        `pnpm run layout:check && ${SCRIPT}`,
+        "the part `pnpm run layout:check` of package.json's check script is not `turbo run <tasks>`",
+      ],
+      [SCRIPT.replace("turbo run", "turbo run --filter=x"), "is not `turbo run <tasks>`"],
+    ];
+    for (const [script, text] of cases) {
+      assertMessage(parity(CHECK, script), text, "package.json");
+    }
+  });
+
+  it("refuses an env assignment the workflow's env does not match", () => {
+    assertMessage(
+      parity(CHECK, SCRIPT.replace("DISABLED=1", "DISABLED=0")),
+      `package.json's check script runs turbo with TURBO_TELEMETRY_DISABLED=0, and ci.yml's check job sets it to "1": set TURBO_TELEMETRY_DISABLED: "0" in ci.yml's env`,
+    );
+    assertMessage(
+      parity(CHECK, `FIN_X=1 ${SCRIPT}`),
+      "runs turbo with FIN_X=1, and ci.yml's check job does not set it",
+    );
+    const timeout = "    timeout-minutes: 20\n";
+    const jobEnv = plantedCheck(timeout, `${timeout}    env:\n      FIN_X: "1"\n`);
+    assert.deepEqual(parity(jobEnv, `FIN_X=1 ${SCRIPT}`), []);
+  });
+
+  it("refuses a package.json without a check script, a part given twice, and no check job", () => {
+    for (const text of [null, "{", JSON.stringify({ scripts: {} })]) {
+      assertMessage(
+        checkCheckParity("ci.yml", CHECK, "package.json", text),
+        "package.json has no check script (scripts.check)",
+        "package.json",
+      );
+    }
+    assertMessage(
+      parity(CHECK, `${SCRIPT} && pnpm run static:check`),
+      "runs `pnpm run static:check` twice: drop one",
+      "package.json",
+    );
+    assertMessage(parity(plantedCheck("  check:\n", "  other:\n")), "ci.yml has no check job");
+  });
+});
+
 describe("this repository", () => {
   it("has clean workflows, with the Postgres service on compose.yaml's digest", () => {
     const { files, findings } = checkRepository(ROOT);
     assert.ok(files >= 4, `found ${files} workflows`);
     assert.deepEqual(findings, []);
+  });
+
+  it("mirrors package.json's check script in ci.yml's check job, and fails when the script alone changes", () => {
+    const file = ".github/workflows/ci.yml";
+    const ci = readFileSync(join(ROOT, file), "utf8");
+    const packageText = readFileSync(join(ROOT, "package.json"), "utf8");
+    const script = JSON.parse(packageText).scripts.check;
+    const parsed = parseCheckScript(script);
+    assert.ok(parsed.turbo !== null && parsed.turbo.tasks.length > 0, "the script runs turbo");
+    assert.ok(parsed.roots.length > 0, "the script runs root checks");
+    assert.deepEqual(parsed.unknown, []);
+    assert.deepEqual(checkCheckParity(file, ci, "package.json", packageText), []);
+    const added = JSON.stringify({ scripts: { check: `${script} && pnpm run new:check` } });
+    assertMessage(
+      checkCheckParity(file, ci, "package.json", added),
+      `add a step that runs \`pnpm run new:check\` to ci.yml's check job, after the step that runs \`pnpm run ${parsed.roots.at(-1)}\``,
+      file,
+    );
   });
 
   it("names the job the ruleset requires exactly commit-dates-utc, and gate needs it", () => {

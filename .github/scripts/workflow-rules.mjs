@@ -44,7 +44,12 @@
 //     options:, description:, with: or env: value (elsewhere a rule may compare the value), an
 //     explicit key (`? `), an anchor, alias, tag or merge key, a key given twice in one mapping,
 //     and more than one document;
-// and, across files, a Postgres image in a workflow that differs from compose.yaml's.
+// and, across files, a Postgres image in a workflow that differs from compose.yaml's; and
+// ci.yml's check job differing from package.json's `check` script (check-parity). The job runs
+// the script's parts one step each, so that one failure does not hide the rest, and package.json
+// is not a control path: a part added to the script alone would pass locally and in the pre-push
+// hook and never run in CI. The rule fails the static job instead (checkCheckParity says what it
+// requires).
 //
 // The reader outlines YAML's block style and reads a flow collection that closes on its own line
 // ({ ... } or [ ... ]) into the same outline, so every rule reads both styles alike. It is not a
@@ -52,7 +57,7 @@
 // actionlint and zizmor run beside it, but no rule here relies on them.
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
-import { clean, isMain, say } from "./lib/ci.mjs";
+import { clean, isMain, isRecord, say } from "./lib/ci.mjs";
 
 /** @typedef {{ file: string, line: number, rule: string, message: string }} Finding */
 /**
@@ -61,6 +66,20 @@ import { clean, isMain, say } from "./lib/ci.mjs";
  *   item: boolean, inline: boolean, flow: boolean, children: OutlineNode[],
  *   scalar: { line: number, text: string }[],
  * }} OutlineNode
+ */
+/**
+ * package.json's `check` script as ci.yml's check job mirrors it: the first part's assignments
+ * and turbo tasks (null when that part has another shape), each later `pnpm run <name>`'s name,
+ * and every part of another shape.
+ * @typedef {{
+ *   turbo: { env: { name: string, value: string }[], tasks: string[] } | null,
+ *   roots: string[],
+ *   unknown: { first: boolean, text: string }[],
+ * }} CheckScript
+ */
+/**
+ * A step of ci.yml's check job: its place, its command and its condition (null when none).
+ * @typedef {{ node: OutlineNode, index: number, run: string, when: string | null }} StepRead
  */
 
 export const FORBIDDEN_TRIGGERS = [
@@ -128,6 +147,18 @@ const ALIAS_START = /^[&*!]/;
 const PUSH_ONLY = /^github\.event_name\s*==\s*'push'\s*(?:&&[^|]*)?$/;
 /** The one condition a job after the gate runs on: a push to main, with the implied success(). */
 export const AFTER_GATE_IF = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+/** The workflow whose check job runs package.json's `check` script part by part. */
+const CHECK_WORKFLOW = ".github/workflows/ci.yml";
+/** The condition of each root check's step: once the setup succeeded, whatever turbo found. */
+export const ROOT_CHECK_IF = "!cancelled() && steps.turbo.outcome != 'skipped'";
+/** The keys a step that mirrors a part of the script may have (no continue-on-error, env, ...). */
+const MIRROR_KEYS = new Set(["name", "id", "if", "run"]);
+/** The check script's first part: `NAME=value` assignments, then `turbo run` and its tasks. */
+const TURBO_PART = /^((?:[A-Za-z_]\w*=[\w.,:/@+-]* +)*)turbo +run((?: +[\w@][\w:#@/.-]*)+)$/;
+/** Each later part of the check script: `pnpm run <name>`. */
+const ROOT_PART = /^pnpm +run +(\w[\w:.-]*)$/;
+/** A step that runs a root check, read for the script's name. */
+const ROOT_STEP = /^pnpm[ \t]+run[ \t]+(\S+)/;
 
 /**
  * Reads a line as YAML does for two things: where its comment starts (a `#` at the start or after
@@ -1095,6 +1126,359 @@ export function checkPins(root, workflows) {
 }
 
 /**
+ * The words of a text, split on spaces.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function words(text) {
+  return text.split(" ").filter((word) => word !== "");
+}
+
+/**
+ * Reads package.json's `check` script as ci.yml's check job mirrors it: split on `&&`, the first
+ * part `turbo run <tasks>` after any `NAME=value` assignments, each later part `pnpm run <name>`.
+ * A part of any other shape (`node x.mjs`, `pnpm run x || true`, a `;`, a quote, a flag) is
+ * unknown, and refused by checkCheckParity.
+ * @param {string} script
+ * @returns {CheckScript}
+ */
+export function parseCheckScript(script) {
+  /** @type {CheckScript} */
+  const parsed = { turbo: null, roots: [], unknown: [] };
+  for (const [index, raw] of script.split("&&").entries()) {
+    const part = raw.replace(/^[ \t\n]+|[ \t\n]+$/g, "");
+    const turbo = index === 0 ? TURBO_PART.exec(part) : null;
+    const root = index === 0 ? null : ROOT_PART.exec(part);
+    if (turbo !== null) {
+      /** @type {{ name: string, value: string }[]} */
+      const env = [];
+      for (const assignment of words(turbo[1] ?? "")) {
+        const at = assignment.indexOf("=");
+        env.push({ name: assignment.slice(0, at), value: assignment.slice(at + 1) });
+      }
+      parsed.turbo = { env, tasks: words(turbo[2] ?? "") };
+    } else if (root !== null) {
+      parsed.roots.push(root[1] ?? "");
+    } else {
+      parsed.unknown.push({ first: index === 0, text: part });
+    }
+  }
+  return parsed;
+}
+
+/**
+ * package.json's `check` script, or null when the file, its JSON or the script is missing.
+ * @param {string | null} packageText
+ * @returns {string | null}
+ */
+function checkScriptOf(packageText) {
+  if (packageText === null) return null;
+  try {
+    /** @type {unknown} */
+    const pkg = JSON.parse(packageText);
+    const scripts = isRecord(pkg) ? pkg.scripts : undefined;
+    const check = isRecord(scripts) ? scripts.check : undefined;
+    return typeof check === "string" ? check : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A run: value's command: a block scalar's lines, or the scalar on its key's line.
+ * @param {OutlineNode} run
+ * @returns {string}
+ */
+function commandText(run) {
+  if (!BLOCK_SCALAR.test(run.value)) return unquote(run.value).trim();
+  const lines = run.scalar.map((s) => s.text);
+  return lines.join("\n").trim();
+}
+
+/**
+ * Why the turbo step's command is not the check script's turbo part with --continue, and the fix.
+ * @param {string} run the step's command
+ * @param {string[]} tasks the check script's turbo tasks
+ * @param {string} expected the command the step runs
+ * @returns {string}
+ */
+function turboDifference(run, tasks, expected) {
+  const tokens = run.split(/[ \t]+/);
+  /** @type {string[]} */
+  const why = [];
+  if (tokens.slice(0, 4).join(" ") !== "pnpm exec turbo run") {
+    why.push(`it runs \`${clean(run, 200)}\`, not \`pnpm exec turbo run <tasks> --continue\``);
+  } else {
+    const rest = tokens.slice(4);
+    const flags = rest.filter((t) => t.startsWith("-"));
+    const named = rest.filter((t) => !t.startsWith("-"));
+    if (!flags.includes("--continue")) {
+      why.push("it has no --continue, so turbo would stop at the first failed task");
+    }
+    for (const flag of flags) {
+      if (flag === "--continue") continue;
+      why.push(`it passes ${clean(flag, 80)}, which the check script's turbo part does not`);
+    }
+    for (const task of tasks) {
+      if (named.includes(task)) continue;
+      why.push(`it does not run ${clean(task, 80)}, which the check script's turbo part runs`);
+    }
+    for (const task of named) {
+      if (tasks.includes(task)) continue;
+      why.push(`it runs ${clean(task, 80)}, which the check script's turbo part does not`);
+    }
+    if (why.length === 0 && named.join(" ") !== tasks.join(" ")) {
+      why.push("it runs the tasks in another order than the check script");
+    }
+  }
+  if (why.length === 0) why.push(`it runs \`${clean(run, 200)}\``);
+  return `the turbo step does not mirror package.json's check script: ${why.join("; ")}. Make it run \`${clean(expected, 300)}\`, or change the script and the step together`;
+}
+
+/**
+ * ci.yml's check job against package.json's `check` script (check-parity). The job runs the
+ * script's parts one step each, not the script, so package.json (not a control path) could gain a
+ * part that CI never runs. So the job must hold: (a) a step with id `turbo` that runs exactly
+ * `pnpm exec turbo run <the script's turbo tasks, in order> --continue`, with no if:, while the
+ * workflow's env (top-level, or the job's) sets each of the script's `NAME=value` assignments;
+ * (b) right after it, one step per `pnpm run <name>` part, in the script's order, each running
+ * exactly `pnpm run <name>` on `if: ${{ ROOT_CHECK_IF }}`; (c) no step that runs `pnpm run` for a
+ * name the script does not have; and the steps carry no key but name, id, if and run (no
+ * continue-on-error, env or shell). (d) A part of the script of any other shape is refused, so a
+ * new kind of part changes ci.yml and this rule too. Each finding says what differs and the fix.
+ * @param {string} file the workflow's path
+ * @param {string} text the workflow
+ * @param {string} packageFile package.json's path
+ * @param {string | null} packageText package.json, or null when there is none
+ * @returns {Finding[]}
+ */
+export function checkCheckParity(file, text, packageFile, packageText) {
+  /** @type {Finding[]} */
+  const findings = [];
+  /**
+   * @param {string} where
+   * @param {number} line
+   * @param {string} message
+   */
+  const add = (where, line, message) =>
+    findings.push({ file: where, line, rule: "check-parity", message });
+  const script = checkScriptOf(packageText);
+  if (script === null) {
+    add(
+      packageFile,
+      1,
+      `${clean(packageFile, 200)} has no check script (scripts.check) for ci.yml's check job to mirror: restore it, or change the job and workflow-rules.mjs's check-parity rule together`,
+    );
+    return findings;
+  }
+  const packageLines = (packageText ?? "").split("\n");
+  const scriptLine = Math.max(1, packageLines.findIndex((l) => /^\s*"check"\s*:/.test(l)) + 1);
+  const parsed = parseCheckScript(script);
+  for (const part of parsed.unknown) {
+    const shape = part.first
+      ? "is not `turbo run <tasks>` (after any NAME=value assignments), the shape ci.yml's check job mirrors as its turbo step"
+      : "is not `pnpm run <name>`, the shape ci.yml's check job mirrors as one step";
+    add(
+      packageFile,
+      scriptLine,
+      `the part \`${clean(part.text, 200)}\` of package.json's check script ${shape}: write it in that shape (a new check as a package.json script, run by \`pnpm run <name>\`), or change ci.yml's check job and workflow-rules.mjs's check-parity rule together`,
+    );
+  }
+  const want = parsed.roots;
+  for (const [i, name] of want.entries()) {
+    if (want.indexOf(name) === i) continue;
+    add(
+      packageFile,
+      scriptLine,
+      `package.json's check script runs \`pnpm run ${clean(name, 80)}\` twice: drop one`,
+    );
+  }
+
+  const { root } = parseOutline(file, text);
+  const jobs = child(root, "jobs");
+  const job = jobs === undefined ? undefined : child(jobs, "check");
+  if (job === undefined) {
+    add(
+      file,
+      1,
+      `${clean(file, 200)} has no check job, so package.json's check script never runs in CI: restore the job`,
+    );
+    return findings;
+  }
+  /** @type {StepRead[]} */
+  const steps = [];
+  for (const [index, node] of (child(job, "steps")?.children ?? []).entries()) {
+    const run = child(node, "run");
+    const when = child(node, "if");
+    steps.push({
+      node,
+      index,
+      run: run === undefined ? "" : commandText(run),
+      when: when === undefined ? null : condition(when.value),
+    });
+  }
+  /**
+   * Refuses a key that a step mirroring a part of the script never has.
+   * @param {StepRead} step
+   * @param {string} what the step, in words
+   */
+  const onlyMirrorKeys = (step, what) => {
+    for (const c of step.node.children) {
+      if (c.key === null || MIRROR_KEYS.has(c.key)) continue;
+      add(
+        file,
+        c.line,
+        `${what} sets ${clean(c.key, 60)}:, which a step that mirrors the check script never does (continue-on-error lets a failure pass; env, shell or working-directory change what runs): remove it`,
+      );
+    }
+  };
+
+  // (a) The turbo step, and the env the script gives turbo.
+  const turbos = steps.filter((s) => unquote(child(s.node, "id")?.value ?? "") === "turbo");
+  const turbo = turbos[0];
+  const tasks = parsed.turbo === null ? null : parsed.turbo.tasks;
+  const expected = `pnpm exec turbo run ${(tasks ?? []).join(" ")} --continue`;
+  if (turbo === undefined) {
+    const runs = tasks === null ? "the script's turbo tasks with --continue" : `\`${expected}\``;
+    add(
+      file,
+      job.line,
+      `the check job has no step with id: turbo; add one after the install that runs ${clean(runs, 300)}`,
+    );
+  }
+  for (const extra of turbos.slice(1)) {
+    add(file, extra.node.line, "two of the check job's steps have id: turbo; keep one");
+  }
+  if (turbo !== undefined) {
+    const when = child(turbo.node, "if");
+    if (when !== undefined) {
+      add(
+        file,
+        when.line,
+        "the turbo step has if:; remove it, so the step runs on the implied success() and is skipped only when the setup failed, which the root checks' condition reads",
+      );
+    }
+    onlyMirrorKeys(turbo, "the turbo step");
+    if (tasks !== null && turbo.run !== expected) {
+      add(
+        file,
+        child(turbo.node, "run")?.line ?? turbo.node.line,
+        turboDifference(turbo.run, tasks, expected),
+      );
+    }
+  }
+  /** @type {Map<string, string>} */
+  const env = new Map();
+  for (const scope of [child(root, "env"), child(job, "env")]) {
+    for (const c of scope?.children ?? []) {
+      if (c.key !== null) env.set(c.key, unquote(c.value));
+    }
+  }
+  for (const { name, value } of parsed.turbo?.env ?? []) {
+    const actual = env.get(name);
+    if (actual === value) continue;
+    const state = actual === undefined ? "does not set it" : `sets it to "${clean(actual, 80)}"`;
+    add(
+      file,
+      child(root, "env")?.line ?? 1,
+      `package.json's check script runs turbo with ${clean(name, 80)}=${clean(value, 80)}, and ci.yml's check job ${state}: set ${clean(name, 80)}: "${clean(value, 80)}" in ci.yml's env, so the turbo step runs as pnpm check does`,
+    );
+  }
+
+  // (b) and (c) The root checks' steps.
+  /** @type {{ step: StepRead, name: string }[]} */
+  const roots = [];
+  for (const step of steps) {
+    const name = ROOT_STEP.exec(step.run)?.[1];
+    if (step !== turbo && name !== undefined) roots.push({ step, name });
+  }
+  const names = roots.map((r) => r.name);
+  const ifText = `if: ${EXPRESSION_OPEN} ${ROOT_CHECK_IF} }}`;
+  /**
+   * The step a root check's step comes right after, in words.
+   * @param {number} i the root check's place in the script
+   */
+  const after = (i) => {
+    if (i === 0) return "the turbo step (id: turbo)";
+    return `the step that runs \`pnpm run ${clean(want[i - 1], 80)}\``;
+  };
+  // A part given twice was refused above; the order is read only once the two lists hold the
+  // same names, once each.
+  let differs = want.some((name, i) => want.indexOf(name) !== i);
+  for (const [i, name] of want.entries()) {
+    if (names.includes(name)) continue;
+    differs = true;
+    const previous = i === 0 ? turbo : roots.find((r) => r.name === want[i - 1])?.step;
+    add(
+      file,
+      previous?.node.line ?? job.line,
+      `package.json's check script runs \`pnpm run ${clean(name, 80)}\` and ci.yml's check job does not: add a step that runs \`pnpm run ${clean(name, 80)}\` to ci.yml's check job, after ${after(i)}, with \`${ifText}\``,
+    );
+  }
+  for (const [i, r] of roots.entries()) {
+    const n = clean(r.name, 80);
+    const line = r.step.node.line;
+    if (!want.includes(r.name)) {
+      differs = true;
+      add(
+        file,
+        line,
+        `ci.yml's check job runs \`pnpm run ${n}\`, which package.json's check script does not: remove the step, or add \`&& pnpm run ${n}\` to the script`,
+      );
+      continue;
+    }
+    if (names.indexOf(r.name) !== i) {
+      differs = true;
+      add(file, line, `ci.yml's check job runs \`pnpm run ${n}\` in two steps: remove one`);
+      continue;
+    }
+    const what = `the step for \`pnpm run ${n}\``;
+    if (r.step.run !== `pnpm run ${r.name}`) {
+      add(
+        file,
+        child(r.step.node, "run")?.line ?? line,
+        `${what} runs \`${clean(r.step.run, 200)}\`: make it run exactly \`pnpm run ${n}\`, as the check script does`,
+      );
+    }
+    if (r.step.when === null) {
+      add(
+        file,
+        line,
+        `${what} has no if:; give it \`${ifText}\`, so it runs whatever turbo or an earlier check found, and only once the setup succeeded`,
+      );
+    } else if (r.step.when !== ROOT_CHECK_IF) {
+      add(
+        file,
+        child(r.step.node, "if")?.line ?? line,
+        `${what} runs on \`${clean(r.step.when, 200)}\`; give it \`${ifText}\`, so it runs whatever turbo or an earlier check found, and only once the setup succeeded`,
+      );
+    }
+    onlyMirrorKeys(r.step, what);
+  }
+  if (differs) return findings;
+  if (names.join("\n") !== want.join("\n")) {
+    const order = (/** @type {string[]} */ list) => list.map((n) => clean(n, 80)).join(", ");
+    add(
+      file,
+      roots[0]?.step.node.line ?? job.line,
+      `ci.yml's check job runs the root checks in the order ${order(names)}, and package.json's check script in the order ${order(want)}: put the steps in the script's order`,
+    );
+    return findings;
+  }
+  if (turbo === undefined) return findings;
+  for (const [i, r] of roots.entries()) {
+    if (r.step.index === turbo.index + 1 + i) continue;
+    add(
+      file,
+      r.step.node.line,
+      `the step for \`pnpm run ${clean(r.name, 80)}\` comes right after ${after(i)}, with no other step between: the root checks' steps follow the turbo step directly, in the script's order`,
+    );
+    break;
+  }
+  return findings;
+}
+
+/**
  * The files under <root>/.github the rules read: the workflows GitHub runs (directly in
  * .github/workflows) and every action's metadata file; and every link there, which is refused,
  * since a link could point the runner at a file this check never reads.
@@ -1148,6 +1532,12 @@ export function checkRepository(root) {
   for (const file of actions)
     findings.push(...checkAction(file, readFileSync(join(root, file), "utf8")));
   findings.push(...checkPins(root, texts));
+  const ci = texts.get(CHECK_WORKFLOW);
+  if (ci !== undefined) {
+    const packageFile = join(root, "package.json");
+    const packageText = existsSync(packageFile) ? readFileSync(packageFile, "utf8") : null;
+    findings.push(...checkCheckParity(CHECK_WORKFLOW, ci, "package.json", packageText));
+  }
   return { files: workflows.length + actions.length, findings };
 }
 

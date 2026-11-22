@@ -147,7 +147,9 @@ jobs:
       # its five root checks, one step each. turbo --continue runs every task whatever an earlier
       # one did and exits with the highest code any task gave; each root check runs once the setup
       # above succeeded (the turbo step ran), whatever turbo or another check found. Any failure
-      # still fails the job. These steps mirror the `check` script: change them together.
+      # still fails the job. These steps mirror the `check` script, and workflow-rules.mjs's
+      # check-parity rule fails the static job when they differ (a part, a task, the order,
+      # --continue, a condition or a key): change them together.
       - name: Turborepo's tasks (pnpm check's, with --continue)
         id: turbo
         run: pnpm exec turbo run lint typecheck test lint:root typecheck:root test:root --continue
