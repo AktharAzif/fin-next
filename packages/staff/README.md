@@ -30,8 +30,10 @@ await realm.run(context, async (tx) => {
   §8.5's rules and the last-Admin rule (`409 last_top_role`), and only then asks for the intent
   (`who.stepUp`), which it spends in the same transaction as the change, its audit event, its
   revocation-journal entry and its notices.
-- `staff.bootstrap_admin()` (migrations/*_staff_bootstrap.sql) is the first Admin's, called by
-  `migrate --task staff-bootstrap` (apps/api/src/tasks/staff-bootstrap) as fin_owner.
+- `staff.bootstrap_admin()` (migrations/*_staff_bootstrap.sql, replaced by
+  *_staff_bootstrap_reset.sql, whose reset takes the member's ceremony lock and voids their
+  emailed sign-in codes) is the first Admin's, called by `migrate --task staff-bootstrap`
+  (apps/api/src/tasks/staff-bootstrap) as fin_owner.
 - `runAccessDriftCheck` is the hourly drift duty's work; the worker wires it with
   `readAllowList` (FIN_ACCESS_READ_TOKEN) and `staffAccessList` (fin_worker's one staff grant).
 

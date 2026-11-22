@@ -197,7 +197,10 @@ export async function addStaff(
   };
 }
 
-/** `PATCH /api/staff/:staffId`: another role; the member's sessions end at once (S2-20). */
+/**
+ * `PATCH /api/staff/:staffId`: another role; the member's sessions end at once (S2-20), and the
+ * sign-in codes already emailed to them are void.
+ */
 export async function changeStaffRole(
   deps: StaffDeps,
   tx: UnitTx,
@@ -238,6 +241,9 @@ export async function changeStaffRole(
     input.roleKey,
     now,
   ]);
+  // The emailed sign-in codes already sent go with the sessions, so that no sign-in begun under
+  // the old role finishes after the change (its ceremony waited for it on the member's lock).
+  await voidSignInCodes(tx, "staff", target.email);
   const ended = await tx.query("DELETE FROM staff.session WHERE user_id = $1", [target.id]);
   const roleLabel = staffRoleLabel(next);
   await noticeEveryone(deps, tx, { email: target.email }, (audience) => ({

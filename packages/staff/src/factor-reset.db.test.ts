@@ -16,9 +16,12 @@
 //     it committed leaves no session and no factor, the code it showed still enrols the member, a
 //     sign-in that overlaps it cannot make it fail, and one that holds the member first finishes
 //     and then loses the session it made. No number of forged assertions in flight keeps it out.
+//   - A sign-in code emailed before a reset, a removal or a role change signs no one in after it.
 //   - An Admin's own staff change, sent while their own step-up is in flight from a session due
-//     for renewal, answers as it would alone, and the step-up passes; two Admins with sessions due
-//     for renewal changing each other at once get one success and one refusal, never a deadlock.
+//     for renewal, answers as it would alone, and the step-up passes, also when the change carries
+//     its proved intent while the step-up replaces the session it was proved in; two Admins with
+//     sessions due for renewal changing each other at once get one success and one refusal, never
+//     a deadlock.
 import { randomInt } from "node:crypto";
 import {
   createPgDatabase,
@@ -46,7 +49,13 @@ import {
 } from "../test/harness.ts";
 import { STAFF_ACTIONS } from "./actions.ts";
 import type { StaffDeps } from "./deps.ts";
-import { addStaff, changeStaffRole, redeemCode, resetStaffFactors } from "./members.ts";
+import {
+  addStaff,
+  changeStaffRole,
+  redeemCode,
+  removeStaff,
+  resetStaffFactors,
+} from "./members.ts";
 import type { UnitTx } from "./ports.ts";
 import { requireStaff } from "./require-staff.ts";
 
@@ -950,6 +959,60 @@ describe("a reset while a sign-in of the member's is in flight, whatever its for
   }, 60_000);
 });
 
+describe("a sign-in code emailed before a change of the member's (§10.2, §11.4, S2-20)", () => {
+  type Change = (staffId: string) => {
+    request: { method: string; path: string; body?: unknown };
+    fn: RouteFn;
+  };
+  const resetting: Change = (staffId) => ({ request: resetPath(staffId), fn: resetFn(staffId) });
+  const removing: Change = (staffId) => ({
+    request: { method: "POST", path: `/api/staff/${staffId}/remove` },
+    fn: async (tx, req, ctx) =>
+      removeStaff(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.remove", changeLock: true }),
+        staffId,
+      ),
+  });
+  const changingRole: Change = (staffId) => ({
+    request: { method: "PATCH", path: `/api/staff/${staffId}`, body: { roleKey: "operator" } },
+    fn: async (tx, req, ctx) =>
+      changeStaffRole(
+        h.deps,
+        tx,
+        await requireStaff(h.realm, req, ctx, { permission: "staff.role", changeLock: true }),
+        staffId,
+        { roleKey: "operator" },
+      ),
+  });
+
+  it.each([
+    ["a reset of their second factors", resetting],
+    ["their removal", removing],
+    ["a change of their role", changingRole],
+  ] as const)("signs no one in after %s", async (_label, change) => {
+    const target = await enrolled("code.before", "viewer");
+    const device = h.browser(accessFor(target.email));
+    const code = await codeFor(device, target.email);
+    const { request, fn } = change(target.staffId);
+    await stepped(h, admin.browser, admin.authenticator, request, fn);
+
+    expect(
+      await count("SELECT 1 FROM staff.verification WHERE identifier = $1", [
+        `sign-in-otp-${target.email}`,
+      ]),
+    ).toBe(0);
+    const signIn = await device.auth("POST", "/sign-in/email-otp", {
+      email: target.email,
+      otp: code,
+    });
+    expect(signIn.status).not.toBe(200);
+    expect(device.sessionToken()).toBeNull();
+    expect(await holdings(target.staffId)).toMatchObject({ sessions: 0 });
+  });
+});
+
 describe("a staff change from the Admin's own browser while their own step-up is in flight (§10.8, §11.2)", () => {
   // The step-up holds the Admin's ceremony lock and row from its start and replaces their session
   // at its end. The change reads that session first, which renews it once its renewal age has
@@ -1043,6 +1106,55 @@ describe("a staff change from the Admin's own browser while their own step-up is
       expect(await reaches(actor.browser)).toBe("none");
     },
   );
+
+  it("carries its proved intent while their own step-up replaces the session, and both pass", async () => {
+    // The change reads and renews the session, and only then spends the intent proved in it; the
+    // step-up's replacement moves that session's unspent intents to the new one and ends it. The
+    // replacement takes the old session's row before its intents, as the change does, so neither
+    // waits on what the other holds.
+    const target = await enrolled("own.intent.target", "viewer");
+    const intent = await provedIntent(actor, target.staffId);
+    const response = await assertionFrom(actor.browser, actor.authenticator);
+    // The session at its renewal age: a staff session is renewed after 5 of its 60 minutes.
+    await h.fixture(
+      "UPDATE staff.session SET expires_at = now() + interval '3200 seconds' WHERE token = $1",
+      [actor.browser.sessionToken()],
+    );
+    // Another transaction holds the target's row for a moment, so the reset stops there, its
+    // guard having renewed the Admin's session; the step-up is sent from the same browser
+    // meanwhile, and reaches the replacement of that session.
+    const blocker = await h.platform.superuser();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT 1 FROM staff.member WHERE id = $1 FOR UPDATE", [
+        target.staffId,
+      ]);
+      const resetting = h.route(
+        actor.browser,
+        { ...resetPath(target.staffId), intent },
+        resetFn(target.staffId),
+      );
+      resetting.catch(() => undefined);
+      await lockWaiters(1, resetting);
+      const stepping = actor.browser.auth("POST", "/passkey/verify-authentication", { response });
+      stepping.catch(() => undefined);
+      await lockWaiters(2, stepping);
+      await blocker.query("ROLLBACK");
+      const [done, stepped] = await Promise.allSettled([resetting, stepping]);
+
+      expect(done).toMatchObject({ status: "fulfilled", value: { status: "pending" } });
+      expect(stepped).toMatchObject({ status: "fulfilled", value: { status: 200 } });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    expect(await reaches(actor.browser)).toBe("none");
+    expect(await holdings(target.staffId)).toMatchObject({
+      sessions: 0,
+      passkeys: 0,
+      liveCodes: 1,
+    });
+  });
 });
 
 describe("two Admins changing each other at once, their sessions due for renewal (§10.8, §11.2)", () => {

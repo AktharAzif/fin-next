@@ -15,7 +15,11 @@ const identity = readdirSync(join(root, "..", "identity", "migrations")).sort();
 
 describe("the staff migrations", () => {
   it("are named for the runner and run after the identity realm's", () => {
-    expect(files).toEqual(["20261121140000_staff_fin.sql", "20261121140100_staff_bootstrap.sql"]);
+    expect(files).toEqual([
+      "20261121140000_staff_fin.sql",
+      "20261121140100_staff_bootstrap.sql",
+      "20261122160000_staff_bootstrap_reset.sql",
+    ]);
     for (const file of files) {
       expect(file).toMatch(/^\d{14}_staff_[a-z0-9_]+\.sql$/);
       expect(file > (identity.at(-1) ?? "")).toBe(true);
@@ -41,12 +45,28 @@ describe("the staff migrations", () => {
     expect(installed).toEqual(STAFF_GUARDS.map(guardSql));
   });
 
-  it("give staff.bootstrap_admin to nobody but its owner", () => {
-    const sql = readFileSync(join(root, "migrations", files[1] as string), "utf8");
-    expect(sql).toContain("SECURITY DEFINER");
-    expect(sql).toContain("SET search_path = pg_catalog, pg_temp");
-    expect(sql).toMatch(/REVOKE ALL ON FUNCTION staff\.bootstrap_admin\([^)]*\) FROM PUBLIC;/);
-    expect(sql).not.toMatch(/GRANT .*bootstrap_admin/);
+  it.each([files[1] as string, files[2] as string])(
+    "give staff.bootstrap_admin to nobody but its owner (%s)",
+    (file) => {
+      const sql = readFileSync(join(root, "migrations", file), "utf8");
+      expect(sql).toMatch(/CREATE (OR REPLACE )?FUNCTION staff\.bootstrap_admin\(/);
+      expect(sql).toContain("SECURITY DEFINER");
+      expect(sql).toContain("SET search_path = pg_catalog, pg_temp");
+      expect(sql).toMatch(/REVOKE ALL ON FUNCTION staff\.bootstrap_admin\([^)]*\) FROM PUBLIC;/);
+      expect(sql).not.toMatch(/GRANT .*bootstrap_admin/);
+    },
+  );
+
+  it("replace staff.bootstrap_admin with a reset that takes the member's ceremony lock and voids their codes", () => {
+    const sql = readFileSync(join(root, "migrations", files[2] as string), "utf8");
+    const lockAt = sql.indexOf("FROM staff.totp_step WHERE user_id = ceremony_of FOR UPDATE");
+    const rowAt = sql.indexOf("FROM staff.member WHERE email = address FOR UPDATE");
+    expect(sql.indexOf("FROM staff.change_lock WHERE id = 1 FOR UPDATE")).toBeLessThan(lockAt);
+    expect(lockAt).toBeGreaterThan(0);
+    expect(lockAt).toBeLessThan(rowAt);
+    expect(sql).toContain(
+      "DELETE FROM staff.verification WHERE identifier = 'sign-in-otp-' || m.email;",
+    );
   });
 });
 

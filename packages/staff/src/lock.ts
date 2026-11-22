@@ -19,7 +19,11 @@
 //   4. the target's row `FOR UPDATE`, then their sessions, factors and emailed codes.
 // The actor's own row and ceremony lock are never taken: a ceremony of theirs in flight holds both
 // while it waits to write the session this change renewed, so a wait on either would wait on that
-// ceremony while it waits on this change. No lock is needed: everything that can take a role or an
+// ceremony while it waits on this change. That ceremony, replacing the session (a passkey step-up,
+// §11.3), takes the session's row before the intents it moves to the new one, in the order this
+// change takes them (the renewed session, then the intent it spends; @fin/identity's
+// moveToReplacement), so it waits for this change rather than hold the intent this change waits
+// for. No lock is needed: everything that can take a role or an
 // active status away takes the change lock first (the changes here and the operator's bootstrap),
 // so the row read inside it is the committed one, and enrolment only makes a pending member
 // active. A change aimed at the actor themselves is refused on that same read, before any row is
