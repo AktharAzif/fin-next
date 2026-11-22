@@ -74,8 +74,9 @@ describe("Account security", () => {
   // The name change (its event per membership) and the switch of the current organisation need
   // the same person: signed in with a code, given an authenticator, in a first organisation and in
   // a second made with a proof. Each test built its own, eight requests through the front door
-  // before its first check; the two now share one, built once here. Neither changes what the other
-  // relies on: one renames the person, the other switches their current organisation.
+  // before its first check (0.2 s alone, 1.2 s in the full db run on GitHub's runner); the two now
+  // share one, built once here. Neither changes what the other relies on: one renames the person,
+  // the other switches their current organisation.
   let twoOrgs: { me: Client; first: Reply; second: { asked: Reply; done: Reply } };
 
   beforeAll(async () => {

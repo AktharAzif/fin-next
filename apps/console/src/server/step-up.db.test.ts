@@ -472,11 +472,12 @@ describe("the step-up matrix, from the policy", () => {
 
   // Genuinely heavy, so a timeout of their own: each intent route builds its own fresh fixture
   // through the front door before its first check (a person signed in with a code and given an
-  // authenticator, a second session raised by a proof, and for the organisation routes an
-  // organisation with the custom roles, invitations and members the route varies, each made with a
-  // proof), then sends about ten requests of the matrix itself. memberRole builds the most: two
-  // roles and two members, each with a proof, about 38 requests in all. On GitHub's runner in the
-  // full db run (CI=true) they took 0.7 to 2.8 s at 2db689f, memberRole the most.
+  // authenticator, a second session raised by a proof, and for the organisation routes the
+  // organisation, roles, invitations and members the route varies, each made with a proof), then
+  // sends the ten or so requests of the matrix: 15 to 38 requests in all, memberRole the most, each
+  // a unit of work of 10 to 25 queries. Nothing waits: the requests are over 90% of each case's
+  // time. On GitHub's runner a case takes 0.1 to 0.3 s alone and 0.6 to 2.8 s in the full db run,
+  // where every package's db files share its 4 vCPUs (memberRole: 0.3 s alone, 1.7 and 2.8 s full).
   for (const policy of INTENT_ROUTES) {
     it(`${policy.id}: refuses every intent but its own, then passes once`, async () => {
       await database.admin.query("DELETE FROM ops.rate_window");
