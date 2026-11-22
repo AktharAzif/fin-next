@@ -11,6 +11,7 @@ import {
   TEMPLATES,
 } from "../src/catalogue.ts";
 import { newId } from "../src/ids.ts";
+import type { Queryable } from "../src/outbox/db.ts";
 import { enqueue, outboxAge, type RecipientKind } from "../src/outbox/store.ts";
 import { HIDDEN_VALUE, nameSecretShapeIn } from "../src/params.ts";
 import { recipientHasher } from "../src/recipient-key.ts";
@@ -116,6 +117,25 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     });
   }
 
+  /**
+   * Runs `work` on one client of the role's pool, kept for it and released after. For a test that
+   * expects the database to refuse statements: pg closes the connection a statement it ran through
+   * the pool itself was refused on, so each refusal there costs the next statement a new login (a
+   * new backend, SCRAM, cold caches), which the full db run's load makes slow. A held client keeps
+   * its connection.
+   */
+  async function onOneClient<T>(
+    role: SenderRole,
+    work: (client: Queryable) => Promise<T>,
+  ): Promise<T> {
+    const client = await db.as[role].connect();
+    try {
+      return await work(client);
+    } finally {
+      client.release();
+    }
+  }
+
   const code = (c = "12345678") => queue("fin_console", "identity/sign-in-code", { code: c });
   const notice = (to = "person@example.com") =>
     queue(
@@ -154,12 +174,22 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
   describe("email.enqueue()", () => {
     it("refuses every template outside each role's folders with FE001, and allows the rest (T08-22)", async () => {
+      // Each role's calls share one held client: through the pool, each of the 108 refusals made the
+      // next call log in afresh, about 0.9 s alone here and past 5 s on CI's 4-vCPU runner.
       for (const role of SENDER_ROLES) {
-        for (const t of TEMPLATES) {
-          const attempt = queue(role, t.id, t.sample as Record<string, unknown>);
-          if (rolesFor(t).includes(role)) await expect(attempt).resolves.toMatch(/^eml_/u);
-          else await expect(attempt).rejects.toMatchObject({ code: "FE001" });
-        }
+        await onOneClient(role, async (client) => {
+          for (const t of TEMPLATES) {
+            const attempt = enqueue(client, {
+              id: newId("eml", clock),
+              template: t.id,
+              recipientKind: "address",
+              recipient: "person@example.com",
+              params: t.sample as Record<string, unknown>,
+            });
+            if (rolesFor(t).includes(role)) await expect(attempt).resolves.toMatch(/^eml_/u);
+            else await expect(attempt).rejects.toMatchObject({ code: "FE001" });
+          }
+        });
       }
       await expect(
         queue("fin_payments", "identity/sign-in-code", { code: "12345678" }),
@@ -201,25 +231,27 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
     });
 
     it("refuses bad input with FE002", async () => {
-      const bad = async (p: Record<string, unknown>) =>
-        db.as.fin_console.query("SELECT email.enqueue($1::jsonb)", [JSON.stringify(p)]);
-      const ok = {
-        id: newId("eml", clock),
-        template: "identity/sign-in-code",
-        recipient: "a@example.com",
-        params: { code: "12345678" },
-      };
-      await expect(bad({ ...ok, id: "eml_bad" })).rejects.toMatchObject({ code: "FE002" });
-      await expect(bad({ ...ok, recipient: "not an address" })).rejects.toMatchObject({
-        code: "FE002",
+      await onOneClient("fin_console", async (client) => {
+        const bad = async (p: Record<string, unknown>) =>
+          client.query("SELECT email.enqueue($1::jsonb)", [JSON.stringify(p)]);
+        const ok = {
+          id: newId("eml", clock),
+          template: "identity/sign-in-code",
+          recipient: "a@example.com",
+          params: { code: "12345678" },
+        };
+        await expect(bad({ ...ok, id: "eml_bad" })).rejects.toMatchObject({ code: "FE002" });
+        await expect(bad({ ...ok, recipient: "not an address" })).rejects.toMatchObject({
+          code: "FE002",
+        });
+        await expect(
+          bad({ ...ok, recipient_kind: "customer", recipient: "a@example.com" }),
+        ).rejects.toMatchObject({ code: "FE002" });
+        await expect(bad({ ...ok, params: { blob: "x".repeat(5000) } })).rejects.toMatchObject({
+          code: "FE002",
+        });
+        await expect(bad({ ...ok, params: [1] })).rejects.toMatchObject({ code: "FE002" });
       });
-      await expect(
-        bad({ ...ok, recipient_kind: "customer", recipient: "a@example.com" }),
-      ).rejects.toMatchObject({ code: "FE002" });
-      await expect(bad({ ...ok, params: { blob: "x".repeat(5000) } })).rejects.toMatchObject({
-        code: "FE002",
-      });
-      await expect(bad({ ...ok, params: [1] })).rejects.toMatchObject({ code: "FE002" });
     });
 
     it("gives no service but the worker a direct write on the outbox", async () => {
@@ -431,25 +463,27 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
     it("refuses an unknown recipient kind with FE002, never echoing the row", async () => {
       const secretCode = "48151623";
-      for (const kind of ["user", 5, "Address", "staff", []]) {
-        const attempt = db.as.fin_console.query("SELECT email.enqueue($1::jsonb)", [
-          JSON.stringify({
-            id: newId("eml", clock),
-            template: "identity/sign-in-code",
-            recipient_kind: kind,
-            recipient: "victim@example.com",
-            params: { code: secretCode },
-          }),
-        ]);
-        const error = (await attempt.then(
-          () => undefined,
-          (e: unknown) => e,
-        )) as { code?: string; message?: string; detail?: string } | undefined;
-        expect(error?.code, String(kind)).toBe("FE002");
-        const said = `${error?.message ?? ""} ${error?.detail ?? ""}`;
-        expect(said).not.toContain("victim");
-        expect(said).not.toContain(secretCode);
-      }
+      await onOneClient("fin_console", async (client) => {
+        for (const kind of ["user", 5, "Address", "staff", []]) {
+          const attempt = client.query("SELECT email.enqueue($1::jsonb)", [
+            JSON.stringify({
+              id: newId("eml", clock),
+              template: "identity/sign-in-code",
+              recipient_kind: kind,
+              recipient: "victim@example.com",
+              params: { code: secretCode },
+            }),
+          ]);
+          const error = (await attempt.then(
+            () => undefined,
+            (e: unknown) => e,
+          )) as { code?: string; message?: string; detail?: string } | undefined;
+          expect(error?.code, String(kind)).toBe("FE002");
+          const said = `${error?.message ?? ""} ${error?.detail ?? ""}`;
+          expect(said).not.toContain("victim");
+          expect(said).not.toContain(secretCode);
+        }
+      });
     });
 
     it("refuses a NUL or a lone surrogate before the database can echo the input", async () => {
