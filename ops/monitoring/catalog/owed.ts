@@ -156,14 +156,6 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "ARCHITECTURE §4.6 and spec 08 §7.8 three cadences, 3 hours, and the higher text binds), " +
       "runbook docs/runbooks/duty-stalled.md.",
   },
-  {
-    name: "audit-guard",
-    severity: "P",
-    fragment: "audit",
-    lane: "P0-F",
-    due: SUNDAY,
-    spec: "spec 08 §3.14",
-  },
   // Named as owed by the catalogue, in the same fragments or their areas' own: owed, with these
   // lanes and dates, by the steward's later ruling of 22 Nov, and not built now.
   {

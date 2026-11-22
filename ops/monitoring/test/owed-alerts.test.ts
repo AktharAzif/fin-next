@@ -21,11 +21,11 @@ afterEach(() => {
 /**
  * The ruling's fifteen, less those that have become rules (admin-access-mismatch,
  * admin-staff-refused, staff-enrolled and staff-enrolment-refused, in alerts/staff.json and
- * staff-alerts.test.ts): the alerts the code names that no fragment defines yet, due Sunday.
+ * staff-alerts.test.ts; audit-guard, in alerts/audit.json and audit-guard-alerts.test.ts): the
+ * alerts the code names that no fragment defines yet, due Sunday.
  */
 const RULED: readonly string[] = [
   "admin-without-second-factor",
-  "audit-guard",
   "csrf-refused-jump",
   "rate-limiter-failing",
   "second-factor-step-failing",
