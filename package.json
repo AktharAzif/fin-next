@@ -15,7 +15,7 @@
     }
   },
   "scripts": {
-    "check": "TURBO_TELEMETRY_DISABLED=1 turbo run lint typecheck test lint:root typecheck:root test:root && pnpm run layout:check && pnpm run supply-chain:check && pnpm run public-safety && pnpm run imports:check && pnpm run static:check",
+    "check": "TURBO_TELEMETRY_DISABLED=1 turbo run lint typecheck test lint:root typecheck:root test:root --continue && pnpm run layout:check && pnpm run supply-chain:check && pnpm run public-safety && pnpm run imports:check && pnpm run static:check",
     "layout:check": "node scripts/layout-check.mjs",
     "supply-chain:check": "node scripts/check-supply-chain.mjs",
     "public-safety": "node scripts/public-safety.mjs",
@@ -26,7 +26,7 @@
     "lint": "TURBO_TELEMETRY_DISABLED=1 turbo run lint lint:root",
     "typecheck": "TURBO_TELEMETRY_DISABLED=1 turbo run typecheck typecheck:root",
     "test": "TURBO_TELEMETRY_DISABLED=1 turbo run test test:root",
-    "test:db": "TURBO_TELEMETRY_DISABLED=1 turbo run test:db --continue",
+    "test:db": "sh measure/run-db.sh",
     "lint:root": "biome ci --error-on-warnings .",
     "typecheck:root": "tsc -p tsconfig.json",
     "test:root": "node --test \"scripts/test/*.test.mjs\""

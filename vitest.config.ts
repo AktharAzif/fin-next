@@ -52,6 +52,9 @@ const BUN_CANARY_SETUP =
     ? [join(root, "packages/testing/src/bun-canary/setup.ts")]
     : [];
 
+// MEASUREMENT ONLY (CI fix 3, throwaway): the console's db tests print their time split by step.
+const SPLIT_SETUP = [join(root, "measure/console-split.ts")];
+
 export default defineConfig(({ mode }) => {
   const db = mode === "db";
   if (db && (process.env.FIN_TEST_DATABASE_URL ?? "") === "") {
@@ -79,12 +82,16 @@ export default defineConfig(({ mode }) => {
       pool: db ? "forks" : "threads",
       css: { include: [/\.css\?raw$/] },
       ...(BUN_CANARY_SETUP.length > 0 ? { setupFiles: BUN_CANARY_SETUP } : {}),
+      ...(db && dir === "apps/console" ? { setupFiles: SPLIT_SETUP } : {}),
     },
   }));
 
   // Vitest refuses an empty projects list, so until a package has tests the root runs nothing.
   // The root never collects files itself: scripts/ uses node:test (`pnpm run test:root`).
   return {
-    test: projects.length > 0 ? { projects, ...(db ? { reporters: ["verbose"], slowTestThreshold: 0 } : {}) } : { include: [], passWithNoTests: true },
+    test:
+      projects.length > 0
+        ? { projects, ...(db ? { reporters: ["verbose"], slowTestThreshold: 0 } : {}) }
+        : { include: [], passWithNoTests: true },
   };
 });
