@@ -113,14 +113,15 @@ export const BOOTSTRAP_REFERENCE = "FIN_BOOTSTRAP_DATABASE_URL";
 /**
  * The plain variable every `pnpm fin` variable commit sets, in the same commit, to the run and the
  * write that made it (`<run ID>:<n>`): a read that shows it has seen that write (rule 4). Not a
- * secret, and read by no Fin service.
+ * secret, never sealed, an ID only, and read by no Fin service (rollout.test.ts scans their code).
  */
 export const WRITE_MARKER = "FIN_VARIABLES_RUN";
 
 /**
  * The value a variable is overwritten with where no deployment is wanted, instead of a removal
- * (rule 3: Railway's variableDelete takes no skipDeploys). It is no URL, so `migrate` refuses it at
- * its configuration check as it refuses an absent superuser reference.
+ * (rule 3: Railway's variableDelete takes no skipDeploys). It is no URL and no credential, so
+ * `migrate` refuses it at its configuration check (exit 78) as it refuses an absent superuser
+ * reference; apps/api/src/migrate/main.test.ts pins that with migrate's own parser.
  */
 export const INERT_VALUE = "inert";
 

@@ -126,13 +126,19 @@ The steward's ruling of 22 Nov. Every Railway variable write of every command ke
    of its own (`~ update redeploy <service> [<variables>]`, a `run.step` and a
    `rotation.redeployed` line naming the services), wait for `SUCCESS` and read back. The rotation
    is done only then, and only then is an old secret revoked or a rule written that sends the new
-   one. A service with no deployment, or whose newest deployment is `REMOVED` (taken down), holds
-   nothing: it takes the value at its next deployment, and nothing is deployed for it. A redeploy
-   is refused when the service is set to an image its newest deployment does not run (it would
-   roll that image), and, when that deployment did not end `SUCCESS` (a `railway deploy` that
-   failed at the service leaves it set to the failed release's image) or Railway does not say
-   which image it runs, unless the service is set to the digest the registered deploys recorded
-   for it. A rotation is decided by what the service holds (`email token` reads `worker`'s
+   one. Only a service with no deployment holds nothing: it takes the value at its next
+   deployment, and nothing is deployed for it. A newest deployment of any status counts as holding
+   the old value, `REMOVED` and `REMOVING` included: Railway marks an aborted deployment `REMOVED`
+   while the one before it keeps serving, and no read the tooling has confirmed says whether
+   anything still runs (`activeDeployments` is in neither Railway's API documentation nor SP-03).
+   The plan says so for such a service, and its redeploy starts it again if it was taken down by
+   hand. A redeploy is refused when the service is set to an image its newest deployment does not
+   run (it would roll that image), and, when that deployment did not end `SUCCESS` (a `railway
+   deploy` that failed at the service leaves it set to the failed release's image; an aborted one
+   ended `REMOVED`) or Railway does not say which image it runs, unless the service is set to the
+   digest the registered deploys recorded for it. The refusal names the service and the command to
+   run first (`pnpm fin railway deploy <env>` for the release it should run), and revokes and
+   sends nothing. A rotation is decided by what the service holds (`email token` reads `worker`'s
    variables, not only Cloudflare's list), and one left unfinished stays visible to the next run
    (`tunnel create` registers as a rotation, and a later run redeploys until one passes).
 3. **Removals**: nothing deletes a variable, since Railway's `variableDelete` takes no

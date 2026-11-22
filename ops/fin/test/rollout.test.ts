@@ -4,20 +4,22 @@
 //
 //   1. a provisioning or configuration write commits with skipDeploys and starts nothing;
 //   2. a rotation commits with skipDeploys, redeploys each service that holds the old secret as a
-//      recorded step, reads back, and only then revokes the old secret or sends the new one;
+//      recorded step, reads back, and only then revokes the old secret or sends the new one (a
+//      service holds it whenever it has a newest deployment, whatever its status: an aborted one
+//      is REMOVED while the one before it serves); its dry run only reads;
 //   3. nothing deletes a variable: the superuser reference is overwritten with the inert value and
 //      recorded as waiting for removal, so migrate runs once per deploy;
 //   4. a read-back proves a write only once it shows that write (its marker), never because it
 //      lacks what the write replaced.
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { FakeGh } from "../../../tools/static-deploy/test/fake.ts";
 import { EXIT } from "../src/core/errors.ts";
 import { parseOverlay } from "../src/core/overlay.ts";
-import { loadSettings } from "../src/core/settings.ts";
+import { loadSettings, mustBeSealed } from "../src/core/settings.ts";
 import type { Written } from "../src/railway/api.ts";
 import {
   INERT_VALUE,
@@ -26,7 +28,7 @@ import {
   WRITE_MARKER,
 } from "../src/railway/inspect.ts";
 import { showsWrite } from "../src/railway/rollout.ts";
-import { hex, overlayFixture, REPO_ROOT, uuid } from "./helpers/fixtures.ts";
+import { hex, overlayFixture, REPO_ROOT, uuid, writePrivate } from "./helpers/fixtures.ts";
 import { harness } from "./helpers/setup.ts";
 
 const RELEASE = hex(40, "a");
@@ -107,9 +109,9 @@ function steps(h: H, kind: string): string[] {
 
 /** The value one commit set for a variable on a service (the newest such commit). */
 function lastSet(h: H, service: string, variable: string): string | undefined {
-  return h.rw.patches.filter((p) => h.rw.nameOf(p.serviceId) === service).at(-1)?.variables[
-    variable
-  ]?.value;
+  return h.rw.patches
+    .filter((p) => h.rw.nameOf(p.serviceId) === service && Object.hasOwn(p.variables, variable))
+    .at(-1)?.variables[variable]?.value;
 }
 
 /** Sets the image a service's instance is set to (what its next deployment takes). */
@@ -136,6 +138,63 @@ function startedWith(h: H, service: string): Array<Record<string, string>> {
     .filter(([, d]) => d.service === service)
     .map(([id]) => h.rw.startedWith.get(id))
     .filter((v): v is Record<string, string> => v !== undefined);
+}
+
+/** The variables the deployment of a service that serves started with (FakeRailway.serving). */
+function serving(h: H, service: string): Record<string, string> | undefined {
+  const id = h.rw.serving(service);
+  return id === undefined ? undefined : h.rw.startedWith.get(id);
+}
+
+/**
+ * A deployment of a service started and aborted in Railway's dashboard: Railway marks it REMOVED
+ * (REMOVING while the abort is under way), it is the service's newest deployment, and the one
+ * before it keeps serving with the variables it started with.
+ */
+function abortNewer(h: H, service: string, status = "REMOVED"): void {
+  const image = h.rw.instances.get(service)?.image;
+  if (image === null || image === undefined) throw new Error(`no image on ${service}`);
+  h.rw.running(service, image, status);
+}
+
+/** The proof the rule of a host role sends, or undefined when no such rule stands. */
+function sentProof(h: H, role: string): string | undefined {
+  const rule = [...h.cf.rulesets.values()]
+    .flatMap((r) => r.rules)
+    .find((r) => r.ref === `fin_next_ingress_proof_${role}`);
+  const headers = (rule?.action_parameters?.headers ?? {}) as Record<string, { value: string }>;
+  return headers["Fin-Ingress-Proof"]?.value;
+}
+
+/** The proof of a host role that a service's serving deployment holds. */
+function heldProof(h: H, service: string, role: string): string | undefined {
+  return JSON.parse(serving(h, service)?.FIN_INGRESS_PROOFS ?? "{}")[role]?.[0];
+}
+
+/** Deletes the rule that sends a role's proof, as rotate-ingress-proof.md does by hand. */
+function dropProofRule(h: H, role: string): void {
+  for (const ruleset of h.cf.rulesets.values())
+    ruleset.rules = ruleset.rules.filter((r) => r.ref !== `fin_next_ingress_proof_${role}`);
+}
+
+const RULE_WRITE = /^cf (POST|PATCH) .*\/rulesets/;
+
+/**
+ * The Railway calls of a harness in order, a variables read and a deployment labelled with its
+ * service (`finVariables worker`, `finDeploy worker`), the rest by operation. The sequence must be
+ * whole, and every variables read answered.
+ */
+function railwayCalls(h: H): string[] {
+  let reads = 0;
+  let deploys = 0;
+  return h.sequence
+    .filter((c) => c.startsWith("rw "))
+    .map((c) => {
+      const op = c.slice(3);
+      if (op === "finVariables") return `${op} ${h.rw.variableReads[reads++]}`;
+      if (op === "finDeploy") return `${op} ${h.rw.deployed[deploys++]}`;
+      return op;
+    });
 }
 
 describe("rule 1: a provisioning or configuration write starts no deployment", () => {
@@ -427,61 +486,217 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     );
   });
 
-  it("a service whose newest deployment was removed holds nothing: a rotation deploys nothing for it, and revokes or writes the rule once the write shows", async () => {
-    // Before, any newest deployment counted as holding the old value, whatever its status: a
-    // service taken down by hand was started again by the rotation's redeploy.
-    const email = staging({ worker: "fin-next-api" });
-    assert.equal(await email.run(["email", "token", "staging"]), EXIT.ok);
-    endNewest(email, "worker", "REMOVED");
-    assert.equal(
-      await email.run(["email", "token", "staging", "--rotate"]),
-      EXIT.ok,
-      email.runtime.err(),
-    );
-    assert.match(email.runtime.out(), /worker has no deployment that holds the old one/);
-    assert.deepEqual(email.rw.deployed, []);
-    assert.deepEqual(steps(email, "redeploy"), []);
-    assert.equal(email.cf.tokens.length, 1, "the old token is revoked");
+  it("an aborted newest deployment (REMOVED or REMOVING) over a running one still holds the old token: with worker's image unrecorded, email token --rotate is refused and revokes nothing", async () => {
+    // Before, a newest deployment REMOVED counted as "runs nothing": the plan had no redeploy, and
+    // the old token was revoked while the deployment before the aborted one still sent with it.
+    for (const status of ["REMOVED", "REMOVING"]) {
+      const h = staging({ worker: "fin-next-api" });
+      assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+      // worker serves on the first token; a deployment after it is aborted.
+      h.rw.running("worker", ref("fin-next-api"));
+      const first = serving(h, "worker")?.FIN_EMAIL_TOKEN;
+      assert.equal(first, lastSet(h, "worker", "FIN_EMAIL_TOKEN"));
+      abortNewer(h, "worker", status);
+      assert.equal(
+        await h.run(["email", "token", "staging", "--rotate", "--dry-run"]),
+        1,
+        h.runtime.err(),
+      );
+      assert.match(h.runtime.out(), /~ update redeploy worker \[FIN_EMAIL_TOKEN\]/);
+      assert.match(h.runtime.out(), /revoked once worker runs the new token, read back/);
+      assert.match(
+        h.runtime.out(),
+        new RegExp(
+          `worker's newest deployment is ${status}: an earlier one may still serve with the old value`,
+        ),
+      );
+      assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.refused, status);
+      assert.match(
+        h.runtime.err(),
+        new RegExp(
+          `worker's newest deployment is ${status}, not SUCCESS .*, and worker is set to an image no registered railway deploy recorded for it, so a redeploy could roll an image nobody asked for: check by hand which image it runs, run pnpm fin railway deploy staging for the release it should run, then run this command again`,
+        ),
+      );
+      assert.match(
+        h.runtime.err(),
+        /the rotation is not done: worker may still run the old token, which is not revoked; once the cause is fixed, run: pnpm fin email token staging --rotate/,
+      );
+      assert.deepEqual(h.rw.deployed, [], status);
+      assert.equal(h.cf.tokens.length, 2, "the token worker serves on is not revoked");
+      assert.equal(serving(h, "worker")?.FIN_EMAIL_TOKEN, first);
+    }
 
-    // Removed between the plan and its redeploy step: the step deploys nothing either.
-    email.rw.running("worker", ref("fin-next-api"));
-    email.rw.ignorePatch = (service) => {
-      if (service === "worker") endNewest(email, "worker", "REMOVED");
+    // Aborted between the plan and its redeploy step: the step is refused the same way.
+    const h = staging({ worker: "fin-next-api" });
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    h.rw.running("worker", ref("fin-next-api"));
+    h.rw.ignorePatch = (service) => {
+      if (service === "worker") abortNewer(h, "worker");
       return false;
     };
-    assert.equal(
-      await email.run(["email", "token", "staging", "--rotate"]),
-      EXIT.ok,
-      email.runtime.err(),
-    );
-    assert.match(
-      email.runtime.out(),
-      /worker has no deployment that runs \(its newest was removed\): it takes the new value at its next \(railway deploy\); nothing is deployed for it here/,
-    );
-    assert.deepEqual(email.rw.deployed, []);
-    assert.equal(email.cf.tokens.length, 1);
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.refused);
+    assert.match(h.runtime.err(), /worker's newest deployment is REMOVED, not SUCCESS/);
+    assert.deepEqual(h.rw.deployed, []);
+    assert.equal(h.cf.tokens.length, 2, "the old token is not revoked");
+  });
 
+  it("a rotation's redeploy that was aborted (REMOVED) is finished by the re-run it names: worker is redeployed onto its recorded digest, and only then are the old tokens revoked", async () => {
+    // Before, the re-run read the aborted redeploy as "worker runs nothing": it exited 0, started
+    // no deployment and revoked both older tokens while worker still sent with the first.
+    for (const status of ["REMOVED", "REMOVING"]) {
+      const h = staging();
+      assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+      assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+      const first = serving(h, "worker")?.FIN_EMAIL_TOKEN;
+      assert.equal(first, lastSet(h, "worker", "FIN_EMAIL_TOKEN"));
+      // The rotation's own redeploy is aborted: Railway marks it REMOVED, or REMOVING while the
+      // abort is under way, and a re-run must read either the same way.
+      h.rw.deployStatuses = ["DEPLOYING", "REMOVED"];
+      assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.unavailable);
+      assert.match(h.runtime.err(), /worker \(redeploy\): the deployment ended REMOVED/);
+      assert.match(
+        h.runtime.err(),
+        /the rotation is not done: worker may still run the old token, which is not revoked; once the cause is fixed, run: pnpm fin email token staging --rotate/,
+      );
+      assert.equal(h.cf.tokens.length, 2);
+      assert.equal(serving(h, "worker")?.FIN_EMAIL_TOKEN, first, "worker still sends with it");
+      if (status === "REMOVING") endNewest(h, "worker", "REMOVING");
+      assert.equal(h.rw.instances.get("worker")?.latestDeployment?.status, status);
+
+      h.rw.deployStatuses = ["DEPLOYING", "SUCCESS"];
+      const rolled = h.rw.deployed.length;
+      h.sequence.length = 0;
+      assert.equal(
+        await h.run(["email", "token", "staging", "--rotate"]),
+        EXIT.ok,
+        h.runtime.err(),
+      );
+      assert.deepEqual(h.rw.deployed.slice(rolled), ["worker"], status);
+      assert.equal(h.cf.tokens.length, 1, "both older tokens are revoked");
+      const token = lastSet(h, "worker", "FIN_EMAIL_TOKEN");
+      assert.notEqual(token, first);
+      assert.equal(serving(h, "worker")?.FIN_EMAIL_TOKEN, token, "worker sends with the new one");
+      assert.match(
+        h.runtime.err(),
+        new RegExp(
+          `worker's newest deployment is ${status}, not SUCCESS .*: the redeploy takes the image it is set to, the digest the registered deploys recorded for it`,
+        ),
+      );
+      const order = h.sequence;
+      const started = order.indexOf("rw finDeploy");
+      const revoked = order.findIndex((c) => c.startsWith("cf DELETE"));
+      assert.ok(started >= 0 && revoked > started, "revoked after the redeploy");
+      assert.ok(order.slice(started, revoked).includes("rw finVariables"), "and its read-back");
+      assert.equal(h.records().at(-1)?.leftover, undefined);
+      h.assertNoLeak([token ?? "", first ?? ""]);
+    }
+  });
+
+  it("zone apply after an aborted newest deployment on admin writes no rule that sends a proof admin's serving deployment does not hold", async () => {
+    // Before, admin counted as running nothing: the rule that sends the new proof was written
+    // while admin's serving deployment held only the old one, so the host answered 403.
     const zone = staging(PROOF_SERVICES);
-    endNewest(zone, "edge", "REMOVED");
     assert.equal(
       await zone.run(["zone", "apply", "staging", "--only", "rules"]),
       EXIT.ok,
       zone.runtime.err(),
     );
-    assert.deepEqual([...zone.rw.deployed].sort(), ["admin", "console", "verify"]);
-    assert.deepEqual([...steps(zone, "redeploy")].sort(), ["admin", "console", "verify"]);
-    assert.ok(zone.sequence.some((c) => /^cf (POST|PATCH) .*\/rulesets/.test(c)));
-
-    const tunnel = staging({ "cloudflared-admin": "fin-next-connector" });
-    endNewest(tunnel, "cloudflared-admin", "REMOVED");
+    const old = sentProof(zone, "admin");
+    assert.equal(heldProof(zone, "admin", "admin"), old);
+    dropProofRule(zone, "admin");
+    abortNewer(zone, "admin");
+    const rolled = zone.rw.deployed.length;
+    zone.sequence.length = 0;
+    // admin's image is one no registered railway deploy recorded: refused.
     assert.equal(
-      await tunnel.run(["tunnel", "create", "staging", "admin", "--redeploy"]),
-      EXIT.ok,
-      tunnel.runtime.err(),
+      await zone.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.refused,
+      zone.runtime.err(),
     );
-    assert.match(tunnel.runtime.out(), /cloudflared-admin has no deployment/);
-    assert.deepEqual(tunnel.rw.deployed, []);
-    assert.deepEqual(steps(tunnel, "redeploy"), []);
+    assert.match(zone.runtime.err(), /admin's newest deployment is REMOVED, not SUCCESS/);
+    assert.match(
+      zone.runtime.err(),
+      /the rotation is not done: admin may still hold the old proofs, and no rule that sends the new one is written/,
+    );
+    assert.deepEqual(zone.rw.deployed.slice(rolled), []);
+    assert.equal(
+      zone.sequence.some((c) => RULE_WRITE.test(c)),
+      false,
+      "no rule is written",
+    );
+    assert.equal(sentProof(zone, "admin"), undefined);
+    assert.equal(heldProof(zone, "admin", "admin"), old);
+
+    // admin set to the digest the registered deploys recorded: it is redeployed with the new
+    // proof, read back, and only then is the rule that sends it written.
+    const h = staging();
+    assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+    assert.equal(
+      await h.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.ok,
+      h.runtime.err(),
+    );
+    const first = sentProof(h, "admin");
+    dropProofRule(h, "admin");
+    abortNewer(h, "admin");
+    const before = h.rw.deployed.length;
+    h.sequence.length = 0;
+    assert.equal(
+      await h.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.ok,
+      h.runtime.err(),
+    );
+    assert.deepEqual(h.rw.deployed.slice(before), ["admin"]);
+    assert.deepEqual(steps(h, "redeploy").at(-1), "admin");
+    const sent = sentProof(h, "admin");
+    assert.ok(sent !== undefined && sent !== first);
+    assert.equal(
+      heldProof(h, "admin", "admin"),
+      sent,
+      "admin serves with the proof the rule sends",
+    );
+    const order = h.sequence;
+    const deployed = order.indexOf("rw finDeploy");
+    const rule = order.findIndex((c) => RULE_WRITE.test(c));
+    assert.ok(deployed >= 0 && rule > deployed, "the rule after the redeploy");
+    assert.ok(order.slice(deployed, rule).includes("rw finVariables"), "and its read-back");
+    h.assertNoLeak([sent ?? "", first ?? ""]);
+  });
+
+  it("a tunnel rotation whose redeploy was aborted (REMOVED) is finished by a plain re-run and by --redeploy: the connector is redeployed onto its recorded digest", async () => {
+    // Before, the connector counted as running nothing: --redeploy said nothing was redeployed, a
+    // plain re-run registered no rotation, and both exited 0 with no leftover while the connector
+    // still ran the deleted tunnel's token.
+    for (const finish of [[], ["--redeploy"]]) {
+      const h = staging();
+      assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.ok);
+      assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+      const first = serving(h, "cloudflared-public")?.TUNNEL_TOKEN;
+      assert.equal(first, lastSet(h, "cloudflared-public", "TUNNEL_TOKEN"));
+      h.cf.tunnels.length = 0;
+      h.rw.deployStatuses = ["DEPLOYING", "REMOVED"];
+      assert.equal(await h.run(["tunnel", "create", "staging", "public"]), EXIT.unavailable);
+      const notDone =
+        /the rotation is not done: cloudflared-public may still run the old token; once the cause is fixed, run: pnpm fin tunnel create staging public --redeploy/;
+      assert.match(h.runtime.err(), notDone);
+      assert.match(String(h.records().at(-1)?.leftover), notDone);
+      assert.equal(serving(h, "cloudflared-public")?.TUNNEL_TOKEN, first);
+
+      h.rw.deployStatuses = ["DEPLOYING", "SUCCESS"];
+      const rolled = h.rw.deployed.length;
+      assert.equal(
+        await h.run(["tunnel", "create", "staging", "public", ...finish]),
+        EXIT.ok,
+        h.runtime.err(),
+      );
+      assert.doesNotMatch(h.runtime.out(), /has no deployment/);
+      assert.deepEqual(h.rw.deployed.slice(rolled), ["cloudflared-public"], finish.join(" "));
+      const token = lastSet(h, "cloudflared-public", "TUNNEL_TOKEN");
+      assert.notEqual(token, first);
+      assert.equal(serving(h, "cloudflared-public")?.TUNNEL_TOKEN, token);
+      assert.equal(h.records().at(-1)?.leftover, undefined);
+      h.assertNoLeak([token ?? "", first ?? ""]);
+    }
   });
 
   it("the tunnel-token incident: tunnel create after the tunnel was deleted rotates, redeploys the connector and reads back", async () => {
@@ -616,6 +831,155 @@ describe("rule 2: a rotation redeploys each service that holds the old secret, r
     );
     assert.match(h.runtime.err(), /the rotation is not done: \S+ may still hold the old proofs/);
   });
+
+  it("each redeploy reads the write back just before its deployment starts, and again once it ended SUCCESS (email token, tunnel create, zone apply)", async () => {
+    const email = staging({ worker: "fin-next-api" });
+    assert.equal(await email.run(["email", "token", "staging"]), EXIT.ok, email.runtime.err());
+    email.rw.running("worker", ref("fin-next-api"));
+    assert.equal(
+      await email.run(["email", "token", "staging", "--rotate"]),
+      EXIT.ok,
+      email.runtime.err(),
+    );
+    const tunnel = staging({ "cloudflared-admin": "fin-next-connector" });
+    assert.equal(
+      await tunnel.run(["tunnel", "create", "staging", "admin"]),
+      EXIT.ok,
+      tunnel.runtime.err(),
+    );
+    const zone = staging(PROOF_SERVICES);
+    assert.equal(
+      await zone.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.ok,
+      zone.runtime.err(),
+    );
+    const runs: Array<[H, string[]]> = [
+      [email, ["worker"]],
+      [tunnel, ["cloudflared-admin"]],
+      [zone, Object.keys(PROOF_SERVICES)],
+    ];
+    for (const [h, services] of runs) {
+      const calls = railwayCalls(h);
+      const redeploys = calls.flatMap((c, i) => (c.startsWith("finDeploy ") ? [i] : []));
+      const deployedServices = redeploys.map((i) => calls[i]?.slice("finDeploy ".length) ?? "");
+      assert.deepEqual([...deployedServices].sort(), [...services].sort());
+      redeploys.forEach((i, n) => {
+        const service = deployedServices[n];
+        const before = calls.slice(0, i).filter((c) => c !== "finServices");
+        assert.equal(
+          before.at(-1),
+          `finVariables ${service}`,
+          `read back before ${service} starts`,
+        );
+        const after = calls.slice(i + 1).find((c) => c !== "finDeployment");
+        assert.equal(after, `finVariables ${service}`, `read back once ${service} ended SUCCESS`);
+      });
+    }
+  });
+});
+
+describe("a rotation's dry run: read-only, and the Railway token never printed", () => {
+  /** Every Railway query text a harness sends from now on. */
+  function railwayQueries(h: H): string[] {
+    const queries: string[] = [];
+    const fetch = h.rw.fetch;
+    Object.assign(h.rw, {
+      fetch: async (url: string, init: RequestInit) => {
+        queries.push(String(JSON.parse(String(init.body)).query));
+        return fetch(url, init);
+      },
+    });
+    return queries;
+  }
+
+  it("zone apply's dry run sends no mutation of any kind to Railway or Cloudflare, whether the services that take a new proof run or not", async () => {
+    const cases: Array<[string, () => Promise<H>, RegExp | undefined]> = [
+      ["no service has a deployment", async () => staging(), undefined],
+      ["every proof service runs", async () => staging(PROOF_SERVICES), /~ update redeploy edge/],
+      [
+        "admin's rule gone and its newest deployment aborted",
+        async () => {
+          const h = staging(PROOF_SERVICES);
+          assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.ok);
+          dropProofRule(h, "admin");
+          abortNewer(h, "admin");
+          return h;
+        },
+        /~ update redeploy admin \[FIN_INGRESS_PROOFS\]/,
+      ],
+    ];
+    for (const [name, make, redeploy] of cases) {
+      const h = await make();
+      const records = h.records().length;
+      const patches = h.rw.patches.length;
+      const deployed = h.rw.deployed.length;
+      const queries = railwayQueries(h);
+      h.sequence.length = 0;
+      assert.equal(await h.run(["zone", "apply", "staging", "--dry-run"]), 1, h.runtime.err());
+      assert.match(h.runtime.out(), /dry run: nothing was sent/, name);
+      if (redeploy !== undefined) assert.match(h.runtime.out(), redeploy, name);
+      assert.ok(queries.length > 0, `${name}: Railway is read`);
+      for (const query of queries) assert.match(query, /^\s*query\s/, `${name}: ${query}`);
+      assert.deepEqual(
+        h.sequence.filter((c) => c.startsWith("cf ") && !c.startsWith("cf GET ")),
+        [],
+        `${name}: Cloudflare is only read`,
+      );
+      assert.equal(h.rw.patches.length, patches, name);
+      assert.equal(h.rw.deployed.length, deployed, name);
+      assert.deepEqual(h.rw.writeDeployments, [], name);
+      assert.equal(h.records().length, records, `${name}: no run is registered`);
+    }
+  });
+
+  it("zone apply's dry run never prints the Railway token, whether Railway accepts it or refuses it", async () => {
+    for (const accepted of [true, false]) {
+      const h = staging(PROOF_SERVICES);
+      const planted = `rwplanted${"Z".repeat(24)}${accepted ? "A" : "R"}`;
+      h.env.FIN_RAILWAY_TOKEN_FILE = writePrivate(h.dir, "planted-railway-token", planted);
+      if (accepted) Object.assign(h.rw, { token: planted });
+      const code = await h.run(["zone", "apply", "staging", "--dry-run"]);
+      if (accepted) {
+        assert.equal(code, 1, h.runtime.err());
+        assert.match(h.runtime.out(), /~ update redeploy admin \[FIN_INGRESS_PROOFS\]/);
+      } else {
+        assert.ok(code !== EXIT.ok && code !== 1, `refused: exit ${code}`);
+        assert.match(h.runtime.err(), /Not Authori[sz]ed/);
+      }
+      const readable = h.readable().toLowerCase();
+      assert.equal(readable.includes(planted.toLowerCase()), false, "the whole token");
+      assert.equal(readable.includes(planted.slice(0, 12).toLowerCase()), false, "a part of it");
+      h.assertNoLeak([planted]);
+    }
+  });
+
+  it("zone apply with no new proof needs no Railway token: its dry run, and a plan of settings, call Railway not once, with the token file unset or absent", async () => {
+    const h = staging(PROOF_SERVICES);
+    assert.equal(
+      await h.run(["zone", "apply", "staging", "--only", "rules"]),
+      EXIT.ok,
+      h.runtime.err(),
+    );
+    for (const file of [undefined, join(h.dir, "no-such-railway-token")]) {
+      if (file === undefined) delete h.env.FIN_RAILWAY_TOKEN_FILE;
+      else h.env.FIN_RAILWAY_TOKEN_FILE = file;
+      h.sequence.length = 0;
+      assert.equal(
+        await h.run(["zone", "apply", "staging", "--only", "rules", "--dry-run"]),
+        EXIT.ok,
+        h.runtime.err(),
+      );
+      assert.match(h.runtime.out(), /dry run: nothing to change/);
+      // The whole plan: the shared zone's settings stay held (exit 1), and Railway is not needed.
+      assert.equal(await h.run(["zone", "apply", "staging", "--dry-run"]), 1, h.runtime.err());
+      assert.deepEqual(
+        h.sequence.filter((c) => c.startsWith("rw ")),
+        [],
+        `Railway is never called (${file === undefined ? "unset" : "absent"})`,
+      );
+      assert.doesNotMatch(h.runtime.err(), /FIN_RAILWAY_TOKEN_FILE|Railway staging project token/);
+    }
+  });
 });
 
 describe("rule 3: nothing deletes a variable; the superuser reference is made inert and waits for removal", () => {
@@ -702,6 +1066,14 @@ describe("rule 3: nothing deletes a variable; the superuser reference is made in
     if (migrate === undefined) throw new Error("fixture");
     migrate.variables.FIN_BOOTSTRAP_DATABASE_URL = INERT_VALUE;
     assert.equal(await deploy(h, manifest(h)), EXIT.ok, h.runtime.err());
+  });
+
+  it("the inert value is the one migrate's own parser refuses with its configuration error", () => {
+    // apps/api/src/migrate/main.test.ts hands this value to migrate as its superuser reference:
+    // every mode that reads it fails closed with exit 78, before any connection, so the value
+    // left between runs is no credential. ops/fin may not import migrate, so the value is pinned
+    // on both sides: change it in neither without the other.
+    assert.equal(INERT_VALUE, "inert");
   });
 });
 
@@ -848,4 +1220,47 @@ describe("rule 4: a read-back proves a write only once it shows that write", () 
     assert.equal(showsWrite(read({ sealed: [] }), written), false);
     assert.equal(showsWrite(read({ differs: ["FIN_EMAIL_FROM"] }), written), false);
   });
+
+  it("the write marker is plain, never sealed, a run ID and a write number only, and read by no service at run time", async () => {
+    assert.equal(mustBeSealed(settings, WRITE_MARKER), false);
+    const h = staging({ worker: "fin-next-api" });
+    assert.equal(await h.run(["email", "token", "staging"]), EXIT.ok, h.runtime.err());
+    h.rw.running("worker", ref("fin-next-api"));
+    assert.equal(await h.run(["email", "token", "staging", "--rotate"]), EXIT.ok, h.runtime.err());
+    assert.equal(await deploy(h, manifest(h, { migrations: ["x.sql"] })), EXIT.ok, h.runtime.err());
+    assert.ok(h.rw.patches.length > 5);
+    for (const p of h.rw.patches) {
+      const marker = p.variables[WRITE_MARKER];
+      assert.deepEqual(Object.keys(marker ?? {}), ["value"], "plain: set with no isSealed");
+      assert.match(marker?.value ?? "", /^run_[0-9a-hjkmnp-tv-z]{26}:[1-9][0-9]*$/);
+    }
+    // No service's code names it, whole or split in two: nothing at run time reads it.
+    const under = (top: string, sub: string) =>
+      readdirSync(join(REPO_ROOT, top))
+        .map((name) => join(REPO_ROOT, top, name, sub))
+        .filter((dir) => existsSync(dir));
+    const roots = [
+      ...under("apps", "src"),
+      ...under("packages", "src"),
+      join(REPO_ROOT, "ops", "watcher"),
+      join(REPO_ROOT, "ops", "docker"),
+    ];
+    const files = roots.flatMap((root) => filesUnder(root));
+    assert.ok(files.length > 100, `the scan reads the services' code (${files.length} files)`);
+    assert.ok(files.includes(join(REPO_ROOT, "apps", "api", "src", "migrate", "main.ts")));
+    assert.deepEqual(
+      files.filter((file) => readFileSync(file, "utf8").includes("VARIABLES_RUN")),
+      [],
+    );
+  });
 });
+
+/** Every file under a directory, outside installed and built output. */
+function filesUnder(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory())
+      return ["node_modules", "dist", ".turbo"].includes(entry.name) ? [] : filesUnder(path);
+    return entry.isFile() ? [path] : [];
+  });
+}

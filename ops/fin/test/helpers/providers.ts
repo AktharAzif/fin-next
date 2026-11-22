@@ -540,15 +540,32 @@ export class FakeRailway {
 
   /**
    * Makes a service run an image the way a finished deploy leaves it: the instance set to the
-   * image, and a newest deployment of that image that ended with the status (SUCCESS: serving).
+   * image, and a newest deployment of that image that ended with the status (SUCCESS: serving),
+   * which started with the variables the instance holds now. One that ended otherwise (REMOVED: an
+   * aborted deployment) leaves the deployment before it serving, as Railway does.
    */
   running(service: string, image: string, status = "SUCCESS"): void {
     const instance = this.instances.get(service);
     if (instance === undefined) throw new Error(`no instance of ${service}`);
     const id = `dep-${this.deployments.size + 1}`;
+    this.startedWith.set(id, {
+      ...instance.variables,
+      ...Object.fromEntries(this.#sealedValues.get(service) ?? []),
+    });
     this.deployments.set(id, { service, statuses: [status], logs: [], reads: 0, image });
     instance.image = image;
     instance.latestDeployment = { id, status };
+  }
+
+  /**
+   * The deployment of a service that serves, by ID: the newest one that ended SUCCESS. Railway
+   * keeps it serving until a newer one is online, so a newer one that failed, was skipped or was
+   * aborted (REMOVED) leaves it serving with the variables it started with.
+   */
+  serving(service: string): string | undefined {
+    return [...this.deployments.entries()]
+      .filter(([, d]) => d.service === service && d.statuses.at(-1) === "SUCCESS")
+      .at(-1)?.[0];
   }
 
   nameOf(id: string): string | undefined {

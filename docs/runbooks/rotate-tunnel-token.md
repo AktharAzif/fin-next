@@ -29,11 +29,13 @@ recreating the tunnel, with a short outage of the hosts on that tunnel.
      nothing without `--redeploy`.
    - If the connector is set to an image its newest deployment does not run, the redeploy is
      refused (it would roll that image): run `railway deploy` for the release staging runs, then
-     step 2 again with `--redeploy`. When that deployment did not end `SUCCESS`, or Railway does
-     not say which image it runs (SP-03), the redeploy goes on only if the connector is set to the
-     digest the registered deploys recorded for it, and is refused otherwise, the same way. A
-     connector whose newest deployment is `REMOVED` (taken down) holds no token and is not
-     redeployed.
+     step 2 again with `--redeploy`. When that deployment did not end `SUCCESS` (one aborted is
+     `REMOVED`, and the connector before it keeps running the old token), or Railway does not say
+     which image it runs (SP-03), the redeploy goes on only if the connector is set to the digest
+     the registered deploys recorded for it, and is refused otherwise, the same way. Only a
+     connector with no deployment holds no token; one whose newest deployment is `REMOVED` or
+     `REMOVING` is redeployed like any other (which starts it again if it was taken down by hand),
+     and the rotation is done only once that redeploy and its read-back pass.
 3. `node ops/fin/src/main.ts routes apply staging`: the proxied CNAMEs move to the new tunnel's ID.
 4. Check: the watcher shows the expected connector count, version and origin address for the new
    tunnel; `/api/health` answers through the console and verify hosts (or `/health` through the API
