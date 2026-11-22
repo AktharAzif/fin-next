@@ -14,6 +14,7 @@ import { collectLines, createTestDatabase, type TestDatabase, testContext } from
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ActorKind, ActorVia, AuditRole } from "./define.ts";
 import { AUDIT_EVENT_AREAS, AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
+import type { events as KEY_EVENTS } from "./events/api-keys.ts";
 import type { events as PLATFORM_EVENTS } from "./events/platform.ts";
 import { AuditWriteError, type RecordInput, recordAudit } from "./record.ts";
 import { tripSwitch } from "./switches.ts";
@@ -106,8 +107,15 @@ const SAMPLES: { [E in PlatformEventName]: Omit<RecordInput<E>, "event"> } = {
     target: "ops.rate_window",
     metadata: { deleted: 5, olderThan: "P1D" },
   },
-  // The API keys area's fragment (events/api-keys.ts, L-SAT-11): organisation scope, the key's
-  // 10-character ID as the target.
+};
+
+type KeyEventName = keyof typeof KEY_EVENTS;
+
+// The API keys area's fragment (events/api-keys.ts, L-SAT-11): organisation scope, the key's
+// 10-character ID as the target. One valid input per event, recorded through recordAudit so each is
+// checked against the fragment's metadata schema as well as the per-role registry; the other areas'
+// events are tried at audit.record() with empty metadata (areaInput below).
+const KEY_SAMPLES: { [E in KeyEventName]: Omit<RecordInput<E>, "event"> } = {
   "api_key.created": {
     actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
     target: "K8D2M4P6Q1",
@@ -218,6 +226,9 @@ async function attempt(role: AuditRole, event: AuditEventName): Promise<string> 
         await recordAudit(tx, { event: platform, ...SAMPLES[platform] } as RecordInput<
           typeof platform
         >);
+      } else if (Object.hasOwn(KEY_SAMPLES, event)) {
+        const key = event as KeyEventName;
+        await recordAudit(tx, { event: key, ...KEY_SAMPLES[key] } as RecordInput<typeof key>);
       } else {
         await tx.query("SELECT audit.record($1::jsonb)", [JSON.stringify(areaInput(tx, event))]);
       }
@@ -273,6 +284,14 @@ describe("T08-04: each login records exactly the events whose roles name its gro
     expect(Object.keys(SAMPLES).sort()).toEqual(
       Object.keys(AUDIT_EVENTS)
         .filter((name) => AUDIT_EVENT_AREAS[name as AuditEventName] === "platform")
+        .sort(),
+    );
+  });
+
+  it("has a sample for every API keys event", () => {
+    expect(Object.keys(KEY_SAMPLES).sort()).toEqual(
+      Object.keys(AUDIT_EVENTS)
+        .filter((name) => AUDIT_EVENT_AREAS[name as AuditEventName] === "api-keys")
         .sort(),
     );
   });
