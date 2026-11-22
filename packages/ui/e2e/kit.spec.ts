@@ -792,6 +792,38 @@ test.describe("the components @kit", () => {
     expect(reach).toEqual({ rules: [across, across, across], page: 0 });
   });
 
+  test("tabs run out in a parent that sizes them to their content: stretched, they fit the box and scroll in themselves", async ({
+    page,
+  }) => {
+    for (const [name, count] of [
+      ["tabs-bleed-start", 3],
+      ["tabs-bleed-column", 2],
+    ] as const) {
+      const reach = await page.locator(`[data-kit="${name}"]`).evaluate((box) => {
+        const outer = box.getBoundingClientRect();
+        const px = (n: number) => Math.round(n) + 0;
+        const rules = [...box.querySelectorAll('[role="tablist"], nav')].map((rule) => {
+          const row = rule.getBoundingClientRect();
+          const list = rule.matches("nav") ? (rule.querySelector("ul") as HTMLElement) : rule;
+          const range = document.createRange();
+          range.selectNodeContents(rule.querySelector('[role="tab"], a') as Element);
+          return {
+            edges: [px(row.left - outer.left), px(outer.right - row.right)],
+            label: px(range.getBoundingClientRect().left - outer.left),
+            scrolls: list.scrollWidth > list.clientWidth,
+          };
+        });
+        return {
+          rules,
+          box: box.scrollWidth - box.clientWidth,
+          page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      const across = { edges: [0, 0], label: 24, scrolls: true };
+      expect(reach, name).toEqual({ rules: Array(count).fill(across), box: 0, page: 0 });
+    }
+  });
+
   test("tab links keep their 40px row under display text's line height", async ({ page }) => {
     const row = await page.locator('[data-kit="tab-links-display"] nav').evaluate((nav) => ({
       // The case is real: the items inherit a 32px font on a 40px line.
@@ -838,6 +870,72 @@ test.describe("the components @kit", () => {
     // Back on its tab, the draft is still there.
     await kept.getByRole("tab", { name: "Note" }).click();
     await expect(note).toHaveValue("Called about the refund.");
+  });
+
+  test("tabs: a leaving panel is hidden at once, mid-transition, so two panels never show", async ({
+    page,
+  }) => {
+    type Frame = { chosen: boolean; out: boolean; shown: number; under: number };
+    const kept = page.locator('[data-kit="tabs-kept"]');
+    // Focus stays in the field, so its ring is still fading out when its panel starts to leave.
+    await kept.getByRole("textbox", { name: "Internal note" }).fill("Called about the refund.");
+    // The page reads the layout on every frame from before the click until the SDK has hidden the
+    // leaving panel, with no waiting assertion in between that would let its exit run out first.
+    const frames = kept.evaluate(
+      (box) =>
+        new Promise<Frame[]>((resolve) => {
+          const seen: Frame[] = [];
+          const started = performance.now();
+          const tabs = [...box.querySelectorAll('[role="tab"]')];
+          const tab = tabs.find((el) => el.textContent === "History");
+          const noteId = tabs.find((el) => el.textContent === "Note")?.id;
+          const note = box.querySelector(`[role="tabpanel"][aria-labelledby="${noteId}"]`);
+          let settled = 0;
+          const read = () => {
+            const row = (
+              box.querySelector('[role="tablist"]') as HTMLElement
+            ).getBoundingClientRect();
+            const shown = [...box.querySelectorAll('[role="tabpanel"]')].filter(
+              (panel) => panel.getBoundingClientRect().height > 0,
+            );
+            // The panel of the chosen tab, wherever it is drawn.
+            const on = box.querySelector('[role="tab"][aria-selected="true"]')?.id;
+            const panel = box.querySelector(`[role="tabpanel"][aria-labelledby="${on}"]`);
+            const chosen = tab?.getAttribute("aria-selected") === "true";
+            // The SDK has ended the Note panel's exit once it carries the hidden attribute.
+            const out = chosen && note?.getAttribute("hidden") === "";
+            seen.push({
+              chosen,
+              out,
+              shown: shown.length,
+              under: panel ? Math.round(panel.getBoundingClientRect().top - row.bottom) + 0 : -1,
+            });
+            settled = out ? settled + 1 : 0;
+            if (settled >= 3 || performance.now() - started > 5000) resolve(seen);
+            else requestAnimationFrame(read);
+          };
+          // The first reading is taken at once, before the click reaches the page.
+          read();
+        }),
+    );
+    await kept.getByRole("tab", { name: "History" }).click();
+    const seen = await frames;
+    // The readings run from before the change to after the leaving panel's exit has ended.
+    expect(seen.some((frame) => !frame.chosen)).toBe(true);
+    expect(seen.at(-1)?.out).toBe(true);
+    // In every frame one panel takes a box, and it starts on the rule.
+    expect(new Set(seen.map(({ shown, under }) => `${shown} panel, ${under}px under`))).toEqual(
+      new Set(["1 panel, 0px under"]),
+    );
+    // The exit still ends: the kept panel is hidden, its draft kept.
+    await expect(kept.getByRole("tabpanel", { name: "Note", includeHidden: true })).toHaveAttribute(
+      "hidden",
+      "",
+    );
+    await kept.getByRole("tab", { name: "Note" }).click();
+    await expect(kept.getByRole("textbox", { name: "Internal note" })).toHaveValue(
+      "Called about the refund.",
+    );
   });
 
   test("toasts: three at most, the oldest non-error evicted, errors stay; F8 reaches them", async ({

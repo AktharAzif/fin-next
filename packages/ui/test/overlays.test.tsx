@@ -496,6 +496,8 @@ describe("Tabs and TabLinks", () => {
     const [kept, chosen] = panels;
     expect(attr(kept, "hidden")).toBe("");
     expect(attr(chosen, "hidden")).toBeUndefined();
+    // While it leaves, before the SDK hides or drops it, a panel takes no box either.
+    for (const panel of panels) expect(classes(panel)).toContain("state-ending:hidden");
     // Chosen again, the kept panel shows like any other.
     const back = tagsWith(render(tree("reply")), "role", "tabpanel");
     expect(back).toHaveLength(1);
@@ -503,18 +505,25 @@ describe("Tabs and TabLinks", () => {
   });
 
   it("a part run out with a negative side margin takes max-w-none, which lifts its cap", () => {
+    // In a parent that sizes it to its content, the part is stretched too: the class stays.
     const html = render(
       <>
-        <Tabs variant="drawer" defaultValue="overview" className="-mx-6 max-w-none">
+        <Tabs
+          variant="drawer"
+          defaultValue="overview"
+          className="-mx-6 max-w-none justify-self-stretch"
+        >
           <TabsList aria-label="Customer" className="-mx-6 max-w-none">
             <Tab value="overview">Overview</Tab>
           </TabsList>
         </Tabs>
-        <TabLinks label="Settings" className="-mx-6 max-w-none">
+        <TabLinks label="Settings" className="-mx-6 max-w-none self-stretch">
           <TabLink href="/settings/team">Team</TabLink>
         </TabLinks>
       </>,
     );
+    expect(classes(tagsWith(html, "data-slot", "tabs")[0])).toContain("justify-self-stretch");
+    expect(classes(html.match(/<nav\b[^>]*>/)?.[0])).toContain("self-stretch");
     const parts = {
       root: tagsWith(html, "data-slot", "tabs")[0],
       list: tagsWith(html, "role", "tablist")[0],

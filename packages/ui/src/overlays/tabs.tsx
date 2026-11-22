@@ -18,10 +18,14 @@
 // the tabs or not (a wrapper of the caller's own in between needs `min-w-0 max-w-full` too). That
 // cap is the parent's content box, and no margin widens it: a part the caller runs out over the
 // parent's side padding with a negative margin (a drawer's `-mx-6`) takes `max-w-none` beside the
-// margin, or it stops short of the far edge. Given a height, the tabs keep their row whole and
-// leave the panels what is left. Tabs and panels draw their focus ring inside their own box, where
-// no edge can clip it. A count follows a label only for work that waits for someone ("To settle
-// 3"); with nothing waiting there is no count at all, never a 0.
+// margin, or it stops short of the far edge. Without its cap the part must be stretched across the
+// parent, or it grows to its row's width: a block, or a grid or flex column that stretches it, does
+// that (the root does for its tablist); in a parent that sizes it to its content (a grid with
+// `justify-items-start` or `place-items-center`, a column with `items-start`) the part takes
+// `justify-self-stretch` (a grid) or `self-stretch` (a column) as well. Given a height, the tabs
+// keep their row whole and leave the panels what is left. Tabs and panels draw their focus ring
+// inside their own box, where no edge can clip it. A count follows a label only for work that
+// waits for someone ("To settle 3"); with nothing waiting there is no count at all, never a 0.
 //
 // TabLinks draw the same row as a named <nav> holding a list of ordinary links, for tabs that are
 // addresses of their own (Settings' sections, a customer's `?tab=`). They are not a tablist: every
@@ -114,7 +118,10 @@ const ROOT_OPTIONS = [
 export type TabsProps = Pick<ComponentProps<typeof SdkTabs>, (typeof ROOT_OPTIONS)[number]> & {
   /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
   variant?: Layout;
-  /** Classes for the root; a negative side margin goes with `max-w-none` (see the header). */
+  /**
+   * Classes for the root; a negative side margin goes with `max-w-none`, and with a stretch where
+   * the parent sizes the root to its content (see the header).
+   */
   className?: string;
   children: ReactNode;
 };
@@ -148,7 +155,7 @@ type TabsListName =
 export type TabsListProps = TabsListName & {
   /**
    * Classes for the tablist itself, the row over its rule (its margins and placement); a negative
-   * side margin goes with `max-w-none` (see the header).
+   * side margin goes with `max-w-none`, and the root stretches it (see the header).
    */
   className?: string;
   children: ReactNode;
@@ -229,6 +236,9 @@ export function TabPanel({ value, keepMounted = false, className, children }: Ta
       keepMounted={keepMounted}
       className={cn(
         "min-w-0 rounded-xs focus-visible:outline-focus-inset",
+        // The SDK keeps a leaving panel until every transition inside it has ended (a field's
+        // focus ring fading out, a spinner); it takes no box from the moment it starts to leave.
+        "state-ending:hidden",
         PANEL[layout],
         className,
       )}
@@ -255,7 +265,10 @@ export type TabLinksProps = {
   variant?: Layout;
   /** The app's router link (a component or a tag name) for every TabLink inside; <a> by default. */
   linkAs?: ElementType<TabLinkTargetProps>;
-  /** Classes for the <nav>, the row's box; a negative side margin goes with `max-w-none`. */
+  /**
+   * Classes for the <nav>, the row's box; a negative side margin goes with `max-w-none`, and with a
+   * stretch where the parent sizes the nav to its content (see Tabs' header).
+   */
   className?: string;
   children: ReactNode;
 };

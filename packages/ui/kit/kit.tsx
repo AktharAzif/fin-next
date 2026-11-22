@@ -107,10 +107,15 @@ const WIDE_TABS = [
   "Audit log",
 ];
 
-function WideTabs(props: { name: string }) {
+function WideTabs(props: {
+  name: string;
+  variant?: "page" | "drawer";
+  className?: string;
+  listClassName?: string;
+}) {
   return (
-    <Tabs defaultValue="tab-0">
-      <TabsList aria-label={props.name}>
+    <Tabs defaultValue="tab-0" variant={props.variant ?? "page"} className={props.className ?? ""}>
+      <TabsList aria-label={props.name} className={props.listClassName ?? ""}>
         {WIDE_TABS.map((label, index) => (
           <Tab key={label} value={`tab-${index}`}>
             {label}
@@ -122,9 +127,13 @@ function WideTabs(props: { name: string }) {
   );
 }
 
-function WideTabLinks(props: { name: string }) {
+function WideTabLinks(props: { name: string; variant?: "page" | "drawer"; className?: string }) {
   return (
-    <TabLinks label={props.name}>
+    <TabLinks
+      label={props.name}
+      variant={props.variant ?? "page"}
+      className={props.className ?? ""}
+    >
       {WIDE_TABS.map((label, index) => (
         <TabLink key={label} href={`#section-${index}`} current={index === 0}>
           {label}
@@ -816,6 +825,45 @@ export function Kit(props: { onReady: () => void }) {
                 </TabLink>
                 <TabLink href="#bleed-team">Team</TabLink>
               </TabLinks>
+            </div>
+            {/*
+              The same, rows too wide for the box, in parents that size a part to its content: a
+              part run out there is stretched as well, or without its cap it grows to its row.
+            */}
+            <div
+              data-kit="tabs-bleed-start"
+              className="grid w-full max-w-drawer-s justify-items-start rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <WideTabs
+                name="Customer drawer in a start-aligned grid, run out"
+                variant="drawer"
+                className="-mx-6 -mt-5 max-w-none justify-self-stretch"
+              />
+              <WideTabs
+                name="Customer in a start-aligned grid, row run out"
+                className="mt-6"
+                listClassName="-mx-6 max-w-none px-4"
+              />
+              <WideTabLinks
+                name="Sections in a start-aligned grid, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none justify-self-stretch"
+              />
+            </div>
+            <div
+              data-kit="tabs-bleed-column"
+              className="flex w-full max-w-drawer-s flex-col items-start rounded-md bg-surface-raised px-6 py-5 shadow-ring"
+            >
+              <WideTabs
+                name="Customer drawer in a start-aligned column, run out"
+                variant="drawer"
+                className="-mx-6 -mt-5 max-w-none self-stretch"
+              />
+              <WideTabLinks
+                name="Sections in a start-aligned column, run out"
+                variant="drawer"
+                className="-mx-6 mt-6 max-w-none self-stretch"
+              />
             </div>
             {/* Tab links under display text, whose line height each item must not take on. */}
             <div data-kit="tab-links-display" className="text-display">
