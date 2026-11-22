@@ -1,0 +1,53 @@
+{
+  "board": "BackupCode",
+  "canvas": "fin-dashboard",
+  "route": "/sign-in/backup-code",
+  "states": {
+    "default": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "typed": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "verifying": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "wrongCode": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noCodes": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a backup code at the factor step, and a person with none"
+    },
+    "passkeyBusy": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "noPasskey": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "usedUp": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "paused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

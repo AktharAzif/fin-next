@@ -1,0 +1,65 @@
+{
+  "board": "Roles",
+  "canvas": "fin-dashboard",
+  "route": "/settings/roles",
+  "states": {
+    "list": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a built-in role is read-only and the list links each role"
+    },
+    "rowMenu": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
+    },
+    "readOnly": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "empty": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deletePeople": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
+    },
+    "deleteInvitations": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteNobody": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteBlocked": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "deleteFailed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a deletion whose holders changed meanwhile moves nobody, and the dialog counts again"
+    },
+    "deleted": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security deleting a role with holders waits for the role they move to"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "failed": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

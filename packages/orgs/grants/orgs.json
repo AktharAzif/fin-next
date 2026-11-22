@@ -1,0 +1,123 @@
+{
+  "$comment": "The organisation area's grants (spec 02 §13.7), in packages/db's fragment shape (roles/grants/<area>.json). fin_console writes the organisation tables but never live_status (Sunday's api writes it, IF-09) and never deletes an organisation row; it reads the audit trail only through the two SECURITY DEFINER reads. fin_api reads the views for its door checks. fin_readonly reads every column but an invitation's token hash. Every other statement fails with 42501.",
+  "area": "orgs",
+  "grants": [
+    {
+      "on": "schema",
+      "name": "identity",
+      "privileges": ["USAGE"],
+      "to": ["fin_console", "fin_api", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.organization",
+      "privileges": ["SELECT"],
+      "to": ["fin_console", "fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.organization",
+      "privileges": ["INSERT"],
+      "columns": ["id", "name", "created_by", "created_at", "updated_at"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.organization",
+      "privileges": ["UPDATE"],
+      "columns": ["name", "updated_at", "deleted_at"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.member",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.invitation",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.role",
+      "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.role_permission",
+      "privileges": ["SELECT", "INSERT", "DELETE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "function",
+      "name": "identity.organization_audit_log(text, text, text, timestamptz, timestamptz, text, text, text, integer, integer)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "function",
+      "name": "identity.person_activity(text, integer, integer)",
+      "privileges": ["EXECUTE"],
+      "to": ["fin_console"]
+    },
+    {
+      "on": "table",
+      "name": "identity.membership_view",
+      "privileges": ["SELECT"],
+      "to": ["fin_api"]
+    },
+    {
+      "on": "table",
+      "name": "identity.role_permission_view",
+      "privileges": ["SELECT"],
+      "to": ["fin_api"]
+    },
+    {
+      "on": "table",
+      "name": "identity.organization_view",
+      "privileges": ["SELECT"],
+      "to": ["fin_api"]
+    },
+    {
+      "on": "table",
+      "name": "identity.member",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.invitation",
+      "privileges": ["SELECT"],
+      "columns": [
+        "id",
+        "organization_id",
+        "email",
+        "role_key",
+        "invited_by",
+        "created_at",
+        "expires_at",
+        "status",
+        "answered_at",
+        "answered_by",
+        "cancel_reason"
+      ],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.role",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    },
+    {
+      "on": "table",
+      "name": "identity.role_permission",
+      "privileges": ["SELECT"],
+      "to": ["fin_readonly"]
+    }
+  ]
+}

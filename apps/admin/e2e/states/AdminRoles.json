@@ -1,0 +1,79 @@
+{
+  "board": "AdminRoles",
+  "canvas": "fin-admin",
+  "route": "/staff/roles",
+  "states": {
+    "list": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "readOnly": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "rowMenu": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "deleteMoves": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "deleted": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/e2e/roles/staff-roles.spec.ts",
+      "test": "@journey an Admin makes, changes, gives and deletes a custom staff role, and a holder sees it read-only"
+    },
+    "deleteFailed": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "names the conflict, the limit, the move and a role beyond the actor's"
+    },
+    "loading": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "draw AdminRoles and AdminRoleEditor with shapes and a header, never a spinner"
+    },
+    "failed": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "fail to the page's own state, with the request ID"
+    },
+    "noPermission": {
+      "status": "new",
+      "uiRequest": "UR-16",
+      "drawn": false,
+      "day": "sat",
+      "spec": "apps/admin/src/client/roles/roles.test.tsx",
+      "test": "read nothing without staff.read"
+    }
+  }
+}

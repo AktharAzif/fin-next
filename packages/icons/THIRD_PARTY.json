@@ -1,0 +1,24 @@
+[
+  {
+    "path": "licenses/phosphor-icons-react-2.1.10.LICENSE",
+    "package": "@phosphor-icons/react",
+    "version": "2.1.10",
+    "upstreamPath": "package/LICENSE",
+    "sha256": "6918b72504641180600cbbd4a86b0dfa9dfccf788775694325b71b9a029f6eb4"
+  },
+  {
+    "path": "licenses/circle-flags-2.8.3.LICENSE.md",
+    "package": "circle-flags",
+    "version": "2.8.3",
+    "upstreamPath": "package/LICENSE.md",
+    "sha256": "9ef248a32ebbb1587b7c4caa3203a33065de29aa6098a6933bad67de2057e72f"
+  },
+  {
+    "path": "licenses/web3icons-core-4.0.58.LICENCE",
+    "package": "@web3icons/core",
+    "version": "4.0.58",
+    "url": "https://raw.githubusercontent.com/0xa3k5/web3icons/763a55d66a03b21b603eb249f2df7c64a7522089/LICENCE",
+    "tag": "@web3icons/core@4.0.58",
+    "sha256": "fcbc59252ec73f93cb16242e7a10157747058b70d561a2cec650d8dc60778263"
+  }
+]

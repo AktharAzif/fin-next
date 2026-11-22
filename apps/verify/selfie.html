@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en-GB" data-app="verify">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta property="csp-nonce">
+    <title>Fin</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <script src="/theme.js"></script>
+    <script type="module" src="/src/selfie/main.tsx"></script>
+  </head>
+  <body class="fin-shimmer">
+    <a class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-tooltip focus:rounded-control focus:bg-surface-raised focus:px-3 focus:py-2 focus:text-label focus:text-text-primary focus:shadow-popover focus:outline-focus" href="#main">Skip to content</a>
+    <div id="root">
+      <!-- boot:auth --><div data-boot-block="auth" aria-hidden="true" class="flex min-h-dvh flex-col gap-8 overflow-hidden bg-bg p-4 sm:gap-0 sm:p-8">
+        <div data-boot-header="auth" class="flex h-6 items-center"><div data-skeleton class="h-4.5 w-4.5 rounded-sm bg-fill-selected sm:w-20"></div></div>
+        <div data-boot-main class="flex flex-1 items-start justify-center sm:items-center sm:pt-8 sm:pb-14">
+          <div class="w-full max-w-modal">
+            <div data-boot-card class="flex flex-col gap-6 bg-bg sm:rounded-md sm:border sm:border-transparent sm:bg-surface-raised sm:p-8 sm:shadow-ring">
+              <div class="flex flex-col gap-2">
+                <div data-skeleton class="h-6 w-40 rounded-sm bg-fill-selected"></div>
+                <div data-skeleton class="h-3 w-56 max-w-full rounded-sm bg-fill-selected"></div>
+              </div>
+              <div class="flex flex-col gap-3">
+                <div data-skeleton class="h-control-lg rounded-control bg-fill-selected"></div>
+                <div data-skeleton class="h-control-lg rounded-control bg-fill-selected"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /boot:auth -->
+    </div>
+  </body>
+</html>
