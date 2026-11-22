@@ -14,12 +14,13 @@ import {
   extensionsOf,
   type Harness,
   inviteAs,
-  memberOf,
   ownerWithOrganization,
   person,
   removeAs,
-  roleAs,
+  seededMemberOf,
+  seededRole,
   unique,
+  warmUp,
   withIntent,
 } from "../test/harness.ts";
 import {
@@ -40,6 +41,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("invitations");
   h = await createHarness(database);
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {
@@ -218,7 +224,7 @@ describe("an invitation", () => {
 
   it("is outranked: an Admin may neither offer nor cancel the Super admin role", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_outrank");
-    const admin = await memberOf(h, who, orgId, "admin", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "admin", "admin");
     const offered = await inviteAs(h, admin.who, orgId, unique("top"), "super_admin");
     expect(codeOf(offered)).toBe("giving_refused");
     expect(extensionsOf(offered)).toMatchObject({ problem: "top_only" });
@@ -257,9 +263,9 @@ describe("an invitation", () => {
   // proofs. Alone it takes 1.0 to 1.5 s; in the full db run on 4 CPUs, 2.4 to 4.3 s.
   it("is replaced only by someone it does not outrank (§8.5, as a cancellation)", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_replace_rank");
-    const inviters = await roleAs(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
-    const low = await memberOf(h, who, orgId, "low_inviter", inviters);
-    const admin = await memberOf(h, who, orgId, "replace_admin", "admin");
+    const inviters = await seededRole(h, who, orgId, "Inviters", ["member.read", "member.invite"]);
+    const low = await seededMemberOf(h, who, orgId, "low_inviter", inviters);
+    const admin = await seededMemberOf(h, who, orgId, "replace_admin", "admin");
     const email = unique("victim");
     const top = await inviteAs(h, who, orgId, email, "super_admin");
     const topId = top.ok ? top.value.invitationId : "";
@@ -311,7 +317,7 @@ describe("an invitation", () => {
   // CPUs, up to 2.6 s.
   it("is accepted after another member changed its role, under the member who changed it", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_changer");
-    const admin = await memberOf(h, who, orgId, "first_inviter", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "first_inviter", "admin");
     const email = unique("raised");
     const sent = await inviteAs(h, admin.who, orgId, email, "admin");
     const id = sent.ok ? sent.value.invitationId : "";
@@ -351,11 +357,11 @@ describe("an invitation", () => {
   // a proof. Alone it takes 0.9 to 1.3 s; in the full db run on 4 CPUs, 2.2 to 3.8 s.
   it("is withdrawn when its inviter is demoted below it, or removed", async () => {
     const { who, orgId } = await ownerWithOrganization(h, "owner_withdraw");
-    const admin = await memberOf(h, who, orgId, "inviter", "admin");
+    const admin = await seededMemberOf(h, who, orgId, "inviter", "admin");
     const sent = await inviteAs(h, admin.who, orgId, unique("pending"), "admin");
     const sentId = sent.ok ? sent.value.invitationId : "";
     // Demoted to a role that can no longer invite: the invitation goes (inviter_demoted).
-    const readers = await roleAs(h, who, orgId, "Readers", ["member.read"]);
+    const readers = await seededRole(h, who, orgId, "Readers", ["member.read"]);
     expect((await changeRoleAs(h, who, orgId, admin.memberId, readers)).ok).toBe(true);
     const demoted = await h.admin.query<{ status: string; cancel_reason: string }>(
       "SELECT status, cancel_reason FROM identity.invitation WHERE id = $1",
@@ -363,7 +369,7 @@ describe("an invitation", () => {
     );
     expect(demoted.rows[0]).toEqual({ status: "cancelled", cancel_reason: "inviter_demoted" });
 
-    const second = await memberOf(h, who, orgId, "inviter2", "admin");
+    const second = await seededMemberOf(h, who, orgId, "inviter2", "admin");
     const again = await inviteAs(h, second.who, orgId, unique("pending2"), "admin");
     const againId = again.ok ? again.value.invitationId : "";
     expect((await removeAs(h, who, orgId, second.memberId)).ok).toBe(true);

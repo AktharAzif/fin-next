@@ -15,6 +15,7 @@ import {
   prove,
   type SignedIn,
   unique,
+  warmUp,
 } from "../test/harness.ts";
 import { inviteMember } from "./invitations.ts";
 
@@ -24,6 +25,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("step_up");
   h = await createHarness(database);
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {
