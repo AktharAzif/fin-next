@@ -16,7 +16,10 @@
 -- `email_private`, which only the worker and email.enqueue()'s owner may use (see P0-E's migration):
 -- Postgres takes a statement's table lock before it checks its privileges, so a login that could
 -- name these tables could hold the sender and the check up; one with no USAGE on the schema cannot
--- name them. Each table has nothing for PUBLIC.
+-- name them. Each table has nothing for PUBLIC. That covers these tables only. The check and the
+-- sender's digest flush also run email.enqueue(), which reads email.template_grant and
+-- pg_catalog.pg_roles (section 7), and the check writes ops.duty_state. Other logins can name all
+-- three, so they can still hold those up (see apps/api/src/worker/email/delivery-check.ts).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -118,8 +121,9 @@ REVOKE ALL ON TABLE email_private.delivery_check FROM PUBLIC;
 --    (FOR UPDATE, ROW SHARE), and a login that can name the table can queue a stronger lock in front
 --    of both with no privilege on it (a PREPARE in an open transaction holds a lock, and a CREATE
 --    RULE or CREATE TRIGGER queues ACCESS EXCLUSIVE or SHARE ROW EXCLUSIVE behind it before its
---    privilege check fails). What keeps them out is the schema: no login but the worker can name a
---    table in `email_private`. After a restore the worker puts the row back.
+--    privilege check fails). What keeps them off this table is the schema: no login but the worker
+--    can name a table in `email_private`. They can still hold the check up through what
+--    email.enqueue() reads (section 7). After a restore the worker puts the row back.
 CREATE TABLE email_private.delivery_check_turn (
   name text PRIMARY KEY CHECK (name = 'delivery-check')
 );
@@ -137,6 +141,11 @@ REVOKE ALL ON TABLE email_private.delivery_check_turn FROM PUBLIC;
 --    INSERT on the outbox and SELECT on the template grants), and its grants: fin_owner replaces the
 --    function as that role's member. The search path is pinned to pg_catalog and pg_temp, and every
 --    table, type and function inside is named with its schema.
+--
+--    The function reads email.template_grant, which stays in `email`, where every sending service
+--    can name it. It also joins pg_catalog.pg_roles, which any login can name. So two sessions of
+--    another login can hold up every caller's enqueue, the worker's delivery check included: one
+--    holds a lock on either relation in an open transaction, and the other queues DDL behind it.
 CREATE OR REPLACE FUNCTION email.enqueue(p jsonb) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE

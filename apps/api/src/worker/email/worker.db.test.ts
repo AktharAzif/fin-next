@@ -1,7 +1,14 @@
 // The worker's email side on a real Postgres 18: the delivery check's once-per-release and daily
 // rule (S0-09), and the whole path from `email.enqueue()` through NOTIFY, the loop and the sender to
 // the transport and the heartbeat, as the worker's own login.
-import { enqueue, newId, recipientHasher, Sender } from "@fin/email";
+import {
+  type ClientLike,
+  enqueue,
+  newId,
+  type PoolLike,
+  recipientHasher,
+  Sender,
+} from "@fin/email";
 import { FakeTransport, LineRecorder } from "@fin/email/testing";
 import { HAS_DATABASE, openTestDatabase, type TestDatabase } from "@fin/email/testing/db";
 import pg, { type PoolClient } from "pg";
@@ -103,7 +110,7 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     expect(turn.rows).toEqual([{ name: "delivery-check" }]);
   });
 
-  it("cannot be held up by another login: no advisory lock, and only the worker may take the turn", async () => {
+  it("is not held up by another login's advisory lock, and only the worker may take the turn", async () => {
     const other = await db.as.fin_console.connect();
     try {
       // What any login could do to an advisory lock, and what it may not do to the worker's tables.
@@ -135,6 +142,9 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
   // worker's tables could hold the check and the sender up with two sessions: one keeps a lock in an
   // open transaction, the other queues DDL behind it, and the worker's own locks queue behind the
   // DDL. No other login may use the schema the worker's tables are in, so it cannot name them.
+  // These tests cover the tables in that schema only. The relations outside it that a run still
+  // locks, which another login can name and so hold, are pinned by "locks no relation outside
+  // email_private but ..." below.
   const OTHERS = ["fin_console", "fin_admin", "fin_api", "fin_payments"] as const;
   const PRIVATE = "email_private";
   const WORKER_TABLES = [
@@ -191,9 +201,9 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid ?? 0;
 
   /** The sender as the worker runs it, over a fake transport. */
-  const sender = () =>
+  const sender = (pool: PoolLike = db.as.fin_worker) =>
     new Sender({
-      db: db.as.fin_worker,
+      db: pool,
       port: new FakeTransport(),
       clock,
       log: new LineRecorder(),
@@ -221,7 +231,7 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     }
   }
 
-  it("cannot be held up by another login's PREPARE and a CREATE RULE or CREATE TRIGGER queued behind it", async () => {
+  it("keeps another login's PREPARE, and a CREATE RULE or CREATE TRIGGER queued behind it, off every table in email_private", async () => {
     let run = 0;
     for (const role of OTHERS) {
       const a = await db.as[role].connect();
@@ -277,7 +287,9 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     }
   }, 120_000);
 
-  it("is not held up by a caller that keeps its transaction open after email.enqueue()", async () => {
+  // The caller's open transaction also holds ACCESS SHARE on email.template_grant. A second session
+  // of the same login that queues DDL on that table does hold the check up; the next test pins it.
+  it("is not held up by a caller that keeps its transaction open after email.enqueue(), and the caller cannot queue DDL on the outbox", async () => {
     const probe = "test/enqueue-probe";
     for (const role of OTHERS) {
       await db.admin.query(
@@ -323,6 +335,107 @@ describe.skipIf(!HAS_DATABASE)("the worker's email side on Postgres 18", () => {
     } finally {
       await db.admin.query("DELETE FROM email.template_grant WHERE template = $1", [probe]);
     }
+  });
+
+  /** The relations (indexes left out) the backend `pid` holds a lock on, schema-qualified. */
+  async function lockedRelations(pid: number): Promise<string[]> {
+    const locked = await db.admin.query<{ name: string }>(
+      `SELECT DISTINCT n.nspname || '.' || c.relname AS name
+         FROM pg_locks l
+         JOIN pg_class c ON c.oid = l.relation
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE l.pid = $1 AND l.locktype = 'relation' AND c.relkind <> 'i'`,
+      [pid],
+    );
+    return locked.rows.map((row) => row.name);
+  }
+
+  /**
+   * The worker's pool, adding to `into` every relation its statements lock. A transaction's locks
+   * are read just before it ends; a statement run on the pool itself gets a transaction of its own,
+   * so that its locks can be read too.
+   */
+  function recordingPool(into: Set<string>): PoolLike {
+    const open = async () => {
+      const client: ClientLike = await db.as.fin_worker.connect();
+      const self = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      return { client, pid: self.rows[0]?.pid ?? 0 };
+    };
+    const record = async (pid: number) => {
+      for (const name of await lockedRelations(pid)) into.add(name);
+    };
+    return {
+      async query<R>(text: string, values?: unknown[]) {
+        const { client, pid } = await open();
+        try {
+          await client.query("BEGIN");
+          const result = await client.query<R>(text, values);
+          await record(pid);
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
+        }
+      },
+      async connect() {
+        const { client, pid } = await open();
+        return {
+          async query<R>(text: string, values?: unknown[]) {
+            if (text === "COMMIT" || text === "ROLLBACK") await record(pid);
+            return client.query<R>(text, values);
+          },
+          release: (error?: Error | boolean) => client.release(error),
+        };
+      },
+    };
+  }
+
+  // The tests above keep other logins off the tables in email_private. A run still locks the
+  // relations below outside that schema, and another login can name each of them, so two sessions
+  // can still hold the check (and every caller's email.enqueue()) up through them. delivery-check.ts
+  // says how. The steward's ruling keeps email.template_grant in `email`. A change to either list
+  // fails here, so the comments that name the list are kept true.
+  it("locks no relation outside email_private but those delivery-check.ts names", async () => {
+    const checked = new Set<string>();
+    expect(
+      await runDeliveryCheck({
+        db: recordingPool(checked),
+        clock,
+        release: RELEASE_A,
+        seedInbox: "seed@example.net",
+        log: new LineRecorder(),
+      }),
+    ).toMatchObject({ result: "queued", trigger: "release" });
+    await enqueue(db.as.fin_console, {
+      id: newId("eml", clock),
+      template: "identity/sign-in-code",
+      recipientKind: "address",
+      recipient: "person@example.com",
+      params: { code: "24682468" },
+    });
+    const sent = new Set<string>();
+    expect(await sender(recordingPool(sent)).runOnce()).toMatchObject({ sent: 2 });
+
+    const outside = (names: Set<string>) =>
+      [...names].filter((name) => !name.startsWith(`${PRIVATE}.`)).sort();
+    // email.enqueue() reads the template grants and joins pg_roles, a view on pg_authid and
+    // pg_db_role_setting; the run's second transaction records it in ops.duty_state.
+    expect(outside(checked)).toEqual([
+      "email.template_grant",
+      "ops.duty_state",
+      "pg_catalog.pg_authid",
+      "pg_catalog.pg_db_role_setting",
+      "pg_catalog.pg_roles",
+    ]);
+    // Sending (with no digest due, whose flush calls email.enqueue()) stays inside email_private.
+    expect(outside(sent)).toEqual([]);
+    // Every table in email_private either one locks is one the two-session test tries.
+    const inside = [...checked, ...sent].filter((name) => name.startsWith(`${PRIVATE}.`));
+    expect(inside.length).toBeGreaterThan(0);
+    for (const name of inside) expect(WORKER_TABLES).toContain(name);
   });
 
   it("records each run in ops.duty_state: the last success, and failures in a row", async () => {
