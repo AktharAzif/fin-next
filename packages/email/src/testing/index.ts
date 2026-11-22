@@ -3,7 +3,7 @@
 // imported by release code.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { grantInsertSql, SENDER_ROLES, type SenderRole } from "../catalogue.ts";
+import { grantSyncSql, SENDER_ROLES } from "../catalogue.ts";
 import type { Queryable } from "../outbox/db.ts";
 import type { EmailPort, OutgoingEmail, SendOutcome } from "../port.ts";
 import type { EmailLog, Level } from "../sender/sender.ts";
@@ -88,35 +88,82 @@ export class LineRecorder implements EmailLog {
 
 const SQL_DIR = join(import.meta.dirname, "..", "..");
 
-/** The fixture schema text: the spec 01 §6.10 stand-in, then this lane's extension. */
+/**
+ * email.enqueue()'s owner: a role that cannot log in and holds only INSERT on the outbox and SELECT on
+ * the template grants (P0-E's migration and its `email` grant fragment).
+ */
+export const ENQUEUE_OWNER = "fin_email_enqueue";
+
+/** The roles the schema's SQL names by `{{placeholder}}`: the senders and enqueue's owner. */
+export const SCHEMA_ROLES = [...SENDER_ROLES, ENQUEUE_OWNER] as const;
+export type SchemaRole = (typeof SCHEMA_ROLES)[number];
+
+/** This package's migration, which `migrate` applies over P0-E's outbox. */
+export const SENDER_MIGRATION = "20261121121000_email_sender.sql";
+
+/**
+ * The grant fragments the sender's objects take in `migrate` (packages/db/src/grants.ts's shape): P0-E's
+ * `email` fragment (the schema, email.enqueue() and the outbox) and this package's own.
+ */
+export const SENDER_GRANT_FRAGMENTS: readonly string[] = [
+  join(SQL_DIR, "..", "db", "roles", "grants", "email.json"),
+  join(SQL_DIR, "grants", "email-sender.json"),
+];
+
+interface FragmentEntry {
+  on: "schema" | "table" | "function";
+  name: string;
+  privileges: string[];
+  columns?: string[];
+  to: string[];
+}
+
+/** The fragments as GRANT statements, each group written `{{fin_worker}}` for the tests to map. */
+export function senderGrantSql(fragments: readonly string[] = SENDER_GRANT_FRAGMENTS): string {
+  const lines: string[] = [];
+  for (const file of fragments) {
+    const { grants } = JSON.parse(readFileSync(file, "utf8")) as { grants: FragmentEntry[] };
+    for (const entry of grants) {
+      const columns = entry.columns === undefined ? "" : ` (${entry.columns.join(", ")})`;
+      const privileges = entry.privileges.map((p) => `${p}${columns}`).join(", ");
+      const target = entry.on === "table" ? "TABLE" : entry.on === "schema" ? "SCHEMA" : "FUNCTION";
+      const to = entry.to.map((role) => `{{${role}}}`).join(", ");
+      lines.push(`GRANT ${privileges} ON ${target} ${entry.name} TO ${to};`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** The fixture schema text: the spec 01 §6.10 stand-in, then this lane's migration and its grants. */
 export function outboxSchemaSql(): { base: string; extension: string; grants: string } {
   return {
     base: readFileSync(join(SQL_DIR, "test", "fixture", "outbox-base.sql"), "utf8"),
-    extension: readFileSync(join(SQL_DIR, "sql", "email_sender.sql"), "utf8"),
-    grants: readFileSync(join(SQL_DIR, "sql", "email_sender.grants.sql"), "utf8"),
+    extension: readFileSync(join(SQL_DIR, "migrations", SENDER_MIGRATION), "utf8"),
+    grants: senderGrantSql(),
   };
 }
 
 /**
- * Drops and recreates the `email` (and stand-in `ops`) schema in the connected (lane-owned)
- * database: the base migration with its seeded grant, then the extension and its grants with each
- * group role mapped by `roleName`, then the generated template grants, exactly as the data lane's
- * runner would load them over the seeded row.
+ * Drops and recreates the `email` and `email_private` (and stand-in `ops`) schemas in the connected
+ * (lane-owned) database: the base migration with its seeded grant, then the extension and its grants
+ * with each role mapped by `roleName`, then the generated template grants, exactly as `migrate` loads
+ * them over the seeded row.
  */
 export async function installOutboxSchema(
   db: Queryable,
-  roleName: (role: SenderRole) => string,
+  roleName: (role: SchemaRole) => string,
 ): Promise<void> {
   const sql = outboxSchemaSql();
   const render = (text: string): string => {
     let out = text;
-    for (const role of SENDER_ROLES) out = out.replaceAll(`{{${role}}}`, roleName(role));
+    for (const role of SCHEMA_ROLES) out = out.replaceAll(`{{${role}}}`, roleName(role));
     return out;
   };
   await db.query("DROP SCHEMA IF EXISTS email CASCADE");
+  await db.query("DROP SCHEMA IF EXISTS email_private CASCADE");
   await db.query("DROP SCHEMA IF EXISTS ops CASCADE");
   await db.query(render(sql.base));
   await db.query(sql.extension);
   await db.query(render(sql.grants));
-  await db.query(grantInsertSql(roleName));
+  await db.query(grantSyncSql(roleName));
 }

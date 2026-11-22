@@ -1,8 +1,8 @@
 -- Step-up intents (spec 02 §7.2, §13.4, [SA-08]). An intent binds one action and the digest of
 -- its parameters to one session for 5 minutes; a ceremony proves it; the matching action
 -- consumes it once, in its own transaction. No foreign key: the two realms share the table.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 CREATE TABLE ops.step_up_intent (
   id text PRIMARY KEY CHECK (id ~ '^sti_[0-9a-hjkmnp-tv-z]{26}$'),

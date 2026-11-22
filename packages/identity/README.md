@@ -72,8 +72,8 @@ app.all("/api/auth/*", (c) => realm.handler(c.req.raw, context));
 | `src/codes.ts`, `src/browsers.ts`, `src/limits.ts` | emailed codes, known and trusted browsers, limits |
 | `src/audit/`, `src/email/`, `src/monitoring.ts` | the event, template and line catalogues of this area |
 | `src/ports/` | the adapters to packages/db, packages/audit and the outbox until they land |
-| `migrations/` | the SQL the runner applies, in name order |
-| `grants/` | the grant fragments the runner renders |
+| `migrations/` | the SQL the runner applies, in name order with every package's (packages/db's `assets.ts`) |
+| `grants/` | the grant fragments, in the runner's shape (`{ on, name, privileges, columns?, to }`), applied exactly |
 | `test/` | the Postgres 18 harness, the platform fixture and a software authenticator |
 
 ## Tests

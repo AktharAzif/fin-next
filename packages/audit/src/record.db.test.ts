@@ -8,11 +8,14 @@ import {
   isSwitchOn,
   type PgClient,
   type ServiceGroup,
+  type UnitTx,
 } from "@fin/db";
 import { collectLines, createTestDatabase, type TestDatabase, testContext } from "@fin/db/testing";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AuditRole } from "./define.ts";
-import { AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
+import type { ActorKind, ActorVia, AuditRole } from "./define.ts";
+import { AUDIT_EVENT_AREAS, AUDIT_EVENTS, type AuditEventName } from "./events/_index.gen.ts";
+import type { events as KEY_EVENTS } from "./events/api-keys.ts";
+import type { events as PLATFORM_EVENTS } from "./events/platform.ts";
 import { AuditWriteError, type RecordInput, recordAudit } from "./record.ts";
 import { tripSwitch } from "./switches.ts";
 import { eventTypeRows, syncEventTypes } from "./sync.ts";
@@ -44,9 +47,12 @@ afterAll(async () => {
   await db?.drop();
 });
 
+type PlatformEventName = keyof typeof PLATFORM_EVENTS;
+
 // One valid input per platform event: the per-event tests below are generated from AUDIT_EVENTS, and a
-// new event without a sample here fails the coverage test.
-const SAMPLES: { [E in AuditEventName]: Omit<RecordInput<E>, "event"> } = {
+// new platform event without a sample here fails the coverage test. The other areas' events (each
+// area's package records its own, in its fragment's shape) are tried at audit.record() itself.
+const SAMPLES: { [E in PlatformEventName]: Omit<RecordInput<E>, "event"> } = {
   "switch.tripped": {
     actor: { kind: "system", id: null, via: "reconciliation" },
     target: "live_money",
@@ -103,6 +109,61 @@ const SAMPLES: { [E in AuditEventName]: Omit<RecordInput<E>, "event"> } = {
   },
 };
 
+type KeyEventName = keyof typeof KEY_EVENTS;
+
+// The API keys area's fragment (events/api-keys.ts, L-SAT-11): organisation scope, the key's
+// 10-character ID as the target. One valid input per event, recorded through recordAudit so each is
+// checked against the fragment's metadata schema as well as the per-role registry; the other areas'
+// events are tried at audit.record() with empty metadata (areaInput below).
+const KEY_SAMPLES: { [E in KeyEventName]: Omit<RecordInput<E>, "event"> } = {
+  "api_key.created": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    mode: "sandbox",
+    metadata: {
+      key_id: "K8D2M4P6Q1",
+      mode: "test",
+      kind: "rk",
+      scopes: ["customers:read"],
+      expires_at: null,
+      allowlist_count: 0,
+      shown_to: "usr_01jd0000000000000000000001",
+    },
+  },
+  "api_key.updated": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: {
+      key_id: "K8D2M4P6Q1",
+      changed: ["name"],
+      scopes_removed: [],
+      expiry_shortened: false,
+      allowlist_count: 0,
+    },
+  },
+  "api_key.rolled": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    refs: ["W6N4R3T5V7"],
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", new_key_id: "W6N4R3T5V7", overlap: "1h", shown_to: null },
+  },
+  "api_key.revoked": {
+    actor: { kind: "user", id: "usr_01jd0000000000000000000001", via: "console" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", reason: "member", source: null },
+  },
+  "api_key.exposed": {
+    actor: { kind: "system", id: null, via: "api" },
+    target: "K8D2M4P6Q1",
+    organizationId: "org_01jd0000000000000000000001",
+    metadata: { key_id: "K8D2M4P6Q1", source: "plain_http" },
+  },
+};
+
 const GROUPS: readonly ServiceGroup[] = [
   "fin_edge",
   "fin_api",
@@ -120,12 +181,57 @@ function databaseFor(role: AuditRole): FinDatabase {
 
 class Rollback extends Error {}
 
-/** Records the sample in a unit that is then rolled back; resolves "ok" or the refusal's code. */
+/** The `via` each actor kind records with, for the inputs built below. */
+const VIA: Readonly<Record<ActorKind, ActorVia>> = {
+  user: "console",
+  api_key: "api",
+  staff: "admin",
+  customer_link: "hosted_pages",
+  person_link: "hosted_pages",
+  system: "job",
+  provider: "webhook",
+  operator: "operator",
+};
+
+/**
+ * audit.record()'s input for another area's event, as that area's package sends it: the event's
+ * first actor kind, a target of its prefix, its scope's fields and empty metadata (the database
+ * checks the metadata's shape; the area's own recorder checks its schema before it calls).
+ */
+function areaInput(tx: UnitTx, event: AuditEventName): Record<string, unknown> {
+  const spec = AUDIT_EVENTS[event];
+  const kind: ActorKind = spec.actors[0] ?? "system";
+  const someId = (prefix: string) => `${prefix}_01jd0000000000000000000000`;
+  return {
+    id: tx.ids.newId("aud"),
+    event,
+    actor_kind: kind,
+    actor_id: kind === "system" ? null : "act_test",
+    actor_via: VIA[kind],
+    target_id: /^[a-z]{3}$/.test(spec.target) ? someId(spec.target) : spec.target,
+    metadata: {},
+    release: tx.context.release,
+    ...(spec.scope === "organisation" ? { organization_id: someId("org") } : {}),
+    ...(spec.scope === "person" ? { subject_user_id: someId("usr") } : {}),
+  };
+}
+
+/** Records the event in a unit that is then rolled back; resolves "ok" or the refusal's code. */
 async function attempt(role: AuditRole, event: AuditEventName): Promise<string> {
   const database = databaseFor(role);
   try {
     await database.unit(testContext(), async (tx) => {
-      await recordAudit(tx, { event, ...SAMPLES[event] } as RecordInput<typeof event>);
+      if (Object.hasOwn(SAMPLES, event)) {
+        const platform = event as PlatformEventName;
+        await recordAudit(tx, { event: platform, ...SAMPLES[platform] } as RecordInput<
+          typeof platform
+        >);
+      } else if (Object.hasOwn(KEY_SAMPLES, event)) {
+        const key = event as KeyEventName;
+        await recordAudit(tx, { event: key, ...KEY_SAMPLES[key] } as RecordInput<typeof key>);
+      } else {
+        await tx.query("SELECT audit.record($1::jsonb)", [JSON.stringify(areaInput(tx, event))]);
+      }
       throw new Rollback();
     });
     return "committed";
@@ -174,8 +280,20 @@ describe("T08-02: the registry in the database", () => {
 });
 
 describe("T08-04: each login records exactly the events whose roles name its group", () => {
-  it("has a sample for every registered event", () => {
-    expect(Object.keys(SAMPLES).sort()).toEqual(Object.keys(AUDIT_EVENTS).sort());
+  it("has a sample for every platform event", () => {
+    expect(Object.keys(SAMPLES).sort()).toEqual(
+      Object.keys(AUDIT_EVENTS)
+        .filter((name) => AUDIT_EVENT_AREAS[name as AuditEventName] === "platform")
+        .sort(),
+    );
+  });
+
+  it("has a sample for every API keys event", () => {
+    expect(Object.keys(KEY_SAMPLES).sort()).toEqual(
+      Object.keys(AUDIT_EVENTS)
+        .filter((name) => AUDIT_EVENT_AREAS[name as AuditEventName] === "api-keys")
+        .sort(),
+    );
   });
 
   for (const event of Object.keys(AUDIT_EVENTS) as AuditEventName[]) {

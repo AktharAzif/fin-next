@@ -1,0 +1,47 @@
+{
+  "$comment": "The edge's key check alerts (spec 05 §10.2; spec 08 §7.8 group B). The check fails closed: a statement that fails answers 503 and alerts. rate-limiter-failing is spec 05's one alert for the window store; step 15's lookup reads the refused-key window with the key record, so it watches both of the edge's statement failures. api's windows and the auth limiter's limits.store_failed (spec 02 §18.2) join this rule when their lines are catalogued.",
+  "alerts": [
+    {
+      "name": "rate-limiter-failing",
+      "group": "B",
+      "severity": "P",
+      "sources": ["edge"],
+      "query": { "count": { "events": ["key.lookup_failed", "rate_limiter.failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The edge's key check could not read Postgres (the key lookup or a rate-limit window) and refused with 503. Failures: {{value}}.",
+      "metadata": {
+        "check": "The event and the code on the lines (a SQLSTATE such as 42501 for a grant, a connection error code); policy on rate_limiter.failed; database-unreachable and the edge's dbOk.",
+        "flow": "F1",
+        "runbook": "docs/runbooks/rate-limiter.md"
+      }
+    },
+    {
+      "name": "pepper-missing",
+      "group": "B",
+      "severity": "P",
+      "sources": ["edge"],
+      "query": { "count": { "events": ["key.pepper_missing"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A key names a pepper the edge does not hold, so the edge refuses it with 401. Lines: {{value}}.",
+      "metadata": {
+        "check": "Which API_KEY_PEPPER_<n> the edge holds against the console and the worker (names only); the keyId on the lines; the last change to the edge's variables.",
+        "flow": "F1",
+        "runbook": "docs/runbooks/pepper-missing.md"
+      }
+    }
+  ]
+}

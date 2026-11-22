@@ -1,3 +1,4 @@
+import { DatabaseConfigError, parseSuperuserUrl } from "@fin/db";
 import { describe, expect, it } from "vitest";
 import { stdoutLines } from "./lines.ts";
 import { EXIT_CONFIG, EXIT_USAGE, parseArgs, runMigrateCli, UsageError } from "./main.ts";
@@ -112,6 +113,39 @@ describe("runMigrateCli's refusals", () => {
     expect(code).toBe(EXIT_CONFIG);
     expect(out).toContain('"code":"bootstrap_verifiers"');
     expect(out).not.toContain(SECRET);
+  });
+
+  it("refuses the inert value that stands for the superuser reference between runs: every mode that reads it fails closed with its configuration error (exit 78)", async () => {
+    // `pnpm fin` overwrites FIN_BOOTSTRAP_DATABASE_URL with this value instead of deleting it
+    // (ops/fin/src/railway/inspect.ts INERT_VALUE, pinned to the same value in
+    // ops/fin/test/rollout.test.ts): a migrate started on it must refuse it as no URL, before any
+    // connection, so the value is no usable credential.
+    const inert = "inert";
+    expect(() => parseSuperuserUrl(inert)).toThrow(DatabaseConfigError);
+    const staging = {
+      FIN_ENVIRONMENT: "staging",
+      FIN_RELEASE: RELEASE,
+      // Any value: the superuser reference is refused before the CA is read.
+      FIN_DB_CA_PEM: "a pinned CA",
+      FIN_BOOTSTRAP_DATABASE_URL: inert,
+    };
+    const cases: Array<[string[], Record<string, string>, string]> = [
+      [["--migrate"], staging, "migrate.failed"],
+      [["--bootstrap"], staging, "migrate.failed"],
+      [["--task", "audit-note"], { ...staging, FIN_RUN_ID: "run_inert" }, "task.failed"],
+    ];
+    for (const [argv, env, event] of cases) {
+      const { code, out } = await run(argv, env);
+      expect(code, argv.join(" ")).toBe(EXIT_CONFIG);
+      const lines = out
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      expect(lines.map((l) => l.event)).toEqual(["migrate.started", event]);
+      expect(lines[1]).toMatchObject({ level: "error", code: "config" });
+      if (event === "migrate.failed")
+        expect(lines[1]).toMatchObject({ variable: "FIN_BOOTSTRAP_DATABASE_URL" });
+    }
   });
 
   it("requires a run ID for a task (the audit actor)", async () => {

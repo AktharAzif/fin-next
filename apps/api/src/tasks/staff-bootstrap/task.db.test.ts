@@ -3,8 +3,9 @@
 // active one and refuses otherwise unless `reset` names the only active Admin; every change carries
 // its events with actor `operator`, `via: operator`; the code itself never reaches the database.
 import { createHash } from "node:crypto";
-import { createIdSource, type UnitTx } from "@fin/db";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { syncEventTypes } from "@fin/audit";
+import { createIdSource, type Queryable, type UnitTx } from "@fin/db";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // The staff area's test platform (packages/staff, L-SAT-04): P0-E's bootstrap and runner with the
 // identity and staff migrations and grants. Read by path: apps/api does not list @fin/staff.
 import {
@@ -12,22 +13,23 @@ import {
   type PlatformClient,
   type StaffPlatform,
 } from "../../../../../packages/staff/test/platform.mjs";
-import { EXIT_FAILED, runMigrateCli } from "../../migrate/main.ts";
+import { EXIT_FAILED, EXIT_OK, runMigrateCli } from "../../migrate/main.ts";
 import { TaskError } from "../run.ts";
 import { staffBootstrap } from "./task.ts";
 
-// `migrate --task` finds a task in the registry, which lists staff-bootstrap once its one line is
-// added there (the pull request's open item); until then this file registers it, so a refusal is
-// read where the operator reads it: migrate's `task.failed` line.
-const registered = vi.hoisted(() => ({}) as Record<string, unknown>);
-vi.mock("../registry.ts", () => ({ TASKS: registered }));
+// The audit event types are exactly those `migrate --migrate` writes: its own registry sync (the
+// compiled AUDIT_EVENTS, every area's fragment), never rows registered by hand, so an event the
+// image could not record fails here as it would on staging (FA001).
+const registry = (q: unknown) => syncEventTypes(q as Queryable, "test-release");
 
+// `migrate --task staff-bootstrap` below finds the task in the real registry and runs it through the
+// real runner, as the image does: a refusal is read where the operator reads it, migrate's
+// `task.failed` line, never `task_unknown`, and a run that succeeds ends with `task.done`.
 let platform: StaffPlatform;
 let su: PlatformClient;
 
 beforeAll(async () => {
-  registered[staffBootstrap.name] = staffBootstrap;
-  platform = await createStaffPlatform("sat04task");
+  platform = await createStaffPlatform("sat04task", { registry });
   su = await platform.superuser();
 }, 120_000);
 
@@ -66,16 +68,16 @@ async function run(params: Record<string, unknown>, runId = `run_${Date.now()}`)
 }
 
 /** The same run through `migrate`'s own entry point, as the operator's `pnpm fin task` starts it. */
-async function cli(params: Record<string, unknown>) {
+async function cli(params: Record<string, unknown>, on: StaffPlatform = platform) {
   let raw = "";
-  const code = await platform.withLock(() =>
+  const code = await on.withLock(() =>
     runMigrateCli(
       ["--task", "staff-bootstrap"],
       {
         FIN_ENVIRONMENT: "ci",
         FIN_RELEASE: "test-release",
         FIN_RUN_ID: "run_cli",
-        FIN_BOOTSTRAP_DATABASE_URL: platform.superuserUrl(),
+        FIN_BOOTSTRAP_DATABASE_URL: on.superuserUrl(),
         FIN_TASK_PARAMS: JSON.stringify(params),
       },
       {
@@ -394,5 +396,78 @@ describe("staff-bootstrap", () => {
         WHERE routine_schema = 'staff' AND routine_name = 'bootstrap_admin' AND privilege_type = 'EXECUTE'`,
     );
     expect(result.rows.map((r) => r.grantee)).toEqual(["fin_owner"]);
+  });
+});
+
+describe("migrate --task staff-bootstrap on a new environment", () => {
+  // Its own database with no Admin yet, so the run must succeed end to end: the registry, the
+  // runner, the task, the runner's own `operator.task_completed`, and the commit.
+  let fresh: StaffPlatform;
+  let freshSu: PlatformClient;
+
+  beforeAll(async () => {
+    fresh = await createStaffPlatform("sat04cli", { registry });
+    freshSu = await fresh.superuser();
+  }, 120_000);
+
+  afterAll(async () => {
+    await freshSu?.end();
+    await fresh?.drop();
+  });
+
+  it("makes the first Admin, records it as the operator and says so with IDs only", async () => {
+    const hash = codeHash("KMNP-QRST-VWXY-Z012");
+    const { code, lines, raw } = await cli(
+      { address: "Cli.Admin@Example.com", codeHash: hash, reasonCode: "first_admin" },
+      fresh,
+    );
+    expect(lines.filter((l) => l.event === "audit.write_failed")).toEqual([]);
+    expect(code).toBe(EXIT_OK);
+    const done = lines.at(-1);
+    expect(done).toMatchObject({
+      event: "task.done",
+      task: "staff-bootstrap",
+      rowsChanged: 2,
+      reset: 0,
+      reactivated: 0,
+    });
+    const staffId = String(done?.staffId);
+    const codeId = String(done?.enrolmentCodeId);
+    expect(staffId).toMatch(/^stf_[0-9a-hjkmnp-tv-z]{26}$/);
+    expect(codeId).toMatch(/^enc_[0-9a-hjkmnp-tv-z]{26}$/);
+    // Neither the address nor the code's hash reaches the output, in any case.
+    expect(raw.toLowerCase()).not.toContain("cli.admin@example.com");
+    expect(raw.toLowerCase()).not.toContain(hash);
+
+    const member = await freshSu.query<{ id: string; email: string; status: string }>(
+      "SELECT id, email, status FROM staff.member WHERE role_key = 'admin'",
+    );
+    expect(member.rows).toEqual([
+      { id: staffId, email: "cli.admin@example.com", status: "pending" },
+    ]);
+    const events = await freshSu.query<{
+      event: string;
+      target_id: string;
+      actor_kind: string;
+      actor_id: string;
+      actor_via: string;
+      db_login: string;
+    }>(
+      "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
+    );
+    expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
+      ["operator.task_completed", "staff-bootstrap"],
+      ["staff.bootstrapped", staffId],
+      ["staff.enrolment_code_issued", codeId],
+      ["staff.member_added", staffId],
+    ]);
+    for (const event of events.rows) {
+      expect(event).toMatchObject({
+        actor_kind: "operator",
+        actor_id: "run_cli",
+        actor_via: "operator",
+        db_login: "fin_owner",
+      });
+    }
   });
 });

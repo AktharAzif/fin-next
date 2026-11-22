@@ -64,7 +64,12 @@ export type { RequestContext } from "./request.ts";
 export { type PersonActor, requirePerson } from "./require-person.ts";
 export { revokeOtherSessions, revokeSession } from "./sessions.ts";
 export { signUp } from "./sign-up.ts";
-export { issueEnrolmentCode, redeemEnrolmentCode } from "./staff/enrolment.ts";
+export {
+  generateEnrolmentCode,
+  hasMixedGroup,
+  issueEnrolmentCode,
+  redeemEnrolmentCode,
+} from "./staff/enrolment.ts";
 export { canonicalJson, paramsDigest } from "./step-up/digest.ts";
 export { hasFreshProof } from "./step-up/intents.ts";
 export type { StepUpAction } from "./step-up/types.ts";

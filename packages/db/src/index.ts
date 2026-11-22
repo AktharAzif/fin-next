@@ -2,11 +2,27 @@
 // registrations and typed access to Phase 0's ops tables (spec 01 §6.6, §6.10; ARCHITECTURE §3.5, §4.5,
 // §6). Test helpers are in `@fin/db/testing`.
 export {
+  ASSET_KINDS,
+  type AssetFile,
+  type AssetKind,
+  assetDirectories,
+  type DbAssets,
+  type DiscoverOptions,
+  dbAssetsRoot,
+  discoverDbAssets,
+  IMAGE_ASSETS_DIR,
+  listMigrations,
+  sourceRoot,
+  stageDbAssets,
+} from "./assets.ts";
+export {
+  type BootstrapFile,
   type BootstrapInput,
   type BootstrapResult,
   bootstrap,
   bootstrapFiles,
   type Environment,
+  orderBootstrapFiles,
   parseReplicas,
   parseRoleVerifiers,
 } from "./bootstrap.ts";
@@ -47,6 +63,7 @@ export {
   grantDrift,
   liveMemberships,
   livePrivileges,
+  loadFragmentFiles,
   loadFragments,
   type Membership,
   membershipKey,
@@ -56,14 +73,14 @@ export { defineGuards, type GuardOperation, type GuardRegistration } from "./gua
 export { createIdSource, type IdSource, idPattern, isId, newId } from "./ids.ts";
 export { assertServiceLogin } from "./login-check.ts";
 export {
-  BOOTSTRAP_DIR,
-  GRANTS_DIR,
+  type LoadedDbAssets,
+  loadDbAssets,
   MIGRATION_NAME,
-  MIGRATIONS_DIR,
   type MigrationFile,
   migrationsNotAfterMain,
   parseMigration,
   type RunResult,
+  readMigrationFiles,
   readMigrations,
   runMigrations,
   schemaVersion,
@@ -101,6 +118,7 @@ export {
 } from "./pool.ts";
 export {
   connectionLimit,
+  ENQUEUE_OWNER,
   FIN_ROLES,
   FIN_SCHEMAS,
   GRANTEE_ROLES,

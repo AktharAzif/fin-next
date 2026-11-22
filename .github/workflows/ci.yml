@@ -1,0 +1,533 @@
+# CI (spec 01 §5.3 to §5.6; spec 07 §10, §11; ARCHITECTURE §11.2 to §11.5; EXECUTION §2.3). A control
+# path: every file under .github/ needs the owner's approval (CI-14).
+#
+# `plan` runs first and decides what runs: main's copy of fin-review's planner (the engine checkout
+# in engine/, never the pull request's), or, until main has the engine, a plan that runs everything.
+# `gate` is the one check the ruleset requires beside commit-dates-utc; it runs main's gate.mjs over
+# every job's result (Phase 0 trimmed, BD-02). `bun` is the non-blocking canary and not in gate's
+# needs. `merge` runs after gate on a push to main only, the result a staging deploy checks. Every
+# job prints `ci.timing job=<name> ms=<n> cache=<hit|miss>` as its last line.
+#
+# Rules every job keeps: least permissions, persist-credentials: false on every checkout, values
+# reach a shell only through env:, every action pinned by SHA, ubuntu-24.04, a timeout. The pnpm
+# store and Turborepo's local cache go through actions/cache (no remote cache, CI-02). Only a push
+# to main saves them, and every run restores main's: a pull request's run saves no cache, so no
+# later run of it can replay what an earlier one left (an earlier commit may have written any
+# file there, and been force-pushed away since). workflow-rules.mjs refuses any other save.
+#
+# plan, commit-dates-utc and gate run main's scripts on main's Node (engine/.node-version); the
+# jobs that run the change's own check scripts check their Node first (node-check.mjs).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - name: Check out the change (blobless, with history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Check out main's engine copy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: engine
+          sparse-checkout: |
+            .github/scripts
+            tools/fin-review
+            docs/review
+          persist-credentials: false
+      # main's Node runs main's engine: the pull request's .node-version is not a control path.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: engine/.node-version
+          package-manager-cache: false
+      - name: Plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -f engine/tools/fin-review/src/main.ts ]; then
+            node engine/tools/fin-review/src/main.ts plan --ci --tree . --output "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=plan::main has no tools/fin-review/src/main.ts yet, so every job runs"
+            node .github/scripts/plan-fallback.mjs >> "$GITHUB_OUTPUT"
+          fi
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: plan
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  check:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).jobs.check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: The Node the checks need (fails before a check can exit 0 unchecked)
+        run: node .github/scripts/node-check.mjs
+      # The two control-path checks run here directly, before pnpm reads the policy: `pnpm check`
+      # runs them too, but through package.json's scripts, which are not a control path.
+      - name: Supply-chain policy (run directly, a control path)
+        run: node scripts/check-supply-chain.mjs
+      - name: Public safety (run directly, a control path)
+        run: node scripts/public-safety.mjs
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Find the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
+      - name: Restore the pnpm store
+        id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+      - name: Restore Turborepo's cache
+        id: turbo-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: turbo-check-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-check-main-
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: pnpm check
+        run: pnpm check
+      - name: Type-check the CI scripts
+        run: pnpm exec tsc -p .github/scripts/tsconfig.json
+      - name: Save the pnpm store (main only)
+        if: github.event_name == 'push' && steps.store-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ steps.store-cache.outputs.cache-primary-key }}
+      - name: Save Turborepo's cache (main only)
+        if: github.event_name == 'push' && steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: check
+          CI_CACHE: ${{ steps.turbo-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  db:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).jobs.db
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
+    services:
+      # The image and digest of compose.yaml (spec 01 §4.2); workflow-rules.mjs refuses any other.
+      # The password is a throwaway for this job's own server, reachable from this runner only.
+      postgres:
+        image: postgres:18.7-trixie@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Find the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
+      - name: Restore the pnpm store
+        id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Point the tests at the service
+        env:
+          PGPASSWORD_CI: postgres
+        run: echo "FIN_TEST_DATABASE_URL=postgres://postgres:${PGPASSWORD_CI}@127.0.0.1:5432/postgres" >> "$GITHUB_ENV"
+      - name: pnpm test:db
+        run: pnpm test:db
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: db
+          CI_CACHE: ${{ steps.store-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  build:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).jobs.build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: The Node the checks need (fails before a check can exit 0 unchecked)
+        run: node .github/scripts/node-check.mjs
+      - name: Install gitleaks (release asset, by checksum)
+        run: .github/scripts/install-tools.sh gitleaks
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Find the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
+      - name: Restore the pnpm store
+        id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+      - name: Restore Turborepo's cache
+        id: turbo-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: turbo-build-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-build-main-
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build (both server targets' bundles and the static builds)
+        run: pnpm build
+      - name: Bundle checks (seams; in static builds secret shapes, public-safety, setting names, server-only markers, maps, origins)
+        run: node .github/scripts/bundle-check.mjs
+      - name: The real-build test (bundle-check finds nothing in the static apps, built and staged as the release does)
+        env:
+          FIN_REAL_BUILDS: "1"
+        run: node --test .github/scripts/test/bundle-check-real.test.mjs
+      - name: gitleaks (the static builds, which .gitignore hides from the tree scan)
+        run: .github/scripts/gitleaks-static.sh apps/*/dist/static
+      - name: Static build checks (index.html, static.json)
+        run: node scripts/static-check.mjs
+      - name: Save Turborepo's cache (main only)
+        if: github.event_name == 'push' && steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: build
+          CI_CACHE: ${{ steps.turbo-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  static:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).jobs.static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install zizmor, actionlint and gitleaks (release assets, by checksum)
+        run: .github/scripts/install-tools.sh zizmor actionlint gitleaks
+      - name: Workflow rules
+        run: node .github/scripts/workflow-rules.mjs
+      - name: The CI scripts' tests
+        run: node --test ".github/scripts/test/*.test.mjs"
+      - name: actionlint
+        run: actionlint -color
+      - name: zizmor (offline audits)
+        run: zizmor --offline --no-progress .
+      - name: gitleaks (this change's commits)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: .github/scripts/gitleaks-change.sh
+      - name: gitleaks (the tree)
+        run: gitleaks dir --redact --no-banner --config .gitleaks.toml .
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: static
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  bun:
+    needs: plan
+    if: fromJSON(needs.plan.outputs.plan).jobs.bun
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read # list this run's own cache scope (cache-scope.mjs)
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install pnpm (release asset, by checksum)
+        run: .github/scripts/install-pnpm.sh
+      - name: Find the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Which caches this run may restore (main's only)
+        id: cache-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/cache-scope.mjs
+      - name: Restore the pnpm store
+        id: store-cache
+        if: steps.cache-scope.outputs.restore == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Install Bun 1.4.5 (release asset, by checksum)
+        run: .github/scripts/install-bun.sh
+      - name: The shared packages' unit tests on Bun
+        run: .github/scripts/bun-canary.sh
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: bun
+          CI_CACHE: ${{ steps.store-cache.outputs.cache-matched-key != '' && 'hit' || 'miss' }}
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  # G-09: the ruleset requires a status with exactly this name.
+  commit-dates-utc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - name: Check out the change (blobless, with history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Check out main's engine copy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: engine
+          sparse-checkout: |
+            .github/scripts
+          persist-credentials: false
+      # main's Node, as in plan and gate: a required check never runs on the change's choice.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: engine/.node-version
+          package-manager-cache: false
+      - name: Every commit's author and committer offsets are +0000
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          script=engine/.github/scripts/commit-dates-utc.mjs
+          if [ ! -f "$script" ]; then
+            echo "::notice title=commit-dates-utc::main has no copy of the check yet; running this change's"
+            script=.github/scripts/commit-dates-utc.mjs
+          fi
+          node "$script"
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: commit-dates-utc
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  gate:
+    needs: [plan, check, db, build, static, commit-dates-utc]
+    # always(): a skipped required check counts as passing, so the gate runs whatever happened
+    # before it, and fails when a run is cancelled.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - name: Check out the change (blobless, with history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Check out main's engine copy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: engine
+          sparse-checkout: |
+            .github/scripts
+            tools/fin-review
+            docs/review
+          persist-credentials: false
+      # main's Node runs main's gate.mjs: the pull request's .node-version is not a control path.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: engine/.node-version
+          package-manager-cache: false
+      - name: Gate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          PLAN: ${{ needs.plan.outputs.plan }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          gate=engine/.github/scripts/gate.mjs
+          if [ ! -f "$gate" ]; then
+            echo "::notice title=gate::main has no gate.mjs yet (the CI pull request itself), so this change's copy runs"
+            gate=.github/scripts/gate.mjs
+          fi
+          node "$gate"
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: gate
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  # A stand-in for fin-review's merge mode (spec 07 §2.3.4) until that mode exists: on a push to
+  # main only, it succeeds exactly when gate succeeded for the pushed commit. ops/fin's provenance
+  # check refuses a staging deploy unless this job, by the name `merge`, concluded success in the
+  # commit's ci.yml run (spec 01 §6.9 step 2; BD-05). There is no always() or !cancelled() in its
+  # condition, so the implied success() skips it whenever gate did not succeed, and a skipped job
+  # refuses the deploy too; the step checks gate's result again. It runs after gate, so it is not
+  # in gate's needs (workflow-rules.mjs allows that only for a job that needs gate and runs on push
+  # to main alone). No checkout, no action, no secret, no token permission. Its one step prints
+  # ci.timing as its last line itself.
+  merge:
+    needs: [gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Gate succeeded for this commit
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          if [ "$GATE_RESULT" = "success" ]; then verdict=pass; else verdict=fail; fi
+          echo "merge.result result=${verdict} gate=${GATE_RESULT} mode=stand-in"
+          if [ "$verdict" != "pass" ]; then
+            echo "::error title=merge::gate did not succeed for this commit, so it is not deployed"
+          fi
+          echo "ci.timing job=merge ms=$(( SECONDS * 1000 )) cache=miss"
+          if [ "$verdict" != "pass" ]; then exit 1; fi

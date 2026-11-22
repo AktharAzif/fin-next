@@ -1,7 +1,7 @@
 -- Fin's own developer-realm tables (spec 02 §13.2): proofs, the TOTP step, known and trusted
 -- browsers, emailed-code and sign-up requests, and the privileged permission set the gate reads.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 -- Proofs: a factor shown in a session (§6.1, §7.3). The window is a proof younger than 5 minutes.
 CREATE TABLE identity.assurance (

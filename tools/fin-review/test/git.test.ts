@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -438,39 +439,47 @@ describe("runProgram", () => {
       return false;
     }
 
+    /**
+     * Runs the parent script under a timeout that starts at `firstMs` and doubles, up to 8 s, until
+     * the program got to start its grandchild before the timeout ended it (the pid file says so): a
+     * run that never reached the grandchild is not the case under test, and on a loaded machine
+     * Node's own start took longer than half a second. Each run must time out, and settle within
+     * 2.5 s of its timeout. Returns the grandchild's pid.
+     */
+    async function timedOutWithGrandchild(
+      pidFile: string,
+      then: string,
+      firstMs: number,
+    ): Promise<number> {
+      for (let timeoutMs = firstMs; timeoutMs <= 8000; timeoutMs *= 2) {
+        rmSync(pidFile, { force: true });
+        const started = performance.now();
+        await assert.rejects(
+          runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", then), {
+            ...base,
+            timeoutMs,
+          }),
+          (error: unknown) =>
+            error instanceof ProgramError &&
+            error.message.includes(`timed out after ${timeoutMs} ms`),
+        );
+        const took = performance.now() - started;
+        assert.ok(took < timeoutMs + 2500, `settled after ${Math.round(took)} ms`);
+        if (existsSync(pidFile)) return Number(readFileSync(pidFile, "utf8"));
+      }
+      assert.fail("the program never started its grandchild before its timeout");
+    }
+
     it("a timeout settles the call at once and kills the grandchild too", async () => {
       const pidFile = join(tmp.dir, "hang.pid");
-      const started = performance.now();
-      await assert.rejects(
-        runProgram(
-          node,
-          parentScript(pidFile, "setInterval(() => {}, 1000)", "setInterval(() => {}, 1000);"),
-          { ...base, timeoutMs: 400 },
-        ),
-        (error: unknown) =>
-          error instanceof ProgramError && /timed out after 400 ms/.test(error.message),
-      );
-      assert.ok(
-        performance.now() - started < 3000,
-        `settled after ${Math.round(performance.now() - started)} ms`,
-      );
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = await timedOutWithGrandchild(pidFile, "setInterval(() => {}, 1000);", 400);
       if (POSIX) assert.equal(await gone(pid), true, "the grandchild was killed with the group");
       else process.kill(pid);
     });
 
     it("a program that exits while its grandchild keeps the pipes open settles at the timeout", async () => {
       const pidFile = join(tmp.dir, "exit.pid");
-      const started = performance.now();
-      await assert.rejects(
-        runProgram(node, parentScript(pidFile, "setInterval(() => {}, 1000)", "process.exit(0);"), {
-          ...base,
-          timeoutMs: 500,
-        }),
-        (error: unknown) => error instanceof ProgramError && /timed out/.test(error.message),
-      );
-      assert.ok(performance.now() - started < 3000);
-      const pid = Number(readFileSync(pidFile, "utf8"));
+      const pid = await timedOutWithGrandchild(pidFile, "process.exit(0);", 500);
       if (POSIX) assert.equal(await gone(pid), true);
       else process.kill(pid);
     });

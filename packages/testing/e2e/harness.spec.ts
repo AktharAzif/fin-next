@@ -269,14 +269,14 @@ test.describe("the run's clock, or the test's own, sets the browser clock and th
   });
 
   test.describe("with FIN_E2E_CLOCK at a time", () => {
-    runClockIs("2026-11-18T09:00:00+05:30");
+    runClockIs("2026-11-18T09:00:00-07:00");
     test("both stand there, in a second context too", async ({
       page,
       servers,
       clock,
       newContext,
     }) => {
-      const at = Date.parse("2026-11-18T03:30:00Z");
+      const at = Date.parse("2026-11-18T16:00:00Z");
       await gotoReady(page, `${servers.host.origin}/`);
       expect(await page.evaluate(() => Date.now())).toBe(at);
       expect(clock.epochMs()).toBe(at);

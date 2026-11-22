@@ -1505,8 +1505,10 @@ developer events `transfer.created` and, when completed, `transfer.completed`.
 
 A live-mode customer in staging gets money for the AC-MON-13 drill only through
 `pnpm fin money fund staging --customer cus_... --amount <minor> --reason "<text>"`. It registers an
-operator run and starts a one-off Railway task on the `payments` image
-(`dist/main.js --task treasury-fund --customer ... --amount ...`), which calls `fundFromTreasury` on
+operator run and starts a one-off Railway task on the `payments` image, whose start command gives
+the whole command line, because a Railway start command replaces the image's `ENTRYPOINT` and `CMD`
+(SP-03's run, `docs/plan/spikes.md` run 2): the image's Node binary, its Node flags, then
+`dist/main.js --task treasury-fund --customer ... --amount ...`. The task calls `fundFromTreasury` on
 `masspay-sandbox` with `op = { idempotencyKey: "<tfu>.load", finId: tfu, businessId: tfu }`, records
 a `funding` transfer and `funding_credit` on completion, audit `treasury.funding_created` (actor
 `operator`). The task refuses when `FIN_ENVIRONMENT` is `production` and, separately, the adapter

@@ -3,19 +3,28 @@
   "area": "limits",
   "grants": [
     {
-      "role": "fin_console",
-      "privileges": ["SELECT", "INSERT", "UPDATE"],
-      "tables": ["ops.rate_window", "ops.lockout"]
+      "on": "schema",
+      "name": "ops",
+      "privileges": ["USAGE"],
+      "to": ["fin_console", "fin_admin", "fin_readonly"]
     },
     {
-      "role": "fin_admin",
+      "on": "table",
+      "name": "ops.rate_window",
       "privileges": ["SELECT", "INSERT", "UPDATE"],
-      "tables": ["ops.rate_window", "ops.lockout"]
+      "to": ["fin_console", "fin_admin"]
     },
     {
-      "role": "fin_readonly",
+      "on": "table",
+      "name": "ops.lockout",
+      "privileges": ["SELECT", "INSERT", "UPDATE"],
+      "to": ["fin_console", "fin_admin"]
+    },
+    {
+      "on": "table",
+      "name": "ops.lockout",
       "privileges": ["SELECT"],
-      "tables": ["ops.lockout"]
+      "to": ["fin_readonly"]
     }
   ]
 }

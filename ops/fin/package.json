@@ -1,0 +1,12 @@
+{
+  "name": "@fin/ops-fin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "pnpm fin: the operator's commands for staging (spec 01 §6, §7, §9, §10). Node built-ins only.",
+  "scripts": {
+    "fin": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}

@@ -1,0 +1,71 @@
+# Nightly checks (spec 01 §5.5; ARCHITECTURE §11.2). A control path. At 01:00 UTC: gitleaks over
+# main's whole history with Fin's token shapes (redacted), and zizmor's online audits (impostor
+# commits, known-vulnerable actions, stale and mismatched refs), which need the network and so stay
+# out of the pull-request static job. A pull request that changes this file runs it too. The full
+# e2e suite joins when the journeys exist (spec 07 §10.4). No caches.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+
+permissions: {}
+
+concurrency:
+  group: nightly-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  gitleaks-history:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (release asset, by checksum)
+        run: .github/scripts/install-tools.sh gitleaks
+      - name: gitleaks over the whole history
+        run: gitleaks git --redact --no-banner --config .gitleaks.toml --log-opts=HEAD .
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: gitleaks-history
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"
+
+  zizmor-online:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Start the clock
+        run: echo "FIN_JOB_START_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install zizmor (release asset, by checksum)
+        run: .github/scripts/install-tools.sh zizmor
+      - name: zizmor (every audit, online)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --no-progress .
+      - name: ci.timing
+        if: always()
+        env:
+          CI_JOB: zizmor-online
+          CI_CACHE: miss
+        run: echo "ci.timing job=${CI_JOB} ms=$(( $(date +%s%3N) - FIN_JOB_START_MS )) cache=${CI_CACHE}"

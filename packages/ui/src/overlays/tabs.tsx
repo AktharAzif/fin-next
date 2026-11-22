@@ -1,12 +1,41 @@
-// Tabs and TabLinks (spec 06 §3.3; the export's Tabs spec). Tabs switch panels in place on the
-// SDK's tabs (arrow keys, Home and End). TabLinks are router links (Settings, a customer's tabs):
-// the current one carries aria-current="page". Counts only for waiting work ("To settle 3").
-import {
-  Tabs as SdkTabs,
-  TabsList as SdkTabsList,
-  TabsPanel as SdkTabsPanel,
-  TabsTab as SdkTabsTab,
-} from "@ui-sdk/react/tabs";
+// Tabs and TabLinks (spec 06 §3.3; the design canvases' Tabs board).
+//
+// Tabs switch between views of one object or list without leaving the page: Transactions' All and
+// To settle, the sections of a record in a drawer. The UI SDK's tabs entry carries the WAI-ARIA
+// tabs pattern (the named tablist with a single tab stop, arrow keys that move and select, Home and
+// End, each panel labelled by its tab, panels mounted only while chosen); Fin adds the look and two
+// layouts:
+//
+// - `variant="page"`, under a page header. The row keeps to its own box, with no negative margin,
+//   so it never widens a scroll container and never clips the first tab's focus ring; each label
+//   sits inside its tab's 8px side padding, and a panel starts 24px under the 1px rule.
+// - `variant="drawer"`, under a drawer header. The caller lets the tabs run out to the drawer's
+//   edges, the rule spans the whole drawer, and the row and its panels are padded so labels and
+//   content start on the drawer's 24px content edge.
+//
+// In both, a row too wide for its box (several tabs on a phone) scrolls sideways inside itself
+// instead of widening the page, whether the parent is a block, a grid or a flex box, stretching
+// the tabs or not (a wrapper of the caller's own in between needs `min-w-0 max-w-full` too). That
+// cap is the parent's content box, and no margin widens it: a part the caller runs out over the
+// parent's side padding with a negative margin (a drawer's `-mx-6`) takes `max-w-none` beside the
+// margin, or it stops short of the far edge. Without its cap the part must be stretched across the
+// parent, or it grows to its row's width: a block, or a grid or flex column that stretches it, does
+// that (the root does for its tablist); in a parent that sizes it to its content (a grid with
+// `justify-items-start` or `place-items-center`, a column with `items-start`) the part takes
+// `justify-self-stretch` (a grid) or `self-stretch` (a column) as well. Given a height, the tabs
+// keep their row whole and leave the panels what is left. Tabs and panels draw their focus ring
+// inside their own box, where no edge can clip it. A count follows a label only for work that
+// waits for someone ("To settle 3"); with nothing waiting there is no count at all, never a 0.
+//
+// TabLinks draw the same row as a named <nav> holding a list of ordinary links, for tabs that are
+// addresses of their own (Settings' sections, a customer's `?tab=`). They are not a tablist: every
+// link is in the Tab order and the one on show carries aria-current="page". @fin/ui knows no
+// router, so the app's router link comes in once, through TabLinks' `linkAs`.
+//
+// Every part takes only the props listed on its type, and hands the SDK or the markup nothing
+// else. Each part's className is merged through cn: a class of the same utility family as one of
+// the part's defaults replaces that default.
+import { Tabs as SdkTabs, TabsList as SdkTabsList, TabsPanel, TabsTab } from "@ui-sdk/react/tabs";
 import {
   type ComponentProps,
   createContext,
@@ -16,143 +45,268 @@ import {
 } from "react";
 import { cn } from "../lib/cn.ts";
 
-type Variant = "page" | "drawer";
-const VariantContext = createContext<Variant>("page");
+type Layout = "page" | "drawer";
 
-const LIST: Record<Variant, string> = {
-  page: "flex gap-6 overflow-x-auto border-b border-border",
-  drawer: "flex gap-4 overflow-x-auto border-b border-border px-6",
+const LayoutContext = createContext<Layout>("page");
+
+/**
+ * The box that holds a row: it may shrink below its content, never grows past its parent, and
+ * draws the 1px rule under it.
+ */
+const BAR = "min-w-0 max-w-full border-b border-border";
+
+/** The row itself, per layout; it scrolls sideways rather than overflow its box. */
+const ROW: Record<Layout, string> = {
+  page: "flex gap-3 overflow-x-auto",
+  drawer: "flex gap-3 overflow-x-auto px-4",
 };
 
-const TAB = cn(
-  "relative inline-flex h-10 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap bg-transparent px-0",
-  "text-label text-text-secondary transition-fade focus-visible:outline-focus-inset",
-  "hover:text-text-primary data-disabled:cursor-not-allowed data-disabled:text-text-disabled",
-  "after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-transparent",
-);
-const TAB_CURRENT = "text-text-primary after:bg-text-primary";
-
-function Count(props: { count?: number }) {
-  if (props.count === undefined || props.count <= 0) return null;
-  return <span className="text-label text-text-tertiary">{props.count}</span>;
-}
-
-type SdkTabsProps = ComponentProps<typeof SdkTabs>;
-
-export type TabsProps = Omit<SdkTabsProps, "className" | "children"> & {
-  variant?: Variant;
-  className?: string;
-  children: ReactNode;
+/** A panel's place under the row, per layout; its focus ring is drawn inside it. */
+const PANEL: Record<Layout, string> = {
+  page: "pt-6",
+  drawer: "px-6 py-5",
 };
 
-export function Tabs(props: TabsProps) {
-  const { variant = "page", className, children, ...rest } = props;
+/** A tab or a tab link: 40px tall, 8px of padding either side, its label in the label role. */
+const ITEM =
+  "relative inline-flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xs px-2 text-label text-text-secondary no-underline transition-fade focus-visible:outline-focus-inset";
+
+/** The 2px bar under the chosen label, kept on ::after and faded in when it is chosen. */
+const MARK =
+  "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-text-primary after:opacity-0 after:transition-fade";
+
+/** A tab's looks: unavailable beats chosen, so a disabled tab never shows the chosen mark. */
+const TAB_ENABLED = "cursor-pointer hover:text-text-primary";
+const TAB_CHOSEN = "text-text-primary after:opacity-100";
+const TAB_DISABLED = "cursor-not-allowed text-text-disabled";
+
+/** The number of things waiting behind a tab, as given, after its label; nothing when none wait. */
+function Count(props: { value: number | undefined }) {
+  if (props.value === undefined || !(props.value > 0)) return null;
   return (
-    <VariantContext.Provider value={variant}>
-      <SdkTabs {...rest} className={cn("flex flex-col", className)}>
-        {children}
-      </SdkTabs>
-    </VariantContext.Provider>
+    <span data-slot="tab-count" className="font-regular text-text-tertiary tabular-nums">
+      {props.value}
+    </span>
   );
 }
 
-export function TabsList(props: {
-  "aria-label"?: string;
+/** Children as content only: a function of the SDK's state (its render form) is dropped. */
+const content = (children: ReactNode): ReactNode =>
+  typeof children === "function" ? null : children;
+
+/** The named props that are set, and nothing else, so no other prop reaches the SDK. */
+function only<P extends object, K extends keyof P>(props: P, names: readonly K[]): Pick<P, K> {
+  const picked: Partial<Pick<P, K>> = {};
+  for (const name of names) if (props[name] !== undefined) picked[name] = props[name];
+  return picked as Pick<P, K>;
+}
+
+/**
+ * The SDK root's documented options that Fin's tabs take. `orientation` is not one (always a row),
+ * nor `hiddenUntilFound`: the SDK keeps each hidden panel's box and Tab stop under it.
+ */
+const ROOT_OPTIONS = [
+  "value",
+  "defaultValue",
+  "onValueChange",
+  "activation",
+  "loop",
+  "controller",
+  "id",
+] as const;
+
+export type TabsProps = Pick<ComponentProps<typeof SdkTabs>, (typeof ROOT_OPTIONS)[number]> & {
+  /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
+  variant?: Layout;
+  /**
+   * Classes for the root; a negative side margin goes with `max-w-none`, and with a stretch where
+   * the parent sizes the root to its content (see the header).
+   */
   className?: string;
   children: ReactNode;
-}) {
-  const variant = useContext(VariantContext);
+};
+
+/**
+ * Views of one object or list, one shown at a time. Uncontrolled with `defaultValue`, else the
+ * first tab that can be chosen; controlled with `value` and `onValueChange` (for a `?tab=` in the
+ * URL), whose `details` are the SDK's own, so `details.cancel()` refuses a change. The tabs always
+ * run in a row.
+ */
+export function Tabs(props: TabsProps) {
+  const variant = props.variant ?? "page";
+  return (
+    <LayoutContext.Provider value={variant}>
+      <SdkTabs
+        {...only(props, ROOT_OPTIONS)}
+        data-variant={variant}
+        className={cn("flex min-w-0 max-w-full flex-col", props.className)}
+      >
+        {content(props.children)}
+      </SdkTabs>
+    </LayoutContext.Provider>
+  );
+}
+
+/** The tablist's accessible name: a label, or the id of an element that names it. */
+type TabsListName =
+  | { "aria-label": string; "aria-labelledby"?: never }
+  | { "aria-labelledby": string; "aria-label"?: never };
+
+export type TabsListProps = TabsListName & {
+  /**
+   * Classes for the tablist itself, the row over its rule (its margins and placement); a negative
+   * side margin goes with `max-w-none`, and the root stretches it (see the header).
+   */
+  className?: string;
+  children: ReactNode;
+};
+
+/**
+ * The row of tabs over its rule. It never shrinks in the root's column: as a scroll container it
+ * could, so a panel taller than a Tabs given a height would squash it.
+ */
+export function TabsList(props: TabsListProps) {
+  const layout = useContext(LayoutContext);
   return (
     <SdkTabsList
-      {...(props["aria-label"] === undefined ? {} : { "aria-label": props["aria-label"] })}
-      className={cn(LIST[variant], props.className)}
+      aria-label={props["aria-label"]}
+      aria-labelledby={props["aria-labelledby"]}
+      className={cn(BAR, ROW[layout], "shrink-0", props.className)}
     >
-      {props.children}
+      {content(props.children)}
     </SdkTabsList>
   );
 }
 
-export function Tab(props: {
+export type TabProps = {
+  /** Pairs the tab with the TabPanel of the same `value`. */
   value: string;
+  /** Reachable with the arrow keys, as the pattern asks, but never chosen. */
   disabled?: boolean;
-  /** Waiting work only; zero shows nothing. */
+  /** Work waiting for someone behind this tab; leave it out, or 0, when nothing waits. */
   count?: number;
   className?: string;
+  /** A noun in sentence case, the same words as the page or section it shows. */
   children: ReactNode;
-}) {
+};
+
+/**
+ * One tab, shown with the TabPanel of the same `value`. A `disabled` tab stays reachable with the
+ * arrow keys, as the pattern asks, but can't be chosen; named by `value` or `defaultValue`, it
+ * still looks unavailable, with no chosen mark.
+ */
+export function Tab({ value, disabled = false, count, className, children }: TabProps) {
   return (
-    <SdkTabsTab
-      value={props.value}
-      {...(props.disabled === undefined ? {} : { disabled: props.disabled })}
+    <TabsTab
+      value={value}
+      disabled={disabled}
+      className={(state) =>
+        cn(
+          ITEM,
+          MARK,
+          state.disabled ? TAB_DISABLED : [TAB_ENABLED, state.selected && TAB_CHOSEN],
+          className,
+        )
+      }
+    >
+      {children}
+      <Count value={count} />
+    </TabsTab>
+  );
+}
+
+export type TabPanelProps = {
+  /** The `value` of the Tab this panel belongs to. */
+  value: string;
+  /** Keeps the panel in the page, hidden, while its tab isn't chosen (to keep a draft). */
+  keepMounted?: boolean;
+  className?: string;
+  children: ReactNode;
+};
+
+/**
+ * The view for the Tab of the same `value`, in the page only while that tab is chosen. With
+ * nothing focusable inside it takes a tab stop of its own, and shows the focus ring there.
+ */
+export function TabPanel({ value, keepMounted = false, className, children }: TabPanelProps) {
+  const layout = useContext(LayoutContext);
+  return (
+    <TabsPanel
+      value={value}
+      keepMounted={keepMounted}
       className={cn(
-        TAB,
-        "state-active:text-text-primary state-active:after:bg-text-primary",
-        props.className,
+        "min-w-0 rounded-xs focus-visible:outline-focus-inset",
+        // The SDK keeps a leaving panel until every transition inside it has ended (a field's
+        // focus ring fading out, a spinner); it takes no box from the moment it starts to leave.
+        "state-ending:hidden",
+        PANEL[layout],
+        className,
       )}
     >
-      {props.children}
-      <Count {...(props.count === undefined ? {} : { count: props.count })} />
-    </SdkTabsTab>
+      {content(children)}
+    </TabsPanel>
   );
 }
 
-export function TabPanel(props: { value: string; className?: string; children: ReactNode }) {
-  return (
-    <SdkTabsPanel
-      value={props.value}
-      className={cn("pt-6 focus-visible:outline-focus", props.className)}
-    >
-      {props.children}
-    </SdkTabsPanel>
-  );
-}
-
-type LinkComponent = ElementType<{
+/** What the app's router link receives: the address, the classes, aria-current and the label. */
+export type TabLinkTargetProps = {
   href: string;
-  className?: string;
+  className: string;
   "aria-current"?: "page";
-  children?: ReactNode;
-}>;
+  children: ReactNode;
+};
 
-const LinkAs = createContext<LinkComponent>("a");
+const LinkContext = createContext<ElementType<TabLinkTargetProps>>("a");
 
-/** Tabs that are links: one per route, the current one marked. */
-export function TabLinks(props: {
-  /** Names the navigation: "Settings". */
+export type TabLinksProps = {
+  /** What the links move between ("Settings"); it names the <nav>. */
   label: string;
-  /** The app's router link; a plain <a> by default. */
-  linkAs?: LinkComponent;
-  variant?: Variant;
+  /** `page` under a page header (the default); `drawer` under a drawer header, edge to edge. */
+  variant?: Layout;
+  /** The app's router link (a component or a tag name) for every TabLink inside; <a> by default. */
+  linkAs?: ElementType<TabLinkTargetProps>;
+  /**
+   * Classes for the <nav>, the row's box; a negative side margin goes with `max-w-none`, and with a
+   * stretch where the parent sizes the nav to its content (see Tabs' header).
+   */
   className?: string;
   children: ReactNode;
-}) {
+};
+
+/** Tabs that are links: the same row, as a named navigation landmark holding a list. */
+export function TabLinks(props: TabLinksProps) {
   return (
-    <LinkAs.Provider value={props.linkAs ?? "a"}>
-      <nav aria-label={props.label} className={props.className}>
-        <ul className={cn(LIST[props.variant ?? "page"], "m-0 list-none p-0")}>{props.children}</ul>
-      </nav>
-    </LinkAs.Provider>
+    <nav aria-label={props.label} data-slot="tab-links" className={cn(BAR, props.className)}>
+      <ul className={cn("m-0 list-none", ROW[props.variant ?? "page"])}>
+        <LinkContext.Provider value={props.linkAs ?? "a"}>{props.children}</LinkContext.Provider>
+      </ul>
+    </nav>
   );
 }
 
-export function TabLink(props: {
+export type TabLinkProps = {
   href: string;
+  /** The address on show: underlined, and announced as the current page. */
   current?: boolean;
-  count?: number;
   className?: string;
   children: ReactNode;
-}) {
-  const Link = useContext(LinkAs);
+};
+
+/**
+ * One link in TabLinks, as one item of its list. The item is a flex box, so the link is a flex
+ * item in it, as a Tab is in the tablist, and the row stays 40px tall whatever line height it
+ * inherits (in a block item the link would sit on a line of that height). The item is as wide as
+ * its link, which never shrinks.
+ */
+export function TabLink({ href, current, className, children }: TabLinkProps) {
+  const Link = useContext(LinkContext);
+  const classes = cn(ITEM, MARK, "hover:text-text-primary", current && TAB_CHOSEN, className);
+  const target: TabLinkTargetProps = current
+    ? { href, className: classes, "aria-current": "page", children }
+    : { href, className: classes, children };
   return (
     <li className="flex">
-      <Link
-        href={props.href}
-        {...(props.current === true ? { "aria-current": "page" as const } : {})}
-        className={cn(TAB, "no-underline", props.current === true && TAB_CURRENT, props.className)}
-      >
-        {props.children}
-        <Count {...(props.count === undefined ? {} : { count: props.count })} />
-      </Link>
+      <Link {...target} />
     </li>
   );
 }

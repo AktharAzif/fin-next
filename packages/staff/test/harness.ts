@@ -329,7 +329,7 @@ export async function createStaffHarness(
     },
     async latestCode(email) {
       const result = await admin.query<{ code: string }>(
-        `SELECT params ->> 'code' AS code FROM email.outbox
+        `SELECT params ->> 'code' AS code FROM email_private.outbox
           WHERE recipient = $1 AND params ? 'code' ORDER BY created_at DESC, id DESC LIMIT 1`,
         [email.toLowerCase()],
       );
@@ -398,7 +398,7 @@ export async function createStaffHarness(
         recipient: string;
         params: Record<string, unknown>;
       }>(
-        `SELECT template, recipient, params FROM email.outbox
+        `SELECT template, recipient, params FROM email_private.outbox
           WHERE ($1::text IS NULL OR template = $1) ORDER BY created_at, id`,
         [template ?? null],
       );

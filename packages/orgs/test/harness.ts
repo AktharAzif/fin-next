@@ -229,7 +229,7 @@ export async function createHarness(
     browser: (browserOptions) => new Browser(realm, browserOptions),
     async latestCode(email) {
       const result = await database.admin.query<{ code: string }>(
-        `SELECT params ->> 'code' AS code FROM email.outbox
+        `SELECT params ->> 'code' AS code FROM email_private.outbox
           WHERE recipient = $1 AND params ? 'code' ORDER BY created_at DESC, id DESC LIMIT 1`,
         [email.toLowerCase()],
       );
@@ -237,7 +237,7 @@ export async function createHarness(
     },
     async outbox(email) {
       const result = await database.admin.query<OutboxRow>(
-        `SELECT template, recipient, params FROM email.outbox
+        `SELECT template, recipient, params FROM email_private.outbox
           WHERE ($1::text IS NULL OR recipient = $1) ORDER BY created_at, id`,
         [email ?? null],
       );
@@ -256,7 +256,7 @@ export async function createHarness(
     },
     async invitationToken(email) {
       const result = await database.admin.query<{ token: string }>(
-        `SELECT params ->> 'token' AS token FROM email.outbox
+        `SELECT params ->> 'token' AS token FROM email_private.outbox
           WHERE recipient = $1 AND template = 'orgs/invitation' ORDER BY created_at DESC, id DESC LIMIT 1`,
         [email.toLowerCase()],
       );
