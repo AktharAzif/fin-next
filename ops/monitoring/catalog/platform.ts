@@ -43,12 +43,13 @@ export const entries: readonly CatalogEntry[] = [
       errorId: "string",
     },
     alerts: ["5xx-rate-{service}", "5xx-count-{service}"],
-    // Spec 02 §18.2's, over the auth paths and Fin Admin's requests.
+    // Spec 02 §18.2's, over the auth paths, Fin Admin's requests and the team and role routes.
     owed: [
       "sign-in-failing",
       "second-factor-step-failing",
       "step-up-failing",
       "admin-without-second-factor",
+      "team-change-failing",
     ],
   },
   {

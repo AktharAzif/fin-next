@@ -335,6 +335,89 @@ describe("monitoring:check refuses", () => {
     expect(files[1]).toBe("packages/edge/src/a.ts:2");
   });
 
+  it("a name a telemetry writer is passed in a variable, read from its declaration (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        "export function set(deps: Deps, input: { state: string }) {",
+        '  const event = input.state === "on" ? "edge.set" : "edge.cleared";',
+        '  deps.lines.write(event, "warn", { reason });',
+        "}",
+        "function guard(context: Context, table: string): void {",
+        '  const line: Line = { event: "edge.guard", level: "error", fields: { table } };',
+        "  context.log.write(line);",
+        "}",
+        'const one = "request";',
+        'lines.write(one, "info", {});',
+        'lines.write(on ? "edge.inline_on" : "edge.inline_off", "info", {});',
+        'o.log?.("edge.optional_call", {});',
+        'for (const each of ["edge.loop_a", "edge.loop_b"]) lines.write(each, "info", {});',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write(event: "edge.set") is not catalogued',
+      'MC-01 lines.write(event: "edge.cleared") is not catalogued',
+      'MC-01 log.write(line: "edge.guard") is not catalogued',
+      'MC-01 lines.write(on ? "edge.inline_on" : "edge.inline_off": "edge.inline_on") is not catalogued',
+      'MC-01 lines.write(on ? "edge.inline_on" : "edge.inline_off": "edge.inline_off") is not catalogued',
+      'MC-01 o.log("edge.optional_call") is not catalogued',
+      'MC-01 lines.write(each: "edge.loop_a") is not catalogued',
+      'MC-01 lines.write(each: "edge.loop_b") is not catalogued',
+    ]);
+  });
+
+  it("a name a telemetry writer is passed that it cannot read, but no parameter (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // A template literal that builds the name: `edge.${kind}`.
+        "const built = `edge.$" + "{kind}`;",
+        'lines.write(built, "warn", {});',
+        'lines.write(nameOf(kind), "warn", {});',
+        "log.write({ ...line, level });",
+        // Names built from a string: `edge.${kind}` in place, and a prefix joined to the rest.
+        "lines.write(`edge.$" + '{kind}`, "warn", {});',
+        'lines.write("edge." + kind, "warn", {});',
+        // Declared with no value to read: assigned later, or destructured.
+        "let later: string;",
+        'later = "edge.later";',
+        'lines.write(later, "warn", {});',
+        "const { event: picked } = pick();",
+        'lines.write(picked, "warn", {});',
+        // Messages, not names.
+        "log(`static: $" + "{count} deployment(s) checked`);",
+        'this.line("warning: ", text);',
+        "export function sink(telemetry: Telemetry): LineSink {",
+        "  return { write: (line) => telemetry.log(line.event, line.fields, line.level) };",
+        "}",
+        "const adapter = {",
+        "  write: (event, level, fields) => ctx.telemetry.log(event, fields, level),",
+        "};",
+        "interface Lines {",
+        "  write(event: string, level: Level, fields?: Fields): void;",
+        "  log(",
+        "    event: string,",
+        "  ): void;",
+        "}",
+        'this.line("", text);',
+      ].join("\n"),
+    );
+    const cannot = "writes a name MC-01 cannot read: write the event's name as a literal";
+    expect(rules(root, { scanCode: true })).toEqual([
+      `MC-01 lines.write(built) ${cannot}`,
+      `MC-01 lines.write(nameOf(kind)) ${cannot}`,
+      `MC-01 log.write({ ...line, level }) ${cannot}`,
+      `MC-01 lines.write(\`edge.$\{kind}\`) ${cannot}`,
+      `MC-01 lines.write("edge." + kind) ${cannot}`,
+      `MC-01 lines.write(later) ${cannot}`,
+      `MC-01 lines.write(picked) ${cannot}`,
+    ]);
+  });
+
   it("drops a one-word name only when no telemetry writer writes it (MC-01)", () => {
     const root = scratch();
     mkdirSync(join(root, "ops", "fin", "src"), { recursive: true });

@@ -1,10 +1,10 @@
 // The staff area's lines (spec 02 §18.1): Fin Admin's people, written by identity's staff realm
-// (sign-in, enrolment) and by packages/staff (the guard, the member changes, the Access drift
-// duty), through the same line port. access.keys_unavailable and access.jwt_refused, the API
-// half's front door, are in web-host.ts. The alerts spec 02 §18.2 names for these lines come with
-// the staff area's alert fragment (alerts/staff.json), which so far holds only web-host.ts's
-// access-keys-unavailable; until the rest land each entry names the alerts it is owed (`owed`,
-// listed in owed.ts with their lane and date), or why none.
+// (sign-in, enrolment) and by packages/staff (the guard, the member changes, the kill switches,
+// the Access drift duty), through the same line port. access.keys_unavailable and
+// access.jwt_refused, the API half's front door, are in web-host.ts. The alerts spec 02 §18.2
+// names for these lines come with the staff area's alert fragment (alerts/staff.json), which so
+// far holds only web-host.ts's access-keys-unavailable; until the rest land each entry names the
+// alerts it is owed (`owed`, listed in owed.ts with their lane and date), or why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -84,5 +84,25 @@ export const entries: readonly CatalogEntry[] = [
     },
     alerts: [],
     owed: ["admin-access-drift"],
+  },
+  // A kill switch moved by a person (spec 02 §14.3; ARCHITECTURE §15.1): spec 08 §7.8 group I's
+  // switch-changed, in alerts/ops.json. A switch an alert trips itself is audit.ts's switch.tripped.
+  {
+    event: "switch.set",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "packages/staff's switches route on admin, when a member with switches.manage and a step-up intent sets a kill switch on through ops.set_switch(); the audit event and the notice to every Admin are in the same unit",
+    fields: { switch: "string", reasonCode: "string", staffId: "string" },
+    alerts: ["switch-changed"],
+  },
+  {
+    event: "switch.cleared",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "packages/staff's switches route on admin, when a member with switches.manage and a step-up intent clears a kill switch through ops.set_switch(); the audit event and the notice to every Admin are in the same unit",
+    fields: { switch: "string", reasonCode: "string", staffId: "string" },
+    alerts: ["switch-changed"],
   },
 ];

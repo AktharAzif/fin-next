@@ -2,7 +2,7 @@
 // call a name an alert) or the catalogue gives is a rule in ops/monitoring/<env>/alerts or is owed
 // in catalog/owed.ts with a lane and a date (the steward's ruling of 22 Nov, option (b)); any other
 // name fails. The code is read as text: ops/monitoring imports no other package.
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,6 +36,23 @@ const RULED: readonly string[] = [
   "step-up-locked",
   "duty-stalled-access-drift",
 ];
+
+/** The later ruling of 22 Nov: five more alerts the catalogue owes, each with its lane and date. */
+const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
+  "admin-access-drift": { lane: "L-SAT-09", due: "2026-11-22" },
+  "staff-changed": { lane: "L-SAT-09", due: "2026-11-22" },
+  "review-refusals": { lane: "P0-C", due: "2026-11-22" },
+  "review-model-mismatch": { lane: "P0-C", due: "2026-11-22" },
+  "money-switch-tripped": { lane: "L-MON-09", due: "2026-11-23" },
+};
+
+/**
+ * Owed by the lane rule in owed.ts's header and not yet ruled by name: the steward confirms or
+ * changes each. A new name here is a visible change to this test in the same pull request.
+ */
+const BY_LANE_RULE: Readonly<Record<string, { lane: string; due: string }>> = {
+  "team-change-failing": { lane: "L-SAT-09", due: "2026-11-22" },
+};
 
 /** A copy of the staging files, the watcher's settings and the runbooks, to plant one fault in. */
 function scratch(): string {
@@ -107,6 +124,26 @@ describe("the alert names on the repository", () => {
     });
   });
 
+  it("owe exactly the ruled names and those the lane rule gives, so a new one changes this test", () => {
+    const want = [...RULED, ...Object.keys(RULED_LATER), ...Object.keys(BY_LANE_RULE)].sort();
+    expect(OWED_ALERTS.map((a) => a.name).sort()).toEqual(want);
+    for (const [name, ruled] of Object.entries({ ...RULED_LATER, ...BY_LANE_RULE })) {
+      expect(owedByName.get(name), name).toMatchObject(ruled);
+    }
+  });
+
+  it("carry the later ruling's note and question, and the production precondition", () => {
+    expect(owedByName.get("admin-access-drift")?.note).toMatch(/already writes access\.drift/);
+    const question = owedByName.get("duty-stalled-access-drift")?.note ?? "";
+    expect(question).toMatch(/decided/);
+    expect(question).toMatch(/spec 02 §10\.9/);
+    expect(question).toMatch(/pings no heartbeat but has a success alert/);
+    const header = readFileSync(join(ROOT, "ops", "monitoring", "catalog", "owed.ts"), "utf8");
+    expect(header).toMatch(/HARD PRODUCTION PRECONDITION/);
+    expect(header).toMatch(/fails closed when it cannot read it/);
+    expect(header).toMatch(/refuses the deploy while any entry here exists/);
+  });
+
   it("owe nothing a staging fragment already defines, and list each owed alert once", () => {
     expect(OWED_ALERTS.filter((a) => staging.has(a.name))).toEqual([]);
     expect(owedByName.size).toBe(OWED_ALERTS.length);
@@ -175,6 +212,60 @@ describe("MC-15 refuses", () => {
     expect(mc15(root, { fragments: { ...fragments, platform }, scanCode: false })).toEqual([
       `ops/monitoring/catalog/platform.ts: thing.failed owes the alert thing-failing, ${tail}`,
       `ops/monitoring/catalog/platform.ts: thing.refused's noAlert names the alert thing-refused, ${tail}`,
+    ]);
+  });
+
+  it("an alert a noAlert names in any words, but not a file name, a path or an event", () => {
+    const root = scratch();
+    const base: CatalogEntry = {
+      event: "thing.watched",
+      kind: "security",
+      level: "warn",
+      fields: {},
+      alerts: [],
+      writtenBy: "test",
+    };
+    const platform = [
+      ...(fragments.platform ?? []),
+      {
+        ...base,
+        noAlert:
+          "Watched by the `thing-failing` alert's sibling: thing-refused-jump, which its lane adds",
+      },
+      {
+        ...base,
+        event: "thing.paged",
+        noAlert: "thing-refused (page) is owed by the area's fragment",
+      },
+      {
+        ...base,
+        event: "thing.covered",
+        noAlert:
+          "process-crash and no-logs-{service} cover it; see docs/runbooks/process-crash.md, telemetry.ship_failed and @thresholds.auth-endpoint-unlisted",
+      },
+    ];
+    const tail =
+      "which is no staging rule and is not listed in catalog/owed.ts with a lane and a date";
+    expect(mc15(root, { fragments: { ...fragments, platform }, scanCode: false })).toEqual([
+      `ops/monitoring/catalog/platform.ts: thing.watched's noAlert names the alert thing-failing, ${tail}`,
+      `ops/monitoring/catalog/platform.ts: thing.watched's noAlert names the alert thing-refused-jump, ${tail}`,
+      `ops/monitoring/catalog/platform.ts: thing.paged's noAlert names the alert thing-refused, ${tail}`,
+    ]);
+  });
+
+  it("an alert a fragment file's own text names, in the specs' form or as code names one", () => {
+    const root = scratch();
+    plant(root, "ops/monitoring/catalog/thing.ts", [
+      "// The thing area's lines. thing-change-failing (N, spec 99 §1) reads the request lines,",
+      "// and the `thing-stalled` alert comes with the area's fragment; sign-in and step-up are",
+      "// words, and process-crash (P) is a rule.",
+      "export const entries = [];",
+    ]);
+    const tail =
+      "which is no staging rule and is not listed in catalog/owed.ts with a lane and a date";
+    expect(mc15(root, { fragments: { ...fragments, thing: [] }, scanCode: false })).toEqual([
+      `ops/monitoring/catalog/thing.ts:2: names the alert thing-stalled, ${tail}`,
+      `ops/monitoring/catalog/thing.ts:1: names the alert thing-change-failing, ${tail}`,
     ]);
   });
 

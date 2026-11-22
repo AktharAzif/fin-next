@@ -6,9 +6,9 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | Path | What |
 |---|---|
 | `staging/*.json` | sources, Errors applications, logs-to-metrics, monitors, heartbeats, the `staging-quiet` policy |
-| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`, `identity`, `staff`) |
+| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`, `identity`, `staff`, `ops`) |
 | `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it or are owed for it (listed in `catalog/index.ts`) |
-| `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due |
+| `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due; production's first deploy waits for a gate that refuses while any is listed (its header) |
 | `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
 | `src/apply.ts` | `pnpm fin monitoring apply <env>`: exports `monitoringApply(ctx)` and `command` for ops/fin's dispatcher |
 
@@ -21,11 +21,13 @@ and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a 
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
 wake the owner) that names the alert back. MC-01 reads every telemetry writer the code uses
 (`log`, `telemetry.logUnit`, `lines.write`, `log.write({ event })`, `run.line`, raw
-`JSON.stringify` lines); its one exclusion rule, and why it cannot hide an event, is at
-`eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code (a line list's `alerts`,
-or text that calls a backquoted name an alert; see `alertsInCode`) or the catalogue (an entry's
-`owed`) gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due
-date, and fails for an owed alert that has become a rule. MC-12 scans every file under
+`JSON.stringify` lines), and a name passed in a variable from the variable's declaration in the
+same file; a writer passed a name it cannot read is a finding. Its one exclusion rule, and why it
+cannot hide an event, is at `eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
+(a line list's `alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the
+catalogue (an entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text)
+gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due date, and
+fails for an owed alert that has become a rule. MC-12 scans every file under
 `staging/`, the catalogue, this README, the runbooks and the watcher's settings.
 
 ## Applying

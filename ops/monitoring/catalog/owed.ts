@@ -8,10 +8,19 @@
 // the catalogue entry's `alerts` and removes it from this list in the same pull request.
 //
 // The lane is the one whose row in EXECUTION's lane tables carries the fragment's work: L-SAT-09
-// ("Auth alerts and catalogue fragments", ops/monitoring/**) for spec 02 §18.2's identity and
-// staff alerts, P0-F (ops/monitoring/** in Phase 0) for the audit fragment, fin-review's lane for
-// its alerts and the Monday ops lane for the money alerts. A Saturday lane's unfinished work is
-// finished in Sunday's spill block (L-SUN-00).
+// ("Auth alerts and catalogue fragments", ops/monitoring/**) for spec 02 §18.2's identity, staff
+// and organisation alerts, P0-F (ops/monitoring/** in Phase 0) for the audit fragment,
+// fin-review's lane for its alerts and the Monday ops lane for the money alerts. A Saturday lane's
+// unfinished work is finished in Sunday's spill block (L-SUN-00).
+//
+// A HARD PRODUCTION PRECONDITION (the steward's ruling of 22 Nov; the plan records it): no owed
+// alert reaches production. Before production's first deploy, a gate is built on whatever path
+// production really takes: the operator's launcher outside this repository (CI-04, FD-19), static
+// uploads included. The gate reads this list as data, fails closed when it cannot read it, and
+// refuses the deploy while any entry here exists. It is not built yet because production has no
+// deploy path yet (ops/fin and tools/static-deploy know only staging); a production gate in
+// ops/fin now would guard a path that does not exist. Until it is built, this paragraph and the
+// plan's entry are the record that it is owed.
 
 export interface OwedAlert {
   /** The alert's name, as its fragment will define it. */
@@ -26,8 +35,13 @@ export interface OwedAlert {
   readonly due: string;
   /** Where the plan defines it. */
   readonly spec: string;
-  /** A heartbeat it needs too, owed with it (ops/monitoring/<env>/heartbeats.json). */
+  /**
+   * A heartbeat a ruling gives it, owed with it (ops/monitoring/<env>/heartbeats.json); the note
+   * says when the plan and the ruling differ on it.
+   */
   readonly heartbeat?: string;
+  /** A fact the lane needs, or a question the lane settles when it builds the alert. */
+  readonly note?: string;
 }
 
 /** Spec 02 §18.2's alerts and the audit guard, due by the steward's ruling of 22 Nov. */
@@ -141,7 +155,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
   },
   {
     // Named by the Access drift duty (packages/staff/src/access-drift.ts): no successful run in
-    // two hours. It needs the duty's heartbeat, which the duty pings after each successful run.
+    // two hours.
     name: "duty-stalled-access-drift",
     severity: "N",
     fragment: "staff",
@@ -149,6 +163,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 02 §10.9, §18.2",
     heartbeat: "access-drift",
+    note: "Open until the alert is built on Sunday, and decided then: the steward's earlier ruling gives the duty a heartbeat, access-drift, pinged after each successful run, while spec 02 §10.9 says the duty pings no heartbeat but has a success alert. No heartbeat is added to heartbeats.json until that is decided.",
   },
   {
     name: "audit-guard",
@@ -158,8 +173,8 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 08 §3.14",
   },
-  // Named as owed by the catalogue, in the same fragments or their areas' own; the steward
-  // confirms each lane and date.
+  // Named as owed by the catalogue, in the same fragments or their areas' own: owed, with these
+  // lanes and dates, by the steward's later ruling of 22 Nov, and not built now.
   {
     name: "admin-access-drift",
     severity: "P",
@@ -167,6 +182,7 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
+    note: "The morning release already writes access.drift (the Access drift duty), so the event exists before its alert does.",
   },
   {
     name: "staff-changed",
@@ -201,5 +217,16 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-MON-09",
     due: "2026-11-23",
     spec: "spec 04 §30.3",
+  },
+  // Named by orgs.ts and owed by the request entry: 5xx on the team and role routes. Its lane and
+  // date follow the lane rule above, as the ruled identity and staff alerts' do; no ruling names
+  // it yet, and the steward confirms or changes them.
+  {
+    name: "team-change-failing",
+    severity: "N",
+    fragment: "orgs",
+    lane: "L-SAT-09",
+    due: SUNDAY,
+    spec: "spec 02 §18.2",
   },
 ];

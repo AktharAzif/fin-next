@@ -3,8 +3,8 @@
 //   MC-00 a file is missing or malformed, an alert has an unexpanded placeholder, or a metric's
 //         type is not one of Better Stack's;
 //   MC-01 an event written in code (any telemetry writer's line; see eventsInCode) is missing
-//         from the catalogue, a catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0
-//         events is missing;
+//         from the catalogue, a telemetry writer is passed a name the scan cannot read, a
+//         catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0 events is missing;
 //   MC-02 a failure, security or money entry has no alert, no owed alert and no noAlert reason;
 //   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
 //   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
@@ -28,8 +28,9 @@
 //   MC-13 a staging object names a production policy, or the files name another environment's
 //         team (`fin-<env>`), environment or name prefix (`fin-next-<env>-`);
 //   MC-14 an alert name is used twice;
-//   MC-15 an alert name the code (see alertsInCode) or the catalogue (an entry's owed, or a noAlert
-//         reason's `<name> (P|N, …)`) gives is neither a rule of the environment nor listed in
+//   MC-15 an alert name the code (see alertsInCode) or the catalogue (an entry's owed, any
+//         alert-shaped word of a noAlert reason, or a fragment file's text read as code is read and
+//         in the form `<name> (P|N, …)`) gives is neither a rule of the environment nor listed in
 //         catalog/owed.ts; an owed alert has no lane, no due date or no fragment, is listed twice,
 //         or is a rule of the environment already (in owed.ts or in an entry's owed);
 //   RT-01 an alert, monitor or heartbeat has no policy, or a staging one names anything but
@@ -220,10 +221,27 @@ function walk(root: string, dir: string, out: string[]): void {
 // event: every event Fin writes is `<area>.<name>`, with a dot, except spec 01 §8.9's `request`,
 // and a dotted name counts through any of the six methods whoever the writer; `request` is written
 // only through telemetry writers (`telemetry.log`, `lines.write`), and PHASE0_EVENTS makes the
-// catalogue hold it whatever the scan finds. A name built at run time (telemetry.bad_event, the
-// formatter's substitute), or a writer reached another way (a computed key, an alias), is beyond
+// catalogue hold it whatever the scan finds. An optional call (`o.log?.("x.y")`) is a call.
+//
+// A telemetry writer's call whose first argument is not a literal is read, or refused, so that no
+// name is skipped in silence:
+//   - a variable (`lines.write(event, …)`, `log.write(line)`, `telemetry.log(line.event, …)`)
+//     declared in the same file with `const`, `let` or `var` is read from the nearest declaration
+//     before the call (its value, or a `for … of` loop's list): an object's own `event` key, the
+//     whole value when it is one string literal, or every dotted string literal in it
+//     (`const event = on ? "switch.set" : "switch.cleared"` gives both). A declaration that gives
+//     no name (`let event;` assigned later, a destructured one), a call or another expression that
+//     holds no dotted literal, an object without a literal `event` key, and a name built from a
+//     string (`` `switch.${state}` ``, `"switch." + state`) are each an MC-01 finding: write the
+//     name as a literal;
+//   - a variable the file does not declare is a parameter: a forwarding adapter (apps' telemetry
+//     sinks, packages/server's own `format(event, …)`), whose callers' names the scan reads where
+//     they call it; a parameter list (`log(event: string, …)`) is a declaration, not a call; a
+//     string that is not a name (`this.line("", text)`, a message) is no line's name.
+// A name built at run time by its callers (telemetry.bad_event, the formatter's substitute), or a
+// writer reached another way (a computed key, an alias, a wrapper the scan does not know), is beyond
 // a lexical scan: a review finding, as for imports:check (BD-19).
-const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)\(/g;
+const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)(?:\?\.)?\(/g;
 const TELEMETRY_WRITERS: ReadonlySet<string> = new Set([
   "lines",
   "log",
@@ -355,23 +373,142 @@ function lineAt(text: string, index: number): number {
   return line;
 }
 
-/** Events written in code, each with the first place that writes it (see the rule above). */
-export function eventsInCode(
-  root: string,
-  code: readonly CodeFile[] = readCode(root),
-): Map<string, CodeEvent> {
+/** The end of the expression starting at `from`: the first `,`, `;` or unmatched closer at depth 0. */
+function expressionEnd(text: string, from: number): number {
+  for (let i = from; i < text.length; i++) {
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return text.length;
+      i = skip;
+      continue;
+    }
+    const c = text[i];
+    if (c === "(" || c === "{" || c === "[") {
+      const inner = closing(text, i);
+      if (inner < 0) return text.length;
+      i = inner - 1;
+    } else if (c === "," || c === ";" || c === ")" || c === "}" || c === "]") return i;
+  }
+  return text.length;
+}
+
+/** The event names an expression's text gives: see the rule above. */
+function namesIn(expression: string): string[] {
+  const trimmed = expression.trim();
+  if (trimmed.startsWith("{")) {
+    const keys = ownKeys(trimmed, 0);
+    const name = keys === undefined ? undefined : [...keys.matchAll(EVENT_KEY)][0]?.[2];
+    return name === undefined ? [] : [name];
+  }
+  const names: string[] = [];
+  for (let i = 0; i < trimmed.length; i++) {
+    const c = trimmed[i];
+    if (c === '"' || c === "'" || c === "`") {
+      const end = stringEnd(trimmed, i);
+      if (end < 0) return names;
+      const value = trimmed.slice(i + 1, end);
+      const whole = i === 0 && end === trimmed.length - 1;
+      if (EVENT_NAME.test(value) && (whole || value.includes("."))) names.push(value);
+      i = end;
+      continue;
+    }
+    const skip = skipped(trimmed, i);
+    if (skip !== undefined) {
+      if (skip < 0) return names;
+      i = skip;
+    }
+  }
+  return names;
+}
+
+/** The value of the nearest `const|let|var <name> =` before `at`, or undefined when there is none. */
+function initializerOf(text: string, name: string, at: number): string | undefined {
+  const id = name.replaceAll("$", "\\$");
+  // `const x = …` and `for (const x of …)` give a value to read; `let x;` (assigned later) and a
+  // destructured `const { x } = …` give none, so they read as "" and the call is a finding.
+  const declaration = new RegExp(
+    `(?<![\\w$.])(?:const|let|var)\\s+${id}(?![\\w$])\\s*(?::[^=;]*)?(=(?![=>])|;|of\\b)` +
+      `|(?<![\\w$.])(?:const|let|var)\\s*[{[][^=;]*?(?<![\\w$])${id}(?![\\w$]|\\s*:)[^=;]*?[}\\]]\\s*(?::[^=;]*)?=(?![=>])`,
+    "g",
+  );
+  let last: RegExpMatchArray | undefined;
+  for (const match of text.slice(0, at).matchAll(declaration)) last = match;
+  if (last === undefined) return undefined;
+  if (last[1] === undefined || last[1] === ";") return "";
+  const start = (last.index ?? 0) + last[0].length;
+  return text.slice(start, Math.min(expressionEnd(text, start), at));
+}
+
+const VARIABLE = /^([A-Za-z_$][\w$]*)(?:\s*\??\.\s*#?[A-Za-z_$][\w$]*)*$/;
+const PARAMETER_LIST = /^\s*(?:[A-Za-z_$][\w$]*\s*\??:|\{[^}]*\}\s*:)/;
+/** A name's first part, joined to the rest at run time: `"switch." + state`. */
+const NAME_PREFIX = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*\.$/;
+
+/**
+ * A string argument that is no name: a name built from it at run time (`` `switch.${state}` ``,
+ * `"switch." + state`), or a message (undefined).
+ */
+function builtName(text: string, at: number, argument: string): string[] | undefined {
+  const end = stringEnd(text, at);
+  if (end < 0) return undefined;
+  const value = text.slice(at + 1, end);
+  if (end - at + 1 < argument.length) return NAME_PREFIX.test(value) ? [] : undefined;
+  const filled = value.replace(/\$\{[^}]*\}/g, "x");
+  return filled !== value && EVENT_NAME.test(filled) && filled.includes(".") ? [] : undefined;
+}
+
+/**
+ * A telemetry writer's call whose first argument is no literal name: the names it gives, `[]` when
+ * it gives none MC-01 can read (a finding), or undefined when it is no line's name to read (a
+ * parameter, a parameter list, a string that is not a name, a raw JSON line, no argument).
+ */
+function variableArgument(text: string, from: number): string[] | undefined {
+  let i = from;
+  while (/\s/.test(text[i] ?? "")) i++;
+  const c = text[i] ?? "";
+  if (c === ")" || c === "") return undefined;
+  const argument = text.slice(i, expressionEnd(text, i)).trim();
+  if (c === '"' || c === "'" || c === "`") return builtName(text, i, argument);
+  if (PARAMETER_LIST.test(text.slice(i, i + 200))) return undefined;
+  if (/^JSON\s*\.\s*stringify\s*\(/.test(argument)) return undefined;
+  if (argument.startsWith("{")) return namesIn(argument);
+  const variable = VARIABLE.exec(argument);
+  if (variable !== null) {
+    const value = initializerOf(text, variable[1] ?? "", i);
+    return value === undefined ? undefined : namesIn(value);
+  }
+  return namesIn(argument).filter((name) => name.includes("."));
+}
+
+/** What eventsInCode reads: the events, and the writer calls whose name it cannot read. */
+function scanWriters(code: readonly CodeFile[]): {
+  found: Map<string, CodeEvent>;
+  unread: CodeEvent[];
+} {
   const found = new Map<string, CodeEvent>();
+  const unread: CodeEvent[] = [];
   const add = (event: string, at: CodeEvent) => {
     if (!found.has(event)) found.set(event, at);
   };
   for (const { file, text } of code) {
     for (const match of text.matchAll(WRITER_CALL)) {
-      const method = match[0].slice(0, -1);
-      const arg = firstArgument(text, match.index + match[0].length);
-      if (arg === undefined) continue;
+      const method = match[0].replace(/(?:\?\.)?\($/, "");
+      const from = match.index + match[0].length;
       const receiver = receiverOf(text, match.index);
-      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !arg.name.includes(".")) continue;
       const callee = receiver === undefined ? method : `${receiver}.${method}`;
+      const arg = firstArgument(text, from);
+      if (arg === undefined) {
+        if (!TELEMETRY_WRITERS.has(receiver ?? method)) continue;
+        const names = variableArgument(text, from);
+        if (names === undefined) continue;
+        const line = lineAt(text, match.index);
+        const whole = text.slice(from, expressionEnd(text, from)).trim().replace(/\s+/g, " ");
+        const shown = whole.length > 60 ? `${whole.slice(0, 57)}…` : whole;
+        if (names.length === 0) unread.push({ file, line, call: `${callee}(${shown})` });
+        for (const name of names) add(name, { file, line, call: `${callee}(${shown}: "${name}")` });
+        continue;
+      }
+      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !arg.name.includes(".")) continue;
       const shown = arg.object ? `{ event: "${arg.name}" }` : `"${arg.name}"`;
       add(arg.name, { file, line: lineAt(text, match.index), call: `${callee}(${shown})` });
     }
@@ -386,7 +523,15 @@ export function eventsInCode(
       }
     }
   }
-  return found;
+  return { found, unread };
+}
+
+/** Events written in code, each with the first place that writes it (see the rule above). */
+export function eventsInCode(
+  root: string,
+  code: readonly CodeFile[] = readCode(root),
+): Map<string, CodeEvent> {
+  return scanWriters(code).found;
 }
 
 /** A source file the code scans read, and its text. */
@@ -424,8 +569,15 @@ const ALERT_NAME = /^[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+$/;
 const ALERTS_PROPERTY = /(?<![\w$.])(?:alerts|"alerts"|'alerts')\s*:\s*/g;
 const ALERT_PROSE =
   /\balerts?\s*\(?\s*`([a-z0-9]+(?:-[a-z0-9]+)+)`|`([a-z0-9]+(?:-[a-z0-9]+)+)`\s+alert\b|(?<![\w-])(duty-stalled-[a-z0-9]+(?:-[a-z0-9]+)*)/g;
-/** A noAlert reason that names an alert the way the specs' tables do: `<name> (P, …)`. */
+/** Text that names an alert the way the specs' tables do: `<name> (P, …)`. */
 const SEVERITY_NAMED = /(?<![\w-])([a-z0-9]+(?:-[a-z0-9]+)+) \((?:P|N)\b/g;
+/**
+ * Any alert-shaped word in a noAlert reason: words of lower-case letters and digits joined by
+ * hyphens, not part of a path, a file name, an event or an overlay key (`docs/runbooks/x-y.md`,
+ * `@thresholds.x-y`). A reason that names an alert claims its cover, in whatever words, so a
+ * reason writes other hyphenated words apart ("sign in", "step up").
+ */
+const ALERT_WORD = /(?<![\w./@#-])[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+(?![\w/{-]|\.\w)/g;
 
 /** Where the code names an alert. */
 export interface CodeAlert {
@@ -535,9 +687,12 @@ function checkOwed(
     }
   }
 
-  // The names the catalogue and the code give, each with where it is given.
+  // The names the catalogue and the code give, each with where it is given: each entry's owed, every
+  // alert-shaped word of its noAlert, and the fragment file's own text (its comments), read in the
+  // forms code is read in and in the specs' `<name> (P|N` form.
   const named = new Map<string, { file: string; by: string }>();
   const entryOwes: { file: string; event: string; name: string }[] = [];
+  const fragmentFiles: CodeFile[] = [];
   for (const [area, entries] of Object.entries(fragments)) {
     const file = `ops/monitoring/catalog/${area}.ts`;
     for (const entry of entries) {
@@ -545,11 +700,24 @@ function checkOwed(
         entryOwes.push({ file, event: entry.event, name });
         if (!named.has(name)) named.set(name, { file, by: `${entry.event} owes` });
       }
-      for (const match of (entry.noAlert ?? "").matchAll(SEVERITY_NAMED)) {
-        const name = match[1] ?? "";
+      for (const match of (entry.noAlert ?? "").matchAll(ALERT_WORD)) {
+        const name = match[0];
         if (!named.has(name)) named.set(name, { file, by: `${entry.event}'s noAlert names` });
       }
     }
+    if (existsSync(join(root, file))) {
+      fragmentFiles.push({ file, text: readFileSync(join(root, file), "utf8") });
+    }
+  }
+  const inFragments = alertsInCode(root, fragmentFiles);
+  for (const { file, text } of fragmentFiles) {
+    for (const match of text.matchAll(SEVERITY_NAMED)) {
+      const name = match[1] ?? "";
+      if (!inFragments.has(name)) inFragments.set(name, { file, line: lineAt(text, match.index) });
+    }
+  }
+  for (const [name, at] of inFragments) {
+    if (!named.has(name)) named.set(name, { file: `${at.file}:${at.line}`, by: "names" });
   }
   if (code !== undefined) {
     for (const [name, at] of alertsInCode(root, code)) {
@@ -672,7 +840,8 @@ function checkCatalogue(
     }
   }
   if (code !== undefined) {
-    for (const [event, at] of eventsInCode(root, code)) {
+    const { found, unread } = scanWriters(code);
+    for (const [event, at] of found) {
       if (!byEvent.has(event)) {
         findings.push({
           file: `${at.file}:${at.line}`,
@@ -680,6 +849,13 @@ function checkCatalogue(
           message: `${at.call} is not catalogued`,
         });
       }
+    }
+    for (const at of unread) {
+      findings.push({
+        file: `${at.file}:${at.line}`,
+        rule: "MC-01",
+        message: `${at.call} writes a name MC-01 cannot read: write the event's name as a literal`,
+      });
     }
   }
   return { findings, byEvent };
