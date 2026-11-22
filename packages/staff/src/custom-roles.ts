@@ -391,7 +391,8 @@ export async function updateStaffRole(
   const after = knownPermissions(body.permissions);
   const { added, removed } = permissionDiff(STAFF_CATALOGUE, before, after);
   const holders = await holdersOf(tx, roleId);
-  if (added.length > 0 && !sameMembers(holders.map((holder) => holder.id), body.holders)) {
+  const heldNow = holders.map((holder) => holder.id);
+  if (added.length > 0 && !sameMembers(heldNow, body.holders)) {
     throw new StaffRefusal("conflict", "staff_role.holders_changed");
   }
   const stepUp = await who.stepUp(tx, {

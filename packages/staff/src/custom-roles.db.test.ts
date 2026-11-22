@@ -730,9 +730,8 @@ describe("changing a custom staff role (§8.4)", () => {
     const raised = ["audit.read", "money.read", "customers.read", "customers.reveal"];
     const asked = { ...draft("Ledger readers", raised), version: 1, holders };
     const request = { method: "PUT", path: `/api/staff-roles/${readers.roleId}` };
-    const save =
-      (body: typeof asked) => (tx: UnitTx, actor: StaffActor) =>
-        updateStaffRole(h.deps, tx, actor, readers.roleId, body);
+    const save = (body: typeof asked) => (tx: UnitTx, actor: StaffActor) =>
+      updateStaffRole(h.deps, tx, actor, readers.roleId, body);
     const intent = await provedIntent(admin, () => attempt(admin, request, save(asked)));
 
     // Meanwhile a desk lead, who may give Ledger readers but never what the save adds, gives it to
