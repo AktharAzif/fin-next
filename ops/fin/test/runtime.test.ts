@@ -95,6 +95,18 @@ function settled(child: Child): boolean {
   return child.out().split("\n").includes("settled");
 }
 
+/**
+ * How many times the one-change stub's own listener for `signal`, added after the runtime's trap,
+ * ran (it prints a line each time). A runtime that exits inside its own listener for a signal never
+ * lets the stub's run for that signal: no time is measured, and no load can make it come.
+ */
+function heard(child: Child, signal: "SIGINT" | "SIGQUIT"): number {
+  return child
+    .out()
+    .split("\n")
+    .filter((line) => line === `heard ${signal}`).length;
+}
+
 /** A run log of `count` chained records with its head file, written at once. */
 function writeLog(dir: string, count: number): void {
   const lines: string[] = [];
@@ -157,7 +169,9 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       await sleep(REPEAT_GRACE_MS + 100);
       child.process.kill("SIGINT");
       assert.equal(await child.exit(), EXIT.interrupted, child.errors());
-      // No time is measured: the change takes ten seconds and says when it ends.
+      // The first Ctrl-C starts the stop and lets the stub's listener run; the second exits inside
+      // the runtime's own listener, so the stub's never runs for it.
+      assert.equal(heard(child, "SIGINT"), 1, "it exited in the second Ctrl-C's own listener");
       assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);
@@ -199,8 +213,9 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
       await child.waitFor("waiting");
       child.process.kill("SIGQUIT");
       assert.equal(await child.exit(), EXIT.quit, child.errors());
-      // No time is measured: the change takes ten seconds and says when it ends. A runtime that
-      // closed the run at once but exited only after the change would pass run.done's checks.
+      // A runtime that closed the run at once but exited later would pass run.done's checks; it
+      // would also let the stub's own listener run.
+      assert.equal(heard(child, "SIGQUIT"), 0, "it exited in SIGQUIT's own listener");
       assert.equal(settled(child), false, "it waited for the change in flight");
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.done"]);

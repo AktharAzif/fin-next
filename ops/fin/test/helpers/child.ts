@@ -71,7 +71,9 @@ export function spawnChild(argv: readonly string[], options: ChildOptions = {}):
   // A destroyed stream is the test's own doing; its error is not the test's failure.
   child.stdout.on("error", () => {});
   child.stderr.on("error", () => {});
-  const ended = once(child, "exit").then(([code, signal]) => ({ code, signal }) as Exit);
+  // "close", not "exit": it comes once the child has exited and its output has all been read, so
+  // a test that reads the output after the exit sees every line the child wrote.
+  const ended = once(child, "close").then(([code, signal]) => ({ code, signal }) as Exit);
   return {
     process: child,
     logDir,
