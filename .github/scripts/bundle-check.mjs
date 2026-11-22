@@ -959,7 +959,7 @@ function nextRaw(reading, c, from) {
 
 /**
  * The `=` signs of a reading that give an attribute its value in some start tag, each tag read
- * as an HTML tokenizer reads it from its `<` (markup a script writes: `e.innerHTML='<img
+ * as an HTML tokenizer reads it from its `<` (markup a script writes into an element: `'<img
  * src=//host/p.png>'`). A regular expression's `x=/\/a\//` is in none. Every tag open at a point
  * is followed at once (a tag inside another's quoted value included), so the pass is linear. A
  * character a reference spelled is data (`&gt;` ends no tag). Where the script's own code may
