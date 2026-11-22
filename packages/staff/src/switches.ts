@@ -40,11 +40,15 @@ function toSwitch(row: RawSwitch): SwitchRow {
   };
 }
 
-/** `GET /api/switches`: each switch's state, who set it and when. */
+/**
+ * `GET /api/switches`: each switch's state, who set it and when, by name in code-point order
+ * (COLLATE "C"), the same on every server: a bare ORDER BY follows the database's collation, and
+ * glibc's en_US.utf8 (CI's Postgres image) orders names with punctuation otherwise.
+ */
 export async function listSwitches(tx: UnitTx): Promise<SwitchRow[]> {
   const result = await tx.query<RawSwitch>(
     `SELECT name, state, reason_code, changed_by_kind, changed_by_id, changed_at
-       FROM ops.kill_switch ORDER BY name`,
+       FROM ops.kill_switch ORDER BY name COLLATE "C"`,
   );
   return result.rows.map(toSwitch);
 }

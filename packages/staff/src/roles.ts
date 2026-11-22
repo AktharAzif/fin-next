@@ -59,8 +59,11 @@ export async function listStaffRoles(tx: UnitTx): Promise<StaffRoleView[]> {
   for (const key of PREBUILT_ROLE_KEYS) {
     out.push(view(key, { kind: "built_in", key }, counts.get(key) ?? 0));
   }
+  // Custom roles by name in code-point order (COLLATE "C"), the same on every server: a bare ORDER
+  // BY follows the database's collation, and glibc's en_US.utf8 (CI's Postgres image) orders names
+  // with spaces or punctuation otherwise.
   const custom = await tx.query<{ id: string }>(
-    "SELECT id FROM staff.role ORDER BY lower(name), id",
+    'SELECT id FROM staff.role ORDER BY lower(name) COLLATE "C", id',
   );
   for (const row of custom.rows) {
     const record = await customStaffRole(tx, row.id);
