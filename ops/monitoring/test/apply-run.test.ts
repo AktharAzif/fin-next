@@ -263,7 +263,7 @@ describe("the overlay's numbers are never printed", () => {
       ...next.ctx,
       thresholds: {
         ...thresholds,
-        "clock-skew": 4321,
+        "process-restarts": 4321,
         "no-logs-api": 5432,
         "5xx-rate-min-count": 6543,
       },
@@ -271,7 +271,9 @@ describe("the overlay's numbers are never printed", () => {
     };
     await monitoringApply(changed);
     const text = next.text();
-    expect(text).toContain("~ alert clock-skew: value (not shown) -> <threshold:clock-skew>");
+    expect(text).toContain(
+      "~ alert process-restarts: value (not shown) -> <threshold:process-restarts>",
+    );
     expect(text).toContain(
       "~ alert no-logs-api: query_period (not shown) -> <threshold:no-logs-api>",
     );

@@ -28,9 +28,9 @@ each object (`<kind>:<name>`).
    `value (not shown) -> <threshold:<name>>`).
 2. For a paused alert, its `paused_reason` (the dry run's note) and whether its query fails.
 3. After a read-back that differs: the lines under `read back:` name each object and the parts that
-   differ (`alert clock-skew: differs in value`, `heartbeat watcher: missing`). Run the dry run
-   again a minute later: a difference that is gone was a read Better Stack had not caught up with;
-   one that stays is Better Stack refusing a field, or someone changing it.
+   differ (`alert process-restarts: differs in value`, `heartbeat watcher: missing`). Run the dry
+   run again a minute later: a difference that is gone was a read Better Stack had not caught up
+   with; one that stays is Better Stack refusing a field, or someone changing it.
 
 ## Containment
 

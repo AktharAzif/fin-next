@@ -26,7 +26,7 @@
 // `ctx.deliver` (the services' sealed variables) and never printed. Everything printed passes
 // one mask: the hostnames, the zones and the monitor header's value, Better Stack's own error
 // text included. The overlay's numbers (thresholds, windows, grace periods) are never printed: a
-// change to one shows its placeholder (`<threshold:clock-skew>`).
+// change to one shows its placeholder (`<threshold:process-restarts>`).
 import { readFileSync, statSync } from "node:fs";
 import {
   BetterStackClient,

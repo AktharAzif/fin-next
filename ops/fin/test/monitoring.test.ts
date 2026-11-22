@@ -170,13 +170,13 @@ describe("pnpm fin monitoring apply", () => {
 
   it("refuses while any overlay key the files name has no value, a dry run and a run alike (MA-10)", async () => {
     const without = (o: Json) => {
-      delete (o.thresholds as Json)["clock-skew"];
+      delete (o.thresholds as Json)["process-restarts"];
     };
     const dry = harness({ overlay: without });
     assert.equal(await dry.run(["--dry-run", "--assert-empty-team", "fin-staging"]), EXIT.refused);
     assert.match(
       dry.runtime.out(),
-      /refused: MA-10 the run's settings have no value for thresholds\.clock-skew/,
+      /refused: MA-10 the run's settings have no value for thresholds\.process-restarts/,
     );
     assert.deepEqual(dry.writes(), []);
 
@@ -249,8 +249,8 @@ describe("pnpm fin monitoring apply", () => {
         const response = await serve(url, init);
         if (init?.method === "POST" && /\/alerts$/.test(new URL(url).pathname)) {
           const sent = JSON.parse(String(init.body)) as Json;
-          if (sent.name === "clock-skew") {
-            const item = h.bs.items("alerts").find((i) => i.attributes.name === "clock-skew");
+          if (sent.name === "process-restarts") {
+            const item = h.bs.items("alerts").find((i) => i.attributes.name === "process-restarts");
             if (item !== undefined) item.attributes.value = 987_654;
           }
         }
@@ -260,11 +260,11 @@ describe("pnpm fin monitoring apply", () => {
     assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.drift);
     const out = h.runtime.out();
     assert.match(out, /read back: 1 difference\(s\) from the files after the writes/);
-    assert.match(out, /alert clock-skew: differs in value/);
+    assert.match(out, /alert process-restarts: differs in value/);
     assert.equal(h.readable().includes("987654"), false);
     const done = h.records().at(-1);
     assert.equal(done?.result, "failed");
-    assert.deepEqual(((done?.readBack ?? {}) as Json).mismatched, ["alert:clock-skew"]);
+    assert.deepEqual(((done?.readBack ?? {}) as Json).mismatched, ["alert:process-restarts"]);
     const line = h.lines().find((l) => l.event === "monitoring.apply");
     assert.equal(line?.outcome, "mismatch");
     assert.equal(line?.level, "error");
@@ -276,13 +276,16 @@ describe("pnpm fin monitoring apply", () => {
     const changed = harness({
       bs: first.bs,
       overlay: (o) => {
-        (o.thresholds as Json)["clock-skew"] = 4_321;
+        (o.thresholds as Json)["process-restarts"] = 4_321;
         (o.grace as Json).watcher = 97;
       },
     });
     assert.equal(await changed.run(["--dry-run"]), EXIT.drift);
     const out = changed.runtime.out();
-    assert.match(out, /^~ alert clock-skew: value \(not shown\) -> <threshold:clock-skew>$/m);
+    assert.match(
+      out,
+      /^~ alert process-restarts: value \(not shown\) -> <threshold:process-restarts>$/m,
+    );
     assert.match(out, /^~ heartbeat watcher: grace \(not shown\) -> <grace:watcher>$/m);
     assert.equal(out.includes("4321"), false);
     assert.doesNotMatch(out, /\b97\b/);
@@ -303,13 +306,13 @@ describe("pnpm fin monitoring apply", () => {
     }
     const file = join(root, "ops", "monitoring", "staging", "alerts", "platform.json");
     const json = JSON.parse(readFileSync(file, "utf8")) as { alerts: Json[] };
-    const alert = json.alerts.find((a) => a.name === "clock-skew");
-    if (alert === undefined) throw new Error("no clock-skew alert");
+    const alert = json.alerts.find((a) => a.name === "process-restarts");
+    if (alert === undefined) throw new Error("no process-restarts alert");
     alert.policy = "loud";
     writeFileSync(file, JSON.stringify(json));
     const h = harness({ repoRoot: root });
     assert.equal(await h.run(["--assert-empty-team", "fin-staging"]), EXIT.refused);
-    assert.match(h.runtime.out(), /RT-01.*clock-skew.*routes to loud/);
+    assert.match(h.runtime.out(), /RT-01.*process-restarts.*routes to loud/);
     assert.deepEqual(h.bs.requests, [], "refused before Better Stack is read");
     assert.deepEqual(h.records(), []);
   });

@@ -72,7 +72,7 @@ export interface DesiredObject {
   /**
    * Compared attributes that hold one of the overlay's private numbers ([OB-13]: a threshold, a
    * window, a minimum count, a grace period), each with what a change prints in its place
-   * (`<threshold:clock-skew>`): neither side of such a change is ever printed.
+   * (`<threshold:process-restarts>`): neither side of such a change is ever printed.
    */
   readonly private?: Readonly<Record<string, string>>;
 }
