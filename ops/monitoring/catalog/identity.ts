@@ -2,10 +2,11 @@
 // (`lines.write`) for both realms, and by the orgs and staff packages and the console's API half
 // where they run identity's gates. packages/identity/src/monitoring.ts keeps the same list beside
 // the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
-// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
-// identity area's alert fragment (alerts/identity.json), which so far holds only web-host.ts's
-// auth-endpoint-unlisted; until the rest land each failure or security entry names the alerts it is
-// owed (`owed`, listed in owed.ts with their lane and date), or why none.
+// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines are in the
+// identity area's alert fragment (alerts/identity.json): web-host.ts's auth-endpoint-unlisted,
+// secret-unreadable and rate-limiter-failing here, and platform.ts's csrf-refused-jump; until the
+// rest land each failure or security entry names the alerts it is owed (`owed`, listed in owed.ts
+// with their lane and date), or why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -37,8 +38,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the TOTP check and the console's viewer, when no configured secret version opens a stored secret",
     fields: { realm: "string", kind: "string" },
-    alerts: [],
-    owed: ["secret-unreadable"],
+    alerts: ["secret-unreadable"],
   },
   {
     event: "auth.unhandled_error",
@@ -96,7 +96,6 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the auth limiter, when its store cannot be read or written; it fails closed, so the request is refused (503)",
     fields: { bucket: "string" },
-    alerts: [],
-    owed: ["rate-limiter-failing"],
+    alerts: ["rate-limiter-failing"],
   },
 ];

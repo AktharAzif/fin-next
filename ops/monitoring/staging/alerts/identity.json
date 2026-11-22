@@ -1,5 +1,5 @@
 {
-  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`.",
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C). auth-endpoint-unlisted, from the steward's ruling of 22 Nov: the API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. secret-unreadable: any auth.secret_unreadable (identity's authenticator code check on console and admin, console's viewer for backup codes). rate-limiter-failing: any limits.store_failed (identity's limiter, which the realms and the organisation routes use on console and admin; spec 05's edge and api join with the keys lane). csrf-refused-jump: csrf.refused above the pre-deploy baseline, the overlay's threshold, in 15 minutes (web-host's origin gate on console, admin and verify, and identity's cross-site GET check on console and admin). Each has one incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`. L-SAT-09 owes the rest of the area's alerts (catalog/owed.ts).",
   "alerts": [
     {
       "name": "auth-endpoint-unlisted",
@@ -26,6 +26,72 @@
         "check": "The realm and release on the lines; the request lines with the same requestId and their cfRay; whether the count began with a release.",
         "flow": "F3",
         "runbook": "docs/runbooks/auth-endpoint-unlisted.md"
+      }
+    },
+    {
+      "name": "secret-unreadable",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["auth.secret_unreadable"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A stored secret (an authenticator's secret, or backup codes) that no configured BETTER_AUTH_SECRETS version opens: the people it belongs to cannot finish a sign-in or step-up with their authenticator. Lines: {{value}}.",
+      "metadata": {
+        "check": "The kind and realm on auth.secret_unreadable and the release; the BETTER_AUTH_SECRETS versions on the service against the last rotation (a version removed while secrets it wrote remain).",
+        "flow": "F3",
+        "runbook": "docs/runbooks/secret-unreadable.md"
+      }
+    },
+    {
+      "name": "rate-limiter-failing",
+      "group": "C",
+      "severity": "P",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["limits.store_failed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The limiter could not read or write its counts in Postgres, so it failed closed and refused requests with 503: sign-ins and every limited step are refused while it lasts. Failures: {{value}}.",
+      "metadata": {
+        "check": "Postgres for the service: database-unreachable, pool-exhausted and the probe's longest transaction; the bucket on limits.store_failed; a run holding a lock on ops.rate_window or ops.lockout; grants-drift for the service's role.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/rate-limiter-failing.md"
+      }
+    },
+    {
+      "name": "csrf-refused-jump",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin", "verify"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin", "verify"] }],
+      "query": { "count": { "events": ["csrf.refused"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.csrf-refused-jump",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Origin-gate refusals above the pre-deploy baseline in 15 minutes: the app's host and the origin or app name the service expects have drifted apart, usually with a deploy. Refusals: {{value}}.",
+      "metadata": {
+        "check": "The reason and route on csrf.refused and the release; FIN_PUBLIC_ORIGIN on the service against the app's host, and the X-Fin-App name the app's client sends.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/csrf-refused-jump.md"
       }
     }
   ]

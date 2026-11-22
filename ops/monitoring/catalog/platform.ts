@@ -254,9 +254,9 @@ export const entries: readonly CatalogEntry[] = [
       "origin_gate.app_header",
       "origin_gate.content_type",
     ],
-    alerts: [],
-    // A jump above the pre-deploy baseline; single refusals are expected traffic.
-    owed: ["csrf-refused-jump"],
+    // A jump above the pre-deploy baseline (alerts/identity.json); single refusals are expected
+    // traffic.
+    alerts: ["csrf-refused-jump"],
   },
   {
     event: "api.outside_request",
