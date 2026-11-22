@@ -4127,7 +4127,7 @@ errors, monitors, heartbeats and alerts (email only, with the shadow count); the
 hardening, D6); the supply-chain policy; browser tests; the kill switches.
 
 Production adds each gate below before it holds real data or moves real money ([G-05]); EXECUTION.md
-§7 tracks them as PG-01 to PG-14.
+§7 tracks them as PG-01 to PG-17.
 
 | Area | Gates |
 |---|---|

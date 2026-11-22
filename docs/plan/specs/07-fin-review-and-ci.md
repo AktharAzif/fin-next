@@ -635,7 +635,9 @@ The checker turns each of these into a blocker (ARCHITECTURE §11.6). Until it l
 [G-10]'s interim merge rule does not let its head merge; the ship step reads `gate` for the seventh
 (§11.3):
 
-1. a confirmed critical, high or medium finding;
+1. a confirmed critical or high finding; a confirmed medium until the piece has had its full review
+   and one fix round, and after that a medium that the latest fix caused (a regression) or an earlier
+   finding that the fix claimed but did not fix ([G-10] as amended by the owner, 22 Nov 2026);
 2. a plausible critical or high finding, until the owner judges it (§7.5);
 3. a required lens that is not `done` (`incomplete`, `refused`, `budget_reached`, `cancelled`);
 4. a test in a tier S path that cannot fail (a test-truth finding of class `test-cannot-fail`, at any
@@ -645,8 +647,14 @@ The checker turns each of these into a blocker (ARCHITECTURE §11.6). Until it l
 6. a coverage gap: a changed unit that no required lens covered;
 7. red CI (`gate`'s own rule, §11.2).
 
-Not blocking: a confirmed low; a plausible medium or low. They go to the backlog (§7.4). Until the
-sceptics land (slice 2, §15), every validated candidate at medium or above blocks.
+Not blocking: a confirmed low, which is logged and never fixed in the middle of a merge cycle (each
+milestone ends with one pull request per area that fixes the cheap ones, reviewed under this rule,
+and before production every low has a disposition, PG-17); a plausible medium or low; and, once the
+piece has had its full review and one fix round, a new confirmed medium on code that already passed
+review, which is a `[follow-up]` item: fixed the same day at the normal bar in a follow-up pull
+request, and never in production while open (PG-16). They go to the backlog (§7.4). Until the
+sceptics land (slice 2, §15), every validated candidate at medium or above counts as confirmed
+under item 1.
 
 ### 2.12 States
 
@@ -1480,7 +1488,11 @@ each machine.
   validated findings with their text, after §2.8's rule 5, for the builder who fixes them.
 - **Non-blocking findings** (confirmed low, plausible medium and low) are appended to
   `$FIN_REVIEW_SHARE/backlog.jsonl`; the steward triages them at C1 (EXECUTION §1.10). They never go to
-  GitHub Issues (off, [CI-08]), pull request comments or check-run text.
+  GitHub Issues (off, [CI-08]), pull request comments or check-run text. Each line carries the
+  finding's ID, its pull request, its area, its severity, whether it is a `[follow-up]` item, and,
+  once settled, its disposition (fixed, or accepted with a one-line reason; a `[follow-up]` item and
+  a low marked as touching security or as visible to users are only ever fixed) with the reason; the
+  production gates PG-16 and PG-17 read this file and fail closed when they cannot (EXECUTION §7.3).
 - **The pull request shows counts and IDs only:** `fin-review ship` posts the block that
   `summary.json` provides, as a comment just before it merges, and never reads the pull request's
   text (§11.3, [CI-15]): the receipt hash (from hardening, D6), tier, counts by lens and severity,
