@@ -33,7 +33,7 @@ import { beforeHook } from "./hooks/before.ts";
 import type { HookContext } from "./hooks/context.ts";
 import { databaseHooks } from "./hooks/database.ts";
 import { createLimitStore, type LimitStore, LimitStoreError } from "./limits.ts";
-import { verifyWithWaiver } from "./passwords/flows.ts";
+import { PASSWORD_HASHING_PATHS, verifyWithWaiver } from "./passwords/flows.ts";
 import { createPasswordHasher, type PasswordHasher } from "./passwords/hasher.ts";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "./passwords/policy.ts";
 import type { Clock } from "./ports/clock.ts";
@@ -225,7 +225,9 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
     },
     verification: { disableCleanup: true },
     // Passwords (stretch 2, §5.7, [SA-07]): the developer realm only, hashed by Fin's argon2id.
-    // Sign-up stays Fin's own route (/sign-up/email is blocked); a reset ends every session.
+    // Sign-up stays Fin's own route (/sign-up/email is blocked). A reset ends every session, in
+    // Fin's after-hook rather than the library's, so each session deleted is one with its event
+    // (passwords/flows.ts).
     emailAndPassword:
       developer && settings.features.passwords
         ? {
@@ -235,7 +237,7 @@ export function buildAuthOptions(rt: RealmRuntime, db: PgFinDatabase): BetterAut
             maxPasswordLength: PASSWORD_MAX_LENGTH,
             requireEmailVerification: true,
             autoSignIn: false,
-            revokeSessionsOnPasswordReset: true,
+            revokeSessionsOnPasswordReset: false,
             password: {
               hash: (password: string) => rt.passwords.hash(password),
               verify: (input: { hash: string; password: string }) => verifyWithWaiver(rt, input),
@@ -456,6 +458,20 @@ export function createRealm(deps: RealmDeps): Realm {
       finishLine(rt, state, refused.status);
       return refused;
     }
+    // A request that may hash holds its client for its whole unit, also while it waits on rows
+    // other requests hold across their hashes, so it is admitted before it takes one, and answered
+    // 503 with Retry-After when the admitted ones hold every client hashing may hold (hasher.ts).
+    let admitted: (() => void) | null = null;
+    if (PASSWORD_HASHING_PATHS.has(rule.path)) {
+      try {
+        admitted = rt.passwords.admit();
+      } catch (error) {
+        if (!(error instanceof AuthRefusal)) throw error;
+        const refused = problem(state, error);
+        finishLine(rt, state, refused.status);
+        return refused;
+      }
+    }
     let response: Response;
     try {
       const answer = await rt.db.unit(
@@ -492,6 +508,9 @@ export function createRealm(deps: RealmDeps): Realm {
       });
     } catch (error) {
       response = failureResponse(rt, state, error);
+    } finally {
+      // The unit has committed or rolled back, and its client is back in the pool.
+      admitted?.();
     }
     finishLine(rt, state, response.status);
     return response;

@@ -4,14 +4,21 @@
 // library calls `hash` and `verify` through `emailAndPassword.password`; Fin's sign-up calls the
 // same hasher, so every hash in the realm is made one way.
 //
-// Load shedding (ARCHITECTURE §3.5): a few hashes run at once and a short queue waits for a slot;
-// past either, the request is answered `503 unavailable` with `Retry-After`. The slots are two per
-// vCPU, and never more than the process can spare (hashSlots()):
-//   - libuv's thread pool, where `crypto.argon2` runs: hashes never take its last two threads, so
-//     a sign-in flood cannot starve the DNS lookups that `pg` and `fetch` need;
-//   - the database pool: a request holds one of its clients while it waits for a slot and while it
-//     hashes (the hash runs inside its unit of work, S2-04), so the slots and the queue together
-//     never hold the pool's last two clients, and a flood is answered 503 before the pool runs dry.
+// Load shedding (ARCHITECTURE §3.5), in two steps:
+//   - Admission. A request that may hash (a password sign-in, reset or change, a sign-up with a
+//     password) is admitted before its unit of work opens, and stays admitted until the unit ends.
+//     All that time it holds one of the database pool's clients (the hash runs inside the unit,
+//     S2-04), also while it waits on a row another request holds across its hash: its network's
+//     counters, its address's sign-up allowance, its address's lock. So at most `concurrency +
+//     queueLimit` requests are admitted at once, and the rest are answered `503 unavailable` with
+//     `Retry-After` before they take a client.
+//   - Slots. Among the admitted, a few hashes run at once and the others wait for a slot, for at
+//     most a second; past that wait (or a full queue), they too are answered 503.
+// The sizes are what the process can spare (hashSlots()): two hashes per vCPU, but never
+//   - more than libuv's thread pool less two threads, where `crypto.argon2` runs, so a sign-in
+//     flood cannot starve the DNS lookups that `pg` and `fetch` need;
+//   - so many admitted that they hold the database pool's last two clients, so a flood is answered
+//     503 before the pool runs dry and every other route keeps two clients.
 // This is the one thing in process memory that decides about a request, and it decides only about
 // load.
 import { availableParallelism } from "node:os";
@@ -20,11 +27,26 @@ import { DEFAULT_THREAD_POOL_SIZE } from "../config.ts";
 import { AuthRefusal } from "../errors.ts";
 import type { LineSink } from "../ports/log.ts";
 
+/**
+ * Why a password request was turned away for load: no room left among the admitted requests (or in
+ * the queue for a slot), a wait for a slot that ran out, or another sign-in of the same address
+ * being checked (passwords/flows.ts).
+ */
+export type BusyReason = "queue_full" | "queue_wait" | "address_busy";
+
 export interface PasswordHasher {
   hash(password: string): Promise<string>;
   verify(input: { hash: string; password: string }): Promise<boolean>;
-  /** Hashes running and waiting now (for tests and the health line). */
-  load(): { running: number; waiting: number };
+  /**
+   * Admits a request that may hash, before its unit of work opens. Returns the release, to call
+   * once the unit has ended (a second call does nothing). Refuses with `503 unavailable` and
+   * `Retry-After` when the requests admitted already hold every client hashing may hold.
+   */
+  admit(): () => void;
+  /** The `503 unavailable` for a password request turned away for load; writes its line. */
+  busy(reason: BusyReason): AuthRefusal;
+  /** Hashes running and waiting, and the requests admitted, now (for tests and the health line). */
+  load(): { running: number; waiting: number; admitted: number };
   /** The slots and the queue this hasher has (for tests and the health line). */
   readonly slots: HashSlots;
 }
@@ -40,7 +62,10 @@ export interface HashingLimits {
 export interface HashSlots {
   /** Hashes at once. */
   concurrency: number;
-  /** Requests that may wait for a slot; more are refused at once. */
+  /**
+   * Requests that may wait for a slot; more are refused at once. Admission lets in at most
+   * `concurrency + queueLimit` requests that may hash.
+   */
   queueLimit: number;
 }
 
@@ -74,7 +99,7 @@ export const DEFAULT_QUEUE_WAIT_MS = 1_000;
 export const DEFAULT_DATABASE_POOL_SIZE = 10;
 /** Threads of libuv's pool that hashes never take: DNS lookups and file reads run there too. */
 export const THREADS_KEPT_FREE = 2;
-/** Clients of the database pool that waiting and hashing requests never hold, for other routes. */
+/** Clients of the database pool that admitted requests never hold, for every other route. */
 export const CLIENTS_KEPT_FREE = 2;
 
 /** The queue a number of slots may have: four per slot, within the clients hashing may hold. */
@@ -85,9 +110,9 @@ function queueFor(limits: HashingLimits, concurrency: number): number {
 
 /**
  * The slots and the queue a process can spare (ARCHITECTURE §3.5): two hashes per vCPU, but never
- * more than libuv's thread pool less THREADS_KEPT_FREE, and never so many that the requests hashing
- * and waiting hold more than the database pool less CLIENTS_KEPT_FREE. Always at least one slot,
- * so passwords keep working on the smallest process.
+ * more than libuv's thread pool less THREADS_KEPT_FREE, and never so many that the requests
+ * admitted (the slots plus the queue) hold more than the database pool less CLIENTS_KEPT_FREE.
+ * Always at least one slot, so passwords keep working on the smallest process.
  */
 export function hashSlots(limits: HashingLimits, cpus: number = availableParallelism()): HashSlots {
   const concurrency = Math.max(
@@ -120,12 +145,30 @@ export function createPasswordHasher(options: PasswordHasherOptions): PasswordHa
   if (!Number.isInteger(queueLimit) || queueLimit < 0) {
     throw new Error("password hashing's queue cannot be negative");
   }
+  /** The requests that may hash at once, each holding a database client from start to end. */
+  const admissionLimit = concurrency + queueLimit;
+  let admitted = 0;
   let running = 0;
   const waiting: Waiter[] = [];
 
-  const busy = (reason: "queue_full" | "queue_wait"): AuthRefusal => {
+  const busy = (reason: BusyReason): AuthRefusal => {
     options.lines.write("auth.password_hash_busy", "warn", { reason });
-    return new AuthRefusal("unavailable", "passwords.busy", { retry_after: retryAfter });
+    return new AuthRefusal(
+      "unavailable",
+      reason === "address_busy" ? "passwords.address_busy" : "passwords.busy",
+      { retry_after: retryAfter },
+    );
+  };
+
+  const admit = (): (() => void) => {
+    if (admitted >= admissionLimit) throw busy("queue_full");
+    admitted += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      admitted -= 1;
+    };
   };
 
   const acquire = (): Promise<void> => {
@@ -171,7 +214,9 @@ export function createPasswordHasher(options: PasswordHasherOptions): PasswordHa
   return {
     hash: (password) => withSlot(() => work.hash(password)),
     verify: ({ hash, password }) => withSlot(() => work.verify(hash, password)),
-    load: () => ({ running, waiting: waiting.length }),
+    admit,
+    busy,
+    load: () => ({ running, waiting: waiting.length, admitted }),
     slots: { concurrency, queueLimit },
   };
 }

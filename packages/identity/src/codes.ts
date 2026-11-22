@@ -73,14 +73,14 @@ export interface LiveCodeRequest {
  * sign-up's own limits first (`sign_up_network`, then `sign_up_address`, which only sign-up takes);
  * then the network's limit (`code_send`, `code_sign_in` for a try, `password_sign_in` for a
  * password sign-in); then this lock; then the address's code limits (`code_send` for the address,
- * the strangers' share and the allowance of code emails, and their pause), its requests, its
- * password counts and pauses (passwords/pause.ts), and a password reset's person row. Nothing per
- * address comes before this lock but `sign_up_address`, which no unit takes after it, no unit takes
- * two addresses' locks, so a shared slot adds no circle either, and no path that holds a person's
- * row takes this lock after it. One row can come first: the gate deletes the request's own session
- * when its factor step has lapsed, before the path's own rules run. Should a reset of that same
- * person hold this lock then, the two wait on each other; Postgres refuses one of them as a
- * deadlock, and that request can be sent again.
+ * the strangers' share and the allowance of code emails, and their pause), its requests, and its
+ * password counts and pauses (passwords/pause.ts). Nothing per address comes before this lock but
+ * `sign_up_address`, which no unit takes after it, and no unit takes two addresses' locks, so a
+ * shared slot adds no circle either. A password sign-in never waits for this lock at all
+ * (tryLockAddress()). One row can come first: the gate deletes the request's own session when its
+ * factor step has lapsed, before the path's own rules run. Should a reset of that same person,
+ * holding this lock, then come to end that session, the two wait on each other; Postgres refuses
+ * one of them as a deadlock, and that request can be sent again.
  */
 export async function lockAddress(
   db: Queryable,
@@ -92,6 +92,30 @@ export async function lockAddress(
     [addressLockSlot(deps.hasher, email)],
   );
   if (locked.rowCount !== 1) throw new Error("identity.email_code_lock is missing an address slot");
+}
+
+/**
+ * lockAddress() without the wait, for a password sign-in (passwords/flows.ts): true when this unit
+ * now holds the address's lock until it ends, false when another unit holds it. A sign-in holds its
+ * database client from the start of its unit to its end and holds this lock across its password
+ * check, so one that waited here would queue behind every other sign-in of the address, each check
+ * in turn, holding clients the hasher never counts; it is answered `503` instead. Only a locked
+ * slot is skipped: a missing one still fails the unit.
+ */
+export async function tryLockAddress(
+  db: Queryable,
+  deps: { hasher: KeyedHasher },
+  email: string,
+): Promise<boolean> {
+  const slot = addressLockSlot(deps.hasher, email);
+  const locked = await db.query(
+    "SELECT slot FROM identity.email_code_lock WHERE slot = $1 FOR UPDATE SKIP LOCKED",
+    [slot],
+  );
+  if (locked.rowCount === 1) return true;
+  const exists = await db.query("SELECT 1 FROM identity.email_code_lock WHERE slot = $1", [slot]);
+  if (exists.rowCount !== 1) throw new Error("identity.email_code_lock is missing an address slot");
+  return false;
 }
 
 /** The number of slots in `identity.email_code_lock` (its migration makes exactly these). */

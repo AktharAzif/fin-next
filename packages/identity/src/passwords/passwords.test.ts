@@ -150,17 +150,64 @@ describe("the password hasher", () => {
     });
     const results = [1, 2, 3].map((n) => hasher.hash(`p${n}`));
     await tick();
-    expect(hasher.load()).toEqual({ running: 2, waiting: 1 });
+    expect(hasher.load()).toEqual({ running: 2, waiting: 1, admitted: 0 });
     pending.shift()?.();
     await results[0];
     await tick();
-    expect(hasher.load()).toEqual({ running: 2, waiting: 0 });
+    expect(hasher.load()).toEqual({ running: 2, waiting: 0, admitted: 0 });
     while (pending.length > 0) {
       pending.shift()?.();
       await tick();
     }
     expect(await Promise.all(results)).toEqual(["hashed:p1", "hashed:p2", "hashed:p3"]);
-    expect(hasher.load()).toEqual({ running: 0, waiting: 0 });
+    expect(hasher.load()).toEqual({ running: 0, waiting: 0, admitted: 0 });
+  });
+
+  it("admits at most the slots plus the queue, and refuses the rest with 503 before they start", () => {
+    const lines = new MemoryLineSink();
+    // The console's sizes: six slots and two waiting, so eight requests that may hash at once.
+    const hasher = createPasswordHasher({
+      lines,
+      limits: { threadPoolSize: 8, databasePoolSize: 10 },
+      concurrency: 6,
+      retryAfterSeconds: 2,
+    });
+    expect(hasher.slots).toEqual({ concurrency: 6, queueLimit: 2 });
+    const releases = Array.from({ length: 8 }, () => hasher.admit());
+    expect(hasher.load()).toEqual({ running: 0, waiting: 0, admitted: 8 });
+    let refused: unknown = null;
+    try {
+      hasher.admit();
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(AuthRefusal);
+    expect(refused).toMatchObject({
+      code: "unavailable",
+      status: 503,
+      lineReason: "passwords.busy",
+      extensions: { retry_after: 2 },
+    });
+    expect(lines.named("auth.password_hash_busy")).toEqual([{ reason: "queue_full" }]);
+    // A release frees one place, once: a second call of the same release changes nothing.
+    releases[0]?.();
+    releases[0]?.();
+    expect(hasher.load().admitted).toBe(7);
+    const again = hasher.admit();
+    expect(() => hasher.admit()).toThrow(AuthRefusal);
+    for (const release of [again, ...releases.slice(1)]) release();
+    expect(hasher.load()).toEqual({ running: 0, waiting: 0, admitted: 0 });
+  });
+
+  it("names a sign-in turned away while another of its address is checked", () => {
+    const lines = new MemoryLineSink();
+    const hasher = createPasswordHasher({ lines, retryAfterSeconds: 3 });
+    expect(hasher.busy("address_busy")).toMatchObject({
+      code: "unavailable",
+      lineReason: "passwords.address_busy",
+      extensions: { retry_after: 3 },
+    });
+    expect(lines.named("auth.password_hash_busy")).toEqual([{ reason: "address_busy" }]);
   });
 
   it("refuses with 503 and Retry-After past a full queue, and writes its line", async () => {
@@ -197,10 +244,10 @@ describe("the password hasher", () => {
     const waited = hasher.hash("b");
     await expect(waited).rejects.toBeInstanceOf(AuthRefusal);
     expect(lines.named("auth.password_hash_busy")).toEqual([{ reason: "queue_wait" }]);
-    expect(hasher.load()).toEqual({ running: 1, waiting: 0 });
+    expect(hasher.load()).toEqual({ running: 1, waiting: 0, admitted: 0 });
     pending.shift()?.();
     await first;
-    expect(hasher.load()).toEqual({ running: 0, waiting: 0 });
+    expect(hasher.load()).toEqual({ running: 0, waiting: 0, admitted: 0 });
   });
 });
 
@@ -343,7 +390,8 @@ describe("the realm with passwords on", () => {
       maxPasswordLength: 128,
       requireEmailVerification: true,
       autoSignIn: false,
-      revokeSessionsOnPasswordReset: true,
+      // A reset ends every session in Fin's after-hook, one event per session it deleted.
+      revokeSessionsOnPasswordReset: false,
     });
     expect(ctx.password.config).toMatchObject({ minPasswordLength: 12, maxPasswordLength: 128 });
   });

@@ -7,8 +7,11 @@
 // - **Sign-in.** It takes the address's lock first (codes.ts), the one a reset takes, so a sign-in
 //   and a reset of one address take turns: a sign-in that read the old password never commits a
 //   session after the reset that ended them all, and each try sees the count and the pause the try
-//   before it left. Then the address's pause (passwords/pause.ts), for browsers its account does
-//   not know. A right password makes an `aal1` session that never proves the mailbox,
+//   before it left. It never waits for that lock: a sign-in that finds it held (another sign-in of
+//   the address being checked, a reset, a code) is answered `503` at once, so one address's tries
+//   never queue on it, each holding a database client (passwords/hasher.ts). Then the address's
+//   pause (passwords/pause.ts), for browsers its account does not know. A right password makes an
+//   `aal1` session that never proves the mailbox,
 //   so a password alone never enrols a first factor (§6.3); a person with a factor is at the factor
 //   step, exactly as after a code sign-in (§6.2), unless a live trusted browser of theirs holds the
 //   session (§6.6). That session is kept: the library's two-factor plugin would replace it with its
@@ -16,12 +19,14 @@
 //   one path, the signed-in one, with its replay, lockout and audit rules (S2-07).
 // - **Reset.** A code, emailed to the address, sent and tried under the emailed-code rules of §5.2
 //   with its own live request, tries and allowances (codes.ts, purpose `password_reset`). It works
-//   only in the browser that asked for it. Every session of the person ends (their row is held
-//   from before the sessions are read until commit, so none is made in between), their trusted
-//   browsers are revoked, every known browser but the one that reset is forgotten (a browser that
-//   once signed in with the old password no longer escapes the pause), the authenticator lockout
-//   and the address's pauses lift, and `sign-in-methods-changed` (kind `password_reset`) tells
-//   them. The same answer for every address.
+//   only in the browser that asked for it. Every session of the person ends (Fin deletes them
+//   itself, after the new password is written, and writes `session.ended` for exactly the ones the
+//   delete returned), their trusted browsers are revoked, every known browser but the one that
+//   reset is forgotten (a browser that once signed in with the old password no longer escapes the
+//   pause), the authenticator lockout and the address's pauses lift, and
+//   `sign-in-methods-changed` (kind `password_reset`) tells them. The same answer for every address.
+// - **Load.** Each path that may hash is admitted by the hasher before its unit of work opens
+//   (PASSWORD_HASHING_PATHS, passwords/hasher.ts).
 // - **Change.** With a step-up intent (`account.password_change`, §7.6) and the current password.
 // - **Factor changes.** The library re-asks a person with a password for it before an
 //   authenticator or backup-code change; Fin's step-up stands in for that (see RECHECKED_PATHS).
@@ -31,7 +36,7 @@ import {
   markTrustedBrowserUsed,
   trustedBrowserOf,
 } from "../browsers.ts";
-import { attemptCode, lockAddress, markCodeUsed, requestCode } from "../codes.ts";
+import { attemptCode, markCodeUsed, requestCode, tryLockAddress } from "../codes.ts";
 import { finCookieAttributes, finCookieName } from "../cookies.ts";
 import { constantTimeEqual, randomToken } from "../crypto/keyed.ts";
 import { AuthRefusal } from "../errors.ts";
@@ -49,7 +54,7 @@ import {
 import type { UnitTx } from "../ports/db.ts";
 import type { PasswordRequest, RequestState } from "../request.ts";
 import type { RealmRuntime } from "../runtime.ts";
-import { factorFacts, personByEmail, personById } from "../store.ts";
+import { factorFacts, personByEmail } from "../store.ts";
 import {
   countWrongPassword,
   liftFactorLockout,
@@ -71,6 +76,18 @@ export const PASSWORD_BODY_FIELDS: Readonly<Record<string, readonly string[]>> =
 export function isPasswordPath(path: string): boolean {
   return Object.hasOwn(PASSWORD_BODY_FIELDS, path);
 }
+
+/**
+ * The library paths whose requests may hash a password inside their unit of work: the realm has
+ * each admitted by the hasher before the unit opens (passwords/hasher.ts). Fin's sign-up with a
+ * password is admitted the same way (sign-up.ts). The two-factor paths' password re-check never
+ * hashes: Fin's stand-in answers it (RECHECKED_PATHS).
+ */
+export const PASSWORD_HASHING_PATHS: ReadonlySet<string> = new Set([
+  "/sign-in/email",
+  "/email-otp/reset-password",
+  "/change-password",
+]);
 
 /** What the after-hook lends this module (they live beside the hook's other cases). */
 export interface AfterHelpers {
@@ -160,7 +177,6 @@ function newRequest(email: string, person: PasswordRequest["person"]): PasswordR
     facts: null,
     codeRequestId: null,
     hadPassword: false,
-    sessionIds: [],
   };
 }
 
@@ -204,10 +220,13 @@ async function signInBefore(
   }
   // The address's lock, held until commit, after the network's `password_sign_in` limit and
   // before anything about the address is read (lockAddress's order). A reset holds it from its
-  // code's try to its commit, so the library reads the password the reset left, or the reset reads
-  // the session this sign-in made and ends it; and a wrong try's count and pause commit before the
-  // next try of the address reads them, so tries sent together cannot pass the pause together.
-  await lockAddress(tx, rt, email);
+  // code's try to its commit, so this sign-in never reads the password a reset is replacing, and a
+  // reset waits for this sign-in and ends the session it made; and a wrong try's count and pause
+  // commit before the next try of the address reads them, so tries sent together cannot pass the
+  // pause together. Taken without waiting: held by another unit, the answer is 503 at once (the
+  // same for every address, before anything about it is read), and nothing queues on the lock
+  // holding a client while each sign-in ahead is checked in turn.
+  if (!(await tryLockAddress(tx, rt, email))) throw rt.passwords.busy("address_busy");
   const person = await personOf(tx, email);
   const request = newRequest(email, person);
   // Read for every address alike, so the pause and its answer say nothing about who has an account.
@@ -331,21 +350,13 @@ async function resetBefore(
   const request = newRequest(email, person);
   request.codeRequestId = attempt.requestId;
   if (person !== null) {
-    // The person's row, held until commit (after the address's lock, as every path takes them): a
-    // session made for them by any other path (a passkey, say) waits for this reset to commit, so
-    // the sessions read here are exactly the ones the library ends, each with its event.
-    await personById(tx, "developer", person.id, { lock: true });
+    // Read before the library writes the new password: a reset, or a first password.
     const account = await tx.query<{ has: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM identity.account
                        WHERE user_id = $1 AND provider_id = 'credential' AND password IS NOT NULL) AS has`,
       [person.id],
     );
     request.hadPassword = account.rows[0]?.has === true;
-    const sessions = await tx.query<{ id: string }>(
-      "SELECT id FROM identity.session WHERE user_id = $1 ORDER BY created_at, id",
-      [person.id],
-    );
-    request.sessionIds = sessions.rows.map((r) => r.id);
   }
   state.password = request;
   return undefined;
@@ -520,6 +531,26 @@ async function passwordReset(
   if (person === null) return;
   const now = rt.clock.now();
   if (request.codeRequestId !== null) await markCodeUsed(tx, request.codeRequestId, now);
+  // The authenticator lockout first, then the sessions: the order the factor step, a step-up and a
+  // wrong code take them in (hooks/after.ts and hooks/shared.ts touch the lockout before the
+  // session), so this person's factor step in another browser and this reset never wait on each
+  // other in a circle. Finishing an authenticator's set-up is the one path the other way round
+  // (the library replaces its session before the after-hook clears the lockout): should it run in
+  // another browser in the very instant this reset ends the sessions, Postgres refuses one of the
+  // two as a deadlock, and that request can be sent again (as lockAddress's residual).
+  await liftFactorLockout(tx, rt, factorLockKey(state, person.id));
+  // Every session ends here, not in the library (revokeSessionsOnPasswordReset is off): the ones
+  // this delete returns are exactly the ones ended, each with its event. A session another unit is
+  // changing is waited for and ended as it commits. One committed after this delete began stays:
+  // a passkey sign-in (which takes no address lock), or the session a passkey step-up or an
+  // authenticator change put in place of an older one at that very instant, each made with a
+  // factor of the person's. Holding no row of the person's, the reset never stops a session from
+  // being made or changed meanwhile (a lock there deadlocked with the person's own factor step).
+  const ended = await tx.query<{ id: string }>(
+    "DELETE FROM identity.session WHERE user_id = $1 RETURNING id",
+    [person.id],
+  );
+  const sessionIds = ended.rows.map((r) => r.id).sort();
   const account = await tx.query<{ id: string }>(
     "SELECT id FROM identity.account WHERE user_id = $1 AND provider_id = 'credential'",
     [person.id],
@@ -532,10 +563,9 @@ async function passwordReset(
       ...account.rows.map((r) => r.id),
       ...(request.codeRequestId === null ? [] : [request.codeRequestId]),
     ],
-    metadata: { sessionsEnded: request.sessionIds.length },
+    metadata: { sessionsEnded: sessionIds.length },
   });
-  // The library ended every session in this unit (revokeSessionsOnPasswordReset); each says why.
-  for (const sessionId of request.sessionIds) {
+  for (const sessionId of sessionIds) {
     await audit(rt, tx, state, {
       event: "session.ended",
       personId: person.id,
@@ -544,18 +574,18 @@ async function passwordReset(
       metadata: { reason: "password_reset" },
     });
   }
-  await revokeTrust(rt, tx, state, person.id, "password_reset");
   // A known browser is never paused (§5.5, §5.7), and any sign-in makes one, so a browser that
   // signed in with the old password would keep guessing the new one with no pause. Every known
   // browser but this one is forgotten, as "sign out everywhere else" does (§11.4): this browser
-  // proved the mailbox with the emailed code just now.
+  // proved the mailbox with the emailed code just now. Known browsers before trusted ones, the
+  // order "sign out everywhere else" (sessions.ts) and the factor step take them in.
   await forgetKnownBrowsersExcept(
     tx,
     rt.hasher,
     person.id,
     tokenCookie(ctx, finCookieName("developer", "known_browser")),
   );
-  await liftFactorLockout(tx, rt, factorLockKey(state, person.id));
+  await revokeTrust(rt, tx, state, person.id, "password_reset");
   await liftPasswordPauses(tx, rt, request.email);
   await notify(rt, tx, "identity/sign-in-methods-changed", person.email, {
     userId: person.id,

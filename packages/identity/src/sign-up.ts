@@ -48,6 +48,27 @@ export async function signUp(
 ): Promise<SignUpAnswer> {
   if (realm.settings.realm !== "developer") throw new Error("signUp is the developer realm's");
   const rt = realm.runtime;
+  // A password is hashed inside the unit, after the sign-up limits and the address's lock that
+  // other sign-ups of the address or the network wait on, each holding a client: so a sign-up with
+  // one is admitted before its unit opens, and answered 503 when the admitted ones hold every
+  // client hashing may hold (passwords/hasher.ts). The same for every address.
+  const hashes =
+    input.password !== undefined && input.password !== null && rt.settings.features.passwords;
+  const admitted = hashes ? rt.passwords.admit() : null;
+  try {
+    return await signUpUnit(realm, request, context, input);
+  } finally {
+    admitted?.();
+  }
+}
+
+async function signUpUnit(
+  realm: Realm,
+  request: Request,
+  context: RequestContext,
+  input: { name: unknown; email: unknown; password?: unknown },
+): Promise<SignUpAnswer> {
+  const rt = realm.runtime;
   return realm.run(context, async (tx, state) => {
     if ((await rt.killSwitch(tx, "signups")) === "on")
       throw new AuthRefusal("paused", "switch.signups");

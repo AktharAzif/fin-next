@@ -105,8 +105,6 @@ export interface PasswordRequest {
   codeRequestId: string | null;
   /** Reset: whether the account had a password before (a reset) or not (a first password). */
   hadPassword: boolean;
-  /** Reset: the sessions that were live before; the library ends them all. */
-  sessionIds: readonly string[];
 }
 
 export function newRequestState(realm: RealmName, context: RequestContext): RequestState {
