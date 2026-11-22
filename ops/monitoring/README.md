@@ -21,9 +21,15 @@ and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a 
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
 wake the owner) that names the alert back. MC-01 reads every telemetry writer the code uses
 (`log`, `telemetry.logUnit`, `lines.write`, `log.write({ event })`, `run.line`, raw
-`JSON.stringify` lines), and a name passed in a variable from the variable's declaration in the
-same file; a writer passed a name it cannot read is a finding. Its one exclusion rule, and why it
-cannot hide an event, is at `eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
+`JSON.stringify` lines), and a name passed in a variable from the declaration that binds it where
+the call stands (a `const`, a `let` never assigned again, a `for … of` over strings). A telemetry
+writer passed a name it cannot read whole is a finding: an import, a `this.` member, a helper's or
+a callback's parameter, a value only partly literal, a name built at run time. Only a forwarding
+adapter's first parameter, a parameter list and a message (a string that cannot be a name, such
+as one with a space) give no name.
+The rule in full, its one exclusion and why that cannot hide an event, and what a lexical scan
+cannot see (a writer under another name, a raw line's `event` that is not a literal) are at
+`eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
 (a line list's `alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the
 catalogue (an entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text)
 gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due date, and

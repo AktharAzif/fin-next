@@ -354,6 +354,20 @@ describe("monitoring:check refuses", () => {
         'lines.write(on ? "edge.inline_on" : "edge.inline_off", "info", {});',
         'o.log?.("edge.optional_call", {});',
         'for (const each of ["edge.loop_a", "edge.loop_b"]) lines.write(each, "info", {});',
+        // A module constant declared below the function that writes it.
+        "function late(deps: Deps) {",
+        '  deps.lines.write(LATE, "warn", {});',
+        "}",
+        'const LATE = "edge.late";',
+        // A receiver with a non-null assertion, and an object's `event` in shorthand.
+        "function bang(deps: Deps) {",
+        '  const name = "edge.bang";',
+        '  deps.lines!.write(name, "warn", {});',
+        "}",
+        "function shorthand(context: Context) {",
+        '  const event = "edge.shorthand";',
+        '  context.log.write({ event, level: "warn", fields: {} });',
+        "}",
       ].join("\n"),
     );
     expect(rules(root, { scanCode: true })).toEqual([
@@ -365,6 +379,111 @@ describe("monitoring:check refuses", () => {
       'MC-01 o.log("edge.optional_call") is not catalogued',
       'MC-01 lines.write(each: "edge.loop_a") is not catalogued',
       'MC-01 lines.write(each: "edge.loop_b") is not catalogued',
+      'MC-01 lines.write(LATE: "edge.late") is not catalogued',
+      'MC-01 lines.write(name: "edge.bang") is not catalogued',
+      'MC-01 log.write({ event: "edge.shorthand" }) is not catalogued',
+    ]);
+  });
+
+  it("every shape of a name MC-01 cannot read is a finding, never a skip or a part read (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        'import { SWITCH_SET } from "./events.ts";',
+        'import * as names from "./names.ts";',
+        // A `let` assigned again after its declaration.
+        "function reassigned(deps: Deps, failed: boolean) {",
+        '  let event = "edge.ok";',
+        '  if (failed) event = "edge.failed";',
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        // A destructured loop, and a `for … in`.
+        'for (const [pair, level] of [["edge.pair_a", "warn"]]) lines.write(pair, level, {});',
+        'for (const key in NAMES) lines.write(key, "warn", {});',
+        // Imported names.
+        'lines.write(SWITCH_SET, "warn", {});',
+        'lines.write(names.failed, "warn", {});',
+        // A class field, read through `this`.
+        "class Probe {",
+        '  readonly event = "edge.field";',
+        "  run(deps: Deps) {",
+        '    deps.lines.write(this.event, "warn", {});',
+        "  }",
+        "}",
+        // A literal beside something that is not one: a ternary, `??`, a join.
+        'const either = failed ? "edge.failed" : okEvent;',
+        'lines.write(either, "warn", {});',
+        'lines.write(ok ? "edge.inline_ok" : other, "warn", {});',
+        'lines.write(name ?? "edge.default", "warn", {});',
+        'lines.write("edge.sign_in" + (failed ? "_failed" : ""), "warn", {});',
+        // Dotted strings that are not in the event-name shape.
+        'lines.write("edge.sign-in", "warn", {});',
+        'lines.write("edge.Failed", "warn", {});',
+        // A member other than `event`.
+        'const pair2 = { event: "edge.first", alt: "edge.second" };',
+        'lines.write(pair2.alt, "warn", {});',
+        // A helper's parameter, a callback's, and one with a default.
+        "function note(deps: Deps, event: string) {",
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        'run().catch((reason) => lines.write(reason, "error", {}));',
+        'function fallback(deps: Deps, event = "edge.default_param") {',
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        // An object whose `event` changes after it is declared, and a spread after the key.
+        "function mutated(context: Context) {",
+        '  const line: Line = { event: "csrf.refused", level: "warn", fields: {} };',
+        '  line.event = "edge.mutated";',
+        "  context.log.write(line);",
+        "}",
+        'context.log.write({ event: "csrf.refused", level: "error", fields: {}, ...override });',
+        // A call that holds a literal; a comment is no declaration.
+        "function held(deps: Deps) {",
+        '  const event = pick(kind, "csrf.refused");',
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        "function commented(deps: Deps) {",
+        "  const event = nameOf(kind);",
+        '  // was: const event = "csrf.refused";',
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        // Another function's declaration does not bind this one's parameter.
+        "function one() {",
+        '  const event = "request";',
+        "}",
+        "function two(deps: Deps, event: string) {",
+        '  deps.lines.write(event, "warn", {});',
+        "}",
+        // A name the file never binds.
+        'lines.write(nowhere, "warn", {});',
+      ].join("\n"),
+    );
+    const cannot = "writes a name MC-01 cannot read: write the event's name as a literal";
+    expect(rules(root, { scanCode: true })).toEqual([
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 lines.write(pair) ${cannot}`,
+      `MC-01 lines.write(key) ${cannot}`,
+      `MC-01 lines.write(SWITCH_SET) ${cannot}`,
+      `MC-01 lines.write(names.failed) ${cannot}`,
+      `MC-01 lines.write(this.event) ${cannot}`,
+      `MC-01 lines.write(either) ${cannot}`,
+      `MC-01 lines.write(ok ? "edge.inline_ok" : other) ${cannot}`,
+      `MC-01 lines.write(name ?? "edge.default") ${cannot}`,
+      `MC-01 lines.write("edge.sign_in" + (failed ? "_failed" : "")) ${cannot}`,
+      `MC-01 lines.write("edge.sign-in") ${cannot}`,
+      `MC-01 lines.write("edge.Failed") ${cannot}`,
+      `MC-01 lines.write(pair2.alt) ${cannot}`,
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 lines.write(reason) ${cannot}`,
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 log.write(line) ${cannot}`,
+      `MC-01 log.write({ event: "csrf.refused", level: "error", fields: {}, ...o…) ${cannot}`,
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 lines.write(event) ${cannot}`,
+      `MC-01 lines.write(nowhere) ${cannot}`,
     ]);
   });
 
@@ -404,6 +523,21 @@ describe("monitoring:check refuses", () => {
         "  ): void;",
         "}",
         'this.line("", text);',
+        // Messages joined to more, a call in a comment or a string, and adapters' methods.
+        'this.line("warning: " + text);',
+        'log("count: " + count + ".");',
+        '// lines.write(event, "warn", {});',
+        'const doc = "lines.write(event)";',
+        "class Sink {",
+        "  write(event: string, level: Level, fields: Fields) {",
+        "    this.format(event, fields, level);",
+        "  }",
+        "}",
+        "const untyped = {",
+        "  write(event, level, fields) {",
+        "    telemetry.log(event, fields, level);",
+        "  },",
+        "};",
       ].join("\n"),
     );
     const cannot = "writes a name MC-01 cannot read: write the event's name as a literal";

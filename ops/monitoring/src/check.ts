@@ -209,39 +209,64 @@ function walk(root: string, dir: string, out: string[]): void {
 //   3. a raw line: an `event: "x.y"` property anywhere inside `JSON.stringify(…)` (a process that
 //      writes before its telemetry exists: config.invalid, process.mode_refused, migrate's config
 //      failure; tools/static-deploy's lines).
-// The writer methods are log, logUnit, logLocal, line, write and format (private `#` ones too); the
-// name is a string literal in the event-name shape. A call's writer is the identifier before the
-// method's dot (`rt.lines.write` is `lines`, `this.o.log.log` is `log`), or the function itself
-// for a bare call (`log("x.y")` is `log`).
+// The writer methods are log, logUnit, logLocal, line, write and format (private `#` ones too). A
+// call's writer is the identifier before the method's dot (`rt.lines.write` is `lines`,
+// `this.o.log.log` is `log`, `deps.lines!.write` is `lines`), or the function itself for a bare
+// call (`log("x.y")` is `log`). An optional call (`o.log?.("x.y")`) is a call; text in a comment or
+// a string is not.
 //
-// One rule drops a match, and only one: its writer is not a telemetry writer (`lines`, `log`,
-// `telemetry`, `run`, or `this`, a writer's call on itself) AND its name is one word, with no dot.
-// Both must hold. That drops ops/fin's stream writer, `write("stdout", …)` and
-// `write("stderr", …)`, and CSS's `format("woff2")` in the token generator. It cannot hide a real
-// event: every event Fin writes is `<area>.<name>`, with a dot, except spec 01 §8.9's `request`,
-// and a dotted name counts through any of the six methods whoever the writer; `request` is written
-// only through telemetry writers (`telemetry.log`, `lines.write`), and PHASE0_EVENTS makes the
-// catalogue hold it whatever the scan finds. An optional call (`o.log?.("x.y")`) is a call.
+// A telemetry writer is one of `lines`, `log`, `telemetry`, `run`, or `this` (a writer's call on
+// itself). Through any other writer a call counts only with a string literal name, or an object's
+// literal `event`, and one rule drops even that: a name of one word, with no dot. That drops
+// ops/fin's stream writer, `write("stdout", …)` and `write("stderr", …)`, and CSS's
+// `format("woff2")` in the token generator. It cannot hide a real event: every event Fin writes is
+// `<area>.<name>`, with a dot, except spec 01 §8.9's `request`, and a dotted name counts through
+// any writer; `request` is written only through telemetry writers (`telemetry.log`,
+// `lines.write`), and PHASE0_EVENTS makes the catalogue hold it whatever the scan finds.
 //
-// A telemetry writer's call whose first argument is not a literal is read, or refused, so that no
-// name is skipped in silence:
-//   - a variable (`lines.write(event, …)`, `log.write(line)`, `telemetry.log(line.event, …)`)
-//     declared in the same file with `const`, `let` or `var` is read from the nearest declaration
-//     before the call (its value, or a `for … of` loop's list): an object's own `event` key, the
-//     whole value when it is one string literal, or every dotted string literal in it
-//     (`const event = on ? "switch.set" : "switch.cleared"` gives both). A declaration that gives
-//     no name (`let event;` assigned later, a destructured one), a call or another expression that
-//     holds no dotted literal, an object without a literal `event` key, and a name built from a
-//     string (`` `switch.${state}` ``, `"switch." + state`) are each an MC-01 finding: write the
-//     name as a literal;
-//   - a variable the file does not declare is a parameter: a forwarding adapter (apps' telemetry
-//     sinks, packages/server's own `format(event, …)`), whose callers' names the scan reads where
-//     they call it; a parameter list (`log(event: string, …)`) is a declaration, not a call; a
-//     string that is not a name (`this.line("", text)`, a message) is no line's name.
-// A name built at run time by its callers (telemetry.bad_event, the formatter's substitute), or a
-// writer reached another way (a computed key, an alias, a wrapper the scan does not know), is beyond
-// a lexical scan: a review finding, as for imports:check (BD-19).
+// A telemetry writer's first argument is read whole, and gives names, no name, or an MC-01
+// finding ("write the event's name as a literal"):
+//   - a string literal, or a ternary whose every branch is one, gives each string that has the
+//     event-name shape; a string with a space, or one out of the shape with no dot (`""`,
+//     `"Done"`), is a message and gives no name; a dotted string without a space that is out of
+//     the shape (`"edge.sign-in"`), or names beside messages, is a finding;
+//   - an object literal gives its own `event` key's value, read as above; no `event` key, a
+//     spread after it, or a value that is not a literal, is a finding;
+//   - a variable, or its `.event` (`lines.write(event, …)`, `log.write(line)`,
+//     `telemetry.log(line.event, …)`), is read from the declaration that binds it where the call
+//     stands: searched in the whole file, above or below the call, by its scope (a block, a
+//     function's parameters, the module), never in a comment. It is read when it is a `const`, or
+//     a `let` or `var` the file never assigns again, whose value is read as above (an object
+//     whose `event` is never assigned again), or a `for (const x of [...])` over strings. A
+//     parameter gives no name only as a forwarding adapter's: the first parameter of a function,
+//     method or property named as a writer method (`write: (event, level, fields) =>
+//     telemetry.log(event, …)`, packages/server's `log(event, …) { this.format(event, …) }`),
+//     whose callers' names the scan reads where they call it. Any other binding is a finding: an
+//     import, a `this.` or `#` member, any other parameter (a helper's, a callback's, one with a
+//     default), a destructured or `for … in` one, `let x;`, a `let` assigned again, an object
+//     whose `event` is assigned again, any member but `.event`, or a name the file never binds;
+//   - anything else is a name built at run time (`` `switch.${state}` ``, `"switch." + state`, a
+//     call, `name ?? "x.y"`, a ternary with a branch that is not a string) and is a finding, but
+//     for a message: a template, or a `+` join with no alternatives in it, whose literal part
+//     holds a space (a name never does);
+//   - a parameter list (`log(event: string, …)`, a method's own) is a declaration, not a call.
+// What a lexical scan cannot see is a review finding, as for imports:check (BD-19): a writer
+// reached under another name (an alias such as `installed.log` or `sink.write`, a receiver that is
+// no identifier such as `getLines().write`, a computed key), so an adapter's callers are read only
+// where they call it by a writer's name; an object changed through another reference or by a
+// destructuring assignment; a raw line's `event` that is not a string literal (JSON.stringify
+// builds other things than lines, so it is not a finding); a name built at run time by its callers
+// (telemetry.bad_event, the formatter's substitute); and code the lexer misreads (a regular
+// expression it takes for a division, JSX text).
 const WRITER_CALL = /(?<![\w$#])#?(log|logUnit|logLocal|line|write|format)(?:\?\.)?\(/g;
+const WRITER_METHODS: ReadonlySet<string> = new Set([
+  "log",
+  "logUnit",
+  "logLocal",
+  "line",
+  "write",
+  "format",
+]);
 const TELEMETRY_WRITERS: ReadonlySet<string> = new Set([
   "lines",
   "log",
@@ -338,7 +363,10 @@ function ownKeys(text: string, open: number): string | undefined {
   return `${out}}`;
 }
 
-/** The event a call's first argument names: a string literal, or an object's own `event` key. */
+/**
+ * Another writer's call: the event its first argument names, a string literal or an object's own
+ * literal `event` key (see the rule above).
+ */
 function firstArgument(text: string, from: number): { name: string; object: boolean } | undefined {
   let i = from;
   while (/\s/.test(text[i] ?? "")) i++;
@@ -360,7 +388,7 @@ function receiverOf(text: string, at: number): string | undefined {
   while (/\s/.test(text[i] ?? "")) i--;
   if (text[i] !== ".") return undefined;
   i--;
-  if (text[i] === "?") i--;
+  if (text[i] === "?" || text[i] === "!") i--;
   while (/\s/.test(text[i] ?? "")) i--;
   let start = i;
   while (/[\w$#]/.test(text[start] ?? "")) start--;
@@ -373,111 +401,580 @@ function lineAt(text: string, index: number): number {
   return line;
 }
 
-/** The end of the expression starting at `from`: the first `,`, `;` or unmatched closer at depth 0. */
-function expressionEnd(text: string, from: number): number {
-  for (let i = from; i < text.length; i++) {
-    const skip = skipped(text, i);
-    if (skip !== undefined) {
-      if (skip < 0) return text.length;
-      i = skip;
-      continue;
-    }
+/** A file as the telemetry writers' reader sees it (see the rule above). */
+interface Source {
+  readonly file: string;
+  readonly text: string;
+  /** The text with comments blanked to spaces, and strings and regular expressions to `"`. */
+  readonly code: string;
+  /** Each bracket's index in `code`, and the index just past the bracket that closes it. */
+  readonly pairs: ReadonlyMap<number, number>;
+  /** The functions, found once when first needed. */
+  functions?: readonly CodeFunction[];
+}
+
+/** A function, method or arrow: its name (or ""), its parameters and its body, as [start, end). */
+interface CodeFunction {
+  readonly name: string;
+  readonly params: readonly [number, number];
+  readonly body: readonly [number, number];
+}
+
+/** Whether a `/` after the code character at `prev` starts a regular expression, not a division. */
+function regexStarts(text: string, prev: number): boolean {
+  const c = text[prev] ?? "";
+  if (prev < 0 || "(,=:[!&|?{};+-*%~^".includes(c)) return true;
+  if (!/[\w$]/.test(c)) return false;
+  let k = prev;
+  while (k >= 0 && /[\w$]/.test(text[k] ?? "")) k--;
+  return /^(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw|new)$/.test(
+    text.slice(k + 1, prev + 1),
+  );
+}
+
+/** The index of a regular expression's last character (its last flag), or -1 when it is none. */
+function regexEnd(text: string, start: number): number {
+  let inClass = false;
+  for (let i = start + 1; i < text.length; i++) {
     const c = text[i];
+    if (c === "\\") i++;
+    else if (c === "\n") return -1;
+    else if (inClass) inClass = c !== "]";
+    else if (c === "[") inClass = true;
+    else if (c === "/") {
+      let end = i;
+      while (/[a-z]/i.test(text[end + 1] ?? "")) end++;
+      return end;
+    }
+  }
+  return -1;
+}
+
+/** The text with comments, strings and regular expressions blanked; a template's `${…}` stays. */
+function codeOnly(text: string): string {
+  const special = /[/"'`{}]/g;
+  const parts: string[] = [];
+  let emitted = 0;
+  const blank = (from: number, to: number, fill: string) => {
+    parts.push(text.slice(emitted, from), text.slice(from, to + 1).replace(/[^\n]/g, fill));
+    emitted = to + 1;
+  };
+  // The brace depth at which each open `${` closes, back into its template.
+  const templates: number[] = [];
+  let depth = 0;
+  // The last code character that is not a space, before what the scan has reached.
+  let prev = -1;
+  let i = 0;
+  for (let match = special.exec(text); match !== null; match = special.exec(text)) {
+    const at = match.index;
+    for (let k = at - 1; k >= i; k--) {
+      if (!/\s/.test(text[k] ?? "")) {
+        prev = k;
+        break;
+      }
+    }
+    const c = text[at];
+    let end = -1;
+    if (c === "/" && text[at + 1] === "/") {
+      const newline = text.indexOf("\n", at);
+      end = newline < 0 ? text.length - 1 : newline - 1;
+      blank(at, end, " ");
+    } else if (c === "/" && text[at + 1] === "*") {
+      const close = text.indexOf("*/", at + 2);
+      end = close < 0 ? text.length - 1 : close + 1;
+      blank(at, end, " ");
+    } else if (c === '"' || c === "'") {
+      end = stringEnd(text, at);
+      if (end >= 0) blank(at, end, '"');
+    } else if (c === "`" || (c === "}" && templates.at(-1) === depth)) {
+      if (c === "}") templates.pop();
+      let j = at + 1;
+      while (j < text.length && text[j] !== "`" && !(text[j] === "$" && text[j + 1] === "{")) {
+        j += text[j] === "\\" ? 2 : 1;
+      }
+      if (j >= text.length) end = text.length - 1;
+      else if (text[j] === "`") end = j;
+      else {
+        end = j + 1;
+        templates.push(depth);
+      }
+      blank(at, end, '"');
+    } else if (c === "/" && regexStarts(text, prev)) {
+      end = regexEnd(text, at);
+      if (end >= 0) blank(at, end, '"');
+    } else if (c === "{") depth++;
+    else if (c === "}") depth--;
+    // A comment leaves `prev` as it was; a string or an expression is an operand that ends at `end`.
+    if (end < 0) prev = at;
+    else if (!(c === "/" && (text[at + 1] === "/" || text[at + 1] === "*"))) prev = end;
+    i = end >= 0 ? end + 1 : at + 1;
+    special.lastIndex = i;
+  }
+  parts.push(text.slice(emitted));
+  return parts.join("");
+}
+
+/** Each bracket's index in `code`, and the index just past the bracket that closes it. */
+function bracketPairs(code: string): Map<number, number> {
+  const pairs = new Map<number, number>();
+  const open: number[] = [];
+  const brackets = /[()[\]{}]/g;
+  for (let match = brackets.exec(code); match !== null; match = brackets.exec(code)) {
+    const c = match[0];
+    if (c === "(" || c === "{" || c === "[") open.push(match.index);
+    else {
+      const at = open.pop();
+      if (at !== undefined) pairs.set(at, match.index + 1);
+    }
+  }
+  return pairs;
+}
+
+function sourceOf(file: string, text: string): Source {
+  const code = codeOnly(text);
+  let pairs: Map<number, number> | undefined;
+  return {
+    file,
+    text,
+    code,
+    get pairs() {
+      pairs ??= bracketPairs(code);
+      return pairs;
+    },
+  };
+}
+
+function skipSpace(code: string, i: number): number {
+  let k = i;
+  while (/\s/.test(code[k] ?? "")) k++;
+  return k;
+}
+
+/** [start, end) without the blank code at either end. */
+function trimmed(src: Source, start: number, end: number): [number, number] {
+  let s = start;
+  let e = end;
+  while (s < e && /\s/.test(src.code[s] ?? "")) s++;
+  while (e > s && /\s/.test(src.code[e - 1] ?? "")) e--;
+  return [s, e];
+}
+
+/** The end of the expression at `from`: the first `,` or `;`, or an unmatched closer. */
+function codeEnd(src: Source, from: number): number {
+  for (let i = from; i < src.code.length; i++) {
+    const c = src.code[i];
     if (c === "(" || c === "{" || c === "[") {
-      const inner = closing(text, i);
-      if (inner < 0) return text.length;
-      i = inner - 1;
+      const close = src.pairs.get(i);
+      if (close === undefined) return src.code.length;
+      i = close - 1;
     } else if (c === "," || c === ";" || c === ")" || c === "}" || c === "]") return i;
   }
-  return text.length;
+  return src.code.length;
 }
 
-/** The event names an expression's text gives: see the rule above. */
-function namesIn(expression: string): string[] {
-  const trimmed = expression.trim();
-  if (trimmed.startsWith("{")) {
-    const keys = ownKeys(trimmed, 0);
-    const name = keys === undefined ? undefined : [...keys.matchAll(EVENT_KEY)][0]?.[2];
-    return name === undefined ? [] : [name];
+/** [start, end) split at each `,` that stands outside any bracket. */
+function commaParts(src: Source, start: number, end: number): [number, number][] {
+  const parts: [number, number][] = [];
+  let from = start;
+  for (let i = start; i < end; i++) {
+    const c = src.code[i];
+    if (c === "(" || c === "{" || c === "[") i = (src.pairs.get(i) ?? end) - 1;
+    else if (c === ",") {
+      parts.push([from, i]);
+      from = i + 1;
+    }
   }
-  const names: string[] = [];
-  for (let i = 0; i < trimmed.length; i++) {
-    const c = trimmed[i];
-    if (c === '"' || c === "'" || c === "`") {
-      const end = stringEnd(trimmed, i);
-      if (end < 0) return names;
-      const value = trimmed.slice(i + 1, end);
-      const whole = i === 0 && end === trimmed.length - 1;
-      if (EVENT_NAME.test(value) && (whole || value.includes("."))) names.push(value);
-      i = end;
+  parts.push([from, end]);
+  return parts;
+}
+
+/** The innermost bracket pair around `at`, as [open, end), or the whole file. */
+function enclosing(src: Source, at: number): [number, number] {
+  let best: [number, number] = [0, src.code.length];
+  for (const [open, end] of src.pairs) {
+    if (open < at && at < end && open >= best[0] && end <= best[1]) best = [open, end];
+  }
+  return best;
+}
+
+/** A function body after the parameter list that ends just before `after`, or undefined. */
+function bodyAfter(src: Source, after: number): [number, number] | undefined {
+  const { code } = src;
+  let k = skipSpace(code, after);
+  if (code[k] === ":") {
+    // A return type, to the body's `{` or the arrow's `=>`; a `{` after `:`, `|`, `&`, `<`, `,`
+    // or `(` is a type literal.
+    for (k = skipSpace(code, k + 1); k < code.length; k = skipSpace(code, k + 1)) {
+      const c = code[k];
+      if (c === "=" && code[k + 1] === ">") break;
+      if (c === "{") {
+        let j = k - 1;
+        while (/\s/.test(code[j] ?? "")) j--;
+        if (!":|&<,(".includes(code[j] ?? "")) break;
+        k = (src.pairs.get(k) ?? code.length) - 1;
+      } else if (c === "(" || c === "[") k = (src.pairs.get(k) ?? code.length) - 1;
+      else if (c === ";" || c === "," || c === ")" || c === "}" || c === "]" || c === "=") {
+        return undefined;
+      }
+    }
+  }
+  if (code.startsWith("=>", k)) {
+    const from = skipSpace(code, k + 2);
+    const end = code[from] === "{" ? src.pairs.get(from) : codeEnd(src, from);
+    return end === undefined ? undefined : [from, end];
+  }
+  if (code[k] !== "{") return undefined;
+  const end = src.pairs.get(k);
+  return end === undefined ? undefined : [k, end];
+}
+
+/** The name a function is given by what stands before its parameters: `log(`, `write: (`. */
+function functionName(before: string): string {
+  const method = /#?([A-Za-z_$][\w$]*)\s*(?:<[^<>()]*>)?\s*$/.exec(before)?.[1];
+  if (method !== undefined && !/^(?:function|async|return|await|yield|typeof|new)$/.test(method)) {
+    return method;
+  }
+  return (
+    /#?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;{}()]*?)?[:=]\s*(?:async\s*)?(?:function\s*\*?\s*)?(?:<[^<>()]*>)?\s*$/.exec(
+      before,
+    )?.[1] ?? ""
+  );
+}
+
+/** Every function, method and arrow in the file (control statements' parentheses are none). */
+function functionsOf(src: Source): readonly CodeFunction[] {
+  if (src.functions !== undefined) return src.functions;
+  const { code } = src;
+  const found: CodeFunction[] = [];
+  for (const [open, end] of src.pairs) {
+    if (code[open] !== "(") continue;
+    const body = bodyAfter(src, end);
+    if (body === undefined) continue;
+    const before = code.slice(Math.max(0, open - 120), open);
+    if (/(?:^|[^\w$.])(?:if|for|while|switch|with)(?:\s+await)?\s*$/.test(before)) continue;
+    found.push({ name: functionName(before), params: [open, end], body });
+  }
+  for (const match of code.matchAll(/(?<![\w$.#])([A-Za-z_$][\w$]*)\s*=>/g)) {
+    const param = match[1] ?? "";
+    const body = bodyAfter(src, match.index + param.length);
+    if (body === undefined) continue;
+    const before = code.slice(Math.max(0, match.index - 120), match.index).replace(/async\s*$/, "");
+    found.push({
+      name: functionName(before),
+      params: [match.index, match.index + param.length],
+      body,
+    });
+  }
+  src.functions = found;
+  return found;
+}
+
+/** Whether the parameters' code binds `name`: as a parameter, in a pattern, or after `...`. */
+function bindsParameter(params: string, name: string): boolean {
+  const id = name.replaceAll("$", "\\$");
+  return new RegExp(`(?:^|[({[,]|\\.\\.\\.)\\s*${id}(?![\\w$])`).test(params);
+}
+
+/** What a name is bound to where a call stands (see the rule above). */
+interface Binding {
+  /** A `const`, `let` or `var` with a value, a `for … of` list, an adapter's parameter, or other. */
+  readonly kind: "value" | "list" | "adapter" | "other";
+  readonly scope: [number, number];
+  /** Where the name is bound. */
+  readonly at: number;
+  /** The value's code, or the list's, as [start, end). */
+  readonly value?: [number, number];
+  /** A `let` or `var`. */
+  readonly mutable?: boolean;
+}
+
+/** Every binding of `name` in the file: declarations, imports and parameters. */
+function bindingsOf(src: Source, name: string): Binding[] {
+  const { code } = src;
+  const id = name.replaceAll("$", "\\$");
+  const out: Binding[] = [];
+  /** A declaration's scope: its block, or a loop's head and body for the loop's own. */
+  const scopeOf = ([open, close]: [number, number]): [number, number] => {
+    const before = code.slice(Math.max(0, open - 16), open);
+    if (code[open] !== "(" || !/(?:^|[^\w$.])for(?:\s+await)?\s*$/.test(before)) {
+      return [open, close];
+    }
+    const from = skipSpace(code, close);
+    return [open, code[from] === "{" ? (src.pairs.get(from) ?? code.length) : codeEnd(src, from)];
+  };
+  for (const match of code.matchAll(/(?<![\w$.#])(const|let|var)\s+/g)) {
+    const at = match.index + match[0].length;
+    const c = code[at];
+    if (c === "{" || c === "[") {
+      const pattern = code.slice(at, src.pairs.get(at) ?? at);
+      if (new RegExp(`(?<![\\w$.#])${id}(?![\\w$]|\\s*:)`).test(pattern)) {
+        out.push({ kind: "other", scope: scopeOf(enclosing(src, match.index)), at });
+      }
       continue;
     }
-    const skip = skipped(trimmed, i);
-    if (skip !== undefined) {
-      if (skip < 0) return names;
-      i = skip;
+    if (!code.startsWith(name, at) || /[\w$]/.test(code[at + name.length] ?? "")) continue;
+    const [open, close] = enclosing(src, match.index);
+    const scope = scopeOf([open, close]);
+    let k = skipSpace(code, at + name.length);
+    if (code[k] === "!") k = skipSpace(code, k + 1);
+    if (code[k] === ":") {
+      for (k++; k < code.length; k++) {
+        const t = code[k];
+        if (t === "(" || t === "{" || t === "[") k = (src.pairs.get(k) ?? code.length) - 1;
+        else if (t === "=" && code[k + 1] === ">") k++;
+        else if (t === "=" || t === ";" || t === "," || t === ")" || t === "}" || t === "]") break;
+      }
+    }
+    const mutable = match[1] !== "const";
+    if (code[k] === "=" && code[k + 1] !== "=") {
+      out.push({ kind: "value", scope, at, value: [k + 1, codeEnd(src, k + 1)], mutable });
+    } else if (/^of(?![\w$])/.test(code.slice(k, k + 3)) && code[open] === "(") {
+      out.push({ kind: "list", scope, at, value: [k + 2, close - 1], mutable });
+    } else out.push({ kind: "other", scope, at });
+  }
+  for (const match of code.matchAll(/(?<![\w$.])import\s+([^;]*?)\bfrom\s*"/g)) {
+    if (new RegExp(`(?<![\\w$.])${id}(?![\\w$])(?!\\s+as\\s)`).test(match[1] ?? "")) {
+      out.push({ kind: "other", scope: [0, code.length], at: match.index });
     }
   }
-  return names;
+  for (const fn of functionsOf(src)) {
+    const [open, end] = fn.params;
+    const inner = code[open] === "(" ? code.slice(open + 1, end - 1) : code.slice(open, end);
+    if (!bindsParameter(inner, name)) continue;
+    const first = code[open] === "(" ? commaParts(src, open + 1, end - 1)[0] : [open, end];
+    const adapter =
+      WRITER_METHODS.has(fn.name) &&
+      first !== undefined &&
+      bindsParameter(code.slice(first[0], first[1]), name);
+    out.push({ kind: adapter ? "adapter" : "other", scope: [open, fn.body[1]], at: open });
+  }
+  return out;
 }
 
-/** The value of the nearest `const|let|var <name> =` before `at`, or undefined when there is none. */
-function initializerOf(text: string, name: string, at: number): string | undefined {
+/** The binding of `name` whose scope holds `at` most closely, or undefined when none does. */
+function bindingOf(src: Source, name: string, at: number): Binding | undefined {
+  let best: Binding | undefined;
+  for (const b of bindingsOf(src, name)) {
+    if (b.scope[0] > at || at >= b.scope[1]) continue;
+    const span = b.scope[1] - b.scope[0];
+    const bestSpan = best === undefined ? Infinity : best.scope[1] - best.scope[0];
+    if (
+      span < bestSpan ||
+      (span === bestSpan && best !== undefined && b.at <= at && b.at > best.at)
+    ) {
+      best = b;
+    }
+  }
+  return best;
+}
+
+/** Whether code in `scope` changes `name` other than where `at` declares it. */
+function assignedAgain(src: Source, name: string, scope: [number, number], at: number): boolean {
   const id = name.replaceAll("$", "\\$");
-  // `const x = …` and `for (const x of …)` give a value to read; `let x;` (assigned later) and a
-  // destructured `const { x } = …` give none, so they read as "" and the call is a finding.
-  const declaration = new RegExp(
-    `(?<![\\w$.])(?:const|let|var)\\s+${id}(?![\\w$])\\s*(?::[^=;]*)?(=(?![=>])|;|of\\b)` +
-      `|(?<![\\w$.])(?:const|let|var)\\s*[{[][^=;]*?(?<![\\w$])${id}(?![\\w$]|\\s*:)[^=;]*?[}\\]]\\s*(?::[^=;]*)?=(?![=>])`,
+  const assignment = new RegExp(
+    `(?<![\\w$.#])${id}\\s*(?:[-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=(?![=>])` +
+      `|(?<![\\w$.#])${id}\\s*(?:\\+\\+|--)|(?:\\+\\+|--)\\s*${id}(?![\\w$])`,
     "g",
   );
-  let last: RegExpMatchArray | undefined;
-  for (const match of text.slice(0, at).matchAll(declaration)) last = match;
-  if (last === undefined) return undefined;
-  if (last[1] === undefined || last[1] === ";") return "";
-  const start = (last.index ?? 0) + last[0].length;
-  return text.slice(start, Math.min(expressionEnd(text, start), at));
-}
-
-const VARIABLE = /^([A-Za-z_$][\w$]*)(?:\s*\??\.\s*#?[A-Za-z_$][\w$]*)*$/;
-const PARAMETER_LIST = /^\s*(?:[A-Za-z_$][\w$]*\s*\??:|\{[^}]*\}\s*:)/;
-/** A name's first part, joined to the rest at run time: `"switch." + state`. */
-const NAME_PREFIX = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*\.$/;
-
-/**
- * A string argument that is no name: a name built from it at run time (`` `switch.${state}` ``,
- * `"switch." + state`), or a message (undefined).
- */
-function builtName(text: string, at: number, argument: string): string[] | undefined {
-  const end = stringEnd(text, at);
-  if (end < 0) return undefined;
-  const value = text.slice(at + 1, end);
-  if (end - at + 1 < argument.length) return NAME_PREFIX.test(value) ? [] : undefined;
-  const filled = value.replace(/\$\{[^}]*\}/g, "x");
-  return filled !== value && EVENT_NAME.test(filled) && filled.includes(".") ? [] : undefined;
-}
-
-/**
- * A telemetry writer's call whose first argument is no literal name: the names it gives, `[]` when
- * it gives none MC-01 can read (a finding), or undefined when it is no line's name to read (a
- * parameter, a parameter list, a string that is not a name, a raw JSON line, no argument).
- */
-function variableArgument(text: string, from: number): string[] | undefined {
-  let i = from;
-  while (/\s/.test(text[i] ?? "")) i++;
-  const c = text[i] ?? "";
-  if (c === ")" || c === "") return undefined;
-  const argument = text.slice(i, expressionEnd(text, i)).trim();
-  if (c === '"' || c === "'" || c === "`") return builtName(text, i, argument);
-  if (PARAMETER_LIST.test(text.slice(i, i + 200))) return undefined;
-  if (/^JSON\s*\.\s*stringify\s*\(/.test(argument)) return undefined;
-  if (argument.startsWith("{")) return namesIn(argument);
-  const variable = VARIABLE.exec(argument);
-  if (variable !== null) {
-    const value = initializerOf(text, variable[1] ?? "", i);
-    return value === undefined ? undefined : namesIn(value);
+  for (const m of src.code.slice(scope[0], scope[1]).matchAll(assignment)) {
+    if (scope[0] + m.index !== at) return true;
   }
-  return namesIn(argument).filter((name) => name.includes("."));
+  return false;
+}
+
+/** Whether code in `scope` changes the object `name` holds: its `event`, a computed key, or all. */
+function objectChanged(src: Source, name: string, scope: [number, number]): boolean {
+  const id = name.replaceAll("$", "\\$");
+  return new RegExp(
+    `(?<![\\w$.#])${id}\\s*[?!]?\\.\\s*event\\s*(?:[-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=(?![=>])` +
+      `|(?<![\\w$.#])${id}\\s*!?\\s*\\[[^\\]]*\\]\\s*=(?![=>])` +
+      `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}(?![\\w$])|\\bdelete\\s+${id}\\s*[?!]?[.[]`,
+  ).test(src.code.slice(scope[0], scope[1]));
+}
+
+/** What a telemetry writer's argument gives: names, a message, an adapter's parameter, or unread. */
+type Reading = string[] | "message" | "adapter" | "unread";
+
+/** Names from strings: each in the event-name shape, or messages only, or unread. */
+function classify(values: readonly string[]): Reading {
+  if (values.every((v) => EVENT_NAME.test(v))) return [...values];
+  if (values.every((v) => !EVENT_NAME.test(v) && !/^\S*\.\S*$/.test(v))) return "message";
+  return "unread";
+}
+
+/** The `?` and `:` of a ternary standing outside any bracket in [start, end), or undefined. */
+function ternaryIn(src: Source, start: number, end: number): [number, number] | undefined {
+  const { code } = src;
+  let question = -1;
+  let nested = 0;
+  for (let i = start; i < end; i++) {
+    const c = code[i];
+    if (c === "(" || c === "{" || c === "[") i = (src.pairs.get(i) ?? end) - 1;
+    else if (c === "?") {
+      if (code[i + 1] === "?" || code[i - 1] === "?") continue;
+      if (code[i + 1] === "." && !/\d/.test(code[i + 2] ?? "")) continue;
+      if (question < 0) question = i;
+      else nested++;
+    } else if (c === ":" && question >= 0) {
+      if (nested === 0) return [question, i];
+      nested--;
+    }
+  }
+  return undefined;
+}
+
+/** The strings an expression is made of when every leaf is one, or undefined. */
+function stringLeaves(src: Source, start: number, end: number): string[] | undefined {
+  const [s, e] = trimmed(src, start, end);
+  if (s >= e) return undefined;
+  if (src.code[s] === "(" && src.pairs.get(s) === e) return stringLeaves(src, s + 1, e - 1);
+  const ternary = ternaryIn(src, s, e);
+  if (ternary !== undefined) {
+    const yes = stringLeaves(src, ternary[0] + 1, ternary[1]);
+    const no = stringLeaves(src, ternary[1] + 1, e);
+    return yes === undefined || no === undefined ? undefined : [...yes, ...no];
+  }
+  const quote = src.text[s];
+  if ((quote !== '"' && quote !== "'" && quote !== "`") || stringEnd(src.text, s) !== e - 1) {
+    return undefined;
+  }
+  const value = src.text.slice(s + 1, e - 1);
+  return quote === "`" && value.includes("${") ? undefined : [value];
+}
+
+/** A message, or a name built at run time (see the rule above). */
+function builtOrMessage(src: Source, start: number, end: number): Reading {
+  const { code, text } = src;
+  if (ternaryIn(src, start, end) !== undefined) return "unread";
+  let from = start;
+  let spaced = false;
+  for (let i = start; i <= end; i++) {
+    if (i < end) {
+      const c = code[i];
+      if (c === "(" || c === "{" || c === "[") {
+        i = (src.pairs.get(i) ?? end) - 1;
+        continue;
+      }
+      const optional = c === "?" && code[i + 1] === "." && !/\d/.test(code[i + 2] ?? "");
+      if ((c === "?" && !optional) || ((c === "|" || c === "&") && code[i + 1] === c)) {
+        return "unread";
+      }
+      if (c !== "+" || code[i + 1] === "+" || code[i + 1] === "=" || code[i - 1] === "+") continue;
+    }
+    const [s, e] = trimmed(src, from, i);
+    const quote = text[s];
+    if ((quote === '"' || quote === "'" || quote === "`") && stringEnd(text, s) === e - 1) {
+      if (/\s|\\[nrt]/.test(text.slice(s + 1, e - 1).replace(/\$\{[^}]*\}/g, "x"))) spaced = true;
+    }
+    from = i + 1;
+  }
+  return spaced ? "message" : "unread";
+}
+
+const PATH = /^([A-Za-z_$][\w$]*)((?:\s*[?!]?\.\s*#?[A-Za-z_$][\w$]*)*)$/;
+
+/** What an expression gives as a line's name, read as the rule above says. */
+function readValue(src: Source, start: number, end: number, depth: number): Reading {
+  const [s, e0] = trimmed(src, start, end);
+  const asConst = /\s+as\s+const$/.exec(src.code.slice(s, e0));
+  const e = asConst === null ? e0 : e0 - asConst[0].length;
+  if (s >= e || depth > 8) return "unread";
+  if (src.code[s] === "(" && src.pairs.get(s) === e) return readValue(src, s + 1, e - 1, depth + 1);
+  if (src.code[s] === "{" && src.pairs.get(s) === e) return readObject(src, s, e, depth);
+  const leaves = stringLeaves(src, s, e);
+  if (leaves !== undefined) return classify(leaves);
+  const path = PATH.exec(src.code.slice(s, e));
+  if (path !== null) {
+    const members = (path[2] ?? "")
+      .split(/[?!]?\./)
+      .map((m) => m.trim())
+      .filter((m) => m !== "");
+    return readPath(src, path[1] ?? "", members, s, depth);
+  }
+  return builtOrMessage(src, s, e);
+}
+
+/** An object literal's own `event`: its value read as a name, or unread. */
+function readObject(src: Source, start: number, end: number, depth: number): Reading {
+  let event: { at: number; value: [number, number] | undefined } | undefined;
+  let spreadAfter = false;
+  for (const [ps, pe] of commaParts(src, start + 1, end - 1)) {
+    const [s, e] = trimmed(src, ps, pe);
+    if (s >= e) continue;
+    if (src.code.startsWith("...", s)) {
+      if (event !== undefined) spreadAfter = true;
+      continue;
+    }
+    const property = src.text.slice(s, e);
+    const key = /^(?:event|"event"|'event')\s*:/.exec(property);
+    if (key !== null) event = { at: s, value: [s + key[0].length, e] };
+    else if (property === "event") event = { at: s, value: undefined };
+    else continue;
+    spreadAfter = false;
+  }
+  if (event === undefined || spreadAfter) return "unread";
+  const read =
+    event.value === undefined
+      ? readPath(src, "event", [], event.at, depth + 1)
+      : readValue(src, event.value[0], event.value[1], depth + 1);
+  return read === "message" ? "unread" : read;
+}
+
+/** A variable, or its `.event`, read from the binding where it stands. */
+function readPath(
+  src: Source,
+  root: string,
+  members: readonly string[],
+  at: number,
+  depth: number,
+): Reading {
+  if (root === "this" || depth > 8) return "unread";
+  const binding = bindingOf(src, root, at);
+  if (binding?.kind === "adapter") return "adapter";
+  if (binding?.value === undefined) return "unread";
+  if (binding.mutable === true && assignedAgain(src, root, binding.scope, binding.at)) {
+    return "unread";
+  }
+  if (objectChanged(src, root, binding.scope)) return "unread";
+  const [s, e] = trimmed(src, binding.value[0], binding.value[1]);
+  if (binding.kind === "list") {
+    const asConst = /\s+as\s+const$/.exec(src.code.slice(s, e));
+    const end = asConst === null ? e : e - asConst[0].length;
+    if (members.length > 0 || src.code[s] !== "[" || src.pairs.get(s) !== end) return "unread";
+    const values: string[] = [];
+    for (const [ps, pe] of commaParts(src, s + 1, end - 1)) {
+      if (trimmed(src, ps, pe)[0] >= pe) continue;
+      const leaves = stringLeaves(src, ps, pe);
+      if (leaves === undefined) return "unread";
+      values.push(...leaves);
+    }
+    return classify(values);
+  }
+  if (members.length === 0) return readValue(src, s, e, depth + 1);
+  if (members.length > 1 || members[0] !== "event" || src.code[s] !== "{") return "unread";
+  return readObject(src, s, src.pairs.get(s) ?? e, depth + 1);
+}
+
+/** A telemetry writer's call: the names its first argument gives (see the rule above). */
+function readCall(src: Source, open: number): Reading {
+  const from = open + 1;
+  const end = codeEnd(src, from);
+  const [s, e] = trimmed(src, from, end);
+  if (s >= e) return "message";
+  // A parameter list, not a call: a typed parameter (`log(event: string, …)`, a signature's), a
+  // typed pattern (`write({ event }: Line)`), or a function's own (`write(event, level) {`).
+  const pattern = src.code[s] === "{" ? src.pairs.get(s) : undefined;
+  if (
+    /^[A-Za-z_$][\w$]*\s*\??:/.test(src.code.slice(s, s + 200)) ||
+    (pattern !== undefined && src.code[skipSpace(src.code, pattern)] === ":")
+  ) {
+    return "adapter";
+  }
+  if (/^JSON\s*\.\s*stringify\s*\(/.test(src.code.slice(s, e))) return "message";
+  const leaves = stringLeaves(src, s, e);
+  if (leaves !== undefined) return classify(leaves);
+  if (functionsOf(src).some((fn) => fn.params[0] === open)) return "adapter";
+  return readValue(src, s, e, 0);
 }
 
 /** What eventsInCode reads: the events, and the writer calls whose name it cannot read. */
@@ -491,28 +988,47 @@ function scanWriters(code: readonly CodeFile[]): {
     if (!found.has(event)) found.set(event, at);
   };
   for (const { file, text } of code) {
+    let src: Source | undefined;
+    const source = () => {
+      src ??= sourceOf(file, text);
+      return src;
+    };
     for (const match of text.matchAll(WRITER_CALL)) {
+      if (source().code[match.index] !== text[match.index]) continue;
       const method = match[0].replace(/(?:\?\.)?\($/, "");
       const from = match.index + match[0].length;
       const receiver = receiverOf(text, match.index);
       const callee = receiver === undefined ? method : `${receiver}.${method}`;
-      const arg = firstArgument(text, from);
-      if (arg === undefined) {
-        if (!TELEMETRY_WRITERS.has(receiver ?? method)) continue;
-        const names = variableArgument(text, from);
-        if (names === undefined) continue;
-        const line = lineAt(text, match.index);
-        const whole = text.slice(from, expressionEnd(text, from)).trim().replace(/\s+/g, " ");
-        const shown = whole.length > 60 ? `${whole.slice(0, 57)}…` : whole;
-        if (names.length === 0) unread.push({ file, line, call: `${callee}(${shown})` });
-        for (const name of names) add(name, { file, line, call: `${callee}(${shown}: "${name}")` });
+      const line = lineAt(text, match.index);
+      if (!TELEMETRY_WRITERS.has(receiver ?? method)) {
+        const arg = firstArgument(text, from);
+        if (arg === undefined || !arg.name.includes(".")) continue;
+        const shown = arg.object ? `{ event: "${arg.name}" }` : `"${arg.name}"`;
+        add(arg.name, { file, line, call: `${callee}(${shown})` });
         continue;
       }
-      if (!TELEMETRY_WRITERS.has(receiver ?? method) && !arg.name.includes(".")) continue;
-      const shown = arg.object ? `{ event: "${arg.name}" }` : `"${arg.name}"`;
-      add(arg.name, { file, line: lineAt(text, match.index), call: `${callee}(${shown})` });
+      const read = readCall(source(), from - 1);
+      if (read === "message" || read === "adapter") continue;
+      const [s, e] = trimmed(source(), from, codeEnd(source(), from));
+      const whole = text.slice(s, e).replace(/\s+/g, " ");
+      const shown = whole.length > 60 ? `${whole.slice(0, 57)}…` : whole;
+      if (read === "unread") {
+        unread.push({ file, line, call: `${callee}(${shown})` });
+        continue;
+      }
+      const literal = stringLeaves(source(), s, e)?.length === 1;
+      const object = source().code[s] === "{";
+      for (const name of read) {
+        const call = literal
+          ? `${callee}("${name}")`
+          : object
+            ? `${callee}({ event: "${name}" })`
+            : `${callee}(${shown}: "${name}")`;
+        add(name, { file, line, call });
+      }
     }
     for (const match of text.matchAll(RAW_LINE)) {
+      if (source().code[match.index] !== text[match.index]) continue;
       const open = match.index + match[0].length - 1;
       const end = closing(text, open);
       if (end < 0) continue;
