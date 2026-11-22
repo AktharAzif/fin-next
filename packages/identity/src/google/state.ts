@@ -116,16 +116,18 @@ export type StateClaim =
 /**
  * Claims a state's code exchange inside the caller's short unit: locks the state's row, reads it
  * and, when no callback has claimed it yet, marks it claimed for `requestId`. A second callback
- * waits on the lock and then reads the claim, so one state buys at most one exchange.
+ * waits on the lock and then reads the claim, so one state buys at most one exchange. `table` is
+ * the realm's verification table.
  */
 export async function claimState(
   tx: Queryable,
   state: string,
   now: Date,
   requestId: string,
+  table: "identity.verification" | "staff.verification" = "identity.verification",
 ): Promise<Exclude<StateClaim, { kind: "limited" }>> {
   const found = await tx.query<{ id: string; value: string; expires_at: Date }>(
-    `SELECT id, value, expires_at FROM identity.verification
+    `SELECT id, value, expires_at FROM ${table}
       WHERE identifier = $1 ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
     [stateIdentifier(state)],
   );
@@ -136,7 +138,7 @@ export async function claimState(
   if (stored.claimed) return { kind: "spent", stored };
   const data = JSON.parse(row.value) as Record<string, unknown>;
   data[STATE_CLAIM_KEY] = requestId;
-  await tx.query("UPDATE identity.verification SET value = $2, updated_at = $3 WHERE id = $1", [
+  await tx.query(`UPDATE ${table} SET value = $2, updated_at = $3 WHERE id = $1`, [
     row.id,
     JSON.stringify(data),
     now,

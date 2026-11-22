@@ -3,7 +3,12 @@
 // T-SAT-03). Code names hosts by role; the real hostnames arrive only through
 // FIN_PUBLIC_ORIGIN (and FIN_API_ORIGIN under the split-host fallback) at deploy time.
 import type { LimitKey } from "./crypto/keyed.ts";
-import { GoogleConfigError, type GoogleSettings, readGoogleSettings } from "./google/settings.ts";
+import {
+  GOOGLE_SWITCH,
+  GoogleConfigError,
+  type GoogleSettings,
+  readGoogleSettings,
+} from "./google/settings.ts";
 
 export type RealmName = "developer" | "staff";
 export type Environment = "development" | "test" | "staging" | "production";
@@ -175,7 +180,7 @@ export function readRealmSettings(
     // Stretch item 2 (spec 02 §1.2) is not built: refusing beats a half-built path.
     throw new RealmConfigError("passwords are not built in this release");
   }
-  // Stretch item 5 (§5.8): off unless switched on with the console's OAuth client (CR-12).
+  // Stretch item 5 (§5.8): off unless the realm's own switch is on with its OAuth client (CR-12).
   let google: GoogleSettings | null;
   try {
     google = readGoogleSettings(realm, env, environment, publicUrl.origin);
@@ -187,7 +192,7 @@ export function readRealmSettings(
     // The client's redirect URI is on FIN_PUBLIC_ORIGIN, while the library would build its
     // callback on the API host: every Google start would fail. One origin only (S-01).
     throw new RealmConfigError(
-      "FIN_FEATURE_GOOGLE is on with FIN_API_ORIGIN set; Google runs only on the app's own origin",
+      `${GOOGLE_SWITCH[realm]} is on with FIN_API_ORIGIN set; Google runs only on the app's own origin`,
     );
   }
   const features = { passwords: false, google: google !== null };

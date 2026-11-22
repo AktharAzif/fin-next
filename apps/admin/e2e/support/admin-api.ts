@@ -13,7 +13,11 @@
 //     that equals the Access identity, and the same answer always;
 //   - enrolment codes (§6.5), passkeys (checked as a relying party), TOTP (RFC 6238, no reuse of a
 //     step), step-up intents bound to the action and its parameters (§7), and §8.5's rules, the last
-//     Admin included.
+//     Admin included;
+//   - staff Google (stretch 5, §5.8), off unless a journey turns it on: the stand-in plays the
+//     provider too, and its callback keeps the staff realm's rules (the Workspace's `hd`, a listed
+//     member equal to the Access identity, an `aal1` session at the factor step or enrolment). The
+//     real round trip, against the fixture OpenID provider, is src/server/google.db.test.ts's.
 // Everything lives in memory and is reset between tests through the control port; every important
 // action appends an audit event the journeys can read back. When the real test server lands, the
 // journeys run against it unchanged (FIN_E2E_ADMIN_API=external) and this file goes.
@@ -205,6 +209,9 @@ export interface AuditEvent {
 
 /** A key from the Access certs endpoint. */
 type Jwk = { readonly [key: string]: unknown };
+
+/** The Google account the stand-in's provider signs in next, or a cancelled sign-in. */
+export type GoogleChoice = { readonly email: string; readonly hd: string | null } | "deny";
 
 const MINUTE = 60_000;
 const SESSION_COOKIE = "__Host-fin.admin_session";
@@ -418,6 +425,17 @@ export class AdminApiStandIn {
   enrolmentCodes = new Map<string, EnrolmentCode>();
   challenges = new Map<string, Challenge>();
   audit: AuditEvent[] = [];
+  /**
+   * Staff Google (stretch 5, spec 02 §5.8): off unless a journey turns it on, with the Workspace
+   * domain it accepts. The stand-in plays the provider too: the start answers the callback's
+   * address straight away, and the callback signs in `next`, under the staff realm's rules.
+   */
+  google: {
+    on: boolean;
+    hostedDomain: string;
+    next: GoogleChoice | null;
+    states: Map<string, number>;
+  } = { on: false, hostedDomain: "", next: null, states: new Map() };
 
   constructor(options: AdminApiOptions) {
     this.#options = options;
@@ -443,6 +461,7 @@ export class AdminApiStandIn {
     this.enrolmentCodes.clear();
     this.challenges.clear();
     this.audit = [];
+    this.google = { on: false, hostedDomain: "", next: null, states: new Map() };
     this.#offsetMs = 0;
   }
 
@@ -712,6 +731,11 @@ export class AdminApiStandIn {
       case "POST /api/enrolment/redeem":
         return this.#redeem(context);
     }
+    if (this.google.on && key === "POST /api/auth/sign-in/social")
+      return this.#googleStart(context);
+    if (this.google.on && key === "GET /api/auth/callback/google") {
+      return this.#googleCallback(context);
+    }
     if (path.startsWith("/api/auth/")) return { status: 404, body: undefined };
 
     // Everything else needs a working session (aal2, active): the gate (§6.4).
@@ -875,7 +899,11 @@ export class AdminApiStandIn {
 
   #viewer({ identity, session, member }: Context): Answer {
     if (session === null || member === null) {
-      return ok({ state: "signed_out", accessEmail: identity.email });
+      return ok({
+        state: "signed_out",
+        accessEmail: identity.email,
+        ...(this.google.on ? { google: true } : {}),
+      });
     }
     if (member.status === "pending") return ok({ state: "pending", email: member.email });
     if (session.assurance === "aal1") {
@@ -966,6 +994,75 @@ export class AdminApiStandIn {
     );
     this.#record("staff.second_factor_required", member.id, session.id);
     return ok({ user: { id: member.id, email: member.email } }, 200, [this.#cookieFor(session)]);
+  }
+
+  // ── Staff Google (stretch 5, §5.8) ──
+
+  /** `/sign-in/social`: Google only, back to the sign-in page only, never a new-user page. */
+  #googleStart({ body }: Context): Answer {
+    const signInPage = (value: unknown) =>
+      value === "/sign-in" || value === `${this.#options.appOrigin}/sign-in`;
+    const refused: string[] = [];
+    if (body.provider !== "google") refused.push("provider");
+    if (!signInPage(body.callbackURL)) refused.push("callbackURL");
+    if (body.errorCallbackURL !== undefined && !signInPage(body.errorCallbackURL)) {
+      refused.push("errorCallbackURL");
+    }
+    if (body.newUserCallbackURL !== undefined) refused.push("newUserCallbackURL");
+    if (refused.length > 0) return problem("invalid", { fields: refused });
+    const state = randomBytes(24).toString("base64url");
+    this.google.states.set(state, this.now() + 10 * MINUTE);
+    const callback = new URL("/api/auth/callback/google", this.#options.appOrigin);
+    callback.searchParams.set("code", randomBytes(16).toString("base64url"));
+    callback.searchParams.set("state", state);
+    return ok({ url: callback.href, redirect: false });
+  }
+
+  /**
+   * The callback, under the staff realm's rules: the Workspace's `hd`, a listed member whose
+   * address is the Access identity's, and then an `aal1` session at the factor step or enrolment,
+   * as an emailed code makes. Anything else goes back with `?error=`.
+   */
+  #googleCallback({ request, identity }: Context): Answer {
+    const signIn = `${this.#options.appOrigin}/sign-in`;
+    const back = (error: string): Answer => ({
+      status: 302,
+      headers: { Location: `${signIn}?error=${error}` },
+    });
+    const state = new URL(request.target, "https://stand-in.invalid").searchParams.get("state");
+    const expiresAt = state === null ? undefined : this.google.states.get(state);
+    if (state !== null) this.google.states.delete(state);
+    if (expiresAt === undefined || expiresAt <= this.now()) return back("state_mismatch");
+    const choice = this.google.next;
+    this.google.next = null;
+    if (choice === null || choice === "deny") return back("access_denied");
+    const member = [...this.members.values()].find((m) => m.email === choice.email) ?? null;
+    const reason =
+      choice.hd !== this.google.hostedDomain
+        ? "hosted_domain"
+        : member === null
+          ? "not_listed"
+          : member.status === "removed"
+            ? "removed"
+            : member.email !== identity.email
+              ? "access_mismatch"
+              : null;
+    if (reason !== null || member === null) {
+      if (member !== null) {
+        this.#record("staff.sign_in_failed", "system", member.id, { method: "google", reason });
+      } else {
+        this.#record("staff.not_listed", "system", null);
+      }
+      return back("account_refused");
+    }
+    const session = this.#newSession(
+      member,
+      identity,
+      "aal1",
+      deviceOf(header(request, "User-Agent")),
+    );
+    this.#record("staff.second_factor_required", member.id, session.id);
+    return { status: 302, headers: { Location: signIn }, cookies: [this.#cookieFor(session)] };
   }
 
   // ── Passkeys (§5.3) ──
@@ -1566,7 +1663,10 @@ export class AdminApiStandIn {
   }
 }
 
-/** The control port's handler: reset, bootstrap the first Admin, move the clock, read the audit. */
+/**
+ * The control port's handler: reset, bootstrap the first Admin, move the clock, read the audit,
+ * and turn staff Google on with the account its provider signs in next.
+ */
 export async function controlHandler(api: AdminApiStandIn, request: ApiRequest): Promise<Response> {
   const path = new URL(request.target, "http://control.invalid").pathname;
   const body =
@@ -1595,5 +1695,18 @@ export async function controlHandler(api: AdminApiStandIn, request: ApiRequest):
     return Response.json({ now: new Date(api.now()).toISOString() });
   }
   if (request.method === "GET" && path === "/audit") return Response.json({ events: api.audit });
+  if (request.method === "POST" && path === "/google") {
+    // Staff Google on or off (stretch 5), with the Workspace domain it accepts.
+    api.google.on = body.on === true;
+    api.google.hostedDomain = String(body.hostedDomain ?? "");
+    return Response.json({ ok: true });
+  }
+  if (request.method === "POST" && path === "/google/next") {
+    api.google.next =
+      body.deny === true
+        ? "deny"
+        : { email: String(body.email ?? ""), hd: typeof body.hd === "string" ? body.hd : null };
+    return Response.json({ ok: true });
+  }
   return new Response(null, { status: 404 });
 }

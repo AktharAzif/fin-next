@@ -2,11 +2,16 @@
 // with the address Cloudflare Access let in, then the 8-digit code emailed to it; or a passkey alone.
 // The realm answers every address the same way, so "not staff" sees the same screens as staff. A
 // code session is `aal1`: the next page is the factor step, or enrolment for a pending member.
+// While staff Google is on (stretch 5, §5.8) the card also offers "Continue with Google", a first
+// factor too: the round trip comes back here, and goes on as a code sign-in does (googleFailed
+// says a refusal; noGoogle is the card without it).
 import type { StaffViewer } from "@fin/app-contracts";
 import { useFin } from "@fin/frame";
+import { GoogleMark } from "@fin/icons";
 import { AuthCard, Button, Field, InlineAlert, Input, OTPInput, type OTPStatus } from "@fin/ui";
 import { useNavigate } from "@tanstack/react-router";
 import { useRef, useState } from "react";
+import { type GoogleError, googleAlert, providerUrl, startGoogle } from "../auth/google.ts";
 import {
   checkWorkEmail,
   EMAILED_CODE_LENGTH,
@@ -92,6 +97,20 @@ function StartAlertView({ alert }: { alert: StartAlert }) {
   }
 }
 
+/** What a refused Google round trip says on the card it came back to (googleFailed). */
+function GoogleRefusalView({ error }: { error: GoogleError }) {
+  const alert = googleAlert(error);
+  return (
+    <InlineAlert
+      tone={alert.tone}
+      title={alert.title}
+      live={alert.tone === "danger" ? "assertive" : "polite"}
+    >
+      {alert.body}
+    </InlineAlert>
+  );
+}
+
 function CodeAlertView({ alert }: { alert: CodeAlert }) {
   switch (alert) {
     case "resent":
@@ -149,11 +168,19 @@ function CodeAlertView({ alert }: { alert: CodeAlert }) {
   }
 }
 
-export function SignInPage({ ended }: { ended: boolean }) {
+export function SignInPage({
+  ended,
+  googleError = null,
+}: {
+  ended: boolean;
+  /** The refusal a Google round trip came back with (`?error=`), or null. */
+  googleError?: GoogleError | null;
+}) {
   const fin = useFin<StaffViewer>();
   const navigate = useNavigate();
   const initialViewer = fin.viewer.get();
   const accessEmail = initialViewer?.state === "signed_out" ? initialViewer.accessEmail : null;
+  const offersGoogle = initialViewer?.state === "signed_out" && initialViewer.google === true;
 
   const [step, setStep] = useState<"start" | "code">("start");
   const [email, setEmail] = useState(accessEmail ?? "");
@@ -161,6 +188,8 @@ export function SignInPage({ ended }: { ended: boolean }) {
   const [startAlert, setStartAlert] = useState<StartAlert>(ended ? "ended" : null);
   const [sending, setSending] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [refusal, setRefusal] = useState<GoogleError | null>(googleError);
   const [sentTo, setSentTo] = useState("");
   const [code, setCode] = useState("");
   const [otpStatus, setOtpStatus] = useState<OTPStatus>("idle");
@@ -190,6 +219,7 @@ export function SignInPage({ ended }: { ended: boolean }) {
       return;
     }
     setStartAlert(null);
+    setRefusal(null);
     setSending(true);
     const address = normaliseEmail(email);
     try {
@@ -259,8 +289,26 @@ export function SignInPage({ ended }: { ended: boolean }) {
     }
   };
 
+  const withGoogle = async () => {
+    setStartAlert(null);
+    setRefusal(null);
+    setGoogleBusy(true);
+    const answer = await startGoogle();
+    const url = answer.ok ? providerUrl(answer.data) : null;
+    if (url !== null) {
+      // The card stays busy while the browser leaves for the provider.
+      window.location.assign(url);
+      return;
+    }
+    setStartAlert(
+      !answer.ok && (answer.kind === "network" || answer.kind === "access") ? "offline" : "ourSide",
+    );
+    setGoogleBusy(false);
+  };
+
   const withPasskey = async () => {
     setStartAlert(null);
+    setRefusal(null);
     setPasskeyBusy(true);
     try {
       const result = await usePasskey(null);
@@ -357,6 +405,7 @@ export function SignInPage({ ended }: { ended: boolean }) {
         }}
       >
         <StartAlertView alert={startAlert} />
+        {refusal === null ? null : <GoogleRefusalView error={refusal} />}
         <Field
           label="Work email"
           {...(emailError === null ? {} : { error: EMAIL_ERRORS[emailError] })}
@@ -374,25 +423,45 @@ export function SignInPage({ ended }: { ended: boolean }) {
             }}
           />
         </Field>
-        <Button type="submit" variant="primary" size="lg" className="w-full" loading={sending}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          className="w-full"
+          loading={sending}
+          disabled={googleBusy}
+        >
           Email me a code
         </Button>
       </form>
+      {passkeysSupported() || offersGoogle ? <OrDivider /> : null}
       {passkeysSupported() ? (
         <>
-          <OrDivider />
           {/* @pendingDesign UR-22: AdminSignIn draws Google here (stretch 5); staff sign in with a passkey alone (spec 02 §4.3). */}
           <Button
             size="lg"
             variant="secondary"
             className="w-full"
             loading={passkeyBusy}
-            disabled={sending}
+            disabled={sending || googleBusy}
             onClick={withPasskey}
           >
             Sign in with a passkey
           </Button>
         </>
+      ) : null}
+      {offersGoogle ? (
+        <Button
+          size="lg"
+          variant="secondary"
+          className="w-full"
+          leadingIcon={<GoogleMark />}
+          loading={googleBusy}
+          disabled={sending || passkeyBusy}
+          onClick={withGoogle}
+        >
+          Continue with Google
+        </Button>
       ) : null}
     </AuthCard>
   );

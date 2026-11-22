@@ -5,6 +5,14 @@
 // URI exactly `<FIN_PUBLIC_ORIGIN>/api/auth/callback/google`. Off, every Google path answers 404
 // through the endpoint allowlist (§4.1).
 //
+// The staff realm has a switch of its own, FIN_FEATURE_STAFF_GOOGLE, and a client of its own: the
+// company Workspace's internal client, registered for the staff host with the same JavaScript
+// origin and redirect URI rule (its ID and secret in the same two variables, sealed on the staff
+// API service: spec 08's secret inventory), and the Workspace's domain in FIN_GOOGLE_HOSTED_DOMAIN,
+// which every ID token's `hd` claim must equal (§5.8). Each realm refuses to start with the other's
+// switch on, and the developer realm with a Workspace domain set: no service holds or half-reads
+// the other realm's Google settings.
+//
 // The provider's endpoints are Google's own, fixed here. Only in development and test may
 // FIN_GOOGLE_TEST_ISSUER point them at the fixture provider (packages/testing/src/oauth); a
 // staging or production process refuses to start with it set.
@@ -32,7 +40,18 @@ export interface GoogleSettings {
   /** Exactly `<publicOrigin>/api/auth/callback/google`, as the client is registered. */
   readonly redirectUri: string;
   readonly endpoints: GoogleEndpoints;
+  /** The staff realm only: the Workspace domain an ID token's `hd` claim must equal (§5.8). */
+  readonly hostedDomain?: string;
 }
+
+/** Each realm's own switch (§5.8): the staff realm's is separate from the developer realm's. */
+export const GOOGLE_SWITCH = {
+  developer: "FIN_FEATURE_GOOGLE",
+  staff: "FIN_FEATURE_STAFF_GOOGLE",
+} as const satisfies Record<RealmName, string>;
+
+/** The staff realm's Workspace domain, read from configuration, never written in the repository. */
+export const GOOGLE_HOSTED_DOMAIN = "FIN_GOOGLE_HOSTED_DOMAIN";
 
 /** Google's own endpoints (its discovery document, read 21 Nov 2026). */
 export const GOOGLE_ENDPOINTS: GoogleEndpoints = Object.freeze({
@@ -56,6 +75,8 @@ export const GOOGLE_CALLBACK_PATH = "/api/auth/callback/google";
 
 const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{7,199}$/;
 const CLIENT_SECRET = /^[\x21-\x7e]{16,256}$/;
+/** A DNS name in lower case, with at least two labels. */
+const DOMAIN = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -84,11 +105,20 @@ function testIssuer(raw: string): string {
   return url.origin;
 }
 
+/** The staff realm's Workspace domain: required with its switch on, a DNS name, lower-cased. */
+function workspaceDomain(env: Env): string {
+  const domain = value(env, GOOGLE_HOSTED_DOMAIN)?.toLowerCase();
+  if (domain === undefined) throw new GoogleConfigError(`${GOOGLE_HOSTED_DOMAIN} is not set`);
+  if (!DOMAIN.test(domain)) throw new GoogleConfigError(`${GOOGLE_HOSTED_DOMAIN} is malformed`);
+  return domain;
+}
+
 /**
- * Whether Google is on, and its client. Returns null when it is off. Refuses a start that would
- * half-enable it: the switch on without the client, the fixture issuer outside development and
- * test, or the staff realm (its Workspace client and checks are not built, §5.8). The realm's
- * settings also refuse it under the split-host fallback (config.ts).
+ * Whether Google is on for `realm`, and its client. Returns null when it is off. Refuses a start
+ * that would half-enable it: the realm's switch on without its client (and, for staff, without
+ * the Workspace domain), the other realm's switch on, a Workspace domain on the developer realm,
+ * or the fixture issuer outside development and test. The realm's settings also refuse it under
+ * the split-host fallback (config.ts).
  */
 export function readGoogleSettings(
   realm: RealmName,
@@ -96,20 +126,27 @@ export function readGoogleSettings(
   environment: Environment,
   publicOrigin: string,
 ): GoogleSettings | null {
-  const switchValue = value(env, "FIN_FEATURE_GOOGLE") ?? "off";
+  const switchName = GOOGLE_SWITCH[realm];
+  const switchValue = value(env, switchName) ?? "off";
   if (switchValue !== "on" && switchValue !== "off") {
-    throw new GoogleConfigError("FIN_FEATURE_GOOGLE is on or off");
+    throw new GoogleConfigError(`${switchName} is on or off`);
+  }
+  const other = realm === "developer" ? "staff" : "developer";
+  if ((value(env, GOOGLE_SWITCH[other]) ?? "off") !== "off") {
+    throw new GoogleConfigError(
+      `${GOOGLE_SWITCH[other]} is the ${other} realm's switch, set for the ${realm} realm`,
+    );
+  }
+  if (realm === "developer" && value(env, GOOGLE_HOSTED_DOMAIN) !== undefined) {
+    throw new GoogleConfigError(
+      `${GOOGLE_HOSTED_DOMAIN} is the staff realm's Workspace domain, set for the developer realm`,
+    );
   }
   const issuer = value(env, "FIN_GOOGLE_TEST_ISSUER");
   if (issuer !== undefined && environment !== "development" && environment !== "test") {
     throw new GoogleConfigError("FIN_GOOGLE_TEST_ISSUER is set outside development and test");
   }
   if (switchValue === "off") return null;
-  if (realm === "staff") {
-    throw new GoogleConfigError(
-      "FIN_FEATURE_GOOGLE is on for the staff realm, whose Workspace client is not built",
-    );
-  }
   const clientId = value(env, "FIN_GOOGLE_CLIENT_ID");
   if (clientId === undefined) throw new GoogleConfigError("FIN_GOOGLE_CLIENT_ID is not set");
   if (!CLIENT_ID.test(clientId)) throw new GoogleConfigError("FIN_GOOGLE_CLIENT_ID is malformed");
@@ -120,10 +157,12 @@ export function readGoogleSettings(
   if (!CLIENT_SECRET.test(clientSecret)) {
     throw new GoogleConfigError("FIN_GOOGLE_CLIENT_SECRET is malformed");
   }
+  const hostedDomain = realm === "staff" ? workspaceDomain(env) : undefined;
   return Object.freeze({
     clientId,
     clientSecret,
     redirectUri: `${publicOrigin}${GOOGLE_CALLBACK_PATH}`,
     endpoints: issuer === undefined ? GOOGLE_ENDPOINTS : fixtureEndpoints(testIssuer(issuer)),
+    ...(hostedDomain === undefined ? {} : { hostedDomain }),
   });
 }

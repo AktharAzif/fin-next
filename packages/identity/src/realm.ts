@@ -31,6 +31,7 @@ import { AuthRefusal, problemResponse } from "./errors.ts";
 import { googleCallbackLocation, googleRequestRefusal } from "./google/hooks.ts";
 import { finGooglePlugin } from "./google/plugin.ts";
 import { createGoogleSignIn, type GoogleSignIn } from "./google/provider.ts";
+import { staffGoogleRequestRefusal } from "./google/staff.ts";
 import { claimState, type StateClaim } from "./google/state.ts";
 import { afterHook } from "./hooks/after.ts";
 import { beforeHook } from "./hooks/before.ts";
@@ -322,7 +323,7 @@ export function buildAuthOptions(
           : {}),
         accountLockout: { enabled: true, maxFailedAttempts: 10, durationSeconds: 3600 },
       }),
-      // Google (stretch 5, §5.8): only when the console's OAuth client is configured (CR-12).
+      // Google (stretch 5, §5.8): only when the realm's own OAuth client is configured (CR-12).
       ...(google === null ? [] : [finGooglePlugin(google.provider)]),
     ],
   } as BetterAuthOptions;
@@ -382,13 +383,13 @@ export function createRealm(deps: RealmDeps): Realm {
   const signing = settings.secrets[0];
   if (signing === undefined) throw new Error("identity: a realm without a secret");
   const google =
-    settings.google === null || settings.realm !== "developer"
+    settings.google === null
       ? null
       : createGoogleSignIn({
           settings: settings.google,
           clock: deps.clock,
           lines: deps.lines,
-          realm: "developer",
+          realm: settings.realm,
           stateCookie: `${settings.cookiePrefix}.state`,
           stateSecret: signing.value,
           flow: () => requestState(rt).google,
@@ -411,7 +412,13 @@ export function createRealm(deps: RealmDeps): Realm {
           const network = rt.hasher.bucket("network", state.network);
           const allowed = await rt.limits.consume(tx, "google_exchange", network);
           if (!allowed.allowed) return { kind: "limited", retryAfter: allowed.retryAfter };
-          return claimState(tx, oauthState, rt.clock.now(), state.context.requestId);
+          return claimState(
+            tx,
+            oauthState,
+            rt.clock.now(),
+            state.context.requestId,
+            settings.realm === "developer" ? "identity.verification" : "staff.verification",
+          );
         },
         { requestId: state.context.requestId },
       );
@@ -500,7 +507,10 @@ export function createRealm(deps: RealmDeps): Realm {
       (rule.path === "/sign-in/social" || rule.path === "/link-social")
     ) {
       // §2.3's redirect rule answers `400 invalid` before the library's own origin check.
-      const fields = await googleRequestRefusal(request.clone(), rule.path, settings.publicOrigin);
+      const fields =
+        settings.realm === "developer"
+          ? await googleRequestRefusal(request.clone(), rule.path, settings.publicOrigin)
+          : await staffGoogleRequestRefusal(request.clone(), settings.publicOrigin);
       if (fields !== null) {
         state.line.outcome = "refused";
         state.line.reason = "body.google";

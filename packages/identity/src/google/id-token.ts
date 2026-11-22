@@ -31,6 +31,11 @@ export interface GoogleClaims {
   /** The profile name, when the provider sent one (checked by the caller before use). */
   readonly name: string | null;
   readonly issuedAt: number;
+  /**
+   * The Workspace domain (`hd`), lower-cased, present only when the account belongs to one; the
+   * staff realm requires its own (§5.8).
+   */
+  readonly hostedDomain?: string;
 }
 
 export type IdTokenResult =
@@ -148,9 +153,17 @@ export async function verifyIdToken(
     return refuse("email_unverified");
   }
   const name = typeof claims.name === "string" && claims.name.trim() !== "" ? claims.name : null;
+  const hd = typeof claims.hd === "string" ? claims.hd.trim().toLowerCase() : "";
   return {
     ok: true,
-    claims: { sub: claims.sub, email, emailVerified: true, name, issuedAt: claims.iat },
+    claims: {
+      sub: claims.sub,
+      email,
+      emailVerified: true,
+      name,
+      issuedAt: claims.iat,
+      ...(hd === "" ? {} : { hostedDomain: hd }),
+    },
   };
 }
 

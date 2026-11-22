@@ -26,6 +26,7 @@ import {
   googleCallbackBefore,
   isCallbackPath,
 } from "../google/hooks.ts";
+import { staffGoogleBefore, staffGoogleCallbackBefore } from "../google/staff.ts";
 import type { CountedBucket } from "../limits.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
@@ -132,6 +133,11 @@ export async function beforeHook(rt: RealmRuntime, ctx: HookContext): Promise<un
   if (realm === "developer" && GOOGLE_PATHS.has(ctx.path)) await googleBefore(rt, ctx, state, tx);
   if (realm === "developer" && isCallbackPath(ctx.path)) {
     return googleCallbackBefore(rt, ctx, state, tx);
+  }
+  // The staff realm's Google (§5.8): the only staff Google paths are these two (§4.3).
+  if (realm === "staff" && ctx.path === "/sign-in/social") staffGoogleBefore(rt, ctx, state);
+  if (realm === "staff" && isCallbackPath(ctx.path)) {
+    return staffGoogleCallbackBefore(rt, ctx, state, tx);
   }
   return undefined;
 }

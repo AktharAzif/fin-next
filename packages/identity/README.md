@@ -68,8 +68,9 @@ Off by default: with `FIN_FEATURE_GOOGLE` unset or `off`, `/sign-in/social`, `/c
 the developer realm, with `FIN_FEATURE_GOOGLE=on` and the console's OAuth client
 (`FIN_GOOGLE_CLIENT_ID`, `FIN_GOOGLE_CLIENT_SECRET`, a sealed variable on `console`, CR-12),
 registered with the redirect URI `<FIN_PUBLIC_ORIGIN>/api/auth/callback/google` exactly. The staff
-realm refuses to start with it on. `FIN_GOOGLE_TEST_ISSUER` points the provider at the fixture
-(packages/testing/src/oauth) and is refused outside development and test.
+realm has its own switch (below) and refuses to start with this one on. `FIN_GOOGLE_TEST_ISSUER`
+points the provider at the fixture (packages/testing/src/oauth) and is refused outside development
+and test.
 
 - Fin's own provider (`src/google/provider.ts`, mounted by a plugin with no routes of its own):
   authorization code with PKCE (S256), a nonce the library keeps in the state, the exact redirect
@@ -87,6 +88,31 @@ realm refuses to start with it on. `FIN_GOOGLE_TEST_ISSUER` points the provider 
   `account.google_unlink` intent bound to the account, only for the person's own Google row.
 - No provider token is kept: the account row's token columns stay empty, and the library's update
   on a later sign-in is off.
+
+### The staff realm (`src/google/staff.ts`)
+
+Off by default, behind its own switch: with `FIN_FEATURE_STAFF_GOOGLE` unset or `off`, the staff
+realm's `/sign-in/social` and `/callback/:id` are blocked and answer 404. It is on with
+`FIN_FEATURE_STAFF_GOOGLE=on`, the company Workspace's internal client for the staff host
+(`FIN_GOOGLE_CLIENT_ID`, `FIN_GOOGLE_CLIENT_SECRET`, sealed on the staff API service, its redirect
+URI `<FIN_PUBLIC_ORIGIN>/api/auth/callback/google` on the staff host) and the Workspace's domain in
+`FIN_GOOGLE_HOSTED_DOMAIN`. The developer realm refuses to start with either staff setting, and the
+staff realm with the developer realm's switch. `/link-social` and `/unlink-account` stay blocked.
+
+- Google is at most a first factor: a staff Google session is the emailed code's `aal1` session
+  (`createdVia: google`, 10 minutes, bound to the Access identity's `sub`), at the factor step for
+  a member with a factor and at enrolment for a pending member, who still needs the enrolment code.
+- Only a member: the verified address must be an `active` or `pending` member's and equal to the
+  request's Access identity, and the ID token's `hd` must be the Workspace domain. Anything else
+  goes back to `/sign-in?error=account_refused`, lined (`auth.google_refused`, and
+  `staff.not_listed` or `staff.access_mismatch`), with `staff.sign_in_failed` for a listed member.
+  No member is ever made from Google.
+- No sign-in method row: `staff.account` stays empty (its guard refuses every write, spec 02
+  §13.8), so the library's account linking is never used. The callback's before-hook checks the
+  state as the library's callback does (`parseState`), makes the session through the library's
+  adapter, sets the cookie and redirects, with `staff.second_factor_required` in the same unit.
+- The API half checks the Access token on every request before the realm runs, the callback
+  included, and the staff gate compares the session with it again on every later request.
 
 ## Layout
 

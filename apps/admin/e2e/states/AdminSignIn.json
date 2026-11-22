@@ -19,7 +19,12 @@
       "spec": "apps/admin/e2e/sat/staff-sign-in.spec.ts",
       "test": "@visual the sign-in page draws in the system theme, light or dark"
     },
-    "googleFailed": { "status": "pending", "day": "stretch-5" },
+    "googleFailed": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/admin/e2e/sat/staff-google.spec.ts",
+      "test": "@journey a refused Google round trip says so on the card, and leaves no session"
+    },
     "noGoogle": {
       "status": "covered",
       "day": "sat",

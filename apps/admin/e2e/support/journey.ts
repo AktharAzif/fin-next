@@ -44,6 +44,12 @@ export const server = {
   /** Moves the server's clock on, as waiting does (the next authenticator step, an expiry). */
   advance: (seconds: number) => control<{ now: string }>("POST", "/clock", { seconds }),
   now: async () => Date.parse((await control<{ now: string }>("GET", "/clock")).now),
+  /** Staff Google on or off (stretch 5), accepting `hostedDomain`'s Workspace. */
+  google: (on: boolean, hostedDomain = "example.com") =>
+    control<{ ok: true }>("POST", "/google", { on, hostedDomain }),
+  /** The Google account the provider signs in next (`hd` its Workspace), or a cancelled sign-in. */
+  googleNext: (next: { email: string; hd: string | null } | "deny") =>
+    control<{ ok: true }>("POST", "/google/next", next === "deny" ? { deny: true } : next),
   audit: async () =>
     (
       await control<{

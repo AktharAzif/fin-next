@@ -146,7 +146,11 @@ export async function googleBefore(
  * Where a refused callback goes when the realm answers it itself: the state's error page when Fin's
  * redirect rule allowed it (an absolute URL on the public origin), else the sign-in page.
  */
-function refusedCallbackTarget(rt: RealmRuntime, errorURL: string | null, error: string): string {
+export function refusedCallbackTarget(
+  rt: RealmRuntime,
+  errorURL: string | null,
+  error: string,
+): string {
   const origin = rt.settings.publicOrigin;
   let target = new URL(`${origin}${GOOGLE_RETURN_PAGES.signIn[0]}`);
   if (errorURL?.startsWith(`${origin}/`)) {
@@ -324,7 +328,7 @@ const REFUSALS = new Set([
 ]);
 
 /** The `error` a callback's redirect carries, bounded for the line. */
-function redirectError(ctx: HookContext): string | null {
+export function redirectError(ctx: HookContext): string | null {
   const returned = ctx.context.returned as { headers?: Headers } | undefined;
   const location = returned?.headers?.get?.("location") ?? null;
   if (location === null) return null;

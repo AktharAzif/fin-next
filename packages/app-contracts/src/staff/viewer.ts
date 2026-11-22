@@ -12,7 +12,12 @@ import { z } from "../zod.ts";
 export const STAFF_ENVIRONMENTS = ["production", "staging", "development"] as const;
 
 export const staffViewerAnswer = z.union([
-  z.object({ state: z.literal("signed_out"), accessEmail: z.string().nullable() }),
+  z.object({
+    state: z.literal("signed_out"),
+    accessEmail: z.string().nullable(),
+    /** Present while staff Google sign-in is on (spec 02 §5.8): the page offers the button. */
+    google: z.literal(true).optional(),
+  }),
   z.object({ state: z.literal("pending"), email: z.string() }),
   z.object({
     state: z.literal("factor_step"),

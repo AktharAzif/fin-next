@@ -47,7 +47,10 @@ export const IDENTITY_LINES = {
   // A round trip that came back refused: the person cancelled, the address has an account not
   // linked to Google, sign-ups are paused, a link did not match the account, the provider refused
   // the code (`invalid_code`), or a second callback came for a state already exchanged
-  // (`state_used`).
+  // (`state_used`). In the staff realm also an account that may not sign in to Fin Admin: outside
+  // the Workspace (`hosted_domain`), not on the staff list (`not_listed`, with staff.not_listed),
+  // removed, or not the Access identity (`access_mismatch`, with staff.access_mismatch), each
+  // watched through those lines' alerts.
   "auth.google_refused": {
     kind: "security",
     alerts: {

@@ -169,6 +169,8 @@ export const STAFF_REALM_EVENTS = {
         "access_mismatch",
         "removed",
         "too_many_tries",
+        // Google (§5.8): the ID token's `hd` was not the company's Workspace.
+        "hosted_domain",
       ]),
     }),
   ),

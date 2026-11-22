@@ -1,6 +1,7 @@
 // Fin Admin's `GET /api/viewer` (spec 02 §14.4): reachable in every staff state (`aal1_allowed`),
 // answering
-//   { state: "signed_out", accessEmail }      no live session (the sign-in field is prefilled)
+//   { state: "signed_out", accessEmail }      no live session (the sign-in field is prefilled;
+//                                             `google: true` too while staff Google is on, §5.8)
 //   { state: "pending", email }               aal1, no factor yet: enrolment only
 //   { state: "factor_step", email, methods }  aal1 with a factor
 //   { state: "ok", staff, permissions, environment }
@@ -25,7 +26,7 @@ import {
 } from "./require-staff.ts";
 
 export type StaffViewer =
-  | { state: "signed_out"; accessEmail: string | null }
+  | { state: "signed_out"; accessEmail: string | null; google?: true }
   | { state: "pending"; email: string }
   | { state: "factor_step"; email: string; methods: FactorMethod[] }
   | {
@@ -49,7 +50,11 @@ export async function staffViewer(
     if (prior === null) {
       options.setCookies?.push(...setCookies);
       await noteNotListed(realm, tx, context);
-      return { state: "signed_out", accessEmail: access?.email.trim().toLowerCase() ?? null };
+      const accessEmail = access?.email.trim().toLowerCase() ?? null;
+      // Whether the sign-in page offers "Continue with Google": a setting read at start-up.
+      return realm.settings.features.google
+        ? { state: "signed_out", accessEmail, google: true }
+        : { state: "signed_out", accessEmail };
     }
     if (
       access === null ||

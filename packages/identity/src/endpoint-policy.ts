@@ -283,11 +283,18 @@ function staffRules(features: PolicyFeatures): EndpointRule[] {
     blocked("/unlink-account", ["POST"], "no account linking for staff"),
     blocked("/error", ["GET"], "the staff realm shows no library page"),
     features.google
-      ? rule("/sign-in/social", ["POST"], "public", ANY, "default", "§5.8")
-      : blocked("/sign-in/social", ["POST"], "until the Workspace client exists ([SA-15])"),
+      ? rule(
+          "/sign-in/social",
+          ["POST"],
+          "public",
+          ANY,
+          "default",
+          "§5.8: the Workspace client; a first factor only (google/staff.ts)",
+        )
+      : blocked("/sign-in/social", ["POST"], "staff Google is off (its own switch, [SA-15])"),
     features.google
       ? rule("/callback/:id", ["GET"], "public", ANY, "default", "callback/google only")
-      : blocked("/callback/:id", ["GET", "POST"], "until the Workspace client exists"),
+      : blocked("/callback/:id", ["GET", "POST"], "staff Google is off"),
   ];
   return [...rules, ...BLOCKED_BOTH];
 }

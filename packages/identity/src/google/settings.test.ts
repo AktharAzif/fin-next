@@ -1,7 +1,7 @@
 // Google's setting (spec 02 §5.8, CR-12): off by default; on only with the console's OAuth client;
 // the redirect URI exactly the console's callback; the fixture provider only in development and
-// test; never for the staff realm, whose Workspace client is not built; and the T-SAT-01 path set
-// unchanged with Google on (the provider mounts no route of its own).
+// test; never through this switch for the staff realm, which has its own (staff.test.ts); and the
+// T-SAT-01 path set unchanged with Google on (the provider mounts no route of its own).
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { untouchableDatabase } from "../../test/fake-db.ts";
@@ -100,7 +100,7 @@ describe("readGoogleSettings", () => {
     }
   });
 
-  it("refuses Google for the staff realm, whose Workspace client is not built", () => {
+  it("refuses the developer realm's switch on the staff realm, which has its own", () => {
     expect(() =>
       readGoogleSettings("staff", client(), "staging", "https://admin.example.com"),
     ).toThrow(/staff realm/);

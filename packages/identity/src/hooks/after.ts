@@ -12,6 +12,7 @@ import { assertionVerified } from "../crypto/webauthn.ts";
 import { AuthRefusal } from "../errors.ts";
 import { personGate, trustedBrowserEligible } from "../gate.ts";
 import { googleCallbackAfter, googleUnlinked, isCallbackPath } from "../google/hooks.ts";
+import { staffGoogleCallbackAfter } from "../google/staff.ts";
 import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
@@ -58,6 +59,10 @@ export async function afterHook(rt: RealmRuntime, ctx: HookContext): Promise<voi
     return googleCallbackAfter(rt, ctx, tx, state, (person, first) =>
       knownBrowserNotice(rt, ctx, tx, state, person, first),
     );
+  }
+  if (state.realm === "staff" && isCallbackPath(ctx.path)) {
+    // Only the library's refusals reach here: Fin makes every staff Google session before it.
+    return staffGoogleCallbackAfter(rt, ctx, state);
   }
   const failed = isAPIError(returned);
   if (failed) {

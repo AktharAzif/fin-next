@@ -57,6 +57,7 @@ describe("the staff viewer (spec 02 §14.4)", () => {
     const states = [
       { state: "signed_out", accessEmail: "nadia@example.org" },
       { state: "signed_out", accessEmail: null },
+      { state: "signed_out", accessEmail: "nadia@example.org", google: true },
       { state: "pending", email: "nadia@example.org" },
       { state: "factor_step", email: "nadia@example.org", methods: ["passkey"] },
       {
@@ -72,6 +73,8 @@ describe("the staff viewer (spec 02 §14.4)", () => {
   it("refuses an unknown state", () => {
     expect(staffViewer.output.safeParse({ state: "ok" }).success).toBe(false);
     expect(staffViewer.output.safeParse({ state: "elsewhere" }).success).toBe(false);
+    const google = { state: "signed_out", accessEmail: null, google: "yes" };
+    expect(staffViewer.output.safeParse(google).success).toBe(false);
   });
 });
 

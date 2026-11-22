@@ -9,6 +9,7 @@ import {
   googleUserFields,
   isCallbackPath,
 } from "../google/hooks.ts";
+import { staffGoogleSessionFields } from "../google/staff.ts";
 import { DAY, HOUR } from "../ports/clock.ts";
 import { type RealmRuntime, requestState, unitOf } from "../runtime.ts";
 import type { SessionRow } from "../store.ts";
@@ -110,6 +111,9 @@ export function databaseHooks(rt: RealmRuntime) {
     } else if (realm === "developer" && isCallbackPath(path)) {
       // Google (§5.8, §6.1): `aal1`, at the factor step when the person has a factor.
       fields = await googleSessionFields(rt, state, unitOf(rt), userId);
+    } else if (realm === "staff" && isCallbackPath(path)) {
+      // Staff Google (§5.8): `aal1` under the request's Access identity, like an emailed code.
+      fields = staffGoogleSessionFields(rt, state);
     } else if (
       (path === "/two-factor/verify-totp" || path === "/two-factor/disable") &&
       prior !== null &&

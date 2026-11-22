@@ -15,7 +15,12 @@
 // request state. Inside the unit the library's `validateAuthorizationCode` and `getUserInfo` only
 // read that outcome, and refuse anything that does not match the code, the verifier and the nonce
 // the library itself parsed.
+//
+// The staff realm uses the same provider with its Workspace client (staff.ts): the authorization
+// request also names the Workspace domain (`hd`, a hint to the account chooser; the ID token's
+// `hd` claim is what is checked), and the library is told never to make a member from a profile.
 import { createHash, type KeyObject } from "node:crypto";
+import type { RealmName } from "../config.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { LineSink } from "../ports/log.ts";
 import type { GoogleFailure, GoogleFlow } from "./flow.ts";
@@ -34,8 +39,8 @@ export interface GoogleSignInDeps {
   readonly settings: GoogleSettings;
   readonly clock: Clock;
   readonly lines: LineSink;
-  readonly realm: "developer";
-  /** The state cookie's full name (`__Host-fin.state`). */
+  readonly realm: RealmName;
+  /** The state cookie's full name (`__Host-fin.state`, `__Host-fin-admin.state`). */
   readonly stateCookie: string;
   /** The secret the library signs the state cookie with: the realm's newest. */
   readonly stateSecret: string;
@@ -250,6 +255,8 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
       disableIdTokenSignIn: true,
       overrideUserInfoOnSignIn: false,
       requireEmailVerification: false,
+      // Staff rows are made only by Fin's staff routes (§10.2): never a sign-up through Google.
+      ...(deps.realm === "staff" ? { disableSignUp: true } : {}),
     },
     accountSubject: ({ profile }: { profile: { sub?: unknown } }) => {
       if (typeof profile.sub !== "string" || profile.sub === "") {
@@ -283,6 +290,7 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
       url.searchParams.set("code_challenge_method", "S256");
       url.searchParams.set("nonce", input.idTokenNonce);
       url.searchParams.set("prompt", "select_account");
+      if (settings.hostedDomain !== undefined) url.searchParams.set("hd", settings.hostedDomain);
       return url;
     },
     async validateAuthorizationCode(input: {
