@@ -134,6 +134,25 @@ describe("connectors", () => {
     expect(tunnelNameMatches("fin-public", "fin-public-２０２６１１２１１２００")).toBe(false);
   });
 
+  it("reads a backslash before a quote in a configured name as two characters of the name", () => {
+    // Nothing is escaped, so there is no escaping order to get wrong: the backslash and the quote
+    // are both the name's own, and neither drops nor doubles on the way.
+    const stamp = "-202611211200";
+    const backslash = "\\";
+    for (const quote of ['"', "'"]) {
+      const name = `fin${backslash}${quote}public`;
+      expect(name, quote).toHaveLength(11);
+      expect(tunnelNameMatches(name, name), name).toBe(true);
+      expect(tunnelNameMatches(name, `${name}${stamp}`), name).toBe(true);
+      // The quote without the backslash, or with the backslash doubled, is another name.
+      expect(tunnelNameMatches(name, `fin${quote}public${stamp}`), name).toBe(false);
+      expect(tunnelNameMatches(name, `fin${backslash.repeat(2)}${quote}public${stamp}`), name).toBe(
+        false,
+      );
+      expect(tunnelNameMatches(name, `fin${quote}public`), name).toBe(false);
+    }
+  });
+
   it("fails closed when Cloudflare refuses the read", async () => {
     const world = healthyWorld();
     world.failures[`/accounts/${ACCOUNT}/cfd_tunnel/${PUBLIC_TUNNEL}/connections`] = 403;
