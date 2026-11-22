@@ -47,6 +47,23 @@ export interface OwedAlert {
 /** Spec 02 §18.2's alerts and the audit guard, due by the steward's ruling of 22 Nov. */
 const SUNDAY = "2026-11-22";
 
+/**
+ * Why spec 07 §12.3's review alerts stay owed (P0-C's step of 22 Nov): what reaches Better Stack
+ * today holds none of their lines.
+ */
+const REVIEW_LINES_NOT_SHIPPED =
+  "Owed, not defined, because no review line reaches Better Stack (checked 22 Nov): " +
+  "tools/fin-review in this tree holds only the options, the roles, the effort floor and the " +
+  "planner (spec 07 §13.4's RP-03) and writes no review line at all, not even to a run's local " +
+  "lines.jsonl; the runner that writes review.refused and review.model_mismatch there (RP-04) " +
+  "is not merged, tools/fin-review ships no line anywhere (spec 07 §12.2's shipping, " +
+  "src/telemetry.ts in RP-10), and staging/sources.json declares no fin-review source " +
+  "(§12.2's fin-review-local, CR-22). A rule over lines that never arrive can never fire. It can " +
+  "be built in the pull request that ships them (RP-10, which spec 07 §13.2 gives P0-C2 with " +
+  "alerts/review.json and the review runbooks), once the shipped lines carry ARCHITECTURE " +
+  "§10.2's envelope (service fin-review) and their source is declared; the plan dated RP-04 and " +
+  "RP-10 Saturday 21 Nov, both overdue, so the steward sets the date. ";
+
 export const OWED_ALERTS: readonly OwedAlert[] = [
   // The steward's ruling of 22 Nov, option (b): the alerts the code names.
   {
@@ -183,13 +200,17 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
       "runbook docs/runbooks/admin-access-drift.md.",
   },
   {
-    // Its lines are local until fin-review ships them to Better Stack.
+    // Its lines never reach Better Stack yet (REVIEW_LINES_NOT_SHIPPED says why).
     name: "review-refusals",
     severity: "N",
     fragment: "review",
     lane: "P0-C",
     due: SUNDAY,
     spec: "spec 07 §12.3",
+    note:
+      REVIEW_LINES_NOT_SHIPPED +
+      "The rule is then spec 07 §12.3's: more review.refused lines on the fin-review source in a " +
+      "day than @thresholds.review-refusals, N, runbook docs/runbooks/review-refusals.md.",
   },
   {
     name: "review-model-mismatch",
@@ -198,6 +219,10 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "P0-C",
     due: SUNDAY,
     spec: "spec 07 §12.3",
+    note:
+      REVIEW_LINES_NOT_SHIPPED +
+      "The rule is then spec 07 §12.3's: any review.model_mismatch on the fin-review source, P " +
+      "(the quiet policy's email in staging), runbook docs/runbooks/review-model-mismatch.md.",
   },
   {
     // No Phase 0 code calls tripSwitch; the money switches come with Monday's money lanes.
