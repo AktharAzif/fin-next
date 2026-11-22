@@ -1,7 +1,8 @@
 // The kill switches from Fin Admin (spec 02 §14.3, S2-27; OP-01; spec 08 §3.4, §3.10): a member
 // holding `switches.manage` sets and clears a switch through `ops.set_switch()` with an intent bound
 // to the switch, the state and the reason; the event, its journal entry and the notice to every
-// Admin commit with it; the guard on ops.kill_switch refuses any change without its event.
+// Admin commit with it; the guard on ops.kill_switch refuses any change without its event; the list
+// is in code-point order.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createStaffHarness,
@@ -138,5 +139,32 @@ describe("the kill switches", () => {
       "SELECT state FROM ops.kill_switch WHERE name = 'live_keys'",
     );
     expect(state.rows[0]?.state).toBe("off");
+  });
+
+  it("are listed by name in code-point order, the same on every server", async () => {
+    // Three names that differ first at "-", "_" or a letter: code point puts them in that order,
+    // while a bare ORDER BY under glibc's en_US.utf8 (CI's Postgres image) orders them otherwise
+    // and a Mac, which sorts by bytes, never shows the difference. Seeded out of order.
+    await h.fixture(
+      `INSERT INTO ops.kill_switch (name, state, changed_by_kind, changed_at)
+       SELECT n, 'off', 'system', now() FROM unnest($1::text[]) AS n`,
+      [["provider_instance:mpa", "provider_instance:mp_c", "provider_instance:mp-b"]],
+    );
+    const operator = await h.enrolled(unique("switch.operator.three"), "operator");
+    const listed = await h.route(
+      operator.browser,
+      { method: "GET", path: "/api/switches" },
+      async (tx, req, ctx) => {
+        await requireStaff(h.realm, req, ctx, { permission: "switches.manage" });
+        return listSwitches(tx);
+      },
+    );
+    const names = listed.map((s) => s.name);
+    expect(names.filter((n) => n.startsWith("provider_instance:"))).toEqual([
+      "provider_instance:mp-b",
+      "provider_instance:mp_c",
+      "provider_instance:mpa",
+    ]);
+    expect(names).toEqual([...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
   });
 });

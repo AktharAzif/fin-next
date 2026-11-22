@@ -3,7 +3,12 @@
 import { entries as audit } from "./audit.ts";
 import { entries as database } from "./database.ts";
 import { entries as email } from "./email.ts";
+import { entries as identity } from "./identity.ts";
+import { entries as ops } from "./ops.ts";
+import { entries as orgs } from "./orgs.ts";
 import { entries as platform } from "./platform.ts";
+import { entries as review } from "./review.ts";
+import { entries as staff } from "./staff.ts";
 import type { CatalogEntry } from "./types.ts";
 import { entries as webHost } from "./web-host.ts";
 
@@ -13,4 +18,9 @@ export const fragments: Readonly<Record<string, readonly CatalogEntry[]>> = {
   database,
   email,
   "web-host": webHost,
+  identity,
+  staff,
+  orgs,
+  ops,
+  review,
 };

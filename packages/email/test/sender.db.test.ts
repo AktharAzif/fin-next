@@ -1253,7 +1253,9 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
         },
       ]);
       const tables = await db.admin.query<{ name: string; privilege: string }>(
-        `SELECT n.nspname || '.' || c.relname AS name, p.privilege
+        // Code-point order, as the list below is written: under glibc's en_US.utf8 a default-collated
+        // name would sort email_private.outbox first (it ignores punctuation), so the query says "C".
+        `SELECT (n.nspname || '.' || c.relname) COLLATE "C" AS name, p.privilege COLLATE "C" AS privilege
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
               unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(privilege)
          WHERE n.nspname IN ('email', 'email_private', 'ops') AND c.relkind = 'r'

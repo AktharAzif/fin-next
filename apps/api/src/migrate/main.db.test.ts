@@ -68,6 +68,19 @@ async function cli(
   return { code, lines, raw };
 }
 
+/**
+ * The recorded migration names in the runner's order: file names compared by code point
+ * (assets.ts). `COLLATE "C"` makes Postgres sort them the same way whatever the database's
+ * collation: glibc's en_US.utf8 (CI's image) ignores punctuation at the first level, so a bare
+ * `ORDER BY name` can order two names there unlike the runner, while a Mac sorts by bytes.
+ */
+async function recordedMigrations(q: PgClient): Promise<string[]> {
+  const result = await q.query<{ name: string }>(
+    `SELECT name FROM ops.schema_migrations ORDER BY name COLLATE "C"`,
+  );
+  return result.rows.map((r) => r.name);
+}
+
 describe("migrate --bootstrap", () => {
   // The connection limits are cluster-wide: the test bootstrap sizes them as every other test file's.
   const bootstrapEnv = {
@@ -128,10 +141,7 @@ describe("migrate --migrate", () => {
       applied: migrations.length,
       newest: migrations.at(-1),
     });
-    const recorded = await su.query<{ name: string }>(
-      "SELECT name FROM ops.schema_migrations ORDER BY name",
-    );
-    expect(recorded.rows.map((r) => r.name)).toEqual(migrations);
+    expect(await recordedMigrations(su)).toEqual(migrations);
     const types = await su.query<{ n: number }>("SELECT count(*)::int AS n FROM audit.event_type");
     expect(types.rows[0]?.n).toBe(Object.keys(AUDIT_EVENTS).length);
     // AC-P0-29: fin_owner has no valid password once the run ends.
@@ -151,6 +161,43 @@ describe("migrate --migrate", () => {
     const { code, lines } = await cli(["--migrate"]);
     expect(code).toBe(EXIT_OK);
     expect(lines[1]).toMatchObject({ applied: 0 });
+  });
+
+  it("reads the recorded names in the runner's order whatever the column's collation", async () => {
+    // Two names a glibc-style collation (punctuation ignored at the first level, as CI's
+    // en_US.utf8 does) orders the other way round from the runner's code-point order. The ICU
+    // collation below sorts as glibc does on any server, a Mac's included, and the column takes it
+    // in this transaction only, so a query that left the order to the collation fails here.
+    const used = "20990101000000_test_code_used.sql";
+    const made = "20990101000000_test_codes_made.sql";
+    await su.query("BEGIN");
+    try {
+      await su.query(
+        "CREATE COLLATION pg_temp.glibc_like (provider = icu, locale = 'en-US-u-ka-shifted')",
+      );
+      await su.query(
+        "ALTER TABLE ops.schema_migrations ALTER COLUMN name TYPE text COLLATE pg_temp.glibc_like",
+      );
+      await su.query(
+        `INSERT INTO ops.schema_migrations (name, checksum, release, applied_at)
+         SELECT n, sha256(convert_to(n, 'UTF8')), 'collation-test', statement_timestamp()
+           FROM unnest($1::text[]) AS n`,
+        [[used, made]],
+      );
+      // The collation does reorder them on this server, so the check below can fail.
+      const loose = await su.query<{ name: string }>(
+        "SELECT name FROM ops.schema_migrations WHERE name = ANY ($1::text[]) ORDER BY name",
+        [[used, made]],
+      );
+      expect(loose.rows.map((r) => r.name)).toEqual([made, used]);
+      expect(await recordedMigrations(su)).toEqual([
+        ...listMigrations(sourceRoot() ?? ""),
+        used,
+        made,
+      ]);
+    } finally {
+      await su.query("ROLLBACK");
+    }
   });
 
   it("builds the email sender's schema and email.enqueue()'s allowlist from the template catalogue", async () => {

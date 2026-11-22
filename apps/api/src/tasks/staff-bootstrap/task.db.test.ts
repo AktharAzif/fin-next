@@ -390,8 +390,9 @@ describe("staff-bootstrap", () => {
         reasonCode: "first_admin",
       }),
     ).rejects.toMatchObject({ code: "pending_admin_exists" });
+    // Code-point order, as the list below is written, whatever the database's collation.
     const admins = await su.query<{ email: string; status: string }>(
-      "SELECT email, status FROM staff.member WHERE role_key = 'admin' AND status <> 'removed' ORDER BY email",
+      `SELECT email, status FROM staff.member WHERE role_key = 'admin' AND status <> 'removed' ORDER BY email COLLATE "C"`,
     );
     expect(admins.rows).toEqual([
       { email: "added.admin@example.com", status: "pending" },
@@ -510,7 +511,7 @@ describe("migrate --task staff-bootstrap on a new environment", () => {
       actor_via: string;
       db_login: string;
     }>(
-      "SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event",
+      `SELECT event, target_id, actor_kind, actor_id, actor_via, db_login FROM audit.event ORDER BY event COLLATE "C"`,
     );
     expect(events.rows.map((e) => [e.event, e.target_id])).toEqual([
       ["operator.task_completed", "staff-bootstrap"],

@@ -17,6 +17,11 @@ export interface EventTypeRow {
   retired: boolean;
 }
 
+/**
+ * The registry's rows, by name in code-point order: the order `ORDER BY name COLLATE "C"` reads them
+ * back in, whatever the database's default collation (glibc's en_US.utf8 ignores the punctuation in
+ * a name, and `localeCompare` puts "_" before "."), so the two can be compared row for row.
+ */
 export function eventTypeRows(
   events: Readonly<Record<string, EventSpec>> = AUDIT_EVENTS,
   areas: Readonly<Record<string, string>> = AUDIT_EVENT_AREAS,
@@ -31,7 +36,18 @@ export function eventTypeRows(
       journal_kind: spec.journal?.kind ?? null,
       retired: spec.retired === true,
     }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => byCodeUnit(a.name, b.name));
+}
+
+/**
+ * Orders by UTF-16 code unit, which is code-point and byte order for the ASCII names events have: the
+ * same on every host and equal to Postgres's `COLLATE "C"`. A locale's order (localeCompare, or a
+ * cluster's default collation such as glibc's en_US.utf8) differs between hosts: one puts
+ * `backup_codes.regenerated` before `backup_code.used`, byte order the other way round.
+ */
+function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  return a > b ? 1 : 0;
 }
 
 export interface SyncResult {

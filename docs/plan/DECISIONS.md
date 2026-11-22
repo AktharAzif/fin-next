@@ -22,7 +22,7 @@ real person.
   away-time authority, for the owner's review (§18). "Was Dnn" names the 19 Nov decision a row
   carries; §17 maps every 19 Nov decision. `CF-nn` is a critic finding (appendix A).
 - **Other IDs used here.**
-  - `PG-nn` is a production gate, PG-01 to PG-14, kept in EXECUTION §7.3. The `G` prefix belongs to
+  - `PG-nn` is a production gate, PG-01 to PG-17, kept in EXECUTION §7.3. The `G` prefix belongs to
     governance alone. No gate uses it: EXECUTION's gates were renamed from `G-` to `PG-` so that
     [G-01] to [G-10] mean one thing everywhere.
   - `SP-nn` is a spike (ARCHITECTURE §11.11).
@@ -67,7 +67,7 @@ real person.
   Saturday morning, held on 21 Nov 2026; every owner decision with this deadline is now decided),
   **Saturday** (by a stated time), **Sunday**, **Monday**, **Tuesday 24 Nov** (the start of
   hardening), or **production** (before production holds real data or moves real money, checked at
-  the gates PG-01 to PG-14).
+  the gates PG-01 to PG-17).
 - **If an owner decision is not answered by its deadline, builders proceed on the default**; for the
   Saturday sitting, the defaults applied from 09:00. A later answer changes the code through a
   reviewed pull request. The exceptions are marked **blocking**: work that depends on them waits. The
@@ -103,7 +103,7 @@ real person.
 
 | Requirement | Decisions |
 |---|---|
-| R1 Production-ready, from scratch, in a new repository | [G-01], [G-02], [G-04], [G-05]; the production gates PG-01 to PG-14 |
+| R1 Production-ready, from scratch, in a new repository | [G-01], [G-02], [G-04], [G-05]; the production gates PG-01 to PG-17 |
 | R2 Everything on Railway, including the database | [P-01], [P-02], [P-09], [OB-18] |
 | R3 Cloudflare Email Sending | [EM-01] to [EM-08] |
 | R4 Cloudflare in front of Railway | [FD-01], [FD-13] to [FD-19] |
@@ -596,7 +596,7 @@ about 08:28: no) and [OB-18] (decided at its default at the Saturday sitting).
 
 ### Production
 
-Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
+Each is checked at the production gates PG-01 to PG-17 (EXECUTION §7.3).
 
 | ID | Question | Default |
 |---|---|---|
@@ -693,7 +693,7 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 
 ### G-05 Staging core first, production gates after
 - **Decision:** each day's features are complete on staging, which carries the whole security core;
-  production adds the gates in ARCHITECTURE §11.10, which EXECUTION §7.3 tracks as PG-01 to PG-14;
+  production adds the gates in ARCHITECTURE §11.10, which EXECUTION §7.3 tracks as PG-01 to PG-17;
   none is assumed.
 - **Default:** as stated.
 - **Alternatives:** full production hardening before any feature (does not fit three days).
@@ -885,6 +885,22 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     emails and that admin's two TOTPs, Access's own factor ([FD-05]) and Fin Admin's ([SA-04];
     spec 02 §10.6), agents sign in to Fin Admin on staging and run its journeys. Never in
     production.
+  - Review severities in development (the owner's standing development rules, 22 Nov 2026). The
+    convergence rule, in the owner's words "note this rule for dev given everything will always
+    be fixed before prod": a critical or high finding always blocks a merge; a medium blocks until
+    the piece has had its full review and one fix round; after that, only a regression that the
+    latest fix caused, or an earlier finding that the fix claimed but did not fix, blocks, and a new
+    medium on code that already passed review is a `[follow-up]` item, fixed the same day at the
+    normal bar (all three lenses) in a follow-up pull request. The rule for lows: in development a
+    low never blocks, and fixers do not fix lows in the middle of a merge cycle; at the end of each
+    milestone one pull request per area fixes the cheap ones, reviewed normally under the
+    convergence rule; before production every low has a disposition, fixed or accepted with a
+    one-line reason, a low the reviewers mark as touching security or as visible to users is fixed
+    and never accepted, and the steward prepares the accepted list for the owner to sign off in one
+    go. A pull request names its deferred and low findings by ID and severity only, never by their
+    text, path or class (spec 07 §7.4). The production invariant: everything is fixed before production;
+    EXECUTION §7.3's PG-15 to PG-17 refuse production while an alert is owed, a `[follow-up]` item
+    is open, or a low has no disposition.
 - **Alternatives:** the owner approves each merge.
 - **Rationale:** the draft's EQ-29, recorded here as the one register asks. From hardening, agents
   cannot approve deployments or control paths with the builder account ([CI-13]). Until then they
@@ -895,7 +911,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   21 Nov 2026, under the owner's away-time authority; for the owner's review. Staging deploys from
   the operator machine while the owner is away ([BD-05]) and the approval of [BD-09]'s three
   entries: decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
-  owner's review · **Deadline:** decided
+  owner's review. The review severities in development (the convergence rule and the rule for
+  lows) and PG-15 to PG-17: decided by the owner, 22 Nov 2026 · **Deadline:** decided
 
 ## 2. Platform and runtime
 

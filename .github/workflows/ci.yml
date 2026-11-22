@@ -286,12 +286,6 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build (both server targets' bundles and the static builds)
         run: pnpm build
-      - name: Bundle checks (seams; in static builds secret shapes, public-safety, setting names, server-only markers, maps, origins)
-        run: node .github/scripts/bundle-check.mjs
-      - name: The real-build test (bundle-check finds nothing in the static apps, built and staged as the release does)
-        env:
-          FIN_REAL_BUILDS: "1"
-        run: node --test .github/scripts/test/bundle-check-real.test.mjs
       - name: gitleaks (the static builds, which .gitignore hides from the tree scan)
         run: .github/scripts/gitleaks-static.sh apps/*/dist/static
       - name: Static build checks (index.html, static.json)

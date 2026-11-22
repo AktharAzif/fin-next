@@ -81,6 +81,16 @@ export function emptyKind(search: AuditSearch): "noMatch" | "range" | "ever" {
   return (search.range ?? DEFAULT_RANGE) === "all" ? "ever" : "range";
 }
 
+/**
+ * The title of the empty state for a range with no events: "No events today", "No events in the
+ * last 30 days". All time has its own empty state; its title is given for completeness.
+ */
+export function rangeEmptyTitle(range: AuditRange): string {
+  if (range === "today") return "No events today";
+  if (range === "all") return "No events yet";
+  return `No events in the ${RANGE_LABELS[range].toLowerCase()}`;
+}
+
 /** The chip that names the one object the log is filtered to. */
 export function objectChip(
   search: AuditSearch,

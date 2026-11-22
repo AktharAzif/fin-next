@@ -1,10 +1,11 @@
 // The look-alike rows against Unicode's data: the confusables entries in
 // src/test-support/confusables.ts (every entry of confusables.txt but those whose source is ASCII
 // or draws as nothing) and the names of the Latin letters in src/test-support/latin-letters.ts.
-// Every entry reads as its prototype is drawn; the members of each of Unicode's classes read
-// alike; a capital reads as its small letter only where Unicode draws it so; a Latin letter named
-// for another with a stroke, hook or curl, or a small capital, reads as that letter; every derived
-// row is one the data asks for; and the rows are well formed.
+// Every entry reads as its prototype is drawn, and a modifier letter drawn as punctuation may
+// always be passed over; the members of each of Unicode's classes read alike; a capital reads as
+// its small letter only where Unicode draws it so; a Latin letter named for another with a stroke,
+// hook or curl, or a small capital, reads as that letter; every derived row is one the data asks
+// for; and the rows are well formed.
 import { describe, expect, it } from "vitest";
 import { CONFUSABLE_ENTRIES, CONFUSABLES_VERSION } from "../test-support/confusables.ts";
 import { LATIN_LETTERS, LATIN_LETTERS_VERSION } from "../test-support/latin-letters.ts";
@@ -218,9 +219,16 @@ describe("Unicode's confusables data (UTS #39)", () => {
   it("reads every letter, digit, sign, symbol and mark as its prototype is drawn", () => {
     const wrong: string[] = [];
     for (const e of known) {
-      // Folding decides what it folds to ASCII, and modifier letters are not read.
-      if (foldedToAscii(e.source) || isModifierLetter(e.source)) continue;
       const glyphs = read(e.source);
+      // A modifier letter drawn as punctuation may always be passed over, as punctuation is,
+      // whatever folding turns it into (the letter it folds to may be read as well): every glyph
+      // it reads as is optional. One drawn as a letter is held to its prototype below.
+      if (isModifierLetter(e.source) && drawnAsPunctuation(e.prototype)) {
+        if (glyphs.some((g) => !g.optional)) wrong.push(`${e.label}: read as ${tokens(glyphs)}`);
+        continue;
+      }
+      // Folding decides what it folds to ASCII.
+      if (foldedToAscii(e.source)) continue;
       if (drawnAsPunctuation(e.prototype)) {
         // A letter drawn as punctuation never counts as a letter of no Latin reading.
         if (glyphs.some((g) => g.reads === null && !g.optional)) wrong.push(e.label);
@@ -238,6 +246,42 @@ describe("Unicode's confusables data (UTS #39)", () => {
       }
     }
     expect(wrong).toEqual([]);
+  });
+
+  it("holds a row for each modifier letter drawn as punctuation that folds to a letter", () => {
+    // The data's: each modifier letter drawn as punctuation that folding turns into one letter.
+    const foldsToLetter = (char: string) => {
+      const folding = char.normalize("NFKD");
+      return isLetter(folding) && !isModifierLetter(folding);
+    };
+    const asked = known
+      .filter((e) => isModifierLetter(e.source) && drawnAsPunctuation(e.prototype))
+      .filter((e) => foldsToLetter(e.source))
+      .map((e) => hex(`${e.source}${e.prototype}`));
+    const rows = UNICODE_LOOK_ALIKES.punctuationModifiers.join(" ").split(" ");
+    expect(rows.map(hex).sort()).toEqual(asked.sort());
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const [char = "", ...drawnAs] = [...row];
+      // Its punctuation stands for no letter, so passing it over reads it as it is drawn.
+      expect(read(drawnAs.join("")), hex(row)).toEqual([]);
+      // Otherwise it reads as the letter it folds to reads, a glyph that may be passed over.
+      const glyphs = read(char);
+      const letter = read(char.normalize("NFKD"));
+      expect(glyphs.length, hex(row)).toBeGreaterThan(0);
+      expect(
+        glyphs.every((g) => g.optional),
+        hex(row),
+      ).toBe(true);
+      expect(
+        letter.every((g) => !g.optional),
+        hex(row),
+      ).toBe(true);
+      expect(
+        glyphs.map((g) => ({ ...g, optional: false })),
+        hex(row),
+      ).toEqual(letter);
+    }
   });
 
   it("reads the members of each of Unicode's classes as the same Latin letters", () => {
@@ -312,6 +356,7 @@ describe("Unicode's confusables data (UTS #39)", () => {
       capitals: UNICODE_LOOK_ALIKES.capitals,
       letters: UNICODE_LOOK_ALIKES.letters,
       named: UNICODE_LOOK_ALIKES.named,
+      punctuationModifiers: UNICODE_LOOK_ALIKES.punctuationModifiers,
       signs: UNICODE_LOOK_ALIKES.signs,
     })) {
       const seen = new Set<string>();

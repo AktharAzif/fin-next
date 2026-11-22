@@ -2,6 +2,7 @@
 // every address it makes carries it (`asha.rao+<scope>@example.com`), so two tests never sign up
 // the same person. Only fixture domains are made.
 import { createHash } from "node:crypto";
+import { trimEnd } from "../text.ts";
 
 export type FixtureDomain = "example.com" | "example.org" | "example.net";
 
@@ -29,13 +30,25 @@ const sha256Hex = (text: string) => createHash("sha256").update(text).digest("he
  * SHA-256 of all of it, so two scopes that differ anywhere (a run ID, a test, a retry) stay apart.
  */
 function cleanScope(scope: string): string {
-  const clean = scope
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  // One pass, no pattern, one read of each UTF-16 unit: ASCII letters and digits are kept, and each
+  // run of anything else between two of them becomes one hyphen (a run at either end becomes none).
+  // A unit outside ASCII (a surrogate half included) is never a letter or digit here.
+  const lower = scope.toLowerCase();
+  let clean = "";
+  let gap = false;
+  for (let i = 0; i < lower.length; i += 1) {
+    const code = lower.charCodeAt(i);
+    if ((code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)) {
+      if (gap && clean !== "") clean += "-";
+      clean += String.fromCharCode(code);
+      gap = false;
+    } else {
+      gap = true;
+    }
+  }
   if (clean === "") throw new Error("an address book needs a scope with a letter or digit");
   if (clean.length <= MAX_SCOPE) return clean;
-  const start = clean.slice(0, MAX_SCOPE - 17).replace(/-+$/, "");
+  const start = trimEnd(clean.slice(0, MAX_SCOPE - 17), "-");
   return `${start}-${sha256Hex(clean).slice(0, 16)}`;
 }
 

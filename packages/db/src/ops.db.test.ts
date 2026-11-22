@@ -447,7 +447,7 @@ describe("scheduler leases and duty state (row-level security, ARCHITECTURE §4.
     });
     await withClient("fin_probe", async (probe) => {
       expect(
-        (await probe.query("SELECT name FROM ops.scheduler_lease ORDER BY name")).rows,
+        (await probe.query('SELECT name FROM ops.scheduler_lease ORDER BY name COLLATE "C"')).rows,
       ).toEqual([{ name: "payments" }, { name: "worker" }]);
       expect(await codeOf(probe, "UPDATE ops.scheduler_lease SET holder = 'x'")).toBe("42501");
     });
@@ -649,7 +649,8 @@ describe("email_private: the worker's tables, out of every other login's reach",
     const acl = await su.query<{ grantee: string; privilege: string }>(
       `SELECT CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
               a.privilege_type AS privilege
-       FROM pg_namespace n, aclexplode(n.nspacl) a WHERE n.nspname = 'email_private' ORDER BY 1, 2`,
+       FROM pg_namespace n, aclexplode(n.nspacl) a WHERE n.nspname = 'email_private'
+       ORDER BY 1, a.privilege_type COLLATE "C"`,
     );
     expect(acl.rows).toEqual([
       { grantee: "fin_email_enqueue", privilege: "USAGE" },
@@ -691,7 +692,7 @@ describe("email_private: the worker's tables, out of every other login's reach",
             unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(privilege)
        WHERE n.nspname IN (${schemas}) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
          AND has_table_privilege('fin_email_enqueue', c.oid, p.privilege)
-       ORDER BY 1, 2`,
+       ORDER BY 1, p.privilege COLLATE "C"`,
     );
     expect(tables.rows).toEqual([
       { name: "email.template_grant", privilege: "SELECT" },

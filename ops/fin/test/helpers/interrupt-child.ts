@@ -23,6 +23,14 @@ import type { Command } from "../../src/command.ts";
 import type { Context } from "../../src/core/context.ts";
 import { main } from "../../src/main.ts";
 
+// Every test ends its child in a `finally`; a runner killed outright runs none, and a child whose
+// shipping hangs would then run for ever. So it ends itself once the test process that started it
+// is gone, checked every 250 ms by a timer that never holds it open.
+const parent = process.ppid;
+setInterval(() => {
+  if (process.ppid !== parent) process.kill(process.pid, "SIGKILL");
+}, 250).unref();
+
 const marker = process.env.FIN_TEST_MARKER ?? "the thrown text";
 
 if (process.env.FIN_TEST_HANG_SHIPPING === "1") {

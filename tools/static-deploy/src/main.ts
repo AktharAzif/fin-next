@@ -125,14 +125,20 @@ export async function main(io: MainIo): Promise<number> {
         JSON.stringify({
           event: "deploy.static_step",
           deployment: r.name,
-          release,
+          deployedRelease: release,
           files: r.files,
           uploaded: r.uploaded,
           assetManifestHash: r.assetManifestHash,
         }),
       );
     }
-    log(JSON.stringify({ event: "deploy.static_done", release, deployments: results.length }));
+    log(
+      JSON.stringify({
+        event: "deploy.static_done",
+        deployedRelease: release,
+        deployments: results.length,
+      }),
+    );
     return 0;
   } catch (error) {
     io.stderr(`error: ${mask(error instanceof Error ? error.message : "failed")}\n`);
