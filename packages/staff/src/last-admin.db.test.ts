@@ -23,29 +23,51 @@ type RouteFn = (tx: UnitTx, request: Request, context: RequestContext) => Promis
 
 let h: StaffHarness;
 
-beforeAll(async () => {
-  h = await createStaffHarness("sat04last");
-}, 120_000);
-
-afterAll(async () => {
-  await h?.close();
-}, DROP_TIMEOUT_MS);
-
 interface Admin {
   staffId: string;
   browser: Browser;
   authenticator: SoftAuthenticator;
 }
 
-/** Leaves no active Admin from an earlier test, then enrols two. */
-async function twoAdmins(): Promise<[Admin, Admin]> {
-  await h.fixture(
-    "UPDATE staff.member SET status = 'removed', removed_at = now() WHERE role_key = 'admin' AND status = 'active'",
-  );
-  return [
+/** Each race's two Admins, made once in the file's setup. */
+let demoting: [Admin, Admin];
+let removing: [Admin, Admin];
+
+beforeAll(async () => {
+  h = await createStaffHarness("sat04last");
+  // The races test the staff-change lock, not how an Admin is made: each Admin comes through the
+  // whole journey (a code sign-in, the enrolment code, a passkey registered), here, once. The
+  // file's first realm requests, which pay a fresh process's cold paths and the database's new
+  // connections, are paid here too, not by whichever test runs first.
+  demoting = [
     await h.enrolled(unique("admin.a"), "admin"),
     await h.enrolled(unique("admin.b"), "admin"),
   ];
+  removing = [
+    await h.enrolled(unique("admin.c"), "admin"),
+    await h.enrolled(unique("admin.d"), "admin"),
+  ];
+}, 120_000);
+
+afterAll(async () => {
+  await h?.close();
+}, DROP_TIMEOUT_MS);
+
+/**
+ * Leaves the pair the only active Admins: every other one (the other race's pair, or an earlier
+ * race's survivor) is set aside, and the pair is active again if an earlier race set it aside.
+ */
+async function onlyActive(pair: [Admin, Admin]): Promise<[Admin, Admin]> {
+  const ids = pair.map((admin) => admin.staffId);
+  await h.fixture(
+    "UPDATE staff.member SET status = 'removed', removed_at = now() WHERE role_key = 'admin' AND status = 'active' AND NOT (id = ANY ($1))",
+    [ids],
+  );
+  await h.fixture(
+    "UPDATE staff.member SET status = 'active', removed_at = NULL WHERE id = ANY ($1) AND status = 'removed'",
+    [ids],
+  );
+  return pair;
 }
 
 /** Asks for the intent and proves it, so the re-send can go out at the same moment as another. */
@@ -67,8 +89,11 @@ async function activeAdmins(): Promise<number> {
 async function race(
   pairs: { who: Admin; request: { method: string; path: string }; fn: RouteFn }[],
 ) {
-  const intents: string[] = [];
-  for (const pair of pairs) intents.push(await provedIntent(pair.who, pair.request, pair.fn));
+  // Each Admin asks for and proves their own intent, side by side; then the re-sends go out at the
+  // same moment.
+  const intents = await Promise.all(
+    pairs.map((pair) => provedIntent(pair.who, pair.request, pair.fn)),
+  );
   return Promise.allSettled(
     pairs.map((pair, i) =>
       h.route(pair.who.browser, { ...pair.request, intent: intents[i] as string }, pair.fn),
@@ -78,7 +103,7 @@ async function race(
 
 describe("the last Admin (§10.8)", () => {
   it("survives two concurrent demotions: exactly one passes", async () => {
-    const [a, b] = await twoAdmins();
+    const [a, b] = await onlyActive(demoting);
     const demote =
       (target: Admin): RouteFn =>
       async (tx, req, ctx) =>
@@ -101,7 +126,7 @@ describe("the last Admin (§10.8)", () => {
   });
 
   it("survives two concurrent removals: exactly one passes", async () => {
-    const [a, b] = await twoAdmins();
+    const [a, b] = await onlyActive(removing);
     const remove =
       (target: Admin): RouteFn =>
       async (tx, req, ctx) =>
