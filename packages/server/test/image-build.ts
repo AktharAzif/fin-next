@@ -5,8 +5,11 @@
 //   - each ops/docker/*.Dockerfile's `release` stage (the target the release workflow builds) and
 //     the one stage of the Dockerfile's own, built from the repository, whose output it copies
 //     (beside it, the release stage may take only the copies ops/docker/release-allowlist.json
-//     names, word for word, each from a stage whose last step is the output scan over exactly what
-//     it copies; any other copy from a stage that holds the repository is a second bundle copy),
+//     names for that Dockerfile, word for word, each from a stage that is nothing but RUNs whose
+//     steps are exactly the command the entry names as making the copy, word for word, and then
+//     the output scan over exactly what it copies, with no ARG, ENV, WORKDIR or SHELL of its own,
+//     built on the stage the bundle's build stage is built on and run where that stage runs pnpm;
+//     any other copy from a stage that holds the repository is a second bundle copy),
 //     with the file's lines, each instruction's flags and each COPY's --from read as Docker reads
 //     them (a stage by index or by name in any case and quoting, an image only by digest), and a
 //     parent stage that runs a command or copies from the repository refused, as ONBUILD is; a
@@ -56,13 +59,17 @@ export const RELEASE_STAGE = "release";
 export const ALLOWLIST_FILE = "ops/docker/release-allowlist.json";
 
 /**
- * A copy a release stage may take beside its bundle: a COPY from the stage `stage` (one that holds
- * the repository) of exactly `source` to exactly `destination`, with --from its only flag.
+ * A copy a release stage may take beside its bundle: in the Dockerfile `dockerfile` (a repository
+ * path) only, a COPY from the stage `stage` (one that holds the repository) of exactly `source` to
+ * exactly `destination`, with --from its only flag; that stage runs exactly the command `produces`,
+ * word for word, and then the output scan over `source`.
  */
 export interface AllowedCopy {
+  dockerfile: string;
   stage: string;
   source: string;
   destination: string;
+  produces: string;
   reason: string;
 }
 
@@ -554,12 +561,28 @@ function readJson(file: string): Record<string, unknown> {
 const plainPath = (path: string): boolean =>
   /^[\w.@+/-]+$/.test(path) && !path.split("/").some((part) => part === "." || part === "..");
 
+/** The words of `command` when it is one simple command of plain words, not led by an assignment. */
+function commandWords(command: string): string[] | undefined {
+  let steps: string[][];
+  try {
+    steps = shellSteps(command, {});
+  } catch (error) {
+    if (error instanceof Unreadable) return undefined;
+    throw error;
+  }
+  const [words, ...more] = steps;
+  if (words === undefined || more.length > 0 || ASSIGNMENT.test(words[0] ?? "")) return undefined;
+  return words;
+}
+
 /**
  * The allowlist (ALLOWLIST_FILE) in `repository`: an object of exactly `about`, `copies` and
- * `preScripts`; each copy an object of exactly a stage's name (in lower case), an absolute source
- * and destination and a reason; each pre-script an object of exactly a command, the repository path
- * of the file it writes and a reason; every value a string with text. Anything else, a missing file
- * included, is refused, which refuses every build.
+ * `preScripts`; each copy an object of exactly a Dockerfile directly under ops/docker (by its
+ * repository path), a stage's name (in lower case), an absolute source and destination, the one
+ * command of plain words that makes the source in that stage, and a reason; each pre-script an
+ * object of exactly a command, the repository path of the file it writes and a reason; every value
+ * a string with text. Anything else, a missing file included, is refused, which refuses every
+ * build.
  */
 export function readAllowlist(repository: string): Allowlist {
   let value: unknown;
@@ -594,13 +617,28 @@ export function readAllowlist(repository: string): Allowlist {
   text(top, "about", "it");
   const copies = list(top, "copies").map((item, index): AllowedCopy => {
     const what = `copy ${index + 1}`;
-    const entry = fields(item, ["stage", "source", "destination", "reason"], what);
+    const entry = fields(
+      item,
+      ["dockerfile", "stage", "source", "destination", "produces", "reason"],
+      what,
+    );
     const copy = {
+      dockerfile: text(entry, "dockerfile", what),
       stage: text(entry, "stage", what),
       source: text(entry, "source", what),
       destination: text(entry, "destination", what),
+      produces: text(entry, "produces", what),
       reason: text(entry, "reason", what),
     };
+    if (
+      !plainPath(copy.dockerfile) ||
+      posix.dirname(copy.dockerfile) !== DOCKER_DIRECTORY ||
+      !copy.dockerfile.endsWith(".Dockerfile")
+    ) {
+      fail(
+        `${what}'s dockerfile, ${JSON.stringify(copy.dockerfile)}, is not a Dockerfile of ${DOCKER_DIRECTORY}`,
+      );
+    }
     if (!STAGE_NAME.test(copy.stage)) {
       fail(`${what}'s stage, ${JSON.stringify(copy.stage)}, is not a stage's name in lower case`);
     }
@@ -608,6 +646,11 @@ export function readAllowlist(repository: string): Allowlist {
       if (!posix.isAbsolute(path) || !plainPath(path)) {
         fail(`${what}'s ${JSON.stringify(path)} is not an absolute path in plain characters`);
       }
+    }
+    if (commandWords(copy.produces) === undefined) {
+      fail(
+        `${what}'s produces, ${JSON.stringify(copy.produces)}, is not one command of plain words`,
+      );
     }
     return copy;
   });
@@ -704,6 +747,13 @@ export function viteBuildConfig(
   return file;
 }
 
+/** An allowlisted copy's stage, read: the stage, its entry, and the directory its steps run in. */
+interface ScannedStage {
+  stage: Stage;
+  entry: AllowedCopy;
+  workdir: string;
+}
+
 /** A Dockerfile's release build, read once: what evaluating it for each app needs. */
 interface Release {
   dockerfile: string;
@@ -713,14 +763,18 @@ interface Release {
   copy: Instruction;
   /** The build stage's build argument (the app), when it declares one. */
   arg: string | undefined;
+  /** The stages of the allowlisted copies the release stage takes, each read by checkScanned. */
+  scanned: ScannedStage[];
 }
 
 /**
- * The allowlist's copy that `copy`, from `source` (a stage that holds the repository), is: --from
- * its only flag, and its words exactly the entry's source and destination, with nothing expanded.
- * Otherwise undefined, and the copy counts as a copy of the bundle.
+ * The allowlist's copy that `copy`, in the Dockerfile `dockerfile` and from `source` (a stage that
+ * holds the repository), is: an entry for that Dockerfile, --from its only flag, and its words
+ * exactly the entry's source and destination, with nothing expanded. Otherwise undefined, and the
+ * copy counts as a copy of the bundle.
  */
 function allowedCopy(
+  dockerfile: string,
   copy: Instruction,
   source: Stage,
   allowlist: Allowlist,
@@ -737,19 +791,31 @@ function allowedCopy(
   const [from, to, ...more] = words;
   if (more.length > 0) return undefined;
   return allowlist.copies.find(
-    (entry) => entry.stage === source.name && entry.source === from && entry.destination === to,
+    (entry) =>
+      entry.dockerfile === dockerfile &&
+      entry.stage === source.name &&
+      entry.source === from &&
+      entry.destination === to,
   );
 }
 
+/** An allowlisted copy's stage, as its refusals name it. */
+const scannedName = (stage: Stage, entry: AllowedCopy): string =>
+  `its stage ${stage.name}, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy ${entry.source} from,`;
+
 /**
- * Refuses an allowlisted copy unless its stage scans what it copies: the stage gives no instruction
- * but ARG, ENV, WORKDIR, SHELL and RUN, each RUN a plain shell command, and its last instruction is
- * a RUN, in a shell the test reads, whose last step is exactly the image's output scan over the
- * copy's source. So nothing the stage does comes after the scan, and the scan's failure fails the
- * image's build.
+ * Refuses an allowlisted copy unless its stage makes exactly what it copies and scans it: the stage
+ * gives no instruction but RUN, each a plain shell command, in a shell the test reads; its last RUN's
+ * last step is exactly the image's output scan over the copy's source; and its steps, across its
+ * RUNs (each RUN a list of steps joined by `&&`), are exactly two: the entry's `produces`, word for
+ * word, and then that scan. So nothing but the command the allowlist names writes what the release
+ * stage copies, nothing the stage does comes before or after the scan, and the scan's failure fails
+ * the image's build. An ARG, ENV, WORKDIR or SHELL of the stage's own, which would change what its
+ * steps run or where, is refused; the stage it is built on and the directory it runs in are held to
+ * the bundle's build stage's by the caller. Returns the directory its steps run in.
  */
-function checkScanned(stage: Stage, entry: AllowedCopy): void {
-  const which = `its stage ${stage.name}, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy ${entry.source} from,`;
+function checkScanned(stage: Stage, entry: AllowedCopy): string {
+  const which = scannedName(stage, entry);
   for (const instruction of stage.instructions) {
     if (!["ARG", "ENV", "WORKDIR", "SHELL", "RUN"].includes(instruction.keyword)) {
       fail(`${which} has ${instruction.keyword} on line ${instruction.line}`);
@@ -777,12 +843,32 @@ function checkScanned(stage: Stage, entry: AllowedCopy): void {
   ) {
     fail(refusal);
   }
+  // Before the scan, as after it: nothing of the stage's own but its RUNs, and in them nothing but
+  // the command that makes the copy and then the scan.
+  for (const instruction of stage.instructions) {
+    if (instruction.keyword !== "RUN") {
+      fail(`${which} has ${instruction.keyword} on line ${instruction.line}`);
+    }
+  }
+  const steps = stage.instructions.flatMap((run) => shellSteps(run.text, env));
+  const [made, ...rest] = steps;
+  if (
+    made === undefined ||
+    rest.length !== 1 ||
+    JSON.stringify(made) !== JSON.stringify(commandWords(entry.produces))
+  ) {
+    fail(
+      `${which} does not run exactly \`${entry.produces}\` and then \`node ${SCAN_SCRIPT} ${directory}\`, with no other step`,
+    );
+  }
+  return workdir;
 }
 
 /**
  * Reads the release stage and its build stage of the Dockerfile at the repository path given: the
  * one copy of the bundle, from a stage that holds the repository, and beside it only the copies
- * `allowlist` names, each from a stage that scans it.
+ * `allowlist` names for this Dockerfile, each from a stage that makes exactly it and scans it, built
+ * on the stage the bundle's build stage is built on (so it starts from the same repository).
  */
 function readRelease(repository: string, dockerfile: string, allowlist: Allowlist): Release {
   const stages = stagesOf(dockerInstructions(readFileSync(join(repository, dockerfile), "utf8")));
@@ -794,6 +880,7 @@ function readRelease(repository: string, dockerfile: string, allowlist: Allowlis
     );
   }
   const copies: { copy: Instruction; build: Stage }[] = [];
+  const scanned: ScannedStage[] = [];
   for (const instruction of release.instructions) {
     if (instruction.keyword === "RUN" || instruction.keyword === "ADD") {
       fail(`its ${RELEASE_STAGE} stage has ${instruction.keyword} on line ${instruction.line}`);
@@ -804,9 +891,11 @@ function readRelease(repository: string, dockerfile: string, allowlist: Allowlis
       fail(`its ${RELEASE_STAGE} stage copies from the build context on line ${instruction.line}`);
     }
     if (source === "image" || !source.repository) continue;
-    const allowed = allowedCopy(instruction, source, allowlist);
+    const allowed = allowedCopy(dockerfile, instruction, source, allowlist);
     if (allowed === undefined) copies.push({ copy: instruction, build: source });
-    else checkScanned(source, allowed);
+    else {
+      scanned.push({ stage: source, entry: allowed, workdir: checkScanned(source, allowed) });
+    }
   }
   const [first, ...more] = copies;
   if (first === undefined || more.length > 0) {
@@ -831,7 +920,19 @@ function readRelease(repository: string, dockerfile: string, allowlist: Allowlis
   const args = argsOf(build);
   if (args.length > 1)
     fail(`its build stage ${build.name} declares ${args.length} build arguments`);
-  return { dockerfile, build, release, run, copy, arg: args[0] };
+  for (const { stage, entry } of scanned) {
+    if (build.parent === undefined) {
+      fail(
+        `${scannedName(stage, entry)} has no stage in common with the bundle's build stage ${build.name}, which is built on an image`,
+      );
+    }
+    if (stage.parent !== build.parent) {
+      fail(
+        `${scannedName(stage, entry)} is built on ${stage.parent?.name ?? "an image"}, not on ${build.parent.name}, the stage the bundle's build stage ${build.name} is built on`,
+      );
+    }
+  }
+  return { dockerfile, build, release, run, copy, arg: args[0], scanned };
 }
 
 /** The directory the release stage copies, with the build argument set to `value`. */
@@ -875,6 +976,15 @@ function evaluate(
   allowlist: Allowlist,
 ): ImageBuild | { skipped: string } {
   const { env, workdir, shell } = settingOf(release.build, release.run, release.arg, value);
+  // An allowlisted copy's stage runs its command and the scan (both repository paths) where the
+  // bundle's build stage runs pnpm, the repository's root, so they are the repository's files.
+  for (const each of release.scanned) {
+    if (each.workdir !== workdir) {
+      fail(
+        `${scannedName(each.stage, each.entry)} runs in ${each.workdir}, not in ${workdir}, where the bundle's build stage ${release.build.name} runs pnpm`,
+      );
+    }
+  }
   if (!SHELLS.some((known) => JSON.stringify(known) === JSON.stringify(shell))) {
     fail(`its build stage's shell, ${JSON.stringify(shell)}, is not one the test reads`);
   }

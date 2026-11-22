@@ -2,9 +2,17 @@
 // in one order by name across packages, duplicates refused; and the image ships exactly that set at
 // FIN_DB_ASSETS_DIR (ops/docker/app.Dockerfile).
 import { execFileSync } from "node:child_process";
-import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, matchesGlob } from "node:path";
+import { dirname, join, matchesGlob, relative, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   dbAssetsRoot,
@@ -233,6 +241,16 @@ describe("the command line (assets-cli.ts)", () => {
     for (const kind of ["bootstrap", "migrations", "grants"] as const) {
       expect(fromImage[kind].map((f) => f.source)).toEqual(fromSource[kind].map((f) => f.source));
     }
+    // Every entry of the staged directory, not only those the rule's globs match, is one of the
+    // rule's files in the source tree: the image copies the whole directory.
+    const staged = readdirSync(out, { recursive: true, withFileTypes: true })
+      .filter((entry) => !entry.isDirectory())
+      .map((entry) => relative(out, join(entry.parentPath, entry.name)).split(sep).join("/"))
+      .sort();
+    const rule = [...fromSource.bootstrap, ...fromSource.migrations, ...fromSource.grants]
+      .map((f) => f.source)
+      .sort();
+    expect(staged).toEqual(rule);
     expect(codeOf(() => stageDbAssets(ROOT, out))).toBe("db_assets");
   });
 

@@ -10,16 +10,20 @@
 // repository, however Docker lets the copy name its stage (by index, in quotes, with an escape,
 // after another flag) or lets a parent stage bring it in (ONBUILD, a command, a copy). The one
 // thing a release stage may take beside its bundle is a copy ops/docker/release-allowlist.json
-// names word for word (today the database's files, from app.Dockerfile's db-assets stage), whose
-// stage must end in the scan over exactly what it copies; an unlisted copy, the listed one changed,
-// or its stage's scan left out, moved or pointed elsewhere is refused, and so is an allowlist of
-// any other shape. A `pre` script is read only when it is byte for byte a command the allowlist
-// names (the api's generator of the audit event index); that command edited by one byte, any other
-// pre-script and every `post` script are refused. It reads
-// the Dockerfile's lines as Docker's parser does, and refuses what Docker would read otherwise
-// (a parser directive, a heredoc however its lines are continued), a Dockerfile holding any
-// character but printable ASCII, tabs and newlines, and one that names two stages alike (Docker
-// reads the last stage of a name, where a first match would read the first). The scan itself
+// names word for word for its Dockerfile (today the database's files, from app.Dockerfile's
+// db-assets stage), whose stage must be exactly the command the allowlist names as making it and
+// then the scan over exactly what it copies, built on the bundle's build stage's parent and run
+// where that stage runs pnpm; an unlisted copy, the listed one changed or in another Dockerfile,
+// its stage's scan left out, moved or pointed elsewhere, any other step or instruction of its
+// stage, before the scan or after it, or another parent or directory is refused, and so is an
+// allowlist of any other shape; and that command stages nothing but the files of
+// packages/db/src/assets.ts's rule. A `pre` script is read only when it is byte for byte a command
+// the allowlist names (the api's generator of the audit event index); that command edited by one
+// byte, any other pre-script and every `post` script are refused. It reads the Dockerfile's lines
+// as Docker's parser does, and refuses what Docker would read otherwise (a parser directive, a
+// heredoc however its lines are continued), a Dockerfile holding any character but printable
+// ASCII, tabs and newlines, and one that names two stages alike (Docker reads the last stage of a
+// name, where a first match would read the first). The scan itself
 // finds each of CI's bundle-check harness rules in a planted output (the fin:test-seam marker, a
 // module comment naming packages/testing, as bundle-check's `//#region` and as this build's Vite
 // writes it, `// <path>`, an import of the harness's package, packages/testing in a map's sources,
@@ -30,6 +34,7 @@ import {
   globSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -37,7 +42,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   ALLOWLIST_FILE,
@@ -130,6 +135,16 @@ const APP_COPY = `COPY --from=build-release /src/apps/\${APP}/dist/server/ /app/
 // test and release stages both take, and the db-assets stage's scan of what it copies.
 const APP_DB_COPY = "COPY --from=db-assets /out/db-assets/ /app/db-assets/\n";
 const APP_DB_SCAN = `RUN node ${SCAN_SCRIPT} /out/db-assets\n`;
+// The db-assets stage's staging command, the command the allowlisted copy names as what makes it.
+const DB_STAGE_COMMAND = "node packages/db/src/assets-cli.ts stage /out/db-assets";
+const APP_DB_PRODUCE = `RUN ${DB_STAGE_COMMAND}\n`;
+// The database's files by packages/db/src/assets.ts's rule, from the repository's root.
+const DB_ASSET_RULE = [
+  "packages/*/bootstrap/*.sql",
+  "packages/*/migrations/*.sql",
+  "packages/*/grants/*.json",
+  "packages/db/roles/grants/*.json",
+];
 // The generator the api's build:server runs first, which the allowlist names as its one pre-script.
 const AUDIT_GEN = "node ../../packages/audit/src/gen.ts";
 // connector.Dockerfile's release stage's copies: cloudflared from its image's stage, and the output.
@@ -542,22 +557,35 @@ describe("a changed release build is refused, or followed", () => {
 });
 
 // The one copy app.Dockerfile's release stage takes beside its bundle, the database's files, is read
-// only because ops/docker/release-allowlist.json names it word for word, and only while the
-// db-assets stage it comes from ends in the image's output scan over exactly what it copies, so
-// every copy the release stage takes is scanned. A second copy the allowlist does not name, the
-// listed one changed in any word or flag, the stage's scan left out, moved, ignored or pointed
-// elsewhere, and an allowlist of any other shape are refused.
+// only because ops/docker/release-allowlist.json names it word for word, for that Dockerfile, and
+// only while the db-assets stage it comes from is exactly the command the allowlist names as making
+// it and then the image's output scan over exactly what it copies, built on the stage the bundle's
+// build stage is built on and run where that stage runs pnpm, so nothing else writes what the
+// release stage copies and every copy it takes is scanned. A second copy the allowlist does not
+// name, the listed one changed in any word or flag or taken in another Dockerfile, the stage's scan
+// left out, moved, ignored or pointed elsewhere, any other step or instruction in the stage (before
+// the scan too: a copy of the harness, a second build, a cd, an ARG, ENV, WORKDIR or SHELL of its
+// own), the staging command changed, another parent or another directory, and an allowlist of any
+// other shape are refused. The command the allowlist names stages nothing but the files of
+// packages/db/src/assets.ts's rule, byte for byte, and none of packages/testing.
 describe("the release stage's allowlisted copies", () => {
   const api = `${APP_DOCKERFILE}, APP=api`;
   const twice = `${APP_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`;
-  const stage = `${APP_DOCKERFILE}: its stage db-assets, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy /out/db-assets/ from,`;
+  const which = `its stage db-assets, which ${ALLOWLIST_FILE} lets the ${RELEASE_STAGE} stage copy /out/db-assets/ from,`;
+  const stage = `${APP_DOCKERFILE}: ${which}`;
   const unscanned = `${stage} does not end in a RUN whose last step is \`node ${SCAN_SCRIPT} /out/db-assets\``;
+  const exactly = `${stage} does not run exactly \`${DB_STAGE_COMMAND}\` and then \`node ${SCAN_SCRIPT} /out/db-assets\`, with no other step`;
+  /** The refusal of an instruction `keyword` of the db-assets stage's own. */
+  const own = (keyword: string) => new RegExp(`^${stage} has ${keyword} on line \\d+$`);
   /** app.Dockerfile with its release stage's allowlisted copy replaced by `to`. */
   const releaseCopy = (to: string) => (files: Map<string, string>) =>
     replace(files, APP_DOCKERFILE, `${APP_COPY}${APP_DB_COPY}`, `${APP_COPY}${to}`);
   /** app.Dockerfile with its db-assets stage's scan replaced by `to`. */
   const dbScan = (to: string) => (files: Map<string, string>) =>
     replace(files, APP_DOCKERFILE, APP_DB_SCAN, to);
+  /** app.Dockerfile with its db-assets stage's instructions (its staging and its scan) replaced. */
+  const dbStage = (to: string) => (files: Map<string, string>) =>
+    replace(files, APP_DOCKERFILE, `${APP_DB_PRODUCE}${APP_DB_SCAN}`, to);
   /** The allowlist, changed by `change`. */
   const allowlist =
     (change: (value: Record<string, unknown>) => void) => (files: Map<string, string>) => {
@@ -574,8 +602,16 @@ describe("the release stage's allowlisted copies", () => {
 
   it("names the database's files and the audit index's generator alone, each with its reason", () => {
     const { copies, preScripts } = readAllowlist(REPOSITORY);
-    expect(copies.map((copy) => [copy.stage, copy.source, copy.destination])).toEqual([
-      ["db-assets", "/out/db-assets/", "/app/db-assets/"],
+    expect(
+      copies.map((copy) => [
+        copy.dockerfile,
+        copy.stage,
+        copy.source,
+        copy.destination,
+        copy.produces,
+      ]),
+    ).toEqual([
+      [APP_DOCKERFILE, "db-assets", "/out/db-assets/", "/app/db-assets/", DB_STAGE_COMMAND],
     ]);
     expect(preScripts.map((pre) => [pre.command, pre.writes])).toEqual([
       [AUDIT_GEN, "packages/audit/src/events/_index.gen.ts"],
@@ -583,18 +619,75 @@ describe("the release stage's allowlisted copies", () => {
     for (const { reason } of [...copies, ...preScripts]) expect(reason.length).toBeGreaterThan(20);
   });
 
-  it("lets the image's db-assets stage's scan pass over the database's files it stages", () => {
+  // The marker scan reads a bundle's markers, so it would pass raw harness sources or SQL: what the
+  // stage may hold is held here instead. The allowlisted command, run as the stage runs it with the
+  // copy's source a temporary directory, stages exactly the files of assets.ts's rule in the source
+  // tree, each byte for byte, and nothing else (packages/db's assets.test.ts holds that rule's files
+  // equal to discoverDbAssets's); and the image's scan passes over them.
+  it("stages by the allowlisted command nothing but the database's files, which the scan passes", () => {
+    const [entry, ...more] = readAllowlist(REPOSITORY).copies;
+    if (entry === undefined || more.length > 0) throw new Error("the allowlist names not one copy");
+    const [node, ...args] = shellSteps(entry.produces, {})[0] ?? [];
+    expect(node).toBe("node");
+    const source = posix.resolve(entry.source);
+    expect(args.filter((word) => word === source)).toHaveLength(1);
     const out = join(temporary(), "db-assets");
     const staged = spawnSync(
       process.execPath,
-      [join(REPOSITORY, "packages/db/src/assets-cli.ts"), "stage", out],
+      args.map((word) => (word === source ? out : word)),
       { cwd: REPOSITORY, encoding: "utf8", env: { PATH: dirname(process.execPath) } },
     );
-    expect(staged.status).toBe(0);
+    expect([staged.status, staged.stderr]).toEqual([0, ""]);
+    const files = readdirSync(out, { recursive: true, withFileTypes: true })
+      .filter((each) => !each.isDirectory())
+      .map((each) => relative(out, join(each.parentPath, each.name)).split(sep).join("/"))
+      .sort();
+    const rule = globSync(DB_ASSET_RULE, { cwd: REPOSITORY })
+      .map((path) => path.split(sep).join("/"))
+      .sort();
+    expect(rule.length).toBeGreaterThan(0);
+    expect(files).toEqual(rule);
+    expect(files.filter((file) => file.startsWith("packages/testing/"))).toEqual([]);
+    for (const file of files) {
+      expect(readFileSync(join(out, file)).equals(readFileSync(join(REPOSITORY, file))), file).toBe(
+        true,
+      );
+    }
     const scan = runHarnessScan(REPOSITORY, out);
     expect([scan.status, scan.stderr]).toEqual([0, ""]);
     expect(scan.stdout).toContain("no harness marker");
   }, 30_000);
+
+  it("reads the staging command and the scan joined in one RUN", () => {
+    const images = imageBuilds(
+      plantRepository(dbStage(`RUN ${DB_STAGE_COMMAND} && node ${SCAN_SCRIPT} /out/db-assets\n`)),
+    );
+    expect(images.refusals).toEqual([]);
+    expect(images.builds.map((build) => build.label)).toContain(api);
+  });
+
+  // The allowlist names the copy for app.Dockerfile: the same copy taken in connector.Dockerfile,
+  // from a stage of the same name that stages and scans it as app.Dockerfile's does, is a second
+  // copy from a stage that holds the repository there.
+  it("refuses the listed copy in another Dockerfile, from a stage that stages and scans it", () => {
+    const images = imageBuilds(
+      plantRepository((files) => {
+        replace(
+          files,
+          CONNECTOR_DOCKERFILE,
+          "FROM deps AS build\n",
+          `FROM deps AS db-assets\n${APP_DB_PRODUCE}${APP_DB_SCAN}\nFROM deps AS build\n`,
+        );
+        replace(files, CONNECTOR_DOCKERFILE, CONNECTOR_COPY, `${CONNECTOR_COPY}${APP_DB_COPY}`);
+      }),
+    );
+    expect(images.refusals).toEqual([
+      `${CONNECTOR_DOCKERFILE}: its ${RELEASE_STAGE} stage copies 2 times from stages that hold the repository, not once`,
+    ]);
+    const labels = images.builds.map((build) => build.label);
+    expect(labels).not.toContain(CONNECTOR_DOCKERFILE);
+    expect(labels).toContain(api);
+  });
 
   it.each<[string, (files: Map<string, string>) => void, string | RegExp]>([
     [
@@ -695,6 +788,115 @@ describe("the release stage's allowlisted copies", () => {
       new RegExp(`^${stage} has a RUN on line \\d+ that is not a plain shell command$`),
     ],
     [
+      "a RUN before the db-assets stage's scan that copies the harness into the copy",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN cp -r packages/testing/src /out/db-assets/harness\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "a step before the scan, in the scan's RUN, that copies the harness into the copy",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN cp -r packages/testing/src /out/db-assets/harness && node ${SCAN_SCRIPT} /out/db-assets\n`,
+      ),
+      exactly,
+    ],
+    [
+      "a test-target build copied into the copy before the db-assets stage's scan",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN FIN_BUILD_TARGET=test pnpm --filter @fin/api run build:server && cp -r apps/api/dist/server /out/db-assets/server\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "a migration planted in the copy before the staging command",
+      dbStage(
+        `RUN mkdir -p /out/db-assets/packages/zz/migrations\n${APP_DB_PRODUCE}${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "the staging command replaced by a copy of the repository",
+      dbStage(`RUN mkdir -p /out && cp -r /src /out/db-assets\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    ["the staging command left out", dbStage(APP_DB_SCAN), exactly],
+    [
+      "the staging command into another directory",
+      dbStage(`RUN ${DB_STAGE_COMMAND}/harness\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    [
+      "the staging command with a flag added",
+      dbStage(
+        `RUN ${DB_STAGE_COMMAND.replace("node ", "node --import=/src/skip.mjs ")}\n${APP_DB_SCAN}`,
+      ),
+      exactly,
+    ],
+    [
+      "the scan emptied before it runs",
+      dbStage(`${APP_DB_PRODUCE}RUN cp /dev/null ${SCAN_SCRIPT}\n${APP_DB_SCAN}`),
+      exactly,
+    ],
+    [
+      "the scan run from another directory after a cd",
+      dbStage(
+        `${APP_DB_PRODUCE}RUN mkdir -p /tmp/x/ops/docker && cp /dev/null /tmp/x/${SCAN_SCRIPT} && cd /tmp/x && node ${SCAN_SCRIPT} /out/db-assets\n`,
+      ),
+      exactly,
+    ],
+    [
+      "a WORKDIR of the db-assets stage's own before its scan",
+      dbStage(`${APP_DB_PRODUCE}WORKDIR /tmp/x\n${APP_DB_SCAN}`),
+      own("WORKDIR"),
+    ],
+    [
+      "an ENV of the db-assets stage's own before its scan",
+      dbStage(`${APP_DB_PRODUCE}ENV NODE_OPTIONS=--import=/src/skip.mjs\n${APP_DB_SCAN}`),
+      own("ENV"),
+    ],
+    [
+      "an ARG of the db-assets stage's own, read at its default, in its scan's directory",
+      dbStage(
+        `ARG APP=../../out/db-assets\n${APP_DB_PRODUCE}RUN node ${SCAN_SCRIPT} "/src/apps/\${APP}"\n`,
+      ),
+      own("ARG"),
+    ],
+    [
+      "a SHELL of the db-assets stage's own",
+      dbStage(`SHELL ["/bin/sh", "-c"]\n${APP_DB_PRODUCE}${APP_DB_SCAN}`),
+      own("SHELL"),
+    ],
+    [
+      "the db-assets stage built on another stage than the bundle's build stage",
+      (files) =>
+        replace(
+          files,
+          APP_DOCKERFILE,
+          "FROM deps AS db-assets\n",
+          "FROM deps AS planted\nRUN mkdir -p packages/zz/migrations\nFROM planted AS db-assets\n",
+        ),
+      `${stage} is built on planted, not on deps, the stage the bundle's build stage build-release is built on`,
+    ],
+    [
+      "the db-assets stage run in another directory than the bundle's build stage",
+      (files) =>
+        replace(
+          files,
+          APP_DOCKERFILE,
+          "FROM deps AS build-release\nARG APP\n",
+          "FROM deps AS build-release\nARG APP\nWORKDIR /\n",
+        ),
+      `${api}: ${which} runs in /src, not in /, where the bundle's build stage build-release runs pnpm`,
+    ],
+    [
+      "the listed copy once the allowlist names it for another Dockerfile",
+      firstCopy((copy) => {
+        copy.dockerfile = CONNECTOR_DOCKERFILE;
+      }),
+      twice,
+    ],
+    [
       "an allowlist that is missing",
       (files) => files.delete(ALLOWLIST_FILE),
       `${ALLOWLIST_FILE}: it is missing or is not JSON`,
@@ -716,7 +918,56 @@ describe("the release stage's allowlisted copies", () => {
       firstCopy((copy) => {
         delete copy.reason;
       }),
-      `${ALLOWLIST_FILE}: copy 1 holds destination, source, stage, not exactly stage, source, destination, reason`,
+      `${ALLOWLIST_FILE}: copy 1 holds destination, dockerfile, produces, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy without the command that makes it",
+      firstCopy((copy) => {
+        delete copy.produces;
+      }),
+      `${ALLOWLIST_FILE}: copy 1 holds destination, dockerfile, reason, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy without its Dockerfile",
+      firstCopy((copy) => {
+        delete copy.dockerfile;
+      }),
+      `${ALLOWLIST_FILE}: copy 1 holds destination, produces, reason, source, stage, not exactly dockerfile, stage, source, destination, produces, reason`,
+    ],
+    [
+      "an allowlisted copy made by two commands",
+      firstCopy((copy) => {
+        copy.produces = `${DB_STAGE_COMMAND} && cp -r packages/testing/src /out/db-assets/`;
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, ${JSON.stringify(`${DB_STAGE_COMMAND} && cp -r packages/testing/src /out/db-assets/`)}, is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy made by a command that expands a variable",
+      firstCopy((copy) => {
+        copy.produces = "node packages/db/src/assets-cli.ts stage $OUT";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, "node packages/db/src/assets-cli.ts stage $OUT", is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy made by a command that is an assignment first",
+      firstCopy((copy) => {
+        copy.produces = `NODE_OPTIONS=--import=/src/skip.mjs ${DB_STAGE_COMMAND}`;
+      }),
+      `${ALLOWLIST_FILE}: copy 1's produces, ${JSON.stringify(`NODE_OPTIONS=--import=/src/skip.mjs ${DB_STAGE_COMMAND}`)}, is not one command of plain words`,
+    ],
+    [
+      "an allowlisted copy of a Dockerfile outside ops/docker",
+      firstCopy((copy) => {
+        copy.dockerfile = "Dockerfile";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's dockerfile, "Dockerfile", is not a Dockerfile of ops/docker`,
+    ],
+    [
+      "an allowlisted copy of a Dockerfile in a directory under ops/docker",
+      firstCopy((copy) => {
+        copy.dockerfile = "ops/docker/sub/app.Dockerfile";
+      }),
+      `${ALLOWLIST_FILE}: copy 1's dockerfile, "ops/docker/sub/app.Dockerfile", is not a Dockerfile of ops/docker`,
     ],
     [
       "an allowlisted copy whose reason is empty",

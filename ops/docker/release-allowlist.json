@@ -1,11 +1,13 @@
 {
-  "about": "What a release image's build may take beside its one server bundle, read by packages/server/test/image-build.ts and nowhere else. ops/docker is a control path, so a new entry is the owner's change. Each copy is one COPY a release stage may take from a stage that holds the repository, word for word, with --from its only flag; that stage's last instruction is a RUN whose last step is node ops/docker/harness-scan.mjs over exactly the copy's source, so every copy the release stage takes is scanned. Each pre-script is a command pnpm may run before an image's build script, byte for byte; the real-bundle tests replay it before the build and check that the bundle used the file it writes.",
+  "about": "What a release image's build may take beside its one server bundle, read by packages/server/test/image-build.ts and nowhere else. ops/docker is a control path, so a new entry is the owner's change. Each copy is one COPY a release stage of the Dockerfile it names may take from a stage that holds the repository, word for word, with --from its only flag. That stage is nothing but RUNs whose steps are exactly the copy's produces, word for word, and then node ops/docker/harness-scan.mjs over exactly the copy's source, with no ARG, ENV, WORKDIR or SHELL of its own, built on the stage the bundle's build stage is built on and run where that stage runs pnpm: so nothing but that command writes what the release stage copies, and every copy the release stage takes is scanned. Each pre-script is a command pnpm may run before an image's build script, byte for byte; the real-bundle tests replay it before the build and check that the bundle used the file it writes.",
   "copies": [
     {
+      "dockerfile": "ops/docker/app.Dockerfile",
       "stage": "db-assets",
       "source": "/out/db-assets/",
       "destination": "/app/db-assets/",
-      "reason": "The database's files of every package (bootstrap, migrations and grants), read-only at FIN_DB_ASSETS_DIR for the api image's migrate service: exactly the set packages/db/src/assets.ts finds, staged by packages/db/src/assets-cli.ts."
+      "produces": "node packages/db/src/assets-cli.ts stage /out/db-assets",
+      "reason": "The database's files of every package (bootstrap, migrations and grants), read-only at FIN_DB_ASSETS_DIR for the api image's migrate service: exactly the set packages/db/src/assets.ts finds, staged by packages/db/src/assets-cli.ts (packages/server's release-image test holds what that command stages to that set)."
     }
   ],
   "preScripts": [
