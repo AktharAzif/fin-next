@@ -7,7 +7,7 @@
 // this area's migrations and the grant fragments of both, with the event registry and the email
 // allowlist loaded from the code. Each test file clones it. Roles are cluster-wide, so the tests use
 // their own `l_sat_03_` roles and never touch another lane's.
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { findTemplate } from "@fin/email";
@@ -175,11 +175,22 @@ function serverConfig(url: URL, database: string): PoolConfig {
   };
 }
 
-/** A login role's password, derived from the server's own so it is never stored or printed. */
+/** Each login role's password, derived once per process: scrypt is slow by design. */
+const loginPasswords = new Map<string, string>();
+
+/**
+ * A login role's password, derived from the server's own so it is never stored or printed: scrypt
+ * (a password KDF) salted with the role's name, so the server's password cannot be guessed back
+ * from it cheaply. Every worker derives the same value, since they share one server.
+ */
 export function loginPassword(url: URL, role: string): string {
-  return createHash("sha256")
-    .update(`${serverPassword(url)}:${ROLE_PREFIX}${role}`)
-    .digest("hex");
+  const name = `${ROLE_PREFIX}${role}`;
+  let password = loginPasswords.get(name);
+  if (password === undefined) {
+    password = scryptSync(serverPassword(url), name, 32).toString("hex");
+    loginPasswords.set(name, password);
+  }
+  return password;
 }
 
 export function testRole(role: string): string {

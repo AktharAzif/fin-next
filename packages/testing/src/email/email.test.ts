@@ -268,4 +268,19 @@ describe("codeFrom and linksFrom", () => {
       "https://console.example.com/i?a=1&b=2",
     ]);
   });
+
+  it("decodes each entity in an href once, so an escaped entity stays text", () => {
+    const href = "https://x.example.com/i?q=&amp;lt;b&amp;gt;&amp;amp;&#39;&quot;&lt;&amp;x=1";
+    expect(linksFrom({ text: "", html: `<a href="${href}">x</a>` })).toEqual([
+      `https://x.example.com/i?q=&lt;b&gt;&amp;'"<&x=1`,
+    ]);
+  });
+
+  it("trims a link's trailing punctuation only", () => {
+    expect(
+      linksFrom({
+        text: `See https://docs.example.com/a?b=c!!).,;:?'" and https://x.example.com/`,
+      }),
+    ).toEqual(["https://docs.example.com/a?b=c", "https://x.example.com/"]);
+  });
 });

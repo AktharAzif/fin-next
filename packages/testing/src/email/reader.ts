@@ -1,4 +1,5 @@
 // Reads the email sink from a test: wait for a message, then take its code or its links.
+import { trimEnd } from "../text.ts";
 import type { SinkFilter, SinkMessage } from "./sink.ts";
 
 export interface WaitOptions {
@@ -20,7 +21,7 @@ export class EmailSinkReader {
   readonly origin: string;
 
   constructor(origin: string) {
-    this.origin = origin.replace(/\/+$/, "");
+    this.origin = trimEnd(origin, "/");
   }
 
   async list(filter: SinkFilter = {}): Promise<{ messages: SinkMessage[]; last: number }> {
@@ -99,20 +100,27 @@ export function codeFrom(
   return [...found][0] as string;
 }
 
+const ENTITIES: Readonly<Record<string, string>> = {
+  "&amp;": "&",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&lt;": "<",
+  "&gt;": ">",
+};
+
+/**
+ * The entities an HTML attribute value carries, decoded in one pass: each is read once, so an
+ * escaped entity (`&amp;lt;`) becomes its text (`&lt;`), never the character it would name.
+ */
 function decodeEntities(text: string): string {
-  return text
-    .replaceAll("&amp;", "&")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&#39;", "'")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">");
+  return text.replace(/&(?:amp|quot|#39|lt|gt);/g, (entity) => ENTITIES[entity] ?? entity);
 }
 
 /** Every distinct http(s) link in a message, from its text and its HTML hrefs, in order. */
 export function linksFrom(message: Pick<SinkMessage, "text" | "html">): string[] {
   const links: string[] = [];
   const add = (link: string) => {
-    const trimmed = link.replace(/[).,;:!?'"]+$/, "");
+    const trimmed = trimEnd(link, ").,;:!?'\"");
     if (!links.includes(trimmed)) links.push(trimmed);
   };
   for (const match of message.text.matchAll(/https?:\/\/[^\s<>"]+/g)) add(match[0]);
