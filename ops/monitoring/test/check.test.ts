@@ -87,12 +87,12 @@ describe("monitoring:check refuses", () => {
     edit(root, "alerts/platform.json", (j) => {
       alert(j, "process-crash").policy = "production-page";
       alert(j, "shutdown-forced").policy = "loud";
-      delete alert(j, "clock-skew").policy;
+      delete alert(j, "dns-lookup-failing").policy;
     });
     const found = rules(root);
     expect(found).toContainEqual("MC-13 process-crash: routes to production-page");
     expect(found).toContainEqual("RT-01 shutdown-forced: routes to loud");
-    expect(found).toContainEqual("RT-01 clock-skew: has no policy");
+    expect(found).toContainEqual("RT-01 dns-lookup-failing: has no policy");
   });
 
   it("a staging object that calls, texts or pushes (RT-03)", () => {
@@ -192,7 +192,7 @@ describe("monitoring:check refuses", () => {
   it("a literal threshold, window or grace (MC-11)", () => {
     const root = scratch();
     edit(root, "alerts/platform.json", (j) => {
-      alert(j, "clock-skew").threshold = 500;
+      alert(j, "dns-lookup-failing").threshold = 500;
       alert(j, "no-logs-{service}").window = "300";
     });
     edit(root, "heartbeats.json", (j) => {
@@ -200,7 +200,7 @@ describe("monitoring:check refuses", () => {
     });
     const found = rules(root);
     expect(found).toContainEqual(
-      "MC-11 clock-skew: threshold must be @any, @none or an @thresholds.<key> overlay key",
+      "MC-11 dns-lookup-failing: threshold must be @any, @none or an @thresholds.<key> overlay key",
     );
     expect(found).toContainEqual(
       "MC-11 no-logs-edge: window must be an @thresholds.<key> overlay key",
@@ -316,16 +316,16 @@ describe("monitoring:check refuses", () => {
 
   it("a runbook without a heading, or that does not name its alert (MC-10)", () => {
     const root = scratch();
-    const path = join(root, "docs", "runbooks", "clock-skew.md");
+    const path = join(root, "docs", "runbooks", "private-dns.md");
     writeFileSync(
       path,
       readFileSync(path, "utf8")
         .replace("## Containment", "## Fixing")
-        .replace("`clock-skew`", "it"),
+        .replace("`dns-lookup-failing`", "it"),
     );
     const found = rules(root);
     expect(found).toContainEqual('MC-10 lacks the heading "## Containment"');
-    expect(found).toContainEqual("MC-10 does not name clock-skew, which points at it");
+    expect(found).toContainEqual("MC-10 does not name dns-lookup-failing, which points at it");
   });
 
   it("a source with no Errors application and no reason, and an alert on an unknown source (MC-07)", () => {

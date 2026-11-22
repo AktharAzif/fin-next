@@ -1,5 +1,5 @@
 {
-  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G). L-SAT-05 extends this fragment with the rest of group G as the sender lands.",
+  "$comment": "Phase 0's email alerts (spec 01 §8.7, spec 08 §7.8 group G), with security-email-unsent and email-budget-reached by the steward's ruling of 22 Nov. security-email-unsent reads the sender's lines on worker and identity's queue-time lines on console and admin, one incident per reason; email-budget-reached has one incident per scope and share, so an organisation's ceiling never hides the environment's budget. Each label is held to the closed set of values the code writes (the sender's reasons, and the queue-time reasons of identity's, staff's and organisations' notices; the budget's scopes and shares), and any other value, a missing one included, is the one label `other`, so no line can choose or multiply a label and every line still counts. L-SAT-05 extends this fragment with the rest of group G.",
   "alerts": [
     {
       "name": "email-not-sent",
@@ -73,6 +73,69 @@
       "incident_cause": "A sending domain turned preview or drop-suppressed on, a domain is gone, or its own DMARC record (_dmarc.auth or _dmarc.notify) is missing, doubled or weaker than p=reject.",
       "metadata": {
         "check": "pnpm fin email verify staging; Cloudflare's audit log for Email Sending.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/email.md"
+      }
+    },
+    {
+      "name": "security-email-unsent",
+      "group": "G",
+      "severity": "P",
+      "sources": ["worker", "console", "admin"],
+      "seriesBy": [
+        {
+          "field": "reason",
+          "oneOf": [
+            "budget",
+            "enqueue_failed",
+            "failed",
+            "invalid_recipient",
+            "not_allowed",
+            "params_refused",
+            "suppressed"
+          ]
+        }
+      ],
+      "query": { "count": { "events": ["email.security_unsent"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A security notice could not be sent or queued: a person was not told about a change to their access. Notices: {{value}}.",
+      "metadata": {
+        "check": "The reason on email.security_unsent (suppressed, failed, budget, invalid_recipient; not_allowed or enqueue_failed at queue time), its code, template and final, and the emailId's outbox row.",
+        "flow": "F10",
+        "runbook": "docs/runbooks/security-email-unsent.md"
+      }
+    },
+    {
+      "name": "email-budget-reached",
+      "group": "G",
+      "severity": "N",
+      "sources": ["worker"],
+      "seriesBy": [
+        { "field": "scope", "oneOf": ["environment", "organisation"] },
+        {
+          "field": "share",
+          "oneOf": ["account_only", "all", "code_only", "ordinary", "security", "security_only"]
+        }
+      ],
+      "query": { "count": { "events": ["email.budget_reached"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 3600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Ordinary mail used its part of today's send budget and reached the security share, or a daily budget refused a send: a flood of ordinary mail. Lines: {{value}}.",
+      "metadata": {
+        "check": "Which template: the template and class on email.budget_reached and email.sent by template for the day; the scope and share, and the orgId for an organisation's ceiling.",
         "flow": "F10",
         "runbook": "docs/runbooks/email.md"
       }

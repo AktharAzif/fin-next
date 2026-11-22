@@ -1,0 +1,131 @@
+{
+  "$comment": "The staff area's alerts (spec 02 §18.2; spec 08 §7.8 group C). access-keys-unavailable is the steward's ruling of 22 Nov: only admin's API half checks the Access token, so only admin writes access.keys_unavailable. L-SAT-09 adds admin-staff-refused, admin-access-mismatch, staff-changed, staff-enrolled and staff-enrolment-refused, each over a line admin writes (identity's staff realm and packages/staff's guard, viewer and member changes, all through admin's telemetry). The staff realm runs only on admin, so admin is each rule's one source and each rule has one series: no field of a line becomes a label. Still owed in catalog/owed.ts, each with why: admin-without-second-factor (admin's request line carries no assurance yet), admin-access-drift and duty-stalled-access-drift (no process runs the Access drift duty yet). Every staging alert routes to staging-quiet, email only.",
+  "alerts": [
+    {
+      "name": "access-keys-unavailable",
+      "group": "C",
+      "severity": "P",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["access.keys_unavailable"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Fin Admin's API half could not read Cloudflare Access's signing keys and refused requests with 503: staff cannot use Fin Admin. Refusals: {{value}}.",
+      "metadata": {
+        "check": "Cloudflare's status for Access; the admin service's FIN_ACCESS_TEAM setting against the Zero Trust team name; the release.",
+        "flow": "F6",
+        "runbook": "docs/runbooks/access-keys-unavailable.md"
+      }
+    },
+    {
+      "name": "admin-staff-refused",
+      "group": "C",
+      "severity": "P",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["staff.not_listed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "An Access identity that is no active or pending member reached Fin Admin's API, asking for a sign-in code or making a request: Access let in someone the staff table does not list. Lines: {{value}}.",
+      "metadata": {
+        "check": "The Access list against the staff table: the line's reason (code_request or request), the request lines with the same requestId, and whether a member was just removed or the Access policy just changed.",
+        "flow": "F6",
+        "runbook": "docs/runbooks/admin-staff-refused.md"
+      }
+    },
+    {
+      "name": "admin-access-mismatch",
+      "group": "C",
+      "severity": "P",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["staff.access_mismatch"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A Fin Admin session was presented under an Access identity that is not its member's: the session was ended and the request refused (spec 02 §10.5). Lines: {{value}}.",
+      "metadata": {
+        "check": "The staff session and Access identity involved: the staffId on the line, that member's sessions and factors, and the request lines with the same requestId.",
+        "flow": "F6",
+        "runbook": "docs/runbooks/admin-access-mismatch.md"
+      }
+    },
+    {
+      "name": "staff-changed",
+      "group": "C",
+      "severity": "N",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["staff.changed"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A Fin Admin member was added, had their role changed, was removed or had their factors reset: the out-of-band notice of a staff change. Changes: {{value}}.",
+      "metadata": {
+        "check": "Whether the change was expected: the line's kind, staffId and actorId, and the staff audit event the change recorded with its step-up intent.",
+        "flow": "F-staff-add-and-enrol",
+        "runbook": "docs/runbooks/staff-changed.md"
+      }
+    },
+    {
+      "name": "staff-enrolled",
+      "group": "C",
+      "severity": "N",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["staff.enrolled"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A Fin Admin member enrolled their first factor, and from now on holds their role's permissions. Enrolments: {{value}}.",
+      "metadata": {
+        "check": "Whether the enrolment was expected: the line's staffId and method, and who added the member and issued the enrolment code, from the staff audit log.",
+        "flow": "F-staff-add-and-enrol",
+        "runbook": "docs/runbooks/staff-enrolled.md"
+      }
+    },
+    {
+      "name": "staff-enrolment-refused",
+      "group": "C",
+      "severity": "N",
+      "sources": ["admin"],
+      "query": { "count": { "events": ["staff.enrolment_refused"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.staff-enrolment-refused",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Staff enrolment was refused more often than its threshold in 15 minutes (a wrong, expired, used or void code, or a factor added outside the enrolment window): someone may be guessing enrolment codes. Refusals: {{value}}.",
+      "metadata": {
+        "check": "Someone guessing enrolment codes: the refusals by staffId and reason, and the request lines with the same requestIds and their cfRay.",
+        "flow": "F-staff-add-and-enrol",
+        "runbook": "docs/runbooks/staff-enrolment-refused.md"
+      }
+    }
+  ]
+}

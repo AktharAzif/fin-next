@@ -6,8 +6,9 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | Path | What |
 |---|---|
 | `staging/*.json` | sources, Errors applications, logs-to-metrics, monitors, heartbeats, the `staging-quiet` policy |
-| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`) |
-| `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it (listed in `catalog/index.ts`) |
+| `staging/alerts/<area>.json` | one alert fragment per area (`platform`, `audit`, `database`, `email`, `identity`, `staff`, `ops`) |
+| `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it or are owed for it (listed in `catalog/index.ts`) |
+| `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due; production's first deploy waits for a gate that refuses while any is listed (its header) |
 | `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
 | `src/apply.ts` | the apply: `monitoringApply(ctx)`, its guards and its read-back |
 | `src/apply-cli.ts` | the entry point `pnpm fin monitoring apply <env>` runs as a child process, over an IPC channel |
@@ -18,11 +19,17 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 `pnpm check` fails on any finding. Those tests read files outside the package (the code tree, the
 runbooks, the flows' atlas, the watcher's settings, the audit writers), which Turborepo's hash
 never sees, so `turbo.json` here turns their cache off and they run on every `pnpm check`. Rules
-MC-00 to MC-14 (MC-05 covers spec 01 §8.5's heartbeats and the watcher's own until the duty
+MC-00 to MC-15 (MC-05 covers spec 01 §8.5's heartbeats and the watcher's own until the duty
 registry exists; MC-09 comes with the credential inventory) and RT-01 to RT-03 are listed at the
 top of `src/check.ts`. Every alert names a runbook in
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
-wake the owner) that names the alert back. MC-12 scans every file under `staging/`, the
+wake the owner) that names the alert back. MC-15 holds every alert name the code (a line list's
+`alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the catalogue (an
+entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text) gives to a rule of
+the environment or an entry of `catalog/owed.ts` with a lane and a due date, and fails for an owed
+alert that has become a rule. An alert reads only fields that a writer of its events writes
+(`test/alert-fields.test.ts`, which lists the exceptions by name with the reason); one whose field
+no process writes yet is owed, not defined. MC-12 scans every file under `staging/`, the
 catalogue, this README, the runbooks and the watcher's settings.
 
 ## Applying
