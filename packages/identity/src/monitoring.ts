@@ -39,18 +39,23 @@ export const IDENTITY_LINES = {
     },
   },
   // Google sign-in (stretch 5, §5.8, §18.2's stretch alert). A failure on Fin's side or the
-  // provider's: the token endpoint failing (any answer but a refused code, or none), the
-  // provider's keys, or an ID token that does not verify. Nothing a client sends can write it: a
-  // callback reaches the token endpoint only with its browser's signed state cookie, once per
-  // state, within the network's allowance.
+  // provider's, and only that: the token endpoint unreachable, too slow, failing or unreadable,
+  // Fin's own client refused there, the provider's keys unavailable, or an ID token that is not
+  // the provider's for this client now. Whatever a client can cause is a refusal instead
+  // (google/flow.ts decides): it sends the callback's code, and its authorization request passes
+  // through its browser, where it can change the nonce, the scopes, the PKCE challenge or the
+  // redirect URI before the provider sees them.
   "auth.google_failed": { kind: "failure", alerts: ["google-sign-in-failing"] },
   // A round trip that came back refused: the person cancelled, the address has an account not
-  // linked to Google, sign-ups are paused, a link did not match the account, the provider refused
-  // the code (`invalid_code`), or a second callback came for a state already exchanged
-  // (`state_used`). In the staff realm also an account that may not sign in to Fin Admin: outside
-  // the Workspace (`hosted_domain`), not on the staff list (`not_listed`, with staff.not_listed),
-  // removed, or not the Access identity (`access_mismatch`, with staff.access_mismatch), each
-  // watched through those lines' alerts.
+  // linked to Google or is one Google has not verified, sign-ups are paused, a link did not match
+  // the account, a second callback came for a state already exchanged (`state_used`), or what the
+  // client changed in its round trip: a code the provider would not exchange (`invalid_code`), a
+  // request that asked for no ID token (`scope`), or an ID token whose nonce is not this
+  // sign-in's (`nonce`), that carries no usable address (`email`), or that a long nonce pushed
+  // past Fin's bound (`too_long`). In the staff realm also an account that may not sign in to Fin
+  // Admin: outside the Workspace (`hosted_domain`), not on the staff list (`not_listed`, with
+  // staff.not_listed), removed, or not the Access identity (`access_mismatch`, with
+  // staff.access_mismatch), each watched through those lines' alerts.
   "auth.google_refused": {
     kind: "security",
     alerts: {

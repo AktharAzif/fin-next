@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { ManualClock } from "../ports/clock.ts";
 import { MemoryLineSink } from "../ports/log.ts";
 import { type GoogleFlow, newGoogleFlow } from "./flow.ts";
+import { MAX_TOKEN_LENGTH, MAX_TOKEN_READ } from "./id-token.ts";
 import { createGoogleSignIn } from "./provider.ts";
 import { fixtureEndpoints, type GoogleSettings } from "./settings.ts";
 import type { StateClaim, StoredState } from "./state.ts";
@@ -66,7 +67,13 @@ interface Calls {
 }
 
 function setup(
-  options: { token?: () => Response; jwks?: () => Response; claim?: StateClaim } = {},
+  options: {
+    token?: () => Response;
+    jwks?: () => Response;
+    claim?: StateClaim;
+    /** Changes to the provider's ID token claims (undefined removes one). */
+    claims?: Record<string, unknown>;
+  } = {},
 ) {
   const clock = new ManualClock(new Date("2026-11-21T12:00:00Z"));
   const lines = new MemoryLineSink();
@@ -83,6 +90,9 @@ function setup(
       return (
         options.token?.() ??
         Response.json({
+          access_token: "provider-access-token",
+          token_type: "Bearer",
+          scope: "openid email profile",
           id_token: idToken(
             {
               iss: ISSUER,
@@ -93,6 +103,7 @@ function setup(
               nonce: NONCE,
               iat: now(),
               exp: now() + 3600,
+              ...options.claims,
             },
             keys.signer,
           ),
@@ -320,30 +331,91 @@ describe("the prefetch and the library's calls", () => {
     ]);
   });
 
-  it("reads a refused code (invalid_grant) as the client's refusal, not a failure", async () => {
-    const s = setup({ token: () => Response.json({ error: "invalid_grant" }, { status: 400 }) });
-    expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
-    expect(s.calls.token).toBe(1);
-    expect(s.flow().prefetched).toMatchObject({ kind: "refused", code: "the-code" });
-    expect(s.lines.named("auth.google_failed")).toEqual([]);
-    const provider = s.google.provider as unknown as Provider;
-    expect(
-      await provider.validateAuthorizationCode({
-        code: "the-code",
-        codeVerifier: VERIFIER,
-        redirectURI: settings.redirectUri,
-      }),
-    ).toBeNull();
-  });
+  // What the client can cause at the token endpoint: it sends the code, and its authorization
+  // request (scopes, challenge, redirect URI) passes through its browser.
+  it.each([
+    [
+      "a refused code (invalid_grant)",
+      () => Response.json({ error: "invalid_grant" }, { status: 400 }),
+      "invalid_code",
+    ],
+    [
+      "a refused request (invalid_request)",
+      () => Response.json({ error: "invalid_request" }, { status: 400 }),
+      "invalid_code",
+    ],
+    [
+      "a code issued for another redirect URI (redirect_uri_mismatch)",
+      () => Response.json({ error: "redirect_uri_mismatch" }, { status: 400 }),
+      "invalid_code",
+    ],
+    [
+      "a token answer for a scope with no identity in it",
+      () =>
+        Response.json({
+          access_token: "x",
+          token_type: "Bearer",
+          scope: "https://www.googleapis.com/auth/drive.file",
+        }),
+      "scope",
+    ],
+    [
+      "a token answer with neither an ID token nor a scope",
+      () => Response.json({ access_token: "x", token_type: "Bearer" }),
+      "scope",
+    ],
+  ])(
+    "reads %s from the token endpoint as the client's refusal, not a failure",
+    async (_label, token, refusal) => {
+      const s = setup({ token });
+      expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
+      expect(s.calls.token).toBe(1);
+      expect(s.flow().prefetched).toMatchObject({ kind: "refused", refusal, code: "the-code" });
+      expect(s.lines.named("auth.google_failed")).toEqual([]);
+      // Inside the unit, the library gets nothing for it.
+      const provider = s.google.provider as unknown as Provider;
+      expect(
+        await provider.validateAuthorizationCode({
+          code: "the-code",
+          codeVerifier: VERIFIER,
+          redirectURI: settings.redirectUri,
+        }),
+      ).toBeNull();
+    },
+  );
 
   it.each([
-    ["another error", () => Response.json({ error: "invalid_request" }, { status: 400 })],
-    ["a refused client", () => Response.json({ error: "invalid_client" }, { status: 401 })],
+    ["Fin's client refused", () => Response.json({ error: "invalid_client" }, { status: 401 })],
+    [
+      "Fin's client refused, with 400",
+      () => Response.json({ error: "invalid_client" }, { status: 400 }),
+    ],
+    [
+      "a client not allowed the grant",
+      () => Response.json({ error: "unauthorized_client" }, { status: 400 }),
+    ],
+    [
+      "a grant type refused",
+      () => Response.json({ error: "unsupported_grant_type" }, { status: 400 }),
+    ],
+    [
+      "an error the grant list does not name",
+      () => Response.json({ error: "temporarily_unavailable" }, { status: 400 }),
+    ],
     ["invalid_grant with the wrong status", () => Response.json({ error: "invalid_grant" })],
     ["an unreadable error", () => new Response("<html>", { status: 400 })],
     ["a server error", () => Response.json({ error: "invalid_grant" }, { status: 500 })],
-    ["an answer without an ID token", () => Response.json({ access_token: "x" })],
+    [
+      "a token answer that grants openid and has no ID token",
+      () =>
+        Response.json({
+          access_token: "x",
+          token_type: "Bearer",
+          scope: "openid https://www.googleapis.com/auth/userinfo.email",
+        }),
+    ],
     ["an answer that is not an object", () => Response.json(null)],
+    ["an answer that is a list", () => Response.json([{ id_token: "x" }])],
     [
       "a timeout",
       () => {
@@ -359,6 +431,123 @@ describe("the prefetch and the library's calls", () => {
     ]);
   });
 
+  // An ID token the provider signed for this client, carrying what the client's own request made
+  // it carry: the nonce it sent, the scopes it asked for. Or an address the person's account has.
+  it.each([
+    ["another nonce", { nonce: "a-nonce-the-client-put-in-its-request" }, "nonce"],
+    ["no nonce", { nonce: undefined }, "nonce"],
+    ["no address (no email scope)", { email: undefined, email_verified: undefined }, "email"],
+    ["an address Fin cannot read", { email: "not-an-address" }, "email"],
+    ["an address the provider has not verified", { email_verified: false }, "email_unverified"],
+    [
+      "a nonce that pushes it past Fin's bound",
+      { nonce: "n".repeat(MAX_TOKEN_LENGTH) },
+      "too_long",
+    ],
+  ])(
+    "reads an ID token with %s as the client's refusal, with no failure line",
+    async (_label, claims, refusal) => {
+      const s = setup({ claims });
+      expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
+      expect(s.flow().prefetched).toMatchObject({ kind: "refused", refusal });
+      expect(s.lines.named("auth.google_failed")).toEqual([]);
+      const provider = s.google.provider as unknown as Provider;
+      expect(
+        await provider.validateAuthorizationCode({
+          code: "the-code",
+          codeVerifier: VERIFIER,
+          redirectURI: settings.redirectUri,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  // An ID token that is not the provider's for this client now: nothing a client sends does this.
+  it.each([
+    ["another audience", { aud: "other.apps.example.com" }, "audience"],
+    ["another issuer", { iss: "https://issuer.example.org" }, "issuer"],
+    ["an expiry passed", { exp: Math.floor(Date.parse("2026-11-21T11:00:00Z") / 1000) }, "expired"],
+    [
+      "an issue time to come",
+      { iat: Math.floor(Date.parse("2026-11-21T12:05:00Z") / 1000) },
+      "issued_at",
+    ],
+    ["no subject", { sub: "" }, "subject"],
+  ])("reads an ID token with %s as a failure, with its line", async (_label, claims, failure) => {
+    const s = setup({ claims });
+    expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
+    expect(s.flow().prefetched).toMatchObject({ kind: "failed", failure });
+    expect(s.lines.named("auth.google_failed")).toEqual([{ realm: "developer", reason: failure }]);
+  });
+
+  // Past Fin's bound, an answer that is not the provider's token for this client now keeps its own
+  // fault, a failure with its line: the bound (`too_long`, which a client's long nonce causes) is
+  // read only from a token already proved the provider's.
+  const T0 = Math.floor(Date.parse("2026-11-21T12:00:00Z") / 1000);
+  const long = {
+    iss: ISSUER,
+    aud: settings.clientId,
+    sub: "1234",
+    email: "maya@example.com",
+    email_verified: true,
+    nonce: NONCE,
+    iat: T0,
+    exp: T0 + 3600,
+    pad: "p".repeat(MAX_TOKEN_LENGTH),
+  };
+  /** A token under K1's kid, signed by K2's private key. */
+  const forged = (claims: Record<string, unknown>) => {
+    const input = `${b64({ alg: "RS256", kid: K1.kid })}.${b64(claims)}`;
+    return `${input}.${sign("sha256", Buffer.from(input), K2.privateKey).toString("base64url")}`;
+  };
+  it.each([
+    ["junk", () => "x".repeat(MAX_TOKEN_LENGTH + 808), "malformed"],
+    ["an HTML page", () => `<html>${"x".repeat(MAX_TOKEN_LENGTH)}</html>`, "malformed"],
+    ["junk past the read cap", () => "x".repeat(MAX_TOKEN_READ + 1), "malformed"],
+    [
+      "an unsigned token (alg none)",
+      () => `${b64({ alg: "none", kid: K1.kid })}.${b64(long)}.`,
+      "algorithm",
+    ],
+    ["a token under a key the provider never listed", () => idToken(long, K3), "unknown_key"],
+    ["a token another key signed under a listed kid", () => forged(long), "signature"],
+    [
+      "a token for another issuer",
+      () => idToken({ ...long, iss: "https://issuer.example.org" }),
+      "issuer",
+    ],
+    [
+      "a token for another client",
+      () => idToken({ ...long, aud: "other.apps.example.com" }),
+      "audience",
+    ],
+  ])(
+    "reads an over-length answer that is %s as a failure, with its line",
+    async (_label, make, failure) => {
+      const answer = make();
+      expect(answer.length).toBeGreaterThan(MAX_TOKEN_LENGTH);
+      const s = setup({
+        token: () => Response.json({ access_token: "x", token_type: "Bearer", id_token: answer }),
+      });
+      expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
+      expect(s.flow().prefetched).toMatchObject({ kind: "failed", failure });
+      expect(s.lines.named("auth.google_failed")).toEqual([
+        { realm: "developer", reason: failure },
+      ]);
+    },
+  );
+
+  it("reads an ID token that is not a token at all as a failure", async () => {
+    const s = setup({
+      token: () => Response.json({ access_token: "x", token_type: "Bearer", id_token: "a.b" }),
+    });
+    await s.google.prefetch(s.callback(), s.claim);
+    expect(s.flow().prefetched).toMatchObject({ kind: "failed", failure: "malformed" });
+    expect(s.lines.named("auth.google_failed")).toEqual([
+      { realm: "developer", reason: "malformed" },
+    ]);
+  });
+
   it("keeps the provider's keys for an hour, and asks again for an unknown kid at most once a minute", async () => {
     const s = setup();
     const prefetch = async () => {
@@ -366,8 +555,8 @@ describe("the prefetch and the library's calls", () => {
       await s.google.prefetch(s.callback(), s.claim);
       return s.flow().prefetched;
     };
-    const verified = { kind: "token", result: { ok: true } };
-    const unknown = { kind: "token", result: { ok: false, reason: "unknown_key" } };
+    const verified = { kind: "token", claims: { sub: "1234" } };
+    const unknown = { kind: "failed", failure: "unknown_key" };
     // The first sign-in fetches the keys; another within the hour reads them from the cache.
     expect(await prefetch()).toMatchObject(verified);
     expect(await prefetch()).toMatchObject(verified);

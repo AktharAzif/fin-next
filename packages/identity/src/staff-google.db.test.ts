@@ -8,13 +8,17 @@
 // unknown, removed, mismatched or outside address is refused, with its line and, for a member,
 // `staff.sign_in_failed`), that no member and no sign-in method row is ever made, that the state
 // is consumed once, and the library's own refusals (a cancelled sign-in, an unverified address).
-import { randomBytes } from "node:crypto";
+// As in the developer realm, whatever a client causes by changing its own authorization request is
+// a refusal of the round trip, never a failure of Fin or the provider, and a token that is not the
+// provider's stays a failure however long it is.
+import { createHash, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type FixtureAccount,
   OAuthFixture,
   type RunningOAuthFixture,
   startOAuthFixture,
+  type Tamper,
 } from "../../testing/src/oauth/fixture.ts";
 import { createTestDatabase, seed, type TestDatabase } from "../test/db.ts";
 import {
@@ -109,11 +113,19 @@ interface RoundTrip {
   location: URL;
 }
 
-/** Starts a staff Google sign-in in this browser, lets the fixture answer, follows the callback. */
+/**
+ * Starts a staff Google sign-in in this browser, lets the fixture answer, follows the callback.
+ * `edit` changes the authorization request on its way through the browser, as a client may;
+ * `tamper` plants a fault in the provider's token answer.
+ */
 async function roundTrip(
   browser: Browser,
   choice: FixtureAccount | "deny",
-  callbackFrom: Browser = browser,
+  options: {
+    edit?: (params: URLSearchParams) => void;
+    tamper?: Tamper;
+    callbackFrom?: Browser;
+  } = {},
 ): Promise<RoundTrip> {
   const start = await browser.post("/api/auth/sign-in/social", {
     provider: "google",
@@ -126,10 +138,13 @@ async function roundTrip(
   }
   const authorize = new URL(String(start.json?.url));
   fixture.chooseNext(choice);
-  const fromProvider = await fetch(authorize, { redirect: "manual" });
+  fixture.tamperNext(options.tamper ?? null);
+  const sent = new URL(authorize);
+  options.edit?.(sent.searchParams);
+  const fromProvider = await fetch(sent, { redirect: "manual" });
   const back = new URL(String(fromProvider.headers.get("location")));
   const callbackPath = `${back.pathname}${back.search}`;
-  const callback = await callbackFrom.get(callbackPath, crossSite);
+  const callback = await (options.callbackFrom ?? browser).get(callbackPath, crossSite);
   const location = callback.headers.get("location");
   if (location === null) {
     throw new Error(`the callback answered ${callback.status}: ${JSON.stringify(callback.json)}`);
@@ -451,5 +466,129 @@ describe("the round trip itself", () => {
     expect(callback.status).toBe(401);
     expect(callback.json).toMatchObject({ code: "access_required" });
     expect(await sessionsOf(memberId)).toBe(0);
+  });
+});
+
+/** A staff round trip whose authorization request the client changed (or whose token says so). */
+interface Edited {
+  readonly label: string;
+  readonly edit?: (params: URLSearchParams) => void;
+  readonly tamper?: Tamper;
+  /** The `auth.google_refused` line's reason. */
+  readonly reason: string;
+  /** The `?error=` the sign-in page comes back with. */
+  readonly page: string;
+  /** What the provider's token endpoint did with the code. */
+  readonly exchange: "issued" | "refused";
+}
+
+const EDITED: readonly Edited[] = [
+  {
+    label: "another nonce",
+    edit: (p) => p.set("nonce", randomBytes(24).toString("base64url")),
+    reason: "nonce",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "a nonce long enough to push the ID token past Fin's bound",
+    edit: (p) => p.set("nonce", "n".repeat(6000)),
+    reason: "too_long",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "a scope without email",
+    edit: (p) => p.set("scope", "openid profile"),
+    reason: "email",
+    page: "email_not_found",
+    exchange: "issued",
+  },
+  {
+    label: "a scope with no identity in it (no ID token comes back)",
+    edit: (p) => p.set("scope", "https://www.googleapis.com/auth/drive.file"),
+    reason: "scope",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "another PKCE challenge",
+    edit: (p) =>
+      p.set("code_challenge", createHash("sha256").update(randomBytes(32)).digest("base64url")),
+    reason: "invalid_code",
+    page: "invalid_code",
+    exchange: "refused",
+  },
+  {
+    label: "a token whose nonce is not this sign-in's, however it came (planted)",
+    tamper: "nonce",
+    reason: "nonce",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+];
+
+describe("what a client changes in its own authorization request (it passes through the browser)", () => {
+  it.each(EDITED)("$label: a refusal of the round trip, never a failure", async (c) => {
+    // A listed member signed in to Access as this address: only the round trip itself is wrong.
+    const email = unique("google.edited");
+    const memberId = await addMember(email, "active");
+    const browser = staffBrowser(email);
+    const failed = h.lines.named("auth.google_failed").length;
+    const unhandled = h.lines.named("auth.unhandled_error").length;
+    const exchanges = fixture.exchanges.length;
+    const trip = await roundTrip(browser, googleAccount(email), {
+      ...(c.edit === undefined ? {} : { edit: c.edit }),
+      ...(c.tamper === undefined ? {} : { tamper: c.tamper }),
+    });
+    // The provider answered the request it was sent; nothing failed on its side or Fin's.
+    expect(fixture.exchanges.slice(exchanges)).toEqual([
+      expect.objectContaining({ outcome: c.exchange }),
+    ]);
+    expect(trip.callback.status).toBe(302);
+    expect(trip.location.href).toBe(`${ADMIN}/sign-in?error=${c.page}`);
+    expect(browser.sessionToken()).toBeNull();
+    expect(await sessionsOf(memberId)).toBe(0);
+    // No line google-sign-in-failing watches, and no unhandled error.
+    expect(h.lines.named("auth.google_failed").length).toBe(failed);
+    expect(h.lines.named("auth.unhandled_error").length).toBe(unhandled);
+    expect(h.lines.named("auth.google_refused").at(-1)).toEqual({
+      realm: "staff",
+      reason: c.reason,
+    });
+    expect(h.lines.named("request").at(-1)).toMatchObject({
+      authPath: "/callback/:id",
+      outcome: "refused",
+      reason: `google.${c.reason}`,
+      status: 302,
+    });
+  });
+});
+
+describe("what Fin or the provider did wrong (google-sign-in-failing watches it)", () => {
+  const longNonce = (p: URLSearchParams) => p.set("nonce", "n".repeat(6000));
+  it.each([
+    ["a bad signature", "signature", undefined, "signature"],
+    ["a bad signature on a token a long nonce made too long", "signature", longNonce, "signature"],
+    ["another audience", "audience", undefined, "audience"],
+    ["the token endpoint failing", "token_error", undefined, "token_exchange"],
+  ] as const)("%s: a failure, not a refusal", async (_label, tamper, edit, reason) => {
+    const email = unique("google.failing");
+    const memberId = await addMember(email, "active");
+    const browser = staffBrowser(email);
+    const refusals = h.lines.named("auth.google_refused").length;
+    const trip = await roundTrip(browser, googleAccount(email), {
+      tamper,
+      ...(edit === undefined ? {} : { edit }),
+    });
+    expect(trip.location.href).toBe(`${ADMIN}/sign-in?error=google_failed`);
+    expect(browser.sessionToken()).toBeNull();
+    expect(await sessionsOf(memberId)).toBe(0);
+    expect(h.lines.named("auth.google_failed").at(-1)).toEqual({ realm: "staff", reason });
+    expect(h.lines.named("auth.google_refused").length).toBe(refusals);
+    expect(h.lines.named("request").at(-1)).toMatchObject({
+      outcome: "error",
+      reason: "google.failed",
+    });
   });
 });

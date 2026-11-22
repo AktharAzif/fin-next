@@ -7,8 +7,13 @@
 // anything unreadable, is a refusal with a bounded reason; the token's contents never reach a log.
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 
-/** Why an ID token was refused (the `auth.google_failed` line's `reason`, §18.1). */
+/**
+ * Why an ID token was refused (§18.1). Which of these is a failure of Fin or the provider
+ * (`auth.google_failed`) and which a refusal a client can cause (`auth.google_refused`) is decided
+ * in flow.ts.
+ */
 export type IdTokenRefusal =
+  | "too_long"
   | "malformed"
   | "algorithm"
   | "unknown_key"
@@ -58,7 +63,17 @@ export type KeyLookup = (kid: string) => Promise<KeyObject | null>;
 export const CLOCK_SKEW_SECONDS = 60;
 /** An ID token older than this is refused, whatever its expiry says. */
 export const MAX_TOKEN_AGE_SECONDS = 3600;
-const MAX_TOKEN_LENGTH = 8192;
+/**
+ * The longest answer parsed as an ID token at all. A longer one is refused unread, as `malformed`
+ * (a failure): it is far past anything a nonce carried in an authorization URL can make a token.
+ */
+export const MAX_TOKEN_READ = 64 * 1024;
+/**
+ * Fin's bound on an ID token, applied only once the token is proved the provider's for this client
+ * now (signature, issuer, audience, times), so that `too_long`, a refusal a client can cause with a
+ * long nonce, is never recorded for an answer that is not the provider's.
+ */
+export const MAX_TOKEN_LENGTH = 8192;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,253}\.[^\s@]{2,63}$/;
 
@@ -103,7 +118,8 @@ export async function verifyIdToken(
   expect: IdTokenExpectations,
   keyFor: KeyLookup,
 ): Promise<IdTokenResult> {
-  if (token.length === 0 || token.length > MAX_TOKEN_LENGTH) return refuse("malformed");
+  // Nothing past the read cap is parsed; it cannot be a token the provider made for any sign-in.
+  if (token.length === 0 || token.length > MAX_TOKEN_READ) return refuse("malformed");
   const parts = token.split(".");
   if (parts.length !== 3) return refuse("malformed");
   const [headerPart, payloadPart, signaturePart] = parts as [string, string, string];
@@ -139,6 +155,10 @@ export async function verifyIdToken(
   ) {
     return refuse("issued_at");
   }
+  // Fin's bound, now that the token is the provider's for this client: the provider's own tokens
+  // are far shorter, and the one part a client can make long is the nonce it puts in its
+  // authorization request.
+  if (token.length > MAX_TOKEN_LENGTH) return refuse("too_long");
   if (typeof claims.nonce !== "string" || claims.nonce === "" || claims.nonce !== expect.nonce) {
     return refuse("nonce");
   }

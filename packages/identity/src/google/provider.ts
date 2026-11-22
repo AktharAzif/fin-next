@@ -12,9 +12,11 @@
 // state under the realm's signature, and then, in a short unit of its own, the network's exchange
 // allowance is counted (§5.6) and the stored state, unexpired, is claimed for this request. It
 // exchanges the code and verifies the ID token with no client held, and leaves the outcome in the
-// request state. Inside the unit the library's `validateAuthorizationCode` and `getUserInfo` only
-// read that outcome, and refuse anything that does not match the code, the verifier and the nonce
-// the library itself parsed.
+// request state: a verified token, a failure of Fin or the provider (lined here), or a refusal of
+// what the client sent, its own authorization request included (flow.ts says which is which).
+// Inside the unit the library's `validateAuthorizationCode` and `getUserInfo` only read that
+// outcome, and refuse anything that does not match the code, the verifier and the nonce the
+// library itself parsed.
 //
 // The staff realm uses the same provider with its Workspace client (staff.ts): the authorization
 // request also names the Workspace domain (`hd`, a hint to the account chooser; the ID token's
@@ -23,7 +25,7 @@ import { createHash, type KeyObject } from "node:crypto";
 import type { RealmName } from "../config.ts";
 import type { Clock } from "../ports/clock.ts";
 import type { LineSink } from "../ports/log.ts";
-import type { GoogleFailure, GoogleFlow } from "./flow.ts";
+import { type GoogleFailure, type GoogleFlow, isClientRefusal } from "./flow.ts";
 import { keysFromJwks, verifyIdToken } from "./id-token.ts";
 import type { GoogleSettings } from "./settings.ts";
 import { type StateClaim, verifiedCookieValue } from "./state.ts";
@@ -71,8 +73,30 @@ export interface GoogleSignIn {
 /** What the token endpoint answered. */
 type Exchange =
   | { readonly kind: "token"; readonly idToken: string }
-  | { readonly kind: "refused" }
+  | { readonly kind: "refused"; readonly refusal: "invalid_code" | "scope" }
   | { readonly kind: "failed" };
+
+/**
+ * The token endpoint's errors (with 400) about the grant: the code, which the client sends, and
+ * the authorization request it was issued for, which passes through the client's browser.
+ * `invalid_grant` (RFC 6749 §5.2: a code made up, used or expired, or issued for another sign-in,
+ * redirect URI, client or PKCE challenge), `invalid_request` (what a provider may answer to a
+ * verifier for a code whose request carried no challenge, the client having removed it) and
+ * Google's `redirect_uri_mismatch` (a code issued for another of the client's redirect URIs). Fin
+ * builds the rest of the token request from its settings, and its unit test pins it. Fin's own
+ * credentials or configuration refused (`invalid_client`, `unauthorized_client`,
+ * `unsupported_grant_type`, a 401) and any other answer are failures.
+ */
+const GRANT_ERRORS: ReadonlySet<string> = new Set([
+  "invalid_grant",
+  "invalid_request",
+  "redirect_uri_mismatch",
+]);
+
+/** Whether a token answer's granted scope (RFC 6749 §5.1, space-delimited) names `openid`. */
+function grantsOpenId(scope: unknown): boolean {
+  return typeof scope === "string" && scope.split(" ").includes("openid");
+}
 
 /** The `error` of a token endpoint's error answer (RFC 6749 §5.2), or null. */
 async function tokenError(response: Response): Promise<string | null> {
@@ -124,9 +148,10 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
   }
 
   /**
-   * POSTs the code to the token endpoint. Only `invalid_grant` is the client's doing (a code made
-   * up, used, expired or issued for another sign-in): a refusal. Any other error, an unreadable
-   * answer or a timeout is a failure on Fin's side or the provider's.
+   * POSTs the code to the token endpoint. A grant error (GRANT_ERRORS) is the client's doing: a
+   * refusal. So is a token answer without an ID token, unless the provider says it granted
+   * `openid`: the client can take the identity scopes out of its request. Any other error, an
+   * unreadable answer or a timeout is a failure on Fin's side or the provider's.
    */
   async function exchange(code: string, codeVerifier: string): Promise<Exchange> {
     const body = new URLSearchParams({
@@ -150,14 +175,19 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
       });
       if (response.status === 200) {
         const answer: unknown = await response.json();
-        const idToken =
-          typeof answer === "object" && answer !== null
-            ? (answer as Record<string, unknown>).id_token
-            : undefined;
-        return typeof idToken === "string" ? { kind: "token", idToken } : { kind: "failed" };
+        if (typeof answer !== "object" || answer === null || Array.isArray(answer)) {
+          return { kind: "failed" };
+        }
+        const fields = answer as Record<string, unknown>;
+        if (typeof fields.id_token === "string") return { kind: "token", idToken: fields.id_token };
+        // A token answer (RFC 6749 §5.1: it carries an access token) without an ID token: the
+        // request asked for none, unless the provider says it granted `openid` and sent none.
+        return typeof fields.access_token === "string" && !grantsOpenId(fields.scope)
+          ? { kind: "refused", refusal: "scope" }
+          : { kind: "failed" };
       }
-      if (response.status === 400 && (await tokenError(response)) === "invalid_grant") {
-        return { kind: "refused" };
+      if (response.status === 400 && GRANT_ERRORS.has((await tokenError(response)) ?? "")) {
+        return { kind: "refused", refusal: "invalid_code" };
       }
       return { kind: "failed" };
     } catch {
@@ -202,8 +232,8 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
     };
     const exchanged = await exchange(code, stored.codeVerifier);
     if (exchanged.kind === "refused") {
-      // The after-hook lines the refusal (`auth.google_refused`, `invalid_code`).
-      flow.prefetched = { ...base, kind: "refused" };
+      // The after-hook lines the refusal (`auth.google_refused`).
+      flow.prefetched = { ...base, kind: "refused", refusal: exchanged.refusal };
       return null;
     }
     if (exchanged.kind === "failed") {
@@ -235,9 +265,24 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
       flow.prefetched = { ...base, kind: "failed", failure: "jwks" };
       return null;
     }
-    // An address Google has not verified is a refusal of the person's account, not a failure.
-    if (!result.ok && result.reason !== "email_unverified") failed(result.reason);
-    flow.prefetched = { ...base, kind: "token", nonce: stored.idTokenNonce, idToken, result };
+    if (result.ok) {
+      flow.prefetched = {
+        ...base,
+        kind: "token",
+        nonce: stored.idTokenNonce,
+        idToken,
+        claims: result.claims,
+      };
+      return null;
+    }
+    if (isClientRefusal(result.reason)) {
+      // A nonce, scope or address the client's own request (or the person's account) caused: the
+      // after-hook lines the refusal.
+      flow.prefetched = { ...base, kind: "refused", refusal: result.reason };
+      return null;
+    }
+    failed(result.reason);
+    flow.prefetched = { ...base, kind: "failed", failure: result.reason };
     return null;
   }
 
@@ -319,12 +364,11 @@ export function createGoogleSignIn(deps: GoogleSignInDeps): GoogleSignIn {
         prefetched.kind !== "token" ||
         tokens.idToken !== prefetched.idToken ||
         tokens.expectedIdTokenNonce === undefined ||
-        tokens.expectedIdTokenNonce !== prefetched.nonce ||
-        !prefetched.result.ok
+        tokens.expectedIdTokenNonce !== prefetched.nonce
       ) {
         return null;
       }
-      const claims = prefetched.result.claims;
+      const claims = prefetched.claims;
       flow.claims = claims;
       return {
         user: { email: claims.email, emailVerified: true, name: claims.name ?? "" },

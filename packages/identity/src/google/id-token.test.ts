@@ -6,6 +6,8 @@ import {
   type IdTokenExpectations,
   keysFromJwks,
   MAX_TOKEN_AGE_SECONDS,
+  MAX_TOKEN_LENGTH,
+  MAX_TOKEN_READ,
   tokenKeyId,
   verifyIdToken,
 } from "./id-token.ts";
@@ -94,11 +96,64 @@ describe("verifyIdToken", () => {
   });
 
   it.each([
+    ["malformed", ""],
     ["malformed", "not-a-token"],
     ["malformed", "a.b"],
     ["malformed", `${b64({ alg: "RS256" })}.not-json.sig`],
   ])("refuses %s input", async (reason, input) => {
     expect(await verifyIdToken(input, expect_, keys)).toEqual({ ok: false, reason });
+  });
+
+  it("refuses a token of the provider's for this client past Fin's bound, with its own reason (a long nonce makes one)", async () => {
+    const long = token({ ...good, nonce: "n".repeat(MAX_TOKEN_LENGTH) });
+    expect(long.length).toBeGreaterThan(MAX_TOKEN_LENGTH);
+    let looked = false;
+    const result = await verifyIdToken(long, expect_, async (kid) => {
+      looked = true;
+      return keys(kid);
+    });
+    expect(result).toEqual({ ok: false, reason: "too_long" });
+    // The bound is applied only once the signature has been checked.
+    expect(looked).toBe(true);
+    // Just within the bound, a token is read.
+    const base = token({ ...good, pad: "" });
+    const room = Math.floor(((MAX_TOKEN_LENGTH - base.length) * 3) / 4) - 3;
+    const near = token({ ...good, pad: "p".repeat(room) });
+    expect(near.length).toBeLessThanOrEqual(MAX_TOKEN_LENGTH);
+    expect(near.length).toBeGreaterThan(MAX_TOKEN_LENGTH - 16);
+    expect((await verifyIdToken(near, expect_, keys)).ok).toBe(true);
+  });
+
+  // Past Fin's bound, but not the provider's token for this client now: each keeps its own fault
+  // (a failure), never `too_long` (a refusal a client can cause).
+  const pad = { pad: "p".repeat(MAX_TOKEN_LENGTH) };
+  it.each([
+    ["malformed", () => "x".repeat(MAX_TOKEN_LENGTH + 1)],
+    ["malformed", () => `<html><body>${"x".repeat(MAX_TOKEN_LENGTH)}</body></html>`],
+    ["malformed", () => `${b64({ alg: "RS256" })}.${"x".repeat(MAX_TOKEN_LENGTH)}.sig`],
+    ["algorithm", () => `${b64({ alg: "none" })}.${b64({ ...good, ...pad })}.`],
+    ["unknown_key", () => token({ ...good, ...pad }, { kid: "nope" })],
+    ["signature", () => token({ ...good, ...pad }, { signer: stranger.privateKey })],
+    ["issuer", () => token({ ...good, ...pad, iss: "https://issuer.example.org" })],
+    ["audience", () => token({ ...good, ...pad, aud: "other.apps.example.com", azp: undefined })],
+    ["expired", () => token({ ...good, ...pad, exp: nowS - 61 })],
+    ["issued_at", () => token({ ...good, ...pad, iat: nowS + 120 })],
+  ])("refuses an over-length token by its own fault: %s", async (reason, make) => {
+    const input = make();
+    expect(input.length).toBeGreaterThan(MAX_TOKEN_LENGTH);
+    expect(await verifyIdToken(input, expect_, keys)).toEqual({ ok: false, reason });
+  });
+
+  it("parses nothing past the read cap, however it is signed: malformed", async () => {
+    const huge = token({ ...good, pad: "p".repeat(MAX_TOKEN_READ) });
+    expect(huge.length).toBeGreaterThan(MAX_TOKEN_READ);
+    let looked = false;
+    const result = await verifyIdToken(huge, expect_, async (kid) => {
+      looked = true;
+      return keys(kid);
+    });
+    expect(result).toEqual({ ok: false, reason: "malformed" });
+    expect(looked).toBe(false);
   });
 
   it.each([

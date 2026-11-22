@@ -3,12 +3,14 @@
 // Proves the state (bound to the browser's signed cookie, unexpired, one exchange however many
 // callbacks come), PKCE (S256, the verifier at the token endpoint), the nonce (minted per sign-in,
 // checked in the ID token), the exact redirect URI, the network's exchange allowance, a refused
-// code read as the client's refusal, verified addresses only (and the mailbox proved only for the
+// code, and whatever a client causes by changing its own authorization request (its nonce, its
+// scopes, its challenge), read as the client's refusal and never as a failure of Fin or the
+// provider, verified addresses only (and the mailbox proved only for the
 // account's own address), linking only from Account security with an intent and only to the same
 // address, unlinking with an intent from a session of any age, the audit events in the action's
 // transaction (the guard refuses the account row without them), the security notices, and 404 for
 // every Google path while Google is off.
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -84,7 +86,10 @@ interface RoundTrip {
   location: URL | null;
 }
 
-/** Starts a Google sign-in in this browser, lets the fixture answer, and follows the callback. */
+/**
+ * Starts a Google sign-in in this browser, lets the fixture answer, and follows the callback.
+ * `edit` changes the authorization request on its way through the browser, as a client may.
+ */
 async function roundTrip(
   browser: Browser,
   choice: FixtureAccount | "deny",
@@ -93,6 +98,7 @@ async function roundTrip(
     body?: Record<string, unknown>;
     headers?: Record<string, string>;
     tamper?: Tamper;
+    edit?: (params: URLSearchParams) => void;
     callbackFrom?: Browser;
   } = {},
 ): Promise<RoundTrip> {
@@ -112,7 +118,9 @@ async function roundTrip(
   const authorize = new URL(String(start.json?.url));
   fixture.chooseNext(choice);
   fixture.tamperNext(options.tamper ?? null);
-  const fromProvider = await fetch(authorize, { redirect: "manual" });
+  const sent = new URL(authorize);
+  options.edit?.(sent.searchParams);
+  const fromProvider = await fetch(sent, { redirect: "manual" });
   const back = new URL(String(fromProvider.headers.get("location")));
   const callbackPath = `${back.pathname}${back.search}`;
   const callback = await (options.callbackFrom ?? browser).get(callbackPath, {
@@ -450,8 +458,9 @@ describe("what a Google sign-in refuses", () => {
     expect(browser.sessionToken()).toBeNull();
   });
 
+  // Faults no client can cause: the token is not the provider's for this client, now, or the
+  // provider failed. (A wrong nonce is one a client can cause; see the next block.)
   it.each([
-    ["nonce", "nonce"],
     ["audience", "audience"],
     ["issuer", "issuer"],
     ["expired", "expired"],
@@ -734,6 +743,110 @@ describe("what a Google sign-in refuses", () => {
     expect(url.searchParams.get("scope")).toBe("openid email profile");
     expect(url.searchParams.get("login_hint")).toBeNull();
     expect(url.searchParams.get("access_type")).toBeNull();
+  });
+});
+
+/** A round trip whose authorization request the client changed (or whose token says it did). */
+interface Edited {
+  readonly label: string;
+  readonly edit?: (params: URLSearchParams) => void;
+  readonly tamper?: Tamper;
+  /** The `auth.google_refused` line's reason. */
+  readonly reason: string;
+  /** The `?error=` the page comes back with. */
+  readonly page: string;
+  /** What the provider's token endpoint did with the code. */
+  readonly exchange: "issued" | "refused";
+}
+
+const EDITED: readonly Edited[] = [
+  {
+    label: "another nonce",
+    edit: (p) => p.set("nonce", randomBytes(24).toString("base64url")),
+    reason: "nonce",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "a nonce long enough to push the ID token past Fin's bound",
+    edit: (p) => p.set("nonce", "n".repeat(6000)),
+    reason: "too_long",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "a scope without email",
+    edit: (p) => p.set("scope", "openid profile"),
+    reason: "email",
+    page: "email_not_found",
+    exchange: "issued",
+  },
+  {
+    label: "openid alone",
+    edit: (p) => p.set("scope", "openid"),
+    reason: "email",
+    page: "email_not_found",
+    exchange: "issued",
+  },
+  {
+    label: "a scope with no identity in it (no ID token comes back)",
+    edit: (p) => p.set("scope", "https://www.googleapis.com/auth/drive.file"),
+    reason: "scope",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+  {
+    label: "another PKCE challenge",
+    edit: (p) =>
+      p.set("code_challenge", createHash("sha256").update(randomBytes(32)).digest("base64url")),
+    reason: "invalid_code",
+    page: "invalid_code",
+    exchange: "refused",
+  },
+  {
+    label: "a token whose nonce is not this sign-in's, however it came (planted)",
+    tamper: "nonce",
+    reason: "nonce",
+    page: "invalid_code",
+    exchange: "issued",
+  },
+];
+
+describe("what a client changes in its own authorization request (it passes through the browser)", () => {
+  it.each(EDITED)("$label: a refusal of the round trip, never a failure", async (c) => {
+    const person = account("edited");
+    const browser = h.browser();
+    const failures = h.lines.named("auth.google_failed").length;
+    const unhandled = h.lines.named("auth.unhandled_error").length;
+    const exchanges = fixture.exchanges.length;
+    const trip = await roundTrip(browser, person, {
+      ...(c.edit === undefined ? {} : { edit: c.edit }),
+      ...(c.tamper === undefined ? {} : { tamper: c.tamper }),
+    });
+    // The provider answered the request it was sent; nothing failed on its side or Fin's.
+    expect(fixture.exchanges.slice(exchanges)).toEqual([
+      expect.objectContaining({ outcome: c.exchange }),
+    ]);
+    expect(trip.callback.status).toBe(302);
+    expect(trip.location?.href).toBe(`${ORIGIN.developer}/sign-in?error=${c.page}`);
+    expect(browser.sessionToken()).toBeNull();
+    // No line google-sign-in-failing watches, and none sign-in-failing does.
+    expect(h.lines.named("auth.google_failed").length).toBe(failures);
+    expect(h.lines.named("auth.unhandled_error").length).toBe(unhandled);
+    expect((await linesOf("auth.google_refused")).at(-1)).toEqual({
+      realm: "developer",
+      reason: c.reason,
+    });
+    expect((await linesOf("request")).at(-1)).toMatchObject({
+      authPath: "/callback/:id",
+      outcome: "refused",
+      reason: `google.${c.reason}`,
+      status: 302,
+    });
+    const users = await h.admin.query(`SELECT 1 FROM identity."user" WHERE email = $1`, [
+      person.email,
+    ]);
+    expect(users.rowCount).toBe(0);
   });
 });
 

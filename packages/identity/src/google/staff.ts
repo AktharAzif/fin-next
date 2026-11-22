@@ -21,9 +21,11 @@
 //     unit of work. A refusal goes back to the sign-in page with `?error=`, its line, and, for a
 //     listed member, `staff.sign_in_failed`.
 //
-// Anything the before-hook leaves to the library (no verified token: the person cancelled, a code
-// the provider refused, a failure on Fin's side or Google's) ends in the library's own refusal,
-// which the after-hook lines as the developer realm's does.
+// Anything the before-hook leaves to the library (no verified token: the person cancelled, a
+// round trip the client's own request caused to be refused, a failure on Fin's side or Google's)
+// ends in the library's own refusal, which the after-hook lines as the developer realm's does:
+// `auth.google_failed` only for what Fin or the provider did, and `auth.google_refused` with its
+// reason for anything a client can cause (flow.ts decides which is which).
 import { setSessionCookie } from "better-auth/cookies";
 import { parseState } from "better-auth/oauth2";
 import { AuthRefusal } from "../errors.ts";
@@ -36,6 +38,7 @@ import type { UnitTx } from "../ports/db.ts";
 import type { RequestState } from "../request.ts";
 import type { RealmRuntime } from "../runtime.ts";
 import { factorFacts, personByEmail } from "../store.ts";
+import { refusalPageError } from "./flow.ts";
 import { redirectError, refusedCallbackTarget } from "./hooks.ts";
 import { type GoogleRedirectField, googleReturnUrl } from "./redirect.ts";
 
@@ -136,7 +139,6 @@ export async function staffGoogleCallbackBefore(
   if (
     prefetched === null ||
     prefetched.kind !== "token" ||
-    !prefetched.result.ok ||
     query.error !== undefined ||
     query.code !== prefetched.code
   ) {
@@ -161,7 +163,7 @@ export async function staffGoogleCallbackBefore(
     state.line.reason = "google.state_mismatch";
     throw redirect(refusedCallbackTarget(rt, parsed.errorURL ?? null, "state_mismatch"));
   }
-  const claims = prefetched.result.claims;
+  const claims = prefetched.claims;
   const member = await personByEmail(tx, "staff", claims.email);
   const refusal: StaffRefusal | null =
     claims.hostedDomain === undefined || claims.hostedDomain !== rt.settings.google?.hostedDomain
@@ -251,30 +253,30 @@ export async function staffGoogleCallbackAfter(
     }
     return;
   }
-  // As in the developer realm: a failure on Fin's side or the provider's was lined when it was
-  // prefetched; an address Google has not verified says `email_unverified`; anything else (a
-  // cancelled sign-in, a code the provider refused) is a refusal, lined here.
+  // As in the developer realm. Where the library refused because Fin's provider answered nothing,
+  // the prefetch says why (flow.ts): a failure on Fin's side or the provider's was lined when it
+  // was prefetched, and the page says `google_failed`; anything the client's round trip caused is
+  // a refusal, lined here with its own reason. Any other `error` is the library's refusal (the
+  // person cancelled, a state that does not match, …).
   const prefetched = state.google.prefetched;
   const fromProvider = error === "invalid_code" || error === "unable_to_get_user_info";
-  const failed =
-    fromProvider &&
-    prefetched !== null &&
-    (prefetched.kind === "failed" ||
-      (prefetched.kind === "token" &&
-        !prefetched.result.ok &&
-        prefetched.result.reason !== "email_unverified"));
-  const unverified =
-    fromProvider &&
-    prefetched?.kind === "token" &&
-    !prefetched.result.ok &&
-    prefetched.result.reason === "email_unverified";
-  state.google.redirectError = failed ? "google_failed" : unverified ? "email_unverified" : null;
-  state.line.outcome = failed ? "error" : "refused";
-  if (failed) {
+  const outcome =
+    fromProvider && prefetched !== null && prefetched.kind !== "token" ? prefetched : null;
+  if (outcome?.kind === "failed") {
+    state.google.redirectError = "google_failed";
+    state.line.outcome = "error";
     state.line.reason = "google.failed";
     return;
   }
-  const reason = unverified ? "email_unverified" : error;
+  let reason: string;
+  if (outcome?.kind === "refused") {
+    state.google.redirectError = refusalPageError(outcome.refusal);
+    reason = outcome.refusal;
+  } else {
+    state.google.redirectError = null;
+    reason = error;
+  }
   rt.lines.write("auth.google_refused", "warn", { realm: "staff", reason });
+  state.line.outcome = "refused";
   state.line.reason = `google.${reason}`;
 }
