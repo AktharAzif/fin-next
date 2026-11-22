@@ -1,0 +1,176 @@
+{
+  "board": "SignIn",
+  "canvas": "fin-dashboard",
+  "route": "/sign-in",
+  "states": {
+    "start": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "signedOut": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "signedOutTries": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "googleNotLinked": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with account_not_linked says so on the card"
+    },
+    "googleCancelled": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with access_denied says so on the card"
+    },
+    "googleUnconfirmed": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with email_unverified says so on the card"
+    },
+    "googleNoSignup": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with unable_to_create_user says so on the card"
+    },
+    "googleUnfinished": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with state_mismatch says so on the card"
+    },
+    "googleOurSide": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with google_failed says so on the card"
+    },
+    "googleIncomplete": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey a round trip refused with email_not_found says so on the card"
+    },
+    "googleBusy": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey @security Continue with Google: busy, then sent where the server says, with the page kept"
+    },
+    "passkeyBusy": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security a passkey added on Protect your account, then a sign-in with it"
+    },
+    "noPasskey": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a cancelled or failed passkey says so on the card"
+    },
+    "passkeyFailed": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey a cancelled or failed passkey says so on the card"
+    },
+    "passkeyRemoved": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "emailInvalid": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "offline": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "password": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "signingIn": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "wrongPassword": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "ourSide": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "didntWork": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passwordPaused": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "pausedLinkRefused": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "tooManyEmails": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey too many emails, and offline, are said on the card"
+    },
+    "sendingLink": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey @security sign-in: the passkey first, then the emailed code and the page asked for"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "loadError": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's boot failure page draws it (\"Couldn't load Fin\")"
+    },
+    "loadOffline": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's boot failure page draws it"
+    },
+    "notFound": {
+      "status": "pending",
+      "day": "sat",
+      "note": "the frame's not-found page draws it"
+    }
+  }
+}

@@ -189,9 +189,6 @@
       "includes": ["packages/ui/**"],
       "linter": {
         "rules": {
-          "security": {
-            "noDangerouslySetInnerHtml": "off"
-          },
           "style": {
             "noRestrictedImports": {
               "level": "error",

@@ -1,0 +1,70 @@
+{
+  "board": "SignUp",
+  "canvas": "fin-dashboard",
+  "route": "/sign-up",
+  "states": {
+    "form": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "invited": {
+      "status": "pending",
+      "day": "sat",
+      "note": "journeys.spec.ts draws it once the console's API test server runs; it skips on this base"
+    },
+    "typing": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "nameRefused": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "emailInvalid": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "passwordShort": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "passwordCommon": {
+      "status": "pending",
+      "day": "stretch-2",
+      "note": "a stretch item (spec 06 §8.2): built with it"
+    },
+    "creating": {
+      "status": "covered",
+      "day": "sat",
+      "spec": "apps/console/e2e/sat/screens.spec.ts",
+      "test": "@journey sign-up: the form, then the emailed code in the same browser"
+    },
+    "didntWork": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "tooManyTries": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "offline": {
+      "status": "pending",
+      "day": "sat"
+    },
+    "googleBusy": {
+      "status": "covered",
+      "day": "stretch-5",
+      "spec": "apps/console/e2e/google/google.spec.ts",
+      "test": "@journey the sign-up board offers Google too, busy while it starts, and comes back to itself"
+    },
+    "loading": {
+      "status": "pending",
+      "day": "sat"
+    }
+  }
+}

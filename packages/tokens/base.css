@@ -1,0 +1,74 @@
+/*
+ * @fin/tokens base.css: the page colour, the body type, selection and the one focus ring
+ * (spec 06 §3.2, §9). In Tailwind's base layer, so every utility wins over it, and above the
+ * UI SDK's layer, which each app declares first.
+ */
+
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--fin-color-border);
+  }
+
+  html {
+    background-color: var(--fin-color-bg);
+    color: var(--fin-color-text-primary);
+    font-family: var(--fin-font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--fin-color-bg);
+    color: var(--fin-color-text-primary);
+    font-family: var(--fin-text-body-family);
+    font-size: var(--fin-text-body-size);
+    line-height: var(--fin-text-body-line-height);
+    font-weight: var(--fin-text-body-weight);
+    letter-spacing: var(--fin-text-body-tracking);
+  }
+
+  ::selection {
+    background-color: var(--fin-color-selection);
+    color: var(--fin-color-text-primary);
+  }
+
+  /* The one focus ring: 2px of focus-ring, 2px outside, on everything focusable, in both themes. */
+  :focus-visible {
+    outline: var(--fin-focus-width) solid var(--fin-color-focus-ring);
+    outline-offset: var(--fin-focus-offset);
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--fin-font-mono);
+  }
+
+  /* WebKit gives an element shown in the top layer as a popover (the SDK's menus, popovers,
+     dialogs and toast region) no initial values for registered custom properties, so Tailwind's
+     border, shadow and ring utilities would draw nothing there (the kit spec checks it on three
+     engines). These are the initial values Tailwind itself registers; utilities still override
+     them. Children are unaffected: the properties do not inherit. */
+  :where([popover], dialog) {
+    --tw-border-style: solid;
+    --tw-outline-style: solid;
+    --tw-shadow: 0 0 #0000;
+    --tw-shadow-alpha: 100%;
+    --tw-inset-shadow: 0 0 #0000;
+    --tw-inset-shadow-alpha: 100%;
+    --tw-ring-shadow: 0 0 #0000;
+    --tw-inset-ring-shadow: 0 0 #0000;
+    --tw-ring-offset-width: 0px;
+    --tw-ring-offset-color: #fff;
+    --tw-ring-offset-shadow: 0 0 #0000;
+    --tw-drop-shadow-alpha: 100%;
+    --tw-translate-x: 0;
+    --tw-translate-y: 0;
+    --tw-translate-z: 0;
+  }
+}

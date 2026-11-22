@@ -1,0 +1,18 @@
+@layer ui-sdk;
+/*
+ * The selfie document's one stylesheet: verify's, in the same order and no other (spec 06 §3.2),
+ * with selfie.html as its document source. `@layer ui-sdk;` comes first so the UI SDK's adopted
+ * sheets declare their layer before Fin's utilities, which then win. The @source paths are relative
+ * to this file.
+ */
+@import "tailwindcss";
+@import "@fin/tokens/tokens.css";
+@import "@fin/tokens/theme.css";
+@import "@fin/tokens/base.css";
+@import "@fin/tokens/fonts.css";
+@import "@fin/motion/fin-motion.css";
+@import "@fin/frame/boot/boot.css";
+@source "../../selfie.html";
+@source "../../../../packages/ui/src";
+@source "../../../../packages/frame/src";
+@source "../../../../packages/icons/src";
