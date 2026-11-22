@@ -5,14 +5,16 @@
 // for the tick; closing asks first; nothing shows it again), roll it with an overlap and see the new
 // secret, revoke it, a role that may only read (every change disabled with the reason), a role
 // without the permission (the page refused), the empty, loading and failed states, a paused
-// organisation's Production keys still listed and revocable, and a list past one page. What the
-// client sends is asserted: the intent on the one re-send, X-Fin-App, the organisation, the body.
+// organisation's Production keys still listed and revocable, a list past one page, and a switch of
+// organisation that starts each list at its first page. What the client sends is asserted: the
+// intent on the one re-send, X-Fin-App, the organisation, the body.
 // The step-up and the route's own refusals are proved on the server (keys.db.test.ts).
 import { expect, gotoReady, test } from "@fin/testing/playwright";
 import type { Page } from "@playwright/test";
 import {
   ApiDouble,
   developerViewer,
+  noContent,
   ORG,
   ok,
   problem,
@@ -351,5 +353,57 @@ test.describe("the API keys page", () => {
     await expect(sandbox).toContainText("Oldest key");
     const asked = api.calls("GET /api/keys").filter((r) => r.search.get("mode") === "test");
     expect(asked.map((r) => r.search.get("page"))).toEqual(["1", "2"]);
+  });
+
+  test("@journey a switch of organisation starts each list at its first page", async ({ page }) => {
+    const other = { ...ORG, orgId: "org_ito", name: "Studio Ito" };
+    let current = ORG.orgId;
+    const many = Array.from({ length: 100 }, (_, i) =>
+      keyRow({
+        keyId: `K${String(i).padStart(9, "0")}`,
+        prefix: `fin_test_rk_K${String(i).padStart(9, "0")}`,
+        name: `Key ${i}`,
+      }),
+    );
+    const oldest = keyRow({
+      keyId: "Z9Y8X7W6V5",
+      prefix: "fin_test_rk_Z9Y8X7W6V5",
+      name: "Oldest key",
+    });
+    const theirs = keyRow({
+      keyId: "S7T8V9W1X2",
+      prefix: "fin_test_rk_S7T8V9W1X2",
+      name: "Ito worker",
+    });
+    const api = new ApiDouble()
+      .on("GET /api/viewer", () => ok(viewer({ memberships: [ORG, other], currentOrgId: current })))
+      .on("PUT /api/viewer/organization", (r) => {
+        current = String((r.body as { orgId: string }).orgId);
+        return noContent();
+      })
+      .on("GET /api/keys", (r) => {
+        if (r.search.get("mode") === "live") return list([]);
+        const n = Number(r.search.get("page") ?? "1");
+        const [keys, total] =
+          r.headers["fin-organization"] === other.orgId
+            ? [n === 1 ? [theirs] : [], 1]
+            : [n === 1 ? many : [oldest], 101];
+        return ok({ keys, total, page: n, size: 100, working: 1, limit: 50, can: CAN_ALL });
+      });
+    await api.install(page);
+    await gotoReady(page, "/developers/keys");
+    const sandbox = page.getByRole("table", { name: "Sandbox keys" });
+    await page.getByRole("button", { name: "Next page" }).click();
+    await expect(sandbox).toContainText("Oldest key");
+    await page.getByRole("button", { name: "Switch organisation, current: Acme Remit" }).click();
+    await page.getByRole("menuitemradio", { name: /Studio Ito/ }).click();
+    await expect(sandbox).toContainText("Ito worker");
+    await expect(page.getByRole("button", { name: "Next page" })).toHaveCount(0);
+    const asked = api
+      .calls("GET /api/keys")
+      .filter(
+        (r) => r.search.get("mode") === "test" && r.headers["fin-organization"] === "org_ito",
+      );
+    expect(asked.map((r) => r.search.get("page"))).toEqual(["1"]);
   });
 });

@@ -42,8 +42,10 @@ import {
 } from "./-dialogs.tsx";
 import {
   KEYS_PAGE_SIZE,
+  type KeyPages,
   lastUsedLine,
   pageCountOf,
+  pagesIn,
   STATUS,
   statusLine,
   withinRole,
@@ -82,7 +84,9 @@ function ApiKeysPage() {
   const orgId = signedIn?.viewer.currentOrgId ?? "";
   const liveStatus = signedIn?.membership?.liveStatus;
   const paused = liveStatus === "paused";
-  const [pages, setPages] = useState<{ test: number; live: number }>({ test: 1, live: 1 });
+  // Each list's page, chosen in this organisation: a switch starts both at the first page.
+  const [chosenPages, setChosenPages] = useState<KeyPages>({ orgId, test: 1, live: 1 });
+  const pages = pagesIn(chosenPages, orgId);
   const sandbox = useResource(`keys:${orgId}:test:${pages.test}`, (signal) =>
     fin.api(keysList, { mode: "test", page: pages.test, size: KEYS_PAGE_SIZE }, { signal }),
   );
@@ -252,7 +256,7 @@ function ApiKeysPage() {
                 pageCount,
                 total: data.data?.total ?? 0,
                 pageSize: KEYS_PAGE_SIZE,
-                onPageChange: (page: number) => setPages((now) => ({ ...now, [mode]: page })),
+                onPageChange: (page: number) => setChosenPages({ ...pages, [mode]: page }),
               },
             }
           : {})}
