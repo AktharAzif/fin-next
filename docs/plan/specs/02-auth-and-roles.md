@@ -23,12 +23,12 @@ zone is `<staging-zone>`. Test addresses use `example.com`, `example.org` or `ex
 specifications, and between two specifications the one that owns the area, as README §8.3 lists
 the owners. The owner's decisions are those DECISIONS.md records as the owner's: the overnight
 ones, which spec 01 §1 lists as OD-1 to OD-6, and the answers of Saturday morning, which spec 01
-§1.2 lists. The decisions taken while the owner was away, the build's [BD-01] to [BD-17] among
-them (BD-15 is withdrawn), are register entries, for the owner's review. Among the specifications,
-this spec owns sign-in in both realms, the second factor, step-up, permissions and roles,
-organisations and teams, staff management and sessions; the sibling owns any other area (spec 05
-for API keys' public conventions, webhooks and events); and spec 08 owns the cross-cutting rules of
-audit, security email, personal data, scrubbing, secrets and observability.
+§1.2 lists. The decisions taken while the owner was away, the build's [BD-01] to [BD-29] among them
+(BD-15 and BD-25 are withdrawn), are register entries, for the owner's review. Among the
+specifications, this spec owns sign-in in both realms, the second factor, step-up, permissions and
+roles, organisations and teams, staff management and sessions; the sibling owns any other area
+(spec 05 for API keys' public conventions, webhooks and events); and spec 08 owns the cross-cutting
+rules of audit, security email, personal data, scrubbing, secrets and observability.
 A decision of this spec (S2-nn, §22) binds where everything above it is silent. DECISIONS appendix C
 found none that changes a register entry; if one is found later, the register holds until appendix C
 settles it. Where this spec repeats a rule it names the section and keeps it short; where it differs
@@ -2478,9 +2478,10 @@ origin checks; a forged Access identity; a leaked service login writing a critic
 checks: the test-truth check on every guard in `packages/identity`, `access`, `orgs` and `staff`; the
 endpoint-policy set reviewed against the installed Better Auth router by reading its source. Every
 merge follows [G-10]'s interim merge rule: green CI, and fin-review's local run on the exact head,
-recorded in the pull request, with sessions within R11 and [RV-06]'s floor (AC-SAT-22). Signed
-receipts move to hardening (D6). The nightly review at 01:00 Sunday is `all --cold` over everything
-merged.
+recorded in the pull request, with sessions within R11 and [RV-06]'s floor (AC-SAT-22); until
+fin-review's pool transport lands, the build's workflow reviews stand in for that run ([BD-22],
+[BD-27]). Signed receipts move to hardening (D6). The nightly review at 01:00 Sunday is
+`all --cold` over everything merged.
 
 ### 20.5 Checkpoints and cut lines (EXECUTION §3.7)
 
@@ -2542,7 +2543,7 @@ merged.
 | AC-SAT-19 [STG] | The release smoke and the Fin Admin check by the first staff admin (an agent on the build machine, or the owner), which waits only if SP-09 shows that a needed Access MFA setting exists only in the Zero Trust organisation's settings, which then waits for the owner (EXECUTION §2.5 step 9, CR-07; [FD-05]); request lines with the release SHA | T-SAT-70 |
 | AC-SAT-20 [STG] | Sign-up code and `new-sign-in` delivered; DKIM, SPF and DMARC passing, the owner's check, waiting for the owner | T-SAT-71 |
 | AC-SAT-21 [STG] | Ten failed staff sign-ins notify the staging policy | T-SAT-72 |
-| AC-SAT-22 [CI] | Every Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run showing the attack pass on its S files and sessions within R11 and the floor | the pull request's record until hardening (D6), when the `gate` checks signed receipts |
+| AC-SAT-22 [CI] | Every Saturday pull request merged under [G-10]'s interim merge rule, with fin-review's recorded local run showing the attack pass on its S files and sessions within R11 and the floor. Until fin-review's pool transport lands, the build's workflow reviews, the Fable attacker among them, stand in for that run, and each pull request or batch records their rounds in its place ([BD-22], [BD-27]) | the pull request's record until hardening (D6), when the `gate` checks signed receipts |
 | AC-SAT-23 [U, E2E] | Every cookie `__Host-`, `Secure`, `HttpOnly`, `Path=/`, no `Domain`; `session_token` `Strict`, the rest `Lax`; each origin-gate refusal reason; a cross-site form POST and a sibling host's `fetch` refused in three engines; no OPTIONS on the console's own calls | T-SAT-03, T-SAT-04, T-SAT-06, P0-D's gate tests; spec 06's `@security` project |
 | AC-SAT-24 [E2E] | The edge toggle in both frames: collapse and expand, focus, `aria-expanded`, remembered, hidden below 1280px, under a drawer's scrim, the specs' geometry; the rail's 24px brand mark | spec 06 AC-UI-09 |
 

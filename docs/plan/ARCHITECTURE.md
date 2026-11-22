@@ -720,11 +720,12 @@ encoder package (§7.12).
   and on Saturday within each step of the build order that the steward set for the owner's review
   (EXECUTION §3.3; spec 06 §3.4), each checked against the SDK version in use; `packages/frame` is
   built fresh too. The similarity check at the ship step flags any copy. A match lying wholly inside
-  the reused assets named next is recorded in the pull request by path and counts only, and any
-  other match stops the ship (spec 07 §11.3). Reused, as the canvases use them: the token values,
-  Inter and Fira Mono, and the Fin.com logo's paths, which are reserved for Fin's own products
-  ([G-03]). By the steward's estimate, building fresh costs a few extra hours on the UI lane; auth's
-  backend lanes run in parallel, so the day still holds (EXECUTION §3.3, §11).
+  the reused assets named next is recorded in the pull request by path and counts only, and other
+  matches stop the ship, except the classes [BD-29] reports by counts (spec 07 §11.3). Reused, as
+  the canvases use them: the token values, Inter and Fira Mono, and the Fin.com logo's paths, which
+  are reserved for Fin's own products ([G-03]). By the steward's estimate, building fresh costs a
+  few extra hours on the UI lane; auth's backend lanes run in parallel, so the day still holds
+  (EXECUTION §3.3, §11).
 - **Versions** ([G-06]). `@ui-sdk/react` and `@ui-sdk/core` stay at the same exact version: the
   newest beta that clears the three-day release age when the install pull request runs
   (`0.1.0-beta.9` at P0-4, cleared at 03:02 UTC; `0.1.0-beta.10` only if the install pull request
@@ -1016,12 +1017,12 @@ the operations the door matrix lists (§7.9).
 | `cloudflared-public-b`, `cloudflared-admin-b` | `fin-next-connector`, no token until a swap | nothing; the standby side of the evict runbook (§5.14) | 0 / 0 | yes | none |
 | `edge` | `fin-next-edge`, `dist/main.js` | `cloudflared-public`: the whole `api.` host | 1 / 2 | no | `fin_edge` |
 | `api` | `fin-next-api`, `dist/main.js` | edge (`/internal/v4`, hook doors, key revoke), console, admin, verify, payments (doors) | 1 / 2 | yes (Sumsub) | `fin_api` |
-| `worker` | `fin-next-api`, `dist/main.js --worker` | nothing (health only) | 1 / 2 | yes (Sumsub, the email token's filter, developer webhooks) | `fin_worker` |
+| `worker` | `fin-next-api`, with a start command that gives the whole command line, because Railway's start command replaces the image's `ENTRYPOINT` and `CMD` (SP-03's run, `docs/plan/spikes.md` run 2): the image's Node binary, its Node flags, `dist/main.js --worker` | nothing (health only) | 1 / 2 | yes (Sumsub, the email token's filter, developer webhooks) | `fin_worker` |
 | `payments` | `fin-next-payments`, `dist/main.js` | edge (money hook door), api, console, admin (money door) | 1 / 2 | yes (MassPay allowlist) | `fin_payments` |
 | `console` | `fin-next-console` | `cloudflared-public`: `/api/*` of the `console.` host | 1 / 2 | no | `fin_console` |
 | `admin` | `fin-next-admin` | `cloudflared-admin`: `/api/*` of the `admin.` host, after Access | 1 / 2 | no | `fin_admin` |
 | `verify` | `fin-next-verify` | `cloudflared-public`: `/api/*` of the `verify.` and `selfie.` hosts | 1 / 2 | no | none |
-| `migrate` | `fin-next-api`, `dist/main.js --migrate` | nothing | one run per release, restart Never | no | `fin_owner`, with a password valid for that run ([AU-08]) |
+| `migrate` | `fin-next-api`, with the whole command line as for `worker`: the image's Node binary, its Node flags, `dist/main.js --migrate` | nothing | one run per release, restart Never | no | `fin_owner`, with a password valid for that run ([AU-08]) |
 | `backup` | `fin-next-backup` (Postgres 18 client, `age`, a small uploader) | nothing | Railway cron, nightly and hourly (§4.5) | no | `fin_backup` |
 | `cloudflared-db` | `fin-next-connector` (supervisor and `cloudflared`); the db tunnel's token once that tunnel exists, before production ([FD-11]), and no token until then | nothing inbound | 0, 1 only during a registered operator run | no | none |
 | `postgres` | Railway's Postgres 18 template | the services above | standalone with PITR / HA with PITR | n/a | the superuser: see [P-18] |
@@ -3351,7 +3352,8 @@ that `email.enqueue()` refuses a template outside each role's allowlist.
   monitors, heartbeats, on-call with calls and critical push, incidents and a status page.
 - **One organisation, two teams**, `fin-staging` and `fin-production`, each with its own team tokens
   per product; no global token kept once the teams exist. Data region **`europe`** for every source
-  and Errors application, set at creation ([OB-02], was D8).
+  and Errors application, set at creation ([OB-02], was D8; staging: `us_west` until the owner
+  decides, [BD-24]).
 - **Sources** (HTTP platform), one per service per environment (the connector services and the
   watcher included), deletion-protected. **Errors applications**, one per server service and one per
   browser app per environment, correlated with the service's source, 90-day retention, spike
@@ -3706,7 +3708,10 @@ components as the service objectives (§15.7).
   (the owner, 21 Nov, about 08:30: "it should start fresh"). The pre-push hook is fin-next's own,
   written fresh in Phase 0: the public-safety check and gitleaks run in it before any push
   ([CI-16]). Merges happen only through the ship step, under [G-10]'s interim rule until hardening
-  (D6). GitHub enforces the ruleset now, and the builder token from hardening.
+  (D6). Until fin-review's pool transport lands, the build's workflow reviews stand in for
+  fin-review's run on each pull request, which merges by the build's rebuild, and Wave 2 lands in
+  batch pull requests ([BD-22], [BD-27]). GitHub enforces the ruleset now, and the builder token
+  from hardening.
 
 ### 11.2 Workflows and jobs
 
@@ -3725,7 +3730,8 @@ Every job sets `permissions: {}` at the top and the least it needs, a timeout, a
 | | `e2e-report` | Merges blob reports; uploads the HTML report for 3 to 7 days (no real data, no credential) |
 | | `static` | zizmor, actionlint, gitleaks with Fin's token shapes (redacted), hadolint, the OpenAPI checks (§13.8), the key-shaped-string check (§7.7) |
 | | `bun` | The non-blocking Bun canary: shared packages' tests under Bun, known-answer tests (argon2id, AES-GCM, Ed25519, key HMAC), the SSRF refusal tests, a server start |
-| | `gate` | `needs` every job but the non-blocking `bun`, `if: always()`; passes only when each job succeeded or was skipped because `plan` said so, and, from hardening, when `main`'s receipt checker, run from the same engine copy, accepts a signed receipt for the head (§11.6, D6). Until then it passes on the jobs alone, and the merge follows [G-10]'s interim rule (§11.1) |
+| | `commit-dates-utc` | Reads the raw commit objects of every commit in the pull request (on a push to `main`, every pushed commit except GitHub's own merge commits) and fails on any author or committer offset other than `+0000`, with no exception ([G-09], [BD-18]; spec 01 §5.3) |
+| | `gate` | `needs` every job but the non-blocking `bun`, `commit-dates-utc` among them, `if: always()`; passes only when each job succeeded or was skipped because `plan` said so, and, from hardening, when `main`'s receipt checker, run from the same engine copy, accepts a signed receipt for the head (§11.6, D6). Until then it passes on the jobs alone, and the merge follows [G-10]'s interim rule (§11.1) |
 | | `merge` | On `push` to `main` only: the pushed commit is a merge commit whose tree equals its reviewed second parent's tree, with that head's receipt accepted from hardening (D6), except the bootstrap merges in `docs/review/bootstrap.json`; a failure raises `main-unreviewed-change`, and the staging deploy (`pnpm fin deploy staging`) needs this job's success: it runs from the operator machine until the owner is back ([BD-05]), then in `deploy-staging` (spec 07 §2.3.4) |
 | `review.yml` (reusable, called from `ci.yml`, once CI has an Anthropic credential, an owner step with no date yet; D9) | `review` (matrix) | fin-review lenses in CI (§11.6); until then fin-review runs locally as the merge gate |
 | `dependencies.yml` (pull requests touching manifests, `push` to `main`, daily) | `audit` | `pnpm audit`, `pnpm audit signatures`, OSV-Scanner, dependency review; no caches |
@@ -4970,7 +4976,7 @@ specifications in the phase-1 notes.
 |---|---|
 | D2 Railway Postgres; D6 two Pro workspaces and static IPs; D19 private networking; D20 fresh staging data; D22 production accounts apart | Held: [P-09], [P-03] |
 | D5 escrow to offline `age` identities; D29 the R2 vault; D10 write-once audit heads (open); D39 what is clear in the vault (open) | Held: §6.10, §8.4; D10 and D39 still for the owner ([AU-03], [DA-11]) |
-| D8 and D9 Better Stack: two teams, region `europe` (was `germany`), alerts as code | Held: §10 |
+| D8 and D9 Better Stack: two teams, region `europe` (was `germany`), alerts as code | Held: §10; staging's region is `us_west` until the owner decides ([BD-24]) |
 | D11 edge and api separate, with signed calls | Held, and extended to doors for every caller ([P-07], [SA-23]) |
 | D13 personal-data design; D23 only api and its worker hold personal-data keys and Sumsub tokens; D51 a separate Sumsub token for documents | Held and built for the first time: §6.5 |
 | D17 Node 26 | Re-checked for R15 and held: §3.2 |
