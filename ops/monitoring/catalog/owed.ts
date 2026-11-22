@@ -219,6 +219,17 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     due: SUNDAY,
     spec: "spec 02 §18.2",
   },
+  // Named by identity's line list for auth.google_failed and owed by its catalogue entry: spec 02
+  // §18.2's stretch alert for Google sign-in (N). Its lane and date follow the lane rule above, as
+  // the ruled identity alerts' do; no ruling names it yet, and the steward confirms or changes them.
+  {
+    name: "google-sign-in-failing",
+    severity: "N",
+    fragment: "identity",
+    lane: "L-SAT-09",
+    due: SUNDAY,
+    spec: "spec 02 §18.2",
+  },
   // Defined in alerts/platform.json until its field was found to have no writer: an alert that
   // reads a field nobody writes can never fire, so it is owed, not defined. Its lane (the
   // platform fragment's) and date follow the lane rule above; the steward confirms or changes them.

@@ -62,6 +62,27 @@ export const entries: readonly CatalogEntry[] = [
     alerts: [],
   },
   {
+    event: "auth.google_failed",
+    kind: "failure",
+    level: "warn",
+    writtenBy:
+      "Google sign-in (stretch 5, spec 02 §5.8), for a failure on Fin's side or the provider's only: the token endpoint unreachable, too slow, failing or unreadable, Fin's own client refused there, the provider's keys unavailable, or an ID token that is not the provider's for this client now (google/flow.ts decides; what a client can cause is auth.google_refused)",
+    fields: { realm: "string", reason: "string" },
+    alerts: [],
+    owed: ["google-sign-in-failing"],
+  },
+  {
+    event: "auth.google_refused",
+    kind: "security",
+    level: "warn",
+    writtenBy:
+      "Google sign-in, for a round trip that came back refused: the person cancelled, the address has an account not linked to Google or one Google has not verified, sign-ups are paused, a link did not match the account, a second callback for a state already exchanged, or what the client changed in its round trip",
+    fields: { realm: "string", reason: "string" },
+    alerts: [],
+    noAlert:
+      "Expected refusals, each answered on the page; spec 02 §18.3 panels them by reason, and google-sign-in-failing watches the failures (auth.google_failed)",
+  },
+  {
     event: "step_up.refused",
     kind: "security",
     level: "warn",

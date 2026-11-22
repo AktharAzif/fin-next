@@ -54,6 +54,8 @@ const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
  */
 const BY_LANE_RULE: Readonly<Record<string, { lane: string; due: string }>> = {
   "team-change-failing": { lane: "L-SAT-09", due: "2026-11-22" },
+  // Named by identity's line list for auth.google_failed (spec 02 §18.2's stretch alert).
+  "google-sign-in-failing": { lane: "L-SAT-09", due: "2026-11-22" },
   // Its rule read clockSkewMs, which no process writes (alert-fields.test.ts).
   "clock-skew": { lane: "P0-F", due: "2026-11-22" },
 };
