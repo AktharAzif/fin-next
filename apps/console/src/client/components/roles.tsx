@@ -14,7 +14,9 @@ import {
   summary,
 } from "@fin/access";
 import { useId } from "react";
+import { failureSentence } from "../api/actions.ts";
 import type { RoleRow } from "../api/contracts/roles.ts";
+import { codeOf, problemField } from "../api/failures.ts";
 
 export interface RoleChoice {
   roleKey: string;
@@ -96,6 +98,40 @@ export function pickedRole(choices: readonly RoleChoice[], picked: string | null
   return choices.some((choice) => choice.roleKey === picked && choice.reason === null)
     ? picked
     : null;
+}
+
+/** Whether the role picked is still one the picker offers (a custom role may go meanwhile). */
+export function offered(choices: readonly RoleChoice[], picked: string | null): boolean {
+  return picked !== null && choices.some((choice) => choice.roleKey === picked);
+}
+
+/**
+ * Whether a refusal says the role picked no longer exists (a custom role deleted meanwhile): the
+ * page reads the roles again before the dialog says so, so the picker no longer offers it.
+ */
+export function roleGone(error: unknown): boolean {
+  if (codeOf(error) !== "giving_refused") return false;
+  const problem = problemField(error, "problem");
+  return problem === "gone" || problem === "unknown_role";
+}
+
+/** The refusal of a role change or an invitation, in one sentence. */
+export function roleRefusal(error: unknown): string {
+  const code = codeOf(error);
+  if (code === "outranked")
+    return "Their role can do more than yours, so you can’t change it. Ask a Super admin.";
+  if (code === "giving_refused") {
+    const problem = problemField(error, "problem");
+    if (problem === "top_only") return "Only a Super admin can make someone a Super admin.";
+    if (problem === "self") return "You can’t change your own role.";
+    if (problem === "unchanged") return "They already have that role.";
+    if (roleGone(error)) return "That role no longer exists. Pick another.";
+    return "That role can do more than yours, so you can’t give it.";
+  }
+  if (code === "last_top_role")
+    return "Every organisation needs a Super admin. Make someone else one first.";
+  if (code === "already_member") return "That person is already a member.";
+  return failureSentence(error);
 }
 
 /** The reason a picker's action waits, or null when a role is picked. */

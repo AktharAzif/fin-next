@@ -29,7 +29,7 @@ import {
 } from "@fin/ui";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { failureSentence, toastFailure, toldElsewhere } from "../../api/actions.ts";
+import { toastFailure, toldElsewhere } from "../../api/actions.ts";
 import { roles as rolesContract } from "../../api/contracts/roles.ts";
 import {
   type CredentialRow,
@@ -44,7 +44,7 @@ import {
   resendInvitation,
   team,
 } from "../../api/contracts/team.ts";
-import { codeOf, failureOf, problemField } from "../../api/failures.ts";
+import { codeOf, failureOf } from "../../api/failures.ts";
 import { useResource } from "../../api/resource.ts";
 import { looksLikeEmail } from "../../auth/pending.ts";
 import {
@@ -56,10 +56,13 @@ import {
   useSignedIn,
 } from "../../components/page.tsx";
 import {
+  offered,
   pickedRole,
   type RoleChoice,
   RolePicker,
   roleChoices,
+  roleGone,
+  roleRefusal,
   whyNoRole,
 } from "../../components/roles.tsx";
 import { formatDay } from "../../format/dates.ts";
@@ -501,6 +504,7 @@ function TeamPage() {
       <InviteDialog
         open={search.view === "invite" && canInvite}
         choices={choicesFor()}
+        onStale={roleList.reload}
         onClose={() => setInviteOpen(false)}
         onSent={async () => {
           await setInviteOpen(false);
@@ -511,6 +515,7 @@ function TeamPage() {
         <ChangeRoleDialog
           member={dialog.member}
           choices={choicesFor(dialog.member.roleKey)}
+          onStale={roleList.reload}
           onClose={() => setDialog(null)}
           onChanged={async () => {
             setDialog(null);
@@ -533,6 +538,7 @@ function TeamPage() {
         <InvitationRoleDialog
           invitation={dialog.invitation}
           choices={choicesFor(dialog.invitation.roleKey)}
+          onStale={roleList.reload}
           onClose={() => setDialog(null)}
           onChanged={async () => {
             setDialog(null);
@@ -544,27 +550,11 @@ function TeamPage() {
   );
 }
 
-/** The refusal of a role change or an invitation, in one sentence. */
-function roleRefusal(error: unknown): string {
-  const code = codeOf(error);
-  if (code === "outranked")
-    return "Their role can do more than yours, so you can’t change it. Ask a Super admin.";
-  if (code === "giving_refused") {
-    const problem = problemField(error, "problem");
-    if (problem === "top_only") return "Only a Super admin can make someone a Super admin.";
-    if (problem === "self") return "You can’t change your own role.";
-    if (problem === "unchanged") return "They already have that role.";
-    return "That role can do more than yours, so you can’t give it.";
-  }
-  if (code === "last_top_role")
-    return "Every organisation needs a Super admin. Make someone else one first.";
-  if (code === "already_member") return "That person is already a member.";
-  return failureSentence(error);
-}
-
 function InviteDialog(props: {
   open: boolean;
   choices: RoleChoice[];
+  /** Reads the roles again: the role picked no longer exists. */
+  onStale: () => Promise<void>;
   onClose: () => void;
   onSent: () => Promise<void>;
 }) {
@@ -611,7 +601,10 @@ function InviteDialog(props: {
         setEmailError("That email address doesn’t look right.");
       else if (codeOf(error) === "limit_reached")
         setFailed("Too many invitations are waiting. Delete some first, or try again tomorrow.");
-      else if (!toldElsewhere(error)) setFailed(roleRefusal(error));
+      else if (!toldElsewhere(error)) {
+        if (roleGone(error)) await props.onStale();
+        setFailed(roleRefusal(error));
+      }
     } finally {
       setBusy(false);
     }
@@ -733,6 +726,8 @@ function CredentialsNotice(props: {
 function ChangeRoleDialog(props: {
   member: MemberRow;
   choices: RoleChoice[];
+  /** Reads the roles again: the role picked no longer exists. */
+  onStale: () => Promise<void>;
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -758,7 +753,10 @@ function ChangeRoleDialog(props: {
       toast.success(`${name}’s role is now ${label}`);
       await props.onChanged();
     } catch (error) {
-      if (!toldElsewhere(error)) setFailed(roleRefusal(error));
+      if (!toldElsewhere(error)) {
+        if (roleGone(error)) await props.onStale();
+        setFailed(roleRefusal(error));
+      }
     } finally {
       setBusy(false);
     }
@@ -781,7 +779,7 @@ function ChangeRoleDialog(props: {
           <Button
             variant="primary"
             loading={busy}
-            disabled={roleKey === props.member.roleKey}
+            disabled={roleKey === props.member.roleKey || !offered(props.choices, roleKey)}
             onClick={save}
           >
             Save
@@ -870,6 +868,8 @@ function RemoveDialog(props: {
 function InvitationRoleDialog(props: {
   invitation: InvitationRow;
   choices: RoleChoice[];
+  /** Reads the roles again: the role picked no longer exists. */
+  onStale: () => Promise<void>;
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -888,7 +888,10 @@ function InvitationRoleDialog(props: {
       toast.success(`The invitation for ${props.invitation.email} was changed`);
       await props.onChanged();
     } catch (error) {
-      if (!toldElsewhere(error)) setFailed(roleRefusal(error));
+      if (!toldElsewhere(error)) {
+        if (roleGone(error)) await props.onStale();
+        setFailed(roleRefusal(error));
+      }
     } finally {
       setBusy(false);
     }
@@ -911,7 +914,7 @@ function InvitationRoleDialog(props: {
           <Button
             variant="primary"
             loading={busy}
-            disabled={roleKey === props.invitation.roleKey}
+            disabled={roleKey === props.invitation.roleKey || !offered(props.choices, roleKey)}
             onClick={save}
           >
             Save

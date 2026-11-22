@@ -1,3 +1,4 @@
+import { ApiError } from "@fin/frame";
 import { describe, expect, it } from "vitest";
 import type { RoleRow } from "../api/contracts/roles.ts";
 import { formatDay, formatFull, formatShort } from "../format/dates.ts";
@@ -16,7 +17,15 @@ import {
   toPermissions,
   whySaveIsOff,
 } from "./role-editor.ts";
-import { canGiveAny, pickedRole, roleChoices, whyNoRole } from "./roles.tsx";
+import {
+  canGiveAny,
+  offered,
+  pickedRole,
+  roleChoices,
+  roleGone,
+  roleRefusal,
+  whyNoRole,
+} from "./roles.tsx";
 
 describe("the role editor's model (spec 02 §8.1, §8.4)", () => {
   it("ticks what a permission needs, and unticks what depends on it", () => {
@@ -192,6 +201,34 @@ describe("choosing a role ([SA-32])", () => {
     // A pick that is no longer offered (the list changed) is no pick.
     expect(pickedRole(top, "rol_gone")).toBeNull();
     expect(whyNoRole(top, "rol_gone")).toBe("Choose a role first.");
+    expect(offered(top, "rol_dev")).toBe(true);
+    expect(offered(top, "rol_gone")).toBe(false);
+    expect(offered(top, null)).toBe(false);
+  });
+
+  it("says a role deleted meanwhile no longer exists, so the page reads the roles again", () => {
+    const refused = (status: number, code: string, extra: Record<string, unknown> = {}) =>
+      new ApiError({
+        kind: "problem",
+        contract: "team.invite",
+        status,
+        problem: { type: "x", title: "x", status, code, request_id: "req_1", ...extra },
+      });
+    for (const problem of ["gone", "unknown_role"]) {
+      const error = refused(403, "giving_refused", { problem });
+      expect(roleGone(error), problem).toBe(true);
+      expect(roleRefusal(error), problem).toBe("That role no longer exists. Pick another.");
+    }
+    const beyond = refused(403, "giving_refused", { problem: "beyond" });
+    expect(roleGone(beyond)).toBe(false);
+    expect(roleRefusal(beyond)).toBe("That role can do more than yours, so you can’t give it.");
+    expect(roleRefusal(refused(403, "giving_refused", { problem: "top_only" }))).toBe(
+      "Only a Super admin can make someone a Super admin.",
+    );
+    expect(roleRefusal(refused(409, "last_top_role"))).toBe(
+      "Every organisation needs a Super admin. Make someone else one first.",
+    );
+    expect(roleGone(refused(404, "not_found"))).toBe(false);
   });
 });
 
