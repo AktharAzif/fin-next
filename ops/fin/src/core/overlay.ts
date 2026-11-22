@@ -8,7 +8,8 @@
 // shorter than six characters (a threshold, a grace period, a timing) is the exception the masker
 // makes (core/mask.ts): matching it by value would mask, and so disclose it through, the tool's own
 // counters. Such numbers are never printed instead: none is echoed by a message, and the only ones
-// the code reads, the thresholds, are PrivateNumbers that print their role (`<threshold:api-v4>`).
+// the code reads, the thresholds and the grace periods, are PrivateNumbers that print their role
+// (`<threshold:api-v4>`, `<grace:watcher>`).
 // The only values left unmasked are the ones the plan itself publishes: the allow-list's
 // host labels (console, staff, onboard, ...), the DMARC record labels, policy and note, the
 // environment's name and the comments at the places this file defines them (PUBLIC_PATHS). A
@@ -66,10 +67,17 @@ export interface Overlay {
   /** Static egress addresses per Railway service, once read back (spec 01 §6.5). */
   staticEgress: Readonly<Record<string, readonly string[]>>;
   /**
-   * Numeric thresholds ([OB-13]), such as `api-v4` for the rate rule. Read with thresholdOf(). Each
-   * prints `<threshold:<name>>`; reveal() gives the number to the request body that carries it.
+   * Numeric thresholds ([OB-13]), such as `api-v4` for the rate rule, and the alert thresholds,
+   * windows and minimum counts ops/monitoring's files name (`@thresholds.<name>`; a ratio is a
+   * fraction). Read with thresholdOf(). Each prints `<threshold:<name>>`; reveal() gives the number
+   * to the request body that carries it.
    */
   thresholds: Readonly<Record<string, PrivateNumber>>;
+  /**
+   * The heartbeats' grace periods in seconds ([OB-13]; ops/monitoring's `@grace.<name>`). Each
+   * prints `<grace:<name>>`; reveal() gives the number to the request body that carries it.
+   */
+  grace: Readonly<Record<string, PrivateNumber>>;
 }
 
 const DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -83,8 +91,16 @@ const IPV6 = /^[0-9a-f:]+$/i;
 const DMARC_POLICY = /^(?:p=)?(none|quarantine|reject)$/;
 /** A key a map uses for a name: a sending subdomain, a service, an alert or a heartbeat. */
 const NAME_KEY = /^[a-z][a-z0-9-]{0,62}$/;
-/** A key that may appear in a placeholder: a plain identifier, never a host, an address or text. */
-const PRINTABLE_KEY = /^[$_]?[A-Za-z][A-Za-z0-9_-]{0,62}$/;
+/**
+ * A key of `thresholds` or `grace`: the names ops/monitoring's files give overlay keys, which may
+ * start with a digit (`5xx-rate-api`), but never only digits.
+ */
+const NUMBER_KEY = /^(?=[a-z0-9-]*[a-z])[a-z0-9][a-z0-9-]{0,62}$/;
+/**
+ * A key that may appear in a placeholder: a plain identifier, never a host, an address or text. It
+ * may start with a digit when it holds a letter (`5xx-rate-api`), never only digits (an ID).
+ */
+const PRINTABLE_KEY = /^[$_]?(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
 /**
  * The values the plan publishes, so they are not masked: exact paths only (dots and [i]). A
@@ -258,11 +274,41 @@ function named(
   path: string,
   what: string,
   problems: string[],
+  pattern: RegExp = NAME_KEY,
 ): Array<[string, unknown]> {
   const entries = Object.entries(value);
-  const good = entries.filter(([key]) => NAME_KEY.test(key));
+  const good = entries.filter(([key]) => pattern.test(key));
   if (good.length < entries.length) problems.push(`${path} holds a key that is not ${what}`);
   return good;
+}
+
+/**
+ * The private numbers of `thresholds` or `grace`, each a PrivateNumber printing
+ * `<${placeholder}:<name>>`. `fractions` admits a positive number that is not whole (a ratio).
+ */
+function privateNumbers(
+  raw: unknown,
+  path: "thresholds" | "grace",
+  placeholder: "threshold" | "grace",
+  fractions: boolean,
+  problems: string[],
+): Record<string, PrivateNumber> {
+  const out: Record<string, PrivateNumber> = {};
+  if (raw === undefined) return out;
+  const entries = named(
+    rec(raw, path, problems),
+    path,
+    "an overlay key's name (lower case, digits and hyphens, with a letter)",
+    problems,
+    NUMBER_KEY,
+  );
+  for (const [name, value] of entries) {
+    const number = typeof value === "number" && Number.isFinite(value) && value > 0;
+    if (!number || (!fractions && !Number.isInteger(value))) {
+      problems.push(`${path}.${name} must be a positive ${fractions ? "number" : "integer"}`);
+    } else out[name] = new PrivateNumber(value, `<${placeholder}:${name}>`);
+  }
+  return out;
 }
 
 /**
@@ -327,20 +373,10 @@ export function parseOverlay(raw: unknown, environment: string): Overlay {
       });
     }
   }
-  const thresholds: Record<string, PrivateNumber> = {};
-  if (top.thresholds !== undefined) {
-    const entries = named(
-      rec(top.thresholds, "thresholds", problems),
-      "thresholds",
-      "an alert's name",
-      problems,
-    );
-    for (const [name, value] of entries) {
-      if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-        problems.push(`thresholds.${name} must be a positive integer`);
-      } else thresholds[name] = new PrivateNumber(value, `<threshold:${name}>`);
-    }
-  }
+  // A threshold may be a ratio (ops/monitoring's 5xx-rate-*); a grace period is whole seconds. A
+  // command that needs a whole number checks it where it sends it (the zone's rate rule).
+  const thresholds = privateNumbers(top.thresholds, "thresholds", "threshold", true, problems);
+  const grace = privateNumbers(top.grace, "grace", "grace", false, problems);
 
   const neverTouch: string[] = [];
   if (!Array.isArray(never.labels)) problems.push("neverTouch.labels must be an array of strings");
@@ -416,6 +452,7 @@ export function parseOverlay(raw: unknown, environment: string): Overlay {
     },
     staticEgress,
     thresholds,
+    grace,
   };
 
   // Consistency: the overlay must agree with itself before any guard trusts it.

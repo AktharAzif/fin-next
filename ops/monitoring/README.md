@@ -10,7 +10,8 @@ hosts, DSNs and heartbeat URLs are resolved at run time and never committed or p
 | `catalog/<area>.ts` | every event Fin writes, its kind and fields, and the alerts that watch it or are owed for it (listed in `catalog/index.ts`) |
 | `catalog/owed.ts` | the alerts code or the catalogue names before their fragment lands, each with its lane and the date due; production's first deploy waits for a gate that refuses while any is listed (its header) |
 | `src/check.ts` | `monitoring:check`: no network, a few milliseconds |
-| `src/apply.ts` | `pnpm fin monitoring apply <env>`: exports `monitoringApply(ctx)` and `command` for ops/fin's dispatcher |
+| `src/apply.ts` | the apply: `monitoringApply(ctx)`, its guards and its read-back |
+| `src/apply-cli.ts` | the entry point `pnpm fin monitoring apply <env>` runs as a child process, over an IPC channel |
 
 ## monitoring:check
 
@@ -38,10 +39,17 @@ pnpm fin monitoring apply staging --dry-run
 pnpm fin monitoring apply staging [--confirm-delete <count>] [--assert-empty-team fin-staging]
 ```
 
-Credentials are files, read only inside the command: `FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE`
-(Telemetry and Errors), `FIN_BETTERSTACK_UPTIME_TOKEN_FILE`, `FIN_MONITOR_HEADER_FILE` (the secret
-monitor header; optional for a dry run). Hostnames come from the deploy configuration by host role,
-thresholds and grace periods from the overlay (`thresholds.<key>`, `grace.<key>`).
+ops/fin may not import this package (CI-14), so `pnpm fin` runs `src/apply-cli.ts` as a child
+process with no argument and an empty environment, and keeps the run (the lock, `run.registered`
+before the first write, a `run.step` per write, `run.done`), the credentials and the overlay. The
+child holds no token: each Better Stack call it makes goes to pnpm fin as a message, and pnpm fin
+sends it with the team token, to Better Stack's API hosts only, never a write in a dry run or
+outside the registered run (`docs/runbooks/monitoring-drift.md`). Credentials are files, read by
+pnpm fin: `FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE` (Telemetry and Errors),
+`FIN_BETTERSTACK_UPTIME_TOKEN_FILE`, `FIN_MONITOR_HEADER_FILE` (the secret monitor header; optional
+for a dry run). Hostnames come from the overlay by host role, thresholds and grace periods from the
+overlay (`thresholds.<key>`, `grace.<key>`); a change to one prints its placeholder
+(`<threshold:<key>>`, `<grace:<key>>`), never the number.
 
 The run checks the files first, prints the difference before changing anything, and refuses
 tokens of any team but `fin-<env>` (the environment's, never a string in the files; MC-13 holds
@@ -49,9 +57,13 @@ the files to it). `--assert-empty-team` is accepted only for a product whose tok
 at all. It caps deletions and pauses together at 3 without `--confirm-delete <count>`, pauses
 (never deletes) a heartbeat the files drop, never deletes a source or an Errors application,
 refuses two Better Stack objects with one name, and refuses anything in staging that calls, texts
-or pushes; a managed alert, monitor or heartbeat someone made loud, or gave a maintenance window
-or a team wait, is put back and shown as drift. New tokens, DSNs and heartbeat URLs go to
-`ctx.deliver` (Railway services' sealed variables only, MC-07) and are never printed; the
+or pushes, or routes to any policy but `staging-quiet` (MA-06); a managed alert, monitor or
+heartbeat someone made loud, or gave a maintenance window or a team wait, is put back and shown as
+drift. After a run that wrote anything, everything is read back and compared with the files again:
+any object that differs fails the run, named with the parts that differ. New tokens, DSNs and
+heartbeat URLs go to `ctx.deliver` (Railway services' sealed variables only, MC-07; pnpm fin does
+not deliver yet, so they are listed by service and variable, and Better Stack keeps them for a
+later `--redeliver`) and are never printed; the
 watcher's and `pnpm fin verify`'s own are read from Better Stack by those commands. The output
 names objects, never their IDs, and masks the hostnames, the zones (`ctx.zones`) and the monitor
 header, Better Stack's own error text included. Each change is printed by the part that changed

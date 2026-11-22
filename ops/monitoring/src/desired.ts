@@ -69,6 +69,24 @@ export interface DesiredObject {
   /** Attributes Better Stack fixes at creation: a difference is reported, never sent. */
   readonly immutable?: readonly string[];
   readonly delivery?: Delivery;
+  /**
+   * Compared attributes that hold one of the overlay's private numbers ([OB-13]: a threshold, a
+   * window, a minimum count, a grace period), each with what a change prints in its place
+   * (`<threshold:clock-skew>`): neither side of such a change is ever printed.
+   */
+  readonly private?: Readonly<Record<string, string>>;
+}
+
+/** What a private number prints as: `<threshold:<name>>` or `<grace:<name>>`, as pnpm fin does. */
+export function placeholderOf(key: string): string {
+  const [family, name = ""] = key.split(/\.(.*)/s);
+  return `<${family === "grace" ? "grace" : "threshold"}:${name}>`;
+}
+
+/** The placeholder of the overlay key a file's value names (`@thresholds.x`), if it names one. */
+function privateAs(value: string | undefined): string | undefined {
+  const key = value === undefined ? undefined : overlayKeys(value)[0];
+  return key === undefined ? undefined : placeholderOf(key);
 }
 
 export interface RunSettings {
@@ -142,6 +160,14 @@ function alertObjects(
     settings.splitSources === true && alert.sources.length > 1
       ? alert.sources.map((s) => ({ suffix: ` (${s})`, sources: [s] }))
       : [{ suffix: "", sources: alert.sources }];
+  // What carries a private number: the threshold and the window, and the query that holds a
+  // minimum count (its digest would name the number, since the rest of the query is public).
+  const hidden: Record<string, string> = {};
+  const threshold = privateAs(alert.threshold);
+  if (threshold !== undefined) hidden.value = threshold;
+  const window = privateAs(alert.window);
+  if (window !== undefined) hidden.query_period = window;
+  const minCount = "ratio" in alert.query ? privateAs(`@${alert.query.ratio.minCount}`) : undefined;
   const out: DesiredObject[] = [];
   for (const group of groups) {
     const name = `${alert.name}${group.suffix}`;
@@ -151,6 +177,7 @@ function alertObjects(
     out.push({
       kind: "exploration",
       key: exploration,
+      ...(minCount === undefined ? {} : { private: { query: `(a query with ${minCount})` } }),
       body: {
         name: exploration,
         date_range_from: "now-3h",
@@ -183,6 +210,7 @@ function alertObjects(
       kind: "alert",
       key: name,
       parent: exploration,
+      ...(Object.keys(hidden).length === 0 ? {} : { private: hidden }),
       body: {
         name,
         alert_type: "threshold",
@@ -326,9 +354,11 @@ export function buildDesired(config: EnvConfig, settings: RunSettings): Desired 
   const hd = config.heartbeats.defaults;
   for (const heartbeat of config.heartbeats.heartbeats) {
     const grace = lookup(heartbeat.grace, settings, missing);
+    const graceAs = privateAs(heartbeat.grace);
     objects.push({
       kind: "heartbeat",
       key: heartbeat.name,
+      ...(graceAs === undefined ? {} : { private: { grace: graceAs } }),
       body: {
         name: heartbeat.name,
         period: heartbeat.period,

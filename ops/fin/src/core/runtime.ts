@@ -1,7 +1,7 @@
 // What a run gets from the outside world, injected so tests replace every part (AGENTS.md §2: no
 // module-scope clock, randomness or connection). main.ts builds the real one.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, fork } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -107,6 +107,12 @@ export interface Runtime {
   /** Runs a program with arguments (no shell) and returns its exit status and output. */
   readonly exec: (program: string, args: readonly string[]) => ExecResult;
   /**
+   * Runs one of the repository's own Node programs as a child process, with an IPC channel and
+   * nothing else: no argument, an empty environment, no inherited Node flags. Whatever it needs
+   * comes over the channel, so nothing private is ever in its argv or its environment.
+   */
+  readonly node: (script: string, events: NodeChildEvents) => NodeChild;
+  /**
    * Calls the handlers when something stops the run (SIGINT, SIGTERM, SIGHUP or SIGQUIT; with the
    * process guards, a closed standard output or error, or an uncaught error), until the returned
    * function is called. The real runtime calls stop() and exits with STOP_EXIT once it has
@@ -138,6 +144,71 @@ export interface ExecResult {
   status: number | null;
   stdout: string;
   stderr: string;
+}
+
+/** What a Node child process tells its parent. */
+export interface NodeChildEvents {
+  /** One message over the IPC channel. */
+  message(message: unknown): void;
+  /** Text the child wrote to its standard output or error (it should write none). */
+  output(stream: "stdout" | "stderr", text: string): void;
+}
+
+export interface NodeExit {
+  code: number | null;
+  signal: string | null;
+}
+
+export interface NodeChild {
+  /** Sends one message over the IPC channel; false once the channel is closed. */
+  send(message: unknown): boolean;
+  /** Ends the child (SIGTERM) while it runs. */
+  kill(): void;
+  /** Settles once the child has exited and its output has been read; never rejects. */
+  readonly exited: Promise<NodeExit>;
+}
+
+/**
+ * The real runtime's `node`: `script` run by this Node (fork), with standard input closed, its
+ * output read as text, the IPC channel in JSON, an empty environment and no inherited Node flags.
+ */
+export function runNodeChild(script: string, events: NodeChildEvents): NodeChild {
+  const child = fork(script, [], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+    env: {},
+    execArgv: [],
+    serialization: "json",
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (text: string) => events.output("stdout", text));
+  child.stderr?.on("data", (text: string) => events.output("stderr", text));
+  child.on("message", (message) => events.message(message));
+  // A child that could not start reports an error and then closes.
+  child.on("error", () => undefined);
+  const closed = new Promise<NodeExit>((resolve) => {
+    child.on("close", (code, signal) => resolve({ code, signal }));
+  });
+  // Every message is delivered before the channel closes: wait for both.
+  const disconnected = new Promise<void>((resolve) => {
+    if (!child.connected) resolve();
+    else child.once("disconnect", () => resolve());
+  });
+  const exited = Promise.all([closed, disconnected]).then(([exit]) => exit);
+  return {
+    send: (message) => {
+      if (!child.connected) return false;
+      try {
+        return child.send(message as Parameters<typeof child.send>[0], () => undefined);
+      } catch {
+        return false;
+      }
+    },
+    kill: () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    },
+    exited,
+  };
 }
 
 /** The directory that holds the local run log and the run lock (until the R2 vault exists). */
@@ -238,6 +309,7 @@ export function processRuntime(repoRoot: string, options: ProcessRuntimeOptions 
         return { status: e.status ?? null, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
       }
     },
+    node: runNodeChild,
     trap: (handlers) => {
       // When the first stop came (a monotonic clock, for the repeat rule), once one did.
       let firstAt: number | undefined;

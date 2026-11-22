@@ -553,4 +553,26 @@ export const entries: readonly CatalogEntry[] = [
     fields: { command: "string", services: "string[]", variables: "string[]" },
     alerts: [],
   },
+  {
+    event: "monitoring.apply",
+    kind: "unit",
+    level: "info",
+    writtenBy:
+      "pnpm fin monitoring apply, once per run, a dry run included: how it ended, its counts and the objects its read-back found different, by kind and name (warn for drift or a refusal, error for a stopped run, a read-back that differs or a failed apply process)",
+    fields: {
+      dryRun: "boolean",
+      outcome: "string",
+      drift: "boolean",
+      created: "number",
+      updated: "number",
+      deleted: "number",
+      paused: "number",
+      delivered: "number",
+      undelivered: "number",
+      refusals: "number",
+      readBackCompared: "number",
+      readBackMismatched: "string[]",
+    },
+    alerts: [],
+  },
 ];

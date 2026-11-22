@@ -224,6 +224,15 @@ describe("zone apply", () => {
     }
   });
 
+  it("refuses a rate threshold that is not a whole number, which the overlay admits for ratios", async () => {
+    const h = harness((o) => {
+      o.thresholds = { "api-v4": 2.5 };
+    });
+    assert.equal(await h.run(["zone", "apply", "staging", "--only", "rules"]), EXIT.config);
+    assert.match(h.runtime.err(), /thresholds.api-v4 must be a whole number/);
+    assert.equal(h.cf.calls.filter((c) => c.method !== "GET").length, 0);
+  });
+
   it("masks the private threshold in the provider errors of the rate rule's own writes", async () => {
     const echo = "the plan allows no more than 4321 requests here";
     // Not shared: the rate rule is written, and Cloudflare echoes its threshold in a refusal.

@@ -15,6 +15,8 @@ export const CREDENTIAL_VARIABLES = {
   FIN_RAILWAY_TOKEN_FILE: "the Railway staging project token (CR-04)",
   FIN_BETTERSTACK_TELEMETRY_TOKEN_FILE: "the Better Stack Telemetry API token (CR-09)",
   FIN_BETTERSTACK_UPTIME_TOKEN_FILE: "the Better Stack Uptime API token (CR-09)",
+  FIN_MONITOR_HEADER_FILE:
+    "the secret header value every Better Stack monitor sends (spec 01 §8.4)",
   FIN_OPS_INGEST_TOKEN_FILE: "the ingest token of the Better Stack source fin-next-<env>-ops",
 } as const;
 
