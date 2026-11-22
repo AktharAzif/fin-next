@@ -15,14 +15,21 @@
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "outputs": [] },
-    "transit": { "dependsOn": ["^transit"] },
-    "test": { "dependsOn": ["transit"], "outputs": [] },
+    "test": { "outputs": [] },
     "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
     "//#lint:root": { "cache": false },
     "//#typecheck:root": {
       "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
       "outputs": []
     },
-    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] },
+    "@fin/console#test": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/orgs/src/**",
+        "$TURBO_ROOT$/packages/server/src/telemetry/**"
+      ],
+      "outputs": []
+    }
   }
 }
