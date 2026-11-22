@@ -12,6 +12,7 @@ import {
   type Harness,
   passkeyCeremony,
   registerPasskey,
+  warmUp,
 } from "../test/harness.ts";
 import { systemClock } from "./ports/clock.ts";
 import { newId } from "./ports/ids.ts";
@@ -22,6 +23,11 @@ let h: Harness;
 beforeAll(async () => {
   database = await createTestDatabase("passkeys");
   h = await createHarness(database, "developer");
+});
+
+// The realm's one-time start, so that the first test's time is its own (test/harness.ts).
+beforeAll(async () => {
+  await warmUp(h);
 });
 
 afterAll(async () => {
