@@ -45,7 +45,7 @@ import {
   STAFF_PAGE_DESCRIPTION,
 } from "./editor.ts";
 import type { RolesData } from "./load.ts";
-import { CANT_MOVE, GONE, roleActionError } from "./messages.ts";
+import { CANT_MOVE, roleActionError, UP_TO_DATE } from "./messages.ts";
 import { StaffTabs } from "./StaffTabs.tsx";
 
 const ROLE_NOUN = { singular: "role", plural: "roles" } as const;
@@ -297,7 +297,7 @@ export function RolesPage({ data }: { data: RolesData }) {
           onGone={async () => {
             setDeletingKey(null);
             await reload();
-            toast.info({ title: `${deleting.label} no longer exists`, description: GONE });
+            toast.info({ title: `${deleting.label} no longer exists`, description: UP_TO_DATE });
           }}
           onDeleted={async () => {
             setDeletingKey(null);

@@ -12,8 +12,9 @@ export const CONFLICT =
   "Someone else changed this role meanwhile. Reload the page to see their changes.";
 export const BEYOND_YOURS = "This role can do more than yours, so you can’t save it.";
 export const LIMIT = "Fin Admin has 30 custom roles. Delete one before you make another.";
-/** Shown once the list has been read again without the role. */
-export const GONE = "This role no longer exists. The list is up to date now.";
+/** Said once the list has been read again without the role. */
+export const UP_TO_DATE = "The list is up to date now.";
+export const GONE = `This role no longer exists. ${UP_TO_DATE}`;
 export const MOVE_GONE = "The role you picked no longer exists. Pick another.";
 export const MOVE_NEEDED = "Pick the role its people move to.";
 export const HOLDERS_CHANGED =
