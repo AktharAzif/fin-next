@@ -2,9 +2,9 @@
 // (sign-in, enrolment) and by packages/staff (the guard, the member changes, the kill switches,
 // the Access drift duty), through the same line port. access.keys_unavailable and
 // access.jwt_refused, the API half's front door, are in web-host.ts. The alerts spec 02 §18.2
-// names for these lines come with the staff area's alert fragment (alerts/staff.json), which so
-// far holds only web-host.ts's access-keys-unavailable; until the rest land each entry names the
-// alerts it is owed (`owed`, listed in owed.ts with their lane and date), or why none.
+// names for these lines are in the staff area's alert fragment (alerts/staff.json); one whose
+// line no process writes yet is owed (`owed`, listed in owed.ts with its lane, its date and why),
+// and an entry with neither says why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -15,8 +15,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "identity's staff realm (a code request) and the staff guard (a request), for an Access identity that is no active or pending member",
     fields: { reason: "string" },
-    alerts: [],
-    owed: ["admin-staff-refused"],
+    alerts: ["admin-staff-refused"],
   },
   {
     event: "staff.access_mismatch",
@@ -25,18 +24,16 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "identity's staff realm and the staff guard and viewer, when the session's member is not the verified Access identity; the session ends (spec 02 §10.5)",
     fields: { staffId: "string" },
-    alerts: [],
-    owed: ["admin-access-mismatch"],
+    alerts: ["admin-access-mismatch"],
   },
   {
     event: "staff.enrolment_refused",
     kind: "security",
     level: "warn",
     writtenBy:
-      "identity's staff enrolment, for a wrong, expired, used or void code, or a factor added outside the enrolment window (spec 02 §6.5)",
+      "identity's staff enrolment, for a wrong, expired, used or void code, a factor added outside the enrolment window (no_window), or in production a first factor that is not a passkey (passkey_first) (spec 02 §6.5)",
     fields: { staffId: "string", reason: "string" },
-    alerts: [],
-    owed: ["staff-enrolment-refused"],
+    alerts: ["staff-enrolment-refused"],
   },
   {
     event: "staff.enrolled",
@@ -44,8 +41,7 @@ export const entries: readonly CatalogEntry[] = [
     level: "warn",
     writtenBy: "identity's staff realm, when a member enrols their first factor (spec 02 §6.5)",
     fields: { staffId: "string", method: "string" },
-    alerts: [],
-    owed: ["staff-enrolled"],
+    alerts: ["staff-enrolled"],
   },
   {
     event: "staff.changed",
@@ -54,8 +50,7 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "packages/staff's member changes: a member added, their role changed, removed, or their factors reset (spec 02 §10.2)",
     fields: { kind: "string", staffId: "string", actorId: "string" },
-    alerts: [],
-    owed: ["staff-changed"],
+    alerts: ["staff-changed"],
   },
   {
     event: "staff.permission_refused",
@@ -73,7 +68,7 @@ export const entries: readonly CatalogEntry[] = [
     kind: "security",
     level: "error",
     writtenBy:
-      "the Access drift duty (packages/staff), when Fin Admin's Access allow list and the staff table differ; counts only (spec 02 §10.9)",
+      "the Access drift duty (packages/staff's runAccessDriftCheck), when Fin Admin's Access allow list and the staff table differ; counts only (spec 02 §10.9). No process runs the duty yet: the worker (apps/api/src/worker/main.ts) runs the email loop, the delivery check and the database probe only, and apps/api does not depend on @fin/staff, so the line's alert is owed until the worker schedules it",
     fields: {
       accessCount: "number",
       staffCount: "number",
