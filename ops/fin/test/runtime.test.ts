@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { EXIT } from "../src/core/errors.ts";
 import { GENESIS, sha256 } from "../src/core/runlog.ts";
 import {
+  INTERRUPT_DEADLINE_MS,
   INTERRUPT_SIGNALS,
   processRuntime,
   STOP_EXIT,
@@ -257,14 +258,22 @@ describe("the stop rules, in a real process", { concurrency: true }, () => {
         FIN_OPS_INGEST_TOKEN_FILE: writePrivate(dir, "ingest", `tok${"x".repeat(24)}`),
       },
     });
-    const watchdog = setTimeout(() => child.process.kill("SIGKILL"), 9_000);
+    // The bounds start with the signal, not with the spawn: a loaded machine took seconds to start
+    // the child. A timer never fires early, so the exit comes at the deadline or later; the upper
+    // bound leaves the child as long again to write run.done and exit, and the watchdog ends a
+    // child that never exits well after that.
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
       await child.waitFor("waiting");
       const sent = performance.now();
       child.process.kill("SIGTERM");
+      watchdog = setTimeout(() => child.process.kill("SIGKILL"), 3 * INTERRUPT_DEADLINE_MS);
       assert.equal(await child.exit(), EXIT.terminated, child.errors());
       const took = performance.now() - sent;
-      assert.ok(took > 4_000 && took < 7_000, `exited after ${Math.round(took)} ms`);
+      assert.ok(
+        took > INTERRUPT_DEADLINE_MS - 1_000 && took < 2 * INTERRUPT_DEADLINE_MS,
+        `exited after ${Math.round(took)} ms`,
+      );
       const run = closedRun(child);
       assert.deepEqual(run.events, ["run.registered", "run.step", "run.done"]);
       assert.equal(run.done?.interrupted, "SIGTERM");

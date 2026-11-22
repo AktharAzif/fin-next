@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -211,11 +212,19 @@ describe("the bundle", () => {
       writeFileSync(join(out, m.name), m.content);
     }
     writeFileSync(join(out, "package.json"), '{"type":"module"}');
-    const loaded = (await import(pathToFileURL(join(out, "index.js")).href)) as {
-      default: { scheduled?: unknown; fetch?: unknown };
-    };
-    expect(typeof loaded.default.scheduled).toBe("function");
-    expect(loaded.default.fetch).toBeUndefined();
+    // Loaded by a plain Node process, as a runtime loads it, not through Vitest's module runner,
+    // which asks Vitest's main process about each import: on a loaded machine those answers took
+    // seconds (over the test timeout once), while building and loading the bundle takes about
+    // 50 ms of CPU. The test waits for the process to exit, and for nothing else.
+    const index = pathToFileURL(join(out, "index.js")).href;
+    const probe = `const loaded = await import(${JSON.stringify(index)});
+process.stdout.write(JSON.stringify({ scheduled: typeof loaded.default.scheduled, fetch: typeof loaded.default.fetch }));`;
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      encoding: "utf8",
+    });
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+    expect(JSON.parse(run.stdout)).toEqual({ scheduled: "function", fetch: "undefined" });
   });
 
   it("refuses a bare import and an import without its .ts file", () => {

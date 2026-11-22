@@ -47,19 +47,22 @@ function freePort(): Promise<number> {
   });
 }
 
+// It records its environment once its metrics server listens, so a test that sees the record knows
+// `/ready` answers.
 const FAKE = `#!${process.execPath}
 const { createServer } = require("node:http");
-const { writeFileSync } = require("node:fs");
+const { renameSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--version") { console.log("cloudflared version 2026.11.1 (built test)"); process.exit(0); }
-writeFileSync(process.env.HOME + "/../fin-fake-env.json", JSON.stringify({ keys: Object.keys(process.env).sort(), args }));
+const file = process.env.HOME + "/../fin-fake-env.json";
+const record = JSON.stringify({ keys: Object.keys(process.env).sort(), args });
 const metrics = args[args.indexOf("--metrics") + 1];
 const [host, port] = metrics.split(":");
 const server = createServer((req, res) => {
   if (req.url === "/ready") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ status: 200, readyConnections: 4 })); }
   else { res.writeHead(404); res.end(); }
 });
-server.listen(Number(port), host);
+server.listen(Number(port), host, () => { writeFileSync(file + ".part", record); renameSync(file + ".part", file); });
 console.error("INF Registered tunnel connection connIndex=0 location=lhr01");
 process.on("SIGTERM", () => { server.close(); process.exit(0); });
 `;
@@ -110,9 +113,11 @@ describe("main", () => {
     if (supervisor === undefined) return;
     const readyz = () => fetch(`http://127.0.0.1:${healthPort}/readyz`).then((r) => r.status);
     expect(await readyz()).toBe(503);
-    for (let i = 0; i < 50 && !existsSync(join(dir, "env.json")); i++)
+    // The stand-in records its environment once `/ready` answers: the test waits for that, and
+    // for nothing else, however long the machine takes to start it (the test's timeout bounds it).
+    while (!existsSync(join(dir, "env.json")) && exits.length === 0) {
       await new Promise((r) => setTimeout(r, 20));
-    await new Promise((r) => setTimeout(r, 100));
+    }
     await supervisor.poll();
     expect(supervisor.state).toBe("ready");
     expect(await readyz()).toBe(200);
@@ -304,9 +309,10 @@ describe("main when stdout's reader goes away", () => {
   it("keeps supervising and answering, then exits 0 on SIGTERM within FIN_DRAIN_SECONDS", async () => {
     const { script, env } = await connectorChild();
     const run = await spawnThenCloseStdout(script, env);
-    // The first line (process.start) comes just before the health server listens.
+    // The first line (process.start) comes just before the health server listens. It is asked until
+    // it answers or the child exits, however long the machine takes (the test's timeout bounds it).
     let status = 0;
-    for (let i = 0; i < 60 && status !== 200; i++) {
+    while (status !== 200 && run.child.exitCode === null && run.child.signalCode === null) {
       status = await fetch(`http://127.0.0.1:${env.PORT}/healthz`, {
         signal: AbortSignal.timeout(1000),
       }).then(
