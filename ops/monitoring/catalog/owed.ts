@@ -56,6 +56,22 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
+    note:
+      "Owed, not defined, because the host's request line carries no authPath (spec 02 §18.1's " +
+      "field): the realm keeps the auth path on its own request state, but the console's and " +
+      "admin's annotate hooks copy only the outcome, the reason and the actor onto the host's one " +
+      "request line (apps/console/src/server/routes.ts, apps/admin/src/server/auth-hook.ts), " +
+      "packages/server's RequestFields has no such field, and the request catalogue entry declares " +
+      "none: every library request's line carries the route /api/auth/* alone, so the sign-in " +
+      "paths cannot be told from the rest. auth.unhandled_error carries authPath but counts only " +
+      "the 500s, never the attempts. Once the request line carries authPath, the rule is the ratio " +
+      "of statusClass 5xx over the request lines on console and admin with route /api/auth/* and " +
+      "an authPath of the realm's sign-in paths (/email-otp/send-verification-otp, " +
+      "/sign-in/email-otp, /passkey/verify-authentication; /sign-in/email and /sign-in/social with " +
+      "their stretches), minimum count @thresholds.sign-in-failing-min-count, threshold " +
+      "@thresholds.sign-in-failing, with the plan's second condition (successful sign-ins at zero " +
+      "while attempts continue) over the same lines' outcome, P, runbook " +
+      "docs/runbooks/sign-in-failing.md.",
   },
   {
     name: "second-factor-step-failing",
@@ -64,6 +80,16 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
+    note:
+      "Owed, not defined, for sign-in-failing's reason: the host's request line carries no " +
+      "authPath, so a 5xx on the factor-step paths (/two-factor/verify-totp, " +
+      "/two-factor/verify-backup-code, /passkey/verify-authentication at the factor step) or the " +
+      "enrolment paths (/passkey/generate-register-options, /passkey/verify-registration, " +
+      "/two-factor/enable) cannot be told from any other /api/auth/* request, and the gate state " +
+      "(spec 02 §18.1's gate) is not on the line either. Once it is, the rule is any request line " +
+      "on console or admin with statusClass 5xx and route /api/auth/* with one of those authPaths, " +
+      "or admin's route /api/enrolment/redeem (threshold @any: the plan names none), P, runbook " +
+      "docs/runbooks/second-factor-step-failing.md.",
   },
   {
     name: "step-up-failing",
@@ -72,22 +98,21 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
-  },
-  {
-    name: "sign-in-code-contested",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
-  },
-  {
-    name: "step-up-locked",
-    severity: "N",
-    fragment: "identity",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
+    note:
+      "Owed, not defined: of its conditions only step_up.refused with reason digest is written " +
+      "where a rule can read it (identity's intents and after-hook and the orgs guard and intents " +
+      "on console, packages/staff's step-up on admin). The 5xx on the ceremonies " +
+      "(/passkey/verify-authentication, /two-factor/verify-totp and /two-factor/verify-backup-code " +
+      "with Fin-Step-Up-Intent, spec 02 §7.4) and on the intent consumption of the library's " +
+      "step_up_self paths cannot be told from the rest: as for sign-in-failing, the host's " +
+      "request line carries no authPath. The Fin routes' intent consumption needs the request " +
+      "line's stepUp, which packages/server's RequestFields declares but nothing sets. The plan's two " +
+      "conditions also read two events with their own thresholds, which one count query cannot " +
+      "hold (its conditions apply to every event it reads). Once the request line carries both, " +
+      "the rule is any request line on console or admin with statusClass 5xx and stepUp intent, or " +
+      "route /api/auth/* with a ceremony or step_up_self authPath, together with step_up.refused " +
+      "with reason digest above @thresholds.step-up-failing on console and admin (two queries, or " +
+      "a query form that holds a condition per event), N, runbook docs/runbooks/step-up-failing.md.",
   },
   {
     name: "secret-unreadable",
@@ -207,17 +232,6 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-MON-09",
     due: "2026-11-23",
     spec: "spec 04 §30.3",
-  },
-  // Named by orgs.ts and owed by the request entry: 5xx on the team and role routes. Its lane and
-  // date follow the lane rule above, as the ruled identity and staff alerts' do; no ruling names
-  // it yet, and the steward confirms or changes them.
-  {
-    name: "team-change-failing",
-    severity: "N",
-    fragment: "orgs",
-    lane: "L-SAT-09",
-    due: SUNDAY,
-    spec: "spec 02 §18.2",
   },
   // Defined in alerts/platform.json until its field was found to have no writer: an alert that
   // reads a field nobody writes can never fire, so it is owed, not defined. Its lane (the

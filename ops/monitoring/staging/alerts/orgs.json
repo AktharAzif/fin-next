@@ -1,0 +1,49 @@
+{
+  "$comment": "The organisations area's alerts (spec 02 §18.2; spec 08 §7.8 group C), L-SAT-09's. team-change-failing reads the request lines of the console's team and role routes (spec 02 §14.2): packages/server's request unit writes one per request with the route template the host names (packages/web-host's api host sets the registered pattern, /api included) and the status class. The routes are listed by template, exactly the console route policy's /team and /roles entries (apps/console/src/server/policy/orgs.ts; test/orgs-alerts.test.ts holds the two together). The plan names no threshold, so any 5xx answer on those routes fires it. The routes are the console's only, so console is the one source and the rule has one series. Every staging alert routes to staging-quiet, email only.",
+  "alerts": [
+    {
+      "name": "team-change-failing",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console"],
+      "query": {
+        "count": {
+          "events": ["request"],
+          "where": [
+            { "field": "statusClass", "eq": "5xx" },
+            {
+              "field": "route",
+              "in": [
+                "/api/team",
+                "/api/team/members/:memberId",
+                "/api/team/members/:memberId/credentials",
+                "/api/team/members/:memberId/remove",
+                "/api/team/invitations",
+                "/api/team/invitations/:invitationId",
+                "/api/team/invitations/:invitationId/resend",
+                "/api/roles",
+                "/api/roles/:roleKey",
+                "/api/roles/:roleId",
+                "/api/roles/:roleId/delete"
+              ]
+            }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "The console's team or role routes answered with a server error: members, invitations or roles could not be read or changed. 5xx answers: {{value}}.",
+      "metadata": {
+        "check": "The last deploy: the route, status, reason and errorId on the request lines, the console's Errors application for those errorIds, and whether the errors began with a release.",
+        "flow": "F4",
+        "runbook": "docs/runbooks/team-change-failing.md"
+      }
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 {
-  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`.",
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C). auth-endpoint-unlisted is the steward's ruling of 22 Nov: the API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. L-SAT-09 adds sign-in-code-contested and step-up-locked, each over a line identity writes. sign-in-code-contested counts auth.code_contested per userId: only the developer realm's code requests write it (spec 02 §5.2: the rule is the developer realm's), so console is its one source; a contest for an address with no account carries no userId, and those share the one empty label. step-up-locked counts step_up.locked, which both realms write when the fifth wrong try at a step-up ends the session; one incident per service, the label held to the rule's sources. Still owed in catalog/owed.ts, each with why: sign-in-failing, second-factor-step-failing and step-up-failing, whose 5xx conditions read the auth path, which the host's one request line does not carry yet. Every staging alert routes to staging-quiet, email only.",
   "alerts": [
     {
       "name": "auth-endpoint-unlisted",
@@ -26,6 +26,50 @@
         "check": "The realm and release on the lines; the request lines with the same requestId and their cfRay; whether the count began with a release.",
         "flow": "F3",
         "runbook": "docs/runbooks/auth-endpoint-unlisted.md"
+      }
+    },
+    {
+      "name": "sign-in-code-contested",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console"],
+      "seriesBy": "userId",
+      "query": { "count": { "events": ["auth.code_contested"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.sign-in-code-contested",
+      "check_period": 60,
+      "query_period": 3600,
+      "confirmation_period": 0,
+      "recovery_period": 3600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Sign-in codes for one account were contested more often than its threshold in an hour: browsers the account does not know asked for codes over its owner's live code, or used up the strangers' share of its code emails. The series is the account's userId (empty for addresses with no account). Contests: {{value}}.",
+      "metadata": {
+        "check": "Someone asking codes for that account from browsers it does not know: the lines' reason (supersede_refused or unknown_share_used) for the userId, the request lines with the same requestIds and their cfRay, and the networks behind those Ray IDs in Cloudflare's records.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/sign-in-code-contested.md"
+      }
+    },
+    {
+      "name": "step-up-locked",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin"] }],
+      "query": { "count": { "events": ["step_up.locked"] } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.step-up-locked",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Sessions were ended by the fifth wrong try at a step-up more often than the threshold allows in 15 minutes: someone holding signed-in sessions is guessing factor codes, or a step-up ceremony is failing for everyone. Locks: {{value}}.",
+      "metadata": {
+        "check": "The sessions' people: the realm on the lines, the step_up.locked (or staff.step_up_locked) audit events with the same requestIds and the step-up failures before them, and whether a release or a factor change came just before.",
+        "flow": "F4",
+        "runbook": "docs/runbooks/step-up-locked.md"
       }
     }
   ]

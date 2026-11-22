@@ -2,10 +2,10 @@
 // (`lines.write`) for both realms, and by the orgs and staff packages and the console's API half
 // where they run identity's gates. packages/identity/src/monitoring.ts keeps the same list beside
 // the code. The staff realm's own lines are in staff.ts; request, csrf.refused and the audit lines
-// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines come with the
-// identity area's alert fragment (alerts/identity.json), which so far holds only web-host.ts's
-// auth-endpoint-unlisted; until the rest land each failure or security entry names the alerts it is
-// owed (`owed`, listed in owed.ts with their lane and date), or why none.
+// are in platform.ts and audit.ts. The alerts spec 02 §18.2 names for these lines are in the
+// identity area's alert fragment (alerts/identity.json), with web-host.ts's auth-endpoint-unlisted;
+// one that is not there yet is owed (`owed`, listed in owed.ts with its lane, its date and why), and
+// an entry with neither says why none.
 import type { CatalogEntry } from "./types.ts";
 
 export const entries: readonly CatalogEntry[] = [
@@ -27,8 +27,9 @@ export const entries: readonly CatalogEntry[] = [
     writtenBy:
       "the sign-in code requests, when a browser the address does not know is refused a new code over a live one, or uses the strangers' share (spec 02 §5.2)",
     fields: { reason: "string", userId: "string" },
-    alerts: [],
-    owed: ["sign-in-code-contested"],
+    alerts: ["sign-in-code-contested"],
+    // Spec 02 §18.2: contests for one userId above the threshold.
+    seriesBy: ["userId"],
   },
   {
     event: "auth.secret_unreadable",
@@ -78,8 +79,7 @@ export const entries: readonly CatalogEntry[] = [
     level: "warn",
     writtenBy: "the step-up counter, when the fifth failure ends the session (spec 02 §7.7)",
     fields: { realm: "string" },
-    alerts: [],
-    owed: ["step-up-locked"],
+    alerts: ["step-up-locked"],
   },
   {
     event: "limits.refused",

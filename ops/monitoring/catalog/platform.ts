@@ -42,14 +42,15 @@ export const entries: readonly CatalogEntry[] = [
       stepUp: "string",
       errorId: "string",
     },
-    alerts: ["5xx-rate-{service}", "5xx-count-{service}"],
-    // Spec 02 §18.2's, over the auth paths, Fin Admin's requests and the team and role routes.
+    // team-change-failing is spec 02 §18.2's, over the console's team and role routes.
+    alerts: ["5xx-rate-{service}", "5xx-count-{service}", "team-change-failing"],
+    // Spec 02 §18.2's, over the auth paths and Fin Admin's requests: owed while the host's request
+    // line carries neither the auth path nor the assurance (owed.ts says why).
     owed: [
       "sign-in-failing",
       "second-factor-step-failing",
       "step-up-failing",
       "admin-without-second-factor",
-      "team-change-failing",
     ],
   },
   {

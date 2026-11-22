@@ -21,7 +21,8 @@ afterEach(() => {
 /**
  * The ruling's fifteen, less those that have become rules (admin-access-mismatch,
  * admin-staff-refused, staff-enrolled and staff-enrolment-refused, in alerts/staff.json and
- * staff-alerts.test.ts): the alerts the code names that no fragment defines yet, due Sunday.
+ * staff-alerts.test.ts; sign-in-code-contested and step-up-locked, in alerts/identity.json and
+ * identity-alerts.test.ts): the alerts the code names that no fragment defines yet, due Sunday.
  */
 const RULED: readonly string[] = [
   "admin-without-second-factor",
@@ -30,10 +31,8 @@ const RULED: readonly string[] = [
   "rate-limiter-failing",
   "second-factor-step-failing",
   "secret-unreadable",
-  "sign-in-code-contested",
   "sign-in-failing",
   "step-up-failing",
-  "step-up-locked",
   "duty-stalled-access-drift",
 ];
 
@@ -51,9 +50,9 @@ const RULED_LATER: Readonly<Record<string, { lane: string; due: string }>> = {
 /**
  * Owed by the lane rule in owed.ts's header and not yet ruled by name: the steward confirms or
  * changes each. A new name here is a visible change to this test in the same pull request.
+ * team-change-failing, owed here before, is a rule now (alerts/orgs.json, orgs-alerts.test.ts).
  */
 const BY_LANE_RULE: Readonly<Record<string, { lane: string; due: string }>> = {
-  "team-change-failing": { lane: "L-SAT-09", due: "2026-11-22" },
   // Its rule read clockSkewMs, which no process writes (alert-fields.test.ts).
   "clock-skew": { lane: "P0-F", due: "2026-11-22" },
 };
