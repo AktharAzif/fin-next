@@ -104,17 +104,19 @@ export interface FixScope {
   readonly quotedStillIn: readonly string[];
   /**
    * The files of the head unchanged since the blocker was found, other than a quote's own file, in
-   * which code the blocker quotes occurs and which code changed since now reaches: a file of the head
-   * imports one, re-exports from it or names another of its exports by a statement it did not have
-   * then (a file added since among them), or a package manifest changed since now names it as an
-   * entry. Nothing moved into it, but callers may now be sent to a copy that was already there. Not
-   * tied to the blocker. Its fix check is shown every one of them and takes two sceptics. Sorted.
+   * which code the blocker quotes occurs and which code changed since reaches through any chain of
+   * imports, through any number of unchanged files: from a file changed since (by any of its imports,
+   * new or not), from a file an unchanged file now imports and did not then, or from a file a package
+   * manifest changed since now names as an entry (src/review/run.ts's reachedHolders). Nothing moved
+   * into it, but callers may be sent to a copy that was already there. Not tied to the blocker. Its
+   * fix check is shown every one of them and takes two sceptics. Sorted.
    */
   readonly quotedReachedIn: readonly string[];
   /**
    * Every other file of the head unchanged since the blocker was found, other than a quote's own
-   * file, in which code the blocker quotes occurs: changed code may still reach the defect there by a
-   * way no import shows. Not tied to the blocker, and never a reason to refuse a claim, however many
+   * file, in which code the blocker quotes occurs: no import chain from changed code reaches it, so
+   * changed code may reach the defect there only by a way no import shows (a path built at run time,
+   * a loader). Not tied to the blocker, and never a reason to refuse a claim, however many
    * there are (a common line occurs in many files). Its fix check takes two sceptics and is shown the
    * first MAX_FIX_CHECK_PATHS of them, how many more, and a search pattern for each quote. Sorted;
    * past MAX_FIX_CHECK_PATHS, those one hop in the import graph from a file the blocker names or a
@@ -205,8 +207,8 @@ function quoteProblems(quote: Quote, ctx: ValidationContext): string[] {
  * found can be its fix, nor a line changed in a file unrelated to it. Whether the defect moved is the
  * fix check's to judge (src/review/run.ts), so no claim is taken when the check could not be shown
  * every other changed file the blocker's quoted code occurs in, and every unchanged one that changed
- * code now reaches. The other files unchanged since that hold it never refuse a claim: nothing moved
- * into them, no changed import or manifest now reaches them, and a common line occurs in many.
+ * code reaches. The other files unchanged since that hold it never refuse a claim: nothing moved into
+ * them, no import chain from changed code reaches them, and a common line occurs in many.
  */
 function fixProblems(id: string, where: Where, quote: Quote, ctx: ValidationContext): string[] {
   const scope = ctx.fixScopes?.get(id);

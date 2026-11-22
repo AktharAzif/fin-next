@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { compileGlob } from "../src/plan/glob.ts";
 import type { Tier } from "../src/roles.ts";
-import { buildGraph, exportHeads, exportedNames, isManifestPath, manifestTargets, scanImports } from "../src/plan/graph.ts";
+import { buildGraph, exportHeads, exportedNames, isManifestPath, MAX_MANIFEST_PATTERNS, manifestTargets, reachable, reaching, scanImports, starGlob } from "../src/plan/graph.ts";
+import type { WorkCounter } from "../src/plan/graph.ts";
 import { packShards } from "../src/shard.ts";
 import { MAX_UNIT_LINES, chunkFile, splitLines } from "../src/units/chunk.ts";
 import { blocksCoverage, estimateTokens, inventory, isBinary } from "../src/units/inventory.ts";
@@ -498,6 +499,126 @@ describe("one hop (the import scanner)", () => {
   it("export names and heads", () => {
     assert.deepEqual(exportedNames(texts.get("packages/a/src/util.ts") ?? ""), ["helper", "Kind"]);
     assert.deepEqual(exportHeads(texts.get("packages/a/src/util.ts") ?? ""), ["export function helper(): number", "export type Kind = 'a' | 'b';"]);
+  });
+
+  it("reads a dynamic import or require of a template literal with no substitution, require.resolve, and an import with options", () => {
+    const text = [
+      "const a = await import(`./a.ts`);",
+      'const b = require("./b.ts");',
+      "const c = require(`./c.ts`);",
+      "const d = require.resolve('./d.ts');",
+      'const e = await import("./e.json", { with: { type: "json" } });',
+      `const f = await import(\`./${"$"}{name}.ts\`);`,
+    ].join("\n");
+    assert.deepEqual(scanImports(text).map((item) => item.spec).sort(), ["./a.ts", "./b.ts", "./c.ts", "./d.ts", "./e.json"], "a template literal with a substitution names no one file");
+  });
+
+  it("resolves a # import through the nearest manifest's imports only, and a subpath through an exports pattern", () => {
+    const tree = new Set(["p/package.json", "p/src/index.ts", "p/src/legacy.ts", "p/src/lib/x.ts", "p/inner/package.json", "p/inner/use.ts", "q/package.json", "q/src/use.ts"]);
+    const graphed = buildGraph(
+      tree,
+      new Map([
+        ["p/src/index.ts", 'export { a } from "#eq";\nexport { b } from "#lib/x";\nexport { c } from "#none";\n'],
+        ["p/inner/use.ts", 'export { a } from "#eq";\n'],
+        ["q/src/use.ts", 'export { x } from "@fin/p/lib/x";\nexport { y } from "@fin/p/legacy";\n'],
+      ]),
+      new Map([
+        ["p/package.json", JSON.stringify({ name: "@fin/p", exports: { ".": "./src/index.ts", "./lib/*": "./src/lib/*.ts", "./*": { import: "./src/*.ts" } }, imports: { "#eq": "./src/legacy.ts", "#lib/*": "./src/lib/*.ts" } })],
+        // A nearer manifest with no imports: Node looks no further up, so p/inner/use.ts's #eq names nothing.
+        ["p/inner/package.json", JSON.stringify({ private: true })],
+        ["q/package.json", JSON.stringify({ name: "@fin/q" })],
+      ]),
+    );
+    assert.deepEqual(graphed.importsOf("p/src/index.ts"), ["p/src/legacy.ts", "p/src/lib/x.ts"]);
+    assert.deepEqual(graphed.importsOf("p/inner/use.ts"), []);
+    // The longest pattern prefix wins: ./lib/* over ./*.
+    assert.deepEqual(graphed.importsOf("q/src/use.ts"), ["p/src/legacy.ts", "p/src/lib/x.ts"]);
+  });
+
+  it("calls a code file whose imports it did not read opaque: a symbolic link (no text), or a file past the scan bound", () => {
+    const tree = new Set(["a.ts", "link.ts", "big.ts", "notes.md"]);
+    const graphed = buildGraph(tree, new Map([["a.ts", 'import "./link.ts";\nimport "./big.ts";\n'], ["big.ts", " ".repeat((1 << 20) + 1)]]), new Map());
+    assert.deepEqual([graphed.opaque("a.ts"), graphed.opaque("link.ts"), graphed.opaque("big.ts"), graphed.opaque("notes.md"), graphed.opaque("gone.ts")], [false, true, true, false, false]);
+    assert.equal(reachable(graphed, ["a.ts"]).opaque, true);
+    assert.deepEqual([...reachable(graphed, ["a.ts"]).files].sort(), ["a.ts", "big.ts", "link.ts"]);
+  });
+
+  it("walks out and in through any chain of imports, each file once, in work linear in the files and imports: a deep chain and a cycle", () => {
+    // A chain of 20,000 files, f0 -> f1 -> ... -> f19999, closed back to f0.
+    const count = 20_000;
+    const names = Array.from({ length: count }, (_, i) => `src/f${i}.ts`);
+    const chainTexts = new Map(names.map((name, i) => [name, `export * from "./f${(i + 1) % count}.ts";\n`]));
+    const chain = buildGraph(new Set(names), chainTexts, new Map());
+    const calls = new Map<string, number>();
+    const counted = {
+      opaque: chain.opaque,
+      importsOf: (path: string): string[] => {
+        calls.set(path, (calls.get(path) ?? 0) + 1);
+        return chain.importsOf(path);
+      },
+    };
+    const work: WorkCounter = { steps: 0 };
+    const out = reachable(counted, ["src/f0.ts"], work);
+    assert.equal(out.files.size, count);
+    assert.equal(out.opaque, false);
+    assert.ok([...calls.values()].every((n) => n === 1) && calls.size === count, "each file is visited once, and the cycle ends");
+    assert.ok(work.steps <= 2 * (count + count), `${work.steps} steps for ${count} files and ${count} imports`);
+    // In: every file of the cycle reaches f5.
+    const inWork: WorkCounter = { steps: 0 };
+    assert.equal(reaching(chain, ["src/f5.ts"], inWork).size, count);
+    assert.ok(inWork.steps <= 2 * (count + count), `${inWork.steps} steps in`);
+  });
+
+  it("matches a manifest's * pattern in steps linear in the pattern and the path, with no backtracking: the reported shape and a deep chain", () => {
+    for (const [pattern, path, expected] of [
+      ["pkg/src/*.ts", "pkg/src/a/b.ts", true],
+      ["pkg/src/*.ts", "pkg/src/a.js", false],
+      ["pkg/*/x/*.ts", "pkg/a/x/b/x/c.ts", true],
+      ["pkg/*/x/*.ts", "pkg/a/y/c.ts", false],
+      ["pkg/**", "pkg/", true],
+      ["a*a", "a", false],
+      ["a*b*c", "abc", true],
+      ["a*bb*bc", "abbc", false],
+      ["a*bb*bc", "abbbc", true],
+      ["pkg/x.ts", "pkg/x.ts", true],
+    ] as const) {
+      assert.equal(starGlob(pattern)(path), expected, `${pattern} ${path}`);
+    }
+    const path = "packages/crypto/src/zz-legacy.ts";
+    const bound = (work: WorkCounter, chars: number): void => assert.ok(work.steps <= 4 * chars + 64, `${work.steps} steps for ${chars} characters`);
+    // The reported shape: one value of 290 asterisks and a "!" under exports, which a backtracking
+    // pattern takes exponential time to refuse.
+    const stars = `./${"*".repeat(290)}!`;
+    const reported: WorkCounter = { steps: 0 };
+    const names = manifestTargets(new Set([path]), "packages/crypto/package.json", JSON.stringify({ exports: { "./x": stars } }), reported);
+    assert.equal(names(path), false);
+    bound(reported, stars.length + path.length);
+    // A deep chain: between a prefix and a suffix the path has, 140 parts that each match at once and
+    // a last part that never does, against a run of the same letter (each part retried at each place
+    // by a backtracking pattern); and parts whose matches overlap ("aab" in a run of "a").
+    for (const [chainPattern, letters, expected] of [
+      [`x*${"a*".repeat(140)}b*y`, `x${"a".repeat(290)}y`, false],
+      [`x*${"aab*".repeat(60)}y`, `x${"a".repeat(200)}${"aab".repeat(60)}y`, true],
+      [`x*${"aab*".repeat(60)}y`, `x${"a".repeat(200)}${"aab".repeat(59)}y`, false],
+    ] as const) {
+      const deep: WorkCounter = { steps: 0 };
+      assert.equal(starGlob(chainPattern, deep)(letters), expected, chainPattern.slice(0, 12));
+      assert.ok(deep.steps >= letters.length - 2, `the search reads the path (${deep.steps} steps)`);
+      bound(deep, chainPattern.length + letters.length);
+    }
+    // And a value nested 60 conditions deep (the JSON parser's bound is 64) is read, in steps linear in the manifest.
+    let nested: unknown = "./src/*.ts";
+    for (let i = 0; i < 60; i++) nested = { import: nested };
+    const nestedWork: WorkCounter = { steps: 0 };
+    assert.equal(manifestTargets(new Set([path]), "packages/crypto/package.json", JSON.stringify({ exports: { "./*": nested } }), nestedWork)(path), true);
+    bound(nestedWork, 61 + "packages/crypto/src/*.ts".length + path.length);
+  });
+
+  it("names every path for a manifest with more patterns than it matches (fail closed)", () => {
+    const exportsField = Object.fromEntries(Array.from({ length: MAX_MANIFEST_PATTERNS + 1 }, (_, i) => [`./p${i}/*`, `./src/p${i}/*.ts`]));
+    assert.equal(manifestTargets(new Set(), "pkg/package.json", JSON.stringify({ exports: exportsField }))("anything/at/all.md"), true);
+    const fewer = Object.fromEntries(Object.entries(exportsField).slice(0, MAX_MANIFEST_PATTERNS));
+    assert.equal(manifestTargets(new Set(), "pkg/package.json", JSON.stringify({ exports: fewer }))("anything/at/all.md"), false);
   });
 });
 

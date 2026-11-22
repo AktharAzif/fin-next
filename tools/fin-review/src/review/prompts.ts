@@ -206,7 +206,7 @@ export function quoteSearchPattern(text: string): string {
  * are, so its code may be there or may have gone elsewhere), every file changed since in which the
  * code it quotes now occurs more often than it did (where the defect may have moved or been copied),
  * every other changed file that holds that code as it did then (where the defect may now be reached),
- * every unchanged file that holds it and that changed code now reaches, the other unchanged files
+ * every unchanged file that holds it and that changed code reaches, the other unchanged files
  * that hold it (the first `maxUntouched` by name, then how many more), a search pattern for each quote
  * (the engine matches with white space taken out), and the fix a lens claims for it, asked whether
  * the defect can still happen at this head. The fix check's instruction says what to do with each. No
@@ -237,7 +237,7 @@ export function fixCheckPrompt(
   }
   if (moved.quotedReachedIn.length > 0) {
     parts.push(
-      `# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code now reaches: a file now imports or re-exports from it, or a changed package manifest now names it)\n${JSON.stringify(moved.quotedReachedIn, null, 2)}\n`,
+      `# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code reaches: through any chain of imports and re-exports, or a changed package manifest now names it)\n${JSON.stringify(moved.quotedReachedIn, null, 2)}\n`,
     );
   }
   if (moved.quotedUntouchedIn.length > 0) {

@@ -416,14 +416,14 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     };
     const reexports = (count: number): string => Array.from({ length: count }, (_, i) => `export { ${name(i + 1)} } from "./${name(i + 1)}.ts";\n`).join("");
 
-    // A: the file the blocker names re-exports 64 files that hold the line; the defect goes to
-    // legacy.ts, which held it all along and sorts after them, by a re-export claimed as the fix.
+    // A: 64 unchanged files that nothing imports hold the line; the defect goes to legacy.ts, which
+    // held it all along and sorts after them, by a re-export claimed as the fix.
     const legacy = "packages/crypto/src/legacy.ts";
-    const h0 = fx.pr(32, { "packages/crypto/src/index.ts": `${reexports(64)}${defect}`, ...eqFiles(64), [legacy]: defect });
-    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "32"], finder(65).services)).code, 1);
+    const h0 = fx.pr(32, { "packages/crypto/src/index.ts": defect, ...eqFiles(64), [legacy]: defect });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "32"], finder(1).services)).code, 1);
     const stub = 'export { sameSecret } from "./legacy.ts";';
-    fx.pr(32, { "packages/crypto/src/index.ts": `${reexports(64)}${stub}\n` }, h0);
-    const hidden = claiming(65, stub, [sees(legacy)]);
+    fx.pr(32, { "packages/crypto/src/index.ts": `${stub}\n` }, h0);
+    const hidden = claiming(1, stub, [sees(legacy)]);
     const run = await runFixtureCli(fx, ["pr", "--pr", "32"], hidden.services);
     assert.equal(run.code, 1, run.stdout + run.stderr);
     assert.equal(outcome(), "still_there");
@@ -436,6 +436,24 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
       "the copy is named, not left to the count of the rest",
     );
     for (const call of checksA) assert.equal(shownMoreUntouched(call.spec), 0);
+
+    // A2: the file the blocker names re-exports 64 files that hold the line, and sends callers to
+    // legacy.ts through mid.ts, an unchanged file that already re-exported it: every file the changed
+    // file reaches, by an import it had or not and through any file between, is reached, so 65 are,
+    // more than a check is shown, and no claim is taken (the count never hides the copy).
+    const h3 = fx.pr(35, { "packages/crypto/src/index.ts": `${reexports(64)}${defect}`, ...eqFiles(64), [legacy]: defect, "packages/crypto/src/mid.ts": `${stub}\n` });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "35"], finder(65).services)).code, 1);
+    const viaMid = 'export { sameSecret } from "./mid.ts";';
+    fx.pr(35, { "packages/crypto/src/index.ts": `${reexports(64)}${viaMid}\n` }, h3);
+    const throughMid = claiming(65, viaMid, []);
+    const midRun = await runFixtureCli(fx, ["pr", "--pr", "35"], throughMid.services);
+    assert.equal(midRun.code, 1, midRun.stdout + midRun.stderr);
+    assert.equal(outcome(), "not_accepted");
+    assert.equal((prior()["quotedReachedIn"] as unknown[]).length, 65);
+    assert.ok((prior()["quotedReachedIn"] as unknown[]).includes(legacy));
+    assert.deepEqual(prior()["quotedUntouchedIn"], []);
+    assert.match(String(((prior()["claim"] as Record<string, unknown>)["notAccepted"] as unknown[])[0]), /65 unchanged that changed code now reaches/);
+    assert.deepEqual(calls(throughMid).filter((call) => isFixCheck(call.spec)), [], "no check is shown part of the list");
 
     // B: the file the blocker names fixed for real, while the package's manifest now names an
     // unchanged file that holds the defect laid out otherwise, behind 64 unrelated files that hold the line.
@@ -477,6 +495,163 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal((prior()["quotedReachedIn"] as unknown[]).length, 65);
     assert.match(String(((prior()["claim"] as Record<string, unknown>)["notAccepted"] as unknown[])[0]), /65 unchanged that changed code now reaches/);
     assert.deepEqual(calls(crowded).filter((call) => isFixCheck(call.spec)), [], "no check is shown part of the list");
+
+    // D: a changed manifest whose one value is 290 asterisks and a "!", which a backtracking match
+    // takes exponential time to refuse (units.test.ts bounds the steps): the run ends, the pattern
+    // names nothing, and the copy is listed with the other unchanged files.
+    const h4 = fx.pr(36, { "packages/crypto/src/index.ts": defect, [zz]: defect });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", "36"], finder(1).services)).code, 1);
+    fx.pr(36, { "packages/crypto/package.json": `${JSON.stringify({ name: "@fin/crypto", private: true, type: "module", exports: { ".": "./src/index.ts", "./x": `./${"*".repeat(290)}!` } }, null, 2)}\n` }, h4);
+    const starred = await runFixtureCli(fx, ["pr", "--pr", "36"], harness(fx, script(), random).services);
+    assert.equal(starred.code, 1, starred.stdout + starred.stderr);
+    assert.deepEqual([prior()["quotedReachedIn"], prior()["quotedUntouchedIn"]], [[], [zz]]);
+  });
+
+  it("an unchanged copy that changed code reaches through any chain of unchanged files is named however the chain is spelled, never left as the 65th file a check only hears counted", async () => {
+    const finder = (line: number): Harness =>
+      harness(
+        fx,
+        script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { where: [{ path: "packages/crypto/src/index.ts", startLine: line, endLine: line + 2 }] })]) } : undefined)),
+        random,
+      );
+    const sees = (path: string): Handler => (spec) =>
+      isFixCheck(spec) && shownQuoted(spec).includes(path) ? { kind: "result", output: { verdict: "CONFIRMED", guardQuotes: [], reason: "The same comparison is still reachable there." } } : undefined;
+    const claiming = (line: number, text: string, handlers: Handler[]) =>
+      harness(
+        fx,
+        script(...handlers, (spec) =>
+          spec.lens === "security"
+            ? { kind: "result", output: { ...cleanOutput(spec), priorBlockers: [{ id: "P1", status: "fixed", fixWhere: { path: "packages/crypto/src/index.ts", startLine: line, endLine: line }, fixQuote: { path: "packages/crypto/src/index.ts", text } }] } }
+            : undefined,
+        ),
+        random,
+      );
+    const prior = (): Record<string, unknown> => (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
+    const outcome = (): unknown => (prior()["claim"] as Record<string, unknown>)["outcome"];
+    const defect = "export function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n";
+    // 64 unrelated files hold the quoted line and sort before every copy, so a copy left unnamed would
+    // be the 65th, which a check only hears of as a count.
+    const docs: Record<string, string> = {};
+    for (let i = 1; i <= 64; i++) docs[`docs/plan/numbers-${String(i).padStart(2, "0")}.md`] = `# numbers ${i}\n\n    return a === b;\n`;
+    const copy = "packages/crypto/src/zz-legacy.ts";
+    const copyText = "export function legacySame(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport function legacyEq(a: string, b: string): boolean {\n  return legacySame(a, b);\n}\n";
+    const manifest = (fields: Record<string, unknown>): string => `${JSON.stringify({ name: "@fin/crypto", private: true, type: "module", ...fields }, null, 2)}\n`;
+    const cases: Array<{ name: string; at0: Record<string, string | { symlink: string }>; where: number; index: string; also?: Record<string, string>; line: number; text: string }> = [
+      // index.ts -> compat.ts (unchanged) -> the copy.
+      { name: "a barrel", at0: { "packages/crypto/src/compat.ts": 'export { legacySame as sameSecret } from "./zz-legacy.ts";\n' }, where: 1, index: 'export { sameSecret } from "./compat.ts";\n', line: 1, text: 'export { sameSecret } from "./compat.ts";' },
+      // index.ts -> barrel.ts -> barrel2.ts (both unchanged) -> the copy.
+      {
+        name: "a re-export of a re-export",
+        at0: { "packages/crypto/src/barrel.ts": 'export { legacySame } from "./barrel2.ts";\n', "packages/crypto/src/barrel2.ts": 'export * from "./zz-legacy.ts";\n' },
+        where: 1,
+        index: 'export { legacySame as sameSecret } from "./barrel.ts";\n',
+        line: 1,
+        text: 'export { legacySame as sameSecret } from "./barrel.ts";',
+      },
+      // index.ts already imported the copy for another export; the fix calls through that import.
+      {
+        name: "an import the changed file already had",
+        at0: { "packages/crypto/src/index.ts": `import { legacyEq } from "./zz-legacy.ts";\n\nexport const eq = legacyEq;\n\n${defect}` },
+        where: 5,
+        index: 'import { legacyEq } from "./zz-legacy.ts";\n\nexport const eq = legacyEq;\n\nexport function sameSecret(a: string, b: string): boolean {\n  return legacyEq(a, b);\n}\n',
+        line: 6,
+        text: "return legacyEq(a, b);",
+      },
+      {
+        name: "a dynamic import of a template literal",
+        at0: {},
+        where: 1,
+        index: "export async function sameSecret(a: string, b: string): Promise<boolean> {\n  const { legacySame } = await import(`./zz-legacy.ts`);\n  return legacySame(a, b);\n}\n",
+        line: 2,
+        text: "const { legacySame } = await import(`./zz-legacy.ts`);",
+      },
+      {
+        name: "a require",
+        at0: {},
+        where: 1,
+        index: 'const { legacySame } = require("./zz-legacy.ts");\n\nexport function sameSecret(a: string, b: string): boolean {\n  return legacySame(a, b);\n}\n',
+        line: 1,
+        text: 'const { legacySame } = require("./zz-legacy.ts");',
+      },
+      // The package's `imports` already map #eq to the copy; only index.ts changes.
+      {
+        name: "a # import",
+        at0: { "packages/crypto/package.json": manifest({ exports: "./src/index.ts", imports: { "#eq": "./src/zz-legacy.ts" } }) },
+        where: 1,
+        index: 'export { legacySame as sameSecret } from "#eq";\n',
+        line: 1,
+        text: 'export { legacySame as sameSecret } from "#eq";',
+      },
+      // The changed manifest adds the `imports` entry that index.ts now uses.
+      {
+        name: "a # import the changed manifest adds",
+        at0: {},
+        where: 1,
+        index: 'export { legacySame as sameSecret } from "#eq";\n',
+        also: { "packages/crypto/package.json": manifest({ exports: "./src/index.ts", imports: { "#eq": "./src/zz-legacy.ts" } }) },
+        line: 1,
+        text: 'export { legacySame as sameSecret } from "#eq";',
+      },
+      // The package's exports already hold a subpath pattern that names the copy.
+      {
+        name: "a subpath pattern",
+        at0: { "packages/crypto/package.json": manifest({ exports: { ".": "./src/index.ts", "./*": "./src/*.ts" } }) },
+        where: 1,
+        index: 'export { legacySame as sameSecret } from "@fin/crypto/zz-legacy";\n',
+        line: 1,
+        text: 'export { legacySame as sameSecret } from "@fin/crypto/zz-legacy";',
+      },
+    ];
+    let pr = 60;
+    for (const item of cases) {
+      pr++;
+      const h0 = fx.pr(pr, { "packages/crypto/src/index.ts": defect, ...docs, [copy]: copyText, ...item.at0 });
+      assert.equal((await runFixtureCli(fx, ["pr", "--pr", String(pr)], finder(item.where).services)).code, 1, item.name);
+      fx.pr(pr, { "packages/crypto/src/index.ts": item.index, ...(item.also ?? {}) }, h0);
+      const h = claiming(item.line, item.text, [sees(copy)]);
+      const run = await runFixtureCli(fx, ["pr", "--pr", String(pr)], h.services);
+      assert.equal(run.code, 1, `${item.name}: ${run.stdout}${run.stderr}`);
+      assert.equal(outcome(), "still_there", item.name);
+      assert.deepEqual(prior()["quotedReachedIn"], [copy], item.name);
+      assert.equal((prior()["quotedUntouchedIn"] as unknown[]).length, 64, item.name);
+      assert.deepEqual(
+        calls(h)
+          .filter((call) => isFixCheck(call.spec))
+          .map((call) => shownReached(call.spec)),
+        [[copy]],
+        `${item.name}: the copy is named`,
+      );
+    }
+
+    // A symbolic link the changed file imports: what it stands for is not read, so every unchanged file
+    // that holds the line counts as reached, 65 here, and no claim is taken.
+    pr++;
+    const h0 = fx.pr(pr, { "packages/crypto/src/index.ts": defect, ...docs, [copy]: copyText, "packages/crypto/src/compat.ts": { symlink: "zz-legacy.ts" } });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", String(pr)], finder(1).services)).code, 1);
+    const linked = 'export { legacySame as sameSecret } from "./compat.ts";';
+    fx.pr(pr, { "packages/crypto/src/index.ts": `${linked}\n` }, h0);
+    const throughLink = claiming(1, linked, []);
+    const run = await runFixtureCli(fx, ["pr", "--pr", String(pr)], throughLink.services);
+    assert.equal(run.code, 1, run.stdout + run.stderr);
+    assert.equal(outcome(), "not_accepted");
+    assert.equal((prior()["quotedReachedIn"] as unknown[]).length, 65);
+    assert.deepEqual(calls(throughLink).filter((call) => isFixCheck(call.spec)), [], "no check is shown part of the list");
+
+    // A changed package manifest past the scan bound (a megabyte of white space before its last brace),
+    // which now names the copy: what it names is not read, so every holder counts as reached, and no
+    // claim is taken however real the fix in the file the blocker names.
+    pr++;
+    const h1 = fx.pr(pr, { "packages/crypto/src/index.ts": defect, ...docs, [copy]: copyText });
+    assert.equal((await runFixtureCli(fx, ["pr", "--pr", String(pr)], finder(1).services)).code, 1);
+    const fixedIndex = 'import { timingSafeEqual } from "node:crypto";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n';
+    const padded = `{ "name": "@fin/crypto", "private": true, "type": "module", "exports": "./src/zz-legacy.ts"${" ".repeat((1 << 20) + 1)}}\n`;
+    fx.pr(pr, { "packages/crypto/src/index.ts": fixedIndex, "packages/crypto/package.json": padded }, h1);
+    const unread = claiming(4, "timingSafeEqual(Buffer.from(a), Buffer.from(b))", []);
+    const unreadRun = await runFixtureCli(fx, ["pr", "--pr", String(pr)], unread.services);
+    // (A lens that cannot finish over the megabyte makes the run could_not_check besides.)
+    assert.notEqual(unreadRun.code, 0, unreadRun.stdout + unreadRun.stderr);
+    assert.equal(outcome(), "not_accepted");
+    assert.equal((prior()["quotedReachedIn"] as unknown[]).length, 65);
   });
 
   it("a fix check is never shown part of the changed files that hold the quoted code: past the cap no claim is taken", async () => {
@@ -534,9 +709,14 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
   it("a real fix closes a blocker whose quoted line is common in files unchanged since: they refuse no claim, and each check is told how many it is not shown by name", async () => {
     const original = 'import { pad } from "./pad.ts";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a === b;\n}\n\nexport const padded = pad;\n';
     const fixed = 'import { timingSafeEqual } from "node:crypto";\nimport { pad } from "./pad.ts";\n\nexport function sameSecret(a: string, b: string): boolean {\n  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));\n}\n\nexport const padded = pad;\n';
-    // 65 unrelated files hold the line, and so does pad.ts, which the file the blocker names imports.
+    // 65 unrelated files hold the line, and so do pad.ts, which the file the blocker names imports
+    // (so the changed file reaches it), and wide.ts, which imports that file (so it reaches nothing).
     const pad = "packages/crypto/src/pad.ts";
-    const common: Record<string, string> = { [pad]: "export function pad(a: number, b: number): boolean {\n  return a === b;\n}\n" };
+    const wide = "packages/crypto/src/wide.ts";
+    const common: Record<string, string> = {
+      [pad]: "export function pad(a: number, b: number): boolean {\n  return a === b;\n}\n",
+      [wide]: 'import { sameSecret } from "./index.ts";\n\nexport function wide(a: number, b: number): boolean {\n  if (sameSecret(String(a), String(b))) return true;\n  return a === b;\n}\n',
+    };
     for (let i = 1; i <= 65; i++) common[`docs/plan/numbers-${String(i).padStart(2, "0")}.md`] = `# numbers ${i}\n\n    return a === b;\n`;
     const h0 = fx.pr(31, { "packages/crypto/src/index.ts": original, ...common });
     const finder = harness(fx, script((spec) => (spec.lens === "security" ? { kind: "result", output: cleanOutput(spec, [cryptoFinding(spec, { where: [{ path: "packages/crypto/src/index.ts", startLine: 3, endLine: 5 }] })]) } : undefined)), random);
@@ -548,14 +728,15 @@ describe("commit: a delta, or escalation to pr (§2.3.2)", () => {
     assert.equal(run.code, 0, run.stdout + run.stderr);
     const prior = (readJson(join(lastRun(fx), "findings.json"))["priorBlockers"] as Array<Record<string, unknown>>)[0] ?? {};
     assert.equal((prior["claim"] as Record<string, unknown>)["outcome"], "fixed");
-    assert.deepEqual([prior["quotedElsewhere"], prior["quotedStillIn"], prior["quotedReachedIn"]], [[], [], []]);
+    assert.deepEqual([prior["quotedElsewhere"], prior["quotedStillIn"], prior["quotedReachedIn"]], [[], [], [pad]]);
     const untouched = prior["quotedUntouchedIn"] as string[];
     assert.equal(untouched.length, 66);
-    assert.equal(untouched[0], pad, "a file one hop from the file the blocker names comes first");
-    // Two checks (the quoted code is elsewhere), each shown 64 files by name and told of 2 more.
+    assert.equal(untouched[0], wide, "a file one hop from the file the blocker names comes first");
+    // Two checks (the quoted code is elsewhere), each shown pad.ts and 64 other files by name, and told of 2 more.
     const checks = calls(h).filter((call) => isFixCheck(call.spec));
     assert.deepEqual(checks.map((call) => call.spec.role), ["sceptic1", "sceptic2"]);
     for (const check of checks) {
+      assert.deepEqual(shownReached(check.spec), [pad]);
       assert.deepEqual(shownUntouched(check.spec), untouched.slice(0, 64));
       assert.equal(shownMoreUntouched(check.spec), 2);
     }

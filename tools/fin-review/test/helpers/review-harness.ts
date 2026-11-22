@@ -56,7 +56,7 @@ export function shownStill(spec: SessionSpec): string[] {
 }
 
 const REACHED_HEADER =
-  "# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code now reaches: a file now imports or re-exports from it, or a changed package manifest now names it)\n";
+  "# Where else the code the finding quotes occurs (files unchanged since it was reported that changed code reaches: through any chain of imports and re-exports, or a changed package manifest now names it)\n";
 
 /** The unchanged files that changed code now reaches that a fix check was told hold the code the blocker quotes; [] when none. */
 export function shownReached(spec: SessionSpec): string[] {

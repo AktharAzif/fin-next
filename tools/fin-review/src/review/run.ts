@@ -25,7 +25,7 @@ import type { DiffEntry, TreeEntry } from "../git.ts";
 import type { PullFacts } from "../gh.ts";
 import { isJsonObject, parseJsonBytes, readJsonFile } from "../json.ts";
 import type { ReviewOptions } from "../options.ts";
-import { buildGraph, CODE_FILE_RE, exportHeads, isManifestPath, manifestTargets } from "../plan/graph.ts";
+import { buildGraph, CODE_FILE_RE, exportHeads, isManifestPath, manifestTargets, reachable, reaching } from "../plan/graph.ts";
 import { changeTiers, linkTarget, pathTier, unionOfDiffs } from "../plan/plan.ts";
 import type { TreeLink } from "../plan/plan.ts";
 import type { CiMap } from "../plan/ci-map.ts";
@@ -478,41 +478,46 @@ interface GraphSide {
 type GraphAt = (sha: string) => Promise<GraphSide>;
 
 /**
- * Of `holders` (files unchanged since `from`), those that code changed since now reaches: a file of
- * the head reaches one in one hop (src/plan/graph.ts) by a statement it did not reach it by at `from`
- * (a file added since, one that now imports or re-exports from it or names another of its exports, or
- * one whose import now resolves to it), or a package manifest changed since now names one as an
- * entry (exports, main and the like) and did not then. White space never counts as a change.
+ * Of `holders` (files unchanged since `from`), those that code changed since reaches at the head
+ * through any chain of imports (src/plan/graph.ts's `reachable`: static, re-export, side-effect and
+ * dynamic imports and `require`, through relative paths, `@fin/` package entries and subpaths, and
+ * `#` imports). The walk starts at:
+ *
+ * - every file changed since `from`, by every import it has, new or not (a changed body may call
+ *   through an import the file already had);
+ * - every file an unchanged file imports at the head and did not at `from` (an import that now
+ *   resolves elsewhere, as when a package manifest was changed, added or deleted);
+ * - every file a package manifest changed since now names as an entry (exports, imports, main, bin
+ *   and the like) and did not then, of the files from which a chain of imports reaches a holder;
+ *
+ * and goes on through every file it reaches, changed or not, each once (a cycle never loops), so a
+ * copy behind any number of unchanged barrels and re-exports is found. When the walk meets a code
+ * file whose imports were not read (a symbolic link, a file past the scan bound), or a manifest
+ * changed since was not read, what it reaches is unknown, so every holder counts as reached.
  */
-function newlyReached(holders: readonly string[], delta: readonly DiffEntry[], head: GraphSide, before: GraphSide): Set<string> {
-  const changed = new Map(delta.filter((entry) => entry.status !== "D").map((entry) => [entry.path, entry]));
-  const fromPath = (path: string): string | null => {
-    const entry = changed.get(path);
-    if (entry === undefined) return path;
-    return entry.status === "A" ? null : (entry.oldPath ?? path);
-  };
-  const out = new Set<string>();
-  for (const holder of holders) {
-    for (const importer of head.graph.importersOf(holder)) {
-      const old = fromPath(importer);
-      const then = new Set(old === null ? [] : before.graph.importStatements(old, holder).map(squeezed));
-      if (head.graph.importStatements(importer, holder).some((statement) => !then.has(squeezed(statement)))) {
-        out.add(holder);
-        break;
-      }
-    }
+function reachedHolders(holders: readonly string[], delta: readonly DiffEntry[], head: GraphSide, before: GraphSide): Set<string> {
+  const changed = delta.filter((entry) => entry.status !== "D");
+  const changedPaths = new Set(changed.map((entry) => entry.path));
+  const starts = new Set<string>(changedPaths);
+  for (const path of head.files) {
+    if (changedPaths.has(path) || !CODE_FILE_RE.test(path)) continue;
+    const then = new Set(before.graph.importsOf(path));
+    for (const target of head.graph.importsOf(path)) if (!then.has(target)) starts.add(target);
   }
-  for (const entry of changed.values()) {
+  const candidates = reaching(head.graph, holders);
+  for (const entry of changed) {
     if (!isManifestPath(entry.path)) continue;
     const text = head.manifests.get(entry.path);
-    if (text === undefined) continue;
+    // A changed manifest whose text was not read (past the scan bound, a link) may name any file.
+    if (text === undefined) return new Set(holders);
     const now = manifestTargets(head.files, entry.path, text);
     const old = entry.status === "A" ? null : (entry.oldPath ?? entry.path);
     const oldText = old === null ? undefined : before.manifests.get(old);
     const then = old === null || oldText === undefined ? () => false : manifestTargets(before.files, old, oldText);
-    for (const holder of holders) if (now(holder) && !then(holder)) out.add(holder);
+    for (const path of candidates) if (now(path) && !then(path)) starts.add(path);
   }
-  return out;
+  const walked = reachable(head.graph, starts);
+  return walked.opaque ? new Set(holders) : new Set(holders.filter((holder) => walked.files.has(holder)));
 }
 
 /**
@@ -532,10 +537,10 @@ function newlyReached(holders: readonly string[], delta: readonly DiffEntry[], h
  * check decides. It is shown every file of the head, other than a quote's own, in which a text the
  * blocker quotes occurs at all: those in `quotedElsewhere`, the other changed files (`quotedStillIn`:
  * files that already held it and were changed around it, where the defect may now be reached through
- * code changed around a line that was there before), the files unchanged since that changed code now
- * reaches (`quotedReachedIn`: a file now imports one or re-exports from it, or a changed manifest now
- * names it; newlyReached), and the other files unchanged since (`quotedUntouchedIn`, where changed
- * code may reach a copy that was already there by a way no import shows; by name up to
+ * code changed around a line that was there before), the files unchanged since that changed code
+ * reaches through any chain of imports (`quotedReachedIn`; reachedHolders), and the other files
+ * unchanged since (`quotedUntouchedIn`, where changed code may reach a copy that was already there
+ * only by a way no import shows; by name up to
  * MAX_FIX_CHECK_PATHS, those one hop from a named or changed file first, then how many more); and,
  * for every file the blocker names (in `where` or a quote) that git reads as renamed since, the path
  * git pairs it with (`renamed`), which git chooses by how alike the two files are, so the code may be
@@ -625,11 +630,11 @@ async function fixScopeFor(
   for (const { entry, part, now } of counted) if (now > occurrences(before.get(entry.path) ?? "", part)) elsewhere.add(entry.path);
   const quotedElsewhere = sortedUnique(elsewhere);
   const quotedStillIn = sortedUnique([...holding].filter((path) => changedAt.has(path) && !elsewhere.has(path)));
-  // Files unchanged since: those changed code now reaches are each shown by name; of the rest, past
-  // what a check is shown by name, those one hop from a file the blocker names or a file changed since
+  // Files unchanged since: those changed code reaches are each shown by name; of the rest, past what
+  // a check is shown by name, those one hop from a file the blocker names or a file changed since
   // come first.
   const untouched = sortedUnique([...holding].filter((path) => !changedAt.has(path)));
-  const reached = untouched.length === 0 ? new Set<string>() : newlyReached(untouched, delta, headSide, await graphAt(from));
+  const reached = untouched.length === 0 ? new Set<string>() : reachedHolders(untouched, delta, headSide, await graphAt(from));
   const quotedReachedIn = untouched.filter((path) => reached.has(path));
   let quotedUntouchedIn = untouched.filter((path) => !reached.has(path));
   if (quotedUntouchedIn.length > MAX_FIX_CHECK_PATHS) {

@@ -22,7 +22,7 @@ The code: `src/runner/` (the session runner: `types.ts`, `cli.ts`, `settings.ts`
 `check.ts`, `client.ts`, and `fake.ts` for tests), `src/review/` (`run.ts` the modes, `findings.ts`
 validation, `verdicts.ts` the verdict table, `prompts.ts`, `procedure.ts`, `lenses.ts`, `attack.ts`,
 `schema.ts`, `repo.ts`, `lock.ts`, `pool.ts`, `report.ts`, `commands.ts`), `src/units/`,
-`src/plan/graph.ts` (one hop), `src/shard.ts`, `src/budget.ts`, `src/gh.ts`, `src/home.ts`,
+`src/plan/graph.ts` (imports, one hop and walks), `src/shard.ts`, `src/budget.ts`, `src/gh.ts`, `src/home.ts`,
 `src/transport.ts`, `src/clock.ts` and `src/doctor.ts`. The configuration adds `config/client.json` (the pin),
 `config/budgets.json` ([RV-13]'s provisional caps) and `config/lenses.json` (the lenses per tier).
 
