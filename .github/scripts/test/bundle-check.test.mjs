@@ -95,6 +95,14 @@ describe("server bundles", () => {
   const seams = [
     ["the unreplaced build target", "if (typeof __FIN_BUILD_TARGET__ === 'string') {}"],
     ["the seam marker", 'const seam = "fin:test-seam";'],
+    // A seam module's marker in a comment the bundler keeps (Vite keeps a legal comment and drops
+    // a literal the module never uses), and in any other comment: a marker wherever it stands.
+    ["the seam marker in a legal comment", "/*! fin:test-seam */\nexport function sink() {}"],
+    ["the seam marker in a licence comment", "/** @license fin:test-seam */\nexport {};"],
+    ["the seam marker in a kept line comment", "//! fin:test-seam\nexport function sink() {}"],
+    ["the seam marker in a line comment", "// fin:test-seam\nexport function sink() {}"],
+    ["the seam marker in a block comment", "/* fin:test-seam */export function sink() {}"],
+    ["the seam marker in a regular expression", "const r = /fin:test-seam/;"],
     ["a region from packages/testing", "//#region ../../packages/testing/src/sink.ts\n"],
     ["an import of @fin/testing", 'import { sink } from "@fin/testing/sink";'],
     ["a dynamic import of @fin/testing", 'await import("@fin/testing");'],
@@ -124,16 +132,22 @@ describe("server bundles", () => {
       },
     ]);
     assert.deepEqual(checkServer("x", dirWith(t, { "clean.mjs": clean })), []);
-    // Only a module comment, or code, counts: a literal holding such a line, a comment of prose
-    // that names the folder or a marker, is no module of the harness and no seam.
+    // Only a module comment, or code, counts for the harness and the build target: a literal
+    // holding such a line, a comment of prose that names the folder or the build target's define,
+    // is no module of the harness, and no define left unreplaced.
     for (const text of [
       'const s="\\n// ../../packages/testing/src/sink.ts\\n";',
       "const s=`\n//#region ../../packages/testing/src/sink.ts\n`;",
       "// see packages/testing/src for the fakes\nexport {};",
-      "/* __FIN_BUILD_TARGET__ is replaced at build time; fin:test-seam marks a seam */\nexport {};",
+      "/* __FIN_BUILD_TARGET__ is replaced at build time */\nexport {};",
     ]) {
       assert.deepEqual(checkServer("x", dirWith(t, { "main.js": text })), [], text);
     }
+    // A seam's marker is one wherever it stands, a comment of prose included.
+    const prose = "/* fin:test-seam marks a seam */\nexport {};";
+    assert.deepEqual(checkServer("x", dirWith(t, { "main.js": prose })), [
+      { file: "x/main.js", rule: "seam", message: "a test seam's marker" },
+    ]);
   });
 
   it("refuses a bundle the tokenizer cannot read, never reading it in part", (t) => {
@@ -706,6 +720,28 @@ describe("static builds", () => {
         "assets/a.js",
         "i.setAttribute(`srcset`,`/a.png, //evil.example/b.png 2x`)",
       ],
+      // A helper that takes the element or a namespace first names the list in a later argument
+      // (Svelte's attr, Solid's setAttribute, the DOM's setAttributeNS).
+      [
+        "a helper's later argument, a bracket in the first candidate",
+        "assets/a.js",
+        "attr(e,'srcset','/hero(1).png, //evil.example/b.png 2x')",
+      ],
+      [
+        "a helper's later argument, a semicolon in the first candidate",
+        "assets/a.js",
+        "setAttribute(e,'srcset','/a.png;v=2, //evil.example/b.png 2x')",
+      ],
+      [
+        "setAttributeNS, a misspelled descriptor",
+        "assets/a.js",
+        "i.setAttributeNS(null,'srcset','/a.png foo, //evil.example/b.png')",
+      ],
+      [
+        "a helper's later argument in backticks, imagesrcset",
+        "assets/a.js",
+        "attr(l,`imagesrcset`,`/hero(1).png, //evil.example/b.png 2x`)",
+      ],
       ["a JSON key", "assets/a.json", '{"srcSet":"/a.png, //evil.example/b.png 2x"}'],
       [
         "a JSON key whose quotes an escape spells",
@@ -835,6 +871,9 @@ describe("static builds", () => {
       'x="f(x), //cdn.example.org/a";',
       'x="see (the docs), //evil.example/x";',
       'a=f(y),/\\//.test(z);x="q",g(h),/\\/a\\//.test(b);',
+      // A later argument that only names a srcset in prose is no key: the code after it is code.
+      'log(e,"bad srcset:",v);/\\//.test(v)&&w();',
+      'log(e,"the srcset list",v),/\\//.test(v)&&w();',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1064,6 +1103,40 @@ describe("static builds", () => {
       [
         "a tag built over statements",
         "let n=`<a `;t&&(n+=`class=x `),n+=`href=//evil.example/>go</a>`;e.innerHTML=n;",
+      ],
+      // A later statement goes on with a tag's start a variable holds: a `+=` statement whatever
+      // joins its literal, and `+`, `.concat(` or a substitution after a statement's end.
+      [
+        "a `+=` statement whose literal a name joins",
+        "let n='<a ';n+=t+' href=//evil.example/x>go</a>';e.innerHTML=n;",
+      ],
+      [
+        "a `+=` statement whose literal a condition holds",
+        "let h='<a ';h+=(c?'class=x ':'')+' href=//evil.example/x>go</a>';",
+      ],
+      [
+        "a `+=` statement whose literal a call joins",
+        "let t='<a ';t+=g(e)+' href=//evil.example/x>go</a>';",
+      ],
+      [
+        "a tag's start in a variable, joined by `+` in a later statement",
+        "const n='<a '+t;e.innerHTML=n+' href=//evil.example/x>go</a>';",
+      ],
+      [
+        "the same in a function, after a condition",
+        "function f(t){const n='<a '+t;if(t)return n+' href=//evil.example/x>go</a>';return n+'>'}",
+      ],
+      [
+        "a variable joined to itself",
+        "let h='<img ';h=h+' src=//evil.example/x>';e.innerHTML=h;",
+      ],
+      [
+        "a variable joined by concat",
+        "const n='<a '+t;e.innerHTML=n.concat(' href=//evil.example/x>go</a>');",
+      ],
+      [
+        "a variable written by a substitution",
+        `const n='<a '+t;e.innerHTML=\`${"$"}{n} href=//evil.example/x>go</a>\`;`,
       ],
       [
         "a tag joined from a list",
@@ -2298,7 +2371,7 @@ describe("static builds", () => {
     // text in a literal, is no code's: no rule reads it.
     for (const text of [
       '// import "node:fs" and FIN_DB_PASSWORD at https://evil.example/x\nexport {};',
-      '/* fetch("https://evil.example/x") and fin:test-seam */ export {};',
+      '/* fetch("https://evil.example/x") */ export {};',
       "const r=/https:\\/\\/evil\\.example\\//;",
       'const s=`import { createHmac } from "node:crypto";`;',
     ]) {
@@ -2307,6 +2380,10 @@ describe("static builds", () => {
     // In a literal, the same text is read; and a sourceMappingURL counts only as a comment.
     assert.deepEqual(staticRules(t, { "assets/a.js": 'const s="FIN_DB_PASSWORD";' }), [
       "setting-name",
+    ]);
+    // A seam's marker is one in a comment too: a seam module carries it in a legal comment.
+    assert.deepEqual(staticRules(t, { "assets/a.js": "/*! fin:test-seam */ export {};" }), [
+      "seam",
     ]);
     assert.deepEqual(
       staticRules(t, { "assets/a.js": 'const s="//# sourceMappingURL=a.js.map";' }),

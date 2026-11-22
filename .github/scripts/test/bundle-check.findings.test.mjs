@@ -11,10 +11,11 @@ import { tempDir, writeTree } from "./helpers.mjs";
 
 const FIXTURE = new URL("./bundle-check.findings.txt", import.meta.url);
 /**
- * The findings the fixture holds: the 136 of the review rounds' journals and the 23 of the
- * steward's two lists of open findings (5 and 18), each once.
+ * The findings the fixture holds: the 136 of the review rounds' journals, the 23 of the
+ * steward's two lists of open findings (5 and 18), and the 5 of the tokenizer port's review that
+ * a static build reproduces (BC1.2 to BC1.6), each once.
  */
-const FINDINGS = 159;
+const FINDINGS = 164;
 /** The scanner's bound on its work, per character of a text (bundle-check.test.mjs's). */
 const WORK_PER_CHARACTER = 64;
 /** Only a hang, never load, comes near it: the work's bound is counted, not timed. */

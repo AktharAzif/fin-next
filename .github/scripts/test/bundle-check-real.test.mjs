@@ -2,8 +2,9 @@
 // staged as release.yml's static-build job builds them (release-static.mjs build: `turbo run build
 // --force` for each app, source maps moved aside) and scanned as its static job scans them
 // (`--artefacts`). Any finding fails it: a check that refuses an honest build fails the release,
-// so a false-positive path that comes back fails here first. And the harness rule over a real
-// server build of the workspace's own Vite, with a module of packages/testing planted in it. They
+// so a false-positive path that comes back fails here first. And the harness and seam rules over
+// a real server build of the workspace's own Vite, with a module of packages/testing planted in
+// it, and a seam module that carries its marker in a legal comment. They
 // build, so they run where the workspace is installed and FIN_REAL_BUILDS=1 asks for them (ci.yml's
 // build job); elsewhere they are skipped and say why.
 import assert from "node:assert/strict";
@@ -54,7 +55,7 @@ describe("bundle-check over the real static builds", () => {
 });
 
 describe("bundle-check over a real Vite server build", () => {
-  it("finds the harness a real server build bundles by its module comment, and nothing else", (t) => {
+  it("finds the harness a real server build bundles by its module comment, a seam by its marker's kept comment, and nothing else", (t) => {
     if (process.env.FIN_REAL_BUILDS !== "1") {
       t.skip(
         "FIN_REAL_BUILDS=1 runs it after an install (ci.yml's build job): it builds with Vite",
@@ -71,6 +72,12 @@ describe("bundle-check over a real Vite server build", () => {
       "apps/api/src/entry.ts":
         'import { sink } from "../../../packages/testing/src/sink.ts";\n\nexport function main() {\n  return sink(1);\n}\nconsole.log(main());\n',
       "apps/api/src/clean.ts": "export function main() {\n  return 1;\n}\nconsole.log(main());\n",
+      // A seam module carries its marker in a legal comment: Vite keeps it, where it drops a
+      // literal the module never uses.
+      "apps/api/src/seams/email-sink.ts":
+        '/*! fin:test-seam */\nexport function emailSink(x: number) {\n  return ["sink", x];\n}\n',
+      "apps/api/src/seamed.ts":
+        'import { emailSink } from "./seams/email-sink.ts";\n\nexport function main() {\n  return emailSink(1);\n}\nconsole.log(main());\n',
     });
     const app = join(dir, "apps", "api");
     /** @param {string} entry @param {string} out */
@@ -93,6 +100,7 @@ describe("bundle-check over a real Vite server build", () => {
     };
     viteBuild("src/entry.ts", "dist/server");
     viteBuild("src/clean.ts", "dist/clean");
+    viteBuild("src/seamed.ts", "dist/seamed");
     const planted = readFileSync(join(app, "dist", "server", "entry.mjs"), "utf8");
     assert.ok(
       planted.split("\n").some((line) => line === "// ../../packages/testing/src/sink.ts"),
@@ -105,5 +113,16 @@ describe("bundle-check over a real Vite server build", () => {
       ["seam: the test harness (packages/testing) is bundled"],
     );
     assert.deepEqual(checkServer("apps/api/dist/clean", join(app, "dist", "clean")), []);
+    const seamed = readFileSync(join(app, "dist", "seamed", "seamed.mjs"), "utf8");
+    assert.ok(
+      seamed.includes("fin:test-seam"),
+      `Vite keeps the seam's legal comment:\n${seamed}`,
+    );
+    assert.deepEqual(
+      checkServer("apps/api/dist/seamed", join(app, "dist", "seamed")).map(
+        (f) => `${f.rule}: ${f.message}`,
+      ),
+      ["seam: a test seam's marker"],
+    );
   });
 });

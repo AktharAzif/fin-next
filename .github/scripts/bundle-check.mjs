@@ -8,17 +8,20 @@
 // substitution ends. Every rule below reads a script's TOKENS: the literal values a script holds
 // (each string's decoded value, and a template literal's static text with each substitution
 // marked as code), the names and punctuators around them, and its comments where a rule is about
-// comments (a bundler's module comments, a sourceMappingURL). A regular expression or a comment is
-// never read as text a page could load. A script the tokenizer cannot read is refused whole
-// (untokenized), never scanned in part. A JSON file (.json, .webmanifest) is read through
-// JSON.parse, its strings (keys included) as a script's literals are; one that does not parse is
-// read as the text it is. Markup, stylesheets and every other file are text, not JavaScript, and
-// are read as text.
+// comments (a bundler's module comments, a sourceMappingURL, a seam's marker). A regular
+// expression or a comment is never read as text a page could load. A script the tokenizer cannot
+// read is refused whole (untokenized), never scanned in part. A JSON file (.json, .webmanifest)
+// is read through JSON.parse, its strings (keys included) as a script's literals are; one that
+// does not parse is read as the text it is. Markup, stylesheets and every other file are text,
+// not JavaScript, and are read as text.
 //
 //   server bundles (apps/<app>/dist/server/**), the release target CI builds by default
 //     - no test seam in the JavaScript (ARCHITECTURE §3.5: CI greps the release bundles for the
 //       seams' markers): the build-target define left unreplaced (`__FIN_BUILD_TARGET__`, a name
-//       or a literal), the `fin:test-seam` marker a seam module carries (a literal), a module
+//       or a literal: only code shows the define was not compiled in), the `fin:test-seam` marker
+//       a seam module carries wherever it stands, as a grep finds it: in a literal, a regular
+//       expression or a comment (Vite drops a literal the module never uses and keeps a legal
+//       comment, `/*! fin:test-seam */`, so a comment is the form that reaches a bundle), a module
 //       comment of packages/testing (the harness bundled in: Vite's `// <path>` and
 //       `//#region <path>`), or an import of @fin/testing left in (a specifier after `from` or
 //       `import`, or the one argument of a dynamic import or a require call);
@@ -49,12 +52,17 @@
 //       reaches it on the network). A start tag is followed through every literal of the script in
 //       source order, as an HTML tokenizer reads it: a template literal's substitution, and the
 //       code between two literals a concatenation, a list, a call, a condition or `+=` joins
-//       (within MAX_PIECE_GAP characters of code, and past a statement's end only after `+=`), may
-//       write any text, so the tag goes on in the next literal. A srcset list is read where a key
-//       names it (`srcSet:`, `.srcset=`, `setAttribute("srcset",`, `"srcset":`, and every literal
-//       in the value such a key is given), where markup or JSON in a literal opens it, and where a
-//       literal's text has a srcset list's shape (a descriptor, or candidates shaped as URLs,
-//       before a comma), a host there counting only where a browser reaches it on the network
+//       (within MAX_PIECE_GAP characters of code), may write any text, so the tag goes on in the
+//       next literal. Past a statement's end it goes on only where a later statement joins a
+//       string an earlier one began (a variable that holds a tag's start): a literal after `+` or
+//       `+=`, any joined literal of a `+=` statement, a literal at a substitution's start, a
+//       template literal that starts with a substitution, and `.concat(`'s arguments
+//       (`const n="<a "+t;e.innerHTML=n+" href=..."`, `` `${n} href=...` ``). A srcset list is
+//       read where a key names it (`srcSet:`, `.srcset=`, `setAttribute("srcset",`, a call's later
+//       argument that is exactly an attribute's name, `attr(e,"srcset",`, `"srcset":`, and every
+//       literal in the value such a key is given), where markup or JSON in a literal opens it, and
+//       where a literal's text has a srcset list's shape (a descriptor, or candidates shaped as
+//       URLs, before a comma), a host there counting only where a browser reaches it on the network
 //       (prose's `"a, b, //c"` names none). In markup and stylesheets, every such URL where a URL
 //       starts (after a quote, an unquoted attribute's `=`, CSS's url(, a refresh's time, as a
 //       srcset candidate; and after any C0 control or space, which the URL parser strips first).
@@ -1400,10 +1408,13 @@ function scanReading(reading, where, found) {
  * @property {Map<string, number[]> | null} marks
  */
 /**
- * A piece of a literal: its token's significant place, its literal, which piece of it it is, and
+ * A piece of a literal: its token's significant place, its literal, which piece of it it is,
  * where the last `;` of its own statement level or an outer one stands in the source before it
- * (`boundary`, -1 for none): code before it is another statement's.
- * @typedef {{ place: number, literal: Literal, n: number, boundary: number }} Piece
+ * (`boundary`, -1 for none): code before it is another statement's; and, for a literal's first
+ * piece, whether it goes on with a string an earlier statement began (`cross`): it stands after
+ * `+` or `+=`, in a statement whose own `+=` stands before it, at a substitution's start, as a
+ * `.concat(` call's argument, or it is a template literal's head that starts with a substitution.
+ * @typedef {{ place: number, literal: Literal, n: number, boundary: number, cross: boolean }} Piece
  */
 
 const LITERAL = new Set([
@@ -1486,20 +1497,53 @@ function scriptOf(tokens) {
     return before.kind === "template" || before.kind === "template-tail";
   };
   // The last `;` of each open bracket's level or an outer one, by depth (open.length): a level
-  // inherits its outer level's when it opens, and a `;` is the latest of its own.
+  // inherits its outer level's when it opens, and a `;` is the latest of its own. So is the last
+  // `+=`: a statement whose own `+=` stands after its `;` is one.
   /** @type {number[]} */
   const semicolon = [-1];
+  /** @type {number[]} */
+  const plusAssign = [-1];
+  // Whether each open bracket is a `.concat(` call's parenthesis, by depth.
+  /** @type {boolean[]} */
+  const concat = [false];
   /** @param {Literal} lit @param {number} p */
   const addPiece = (lit, p) => {
-    const boundary = semicolon[open.length] ?? -1;
-    const piece = { place: p, literal: lit, n: lit.pieces.length, boundary };
+    const depth = open.length;
+    const boundary = semicolon[depth] ?? -1;
+    let cross = false;
+    if (lit.pieces.length === 0) {
+      const t = tokenAt(p);
+      const before = p > 0 ? tokenAt(p - 1) : undefined;
+      cross =
+        (plusAssign[depth] ?? -1) > boundary ||
+        (t.kind === "template-head" && t.raw === "") ||
+        before?.kind === "template-head" ||
+        before?.kind === "template-middle" ||
+        (before?.kind === "punct" &&
+          (before.value === "+" ||
+            before.value === "+=" ||
+            (concat[depth] === true && (before.value === "(" || before.value === ","))));
+    }
+    const piece = { place: p, literal: lit, n: lit.pieces.length, boundary, cross };
     lit.pieces.push(piece);
     pieces.push(piece);
   };
   /** @param {number} p */
   const push = (p) => {
     open.push(p);
-    semicolon[open.length] = semicolon[open.length - 1] ?? -1;
+    const depth = open.length;
+    semicolon[depth] = semicolon[depth - 1] ?? -1;
+    plusAssign[depth] = plusAssign[depth - 1] ?? -1;
+    const t = tokenAt(p);
+    const callee = p > 0 ? tokenAt(p - 1) : undefined;
+    const dot = p > 1 ? tokenAt(p - 2) : undefined;
+    concat[depth] =
+      t.kind === "punct" &&
+      t.value === "(" &&
+      callee?.kind === "name" &&
+      callee.value === "concat" &&
+      dot?.kind === "punct" &&
+      (dot.value === "." || dot.value === "?.");
   };
   for (let p = 0; p < sig.length; p++) {
     const t = tokenAt(p);
@@ -1510,6 +1554,8 @@ function scriptOf(tokens) {
         if (o !== undefined) closer[o] = p;
       } else if (t.value === ";") {
         semicolon[open.length] = t.start;
+      } else if (t.value === "+=") {
+        plusAssign[open.length] = t.start;
       }
     } else if (t.kind === "string" || t.kind === "template") {
       const lit = newLiteral(p, t.kind === "template", t.kind === "template" && taggedAt(p));
@@ -1722,10 +1768,11 @@ function afterSubstitution(live) {
  * One piece of a literal's text, as the tag pass reads it: its literal, the reading and the range
  * of it the piece holds, where the piece stands in the source, which piece of its literal it is
  * (`n`), whether the literal goes on after it (`more`: a substitution follows), and, for a
- * literal's first piece, whether the code joins it to an earlier literal (`joined`), whether by
- * `+=` (`assign`), and where its statement starts (Piece's `boundary`).
+ * literal's first piece, whether the code joins it to an earlier literal (`joined`), whether it
+ * goes on with a string an earlier statement began (Piece's `cross`), and where its statement
+ * starts (Piece's `boundary`).
  * @typedef {{ literal: object, reading: Reading, from: number, to: number, start: number,
- *   end: number, n: number, more: boolean, joined: boolean, assign: boolean,
+ *   end: number, n: number, more: boolean, joined: boolean, cross: boolean,
  *   boundary: number }} TagPiece
  */
 
@@ -1743,10 +1790,12 @@ const JOINS = new Set(["+", "+=", ",", "(", "[", "?", ":", "&&", "||", "??"]);
  *   the code and any literal nested in it (whose own states go on there too), whatever its length;
  * - code between two literals: the states at a literal's end are held, up to MAX_PIECE_GAP
  *   characters after it, and go on in each later literal the code joins to them (after `+`, `+=`,
- *   a list's or a call's comma or bracket, a condition's branches, `&&`, `||`, `??`, or at a
- *   substitution's start), a condition's branches each holding theirs; across a statement's end
- *   (a `;` of the later literal's level or an outer one) only after `+=`, which goes on with a
- *   string an earlier statement began (`let h="<a ";h+=" href=..."`).
+ *   a list's or a call's comma or bracket, a condition's branches, `&&`, `||`, `??`, at a
+ *   substitution's start, or as a template literal that starts with one), a condition's branches
+ *   each holding theirs; across a statement's end (a `;` of the later literal's level or an outer
+ *   one) only where the later statement goes on with a string an earlier one began, as a
+ *   variable holds it (Piece's `cross`: `let h="<a ";h+=" href=..."`, `h+=t+" href=..."`,
+ *   `const n="<a "+t;e.innerHTML=n+" href=..."`, `n.concat(" href=...")`, `` `${n} href=...` ``).
  * A `<` or a tag's name at a piece's end opens a tag the code goes on with (`"<"+t+" href=..."`,
  * `` `<a${c} href=...>` ``, `` `<${t} href=...>` ``). The code itself is never read as text.
  * @param {Iterable<TagPiece>} pieces
@@ -1767,7 +1816,7 @@ function tagPass(pieces) {
     const { text } = reading;
     let states = 0;
     if (piece.n === 0) {
-      const sameStatement = piece.assign || piece.boundary < heldAt;
+      const sameStatement = piece.cross || piece.boundary < heldAt;
       if (held !== 0 && heldUntil >= piece.start && piece.joined && sameStatement) {
         states = afterSubstitution(held);
       }
@@ -1823,11 +1872,15 @@ function* scriptPieces(script, name) {
     const from = piece.n === 0 ? 0 : (marks[piece.n - 1] ?? reading.text.length - 1) + 1;
     const to = marks[piece.n] ?? reading.text.length;
     const before = piece.n === 0 ? tokenAt(script, piece.place - 1) : undefined;
+    // A template literal that starts with a substitution: the code there may write any text, a
+    // string an earlier literal began included (`` `${n} href=...` ``).
+    const leads = piece.n === 0 && token.kind === "template-head" && token.raw === "";
     const joined =
-      before !== undefined &&
-      ((before.kind === "punct" && JOINS.has(before.value)) ||
-        before.kind === "template-head" ||
-        before.kind === "template-middle");
+      leads ||
+      (before !== undefined &&
+        ((before.kind === "punct" && JOINS.has(before.value)) ||
+          before.kind === "template-head" ||
+          before.kind === "template-middle"));
     yield {
       literal: lit,
       reading,
@@ -1838,7 +1891,7 @@ function* scriptPieces(script, name) {
       n: piece.n,
       more: piece.n < lit.pieces.length - 1,
       joined,
-      assign: before !== undefined && before.kind === "punct" && before.value === "+=",
+      cross: piece.cross,
       boundary: piece.boundary,
     };
   }
@@ -2155,11 +2208,19 @@ const keyAt = (script, p, test) => {
 };
 
 /**
+ * An attribute's name that names a srcset list, lower-cased (`srcset`, `imagesrcset`,
+ * `data-srcset`): a call's later argument that is exactly one is a key. Prose that names one
+ * (`"Invalid srcset:"`) is none.
+ */
+const SRCSET_NAME = /^[a-z-]*srcset$/;
+
+/**
  * The literals a key in the code names a srcset list: the value after `srcSet:`, `.srcset=`,
- * `"srcset":`, `i["srcset"]=` and `setAttribute("srcset",` (a key whose name ends in srcset:
- * `imageSrcSet` too), and every literal in that value up to its end (a `,`, `;` or closing bracket
- * of its own level: `srcSet:d?"/a.png, //host/b.png 2x":"/l.png"`, `srcSet:p??"..."`). A value
- * that holds another such key ends there, so the work stays linear.
+ * `"srcset":`, `i["srcset"]=`, `setAttribute("srcset",` and a call's later argument that is
+ * exactly an attribute's name (`attr(e,"srcset",`, `setAttributeNS(null,"srcset",`) (a key whose
+ * name ends in srcset: `imageSrcSet` too), and every literal in that value up to its end (a `,`,
+ * `;` or closing bracket of its own level: `srcSet:d?"/a.png, //host/b.png 2x":"/l.png"`,
+ * `srcSet:p??"..."`). A value that holds another such key ends there, so the work stays linear.
  * @param {Script} script
  * @returns {Set<Literal>}
  */
@@ -2179,9 +2240,14 @@ function srcsetValues(script) {
     if (punctAt(script, p - 1, "[") && punctAt(script, p + 1, "]") && punctAt(script, p + 2, "=")) {
       return p + 3;
     }
-    // `setAttribute("srcset",`
-    if (tokenAt(script, p)?.kind !== "name" && punctAt(script, p - 1, "(")) {
-      if (punctAt(script, p + 1, ",")) return p + 2;
+    // `setAttribute("srcset",`, and a later argument that is exactly an attribute's name, as a
+    // helper that takes the element or a namespace first names it (`attr(e,"srcset",`,
+    // `setAttribute(e,"srcset",`, `setAttributeNS(null,"srcset",`).
+    if (tokenAt(script, p)?.kind !== "name" && punctAt(script, p + 1, ",")) {
+      if (punctAt(script, p - 1, "(")) return p + 2;
+      if (punctAt(script, p - 1, ",") && keyAt(script, p, (lower) => SRCSET_NAME.test(lower))) {
+        return p + 2;
+      }
     }
     return -1;
   };
@@ -2349,7 +2415,7 @@ function scanJson(text, found) {
         n: 0,
         more: false,
         joined: false,
-        assign: false,
+        cross: false,
         boundary: -1,
       };
       /** @type {Where} */
@@ -2435,10 +2501,11 @@ function tokensOf(text, file) {
 }
 
 /**
- * A script's markers, from its tokens: the build target's name or text, a seam's marker in a
- * literal, a harness module's comment, an import of the harness or of a Node built-in (a
- * specifier after `from` or `import`, or the one argument of a dynamic import or a require call),
- * and Vite's stand-in for a Node module in a literal or a module comment.
+ * A script's markers, from its tokens: the build target's name or text, a seam's marker wherever
+ * it stands (a literal, a regular expression, or a comment: a seam module's legal comment, which
+ * the bundler keeps), a harness module's comment, an import of the harness or of a Node built-in
+ * (a specifier after `from` or `import`, or the one argument of a dynamic import or a require
+ * call), and Vite's stand-in for a Node module in a literal or a module comment.
  * @param {Token[]} tokens
  * @returns {Array<{ rule: string, what: string }>}
  */
@@ -2450,18 +2517,22 @@ function scriptMarkers(tokens) {
   /** @type {Token[]} */
   const sig = [];
   for (const t of tokens) {
-    if (t.kind === "line-comment") {
+    // A seam's marker is one wherever it stands, as a grep of the bundle finds it: in a literal,
+    // a regular expression or a comment. Vite keeps a seam module's legal comment
+    // (`/*! fin:test-seam */`, `//! ...`, `@license`, `@preserve`) and drops a literal the module
+    // never uses.
+    if (t.value.includes(SEAM_MARK)) add("seam", WHAT.seam);
+    if (COMMENT.has(t.kind)) {
+      if (t.kind !== "line-comment") continue;
       const path = MODULE_COMMENT.exec(t.value)?.[1] ?? "";
       if (path.includes(HARNESS_PATH)) add("seam", WHAT.region);
       if (path.includes(BROWSER_EXTERNAL)) add("server-only", WHAT.external);
       continue;
     }
-    if (COMMENT.has(t.kind)) continue;
     sig.push(t);
     if (t.kind === "name" && t.value === "__FIN_BUILD_TARGET__") add("seam", WHAT.target);
     if (!LITERAL.has(t.kind)) continue;
     if (BUILD_TARGET.test(t.value)) add("seam", WHAT.target);
-    if (t.value.includes(SEAM_MARK)) add("seam", WHAT.seam);
     if (t.value.includes(BROWSER_EXTERNAL)) add("server-only", WHAT.external);
     if (t.kind !== "string" && t.kind !== "template") continue;
     const before = sig.at(-2);

