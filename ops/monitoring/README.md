@@ -21,15 +21,20 @@ and RT-01 to RT-03 are listed at the top of `src/check.ts`. Every alert names a 
 `docs/runbooks/` with the four Phase 0 headings (What it means, First check, Containment, When to
 wake the owner) that names the alert back. MC-01 reads every telemetry writer the code uses
 (`log`, `telemetry.logUnit`, `lines.write`, `log.write({ event })`, `run.line`, raw
-`JSON.stringify` lines), and a name passed in a variable from the declaration that binds it where
-the call stands (a `const`, a `let` never assigned again, a `for … of` over strings). A telemetry
-writer passed a name it cannot read whole is a finding: an import, a `this.` member, a helper's or
-a callback's parameter, a value only partly literal, a name built at run time. Only a forwarding
-adapter's first parameter, a parameter list and a message (a string that cannot be a name, such
-as one with a space) give no name.
+`JSON.stringify` lines, and an adapter the file itself declares, whatever its receiver), and a
+name passed in a variable from the declaration that binds it where the call stands (a `const`, a
+`let` never assigned again, a `for … of` over strings). A telemetry writer passed a name it cannot
+read whole is a finding: an import, a `this.` member, a helper's or a callback's parameter, a
+value only partly literal, a name built at run time. So is a name out of the event-name shape
+(`step-up-locked`, `deployFailed`, a sentence), which would ship as `telemetry.bad_event`. Only a
+forwarding adapter's first parameter, a parameter list and, through `this` or a bare call, a
+message (an empty string, or one with a space) give no name. The scan reads code only, once a
+lexer has blanked the comments, strings and regular expressions; a file the lexer cannot read to
+its end (a template, comment, string or regular expression left open, or brackets that do not
+pair) is a finding, never a skip.
 The rule in full, its one exclusion and why that cannot hide an event, and what a lexical scan
-cannot see (a writer under another name, a raw line's `event` that is not a literal) are at
-`eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
+cannot see (a writer under another name, a name computed at run time, a raw line's `event` that is
+not a literal) are at `eventsInCode` in `src/check.ts`. MC-15 holds every alert name the code
 (a line list's `alerts`, or text that calls a backquoted name an alert; see `alertsInCode`) or the
 catalogue (an entry's `owed`, any alert-shaped word of a `noAlert`, a fragment file's own text)
 gives to a rule of the environment or an entry of `catalog/owed.ts` with a lane and a due date, and

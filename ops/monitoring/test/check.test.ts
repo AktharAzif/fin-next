@@ -37,6 +37,12 @@ type Json = Record<string, unknown>;
 const alerts = (json: Json) => json.alerts as Json[];
 const alert = (json: Json, name: string) => alerts(json).find((a) => a.name === name) as Json;
 
+const CANNOT = "writes a name MC-01 cannot read: write the event's name as a literal";
+const OUT_OF_SHAPE =
+  "writes a name out of the event-name shape: write <area>.<name> in lower case (any other ships as telemetry.bad_event)";
+const UNLEXED = (why: string) =>
+  `the lexer cannot read the file from here (${why}), so MC-01 reads none of its writer calls: a misread could hide one`;
+
 function rules(root: string, options: Parameters<typeof checkMonitoring>[1] = {}): string[] {
   return checkMonitoring(root, { scanCode: false, scan: [], ...options }).map(
     (f) => `${f.rule} ${f.message}`,
@@ -472,8 +478,8 @@ describe("monitoring:check refuses", () => {
       `MC-01 lines.write(ok ? "edge.inline_ok" : other) ${cannot}`,
       `MC-01 lines.write(name ?? "edge.default") ${cannot}`,
       `MC-01 lines.write("edge.sign_in" + (failed ? "_failed" : "")) ${cannot}`,
-      `MC-01 lines.write("edge.sign-in") ${cannot}`,
-      `MC-01 lines.write("edge.Failed") ${cannot}`,
+      `MC-01 lines.write("edge.sign-in") ${OUT_OF_SHAPE}`,
+      `MC-01 lines.write("edge.Failed") ${OUT_OF_SHAPE}`,
       `MC-01 lines.write(pair2.alt) ${cannot}`,
       `MC-01 lines.write(event) ${cannot}`,
       `MC-01 lines.write(reason) ${cannot}`,
@@ -549,6 +555,171 @@ describe("monitoring:check refuses", () => {
       `MC-01 lines.write("edge." + kind) ${cannot}`,
       `MC-01 lines.write(later) ${cannot}`,
       `MC-01 lines.write(picked) ${cannot}`,
+    ]);
+  });
+
+  it("a regular expression after an arrow, a postfix operator or a control head hides no writer call (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // A regular expression after `=>` holding a backtick, a quote, `\/*` or a fence.
+        "const hasTick = (s: string) => /`/.test(s);",
+        "function after(deps: Deps) {",
+        '  deps.lines.write("edge.after_tick", "warn", {});',
+        "}",
+        'const EV = "edge.after_tick_const";',
+        'lines.write(EV, "warn", {});',
+        'const quote = (s: string) => /"/.test(s); lines.write("edge.same_line", "warn", {}); const t = "x";',
+        "const bare = (path: string) => /^\\/*$/.test(path);",
+        'lines.write("edge.after_comment_open", "warn", {});',
+        'const fences = text.split("\\n").filter((row) => /^```/.test(row));',
+        'lines.write("edge.after_fence", "warn", {});',
+        // A division after a postfix `++` or `!`; a regular expression after an `if` head.
+        'const half = i++ / 2; lines.write("edge.after_postfix", "warn", {}); const third = half / 3;',
+        'const ratio = value! / 2; lines.write("edge.after_bang", "warn", {}); const r = ratio / 3;',
+        "if (ready) /`/.test(text);",
+        'lines.write("edge.after_head", "warn", {});',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 lines.write("edge.after_tick") is not catalogued',
+      'MC-01 lines.write(EV: "edge.after_tick_const") is not catalogued',
+      'MC-01 lines.write("edge.same_line") is not catalogued',
+      'MC-01 lines.write("edge.after_comment_open") is not catalogued',
+      'MC-01 lines.write("edge.after_fence") is not catalogued',
+      'MC-01 lines.write("edge.after_postfix") is not catalogued',
+      'MC-01 lines.write("edge.after_bang") is not catalogued',
+      'MC-01 lines.write("edge.after_head") is not catalogued',
+    ]);
+  });
+
+  it("a file the lexer cannot read is a finding that names it, never a skip (MC-01)", () => {
+    const root = scratch();
+    const dir = join(root, "packages", "edge", "src");
+    mkdirSync(dir, { recursive: true });
+    const files: Record<string, string[]> = {
+      // A template that never closes: read as one, it would blank every call after it.
+      "a.ts": [
+        'lines.write("edge.before", "warn", {});',
+        "const open = `never closed;",
+        'lines.write("edge.hidden", "warn", {});',
+      ],
+      "b.ts": [
+        'lines.write("edge.b", "warn", {});',
+        "/* never closed",
+        'lines.write("edge.b_hidden", "warn", {});',
+      ],
+      "c.ts": ['const s = "never closed;', 'lines.write("edge.c", "warn", {});'],
+      "d.ts": ["const r = ok ? /never closed : other;", 'lines.write("edge.d", "warn", {});'],
+      // Misreads the lexer cannot see itself: the brackets of the code it kept do not pair.
+      "e.ts": ["function f(deps: Deps) {", '  deps.lines.write("edge.e", "warn", {});'],
+      "f.ts": ['lines.write("edge.f", "warn", {}));'],
+      "g.ts": ['lines.write("edge.g", ["warn", {});'],
+    };
+    for (const [name, lines] of Object.entries(files)) {
+      writeFileSync(join(dir, name), lines.join("\n"));
+    }
+    const found = checkMonitoring(root, { scan: [] }).map(
+      (f) => `${f.file} ${f.rule} ${f.message}`,
+    );
+    expect(found).toEqual([
+      `packages/edge/src/a.ts:2 MC-01 ${UNLEXED("a template literal never closes")}`,
+      `packages/edge/src/b.ts:2 MC-01 ${UNLEXED("a block comment never closes")}`,
+      `packages/edge/src/c.ts:1 MC-01 ${UNLEXED("a string does not close on its line")}`,
+      `packages/edge/src/d.ts:1 MC-01 ${UNLEXED("a regular expression does not close on its line")}`,
+      `packages/edge/src/e.ts:1 MC-01 ${UNLEXED("a `{` never closes")}`,
+      `packages/edge/src/f.ts:1 MC-01 ${UNLEXED("a `)` closes no bracket")}`,
+      `packages/edge/src/g.ts:1 MC-01 ${UNLEXED("a `)` closes the `[` of line 1")}`,
+    ]);
+  });
+
+  it("a name out of the event-name shape, or a message through a member call, is a finding (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // Each ships as telemetry.bad_event, which no alert watches.
+        'deps.lines.write("step-up-locked", "error", { realm });',
+        'run.line("deployFailed", "error", { step });',
+        'telemetry.log("Access keys unavailable", {}, "error");',
+        'const event = "auditGuard";',
+        'telemetry.log(event, {}, "error");',
+        'const message = "sign in failed";',
+        'deps.lines.write(message, "error", {});',
+        'log.write({ event: "sign in failed", level: "warn", fields: {} });',
+        'log("Done");',
+        // A template's `${…}` ends at its own brace: no space outside it, so no message.
+        "lines.write(`auth.$" + '{pick({ a: 1 }, kind)}`, "warn", {});',
+        "this.line(`auth.$" + '{pick({ a: 1 }, kind)}`, "warn", {});',
+        // Messages through `this` or a bare call give no name and no finding.
+        'this.line("warning: ", text);',
+        'this.#line("", text);',
+        "log(`static: $" + "{count} deployment(s) checked`);",
+        'log("count: " + count + ".");',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      `MC-01 lines.write("step-up-locked") ${OUT_OF_SHAPE}`,
+      `MC-01 run.line("deployFailed") ${OUT_OF_SHAPE}`,
+      `MC-01 telemetry.log("Access keys unavailable") ${OUT_OF_SHAPE}`,
+      `MC-01 telemetry.log(event) ${OUT_OF_SHAPE}`,
+      `MC-01 lines.write(message) ${OUT_OF_SHAPE}`,
+      `MC-01 log.write({ event: "sign in failed", level: "warn", fields: {} }) ${OUT_OF_SHAPE}`,
+      `MC-01 log("Done") ${OUT_OF_SHAPE}`,
+      `MC-01 lines.write(\`auth.$\{pick({ a: 1 }, kind)}\`) ${CANNOT}`,
+      `MC-01 this.line(\`auth.$\{pick({ a: 1 }, kind)}\`) ${CANNOT}`,
+    ]);
+  });
+
+  it("an adapter the file declares is read whatever the receiver, and any writer's strings whole (MC-01)", () => {
+    const root = scratch();
+    mkdirSync(join(root, "packages", "edge", "src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages", "edge", "src", "a.ts"),
+      [
+        // Adapters this file declares, called bare or through another receiver.
+        'const line = (event: string, fields: object) => run.line(event, "error", fields);',
+        'line(failed ? "edge.line_failed" : "edge.line_done", { step });',
+        'const write = (event: string, fields: Fields) => telemetry.log(event, fields, "error");',
+        "write(`auth.$" + "{kind}_refused`, {});",
+        'const sink = { format: (event: string) => lines.write(event, "error", {}) };',
+        "sink.format(pickName());",
+        // An adapter of an adapter.
+        "const note = { log: (event: string) => line(event, {}) };",
+        "note.log(kind);",
+        // A writer method's first parameter forwards only whole, or as a line's `.event`.
+        "export function format(error: FinError, telemetry: Telemetry): string {",
+        '  telemetry.log(error.code, {}, "error");',
+        "  return error.message;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(root, "packages", "edge", "src", "b.ts"),
+      [
+        // No adapter here: a writer under another name counts each whole string it is passed.
+        "const { logUnit } = telemetry;",
+        'logUnit(failed ? "edge.unit_failed" : "edge.unit_ok", {}, "error");',
+        'out.write(quiet ? "edge.quiet" : "edge.loud");',
+        'out.format("edge.first" || "edge.second");',
+      ].join("\n"),
+    );
+    expect(rules(root, { scanCode: true })).toEqual([
+      'MC-01 line(failed ? "edge.line_failed" : "edge.line_done": "edge.line_failed") is not catalogued',
+      'MC-01 line(failed ? "edge.line_failed" : "edge.line_done": "edge.line_done") is not catalogued',
+      'MC-01 logUnit(failed ? "edge.unit_failed" : "edge.unit_ok": "edge.unit_failed") is not catalogued',
+      'MC-01 logUnit(failed ? "edge.unit_failed" : "edge.unit_ok": "edge.unit_ok") is not catalogued',
+      'MC-01 out.write(quiet ? "edge.quiet" : "edge.loud": "edge.quiet") is not catalogued',
+      'MC-01 out.write(quiet ? "edge.quiet" : "edge.loud": "edge.loud") is not catalogued',
+      'MC-01 out.format("edge.first" || "edge.second": "edge.first") is not catalogued',
+      'MC-01 out.format("edge.first" || "edge.second": "edge.second") is not catalogued',
+      `MC-01 write(\`auth.$\{kind}_refused\`) ${CANNOT}`,
+      `MC-01 sink.format(pickName()) ${CANNOT}`,
+      `MC-01 note.log(kind) ${CANNOT}`,
+      `MC-01 telemetry.log(error.code) ${CANNOT}`,
     ]);
   });
 
