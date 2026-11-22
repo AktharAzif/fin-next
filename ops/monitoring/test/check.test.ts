@@ -314,7 +314,9 @@ describe("monitoring:check refuses", () => {
     ]);
   });
 
-  it("a staging-quiet whose step waits, or reaches anyone but the entire staging team (RT-02)", () => {
+  describe("a staging-quiet whose step waits, or reaches anyone but the entire staging team (RT-02)", () => {
+    // One test for each case: each makes its own scratch copy, and the five together took about
+    // 130 ms alone and went over the test timeout inside a loaded `pnpm check`.
     const cases: [string, Json, string][] = [
       [
         "no member",
@@ -343,12 +345,14 @@ describe("monitoring:check refuses", () => {
       ],
     ];
     for (const [what, change, expected] of cases) {
-      const root = scratch();
-      edit(root, "policies.json", (j) => {
-        const step = (((j.policies as Json[])[0] as Json).steps as Json[])[0] as Json;
-        Object.assign(step, change);
+      it(what, () => {
+        const root = scratch();
+        edit(root, "policies.json", (j) => {
+          const step = (((j.policies as Json[])[0] as Json).steps as Json[])[0] as Json;
+          Object.assign(step, change);
+        });
+        expect(rules(root), what).toEqual([expected]);
       });
-      expect(rules(root), what).toEqual([expected]);
     }
   });
 
