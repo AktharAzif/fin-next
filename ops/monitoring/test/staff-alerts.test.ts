@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fragments } from "../catalog/index.ts";
 import { OWED_ALERTS } from "../catalog/owed.ts";
-import { RUNBOOK_HEADINGS } from "../src/check.ts";
+import { RUNBOOK_HEADINGS, readCode } from "../src/check.ts";
 import { type AlertDef, loadEnv } from "../src/config.ts";
 import { renderSql } from "../src/sql.ts";
 
@@ -158,5 +158,58 @@ describe("the staff fragment's alerts", () => {
     }
     const admin = readFileSync(join(ROOT, "apps", "admin", "src", "server", "main.ts"), "utf8");
     expect(admin).toContain("createStaffDeps({ realm, clock, lines");
+  });
+});
+
+/**
+ * The staff fragment's alerts that stay owed, each while what it would read is written by no
+ * process: a rule over such a line can never fire (or, over a missing field with notEq, fires on
+ * every line). Each check below fails once the writer lands, so the lane that lands it moves the
+ * alert from catalog/owed.ts to alerts/staff.json in the same change (MC-15).
+ */
+describe("the staff fragment's owed alerts", () => {
+  const owed = (name: string) => OWED_ALERTS.find((a) => a.name === name);
+  const read = (...path: string[]) => readFileSync(join(ROOT, ...path), "utf8");
+
+  it("stay owed, in the staff fragment, with the reason in their note", () => {
+    for (const name of [
+      "admin-without-second-factor",
+      "admin-access-drift",
+      "duty-stalled-access-drift",
+    ]) {
+      expect(rule(name), `${name} is a staging rule`).toBeUndefined();
+      expect(owed(name), name).toMatchObject({ fragment: "staff", lane: "L-SAT-09" });
+    }
+    expect(owed("admin-without-second-factor")?.note).toMatch(
+      /no admin request line carries assurance/,
+    );
+    expect(owed("admin-access-drift")?.note).toMatch(/no process runs the duty yet/);
+    expect(owed("duty-stalled-access-drift")?.note).toMatch(/no process runs the duty yet/);
+  });
+
+  it("admin-without-second-factor: no admin request line carries assurance yet", () => {
+    // The host's one request line: packages/server's fields, and what admin adds to them.
+    expect(read("packages", "server", "src", "telemetry", "lines.ts")).not.toMatch(/\bassurance\b/);
+    expect(read("packages", "server", "src", "http", "request.ts")).not.toMatch(/\bassurance\b/);
+    expect(read("apps", "admin", "src", "server", "auth-hook.ts")).not.toMatch(/\bassurance\b/);
+    expect(read("apps", "admin", "src", "server", "routes", "register.ts")).not.toMatch(
+      /c\.set\("assurance"/,
+    );
+    expect(entry("request")?.fields).not.toHaveProperty("assurance");
+    expect(entry("request")?.owed).toContain("admin-without-second-factor");
+  });
+
+  it("admin-access-drift and duty-stalled-access-drift: no process runs the Access drift duty yet", () => {
+    // packages/staff writes the line when the duty runs; nothing in a deployable runs it.
+    expect(read("packages", "staff", "src", "access-drift.ts")).toContain(
+      'lines.write("access.drift"',
+    );
+    const runners = readCode(ROOT)
+      .filter(({ file }) => file.startsWith("apps/") || file.startsWith("ops/"))
+      .filter(({ text }) => /\brunAccessDriftCheck\b/.test(text))
+      .map(({ file }) => file);
+    expect(runners).toEqual([]);
+    expect(entry("access.drift")?.owed).toEqual(["admin-access-drift"]);
+    expect(entry("access.drift")?.alerts).toEqual([]);
   });
 });

@@ -122,10 +122,14 @@ describe("the alert names on the repository", () => {
       expect(owedByName.get(name), name).toMatchObject({ due: "2026-11-22" });
       expect(owedByName.get(name)?.lane, name).toMatch(/^(?:P0-F|L-SAT-09)$/);
     }
-    expect(owedByName.get("duty-stalled-access-drift")).toMatchObject({
-      fragment: "staff",
-      heartbeat: "access-drift",
-    });
+    // Decided by the plan's order (spec 02 §10.9): a success alert and no heartbeat.
+    expect(owedByName.get("duty-stalled-access-drift")).toMatchObject({ fragment: "staff" });
+    expect(owedByName.get("duty-stalled-access-drift")?.heartbeat).toBeUndefined();
+    const heartbeats = readFileSync(
+      join(ROOT, "ops", "monitoring", "staging", "heartbeats.json"),
+      "utf8",
+    );
+    expect(heartbeats).not.toContain("access-drift");
   });
 
   it("owe exactly the ruled names and those the lane rule gives, so a new one changes this test", () => {
@@ -136,12 +140,15 @@ describe("the alert names on the repository", () => {
     }
   });
 
-  it("carry the later ruling's note and question, and the production precondition", () => {
-    expect(owedByName.get("admin-access-drift")?.note).toMatch(/already writes access\.drift/);
+  it("carry the later ruling's note, the decided question, and the production precondition", () => {
+    expect(owedByName.get("admin-access-drift")?.note).toMatch(
+      /writes access\.drift .* but no process runs the duty yet/,
+    );
     const question = owedByName.get("duty-stalled-access-drift")?.note ?? "";
     expect(question).toMatch(/decided/);
     expect(question).toMatch(/spec 02 §10\.9/);
     expect(question).toMatch(/pings no heartbeat but has a success alert/);
+    expect(question).toMatch(/no heartbeat/);
     const header = readFileSync(join(ROOT, "ops", "monitoring", "catalog", "owed.ts"), "utf8");
     expect(header).toMatch(/HARD PRODUCTION PRECONDITION/);
     expect(header).toMatch(/fails closed when it cannot read it/);

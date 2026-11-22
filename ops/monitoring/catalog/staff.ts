@@ -68,7 +68,7 @@ export const entries: readonly CatalogEntry[] = [
     kind: "security",
     level: "error",
     writtenBy:
-      "the Access drift duty (packages/staff), when Fin Admin's Access allow list and the staff table differ; counts only (spec 02 §10.9)",
+      "the Access drift duty (packages/staff's runAccessDriftCheck), when Fin Admin's Access allow list and the staff table differ; counts only (spec 02 §10.9). No process runs the duty yet: the worker (apps/api/src/worker/main.ts) runs the email loop, the delivery check and the database probe only, and apps/api does not depend on @fin/staff, so the line's alert is owed until the worker schedules it",
     fields: {
       accessCount: "number",
       staffCount: "number",

@@ -120,18 +120,41 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
+    note:
+      "Owed, not defined, because no admin request line carries assurance (spec 02 §18.1's field): " +
+      "the staff realm keeps it on its own request state, but admin's auth hook copies only the " +
+      "outcome, the reason and the actor onto the host's one request line " +
+      "(apps/admin/src/server/auth-hook.ts), the guarded routes set the route, the actor and the " +
+      "outcome only (apps/admin/src/server/routes/register.ts), packages/server's RequestFields has " +
+      "no such field, and the request catalogue entry declares none. A rule over the missing field " +
+      "would never fire (eq) or fire on every staff request (notEq matches a line without it). " +
+      "Once admin's request line carries assurance, the rule is any request on admin with actor " +
+      "staff, assurance notEq aal2 (failing closed), statusClass 1xx, 2xx or 3xx, and a route " +
+      "outside spec 02 §6.4's aal1-allowed list, P, runbook " +
+      "docs/runbooks/admin-without-second-factor.md.",
   },
   {
-    // Named by the Access drift duty (packages/staff/src/access-drift.ts): no successful run in
-    // two hours.
+    // Named by the Access drift duty (packages/staff/src/access-drift.ts) as its success alert.
     name: "duty-stalled-access-drift",
     severity: "N",
     fragment: "staff",
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §10.9, §18.2",
-    heartbeat: "access-drift",
-    note: "Open until the alert is built on Sunday, and decided then: the steward's earlier ruling gives the duty a heartbeat, access-drift, pinged after each successful run, while spec 02 §10.9 says the duty pings no heartbeat but has a success alert. No heartbeat is added to heartbeats.json until that is decided.",
+    note:
+      "The heartbeat question is decided (22 Nov, L-SAT-09) by the plan's order of precedence: " +
+      "no heartbeat. The area's own spec, spec 02 §10.9, says the duty pings no heartbeat but has " +
+      "a success alert; ARCHITECTURE §4.6, higher, lets a duty name a heartbeat or a success alert, " +
+      "and neither its §10.7 heartbeat table nor spec 01 §8.5 names one for this duty. The " +
+      "steward's earlier ruling, which gave it a heartbeat access-drift pinged after each " +
+      "successful run, is no text of the plan's order, so the plan's text binds and " +
+      "heartbeats.json gains nothing. Still owed: no process runs the duty yet (see " +
+      "admin-access-drift), so nothing writes its job.run line and its job name is not fixed " +
+      "(spec 02 §18.1 names it staff.access_drift). Once the worker runs it, the rule is no " +
+      "job.run with that job and result ok in its window (lower_than @none, on_missing_data " +
+      "start_incident, window @thresholds.duty-stalled-access-drift: spec 02 §18.2 says 2 hours, " +
+      "ARCHITECTURE §4.6 and spec 08 §7.8 three cadences, 3 hours, and the higher text binds), " +
+      "runbook docs/runbooks/duty-stalled.md.",
   },
   {
     name: "audit-guard",
@@ -150,7 +173,14 @@ export const OWED_ALERTS: readonly OwedAlert[] = [
     lane: "L-SAT-09",
     due: SUNDAY,
     spec: "spec 02 §18.2",
-    note: "The morning release already writes access.drift (the Access drift duty), so the event exists before its alert does.",
+    note:
+      "packages/staff's runAccessDriftCheck writes access.drift with its counts " +
+      "(access-drift.db.test.ts), but no process runs the duty yet: the worker " +
+      "(apps/api/src/worker/main.ts) runs the email loop, the delivery check and the database " +
+      "probe only, and apps/api does not depend on @fin/staff. An alert over a line no process " +
+      "writes can never fire, so it stays owed, as clock-skew does, until the worker schedules " +
+      "the duty with FIN_ACCESS_READ_TOKEN; the rule is then any access.drift on worker, P, " +
+      "runbook docs/runbooks/admin-access-drift.md.",
   },
   {
     // Its lines are local until fin-review ships them to Better Stack.
