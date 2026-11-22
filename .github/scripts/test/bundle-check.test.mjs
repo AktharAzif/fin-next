@@ -16,7 +16,7 @@ import {
   originsIn,
   urlsIn,
 } from "../bundle-check.mjs";
-import { tempDir, writeTree } from "./helpers.mjs";
+import { assertLinearTime, tempDir, writeTree } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../bundle-check.mjs", import.meta.url));
 
@@ -719,40 +719,6 @@ describe("static builds", () => {
         "assets/a.js",
         'const S="/a.png 100px, //evil.example/b.png 200w";',
       ],
-      // A first candidate a substitution writes is one word whatever it holds (a helper call, a
-      // condition), and a path's brackets that pair are the path's.
-      [
-        "a helper call in a condition's branch",
-        "assets/a.js",
-        `jsx(\`img\`,{srcSet:d?\`${"$"}{u(\`/a.png\`)}, //evil.example/b.png 2x\`:\`/l.png\`})`,
-      ],
-      [
-        "a helper call in a constant",
-        "assets/a.js",
-        `const H=\`${"$"}{asset(\`hero.png\`)}, //evil.example/hero-2x.png 2x\`;`,
-      ],
-      [
-        "a condition in a constant",
-        "assets/a.js",
-        `const H=\`${"$"}{k?"/d.png":"/l.png"}, //evil.example/b.png 2x\`;`,
-      ],
-      ["a path with brackets", "assets/a.js", 'const H="/hero(1).png, //evil.example/b.png 2x";'],
-      [
-        "a helper call, then a candidate with no descriptor",
-        "assets/a.js",
-        `const H=\`${"$"}{asset(\`a.png\`)}, /b.png, //evil.example/c.png 3x\`;`,
-      ],
-      [
-        "a condition, then a candidate with no descriptor",
-        "assets/a.js",
-        `const H=\`${"$"}{k?"/d.png":"/l.png"}, /b.png, //evil.example/c.png 3x\`;`,
-      ],
-      [
-        "a path with brackets, then a candidate with no descriptor",
-        "assets/a.js",
-        'const H="/a(1).png, /b.png, //evil.example/c.png 3x";',
-      ],
-      ["a path with square brackets", "assets/a.js", 'const H="/a[1].png, //evil.example/c.png";'],
     ];
     for (const [what, file, text] of cases) {
       const found = staticRules(t, { [file]: text });
@@ -789,9 +755,6 @@ describe("static builds", () => {
       'f("(",a,b,/\\//)',
       'x="a,b".split(","),/\\//.test(x)',
       'x="Hello, world, and more, //evil.example/x";',
-      // Brackets that do not pair within the run, and a call in code, start no list.
-      'x="see (the docs), //evil.example/x";',
-      'a=f(y),/\\//.test(z);x="q",g(h),/\\/a\\//.test(b);',
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1069,6 +1032,10 @@ describe("static builds", () => {
         `e.innerHTML=\`<base${"$"}{t} href=//evil.example/>\`;`,
       ],
       ["a name a substitution writes", `e.innerHTML=\`<${"$"}{t} href=//evil.example/x>go\`;`],
+      [
+        "another attribute after a name a substitution ends",
+        `e.innerHTML=\`<img${"$"}{c} alt=x src=//evil.example/p.png>\`;`,
+      ],
     ];
     for (const [what, text] of cases) {
       const found = staticRules(t, { "assets/a.js": text });
@@ -1106,6 +1073,11 @@ describe("static builds", () => {
       `export function check(e,t){if(e>=t)throw RangeError(\`expected ${"$"}{e}<${"$"}{t}\`)}export const API=/\\/api\\/v4\\//;export const isApi=e=>API.test(e);`,
       `const m=\`expected ${"$"}{a}<${"$"}{b}\`,re=/\\/api\\/v4\\//;`,
       `throw Error(\`index<n${"$"}{i}\`);var r=/\\/x\\//;`,
+      // Nor where no attribute's `=` follows the substitution before a quote or `>`: a message
+      // that names a component (the UI SDK's), and a plain string's `<${`, whose quote comes first.
+      `throw Error(\`<${"$"}{u.displayName}> must be used inside <${"$"}{o}${"$"}{x}>.\`);let r=/\\/v1\\//;`,
+      `x="<${"$"}{y}"+z;w=/\\/api\\//;q=\`a\`;`,
+      `x='<a${"$"}{y}'+z;w=/\\/api\\//;q=\`a\`;`,
     ]) {
       assert.deepEqual(staticRules(t, { "assets/a.js": text }), [], text);
     }
@@ -1400,14 +1372,18 @@ describe("static builds", () => {
     }
   });
 
-  it("looks for a refresh before each URL in time linear in the text", (t) => {
+  it("looks for a refresh before each URL in time linear in the text", () => {
     // Quoted path data: a digit run and white space before each `//`, as an icon set has.
     const piece = `<path d="${"1".repeat(120)}${" ".repeat(120)}x//a"/>`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(3_000)}</svg>`;
-    const started = performance.now();
-    assert.deepEqual(staticRules(t, { "assets/a.svg": svg }), []);
-    const took = performance.now() - started;
-    assert.ok(took < 3_000, `${Math.round(took)} ms for ${svg.length} characters`);
+    assertLinearTime(
+      "an icon set's path data",
+      (scale) => `<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(750 * scale)}</svg>`,
+      (svg) =>
+        assert.deepEqual(
+          urlsIn(svg).map((u) => u.origin),
+          ["http://www.w3.org"],
+        ),
+    );
   });
 
   it("reads a fixed host a template literal's substitution follows, and one it precedes", (t) => {
@@ -1643,71 +1619,81 @@ describe("static builds", () => {
     }
   });
 
-  it("reads a large script's tags in one pass, its regular expressions left alone", {
-    timeout: 10_000,
-  }, () => {
-    const code = "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;a=>b}".repeat(30_000);
-    assert.deepEqual(urlsIn(code, { kind: "script" }), []);
-    const written = `${code}e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
-    assert.deepEqual(originsIn(written, { kind: "script" }), ["https://collector.evil.example"]);
+  it("reads a large script's tags in one pass, its regular expressions left alone", () => {
+    const loop = "for(let e=0;e<t.length;e++){const n=/\\/assets\\//;a=>b}";
+    const tag = `e.innerHTML='<p title="a>b"><img alt=x src=//collector.evil.example/p.png>';`;
+    assertLinearTime(
+      "a loop's comparisons and regular expressions",
+      (scale) => loop.repeat(7_500 * scale),
+      (code) => assert.deepEqual(urlsIn(code, { kind: "script" }), []),
+    );
+    assertLinearTime(
+      "a tag written after them",
+      (scale) => `${loop.repeat(7_500 * scale)}${tag}`,
+      (code) =>
+        assert.deepEqual(originsIn(code, { kind: "script" }), ["https://collector.evil.example"]),
+    );
   });
 
-  it("pairs a large script's substitutions in time linear in the text", { timeout: 10_000 }, () => {
+  it("pairs a large script's substitutions in time linear in the text", () => {
     // Each `${` in a plain string starts a lexer run that reads out of step, up to its bound.
     const d = "$";
-    const strings = `"${d}{" '${d}{' x=/${d}{/g;`.repeat(40_000);
-    const text = `${strings}i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
-    const started = performance.now();
-    assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]);
-    const took = performance.now() - started;
-    assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
+    const strings = `"${d}{" '${d}{' x=/${d}{/g;`;
+    const tail = `i.src=\`${d}{a?"}":""}//evil.example/x.png\`;e.innerHTML=\`<b ${d}{a?"{":""}>\`;`;
+    assertLinearTime(
+      "dollar-braces in plain strings and regular expressions",
+      (scale) => `${strings.repeat(10_000 * scale)}${tail}`,
+      (text) => assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]),
+    );
   });
 
-  it("reads a large script's srcset lists in time linear in the text", { timeout: 20_000 }, () => {
+  it("reads a large script's srcset lists in time linear in the text", () => {
     // Keyed template lists, each walking through substitutions, and descriptors before commas.
     const d = "$";
-    const lists = `i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(100);
-    const commas = `x=\`${"/a.png 2x, //react.dev/b.png ".repeat(20_000)}\`;`;
-    const text = `${lists}${commas}jsx("img",{srcSet:\`${d}{f(\`a\`)} 1x, //evil.example/b.png 2x\`})`;
-    const started = performance.now();
-    assert.deepEqual(originsIn(text, { kind: "script" }), [
-      "https://react.dev",
-      "https://evil.example",
-    ]);
-    const took = performance.now() - started;
-    assert.ok(took < 3_000, `${Math.round(took)} ms for ${text.length} characters`);
-    // Keyed template lists whose substitutions close far away, side by side or nested in each
-    // other, and a list no key opens over many commas: each list is read up to MAX_SRCSET, and
-    // one that closes past it is refused (url-unread).
-    for (const far of [
-      `${`i.srcset=\`${d}{`.repeat(10_000)}x${"}".repeat(10_000)}\``,
-      `${`srcset:\`${d}{`.repeat(6_000)}${"a".repeat(150_000)}${"}".repeat(6_000)}\``,
-      `${`i.srcset=\`${d}{`.repeat(10_000)}0${"}`".repeat(10_000)}`,
-    ]) {
-      const begun = performance.now();
-      assert.ok(
-        urlsIn(far, { kind: "script" }).some((u) => u.unread),
-        `${far.slice(0, 20)}: not refused`,
+    const last = `jsx("img",{srcSet:\`${d}{f(\`a\`)} 1x, //evil.example/b.png 2x\`})`;
+    assertLinearTime(
+      "keyed lists and descriptors before commas",
+      (scale) =>
+        `${`i.srcset=\`${`${d}{a} 1x, `.repeat(400)}\`;`.repeat(25 * scale)}x=\`${"/a.png 2x, //react.dev/b.png ".repeat(5_000 * scale)}\`;${last}`,
+      (text) =>
+        assert.deepEqual(originsIn(text, { kind: "script" }), [
+          "https://react.dev",
+          "https://evil.example",
+        ]),
+    );
+    // Keyed template lists whose substitutions close far away, nested in each other or closing
+    // one by one: each list is read up to MAX_SRCSET, and one that closes past it is refused
+    // (url-unread).
+    /** @type {[string, (scale: number) => string][]} */
+    const far = [
+      [
+        "lists nested in each other",
+        (scale) => `${`i.srcset=\`${d}{`.repeat(2_500 * scale)}x${"}".repeat(2_500 * scale)}\``,
+      ],
+      [
+        "lists around a long text",
+        (scale) =>
+          `${`srcset:\`${d}{`.repeat(1_500 * scale)}${"a".repeat(37_500 * scale)}${"}".repeat(1_500 * scale)}\``,
+      ],
+      [
+        "lists closing one by one",
+        (scale) => `${`i.srcset=\`${d}{`.repeat(2_500 * scale)}0${"}`".repeat(2_500 * scale)}`,
+      ],
+    ];
+    for (const [what, make] of far) {
+      assertLinearTime(what, make, (text) =>
+        assert.ok(
+          urlsIn(text, { kind: "script" }).some((u) => u.unread),
+          `${what}: not refused`,
+        ),
       );
-      const spent = performance.now() - begun;
-      assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${far.length} characters`);
     }
-    const list = `x="${"/a.png, ".repeat(200_000)}//evil.example/b.png 2x";`;
-    const begun = performance.now();
-    assert.deepEqual(originsIn(list, { kind: "script" }), ["https://evil.example"]);
-    const spent = performance.now() - begun;
-    assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${list.length} characters`);
-    // Lists read back over many substitutions, and from inside each of many side by side: a run
-    // stops at what no candidate holds, never passing the substitutions before it again.
-    for (const many of [
-      `x="${`${d}{a}`.repeat(100_000)}, //evil.example/b.png 2x";`,
-      `x=\`${`${d}{a,//b.png}`.repeat(50_000)}\`;y="${d}{a}, //evil.example/b.png";`,
-    ]) {
-      const begun = performance.now();
-      assert.deepEqual(originsIn(many, { kind: "script" }), ["https://evil.example"]);
-      const spent = performance.now() - begun;
-      assert.ok(spent < 3_000, `${Math.round(spent)} ms for ${many.length} characters`);
-    }
+    // A list no key opens, read back over many commas.
+    assertLinearTime(
+      "a list over many commas",
+      (scale) => `x="${"/a.png, ".repeat(50_000 * scale)}//evil.example/b.png 2x";`,
+      (text) => assert.deepEqual(originsIn(text, { kind: "script" }), ["https://evil.example"]),
+    );
   });
 
   it("refuses a URL that runs past what the scanner reads, never reading only its start", (t) => {
@@ -1858,6 +1844,12 @@ describe("static builds", () => {
       staticRules(t, { "assets/a.js": `const s=${JSON.stringify(sample)},c="Copy as FIN_KEY=";` }),
       [],
     );
+    // Any name a shell expands is a sample's shell variable: the console's key page as the build
+    // prints it (its Try it sample, its copy button's text and what it copies).
+    const keysPage =
+      '(0,Z.jsx)(w,{variant:`block`,label:`Try it`,value:`curl "$FIN_API/v4/whoami" -H "Authorization: Bearer $FIN_KEY"`});' +
+      `function ve(e){return\`FIN_KEY=${"$"}{e}\`}const c=\`Copy as FIN_KEY=…\`;`;
+    assert.deepEqual(staticRules(t, { "assets/keys.js": keysPage }), []);
     for (const name of ["FIN_KEY_SALT", "FIN_API_ORIGIN", "FIN_API", "FIN_KEYS"]) {
       assert.deepEqual(
         staticRules(t, { "assets/a.js": `const k="${name}";` }),

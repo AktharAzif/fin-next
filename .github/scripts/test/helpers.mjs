@@ -1,4 +1,6 @@
-// Test helpers for the CI scripts: temporary folders and git repositories with chosen dates.
+// Test helpers for the CI scripts: temporary folders, git repositories with chosen dates, and
+// timing that load cannot trip.
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,4 +119,41 @@ export function collect() {
   /** @type {string[]} */
   const lines = [];
   return { lines, print: (/** @type {string} */ line) => lines.push(line) };
+}
+
+/** How many times larger assertLinearTime's second input is than its first. */
+export const GROWTH = 4;
+
+/**
+ * Asserts that work takes time linear in its input's size, by the steward's rule for a test that
+ * asserts speed: no wall-clock limit that load alone can trip. The work runs on two inputs, the
+ * second GROWTH times the first, each timed as the fastest of three runs, and the test fails only
+ * where both measures agree that it is slow: the larger input took longer than `limitMs`, and the
+ * time grew more than two and a half times as fast as the input did (linear work grows about
+ * GROWTH times, quadratic work GROWTH squared). Load slows both inputs, so alone it trips the
+ * limit, and a short run's noise alone trips the ratio.
+ * @template T
+ * @param {string} what the work, for the message
+ * @param {(scale: number) => T} make the input at a scale, 1 then GROWTH (not timed)
+ * @param {(input: T) => void} work the work timed, which asserts its own result
+ * @param {number} [limitMs]
+ */
+export function assertLinearTime(what, make, work, limitMs = 2_000) {
+  /** @param {number} scale */
+  const fastest = (scale) => {
+    const input = make(scale);
+    let best = Infinity;
+    for (let run = 0; run < 3; run++) {
+      const started = performance.now();
+      work(input);
+      best = Math.min(best, performance.now() - started);
+    }
+    return best;
+  };
+  const small = fastest(1);
+  const large = fastest(GROWTH);
+  assert.ok(
+    large <= limitMs || large <= small * GROWTH * 2.5,
+    `${what}: ${Math.round(small)} ms, then ${Math.round(large)} ms for ${GROWTH} times the input`,
+  );
 }

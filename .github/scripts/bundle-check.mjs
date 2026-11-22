@@ -14,8 +14,9 @@
 //       scripts/public-safety.mjs's own rules (and the overlay's refuse list when FIN_OVERLAY_FILE
 //       names one); and, in every file a browser reads as text (STATIC_TEXT_FILES) and every
 //       other file that is not binary (an unknown extension, or none): no server setting's name
-//       (`FIN_*`: a build takes public settings only, and env.json's fields are not named so; the
-//       samples' shell variables the plan names, SAMPLE_NAMES, are no setting's); no
+//       (`FIN_*`: a build takes public settings only, and env.json's fields are not named so; a
+//       sample's shell variable, `$FIN_API`, and the bare names the plan's samples use,
+//       SAMPLE_NAMES, are no setting's); no
 //       server-only marker (a `node:` module import, or Vite's stand-in for one,
 //       `__vite-browser-external`); no test seam marker;
 //     - in the same files, no third-party origin: every http, https, ws or wss URL and every
@@ -104,7 +105,10 @@ const SETTING_NAME = /\bFIN_[A-Z0-9]+(?:_[A-Z0-9]+)*\b/g;
 /**
  * The names the plan gives a customer's own shell variables in the docs' and the console's
  * samples (spec 05 §8.2 and §8.8: `$FIN_API_URL`, `$FIN_KEY`), which no server setting is ever
- * named, so a build may name them. A setting's longer name (`FIN_KEY_SALT`) is still refused.
+ * named, so a build may name them bare too (a Node sample's `process.env.FIN_KEY`, the console's
+ * `Copy as FIN_KEY=`). Any name right after a `$` is a sample's shell variable, the customer's own
+ * (the console's `curl "$FIN_API/v4/whoami"`): a server configuration bundled in names its
+ * settings bare. A setting's name written bare (`FIN_KEY_SALT`, `FIN_API`) is still refused.
  */
 export const SAMPLE_NAMES = new Set(["FIN_API_URL", "FIN_KEY"]);
 
@@ -482,13 +486,39 @@ const cssBadUrl = (c) => {
  * (letters, digits and hyphens), then white space or `/`, or a raw quote, which may end the
  * script's string with the tag going on in the next (`"<img"+" src=..."`), or a template
  * literal's substitution, which may write the white space and more (`` `<a${c} href=...>` ``) or
- * the name itself (`` `<${t} href=...>` ``). A tag a substitution ends or names is read only as
- * far as its template literal goes (attributeEquals): a message's `` `${a}<${b}` `` opens one
- * too, and the code after the literal is no tag's.
+ * the name itself (`` `<${t} href=...>` ``). A `<` before a substitution is as often a message's
+ * (`` `${a}<${b}` ``, `` `<${name}> must be used inside` ``), so a tag a substitution ends or names
+ * opens only where its literal goes on as markup (markupAfter), and is read only as far as its
+ * template literal goes (attributeEquals): the code after the literal is no tag's.
  */
 const TAG_OPEN = /<(?:[A-Za-z][A-Za-z0-9-]*[\t\n\f\r /"'`]|(?:[A-Za-z][A-Za-z0-9-]*)?(?=\$\{))/g;
 /** What ends a name in TAG_OPEN's first form; the form a substitution follows ends in none. */
 const NAME_END = /[\t\n\f\r /"'`]$/;
+/** How far after a substitution that ends a tag's name markupAfter looks: a bound on its work. */
+const MAX_NAME_GAP = 256;
+
+/**
+ * Whether the text after a substitution that ends a start tag's name, or writes it, goes on as
+ * that tag's markup: past a `}` that may close the substitution, an attribute's `=` stands before
+ * any raw `>` or quote, within MAX_NAME_GAP (`` `<a${c} href=...>` ``). A message goes on
+ * otherwise (`` `${a}<${b}` ``, `` `<${o}> must be used inside` ``), and so does a plain string's
+ * `"<${"` (its quote comes first).
+ * @param {Reading} reading
+ * @param {number[]} closes each `}` that may close the substitution
+ */
+function markupAfter(reading, closes) {
+  const { text } = reading;
+  for (const close of closes) {
+    const end = Math.min(text.length, close + 1 + MAX_NAME_GAP);
+    for (let k = close + 1; k < end; k++) {
+      if (isSpelled(reading, k)) continue;
+      const c = text[k];
+      if (c === "=") return true;
+      if (c === ">" || c === '"' || c === "'" || c === "`") break;
+    }
+  }
+  return false;
+}
 // The HTML tokenizer's states inside a start tag, as bits, so every tag open at once is followed
 // in one pass: before an attribute's name, in it, after it, before its value, in a double- or
 // single-quoted value, in an unquoted one, after a quoted one.
@@ -808,10 +838,11 @@ function nextRaw(reading, c, from) {
  *   `,` looks like the next one's start), so a string after a tag may be read as part of it, but
  *   only within the bound, and only its own text: the code after a string is read by the
  *   literal reading only.
- * A tag a substitution ends or names (`` `<a${c} href=...>` ``, `` `<${t} href=...>` ``) is read
- * by the template literal's piece reading alone, never the literal one, so it ends at the
- * literal's closing backtick: `<` before a substitution is as often a comparison in a message
- * (`` `expected ${a}<${b}` ``), and the code after it is no tag's.
+ * A tag a substitution ends or names (`` `<a${c} href=...>` ``, `` `<${t} href=...>` ``) opens
+ * only where its literal goes on as markup (markupAfter), and is read by the template literal's
+ * piece reading alone, never the literal one, so it ends at the literal's closing backtick: `<`
+ * before a substitution is as often a comparison in a message (`` `expected ${a}<${b}` ``), and
+ * the code after it is no tag's.
  * @param {Reading} reading
  * @param {() => Map<number, number[]>} spansOf the reading's substitutions
  * @returns {Set<number>}
@@ -823,7 +854,7 @@ function attributeEquals(reading, spansOf) {
   // Where each tag's first state starts: after the white space, `/` or quote after its name, or
   // at the `${` that ends its name (or stands for it).
   /** @type {number[]} */
-  const opens = [];
+  const found = [];
   // The opens whose tag a substitution ends or names: read only to the template literal's end.
   /** @type {Set<number>} */
   const written = new Set();
@@ -833,11 +864,16 @@ function attributeEquals(reading, spansOf) {
     let raw = true;
     for (let k = at; k <= last && raw; k++) raw = !isSpelled(reading, k);
     if (!raw) continue;
-    opens.push(last);
+    found.push(last);
     if (!NAME_END.test(m[0])) written.add(last);
   }
-  if (opens.length === 0) return equals;
+  if (found.length === 0) return equals;
   const spans = spansOf();
+  // Such a tag opens only where its literal goes on as markup (markupAfter).
+  const opens = found.filter(
+    (last) => !written.has(last) || markupAfter(reading, spans.get(last + 1) ?? []),
+  );
+  if (opens.length === 0) return equals;
   // The states held at substitutions, by each `}` that may close them: the literal reading's,
   // and a template literal's piece reading's. `ends` orders those `}`s, least first.
   /** @type {Map<number, number>} */
@@ -1386,34 +1422,13 @@ function opensString(text, quote) {
 
 /**
  * A srcset candidate's URL in a list no key opens, with each substitution read as a word: a
- * path, a relative path or a word's start, and nothing code holds (a brace, `<`, `>`, `;`, a
- * backslash, a quote, `^`, `|`, `*` or `$`, and a bracket that does not pair within it:
- * bracketsPair). Code after a string's closing quote starts with an operator or a bracket
- * (`"x"),`, `"("+t,`, `"?".length,`), never so.
+ * path, a relative path or a word's start, and nothing code holds (a bracket, a brace, `<`, `>`,
+ * `;`, a backslash, a quote, `^`, `|`, `*` or `$`). Code after a string's closing quote starts with
+ * an operator or a bracket (`"x"),`, `"("+t,`, `"?".length,`), never so.
  */
-const CANDIDATE_URL = /^(?:\.{0,2}\/|\w)[^{}<>;\\"'`^|*$\u{e000}-\u{e002}]*$/u;
-/** What no candidate's URL nor descriptor holds, which ends a list's read-back at once. */
-const NO_CANDIDATE = new Set([..."{}<>;\\^|*$"]);
+const CANDIDATE_URL = /^(?:\.{0,2}\/|\w)[^()[\]{}<>;\\"'`^|*$\u{e000}-\u{e002}]*$/u;
 /** A descriptor, misspelled ones included (`2X`, `100px`, `1.5dppx`): a number first. */
 const DESCRIPTOR_LIKE = /^\.?[0-9][0-9A-Za-z.+-]*$/;
-/** What a substitution a list's read-back passes over stands for in the run read: a word. */
-const WORD = "\u{1}";
-
-/**
- * Whether every bracket of a run pairs within it, each closed after it opens: `/hero(1).png` and
- * `/a[1].png` do; `)`, `){if(C.shift()` and `^([^\s].*)\((\d+` do not.
- * @param {string} run
- */
-function bracketsPair(run) {
-  /** @type {string[]} */
-  const open = [];
-  for (const c of run) {
-    if (c === "(" || c === "[") open.push(c);
-    else if (c === ")" && open.pop() !== "(") return false;
-    else if (c === "]" && open.pop() !== "[") return false;
-  }
-  return open.length === 0;
-}
 
 /**
  * Whether a comma ends a candidate of a srcset list a script's string holds where no srcset key
@@ -1421,21 +1436,20 @@ function bracketsPair(run) {
  * `c?"/a.png, //host/b.png 2x":x`), so a URL after it is a later candidate. The list is read back
  * piece by piece (split at commas) from the comma to the quote that opens it: each piece is one
  * candidate, its URL (CANDIDATE_URL) and descriptors after white space, misspelled ones
- * included (DESCRIPTOR_LIKE); an empty piece (`,,`) is passed over. A substitution the lexer or
- * brace counting pairs is one word, whatever it holds (`${asset(`a.png`)}`,
- * `${dark?"/d.png":"/l.png"}`): the read-back goes on from its `${`. The quote must open a string
+ * included (DESCRIPTOR_LIKE); an empty piece (`,,`) is passed over. The quote must open a string
  * (opensString) and the first candidate stand right after it, past white space: a quote right
  * before a comma closes a string and opens no list. With no quote between the comma and the
  * quote, the whole list is that string's text when the quote opens it; the first candidate's
  * shape tells a closing quote from an opening one. Each comma passed is remembered with the
- * answer, so each piece is read back once, a run stops at the first character no candidate holds
- * (NO_CANDIDATE), and the work stays linear.
+ * answer, so each piece is read back once and the work stays linear. A list whose first
+ * candidate code builds (a helper's call or a condition in a substitution) is not read here: an
+ * image list built at run time is the page policy's to refuse (img-src). A list a key opens is
+ * read whole, whatever it holds.
  * @param {string} text
  * @param {number} comma
  * @param {Map<number, boolean>} known the answers so far, for this text
- * @param {Map<number, number>} openers each `}` that may close a substitution, to its `${`
  */
-function srcsetListBefore(text, comma, known, openers) {
+function srcsetListBefore(text, comma, known) {
   /** @type {number[]} */
   const passed = [];
   let answer = false;
@@ -1453,34 +1467,21 @@ function srcsetListBefore(text, comma, known, openers) {
     for (;;) {
       while (i >= 0 && ASCII_SPACE.has(text[i] ?? "")) i--;
       const end = i;
-      // The run, back to white space, a quote or a comma, each substitution in it a word.
-      /** @type {string[]} */
-      const parts = [];
-      let to = end + 1;
-      while (i >= 0) {
-        const c = text[i] ?? "";
-        const open = c === "}" ? openers.get(i) : undefined;
-        if (open !== undefined) {
-          parts.push(text.slice(i + 1, to), WORD);
-          to = open;
-          i = open - 1;
-          continue;
-        }
-        if (ASCII_SPACE.has(c) || QUOTES.has(c) || c === ",") break;
-        if (NO_CANDIDATE.has(c)) {
-          shape = false;
-          break;
-        }
+      while (
+        i >= 0 &&
+        !ASCII_SPACE.has(text[i] ?? "") &&
+        !QUOTES.has(text[i] ?? "") &&
+        text[i] !== ","
+      ) {
         i--;
       }
-      if (!shape || i === end) break;
-      parts.push(text.slice(i + 1, to));
+      if (i === end) break;
       // A run before another: the one after it is a descriptor.
-      if (url !== "" && !DESCRIPTOR_LIKE.test(url.replaceAll(WORD, "1"))) {
+      if (url !== "" && !DESCRIPTOR_LIKE.test(url.replace(CANDIDATE_SUBSTITUTION, "1"))) {
         shape = false;
         break;
       }
-      url = parts.reverse().join("");
+      url = text.slice(i + 1, end + 1);
     }
     const start = text[i] ?? "";
     if (!shape) break;
@@ -1489,7 +1490,7 @@ function srcsetListBefore(text, comma, known, openers) {
       at = i;
       continue;
     }
-    if (!CANDIDATE_URL.test(url.replaceAll(WORD, "x")) || !bracketsPair(url)) break;
+    if (!CANDIDATE_URL.test(url.replace(CANDIDATE_SUBSTITUTION, "x"))) break;
     if (start === ",") {
       at = i;
       continue;
@@ -1579,35 +1580,26 @@ function scanReading(reading, kind, found) {
     equals ??= attributeEquals(reading, spansOf);
     return equals.has(eq);
   };
-  /**
-   * Each `}` that counting or the lexer pairs with a `${`, to the nearest such `${`.
-   * @type {Map<number, number> | null}
-   */
+  /** @type {Set<number> | null} */
   let substitutionEnds = null;
   /** The starts whose `}` neither counting nor the lexer knows, least first. */
   /** @type {number[]} */
   const unknownStarts = [];
-  const openers = () => {
-    if (substitutionEnds === null) {
-      substitutionEnds = new Map();
-      for (const [start, ends] of spansOf()) {
-        if (ends.length === 0) unknownStarts.push(start);
-        for (const end of ends) {
-          if ((substitutionEnds.get(end) ?? -1) < start) substitutionEnds.set(end, start);
-        }
-      }
-    }
-    return substitutionEnds;
-  };
   /**
    * Whether the `}` at an index may close a substitution: one that counting or the lexer pairs
    * with a `${`, or any raw `}` up to MAX_SUBSTITUTION after a `${` neither pairs.
    * @param {number} brace
    */
   const closesSubstitution = (brace) => {
-    const paired = openers();
+    if (substitutionEnds === null) {
+      substitutionEnds = new Set();
+      for (const [start, ends] of spansOf()) {
+        if (ends.length === 0) unknownStarts.push(start);
+        for (const end of ends) substitutionEnds.add(end);
+      }
+    }
     if (isSpelled(reading, brace)) return false;
-    if (paired.has(brace)) return true;
+    if (substitutionEnds.has(brace)) return true;
     let lo = 0;
     let hi = unknownStarts.length;
     while (lo < hi) {
@@ -1621,7 +1613,7 @@ function scanReading(reading, kind, found) {
   /** @type {Map<number, boolean>} */
   const listEnds = new Map();
   /** @param {number} comma */
-  const inList = (comma) => srcsetListBefore(text, comma, listEnds, openers());
+  const inList = (comma) => srcsetListBefore(text, comma, listEnds);
   /** @param {number} start */
   const contexts = (start) =>
     contextsBefore(reading, start, kind, inTag, inList, closesSubstitution);
@@ -1914,8 +1906,10 @@ function textFindings(at, file, bytes) {
     for (const marker of SERVER_MARKERS) {
       if (marker.pattern.test(text)) add("server-only", marker.what);
     }
-    for (const name of new Set([...text.matchAll(SETTING_NAME)].map((m) => m[0]))) {
-      if (SAMPLE_NAMES.has(name)) continue;
+    for (const m of text.matchAll(SETTING_NAME)) {
+      const name = m[0];
+      // A name a shell expands is a sample's shell variable (`curl "$FIN_API/v4/whoami"`).
+      if (SAMPLE_NAMES.has(name) || text[(m.index ?? 0) - 1] === "$") continue;
       add(
         "setting-name",
         `names the server setting ${clean(name, 60)} (FW-C12: a build takes public settings only)`,
