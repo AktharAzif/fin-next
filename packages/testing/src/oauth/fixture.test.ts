@@ -1,6 +1,7 @@
 // The fixture OpenID provider answers as Google's endpoints do, and refuses what Google refuses:
-// an unknown client or redirect URI, no state, no S256 challenge, no nonce; a reused or expired
-// code, another client, another redirect URI, a wrong verifier. Its ID tokens verify under its JWKS.
+// an unknown client or redirect URI, no scope, no state, no S256 challenge, no nonce; a reused or
+// expired code, another client, another redirect URI, a wrong verifier. Its ID tokens verify under
+// its JWKS, and carry what the granted scope allows.
 import { createHash, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { decodeToken, verifyRs256 } from "../access/jwt.ts";
@@ -46,10 +47,15 @@ function authorizeUrl(params: Record<string, string | null>): string {
   return url.href;
 }
 
-async function codeFor(fixture: OAuthFixture, challenge: string, nonce = "nonce-1") {
+async function codeFor(
+  fixture: OAuthFixture,
+  challenge: string,
+  nonce = "nonce-1",
+  params: Record<string, string> = {},
+) {
   fixture.chooseNext(MAYA);
   const answer = await fixture.handle(
-    new Request(authorizeUrl({ code_challenge: challenge, nonce })),
+    new Request(authorizeUrl({ code_challenge: challenge, nonce, ...params })),
   );
   expect(answer.status).toBe(302);
   const back = new URL(String(answer.headers.get("location")));
@@ -71,7 +77,8 @@ describe("the fixture's authorization endpoint", () => {
     ["an unknown client", { client_id: "other" }],
     ["a redirect URI that is not exactly registered", { redirect_uri: `${REDIRECT}/` }],
     ["another response type", { response_type: "token" }],
-    ["no openid scope", { scope: "email" }],
+    ["no scope", { scope: null }],
+    ["an empty scope", { scope: " " }],
     ["no state", { state: null }],
     ["a plain challenge", { code_challenge_method: "plain" }],
     ["no challenge", { code_challenge: null }],
@@ -149,6 +156,58 @@ describe("the fixture's token endpoint", () => {
       nonce: "nonce-1",
     });
     expect(fixture.exchanges.at(-1)).toMatchObject({ outcome: "issued", pkce: true });
+  });
+
+  it("carries the address only for the email scope, and the name only for profile", async () => {
+    const fixture = setup();
+    const exchange = async (scope: string) => {
+      const { verifier, challenge } = pkce();
+      const code = await codeFor(fixture, challenge, "nonce-1", { scope });
+      const answer = await fixture.handle(
+        tokenRequest({
+          grant_type: "authorization_code",
+          code,
+          code_verifier: verifier,
+          redirect_uri: REDIRECT,
+          client_id: CLIENT.clientId,
+          client_secret: CLIENT.clientSecret,
+        }),
+      );
+      expect(answer.status).toBe(200);
+      return (await answer.json()) as { id_token?: string; scope: string };
+    };
+    const openid = await exchange("openid");
+    expect(openid.scope).toBe("openid");
+    const bare = decodeToken(String(openid.id_token)).payload;
+    expect(bare).toMatchObject({ sub: MAYA.sub, nonce: "nonce-1" });
+    expect(bare).not.toHaveProperty("email");
+    expect(bare).not.toHaveProperty("email_verified");
+    expect(bare).not.toHaveProperty("name");
+    const email = decodeToken(String((await exchange("openid email")).id_token)).payload;
+    expect(email).toMatchObject({ email: MAYA.email, email_verified: true });
+    expect(email).not.toHaveProperty("name");
+  });
+
+  it("answers no ID token for a scope with no identity in it", async () => {
+    const fixture = setup();
+    const { verifier, challenge } = pkce();
+    const scope = "https://www.googleapis.com/auth/drive.file";
+    const code = await codeFor(fixture, challenge, "nonce-1", { scope });
+    const answer = await fixture.handle(
+      tokenRequest({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: verifier,
+        redirect_uri: REDIRECT,
+        client_id: CLIENT.clientId,
+        client_secret: CLIENT.clientSecret,
+      }),
+    );
+    expect(answer.status).toBe(200);
+    const body = (await answer.json()) as Record<string, unknown>;
+    expect(body.scope).toBe(scope);
+    expect(body).not.toHaveProperty("id_token");
+    expect(typeof body.access_token).toBe("string");
   });
 
   it("takes the client's credentials by HTTP Basic too", async () => {

@@ -28,7 +28,7 @@ import type { RequestState } from "../request.ts";
 import type { RealmRuntime } from "../runtime.ts";
 import { consumeIntent, readIntent } from "../step-up/intents.ts";
 import { personById } from "../store.ts";
-import type { GoogleFlow } from "./flow.ts";
+import { type GoogleFlow, refusalPageError } from "./flow.ts";
 import { GOOGLE_RETURN_PAGES, type GoogleRedirectField, googleReturnUrl } from "./redirect.ts";
 import { LINK_INTENT_KEY } from "./state.ts";
 
@@ -378,40 +378,37 @@ export async function googleCallbackAfter(
 ): Promise<void> {
   const error = redirectError(ctx);
   if (error !== null) {
-    // On its way back to the page with `?error=`. A failure on Fin's side or the provider's (the
-    // exchange, the keys, a token that did not verify) was lined when it was prefetched, and the
-    // page says `google_failed`; an address Google has not verified says `email_unverified`;
-    // anything else (a code the provider refused among them) is a refusal, lined here.
+    // On its way back to the page with `?error=`. Where the library refused because Fin's provider
+    // answered nothing, the prefetch says why (flow.ts): a failure on Fin's side or the provider's
+    // was lined when it was prefetched, and the page says `google_failed`; anything the client's
+    // round trip caused is a refusal, lined here with its own reason. Any other `error` is the
+    // library's refusal (the person cancelled, an account not linked, sign-ups paused, …).
     const prefetched = state.google.prefetched;
-    // Only where the library refused because Fin's provider answered nothing.
     const fromProvider = error === "invalid_code" || error === "unable_to_get_user_info";
-    const failed =
-      fromProvider &&
-      prefetched !== null &&
-      (prefetched.kind === "failed" ||
-        (prefetched.kind === "token" &&
-          !prefetched.result.ok &&
-          prefetched.result.reason !== "email_unverified"));
-    const unverified =
-      fromProvider &&
-      prefetched?.kind === "token" &&
-      !prefetched.result.ok &&
-      prefetched.result.reason === "email_unverified";
-    state.google.redirectError = failed ? "google_failed" : unverified ? "email_unverified" : null;
-    state.line.outcome = failed ? "error" : "refused";
-    if (failed) {
+    const outcome =
+      fromProvider && prefetched !== null && prefetched.kind !== "token" ? prefetched : null;
+    if (outcome?.kind === "failed") {
+      state.google.redirectError = "google_failed";
+      state.line.outcome = "error";
       state.line.reason = "google.failed";
       return;
     }
-    const lineReason = typeof state.line.reason === "string" ? state.line.reason : "";
-    const reason = unverified
-      ? "email_unverified"
-      : lineReason === "switch.signups"
-        ? "signups_paused"
-        : lineReason.startsWith("limits.sign_up")
-          ? "sign_up_limited"
-          : error;
+    let reason: string;
+    if (outcome?.kind === "refused") {
+      state.google.redirectError = refusalPageError(outcome.refusal);
+      reason = outcome.refusal;
+    } else {
+      state.google.redirectError = null;
+      const lineReason = typeof state.line.reason === "string" ? state.line.reason : "";
+      reason =
+        lineReason === "switch.signups"
+          ? "signups_paused"
+          : lineReason.startsWith("limits.sign_up")
+            ? "sign_up_limited"
+            : error;
+    }
     rt.lines.write("auth.google_refused", "warn", { realm: "developer", reason });
+    state.line.outcome = "refused";
     state.line.reason = `google.${reason}`;
     return;
   }

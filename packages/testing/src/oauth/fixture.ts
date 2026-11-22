@@ -2,17 +2,21 @@
 // Google round trip ... proven in Playwright against a mock identity provider"), test target only
 // ([SA-38]). It answers as Google's endpoints do for an authorization-code flow with PKCE:
 //
-//   GET  /authorize   checks the client, the exact redirect URI, `response_type=code`, an `openid`
-//                     scope, a state, an S256 code challenge and a nonce, then signs in the chosen
-//                     account (or shows an account chooser, as `prompt=select_account` does) and
-//                     redirects back with a single-use code;
+//   GET  /authorize   checks the client, the exact redirect URI, `response_type=code`, a scope, a
+//                     state, an S256 code challenge and a nonce, then signs in the chosen account
+//                     (or shows an account chooser, as `prompt=select_account` does) and redirects
+//                     back with a single-use code;
 //   POST /token       authenticates the client (client_secret_post or Basic), checks the code, the
-//                     same redirect URI and the PKCE verifier, and answers an RS256 ID token
-//                     carrying the nonce;
+//                     same redirect URI and the PKCE verifier, and answers the scope it granted
+//                     and, for an identity scope (`openid`, `email` or `profile`), an RS256 ID
+//                     token carrying the nonce, with the address only for `email` and the name
+//                     only for `profile`, as Google's token endpoint answers;
 //   GET  /jwks        lists the signing keys;
 //   /control/*        lets Node-side test code choose the next account and read what was asked.
 //
-// Each refusal a client must handle can be planted (`tamperNext`): a wrong nonce, audience or
+// The authorization request passes through the browser, so a test may change any of it before it
+// reaches the fixture (its nonce, its scopes, its challenge), as a client can at Google. Each
+// refusal a client must handle can also be planted (`tamperNext`): a wrong nonce, audience or
 // issuer, an expired or old token, a bad signature, an unverified address, `alg: none`, an
 // unknown key, or a provider error at the token endpoint. Nothing here is ever deployed; the import
 // rules keep @fin/testing out of deployable code.
@@ -107,6 +111,8 @@ function makeKey(): SigningKey {
 
 const CODE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
+/** The scopes for which Google's token endpoint answers an ID token. */
+const IDENTITY_SCOPES = new Set(["openid", "email", "profile"]);
 
 function text(status: number, body: string): Response {
   return new Response(`${body}\n`, {
@@ -231,8 +237,9 @@ export class OAuthFixture {
     const redirectUri = p.get("redirect_uri") ?? "";
     if (!client.redirectUris.includes(redirectUri)) return refuse("redirect_uri_mismatch");
     if (p.get("response_type") !== "code") return refuse("unsupported_response_type");
-    const scopes = (p.get("scope") ?? "").split(" ");
-    if (!scopes.includes("openid")) return refuse("the scope must include openid");
+    // Any scope, as Google takes one without `openid`; the token answer then says what it granted.
+    const scopes = (p.get("scope") ?? "").split(" ").filter((s) => s !== "");
+    if (scopes.length === 0) return refuse("a scope is required");
     const state = p.get("state") ?? "";
     if (state === "") return refuse("a state is required");
     const challenge = p.get("code_challenge") ?? "";
@@ -375,13 +382,15 @@ export class OAuthFixture {
     if (challenge !== code.codeChallenge) return refuse("invalid_grant");
     if (code.tamper === "token_error") return refuse("server_error");
     record("issued");
+    const scopes = code.scope.split(" ");
     return Response.json(
       {
         access_token: base64url(randomBytes(24)),
         token_type: "Bearer",
         expires_in: 3599,
         scope: code.scope,
-        id_token: this.#idToken(code),
+        // Google answers an ID token only for an identity scope.
+        ...(scopes.some((s) => IDENTITY_SCOPES.has(s)) ? { id_token: this.#idToken(code) } : {}),
       },
       { headers: { "cache-control": "no-store" } },
     );
@@ -390,18 +399,22 @@ export class OAuthFixture {
   #idToken(code: IssuedCode): string {
     const now = Math.floor(this.#now() / 1000);
     const { account, tamper } = code;
+    const scopes = code.scope.split(" ");
     const claims: Record<string, unknown> = {
       iss: tamper === "issuer" ? "https://issuer.example.org" : this.issuer,
       azp: code.clientId,
       aud: tamper === "audience" ? "another-client.example.org" : code.clientId,
       sub: account.sub,
-      email: account.email,
-      email_verified: tamper === "unverified" ? false : (account.emailVerified ?? true),
       nonce: tamper === "nonce" ? base64url(randomBytes(16)) : code.nonce,
       iat: tamper === "issued_long_ago" ? now - 7200 : now,
       exp: tamper === "expired" ? now - 600 : now + 3600,
     };
-    if (account.name !== undefined) claims.name = account.name;
+    // The address only for the `email` scope, the profile only for `profile`, as Google sends them.
+    if (scopes.includes("email")) {
+      claims.email = account.email;
+      claims.email_verified = tamper === "unverified" ? false : (account.emailVerified ?? true);
+    }
+    if (scopes.includes("profile") && account.name !== undefined) claims.name = account.name;
     if (account.hd !== undefined) claims.hd = account.hd;
     if (tamper === "alg_none") return unsignedToken({ alg: "none", typ: "JWT" }, claims);
     let signer = this.#key;
