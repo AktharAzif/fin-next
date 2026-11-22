@@ -14,7 +14,9 @@
 //     challenge, the redirect URI. So a code the provider will not exchange for this sign-in, an
 //     answer without an ID token to a request that asked for none, and an ID token whose nonce is
 //     not this sign-in's, that carries no usable address, or that a long nonce pushed past Fin's
-//     bound are refusals, as is an address the provider has not verified.
+//     bound are refusals, as is an address the provider has not verified. Each of these is read
+//     only from a token already proved the provider's for this client now (id-token.ts checks the
+//     signature, issuer, audience and times first), so no answer that is not one is a refusal.
 import type { GoogleClaims, IdTokenRefusal } from "./id-token.ts";
 
 /** The ID token refusals a client (or the person's own account) can cause. */

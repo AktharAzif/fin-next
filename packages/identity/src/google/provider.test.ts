@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { ManualClock } from "../ports/clock.ts";
 import { MemoryLineSink } from "../ports/log.ts";
 import { type GoogleFlow, newGoogleFlow } from "./flow.ts";
-import { MAX_TOKEN_LENGTH } from "./id-token.ts";
+import { MAX_TOKEN_LENGTH, MAX_TOKEN_READ } from "./id-token.ts";
 import { createGoogleSignIn } from "./provider.ts";
 import { fixtureEndpoints, type GoogleSettings } from "./settings.ts";
 import type { StateClaim, StoredState } from "./state.ts";
@@ -479,6 +479,63 @@ describe("the prefetch and the library's calls", () => {
     expect(s.flow().prefetched).toMatchObject({ kind: "failed", failure });
     expect(s.lines.named("auth.google_failed")).toEqual([{ realm: "developer", reason: failure }]);
   });
+
+  // Past Fin's bound, an answer that is not the provider's token for this client now keeps its own
+  // fault, a failure with its line: the bound (`too_long`, which a client's long nonce causes) is
+  // read only from a token already proved the provider's.
+  const T0 = Math.floor(Date.parse("2026-11-21T12:00:00Z") / 1000);
+  const long = {
+    iss: ISSUER,
+    aud: settings.clientId,
+    sub: "1234",
+    email: "maya@example.com",
+    email_verified: true,
+    nonce: NONCE,
+    iat: T0,
+    exp: T0 + 3600,
+    pad: "p".repeat(MAX_TOKEN_LENGTH),
+  };
+  /** A token under K1's kid, signed by K2's private key. */
+  const forged = (claims: Record<string, unknown>) => {
+    const input = `${b64({ alg: "RS256", kid: K1.kid })}.${b64(claims)}`;
+    return `${input}.${sign("sha256", Buffer.from(input), K2.privateKey).toString("base64url")}`;
+  };
+  it.each([
+    ["junk", () => "x".repeat(MAX_TOKEN_LENGTH + 808), "malformed"],
+    ["an HTML page", () => `<html>${"x".repeat(MAX_TOKEN_LENGTH)}</html>`, "malformed"],
+    ["junk past the read cap", () => "x".repeat(MAX_TOKEN_READ + 1), "malformed"],
+    [
+      "an unsigned token (alg none)",
+      () => `${b64({ alg: "none", kid: K1.kid })}.${b64(long)}.`,
+      "algorithm",
+    ],
+    ["a token under a key the provider never listed", () => idToken(long, K3), "unknown_key"],
+    ["a token another key signed under a listed kid", () => forged(long), "signature"],
+    [
+      "a token for another issuer",
+      () => idToken({ ...long, iss: "https://issuer.example.org" }),
+      "issuer",
+    ],
+    [
+      "a token for another client",
+      () => idToken({ ...long, aud: "other.apps.example.com" }),
+      "audience",
+    ],
+  ])(
+    "reads an over-length answer that is %s as a failure, with its line",
+    async (_label, make, failure) => {
+      const answer = make();
+      expect(answer.length).toBeGreaterThan(MAX_TOKEN_LENGTH);
+      const s = setup({
+        token: () => Response.json({ access_token: "x", token_type: "Bearer", id_token: answer }),
+      });
+      expect(await s.google.prefetch(s.callback(), s.claim)).toBeNull();
+      expect(s.flow().prefetched).toMatchObject({ kind: "failed", failure });
+      expect(s.lines.named("auth.google_failed")).toEqual([
+        { realm: "developer", reason: failure },
+      ]);
+    },
+  );
 
   it("reads an ID token that is not a token at all as a failure", async () => {
     const s = setup({
