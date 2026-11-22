@@ -1,0 +1,131 @@
+{
+  "$comment": "Phase 0's database alerts (spec 01 §8.7, spec 08 §7.8 group H). P0-E's probe and matcher write the lines; the HA alerts come before production.",
+  "alerts": [
+    {
+      "name": "database-unreachable",
+      "group": "H",
+      "severity": "P",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin"],
+      "query": {
+        "count": {
+          "events": ["database.pool_error", "process.health"],
+          "whereAny": [
+            { "field": "event", "eq": "database.pool_error" },
+            { "field": "dbOk", "eq": false }
+          ]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 120,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Services cannot reach Postgres (pool errors, or dbOk false on process.health) for 2 minutes.",
+      "metadata": {
+        "check": "Railway's Postgres state; whether one service or all report it.",
+        "flow": "F14",
+        "runbook": "docs/runbooks/database.md"
+      }
+    },
+    {
+      "name": "pool-exhausted",
+      "group": "H",
+      "severity": "P",
+      "sources": ["edge", "api", "worker", "payments", "console", "admin"],
+      "query": { "max": { "event": "process.health", "field": "poolWaiting" } },
+      "operator": "higher_than",
+      "threshold": "@thresholds.pool-exhausted",
+      "check_period": 60,
+      "query_period": 60,
+      "confirmation_period": 300,
+      "recovery_period": 300,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Requests are waiting for database connections. Waiting: {{value}}.",
+      "metadata": {
+        "check": "Long transactions (the probe's longest_tx_s); pool sizes against replicas.",
+        "flow": "F14",
+        "runbook": "docs/runbooks/database.md"
+      }
+    },
+    {
+      "name": "wal-archiving-stalled",
+      "group": "H",
+      "severity": "P",
+      "sources": ["worker"],
+      "query": {
+        "max": {
+          "event": "job.run",
+          "field": "archiverLagS",
+          "where": [{ "field": "job", "eq": "db-probe" }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.wal-archiving-stalled",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 60,
+      "recovery_period": 600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "No WAL has been archived for {{value}} s: point-in-time recovery has a gap.",
+      "metadata": {
+        "check": "The probe's archiverFailed count; Railway's PITR status.",
+        "flow": "F16",
+        "runbook": "docs/runbooks/pitr-gap.md"
+      }
+    },
+    {
+      "name": "privileged-login",
+      "group": "H",
+      "severity": "P",
+      "sources": ["worker"],
+      "seriesBy": "role",
+      "query": {
+        "count": {
+          "events": ["database.privileged_login"],
+          "where": [{ "field": "registered", "notEq": true }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 60,
+      "query_period": 300,
+      "confirmation_period": 0,
+      "recovery_period": 3600,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "A superuser or owner login happened outside a registered run, or the matcher could not say it was registered.",
+      "metadata": {
+        "check": "Who: the role on the line; Railway's audit log; the registered runs.",
+        "flow": "F18",
+        "runbook": "docs/runbooks/privileged-login.md"
+      }
+    },
+    {
+      "name": "grants-drift",
+      "group": "H",
+      "severity": "P",
+      "sources": ["worker"],
+      "seriesBy": "role",
+      "query": { "count": { "events": ["database.grants_drift"] } },
+      "operator": "higher_than",
+      "threshold": "@any",
+      "check_period": 300,
+      "query_period": 3900,
+      "confirmation_period": 0,
+      "recovery_period": 3900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Live database grants differ from the grant matrix.",
+      "metadata": {
+        "check": "The last migration; privileged-login history.",
+        "flow": "F18",
+        "runbook": "docs/runbooks/grants-drift.md"
+      }
+    }
+  ]
+}
