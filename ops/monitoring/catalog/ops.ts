@@ -19,7 +19,7 @@ export const entries: readonly CatalogEntry[] = [
     kind: "unit",
     level: "info",
     writtenBy:
-      "pnpm fin static deploy, one per static deployment uploaded; tools/static-deploy prints the same in its job log, where the release is named `release` (that line has no envelope)",
+      "pnpm fin static deploy, one per static deployment uploaded; tools/static-deploy prints the same in its job log (that line has no envelope, and names the release `deployedRelease` all the same: `release` is the envelope's)",
     fields: {
       deployment: "string",
       deployedRelease: "string",
@@ -34,7 +34,7 @@ export const entries: readonly CatalogEntry[] = [
     kind: "unit",
     level: "info",
     writtenBy:
-      "pnpm fin static deploy once every deployment is uploaded, and tools/static-deploy in its job log (with `release`, as above)",
+      "pnpm fin static deploy once every deployment is uploaded, and tools/static-deploy in its job log (as above)",
     fields: { deployedRelease: "string", deployments: "number" },
     alerts: [],
   },

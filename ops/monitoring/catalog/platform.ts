@@ -56,8 +56,18 @@ export const entries: readonly CatalogEntry[] = [
     event: "process.start",
     kind: "unit",
     level: "info",
-    writtenBy: PROCESSES,
-    fields: { node: "string" },
+    writtenBy: `${PROCESSES}: packages/server's runService writes the build target, port, drain and whether lines ship and errors report; the connector supervisor its tunnel's role, cloudflared's version and the state it starts in`,
+    fields: {
+      node: "string",
+      target: "string",
+      port: "number",
+      drainSeconds: "number",
+      shipping: "boolean",
+      reporting: "boolean",
+      tunnel: "string",
+      version: "string",
+      state: "string",
+    },
     alerts: ["process-restarts"],
   },
   {
@@ -393,7 +403,11 @@ export const entries: readonly CatalogEntry[] = [
       connections: "number",
       connectionsByRole: "object",
       sizeMb: "number",
+      // The probe's own reading of the oldest unchained audit row (spec 08 §3.6), and the
+      // sequencer's, on its once-a-minute line with the passes it ran.
       auditUnsequencedS: "number",
+      oldestUnsequencedS: "number",
+      runs: "number",
     },
     reasons: ["leased", "disabled", "no_work", "switch"],
     alerts: ["wal-archiving-stalled", "email-outbox-age"],

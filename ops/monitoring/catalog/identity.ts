@@ -57,8 +57,8 @@ export const entries: readonly CatalogEntry[] = [
     kind: "info",
     level: "warn",
     writtenBy:
-      "the auth library's logger, its warnings and errors by level only (the line's level is the library's; no message is kept)",
-    fields: { realm: "string" },
+      "the auth library's logger, its warnings and errors by level only (`libraryLevel`, the library's own; the line's envelope `level` is warn or error; no message is kept)",
+    fields: { realm: "string", libraryLevel: "string" },
     alerts: [],
   },
   {
