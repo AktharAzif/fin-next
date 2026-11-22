@@ -11,7 +11,12 @@ import {
   rolesFor,
   TEMPLATES,
 } from "../src/catalogue.ts";
-import { CLASS_RULES, defineTemplate, TemplateDefinitionError } from "../src/classes.ts";
+import {
+  CLASS_RULES,
+  defineTemplate,
+  type Template,
+  TemplateDefinitionError,
+} from "../src/classes.ts";
 import { checkHeaders, finHeaders } from "../src/headers.ts";
 import { HIDDEN_VALUE, param } from "../src/params.ts";
 import { RenderError, renderTemplate } from "../src/render.ts";
@@ -65,6 +70,12 @@ describe("the catalogue", () => {
       if (t.area === "staff") expect(roles).toEqual(["fin_admin"]);
       if (t.area === "ops") expect(roles).toEqual(["fin_worker"]);
     }
+    // The API keys folder is the console's; `api` may queue only the exposure notice by name.
+    expect(rolesFor(findTemplate("api-keys/key-changed") as Template)).toEqual(["fin_console"]);
+    expect(rolesFor(findTemplate("api-keys/key-exposed") as Template)).toEqual([
+      "fin_console",
+      "fin_api",
+    ]);
     const rows = grantRows();
     expect(rows.find((r) => r.template === "ops/delivery-check")).toMatchObject({
       role: "fin_worker",
@@ -80,6 +91,7 @@ describe("the catalogue", () => {
     );
     expect(bypass.sort()).toEqual(
       [
+        "api-keys/key-exposed",
         "ops/security-digest",
         "orgs/member-joined",
         "orgs/member-removed",

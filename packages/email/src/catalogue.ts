@@ -7,6 +7,8 @@
 // row for those templates (grantSyncSql, from apps/api's afterMigrations), and a test proves the
 // database refuses the rest (T08-22).
 import { CLASS_RULES, type EmailClass, type Template, type TemplateArea } from "./classes.ts";
+import { keyChanged } from "./templates/api-keys/key-changed.ts";
+import { keyExposed } from "./templates/api-keys/key-exposed.ts";
 import { accountLocked } from "./templates/identity/account-locked.ts";
 import { accountRecoveryFinished } from "./templates/identity/account-recovery-finished.ts";
 import { accountRecoveryStarted } from "./templates/identity/account-recovery-started.ts";
@@ -62,6 +64,8 @@ export const TEMPLATES: readonly Template[] = Object.freeze([
   staffFactorsReset,
   staffRolePermissionsChanged,
   staffSwitchChanged,
+  keyChanged,
+  keyExposed,
   deliveryCheck,
   securityDigest,
 ] as Template[]);

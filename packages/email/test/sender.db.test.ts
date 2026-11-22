@@ -650,14 +650,17 @@ describe.skipIf(!HAS_DATABASE)("the sender on Postgres 18", () => {
 
     it("keeps a security notice whose template this release does not know, never deleting it unsent", async () => {
       await db.admin.query(
-        "INSERT INTO email.template_grant (template, role, category, priority, carries_secret) VALUES ('api-keys/key-changed', $1, 'security', 2, false)",
+        "INSERT INTO email.template_grant (template, role, category, priority, carries_secret) VALUES ('api-keys/key-from-a-newer-release', $1, 'security', 2, false)",
         [db.roleName("fin_console")],
       );
-      await queueRaw("fin_console", "api-keys/key-changed", { orgId: ORG, mode: "live" });
+      await queueRaw("fin_console", "api-keys/key-from-a-newer-release", {
+        orgId: ORG,
+        mode: "live",
+      });
       expect(await sender().runOnce()).toMatchObject({ failed: 1, sent: 0 });
       const [row] = await rows();
       expect(row).toMatchObject({
-        template: "api-keys/key-changed",
+        template: "api-keys/key-from-a-newer-release",
         last_error_code: "unknown_template",
       });
       expect(new Date(row?.due_at ?? 0).getTime()).toBe(clock.now() + 5 * MINUTE);
