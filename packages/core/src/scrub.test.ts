@@ -215,6 +215,158 @@ function samples(rand: () => number): Sample[] {
   ];
 }
 
+// A linear-time check judges the time at 1 MB and its growth from 128 KB, eight times less input,
+// and a shape fails in either of two ways: its time at 1 MB is over the ceiling, whatever its
+// growth, or it is over a lower limit and its growth is far above linear. A quadratic part takes
+// seconds or minutes at 1 MB and grows about 64 times; a part that grows more slowly but is costly,
+// such as a bounded run of hundreds of characters tried at every position, fails on the ceiling
+// alone. Each time is the fastest of three runs, the sizes taking turns, each run on a text no run
+// before it has seen (see timedTexts), and it is the thread's CPU time, not the clock on the wall:
+// what load adds is time spent waiting for a core, and it adds it unevenly. With many threads to
+// each core, a run that fits in one scheduler slice keeps its wall time while a longer one waits
+// between slices: on such a machine a linear shape took over a second of wall time at 1 MB, and
+// its wall-clock growth reached 84, while its CPU time stayed under 100 ms and grew about eight
+// times. CPU time is what lets the ceiling stand alone.
+const SMALL_INPUT = 128 * 1024;
+const LARGE_INPUT = 1024 * 1024;
+/**
+ * The CPU time at 1 MB no shape may pass, whatever its growth. Load barely moves CPU time, so this
+ * needs no growth beside it: the slowest shape takes under 100 ms, and under 170 ms at background
+ * priority on the efficiency cores of a loaded machine.
+ */
+const CEILING_MS = 1000;
+/**
+ * The CPU time at 1 MB above which growth decides. A quadratic part that takes a shape over it
+ * grows the shape over MAX_GROWTH even behind the slowest linear part (about 7 ms at 128 KB), so it
+ * fails here, long before the ceiling. A linear shape would have to be slowed two and a half times
+ * and grow twice its most to fail.
+ */
+const LIMIT_MS = 250;
+/**
+ * Growth from 128 KB to 1 MB: about 8 times for a linear shape, about 64 for a quadratic one. 24
+ * sits near their geometric mean (about 23), about a factor of three from each: load would have to
+ * slow every large run three times as much as the small runs between them, and a quadratic part
+ * passes only behind a linear part that takes two and a half times as long as it at 128 KB.
+ */
+const MAX_GROWTH = 24;
+/** A floor under the 128 KB time, so a reading near clock resolution cannot inflate the growth. */
+const FLOOR_MS = 5;
+/**
+ * The wall-clock timeout of a linear-time test, there only to stop a hang: the speed is judged in
+ * CPU time, above. Vitest fails a test that runs past its timeout even when every check passed, and
+ * load stretches the wall time: on a loaded machine a test that needed about 0.13 s of CPU took
+ * 2.3 s, and the heaviest shapes need about 0.25 s, too near the default of 5 s.
+ */
+const WALL_TIMEOUT_MS = 60_000;
+
+/** The CPU time this thread has used, in milliseconds. */
+function threadCpuMs(): number {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+}
+
+/** The growth from a 128 KB time to a 1 MB time, with the floor under the 128 KB time. */
+const growthOf = (smallMs: number, largeMs: number): number =>
+  largeMs / Math.max(smallMs, FLOOR_MS);
+
+/** Whether a shape's fastest CPU times at 128 KB and at 1 MB fail the linear-time check. */
+function tooSlow(smallMs: number, largeMs: number): boolean {
+  return largeMs > CEILING_MS || (largeMs > LIMIT_MS && growthOf(smallMs, largeMs) > MAX_GROWTH);
+}
+
+/**
+ * How many texts the linear-time checks have timed. Each timed text is its input behind a line of
+ * its own number, so no two are alike, and a scrubber that remembered what it scrubbed would still
+ * be timed on its first pass over every text: timing one text three times would judge the fastest,
+ * remembered, run. Every shape takes a line break as it takes the start of the text, and no shape
+ * matches a line of under nine digits.
+ */
+let timedTexts = 0;
+
+/**
+ * Fails when `scrub` is too slow or quadratic on the input `build` makes at 128 KB and 1 MB, timed
+ * by `cpuMs`: the thread's CPU time, or a test's own clock.
+ */
+function expectLinearTime(
+  name: string,
+  build: (size: number) => string,
+  scrub: (text: string) => unknown,
+  cpuMs: () => number = threadCpuMs,
+): void {
+  const small = build(SMALL_INPUT);
+  const large = build(LARGE_INPUT);
+  const time = (input: string): number => {
+    timedTexts += 1;
+    const text = `${timedTexts}\n${input}`;
+    const t0 = cpuMs();
+    scrub(text);
+    return cpuMs() - t0;
+  };
+  let smallMs = Number.POSITIVE_INFINITY;
+  let largeMs = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < 3; run++) {
+    smallMs = Math.min(smallMs, time(small));
+    largeMs = Math.min(largeMs, time(large));
+  }
+  const growth = growthOf(smallMs, largeMs);
+  const ms = (value: number): string => `${value.toFixed(1)} ms of CPU`;
+  const seen = `${ms(smallMs)} at 128 KB, ${ms(largeMs)} at 1 MB, growth ${growth.toFixed(1)}`;
+  expect(tooSlow(smallMs, largeMs), `${name}: ${seen}`).toBe(false);
+}
+
+/** Builds an adversarial input: the unit repeated to the input's size, then the tail. */
+type Fill = (unit: string, tail?: string) => string;
+
+/** The Fill for inputs of `size` characters. */
+const filler =
+  (size: number): Fill =>
+  (unit, tail = "") =>
+    unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+
+describe("the linear-time check", () => {
+  it("fails a shape over the ceiling whatever its growth, and a quadratic one over the limit", () => {
+    // [CPU ms at 128 KB, CPU ms at 1 MB, fails]: measured times of the real scrubber and of
+    // scrubbers changed to be slow, then the edges of the rule.
+    const cases: [number, number, boolean][] = [
+      [6.9, 68.9, false], // the slowest real shape
+      [0.004, 0.004, false], // a shape near clock resolution
+      [276.3, 2177.3, true], // a bounded run of 600 tried at every position: linear, and costly
+      [549.9, 5280.7, true], // n log n
+      [46.6, 3002.0, true], // quadratic
+      [100, 1000, false], // at the ceiling
+      [200, 1001, true], // over the ceiling, growth 5
+      [13, 300, false], // over the limit, growth 23
+      [10, 260, true], // over the limit, growth 26
+      [3, 240, false], // under the limit, growth 48: a quadratic part too small to matter yet
+    ];
+    for (const [smallMs, largeMs, fails] of cases) {
+      expect(tooSlow(smallMs, largeMs), `${smallMs} ms, ${largeMs} ms`).toBe(fails);
+    }
+  });
+
+  it("times a scrubber that remembers what it scrubbed on texts it has not seen", () => {
+    // On a clock of its own, each scrubber here costs `cost` of a text's size in KB the first
+    // time it sees the text, and nothing after. Timed three times on one text, the quadratic one
+    // would pass on its second and third runs, however slow its first.
+    let now = 0;
+    const remembering = (cost: (kb: number) => number): ((text: string) => void) => {
+      const seen = new Set<string>();
+      return (text) => {
+        if (!seen.has(text)) now += cost(text.length / 1024);
+        seen.add(text);
+      };
+    };
+    const build = (size: number): string => "a".repeat(size);
+    const clock = (): number => now;
+    // About 41 ms at 128 KB and 2621 ms at 1 MB.
+    const quadratic = remembering((kb) => (kb * kb) / 400);
+    expect(() => expectLinearTime("quadratic", build, quadratic, clock)).toThrow(/quadratic: /);
+    // About 6.4 ms at 128 KB and 51 ms at 1 MB.
+    const linear = remembering((kb) => kb / 20);
+    expectLinearTime("linear", build, linear, clock);
+  });
+});
+
 describe("scrubText", () => {
   for (const sample of samples(prng(1))) {
     it(`removes a ${sample.name}`, () => {
@@ -355,72 +507,71 @@ describe("scrubText", () => {
     }
   });
 
-  it("scrubs 1 MB of an adversarial input for every shape in linear time", () => {
+  describe("scrubs 1 MB of an adversarial input for every shape in linear time", () => {
     // Four times the largest body Fin accepts. Each input repeats what starts a match and never
-    // finishes it, which is what makes an open-ended part quadratic.
-    const size = 1024 * 1024;
-    const fill = (unit: string, tail = ""): string =>
-      unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+    // finishes it, which is what makes an open-ended part quadratic. One test per shape, so that a
+    // failure names its shape and the six runs of each stay short.
     const begin = join(dashes, "BEGIN ", "PRIVATE KEY", dashes);
     const end = join(dashes, "END ");
-    const runs: Record<string, string> = {
-      "private key, BEGIN after BEGIN": fill(begin),
-      "private key, a long body and no END": `${begin}\n${fill("A")}`,
-      "private key, ENDs of something else": `${begin}${fill(`${end}X `)}`,
-      "private key, a long header": join(dashes, "BEGIN ", fill("A")),
-      "age identity": fill(["AGE", "SECRET", "KEY", "1"].join("-")),
-      "Fin API key": fill(["fin", "live", "sk", ""].join("_")),
-      "Fin key-like": fill(["fin", "test", ""].join("_")),
-      "webhook secret": fill(join("wh", "sec_")),
-      "Cloudflare token": fill(join("cf", "at_")),
-      "JWT, eyJ after eyJ": fill("eyJ"),
-      "JWT, a short part after each": fill("eyJabcdefgh."),
-      "heartbeat URL, one long host": `https://${fill(join("better", "stack"))}`,
-      "heartbeat URL, a host and no path": fill(join("https://a.", "better", "stack.com/api/v1/")),
-      "heartbeat URL, one host of dots": `https://${fill(join("a.", "better", "stack."))}`,
-      "DSN, a login and no host": fill("https://a@"),
-      "DSN, one long login": `https://${fill("a")}`,
-      "Postgres URL, logins and no @": fill(join("postgres", "://a:")),
-      "Postgres URL, ql and a password": fill(join("postgres", "ql://a:b")),
-      "Postgres URL, one long password": join("postgres", "://a:", fill("b")),
-      "Postgres URL, no colon after the login": fill(join("postgres", "://a")),
-      "bearer, no token": fill(join("bea", "rer ")),
-      "bearer, a long gap": join("bea", "rer", fill(" ")),
-      "basic, no token": fill(join("bas", "ic ")),
-      "__Host- cookie, no =": fill("__Host-a"),
-      "__Secure- cookie, no =": fill("__Secure-"),
-      "cookie, one long name": `__Host-${fill("a")}`,
-      "Access cookie": fill("CF_Authorization"),
-      "ingress proof, a long gap": join("fin-ingress-proof:", fill(" ")),
-      "email, no @": fill("a."),
-      "email, @ after @": fill("@a"),
-      "email, a long domain": `a@${fill("a.")}`,
-      "IPv4, dots and no end": fill("1.1.1."),
-      "IPv4, escapes and dots": fill("%201.1."),
-      "IPv6, hex and colons and no end": fill("a:", "g"),
-      "IPv6, compressed runs": fill("1::", "x"),
-      "IPv6, hex and no colon": fill("0123456789abcdef"),
-      "IPv6, zones": fill("::1%a"),
-      "IPv6, one long zone": `::1%${fill("a")}`,
-      "IPv6, one long zone and a colon": `::1%${fill("g")}:`,
-      "IPv6, zones that run on": fill("::1%a:"),
-      "IPv6, escapes between runs": fill("1::1%20"),
-      "IPv6, colons then a hex digit": fill(":", "a"),
-      "IPv6, a hex digit between colons": `${fill(":")}a${fill(":")}`,
-      "IPv6, colons and no hex": fill(":"),
-      "query string": fill("?"),
-      "ID-bearing path": fill("/c/"),
-      "long segment": `/${fill("A1")}`,
-      slashes: fill("/"),
-      "digits, then a letter": fill("1", "a"),
-      "code, no digits": fill("code "),
-      letters: fill("a"),
+    const runs: Record<string, (fill: Fill) => string> = {
+      "private key, BEGIN after BEGIN": (fill) => fill(begin),
+      "private key, a long body and no END": (fill) => `${begin}\n${fill("A")}`,
+      "private key, ENDs of something else": (fill) => `${begin}${fill(`${end}X `)}`,
+      "private key, a long header": (fill) => join(dashes, "BEGIN ", fill("A")),
+      "age identity": (fill) => fill(["AGE", "SECRET", "KEY", "1"].join("-")),
+      "Fin API key": (fill) => fill(["fin", "live", "sk", ""].join("_")),
+      "Fin key-like": (fill) => fill(["fin", "test", ""].join("_")),
+      "webhook secret": (fill) => fill(join("wh", "sec_")),
+      "Cloudflare token": (fill) => fill(join("cf", "at_")),
+      "JWT, eyJ after eyJ": (fill) => fill("eyJ"),
+      "JWT, a short part after each": (fill) => fill("eyJabcdefgh."),
+      "heartbeat URL, one long host": (fill) => `https://${fill(join("better", "stack"))}`,
+      "heartbeat URL, a host and no path": (fill) =>
+        fill(join("https://a.", "better", "stack.com/api/v1/")),
+      "heartbeat URL, one host of dots": (fill) =>
+        `https://${fill(join("a.", "better", "stack."))}`,
+      "DSN, a login and no host": (fill) => fill("https://a@"),
+      "DSN, one long login": (fill) => `https://${fill("a")}`,
+      "Postgres URL, logins and no @": (fill) => fill(join("postgres", "://a:")),
+      "Postgres URL, ql and a password": (fill) => fill(join("postgres", "ql://a:b")),
+      "Postgres URL, one long password": (fill) => join("postgres", "://a:", fill("b")),
+      "Postgres URL, no colon after the login": (fill) => fill(join("postgres", "://a")),
+      "bearer, no token": (fill) => fill(join("bea", "rer ")),
+      "bearer, a long gap": (fill) => join("bea", "rer", fill(" ")),
+      "basic, no token": (fill) => fill(join("bas", "ic ")),
+      "__Host- cookie, no =": (fill) => fill("__Host-a"),
+      "__Secure- cookie, no =": (fill) => fill("__Secure-"),
+      "cookie, one long name": (fill) => `__Host-${fill("a")}`,
+      "Access cookie": (fill) => fill("CF_Authorization"),
+      "ingress proof, a long gap": (fill) => join("fin-ingress-proof:", fill(" ")),
+      "email, no @": (fill) => fill("a."),
+      "email, @ after @": (fill) => fill("@a"),
+      "email, a long domain": (fill) => `a@${fill("a.")}`,
+      "IPv4, dots and no end": (fill) => fill("1.1.1."),
+      "IPv4, escapes and dots": (fill) => fill("%201.1."),
+      "IPv6, hex and colons and no end": (fill) => fill("a:", "g"),
+      "IPv6, compressed runs": (fill) => fill("1::", "x"),
+      "IPv6, hex and no colon": (fill) => fill("0123456789abcdef"),
+      "IPv6, zones": (fill) => fill("::1%a"),
+      "IPv6, one long zone": (fill) => `::1%${fill("a")}`,
+      "IPv6, one long zone and a colon": (fill) => `::1%${fill("g")}:`,
+      "IPv6, zones that run on": (fill) => fill("::1%a:"),
+      "IPv6, escapes between runs": (fill) => fill("1::1%20"),
+      "IPv6, colons then a hex digit": (fill) => fill(":", "a"),
+      "IPv6, a hex digit between colons": (fill) => `${fill(":")}a${fill(":")}`,
+      "IPv6, colons and no hex": (fill) => fill(":"),
+      "query string": (fill) => fill("?"),
+      "ID-bearing path": (fill) => fill("/c/"),
+      "long segment": (fill) => `/${fill("A1")}`,
+      slashes: (fill) => fill("/"),
+      "digits, then a letter": (fill) => fill("1", "a"),
+      "code, no digits": (fill) => fill("code "),
+      letters: (fill) => fill("a"),
     };
     for (const [name, run] of Object.entries(runs)) {
-      const t0 = performance.now();
-      scrubText(run);
-      // A quadratic part takes seconds here, or minutes; every linear one a few milliseconds.
-      expect(performance.now() - t0, name).toBeLessThan(1000);
+      it(name, { timeout: WALL_TIMEOUT_MS }, () => {
+        expectLinearTime(name, (size) => run(filler(size)), scrubText);
+      });
     }
   });
 
@@ -772,12 +923,16 @@ describe("scrubEvent and scrubBreadcrumb", () => {
     ).toEqual({ category: "navigation", data: { from: "/a", to: "/b" } });
   });
 
-  it("cuts a long breadcrumb's query in linear time", () => {
-    const size = 1024 * 1024;
-    for (const from of [`${"?".repeat(size)}\nx`, "#\n".repeat(size / 2), "/".repeat(size)]) {
-      const t0 = performance.now();
-      scrubBreadcrumb({ category: "navigation", data: { from } });
-      expect(performance.now() - t0, from.slice(0, 4)).toBeLessThan(1000);
+  it("cuts a long breadcrumb's query in linear time", { timeout: WALL_TIMEOUT_MS }, () => {
+    const froms: Record<string, (size: number) => string> = {
+      "one long query": (size) => `${"?".repeat(size)}\nx`,
+      "a fragment on every line": (size) => "#\n".repeat(size / 2),
+      slashes: (size) => "/".repeat(size),
+    };
+    for (const [name, from] of Object.entries(froms)) {
+      expectLinearTime(name, from, (text) =>
+        scrubBreadcrumb({ category: "navigation", data: { from: text } }),
+      );
     }
   });
 

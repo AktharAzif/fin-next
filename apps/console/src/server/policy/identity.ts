@@ -33,6 +33,21 @@ export const IDENTITY_ROUTES = [
     limits: ["code_sign_in"],
     audit: [],
   }),
+  // Which optional ways in this deployment offers (spec 02 §5.8, stretch 5): the sign-in and
+  // sign-up pages show "Continue with Google" only when it is on. Public, read only, no budget.
+  route({
+    id: "signInMethods",
+    method: "GET",
+    path: "/sign-in/methods",
+    guard: "public",
+    scope: "public",
+    stepUp: "none",
+    assurance: "none",
+    body: "none",
+    query: "none",
+    limits: [],
+    audit: [],
+  }),
   route({
     id: "viewer",
     method: "GET",

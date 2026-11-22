@@ -4,9 +4,9 @@
 // fragment (the sign-in, factor, step-up and enrolment-code events its realm writes).
 //
 // These are written in @fin/audit's `defineEvents` shape (category, scope, roles, actors, target,
-// a strict flat metadata schema, the journal kind), so they move unchanged into
-// packages/audit/src/events/staff.ts with identity's half when that fragment is assembled; until
-// then the registry rows come from `staffEventTypeRows()` (recorded under the PR's open items).
+// a strict flat metadata schema, the journal kind). packages/audit/src/events/staff.ts holds them
+// with identity's half: that fragment is what `migrate` syncs to audit.event_type, and
+// fragment.test.ts holds it equal to these. `staffEventTypeRows()` serves the test platform.
 //
 // Metadata is flat: IDs, role keys, codes, counts and flags. Never a name, an address, a code, a
 // token or typed text (spec 02 §16.1, ARCHITECTURE §8.2).

@@ -1,37 +1,37 @@
 // The `migrate` service (spec 01 §6.2, §6.6; ARCHITECTURE §6.4): the api image started with one of
 //   --bootstrap       create the roles, schemas and privileged-login guard (once per environment)
-//   --migrate         apply pending migrations, render the grants and sync the audit registry
+//   --migrate         apply pending migrations, render the grants, and sync the audit registry and
+//                     email.enqueue()'s template allowlist (afterMigrations)
 //   --print-db-cert   print the certificate chain the database presents, to pin as FIN_DB_CA_PEM
 //   --task <name>     run one operator task as fin_owner (spec 01 §6.6 "Operator tasks")
 // P0-D's apps/api/src/main.ts dispatches these flags here. Every mode reads its configuration once,
 // refuses a missing or malformed variable with exit 78 naming it (never its value), writes
 // migrate.started and migrate.done or migrate.failed (or task.done / task.failed), and exits non-zero on
 // any failure, which stops the deploy.
-import { join } from "node:path";
 import { syncEventTypes } from "@fin/audit";
 import {
-  BOOTSTRAP_DIR,
   bootstrap,
   type Clock,
   connectClient,
   createDatabase,
   createPool,
   DatabaseConfigError,
-  GRANTS_DIR,
+  dbAssetsRoot,
   type LineSink,
-  loadFragments,
-  MIGRATIONS_DIR,
+  type LoadedDbAssets,
+  loadDbAssets,
   MigrationError,
   parseReplicas,
   parseRoleVerifiers,
   parseSuperuserUrl,
-  readMigrations,
+  type Queryable,
   readPresentedCertificate,
   runMigrations,
   sqlState,
   type TlsSettings,
   withOwnerSession,
 } from "@fin/db";
+import { grantSyncSql } from "@fin/email";
 import { z } from "zod";
 import { parseTaskParams, runTask, TaskError } from "../tasks/run.ts";
 import { stdoutLines } from "./lines.ts";
@@ -108,16 +108,12 @@ function tlsFor(base: BaseEnv, host: string): TlsSettings {
   throw new DatabaseConfigError("FIN_DB_CA_PEM", "is required outside a loopback test database");
 }
 
-function assets(base: BaseEnv): { migrations: string; bootstrap: string; grants: string } {
-  if (base.FIN_DB_ASSETS_DIR === undefined || base.FIN_DB_ASSETS_DIR === "") {
-    return { migrations: MIGRATIONS_DIR, bootstrap: BOOTSTRAP_DIR, grants: GRANTS_DIR };
-  }
-  const dir = base.FIN_DB_ASSETS_DIR;
-  return {
-    migrations: join(dir, "migrations"),
-    bootstrap: join(dir, "bootstrap"),
-    grants: join(dir, "roles", "grants"),
-  };
+/**
+ * Every package's bootstrap, migrations and grants, read and checked before any connection: from
+ * FIN_DB_ASSETS_DIR in the image (ops/docker/app.Dockerfile sets it), from the source tree locally.
+ */
+function assets(base: BaseEnv): LoadedDbAssets {
+  return loadDbAssets(dbAssetsRoot({ FIN_DB_ASSETS_DIR: base.FIN_DB_ASSETS_DIR }));
 }
 
 function applicationName(base: BaseEnv): string {
@@ -160,7 +156,7 @@ async function bootstrapMode(
   const target = parseSuperuserUrl(env.FIN_BOOTSTRAP_DATABASE_URL);
   const verifiers = parseRoleVerifiers(env.FIN_ROLE_VERIFIERS);
   const replicas = parseReplicas(env.FIN_DB_REPLICAS);
-  const dirs = assets(base);
+  const files = assets(base);
   const client = await connectClient({
     ...target,
     tls: tlsFor(base, target.host),
@@ -171,8 +167,8 @@ async function bootstrapMode(
       verifiers,
       replicas,
       environment: base.FIN_ENVIRONMENT,
-      bootstrapDir: dirs.bootstrap,
-      fragments: loadFragments(dirs.grants),
+      files: files.bootstrap,
+      fragments: files.fragments,
     });
     log.write({
       event: "migrate.done",
@@ -189,6 +185,21 @@ async function bootstrapMode(
   }
 }
 
+/**
+ * What `--migrate` runs after the files and the grants, in the run's transaction as fin_owner: the
+ * audit registry sync (spec 08 §3.2) and `email.enqueue()`'s per-role allowlist, generated from the
+ * template catalogue's folders (spec 08 §4.4, [DA-14]). The registry sync only adds and updates rows;
+ * the allowlist is made exact for every template this release knows, so a role whose rule is narrowed
+ * loses the template. Neither touches what only a newer release knows. Tests that need the schema
+ * `migrate` builds pass it as theirs.
+ */
+export function afterMigrations(release: string): (q: Queryable) => Promise<void> {
+  return async (q) => {
+    await syncEventTypes(q, release);
+    await q.query(grantSyncSql());
+  };
+}
+
 async function migrateMode(
   env: Readonly<Record<string, string | undefined>>,
   base: BaseEnv,
@@ -196,9 +207,7 @@ async function migrateMode(
   clock: Clock,
 ): Promise<void> {
   const target = parseSuperuserUrl(env.FIN_BOOTSTRAP_DATABASE_URL);
-  const dirs = assets(base);
-  const files = readMigrations(dirs.migrations);
-  const fragments = loadFragments(dirs.grants);
+  const { migrations: files, fragments } = assets(base);
   const tls = tlsFor(base, target.host);
   const superuser = await connectClient({ ...target, tls, applicationName: applicationName(base) });
   try {
@@ -217,9 +226,7 @@ async function migrateMode(
           files,
           release: base.FIN_RELEASE,
           fragments,
-          after: async (q) => {
-            await syncEventTypes(q, base.FIN_RELEASE);
-          },
+          after: afterMigrations(base.FIN_RELEASE),
         }),
     );
     log.write({

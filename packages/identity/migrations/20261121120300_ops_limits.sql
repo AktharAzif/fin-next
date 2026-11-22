@@ -2,8 +2,8 @@
 -- itself is on P0-E's UNLOGGED ops.rate_window; a lockout recorded here outlives a crash that
 -- empties it, so a paused address stays paused (T-SAT-33). Keys are keyed hashes, never an
 -- address or a token in clear.
-SET lock_timeout = '5s';
-SET statement_timeout = '60s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 CREATE TABLE ops.lockout (
   key text PRIMARY KEY CHECK (char_length(key) BETWEEN 1 AND 200),

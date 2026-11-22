@@ -98,5 +98,37 @@ describe("the database probe", () => {
         discardLines,
       ),
     ).toThrow(/FIN_DB_CA_PEM/);
+    // TLS may be off only for a loopback database in development or CI, as for the worker's pool.
+    expect(() =>
+      probeDatabaseFromEnv(
+        {
+          FIN_ENVIRONMENT: "staging",
+          FIN_DB_HOST: "127.0.0.1",
+          FIN_DB_PORT: "5432",
+          FIN_DB_NAME: "d",
+          FIN_DB_PROBE_PASSWORD: "x".repeat(20),
+        },
+        discardLines,
+      ),
+    ).toThrow(/FIN_DB_CA_PEM/);
+  });
+
+  it("builds a loopback pool in CI without a CA, and reads through it", async () => {
+    const fromEnv = probeDatabaseFromEnv(
+      {
+        FIN_ENVIRONMENT: "ci",
+        FIN_DB_HOST: db.target.host,
+        FIN_DB_PORT: String(db.target.port),
+        FIN_DB_NAME: db.target.database,
+        FIN_DB_PROBE_PASSWORD: testLoginPassword("fin_probe"),
+      },
+      discardLines,
+    );
+    try {
+      const reading = await fromEnv.read(testContext(), readDatabaseProbe);
+      expect(reading.connectionsByRole.fin_probe).toBeGreaterThanOrEqual(1);
+    } finally {
+      await fromEnv.end();
+    }
   });
 });

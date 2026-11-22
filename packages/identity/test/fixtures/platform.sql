@@ -1,7 +1,8 @@
 -- A minimal stand-in for Phase 0's platform objects (spec 01 §6.10, spec 08 §3.3 and §3.5), for
 -- this package's integration tests only, until packages/db (P0-E) lands with the real bootstrap
 -- and migrations. It keeps the same interfaces: audit.record(p jsonb), audit.install_guard(),
--- audit.require_event() (FA010 at commit), email.enqueue(p jsonb) with its per-role allowlist,
+-- audit.require_event() (FA010 at commit), email.enqueue(p jsonb) with its per-role allowlist (its
+-- outbox in email_private, which no service role may use: rows arrive only through enqueue),
 -- ops.kill_switch and the UNLOGGED ops.rate_window. Role names come from the rows the test
 -- harness inserts (event_type.roles, template_grant.role), so the tests run under prefixed roles.
 SET client_min_messages = warning;
@@ -11,7 +12,8 @@ CREATE SCHEMA staff;
 CREATE SCHEMA ops;
 CREATE SCHEMA audit;
 CREATE SCHEMA email;
-REVOKE ALL ON SCHEMA identity, staff, ops, audit, email FROM PUBLIC;
+CREATE SCHEMA email_private;
+REVOKE ALL ON SCHEMA identity, staff, ops, audit, email, email_private FROM PUBLIC;
 
 CREATE TABLE audit.event_type (
   name text PRIMARY KEY CHECK (name ~ '^[a-z][a-z_]*(\.[a-z][a-z_]*){1,2}$'),
@@ -175,7 +177,7 @@ CREATE TABLE email.template_grant (
   PRIMARY KEY (template, role)
 );
 
-CREATE TABLE email.outbox (
+CREATE TABLE email_private.outbox (
   id text PRIMARY KEY CHECK (id ~ '^eml_[0-9a-hjkmnp-tv-z]{26}$'),
   template text NOT NULL,
   category text NOT NULL,
@@ -212,7 +214,7 @@ BEGIN
      OR coalesce(p ->> 'recipient', '') !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN
     RAISE EXCEPTION 'email.enqueue: shape' USING ERRCODE = 'FE002';
   END IF;
-  INSERT INTO email.outbox (id, template, category, priority, recipient_kind, recipient, params,
+  INSERT INTO email_private.outbox (id, template, category, priority, recipient_kind, recipient, params,
     carries_code, due_at, enqueued_by, created_at)
   VALUES (p ->> 'id', g.template, g.category,
     CASE g.category WHEN 'code' THEN 1 WHEN 'security' THEN 2 ELSE 3 END,

@@ -1,0 +1,32 @@
+{
+  "$comment": "The identity area's alerts (spec 02 §18.2; spec 08 §7.8 group C), from the steward's ruling of 22 Nov: auth-endpoint-unlisted. L-SAT-09 adds the rest of the area's alerts (owed in catalog/owed.ts). The API halves write auth.endpoint_blocked (console's developer realm, admin's staff realm, verify with none); the query counts every line whose class is not blocked, so a line that lost its class counts as unlisted and the alert fails closed. One incident per service, the label held to the rule's sources: any other value, a missing one included, is the one label `other`.",
+  "alerts": [
+    {
+      "name": "auth-endpoint-unlisted",
+      "group": "C",
+      "severity": "N",
+      "sources": ["console", "admin", "verify"],
+      "seriesBy": [{ "field": "service", "oneOf": ["console", "admin", "verify"] }],
+      "query": {
+        "count": {
+          "events": ["auth.endpoint_blocked"],
+          "where": [{ "field": "class", "notEq": "blocked" }]
+        }
+      },
+      "operator": "higher_than",
+      "threshold": "@thresholds.auth-endpoint-unlisted",
+      "check_period": 60,
+      "query_period": 900,
+      "confirmation_period": 0,
+      "recovery_period": 900,
+      "on_missing_data": "dont_fire",
+      "policy": "staging-quiet",
+      "incident_cause": "Requests for /api/auth/* paths the realm does not list, above their threshold in 15 minutes: a client or library change calling an unlisted path, or probing. Count: {{value}}.",
+      "metadata": {
+        "check": "The realm and release on the lines; the request lines with the same requestId and their cfRay; whether the count began with a release.",
+        "flow": "F3",
+        "runbook": "docs/runbooks/auth-endpoint-unlisted.md"
+      }
+    }
+  ]
+}

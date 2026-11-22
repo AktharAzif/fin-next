@@ -105,6 +105,15 @@ export function auditPayload(
   };
 }
 
+/**
+ * The failed event's name goes in the field `auditEvent`, as packages/audit names it: the line's
+ * own `event` is `audit.write_failed`, and the process telemetry drops any field that shares a name
+ * with the envelope, so a field called `event` would never reach Better Stack.
+ */
+function writeFailed(lines: LineSink, input: AuditInput, sqlstate: string): void {
+  lines.write("audit.write_failed", "error", { auditEvent: input.event, sqlstate });
+}
+
 export function createRecordAudit(deps: { clock: Clock; lines: LineSink }): RecordAudit {
   return async (tx, input) => {
     let payload: Record<string, unknown>;
@@ -112,7 +121,7 @@ export function createRecordAudit(deps: { clock: Clock; lines: LineSink }): Reco
       payload = auditPayload(input, newId("aud", deps.clock), tx.requestId, tx.release);
     } catch (error) {
       tx.poison("audit_input");
-      deps.lines.write("audit.write_failed", "error", { event: input.event, sqlstate: "input" });
+      writeFailed(deps.lines, input, "input");
       throw error;
     }
     try {
@@ -124,10 +133,7 @@ export function createRecordAudit(deps: { clock: Clock; lines: LineSink }): Reco
       return recorded;
     } catch (error) {
       tx.poison("audit_write");
-      deps.lines.write("audit.write_failed", "error", {
-        event: input.event,
-        sqlstate: sqlState(error) ?? "unknown",
-      });
+      writeFailed(deps.lines, input, sqlState(error) ?? "unknown");
       throw error;
     }
   };

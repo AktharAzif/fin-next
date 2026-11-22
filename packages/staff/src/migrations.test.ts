@@ -15,7 +15,11 @@ const identity = readdirSync(join(root, "..", "identity", "migrations")).sort();
 
 describe("the staff migrations", () => {
   it("are named for the runner and run after the identity realm's", () => {
-    expect(files).toEqual(["20261121140000_staff_fin.sql", "20261121140100_staff_bootstrap.sql"]);
+    expect(files).toEqual([
+      "20261121140000_staff_fin.sql",
+      "20261121140100_staff_bootstrap.sql",
+      "20261122081500_staff_audit_log.sql",
+    ]);
     for (const file of files) {
       expect(file).toMatch(/^\d{14}_staff_[a-z0-9_]+\.sql$/);
       expect(file > (identity.at(-1) ?? "")).toBe(true);

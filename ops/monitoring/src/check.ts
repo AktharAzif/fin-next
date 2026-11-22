@@ -1,0 +1,1217 @@
+// monitoring:check (spec 08 §7.11; ARCHITECTURE §10.11): the rules over ops/monitoring/<env>/ and
+// the catalogue, with no network, in well under a second. It fails when:
+//   MC-00 a file is missing or malformed, an alert has an unexpanded placeholder, or a metric's
+//         type is not one of Better Stack's;
+//   MC-01 an event written in code (`log("<name>", ...)`) is missing from the catalogue, a
+//         catalogue entry is listed twice, or one of spec 01 §8.9's Phase 0 events is missing;
+//   MC-02 a failure, security or money entry has no alert, no owed alert and no noAlert reason;
+//   MC-03 an entry redeclares an envelope field, or a reason code breaks the ReasonCode shape;
+//   MC-04 an alert reads an event or field the catalogue does not declare, a catalogue entry names
+//         an alert no fragment defines (or an alert watches an event whose entry does not name
+//         it), an alert's query cannot be rendered, a security event is filtered with
+//         `eq: false` (a line without the field would never alert; `notEq: true` fails closed),
+//         or an alert groups an event by other fields than the entry's seriesBy (the watcher's
+//         check, target and detail: a failure that stands must never hide a later one);
+//   MC-05 one of spec 01 §8.5's heartbeats, or the one the watcher's settings ping, is missing;
+//   MC-06 a metric label is ID-shaped or free text;
+//   MC-07 a source has no Errors application and no written reason, a file names a source
+//         that does not exist, or a secret is delivered to anything but a Railway service of
+//         spec 01 §6.2;
+//   MC-08 an alert lacks incident_cause, metadata.check, metadata.flow or metadata.runbook, or a
+//         runbook (an alert's, a monitor's or a heartbeat's) does not exist;
+//   MC-10 a runbook lacks one of Phase 0's headings, or does not name an alert that points at it;
+//   MC-11 a threshold, window, minimum count or grace is a literal number instead of an overlay
+//         key;
+//   MC-12 any file of the environment, the catalogue, the runbooks or the watcher's settings holds
+//         a Better Stack identifier, ingest host, DSN or heartbeat URL;
+//   MC-13 a staging object names a production policy, or the files name another environment's
+//         team (`fin-<env>`), environment or name prefix (`fin-next-<env>-`);
+//   MC-14 an alert name is used twice;
+//   MC-15 an alert name the code (see alertsInCode) or the catalogue (an entry's owed, any
+//         alert-shaped word of a noAlert reason, or a fragment file's text read as code is read and
+//         in the form `<name> (P|N, …)`) gives is neither a rule of the environment nor listed in
+//         catalog/owed.ts; an owed alert has no lane, no due date or no fragment, is listed twice,
+//         or is a rule of the environment already (in owed.ts or in an entry's owed);
+//   RT-01 an alert, monitor or heartbeat has no policy, or a staging one names anything but
+//         staging-quiet, or names a policy the files do not define;
+//   RT-02 staging-quiet is not email only: a severity that calls, texts, pushes or sends critical
+//         alerts, an escalation (a repeat or a second step), an ai_sre member, or a step that
+//         waits or reaches anyone but the entire staging team (spec 08 §7.9);
+//   RT-03 any staging object asks for a call, an SMS, a push or a critical alert itself.
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fragments as defaultFragments } from "../catalog/index.ts";
+import { OWED_ALERTS, type OwedAlert } from "../catalog/owed.ts";
+import { type CatalogEntry, ENVELOPE_FIELDS, kindsOf } from "../catalog/types.ts";
+import {
+  type AlertDef,
+  type EnvConfig,
+  type Finding,
+  loadEnv,
+  type Notify,
+  overlayKeys,
+} from "./config.ts";
+import {
+  QueryError,
+  queryConditions,
+  queryEvents,
+  queryFields,
+  renderSql,
+  seriesFields,
+} from "./sql.ts";
+
+/** Spec 01 §8.9: every event Phase 0 writes. platform.ts must hold each one. */
+export const PHASE0_EVENTS: readonly string[] = [
+  "request",
+  "process.start",
+  "process.health",
+  "shutdown.started",
+  "shutdown.done",
+  "shutdown.forced",
+  "process.uncaught_exception",
+  "process.unhandled_rejection",
+  "background.failed",
+  "database.pool_error",
+  "dns.lookup_failed",
+  "connector.state",
+  "connector.health",
+  "connector.exited",
+  "ingress.untrusted_peer",
+  "csrf.refused",
+  "api.outside_request",
+  "caller.signature_invalid",
+  "telemetry.ship_failed",
+  "telemetry.recovered",
+  "error.unexpected",
+  "migrate.started",
+  "migrate.done",
+  "migrate.failed",
+  "task.done",
+  "task.failed",
+  "job.run",
+  "email.sent",
+  "email.send_failed",
+  "csp.report",
+  "watcher.run",
+  "watcher.check_failed",
+  "deploy.started",
+  "deploy.step",
+  "deploy.done",
+  "deploy.failed",
+  "run.registered",
+  "run.done",
+];
+
+/** Spec 01 §8.5: every heartbeat Phase 0 has. heartbeats.json must hold each one (MC-05). */
+export const PHASE0_HEARTBEATS: readonly string[] = [
+  "watcher",
+  "scheduler-worker",
+  "scheduler-payments",
+  "email-delivery-check",
+  "backup-nightly",
+  "backup-hourly",
+  "verify-daily",
+];
+
+/** Spec 01 §6.2: the Railway services, the only places a secret is delivered to (MC-07). */
+export const RAILWAY_SERVICES: readonly string[] = [
+  "cloudflared-public",
+  "cloudflared-admin",
+  "cloudflared-public-b",
+  "cloudflared-admin-b",
+  "edge",
+  "api",
+  "worker",
+  "payments",
+  "console",
+  "admin",
+  "verify",
+  "migrate",
+  "backup",
+  "cloudflared-db",
+];
+
+/** Better Stack's logs-to-metrics types. */
+export const METRIC_TYPES: readonly string[] = [
+  "string_low_cardinality",
+  "int64_delta",
+  "float64_delta",
+  "datetime64_delta",
+  "boolean",
+];
+
+/** The headings every Phase 0 runbook has (spec 01 §8.7: short runbooks). */
+export const RUNBOOK_HEADINGS: readonly string[] = [
+  "## What it means",
+  "## First check",
+  "## Containment",
+  "## When to wake the owner",
+];
+
+const QUIET_POLICY = "staging-quiet";
+const REASON_CODE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
+const FLOW_ID = /^F(?:\d{1,2}|-[a-z0-9-]+)$/;
+const THRESHOLD = /^@(?:any|none|thresholds\.[a-z0-9][a-z0-9-]*)$/;
+const ID_SHAPED_FIELD = /(?:Id|ID|_id)$|^(?:cfRay|dt|message|replica|release|detail|target|runId)$/;
+const NOTIFY_KEYS = ["sms", "call", "push", "critical_alert"] as const;
+const LOG_CALL = /\blog\(\s*["']([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)["']/g;
+const CODE_DIRS = ["apps", "packages", "ops", "tools"];
+const SKIP_DIRS = new Set(["node_modules", "dist", ".turbo", "coverage", "test", "fixtures"]);
+
+/** Better Stack identifiers, ingest hosts, DSNs and heartbeat URLs (MC-12). */
+const IDENTIFIER_SHAPES: readonly { name: string; pattern: RegExp }[] = [
+  { name: "ingest host", pattern: /betterstackdata\.com/i },
+  { name: "heartbeat URL", pattern: /\/api\/v\d+\/heartbeat\//i },
+  { name: "DSN", pattern: /https?:\/\/[A-Za-z0-9]{8,}@/ },
+  { name: "team ID", pattern: /(?<![A-Za-z0-9])t\d{4,}(?![A-Za-z0-9])/ },
+  {
+    name: "object ID",
+    pattern:
+      /"(?:id|team_id|source_id|policy_id|monitor_id|heartbeat_id|exploration_id|urgency_id|application_id)"\s*:/,
+  },
+  { name: "token field", pattern: /"(?:token|ingesting_host|url|dsn)"\s*:/ },
+];
+
+export interface CheckOptions {
+  readonly envs?: readonly string[];
+  readonly fragments?: Readonly<Record<string, readonly CatalogEntry[]>>;
+  /** The owed alerts (MC-15); catalog/owed.ts's by default. */
+  readonly owed?: readonly OwedAlert[];
+  /** Extra files scanned for MC-12, relative to root (directories are walked). */
+  readonly scan?: readonly string[];
+  /**
+   * Whether to scan the repository's code for log("...") calls (MC-01) and the alerts it names
+   * (MC-15).
+   */
+  readonly scanCode?: boolean;
+}
+
+function walk(root: string, dir: string, out: string[]): void {
+  const full = join(root, dir);
+  if (!existsSync(full)) return;
+  for (const name of readdirSync(full)) {
+    if (SKIP_DIRS.has(name) || name.startsWith(".")) continue;
+    const rel = `${dir}/${name}`;
+    const stat = statSync(join(root, rel));
+    if (stat.isDirectory()) walk(root, rel, out);
+    else out.push(rel);
+  }
+}
+
+/** Events written in code: `log("<event>", ...)` in TypeScript outside tests. */
+export function eventsInCode(root: string): Map<string, string> {
+  const files: string[] = [];
+  for (const dir of CODE_DIRS) walk(root, dir, files);
+  const found = new Map<string, string>();
+  for (const file of files) {
+    if (!/\.tsx?$/.test(file) || /\.(?:db\.)?test\.tsx?$/.test(file)) continue;
+    if (file.startsWith("ops/monitoring/")) continue;
+    const text = readFileSync(join(root, file), "utf8");
+    for (const match of text.matchAll(LOG_CALL)) {
+      const event = match[1] ?? "";
+      if (!found.has(event)) found.set(event, file);
+    }
+  }
+  return found;
+}
+
+/** A source file MC-15's scan reads, and its text. */
+export interface CodeFile {
+  readonly file: string;
+  readonly text: string;
+}
+
+/**
+ * The files MC-15's scan reads, the ones eventsInCode reads: TypeScript outside tests and
+ * ops/monitoring.
+ */
+export function readCode(root: string): CodeFile[] {
+  const files: string[] = [];
+  for (const dir of CODE_DIRS) walk(root, dir, files);
+  return files
+    .sort()
+    .filter(
+      (file) =>
+        /\.tsx?$/.test(file) &&
+        !/\.(?:db\.)?test\.tsx?$/.test(file) &&
+        !file.startsWith("ops/monitoring/"),
+    )
+    .map((file) => ({ file, text: readFileSync(join(root, file), "utf8") }));
+}
+
+/** The index of the quote that ends the string starting at `start`, or -1. */
+function stringEnd(text: string, start: number): number {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") i++;
+    else if (c === quote) return i;
+    else if (quote === "`" && c === "$" && text[i + 1] === "{") {
+      const end = closing(text, i + 1);
+      if (end < 0) return -1;
+      i = end - 1;
+    } else if (quote !== "`" && c === "\n") return -1;
+  }
+  return -1;
+}
+
+/** The index of the string's or comment's last character at `i`; undefined when none starts there. */
+function skipped(text: string, i: number): number | undefined {
+  const c = text[i];
+  if (c === '"' || c === "'" || c === "`") return stringEnd(text, i);
+  if (c === "/" && text[i + 1] === "/") {
+    const end = text.indexOf("\n", i);
+    return end < 0 ? text.length - 1 : end;
+  }
+  if (c === "/" && text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end < 0 ? -1 : end + 1;
+  }
+  return undefined;
+}
+
+/** The index just past the bracket that closes the one at `open`, or -1 when it is not closed. */
+function closing(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return -1;
+      i = skip;
+      continue;
+    }
+    const c = text[i];
+    if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function lineAt(text: string, index: number): number {
+  let line = 1;
+  for (let i = text.indexOf("\n"); i >= 0 && i < index; i = text.indexOf("\n", i + 1)) line++;
+  return line;
+}
+
+// MC-15's scan: the alert names the code gives, in the same files as MC-01's (ops/monitoring's own
+// catalogue is read as data). The code names an alert in two ways, and the scan reads each:
+//   1. a line list: an `alerts` property whose value is a string or an array, each string at the
+//      array's top level a name (packages/identity/src/monitoring.ts's IDENTITY_LINES; a value of
+//      another kind, such as `{ none: "…" }` or a type, names none);
+//   2. text that calls a backquoted name an alert, in a comment or a string: "alert (`x`)",
+//      "alert `x`" or "the `x` alert"; and the duty alerts' family name `duty-stalled-<duty>`
+//      (ARCHITECTURE §10.8 group I) wherever it stands.
+// Prose that names an alert in other words ("`x` watches it") is beyond a lexical scan: a review
+// finding.
+const ALERT_NAME = /^[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+$/;
+const ALERTS_PROPERTY = /(?<![\w$.])(?:alerts|"alerts"|'alerts')\s*:\s*/g;
+const ALERT_PROSE =
+  /\balerts?\s*\(?\s*`([a-z0-9]+(?:-[a-z0-9]+)+)`|`([a-z0-9]+(?:-[a-z0-9]+)+)`\s+alert\b|(?<![\w-])(duty-stalled-[a-z0-9]+(?:-[a-z0-9]+)*)/g;
+/** Text that names an alert the way the specs' tables do: `<name> (P, …)`. */
+const SEVERITY_NAMED = /(?<![\w-])([a-z0-9]+(?:-[a-z0-9]+)+) \((?:P|N)\b/g;
+/**
+ * Any alert-shaped word in a noAlert reason: words of lower-case letters and digits joined by
+ * hyphens, not part of a path, a file name, an event or an overlay key (`docs/runbooks/x-y.md`,
+ * `@thresholds.x-y`). A reason that names an alert claims its cover, in whatever words, so a
+ * reason writes other hyphenated words apart ("sign in", "step up").
+ */
+const ALERT_WORD = /(?<![\w./@#-])[a-z0-9]+(?:-(?:[a-z0-9]+|\{[a-z]+\}))+(?![\w/{-]|\.\w)/g;
+
+/** Where the code names an alert. */
+export interface CodeAlert {
+  readonly file: string;
+  readonly line: number;
+}
+
+/** The strings at the top level of the array at `open` (none for a template with `${`). */
+function topLevelStrings(text: string, open: number): { value: string; at: number }[] {
+  const end = closing(text, open);
+  if (end < 0) return [];
+  const out: { value: string; at: number }[] = [];
+  for (let i = open + 1; i < end - 1; i++) {
+    const c = text[i] ?? "";
+    if (c === '"' || c === "'" || c === "`") {
+      const close = stringEnd(text, i);
+      if (close < 0) return out;
+      const value = text.slice(i + 1, close);
+      if (!value.includes("${")) out.push({ value, at: i });
+      i = close;
+      continue;
+    }
+    const skip = skipped(text, i);
+    if (skip !== undefined) {
+      if (skip < 0) return out;
+      i = skip;
+      continue;
+    }
+    if (c === "(" || c === "{" || c === "[") {
+      const inner = closing(text, i);
+      if (inner < 0) return out;
+      i = inner - 1;
+    }
+  }
+  return out;
+}
+
+/** Alert names the code gives, each with the first place that names it (see the rule above). */
+export function alertsInCode(
+  root: string,
+  code: readonly CodeFile[] = readCode(root),
+): Map<string, CodeAlert> {
+  const found = new Map<string, CodeAlert>();
+  for (const { file, text } of code) {
+    if (!text.includes("alert") && !text.includes("duty-stalled-")) continue;
+    const add = (name: string, index: number) => {
+      if (!found.has(name)) found.set(name, { file, line: lineAt(text, index) });
+    };
+    for (const match of text.matchAll(ALERTS_PROPERTY)) {
+      const at = match.index + match[0].length;
+      const c = text[at];
+      if (c === "[") {
+        for (const s of topLevelStrings(text, at)) add(s.value, s.at);
+      } else if (c === '"' || c === "'" || c === "`") {
+        const close = stringEnd(text, at);
+        const value = close < 0 ? "" : text.slice(at + 1, close);
+        if (value !== "" && !value.includes("${")) add(value, at);
+      }
+    }
+    for (const match of text.matchAll(ALERT_PROSE)) {
+      add(match[1] ?? match[2] ?? match[3] ?? "", match.index);
+    }
+  }
+  return found;
+}
+
+function isDate(value: unknown): boolean {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+const OWED_FILE = "ops/monitoring/catalog/owed.ts";
+const LANE = /^(?:P0-[A-Z][0-9]?|L-[A-Z]{3,4}-[0-9]{2})$/;
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * MC-15: every alert name the code or the catalogue gives is a rule of each environment or owed,
+ * with a lane and a due date; an owed alert that has become a rule leaves the list.
+ */
+function checkOwed(
+  fragments: Readonly<Record<string, readonly CatalogEntry[]>>,
+  owed: readonly OwedAlert[],
+  configs: readonly EnvConfig[],
+  root: string,
+  code: readonly CodeFile[] | undefined,
+): Finding[] {
+  const findings: Finding[] = [];
+  const owedNames = new Set<string>();
+  for (const alert of owed) {
+    const add = (message: string) =>
+      findings.push({ file: OWED_FILE, rule: "MC-15", message: `${alert.name}: ${message}` });
+    if (owedNames.has(alert.name)) add("is listed twice");
+    owedNames.add(alert.name);
+    if (!ALERT_NAME.test(alert.name)) add("is not an alert name (words joined by hyphens)");
+    if (typeof alert.lane !== "string" || !LANE.test(alert.lane)) {
+      add("names no lane (a lane of EXECUTION's tables, such as L-SAT-09)");
+    }
+    if (!isDate(alert.due)) add("has no due date (YYYY-MM-DD)");
+    if (alert.severity !== "P" && alert.severity !== "N") add("severity must be P or N");
+    if (typeof alert.fragment !== "string" || !SLUG.test(alert.fragment)) {
+      add("names no fragment (ops/monitoring/<env>/alerts/<fragment>.json)");
+    }
+    if (typeof alert.spec !== "string" || alert.spec.trim() === "") add("names no spec section");
+    if (alert.heartbeat !== undefined && !SLUG.test(alert.heartbeat)) {
+      add(`its heartbeat ${String(alert.heartbeat)} is not a heartbeat name`);
+    }
+  }
+
+  // The names the catalogue and the code give, each with where it is given: each entry's owed, every
+  // alert-shaped word of its noAlert, and the fragment file's own text (its comments), read in the
+  // forms code is read in and in the specs' `<name> (P|N` form.
+  const named = new Map<string, { file: string; by: string }>();
+  const entryOwes: { file: string; event: string; name: string }[] = [];
+  const fragmentFiles: CodeFile[] = [];
+  for (const [area, entries] of Object.entries(fragments)) {
+    const file = `ops/monitoring/catalog/${area}.ts`;
+    for (const entry of entries) {
+      for (const name of entry.owed ?? []) {
+        entryOwes.push({ file, event: entry.event, name });
+        if (!named.has(name)) named.set(name, { file, by: `${entry.event} owes` });
+      }
+      for (const match of (entry.noAlert ?? "").matchAll(ALERT_WORD)) {
+        const name = match[0];
+        if (!named.has(name)) named.set(name, { file, by: `${entry.event}'s noAlert names` });
+      }
+    }
+    if (existsSync(join(root, file))) {
+      fragmentFiles.push({ file, text: readFileSync(join(root, file), "utf8") });
+    }
+  }
+  const inFragments = alertsInCode(root, fragmentFiles);
+  for (const { file, text } of fragmentFiles) {
+    for (const match of text.matchAll(SEVERITY_NAMED)) {
+      const name = match[1] ?? "";
+      if (!inFragments.has(name)) inFragments.set(name, { file, line: lineAt(text, match.index) });
+    }
+  }
+  for (const [name, at] of inFragments) {
+    if (!named.has(name)) named.set(name, { file: `${at.file}:${at.line}`, by: "names" });
+  }
+  if (code !== undefined) {
+    for (const [name, at] of alertsInCode(root, code)) {
+      if (!named.has(name)) named.set(name, { file: `${at.file}:${at.line}`, by: "names" });
+    }
+  }
+
+  for (const config of configs) {
+    const defined = new Set(config.alerts.flatMap((a) => [a.name, a.template]));
+    for (const [name, at] of named) {
+      if (defined.has(name) || owedNames.has(name)) continue;
+      findings.push({
+        file: at.file,
+        rule: "MC-15",
+        message: `${at.by} the alert ${name}, which is no ${config.env} rule and is not listed in catalog/owed.ts with a lane and a date`,
+      });
+    }
+    for (const alert of owed) {
+      if (!defined.has(alert.name)) continue;
+      findings.push({
+        file: OWED_FILE,
+        rule: "MC-15",
+        message: `${alert.name} is a ${config.env} rule now: name it in its catalogue entries' alerts and drop it from the owed list`,
+      });
+    }
+    for (const { file, event, name } of entryOwes) {
+      if (!defined.has(name)) continue;
+      findings.push({
+        file,
+        rule: "MC-15",
+        message: `${event} owes ${name}, which is a ${config.env} rule now: name it in alerts`,
+      });
+    }
+  }
+  return findings;
+}
+
+function envDirs(root: string): string[] {
+  const base = join(root, "ops", "monitoring");
+  if (!existsSync(base)) return [];
+  return readdirSync(base)
+    .filter((name) => existsSync(join(base, name, "sources.json")))
+    .sort();
+}
+
+function notifyFindings(file: string, what: string, notify: Notify | undefined): Finding[] {
+  if (notify === undefined) return [];
+  return NOTIFY_KEYS.filter((key) => notify[key] === true).map((key) => ({
+    file,
+    rule: "RT-03",
+    message: `${what} asks for ${key}: staging stays quiet (email only)`,
+  }));
+}
+
+function checkCatalogue(
+  fragments: Readonly<Record<string, readonly CatalogEntry[]>>,
+  root: string,
+  scanCode: boolean,
+): { findings: Finding[]; byEvent: Map<string, CatalogEntry> } {
+  const findings: Finding[] = [];
+  const byEvent = new Map<string, CatalogEntry>();
+  for (const [area, entries] of Object.entries(fragments)) {
+    const file = `ops/monitoring/catalog/${area}.ts`;
+    for (const entry of entries) {
+      if (byEvent.has(entry.event)) {
+        findings.push({ file, rule: "MC-01", message: `${entry.event} is catalogued twice` });
+      }
+      byEvent.set(entry.event, entry);
+      const kinds = kindsOf(entry);
+      const watched = kinds.some((k) => k === "failure" || k === "security" || k === "money");
+      const covered = entry.alerts.length > 0 || (entry.owed ?? []).length > 0;
+      if (watched && !covered && (entry.noAlert ?? "").trim() === "") {
+        findings.push({
+          file,
+          rule: "MC-02",
+          message: `${entry.event} is ${kinds.join(" and ")} with no alert and no noAlert reason`,
+        });
+      }
+      for (const name of Object.keys(entry.fields)) {
+        if (ENVELOPE_FIELDS.includes(name)) {
+          findings.push({
+            file,
+            rule: "MC-03",
+            message: `${entry.event} redeclares the envelope field ${name}`,
+          });
+        }
+      }
+      for (const reason of entry.reasons ?? []) {
+        if (!REASON_CODE.test(reason) || reason.length > 64) {
+          findings.push({
+            file,
+            rule: "MC-03",
+            message: `${entry.event}: reason ${reason} breaks the ReasonCode shape`,
+          });
+        }
+      }
+    }
+  }
+  const catalogDir = join(root, "ops", "monitoring", "catalog");
+  if (existsSync(catalogDir)) {
+    for (const name of readdirSync(catalogDir)) {
+      const area = name.replace(/\.ts$/, "");
+      if (!name.endsWith(".ts") || ["types", "index", "owed"].includes(area)) continue;
+      if (!(area in fragments)) {
+        findings.push({
+          file: `ops/monitoring/catalog/${name}`,
+          rule: "MC-01",
+          message: "a catalogue fragment that catalog/index.ts does not list",
+        });
+      }
+    }
+  }
+  for (const event of PHASE0_EVENTS) {
+    if (!byEvent.has(event)) {
+      findings.push({
+        file: "ops/monitoring/catalog/platform.ts",
+        rule: "MC-01",
+        message: `spec 01 §8.9's event ${event} is not catalogued`,
+      });
+    }
+  }
+  if (scanCode) {
+    for (const [event, file] of eventsInCode(root)) {
+      if (!byEvent.has(event)) {
+        findings.push({ file, rule: "MC-01", message: `log("${event}") is not catalogued` });
+      }
+    }
+  }
+  return { findings, byEvent };
+}
+
+function fieldsOf(entry: CatalogEntry | undefined): Set<string> {
+  return new Set([...ENVELOPE_FIELDS, ...Object.keys(entry?.fields ?? {})]);
+}
+
+function checkAlert(
+  alert: AlertDef,
+  config: EnvConfig,
+  byEvent: Map<string, CatalogEntry>,
+  sourceNames: Set<string>,
+  policyNames: Set<string>,
+  root: string,
+): Finding[] {
+  const findings: Finding[] = [];
+  const add = (rule: string, message: string) =>
+    findings.push({ file: alert.file, rule, message: `${alert.name}: ${message}` });
+  const { template: _template, ...expanded } = alert;
+  if (/(?<!\{)\{[a-z]+\}(?!\})/.test(JSON.stringify(expanded))) {
+    add("MC-00", "an unexpanded {placeholder} remains (forEach does not provide it)");
+  }
+  if (alert.severity !== "P" && alert.severity !== "N") add("MC-00", "severity must be P or N");
+  if (!Array.isArray(alert.sources) || alert.sources.length === 0) {
+    add("MC-00", "names no source");
+  }
+  for (const source of alert.sources ?? []) {
+    if (!sourceNames.has(source)) add("MC-07", `names the source ${source}, which does not exist`);
+  }
+  // Routing.
+  if (alert.policy === undefined || alert.policy === "") add("RT-01", "has no policy");
+  else if (config.env === "staging" && alert.policy !== QUIET_POLICY) {
+    add(alert.policy.startsWith("production-") ? "MC-13" : "RT-01", `routes to ${alert.policy}`);
+  } else if (!policyNames.has(alert.policy)) add("RT-01", `names an undefined policy`);
+  for (const key of NOTIFY_KEYS) {
+    if (alert[key] === true) add("RT-03", `asks for ${key}: staging stays quiet`);
+  }
+  // Metadata and runbook.
+  if ((alert.incident_cause ?? "").trim() === "") add("MC-08", "has no incident_cause");
+  const meta = alert.metadata ?? {};
+  for (const key of ["check", "flow", "runbook"]) {
+    if ((meta[key] ?? "").trim() === "") add("MC-08", `has no metadata.${key}`);
+  }
+  const flow = meta.flow ?? "";
+  if (flow !== "" && !FLOW_ID.test(flow)) add("MC-08", `metadata.flow ${flow} is not a flow ID`);
+  const atlas = join(root, "docs", "flows", "atlas.json");
+  if (flow !== "" && existsSync(atlas) && !readFileSync(atlas, "utf8").includes(`"${flow}"`)) {
+    add("MC-08", `metadata.flow ${flow} is not in docs/flows/atlas.json`);
+  }
+  const runbook = meta.runbook ?? "";
+  if (runbook !== "" && (!runbook.startsWith("docs/runbooks/") || !runbook.endsWith(".md"))) {
+    add("MC-08", "metadata.runbook must be a docs/runbooks/*.md path");
+  } else if (runbook !== "" && !existsSync(join(root, runbook))) {
+    add("MC-08", `its runbook ${runbook} does not exist`);
+  }
+  // Thresholds name overlay keys.
+  if (typeof alert.threshold !== "string" || !THRESHOLD.test(alert.threshold)) {
+    add("MC-11", "threshold must be @any, @none or an @thresholds.<key> overlay key");
+  } else if (alert.threshold === "@any" && alert.operator !== "higher_than") {
+    add("MC-00", "@any needs the operator higher_than");
+  } else if (alert.threshold === "@none" && alert.operator !== "lower_than") {
+    add("MC-00", "@none needs the operator lower_than");
+  }
+  if (alert.window !== undefined && overlayKeys(alert.window).length !== 1) {
+    add("MC-11", "window must be an @thresholds.<key> overlay key");
+  }
+  if (alert.window === undefined && typeof alert.query_period !== "number") {
+    add("MC-00", "needs a query_period or a window");
+  }
+  if ("ratio" in alert.query && overlayKeys(`@${alert.query.ratio.minCount}`).length === 0) {
+    add("MC-11", "ratio.minCount must be an @thresholds.<key> overlay key");
+  }
+  // The catalogue.
+  for (const event of queryEvents(alert.query)) {
+    const entry = byEvent.get(event);
+    if (entry === undefined) {
+      add("MC-04", `reads the event ${event}, which is not catalogued`);
+      continue;
+    }
+    if (!entry.alerts.includes(alert.template)) {
+      add("MC-04", `watches ${event}, whose catalogue entry does not name ${alert.template}`);
+    }
+  }
+  const events = queryEvents(alert.query);
+  const declared = new Set(events.flatMap((e) => [...fieldsOf(byEvent.get(e))]));
+  const series = seriesFields(alert) ?? [];
+  for (const name of [...queryFields(alert.query), ...series]) {
+    if (events.length > 0 && !declared.has(name)) {
+      add("MC-04", `reads the field ${name}, which no watched event declares`);
+    }
+  }
+  // An event whose lines tell failures apart only by several fields together is grouped by all
+  // of them, or a failure that stands joins the incident a later, different one should open.
+  for (const event of events) {
+    const want = byEvent.get(event)?.seriesBy;
+    if (want === undefined || want.join("/") === series.join("/")) continue;
+    add(
+      "MC-04",
+      `groups ${event} by ${series.length === 0 ? "nothing" : series.join(", ")}, not by ${want.join(", ")}, so a failure that stands never hides a later, different one`,
+    );
+  }
+  // A security alert must fail closed: `eq: false` needs the field on the line, so a line
+  // without it (a matcher that could not decide, a writer that regressed) would never alert.
+  const security = events.filter((e) => {
+    const entry = byEvent.get(e);
+    return entry !== undefined && kindsOf(entry).includes("security");
+  });
+  for (const c of queryConditions(alert.query)) {
+    if (c.eq !== false || security.length === 0) continue;
+    add(
+      "MC-04",
+      `filters the security event ${security.join(", ")} with ${c.field} eq false, so a line without ${c.field} never alerts; use notEq true`,
+    );
+  }
+  try {
+    const numbers: Record<string, number> = {};
+    if ("ratio" in alert.query) numbers[alert.query.ratio.minCount] = 1;
+    renderSql(alert, numbers);
+  } catch (error) {
+    add(
+      "MC-04",
+      `its query cannot be rendered (${error instanceof QueryError ? error.message : "error"})`,
+    );
+  }
+  return findings;
+}
+
+function checkRunbook(root: string, path: string, names: readonly string[]): Finding[] {
+  const full = join(root, path);
+  if (!existsSync(full)) return [];
+  const text = readFileSync(full, "utf8");
+  const findings: Finding[] = [];
+  for (const heading of RUNBOOK_HEADINGS) {
+    if (!text.split("\n").some((line) => line.trim() === heading)) {
+      findings.push({ file: path, rule: "MC-10", message: `lacks the heading "${heading}"` });
+    }
+  }
+  for (const name of names) {
+    if (!text.includes(`\`${name}\``)) {
+      findings.push({
+        file: path,
+        rule: "MC-10",
+        message: `does not name ${name}, which points at it`,
+      });
+    }
+  }
+  return findings;
+}
+
+function checkIdentifiers(file: string, text: string): Finding[] {
+  const findings: Finding[] = [];
+  for (const [index, line] of text.split("\n").entries()) {
+    for (const shape of IDENTIFIER_SHAPES) {
+      if (shape.pattern.test(line)) {
+        findings.push({
+          file: `${file}:${index + 1}`,
+          rule: "MC-12",
+          message: `holds what looks like a Better Stack ${shape.name}`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+function checkEnv(config: EnvConfig, byEvent: Map<string, CatalogEntry>, root: string): Finding[] {
+  const findings: Finding[] = [];
+  const base = `ops/monitoring/${config.env}`;
+  const { sources, errors, metrics, monitors, heartbeats, policies } = config;
+  const sourceNames = new Set(sources.sources.map((s) => s.service));
+
+  // MC-13: the files are the environment's own. The apply checks the tokens' team against
+  // `fin-<env>`, never against a string in the files it is applying.
+  const team = `fin-${config.env}`;
+  const prefix = `fin-next-${config.env}-`;
+  for (const [file, value] of [
+    ["sources.json", sources.team],
+    ["policies.json", policies.team],
+  ] as const) {
+    if (value !== team) {
+      findings.push({
+        file: `${base}/${file}`,
+        rule: "MC-13",
+        message: `names the team ${String(value)}; the ${config.env} files belong to ${team}`,
+      });
+    }
+  }
+  if (sources.environment !== config.env) {
+    findings.push({
+      file: `${base}/sources.json`,
+      rule: "MC-13",
+      message: `names the environment ${String(sources.environment)}, not ${config.env}`,
+    });
+  }
+  for (const [file, value] of [
+    ["sources.json", sources.namePrefix],
+    ["errors.json", errors.namePrefix],
+  ] as const) {
+    if (value !== prefix) {
+      findings.push({
+        file: `${base}/${file}`,
+        rule: "MC-13",
+        message: `names the prefix ${String(value)}; the ${config.env} files use ${prefix}`,
+      });
+    }
+  }
+
+  // MC-07: a secret goes only to a Railway service, as a sealed variable (spec 08 §7.11).
+  const holders: { file: string; what: string; services: unknown }[] = [
+    ...sources.sources.map((s) => ({
+      file: "sources.json",
+      what: `source ${s.service}`,
+      services: s.holders ?? [s.service],
+    })),
+    ...errors.applications.map((a) => ({
+      file: "errors.json",
+      what: `application ${a.name}`,
+      services: a.holders,
+    })),
+    ...heartbeats.heartbeats.map((h) => ({
+      file: "heartbeats.json",
+      what: `heartbeat ${h.name}`,
+      services: h.holders,
+    })),
+  ];
+  for (const holder of holders) {
+    if (!Array.isArray(holder.services)) {
+      // errors.json's own shape rule below reports an application's.
+      if (holder.file !== "errors.json") {
+        findings.push({
+          file: `${base}/${holder.file}`,
+          rule: "MC-00",
+          message: `${holder.what}: holders must list the Railway services that receive its secret`,
+        });
+      }
+      continue;
+    }
+    for (const service of holder.services) {
+      if (!RAILWAY_SERVICES.includes(String(service))) {
+        findings.push({
+          file: `${base}/${holder.file}`,
+          rule: "MC-07",
+          message: `${holder.what} delivers its secret to ${String(service)}, which is not a Railway service`,
+        });
+      }
+    }
+  }
+
+  // MC-05: every heartbeat of spec 01 §8.5, and the one the watcher pings, is defined. A dropped
+  // heartbeat is paused by the apply, so a missing one silences a dead-man switch.
+  const heartbeatNames = new Set(heartbeats.heartbeats.map((h) => h.name));
+  for (const name of PHASE0_HEARTBEATS) {
+    if (!heartbeatNames.has(name)) {
+      findings.push({
+        file: `${base}/heartbeats.json`,
+        rule: "MC-05",
+        message: `spec 01 §8.5's heartbeat ${name} is missing`,
+      });
+    }
+  }
+  const watcherSettings = join(root, "ops", "watcher", "settings", `${config.env}.json`);
+  if (existsSync(watcherSettings)) {
+    let pinged: unknown;
+    try {
+      pinged = (JSON.parse(readFileSync(watcherSettings, "utf8")) as { heartbeat?: unknown })
+        .heartbeat;
+    } catch {
+      pinged = undefined;
+    }
+    if (typeof pinged !== "string" || !heartbeatNames.has(pinged)) {
+      findings.push({
+        file: `ops/watcher/settings/${config.env}.json`,
+        rule: "MC-05",
+        message: `the watcher's settings ping the heartbeat ${String(pinged)}, which heartbeats.json does not define`,
+      });
+    }
+  }
+
+  // MC-07: every source has an Errors application or a written reason.
+  const covered = new Set<string>();
+  for (const app of errors.applications) {
+    if (app.source !== undefined) {
+      if (!sourceNames.has(app.source)) {
+        findings.push({
+          file: `${base}/errors.json`,
+          rule: "MC-07",
+          message: `${app.name} correlates with ${app.source}, which is not a source`,
+        });
+      }
+      covered.add(app.source);
+    }
+    for (const user of app.alsoUsedBy ?? []) covered.add(user);
+    if (!Array.isArray(app.holders) || typeof app.variable !== "string") {
+      findings.push({
+        file: `${base}/errors.json`,
+        rule: "MC-00",
+        message: `${app.name}: needs holders and variable (where its DSN is delivered)`,
+      });
+    }
+    if (!/_errors$/.test(app.platform)) {
+      findings.push({
+        file: `${base}/errors.json`,
+        rule: "MC-00",
+        message: `${app.name}: an Errors platform ends in _errors`,
+      });
+    }
+  }
+  const reasons = errors.noApplication ?? {};
+  for (const source of sourceNames) {
+    if (!covered.has(source) && (reasons[source] ?? "").trim() === "") {
+      findings.push({
+        file: `${base}/errors.json`,
+        rule: "MC-07",
+        message: `the source ${source} has no Errors application and no reason`,
+      });
+    }
+  }
+
+  // MC-06 and MC-07 for metrics.
+  for (const name of Object.keys(metrics.sources)) {
+    if (!sourceNames.has(name)) {
+      findings.push({
+        file: `${base}/metrics.json`,
+        rule: "MC-07",
+        message: `metrics for ${name}, which is not a source`,
+      });
+    }
+    for (const set of metrics.sources[name] ?? []) {
+      if (!(set in metrics.sets)) {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-00",
+          message: `${name} names the unknown set ${set}`,
+        });
+      }
+    }
+  }
+  const allFields = new Set<string>(ENVELOPE_FIELDS);
+  for (const entry of byEvent.values()) for (const f of Object.keys(entry.fields)) allFields.add(f);
+  for (const [set, defs] of Object.entries(metrics.sets)) {
+    for (const metric of defs) {
+      if (!METRIC_TYPES.includes(metric.type)) {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-00",
+          message: `${set}.${metric.name}: type ${String(metric.type)} is not a Better Stack metric type`,
+        });
+      }
+      const label = metric.aggregations.length === 0;
+      if (label && ID_SHAPED_FIELD.test(metric.field)) {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-06",
+          message: `${set}.${metric.name}: the label ${metric.field} is ID-shaped or free text`,
+        });
+      }
+      if (label && metric.type !== "string_low_cardinality") {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-06",
+          message: `${set}.${metric.name}: a label is string_low_cardinality`,
+        });
+      }
+      if (!allFields.has(metric.field)) {
+        findings.push({
+          file: `${base}/metrics.json`,
+          rule: "MC-04",
+          message: `${set}.${metric.name} reads ${metric.field}, which no catalogued event declares`,
+        });
+      }
+    }
+  }
+
+  // Policies: staging-quiet exists and is email only (RT-02).
+  const policyNames = new Set(policies.policies.map((p) => p.name));
+  const severities = new Map(policies.severities.map((s) => [s.name, s]));
+  if (policies.team !== sources.team) {
+    findings.push({
+      file: `${base}/policies.json`,
+      rule: "RT-01",
+      message: "the policies' team differs from the sources' team",
+    });
+  }
+  if (config.env === "staging") {
+    if (!policyNames.has(QUIET_POLICY)) {
+      findings.push({ file: `${base}/policies.json`, rule: "RT-01", message: "no staging-quiet" });
+    }
+    for (const policy of policies.policies) {
+      if (policy.name !== QUIET_POLICY) {
+        findings.push({
+          file: `${base}/policies.json`,
+          rule: policy.name.startsWith("production-") ? "MC-13" : "RT-01",
+          message: `staging defines ${policy.name}; staging has staging-quiet only`,
+        });
+      }
+    }
+  }
+  for (const policy of policies.policies) {
+    const file = `${base}/policies.json`;
+    if (config.env === "staging" && (policy.repeatCount !== 0 || policy.steps.length !== 1)) {
+      findings.push({ file, rule: "RT-02", message: `${policy.name} escalates or repeats` });
+    }
+    for (const step of policy.steps) {
+      const members = Array.isArray(step.members) ? step.members : [];
+      // Spec 08 §7.9: one step, at once, to the entire staging team. Every staging alert,
+      // monitor and heartbeat routes here, so a wait or other members would quiet them all.
+      if (config.env === "staging") {
+        if (step.waitBefore !== 0) {
+          findings.push({
+            file,
+            rule: "RT-02",
+            message: `${policy.name}: its step must notify at once (waitBefore 0)`,
+          });
+        }
+        const onlyTeam =
+          members.length === 1 &&
+          members[0]?.type === "entire_team" &&
+          members[0]?.id === undefined;
+        if (!onlyTeam) {
+          findings.push({
+            file,
+            rule: "RT-02",
+            message: `${policy.name}: its step must reach the entire staging team and no one else`,
+          });
+        }
+      }
+      const severity = severities.get(step.severity);
+      if (severity === undefined) {
+        findings.push({ file, rule: "RT-02", message: `${policy.name}: unknown severity` });
+      } else if (config.env === "staging") {
+        findings.push(...notifyFindings(file, `severity ${severity.name}`, severity));
+        if (severity.email !== true) {
+          findings.push({
+            file,
+            rule: "RT-02",
+            message: `severity ${severity.name} sends no email`,
+          });
+        }
+      }
+      for (const member of members) {
+        if (member.type === "ai_sre") {
+          findings.push({ file, rule: "RT-02", message: `${policy.name} has an ai_sre member` });
+        }
+      }
+    }
+  }
+
+  // Alerts.
+  const seen = new Map<string, string>();
+  const runbookUsers = new Map<string, string[]>();
+  const point = (runbook: string | undefined, name: string) => {
+    if (runbook === undefined || runbook === "") return;
+    runbookUsers.set(runbook, [...(runbookUsers.get(runbook) ?? []), name]);
+  };
+  for (const alert of config.alerts) {
+    const other = seen.get(alert.name);
+    if (other !== undefined) {
+      findings.push({
+        file: alert.file,
+        rule: "MC-14",
+        message: `${alert.name} is also defined in ${other}`,
+      });
+    }
+    seen.set(alert.name, alert.file);
+    findings.push(...checkAlert(alert, config, byEvent, sourceNames, policyNames, root));
+    point(alert.metadata?.runbook, alert.template);
+  }
+  const templates = new Set(config.alerts.map((a) => a.template));
+  for (const entry of byEvent.values()) {
+    for (const name of entry.alerts) {
+      if (!templates.has(name)) {
+        findings.push({
+          file: "ops/monitoring/catalog",
+          rule: "MC-04",
+          message: `${entry.event} names the alert ${name}, which no ${config.env} fragment defines`,
+        });
+      }
+    }
+  }
+
+  // Monitors and heartbeats: policy, quiet, runbook.
+  const objects = [
+    ...monitors.monitors.map((m) => ({
+      file: `${base}/monitors.json`,
+      what: `monitor ${m.name}`,
+      name: m.name,
+      policy: m.policy ?? monitors.defaults.policy,
+      notify: { ...monitors.defaults.notify, ...m.notify },
+      runbook: m.runbook ?? monitors.defaults.runbook,
+    })),
+    ...heartbeats.heartbeats.map((h) => ({
+      file: `${base}/heartbeats.json`,
+      what: `heartbeat ${h.name}`,
+      name: h.name,
+      policy: h.policy ?? heartbeats.defaults.policy,
+      notify: { ...heartbeats.defaults.notify, ...h.notify },
+      runbook: h.runbook ?? heartbeats.defaults.runbook,
+    })),
+  ];
+  for (const object of objects) {
+    if (object.policy === undefined || object.policy === "") {
+      findings.push({ file: object.file, rule: "RT-01", message: `${object.what} has no policy` });
+    } else if (config.env === "staging" && object.policy !== QUIET_POLICY) {
+      findings.push({
+        file: object.file,
+        rule: object.policy.startsWith("production-") ? "MC-13" : "RT-01",
+        message: `${object.what} routes to ${object.policy}`,
+      });
+    } else if (!policyNames.has(object.policy)) {
+      findings.push({
+        file: object.file,
+        rule: "RT-01",
+        message: `${object.what}: unknown policy`,
+      });
+    }
+    if (config.env === "staging")
+      findings.push(...notifyFindings(object.file, object.what, object.notify));
+    if (!existsSync(join(root, object.runbook))) {
+      findings.push({
+        file: object.file,
+        rule: "MC-08",
+        message: `${object.what}: its runbook ${object.runbook} does not exist`,
+      });
+    }
+    point(object.runbook, object.name);
+  }
+  for (const monitor of monitors.monitors) {
+    if (/[./]/.test(monitor.host) || !/^[a-z]+$/.test(monitor.host)) {
+      findings.push({
+        file: `${base}/monitors.json`,
+        rule: "MC-00",
+        message: `monitor ${monitor.name}: host must be a host role, never a hostname`,
+      });
+    }
+    if (!monitor.path.startsWith("/")) {
+      findings.push({
+        file: `${base}/monitors.json`,
+        rule: "MC-00",
+        message: `monitor ${monitor.name}: path must start with /`,
+      });
+    }
+    if (monitor.type === "keyword" && (monitor.keyword ?? "") === "") {
+      findings.push({
+        file: `${base}/monitors.json`,
+        rule: "MC-00",
+        message: `monitor ${monitor.name}: a keyword monitor needs its keyword`,
+      });
+    }
+    if (monitor.type === "expected_status_code" && (monitor.expectStatus ?? []).length === 0) {
+      findings.push({
+        file: `${base}/monitors.json`,
+        rule: "MC-00",
+        message: `monitor ${monitor.name}: needs expectStatus`,
+      });
+    }
+  }
+  for (const heartbeat of heartbeats.heartbeats) {
+    if (!/^@grace\.[a-z0-9-]+$/.test(String(heartbeat.grace))) {
+      findings.push({
+        file: `${base}/heartbeats.json`,
+        rule: "MC-11",
+        message: `heartbeat ${heartbeat.name}: grace must be an @grace.<key> overlay key`,
+      });
+    }
+  }
+
+  // MC-10: each runbook has the headings and names who points at it.
+  for (const [runbook, names] of runbookUsers) {
+    findings.push(...checkRunbook(root, runbook, [...new Set(names)]));
+  }
+  return findings;
+}
+
+/** MC-12 over every file under the given paths (files or directories), each file once. */
+function scanIdentifiers(root: string, paths: readonly string[]): Finding[] {
+  const files = new Set<string>();
+  for (const path of paths) {
+    const full = join(root, path);
+    if (!existsSync(full)) continue;
+    if (statSync(full).isDirectory()) {
+      const found: string[] = [];
+      walk(root, path, found);
+      for (const file of found) files.add(file);
+    } else files.add(path);
+  }
+  const findings: Finding[] = [];
+  for (const file of [...files].sort()) {
+    findings.push(...checkIdentifiers(file, readFileSync(join(root, file), "utf8")));
+  }
+  return findings;
+}
+
+/** Runs every rule. Returns the findings, empty when the files pass. */
+export function checkMonitoring(root: string, options: CheckOptions = {}): Finding[] {
+  const fragments = options.fragments ?? defaultFragments;
+  const { findings, byEvent } = checkCatalogue(fragments, root, options.scanCode ?? true);
+  const envs = options.envs ?? envDirs(root);
+  if (envs.length === 0) {
+    findings.push({ file: "ops/monitoring", rule: "MC-00", message: "no environment files" });
+  }
+  const configs: EnvConfig[] = [];
+  for (const env of envs) {
+    const loaded = loadEnv(root, env);
+    findings.push(...loaded.findings);
+    if (loaded.config === undefined) continue;
+    configs.push(loaded.config);
+    findings.push(...checkEnv(loaded.config, byEvent, root));
+  }
+  const code = (options.scanCode ?? true) ? readCode(root) : undefined;
+  findings.push(...checkOwed(fragments, options.owed ?? OWED_ALERTS, configs, root, code));
+  // MC-12 over every file, not only those the loader parses: each environment's whole directory
+  // (dashboards, webhooks and the status page included), the catalogue, the README and the
+  // runbooks, and the watcher's settings.
+  findings.push(
+    ...scanIdentifiers(root, [
+      ...envs.map((env) => `ops/monitoring/${env}`),
+      "ops/monitoring/catalog",
+      "ops/monitoring/README.md",
+      ...(options.scan ?? ["ops/watcher/settings", "docs/runbooks"]),
+    ]),
+  );
+  return findings;
+}
+
+/** Formats findings one per line: where, the rule, the message. Never a value from a secret. */
+export function formatFindings(findings: readonly Finding[]): string {
+  return findings.map((f) => `${f.file}: ${f.rule} ${f.message}`).join("\n");
+}

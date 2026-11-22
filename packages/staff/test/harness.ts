@@ -71,8 +71,9 @@ export class Browser {
   constructor(realm: Realm, access: AccessIdentity | null) {
     this.#realm = realm;
     this.access = access;
-    // Each browser on its own /48 of the documentation prefix, so per-network limits are its own.
-    this.ip = `2001:db8:${randomBytes(2).toString("hex")}::1`;
+    // Each browser on its own /48 of the documentation prefix, so per-network limits are its own,
+    // written as the database writes it back (no leading zero), so a stored address compares equal.
+    this.ip = `2001:db8:${(0x1000 + (randomBytes(2).readUInt16BE() % 0xe000)).toString(16)}::1`;
   }
 
   context(): RequestContext {
@@ -329,7 +330,7 @@ export async function createStaffHarness(
     },
     async latestCode(email) {
       const result = await admin.query<{ code: string }>(
-        `SELECT params ->> 'code' AS code FROM email.outbox
+        `SELECT params ->> 'code' AS code FROM email_private.outbox
           WHERE recipient = $1 AND params ? 'code' ORDER BY created_at DESC, id DESC LIMIT 1`,
         [email.toLowerCase()],
       );
@@ -398,7 +399,7 @@ export async function createStaffHarness(
         recipient: string;
         params: Record<string, unknown>;
       }>(
-        `SELECT template, recipient, params FROM email.outbox
+        `SELECT template, recipient, params FROM email_private.outbox
           WHERE ($1::text IS NULL OR template = $1) ORDER BY created_at, id`,
         [template ?? null],
       );

@@ -3,6 +3,7 @@
 import type { RealmName } from "./config.ts";
 import type { EndpointRule, GateState } from "./endpoint-policy.ts";
 import type { PersonGateFacts } from "./gate.ts";
+import { type GoogleFlow, newGoogleFlow } from "./google/flow.ts";
 import type { LineFields, LineValue } from "./ports/log.ts";
 import type { IntentBinding } from "./step-up/intents.ts";
 import type { FactorFacts, PersonRow, SessionRow } from "./store.ts";
@@ -79,6 +80,8 @@ export interface RequestState {
     publicKey: string;
     expectedChallenge: string;
   } | null;
+  /** A Google round trip's part (stretch 5, §5.8): what the realm prefetched and what it made. */
+  readonly google: GoogleFlow;
   readonly line: Record<string, LineValue>;
 }
 
@@ -99,6 +102,7 @@ export function newRequestState(realm: RealmName, context: RequestContext): Requ
     finishingAuthenticator: false,
     removedTwoFactorId: null,
     passkeyCounter: null,
+    google: newGoogleFlow(),
     // §18.1: `none` until a live session is read or made.
     line: { realm, assurance: "none" },
   };

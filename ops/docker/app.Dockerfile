@@ -1,5 +1,6 @@
-# The Fin Node images: fin-next-edge, -api, -payments, -console, -admin and -verify (spec 01 §4.9;
-# ARCHITECTURE §3.5; [SA-38]). One Dockerfile, ARG APP, two targets built from the same sources:
+# The Fin Node images: fin-next-edge, -api, -payments, -console, -admin and -verify (spec 01
+# section 4.9; ARCHITECTURE section 3.5; [SA-38]). One Dockerfile, ARG APP, two targets built
+# from the same sources:
 #   release  the only target pushed to GHCR, attested and deployed; it holds no seam, and its bundle
 #            (built with FIN_BUILD_TARGET=release) exits 78 when any FIN_SEAM_* variable is set;
 #   test     the bundle built with FIN_BUILD_TARGET=test, for CI's journeys; it refuses to start
@@ -8,17 +9,24 @@
 #   docker build -f ops/docker/app.Dockerfile --build-arg APP=console --target release .
 # Node is PID 1: the distroless image's entrypoint is node, and the exec-form CMD carries the flags.
 # No NODE_OPTIONS, no shell, no package manager and no node_modules in either run image: the server
-# is one Vite SSR bundle with its map beside it, unserved (S0-13).
+# is one Vite SSR bundle with its map beside it, unserved (S0-13). Beside it, read-only, are the
+# database's files from every package (bootstrap, migrations, grants) at FIN_DB_ASSETS_DIR, which
+# the api image's `migrate` service reads: exactly the set packages/db/src/assets.ts finds in the
+# source tree, laid out as there.
 
-# ---- deps: the pinned build image, pnpm from its release asset by checksum, the workspace installed
+# ---- deps: the pinned build image, pnpm from its release asset by checksum, the workspace installed.
+# The bundle's build stages and the db-assets stage are built on it, so packages/server's tests
+# (test/image-build.ts) hold it to Node's image by digest and exactly these instructions (any other
+# instruction, RUN step, ENV name, ARG, ADD or COPY is refused), and refuse a workspace manifest
+# with a script pnpm runs on install.
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS deps
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV TURBO_TELEMETRY_DISABLED=1 \
     CI=1
 WORKDIR /src
-# pnpm 12.21.0, the linux-x64 release asset checked against its SHA-256 (spec 01 §4.1): never
-# Corepack, never npm i -g. The asset's name and layout (a tarball holding `pnpm` and `dist/`, as the
-# other platforms' assets do) are confirmed by CI's first image build.
+# pnpm 12.21.0, the linux-x64 release asset checked against its SHA-256 (spec 01 section 4.1):
+# never Corepack, never npm i -g. The asset's name and layout (a tarball holding `pnpm` and
+# `dist/`, as the other platforms' assets do) are confirmed by CI's first image build.
 ADD --checksum=sha256:84c4773bcf4a217f4083cd7b2a91e4cee6103cf42426c1282ef37d308f55a410 \
     https://github.com/pnpm/pnpm/releases/download/v12.21.0/pnpm-linux-x64.tar.gz /tmp/pnpm.tar.gz
 RUN mkdir -p /opt/pnpm \
@@ -33,12 +41,28 @@ RUN pnpm fetch --frozen-lockfile
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
 
+# ---- the database's files: every package's bootstrap, migrations and grants, by assets.ts's rule.
+# The release stage copies them beside the bundle (release-allowlist.json names the copy). This
+# stage is exactly the staging command and then the scan in its database files' mode over what it
+# staged, built on deps and run in its directory, and nothing else: packages/server's tests refuse
+# any other step or instruction. The scan (harness-scan.mjs --db-assets) fails this stage, and so
+# the image's build, on any file but a .sql or .json file in the database's folders assets.ts
+# reads, on any other directory, on any path that contains packages/testing, and on the test
+# harness's markers.
+FROM deps AS db-assets
+RUN node packages/db/src/assets-cli.ts stage /out/db-assets
+RUN node ops/docker/harness-scan.mjs --db-assets /out/db-assets
+
 # ---- the two bundles
+# The release bundle's output is scanned for the test harness's markers right after its build, in
+# the same RUN, over exactly the directory the release stage copies (harness-scan.mjs): a finding
+# fails this RUN and so the image's build. packages/server's tests pin this step's shape.
 FROM deps AS build-release
 ARG APP
 RUN test -n "${APP}" \
     && test -f "apps/${APP}/vite.server.config.ts" \
     && FIN_BUILD_TARGET=release pnpm --filter "@fin/${APP}" run build:server \
+    && node ops/docker/harness-scan.mjs "apps/${APP}/dist/server" \
     && test -f "apps/${APP}/dist/server/main.js"
 
 FROM deps AS build-test
@@ -52,17 +76,23 @@ FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f
 ARG APP
 WORKDIR /app
 COPY --from=build-test /src/apps/${APP}/dist/server/ /app/dist/
-ENV FIN_CONTAINER=1
+COPY --from=db-assets /out/db-assets/ /app/db-assets/
+ENV FIN_CONTAINER=1 \
+    FIN_DB_ASSETS_DIR=/app/db-assets
 USER nonroot
 EXPOSE 8080
 CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]
 
-# ---- release: the image that deploys (last, so it is also the default target)
+# ---- release: the image that deploys (last, so it is also the default target). packages/server's
+# tests refuse an ENTRYPOINT, a HEALTHCHECK, an ENV that sets a NODE_* variable, and any CMD but
+# this one: the known Node flags and the bundle's main.js.
 FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531 AS release
 ARG APP
 WORKDIR /app
 COPY --from=build-release /src/apps/${APP}/dist/server/ /app/dist/
-ENV FIN_CONTAINER=1
+COPY --from=db-assets /out/db-assets/ /app/db-assets/
+ENV FIN_CONTAINER=1 \
+    FIN_DB_ASSETS_DIR=/app/db-assets
 USER nonroot
 EXPOSE 8080
 CMD ["--max-old-space-size-percentage=70", "--disable-proto=throw", "--enable-source-maps", "dist/main.js"]

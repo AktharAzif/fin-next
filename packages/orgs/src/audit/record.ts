@@ -3,7 +3,8 @@
 // any SQL it checks the event is this fragment's, the actor kind, the target's prefix and the
 // metadata's strict schema, and refuses a personal or secret shape in any string. It then writes the
 // journal entry the event declares (§16.6) in the same transaction. On any refusal the unit is
-// poisoned, so the action that needed the event rolls back.
+// poisoned, so the action that needed the event rolls back, and `audit.write_failed` names the
+// event as `auditEvent`: a field named `event` collides with the line's own and is dropped.
 import {
   AuditMetadataError,
   assertNoPersonalShapes,
@@ -142,7 +143,10 @@ export function createRecordOrgAudit(deps: { clock: DateClock; lines: LineSink }
       payload = orgAuditPayload(input, newId("aud", deps.clock), tx.requestId, tx.release);
     } catch (error) {
       tx.poison("audit_input");
-      deps.lines.write("audit.write_failed", "error", { event: input.event, sqlstate: "input" });
+      deps.lines.write("audit.write_failed", "error", {
+        auditEvent: input.event,
+        sqlstate: "input",
+      });
       throw error;
     }
     const id = payload.id as string;
@@ -151,7 +155,7 @@ export function createRecordOrgAudit(deps: { clock: DateClock; lines: LineSink }
     } catch (error) {
       tx.poison("audit_write");
       deps.lines.write("audit.write_failed", "error", {
-        event: input.event,
+        auditEvent: input.event,
         sqlstate: sqlStateOf(error),
       });
       throw error;
@@ -167,7 +171,7 @@ export function createRecordOrgAudit(deps: { clock: DateClock; lines: LineSink }
       } catch (error) {
         tx.poison("audit_journal");
         deps.lines.write("audit.write_failed", "error", {
-          event: input.event,
+          auditEvent: input.event,
           sqlstate: sqlStateOf(error),
         });
         throw error;

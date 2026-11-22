@@ -2,13 +2,28 @@
 // terminal line per unit even when the work throws.
 import { gunzipSync } from "node:zlib";
 import { createManualClock } from "@fin/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { capture, type Line, TEST_RELEASE, TEST_START } from "../testing/capture.ts";
 import { capLine, MAX_LINE_BYTES } from "./cap.ts";
 import { batches, betterStackTransport, MAX_BATCH_BYTES, type Transport } from "./ship.ts";
-import { Telemetry } from "./telemetry.ts";
+import { log, Telemetry } from "./telemetry.ts";
 
 const settle = async (telemetry: { flush(ms: number): Promise<void> }) => telemetry.flush(1000);
+
+/** The lines the module's `log` writes to stdout with no telemetry installed (none is, here). */
+function fallbackLines(write: () => void): Line[] {
+  const chunks: string[] = [];
+  const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  try {
+    write();
+  } finally {
+    spy.mockRestore();
+  }
+  return chunks.map((chunk) => JSON.parse(chunk) as Line);
+}
 
 describe("the line", () => {
   it("has the envelope, scrubbed, with message equal to event", () => {
@@ -42,6 +57,30 @@ describe("the line", () => {
     expect(stdout[0]?.event).toBe("request");
     expect(stdout[0]?.email).toBe("[withheld]");
     expect(stdout[0]?.userId).toBe("usr_1");
+  });
+
+  it("keeps its envelope before installTelemetry too: no field relabels the fallback line", () => {
+    for (const key of ["event", "service", "release", "level"]) {
+      const lines = fallbackLines(() =>
+        log("boot.started", { [key]: "relabelled", reason: "kept" }, "warn"),
+      );
+      expect(lines).toEqual([
+        { message: "boot.started", event: "boot.started", level: "warn", reason: "kept" },
+      ]);
+    }
+    const lines = fallbackLines(() =>
+      log("boot.started", {
+        event: "x",
+        message: "x",
+        level: "error",
+        service: "evil",
+        release: "0".repeat(40),
+        email: "a@example.com",
+      }),
+    );
+    expect(lines).toEqual([
+      { message: "boot.started", event: "boot.started", level: "info", email: "[withheld]" },
+    ]);
   });
 
   it("replaces an event name that is not a bounded code", () => {

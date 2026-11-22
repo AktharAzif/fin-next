@@ -1,7 +1,8 @@
 // `migrate --bootstrap` (spec 01 §6.6 steps 3 and 4): run once per environment, by a registered run,
 // as the template's superuser. In one transaction it creates the roles and schemas
 // (bootstrap/010_roles.sql), sets each login's SCRAM verifier and CONNECTION LIMIT, then runs the
-// superuser's other files in name order: the privileged-login record and its guards
+// superuser's other files in name order (every package's bootstrap/ by assets.ts's rule; today only
+// packages/db has any): the privileged-login record and its guards
 // (020_privileged_login.sql), the environment row (030_environment.sql, written here from
 // FIN_ENVIRONMENT) and the guard on the audit trail's protections (040_audit_guard.sql); and it applies
 // the grants on the superuser's own objects.
@@ -30,9 +31,15 @@ export const MIN_SERVER_VERSION = 180_000;
 
 export type Environment = "development" | "ci" | "staging" | "production";
 
-/** The roles file, run first; the rest of the directory's `NNN_<what>.sql` files follow in name order. */
+/** The roles file, run first; the other `NNN_<what>.sql` files follow in name order. */
 export const ROLES_FILE = "010_roles.sql";
 const BOOTSTRAP_FILE = /^\d{3}_[a-z][a-z0-9_]*\.sql$/;
+
+/** One of the superuser's files: its name, which orders it, and where to read it. */
+export interface BootstrapFile {
+  name: string;
+  path: string;
+}
 
 export interface BootstrapInput {
   /** Login to SCRAM-SHA-256 verifier. Every `_a` login needs one; the others are optional. */
@@ -41,22 +48,43 @@ export interface BootstrapInput {
   replicas?: Partial<Record<ServiceName, number>>;
   /** FIN_ENVIRONMENT: written once to ops.environment, which audit.start_epoch() checks. */
   environment: Environment;
-  bootstrapDir: string;
+  /** Every package's bootstrap files (loadDbAssets's `bootstrap`). */
+  files: readonly BootstrapFile[];
   fragments: readonly GrantFragment[];
 }
 
-/** The bootstrap files in the order they run: the roles first, then the others by name. */
-export function bootstrapFiles(dir: string): string[] {
-  const names = readdirSync(dir)
-    .filter((name) => BOOTSTRAP_FILE.test(name))
-    .sort();
-  if (names[0] !== ROLES_FILE) {
-    throw new MigrationError(
-      "bootstrap_files",
-      `the bootstrap directory must start with ${ROLES_FILE}`,
-    );
+/**
+ * The bootstrap files in the order they run, whichever packages they come from: each named
+ * `NNN_<what>.sql`, no name twice, the roles file first and the others by name.
+ */
+export function orderBootstrapFiles<T extends BootstrapFile>(files: readonly T[]): T[] {
+  for (const file of files) {
+    if (!BOOTSTRAP_FILE.test(file.name)) {
+      throw new MigrationError("bootstrap_files", `${file.name}: not NNN_<what>.sql`, file.name);
+    }
   }
-  return names;
+  const sorted = [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i]?.name === sorted[i - 1]?.name) {
+      throw new MigrationError(
+        "bootstrap_files",
+        `${sorted[i]?.name}: two bootstrap files share the name`,
+        sorted[i]?.name,
+      );
+    }
+  }
+  if (sorted[0]?.name !== ROLES_FILE) {
+    throw new MigrationError("bootstrap_files", `the bootstrap must start with ${ROLES_FILE}`);
+  }
+  return sorted;
+}
+
+/** One directory's bootstrap files, by name, in the order they run. */
+export function bootstrapFiles(dir: string): string[] {
+  const names = readdirSync(dir).filter((name) => BOOTSTRAP_FILE.test(name));
+  return orderBootstrapFiles(names.map((name) => ({ name, path: join(dir, name) }))).map(
+    (file) => file.name,
+  );
 }
 
 export interface BootstrapResult {
@@ -175,9 +203,10 @@ export async function bootstrap(client: PgClient, input: BootstrapInput): Promis
   if (!["development", "ci", "staging", "production"].includes(input.environment)) {
     throw new MigrationError("bootstrap_environment", "the environment is not one of Fin's four");
   }
-  const [rolesFile, ...others] = bootstrapFiles(input.bootstrapDir);
-  const roles = readFileSync(join(input.bootstrapDir, rolesFile ?? ROLES_FILE), "utf8");
-  const rest = others.map((name) => readFileSync(join(input.bootstrapDir, name), "utf8"));
+  const [rolesFile, ...others] = orderBootstrapFiles(input.files);
+  if (rolesFile === undefined) throw new MigrationError("bootstrap_files", "no bootstrap files");
+  const roles = readFileSync(rolesFile.path, "utf8");
+  const rest = others.map((file) => readFileSync(file.path, "utf8"));
   const replicas = input.replicas ?? {};
   const q: Queryable = { query: (text, values) => client.query(text, values) };
 

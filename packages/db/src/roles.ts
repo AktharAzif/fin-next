@@ -11,8 +11,20 @@ export const SERVICE_GROUPS = [
 ] as const;
 export type ServiceGroup = (typeof SERVICE_GROUPS)[number];
 
-/** Roles a grant fragment may name: the service groups and the two narrow logins. */
-export const GRANTEE_ROLES = [...SERVICE_GROUPS, "fin_probe", "fin_readonly"] as const;
+/**
+ * The owner of `email.enqueue()`: a NOLOGIN role, a member of nothing, holding only what the function
+ * needs (INSERT on `email_private.outbox` and what it reads), so the function reaches the worker's
+ * private schema while no caller does. fin_owner is its one member, to own and replace the function.
+ */
+export const ENQUEUE_OWNER = "fin_email_enqueue";
+
+/** Roles a grant fragment may name: the service groups, the two narrow logins and enqueue's owner. */
+export const GRANTEE_ROLES = [
+  ...SERVICE_GROUPS,
+  "fin_probe",
+  "fin_readonly",
+  ENQUEUE_OWNER,
+] as const;
 export type GranteeRole = (typeof GRANTEE_ROLES)[number];
 
 export const SERVICE_LOGINS = SERVICE_GROUPS.flatMap((group) => [
@@ -33,9 +45,14 @@ export const FIN_ROLES = [
   "fin_backup",
   "fin_probe",
   "fin_readonly",
+  ENQUEUE_OWNER,
 ] as const;
 
-/** The schemas, one per area (DECISIONS DA-01), and the superuser's guard schema. */
+/**
+ * The schemas, one per area (DECISIONS DA-01), plus `email_private`: the worker's outbox and sender
+ * tables, which only the worker and enqueue's owner may use, so no other login can name (and so lock)
+ * them. The superuser's guard schema is GUARD_SCHEMA.
+ */
 export const FIN_SCHEMAS = [
   "identity",
   "staff",
@@ -44,6 +61,7 @@ export const FIN_SCHEMAS = [
   "money",
   "events",
   "email",
+  "email_private",
   "audit",
   "ops",
 ] as const;

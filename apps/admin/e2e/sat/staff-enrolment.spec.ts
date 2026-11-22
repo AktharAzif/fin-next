@@ -10,6 +10,7 @@ import {
   ENDED_URL,
   emailedCodeSignIn,
   endNextPasskeyPrompt,
+  expectHome,
   hold,
   inApp,
   ORIGIN,
@@ -84,8 +85,7 @@ test("@journey forced enrolment with the enrolment code, which works once", asyn
   await box.fill(await authenticatorCode(key));
   await expect(turnOn).toHaveAttribute("aria-busy", "true");
   checking.release();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
-  await expect(page.getByRole("heading", { level: 1, name: "Staff" })).toBeVisible();
+  await expectHome(page);
 
   // Enrolled: neither code opens anything again.
   for (const code of [enrolmentCode, fresh]) {
@@ -121,7 +121,7 @@ test("@journey a closed passkey prompt at set-up says so, and the next one adds 
   expect(await authenticator.list(authenticator.rpIdFor(ORIGIN))).toHaveLength(0);
 
   await add.click();
-  await expect(page).toHaveURL(`${ORIGIN}/staff`);
+  await expectHome(page);
   expect(await authenticator.list(authenticator.rpIdFor(ORIGIN))).toHaveLength(1);
 });
 

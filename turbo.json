@@ -15,13 +15,14 @@
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "outputs": [] },
-    "test": { "outputs": [] },
+    "test": { "cache": false },
+    "@fin/server#test": { "cache": false },
     "test:db": { "cache": false, "passThroughEnv": ["FIN_TEST_DATABASE_URL"] },
     "//#lint:root": { "cache": false },
     "//#typecheck:root": {
       "inputs": ["tsconfig.json", "vitest.config.ts", "scripts/**"],
       "outputs": []
     },
-    "//#test:root": { "inputs": ["scripts/**"], "outputs": [] }
+    "//#test:root": { "cache": false }
   }
 }

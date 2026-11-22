@@ -23,6 +23,14 @@ imports this file and adds nothing.
   every control-path file. No built-in review command counts as a review. A builder never reviews
   its own work. Signed review receipts, the builder machine account and the separate OS users come
   with hardening, not in Phase 0 (the owner's trim of 21 Nov).
+- **Review severities** (DECISIONS G-10 as amended by the owner on 22 Nov; spec 07 §2.11). A
+  critical or high finding always blocks. A medium blocks until a piece has had its full review and
+  one fix round; after that only a regression the latest fix caused, or an earlier finding that was
+  not actually fixed, blocks, and a new medium on code that already passed review is marked
+  `[follow-up]` and fixed the same day, at the normal bar, in a follow-up pull request. A low is
+  logged, never fixed in the middle of a merge cycle, swept per area at the end of each milestone,
+  and given a disposition before production. Nothing reaches production with an alert owed, a
+  `[follow-up]` item open or a low without a disposition (EXECUTION §7.3, PG-15 to PG-17).
 - **Stay in your lane.** A lane edits only the paths `tools/layout.json` and the lane tables give
   it; anything else goes through the lane board. Shared registries use per-area fragment files.
 - **Before you push**, `pnpm check` passes and the pre-push hook runs (enable it once per clone
@@ -122,10 +130,11 @@ The bar that never moves (EXECUTION §1.6, NB-01 to NB-15) applies to every chan
   parameter properties), `verbatimModuleSyntax`, and relative imports that name the `.ts` or `.tsx`
   file. No `paths` aliases, never `preserveSymlinks`.
 - Portability: no `bun:*`, `Bun.*` or `drizzle-orm/bun-sql`; `node:http`, `node:https`, `node:net`,
-  `node:dns`, `node:cluster` and `node:worker_threads` only in `packages/server` and
-  `apps/connector`; no `node:*` and no server package in client code; `ops/fin`, `tools/fin-review`,
-  `tools/static-deploy` and `packages/web-host/src/static` use Node built-ins only, and the watcher
-  Web APIs only (spec 01 §4.6).
+  `node:dns`, `node:cluster` and `node:worker_threads` only in `packages/server`, `apps/connector`
+  and one test-support file, `packages/testing/src/http/node.ts` (`@fin/testing` is a devDependency
+  only, imported only from tests and test support); no `node:*` and no server package in client
+  code; `ops/fin`, `tools/fin-review`, `tools/static-deploy` and `packages/web-host/src/static` use
+  Node built-ins only, and the watcher Web APIs only (spec 01 §4.6).
 - **What `imports:check` guarantees** (BD-19). It refuses the imports these rules forbid and, in
   the Node-side areas and the control paths, the plain spellings of loading or running code
   (static and dynamic `import`, `require` and `require.resolve`, `createRequire`, `eval`,

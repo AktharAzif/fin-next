@@ -22,7 +22,7 @@ real person.
   away-time authority, for the owner's review (§18). "Was Dnn" names the 19 Nov decision a row
   carries; §17 maps every 19 Nov decision. `CF-nn` is a critic finding (appendix A).
 - **Other IDs used here.**
-  - `PG-nn` is a production gate, PG-01 to PG-14, kept in EXECUTION §7.3. The `G` prefix belongs to
+  - `PG-nn` is a production gate, PG-01 to PG-17, kept in EXECUTION §7.3. The `G` prefix belongs to
     governance alone. No gate uses it: EXECUTION's gates were renamed from `G-` to `PG-` so that
     [G-01] to [G-10] mean one thing everywhere.
   - `SP-nn` is a spike (ARCHITECTURE §11.11).
@@ -67,13 +67,13 @@ real person.
   Saturday morning, held on 21 Nov 2026; every owner decision with this deadline is now decided),
   **Saturday** (by a stated time), **Sunday**, **Monday**, **Tuesday 24 Nov** (the start of
   hardening), or **production** (before production holds real data or moves real money, checked at
-  the gates PG-01 to PG-14).
+  the gates PG-01 to PG-17).
 - **If an owner decision is not answered by its deadline, builders proceed on the default**; for the
   Saturday sitting, the defaults applied from 09:00. A later answer changes the code through a
   reviewed pull request. The exceptions are marked **blocking**: work that depends on them waits. The
   short list below named the nine that Saturday's start depended on; the owner answered all nine at
   the sitting on 21 Nov 2026.
-- **Counts:** 290 decisions.
+- **Counts:** 301 decisions.
   - 91 are decided, by the owner or on the owner's delegation. 20 of them cite one of the owner's
     overnight decisions of 21 Nov in their status. 14 of those became decided overnight: [G-04] (its
     confirmation; its overnight exception was withdrawn at about 08:28 by [UI-12]), [P-02], [FW-01],
@@ -83,8 +83,9 @@ real person.
     nine on the short list ([UI-12] at about 08:28, [FD-09] at about 08:30, the other seven at their
     defaults at about 08:25) and the 24 also at the sitting, at their defaults.
   - 120 are recommended.
-  - 16 are the build's ([BD-01] to [BD-14], [BD-16] and [BD-17], §18), made under the owner's
-    away-time authority, for the owner's review. BD-15 was withdrawn, and its number is left free.
+  - 27 are the build's ([BD-01] to [BD-14], [BD-16] to [BD-24] and [BD-26] to [BD-29], §18), made
+    under the owner's away-time authority, for the owner's review. BD-15 and BD-25 were withdrawn,
+    and their numbers are left free.
   - 58 are for the owner, some of them confirming or completing an earlier answer:
     - 4 on Saturday;
     - 13 on Sunday;
@@ -102,7 +103,7 @@ real person.
 
 | Requirement | Decisions |
 |---|---|
-| R1 Production-ready, from scratch, in a new repository | [G-01], [G-02], [G-04], [G-05]; the production gates PG-01 to PG-14 |
+| R1 Production-ready, from scratch, in a new repository | [G-01], [G-02], [G-04], [G-05]; the production gates PG-01 to PG-17 |
 | R2 Everything on Railway, including the database | [P-01], [P-02], [P-09], [OB-18] |
 | R3 Cloudflare Email Sending | [EM-01] to [EM-08] |
 | R4 Cloudflare in front of Railway | [FD-01], [FD-13] to [FD-19] |
@@ -135,6 +136,7 @@ the blocks named.
 | about 03:25, partly superseded about 08:28 | The apps' UI is built on the UI SDK (vercel-labs/ui: `@ui-sdk/react` and `@ui-sdk/core`). fin-next's `packages/ui` implements the Fin design system on it; only the design system's token values and specifications are used; the old product's redesign branch is a reviewed starting point, ported through fin-review (superseded at about 08:28, when the owner answered [UI-12] no: nothing is ported, and the UI is built fresh from the canvases) | [UI-10], [UI-12], [G-04], [G-06] | [UI-01]'s vendoring of the design system's private, Radix-based source |
 | about 03:25 | The sidebar's collapse control is an edge toggle: a small round chevron on the sidebar's right edge near the top, always visible. The logo is a plain 24px mark linking Home, with no hover swap. Canvases now, code later | [UI-11] | Round 2's brand-cell hover swap ([UI-09]) |
 | about 03:50 | Each app's static build served by an assets-only Workers static assets deployment with no script. Per app host, a Workers route to it and a no-Worker route for `/api/*` that falls through to the tunnel, whose ingress matches the host and `^/api/`; Fin Admin the same on the admin tunnel, with Access over the whole host. No CORS between an app and its API. Host-only `__Host-` cookies, the session Strict and every other auth cookie Lax. CSRF by an exact Origin check, `Sec-Fetch-Site`, the `X-Fin-App` header and JSON-only bodies, under Better Auth's origin check with exact trusted origins. No code runs at Cloudflare. The spike first thing on Saturday, with per-app API hosts as the fallback. The docs assets-only too; `api.<zone>` straight to the tunnel; Try it cross-origin, without credentials, Sandbox keys only | [FD-17], [FD-18], [FD-13], [FD-05], [SA-43], [SA-44], [AP-10] | The 03:10 Origin Rules routing; the 03:00 Pages hosting; FW-C09's all-`Lax` cookies; [UI-05]'s cookies; the parts of FW-C02 to FW-C06, FW-C10, FW-C13 and FW-C16 that served files from Railway ([FW-01]) |
+| about 22:10 | Production uses the owner's existing production domain, with its already warmed sending reputation, its existing accounts and its vendor relationships ("we have all those items and email warmup, domain etc at" that domain, the owner's words to the plan's steward after the list of what production depends on) | [FD-10], [EM-08]; EXECUTION §0.3, §6 (H-11) | H-11's "production zones chosen early and the sending domains' two-week warm-up started" largely falls away. A short sending ramp may remain: fin-next sends through Cloudflare Email Sending, and the existing domain may send through another provider today. Still open with the owner: whether production takes over the existing product's production or starts fresh on that domain; which provider sends that domain's mail today; whether a Sumsub production app exists for it, and MassPay live's status |
 
 ## Decided while the owner was away (from 21 Nov 2026, about 08:41)
 
@@ -236,7 +238,13 @@ authority; for the owner's review:
   `Ratelimit` headers, quota and token powers), so security emails do not wait for the owner. The
   owner's read of a delivered message's DKIM, SPF and DMARC headers in the seed inbox is recorded as
   waiting for the owner, not met, as AC-P0-30 is for CR-10 (EXECUTION §2.6 S-03, §2.11 AC-P0-10,
-  §3.6 AC-SAT-20; spec 01 §11.1, §13; spec 02 §19.4 T-SAT-71, §21.1).
+  §3.6 AC-SAT-20; spec 01 §11.1, §13; spec 02 §19.4 T-SAT-71, §21.1). The build's note: the
+  owner's grant at about 08:49 was general ("it's logged into gmail. u can access through
+  browser"); the limit to Fin's and Cloudflare's sign-in emails is the steward's narrowing of it
+  (the steward's line above and [G-10]'s Decided cell). On 21 Nov the build read the authentication
+  results of S-03's own message in the seed inbox, a Fin email that fin-next sent there for this
+  check, under the owner's general grant rather than the narrowing: DKIM, SPF and DMARC all passed
+  (`docs/plan/spikes.md`, run 5). Whether the narrowing stands is for the owner (below).
 - While the owner is away the ops agent runs alone each step that touches only staging and
   fin-next's own objects, among them CR-19's canary key, made in fin-next's staging console and set
   into the Better Stack monitor secret by `pnpm fin monitoring apply`, never printed. Steps that
@@ -261,17 +269,33 @@ authority; for the owner's review:
   under [G-10]'s interim rule, so [CI-11]'s production refusal of an unsigned receipt is unchanged.
   Until hardening a `merge --delta` result is the run's unsigned record, named in the steward's C1
   report ([CI-11]; spec 07 §2.3.4, §2.3.11, §6.5, S7-14; EXECUTION §6, H-03).
-- The ship step's similarity check still reads every file. A match lying wholly inside the assets
-  [G-04] lets fin-next reuse (the token values, the font files and the Fin logo's path data, named
-  by fin-next path) is recorded in the pull request by path and counts only, and does not stop the
-  ship; any other match stops it as before ([G-04]; spec 07 §11.3, T-RV-35; EXECUTION §1.4;
-  ARCHITECTURE §3.4).
+- The ship step's similarity check still reads every file. Until pull requests ship through
+  `fin-review ship`, it runs by hand, on the exact tree that merges, before every merge ([BD-29]). A
+  match lying wholly inside the assets [G-04] lets fin-next reuse (the token values, the font files
+  and the Fin logo's path data, named by fin-next path) is recorded in the pull request by path and
+  counts only, and does not stop the ship; any other match stops it, except the classes [BD-29]
+  reports by counts as the steward ruled them (the root `pnpm-lock.yaml`, lines inside the plan's
+  fenced code blocks, third-party files matching their pinned release, and a file the steward
+  accepts by path, pinned to its blob, recorded in [BD-29] with its blob, counts and reason and
+  reported as "accepted", any other version of the file being checked afresh), with rules A to C
+  and, for a `package.json`, rule M ([G-04]; spec 07 §11.3, T-RV-35; EXECUTION §1.4; ARCHITECTURE
+  §3.4).
 - The Cloudflare kill-switch rules take spec 08's names (`killswitch-api`, which spares `/hooks/`,
   `killswitch-money`, `killswitch-signups`, `killswitch-verify`) and come with `pnpm fin killswitch`
   in hardening, as [OP-01]'s default says. On the shared staging zone the Free plan's custom rules
   hold three of them, and `killswitch-verify` and the monitors' WAF skip rule are production's only
   ([OP-01]; ARCHITECTURE §5.7, §15.1; spec 01 §7.6; spec 04 §31 and L-MON-09; spec 05 §4.9; spec 08
   §6.2, §8.6, A08-32; EXECUTION L-MON-09).
+- One test-support file may import `node:http`: `packages/testing/src/http/node.ts`, the test
+  harness's HTTP server. `imports:check` names exactly that file, `@fin/testing` is imported only
+  from test files and test support and is listed only in `devDependencies`, and a planted test
+  covers each of the three (AGENTS.md §6; spec 01 §4.6, AC-P0-22). Pull request 27 carries it.
+- `supply-chain:check` accepts pnpm's lockfile entry for a workspace project with no dependencies,
+  written `path: {}`, and nothing wider: the value is exactly an empty object, the path is a
+  workspace project and that project has no dependencies, and tests plant each refusal. The control
+  path `scripts/check-supply-chain.mjs` changes in pull request 27, reviewed with it, and the merge
+  is listed in the away-time log ([BD-02]); pull request 28's own version of the change gives way to
+  it.
 
 **The build's decisions** (§18), each decided by the build, 21 Nov 2026, under the owner's away-time
 authority; for the owner's review:
@@ -306,12 +330,92 @@ authority; for the owner's review:
   ([FD-13], [FD-18]; spec 01 §7.6; AC-P0-23).
 - [BD-14] No secret escrow on staging until the owner gives CR-10 ([DA-10], [SA-22]; spec 01 §6.6,
   §7.9, §9.1 and AC-P0-30; EXECUTION §0.3 and §2.9, CR-10 and CR-15).
+- BD-15 was withdrawn, and its number is left free. Its finding, that Railway seals a variable
+  through its API, is recorded in spec 01 §6.7 and `docs/plan/spikes.md`.
 - [BD-16] Static uploads go through Cloudflare's API from `tools/static-deploy`, with no `wrangler`
   ([FD-19], [G-06]; appendix C, SF-02).
 - [BD-17] The two staging sending subdomains' DMARC records stay at `p=reject`, with no aggregate
   reports for now ([EM-05], [FD-09]; spec 01 §7.8; ARCHITECTURE §9.6).
-- BD-15 was withdrawn, and its number is left free. Its finding, that Railway seals a variable
-  through its API, is recorded in spec 01 §6.7 and `docs/plan/spikes.md`.
+- [BD-18] [G-09]'s commit dates are enforced on `main`: the ruleset requires the commit status
+  `commit-dates-utc`. Until CI's job of that name lands, the operator rebuilds each reviewed pull
+  request as one `+0000` commit on top of `main`, its changes checked to touch only the pull
+  request's own files, force-pushes it to the pull request's own branch with a lease, runs the
+  similarity check by hand on that commit's tree ([BD-29]), checks the raw offsets, sets the status
+  and merges naming that head. In place of fin-review's run record, each pull request records its
+  review rounds' lenses, models and efforts and its findings' counts, never their text; the record
+  is written without reading any pull request text, and no engine record is checked before the
+  merge, a departure from [G-10]'s interim rule. The similarity check runs by hand on every
+  rebuilt head before it merges; its results over pull requests 2 and 3 are in [BD-29]
+  ([G-09], [G-10], [CI-01], [CI-15], [G-04], [BD-29]; spec 01 §3.3 and §3.8; spec 07 §7.4;
+  EXECUTION §1.2; AGENTS.md §1).
+- [BD-19] `imports:check` is a lint against mistakes and the plain spellings of loading code, not a
+  sandbox; deliberately obfuscated loading is a review finding by definition ([BD-02], [CI-14];
+  spec 01 §4.6; AGENTS.md §6; `scripts/import-rules.mjs`).
+- [BD-20] Findings still blocking after a pull request's two fix rounds get a finish round, at most
+  two rounds; whatever is left is triaged by the build: a real control gap is fixed, an edge case
+  becomes a tracked follow-up for the cold review before production ([G-10], [RV-01]; EXECUTION
+  §1.7 EX-12, §7.3 PG-01; spec 07 §2.10, §2.11).
+- [BD-21] Wave 3's lanes were built on integration branches that are never merged; reviews cover
+  each pull request's own changes, and shipping replays only those onto `main` ([BD-18], [RV-20];
+  EXECUTION §1.2, §3.2, §3.3; spec 07 §5.7).
+- [BD-22] fin-review gets an opt-in pool transport for the build machine, being built in pull
+  request 13's fix round; until it lands, the build's workflow reviews are the gate, and each pull
+  request ships with [BD-18]'s record and rebuild, a departure from [G-10]'s interim rule: the
+  record is written without reading any pull request text, no engine record is checked before the
+  merge, and the similarity check runs by hand on every rebuilt head before it merges ([BD-29],
+  [G-10], [RV-04], [RV-19], [CI-15], [G-04]; spec 07 §4.3, §4.5, §7.4; EXECUTION EX-09, EX-18).
+- [BD-23] The two staging tunnels are remote-managed, and each connector service runs the stock
+  `cloudflared` 2026.11.1 image by digest, until the connector image deploys ([FD-13], [FD-15],
+  [OB-11]; spec 01 §4.9, §6.2, §7.3, §11.2; ARCHITECTURE §5.3, §5.4; EXECUTION §2.5 steps 4
+  and 10).
+- [BD-24] Better Stack's data region is `us_west`, the only region this organisation offers;
+  `europe` needs a plan change, which is the owner's call (below); staging's DSN check takes the
+  `us_west` shape meanwhile ([OB-02]; spec 01 §8.1; spec 08 §7.1, §7.5; ARCHITECTURE §10.1,
+  §14.2; EXECUTION §0.3, §2.7 and §2.9, CR-09; README §7.1; §17.1's D8 row).
+- BD-25 was withdrawn, and its number is left free: a lean resume after the agents' model account
+  reached its monthly spend limit at about 16:20, withdrawn at about 16:50 on the owner's word (§18).
+- [BD-26] Access on `staff.<staging-zone>` uses the account's built-in emailed-code identity
+  provider, referenced and not added ([FD-05], [FD-09]; spec 01 §7.7).
+- [BD-27] Wave 2's pull requests land on `main` in batch pull requests: one commit per reviewed pull
+  request, replayed onto `main`, then integration commits; only the conflict resolutions and the
+  integration commits get delta reviews, and each batch ships with [BD-18]'s record and rebuild, a
+  departure from [G-10]'s interim rule: the record is written without reading any pull request
+  text, no engine record is checked before the merge, and the similarity check runs by hand on each
+  batch's head before it merges ([BD-29], [BD-18], [BD-21], [G-10], [RV-20], [CI-15], [G-04];
+  spec 07 §7.4; EXECUTION §1.2).
+- [BD-28] Until `pnpm fin` lands, the build provisioned staging's front door with its own operator
+  scripts, the front-door script checked against the same allow-list before every Cloudflare write
+  on a zone name, and each write in the build's run log; two connector changes in SP-03's run were
+  made by hand and recorded in the same log; `pnpm fin verify` checks it all for drift once it
+  lands. Access's include, set wider at first on the steward's message, was narrowed on review to
+  the exact staff list, the first staff admin's address only. Three differences wait for the
+  owner's review: Access's independent MFA is not set on fin-next's application yet (the
+  requirement waits for SP-09's field names and `pnpm fin access apply staging`; the agent's TOTP
+  enrolment follows at the first staff admin's first Access sign-in, spec 02 §10.6); the Access
+  application and the staff and onboard deployments are named after the hosts; and no guard
+  checked the account-object writes against the steward's rule above before the call, so only the
+  scripts' fixed `fin-next-staging-` names kept them to fin-next's own objects ([P-13], [FD-05],
+  [FD-09], [BD-11] to [BD-13], [BD-23], [BD-24], [BD-26]; spec 01 §7.2 to §7.8, §8.2; EXECUTION
+  §2.5).
+- [BD-29] Until pull requests ship through `fin-review ship`, [G-04]'s similarity check runs by
+  hand: a local script on the build machine, outside every repository, compares every file a pull
+  request adds or changes with every text blob in the old product's checkout, its whole history
+  included, on the exact tree that merges and before every merge. A run of 12 or more consecutive
+  non-trivial lines (rule A); 30% or more of a file's distinctive lines found in the old product,
+  for a file of 10 or more non-trivial lines (rule B); or, for a file of fewer than 10 non-trivial
+  lines, 3 or more matched distinctive lines making up 30% or more (rule C) refuses the merge, and
+  the result is recorded in the pull request by fin-next path and counts only. As the steward ruled:
+  the exact reused-asset files, the root `pnpm-lock.yaml` ("generated"), lines inside the plan's
+  fenced code blocks (a run exempt only when all its lines are), third-party files whose
+  `THIRD_PARTY.json` entry matches the pinned upstream release and a file the steward accepts by
+  path, pinned to its blob (reported as "accepted"; any other version of it is checked afresh) are
+  reported by counts and do not block. Run over pull requests 2 and 3 after their merges: pull
+  request 2's `.gitignore` is flagged by rule C, and the steward accepted it, pinned to its blob;
+  the plan's own fenced code matches nothing. A dry run over the open pull requests found a probable
+  port of the old redesign's theme mapping in pull request 11's `packages/tokens/theme.css`, which
+  [UI-12] rules out: it is rebuilt from the allowed sources before it lands, for the owner's review.
+  Matching by line misses renamed or reformatted code ([G-04], [G-09], [UI-12], [BD-18], [BD-22],
+  [BD-27]; spec 07 §11.3; spec 01 §4.2).
 
 **For the owner to decide:**
 
@@ -322,11 +426,18 @@ authority; for the owner's review:
   the consistency pass flagged those mentions for the owner's judgement. They stay as they are, and
   no new mention is added, until the owner decides.
 - The email header check: the read of a delivered message's DKIM, SPF and DMARC results in the
-  seed inbox, the owner's own mailbox, for S-03, AC-P0-10 and AC-SAT-20 (T-SAT-71). It is recorded
-  as waiting for the owner, not met. The owner reads the headers, or widens [G-10]'s mailbox rule so
-  agents may read those messages' headers on staging, or names a separate staging seed inbox. Until
-  then [G-10]'s rule stands: agents read only Fin's and Cloudflare's sign-in emails, to sign in on
-  staging.
+  seed inbox, the owner's own mailbox, for S-03, AC-P0-10 and AC-SAT-20 (T-SAT-71). The owner's
+  grant at about 08:49 was general ("it's logged into gmail. u can access through browser"). The
+  steward narrowed it to Fin's and Cloudflare's sign-in emails (the steward's line above and
+  [G-10]'s Decided cell) and so recorded this check as waiting for the owner, not met. On 21 Nov the
+  build read the authentication results of S-03's own message, a Fin email that fin-next sent to the
+  seed inbox for this check, under the owner's general grant rather than the narrowing: DKIM, SPF
+  and DMARC all passed (`docs/plan/spikes.md`, run 5). The owner decides whether the steward's
+  narrowing stands, which settles whether AC-P0-10's header read counts as met. If it stands, the
+  later reads need the owner to read the headers, or to widen [G-10]'s mailbox rule so agents may
+  read those messages' headers on staging, or to name a separate staging seed inbox. Until the
+  owner decides, the narrowing holds: agents read only Fin's and Cloudflare's sign-in emails, to
+  sign in on staging.
 - Whether to accept that the old product's Cloudflare credentials also reach fin-next's
   account-level objects in the shared staging account (its tunnels, Workers scripts, R2 vault
   buckets and the tokens it minted), beyond the zone-level risk accepted with [FD-09]. Meanwhile the
@@ -336,6 +447,16 @@ authority; for the owner's review:
   that ARCHITECTURE §5.12's operator token does not list (UNVERIFIED). Either add that permission to
   production's token, or revoke the sessions of Fin Admin's own Access application, as staging does
   (spec 02 §10.1). The plan's text stands meanwhile ([SA-39]; ARCHITECTURE §5.10, §5.12).
+- Better Stack's data region ([BD-24]). This Better Stack organisation offers only `us_west`, so
+  staging's sources and Errors applications are there. The plan's `europe` ([OB-02], was D8; spec 01
+  §8.1) needs a Better Stack plan change, which is new spending and so outside the away-time
+  authority. The owner either changes the plan, and staging's objects are made again in `europe`, or
+  accepts `us_west`. Staging stays in `us_west` meanwhile.
+- Production on the owner's existing production domain (the owner, 21 Nov, about 22:10): three
+  questions remain. Does production take over the existing product's production, a cutover with its
+  users and data, or start fresh on that domain? Which provider sends that domain's production mail
+  today? Does a Sumsub production app exist for it, and what is MassPay live's status? Until the
+  owner answers, the plan assumes neither a cutover nor a fresh start (EXECUTION §0.3, §6 H-11).
 
 **Control-path pull requests merged while the owner is away** ([BD-02]), one line each: the pull
 request, its merged head and the control paths it touches.
@@ -475,7 +596,7 @@ about 08:28: no) and [OB-18] (decided at its default at the Saturday sitting).
 
 ### Production
 
-Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
+Each is checked at the production gates PG-01 to PG-17 (EXECUTION §7.3).
 
 | ID | Question | Default |
 |---|---|---|
@@ -572,7 +693,7 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 
 ### G-05 Staging core first, production gates after
 - **Decision:** each day's features are complete on staging, which carries the whole security core;
-  production adds the gates in ARCHITECTURE §11.10, which EXECUTION §7.3 tracks as PG-01 to PG-14;
+  production adds the gates in ARCHITECTURE §11.10, which EXECUTION §7.3 tracks as PG-01 to PG-17;
   none is assumed.
 - **Default:** as stated.
 - **Alternatives:** full production hardening before any feature (does not fit three days).
@@ -764,6 +885,22 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
     emails and that admin's two TOTPs, Access's own factor ([FD-05]) and Fin Admin's ([SA-04];
     spec 02 §10.6), agents sign in to Fin Admin on staging and run its journeys. Never in
     production.
+  - Review severities in development (the owner's standing development rules, 22 Nov 2026). The
+    convergence rule, in the owner's words "note this rule for dev given everything will always
+    be fixed before prod": a critical or high finding always blocks a merge; a medium blocks until
+    the piece has had its full review and one fix round; after that, only a regression that the
+    latest fix caused, or an earlier finding that the fix claimed but did not fix, blocks, and a new
+    medium on code that already passed review is a `[follow-up]` item, fixed the same day at the
+    normal bar (all three lenses) in a follow-up pull request. The rule for lows: in development a
+    low never blocks, and fixers do not fix lows in the middle of a merge cycle; at the end of each
+    milestone one pull request per area fixes the cheap ones, reviewed normally under the
+    convergence rule; before production every low has a disposition, fixed or accepted with a
+    one-line reason, a low the reviewers mark as touching security or as visible to users is fixed
+    and never accepted, and the steward prepares the accepted list for the owner to sign off in one
+    go. A pull request names its deferred and low findings by ID and severity only, never by their
+    text, path or class (spec 07 §7.4). The production invariant: everything is fixed before production;
+    EXECUTION §7.3's PG-15 to PG-17 refuse production while an alert is owed, a `[follow-up]` item
+    is open, or a low has no disposition.
 - **Alternatives:** the owner approves each merge.
 - **Rationale:** the draft's EQ-29, recorded here as the one register asks. From hardening, agents
   cannot approve deployments or control paths with the builder account ([CI-13]). Until then they
@@ -774,7 +911,8 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   21 Nov 2026, under the owner's away-time authority; for the owner's review. Staging deploys from
   the operator machine while the owner is away ([BD-05]) and the approval of [BD-09]'s three
   entries: decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
-  owner's review · **Deadline:** decided
+  owner's review. The review severities in development (the convergence rule and the rule for
+  lows) and PG-15 to PG-17: decided by the owner, 22 Nov 2026 · **Deadline:** decided
 
 ## 2. Platform and runtime
 
@@ -1277,7 +1415,11 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
   third-party script, the docs site's bundle and the host Better Stack serves are never same-site with
   the console or Fin Admin. Every cookie is host-only and
   `__Host-` prefixed ([SA-43]), and each app host's routes ([FD-18]) sit on its own zone. Chosen early
-  in hardening, because the sending domains need two weeks of warm-up ([EM-08]).
+  in hardening, because the sending domains need two weeks of warm-up ([EM-08]). The owner, 21 Nov
+  (about 22:10): production uses the owner's existing production domain as `<zone>`, with its
+  existing accounts and its already warm sending reputation, so the warm-up deadline largely falls
+  away (a short ramp may remain on Cloudflare Email Sending, [EM-08]); `<admin zone>` and `<hosted
+  zone>` stay with the owner.
 - **Alternatives:** one zone for everything (the origin gate is then the only barrier between them).
 - **Rationale:** passkey RP IDs and error `type` URLs are permanent once used, and same-site hosts share
   SameSite protection.
@@ -2865,14 +3007,18 @@ Each is checked at the production gates PG-01 to PG-14 (EXECUTION §7.3).
 - **Decision:** how Fin's mail streams are kept apart, and how production's reputation is built.
 - **Default:** two sending subdomains per zone, each its own Cloudflare sending domain with its own
   suppressions and analytics alerts: `auth.` for codes and security notices, `notify.` for invitations
-  and the white-labelled mail to developers' customers. Production's domains carry real low-volume mail
-  for at least two weeks before launch, with Postmaster Tools verified and the placement test passing
-  on production; the quota increase is asked for with the warm-up figures. On staging these are
-  `auth.<staging-zone>` and `notify.<staging-zone>`, onboarded on 21 Nov, each with its own DMARC
-  record ([FD-09], [BD-17]).
+  and the white-labelled mail to developers' customers. Production's domains carry real low-volume
+  mail for at least two weeks before launch (but see the owner's input of 21 Nov below), with
+  Postmaster Tools verified and the placement test passing on production; the quota increase is
+  asked for with the warm-up figures. On staging these are `auth.<staging-zone>` and
+  `notify.<staging-zone>`, onboarded on 21 Nov, each with its own DMARC record ([FD-09], [BD-17]).
 - **Alternatives:** one sending domain (the first draft), where customer complaints would hurt sign-in
   codes; the staging soak as the only warm-up.
-- **Rationale:** the staging soak proves templates, not production's reputation.
+- **Rationale:** the staging soak proves templates, not production's reputation. The owner, 21 Nov
+  (about 22:10): the owner's existing production domain already has a warm sending reputation, so
+  the two-week warm-up largely falls away. fin-next sends through Cloudflare Email Sending and that
+  domain may send through another provider today, so a short ramp on Cloudflare's sending subdomains
+  may remain; which provider sends today is a question for the owner.
 - **Status:** Recommended · **Deadline:** production (the warm-up starts once [FD-10] is chosen)
 
 ## 8. Observability
@@ -4779,7 +4925,7 @@ in fin-next.
 | D5 | How top secrets are held | Holds for staging, where escrow waits for the owner's recipient (CR-10, [BD-14]); production is open: [DA-10] |
 | D6 | Railway layout and plan | Holds: [P-03] |
 | D7 | GitHub organisation settings and Team | Superseded by rules on a personal public repository: [CI-01] |
-| D8 | Better Stack setup | Holds (region `europe`): [OB-02]; responders: [OB-06] |
+| D8 | Better Stack setup | Holds (region `europe`; staging: `us_west` until the owner decides, [BD-24]): [OB-02]; responders: [OB-06] |
 | D9 | Monitoring as code | Holds: [OB-05] |
 | D10 | The audit head store | Open: [AU-03] |
 | D11 | Edge and api apart, with signed calls | Holds, extended to every caller with Ed25519 signatures and the door matrix: [P-07], [SA-23], [SA-36] |
@@ -4868,6 +5014,7 @@ in fin-next.
 | 21 Nov, about 08:30 | The staging zone: "use [the staging domain] itself. but on a different sub like console, app, dash etc"; the staging accounts: "they exist"; the guard hooks, which are the old product's: "it should start fresh with ur recommendations" | Holds: [FD-09] (CR-05b not needed); the staging accounts exist, and their credentials came at about 08:37: CR-04, CR-05 and CR-09 met; CR-25 covered by CR-05 until the owner is back, as it was not given as a token of its own; CR-06 met, as the build found (EXECUTION §0.3, §2.9); fin-next's hooks start fresh: Phase 0 has no `.claude` merge-guard hook ([BD-07]), and its pre-push hook is written fresh ([CI-16]) |
 | 21 Nov, about 08:41 and 08:55 | Work unsupervised and make decisions | The away-time authority: "Decided while the owner was away" |
 | 21 Nov, about 08:49 | The first staff admin's address; the Sumsub webhook "by monday"; fin-review locally "fine for now"; revoking the Railway workspace token on Monday ("ok") | Holds: [SA-04], [KY-02], [RV-04]; the workspace token is CR-04's (EXECUTION §2.9) |
+| 21 Nov, about 16:50 | After the agents' model account reached its monthly spend limit (about 16:20): "u can resume everything that was stopped before. Don't have to ration" | Holds: BD-25's lean resume is withdrawn (§18), and the stopped work resumed in full |
 
 ## 18. Build decisions (BD)
 
@@ -4875,7 +5022,12 @@ The build session's decisions, made under the owner's away-time authority, each 
 away-time log ("Decided while the owner was away") for the owner's review. BD-15 is withdrawn, and
 its number is left free. Its finding stands: Railway seals a variable through its API, as the build
 tested at about 09:58 on 21 Nov, and `pnpm fin` sets every staging secret that way, so spec 01
-§6.7's "sealed" holds (`docs/plan/spikes.md`).
+§6.7's "sealed" holds (`docs/plan/spikes.md`). BD-25 is withdrawn too, and its number is left free.
+It was a lean resume: when the work resumed after the agents' model account reached its monthly
+spend limit at about 16:20 on 21 Nov, only the day's critical path was to run, with one review round
+per pull request. It was withdrawn at about 16:50, when the owner said: "u can resume everything
+that was stopped before. Don't have to ration" (§17.2). Everything stopped at the limit then resumed
+with its full review loop ([BD-20]).
 
 ### BD-01 Secret scanning's extra detectors stay off
 - **Decision:** secret scanning's non-provider patterns and validity checks.
@@ -5109,6 +5261,519 @@ tested at about 09:58 on 21 Nov, and `pnpm fin` sets every staging secret that w
   in its own domain's DNS.
 - **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
   owner's review · **Deadline:** decided
+
+### BD-18 Commit dates in UTC, enforced on `main`
+- **Decision:** how [G-09]'s commit-date rule is enforced on what merges into `main`.
+- **Default:** the ruleset on `main` also requires the commit status `commit-dates-utc`, added on
+  21 Nov (spec 01 §3.3), so no pull request merges until its commits are checked as `+0000`. Until
+  CI's job of that name lands, the operator ships each reviewed pull request this way:
+  - it rebuilds the pull request as one commit on top of `main`, with author and committer dates at
+    `+0000`, whose tree is the reviewed head merged with `main` (for a branch built on another base,
+    its reviewed changes replayed onto `main`: [BD-21], [BD-27]). The rebuild is refused if its
+    changes against `main` touch any file outside the pull request's own changes, the lockfile
+    regenerated by pnpm aside when the changes are replayed;
+  - it force-pushes that commit to the pull request's own branch with a lease, never to `main`;
+  - it runs the similarity check by hand on that commit's tree, the exact tree that merges, and
+    refuses the merge on a blocking match ([BD-29]);
+  - it checks the commit's raw author and committer offsets, sets the status, and merges with
+    `gh pr merge <n> --merge --match-head-commit <sha>` ([G-10]).
+
+  In place of fin-review's run record ([G-10]), each pull request records the reviewed head, each
+  review round's lenses with their model and effort, and the findings' counts by severity with how
+  many were fixed or rejected, never the findings' text ([G-10]; spec 07 §7.4). The record is
+  written without reading any pull request text ([CI-15]); no engine record is checked before the
+  merge. The similarity check against the old product ([G-04]; spec 07 §11.3) runs by hand
+  ([BD-29]): the build's ship tool runs it on every rebuilt or batch head before it merges, refuses
+  the merge on a blocking match, and records the result in the pull request by fin-next path and
+  counts only. Its results over pull requests 2 and 3, run after their merges on the steward's
+  ruling, are in [BD-29] and in those pull requests.
+
+  Once the CI pull request (pull request 20) merges, CI's `commit-dates-utc` job checks every commit
+  of a pull request, and `gate` needs it. The ruleset then requires `gate` and drops the separate
+  `commit-dates-utc` requirement, so `gate` is again the only required check, as EXECUTION EX-20,
+  spec 01 §2 and §3.3 and [CI-01] say. GitHub's own merge commits keep the account's offset, which
+  the rule cannot cover ([G-09]'s note; the steward's finding, in "For the owner to decide"). The
+  plan's own pull request 25, whose two commits were already `+0000`, had its offsets checked and
+  its status set by the operator without a rebuild.
+- **Alternatives:** the pre-push hook alone (spec 01 §3.8), which runs only on a machine where it is
+  enabled; [G-09]'s alternative, the build clock's time zone made public.
+- **Rationale:** the pre-push hook checks only the machine that pushes, and the day's earlier
+  workflows committed with the build machine's offset before every shell ran with `TZ=UTC`. A
+  required status makes GitHub refuse any merge whose commits were not checked, and one rebuilt
+  commit per pull request keeps `main`'s own commits at `+0000`, GitHub's merge commits apart.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review. The force-push to a pull request's own branch departs from AGENTS.md §1 ("Nobody
+  ... force-pushes"), as [G-09]'s re-made plan branch did, so the owner's review covers that too.
+  It departs from [G-10]'s interim merge rule (fin-review's local run on the exact head, recorded
+  by `fin-review ship`), so the owner's review covers that too. The record in its place is written
+  without reading any pull request text ([CI-15]); no engine record is checked before the merge;
+  and the similarity check ([G-04]) runs by hand on every rebuilt head before it merges ([BD-29]) ·
+  **Deadline:** decided
+
+### BD-19 `imports:check` is a lint, not a sandbox
+- **Decision:** what `imports:check` (`scripts/import-rules.mjs`, spec 01 §4.6) guarantees.
+- **Default:** it refuses the imports AGENTS.md forbids and, in the Node-side areas and the control
+  paths, the plain spellings of loading or running code (static and dynamic `import`, `require` and
+  `require.resolve`, `createRequire`, `eval`, `Function`, `process.binding` and `getBuiltinModule`,
+  and the forms its tests list). It is a lint against mistakes, not a sandbox. Deliberately
+  obfuscated loading (a constructor reached by destructuring, `arguments`, `with`, a computed key
+  built at run time, a trick on the lexer) cannot be excluded by a lexer, and is a review finding by
+  definition, which fin-review's lenses treat as critical. The control-path approval rule returns in
+  hardening ([BD-02], [CI-14]). Pull request 2 applied this in AGENTS.md §6 and in the header of
+  `scripts/import-rules.mjs`.
+- **Alternatives:** extending the lexer for each new spelling a review finds, which never ends.
+- **Rationale:** no check that reads source text can see every way JavaScript can load code, so the
+  check promises only what it can keep, and review covers the rest. On pull request 2, three findings
+  of the obfuscated kind were scoped out under this rule; its four genuine findings were fixed, each
+  with a test.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review · **Deadline:** decided
+
+### BD-20 Findings left after the fix rounds
+- **Decision:** what happens to a pull request whose review loop still has blocking findings.
+- **Default:** a pull request's review loop is two fix rounds, each followed by delta reviews. If
+  blocking findings are still open after it, the pull request gets a finish round: a fix with its
+  sibling searches (EXECUTION EX-12; spec 07 §2.10), then delta reviews of only the fix commits, code
+  and security on Opus at `xhigh`, and the Fable attacker on the sign-in, personal-data, money and
+  control lanes. There are at most two finish rounds. Whatever is still open after them is triaged by
+  the build: a real control gap is fixed; an edge case becomes a tracked follow-up for the cold
+  review before production (PG-01; EXECUTION §7.3, H-13).
+- **Alternatives:** more rounds until nothing blocks; every leftover finding waits for the owner.
+- **Rationale:** on pull request 2 the open findings fell round by round, and each round costs hours.
+  PG-01 still fixes every confirmed critical, high and medium finding before production, with a
+  delta review, and the owner judges every plausible high there.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review · **Deadline:** decided
+
+### BD-21 Wave 3 built on integration commits
+- **Decision:** how Saturday's third wave (L-SAT-03 and L-SAT-04's back ends, L-SAT-06 and
+  L-SAT-07's screens) was built before the pull requests it depends on had merged.
+- **Default:** on integration commits pushed as the branches `int/backend` and `int/ui`, each `main`
+  plus the open pull requests its lanes depend on: build bases only, never merged. Reviews cover only
+  each pull request's own changes on top of its integration commit. Shipping replays only those
+  changes onto `main`: the lockfile regenerated by pnpm, `pnpm check` on that exact tree, then
+  [BD-18]'s rebuild. A pull request whose dependency has not reached `main` yet fails that check and
+  waits.
+- **Alternatives:** start each lane only once its dependencies have merged (EXECUTION §3.3's order).
+- **Rationale:** Saturday's lanes could start hours before their dependencies merged. Each review
+  sees only code its own lane wrote, and the check on the replayed tree catches anything that held
+  only on the integration commit (EXECUTION §1.2, §3.2; [RV-20]; spec 07 §5.7).
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review · **Deadline:** decided
+
+### BD-22 fin-review's pool transport on the build machine
+- **Decision:** how fin-review can be the local gate on a build machine whose sessions reach Claude
+  through a local pool forwarder.
+- **Default:** on the build machine every Claude Code session reaches Claude through a local pool
+  forwarder: a loopback base URL, an auth token and a config directory are set in the environment.
+  Spec 07 §4.3's lock-down refuses them, so the engine exits 78 there and cannot be today's local
+  gate. An opt-in transport, `FIN_REVIEW_TRANSPORT=pool`, read from the engine's own environment
+  only, accepts a loopback base URL with an explicit port, its token and its config directory, and
+  passes exactly those into each session. It still refuses every other model, effort, provider and
+  credential variable, keeps the `modelUsage` check after every session (spec 07 §4.5, [RV-19]), and
+  records the transport in every run's summary. It is being built in pull request 13's fix round.
+  Until it lands, the build's workflow reviews (code and security on Opus at `xhigh`, the Fable
+  attacker) are the gate, in place of the fin-review run that [G-10]'s interim rule asks for. In
+  place of fin-review's run record, each pull request records the reviewed head, each review
+  round's lenses with their model and effort, and the findings' counts by severity with how many
+  were fixed or rejected, never the findings' text ([G-10]; spec 07 §7.4). The record is written
+  without reading any pull request text ([CI-15]); no engine record is checked before the merge. It
+  ships by [BD-18]'s rebuild: the merged tree is the reviewed head merged with `main` (or its
+  reviewed changes replayed onto `main`), checked to touch only the pull request's own files. With
+  no `fin-review ship`, the similarity check ([G-04]; spec 07 §11.3) runs by hand ([BD-29]): the
+  build's ship tool runs it on every rebuilt or batch head before it merges, refuses the merge on a
+  blocking match, and records the result in the pull request by fin-next path and counts only. Its
+  results over pull requests 2 and 3, run after their merges on the steward's ruling, are in
+  [BD-29]. CI's planner (`plan`) is unaffected.
+- **Alternatives:** loosen spec 07 §4.3's refusals for every run; run fin-review only on a machine
+  without the forwarder; leave the gate to the workflow reviews until CI has an Anthropic credential
+  (EXECUTION EX-09, D9).
+- **Rationale:** the lock-down exists so that no session runs another model or reaches another
+  endpoint ([RV-19]). A transport that names one loopback endpoint, and is chosen only in the
+  engine's own environment, keeps that, and the `modelUsage` check still proves which model ran. The
+  workflow reviews meanwhile cover what EXECUTION EX-18's hand-started sessions do, a security review
+  and an attack pass, on the models R11 allows.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review. It departs from [G-10]'s interim merge rule (fin-review's local run on the exact
+  head, recorded by `fin-review ship`), so the owner's review covers that too. The record in its
+  place is written without reading any pull request text ([CI-15]); no engine record is checked
+  before the merge; and the similarity check ([G-04]) runs by hand on every rebuilt head before it
+  merges ([BD-29]) · **Deadline:** decided
+
+### BD-23 Remote-managed staging tunnels on the stock image, for now
+- **Decision:** how the two staging tunnels and their connectors run before the connector image
+  exists.
+- **Default:** `fin-next-staging-public` and `fin-next-staging-admin` are remote-managed for now:
+  SP-04a's fallback (spec 01 §11.2; ARCHITECTURE §5.3), with the configuration set through
+  Cloudflare's API and its hash kept for the watcher ([OB-11]). Their ingress is spec 01 §7.3's map
+  on the staging names. The connector image that renders a locally managed configuration
+  (`apps/connector` and its Dockerfile; spec 01 §4.9) is not built yet. Meanwhile each connector
+  service on Railway runs the stock `cloudflared` 2026.11.1 image by digest, its token sealed, in
+  place of spec 01 §6.2's `fin-next-connector`. The tunnels go back to locally managed once the
+  connector image deploys: a new tunnel, by the evict runbook ([FD-15]).
+- **Alternatives:** make no tunnel until the connector image exists, which holds up the front door,
+  S-04 and SP-04's first checks.
+- **Rationale:** the front door could run hours before the connector lane lands. ARCHITECTURE §5.3's
+  fallback has the watcher compare the remote configuration's hash with the expected one every
+  minute (ARCHITECTURE §5.9's `tunnel-config-drift`; spec 01 §7.11's `tunnel-config` check), and the
+  hash it compares against is already kept. Once the watcher deploys (EXECUTION §2.5 step 10, which
+  names the fallback's check), a change made outside `pnpm fin` will be seen; until then nothing
+  checks it ([FD-13]; EXECUTION §2.5 step 4; `docs/plan/spikes.md`, run 4).
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review · **Deadline:** decided; locally managed tunnels return with the connector image
+
+### BD-24 Better Stack's data region is `us_west`
+- **Decision:** the data region of staging's Better Stack sources and Errors applications.
+- **Default:** `us_west`, the only region this Better Stack organisation offers. Every staging
+  source and Errors application is there. The plan's `europe` ([OB-02]; spec 01 §8.1; spec 08 §7.1;
+  ARCHITECTURE §10.1; EXECUTION §0.3, §2.7, CR-09) would need a plan change, which is new spending
+  and so the owner's call, listed in "For the owner to decide". The region is set when an object is
+  made (spec 01 §8.1), so a move later means making staging's objects again. Two consequences,
+  marked wherever the plan states the region, [OB-02]'s own words aside: the team `fin-staging`
+  holds its objects in `us_west`, not `europe` (spec 01 §8.1; spec 08 §7.1; ARCHITECTURE §10.1 and
+  §14.2; EXECUTION §0.3, §2.7 and §2.9, CR-09 among them; README §7.1's CR-09; §17.1's D8 row), and
+  `packages/server/src/report-dsn.ts`'s regex is the shape SP-06 records for the region staging
+  uses, `us_west`, not the `europe` one, until the owner decides (spec 08 §7.5 and §15 item 8;
+  `docs/plan/spikes.md`, run 6); otherwise every staging service would refuse its own DSN and
+  exit 78.
+- **Alternatives:** a Better Stack plan that offers `europe` (the owner's call); no staging
+  monitoring until the owner decides.
+- **Rationale:** R5 needs staging's monitoring now, and the away-time authority excludes new
+  spending. Fin's lines are scrubbed first and carry IDs only (spec 08 §7.2), so staging sends no
+  personal data there by design (`docs/plan/spikes.md`, run 6).
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review. It departs from the owner's decision of 19 Nov ([OB-02], was D8), so the owner's
+  review covers that too · **Deadline:** decided for staging; the owner's answer before production
+
+### BD-26 Access's identity provider on staging
+- **Decision:** which identity provider Access on `staff.<staging-zone>` uses.
+- **Default:** the account's built-in emailed-code provider (Cloudflare's One-time PIN), the one the
+  old product's staging application already uses. The build referenced it and added no provider
+  ([FD-05]; spec 01 §7.7).
+- **Alternatives:** an identity provider added for fin-next.
+- **Rationale:** an identity provider added to the shared account could also be offered on Access
+  applications fin-next does not own, and fin-next never changes the old product's resources
+  ([FD-09]). This follows the steward's rule that Access's independent MFA is set on fin-next's own
+  application only (the away-time section's line on Access's independent MFA).
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review · **Deadline:** decided
+
+### BD-27 Wave 2 lands in batch pull requests
+- **Decision:** how Wave 2's pull requests, built on the scaffold's first draft, reach `main`.
+- **Default:** Wave 2's pull requests were built on the scaffold's first draft (pull request 2's
+  first commit), while `main` holds the scaffold as reviewed, with stricter rules. They land on
+  `main` in batch pull requests: one commit per reviewed pull request, carrying its own changes since
+  that draft, replayed onto `main`; then separate integration commits that bring each into line with
+  `main`'s rules without weakening any. Only the conflict resolutions and the integration commits
+  get delta reviews, since each pull request's code was already reviewed in its own pull request.
+  The individual pull requests then close as landed. Each batch ships under [BD-18]: the merged
+  tree is the batch's reviewed head merged with `main` (or its reviewed changes replayed onto
+  `main`), checked to touch only the batch's own files. In place of fin-review's run record, each
+  batch records the reviewed head, each review round's lenses with their model and effort, and the
+  findings' counts by severity with how many were fixed or rejected, never the findings' text
+  ([G-10]; spec 07 §7.4). The record is written without reading any pull request text ([CI-15]);
+  no engine record is checked before the merge. With no `fin-review ship`, the similarity check
+  ([G-04]; spec 07 §11.3) runs by hand ([BD-29]): the build's ship tool runs it on each batch's
+  head before it merges, refuses the merge on a blocking match, and records the result in the
+  batch pull request by fin-next path and counts only. Its results, over pull requests 2 and 3 after
+  their merges and over the open pull requests before they land, are in [BD-29].
+- **Alternatives:** land each pull request on its own, in the merge batches of [RV-20].
+- **Rationale:** landing about 17 pull requests one by one, each with its own integration work,
+  would take most of the evening. Separate integration commits keep each reviewed change apart from
+  the work that fits it to `main`, so the delta reviews see exactly what is new ([G-10], [RV-20];
+  EXECUTION §1.2).
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review. It departs from [G-10]'s interim merge rule (fin-review's local run on the exact
+  head, recorded by `fin-review ship`), so the owner's review covers that too. The record in its
+  place is written without reading any pull request text ([CI-15]); no engine record is checked
+  before the merge; and the similarity check ([G-04]) runs by hand on each batch's head before it
+  merges ([BD-29]) · **Deadline:** decided
+
+### BD-28 Staging's front door from the build's scripts, until `pnpm fin` lands
+- **Decision:** how staging's front door is provisioned before `pnpm fin`'s commands are on `main`.
+- **Default:** with the build's own operator scripts, each recording every write in the build's run
+  log: a front-door script for Cloudflare and the connector services, which checks every write on a
+  zone name against the same allow-list as `pnpm fin` before it makes it ([FD-09]; spec 01 §7.2);
+  one for Better Stack; and one for S-03's email set-up. Two changes to the connector services in
+  SP-03's run, the digest-only image reference and the start command that names the binary, were
+  made by hand and recorded in the same run log (`docs/plan/spikes.md`, run 2). On 21 Nov, from
+  about 15:50, the scripts made:
+  - the Access application on `staff.<staging-zone>` (spec 01 §7.7): an Allow policy whose include
+    is now the exact staff list, the first staff admin's address only (below); the emailed-code
+    provider ([BD-26]); an 8-hour session, the binding cookie, HTTP-only, `SameSite=Lax`, not in the
+    App Launcher;
+  - the two tunnels and their ingress ([BD-23]);
+  - placeholder assets-only deployments for console, staff, onboard and docs, with no module and
+    `workers.dev` and previews off (spec 01 §7.4);
+  - the Workers routes of spec 01 §7.5 on the staging names, and the five proxied CNAMEs (spec 01
+    §7.2);
+  - fin-next's zone rules (spec 01 §7.6), each through the per-rule endpoints with a `fin_next_` ref
+    ([BD-11]): the https redirect for the browser hosts, the plain-http unsafe-method block,
+    [BD-13]'s path rule on the raw path, [BD-12]'s `no-store`, the cache bypass for
+    `gateway.<staging-zone>` and `/api/`, and one ingress-proof transform per host role;
+  - the connector services ([BD-23]);
+  - Better Stack's sources and Errors applications ([BD-24]; spec 01 §8.2);
+  - the email token (CR-08), minted at S-03's set-up: Email Sending Write only, its client IP filter
+    `worker`'s static egress addresses, expiring in 180 days; and `worker`'s sealed email variables
+    (spec 01 §7.8). Cloudflare names the token's permission group "Email Sending Write", with
+    "Email Sending Read" its pair; the plan's "Email Sending Edit" (CR-08; spec 01 §7.8) is that
+    group.
+
+  The selfie host is not provisioned yet: it comes on Sunday, with the hosted verify pages
+  (EXECUTION §0.1's Sunday row).
+
+  The Access include was set wider at first, to the first staff admin's address and the company's
+  email domain, on the steward's message ("as the old staging did"). On review (the steward's
+  consistency read of pull request 26, 21 Nov) the build narrowed the live policy to the exact staff
+  list, the first staff admin's address only, and read it back, so the include follows [FD-05] and
+  spec 01 §7.7.
+
+  The account objects the scripts made (the two tunnels, the four placeholder deployments, the
+  Access application and the email token) have names fixed in the scripts, each starting
+  `fin-next-staging-`, the token's included. But no guard checked each account-object write against
+  the steward's rule on fin-next's own account objects (the away-time section) before the call: the
+  front-door script's guard checked zone names only. `pnpm fin`'s guard checks account objects once
+  it lands.
+
+  Once `pnpm fin` lands, `pnpm fin verify` checks all of it for drift. Three differences from the
+  plan are recorded for the owner's review:
+  - Access's independent MFA is not set on fin-next's own application yet, where [FD-05] and spec 01
+    §7.7 require it. The requirement waits for SP-09's field names and for `pnpm fin access apply
+    staging`, which sets it; an agent's enrolment of Access's own factor, a TOTP, follows at the
+    first staff admin's first Access sign-in (spec 02 §10.6);
+  - the names of the Access application and of the staff and onboard deployments follow the hosts
+    (`fin-next-staging-staff`, `fin-next-staging-staff-static`, `fin-next-staging-onboard-static`)
+    where spec 01 §7.2, §7.5 and §7.7 use the roles (`fin-next-staging-admin`, `-admin-static`,
+    `-verify-static`);
+  - the account-object writes had no guard before the call, where the steward's rule asks for a
+    check in code (spec 01 §7.2).
+- **Alternatives:** wait for each `pnpm fin` command to reach `main` (EXECUTION P0-7); provision by
+  hand in Cloudflare's and Railway's consoles.
+- **Rationale:** the front door, S-03 and S-04 could run hours before `ops/fin`'s pull requests
+  merged. For Railway this is [P-13]'s hand provisioning, recorded; for Cloudflare it departs from
+  EXECUTION §2.5, where every Cloudflare step runs through `pnpm fin`. The front-door script's check
+  against the same allow-list keeps [FD-09]'s rule that fin-next writes only its own names on the
+  zone; in the account, only the names fixed in the scripts kept the writes to fin-next's own
+  objects. The run log is the record until `pnpm fin verify` can check it.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority; for the
+  owner's review. The three differences above depart from [FD-05], spec 01 §7.2, §7.5 and §7.7,
+  and the steward's rule on fin-next's own account objects, so the owner's review covers them too ·
+  **Deadline:** decided; `pnpm fin verify` takes over once it lands
+
+### BD-29 The similarity check by hand, until `fin-review ship` runs
+- **Decision:** how [G-04]'s similarity check against the old product runs while pull requests
+  ship by [BD-18]'s rebuild and [BD-27]'s batches rather than through `fin-review ship` ([BD-22]),
+  and with which parameters and exceptions.
+- **Default:** a local script on the build machine, outside every repository, compares the
+  normalised lines of every file a pull request adds or changes with every blob reachable from any
+  ref of the old product's checkout: its whole history, the redesign branches included. The
+  checkout's location is never written anywhere ([G-09]). The build's ship tool runs it on the
+  exact tree that merges, the rebuilt or batch head, before every merge, and refuses the merge on a
+  blocking match. The result goes into the pull request by fin-next path and counts only, never the
+  old product's paths or text (spec 07 §11.3), and no error prints them either. Its rules, as the
+  steward ruled them on 21 Nov and as version v7.1 implements them after four adversarial rounds:
+  - **rule inputs from `main`:** the plan's fenced code, `tools/layout.json`,
+    `scripts/layout-check.mjs`'s `VITEST_SCRIPTS` and the steward's pins (the table below) are read
+    from the tip of the base, `main`'s reviewed tip, never from the head under review or from a
+    merge base inside a merged branch; the files checked are those that differ from the merge base.
+    A pull request that changes the plan's fenced code exempts nothing with those lines in that same
+    pull request. A full refname is read by exact match, and a short name only when no tag shares
+    it, so no tag can stand in for a ref; replace objects and grafts are ignored; a head at or
+    behind its base, unrelated histories and a shallow or partial old checkout are errors;
+  - **the old corpus:** every reachable blob, judged by its content (text, or valid UTF-8 once NUL
+    bytes are removed), whatever its path or size;
+  - **normalisation:** NFKD; default-ignorable, format (Cf) and combining (M) characters, DEL, the C1
+    controls and U+2800 removed; common Cyrillic, Greek and Armenian look-alikes, Latin small
+    capitals and IPA letters folded to plain Latin letters; NFKC; trimmed; internal white space
+    collapsed; every line terminator (CR LF, LF, CR, VT, FF, NEL, LS and PS) splits lines. The
+    matching key also folds what a formatter changes: the quote style, the spaces around brackets,
+    commas, semicolons and colons, and a trailing semicolon or comma, on the old side and the new
+    side alike;
+  - **trivial lines,** judged on the matching key and ignored: shorter than 12 characters or without
+    three letters in a row, unless 32 or more characters long with 8 or more digits (path data,
+    tables of numbers);
+  - **distinctive lines:** found in at most two distinct old file lineages across the whole history,
+    every path a blob was ever written at counted and a rename continuing its file;
+  - rule A: a run of 12 or more consecutive non-trivial lines identical to a run in one old blob
+    blocks, unless every line of the run is dictated;
+  - rule B: a file of 10 or more non-trivial lines blocks when 30% or more of its distinctive lines
+    are found in the old corpus;
+  - rule C: a file of fewer than 10 non-trivial lines blocks when 3 or more of its distinctive lines
+    are found and they make up 30% or more;
+  - rule M, for files named `package.json`: 12 or more consecutive non-dictated lines found in the
+    old corpus block, so a copied `exports` block blocks;
+  - an exact copy of an old blob with 64 or more non-blank bytes blocks;
+  - **no file is skipped silently:** a changed file that holds a NUL byte, is 2 MB or more, is a type
+    change, a submodule gitlink or a Git LFS pointer (in every form Git LFS itself reads) blocks and
+    is reported by path for the steward, unless it is pinned, a verified reused asset or a verified
+    third-party file; a malformed `THIRD_PARTY.json` blocks too.
+
+  Dictated lines never count as matches and stay in the denominator of rules B and C:
+  - plan-dictated: lines inside the plan's fenced code blocks (CommonMark fences; an HTML block opens
+    no fence; a fence still open at the end of its file dictates nothing), never its prose or tables;
+  - manifest-dictated, the class "manifest", in files named `package.json` only and by position: the
+    package's own top-level `"name"` as `tools/layout.json` gives it; an entry of a top-level
+    `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` block whose value
+    is `catalog:` or `workspace:*`; an entry of the top-level `scripts` block whose exact text
+    `VITEST_SCRIPTS` requires (`test` and `test:db`; turbo.json's tasks fix no script text); and the
+    standard key lines `"private": true`, `"type": "module"`, `"version": "0.0.0"`,
+    `"sideEffects": false`, `"scripts": {`, `"dependencies": {`, `"devDependencies": {`,
+    `"peerDependencies": {` and `"optionalDependencies": {`, each with or without a trailing comma
+    (`"exports": {` is not one).
+
+  Reported by counts, never blocking, and each narrow ([G-04] has no exception otherwise):
+  - the reused assets [G-04] names, at their exact paths, every matched line and every matched run
+    lying inside the design-system export's own copy of the asset: `packages/tokens/tokens.css` and
+    `packages/tokens/export-pin/tokens.json` (custom-property declarations whose name and value are
+    the export's, compared in one canonical CSS spelling so that a minified value equals its readable
+    form, a comment on such a line counting only when the export has it word for word; theme
+    selectors, at-rules, braces and `color-scheme` lines; comment lines the export's `tokens.css`
+    has; key lines its `tokens.json` has word for word, group keys among them);
+    `packages/tokens/fonts/*.woff2` (byte-identical to the export's fonts);
+    `packages/tokens/fonts/OFL.txt` (the export's licence text and the fonts' own copyright records,
+    nameID 0 of their name tables); `packages/icons/src/brand-art.ts` (the lockup and the 24px F
+    mark), each app's `apps/<app>/public/favicon.svg` and verify's selfie copy,
+    `apps/verify/public-selfie/favicon.svg` (spec 06 S6-27) (whole lines of the export's logos, or
+    path data and attribute values verbatim from them);
+  - the root `pnpm-lock.yaml` only, as "generated": its text is pnpm's resolution of public
+    registry metadata. No other generated file is exempt;
+  - third-party files: a file listed in a `THIRD_PARTY.json` manifest (package, exact version,
+    upstream path, SHA-256; paths relative to the manifest) is "third-party" only when its content
+    matches the pinned npm release byte for byte, the tarball verified against the registry's
+    `dist.integrity`; a listed file that does not match blocks, similar or not. The steward's narrow
+    extension of 21 Nov: a licence or notice file (named `LICENSE`, `LICENCE`, `NOTICE` or `COPYING`,
+    never a code file) whose npm release ships none may name a raw GitHub file at a 40-hex commit
+    (`https://raw.githubusercontent.com/<owner>/<repo>/<commit>/<path>`, never a branch or a tag,
+    the last segment itself a licence or notice name), compared by SHA-256; its entry records the
+    release tag, checked once when the entry is written;
+  - "accepted": a file the steward accepts by path, pinned to its blob (or a gitlink's commit), in
+    the table below with its counts and reason; any other version of the file is checked afresh.
+
+  **Allowed sources** (the steward's wording, 21 Nov). The allowed sources are:
+  - the plan on `main`;
+  - the canvases;
+  - the design-system export's token values, fonts and logo ([UI-12]'s reused assets). The export's
+    other text is the design system's private source, which fin-next follows but does not copy;
+    names taken from it, such as component and prop names, are fine;
+  - the published types and docs of the packages a file uses;
+  - public specifications.
+
+  The design tool's reference folder and tools are not sources for fin-next code. A line shared with
+  the old product whose only allowed home is the export's README or prose text is not allowed: it
+  goes to the steward.
+
+  **The audit of the sources** (21 Nov, counts only): the canvases, 689 files, hold no file that
+  would block against the old product's whole history or its redesign branches alone (at most 4% of
+  a file, incidental lines). The design-system export holds 32 files that would block against the
+  redesign branches (30 component READMEs, `licences.md` and `tokens.css`), but the 40 redesign-only
+  old blobs that best match the READMEs (38 `.tsx`, 2 `.md`) first appeared on 20 Nov, after the
+  export's files were written on 19 Nov, and none earlier; only its two font files are byte-identical
+  in the old history, also from 20 Nov. The old redesign copied the export. The reference folder
+  holds one such file, third-party licence texts, and the design tool's folder only React's licence.
+
+  Results under the first parameters (21 Nov, recorded in each pull request): pull request 2, 33
+  files added or changed, two matches: `pnpm-lock.yaml` (generated) and `.gitignore`, which rule C
+  flags after the merge, with 3 of its 9 distinctive lines (33%) matched: the standard tool-output
+  directories spec 01 §4.2 lists, in prose rather than a fenced block, so they are not
+  plan-dictated. The steward accepted `.gitignore` on 21 Nov for that reason, by path and pinned to
+  its blob (the table below). Plan-dictated lines, kept in the denominator, were found in four
+  files. Pull request 3, 42 files, no match; plan-dictated lines, kept in the denominator, were
+  found in six files. The plan's own fenced code, checked once for information: ten plan files with
+  code, no match against the old product.
+
+  A dry run over the open pull requests' own changes (21 Nov, before they land, on the steward's
+  ruling) found 18 blocking files in 8 pull requests. Pull request 11's finding is for the owner's
+  review ([UI-12]): `packages/tokens/theme.css`, 357 non-trivial lines, shares 224 lines with the
+  old product, 210 of them found only on its redesign branches and 198 of those in none of the
+  allowed sources (the plan, the canvases, the design-system export and its references), with a
+  longest identical run of 68 lines. It is a probable port of the old redesign's mapping of the
+  tokens onto the theme, which [UI-12] rules out. `packages/tokens/fonts.css`, 29 lines, shares 22,
+  8 of them only on the redesign branches and in no allowed source (the fallback fonts' metrics and
+  the font files' names); `packages/icons/NOTICE.md`, 69 lines, shares 45, 44 of them licence texts
+  that the design export also carries. The remedy, as the steward ruled: `theme.css` is rebuilt
+  verifiably, generated from `packages/tokens/tokens.css` by a script in the package or written
+  fresh from the canvases, the export and `tokens.css` alone, by a builder who never opens the old
+  product's checkout; the fallback metrics are recomputed from the font files with a tool whose
+  version is recorded; and the licence texts move into files listed in a `THIRD_PARTY.json` manifest
+  that match their pinned upstream releases. Pull request 11 lands only once the check passes on it.
+  The other 15 blocking files (by pull request: 6, five; 10, one; 12, three; 15, two; 16, one; 17,
+  one; 19, two) are cured the same way before they land, by an independent rewrite and never by
+  reshuffling lines to pass the thresholds, or go to the steward for a ruling; each landing records
+  its result by fin-next path and counts.
+
+  **The steward's pins** (the script reads this table from `main`). Counts are the file's matched
+  distinctive lines under v7.1 and the rule that fires, then the matched lines as `--explain-sources`
+  classes them: from the plan or canvases (the whole line, or every string literal verbatim around
+  one identifier key) / names (a line of names, each found in the code of the plan, the canvases or
+  the export) / declarations (an import, an export-from, a declaration opener, or a type derived
+  from one by `keyof` or `typeof`) / not.
+
+| Path | Blob | Counts | Reason |
+  |---|---|---|---|
+| `.gitignore` | `48b0b3b6ff497cee655091c7d08b1c6788d4dd2d` | 3 of 9 (33%, rule C) | The standard tool-output directories spec 01 §4.2 lists, in prose |
+| `packages/access/src/catalogue/dashboard/api-keys.ts` | `1568f198a27354ad35b34fc901c8f342594ee0de` | 10 of 33 (30%, rule B): 6 from the plan or canvases, 4 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/audit-log.ts` | `059923d6ff19a835a04f854ba95016b503bd2c6c` | 5 of 15 (33%, rule B): 3 from the plan or canvases, 2 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/customers.ts` | `cb31757f29587c19ab5fc07cadb5e665f3651e62` | 15 of 42 (36%, rule B): 10 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/money.ts` | `a1b3e1974c62a82baec9fc9167d43e89e603fff5` | 13 of 43 (30%, rule B): 8 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/roles.ts` | `d2525d71ed7a23776230588207896cc625f1c2d2` | 13 of 24 (54%, rule B): 13 from the plan or canvases | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/access/src/catalogue/dashboard/team.ts` | `926b72178bdc08932a1ac27ac29c7ecd1fc1f664` | 13 of 43 (30%, rule B): 8 from the plan or canvases, 5 not | Spec 02's catalogue, keys, labels and descriptions, verbatim |
+| `packages/frame/src/nav/console/money.ts` | `332d039f796d421579fd355127e1062bf5081772` | 6 of 20 (30%, rule B): 6 from the plan or canvases | The console's nav ids, labels and paths as specs 03 and 06 and the canvases name them |
+| `packages/icons/src/glyphs.ts` | `4679008265f222bf07cffe4fb54f9a366cf7c4f1` | 86 of 210 (41%, rule B): 85 from the plan or canvases, 1 not | Phosphor 2.1.10 path data (MIT), checked against the published package; 85 of the 86 matched lines are verbatim in the canvases; the other is the CircleHalf (fill) glyph, checked the same way |
+| `packages/tokens/fonts.css` | `eb65737bfede81aec00ba50f1695f384712e1b06` | 11 of 27 (41%, rule B): 11 not | Generated by `packages/tokens/scripts/fonts.ts` (fin-font-metrics 1.0.0) from the font files' own metrics; its header states, per descriptor, the value and the table or constant it comes from; `test/fonts.test.ts` holds the whole file, byte for byte, to the generator's output; the generators have no match (the steward's three conditions) |
+| `packages/tokens/theme.css` | `e71c0080767b1a76c949d31da230d2cf9fa5a569` | 191 of 345 (55%, rules A and B, longest run 70): 5 from the plan or canvases, 186 not | Generated by `packages/tokens/scripts/theme.ts` from `tokens.css`; its header states the mapping as a table (each `--fin-` family, the prefix it strips and the Tailwind theme namespace it maps to), what it adds and that every mapped value is `var(--fin-*)`; `test/theme-file.test.ts` holds the whole file, byte for byte, to the generator's output; the generators have no match (the steward's three conditions) |
+| `packages/ui/src/index.ts` | `79ec2541f80e2c7f92e8b4c56530ff2bd13c6fcd` | 25 of 65 (38%, rule B): 25 names | The UI kit's export list: lines of names, each found in the code of the plan, the canvases or the export |
+
+  `packages/frame/src/nav/admin/review.ts`, which the steward also ruled on, no longer matches under
+  v6 and later, and needs no pin. `packages/tokens/theme.css` and `packages/tokens/fonts.css` are
+  pinned on 22 Nov, once pull request 28 met the steward's three conditions: each generator states
+  its mapping in its header, each test holds the whole generated file to the generator's output
+  byte for byte, and the generators themselves have no match. `packages/identity/src/ports/ids.ts`
+  no longer matches after its encoder's independent rewrite (v7.1 on the backend landing's head, 22
+  Nov: no line for it), and needs no pin. Still to come, once its landing's last step finishes:
+  whatever of `packages/ui/src/overlays/tabs.tsx` still matches after its independent rewrite.
+
+  **Pull request 11's history.** Pull request 11's branch commits held the ported
+  `packages/tokens/theme.css` (224 of its 357 lines shared with the old product, a 68-line run) and
+  `packages/tokens/fonts.css` (22 of 29), and pull request 28 replayed them in its "Land PR #11"
+  commit before its rebuild commit replaced both. A pull request's commits stay readable on GitHub
+  through `refs/pull/11/head` and `refs/pull/28/head` after their branches are deleted. `main` never
+  holds them: each landing merges as one rebuilt commit ([BD-18]). The content is low in sensitivity
+  (a mapping of CSS variables and font metrics), but [UI-12]'s no covers it; the owner decides
+  whether to ask GitHub to purge those refs.
+
+  **The check's record.** Version v7.1 (sha256
+  `c3ef7696741c42077c2e2274bcd9cc1c0394f8246f5ddd14d30d1c9e2e851136`) runs from about 22:50 on 21
+  Nov, in place of v6. Its planted-case suite, 252 cases kept by each round's tester on synthetic
+  repositories, passes 250; the two that fail check v6's frozen version string. Four adversarial
+  rounds, each with a tester, an attacker and a reviewer working only on synthetic repositories,
+  brought the check from the first parameters to v7.1. The fourth round's reviewer found four highs
+  (Latin small capitals, the other Git LFS pointer forms, comment-only lines inside a wrapped token
+  declaration, and a crash and a slow regular expression on malformed input) and its tester seven
+  failing cases; v7 and v7.1 fix all of them. What its false-negative hunter found is under the
+  check's limits.
+- **The check's limits:** matching by line misses code that was renamed or reordered, reformatted
+  past what the matching key folds, minified, joined into or split across lines, or encoded (base64
+  and the like), and the root `pnpm-lock.yaml` is exempt whole. The fourth round also found what
+  v7.1 does not see: lines a pull request's own commits held that its merged tree does not (its
+  history), constant decorations (diff markers, comment leaders, line numbers, every line written as
+  a string), a copy diluted in a much larger file or broken by a changed line every few lines, a
+  module the old product kept at three or more paths, old content reachable only from a reflog, an
+  index or a working tree, letter case, and escapes. A version v8 that covers them is in its fifth
+  round and goes live only on the steward's ruling. Until then each landing merges as one rebuilt
+  commit ([BD-18]), so no branch history reaches `main`. fin-review's own check replaces this one
+  once `fin-review ship` ships the pull requests.
+- **Alternatives:** no similarity check until `fin-review ship` ships the pull requests (what
+  [BD-18], [BD-22] and [BD-27] first said); the old product's current tree only, as spec 07 §11.3
+  said before [BD-29].
+- **Rationale:** [G-04] has the check run at every ship, and [BD-18]'s rebuild took the place of
+  `fin-review ship`, which runs it. Every blob in the old product's history, the redesign branches
+  included, covers the text [UI-12] keeps out of fin-next as well as the current tree. Rules A and
+  B keep spec 07 §11.3's two thresholds, 12 lines and 30%; rule C stops a small file copied whole
+  from passing under both, and rule M a copied block of a manifest from hiding among its dictated
+  lines.
+- **Status:** Decided by the build, 21 Nov 2026, under the owner's away-time authority, with its
+  parameters and exceptions as the steward ruled them; for the owner's review · **Deadline:**
+  decided; `fin-review ship`'s own check takes over once it ships the pull requests
 
 ## Appendix A. Critic findings and how each was resolved
 
